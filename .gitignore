@@ -1,0 +1,62 @@
+# Build
+/target/
+
+# Profiling & benchmarks
+bench_results/
+benchmark_internal/
+profile.json.gz
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Project tracking I use locally. No need to see how disorganized it is...
+TASK_TRACKER.md
+
+# AI development configuration
+# While I think AI-assisted development is fine, I want to gitignore these for the
+# time being to allow people to utilize these sorts of files as they see fit. In the
+# future if it makes sense to unify this for development, I shall remove these. In
+# the meantime, feel free to open a feature request if you feel that these should be
+# tracked in the repo.
+AGENTS.md
+CLAUDE.md
+
+# Claude / agent local state
+.claude/
+.claude/**
+
+# Aider (chat + input history are local)
+.aider.chat.history.md
+.aider.input.history
+.aider/
+
+# If you keep aider config in-repo AND it contains secrets, ignore it:
+# .aider.conf.yml
+
+# Cursor - ignore metadata/state, but keep versioned rules if you use them
+.cursor/**
+!.cursor/rules/
+!.cursor/rules/**
+
+# Continue - only ignore if you actually use it for per-user overrides / secrets
+# .continuerc.json
+
+# Generic GenAI artifacts (optional; enable if your tools generate these)
+*.transcript
+*.chatlog
+*.promptlog
+.llm-cache/
+.ai-cache/
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+nul

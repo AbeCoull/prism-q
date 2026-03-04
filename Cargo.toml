@@ -1,0 +1,66 @@
+[package]
+name = "prism-q"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75.0"
+authors = ["A. Coull"]
+description = "PRISM-Q — Performance Rust Interoperable Simulator for Quantum"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/prism-q"
+repository = "https://github.com/AbeCoull/prism-q"
+homepage = "https://github.com/AbeCoull/prism-q"
+keywords = ["quantum", "simulator", "openqasm", "circuit", "statevector"]
+categories = ["science", "simulation"]
+
+[dependencies]
+num-complex = "0.4"
+rand = "0.8"
+rand_chacha = "0.3"
+smallvec = "1"
+thiserror = "1"
+rayon = { version = "1.10", optional = true }
+num_cpus = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+faer = { version = "0.20", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+faer = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+approx = "0.5"
+proptest = "1"
+test-case = "3"
+pretty_assertions = "1"
+
+[features]
+default = []
+parallel = ["rayon", "num_cpus", "faer"]
+serialization = ["serde", "serde_json"]
+bench-fast = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = "none"
+
+[[bench]]
+name = "bench_driver"
+harness = false
+
+[[bench]]
+name = "circuits"
+harness = false
+
+[[bench]]
+name = "svd_bench"
+harness = false

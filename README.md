@@ -190,6 +190,7 @@ SVGs go to `bench_results/` (gitignored).
 - **Expectation values** — `<psi|O|psi>` for Pauli strings (VQE/QAOA support)
 - **Density matrix backend** — mixed-state simulation for noise and decoherence modeling
 - **GPU acceleration** — CUDA/Vulkan compute backend for large qubit counts
+- **Generalize to other CPU architectures** - currently only x86 is supported
 
 ## Architecture
 

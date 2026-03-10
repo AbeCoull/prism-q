@@ -803,22 +803,33 @@ pub(crate) fn apply_diagonal_sequential(
                 let d1_ii = _mm_set1_pd(d1.im);
                 apply_diagonal_loop_fma(state, target, d0_rr, d0_ii, d1_rr, d1_ii, skip_lo);
             }
-            return;
+        } else {
+            apply_diagonal_scalar(state, target, d0, d1, skip_lo);
         }
     }
 
     #[cfg(target_arch = "aarch64")]
-    {
-        unsafe {
-            let d0_rr = vdupq_n_f64(d0.re);
-            let d0_ii_as = vcombine_f64(vdup_n_f64(-d0.im), vdup_n_f64(d0.im));
-            let d1_rr = vdupq_n_f64(d1.re);
-            let d1_ii_as = vcombine_f64(vdup_n_f64(-d1.im), vdup_n_f64(d1.im));
-            apply_diagonal_loop_neon(state, target, d0_rr, d0_ii_as, d1_rr, d1_ii_as, skip_lo);
-        }
-        return;
+    unsafe {
+        let d0_rr = vdupq_n_f64(d0.re);
+        let d0_ii_as = vcombine_f64(vdup_n_f64(-d0.im), vdup_n_f64(d0.im));
+        let d1_rr = vdupq_n_f64(d1.re);
+        let d1_ii_as = vcombine_f64(vdup_n_f64(-d1.im), vdup_n_f64(d1.im));
+        apply_diagonal_loop_neon(state, target, d0_rr, d0_ii_as, d1_rr, d1_ii_as, skip_lo);
     }
 
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    apply_diagonal_scalar(state, target, d0, d1, skip_lo);
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+fn apply_diagonal_scalar(
+    state: &mut [Complex64],
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+    skip_lo: bool,
+) {
     let half = 1usize << target;
     let mask = half - 1;
     let num_pairs = state.len() >> 1;
@@ -837,40 +848,22 @@ pub(crate) fn apply_diagonal_sequential(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn has_avx2_fma() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn has_fma() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| is_x86_feature_detected!("fma"))
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| is_x86_feature_detected!("fma"))
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn has_bmi2() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| is_x86_feature_detected!("bmi2"))
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| is_x86_feature_detected!("bmi2"))
 }
 
 #[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
@@ -1286,22 +1279,25 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
 #[cfg(test)]
 fn scale_slice(slice: &mut [Complex64], factor: f64) {
     #[cfg(target_arch = "x86_64")]
-    if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        unsafe { scale_slice_avx2(slice, factor) };
-        return;
-    }
-    #[cfg(target_arch = "aarch64")]
     {
-        unsafe {
-            let f = vdupq_n_f64(factor);
-            let ptr = slice.as_mut_ptr() as *mut f64;
-            for i in 0..slice.len() {
-                let p = ptr.add(i * 2);
-                vst1q_f64(p, vmulq_f64(vld1q_f64(p), f));
+        if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+            unsafe { scale_slice_avx2(slice, factor) };
+        } else {
+            for amp in slice.iter_mut() {
+                *amp *= factor;
             }
         }
-        return;
     }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let f = vdupq_n_f64(factor);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for i in 0..slice.len() {
+            let p = ptr.add(i * 2);
+            vst1q_f64(p, vmulq_f64(vld1q_f64(p), f));
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     for amp in slice.iter_mut() {
         *amp *= factor;
     }

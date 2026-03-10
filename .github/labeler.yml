@@ -1,0 +1,57 @@
+backend:
+  - changed-files:
+      - any-glob-to-any-file: 'src/backend/**/*'
+
+simd:
+  - changed-files:
+      - any-glob-to-any-file: 'src/backend/simd.rs'
+
+statevector:
+  - changed-files:
+      - any-glob-to-any-file: 'src/backend/statevector/**/*'
+
+stabilizer:
+  - changed-files:
+      - any-glob-to-any-file: 'src/backend/stabilizer.rs'
+
+mps:
+  - changed-files:
+      - any-glob-to-any-file: 'src/backend/mps.rs'
+
+parser:
+  - changed-files:
+      - any-glob-to-any-file: 'src/circuit/openqasm.rs'
+
+circuit:
+  - changed-files:
+      - any-glob-to-any-file: 'src/circuit/**/*'
+
+fusion:
+  - changed-files:
+      - any-glob-to-any-file: 'src/circuit/fusion.rs'
+
+gates:
+  - changed-files:
+      - any-glob-to-any-file: 'src/gates/**/*'
+
+sim:
+  - changed-files:
+      - any-glob-to-any-file: 'src/sim/**/*'
+
+benchmarks:
+  - changed-files:
+      - any-glob-to-any-file: 'benches/**/*'
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file: 'tests/**/*'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**/*'
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+          - 'LICENSE*'

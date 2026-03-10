@@ -43,7 +43,9 @@ const MAX_BATCH_PHASE_GROUPS: usize = 4;
 const BATCH_RZZ_GROUP_SIZE: usize = 8;
 const BATCH_RZZ_TABLE_SIZE: usize = 256;
 const MAX_BATCH_RZZ_GROUPS: usize = 4;
+#[cfg(target_arch = "x86_64")]
 const BATCH_RZZ_BMI2_MAX_UNIQUE: usize = 10;
+#[cfg(target_arch = "x86_64")]
 const BATCH_RZZ_BMI2_TABLE_SIZE: usize = 1024;
 
 #[derive(Clone, Copy)]
@@ -98,12 +100,14 @@ fn extract_rzz_bits(i: usize, group: &BatchRzzGroup) -> usize {
     bits
 }
 
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 struct BatchRzzBmi2Group {
     table: [Complex64; BATCH_RZZ_BMI2_TABLE_SIZE],
     pext_mask: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 fn build_batch_rzz_bmi2_tables(
     edges: &[(usize, usize, f64)],
     groups: &mut [BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS],

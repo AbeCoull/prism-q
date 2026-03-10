@@ -7,8 +7,9 @@
 //! |----------|------------------|---------------------------------|
 //! | AVX2+FMA | `avx2` + `fma`   | 256-bit: 1 mul + 1 fmaddsub (2 pairs) |
 //! | FMA      | `fma`            | 128-bit: 1 mul + 1 fmaddsub |
+//! | NEON     | aarch64 baseline | 128-bit: 1 mul + 1 fma (pre-negated) |
 //! | SSE2     | x86_64 baseline  | 128-bit: 2 mul + shuffle + xor + add |
-//! | Scalar   | Non-x86_64       | Standard Complex64 ops |
+//! | Scalar   | fallback         | Standard Complex64 ops |
 //!
 //! Call [`PreparedGate1q::new`] once per gate, then [`PreparedGate1q::apply`]
 //! per chunk. This hoists the matrix broadcast and CPU feature detection out
@@ -18,6 +19,9 @@ use num_complex::Complex64;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
 
 #[cfg(target_arch = "x86_64")]
 struct MatBroadcast {
@@ -78,6 +82,45 @@ impl MatBroadcast256 {
             m11_ii: _mm256_set1_pd(mat[1][1].im),
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+struct MatBroadcast {
+    m00_rr: float64x2_t,
+    m00_ii_as: float64x2_t,
+    m01_rr: float64x2_t,
+    m01_ii_as: float64x2_t,
+    m10_rr: float64x2_t,
+    m10_ii_as: float64x2_t,
+    m11_rr: float64x2_t,
+    m11_ii_as: float64x2_t,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl MatBroadcast {
+    #[inline(always)]
+    fn from_matrix(mat: &[[Complex64; 2]; 2]) -> Self {
+        unsafe {
+            Self {
+                m00_rr: vdupq_n_f64(mat[0][0].re),
+                m00_ii_as: vcombine_f64(vdup_n_f64(-mat[0][0].im), vdup_n_f64(mat[0][0].im)),
+                m01_rr: vdupq_n_f64(mat[0][1].re),
+                m01_ii_as: vcombine_f64(vdup_n_f64(-mat[0][1].im), vdup_n_f64(mat[0][1].im)),
+                m10_rr: vdupq_n_f64(mat[1][0].re),
+                m10_ii_as: vcombine_f64(vdup_n_f64(-mat[1][0].im), vdup_n_f64(mat[1][0].im)),
+                m11_rr: vdupq_n_f64(mat[1][1].re),
+                m11_ii_as: vcombine_f64(vdup_n_f64(-mat[1][1].im), vdup_n_f64(mat[1][1].im)),
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn complex_mul_neon(c_rr: float64x2_t, c_ii_as: float64x2_t, z: float64x2_t) -> float64x2_t {
+    let z_swap = vextq_f64(z, z, 1);
+    let prod = vmulq_f64(c_rr, z);
+    vfmaq_f64(prod, c_ii_as, z_swap)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -158,6 +201,34 @@ unsafe fn apply_slices_fma(lo: &mut [Complex64], hi: &mut [Complex64], mat: &Mat
 
         _mm_storeu_pd(a_ptr, new_a);
         _mm_storeu_pd(b_ptr, new_b);
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", any(feature = "parallel", test)))]
+unsafe fn apply_slices_neon(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast) {
+    debug_assert_eq!(lo.len(), hi.len());
+    let n = lo.len();
+    let lo_ptr = lo.as_mut_ptr() as *mut f64;
+    let hi_ptr = hi.as_mut_ptr() as *mut f64;
+
+    for i in 0..n {
+        let a_ptr = lo_ptr.add(i * 2);
+        let b_ptr = hi_ptr.add(i * 2);
+
+        let a = vld1q_f64(a_ptr);
+        let b = vld1q_f64(b_ptr);
+
+        let new_a = vaddq_f64(
+            complex_mul_neon(mat.m00_rr, mat.m00_ii_as, a),
+            complex_mul_neon(mat.m01_rr, mat.m01_ii_as, b),
+        );
+        let new_b = vaddq_f64(
+            complex_mul_neon(mat.m10_rr, mat.m10_ii_as, a),
+            complex_mul_neon(mat.m11_rr, mat.m11_ii_as, b),
+        );
+
+        vst1q_f64(a_ptr, new_a);
+        vst1q_f64(b_ptr, new_b);
     }
 }
 
@@ -306,6 +377,55 @@ unsafe fn apply_full_loop_avx2fma_inline(
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+unsafe fn apply_full_loop_neon(state: &mut [Complex64], target: usize, mat: &MatBroadcast) {
+    let half = 1usize << target;
+    let mask = half - 1;
+    let num_pairs = state.len() >> 1;
+    let base = state.as_mut_ptr() as *mut f64;
+
+    for k in 0..num_pairs {
+        let i0 = (k & !mask) << 1 | (k & mask);
+        let i1 = i0 | half;
+        let a_ptr = base.add(i0 * 2);
+        let b_ptr = base.add(i1 * 2);
+
+        let a = vld1q_f64(a_ptr);
+        let b = vld1q_f64(b_ptr);
+
+        let new_a = vaddq_f64(
+            complex_mul_neon(mat.m00_rr, mat.m00_ii_as, a),
+            complex_mul_neon(mat.m01_rr, mat.m01_ii_as, b),
+        );
+        let new_b = vaddq_f64(
+            complex_mul_neon(mat.m10_rr, mat.m10_ii_as, a),
+            complex_mul_neon(mat.m11_rr, mat.m11_ii_as, b),
+        );
+
+        vst1q_f64(a_ptr, new_a);
+        vst1q_f64(b_ptr, new_b);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn apply_pair_neon(a_ptr: *mut f64, b_ptr: *mut f64, mat: &MatBroadcast) {
+    let a = vld1q_f64(a_ptr);
+    let b = vld1q_f64(b_ptr);
+
+    let new_a = vaddq_f64(
+        complex_mul_neon(mat.m00_rr, mat.m00_ii_as, a),
+        complex_mul_neon(mat.m01_rr, mat.m01_ii_as, b),
+    );
+    let new_b = vaddq_f64(
+        complex_mul_neon(mat.m10_rr, mat.m10_ii_as, a),
+        complex_mul_neon(mat.m11_rr, mat.m11_ii_as, b),
+    );
+
+    vst1q_f64(a_ptr, new_a);
+    vst1q_f64(b_ptr, new_b);
+}
+
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn apply_pair_sse2(a_ptr: *mut f64, b_ptr: *mut f64, mat: &MatBroadcast) {
@@ -375,7 +495,9 @@ pub(crate) struct PreparedGate1q {
     broadcast256: Option<MatBroadcast256>,
     #[cfg(target_arch = "x86_64")]
     tier: SimdTier,
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    broadcast: MatBroadcast,
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     mat: [[Complex64; 2]; 2],
 }
 
@@ -404,7 +526,13 @@ impl PreparedGate1q {
                 tier,
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self {
+                broadcast: MatBroadcast::from_matrix(mat),
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             Self { mat: *mat }
         }
@@ -429,7 +557,12 @@ impl PreparedGate1q {
             }
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe { apply_slices_neon(lo, hi, &self.broadcast) };
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             apply_slices_scalar(lo, hi, &self.mat);
         }
@@ -461,7 +594,12 @@ impl PreparedGate1q {
             }
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let half = 1usize << target;
             let mask = half - 1;
@@ -501,7 +639,12 @@ impl PreparedGate1q {
             }
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             self.apply_full_sequential(state, target);
         }
@@ -524,7 +667,12 @@ impl PreparedGate1q {
             }
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            apply_pair_neon(a_ptr, b_ptr, &self.broadcast);
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let a = &mut *(a_ptr as *mut Complex64);
             let b = &mut *(b_ptr as *mut Complex64);
@@ -592,6 +740,47 @@ unsafe fn apply_diagonal_loop_fma(
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+unsafe fn apply_diagonal_loop_neon(
+    state: &mut [Complex64],
+    target: usize,
+    d0_rr: float64x2_t,
+    d0_ii_as: float64x2_t,
+    d1_rr: float64x2_t,
+    d1_ii_as: float64x2_t,
+    skip_lo: bool,
+) {
+    let half = 1usize << target;
+    let mask = half - 1;
+    let num_pairs = state.len() >> 1;
+    let base = state.as_mut_ptr() as *mut f64;
+
+    if skip_lo {
+        for k in 0..num_pairs {
+            let i1 = ((k & !mask) << 1 | (k & mask)) | half;
+            let p = base.add(i1 * 2);
+            let s = vld1q_f64(p);
+            let r = complex_mul_neon(d1_rr, d1_ii_as, s);
+            vst1q_f64(p, r);
+        }
+    } else {
+        for k in 0..num_pairs {
+            let i0 = (k & !mask) << 1 | (k & mask);
+            let i1 = i0 | half;
+
+            let p0 = base.add(i0 * 2);
+            let s0 = vld1q_f64(p0);
+            let r0 = complex_mul_neon(d0_rr, d0_ii_as, s0);
+            vst1q_f64(p0, r0);
+
+            let p1 = base.add(i1 * 2);
+            let s1 = vld1q_f64(p1);
+            let r1 = complex_mul_neon(d1_rr, d1_ii_as, s1);
+            vst1q_f64(p1, r1);
+        }
+    }
+}
+
 /// Apply a diagonal single-qubit gate using a tight SIMD loop.
 ///
 /// For gates where `d0 ≈ 1` (Z, S, T, P), set `skip_lo = true` to halve
@@ -614,10 +803,33 @@ pub(crate) fn apply_diagonal_sequential(
                 let d1_ii = _mm_set1_pd(d1.im);
                 apply_diagonal_loop_fma(state, target, d0_rr, d0_ii, d1_rr, d1_ii, skip_lo);
             }
-            return;
+        } else {
+            apply_diagonal_scalar(state, target, d0, d1, skip_lo);
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let d0_rr = vdupq_n_f64(d0.re);
+        let d0_ii_as = vcombine_f64(vdup_n_f64(-d0.im), vdup_n_f64(d0.im));
+        let d1_rr = vdupq_n_f64(d1.re);
+        let d1_ii_as = vcombine_f64(vdup_n_f64(-d1.im), vdup_n_f64(d1.im));
+        apply_diagonal_loop_neon(state, target, d0_rr, d0_ii_as, d1_rr, d1_ii_as, skip_lo);
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    apply_diagonal_scalar(state, target, d0, d1, skip_lo);
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[inline(always)]
+fn apply_diagonal_scalar(
+    state: &mut [Complex64],
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+    skip_lo: bool,
+) {
     let half = 1usize << target;
     let mask = half - 1;
     let num_pairs = state.len() >> 1;
@@ -636,40 +848,22 @@ pub(crate) fn apply_diagonal_sequential(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn has_avx2_fma() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"))
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn has_fma() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| is_x86_feature_detected!("fma"))
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| is_x86_feature_detected!("fma"))
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn has_bmi2() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *CACHED.get_or_init(|| is_x86_feature_detected!("bmi2"))
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| is_x86_feature_detected!("bmi2"))
 }
 
 #[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
@@ -696,6 +890,18 @@ pub(crate) fn negate_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
         unsafe { negate_slice_avx2(slice) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if slice.len() >= MIN_SIMD_SLICE {
+        unsafe {
+            let ptr = slice.as_mut_ptr() as *mut f64;
+            for i in 0..slice.len() {
+                let p = ptr.add(i * 2);
+                let v = vld1q_f64(p);
+                vst1q_f64(p, vnegq_f64(v));
+            }
+        }
         return;
     }
     for amp in slice.iter_mut() {
@@ -730,6 +936,21 @@ pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if a.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
         unsafe { swap_slices_avx2(a, b) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if a.len() >= MIN_SIMD_SLICE {
+        unsafe {
+            let ap = a.as_mut_ptr() as *mut f64;
+            let bp = b.as_mut_ptr() as *mut f64;
+            for i in 0..a.len() {
+                let off = i * 2;
+                let va = vld1q_f64(ap.add(off));
+                let vb = vld1q_f64(bp.add(off));
+                vst1q_f64(ap.add(off), vb);
+                vst1q_f64(bp.add(off), va);
+            }
+        }
         return;
     }
     for (x, y) in a.iter_mut().zip(b.iter_mut()) {
@@ -787,6 +1008,36 @@ pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
         return unsafe { norm_sqr_sum_avx2fma(slice) };
     }
+    #[cfg(target_arch = "aarch64")]
+    if slice.len() >= MIN_SIMD_SLICE {
+        return unsafe {
+            let ptr = slice.as_ptr() as *const f64;
+            let mut a0 = vdupq_n_f64(0.0);
+            let mut a1 = vdupq_n_f64(0.0);
+            let mut a2 = vdupq_n_f64(0.0);
+            let mut a3 = vdupq_n_f64(0.0);
+            let unrolled = slice.len() / 4;
+            let remainder = slice.len() % 4;
+            for i in 0..unrolled {
+                let base = i * 8;
+                let v0 = vld1q_f64(ptr.add(base));
+                let v1 = vld1q_f64(ptr.add(base + 2));
+                let v2 = vld1q_f64(ptr.add(base + 4));
+                let v3 = vld1q_f64(ptr.add(base + 6));
+                a0 = vfmaq_f64(a0, v0, v0);
+                a1 = vfmaq_f64(a1, v1, v1);
+                a2 = vfmaq_f64(a2, v2, v2);
+                a3 = vfmaq_f64(a3, v3, v3);
+            }
+            let mut acc = vaddq_f64(vaddq_f64(a0, a1), vaddq_f64(a2, a3));
+            let tail = unrolled * 4;
+            for i in 0..remainder {
+                let v = vld1q_f64(ptr.add((tail + i) * 2));
+                acc = vfmaq_f64(acc, v, v);
+            }
+            vaddvq_f64(acc)
+        };
+    }
     slice.iter().map(|c| c.norm_sqr()).sum()
 }
 
@@ -826,6 +1077,28 @@ pub(crate) fn norm_sqr_to_slice(src: &[Complex64], dst: &mut [f64]) {
         unsafe { norm_sqr_to_slice_avx2(src, dst) };
         return;
     }
+    #[cfg(target_arch = "aarch64")]
+    if src.len() >= MIN_SIMD_SLICE {
+        unsafe {
+            let inp = src.as_ptr() as *const f64;
+            let out = dst.as_mut_ptr();
+            let pairs = src.len() / 2;
+            for i in 0..pairs {
+                let base = i * 4;
+                let v0 = vld1q_f64(inp.add(base));
+                let v1 = vld1q_f64(inp.add(base + 2));
+                let sq0 = vmulq_f64(v0, v0);
+                let sq1 = vmulq_f64(v1, v1);
+                let ns = vpaddq_f64(sq0, sq1);
+                vst1q_f64(out.add(i * 2), ns);
+            }
+            if src.len() % 2 != 0 {
+                let last = src.len() - 1;
+                *out.add(last) = src[last].norm_sqr();
+            }
+        }
+        return;
+    }
     for (i, c) in src.iter().enumerate() {
         dst[i] = c.norm_sqr();
     }
@@ -863,6 +1136,29 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
     #[cfg(target_arch = "x86_64")]
     if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
         unsafe { norm_sqr_to_slice_scaled_avx2(src, dst, scale) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if src.len() >= MIN_SIMD_SLICE {
+        unsafe {
+            let inp = src.as_ptr() as *const f64;
+            let out = dst.as_mut_ptr();
+            let s = vdupq_n_f64(scale);
+            let pairs = src.len() / 2;
+            for i in 0..pairs {
+                let base = i * 4;
+                let v0 = vld1q_f64(inp.add(base));
+                let v1 = vld1q_f64(inp.add(base + 2));
+                let sq0 = vmulq_f64(v0, v0);
+                let sq1 = vmulq_f64(v1, v1);
+                let ns = vmulq_f64(vpaddq_f64(sq0, sq1), s);
+                vst1q_f64(out.add(i * 2), ns);
+            }
+            if src.len() % 2 != 0 {
+                let last = src.len() - 1;
+                *out.add(last) = src[last].norm_sqr() * scale;
+            }
+        }
         return;
     }
     for (i, c) in src.iter().enumerate() {
@@ -961,6 +1257,20 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
             return;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    if slice.len() >= MIN_SIMD_SLICE {
+        unsafe {
+            let c_rr = vdupq_n_f64(factor.re);
+            let c_ii_as = vcombine_f64(vdup_n_f64(-factor.im), vdup_n_f64(factor.im));
+            let ptr = slice.as_mut_ptr() as *mut f64;
+            for i in 0..slice.len() {
+                let p = ptr.add(i * 2);
+                let v = vld1q_f64(p);
+                vst1q_f64(p, complex_mul_neon(c_rr, c_ii_as, v));
+            }
+        }
+        return;
+    }
     for amp in slice.iter_mut() {
         *amp *= factor;
     }
@@ -969,10 +1279,25 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
 #[cfg(test)]
 fn scale_slice(slice: &mut [Complex64], factor: f64) {
     #[cfg(target_arch = "x86_64")]
-    if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        unsafe { scale_slice_avx2(slice, factor) };
-        return;
+    {
+        if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+            unsafe { scale_slice_avx2(slice, factor) };
+        } else {
+            for amp in slice.iter_mut() {
+                *amp *= factor;
+            }
+        }
     }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let f = vdupq_n_f64(factor);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for i in 0..slice.len() {
+            let p = ptr.add(i * 2);
+            vst1q_f64(p, vmulq_f64(vld1q_f64(p), f));
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     for amp in slice.iter_mut() {
         *amp *= factor;
     }
@@ -1110,17 +1435,113 @@ unsafe fn apply_fused_2q_group_sse2(state: *mut f64, i: [usize; 4], mat: &Mat4x4
     row!(3);
 }
 
+#[cfg(target_arch = "aarch64")]
+struct Mat4x4Broadcast {
+    rr: [float64x2_t; 16],
+    ii_as: [float64x2_t; 16],
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Mat4x4Broadcast {
+    #[inline(always)]
+    fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
+        unsafe {
+            let mut rr = [vdupq_n_f64(0.0); 16];
+            let mut ii_as = [vdupq_n_f64(0.0); 16];
+            for (r, row) in mat.iter().enumerate() {
+                for (c, elem) in row.iter().enumerate() {
+                    let idx = r * 4 + c;
+                    rr[idx] = vdupq_n_f64(elem.re);
+                    ii_as[idx] = vcombine_f64(vdup_n_f64(-elem.im), vdup_n_f64(elem.im));
+                }
+            }
+            Self { rr, ii_as }
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn complex_mul_neon_preswapped(
+    c_rr: float64x2_t,
+    c_ii_as: float64x2_t,
+    z: float64x2_t,
+    z_swap: float64x2_t,
+) -> float64x2_t {
+    let prod = vmulq_f64(c_rr, z);
+    vfmaq_f64(prod, c_ii_as, z_swap)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn apply_fused_2q_group_neon(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
+    let s0 = vld1q_f64(state.add(i[0] * 2));
+    let s1 = vld1q_f64(state.add(i[1] * 2));
+    let s2 = vld1q_f64(state.add(i[2] * 2));
+    let s3 = vld1q_f64(state.add(i[3] * 2));
+
+    let sf0 = vextq_f64(s0, s0, 1);
+    let sf1 = vextq_f64(s1, s1, 1);
+    let sf2 = vextq_f64(s2, s2, 1);
+    let sf3 = vextq_f64(s3, s3, 1);
+
+    macro_rules! row {
+        ($r:expr) => {{
+            let off = $r * 4;
+            let mut acc = complex_mul_neon_preswapped(mat.rr[off], mat.ii_as[off], s0, sf0);
+            acc = vaddq_f64(
+                acc,
+                complex_mul_neon_preswapped(mat.rr[off + 1], mat.ii_as[off + 1], s1, sf1),
+            );
+            acc = vaddq_f64(
+                acc,
+                complex_mul_neon_preswapped(mat.rr[off + 2], mat.ii_as[off + 2], s2, sf2),
+            );
+            acc = vaddq_f64(
+                acc,
+                complex_mul_neon_preswapped(mat.rr[off + 3], mat.ii_as[off + 3], s3, sf3),
+            );
+            vst1q_f64(state.add(i[$r] * 2), acc);
+        }};
+    }
+    row!(0);
+    row!(1);
+    row!(2);
+    row!(3);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn apply_fused_2q_loop_neon(
+    state: *mut f64,
+    n_iter: usize,
+    lo: usize,
+    hi: usize,
+    mask0: usize,
+    mask1: usize,
+    mat: &Mat4x4Broadcast,
+) {
+    use crate::backend::statevector::insert_zero_bit;
+
+    for k in 0..n_iter {
+        let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+        let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+        apply_fused_2q_group_neon(state, i, mat);
+    }
+}
+
 /// Precomputed two-qubit gate ready for repeated application via SIMD.
 ///
 /// Created once per gate, then applied to each 4-element group of the
-/// statevector. On x86_64, stores the 4×4 matrix in broadcast form for
-/// SSE2/FMA kernels. On other platforms, stores the raw matrix.
+/// statevector. On x86_64 and aarch64, stores the 4×4 matrix in broadcast
+/// form for SIMD kernels. On other platforms, stores the raw matrix.
 pub(crate) struct PreparedGate2q {
     #[cfg(target_arch = "x86_64")]
     broadcast: Mat4x4Broadcast,
     #[cfg(target_arch = "x86_64")]
     use_fma: bool,
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    broadcast: Mat4x4Broadcast,
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     mat: [[Complex64; 4]; 4],
 }
 
@@ -1134,7 +1555,13 @@ impl PreparedGate2q {
                 use_fma: is_x86_feature_detected!("fma"),
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self {
+                broadcast: Mat4x4Broadcast::from_matrix(mat),
+            }
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             Self { mat: *mat }
         }
@@ -1173,7 +1600,15 @@ impl PreparedGate2q {
             }
         }
 
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            let base = state.as_mut_ptr() as *mut f64;
+            unsafe {
+                apply_fused_2q_loop_neon(base, n_iter, lo, hi, mask0, mask1, &self.broadcast);
+            }
+        }
+
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             use crate::backend::statevector::insert_zero_bit;
             for k in 0..n_iter {
@@ -1206,7 +1641,11 @@ impl PreparedGate2q {
                 apply_fused_2q_group_sse2(state, i, &self.broadcast);
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            apply_fused_2q_group_neon(state, i, &self.broadcast);
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let a: [Complex64; 4] = [
                 *(state.add(i[0] * 2) as *const Complex64),
@@ -1225,10 +1664,15 @@ impl PreparedGate2q {
     }
 }
 
-// SAFETY: Mat4x4Broadcast contains only __m128d values (pure SIMD data, no pointers).
+// SAFETY: Mat4x4Broadcast contains only SIMD register values (pure data, no pointers).
 #[cfg(target_arch = "x86_64")]
 unsafe impl Send for Mat4x4Broadcast {}
 #[cfg(target_arch = "x86_64")]
+unsafe impl Sync for Mat4x4Broadcast {}
+// SAFETY: Mat4x4Broadcast on aarch64 contains only float64x2_t values (pure SIMD data).
+#[cfg(target_arch = "aarch64")]
+unsafe impl Send for Mat4x4Broadcast {}
+#[cfg(target_arch = "aarch64")]
 unsafe impl Sync for Mat4x4Broadcast {}
 unsafe impl Send for PreparedGate2q {}
 unsafe impl Sync for PreparedGate2q {}

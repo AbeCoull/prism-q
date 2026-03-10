@@ -620,7 +620,6 @@ fn run_shots_via_qasm() {
     let circuit = openqasm::parse(qasm).unwrap();
     let result = prism_q::run_shots(&circuit, 100, 42).unwrap();
     let counts = result.counts();
-    // Deterministic: x q[0] → measure always gives c[0]=1, c[1]=0
     assert_eq!(counts.len(), 1);
     assert_eq!(*counts.get(&vec![true, false]).unwrap_or(&0), 100);
 }
@@ -637,7 +636,6 @@ fn run_shots_superposition_via_qasm() {
     let circuit = openqasm::parse(qasm).unwrap();
     let result = prism_q::run_shots(&circuit, 1000, 42).unwrap();
     let counts = result.counts();
-    // H creates superposition — should see both 0 and 1 outcomes
     let zeros = *counts.get(&vec![false]).unwrap_or(&0);
     let ones = *counts.get(&vec![true]).unwrap_or(&0);
     assert!(zeros > 100, "expected >100 zeros, got {zeros}");

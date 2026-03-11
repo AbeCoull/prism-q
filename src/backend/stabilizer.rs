@@ -768,8 +768,7 @@ impl StabilizerBackend {
                 }
 
                 let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
-                let pos =
-                    (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+                let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
                 sum = sum.wrapping_add(2 * pos.count_ones() as u64);
                 sum = sum.wrapping_sub(nonzero.count_ones() as u64);
             }
@@ -821,7 +820,13 @@ impl StabilizerBackend {
                 });
             // skip sequential fallthrough
         } else {
-            for (row_idx, (row, phase)) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()).enumerate().take(2 * n) {
+            for (row_idx, (row, phase)) in self
+                .xz
+                .chunks_mut(stride)
+                .zip(self.phase.iter_mut())
+                .enumerate()
+                .take(2 * n)
+            {
                 if row_idx == p_row || row[word] & bit_mask == 0 {
                     continue;
                 }
@@ -831,7 +836,13 @@ impl StabilizerBackend {
 
         #[cfg(not(feature = "parallel"))]
         {
-            for (row_idx, (row, phase)) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()).enumerate().take(2 * n) {
+            for (row_idx, (row, phase)) in self
+                .xz
+                .chunks_mut(stride)
+                .zip(self.phase.iter_mut())
+                .enumerate()
+                .take(2 * n)
+            {
                 if row_idx == p_row || row[word] & bit_mask == 0 {
                     continue;
                 }

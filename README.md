@@ -9,9 +9,10 @@
  ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚═╝     ╚═╝       ╚══▀▀═╝
 ```
 
+[![CI](https://github.com/AbeCoull/prism-q/actions/workflows/ci.yml/badge.svg)](https://github.com/AbeCoull/prism-q/actions/workflows/ci.yml)
+![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/AbeCoull/4ea63a3791840048749e67b2484098a3/raw/coverage.json)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
-![Tests](https://img.shields.io/badge/tests-687_passing-brightgreen)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 
 A performance oriented quantum circuit simulator written in Rust.
@@ -125,9 +126,10 @@ The complete list of supported gate keywords, language features, and modifiers i
 
 ```bash
 cargo build --release
-cargo test
+cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
+cargo doc --no-deps --all-features
 ```
 
 ## Parallelism
@@ -139,6 +141,17 @@ cargo build --release --features parallel
 ```
 
 Defaults to logical core count. Set `RAYON_NUM_THREADS` to override.
+
+## Coverage
+
+Requires `rustup component add llvm-tools-preview` and `cargo install cargo-llvm-cov`.
+
+```bash
+cargo llvm-cov --all-features                     # terminal summary
+cargo llvm-cov --all-features --html --open       # browseable HTML report
+```
+
+CI generates coverage on every push/PR and updates the badge automatically.
 
 ## Benchmarks
 
@@ -190,7 +203,6 @@ SVGs go to `bench_results/` (gitignored).
 - **Expectation values** — `<psi|O|psi>` for Pauli strings (VQE/QAOA support)
 - **Density matrix backend** — mixed-state simulation for noise and decoherence modeling
 - **GPU acceleration** — CUDA/Vulkan compute backend for large qubit counts
-- **Generalize to other CPU architectures** - currently only x86 is supported
 
 ## Architecture
 

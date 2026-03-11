@@ -29,6 +29,42 @@ jobs:
       - name: Tests
         run: cargo test --all-features
 
+      - name: Doc build
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      - name: Extract coverage percentage
+        id: cov
+        run: |
+          COVERAGE=$(cargo llvm-cov report --all-features 2>&1 | grep 'TOTAL' | awk '{print $NF}' | tr -d '%')
+          echo "percentage=$COVERAGE" >> "$GITHUB_OUTPUT"
+          echo "### Coverage: ${COVERAGE}%" >> "$GITHUB_STEP_SUMMARY"
+      - name: Update coverage badge
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: coverage.json
+          label: coverage
+          message: ${{ steps.cov.outputs.percentage }}%
+          valColorRange: ${{ steps.cov.outputs.percentage }}
+          minColorRange: 50
+          maxColorRange: 90
+
   check-aarch64:
     name: Cross-compile aarch64
     runs-on: ubuntu-latest

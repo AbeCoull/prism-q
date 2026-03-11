@@ -14,6 +14,15 @@ cargo build --all-features        # everything
 cargo test --all-features
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo doc --no-deps --all-features
+```
+
+## Coverage
+
+```bash
+# requires: rustup component add llvm-tools-preview && cargo install cargo-llvm-cov
+cargo llvm-cov --all-features                     # terminal summary
+cargo llvm-cov --all-features --html --open       # browseable HTML report
 ```
 
 ## Benchmarks
@@ -28,8 +37,12 @@ Always use `--features parallel` — baselines were taken with Rayon enabled. Do
 ## PR guidelines
 
 - Include before/after benchmark numbers for performance-sensitive changes.
-- All tests pass, clippy clean, fmt clean.
+- All tests pass, clippy clean, fmt clean, doc build clean.
 - Fixed seeds: `42` for tests, `0xDEAD_BEEF` for benchmark circuits.
+
+## CI
+
+PRs run: formatting, clippy, tests, doc build, coverage, aarch64 cross-compile, macOS ARM64 tests, and `cargo-deny` (security advisories + license audit).
 
 ## Hot-path rules
 

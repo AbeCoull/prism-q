@@ -65,7 +65,7 @@ const MIN_QUBITS_FOR_2Q_FUSION: usize = 20;
 ///
 /// Batches consecutive Fused2q gates into a single cache-tiled pass. Only
 /// created when Fused2q gates exist (which requires ≥20q), so threshold matches.
-const MIN_QUBITS_FOR_MULTI_2Q_FUSION: usize = 20;
+const MIN_QUBITS_FOR_MULTI_2Q_FUSION: usize = MIN_QUBITS_FOR_2Q_FUSION;
 
 /// Minimum batch size for multi-2q fusion (single gate not worth wrapping).
 const MIN_MULTI_2Q_BATCH: usize = 2;
@@ -1134,7 +1134,7 @@ fn fuse_batch_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
     let mut output: Vec<Instruction> = Vec::with_capacity(n);
     let mut rzz_run: Vec<(usize, usize, f64)> = Vec::new();
     let mut deferred: Vec<Instruction> = Vec::new();
-    let mut rzz_qubits = [false; 64];
+    let mut rzz_qubits = vec![false; circuit.num_qubits];
 
     for inst in insts {
         if let Instruction::Gate {
@@ -1176,18 +1176,15 @@ fn flush_rzz_run(
     output: &mut Vec<Instruction>,
     rzz_run: &mut Vec<(usize, usize, f64)>,
     deferred: &mut Vec<Instruction>,
-    rzz_qubits: &mut [bool; 64],
+    rzz_qubits: &mut [bool],
 ) {
     if rzz_run.len() >= 2 {
-        let mut seen = [false; 64];
         let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
         for &(q0, q1, _) in rzz_run.iter() {
-            if !seen[q0] {
-                seen[q0] = true;
+            if !tgts.contains(&q0) {
                 tgts.push(q0);
             }
-            if !seen[q1] {
-                seen[q1] = true;
+            if !tgts.contains(&q1) {
                 tgts.push(q1);
             }
         }
@@ -1207,7 +1204,7 @@ fn flush_rzz_run(
     }
     output.append(deferred);
     rzz_run.clear();
-    *rzz_qubits = [false; 64];
+    rzz_qubits.fill(false);
 }
 
 /// Recognize CX(a,b) · Rz(θ,b) · CX(a,b) → Rzz(θ, a, b).

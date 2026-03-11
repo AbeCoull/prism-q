@@ -136,6 +136,52 @@ impl Circuit {
         })
     }
 
+    /// True if no gate or conditional appears after any measurement.
+    pub fn has_terminal_measurements_only(&self) -> bool {
+        let mut seen_measurement = false;
+        for inst in &self.instructions {
+            match inst {
+                Instruction::Conditional { .. } => return false,
+                Instruction::Measure { .. } => {
+                    seen_measurement = true;
+                }
+                Instruction::Gate { .. } => {
+                    if seen_measurement {
+                        return false;
+                    }
+                }
+                Instruction::Barrier { .. } => {}
+            }
+        }
+        true
+    }
+
+    /// Extract the qubit-to-classical-bit mapping from all measurements.
+    pub fn measurement_map(&self) -> Vec<(usize, usize)> {
+        self.instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                Instruction::Measure {
+                    qubit,
+                    classical_bit,
+                } => Some((*qubit, *classical_bit)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Return a copy of this circuit with all measurement instructions removed.
+    pub fn without_measurements(&self) -> Circuit {
+        let mut c = Circuit::new(self.num_qubits, self.num_classical_bits);
+        c.instructions = self
+            .instructions
+            .iter()
+            .filter(|inst| !matches!(inst, Instruction::Measure { .. }))
+            .cloned()
+            .collect();
+        c
+    }
+
     /// Partition qubits into independent (non-interacting) subsystems.
     ///
     /// Two qubits are in the same subsystem if any multi-qubit gate connects

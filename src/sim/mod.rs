@@ -831,13 +831,89 @@ impl std::fmt::Display for ShotsResult {
     }
 }
 
-/// Execute a circuit multiple times with automatic backend selection,
-/// collecting measurement outcomes from each shot.
-///
-/// Each shot uses a deterministic seed derived from the base `seed`,
-/// so results are reproducible. Probabilities are extracted from the
-/// final shot only (the pre-measurement quantum state is identical
-/// across shots).
+fn build_cdf(probs: &[f64]) -> Vec<f64> {
+    let mut cdf = Vec::with_capacity(probs.len());
+    let mut acc = 0.0;
+    for &p in probs {
+        acc += p;
+        cdf.push(acc);
+    }
+    if let Some(last) = cdf.last_mut() {
+        *last = 1.0;
+    }
+    cdf
+}
+
+fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
+    match cdf.binary_search_by(|p| p.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal)) {
+        Ok(i) => i,
+        Err(i) => i.min(cdf.len() - 1),
+    }
+}
+
+fn sample_shots(
+    probs: &Probabilities,
+    meas_map: &[(usize, usize)],
+    num_classical_bits: usize,
+    num_shots: usize,
+    seed: u64,
+) -> Vec<Vec<bool>> {
+    use rand::Rng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    if meas_map.is_empty() {
+        return vec![vec![false; num_classical_bits]; num_shots];
+    }
+
+    let mut shots = Vec::with_capacity(num_shots);
+
+    match probs {
+        Probabilities::Dense(v) => {
+            let cdf = build_cdf(v);
+            for _ in 0..num_shots {
+                let r: f64 = rng.gen();
+                let state_idx = sample_from_cdf(&cdf, r);
+                let mut bits = vec![false; num_classical_bits];
+                for &(qubit, cbit) in meas_map {
+                    bits[cbit] = (state_idx >> qubit) & 1 == 1;
+                }
+                shots.push(bits);
+            }
+        }
+        Probabilities::Factored { blocks, .. } => {
+            let block_cdfs: Vec<Vec<f64>> = blocks.iter().map(|b| build_cdf(&b.probs)).collect();
+            for _ in 0..num_shots {
+                let mut global_idx = 0usize;
+                for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
+                    let r: f64 = rng.gen();
+                    let local_idx = sample_from_cdf(cdf, r);
+                    let mut m = block.mask;
+                    let mut bit = 0;
+                    while m != 0 {
+                        let pos = m.trailing_zeros() as usize;
+                        if local_idx & (1 << bit) != 0 {
+                            global_idx |= 1 << pos;
+                        }
+                        bit += 1;
+                        m &= m.wrapping_sub(1);
+                    }
+                }
+                let mut bits = vec![false; num_classical_bits];
+                for &(qubit, cbit) in meas_map {
+                    bits[cbit] = (global_idx >> qubit) & 1 == 1;
+                }
+                shots.push(bits);
+            }
+        }
+    }
+
+    shots
+}
+
+/// Execute a circuit multiple times, collecting measurement outcomes.
 pub fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     run_shots_with(BackendKind::Auto, circuit, num_shots, seed)
 }
@@ -851,14 +927,31 @@ pub fn run_shots_random(circuit: &Circuit, num_shots: usize) -> Result<ShotsResu
 }
 
 /// Execute a circuit multiple times with explicit backend selection.
-///
-/// Like [`run_shots`], but allows specifying the backend via [`BackendKind`].
 pub fn run_shots_with(
     kind: BackendKind,
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    if circuit.has_terminal_measurements_only() {
+        let stripped = circuit.without_measurements();
+        let result = run_with_opts(kind.clone(), &stripped, seed, SimOptions::default())?;
+        if let Some(probs) = result.probabilities {
+            let meas_map = circuit.measurement_map();
+            let shots = sample_shots(
+                &probs,
+                &meas_map,
+                circuit.num_classical_bits,
+                num_shots,
+                seed,
+            );
+            return Ok(ShotsResult {
+                shots,
+                probabilities: Some(probs),
+            });
+        }
+    }
+
     let mut shots = Vec::with_capacity(num_shots);
     let mut probabilities = None;
 
@@ -1436,11 +1529,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shots_single_matches_run() {
+    fn test_shots_single_valid_outcome() {
         let circuit = make_bell_with_measure();
         let shots_result = run_shots(&circuit, 1, 42).unwrap();
-        let single_result = run(&circuit, 42).unwrap();
-        assert_eq!(shots_result.shots[0], single_result.classical_bits);
+        let shot = &shots_result.shots[0];
+        assert_eq!(shot[0], shot[1], "Bell state: both bits must agree");
     }
 
     #[test]
@@ -1631,5 +1724,100 @@ mod tests {
         );
         assert_eq!(n_01, 0, "|01> should never appear in Bell state");
         assert_eq!(n_10, 0, "|10> should never appear in Bell state");
+    }
+
+    #[test]
+    fn test_has_terminal_measurements_only() {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        assert!(c.has_terminal_measurements_only());
+
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[2] q;
+            bit[2] c;
+            h q[0];
+            cx q[0], q[1];
+            c[0] = measure q[0];
+            c[1] = measure q[1];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        assert!(circuit.has_terminal_measurements_only());
+
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[2] q;
+            bit[1] c;
+            c[0] = measure q[0];
+            h q[1];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        assert!(!circuit.has_terminal_measurements_only());
+
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[2] q;
+            bit[2] c;
+            x q[0];
+            c[0] = measure q[0];
+            if (c[0]) x q[1];
+            c[1] = measure q[1];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        assert!(!circuit.has_terminal_measurements_only());
+
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[1] q;
+            bit[1] c;
+            h q[0];
+            c[0] = measure q[0];
+            x q[0];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        assert!(!circuit.has_terminal_measurements_only());
+    }
+
+    #[test]
+    fn test_measurement_map() {
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[3] q;
+            bit[3] c;
+            c[2] = measure q[0];
+            c[0] = measure q[2];
+            c[1] = measure q[1];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        let map = circuit.measurement_map();
+        assert_eq!(map, vec![(0, 2), (2, 0), (1, 1)]);
+    }
+
+    #[test]
+    fn test_fast_path_deterministic_x() {
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[1] q;
+            bit[1] c;
+            x q[0];
+            c[0] = measure q[0];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        assert!(circuit.has_terminal_measurements_only());
+        let result = run_shots(&circuit, 100, 42).unwrap();
+        for (i, shot) in result.shots.iter().enumerate() {
+            assert!(shot[0], "shot {i}: X|0> should always measure 1");
+        }
+    }
+
+    #[test]
+    fn test_fast_path_no_measurements() {
+        let mut c = Circuit::new(2, 2);
+        c.add_gate(Gate::H, &[0]);
+        let result = run_shots(&c, 50, 42).unwrap();
+        for shot in &result.shots {
+            assert_eq!(shot.len(), 2);
+            assert!(!shot[0] && !shot[1], "no measurements → all-false");
+        }
     }
 }

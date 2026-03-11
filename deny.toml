@@ -3,8 +3,8 @@ all-features = true
 
 [advisories]
 ignore = [
-    # paste — unmaintained, transitive dep from faer/gemm. No replacement available.
-    { id = "RUSTSEC-2024-0436", reason = "transitive dep from faer, no action possible" },
+    # paste — unmaintained, transitive dep from faer/gemm. Revisit when upstream moves to pastey.
+    { id = "RUSTSEC-2024-0436", reason = "transitive dep from faer, revisit when deps migrate to pastey" },
 ]
 
 [licenses]

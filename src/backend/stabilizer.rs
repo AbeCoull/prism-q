@@ -670,17 +670,19 @@ impl StabilizerBackend {
             let x2 = self.xz[base_h + w];
             let z2 = self.xz[base_h + nw + w];
 
-            self.xz[base_h + w] = x1 ^ x2;
-            self.xz[base_h + nw + w] = z1 ^ z2;
+            let new_x = x1 ^ x2;
+            let new_z = z1 ^ z2;
+            self.xz[base_h + w] = new_x;
+            self.xz[base_h + nw + w] = new_z;
 
             if (x1 | z1 | x2 | z2) == 0 {
                 continue;
             }
 
+            let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
             let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-            let neg = (x1 & z1 & x2 & !z2) | (x1 & !z1 & !x2 & z2) | (!x1 & z1 & x2 & z2);
-            sum = sum.wrapping_add(pos.count_ones() as u64);
-            sum = sum.wrapping_sub(neg.count_ones() as u64);
+            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
         }
 
         self.phase[h] = (sum & 3) >= 2;
@@ -743,13 +745,40 @@ impl StabilizerBackend {
         let nw = self.num_words;
         let stride = self.stride();
 
+        let p_base = p_row * stride;
+        let p_data: Vec<u64> = self.xz[p_base..p_base + stride].to_vec();
+        let p_phase = self.phase[p_row];
+
+        let rowmul_inline = |row: &mut [u64], phase: &mut bool| {
+            let mut sum = if p_phase { 2u64 } else { 0 } + if *phase { 2u64 } else { 0 };
+
+            for w in 0..nw {
+                let x1 = p_data[w];
+                let z1 = p_data[nw + w];
+                let x2 = row[w];
+                let z2 = row[nw + w];
+
+                let new_x = x1 ^ x2;
+                let new_z = z1 ^ z2;
+                row[w] = new_x;
+                row[nw + w] = new_z;
+
+                if (x1 | z1 | x2 | z2) == 0 {
+                    continue;
+                }
+
+                let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
+                let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+                sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+                sum = sum.wrapping_sub(nonzero.count_ones() as u64);
+            }
+
+            *phase = (sum & 3) >= 2;
+        };
+
         #[cfg(feature = "parallel")]
         if self.n >= MIN_QUBITS_FOR_PAR_GATES {
             use rayon::prelude::*;
-
-            let p_base = p_row * stride;
-            let p_data: Vec<u64> = self.xz[p_base..p_base + stride].to_vec();
-            let p_phase = self.phase[p_row];
 
             self.xz
                 .par_chunks_mut(stride)
@@ -771,37 +800,53 @@ impl StabilizerBackend {
                         let x2 = row[w];
                         let z2 = row[nw + w];
 
-                        row[w] = x1 ^ x2;
-                        row[nw + w] = z1 ^ z2;
+                        let new_x = x1 ^ x2;
+                        let new_z = z1 ^ z2;
+                        row[w] = new_x;
+                        row[nw + w] = new_z;
 
                         if (x1 | z1 | x2 | z2) == 0 {
                             continue;
                         }
 
+                        let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
                         let pos =
                             (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-                        let neg =
-                            (x1 & z1 & x2 & !z2) | (x1 & !z1 & !x2 & z2) | (!x1 & z1 & x2 & z2);
-                        sum = sum.wrapping_add(pos.count_ones() as u64);
-                        sum = sum.wrapping_sub(neg.count_ones() as u64);
+                        sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+                        sum = sum.wrapping_sub(nonzero.count_ones() as u64);
                     }
 
                     *phase = (sum & 3) >= 2;
                 });
+            // skip sequential fallthrough
         } else {
-            for i in 0..2 * n {
-                if i != p_row && (self.xz[i * stride + word] & bit_mask != 0) {
-                    self.rowmul(i, p_row);
+            for (row_idx, (row, phase)) in self
+                .xz
+                .chunks_mut(stride)
+                .zip(self.phase.iter_mut())
+                .enumerate()
+                .take(2 * n)
+            {
+                if row_idx == p_row || row[word] & bit_mask == 0 {
+                    continue;
                 }
+                rowmul_inline(row, phase);
             }
         }
 
         #[cfg(not(feature = "parallel"))]
         {
-            for i in 0..2 * n {
-                if i != p_row && (self.xz[i * stride + word] & bit_mask != 0) {
-                    self.rowmul(i, p_row);
+            for (row_idx, (row, phase)) in self
+                .xz
+                .chunks_mut(stride)
+                .zip(self.phase.iter_mut())
+                .enumerate()
+                .take(2 * n)
+            {
+                if row_idx == p_row || row[word] & bit_mask == 0 {
+                    continue;
                 }
+                rowmul_inline(row, phase);
             }
         }
 
@@ -1020,18 +1065,19 @@ impl StabilizerBackend {
                             let x2 = stab_x[row_off + ww];
                             let z2 = stab_z[row_off + ww];
 
-                            stab_x[row_off + ww] = x1 ^ x2;
-                            stab_z[row_off + ww] = z1 ^ z2;
+                            let new_x = x1 ^ x2;
+                            let new_z = z1 ^ z2;
+                            stab_x[row_off + ww] = new_x;
+                            stab_z[row_off + ww] = new_z;
 
                             if (x1 | z1 | x2 | z2) == 0 {
                                 continue;
                             }
+                            let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
                             let pos =
                                 (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-                            let neg =
-                                (x1 & z1 & x2 & !z2) | (x1 & !z1 & !x2 & z2) | (!x1 & z1 & x2 & z2);
-                            sum = sum.wrapping_add(pos.count_ones() as u64);
-                            sum = sum.wrapping_sub(neg.count_ones() as u64);
+                            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+                            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
                         }
                         stab_phase[row] = (sum & 3) >= 2;
                     }

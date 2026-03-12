@@ -12,7 +12,7 @@ use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
 use crate::backend::Backend;
-use crate::circuit::Circuit;
+use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
 /// Maximum qubit count for statevector simulation in Auto dispatch.
@@ -389,6 +389,14 @@ fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()
     Ok(())
 }
 
+fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> bool {
+    match kind {
+        BackendKind::Stabilizer => false,
+        BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
+        _ => true,
+    }
+}
+
 fn select_backend(
     kind: &BackendKind,
     circuit: &Circuit,
@@ -497,8 +505,26 @@ fn run_decomposed(
     let results: Vec<Result<SimulationResult>> =
         run_blocks_maybe_par(kind, &partitions, components, seed, opts, k);
 
+    merge_decomposed_results(
+        results,
+        components,
+        &partitions,
+        circuit.num_classical_bits,
+        circuit.num_qubits,
+        opts,
+    )
+}
+
+fn merge_decomposed_results(
+    results: Vec<Result<SimulationResult>>,
+    components: &[Vec<usize>],
+    partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
+    num_classical_bits: usize,
+    num_qubits: usize,
+    opts: &SimOptions,
+) -> Result<SimulationResult> {
     let mut factored_blocks: Vec<FactoredBlock> = Vec::new();
-    let mut merged_classical = vec![false; circuit.num_classical_bits];
+    let mut merged_classical = vec![false; num_classical_bits];
 
     for (i, result) in results.into_iter().enumerate() {
         let result = result?;
@@ -523,7 +549,7 @@ fn run_decomposed(
     let probabilities = if opts.probabilities && factored_blocks.len() == components.len() {
         Some(Probabilities::Factored {
             blocks: factored_blocks,
-            total_qubits: circuit.num_qubits,
+            total_qubits: num_qubits,
         })
     } else {
         None
@@ -533,6 +559,42 @@ fn run_decomposed(
         classical_bits: merged_classical,
         probabilities,
     })
+}
+
+fn run_decomposed_prefused(
+    kind: &BackendKind,
+    components: &[Vec<usize>],
+    partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
+    fused_blocks: &[std::borrow::Cow<'_, Circuit>],
+    seed: u64,
+    opts: &SimOptions,
+    original_circuit: &Circuit,
+) -> Result<SimulationResult> {
+    let k = partitions.len();
+    let results: Vec<Result<SimulationResult>> = (0..k)
+        .map(|i| {
+            let block_seed = seed.wrapping_add(i as u64);
+            let sub = &partitions[i].0;
+            let block_kind = if matches!(kind, BackendKind::Auto) {
+                BackendKind::Auto
+            } else {
+                kind.clone()
+            };
+            if !matches!(block_kind, BackendKind::Auto) {
+                validate_explicit_backend(&block_kind, sub)?;
+            }
+            let mut backend = select_backend(&block_kind, sub, block_seed, false);
+            execute_circuit(&mut *backend, &fused_blocks[i], opts)
+        })
+        .collect();
+    merge_decomposed_results(
+        results,
+        components,
+        partitions,
+        original_circuit.num_classical_bits,
+        original_circuit.num_qubits,
+        opts,
+    )
 }
 
 /// Combine per-block probability vectors via Kronecker product.
@@ -624,6 +686,30 @@ pub(crate) fn merge_probabilities(
 #[inline]
 fn min_clifford_prefix_gates(num_qubits: usize) -> usize {
     (num_qubits * 2).max(16)
+}
+
+fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Circuit) -> bool {
+    if !matches!(kind, BackendKind::Auto) {
+        return false;
+    }
+    if circuit.num_qubits > max_statevector_qubits() {
+        return false;
+    }
+    let min_gates = min_clifford_prefix_gates(circuit.num_qubits);
+    let mut prefix_gates = 0;
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate { gate, .. } => {
+                if !gate.is_clifford() {
+                    break;
+                }
+                prefix_gates += 1;
+            }
+            Instruction::Measure { .. } | Instruction::Conditional { .. } => break,
+            Instruction::Barrier { .. } => {}
+        }
+    }
+    prefix_gates >= min_gates && prefix_gates < circuit.instructions.len()
 }
 
 /// Try temporal Clifford decomposition: run a Clifford prefix on Stabilizer,
@@ -952,9 +1038,100 @@ pub fn run_shots_with(
         }
     }
 
+    // Slow path: mid-circuit measurements require per-shot simulation.
+    // Pre-compute seed-independent analysis to avoid redundant work.
+    if !matches!(kind, BackendKind::Auto) {
+        validate_explicit_backend(&kind, circuit)?;
+    }
+
+    let mut has_partial_independence = false;
+    let decompose = if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
+        let comps = circuit.independent_subsystems();
+        if comps.len() > 1 {
+            if should_decompose(&comps, circuit.num_qubits) {
+                Some(comps)
+            } else {
+                has_partial_independence = true;
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if has_temporal_clifford_opportunity(&kind, circuit) {
+        return run_shots_fallback(&kind, circuit, num_shots, seed);
+    }
+
+    let supports_fused = supports_fused_for_kind(&kind, circuit);
     let mut shots = Vec::with_capacity(num_shots);
     let mut probabilities = None;
 
+    if let Some(ref comps) = decompose {
+        let partitions = circuit.partition_subcircuits(comps);
+        let fused_blocks: Vec<_> = partitions
+            .iter()
+            .map(|(sub, _, _)| {
+                crate::circuit::fusion::fuse_circuit(sub, supports_fused_for_kind(&kind, sub))
+            })
+            .collect();
+
+        for i in 0..num_shots {
+            let shot_seed = seed.wrapping_add(i as u64);
+            let opts = if i == num_shots - 1 {
+                SimOptions::default()
+            } else {
+                SimOptions::classical_only()
+            };
+            let result = run_decomposed_prefused(
+                &kind,
+                comps,
+                &partitions,
+                &fused_blocks,
+                shot_seed,
+                &opts,
+                circuit,
+            )?;
+            shots.push(result.classical_bits);
+            if i == num_shots - 1 {
+                probabilities = result.probabilities;
+            }
+        }
+    } else {
+        let fused = crate::circuit::fusion::fuse_circuit(circuit, supports_fused);
+
+        for i in 0..num_shots {
+            let shot_seed = seed.wrapping_add(i as u64);
+            let opts = if i == num_shots - 1 {
+                SimOptions::default()
+            } else {
+                SimOptions::classical_only()
+            };
+            let mut backend = select_backend(&kind, circuit, shot_seed, has_partial_independence);
+            let result = execute_circuit(&mut *backend, &fused, &opts)?;
+            shots.push(result.classical_bits);
+            if i == num_shots - 1 {
+                probabilities = result.probabilities;
+            }
+        }
+    }
+
+    Ok(ShotsResult {
+        shots,
+        probabilities,
+    })
+}
+
+fn run_shots_fallback(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let mut shots = Vec::with_capacity(num_shots);
+    let mut probabilities = None;
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
         let opts = if i == num_shots - 1 {
@@ -968,7 +1145,6 @@ pub fn run_shots_with(
             probabilities = result.probabilities;
         }
     }
-
     Ok(ShotsResult {
         shots,
         probabilities,
@@ -1818,6 +1994,85 @@ mod tests {
         for shot in &result.shots {
             assert_eq!(shot.len(), 2);
             assert!(!shot[0] && !shot[1], "no measurements → all-false");
+        }
+    }
+
+    #[test]
+    fn test_shots_cached_fusion_matches_uncached() {
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[2] q;
+            bit[2] c;
+            h q[0];
+            cx q[0], q[1];
+            c[0] = measure q[0];
+            x q[1];
+            c[1] = measure q[1];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        assert!(!circuit.has_terminal_measurements_only());
+
+        let cached = run_shots_with(BackendKind::Statevector, &circuit, 20, 42).unwrap();
+        for i in 0..20 {
+            let seed_i = 42u64.wrapping_add(i as u64);
+            let single = run_with_opts(
+                BackendKind::Statevector,
+                &circuit,
+                seed_i,
+                SimOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(cached.shots[i], single.classical_bits, "shot {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_shots_decomposed_cached() {
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[8] q;
+            bit[8] c;
+            h q[0];
+            cx q[0], q[1];
+            c[0] = measure q[0];
+            x q[1];
+            c[1] = measure q[1];
+            h q[4];
+            cx q[4], q[5];
+            c[4] = measure q[4];
+            x q[5];
+            c[5] = measure q[5];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        assert!(!circuit.has_terminal_measurements_only());
+        let comps = circuit.independent_subsystems();
+        assert!(comps.len() > 1, "circuit should decompose");
+
+        let result = run_shots_with(BackendKind::Statevector, &circuit, 10, 42).unwrap();
+        assert_eq!(result.shots.len(), 10);
+        for shot in &result.shots {
+            assert_eq!(shot.len(), 8);
+        }
+    }
+
+    #[test]
+    fn test_shots_temporal_clifford_fallback() {
+        let mut c = Circuit::new(4, 4);
+        for i in 0..4 {
+            c.add_gate(Gate::H, &[i]);
+        }
+        for i in 0..3 {
+            c.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        c.add_gate(Gate::T, &[0]);
+        c.add_measure(0, 0);
+        c.add_gate(Gate::X, &[1]);
+        c.add_measure(1, 1);
+
+        let result = run_shots_with(BackendKind::Auto, &c, 10, 42).unwrap();
+        assert_eq!(result.shots.len(), 10);
+        for shot in &result.shots {
+            assert_eq!(shot.len(), 4);
         }
     }
 }

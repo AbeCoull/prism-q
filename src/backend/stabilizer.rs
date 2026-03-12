@@ -32,6 +32,7 @@
 //! - Probability extraction: O(2^n * n) — only available for n ≤ 20
 
 use num_complex::Complex64;
+use smallvec::SmallVec;
 
 use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
@@ -41,7 +42,6 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-#[allow(dead_code)]
 #[inline(always)]
 unsafe fn xor_words(dst: *mut u64, src: *const u64, len: usize) {
     #[cfg(target_arch = "x86_64")]
@@ -60,7 +60,6 @@ unsafe fn xor_words(dst: *mut u64, src: *const u64, len: usize) {
     }
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn xor_words_avx2(dst: *mut u64, src: *const u64, len: usize) {
@@ -80,7 +79,6 @@ unsafe fn xor_words_avx2(dst: *mut u64, src: *const u64, len: usize) {
     }
 }
 
-#[allow(dead_code)]
 #[cfg(target_arch = "x86_64")]
 fn has_avx2() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -746,7 +744,7 @@ impl StabilizerBackend {
         let stride = self.stride();
 
         let p_base = p_row * stride;
-        let p_data: Vec<u64> = self.xz[p_base..p_base + stride].to_vec();
+        let p_data: SmallVec<[u64; 32]> = SmallVec::from_slice(&self.xz[p_base..p_base + stride]);
         let p_phase = self.phase[p_row];
 
         let rowmul_inline = |row: &mut [u64], phase: &mut bool| {
@@ -820,32 +818,26 @@ impl StabilizerBackend {
                 });
             // skip sequential fallthrough
         } else {
-            for (row_idx, (row, phase)) in self
-                .xz
-                .chunks_mut(stride)
-                .zip(self.phase.iter_mut())
-                .enumerate()
-                .take(2 * n)
-            {
-                if row_idx == p_row || row[word] & bit_mask == 0 {
-                    continue;
-                }
+            let anti_rows: SmallVec<[usize; 16]> = (0..2 * n)
+                .filter(|&r| r != p_row && self.xz[r * stride + word] & bit_mask != 0)
+                .collect();
+            for &r in &anti_rows {
+                let base = r * stride;
+                let row = &mut self.xz[base..base + stride];
+                let phase = &mut self.phase[r];
                 rowmul_inline(row, phase);
             }
         }
 
         #[cfg(not(feature = "parallel"))]
         {
-            for (row_idx, (row, phase)) in self
-                .xz
-                .chunks_mut(stride)
-                .zip(self.phase.iter_mut())
-                .enumerate()
-                .take(2 * n)
-            {
-                if row_idx == p_row || row[word] & bit_mask == 0 {
-                    continue;
-                }
+            let anti_rows: SmallVec<[usize; 16]> = (0..2 * n)
+                .filter(|&r| r != p_row && self.xz[r * stride + word] & bit_mask != 0)
+                .collect();
+            for &r in &anti_rows {
+                let base = r * stride;
+                let row = &mut self.xz[base..base + stride];
+                let phase = &mut self.phase[r];
                 rowmul_inline(row, phase);
             }
         }
@@ -1030,25 +1022,21 @@ impl StabilizerBackend {
             stab_phase[i] = self.phase[i + n];
         }
 
-        let mut has_pivot = vec![false; n];
+        let mut remaining: Vec<usize> = (0..n).collect();
 
-        #[allow(clippy::needless_range_loop)]
         for col in 0..n {
             let w = col / 64;
             let b = col % 64;
-            let mut pivot_row = None;
-            for row in 0..n {
-                if has_pivot[row] {
-                    continue;
-                }
+            let mut pivot_idx = None;
+            for (ri, &row) in remaining.iter().enumerate() {
                 if (stab_x[row * nw + w] >> b) & 1 == 1 {
-                    pivot_row = Some(row);
+                    pivot_idx = Some(ri);
                     break;
                 }
             }
 
-            if let Some(pr) = pivot_row {
-                has_pivot[pr] = true;
+            if let Some(ri) = pivot_idx {
+                let pr = remaining.swap_remove(ri);
                 let pr_off = pr * nw;
 
                 for row in 0..n {
@@ -1085,8 +1073,8 @@ impl StabilizerBackend {
             }
         }
 
-        let k = has_pivot.iter().filter(|&&p| p).count();
-        let diag: Vec<usize> = (0..n).filter(|i| !has_pivot[*i]).collect();
+        let k = n - remaining.len();
+        let diag = remaining;
 
         (stab_x, stab_z, stab_phase, diag, k)
     }
@@ -1111,28 +1099,26 @@ impl StabilizerBackend {
         }
 
         let mut pivot_col = vec![usize::MAX; d];
-        let mut used_cols = vec![false; n];
+        let mut available_cols: Vec<usize> = (0..n).collect();
 
         for row in 0..d {
             let row_off = row * nw;
             let mut found = None;
-            for col in 0..n {
-                if used_cols[col] {
-                    continue;
-                }
+            for (ci, &col) in available_cols.iter().enumerate() {
                 if (z_rows[row_off + col / 64] >> (col % 64)) & 1 == 1 {
-                    found = Some(col);
+                    found = Some(ci);
                     break;
                 }
             }
 
-            if let Some(col) = found {
-                used_cols[col] = true;
+            if let Some(ci) = found {
+                let col = available_cols.swap_remove(ci);
                 pivot_col[row] = col;
                 let w = col / 64;
                 let b = col % 64;
 
-                let pivot_z: Vec<u64> = z_rows[row_off..row_off + nw].to_vec();
+                let pivot_z: SmallVec<[u64; 16]> =
+                    SmallVec::from_slice(&z_rows[row_off..row_off + nw]);
                 let pivot_phase = phases[row];
 
                 #[allow(clippy::needless_range_loop)]
@@ -1142,8 +1128,11 @@ impl StabilizerBackend {
                     }
                     let other_off = other * nw;
                     if (z_rows[other_off + w] >> b) & 1 == 1 {
-                        for ww in 0..nw {
-                            z_rows[other_off + ww] ^= pivot_z[ww];
+                        // SAFETY: other_off..other_off+nw and pivot_z are non-overlapping
+                        // valid regions of nw u64s. pivot_z was cloned from z_rows at
+                        // row_off (row != other), so the regions do not alias.
+                        unsafe {
+                            xor_words(z_rows.as_mut_ptr().add(other_off), pivot_z.as_ptr(), nw);
                         }
                         phases[other] ^= pivot_phase;
                     }

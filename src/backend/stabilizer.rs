@@ -85,6 +85,7 @@ fn has_avx2() -> bool {
     *CACHED.get_or_init(|| is_x86_feature_detected!("avx2"))
 }
 
+#[allow(dead_code)]
 #[cfg(not(target_arch = "x86_64"))]
 fn has_avx2() -> bool {
     false

@@ -909,7 +909,7 @@ pub(crate) fn negate_slice(slice: &mut [Complex64]) {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn swap_slices_avx2(a: &mut [Complex64], b: &mut [Complex64]) {
     debug_assert_eq!(a.len(), b.len());
@@ -930,7 +930,6 @@ unsafe fn swap_slices_avx2(a: &mut [Complex64], b: &mut [Complex64]) {
     }
 }
 
-#[cfg(any(feature = "parallel", test))]
 pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]

@@ -79,6 +79,30 @@ pub fn clifford_heavy_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
+pub fn clifford_random_pairs(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let cliffords = [Gate::H, Gate::S, Gate::X, Gate::Y, Gate::Z];
+    for _ in 0..depth {
+        for q in 0..n {
+            c.add_gate(cliffords[rng.gen_range(0..cliffords.len())].clone(), &[q]);
+        }
+        let num_pairs = n / 2;
+        let mut available: Vec<usize> = (0..n).collect();
+        for _ in 0..num_pairs {
+            if available.len() < 2 {
+                break;
+            }
+            let i = rng.gen_range(0..available.len());
+            let q0 = available.swap_remove(i);
+            let j = rng.gen_range(0..available.len());
+            let q1 = available.swap_remove(j);
+            c.add_gate(Gate::Cx, &[q0, q1]);
+        }
+    }
+    c
+}
+
 /// N independent Bell pairs: qubits (0,1), (2,3), ..., (2N-2, 2N-1).
 ///
 /// Decomposes into `n_pairs` blocks of 2 qubits each. Useful for
@@ -158,6 +182,129 @@ pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
         for q in 0..n {
             let beta: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
             c.add_gate(Gate::Rx(beta), &[q]);
+        }
+    }
+    c
+}
+
+/// Build a circuit with only single-qubit rotation gates (no entanglement).
+///
+/// `depth` layers of random Rx/Ry/Rz on every qubit. Useful for benchmarking
+/// product-state and single-qubit gate throughput.
+pub fn single_qubit_rotation_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for _ in 0..depth {
+        for q in 0..n {
+            let choice: usize = rng.gen_range(0..3);
+            let angle: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
+            match choice {
+                0 => c.add_gate(Gate::Rx(angle), &[q]),
+                1 => c.add_gate(Gate::Ry(angle), &[q]),
+                _ => c.add_gate(Gate::Rz(angle), &[q]),
+            }
+        }
+    }
+    c
+}
+
+/// Build a Clifford+T circuit with controlled T-count.
+///
+/// Clifford depth-10 base with `t_fraction` of single-qubit gates replaced by T/Tdg.
+/// For benchmarking stabilizer rank and quasi-probability dispatch.
+pub fn clifford_t_circuit(n: usize, depth: usize, t_fraction: f64, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let cliffords = [Gate::H, Gate::S, Gate::X, Gate::Y, Gate::Z];
+    for layer in 0..depth {
+        for q in 0..n {
+            if rng.gen::<f64>() < t_fraction {
+                if rng.gen_bool(0.5) {
+                    c.add_gate(Gate::T, &[q]);
+                } else {
+                    c.add_gate(Gate::Tdg, &[q]);
+                }
+            } else {
+                c.add_gate(cliffords[rng.gen_range(0..cliffords.len())].clone(), &[q]);
+            }
+        }
+        let offset = layer % 2;
+        for q in (offset..n.saturating_sub(1)).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    c
+}
+
+/// Build a W-state preparation circuit.
+///
+/// Produces the n-qubit W state: (|100...0⟩ + |010...0⟩ + ... + |000...1⟩) / √n.
+/// Uses a cascade of controlled rotations and CX gates.
+pub fn w_state_circuit(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    c.add_gate(Gate::X, &[0]);
+    for i in 0..n - 1 {
+        let remaining = (n - i) as f64;
+        let theta = 2.0 * (1.0 / remaining).sqrt().acos();
+        c.add_gate(Gate::Ry(theta), &[i + 1]);
+        c.add_gate(Gate::Cx, &[i + 1, i]);
+        c.add_gate(Gate::Ry(-theta), &[i + 1]);
+        c.add_gate(Gate::Cx, &[i, i + 1]);
+    }
+    c
+}
+
+/// Build a quantum volume-style circuit.
+///
+/// `depth` layers, each applying a random permutation of qubit pairs followed
+/// by random SU(4) gates (decomposed into CX + single-qubit rotations).
+pub fn quantum_volume_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let n_pairs = n / 2;
+    for _ in 0..depth {
+        let mut perm: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = rng.gen_range(0..=i);
+            perm.swap(i, j);
+        }
+        for p in 0..n_pairs {
+            let q0 = perm[2 * p];
+            let q1 = perm[2 * p + 1];
+            let a0: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
+            let a1: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
+            let a2: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
+            c.add_gate(Gate::Ry(a0), &[q0]);
+            c.add_gate(Gate::Rz(a1), &[q0]);
+            c.add_gate(Gate::Ry(a2), &[q1]);
+            c.add_gate(Gate::Cx, &[q0, q1]);
+            let b0: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
+            let b1: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
+            let b2: f64 = rng.gen::<f64>() * std::f64::consts::TAU;
+            c.add_gate(Gate::Ry(b0), &[q0]);
+            c.add_gate(Gate::Rz(b1), &[q1]);
+            c.add_gate(Gate::Cx, &[q0, q1]);
+            c.add_gate(Gate::Ry(b2), &[q0]);
+        }
+    }
+    c
+}
+
+/// Build a linearly-connected circuit with only CZ + single-qubit gates.
+///
+/// `depth` layers of random {H, S, T, X} + linear CZ chain. CZ-heavy circuits
+/// exercise different fusion/reordering paths than CX-heavy ones.
+pub fn cz_chain_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let singles = [Gate::H, Gate::S, Gate::T, Gate::X];
+    for layer in 0..depth {
+        for q in 0..n {
+            c.add_gate(singles[rng.gen_range(0..singles.len())].clone(), &[q]);
+        }
+        let offset = layer % 2;
+        for q in (offset..n.saturating_sub(1)).step_by(2) {
+            c.add_gate(Gate::Cz, &[q, q + 1]);
         }
     }
     c

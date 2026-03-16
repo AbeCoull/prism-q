@@ -222,8 +222,13 @@ struct PendingFusion {
 fn flush(pending: &mut Option<PendingFusion>, output: &mut Vec<Instruction>) {
     if let Some(p) = pending.take() {
         if !is_identity(&p.matrix) {
+            let gate = match Gate::recognize_matrix(&p.matrix) {
+                Some(Gate::Id) => return,
+                Some(named) => named,
+                None => Gate::Fused(Box::new(p.matrix)),
+            };
             output.push(Instruction::Gate {
-                gate: Gate::Fused(Box::new(p.matrix)),
+                gate,
                 targets: smallvec![p.target],
             });
         }
@@ -1473,7 +1478,8 @@ mod tests {
         c.add_gate(Gate::T, &[0]);
         let fused = fuse_single_qubit_gates(&c);
         assert_eq!(fused.instructions.len(), 2);
-        assert_eq!(count_fused(&fused), 2);
+        // H·T on q0 stays Fused (no named match), X on q1 recognized as Gate::X
+        assert_eq!(count_fused(&fused), 1);
 
         let expected = mat_mul_2x2(&Gate::T.matrix_2x2(), &Gate::H.matrix_2x2());
         let fused_mat = extract_fused_matrix(&fused.instructions[0]);
@@ -1657,9 +1663,12 @@ mod tests {
         c.add_gate(Gate::S, &[0]);
         c.add_gate(Gate::S, &[0]);
         let fused = fuse_single_qubit_gates(&c);
-        assert_eq!(count_fused(&fused), 1);
-        let fused_mat = extract_fused_matrix(&fused.instructions[0]);
-        assert_mat_close(&fused_mat, &Gate::Z.matrix_2x2());
+        assert_eq!(fused.instructions.len(), 1);
+        // S·S recognized as Gate::Z
+        assert!(matches!(
+            &fused.instructions[0],
+            Instruction::Gate { gate: Gate::Z, .. }
+        ));
     }
 
     #[test]
@@ -1688,9 +1697,11 @@ mod tests {
         c.add_gate(Gate::T, &[1]);
         let fused = fuse_single_qubit_gates(&c);
         assert_eq!(fused.instructions.len(), 1);
-        assert_eq!(count_fused(&fused), 1);
-        let mat = extract_fused_matrix(&fused.instructions[0]);
-        assert_mat_close(&mat, &Gate::T.matrix_2x2());
+        // H·H on q0 elided, lone T on q1 recognized as Gate::T
+        assert!(matches!(
+            &fused.instructions[0],
+            Instruction::Gate { gate: Gate::T, .. }
+        ));
     }
 
     #[test]
@@ -2333,5 +2344,30 @@ mod tests {
             .count();
         assert_eq!(batch_rzz_count, 3);
         assert_eq!(multi_fused_count, 3);
+    }
+
+    #[test]
+    fn test_recognition_extends_clifford_prefix() {
+        let mut c = Circuit::new(2, 0);
+        // T, T on q0 then CX then Rx on q1
+        c.add_gate(Gate::T, &[0]);
+        c.add_gate(Gate::T, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Rx(0.7), &[1]);
+
+        // Without fusion: first gate is T (non-Clifford), so no prefix at all
+        assert!(c.clifford_prefix_split().is_none());
+
+        // After fusion: T·T recognized as S (Clifford), so prefix = [S, CX], tail = [Rx]
+        let fused = fuse_single_qubit_gates(&c);
+        assert!(matches!(
+            &fused.instructions[0],
+            Instruction::Gate { gate: Gate::S, .. }
+        ));
+        let split = fused.clifford_prefix_split();
+        assert!(split.is_some());
+        let (pre_f, tail_f) = split.unwrap();
+        assert_eq!(pre_f.instructions.len(), 2); // S + CX
+        assert_eq!(tail_f.instructions.len(), 1); // Rx(0.7)
     }
 }

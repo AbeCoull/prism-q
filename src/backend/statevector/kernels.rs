@@ -961,14 +961,21 @@ impl StatevectorBackend {
             return;
         }
 
-        let mask0 = 1usize << q0;
-        let mask1 = 1usize << q1;
-        let n = 1usize << self.num_qubits;
+        let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+        let lo_half = 1usize << lo;
+        let lo_block = lo_half << 1;
+        let hi_half = 1usize << hi;
+        let block_size = hi_half << 1;
 
-        for i in 0..n {
-            if (i & mask0) == 0 && (i & mask1) != 0 {
-                let j = i ^ mask0 ^ mask1;
-                self.state.swap(i, j);
+        for chunk in self.state.chunks_mut(block_size) {
+            let (lo_group, hi_group) = chunk.split_at_mut(hi_half);
+            for (lo_sub, hi_sub) in lo_group
+                .chunks_mut(lo_block)
+                .zip(hi_group.chunks_mut(lo_block))
+            {
+                let (_, lo_sub_hi) = lo_sub.split_at_mut(lo_half);
+                let (hi_sub_lo, _) = hi_sub.split_at_mut(lo_half);
+                simd::swap_slices(lo_sub_hi, hi_sub_lo);
             }
         }
     }

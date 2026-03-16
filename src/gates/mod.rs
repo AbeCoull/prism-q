@@ -611,6 +611,49 @@ impl Gate {
         }
     }
 
+    /// Try to recognize a 2x2 unitary matrix as a named gate (up to global phase).
+    ///
+    /// Used by the fusion pass to emit named gate variants instead of opaque
+    /// `Gate::Fused` matrices, enabling downstream passes (e.g. `clifford_prefix_split`)
+    /// to identify Clifford gates that arose from fusion (e.g. T·T → S).
+    pub fn recognize_matrix(mat: &[[Complex64; 2]; 2]) -> Option<Gate> {
+        const EPS: f64 = 1e-10;
+
+        // Check each candidate gate. For each, compute the global phase ratio
+        // mat[i][j] / ref[i][j] using the first non-zero entry, then verify
+        // all other entries match under that same phase.
+        let candidates: &[Gate] = &[
+            Gate::H,
+            Gate::X,
+            Gate::Y,
+            Gate::Z,
+            Gate::S,
+            Gate::Sdg,
+            Gate::T,
+            Gate::Tdg,
+            Gate::SX,
+            Gate::SXdg,
+        ];
+
+        for candidate in candidates {
+            let ref_mat = candidate.matrix_2x2();
+            if matrices_equal_up_to_phase(mat, &ref_mat, EPS) {
+                return Some(candidate.clone());
+            }
+        }
+
+        // Identity check: all off-diagonal zero, diagonal entries equal
+        if mat[0][1].norm_sqr() < EPS
+            && mat[1][0].norm_sqr() < EPS
+            && (mat[0][0] - mat[1][1]).norm_sqr() < EPS
+            && mat[0][0].norm_sqr() > EPS
+        {
+            return Some(Gate::Id);
+        }
+
+        None
+    }
+
     /// True if this gate is a Clifford gate (relevant for stabilizer backend).
     #[inline]
     pub fn is_clifford(&self) -> bool {
@@ -630,6 +673,42 @@ impl Gate {
                 | Gate::Swap
         )
     }
+}
+
+/// Check if two 2x2 unitary matrices are equal up to a global phase factor.
+fn matrices_equal_up_to_phase(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) -> bool {
+    // Find the first non-zero entry in b to determine the phase ratio
+    let mut phase = None;
+    for i in 0..2 {
+        for j in 0..2 {
+            if b[i][j].norm_sqr() > eps {
+                if a[i][j].norm_sqr() < eps {
+                    return false;
+                }
+                phase = Some(a[i][j] / b[i][j]);
+                break;
+            }
+        }
+        if phase.is_some() {
+            break;
+        }
+    }
+
+    let phase = match phase {
+        Some(p) => p,
+        None => return true, // Both are zero matrices
+    };
+
+    // Verify all entries match under the same phase
+    for i in 0..2 {
+        for j in 0..2 {
+            let expected = phase * b[i][j];
+            if (a[i][j] - expected).norm_sqr() > eps {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -1025,5 +1104,84 @@ mod tests {
             16,
             "Gate enum must stay at 16 bytes"
         );
+    }
+
+    #[test]
+    fn test_recognize_named_gates() {
+        for gate in &[
+            Gate::H,
+            Gate::X,
+            Gate::Y,
+            Gate::Z,
+            Gate::S,
+            Gate::Sdg,
+            Gate::T,
+            Gate::Tdg,
+            Gate::SX,
+            Gate::SXdg,
+        ] {
+            let mat = gate.matrix_2x2();
+            let recognized = Gate::recognize_matrix(&mat);
+            assert_eq!(
+                recognized.as_ref(),
+                Some(gate),
+                "failed to recognize {:?}",
+                gate.name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_recognize_identity() {
+        let id = Gate::Id.matrix_2x2();
+        assert_eq!(Gate::recognize_matrix(&id), Some(Gate::Id));
+    }
+
+    #[test]
+    fn test_recognize_t_squared_is_s() {
+        let t = Gate::T.matrix_2x2();
+        let tt = mat_mul_2x2(&t, &t);
+        assert_eq!(Gate::recognize_matrix(&tt), Some(Gate::S));
+    }
+
+    #[test]
+    fn test_recognize_s_squared_is_z() {
+        let s = Gate::S.matrix_2x2();
+        let ss = mat_mul_2x2(&s, &s);
+        assert_eq!(Gate::recognize_matrix(&ss), Some(Gate::Z));
+    }
+
+    #[test]
+    fn test_recognize_h_squared_is_identity() {
+        let h = Gate::H.matrix_2x2();
+        let hh = mat_mul_2x2(&h, &h);
+        assert_eq!(Gate::recognize_matrix(&hh), Some(Gate::Id));
+    }
+
+    #[test]
+    fn test_recognize_t_fourth_is_z() {
+        let t = Gate::T.matrix_2x2();
+        let t2 = mat_mul_2x2(&t, &t);
+        let t4 = mat_mul_2x2(&t2, &t2);
+        assert_eq!(Gate::recognize_matrix(&t4), Some(Gate::Z));
+    }
+
+    #[test]
+    fn test_recognize_non_clifford_returns_none() {
+        let rx = Gate::Rx(0.7).matrix_2x2();
+        assert_eq!(Gate::recognize_matrix(&rx), None);
+        let ry = Gate::Ry(1.3).matrix_2x2();
+        assert_eq!(Gate::recognize_matrix(&ry), None);
+    }
+
+    #[test]
+    fn test_recognize_global_phase_invariance() {
+        let phase = Complex64::from_polar(1.0, 0.42);
+        let h = Gate::H.matrix_2x2();
+        let phased = [
+            [h[0][0] * phase, h[0][1] * phase],
+            [h[1][0] * phase, h[1][1] * phase],
+        ];
+        assert_eq!(Gate::recognize_matrix(&phased), Some(Gate::H));
     }
 }

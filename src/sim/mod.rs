@@ -3,6 +3,12 @@
 //! Connects the circuit IR to a backend. This module is deliberately thin —
 //! the complexity lives in the backends and the parser.
 
+pub mod compiled;
+pub mod homological;
+pub mod noise;
+pub mod quasi_prob;
+pub mod stabilizer_rank;
+
 use std::collections::HashMap;
 
 use crate::backend::mps::MpsBackend;
@@ -93,6 +99,13 @@ fn detect_max_sv_qubits() -> Option<usize> {
 
 /// Default bond dimension for MPS when auto-selected.
 const AUTO_MPS_BOND_DIM: usize = 256;
+
+/// Maximum T-gate count for automatic Clifford+T dispatch.
+/// At t=12, stabilizer rank creates 2^12 = 4096 branches.
+const MAX_AUTO_T_COUNT: usize = 12;
+
+/// Maximum qubit count for stabilizer rank exact probability computation.
+const MAX_STABILIZER_RANK_QUBITS: usize = 25;
 
 /// Minimum qubit count for subsystem decomposition.
 ///
@@ -335,12 +348,13 @@ pub enum BackendKind {
     /// Automatically select the optimal backend based on circuit analysis.
     ///
     /// Decision tree:
-    /// 1. No entangling gates   → ProductState (O(n))
-    /// 2. All Clifford gates    → Stabilizer (O(n²))
-    /// 3. Above memory limit:
-    ///    a. Sparse-friendly    → Sparse (O(k) where k = non-zero amplitudes)
-    ///    b. Otherwise          → MPS (bounded bond dimension)
-    /// 4. Otherwise             → Statevector (exact, general-purpose)
+    /// 1. No entangling gates        → ProductState (O(n))
+    /// 2. All Clifford gates         → Stabilizer (O(n²))
+    /// 3. Clifford+T, t ≤ 12        → StabilizerRank/QuasiProb (O(2^t · n²))
+    /// 4. Above memory limit:
+    ///    a. Sparse-friendly         → Sparse (O(k) where k = non-zero amplitudes)
+    ///    b. Otherwise               → MPS (bounded bond dimension)
+    /// 5. Otherwise                  → Statevector (exact, general-purpose)
     Auto,
     /// Full state-vector simulation (exact, exponential memory).
     Statevector,
@@ -359,6 +373,24 @@ pub enum BackendKind {
     TensorNetwork,
     /// Dynamic split-state with on-demand merging.
     Factored,
+    /// Quasi-probability decomposition for Clifford+T circuits.
+    ///
+    /// Decomposes each T gate as T = α·I + β·Z, enumerates all 2^t Clifford
+    /// branches, and accumulates weighted amplitudes for exact probabilities.
+    /// Limits: t ≤ 20, n ≤ 25.
+    QuasiProbability,
+    /// Stabilizer rank decomposition for Clifford+T circuits.
+    ///
+    /// Maintains a weighted sum of stabilizer states. Clifford gates are O(n²)
+    /// per term. Each T gate doubles the term count via T = α·I + β·Z.
+    /// Accumulates weighted amplitudes for exact probabilities. Limits: t ≤ 20, n ≤ 25.
+    StabilizerRank,
+    /// Filtered stabilizer: per-cluster tableaux with dynamic merging.
+    ///
+    /// Starts with one qubit per cluster. Gates within a cluster operate on
+    /// a small tableau. Cross-cluster 2q gates merge tableaux. Independent
+    /// subsystems never merge, giving O(block_size²) per gate vs O(n²).
+    FilteredStabilizer,
 }
 
 /// Validate that an explicitly-chosen backend is compatible with the circuit.
@@ -368,7 +400,7 @@ pub enum BackendKind {
 /// early with clear error messages instead of cryptic backend errors later.
 fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
     match kind {
-        BackendKind::Stabilizer => {
+        BackendKind::Stabilizer | BackendKind::FilteredStabilizer => {
             if !circuit.is_clifford_only() {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "stabilizer".into(),
@@ -384,6 +416,14 @@ fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()
                 });
             }
         }
+        BackendKind::QuasiProbability | BackendKind::StabilizerRank => {
+            if !circuit.has_t_gates() {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "stabilizer_rank".into(),
+                    reason: "circuit has no T gates; use Stabilizer instead".into(),
+                });
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -391,7 +431,10 @@ fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()
 
 fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> bool {
     match kind {
-        BackendKind::Stabilizer => false,
+        BackendKind::Stabilizer
+        | BackendKind::FilteredStabilizer
+        | BackendKind::QuasiProbability
+        | BackendKind::StabilizerRank => false,
         BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
         _ => true,
     }
@@ -423,11 +466,20 @@ fn select_backend(
         }
         BackendKind::Statevector => Box::new(StatevectorBackend::new(seed)),
         BackendKind::Stabilizer => Box::new(StabilizerBackend::new(seed)),
+        BackendKind::FilteredStabilizer => Box::new(
+            crate::backend::stabilizer::FilteredStabilizerBackend::new(seed),
+        ),
         BackendKind::Sparse => Box::new(SparseBackend::new(seed)),
         BackendKind::Mps { max_bond_dim } => Box::new(MpsBackend::new(seed, *max_bond_dim)),
         BackendKind::ProductState => Box::new(ProductStateBackend::new(seed)),
         BackendKind::TensorNetwork => Box::new(TensorNetworkBackend::new(seed)),
         BackendKind::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
+        BackendKind::QuasiProbability => {
+            unreachable!("QuasiProbability is handled before select_backend")
+        }
+        BackendKind::StabilizerRank => {
+            unreachable!("StabilizerRank is handled before select_backend")
+        }
     }
 }
 
@@ -466,6 +518,9 @@ fn run_blocks_maybe_par(
 }
 
 /// Execute a pre-extracted sub-circuit on an appropriate backend.
+///
+/// Delegates to `run_with_opts` so subcircuits benefit from the full Auto
+/// dispatch tree (Clifford+T → StabilizerRank, temporal Clifford, etc.).
 fn run_subcircuit(
     kind: &BackendKind,
     sub_circuit: &Circuit,
@@ -477,12 +532,7 @@ fn run_subcircuit(
     } else {
         kind.clone()
     };
-
-    if !matches!(block_kind, BackendKind::Auto) {
-        validate_explicit_backend(&block_kind, sub_circuit)?;
-    }
-    let mut backend = select_backend(&block_kind, sub_circuit, block_seed, false);
-    execute(&mut *backend, sub_circuit, opts)
+    run_with_opts(block_kind, sub_circuit, block_seed, opts.clone())
 }
 
 #[cfg(feature = "parallel")]
@@ -534,7 +584,7 @@ fn merge_decomposed_results(
             merged_classical[global_idx] = result.classical_bits[local_idx];
         }
 
-        if opts.probabilities {
+        if opts.probabilities && num_qubits <= 64 {
             if let Some(probs) = result.probabilities {
                 let dense = probs.to_vec();
                 let mut mask = 0u64;
@@ -847,6 +897,35 @@ pub fn run_with_opts(
             has_partial_independence = true;
         }
     }
+    if matches!(kind, BackendKind::QuasiProbability) {
+        let qp = quasi_prob::run_quasi_prob(circuit, seed)?;
+        return Ok(SimulationResult {
+            probabilities: Some(Probabilities::Dense(qp.probabilities)),
+            classical_bits: vec![],
+        });
+    }
+    if matches!(kind, BackendKind::StabilizerRank) {
+        let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
+        return Ok(SimulationResult {
+            probabilities: Some(Probabilities::Dense(sr.probabilities)),
+            classical_bits: vec![],
+        });
+    }
+    // Auto: Clifford+T with small T-count → stabilizer rank decomposition.
+    // Each branch is O(n²) stabilizer instead of O(2^n) statevector, but we
+    // need 2^t branches for exact probabilities, so limit t ≤ 12 (4096 branches).
+    if matches!(kind, BackendKind::Auto)
+        && circuit.is_clifford_plus_t()
+        && circuit.has_t_gates()
+        && circuit.t_count() <= MAX_AUTO_T_COUNT
+        && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
+    {
+        let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
+        return Ok(SimulationResult {
+            probabilities: Some(Probabilities::Dense(sr.probabilities)),
+            classical_bits: vec![],
+        });
+    }
     // Temporal Clifford decomposition: if the circuit has a substantial Clifford
     // prefix followed by non-Clifford gates, run the prefix on Stabilizer and
     // the tail on Statevector with the exported state.
@@ -1019,6 +1098,21 @@ pub fn run_shots_with(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    // Compiled sampler: O(n²·m) compile + O(r·m/64) per shot with LUT.
+    // Always polynomial — avoids the O(2^k) probability computation path.
+    if (matches!(
+        kind,
+        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
+    )) && circuit.is_clifford_only()
+        && circuit
+            .instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::Measure { .. }))
+        && num_shots >= 2
+    {
+        return compiled::run_shots_compiled(circuit, num_shots, seed);
+    }
+
     if circuit.has_terminal_measurements_only() {
         let stripped = circuit.without_measurements();
         let result = run_with_opts(kind.clone(), &stripped, seed, SimOptions::default())?;
@@ -1060,6 +1154,23 @@ pub fn run_shots_with(
     } else {
         None
     };
+
+    if matches!(kind, BackendKind::QuasiProbability) {
+        return quasi_prob::run_quasi_prob_shots(circuit, num_shots, seed);
+    }
+    if matches!(kind, BackendKind::StabilizerRank) {
+        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+    }
+    // Auto: Clifford+T with small T-count → quasi-probability shot sampling.
+    // Each shot samples a random Clifford branch (O(n²) stabilizer), avoiding
+    // exponential statevector/MPS cost. No qubit limit for shots.
+    if matches!(kind, BackendKind::Auto)
+        && circuit.is_clifford_plus_t()
+        && circuit.has_t_gates()
+        && circuit.t_count() <= MAX_AUTO_T_COUNT
+    {
+        return quasi_prob::run_quasi_prob_shots(circuit, num_shots, seed);
+    }
 
     if has_temporal_clifford_opportunity(&kind, circuit) {
         return run_shots_fallback(&kind, circuit, num_shots, seed);
@@ -1122,6 +1233,36 @@ pub fn run_shots_with(
         shots,
         probabilities,
     })
+}
+
+/// Execute a noisy circuit for multiple shots with explicit backend selection.
+///
+/// For Clifford circuits with Auto/Stabilizer/FilteredStabilizer backends,
+/// uses the compiled noisy sampler (fast O(n²·m) compile + O(events·m/64) per shot).
+/// For all other cases, falls back to per-shot simulation with noise injection.
+pub fn run_shots_with_noise(
+    kind: BackendKind,
+    circuit: &Circuit,
+    noise_model: &noise::NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let use_compiled = matches!(
+        kind,
+        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
+    ) && circuit.is_clifford_only();
+
+    if use_compiled {
+        return noise::run_shots_noisy(circuit, noise_model, num_shots, seed);
+    }
+
+    noise::run_shots_noisy_brute_with(
+        |s| select_backend(&kind, circuit, s, false),
+        circuit,
+        noise_model,
+        num_shots,
+        seed,
+    )
 }
 
 fn run_shots_fallback(
@@ -1753,7 +1894,11 @@ mod tests {
 
     #[test]
     fn test_shots_has_probabilities() {
-        let circuit = make_bell_with_measure();
+        let mut circuit = Circuit::new(2, 2);
+        circuit.add_gate(Gate::Rx(std::f64::consts::FRAC_PI_4), &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_measure(0, 0);
+        circuit.add_measure(1, 1);
         let result = run_shots(&circuit, 5, 42).unwrap();
         assert!(result.probabilities.is_some());
     }
@@ -2074,5 +2219,162 @@ mod tests {
         for shot in &result.shots {
             assert_eq!(shot.len(), 4);
         }
+    }
+
+    #[test]
+    fn test_quasi_prob_dispatch() {
+        let circuit = make_general_circuit(); // H, T, CX on 3 qubits
+        let result = run_with(BackendKind::QuasiProbability, &circuit, 42).unwrap();
+        let probs = result.probabilities.unwrap().to_vec();
+        assert_eq!(probs.len(), 8);
+        let total: f64 = probs.iter().sum();
+        assert!((total - 1.0).abs() < 1e-10);
+
+        // Compare against statevector for correctness
+        let sv_result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+        let sv_probs = sv_result.probabilities.unwrap().to_vec();
+        for (i, (qp, sv)) in probs.iter().zip(sv_probs.iter()).enumerate() {
+            assert!(
+                (qp - sv).abs() < 1e-10,
+                "prob[{i}]: quasi_prob={qp}, statevector={sv}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quasi_prob_rejects_no_t() {
+        let circuit = make_clifford_circuit();
+        let result = run_with(BackendKind::QuasiProbability, &circuit, 42);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_stabilizer_rank_dispatch() {
+        let circuit = make_general_circuit();
+        let result = run_with(BackendKind::StabilizerRank, &circuit, 42).unwrap();
+        let probs = result.probabilities.unwrap().to_vec();
+        assert_eq!(probs.len(), 8);
+        let total: f64 = probs.iter().sum();
+        assert!((total - 1.0).abs() < 1e-10);
+
+        let sv_result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+        let sv_probs = sv_result.probabilities.unwrap().to_vec();
+        for (i, (sr, sv)) in probs.iter().zip(sv_probs.iter()).enumerate() {
+            assert!(
+                (sr - sv).abs() < 1e-10,
+                "prob[{i}]: stab_rank={sr}, statevector={sv}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_stabilizer_rank_rejects_no_t() {
+        let circuit = make_clifford_circuit();
+        let result = run_with(BackendKind::StabilizerRank, &circuit, 42);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auto_clifford_plus_t_probabilities() {
+        let circuit = make_general_circuit();
+        assert!(circuit.is_clifford_plus_t());
+        assert!(circuit.has_t_gates());
+
+        let auto_result = run_with(BackendKind::Auto, &circuit, 42).unwrap();
+        let sv_result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+
+        let auto_probs = auto_result.probabilities.unwrap().to_vec();
+        let sv_probs = sv_result.probabilities.unwrap().to_vec();
+        for (i, (a, s)) in auto_probs.iter().zip(sv_probs.iter()).enumerate() {
+            assert!(
+                (a - s).abs() < 1e-10,
+                "prob[{i}]: auto={a}, statevector={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_auto_clifford_plus_t_shots() {
+        let mut c = Circuit::new(2, 2);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::T, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_measure(0, 0);
+        c.add_measure(1, 1);
+
+        let result = run_shots_with(BackendKind::Auto, &c, 100, 42).unwrap();
+        assert_eq!(result.shots.len(), 100);
+        for shot in &result.shots {
+            assert_eq!(shot.len(), 2);
+        }
+    }
+
+    #[test]
+    fn test_decomposed_mixed_clifford_and_t() {
+        // Two independent subsystems: q0-q1 (Clifford+T), q2-q3 (Clifford-only)
+        // Under decomposition, q2-q3 should route to Stabilizer, q0-q1 to StabilizerRank
+        let mut c = Circuit::new(4, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::T, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::H, &[2]);
+        c.add_gate(Gate::Cx, &[2, 3]);
+
+        let subs = c.independent_subsystems();
+        assert_eq!(subs.len(), 2);
+
+        let auto_result = run_with(BackendKind::Auto, &c, 42).unwrap();
+        let sv_result = run_with(BackendKind::Statevector, &c, 42).unwrap();
+
+        let auto_probs = auto_result.probabilities.unwrap().to_vec();
+        let sv_probs = sv_result.probabilities.unwrap().to_vec();
+        for (i, (a, s)) in auto_probs.iter().zip(sv_probs.iter()).enumerate() {
+            assert!(
+                (a - s).abs() < 1e-10,
+                "prob[{i}]: auto={a}, statevector={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_shots_with_noise_clifford_uses_compiled() {
+        let n = 10;
+        let mut circuit = crate::circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let result = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 100, 42).unwrap();
+        assert_eq!(result.shots.len(), 100);
+        assert!(result.shots[0].len() == n);
+    }
+
+    #[test]
+    fn test_run_shots_with_noise_statevector_brute() {
+        let mut circuit = Circuit::new(3, 3);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_measure(0, 0);
+        circuit.add_measure(1, 1);
+        let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let result =
+            run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, 50, 42).unwrap();
+        assert_eq!(result.shots.len(), 50);
+        assert_eq!(result.shots[0].len(), 3);
+    }
+
+    #[test]
+    fn test_run_shots_with_noise_auto_non_clifford() {
+        let mut circuit = Circuit::new(3, 3);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_measure(0, 0);
+        circuit.add_measure(1, 1);
+        let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        let result = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 100, 42).unwrap();
+        assert_eq!(result.shots.len(), 100);
     }
 }

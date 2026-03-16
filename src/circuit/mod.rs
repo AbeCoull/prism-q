@@ -98,6 +98,29 @@ impl Circuit {
             .count()
     }
 
+    /// Count T and Tdg gates in the circuit.
+    pub fn t_count(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter(|inst| match inst {
+                Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
+                    matches!(gate, Gate::T | Gate::Tdg)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Returns true if the circuit contains any T or Tdg gates.
+    pub fn has_t_gates(&self) -> bool {
+        self.instructions.iter().any(|inst| match inst {
+            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
+                matches!(gate, Gate::T | Gate::Tdg)
+            }
+            _ => false,
+        })
+    }
+
     /// True if every gate in the circuit is a Clifford gate.
     ///
     /// When true, the stabilizer backend can simulate this circuit exactly
@@ -106,6 +129,16 @@ impl Circuit {
         self.instructions.iter().all(|inst| match inst {
             Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
                 gate.is_clifford()
+            }
+            _ => true,
+        })
+    }
+
+    /// True if every gate is Clifford or T/Tdg.
+    pub fn is_clifford_plus_t(&self) -> bool {
+        self.instructions.iter().all(|inst| match inst {
+            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
+                gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg)
             }
             _ => true,
         })
@@ -185,7 +218,10 @@ impl Circuit {
     /// Partition qubits into independent (non-interacting) subsystems.
     ///
     /// Two qubits are in the same subsystem if any multi-qubit gate connects
-    /// them, transitively. Returns a list of qubit groups, each sorted.
+    /// them, transitively. Classical dependencies (measure qubit → conditional
+    /// target) also merge subsystems, since the conditional outcome depends on
+    /// measurement results that must be available in the same simulation context.
+    /// Returns a list of qubit groups, each sorted.
     /// A fully-entangled circuit returns a single group containing all qubits.
     pub fn independent_subsystems(&self) -> Vec<Vec<usize>> {
         let n = self.num_qubits;
@@ -219,9 +255,36 @@ impl Circuit {
             }
         }
 
+        // Build cbit → measurement qubit map for classical dependency tracking
+        let mut cbit_to_qubit: Vec<Option<usize>> = vec![None; self.num_classical_bits.max(1)];
+        for inst in &self.instructions {
+            if let Instruction::Measure {
+                qubit,
+                classical_bit,
+            } = inst
+            {
+                cbit_to_qubit[*classical_bit] = Some(*qubit);
+            }
+        }
+
         for inst in &self.instructions {
             let targets = match inst {
-                Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
+                Instruction::Gate { targets, .. } => targets,
+                Instruction::Conditional {
+                    condition, targets, ..
+                } => {
+                    match condition {
+                        ClassicalCondition::BitIsOne(bit) => {
+                            if let Some(mq) = cbit_to_qubit[*bit] {
+                                union(&mut parent, &mut rank, targets[0], mq);
+                            }
+                        }
+                        ClassicalCondition::RegisterEquals { offset, size, .. } => {
+                            for mq in cbit_to_qubit.iter().skip(*offset).take(*size).flatten() {
+                                union(&mut parent, &mut rank, targets[0], *mq);
+                            }
+                        }
+                    }
                     targets
                 }
                 _ => continue,
@@ -325,8 +388,22 @@ impl Circuit {
                             .iter()
                             .map(|&t| old_to_new_qubit[t].unwrap())
                             .collect();
+                        let new_condition = match condition {
+                            ClassicalCondition::BitIsOne(bit) => ClassicalCondition::BitIsOne(
+                                old_to_new_classical[*bit].unwrap_or(*bit),
+                            ),
+                            ClassicalCondition::RegisterEquals {
+                                offset,
+                                size,
+                                value,
+                            } => ClassicalCondition::RegisterEquals {
+                                offset: old_to_new_classical[*offset].unwrap_or(*offset),
+                                size: *size,
+                                value: *value,
+                            },
+                        };
                         sub.instructions.push(Instruction::Conditional {
-                            condition: condition.clone(),
+                            condition: new_condition,
                             gate: gate.clone(),
                             targets: new_targets,
                         });
@@ -431,8 +508,26 @@ impl Circuit {
                     let (comp_idx, _) = qubit_map[targets[0]];
                     let new_targets: SmallVec<[usize; 4]> =
                         targets.iter().map(|&t| qubit_map[t].1).collect();
+                    let new_condition = match condition {
+                        ClassicalCondition::BitIsOne(bit) => {
+                            let (_, nc) = cbit_map[*bit].unwrap_or((comp_idx, *bit));
+                            ClassicalCondition::BitIsOne(nc)
+                        }
+                        ClassicalCondition::RegisterEquals {
+                            offset,
+                            size,
+                            value,
+                        } => {
+                            let new_offset = cbit_map[*offset].map(|(_, nc)| nc).unwrap_or(*offset);
+                            ClassicalCondition::RegisterEquals {
+                                offset: new_offset,
+                                size: *size,
+                                value: *value,
+                            }
+                        }
+                    };
                     subs[comp_idx].instructions.push(Instruction::Conditional {
-                        condition: condition.clone(),
+                        condition: new_condition,
                         gate: gate.clone(),
                         targets: new_targets,
                     });
@@ -727,6 +822,36 @@ mod tests {
     fn test_subsystems_empty() {
         let c = Circuit::new(0, 0);
         assert!(c.independent_subsystems().is_empty());
+    }
+
+    #[test]
+    fn test_subsystems_classical_dependency_merges() {
+        let mut c = Circuit::new(4, 2);
+        // q0-q1 entangled, q2-q3 entangled, but q0 measured and conditional on q2
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Cx, &[2, 3]);
+        c.add_measure(0, 0);
+        c.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(0),
+            gate: Gate::X,
+            targets: SmallVec::from_slice(&[2]),
+        });
+        let subs = c.independent_subsystems();
+        // All four qubits should be in one group due to classical dependency
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0], vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn test_subsystems_no_classical_dependency() {
+        let mut c = Circuit::new(4, 2);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Cx, &[2, 3]);
+        c.add_measure(0, 0);
+        c.add_measure(2, 1);
+        // No conditionals — subsystems remain independent
+        let subs = c.independent_subsystems();
+        assert_eq!(subs.len(), 2);
     }
 
     #[test]

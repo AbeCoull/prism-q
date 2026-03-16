@@ -817,6 +817,158 @@ fn bench_factored_dense(c: &mut Criterion) {
     group.finish();
 }
 
+fn clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n_qubits, 0);
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
+
+    // Clifford layer first
+    for q in 0..n_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n_qubits - 1 {
+        if rng.gen_bool(0.5) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+
+    // Insert T gates on random qubits
+    for _ in 0..t_count {
+        let q = rng.gen_range(0..n_qubits);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+
+    // More Clifford layers
+    for _ in 0..3 {
+        for q in 0..n_qubits {
+            let gate_idx = rng.gen_range(0..cliffords.len());
+            circuit.add_gate(cliffords[gate_idx].clone(), &[q]);
+        }
+        for q in 0..n_qubits - 1 {
+            if rng.gen_bool(0.5) {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    }
+    circuit
+}
+
+fn bench_quasi_prob(c: &mut Criterion) {
+    let mut group = c.benchmark_group("quasi_prob");
+    configure_group(&mut group);
+
+    // Compare quasi-prob exact vs statevector for varying T-counts at fixed qubit count
+    let n = 10;
+    for &t in &[1, 2, 4, 8, 12] {
+        let circuit = clifford_t_circuit(n, t, SEED);
+
+        group.bench_function(BenchmarkId::new("exact", format!("{n}q_{t}t")), |b| {
+            b.iter(|| {
+                prism_q::run_quasi_prob(&circuit, 42).unwrap();
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("statevector", format!("{n}q_{t}t")), |b| {
+            b.iter(|| {
+                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+            });
+        });
+    }
+
+    // Qubit scaling at fixed T-count (t=4)
+    for &n in &[5, 15, 20] {
+        let circuit = clifford_t_circuit(n, 4, SEED);
+
+        group.bench_function(BenchmarkId::new("exact", format!("{n}q_4t")), |b| {
+            b.iter(|| {
+                prism_q::run_quasi_prob(&circuit, 42).unwrap();
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("statevector", format!("{n}q_4t")), |b| {
+            b.iter(|| {
+                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_stabilizer_rank(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stabilizer_rank");
+    configure_group(&mut group);
+
+    // Compare stabilizer_rank exact vs quasi_prob vs statevector
+    let n = 10;
+    for &t in &[2, 4, 8, 12] {
+        let circuit = clifford_t_circuit(n, t, SEED);
+        let id = format!("{n}q_{t}t");
+
+        group.bench_function(BenchmarkId::new("stab_rank", &id), |b| {
+            b.iter(|| {
+                prism_q::run_stabilizer_rank(&circuit, 42).unwrap();
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("quasi_prob", &id), |b| {
+            b.iter(|| {
+                prism_q::run_quasi_prob(&circuit, 42).unwrap();
+            });
+        });
+    }
+
+    // Approximate mode: higher T-counts with bounded terms
+    for &t in &[16, 20] {
+        let circuit = clifford_t_circuit(n, t, SEED);
+        let id = format!("{n}q_{t}t");
+
+        group.bench_function(BenchmarkId::new("approx_256", &id), |b| {
+            b.iter(|| {
+                prism_q::run_stabilizer_rank_approx(&circuit, 256, 42).unwrap();
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("approx_1024", &id), |b| {
+            b.iter(|| {
+                prism_q::run_stabilizer_rank_approx(&circuit, 1024, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_compiled_sampler(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compiled_sampler");
+    configure_group(&mut group);
+
+    for &n in &[100, 500, 1000] {
+        let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+
+        let id = format!("noiseless_{}q_10k", n);
+        group.bench_function(BenchmarkId::new("noiseless", &id), |b| {
+            b.iter(|| {
+                prism_q::run_shots_compiled(&circuit, 10_000, SEED).unwrap();
+            });
+        });
+
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        let id_noisy = format!("noisy_{}q_10k", n);
+        group.bench_function(BenchmarkId::new("noisy", &id_noisy), |b| {
+            b.iter(|| {
+                prism_q::run_shots_noisy(&circuit, &noise, 10_000, SEED).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     // Statevector sweeps
@@ -864,5 +1016,11 @@ criterion_group!(
     bench_factored_sim_only,
     bench_factored_dynamic,
     bench_factored_dense,
+    // Quasi-probability (Clifford+T)
+    bench_quasi_prob,
+    // Stabilizer rank
+    bench_stabilizer_rank,
+    // Compiled sampler (noiseless + noisy shot sampling)
+    bench_compiled_sampler,
 );
 criterion_main!(benches);

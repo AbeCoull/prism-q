@@ -56,8 +56,21 @@ pub use circuit::builder::CircuitBuilder;
 pub use circuit::{Circuit, ClassicalCondition, Instruction};
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
+pub use sim::compiled::{
+    compile_forward, compile_measurements, propagate_backward, run_shots_compiled, CompiledSampler,
+    PauliVec,
+};
+pub use sim::homological::{run_shots_homological, ErrorChainComplex, HomologicalSampler};
+pub use sim::noise::{run_shots_noisy, NoiseModel, NoiseOp};
+pub use sim::quasi_prob::{
+    run_quasi_prob, run_quasi_prob_shots, run_quasi_prob_shots_adaptive,
+    run_quasi_prob_shots_stratified, AdaptiveResult, QuasiProbResult,
+};
+pub use sim::stabilizer_rank::{
+    run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_overlap_sq, StabRankResult,
+};
 pub use sim::{
-    run, run_on, run_on_opts, run_qasm, run_shots, run_shots_random, run_shots_with, run_with,
-    run_with_opts, BackendKind, FactoredBlock, Probabilities, ShotsResult, SimOptions,
-    SimulationResult,
+    run, run_on, run_on_opts, run_qasm, run_shots, run_shots_random, run_shots_with,
+    run_shots_with_noise, run_with, run_with_opts, BackendKind, FactoredBlock, Probabilities,
+    ShotsResult, SimOptions, SimulationResult,
 };

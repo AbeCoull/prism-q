@@ -37,7 +37,7 @@ use rand_chacha::ChaCha8Rng;
 use crate::backend::{simd, Backend, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
+use crate::gates::{DiagEntry, Gate};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -1396,6 +1396,38 @@ impl MpsBackend {
                 for &(q0, q1, theta) in &data.edges {
                     let g = Gate::Rzz(theta).matrix_4x4();
                     self.apply_two_qubit_gate(&g, q0, q1);
+                }
+            }
+            Gate::DiagonalBatch(data) => {
+                for entry in &data.entries {
+                    match entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            let zero = Complex64::new(0.0, 0.0);
+                            let mat = [[*d0, zero], [zero, *d1]];
+                            self.apply_single_qubit_gate(*qubit, &mat);
+                        }
+                        DiagEntry::Phase2q { q0, q1, phase } => {
+                            let one = Complex64::new(1.0, 0.0);
+                            let zero = Complex64::new(0.0, 0.0);
+                            let m4 = [
+                                [one, zero, zero, zero],
+                                [zero, one, zero, zero],
+                                [zero, zero, one, zero],
+                                [zero, zero, zero, *phase],
+                            ];
+                            self.apply_two_qubit_gate(&m4, *q0, *q1);
+                        }
+                        DiagEntry::Parity2q { q0, q1, same, diff } => {
+                            let zero = Complex64::new(0.0, 0.0);
+                            let g = [
+                                [*same, zero, zero, zero],
+                                [zero, *diff, zero, zero],
+                                [zero, zero, *diff, zero],
+                                [zero, zero, zero, *same],
+                            ];
+                            self.apply_two_qubit_gate(&g, *q0, *q1);
+                        }
+                    }
                 }
             }
             Gate::MultiFused(data) => {

@@ -31,7 +31,7 @@ const MIN_STATES_FOR_PAR: usize = 4096;
 use crate::backend::{is_phase_one, Backend, MAX_PROB_QUBITS};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
+use crate::gates::{DiagEntry, Gate};
 
 const DEFAULT_EPSILON: f64 = 1e-16;
 
@@ -331,6 +331,36 @@ impl SparseBackend {
                     for (idx, amp) in self.state.iter_mut() {
                         let parity = ((*idx >> q0) ^ (*idx >> q1)) & 1;
                         *amp *= if parity == 0 { phase_same } else { phase_diff };
+                    }
+                }
+            }
+            Gate::DiagonalBatch(data) => {
+                for entry in &data.entries {
+                    match entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            let mask = 1usize << qubit;
+                            for (idx, amp) in self.state.iter_mut() {
+                                if (*idx & mask) != 0 {
+                                    *amp *= d1;
+                                } else {
+                                    *amp *= d0;
+                                }
+                            }
+                        }
+                        DiagEntry::Phase2q { q0, q1, phase } => {
+                            let mask = (1usize << q0) | (1usize << q1);
+                            for (idx, amp) in self.state.iter_mut() {
+                                if (*idx & mask) == mask {
+                                    *amp *= phase;
+                                }
+                            }
+                        }
+                        DiagEntry::Parity2q { q0, q1, same, diff } => {
+                            for (idx, amp) in self.state.iter_mut() {
+                                let parity = ((*idx >> q0) ^ (*idx >> q1)) & 1;
+                                *amp *= if parity == 0 { *same } else { *diff };
+                            }
+                        }
                     }
                 }
             }

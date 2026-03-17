@@ -101,6 +101,12 @@ pub enum Gate {
     /// angles. Boxed to keep `Gate` at 16 bytes.
     BatchRzz(Box<BatchRzzData>),
 
+    /// Batched diagonal gates: a contiguous run of diagonal 1q and 2q gates
+    /// collapsed into a single state-vector sweep with a precomputed phase LUT.
+    /// Subsumes BatchPhase and BatchRzz for mixed diagonal runs. Created by the
+    /// diagonal batch fusion pass. Boxed to keep `Gate` at 16 bytes.
+    DiagonalBatch(Box<DiagonalBatchData>),
+
     /// Multiple single-qubit gates on distinct qubits, batched for a single
     /// tiled pass over the statevector. Created by the multi-gate fusion pass.
     /// Boxed to keep `Gate` at 16 bytes.
@@ -144,6 +150,37 @@ pub struct BatchPhaseData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchRzzData {
     pub edges: Vec<(usize, usize, f64)>,
+}
+
+/// An individual diagonal phase contribution in a [`DiagonalBatchData`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DiagEntry {
+    /// Diagonal on a single qubit: `state[i] *= d0` when bit 0, `*= d1` when bit 1.
+    Phase1q { qubit: usize, d0: Complex64, d1: Complex64 },
+    /// Phase on a qubit pair: `state[i] *= phase` when both bits are set (CZ/CPhase).
+    Phase2q {
+        q0: usize,
+        q1: usize,
+        phase: Complex64,
+    },
+    /// Parity-dependent phase (Rzz): `state[i] *= same` when parity is even,
+    /// `state[i] *= diff` when parity is odd.
+    Parity2q {
+        q0: usize,
+        q1: usize,
+        same: Complex64,
+        diff: Complex64,
+    },
+}
+
+/// Data for a batched diagonal gate pass.
+///
+/// A contiguous run of diagonal gates collapsed into a precomputed phase LUT.
+/// The `entries` describe individual phase contributions; the kernel extracts
+/// unique qubits, builds a LUT indexed by their bits, and applies in one sweep.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiagonalBatchData {
+    pub entries: Vec<DiagEntry>,
 }
 
 /// Data for multi-gate single-pass fusion.
@@ -258,6 +295,26 @@ impl Gate {
                 }
                 count
             }
+            Gate::DiagonalBatch(data) => {
+                let mut count = 0;
+                let mut seen = [false; 64];
+                for e in &data.entries {
+                    let qs = match e {
+                        DiagEntry::Phase1q { qubit, .. } => {
+                            [*qubit, usize::MAX]
+                        }
+                        DiagEntry::Phase2q { q0, q1, .. }
+                        | DiagEntry::Parity2q { q0, q1, .. } => [*q0, *q1],
+                    };
+                    for &q in &qs {
+                        if q < 64 && !seen[q] {
+                            seen[q] = true;
+                            count += 1;
+                        }
+                    }
+                }
+                count
+            }
             Gate::MultiFused(data) => data.gates.len(),
             Gate::Multi2q(data) => {
                 let mut count = 0;
@@ -351,6 +408,7 @@ impl Gate {
             | Gate::Mcu(_)
             | Gate::BatchPhase(_)
             | Gate::BatchRzz(_)
+            | Gate::DiagonalBatch(_)
             | Gate::MultiFused(_)
             | Gate::Fused2q(_)
             | Gate::Multi2q(_) => {
@@ -425,6 +483,7 @@ impl Gate {
             Gate::Fused(_) => "fused",
             Gate::BatchPhase(_) => "batch_phase",
             Gate::BatchRzz(_) => "batch_rzz",
+            Gate::DiagonalBatch(_) => "diagonal_batch",
             Gate::MultiFused(_) => "multi_fused",
             Gate::Fused2q(_) => "fused_2q",
             Gate::Multi2q(_) => "multi_2q",
@@ -460,6 +519,34 @@ impl Gate {
                     .map(|&(q0, q1, theta)| (q0, q1, -theta))
                     .collect(),
             })),
+            Gate::DiagonalBatch(data) => {
+                Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+                    entries: data
+                        .entries
+                        .iter()
+                        .map(|e| match e {
+                            DiagEntry::Phase1q { qubit, d0, d1 } => DiagEntry::Phase1q {
+                                qubit: *qubit,
+                                d0: d0.conj(),
+                                d1: d1.conj(),
+                            },
+                            DiagEntry::Phase2q { q0, q1, phase } => DiagEntry::Phase2q {
+                                q0: *q0,
+                                q1: *q1,
+                                phase: phase.conj(),
+                            },
+                            DiagEntry::Parity2q { q0, q1, same, diff } => {
+                                DiagEntry::Parity2q {
+                                    q0: *q0,
+                                    q1: *q1,
+                                    same: same.conj(),
+                                    diff: diff.conj(),
+                                }
+                            }
+                        })
+                        .collect(),
+                }))
+            }
             Gate::MultiFused(data) => Gate::MultiFused(Box::new(MultiFusedData {
                 gates: data
                     .gates
@@ -606,7 +693,7 @@ impl Gate {
                     && m[1][1].norm_sqr() < NEAR_ZERO_NORM_SQ;
                 is_diag || is_antidiag
             }
-            Gate::BatchPhase(_) | Gate::BatchRzz(_) => true,
+            Gate::BatchPhase(_) | Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => true,
             _ => false,
         }
     }

@@ -84,7 +84,6 @@ struct Parser<'a> {
 }
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
-const MAX_REGISTER_SIZE: usize = 64;
 
 // ── Expression evaluator ────────────────────────────────────────────────
 //
@@ -572,14 +571,6 @@ impl<'a> Parser<'a> {
                     message: "qubit count must be > 0".to_string(),
                 });
             }
-            if size > MAX_REGISTER_SIZE {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!(
-                        "qubit register size {size} exceeds maximum ({MAX_REGISTER_SIZE})"
-                    ),
-                });
-            }
             let end = rest.find(']').unwrap(); // safe: extract_bracket succeeded
             let after_bracket = rest[end + 1..].trim();
             let name = after_bracket.to_string();
@@ -624,14 +615,6 @@ impl<'a> Parser<'a> {
                 return Err(PrismError::Parse {
                     line: line_num,
                     message: "bit count must be > 0".to_string(),
-                });
-            }
-            if size > MAX_REGISTER_SIZE {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!(
-                        "bit register size {size} exceeds maximum ({MAX_REGISTER_SIZE})"
-                    ),
                 });
             }
             let end = rest.find(']').unwrap(); // safe: extract_bracket succeeded
@@ -2677,17 +2660,17 @@ mod tests {
     }
 
     #[test]
-    fn test_register_size_too_large() {
+    fn test_large_register_accepted() {
         let qasm = "OPENQASM 3.0;\nqubit[999] q;";
-        let err = parse(qasm).unwrap_err();
-        assert!(matches!(err, PrismError::Parse { .. }));
+        let circuit = parse(qasm).unwrap();
+        assert_eq!(circuit.num_qubits, 999);
     }
 
     #[test]
-    fn test_bit_register_size_too_large() {
+    fn test_large_bit_register_accepted() {
         let qasm = "OPENQASM 3.0;\nbit[999] c;";
-        let err = parse(qasm).unwrap_err();
-        assert!(matches!(err, PrismError::Parse { .. }));
+        let circuit = parse(qasm).unwrap();
+        assert_eq!(circuit.num_classical_bits, 999);
     }
 
     #[test]

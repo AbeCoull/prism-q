@@ -156,7 +156,11 @@ pub struct BatchRzzData {
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiagEntry {
     /// Diagonal on a single qubit: `state[i] *= d0` when bit 0, `*= d1` when bit 1.
-    Phase1q { qubit: usize, d0: Complex64, d1: Complex64 },
+    Phase1q {
+        qubit: usize,
+        d0: Complex64,
+        d1: Complex64,
+    },
     /// Phase on a qubit pair: `state[i] *= phase` when both bits are set (CZ/CPhase).
     Phase2q {
         q0: usize,
@@ -300,11 +304,10 @@ impl Gate {
                 let mut seen = [false; 64];
                 for e in &data.entries {
                     let qs = match e {
-                        DiagEntry::Phase1q { qubit, .. } => {
-                            [*qubit, usize::MAX]
+                        DiagEntry::Phase1q { qubit, .. } => [*qubit, usize::MAX],
+                        DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                            [*q0, *q1]
                         }
-                        DiagEntry::Phase2q { q0, q1, .. }
-                        | DiagEntry::Parity2q { q0, q1, .. } => [*q0, *q1],
                     };
                     for &q in &qs {
                         if q < 64 && !seen[q] {
@@ -519,34 +522,30 @@ impl Gate {
                     .map(|&(q0, q1, theta)| (q0, q1, -theta))
                     .collect(),
             })),
-            Gate::DiagonalBatch(data) => {
-                Gate::DiagonalBatch(Box::new(DiagonalBatchData {
-                    entries: data
-                        .entries
-                        .iter()
-                        .map(|e| match e {
-                            DiagEntry::Phase1q { qubit, d0, d1 } => DiagEntry::Phase1q {
-                                qubit: *qubit,
-                                d0: d0.conj(),
-                                d1: d1.conj(),
-                            },
-                            DiagEntry::Phase2q { q0, q1, phase } => DiagEntry::Phase2q {
-                                q0: *q0,
-                                q1: *q1,
-                                phase: phase.conj(),
-                            },
-                            DiagEntry::Parity2q { q0, q1, same, diff } => {
-                                DiagEntry::Parity2q {
-                                    q0: *q0,
-                                    q1: *q1,
-                                    same: same.conj(),
-                                    diff: diff.conj(),
-                                }
-                            }
-                        })
-                        .collect(),
-                }))
-            }
+            Gate::DiagonalBatch(data) => Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+                entries: data
+                    .entries
+                    .iter()
+                    .map(|e| match e {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => DiagEntry::Phase1q {
+                            qubit: *qubit,
+                            d0: d0.conj(),
+                            d1: d1.conj(),
+                        },
+                        DiagEntry::Phase2q { q0, q1, phase } => DiagEntry::Phase2q {
+                            q0: *q0,
+                            q1: *q1,
+                            phase: phase.conj(),
+                        },
+                        DiagEntry::Parity2q { q0, q1, same, diff } => DiagEntry::Parity2q {
+                            q0: *q0,
+                            q1: *q1,
+                            same: same.conj(),
+                            diff: diff.conj(),
+                        },
+                    })
+                    .collect(),
+            })),
             Gate::MultiFused(data) => Gate::MultiFused(Box::new(MultiFusedData {
                 gates: data
                     .gates

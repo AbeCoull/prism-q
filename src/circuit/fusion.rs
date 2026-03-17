@@ -25,8 +25,8 @@ use num_complex::Complex64;
 
 use super::{smallvec, Circuit, Instruction, SmallVec};
 use crate::gates::{
-    kron_2x2, mat_mul_2x2, mat_mul_4x4, BatchPhaseData, BatchRzzData, DiagEntry,
-    DiagonalBatchData, Gate, Multi2qData, MultiFusedData,
+    kron_2x2, mat_mul_2x2, mat_mul_4x4, BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData,
+    Gate, Multi2qData, MultiFusedData,
 };
 
 const IDENTITY_EPS: f64 = 1e-12;
@@ -1327,20 +1327,29 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                 continue;
             }
 
-            if !run_entries.is_empty()
-                && gate.num_qubits() == 1
-                && !run_qubits[targets[0]]
-            {
+            if !run_entries.is_empty() && gate.num_qubits() == 1 && !run_qubits[targets[0]] {
                 deferred.push(inst.clone());
                 continue;
             }
         }
 
-        flush_diag_run(&mut output, &mut run_entries, &mut run_originals, &mut deferred, &mut run_qubits);
+        flush_diag_run(
+            &mut output,
+            &mut run_entries,
+            &mut run_originals,
+            &mut deferred,
+            &mut run_qubits,
+        );
         output.push(inst.clone());
     }
 
-    flush_diag_run(&mut output, &mut run_entries, &mut run_originals, &mut deferred, &mut run_qubits);
+    flush_diag_run(
+        &mut output,
+        &mut run_entries,
+        &mut run_originals,
+        &mut deferred,
+        &mut run_qubits,
+    );
 
     let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
     c.instructions = output;

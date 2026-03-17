@@ -274,16 +274,12 @@ impl FactoredBackend {
                         DiagEntry::Phase1q { qubit, d0, d1 } => {
                             let lq = Self::local_qubit(sub, *qubit);
                             let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
-                            simd::apply_diagonal_sequential(
-                                &mut sub.state, lq, *d0, *d1, skip_lo,
-                            );
+                            simd::apply_diagonal_sequential(&mut sub.state, lq, *d0, *d1, skip_lo);
                         }
                         DiagEntry::Phase2q { q0, q1, phase } => {
                             let lq0 = Self::local_qubit(sub, *q0);
                             let lq1 = Self::local_qubit(sub, *q1);
-                            apply_cu_phase_seq(
-                                &mut sub.state, sub.qubits.len(), lq0, lq1, *phase,
-                            );
+                            apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase);
                         }
                         DiagEntry::Parity2q { q0, q1, same, diff } => {
                             let lq0 = Self::local_qubit(sub, *q0);
@@ -461,9 +457,7 @@ impl FactoredBackend {
                         DiagEntry::Phase2q { q0, q1, phase } => {
                             let lq0 = Self::local_qubit(sub, *q0);
                             let lq1 = Self::local_qubit(sub, *q1);
-                            par_apply_cu_phase(
-                                &mut sub.state, sub.qubits.len(), lq0, lq1, *phase,
-                            );
+                            par_apply_cu_phase(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase);
                         }
                         DiagEntry::Parity2q { q0, q1, same, diff } => {
                             let lq0 = Self::local_qubit(sub, *q0);

@@ -19,7 +19,7 @@ use crate::backend::statevector::insert_zero_bit;
 use crate::backend::{is_phase_one, measurement_inv_norm, sorted_mcu_qubits, Backend};
 use crate::circuit::Instruction;
 use crate::error::Result;
-use crate::gates::Gate;
+use crate::gates::{DiagEntry, Gate};
 
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::{SendPtr, MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
@@ -267,6 +267,32 @@ impl FactoredBackend {
                     apply_rzz_seq(&mut sub.state, lq0, lq1, theta);
                 }
             }
+            Gate::DiagonalBatch(data) => {
+                let sub = self.substates[ss_idx].as_mut().unwrap();
+                for entry in &data.entries {
+                    match entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            let lq = Self::local_qubit(sub, *qubit);
+                            let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
+                            simd::apply_diagonal_sequential(&mut sub.state, lq, *d0, *d1, skip_lo);
+                        }
+                        DiagEntry::Phase2q { q0, q1, phase } => {
+                            let lq0 = Self::local_qubit(sub, *q0);
+                            let lq1 = Self::local_qubit(sub, *q1);
+                            apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase);
+                        }
+                        DiagEntry::Parity2q { q0, q1, same, diff } => {
+                            let lq0 = Self::local_qubit(sub, *q0);
+                            let lq1 = Self::local_qubit(sub, *q1);
+                            let n = sub.state.len();
+                            for i in 0..n {
+                                let parity = ((i >> lq0) ^ (i >> lq1)) & 1;
+                                sub.state[i] *= if parity == 0 { *same } else { *diff };
+                            }
+                        }
+                    }
+                }
+            }
             Gate::Fused2q(mat) => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
@@ -417,6 +443,39 @@ impl FactoredBackend {
                     let lq0 = Self::local_qubit(sub, q0);
                     let lq1 = Self::local_qubit(sub, q1);
                     par_apply_rzz(&mut sub.state, lq0, lq1, theta);
+                }
+            }
+            Gate::DiagonalBatch(data) => {
+                let sub = self.substates[ss_idx].as_mut().unwrap();
+                for entry in &data.entries {
+                    match entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            let lq = Self::local_qubit(sub, *qubit);
+                            let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
+                            par_apply_diagonal(&mut sub.state, lq, *d0, *d1, skip_lo);
+                        }
+                        DiagEntry::Phase2q { q0, q1, phase } => {
+                            let lq0 = Self::local_qubit(sub, *q0);
+                            let lq1 = Self::local_qubit(sub, *q1);
+                            par_apply_cu_phase(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase);
+                        }
+                        DiagEntry::Parity2q { q0, q1, same, diff } => {
+                            let lq0 = Self::local_qubit(sub, *q0);
+                            let lq1 = Self::local_qubit(sub, *q1);
+                            let phases = [*same, *diff];
+                            sub.state
+                                .par_chunks_mut(MIN_PAR_ELEMS)
+                                .enumerate()
+                                .for_each(|(chunk_idx, chunk)| {
+                                    let base = chunk_idx * MIN_PAR_ELEMS;
+                                    for (j, amp) in chunk.iter_mut().enumerate() {
+                                        let i = base + j;
+                                        let parity = ((i >> lq0) ^ (i >> lq1)) & 1;
+                                        *amp *= phases[parity];
+                                    }
+                                });
+                        }
+                    }
                 }
             }
             Gate::Fused2q(mat) => {

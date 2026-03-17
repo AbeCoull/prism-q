@@ -789,6 +789,7 @@ fn try_temporal_clifford(
     if let Err(e) = stab.init(prefix.num_qubits, prefix.num_classical_bits) {
         return Some(Err(e));
     }
+    stab.enable_lazy_destab();
     for inst in &prefix.instructions {
         if let Err(e) = stab.apply(inst) {
             return Some(Err(e));

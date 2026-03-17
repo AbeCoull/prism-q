@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 use crate::backend::{Backend, MAX_PROB_QUBITS, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
+use crate::gates::{DiagEntry, Gate};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -578,6 +578,36 @@ impl TensorNetworkBackend {
                 for &(q0, q1, theta) in &data.edges {
                     let m4 = Gate::Rzz(theta).matrix_4x4();
                     self.apply_2q_matrix(q0, q1, &m4);
+                }
+            }
+            Gate::DiagonalBatch(data) => {
+                let one = Complex64::new(1.0, 0.0);
+                let zero = Complex64::new(0.0, 0.0);
+                for entry in &data.entries {
+                    match entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            let mat = [[*d0, zero], [zero, *d1]];
+                            self.apply_1q_matrix(*qubit, &mat);
+                        }
+                        DiagEntry::Phase2q { q0, q1, phase } => {
+                            let m4 = [
+                                [one, zero, zero, zero],
+                                [zero, one, zero, zero],
+                                [zero, zero, one, zero],
+                                [zero, zero, zero, *phase],
+                            ];
+                            self.apply_2q_matrix(*q0, *q1, &m4);
+                        }
+                        DiagEntry::Parity2q { q0, q1, same, diff } => {
+                            let m4 = [
+                                [*same, zero, zero, zero],
+                                [zero, *diff, zero, zero],
+                                [zero, zero, *diff, zero],
+                                [zero, zero, zero, *same],
+                            ];
+                            self.apply_2q_matrix(*q0, *q1, &m4);
+                        }
+                    }
                 }
             }
             Gate::MultiFused(data) => {

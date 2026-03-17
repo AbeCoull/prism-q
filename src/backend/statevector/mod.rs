@@ -190,6 +190,9 @@ impl StatevectorBackend {
             Gate::BatchRzz(data) => {
                 self.apply_batch_rzz(&data.edges);
             }
+            Gate::DiagonalBatch(data) => {
+                self.apply_diagonal_batch(&data.entries);
+            }
             Gate::MultiFused(data) => {
                 self.apply_multi_1q(&data.gates);
             }

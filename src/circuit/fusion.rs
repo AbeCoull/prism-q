@@ -25,8 +25,8 @@ use num_complex::Complex64;
 
 use super::{smallvec, Circuit, Instruction, SmallVec};
 use crate::gates::{
-    kron_2x2, mat_mul_2x2, mat_mul_4x4, BatchPhaseData, BatchRzzData, Gate, Multi2qData,
-    MultiFusedData,
+    kron_2x2, mat_mul_2x2, mat_mul_4x4, BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData,
+    Gate, Multi2qData, MultiFusedData,
 };
 
 const IDENTITY_EPS: f64 = 1e-12;
@@ -41,11 +41,10 @@ const MIN_QUBITS_FOR_FUSION: usize = 10;
 /// Minimum qubit count for multi-gate tiled fusion to be profitable.
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 14;
 
-/// Minimum qubit count for controlled-phase batching to be profitable.
-const MIN_QUBITS_FOR_CPHASE_FUSION: usize = 16;
-
-/// Minimum qubit count for batch-Rzz fusion to be profitable.
-const MIN_QUBITS_FOR_BATCH_RZZ: usize = 16;
+/// Minimum qubit count for diagonal-family batch passes (BatchRzz, BatchPhase,
+/// DiagonalBatch) to be profitable. LUT kernel overhead needs enough state size
+/// to amortize.
+const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
 
 /// Minimum qubit count for post-phase-fusion 1q batching.
 ///
@@ -378,7 +377,7 @@ fn has_reorder_opportunity(circuit: &Circuit) -> bool {
                         block_all[targets[1]] = Some(i);
                         // block_diag unchanged — diagonal commutes on both
                     }
-                    Gate::BatchRzz(_) => {
+                    Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => {
                         for &q in targets.iter() {
                             block_all[q] = Some(i);
                         }
@@ -474,7 +473,7 @@ pub fn reorder_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                             block_all[targets[1]] = idx;
                             // block_diag unchanged for both — diagonal commutes on both
                         }
-                        Gate::BatchRzz(_) => {
+                        Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => {
                             for &q in targets.iter() {
                                 block_all[q] = idx;
                             }
@@ -1042,7 +1041,7 @@ fn is_batchable_1q(inst: &Instruction) -> bool {
         inst,
         Instruction::Gate { targets, gate, .. }
             if targets.len() == 1
-                && !matches!(gate, Gate::BatchPhase(_) | Gate::MultiFused(_) | Gate::Multi2q(_))
+                && !matches!(gate, Gate::BatchPhase(_) | Gate::MultiFused(_) | Gate::Multi2q(_) | Gate::DiagonalBatch(_))
     )
 }
 
@@ -1212,6 +1211,151 @@ fn flush_rzz_run(
     rzz_qubits.fill(false);
 }
 
+/// Returns true if `gate` is a diagonal gate that can be absorbed into a DiagonalBatch.
+fn is_diag_batchable(gate: &Gate) -> bool {
+    match gate {
+        Gate::Cz | Gate::Rzz(_) => true,
+        _ if gate.is_diagonal_1q() => true,
+        _ if gate.controlled_phase().is_some() => true,
+        _ => false,
+    }
+}
+
+/// Convert a gate to one or more DiagEntry values.
+fn gate_to_diag_entries(gate: &Gate, targets: &[usize]) -> SmallVec<[DiagEntry; 2]> {
+    match gate {
+        Gate::Cz => {
+            smallvec![DiagEntry::Phase2q {
+                q0: targets[0],
+                q1: targets[1],
+                phase: Complex64::new(-1.0, 0.0),
+            }]
+        }
+        Gate::Rzz(theta) => {
+            let half = theta / 2.0;
+            let same = Complex64::new((-half).cos(), (-half).sin()); // e^{-iθ/2}
+            let diff = Complex64::new(half.cos(), half.sin()); // e^{iθ/2}
+            smallvec![DiagEntry::Parity2q {
+                q0: targets[0],
+                q1: targets[1],
+                same,
+                diff,
+            }]
+        }
+        _ if gate.controlled_phase().is_some() => {
+            let phase = gate.controlled_phase().unwrap();
+            smallvec![DiagEntry::Phase2q {
+                q0: targets[0],
+                q1: targets[1],
+                phase,
+            }]
+        }
+        _ => {
+            let mat = gate.matrix_2x2();
+            smallvec![DiagEntry::Phase1q {
+                qubit: targets[0],
+                d0: mat[0][0],
+                d1: mat[1][1],
+            }]
+        }
+    }
+}
+
+/// Batch contiguous runs of diagonal gates into `DiagonalBatch` instructions.
+///
+/// Diagonal gates (Z, S, T, Rz, P, CZ, Rzz, CPhase) commute with each other,
+/// so adjacent diagonal gates can be collapsed into a single pass with precomputed
+/// phase LUTs. Non-diagonal gates on non-involved qubits are deferred past the run.
+fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+    let circuit = input.as_ref();
+    let insts = &circuit.instructions;
+    let n = insts.len();
+    if n < 2 {
+        return input;
+    }
+
+    let diag_count = insts
+        .iter()
+        .filter(|i| matches!(i, Instruction::Gate { gate, .. } if is_diag_batchable(gate)))
+        .count();
+    if diag_count < 2 {
+        return input;
+    }
+
+    let mut output: Vec<Instruction> = Vec::with_capacity(n);
+    let mut run_entries: Vec<DiagEntry> = Vec::new();
+    let mut run_originals: Vec<Instruction> = Vec::new();
+    let mut run_qubits = vec![false; circuit.num_qubits];
+    let mut deferred: Vec<Instruction> = Vec::new();
+
+    let flush_diag_run = |output: &mut Vec<Instruction>,
+                          entries: &mut Vec<DiagEntry>,
+                          originals: &mut Vec<Instruction>,
+                          deferred: &mut Vec<Instruction>,
+                          run_qubits: &mut [bool]| {
+        if entries.len() >= 2 {
+            let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
+            for (i, &used) in run_qubits.iter().enumerate() {
+                if used {
+                    tgts.push(i);
+                }
+            }
+            output.push(Instruction::Gate {
+                gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+                    entries: std::mem::take(entries),
+                })),
+                targets: tgts,
+            });
+        } else {
+            output.append(originals);
+        }
+        entries.clear();
+        originals.clear();
+        output.append(deferred);
+        run_qubits.fill(false);
+    };
+
+    for inst in insts {
+        if let Instruction::Gate { gate, targets } = inst {
+            if is_diag_batchable(gate) {
+                let new_entries = gate_to_diag_entries(gate, targets);
+                for t in targets.iter() {
+                    run_qubits[*t] = true;
+                }
+                run_entries.extend(new_entries.into_iter());
+                run_originals.push(inst.clone());
+                continue;
+            }
+
+            if !run_entries.is_empty() && gate.num_qubits() == 1 && !run_qubits[targets[0]] {
+                deferred.push(inst.clone());
+                continue;
+            }
+        }
+
+        flush_diag_run(
+            &mut output,
+            &mut run_entries,
+            &mut run_originals,
+            &mut deferred,
+            &mut run_qubits,
+        );
+        output.push(inst.clone());
+    }
+
+    flush_diag_run(
+        &mut output,
+        &mut run_entries,
+        &mut run_originals,
+        &mut deferred,
+        &mut run_qubits,
+    );
+
+    let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
+    c.instructions = output;
+    Cow::Owned(c)
+}
+
 /// Recognize CX(a,b) · Rz(θ,b) · CX(a,b) → Rzz(θ, a, b).
 ///
 /// This is the standard decomposition of ZZ rotations used in QAOA and
@@ -1288,7 +1432,7 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
     };
 
     // Batch consecutive Rzz gates (≥16q) — collapses N Rzz into 1 BatchRzz pass
-    let pass0b = if circuit.num_qubits >= MIN_QUBITS_FOR_BATCH_RZZ {
+    let pass0b = if circuit.num_qubits >= MIN_QUBITS_FOR_DIAG_BATCH {
         match pass0r {
             Cow::Borrowed(c) => fuse_batch_rzz(c),
             Cow::Owned(c) => Cow::Owned(fuse_batch_rzz(&c).into_owned()),
@@ -1336,15 +1480,20 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
     } else {
         pass2
     };
-    let pass_cp = if circuit.num_qubits >= MIN_QUBITS_FOR_CPHASE_FUSION {
+    let pass_cp = if circuit.num_qubits >= MIN_QUBITS_FOR_DIAG_BATCH {
         fuse_controlled_phases(pass_m2q)
     } else {
         pass_m2q
     };
-    if circuit.num_qubits >= MIN_QUBITS_FOR_POST_PHASE_BATCH {
-        batch_post_phase_1q(pass_cp)
+    let pass_db = if circuit.num_qubits >= MIN_QUBITS_FOR_DIAG_BATCH {
+        fuse_diagonal_batch(pass_cp)
     } else {
         pass_cp
+    };
+    if circuit.num_qubits >= MIN_QUBITS_FOR_POST_PHASE_BATCH {
+        batch_post_phase_1q(pass_db)
+    } else {
+        pass_db
     }
 }
 

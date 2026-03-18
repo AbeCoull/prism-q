@@ -62,10 +62,7 @@ pub use sim::compiled::{
 };
 pub use sim::homological::{run_shots_homological, ErrorChainComplex, HomologicalSampler};
 pub use sim::noise::{run_shots_noisy, NoiseModel, NoiseOp};
-pub use sim::quasi_prob::{
-    run_quasi_prob, run_quasi_prob_shots, run_quasi_prob_shots_adaptive,
-    run_quasi_prob_shots_stratified, AdaptiveResult, QuasiProbResult,
-};
+pub use sim::unified_pauli::{run_spd, run_spp, spd_to_probabilities, spp_to_probabilities, SpdResult, SppResult};
 pub use sim::stabilizer_rank::{
     run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_overlap_sq, StabRankResult,
 };

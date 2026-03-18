@@ -6,8 +6,8 @@
 pub mod compiled;
 pub mod homological;
 pub mod noise;
-pub mod quasi_prob;
 pub mod stabilizer_rank;
+pub mod unified_pauli;
 
 use std::collections::HashMap;
 
@@ -350,7 +350,7 @@ pub enum BackendKind {
     /// Decision tree:
     /// 1. No entangling gates        → ProductState (O(n))
     /// 2. All Clifford gates         → Stabilizer (O(n²))
-    /// 3. Clifford+T, t ≤ 12        → StabilizerRank/QuasiProb (O(2^t · n²))
+    /// 3. Clifford+T, t ≤ 12        → StabilizerRank (O(2^t · n²))
     /// 4. Above memory limit:
     ///    a. Sparse-friendly         → Sparse (O(k) where k = non-zero amplitudes)
     ///    b. Otherwise               → MPS (bounded bond dimension)
@@ -373,12 +373,6 @@ pub enum BackendKind {
     TensorNetwork,
     /// Dynamic split-state with on-demand merging.
     Factored,
-    /// Quasi-probability decomposition for Clifford+T circuits.
-    ///
-    /// Decomposes each T gate as T = α·I + β·Z, enumerates all 2^t Clifford
-    /// branches, and accumulates weighted amplitudes for exact probabilities.
-    /// Limits: t ≤ 20, n ≤ 25.
-    QuasiProbability,
     /// Stabilizer rank decomposition for Clifford+T circuits.
     ///
     /// Maintains a weighted sum of stabilizer states. Clifford gates are O(n²)
@@ -391,6 +385,29 @@ pub enum BackendKind {
     /// a small tableau. Cross-cluster 2q gates merge tableaux. Independent
     /// subsystems never merge, giving O(block_size²) per gate vs O(n²).
     FilteredStabilizer,
+    /// Stochastic Pauli Propagation for Clifford+T circuits.
+    ///
+    /// Backward-propagates measurement observables through the circuit as Pauli
+    /// strings. Clifford gates conjugate in O(1). T gates branch stochastically.
+    /// Per-path cost O(d×n/64), independent of T-gate count. Returns marginal
+    /// probabilities via Monte Carlo estimation.
+    StochasticPauli {
+        /// Number of stochastic paths per measurement qubit.
+        num_samples: usize,
+    },
+    /// Deterministic Sparse Pauli Dynamics for Clifford+T circuits.
+    ///
+    /// Backward-propagates measurement observables as a weighted sum of Pauli
+    /// strings stored in a HashMap. T gates deterministically branch X/Y terms.
+    /// Identical strings auto-merge. Optional ε-truncation for approximate mode.
+    /// Exact for small T-counts, approximate with bounded error for larger ones.
+    DeterministicPauli {
+        /// Drop Pauli terms with coefficient magnitude below this threshold.
+        /// Use 0.0 for exact mode.
+        epsilon: f64,
+        /// Maximum number of terms before forced truncation. Use 0 for unlimited.
+        max_terms: usize,
+    },
 }
 
 /// Validate that an explicitly-chosen backend is compatible with the circuit.
@@ -416,7 +433,7 @@ fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()
                 });
             }
         }
-        BackendKind::QuasiProbability | BackendKind::StabilizerRank => {
+        BackendKind::StabilizerRank => {
             if !circuit.has_t_gates() {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "stabilizer_rank".into(),
@@ -433,8 +450,9 @@ fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> bool {
     match kind {
         BackendKind::Stabilizer
         | BackendKind::FilteredStabilizer
-        | BackendKind::QuasiProbability
-        | BackendKind::StabilizerRank => false,
+        | BackendKind::StabilizerRank
+        | BackendKind::StochasticPauli { .. }
+        | BackendKind::DeterministicPauli { .. } => false,
         BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
         _ => true,
     }
@@ -474,11 +492,14 @@ fn select_backend(
         BackendKind::ProductState => Box::new(ProductStateBackend::new(seed)),
         BackendKind::TensorNetwork => Box::new(TensorNetworkBackend::new(seed)),
         BackendKind::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
-        BackendKind::QuasiProbability => {
-            unreachable!("QuasiProbability is handled before select_backend")
-        }
         BackendKind::StabilizerRank => {
             unreachable!("StabilizerRank is handled before select_backend")
+        }
+        BackendKind::StochasticPauli { .. } => {
+            unreachable!("StochasticPauli is handled before select_backend")
+        }
+        BackendKind::DeterministicPauli { .. } => {
+            unreachable!("DeterministicPauli is handled before select_backend")
         }
     }
 }
@@ -898,17 +919,26 @@ pub fn run_with_opts(
             has_partial_independence = true;
         }
     }
-    if matches!(kind, BackendKind::QuasiProbability) {
-        let qp = quasi_prob::run_quasi_prob(circuit, seed)?;
-        return Ok(SimulationResult {
-            probabilities: Some(Probabilities::Dense(qp.probabilities)),
-            classical_bits: vec![],
-        });
-    }
     if matches!(kind, BackendKind::StabilizerRank) {
         let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
         return Ok(SimulationResult {
             probabilities: Some(Probabilities::Dense(sr.probabilities)),
+            classical_bits: vec![],
+        });
+    }
+    if let BackendKind::StochasticPauli { num_samples } = kind {
+        let spp = unified_pauli::run_spp(circuit, num_samples, seed)?;
+        let probs = unified_pauli::spp_to_probabilities(&spp);
+        return Ok(SimulationResult {
+            probabilities: Some(Probabilities::Dense(probs)),
+            classical_bits: vec![],
+        });
+    }
+    if let BackendKind::DeterministicPauli { epsilon, max_terms } = kind {
+        let spd = unified_pauli::run_spd(circuit, epsilon, max_terms)?;
+        let probs = unified_pauli::spd_to_probabilities(&spd);
+        return Ok(SimulationResult {
+            probabilities: Some(Probabilities::Dense(probs)),
             classical_bits: vec![],
         });
     }
@@ -1156,13 +1186,10 @@ pub fn run_shots_with(
         None
     };
 
-    if matches!(kind, BackendKind::QuasiProbability) {
-        return quasi_prob::run_quasi_prob_shots(circuit, num_shots, seed);
-    }
     if matches!(kind, BackendKind::StabilizerRank) {
         return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
-    // Auto: Clifford+T with small T-count → quasi-probability shot sampling.
+    // Auto: Clifford+T with small T-count → stabilizer rank shot sampling.
     // Each shot samples a random Clifford branch (O(n²) stabilizer), avoiding
     // exponential statevector/MPS cost. No qubit limit for shots.
     if matches!(kind, BackendKind::Auto)
@@ -1170,7 +1197,7 @@ pub fn run_shots_with(
         && circuit.has_t_gates()
         && circuit.t_count() <= MAX_AUTO_T_COUNT
     {
-        return quasi_prob::run_quasi_prob_shots(circuit, num_shots, seed);
+        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
 
     if has_temporal_clifford_opportunity(&kind, circuit) {
@@ -2220,33 +2247,6 @@ mod tests {
         for shot in &result.shots {
             assert_eq!(shot.len(), 4);
         }
-    }
-
-    #[test]
-    fn test_quasi_prob_dispatch() {
-        let circuit = make_general_circuit(); // H, T, CX on 3 qubits
-        let result = run_with(BackendKind::QuasiProbability, &circuit, 42).unwrap();
-        let probs = result.probabilities.unwrap().to_vec();
-        assert_eq!(probs.len(), 8);
-        let total: f64 = probs.iter().sum();
-        assert!((total - 1.0).abs() < 1e-10);
-
-        // Compare against statevector for correctness
-        let sv_result = run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-        let sv_probs = sv_result.probabilities.unwrap().to_vec();
-        for (i, (qp, sv)) in probs.iter().zip(sv_probs.iter()).enumerate() {
-            assert!(
-                (qp - sv).abs() < 1e-10,
-                "prob[{i}]: quasi_prob={qp}, statevector={sv}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_quasi_prob_rejects_no_t() {
-        let circuit = make_clifford_circuit();
-        let result = run_with(BackendKind::QuasiProbability, &circuit, 42);
-        assert!(result.is_err());
     }
 
     #[test]

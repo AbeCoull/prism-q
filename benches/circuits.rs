@@ -853,18 +853,23 @@ fn clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
     circuit
 }
 
-fn bench_quasi_prob(c: &mut Criterion) {
-    let mut group = c.benchmark_group("quasi_prob");
+fn bench_clifford_t(c: &mut Criterion) {
+    let mut group = c.benchmark_group("clifford_t");
     configure_group(&mut group);
 
-    // Compare quasi-prob exact vs statevector for varying T-counts at fixed qubit count
     let n = 10;
     for &t in &[1, 2, 4, 8, 12] {
         let circuit = clifford_t_circuit(n, t, SEED);
 
-        group.bench_function(BenchmarkId::new("exact", format!("{n}q_{t}t")), |b| {
+        group.bench_function(BenchmarkId::new("spd", format!("{n}q_{t}t")), |b| {
             b.iter(|| {
-                prism_q::run_quasi_prob(&circuit, 42).unwrap();
+                prism_q::run_spd(&circuit, 0.0, 0).unwrap();
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("spp_10k", format!("{n}q_{t}t")), |b| {
+            b.iter(|| {
+                prism_q::run_spp(&circuit, 10_000, 42).unwrap();
             });
         });
 
@@ -875,13 +880,12 @@ fn bench_quasi_prob(c: &mut Criterion) {
         });
     }
 
-    // Qubit scaling at fixed T-count (t=4)
     for &n in &[5, 15, 20] {
         let circuit = clifford_t_circuit(n, 4, SEED);
 
-        group.bench_function(BenchmarkId::new("exact", format!("{n}q_4t")), |b| {
+        group.bench_function(BenchmarkId::new("spd", format!("{n}q_4t")), |b| {
             b.iter(|| {
-                prism_q::run_quasi_prob(&circuit, 42).unwrap();
+                prism_q::run_spd(&circuit, 0.0, 0).unwrap();
             });
         });
 
@@ -899,7 +903,7 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
     let mut group = c.benchmark_group("stabilizer_rank");
     configure_group(&mut group);
 
-    // Compare stabilizer_rank exact vs quasi_prob vs statevector
+    // Compare stabilizer_rank exact vs SPD vs statevector
     let n = 10;
     for &t in &[2, 4, 8, 12] {
         let circuit = clifford_t_circuit(n, t, SEED);
@@ -911,9 +915,9 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
             });
         });
 
-        group.bench_function(BenchmarkId::new("quasi_prob", &id), |b| {
+        group.bench_function(BenchmarkId::new("spd", &id), |b| {
             b.iter(|| {
-                prism_q::run_quasi_prob(&circuit, 42).unwrap();
+                prism_q::run_spd(&circuit, 0.0, 0).unwrap();
             });
         });
     }
@@ -969,6 +973,84 @@ fn bench_compiled_sampler(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_spp(c: &mut Criterion) {
+    let mut group = c.benchmark_group("spp");
+    configure_group(&mut group);
+
+    let num_samples = 10_000;
+
+    for &t in &[2, 4, 8, 12] {
+        let circuit = clifford_t_circuit(10, t, SEED);
+        let id = format!("10q_{t}t");
+
+        group.bench_function(BenchmarkId::new("spp_10k", &id), |b| {
+            b.iter(|| {
+                prism_q::sim::unified_pauli::run_spp(&circuit, num_samples, 42).unwrap();
+            });
+        });
+
+        if t <= 12 {
+            group.bench_function(BenchmarkId::new("spd", &id), |b| {
+                b.iter(|| {
+                    prism_q::run_spd(&circuit, 0.0, 0).unwrap();
+                });
+            });
+        }
+    }
+
+    for &n in &[20, 50, 100] {
+        let circuit = clifford_t_circuit(n, 8, SEED);
+        let id = format!("{n}q_8t");
+
+        group.bench_function(BenchmarkId::new("spp_10k", &id), |b| {
+            b.iter(|| {
+                prism_q::sim::unified_pauli::run_spp(&circuit, num_samples, 42).unwrap();
+            });
+        });
+    }
+
+    let circuit_100t = clifford_t_circuit(20, 100, SEED);
+    group.bench_function(BenchmarkId::new("spp_10k", "20q_100t"), |b| {
+        b.iter(|| {
+            prism_q::sim::unified_pauli::run_spp(&circuit_100t, num_samples, 42).unwrap();
+        });
+    });
+
+    let circuit_1000t = clifford_t_circuit(50, 1000, SEED);
+    group.bench_function(BenchmarkId::new("spp_10k", "50q_1000t"), |b| {
+        b.iter(|| {
+            prism_q::sim::unified_pauli::run_spp(&circuit_1000t, num_samples, 42).unwrap();
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_coalesce_baseline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("coalesce_baseline");
+    configure_group(&mut group);
+
+    let num_samples = 10_000;
+
+    for &(n, depth, t_frac, label) in &[
+        (10, 20, 0.05, "10q_d20_t5pct"),
+        (10, 50, 0.05, "10q_d50_t5pct"),
+        (20, 20, 0.05, "20q_d20_t5pct"),
+        (50, 20, 0.05, "50q_d20_t5pct"),
+        (100, 10, 0.05, "100q_d10_t5pct"),
+    ] {
+        let circuit = circuits::clifford_t_circuit(n, depth, t_frac, SEED);
+
+        group.bench_function(BenchmarkId::new("spp_10k", label), |b| {
+            b.iter(|| {
+                prism_q::sim::unified_pauli::run_spp(&circuit, num_samples, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     // Statevector sweeps
@@ -1016,11 +1098,15 @@ criterion_group!(
     bench_factored_sim_only,
     bench_factored_dynamic,
     bench_factored_dense,
-    // Quasi-probability (Clifford+T)
-    bench_quasi_prob,
+    // Clifford+T (SPD/SPP)
+    bench_clifford_t,
     // Stabilizer rank
     bench_stabilizer_rank,
     // Compiled sampler (noiseless + noisy shot sampling)
     bench_compiled_sampler,
+    // Stochastic Pauli Propagation (Clifford+T)
+    bench_spp,
+    // Coalescing baseline (interleaved Clifford+T)
+    bench_coalesce_baseline,
 );
 criterion_main!(benches);

@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -6,7 +8,7 @@ use rand::RngCore;
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PauliVec {
     pub x: Vec<u64>,
     pub z: Vec<u64>,
@@ -24,6 +26,23 @@ impl PauliVec {
         let mut pv = Self::new(num_words);
         pv.z[qubit / 64] |= 1u64 << (qubit % 64);
         pv
+    }
+
+    #[inline(always)]
+    pub fn is_diagonal(&self) -> bool {
+        self.x.iter().all(|&w| w == 0)
+    }
+
+    #[inline(always)]
+    pub fn has_x_or_y(&self, qubit: usize) -> bool {
+        get_bit(&self.x, qubit)
+    }
+}
+
+impl Hash for PauliVec {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.x.hash(state);
+        self.z.hash(state);
     }
 }
 
@@ -44,7 +63,7 @@ fn set_bit(words: &mut [u64], qubit: usize, val: bool) {
 }
 
 #[inline(always)]
-fn flip_bit(words: &mut [u64], qubit: usize) {
+pub(crate) fn flip_bit(words: &mut [u64], qubit: usize) {
     words[qubit / 64] ^= 1u64 << (qubit % 64);
 }
 

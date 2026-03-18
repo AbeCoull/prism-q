@@ -11,6 +11,7 @@
 //!   stabilizer inner products O(χ² · n³), sample outcomes.
 
 use num_complex::Complex64;
+use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::f64::consts::FRAC_PI_4;
@@ -454,17 +455,130 @@ pub fn stabilizer_overlap_sq(s1: &StabilizerBackend, s2: &StabilizerBackend, n: 
     2.0_f64.powi(n as i32 - rank as i32)
 }
 
-/// Stabilizer rank shot sampling on a Clifford+T circuit.
+struct TGateLocation {
+    instruction_index: usize,
+    qubit: usize,
+}
+
+fn find_t_gates(circuit: &Circuit) -> Vec<TGateLocation> {
+    circuit
+        .instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, inst)| match inst {
+            Instruction::Gate {
+                gate: Gate::T | Gate::Tdg,
+                targets,
+            } if targets.len() == 1 => Some(TGateLocation {
+                instruction_index: idx,
+                qubit: targets[0],
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn build_clifford_branch(
+    circuit: &Circuit,
+    t_locations: &[TGateLocation],
+    branch_bits: u64,
+) -> Circuit {
+    let mut out = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
+    out.instructions.reserve(circuit.instructions.len());
+
+    let mut t_idx = 0;
+
+    for (instr_idx, inst) in circuit.instructions.iter().enumerate() {
+        if t_idx < t_locations.len() && t_locations[t_idx].instruction_index == instr_idx {
+            let loc = &t_locations[t_idx];
+            if (branch_bits >> t_idx) & 1 == 1 {
+                out.instructions.push(Instruction::Gate {
+                    gate: Gate::Z,
+                    targets: SmallVec::from_slice(&[loc.qubit]),
+                });
+            }
+            t_idx += 1;
+        } else {
+            out.instructions.push(inst.clone());
+        }
+    }
+
+    out
+}
+
+fn run_branch(
+    circuit: &Circuit,
+    t_locations: &[TGateLocation],
+    branch_bits: u64,
+    seed: u64,
+) -> Result<Vec<bool>> {
+    let branch_circuit = build_clifford_branch(circuit, t_locations, branch_bits);
+    let mut backend = StabilizerBackend::new(seed);
+    backend.init(branch_circuit.num_qubits, branch_circuit.num_classical_bits)?;
+    for inst in &branch_circuit.instructions {
+        backend.apply(inst)?;
+    }
+    Ok(backend.classical_results().to_vec())
+}
+
+/// Shot sampling on a Clifford+T circuit via stochastic branch selection.
 ///
-/// Delegates to quasi-probability shot sampling.
+/// Each shot randomly replaces T→I or T→Z weighted by |α|/|β|, producing a
+/// Clifford circuit that is simulated on the stabilizer backend. Uses
+/// antithetic pairing (complement branch) for variance reduction.
 pub fn run_stabilizer_rank_shots(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
 ) -> Result<super::ShotsResult> {
-    // For shots, delegate to quasi-probability shot sampling
-    // (same decomposition, different framing)
-    super::quasi_prob::run_quasi_prob_shots(circuit, num_shots, seed)
+    let t_locations = find_t_gates(circuit);
+    let t_count = t_locations.len();
+
+    if t_count == 0 {
+        return super::run_shots_with(super::BackendKind::Stabilizer, circuit, num_shots, seed);
+    }
+    if t_count > 64 {
+        return Err(PrismError::BackendUnsupported {
+            backend: "stabilizer_rank".into(),
+            operation: format!("shot sampling for {} T-gates (max 64)", t_count),
+        });
+    }
+
+    let (alpha, beta) = t_coefficients();
+    let p_alpha = alpha.norm() / (alpha.norm() + beta.norm());
+    let t_mask = if t_count >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << t_count) - 1
+    };
+
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut shots = Vec::with_capacity(num_shots);
+
+    while shots.len() < num_shots {
+        let mut branch_bits = 0u64;
+        for i in 0..t_count {
+            if rng.gen::<f64>() >= p_alpha {
+                branch_bits |= 1u64 << i;
+            }
+        }
+
+        let branch_seed = rng.gen::<u64>();
+        shots.push(run_branch(circuit, &t_locations, branch_bits, branch_seed)?);
+
+        if shots.len() < num_shots {
+            let anti_bits = !branch_bits & t_mask;
+            let anti_seed = rng.gen::<u64>();
+            shots.push(run_branch(circuit, &t_locations, anti_bits, anti_seed)?);
+        }
+    }
+
+    shots.truncate(num_shots);
+
+    Ok(super::ShotsResult {
+        shots,
+        probabilities: None,
+    })
 }
 
 #[cfg(test)]

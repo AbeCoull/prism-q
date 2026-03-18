@@ -1026,6 +1026,31 @@ fn bench_spp(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_coalesce_baseline(c: &mut Criterion) {
+    let mut group = c.benchmark_group("coalesce_baseline");
+    configure_group(&mut group);
+
+    let num_samples = 10_000;
+
+    for &(n, depth, t_frac, label) in &[
+        (10, 20, 0.05, "10q_d20_t5pct"),
+        (10, 50, 0.05, "10q_d50_t5pct"),
+        (20, 20, 0.05, "20q_d20_t5pct"),
+        (50, 20, 0.05, "50q_d20_t5pct"),
+        (100, 10, 0.05, "100q_d10_t5pct"),
+    ] {
+        let circuit = circuits::clifford_t_circuit(n, depth, t_frac, SEED);
+
+        group.bench_function(BenchmarkId::new("spp_10k", label), |b| {
+            b.iter(|| {
+                prism_q::sim::unified_pauli::run_spp(&circuit, num_samples, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     // Statevector sweeps
@@ -1081,5 +1106,7 @@ criterion_group!(
     bench_compiled_sampler,
     // Stochastic Pauli Propagation (Clifford+T)
     bench_spp,
+    // Coalescing baseline (interleaved Clifford+T)
+    bench_coalesce_baseline,
 );
 criterion_main!(benches);

@@ -3,12 +3,254 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::sim::compiled::{flip_bit, propagate_backward, PauliVec};
 
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
+const MIN_CLIFF_GATES_FOR_COALESCE: usize = 16;
+
+// ---------------------------------------------------------------------------
+// Clifford Map: pre-compiled symplectic transformation over GF(2)
+// ---------------------------------------------------------------------------
+
+struct CliffordMap {
+    num_words: usize,
+    col_xx: Vec<u64>,
+    col_xz: Vec<u64>,
+    col_zx: Vec<u64>,
+    col_zz: Vec<u64>,
+}
+
+impl CliffordMap {
+    fn identity(n: usize) -> Self {
+        let num_words = n.div_ceil(64);
+        let mut col_xx = vec![0u64; n * num_words];
+        let mut col_zz = vec![0u64; n * num_words];
+        for q in 0..n {
+            col_xx[q * num_words + q / 64] = 1u64 << (q % 64);
+            col_zz[q * num_words + q / 64] = 1u64 << (q % 64);
+        }
+        Self {
+            num_words,
+            col_xx,
+            col_xz: vec![0u64; n * num_words],
+            col_zx: vec![0u64; n * num_words],
+            col_zz,
+        }
+    }
+
+    #[inline(always)]
+    fn col_range(&self, q: usize) -> std::ops::Range<usize> {
+        q * self.num_words..(q + 1) * self.num_words
+    }
+
+    fn apply_h(&mut self, q: usize) {
+        let r = self.col_range(q);
+        for i in r {
+            std::mem::swap(&mut self.col_xx[i], &mut self.col_xz[i]);
+            std::mem::swap(&mut self.col_zx[i], &mut self.col_zz[i]);
+        }
+    }
+
+    fn apply_s(&mut self, q: usize) {
+        let r = self.col_range(q);
+        for i in r {
+            self.col_xz[i] ^= self.col_xx[i];
+            self.col_zz[i] ^= self.col_zx[i];
+        }
+    }
+
+    fn apply_sx(&mut self, q: usize) {
+        let r = self.col_range(q);
+        for i in r {
+            self.col_xx[i] ^= self.col_xz[i];
+            self.col_zx[i] ^= self.col_zz[i];
+        }
+    }
+
+    fn apply_cx(&mut self, ctrl: usize, tgt: usize) {
+        let nw = self.num_words;
+        for w in 0..nw {
+            self.col_xx[tgt * nw + w] ^= self.col_xx[ctrl * nw + w];
+            self.col_xz[tgt * nw + w] ^= self.col_xz[ctrl * nw + w];
+            self.col_zx[ctrl * nw + w] ^= self.col_zx[tgt * nw + w];
+            self.col_zz[ctrl * nw + w] ^= self.col_zz[tgt * nw + w];
+        }
+    }
+
+    fn apply_cz(&mut self, q0: usize, q1: usize) {
+        let nw = self.num_words;
+        for w in 0..nw {
+            self.col_xz[q0 * nw + w] ^= self.col_xx[q1 * nw + w];
+            self.col_xz[q1 * nw + w] ^= self.col_xx[q0 * nw + w];
+            self.col_zz[q0 * nw + w] ^= self.col_zx[q1 * nw + w];
+            self.col_zz[q1 * nw + w] ^= self.col_zx[q0 * nw + w];
+        }
+    }
+
+    fn apply_swap(&mut self, q0: usize, q1: usize) {
+        let nw = self.num_words;
+        for w in 0..nw {
+            let r0 = q0 * nw + w;
+            let r1 = q1 * nw + w;
+            self.col_xx.swap(r0, r1);
+            self.col_xz.swap(r0, r1);
+            self.col_zx.swap(r0, r1);
+            self.col_zz.swap(r0, r1);
+        }
+    }
+
+    fn apply_gate(&mut self, gate: &Gate, targets: &[usize]) {
+        match gate {
+            Gate::H => self.apply_h(targets[0]),
+            Gate::S | Gate::Sdg => self.apply_s(targets[0]),
+            Gate::SX | Gate::SXdg => self.apply_sx(targets[0]),
+            Gate::X | Gate::Y | Gate::Z | Gate::Id => {}
+            Gate::Cx => self.apply_cx(targets[0], targets[1]),
+            Gate::Cz => self.apply_cz(targets[0], targets[1]),
+            Gate::Swap => self.apply_swap(targets[0], targets[1]),
+            _ => {}
+        }
+    }
+
+    fn apply(&self, pauli: &mut PauliVec) {
+        let nw = self.num_words;
+
+        let mut scratch = [0u64; 32];
+        if nw <= 16 {
+            scratch[..nw].copy_from_slice(&pauli.x);
+            scratch[16..16 + nw].copy_from_slice(&pauli.z);
+            pauli.x.fill(0);
+            pauli.z.fill(0);
+
+            for word in 0..nw {
+                let mut xw = scratch[word];
+                while xw != 0 {
+                    let bit = xw.trailing_zeros() as usize;
+                    let q = word * 64 + bit;
+                    let base = q * nw;
+                    for w in 0..nw {
+                        pauli.x[w] ^= self.col_xx[base + w];
+                        pauli.z[w] ^= self.col_xz[base + w];
+                    }
+                    xw &= xw - 1;
+                }
+
+                let mut zw = scratch[16 + word];
+                while zw != 0 {
+                    let bit = zw.trailing_zeros() as usize;
+                    let q = word * 64 + bit;
+                    let base = q * nw;
+                    for w in 0..nw {
+                        pauli.x[w] ^= self.col_zx[base + w];
+                        pauli.z[w] ^= self.col_zz[base + w];
+                    }
+                    zw &= zw - 1;
+                }
+            }
+        } else {
+            let old_x = pauli.x.clone();
+            let old_z = pauli.z.clone();
+            pauli.x.fill(0);
+            pauli.z.fill(0);
+
+            for word in 0..nw {
+                let mut xw = old_x[word];
+                while xw != 0 {
+                    let bit = xw.trailing_zeros() as usize;
+                    let q = word * 64 + bit;
+                    let base = q * nw;
+                    for w in 0..nw {
+                        pauli.x[w] ^= self.col_xx[base + w];
+                        pauli.z[w] ^= self.col_xz[base + w];
+                    }
+                    xw &= xw - 1;
+                }
+
+                let mut zw = old_z[word];
+                while zw != 0 {
+                    let bit = zw.trailing_zeros() as usize;
+                    let q = word * 64 + bit;
+                    let base = q * nw;
+                    for w in 0..nw {
+                        pauli.x[w] ^= self.col_zx[base + w];
+                        pauli.z[w] ^= self.col_zz[base + w];
+                    }
+                    zw &= zw - 1;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Coalesced circuit representation
+// ---------------------------------------------------------------------------
+
+enum CoalescedOp {
+    Map(CliffordMap),
+    SmallCliff(Vec<(Gate, SmallVec<[usize; 4]>)>),
+    T { qubit: usize, is_dagger: bool },
+}
+
+fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
+    let n = circuit.num_qubits;
+    let mut ops = Vec::new();
+    let mut cliff_buf: Vec<(Gate, SmallVec<[usize; 4]>)> = Vec::new();
+
+    for inst in &circuit.instructions {
+        if let Instruction::Gate { gate, targets } = inst {
+            match gate {
+                Gate::T => {
+                    flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+                    ops.push(CoalescedOp::T {
+                        qubit: targets[0],
+                        is_dagger: false,
+                    });
+                }
+                Gate::Tdg => {
+                    flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+                    ops.push(CoalescedOp::T {
+                        qubit: targets[0],
+                        is_dagger: true,
+                    });
+                }
+                _ => {
+                    cliff_buf.push((gate.clone(), SmallVec::from_slice(targets)));
+                }
+            }
+        } else {
+            flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+        }
+    }
+    flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+    ops
+}
+
+fn flush_cliff_buf(
+    n: usize,
+    buf: &mut Vec<(Gate, SmallVec<[usize; 4]>)>,
+    ops: &mut Vec<CoalescedOp>,
+) {
+    if buf.is_empty() {
+        return;
+    }
+    if buf.len() < MIN_CLIFF_GATES_FOR_COALESCE {
+        ops.push(CoalescedOp::SmallCliff(std::mem::take(buf)));
+    } else {
+        let mut map = CliffordMap::identity(n);
+        for (gate, targets) in buf.drain(..) {
+            map.apply_gate(&gate, &targets);
+        }
+        ops.push(CoalescedOp::Map(map));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SPP (Stochastic Pauli Propagation)
+// ---------------------------------------------------------------------------
 
 #[inline(always)]
 fn branch_t_gate(
@@ -22,29 +264,27 @@ fn branch_t_gate(
     }
 
     let has_z = (pauli.z[qubit / 64] >> (qubit % 64)) & 1 != 0;
-    let is_y = has_z; // X: x=1,z=0; Y: x=1,z=1
+    let is_y = has_z;
 
     let keep = rng.gen_bool(0.5);
     if !keep {
         flip_bit(&mut pauli.z, qubit);
     }
 
-    // T†XT = (X+Y)/√2, T†YT = (Y-X)/√2
-    // Tdg†XT = (X-Y)/√2, Tdg†YT = (Y+X)/√2
     let sign = match (is_y, keep, is_dagger) {
-        (false, _, false) => 1.0,     // T on X: both branches positive
-        (false, true, true) => 1.0,   // Tdg on X, keep X: positive
-        (false, false, true) => -1.0, // Tdg on X, flip to Y: negative
-        (true, true, false) => 1.0,   // T on Y, keep Y: positive
-        (true, false, false) => -1.0, // T on Y, flip to X: negative
-        (true, _, true) => 1.0,       // Tdg on Y: both branches positive
+        (false, _, false) => 1.0,
+        (false, true, true) => 1.0,
+        (false, false, true) => -1.0,
+        (true, true, false) => 1.0,
+        (true, false, false) => -1.0,
+        (true, _, true) => 1.0,
     };
 
     Complex64::new(sign * SQRT_2, 0.0)
 }
 
-fn backward_propagate_stochastic(
-    circuit: &Circuit,
+fn backward_propagate_coalesced(
+    ops: &[CoalescedOp],
     observable: &PauliVec,
     rng: &mut impl Rng,
 ) -> (PauliVec, Complex64) {
@@ -54,18 +294,18 @@ fn backward_propagate_stochastic(
     };
     let mut weight = Complex64::new(1.0, 0.0);
 
-    for inst in circuit.instructions.iter().rev() {
-        if let Instruction::Gate { gate, targets } = inst {
-            match gate {
-                Gate::T => {
-                    weight *= branch_t_gate(&mut pauli, targets[0], false, rng);
-                }
-                Gate::Tdg => {
-                    weight *= branch_t_gate(&mut pauli, targets[0], true, rng);
-                }
-                _ => {
+    for op in ops.iter().rev() {
+        match op {
+            CoalescedOp::Map(map) => {
+                map.apply(&mut pauli);
+            }
+            CoalescedOp::SmallCliff(gates) => {
+                for (gate, targets) in gates.iter().rev() {
                     propagate_backward(&mut pauli, gate, targets);
                 }
+            }
+            CoalescedOp::T { qubit, is_dagger } => {
+                weight *= branch_t_gate(&mut pauli, *qubit, *is_dagger, rng);
             }
         }
     }
@@ -98,7 +338,7 @@ pub struct SppResult {
 }
 
 fn estimate_qubit_expectation(
-    circuit: &Circuit,
+    ops: &[CoalescedOp],
     qubit: usize,
     num_words: usize,
     num_samples: usize,
@@ -112,7 +352,7 @@ fn estimate_qubit_expectation(
     let mut nonzero = 0usize;
 
     for i in 0..num_samples {
-        let (pauli, weight) = backward_propagate_stochastic(circuit, &obs, &mut rng);
+        let (pauli, weight) = backward_propagate_coalesced(ops, &obs, &mut rng);
         let val = if pauli.is_diagonal() {
             nonzero += 1;
             weight.re
@@ -139,6 +379,7 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_t_gates(circuit);
+    let ops = coalesce_cliffords(circuit);
 
     #[cfg(feature = "parallel")]
     let results: Vec<(f64, f64, usize)> = {
@@ -147,7 +388,7 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
             .into_par_iter()
             .map(|q| {
                 estimate_qubit_expectation(
-                    circuit,
+                    &ops,
                     q,
                     num_words,
                     num_samples,
@@ -160,13 +401,7 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
     #[cfg(not(feature = "parallel"))]
     let results: Vec<(f64, f64, usize)> = (0..n)
         .map(|q| {
-            estimate_qubit_expectation(
-                circuit,
-                q,
-                num_words,
-                num_samples,
-                seed.wrapping_add(q as u64),
-            )
+            estimate_qubit_expectation(&ops, q, num_words, num_samples, seed.wrapping_add(q as u64))
         })
         .collect();
 
@@ -232,6 +467,14 @@ impl WeightedPauliSum {
         }
     }
 
+    fn conjugate_all_map(&mut self, map: &CliffordMap) {
+        let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
+        for (mut pauli, coeff) in old_terms {
+            map.apply(&mut pauli);
+            self.insert(pauli, coeff);
+        }
+    }
+
     fn branch_t_deterministic(&mut self, qubit: usize, is_dagger: bool) {
         let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
         let inv_sqrt2 = 1.0 / SQRT_2;
@@ -249,13 +492,11 @@ impl WeightedPauliSum {
             let mut pauli_flip = pauli;
             flip_bit(&mut pauli_flip.z, qubit);
 
-            // T†XT = (X+Y)/√2, T†YT = (Y-X)/√2
-            // Tdg†XT = (X-Y)/√2, Tdg†YT = (Y+X)/√2
             let (sign_keep, sign_flip) = match (is_y, is_dagger) {
-                (false, false) => (1.0, 1.0), // T on X: (X+Y)/√2
-                (false, true) => (1.0, -1.0), // Tdg on X: (X-Y)/√2
-                (true, false) => (1.0, -1.0), // T on Y: (Y-X)/√2
-                (true, true) => (1.0, 1.0),   // Tdg on Y: (Y+X)/√2
+                (false, false) => (1.0, 1.0),
+                (false, true) => (1.0, -1.0),
+                (true, false) => (1.0, -1.0),
+                (true, true) => (1.0, 1.0),
             };
 
             self.insert(pauli_keep, coeff * sign_keep * inv_sqrt2);
@@ -298,6 +539,7 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_t_gates(circuit);
+    let ops = coalesce_cliffords(circuit);
 
     let mut expectations = Vec::with_capacity(n);
     let mut peak_terms = 0usize;
@@ -307,12 +549,16 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
         let mut sum = WeightedPauliSum::new();
         sum.insert(PauliVec::z_on_qubit(num_words, q), Complex64::new(1.0, 0.0));
 
-        for inst in circuit.instructions.iter().rev() {
-            if let Instruction::Gate { gate, targets } = inst {
-                match gate {
-                    Gate::T => sum.branch_t_deterministic(targets[0], false),
-                    Gate::Tdg => sum.branch_t_deterministic(targets[0], true),
-                    _ => sum.conjugate_all_backward(gate, targets),
+        for op in ops.iter().rev() {
+            match op {
+                CoalescedOp::Map(map) => sum.conjugate_all_map(map),
+                CoalescedOp::SmallCliff(gates) => {
+                    for (gate, targets) in gates.iter().rev() {
+                        sum.conjugate_all_backward(gate, targets);
+                    }
+                }
+                CoalescedOp::T { qubit, is_dagger } => {
+                    sum.branch_t_deterministic(*qubit, *is_dagger);
                 }
             }
 
@@ -366,7 +612,8 @@ mod tests {
 
         let obs = PauliVec::z_on_qubit(1, 1);
         let mut rng = ChaCha8Rng::seed_from_u64(42);
-        let (result, weight) = backward_propagate_stochastic(&circuit, &obs, &mut rng);
+        let ops = coalesce_cliffords(&circuit);
+        let (result, weight) = backward_propagate_coalesced(&ops, &obs, &mut rng);
 
         let mut expected = PauliVec::z_on_qubit(1, 1);
         for inst in circuit.instructions.iter().rev() {
@@ -391,25 +638,16 @@ mod tests {
         let num_samples = 100_000;
         let mut sum = 0.0;
         let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let ops = coalesce_cliffords(&circuit);
 
         for _ in 0..num_samples {
-            let (pauli, weight) = backward_propagate_stochastic(&circuit, &obs, &mut rng);
+            let (pauli, weight) = backward_propagate_coalesced(&ops, &obs, &mut rng);
             if pauli.is_diagonal() {
                 sum += weight.re;
             }
         }
         let mean = sum / num_samples as f64;
 
-        // Exact: ⟨0|H T H Z H T† H|0⟩ = ⟨0| (HTH)† Z (HTH) |0⟩
-        // HTH = Rz(π/4) up to global phase. ⟨Z⟩ for Rz(π/4)|0⟩ = cos(π/4) = 1/√2
-        // Actually, |ψ⟩ = HTH|0⟩ = H T |+⟩ = H (T|+⟩)
-        // T|+⟩ = (|0⟩ + e^{iπ/4}|1⟩)/√2
-        // H T|+⟩ = ((1+e^{iπ/4})|0⟩ + (1-e^{iπ/4})|1⟩)/2
-        // P(0) = |1+e^{iπ/4}|²/4 = (1+cos(π/4)+1+cos(π/4))/4... let me compute directly.
-        // |1+e^{iπ/4}|² = (1+cos(π/4))² + sin²(π/4) = 1 + 2cos(π/4) + cos²(π/4) + sin²(π/4)
-        //                = 2 + 2cos(π/4) = 2 + √2
-        // P(0) = (2+√2)/4 ≈ 0.8536
-        // ⟨Z⟩ = 2*P(0) - 1 = (2+√2)/2 - 1 = √2/2 ≈ 0.7071
         let exact_z = std::f64::consts::FRAC_1_SQRT_2;
         assert!(
             (mean - exact_z).abs() < 0.02,
@@ -421,11 +659,11 @@ mod tests {
     fn test_branch_t_gate_passthrough_iz() {
         let mut rng = ChaCha8Rng::seed_from_u64(42);
 
-        let mut pauli_i = PauliVec::new(1); // I on qubit 0
+        let mut pauli_i = PauliVec::new(1);
         let w = branch_t_gate(&mut pauli_i, 0, false, &mut rng);
         assert!((w - Complex64::new(1.0, 0.0)).norm() < 1e-14);
 
-        let mut pauli_z = PauliVec::z_on_qubit(1, 0); // Z on qubit 0
+        let mut pauli_z = PauliVec::z_on_qubit(1, 0);
         let w = branch_t_gate(&mut pauli_z, 0, false, &mut rng);
         assert!((w - Complex64::new(1.0, 0.0)).norm() < 1e-14);
     }
@@ -439,13 +677,13 @@ mod tests {
 
         for _ in 0..num_samples {
             let mut pauli = PauliVec::new(1);
-            pauli.x[0] = 1; // X on qubit 0
+            pauli.x[0] = 1;
             let w = branch_t_gate(&mut pauli, 0, false, &mut rng);
             assert!((w.norm() - SQRT_2).abs() < 1e-14);
             if pauli.z[0] == 0 {
-                x_count += 1; // stayed X
+                x_count += 1;
             } else {
-                y_count += 1; // became Y
+                y_count += 1;
             }
         }
 
@@ -544,10 +782,10 @@ mod tests {
         };
         let probs = spp_to_probabilities(&result);
         assert_eq!(probs.len(), 4);
-        assert!((probs[0] - 0.75).abs() < 1e-14); // P(q0=0) = (1+0.5)/2
-        assert!((probs[1] - 0.25).abs() < 1e-14); // P(q0=1) = (1-0.5)/2
-        assert!((probs[2] - 0.35).abs() < 1e-14); // P(q1=0) = (1-0.3)/2
-        assert!((probs[3] - 0.65).abs() < 1e-14); // P(q1=1) = (1+0.3)/2
+        assert!((probs[0] - 0.75).abs() < 1e-14);
+        assert!((probs[1] - 0.25).abs() < 1e-14);
+        assert!((probs[2] - 0.35).abs() < 1e-14);
+        assert!((probs[3] - 0.65).abs() < 1e-14);
     }
 
     #[test]

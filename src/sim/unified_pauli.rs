@@ -32,12 +32,12 @@ fn branch_t_gate(
     // T†XT = (X+Y)/√2, T†YT = (Y-X)/√2
     // Tdg†XT = (X-Y)/√2, Tdg†YT = (Y+X)/√2
     let sign = match (is_y, keep, is_dagger) {
-        (false, _, false) => 1.0,  // T on X: both branches positive
-        (false, true, true) => 1.0,  // Tdg on X, keep X: positive
+        (false, _, false) => 1.0,     // T on X: both branches positive
+        (false, true, true) => 1.0,   // Tdg on X, keep X: positive
         (false, false, true) => -1.0, // Tdg on X, flip to Y: negative
-        (true, true, false) => 1.0,  // T on Y, keep Y: positive
+        (true, true, false) => 1.0,   // T on Y, keep Y: positive
         (true, false, false) => -1.0, // T on Y, flip to X: negative
-        (true, _, true) => 1.0,  // Tdg on Y: both branches positive
+        (true, _, true) => 1.0,       // Tdg on Y: both branches positive
     };
 
     Complex64::new(sign * SQRT_2, 0.0)
@@ -77,7 +77,15 @@ fn count_t_gates(circuit: &Circuit) -> usize {
     circuit
         .instructions
         .iter()
-        .filter(|inst| matches!(inst, Instruction::Gate { gate: Gate::T | Gate::Tdg, .. }))
+        .filter(|inst| {
+            matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::T | Gate::Tdg,
+                    ..
+                }
+            )
+        })
         .count()
 }
 
@@ -127,11 +135,7 @@ fn estimate_qubit_expectation(
     (mean, std_error, nonzero)
 }
 
-pub fn run_spp(
-    circuit: &Circuit,
-    num_samples: usize,
-    seed: u64,
-) -> Result<SppResult> {
+pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppResult> {
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_t_gates(circuit);
@@ -248,10 +252,10 @@ impl WeightedPauliSum {
             // T†XT = (X+Y)/√2, T†YT = (Y-X)/√2
             // Tdg†XT = (X-Y)/√2, Tdg†YT = (Y+X)/√2
             let (sign_keep, sign_flip) = match (is_y, is_dagger) {
-                (false, false) => (1.0, 1.0),   // T on X: (X+Y)/√2
-                (false, true) => (1.0, -1.0),    // Tdg on X: (X-Y)/√2
-                (true, false) => (1.0, -1.0),    // T on Y: (Y-X)/√2
-                (true, true) => (1.0, 1.0),      // Tdg on Y: (Y+X)/√2
+                (false, false) => (1.0, 1.0), // T on X: (X+Y)/√2
+                (false, true) => (1.0, -1.0), // Tdg on X: (X-Y)/√2
+                (true, false) => (1.0, -1.0), // T on Y: (Y-X)/√2
+                (true, true) => (1.0, 1.0),   // Tdg on Y: (Y+X)/√2
             };
 
             self.insert(pauli_keep, coeff * sign_keep * inv_sqrt2);
@@ -290,11 +294,7 @@ pub struct SpdResult {
     pub total_discarded: f64,
 }
 
-pub fn run_spd(
-    circuit: &Circuit,
-    epsilon: f64,
-    max_terms: usize,
-) -> Result<SpdResult> {
+pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdResult> {
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_t_gates(circuit);

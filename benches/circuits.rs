@@ -961,12 +961,46 @@ fn bench_compiled_sampler(c: &mut Criterion) {
             });
         });
 
+        let id_lut = format!("lut_only_{}q_10k", n);
+        group.bench_function(BenchmarkId::new("lut_only", &id_lut), |b| {
+            let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();
+            b.iter(|| sampler.sample_bulk(10_000));
+        });
+
+        let id_packed = format!("packed_{}q_10k", n);
+        group.bench_function(BenchmarkId::new("packed", &id_packed), |b| {
+            let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();
+            b.iter(|| sampler.sample_bulk_packed(10_000));
+        });
+
         let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
         let id_noisy = format!("noisy_{}q_10k", n);
         group.bench_function(BenchmarkId::new("noisy", &id_noisy), |b| {
             b.iter(|| {
                 prism_q::run_shots_noisy(&circuit, &noise, 10_000, SEED).unwrap();
             });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_compiled_sampler_scale(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compiled_sampler_scale");
+    configure_group(&mut group);
+
+    let n = 100;
+    let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
+    circuit.num_classical_bits = n;
+    for i in 0..n {
+        circuit.add_measure(i, i);
+    }
+
+    for &shots in &[100_000, 1_000_000, 10_000_000] {
+        let label = format!("packed_100q_{shots}");
+        group.bench_function(BenchmarkId::new("packed", &label), |b| {
+            let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();
+            b.iter(|| sampler.sample_bulk_packed(shots));
         });
     }
 
@@ -1104,6 +1138,8 @@ criterion_group!(
     bench_stabilizer_rank,
     // Compiled sampler (noiseless + noisy shot sampling)
     bench_compiled_sampler,
+    // Compiled sampler at scale (high shot counts)
+    bench_compiled_sampler_scale,
     // Stochastic Pauli Propagation (Clifford+T)
     bench_spp,
     // Coalescing baseline (interleaved Clifford+T)

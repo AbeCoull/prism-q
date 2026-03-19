@@ -1193,15 +1193,371 @@ impl FlipLut {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct SparseParity {
+    pub col_indices: Vec<u32>,
+    pub row_offsets: Vec<u32>,
+    pub num_rows: usize,
+}
+
+impl SparseParity {
+    pub fn from_flip_rows(flip_rows: &[Vec<u64>], num_measurements: usize) -> Self {
+        let num_rows = num_measurements;
+        let rank = flip_rows.len();
+        let mut row_offsets = Vec::with_capacity(num_rows + 1);
+        let mut col_indices = Vec::new();
+
+        for m in 0..num_rows {
+            row_offsets.push(col_indices.len() as u32);
+            let w = m / 64;
+            let bit = m % 64;
+            for (j, row) in flip_rows.iter().enumerate().take(rank) {
+                if (row[w] >> bit) & 1 != 0 {
+                    col_indices.push(j as u32);
+                }
+            }
+        }
+        row_offsets.push(col_indices.len() as u32);
+
+        Self {
+            col_indices,
+            row_offsets,
+            num_rows,
+        }
+    }
+
+    #[inline(always)]
+    pub fn row_weight(&self, row: usize) -> usize {
+        (self.row_offsets[row + 1] - self.row_offsets[row]) as usize
+    }
+
+    pub fn row_cols(&self, row: usize) -> &[u32] {
+        let start = self.row_offsets[row] as usize;
+        let end = self.row_offsets[row + 1] as usize;
+        &self.col_indices[start..end]
+    }
+
+    pub fn build_xor_dag(&self) -> XorDag {
+        let n = self.num_rows;
+        let mut entries: Vec<XorDagEntry> = Vec::with_capacity(n);
+
+        for m in 0..n {
+            let cols = self.row_cols(m);
+            let weight = cols.len();
+
+            let mut best_parent = None;
+            let mut best_residual_weight = weight;
+
+            for p in 0..m {
+                let parent_cols = self.row_cols(p);
+                let sym_diff_size = symmetric_difference_size(cols, parent_cols);
+                if sym_diff_size < best_residual_weight {
+                    best_residual_weight = sym_diff_size;
+                    best_parent = Some(p);
+                }
+            }
+
+            if let Some(p) = best_parent {
+                if best_residual_weight < weight {
+                    let parent_cols = self.row_cols(p);
+                    let residual = symmetric_difference(cols, parent_cols);
+                    entries.push(XorDagEntry {
+                        parent: Some(p),
+                        residual_cols: residual,
+                    });
+                } else {
+                    entries.push(XorDagEntry {
+                        parent: None,
+                        residual_cols: cols.to_vec(),
+                    });
+                }
+            } else {
+                entries.push(XorDagEntry {
+                    parent: None,
+                    residual_cols: cols.to_vec(),
+                });
+            }
+        }
+
+        let original_weight: usize = (0..n).map(|m| self.row_weight(m)).sum();
+        let dag_weight: usize = entries.iter().map(|e| e.residual_cols.len()).sum();
+
+        XorDag {
+            entries,
+            original_weight,
+            dag_weight,
+        }
+    }
+
+    pub fn stats(&self) -> ParityStats {
+        if self.num_rows == 0 {
+            return ParityStats {
+                min_weight: 0,
+                max_weight: 0,
+                mean_weight: 0.0,
+                total_weight: 0,
+                num_deterministic: 0,
+            };
+        }
+        let mut min_w = usize::MAX;
+        let mut max_w = 0usize;
+        let mut total = 0usize;
+        let mut num_det = 0usize;
+        for r in 0..self.num_rows {
+            let w = self.row_weight(r);
+            min_w = min_w.min(w);
+            max_w = max_w.max(w);
+            total += w;
+            if w == 0 {
+                num_det += 1;
+            }
+        }
+        ParityStats {
+            min_weight: min_w,
+            max_weight: max_w,
+            mean_weight: total as f64 / self.num_rows as f64,
+            total_weight: total,
+            num_deterministic: num_det,
+        }
+    }
+
+    pub fn find_blocks(&self, rank: usize) -> Option<Vec<Vec<usize>>> {
+        if self.num_rows <= 1 || rank == 0 {
+            return None;
+        }
+
+        let mut col_to_rows: Vec<Vec<usize>> = vec![Vec::new(); rank];
+        for m in 0..self.num_rows {
+            for &c in self.row_cols(m) {
+                col_to_rows[c as usize].push(m);
+            }
+        }
+
+        let mut parent: Vec<usize> = (0..self.num_rows).collect();
+        let mut size: Vec<usize> = vec![1; self.num_rows];
+
+        fn find(parent: &mut [usize], x: usize) -> usize {
+            let mut root = x;
+            while parent[root] != root {
+                root = parent[root];
+            }
+            let mut cur = x;
+            while parent[cur] != root {
+                let next = parent[cur];
+                parent[cur] = root;
+                cur = next;
+            }
+            root
+        }
+
+        fn union(parent: &mut [usize], size: &mut [usize], a: usize, b: usize) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra == rb {
+                return;
+            }
+            if size[ra] < size[rb] {
+                parent[ra] = rb;
+                size[rb] += size[ra];
+            } else {
+                parent[rb] = ra;
+                size[ra] += size[rb];
+            }
+        }
+
+        for rows in &col_to_rows {
+            for i in 1..rows.len() {
+                union(&mut parent, &mut size, rows[0], rows[i]);
+            }
+        }
+
+        let mut block_map: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        for m in 0..self.num_rows {
+            let root = find(&mut parent, m);
+            block_map.entry(root).or_default().push(m);
+        }
+
+        let blocks: Vec<Vec<usize>> = block_map.into_values().collect();
+        if blocks.len() <= 1 {
+            return None;
+        }
+
+        Some(blocks)
+    }
+
+    pub fn compile_detection_events(&self, pairs: &[(usize, usize)]) -> SparseParity {
+        let num_events = pairs.len();
+        let mut row_offsets = Vec::with_capacity(num_events + 1);
+        let mut col_indices = Vec::new();
+
+        for &(m_a, m_b) in pairs {
+            row_offsets.push(col_indices.len() as u32);
+            let cols_a = self.row_cols(m_a);
+            let cols_b = self.row_cols(m_b);
+            let sym_diff = symmetric_difference(cols_a, cols_b);
+            col_indices.extend_from_slice(&sym_diff);
+        }
+        row_offsets.push(col_indices.len() as u32);
+
+        SparseParity {
+            col_indices,
+            row_offsets,
+            num_rows: num_events,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct XorDagEntry {
+    pub parent: Option<usize>,
+    pub residual_cols: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct XorDag {
+    pub entries: Vec<XorDagEntry>,
+    pub original_weight: usize,
+    pub dag_weight: usize,
+}
+
+fn symmetric_difference_size(a: &[u32], b: &[u32]) -> usize {
+    let mut count = 0;
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                count += 1;
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                count += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    count + (a.len() - i) + (b.len() - j)
+}
+
+fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut result = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                result.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                result.push(b[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    result.extend_from_slice(&a[i..]);
+    result.extend_from_slice(&b[j..]);
+    result
+}
+
+#[derive(Debug, Clone)]
+pub struct ParityStats {
+    pub min_weight: usize,
+    pub max_weight: usize,
+    pub mean_weight: f64,
+    pub total_weight: usize,
+    pub num_deterministic: usize,
+}
+
+pub struct ParityBlock {
+    pub meas_indices: Vec<usize>,
+    pub sparse: SparseParity,
+    pub block_rank: usize,
+    pub ref_bits_packed: Vec<u64>,
+}
+
+pub struct ParityBlocks {
+    pub blocks: Vec<ParityBlock>,
+}
+
+impl ParityBlocks {
+    fn build(
+        global_sparse: &SparseParity,
+        block_meas: Vec<Vec<usize>>,
+        rank: usize,
+        ref_bits: &[u64],
+    ) -> Self {
+        let mut blocks = Vec::with_capacity(block_meas.len());
+        for meas_indices in block_meas {
+            let mut col_set: Vec<u32> = Vec::new();
+            for &m in &meas_indices {
+                for &c in global_sparse.row_cols(m) {
+                    col_set.push(c);
+                }
+            }
+            col_set.sort_unstable();
+            col_set.dedup();
+            let block_rank = col_set.len();
+
+            let mut col_remap = vec![0u32; rank];
+            for (new_idx, &old_idx) in col_set.iter().enumerate() {
+                col_remap[old_idx as usize] = new_idx as u32;
+            }
+
+            let num_rows = meas_indices.len();
+            let mut row_offsets = Vec::with_capacity(num_rows + 1);
+            let mut col_indices = Vec::new();
+            for &m in &meas_indices {
+                row_offsets.push(col_indices.len() as u32);
+                for &c in global_sparse.row_cols(m) {
+                    col_indices.push(col_remap[c as usize]);
+                }
+            }
+            row_offsets.push(col_indices.len() as u32);
+
+            let sparse = SparseParity {
+                col_indices,
+                row_offsets,
+                num_rows,
+            };
+
+            let ref_words = num_rows.div_ceil(64);
+            let mut block_ref = vec![0u64; ref_words];
+            for (local_m, &global_m) in meas_indices.iter().enumerate() {
+                let ref_bit = (ref_bits[global_m / 64] >> (global_m % 64)) & 1;
+                if ref_bit != 0 {
+                    block_ref[local_m / 64] |= 1u64 << (local_m % 64);
+                }
+            }
+
+            blocks.push(ParityBlock {
+                meas_indices,
+                sparse,
+                block_rank,
+                ref_bits_packed: block_ref,
+            });
+        }
+        ParityBlocks { blocks }
+    }
+}
+
 pub struct CompiledSampler {
-    /// r rows, each packed as m_words u64s. Row j stores which measurements
-    /// flip when random bit j is 1.
     flip_rows: Vec<Vec<u64>>,
     ref_bits_packed: Vec<u64>,
     rank: usize,
     num_measurements: usize,
     rng: ChaCha8Rng,
     lut: Option<FlipLut>,
+    sparse: Option<SparseParity>,
+    xor_dag: Option<XorDag>,
+    parity_blocks: Option<ParityBlocks>,
 }
 
 fn pack_bools(bools: &[bool]) -> Vec<u64> {
@@ -1224,6 +1580,14 @@ impl CompiledSampler {
         self.num_measurements
     }
 
+    pub fn sparse(&self) -> Option<&SparseParity> {
+        self.sparse.as_ref()
+    }
+
+    pub fn parity_stats(&self) -> Option<ParityStats> {
+        self.sparse.as_ref().map(|s| s.stats())
+    }
+
     pub fn sample(&mut self) -> Vec<bool> {
         let num_meas_words = self.num_measurements.div_ceil(64);
         let mut accum = vec![0u64; num_meas_words];
@@ -1231,7 +1595,7 @@ impl CompiledSampler {
         self.unpack_result(&accum)
     }
 
-    pub(crate) fn sample_bulk_words(&mut self, num_shots: usize) -> (Vec<u64>, usize) {
+    pub(crate) fn sample_bulk_words_shot_major(&mut self, num_shots: usize) -> (Vec<u64>, usize) {
         let m_words = self.num_measurements.div_ceil(64);
         if num_shots == 0 || self.num_measurements == 0 || self.rank == 0 {
             return (vec![0u64; num_shots * m_words], m_words);
@@ -1346,98 +1710,65 @@ impl CompiledSampler {
         }
     }
 
+    fn bts_weight_threshold(&self, num_shots: usize) -> usize {
+        let s_words = num_shots.div_ceil(64);
+        let m_words = self.num_measurements.div_ceil(64);
+        let lut_groups = self.rank.div_ceil(LUT_GROUP_SIZE);
+        if s_words == 0 || self.num_measurements == 0 {
+            return 0;
+        }
+        (num_shots as u64 * lut_groups as u64 * m_words as u64
+            / (s_words as u64 * self.num_measurements as u64)) as usize
+    }
+
+    fn should_use_bts(&self, num_shots: usize) -> bool {
+        if let Some(sparse) = &self.sparse {
+            if self.rank == 0 {
+                return false;
+            }
+            let m_words = self.num_measurements.div_ceil(64) as u64;
+            let lut_groups = (self.rank.div_ceil(LUT_GROUP_SIZE)) as u64;
+
+            let lut_alloc_bytes = num_shots as u64 * (lut_groups + m_words * 8);
+            if lut_alloc_bytes > MAX_LUT_ALLOC_BYTES {
+                return true;
+            }
+
+            let s_words = num_shots.div_ceil(64);
+            let stats = sparse.stats();
+            let bts_work = stats.total_weight as u64 * s_words as u64;
+            let lut_work = num_shots as u64 * lut_groups * m_words;
+            bts_work < lut_work
+        } else {
+            false
+        }
+    }
+
+    #[allow(dead_code)]
+    fn partition_measurements(&self, num_shots: usize) -> (Vec<usize>, Vec<usize>) {
+        let threshold = self.bts_weight_threshold(num_shots);
+        let sparse = match &self.sparse {
+            Some(s) => s,
+            None => return (Vec::new(), (0..self.num_measurements).collect()),
+        };
+        let mut light = Vec::new();
+        let mut heavy = Vec::new();
+        for m in 0..self.num_measurements {
+            if sparse.row_weight(m) <= threshold {
+                light.push(m);
+            } else {
+                heavy.push(m);
+            }
+        }
+        (light, heavy)
+    }
+
     pub(crate) fn ref_bits_packed(&self) -> &[u64] {
         &self.ref_bits_packed
     }
 
     pub fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
-        if num_shots == 0 || self.num_measurements == 0 {
-            return vec![Vec::new(); num_shots];
-        }
-
-        let m_words = self.num_measurements.div_ceil(64);
-
-        if self.rank == 0 {
-            let result = self.unpack_result_static();
-            return vec![result; num_shots];
-        }
-
-        if self.lut.is_some() {
-            self.sample_bulk_grouped(num_shots, m_words)
-        } else {
-            self.sample_bulk_sequential(num_shots, m_words)
-        }
-    }
-
-    fn sample_bulk_grouped(&mut self, num_shots: usize, m_words: usize) -> Vec<Vec<bool>> {
-        let lut = self.lut.as_ref().unwrap();
-        let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
-
-        let bytes_per_shot = total_groups;
-        let total_bytes = num_shots * bytes_per_shot;
-        let mut rand_bytes: Vec<u8> = vec![0u8; total_bytes];
-        {
-            let full_chunks = total_bytes / 8;
-            let tail = full_chunks * 8;
-            for i in 0..full_chunks {
-                let r = self.rng.next_u64();
-                rand_bytes[i * 8..(i + 1) * 8].copy_from_slice(&r.to_le_bytes());
-            }
-            if tail < total_bytes {
-                let r = self.rng.next_u64();
-                let bytes = r.to_le_bytes();
-                rand_bytes[tail..total_bytes].copy_from_slice(&bytes[..total_bytes - tail]);
-            }
-            if lut.remainder_size > 0 {
-                let remainder_mask = (1u8 << lut.remainder_size) - 1;
-                let last_group = lut.num_full_groups;
-                for s in 0..num_shots {
-                    rand_bytes[s * bytes_per_shot + last_group] &= remainder_mask;
-                }
-            }
-        }
-
-        let mut accum: Vec<u64> = vec![0u64; num_shots * m_words];
-
-        // Tile shots so accumulators fit in L2 (~256KB). Each shot uses m_words × 8 bytes.
-        let max_batch = if m_words > 0 {
-            (256 * 1024 / (m_words * 8)).max(64)
-        } else {
-            num_shots
-        };
-
-        // Group-major loop with tiling: LUT group stays L1-hot within each tile
-        for tile_start in (0..num_shots).step_by(max_batch) {
-            let tile_end = (tile_start + max_batch).min(num_shots);
-            for g in 0..total_groups {
-                for s in tile_start..tile_end {
-                    let byte = rand_bytes[s * bytes_per_shot + g] as usize;
-                    let entry = lut.lookup(g, byte);
-                    let shot_base = s * m_words;
-                    xor_words(&mut accum[shot_base..shot_base + m_words], entry);
-                }
-            }
-        }
-
-        let mut shots = Vec::with_capacity(num_shots);
-        for s in 0..num_shots {
-            let shot_base = s * m_words;
-            shots.push(self.unpack_result(&accum[shot_base..shot_base + m_words]));
-        }
-        shots
-    }
-
-    fn sample_bulk_sequential(&mut self, num_shots: usize, m_words: usize) -> Vec<Vec<bool>> {
-        let mut accum = vec![0u64; m_words];
-        let mut shots = Vec::with_capacity(num_shots);
-
-        for _ in 0..num_shots {
-            accum.fill(0);
-            self.sample_into(&mut accum);
-            shots.push(self.unpack_result(&accum));
-        }
-
-        shots
+        self.sample_bulk_packed(num_shots).to_shots()
     }
 
     #[inline(always)]
@@ -1506,18 +1837,481 @@ impl CompiledSampler {
         xor_words(accum, &self.ref_bits_packed);
     }
 
-    fn unpack_result_static(&self) -> Vec<bool> {
-        let mut result = Vec::with_capacity(self.num_measurements);
-        for m in 0..self.num_measurements {
-            let w = m / 64;
-            let bit = if w < self.ref_bits_packed.len() {
-                (self.ref_bits_packed[w] >> (m % 64)) & 1 != 0
-            } else {
-                false
+    pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
+        let m_words = self.num_measurements.div_ceil(64);
+        let s_words = num_shots.div_ceil(64);
+        if num_shots == 0 || self.num_measurements == 0 {
+            return PackedShots {
+                data: Vec::new(),
+                num_shots,
+                num_measurements: self.num_measurements,
+                m_words,
+                s_words,
+                layout: ShotLayout::ShotMajor,
             };
-            result.push(bit);
         }
-        result
+        if self.rank == 0 {
+            let mut data = vec![0u64; num_shots * m_words];
+            for s in 0..num_shots {
+                let base = s * m_words;
+                data[base..base + m_words].copy_from_slice(&self.ref_bits_packed);
+            }
+            return PackedShots {
+                data,
+                num_shots,
+                num_measurements: self.num_measurements,
+                m_words,
+                s_words,
+                layout: ShotLayout::ShotMajor,
+            };
+        }
+
+        if self.should_use_bts(num_shots) {
+            return self.sample_bulk_packed_bts(num_shots, m_words, s_words);
+        }
+
+        let (mut data, _) = self.sample_bulk_words_shot_major(num_shots);
+        for s in 0..num_shots {
+            let base = s * m_words;
+            xor_words(&mut data[base..base + m_words], &self.ref_bits_packed);
+        }
+        PackedShots {
+            data,
+            num_shots,
+            num_measurements: self.num_measurements,
+            m_words,
+            s_words,
+            layout: ShotLayout::ShotMajor,
+        }
+    }
+
+    fn sample_bulk_packed_bts(
+        &mut self,
+        num_shots: usize,
+        m_words: usize,
+        s_words: usize,
+    ) -> PackedShots {
+        let num_meas = self.num_measurements;
+
+        if let Some(pb) = &self.parity_blocks {
+            let block_seeds: Vec<u64> = (0..pb.blocks.len())
+                .map(|_| self.rng.next_u64())
+                .collect();
+
+            #[cfg(feature = "parallel")]
+            let block_results: Vec<(Vec<u64>, &[usize])> = {
+                use rayon::prelude::*;
+                pb.blocks
+                    .par_iter()
+                    .zip(block_seeds.par_iter())
+                    .map(|(block, &seed)| {
+                        let mut block_rng = ChaCha8Rng::seed_from_u64(seed);
+                        let data = sample_bts_meas_major(
+                            &block.sparse,
+                            num_shots,
+                            &block.ref_bits_packed,
+                            &mut block_rng,
+                            block.block_rank,
+                        );
+                        (data, block.meas_indices.as_slice())
+                    })
+                    .collect()
+            };
+
+            #[cfg(not(feature = "parallel"))]
+            let block_results: Vec<(Vec<u64>, &[usize])> = pb
+                .blocks
+                .iter()
+                .zip(block_seeds.iter())
+                .map(|(block, &seed)| {
+                    let mut block_rng = ChaCha8Rng::seed_from_u64(seed);
+                    let data = sample_bts_meas_major(
+                        &block.sparse,
+                        num_shots,
+                        &block.ref_bits_packed,
+                        &mut block_rng,
+                        block.block_rank,
+                    );
+                    (data, block.meas_indices.as_slice())
+                })
+                .collect();
+
+            let mut meas_major = vec![0u64; num_meas * s_words];
+            for (block_data, meas_indices) in &block_results {
+                for (local_m, &global_m) in meas_indices.iter().enumerate() {
+                    let src = &block_data[local_m * s_words..(local_m + 1) * s_words];
+                    let dst = &mut meas_major[global_m * s_words..(global_m + 1) * s_words];
+                    dst.copy_from_slice(src);
+                }
+            }
+
+            return PackedShots {
+                data: meas_major,
+                num_shots,
+                num_measurements: num_meas,
+                m_words,
+                s_words,
+                layout: ShotLayout::MeasMajor,
+            };
+        }
+
+        let sparse = self.sparse.as_ref().unwrap();
+
+        if num_shots <= BTS_BATCH_SHOTS {
+            let data = bts_single_pass(
+                sparse,
+                self.xor_dag.as_ref(),
+                num_shots,
+                &self.ref_bits_packed,
+                &mut self.rng,
+                self.rank,
+            );
+            return PackedShots {
+                data,
+                num_shots,
+                num_measurements: num_meas,
+                m_words,
+                s_words,
+                layout: ShotLayout::MeasMajor,
+            };
+        }
+
+        let data = bts_batched(
+            sparse,
+            self.xor_dag.as_ref(),
+            num_shots,
+            s_words,
+            &self.ref_bits_packed,
+            &mut self.rng,
+            self.rank,
+        );
+        PackedShots {
+            data,
+            num_shots,
+            num_measurements: num_meas,
+            m_words,
+            s_words,
+            layout: ShotLayout::MeasMajor,
+        }
+    }
+
+    pub fn sample_streaming<F>(&mut self, total_shots: usize, batch_size: usize, mut callback: F)
+    where
+        F: FnMut(&PackedShots),
+    {
+        let mut remaining = total_shots;
+        while remaining > 0 {
+            let this_batch = remaining.min(batch_size);
+            let packed = self.sample_bulk_packed(this_batch);
+            callback(&packed);
+            remaining -= this_batch;
+        }
+    }
+
+    pub fn sample_counts_streaming(
+        &mut self,
+        total_shots: usize,
+        batch_size: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        use std::collections::HashMap;
+        let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
+        self.sample_streaming(total_shots, batch_size, |packed| {
+            for (key, count) in packed.counts() {
+                *counts.entry(key).or_insert(0) += count;
+            }
+        });
+        counts
+    }
+
+    pub fn sample_detection_events(
+        &mut self,
+        pairs: &[(usize, usize)],
+        num_shots: usize,
+    ) -> PackedShots {
+        let sparse = self.sparse.as_ref().expect("sparse parity required");
+        let det_sparse = sparse.compile_detection_events(pairs);
+        let num_events = det_sparse.num_rows;
+        let m_words = num_events.div_ceil(64);
+        let s_words = num_shots.div_ceil(64);
+
+        if num_events == 0 || num_shots == 0 || self.rank == 0 {
+            return PackedShots {
+                data: vec![0u64; num_events * s_words],
+                num_shots,
+                num_measurements: num_events,
+                m_words,
+                s_words,
+                layout: ShotLayout::MeasMajor,
+            };
+        }
+
+        let det_ref = vec![0u64; m_words];
+
+        let data = if num_shots > BTS_BATCH_SHOTS {
+            bts_batched(
+                &det_sparse,
+                None,
+                num_shots,
+                s_words,
+                &det_ref,
+                &mut self.rng,
+                self.rank,
+            )
+        } else {
+            sample_bts_meas_major(
+                &det_sparse,
+                num_shots,
+                &det_ref,
+                &mut self.rng,
+                self.rank,
+            )
+        };
+
+        PackedShots {
+            data,
+            num_shots,
+            num_measurements: num_events,
+            m_words,
+            s_words,
+            layout: ShotLayout::MeasMajor,
+        }
+    }
+
+    pub fn exact_counts(&self) -> Option<std::collections::HashMap<Vec<u64>, u64>> {
+        if self.rank > MAX_RANK_FOR_GRAY_CODE {
+            return None;
+        }
+        let sparse = self.sparse.as_ref()?;
+        Some(gray_code_exact_counts(
+            sparse,
+            self.rank,
+            &self.ref_bits_packed,
+            self.num_measurements,
+        ))
+    }
+
+    pub fn marginal_probabilities(&self) -> Vec<f64> {
+        let mut probs = vec![0.5f64; self.num_measurements];
+        if let Some(sparse) = &self.sparse {
+            for (m, p) in probs.iter_mut().enumerate() {
+                if sparse.row_weight(m) == 0 {
+                    let ref_bit = (self.ref_bits_packed[m / 64] >> (m % 64)) & 1;
+                    *p = ref_bit as f64;
+                }
+            }
+        } else {
+            for (m, p) in probs.iter_mut().enumerate() {
+                let mut depends_on_random = false;
+                for row in &self.flip_rows {
+                    let w = m / 64;
+                    if w < row.len() && (row[w] >> (m % 64)) & 1 != 0 {
+                        depends_on_random = true;
+                        break;
+                    }
+                }
+                if !depends_on_random {
+                    let ref_bit = (self.ref_bits_packed[m / 64] >> (m % 64)) & 1;
+                    *p = ref_bit as f64;
+                }
+            }
+        }
+        probs
+    }
+
+    pub fn parity_report(&self) -> String {
+        let mut report = format!(
+            "CompiledSampler: {} measurements, rank {}, {} flip rows\n",
+            self.num_measurements,
+            self.rank,
+            self.flip_rows.len()
+        );
+        if let Some(sparse) = &self.sparse {
+            let stats = sparse.stats();
+            report.push_str(&format!(
+                "Parity matrix: {} rows, total weight {}\n\
+                 Weight range: {} to {}, mean {:.1}\n\
+                 Deterministic measurements: {}\n",
+                sparse.num_rows,
+                stats.total_weight,
+                stats.min_weight,
+                stats.max_weight,
+                stats.mean_weight,
+                stats.num_deterministic,
+            ));
+            let mut histogram = [0usize; 8];
+            for m in 0..sparse.num_rows {
+                let w = sparse.row_weight(m);
+                let bucket = w.min(7);
+                histogram[bucket] += 1;
+            }
+            report.push_str("Weight histogram: ");
+            for (i, &count) in histogram.iter().enumerate() {
+                if count > 0 {
+                    if i < 7 {
+                        report.push_str(&format!("w{}={} ", i, count));
+                    } else {
+                        report.push_str(&format!("w7+={} ", count));
+                    }
+                }
+            }
+            report.push('\n');
+        } else {
+            report.push_str("No sparse parity matrix available\n");
+        }
+        report
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShotLayout {
+    ShotMajor,
+    MeasMajor,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackedShots {
+    data: Vec<u64>,
+    num_shots: usize,
+    num_measurements: usize,
+    m_words: usize,
+    s_words: usize,
+    layout: ShotLayout,
+}
+
+impl PackedShots {
+    #[allow(dead_code)]
+    pub(crate) fn empty(
+        num_shots: usize,
+        num_measurements: usize,
+        m_words: usize,
+        s_words: usize,
+    ) -> Self {
+        Self {
+            data: Vec::new(),
+            num_shots,
+            num_measurements,
+            m_words,
+            s_words,
+            layout: ShotLayout::ShotMajor,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn from_shot_major(
+        data: Vec<u64>,
+        num_shots: usize,
+        num_measurements: usize,
+        m_words: usize,
+    ) -> Self {
+        Self {
+            data,
+            num_shots,
+            num_measurements,
+            m_words,
+            s_words: num_shots.div_ceil(64),
+            layout: ShotLayout::ShotMajor,
+        }
+    }
+
+    pub fn num_shots(&self) -> usize {
+        self.num_shots
+    }
+
+    pub fn num_measurements(&self) -> usize {
+        self.num_measurements
+    }
+
+    pub fn layout(&self) -> ShotLayout {
+        self.layout
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn data_mut(&mut self) -> &mut [u64] {
+        &mut self.data
+    }
+
+    #[inline(always)]
+    pub fn get_bit(&self, shot: usize, measurement: usize) -> bool {
+        match self.layout {
+            ShotLayout::ShotMajor => {
+                let base = shot * self.m_words;
+                let w = measurement / 64;
+                (self.data[base + w] >> (measurement % 64)) & 1 != 0
+            }
+            ShotLayout::MeasMajor => {
+                let base = measurement * self.s_words;
+                let w = shot / 64;
+                (self.data[base + w] >> (shot % 64)) & 1 != 0
+            }
+        }
+    }
+
+    pub fn shot_words(&self, shot: usize) -> &[u64] {
+        assert!(
+            self.layout == ShotLayout::ShotMajor,
+            "shot_words requires ShotMajor layout"
+        );
+        let base = shot * self.m_words;
+        &self.data[base..base + self.m_words]
+    }
+
+    pub fn to_shots(&self) -> Vec<Vec<bool>> {
+        let mut shots = Vec::with_capacity(self.num_shots);
+        for s in 0..self.num_shots {
+            let mut shot = Vec::with_capacity(self.num_measurements);
+            for m in 0..self.num_measurements {
+                shot.push(self.get_bit(s, m));
+            }
+            shots.push(shot);
+        }
+        shots
+    }
+
+    pub fn counts(&self) -> std::collections::HashMap<Vec<u64>, u64> {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+
+        match self.layout {
+            ShotLayout::ShotMajor => {
+                for s in 0..self.num_shots {
+                    let base = s * self.m_words;
+                    let words = self.data[base..base + self.m_words].to_vec();
+                    *map.entry(words).or_insert(0) += 1;
+                }
+            }
+            ShotLayout::MeasMajor => {
+                let batch_size = 64;
+                let mut shot_buf = vec![0u64; batch_size * self.m_words];
+                for batch_start in (0..self.num_shots).step_by(batch_size) {
+                    let batch_end = (batch_start + batch_size).min(self.num_shots);
+                    let batch_len = batch_end - batch_start;
+                    shot_buf[..batch_len * self.m_words].fill(0);
+
+                    let sw_base = batch_start / 64;
+                    let bit_off = batch_start % 64;
+
+                    for m in 0..self.num_measurements {
+                        let mw = m / 64;
+                        let mbit = m % 64;
+                        let meas_row = &self.data[m * self.s_words..];
+                        let word = meas_row[sw_base];
+                        let shifted = word >> bit_off;
+                        for s in 0..batch_len {
+                            if (shifted >> s) & 1 != 0 {
+                                shot_buf[s * self.m_words + mw] |= 1u64 << mbit;
+                            }
+                        }
+                    }
+
+                    for s in 0..batch_len {
+                        let base = s * self.m_words;
+                        let words = shot_buf[base..base + self.m_words].to_vec();
+                        *map.entry(words).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        map
     }
 }
 
@@ -1845,6 +2639,524 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
     for (d, &s) in dst.iter_mut().zip(src) {
         *d ^= s;
     }
+}
+
+fn bts_single_pass(
+    sparse: &SparseParity,
+    xor_dag: Option<&XorDag>,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut ChaCha8Rng,
+    rank: usize,
+) -> Vec<u64> {
+    if let Some(dag) = xor_dag {
+        sample_bts_meas_major_dag(sparse, dag, num_shots, ref_bits, rng, rank)
+    } else {
+        sample_bts_meas_major(sparse, num_shots, ref_bits, rng, rank)
+    }
+}
+
+fn bts_batched(
+    sparse: &SparseParity,
+    xor_dag: Option<&XorDag>,
+    num_shots: usize,
+    total_s_words: usize,
+    ref_bits: &[u64],
+    rng: &mut ChaCha8Rng,
+    rank: usize,
+) -> Vec<u64> {
+    let num_meas = sparse.num_rows;
+
+    #[cfg(feature = "parallel")]
+    {
+        let num_threads = rayon::current_num_threads();
+        if num_threads > 1 {
+            let shots_per_thread =
+                (num_shots.div_ceil(num_threads) / 64) * 64;
+            if shots_per_thread >= 64 {
+                let base_seed = rng.next_u64();
+
+                let chunks: Vec<(usize, usize)> = (0..num_threads)
+                    .map(|t| {
+                        let start = t * shots_per_thread;
+                        let end = ((t + 1) * shots_per_thread).min(num_shots);
+                        (start, end)
+                    })
+                    .filter(|(s, e)| s < e)
+                    .collect();
+
+                let mut output = vec![0u64; num_meas * total_s_words];
+                let out_ptr = output.as_mut_ptr();
+
+                {
+                    use rayon::prelude::*;
+                    let out_slice = &mut output[..];
+                    let total_sw = total_s_words;
+                    let nm = num_meas;
+
+                    chunks
+                        .into_par_iter()
+                        .enumerate()
+                        .map(|(t, (shot_start, shot_end))| {
+                            let chunk_shots = shot_end - shot_start;
+                            let word_offset = shot_start / 64;
+                            let mut thread_rng = ChaCha8Rng::seed_from_u64(base_seed);
+                            thread_rng.set_stream(t as u64 + 1);
+
+                            let mut results = Vec::new();
+                            let mut chunk_done = 0usize;
+                            while chunk_done < chunk_shots {
+                                let batch_shots =
+                                    (chunk_shots - chunk_done).min(BTS_BATCH_SHOTS);
+                                let batch_offset = word_offset + chunk_done / 64;
+                                let batch_data = sample_bts_meas_major(
+                                    sparse,
+                                    batch_shots,
+                                    ref_bits,
+                                    &mut thread_rng,
+                                    rank,
+                                );
+                                results.push((batch_data, batch_shots, batch_offset));
+                                chunk_done += batch_shots;
+                            }
+                            results
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .for_each(|thread_results| {
+                            for (batch_data, batch_shots, batch_offset) in thread_results {
+                                let batch_s_words = batch_shots.div_ceil(64);
+                                for m in 0..nm {
+                                    let src = &batch_data
+                                        [m * batch_s_words..(m + 1) * batch_s_words];
+                                    let dst_start = m * total_sw + batch_offset;
+                                    out_slice[dst_start..dst_start + batch_s_words]
+                                        .copy_from_slice(src);
+                                }
+                            }
+                        });
+                }
+
+                let _ = out_ptr;
+                return output;
+            }
+        }
+    }
+
+    let mut output = vec![0u64; num_meas * total_s_words];
+    let mut shots_done = 0usize;
+
+    while shots_done < num_shots {
+        let batch_shots = (num_shots - shots_done).min(BTS_BATCH_SHOTS);
+        let batch_s_words = batch_shots.div_ceil(64);
+        let word_offset = shots_done / 64;
+
+        let batch_data = bts_single_pass(sparse, xor_dag, batch_shots, ref_bits, rng, rank);
+
+        for m in 0..num_meas {
+            let src = &batch_data[m * batch_s_words..(m + 1) * batch_s_words];
+            let dst_start = m * total_s_words + word_offset;
+            output[dst_start..dst_start + batch_s_words].copy_from_slice(src);
+        }
+
+        shots_done += batch_shots;
+    }
+
+    output
+}
+
+fn sample_bts_meas_major(
+    sparse: &SparseParity,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut ChaCha8Rng,
+    rank: usize,
+) -> Vec<u64> {
+    let num_meas = sparse.num_rows;
+    let s_words = num_shots.div_ceil(64);
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && num_shots >= 256 {
+            // SAFETY: AVX2 detected, all pointer arithmetic bounded by allocation sizes
+            return unsafe { sample_bts_meas_major_avx2(sparse, num_shots, ref_bits, rng, rank) };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if num_shots >= 128 {
+            // SAFETY: NEON is baseline on aarch64, pointers are valid
+            return unsafe { sample_bts_meas_major_neon(sparse, num_shots, ref_bits, rng, rank) };
+        }
+    }
+
+    let mut meas_major = vec![0u64; num_meas * s_words];
+    let mut random_bits = vec![0u64; rank];
+
+    for batch in 0..s_words {
+        for r in random_bits.iter_mut().take(rank) {
+            *r = rng.next_u64();
+        }
+        if batch == s_words - 1 {
+            let rem = num_shots % 64;
+            if rem != 0 {
+                let mask = (1u64 << rem) - 1;
+                for r in random_bits.iter_mut().take(rank) {
+                    *r &= mask;
+                }
+            }
+        }
+
+        for m in 0..num_meas {
+            let cols = sparse.row_cols(m);
+            let acc = match cols.len() {
+                0 => 0u64,
+                1 => random_bits[cols[0] as usize],
+                2 => random_bits[cols[0] as usize] ^ random_bits[cols[1] as usize],
+                3 => {
+                    random_bits[cols[0] as usize]
+                        ^ random_bits[cols[1] as usize]
+                        ^ random_bits[cols[2] as usize]
+                }
+                _ => {
+                    let mut a =
+                        random_bits[cols[0] as usize] ^ random_bits[cols[1] as usize];
+                    for &c in &cols[2..] {
+                        a ^= random_bits[c as usize];
+                    }
+                    a
+                }
+            };
+            meas_major[m * s_words + batch] = acc;
+        }
+    }
+
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    meas_major
+}
+
+fn gray_code_exact_counts(
+    sparse: &SparseParity,
+    rank: usize,
+    ref_bits: &[u64],
+    num_measurements: usize,
+) -> std::collections::HashMap<Vec<u64>, u64> {
+    use std::collections::HashMap;
+
+    let m_words = num_measurements.div_ceil(64);
+    let mut meas_vec = ref_bits[..m_words].to_vec();
+    let total: u64 = 1u64 << rank;
+
+    let mut col_words: Vec<Vec<u64>> = Vec::with_capacity(rank);
+    for col in 0..rank {
+        let mut cw = vec![0u64; m_words];
+        for m in 0..num_measurements {
+            let start = sparse.row_offsets[m] as usize;
+            let end = sparse.row_offsets[m + 1] as usize;
+            for &c in &sparse.col_indices[start..end] {
+                if c as usize == col {
+                    cw[m / 64] |= 1u64 << (m % 64);
+                }
+            }
+        }
+        col_words.push(cw);
+    }
+
+    let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
+    *counts.entry(meas_vec.clone()).or_insert(0) += 1;
+
+    for step in 1..total {
+        let bit_to_flip = step.trailing_zeros() as usize;
+        let col = &col_words[bit_to_flip];
+        for (mw, cw) in meas_vec.iter_mut().zip(col.iter()) {
+            *mw ^= cw;
+        }
+        *counts.entry(meas_vec.clone()).or_insert(0) += 1;
+    }
+
+    counts
+}
+
+fn apply_ref_bits_meas_major(
+    meas_major: &mut [u64],
+    ref_bits: &[u64],
+    num_meas: usize,
+    s_words: usize,
+) {
+    for m in 0..num_meas {
+        let ref_bit = (ref_bits[m / 64] >> (m % 64)) & 1;
+        if ref_bit != 0 {
+            let row = &mut meas_major[m * s_words..(m + 1) * s_words];
+            for w in row.iter_mut() {
+                *w ^= !0u64;
+            }
+        }
+    }
+}
+
+fn sample_bts_meas_major_dag(
+    sparse: &SparseParity,
+    dag: &XorDag,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut ChaCha8Rng,
+    rank: usize,
+) -> Vec<u64> {
+    let num_meas = sparse.num_rows;
+    let s_words = num_shots.div_ceil(64);
+
+    let mut meas_major = vec![0u64; num_meas * s_words];
+    let mut random_bits = vec![0u64; rank];
+
+    for batch in 0..s_words {
+        for r in random_bits.iter_mut().take(rank) {
+            *r = rng.next_u64();
+        }
+        if batch == s_words - 1 {
+            let rem = num_shots % 64;
+            if rem != 0 {
+                let mask = (1u64 << rem) - 1;
+                for r in random_bits.iter_mut().take(rank) {
+                    *r &= mask;
+                }
+            }
+        }
+
+        for (m, entry) in dag.entries.iter().enumerate() {
+            let mut acc = if let Some(p) = entry.parent {
+                meas_major[p * s_words + batch]
+            } else {
+                0u64
+            };
+            for &c in &entry.residual_cols {
+                acc ^= random_bits[c as usize];
+            }
+            meas_major[m * s_words + batch] = acc;
+        }
+    }
+
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    meas_major
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn sample_bts_meas_major_avx2(
+    sparse: &SparseParity,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut ChaCha8Rng,
+    rank: usize,
+) -> Vec<u64> {
+    use std::arch::x86_64::*;
+
+    let num_meas = sparse.num_rows;
+    let s_words = num_shots.div_ceil(64);
+    let s_quads = num_shots.div_ceil(256);
+
+    let mut meas_major = vec![0u64; num_meas * s_words];
+    let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
+    let mut rng_buf = vec![0u64; rank * 4];
+
+    for quad in 0..s_quads {
+        let base_sw = quad * 4;
+        let words_this_quad = (s_words - base_sw).min(4);
+
+        for j in 0..rank {
+            for w in 0..4 {
+                rng_buf[j * 4 + w] = rng.next_u64();
+            }
+        }
+
+        let last_quad = quad == s_quads - 1;
+        if last_quad {
+            let rem = num_shots % 256;
+            if rem != 0 {
+                let full_words = rem / 64;
+                let tail_bits = rem % 64;
+                for j in 0..rank {
+                    for w in (full_words + usize::from(tail_bits > 0))..4 {
+                        rng_buf[j * 4 + w] = 0;
+                    }
+                    if tail_bits > 0 {
+                        rng_buf[j * 4 + full_words] &= (1u64 << tail_bits) - 1;
+                    }
+                }
+            }
+        }
+
+        for (j, avx) in random_avx.iter_mut().enumerate().take(rank) {
+            *avx = _mm256_loadu_si256(rng_buf[j * 4..].as_ptr() as *const __m256i);
+        }
+
+        for m in 0..num_meas {
+            let cols = sparse.row_cols(m);
+            let acc = match cols.len() {
+                0 => _mm256_setzero_si256(),
+                1 => random_avx[cols[0] as usize],
+                2 => _mm256_xor_si256(
+                    random_avx[cols[0] as usize],
+                    random_avx[cols[1] as usize],
+                ),
+                3 => _mm256_xor_si256(
+                    _mm256_xor_si256(
+                        random_avx[cols[0] as usize],
+                        random_avx[cols[1] as usize],
+                    ),
+                    random_avx[cols[2] as usize],
+                ),
+                4 => _mm256_xor_si256(
+                    _mm256_xor_si256(
+                        random_avx[cols[0] as usize],
+                        random_avx[cols[1] as usize],
+                    ),
+                    _mm256_xor_si256(
+                        random_avx[cols[2] as usize],
+                        random_avx[cols[3] as usize],
+                    ),
+                ),
+                _ => {
+                    let mut a = _mm256_xor_si256(
+                        random_avx[cols[0] as usize],
+                        random_avx[cols[1] as usize],
+                    );
+                    for &c in &cols[2..] {
+                        a = _mm256_xor_si256(a, random_avx[c as usize]);
+                    }
+                    a
+                }
+            };
+
+            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+            if words_this_quad == 4 {
+                _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
+            } else {
+                let mut tmp = [0u64; 4];
+                _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
+                for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
+                    *out_ptr.add(w) = val;
+                }
+            }
+        }
+    }
+
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    meas_major
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[allow(dead_code)]
+unsafe fn sample_bts_meas_major_avx2(
+    _sparse: &SparseParity,
+    _num_shots: usize,
+    _ref_bits: &[u64],
+    _rng: &mut ChaCha8Rng,
+    _rank: usize,
+) -> Vec<u64> {
+    unreachable!()
+}
+
+#[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
+unsafe fn sample_bts_meas_major_neon(
+    sparse: &SparseParity,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut ChaCha8Rng,
+    rank: usize,
+) -> Vec<u64> {
+    use std::arch::aarch64::*;
+
+    let num_meas = sparse.num_rows;
+    let s_words = num_shots.div_ceil(64);
+    let s_pairs = num_shots.div_ceil(128);
+
+    let mut meas_major = vec![0u64; num_meas * s_words];
+    let mut random_neon: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank];
+    let mut rng_buf = vec![0u64; rank * 2];
+
+    for pair in 0..s_pairs {
+        let base_sw = pair * 2;
+        let words_this_pair = (s_words - base_sw).min(2);
+
+        for j in 0..rank {
+            rng_buf[j * 2] = rng.next_u64();
+            rng_buf[j * 2 + 1] = rng.next_u64();
+        }
+
+        let last_pair = pair == s_pairs - 1;
+        if last_pair {
+            let rem = num_shots % 128;
+            if rem != 0 {
+                let full_words = rem / 64;
+                let tail_bits = rem % 64;
+                for j in 0..rank {
+                    if full_words + usize::from(tail_bits > 0) < 2 {
+                        rng_buf[j * 2 + 1] = 0;
+                    }
+                    if tail_bits > 0 {
+                        rng_buf[j * 2 + full_words] &= (1u64 << tail_bits) - 1;
+                    }
+                }
+            }
+        }
+
+        for (j, nval) in random_neon.iter_mut().enumerate().take(rank) {
+            *nval = vld1q_u64(rng_buf[j * 2..].as_ptr());
+        }
+
+        for m in 0..num_meas {
+            let cols = sparse.row_cols(m);
+            let acc = match cols.len() {
+                0 => vdupq_n_u64(0),
+                1 => random_neon[cols[0] as usize],
+                2 => veorq_u64(
+                    random_neon[cols[0] as usize],
+                    random_neon[cols[1] as usize],
+                ),
+                3 => veorq_u64(
+                    veorq_u64(
+                        random_neon[cols[0] as usize],
+                        random_neon[cols[1] as usize],
+                    ),
+                    random_neon[cols[2] as usize],
+                ),
+                _ => {
+                    let mut a = veorq_u64(
+                        random_neon[cols[0] as usize],
+                        random_neon[cols[1] as usize],
+                    );
+                    for &c in &cols[2..] {
+                        a = veorq_u64(a, random_neon[c as usize]);
+                    }
+                    a
+                }
+            };
+
+            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+            if words_this_pair == 2 {
+                vst1q_u64(out_ptr, acc);
+            } else {
+                *out_ptr = vgetq_lane_u64(acc, 0);
+            }
+        }
+    }
+
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    meas_major
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+#[allow(dead_code)]
+unsafe fn sample_bts_meas_major_neon(
+    _sparse: &SparseParity,
+    _num_shots: usize,
+    _ref_bits: &[u64],
+    _rng: &mut ChaCha8Rng,
+    _rank: usize,
+) -> Vec<u64> {
+    unreachable!()
 }
 
 /// Compute reference measurement outcomes by simulating measurements of the
@@ -2382,6 +3694,111 @@ fn colmajor_forward_sim(
     Ok((xz, phase_vec, nw))
 }
 
+fn row_weight(row: &[u64]) -> u32 {
+    row.iter().map(|w| w.count_ones()).sum()
+}
+
+const MAX_MEASUREMENTS_FOR_DAG: usize = 2000;
+const MIN_DAG_REDUCTION_PCT: usize = 20;
+const MIN_MEAN_WEIGHT_FOR_DAG: usize = 3;
+
+fn build_xor_dag_if_useful(sparse: &SparseParity) -> Option<XorDag> {
+    if sparse.num_rows <= 1 || sparse.num_rows > MAX_MEASUREMENTS_FOR_DAG {
+        return None;
+    }
+    let stats = sparse.stats();
+    if stats.mean_weight < MIN_MEAN_WEIGHT_FOR_DAG as f64 {
+        return None;
+    }
+    let dag = sparse.build_xor_dag();
+    if dag.original_weight == 0 {
+        return None;
+    }
+    let saved = dag.original_weight - dag.dag_weight;
+    let reduction_pct = 100 * saved / dag.original_weight;
+    if reduction_pct >= MIN_DAG_REDUCTION_PCT {
+        Some(dag)
+    } else {
+        None
+    }
+}
+
+const MAX_RANK_FOR_GRAY_CODE: usize = 25;
+const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+const BTS_BATCH_SHOTS: usize = 65536;
+const MIN_BLOCKS_FOR_PARALLEL: usize = 2;
+const MIN_BLOCK_MEASUREMENTS: usize = 2;
+
+fn build_parity_blocks_if_useful(
+    sparse: &SparseParity,
+    rank: usize,
+    ref_bits: &[u64],
+) -> Option<ParityBlocks> {
+    let block_meas = sparse.find_blocks(rank)?;
+
+    if block_meas.len() < MIN_BLOCKS_FOR_PARALLEL {
+        return None;
+    }
+    if block_meas
+        .iter()
+        .any(|b| b.len() < MIN_BLOCK_MEASUREMENTS)
+    {
+        return None;
+    }
+
+    Some(ParityBlocks::build(sparse, block_meas, rank, ref_bits))
+}
+
+const MAX_RANK_FOR_WEIGHT_MIN: usize = 500;
+
+fn minimize_flip_row_weight(flip_rows: &mut [Vec<u64>]) -> (usize, usize) {
+    let rank = flip_rows.len();
+    let total: usize = flip_rows.iter().map(|r| row_weight(r) as usize).sum();
+    if rank <= 1 || rank > MAX_RANK_FOR_WEIGHT_MIN {
+        return (total, total);
+    }
+
+    let before = total;
+    let mut weights: Vec<u32> = flip_rows.iter().map(|r| row_weight(r)).collect();
+
+    let mut improved = true;
+    while improved {
+        improved = false;
+        for i in 0..rank {
+            let wi = weights[i];
+            if wi == 0 {
+                continue;
+            }
+            let mut best_j = usize::MAX;
+            let mut best_w = wi;
+            for j in 0..rank {
+                if j == i {
+                    continue;
+                }
+                let xor_w: u32 = flip_rows[i]
+                    .iter()
+                    .zip(flip_rows[j].iter())
+                    .map(|(&a, &b)| (a ^ b).count_ones())
+                    .sum();
+                if xor_w < best_w {
+                    best_w = xor_w;
+                    best_j = j;
+                }
+            }
+            if best_j != usize::MAX {
+                for w in 0..flip_rows[i].len() {
+                    flip_rows[i][w] ^= flip_rows[best_j][w];
+                }
+                weights[i] = best_w;
+                improved = true;
+            }
+        }
+    }
+
+    let after: usize = weights.iter().map(|&w| w as usize).sum();
+    (before, after)
+}
+
 pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     if !circuit.is_clifford_only() {
         return Err(PrismError::IncompatibleBackend {
@@ -2411,6 +3828,9 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed),
             lut: None,
+            sparse: None,
+            xor_dag: None,
+            parity_blocks: None,
         });
     }
 
@@ -2525,19 +3945,29 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
     }
 
     let num_meas_words = m_words;
+    minimize_flip_row_weight(&mut flip_rows);
+
     let lut = if rank >= LUT_MIN_RANK {
         Some(FlipLut::build(&flip_rows, num_meas_words))
     } else {
         None
     };
 
+    let sparse = SparseParity::from_flip_rows(&flip_rows, num_measurements);
+    let xor_dag = build_xor_dag_if_useful(&sparse);
+    let ref_bits_packed = pack_bools(&ref_bits);
+    let parity_blocks = build_parity_blocks_if_useful(&sparse, rank, &ref_bits_packed);
+
     Ok(CompiledSampler {
         flip_rows,
-        ref_bits_packed: pack_bools(&ref_bits),
+        ref_bits_packed,
         rank,
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed),
         lut,
+        sparse: Some(sparse),
+        xor_dag,
+        parity_blocks,
     })
 }
 
@@ -2560,6 +3990,9 @@ fn compile_measurements_filtered(
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed),
             lut: None,
+            sparse: None,
+            xor_dag: None,
+            parity_blocks: None,
         });
     }
 
@@ -2620,11 +4053,17 @@ fn compile_measurements_filtered(
         }
     }
 
+    minimize_flip_row_weight(&mut flip_rows);
+
     let lut = if total_rank >= LUT_MIN_RANK {
         Some(FlipLut::build(&flip_rows, m_words))
     } else {
         None
     };
+
+    let sparse = SparseParity::from_flip_rows(&flip_rows, num_global_measurements);
+    let xor_dag = build_xor_dag_if_useful(&sparse);
+    let parity_blocks = build_parity_blocks_if_useful(&sparse, total_rank, &ref_bits_packed);
 
     Ok(CompiledSampler {
         flip_rows,
@@ -2633,6 +4072,9 @@ fn compile_measurements_filtered(
         num_measurements: num_global_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed),
         lut,
+        sparse: Some(sparse),
+        xor_dag,
+        parity_blocks,
     })
 }
 
@@ -2674,6 +4116,9 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed),
             lut: None,
+            sparse: None,
+            xor_dag: None,
+            parity_blocks: None,
         });
     }
 
@@ -2737,27 +4182,37 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
         }
     }
 
+    minimize_flip_row_weight(&mut flip_rows);
+
     let lut = if rank >= LUT_MIN_RANK {
         Some(FlipLut::build(&flip_rows, num_meas_words))
     } else {
         None
     };
 
+    let sparse = SparseParity::from_flip_rows(&flip_rows, num_measurements);
+    let xor_dag = build_xor_dag_if_useful(&sparse);
+    let ref_bits_packed = pack_bools(&ref_bits);
+    let parity_blocks = build_parity_blocks_if_useful(&sparse, rank, &ref_bits_packed);
+
     Ok(CompiledSampler {
         flip_rows,
-        ref_bits_packed: pack_bools(&ref_bits),
+        ref_bits_packed,
         rank,
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed),
         lut,
+        sparse: Some(sparse),
+        xor_dag,
+        parity_blocks,
     })
 }
 
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
-    let shots = sampler.sample_bulk(num_shots);
+    let packed = sampler.sample_bulk_packed(num_shots);
     Ok(ShotsResult {
-        shots,
+        shots: packed.to_shots(),
         probabilities: None,
     })
 }
@@ -3243,6 +4698,537 @@ mod tests {
                 (frac - 0.5).abs() < 0.06,
                 "Qubit {q} should be ~50/50, got {frac:.3}"
             );
+        }
+    }
+
+    #[test]
+    fn packed_shots_roundtrip_ghz() {
+        let mut c = circuits::ghz_circuit(10);
+        c.num_classical_bits = 10;
+        for i in 0..10 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let packed = sampler.sample_bulk_packed(1000);
+        assert_eq!(packed.num_shots(), 1000);
+        assert_eq!(packed.num_measurements(), 10);
+
+        let unpacked = packed.to_shots();
+        assert_eq!(unpacked.len(), 1000);
+        for shot in &unpacked {
+            assert_eq!(shot.len(), 10);
+            let first = shot[0];
+            assert!(shot.iter().all(|&b| b == first));
+        }
+    }
+
+    #[test]
+    fn packed_shots_matches_sample_bulk() {
+        let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
+        c.num_classical_bits = 20;
+        for i in 0..20 {
+            c.add_measure(i, i);
+        }
+
+        let mut sampler1 = compile_forward(&c, 42).unwrap();
+        let mut sampler2 = compile_forward(&c, 42).unwrap();
+
+        let num_shots = 5000;
+        let bulk = sampler1.sample_bulk(num_shots);
+        let packed = sampler2.sample_bulk_packed(num_shots);
+        let unpacked = packed.to_shots();
+
+        assert_eq!(bulk.len(), unpacked.len());
+        assert_eq!(bulk[0].len(), unpacked[0].len());
+
+        let n = bulk[0].len();
+        for q in 0..n {
+            let freq1: usize = bulk.iter().filter(|s| s[q]).count();
+            let freq2: usize = unpacked.iter().filter(|s| s[q]).count();
+            let p1 = freq1 as f64 / num_shots as f64;
+            let p2 = freq2 as f64 / num_shots as f64;
+            assert!(
+                (p1 - p2).abs() < 0.05,
+                "qubit {q}: bulk={p1:.3}, packed={p2:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn packed_shots_get_bit() {
+        let mut c = circuits::ghz_circuit(4);
+        c.num_classical_bits = 4;
+        for i in 0..4 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let packed = sampler.sample_bulk_packed(100);
+
+        for s in 0..100 {
+            let first = packed.get_bit(s, 0);
+            for m in 1..4 {
+                assert_eq!(packed.get_bit(s, m), first);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_shots_counts() {
+        let mut c = circuits::ghz_circuit(4);
+        c.num_classical_bits = 4;
+        for i in 0..4 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let packed = sampler.sample_bulk_packed(10_000);
+        let counts = packed.counts();
+
+        assert_eq!(counts.len(), 2);
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, 10_000);
+    }
+
+    #[test]
+    fn sparse_parity_ghz() {
+        let mut c = circuits::ghz_circuit(4);
+        c.num_classical_bits = 4;
+        for i in 0..4 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_forward(&c, 42).unwrap();
+
+        let sp = sampler.sparse().expect("sparse should be Some");
+        assert_eq!(sp.num_rows, 4);
+
+        let stats = sp.stats();
+        assert!(stats.total_weight > 0);
+        assert!(stats.min_weight <= stats.max_weight);
+
+        for m in 0..4 {
+            let cols = sp.row_cols(m);
+            assert_eq!(cols.len(), sp.row_weight(m));
+        }
+    }
+
+    #[test]
+    fn sparse_parity_matches_flip_rows() {
+        let mut c = circuits::ghz_circuit(8);
+        c.num_classical_bits = 8;
+        for i in 0..8 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_forward(&c, 42).unwrap();
+
+        let sp = sampler.sparse().unwrap();
+        let stats = sampler.parity_stats().unwrap();
+        assert_eq!(stats.min_weight, sp.stats().min_weight);
+        assert_eq!(stats.max_weight, sp.stats().max_weight);
+    }
+
+    #[test]
+    fn sparse_parity_empty_circuit() {
+        let c = Circuit::new(2, 0);
+        let sampler = compile_forward(&c, 42).unwrap();
+        assert!(sampler.sparse().is_none());
+    }
+
+    #[test]
+    fn bts_meas_major_ghz_counts() {
+        let mut c = circuits::ghz_circuit(8);
+        c.num_classical_bits = 8;
+        for i in 0..8 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let packed = sampler.sample_bulk_packed(10_000);
+
+        assert_eq!(packed.layout(), ShotLayout::MeasMajor);
+
+        let counts = packed.counts();
+        assert_eq!(counts.len(), 2, "GHZ should have exactly 2 outcomes");
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, 10_000);
+    }
+
+    #[test]
+    fn bts_meas_major_get_bit_consistency() {
+        let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
+        c.num_classical_bits = 20;
+        for i in 0..20 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let packed = sampler.sample_bulk_packed(500);
+
+        let shots = packed.to_shots();
+        for (s, shot) in shots.iter().enumerate() {
+            for (m, &val) in shot.iter().enumerate().take(20) {
+                assert_eq!(packed.get_bit(s, m), val, "Mismatch at shot={s} meas={m}");
+            }
+        }
+    }
+
+    #[test]
+    fn bts_meas_major_marginals_match_stabilizer() {
+        let mut c = circuits::clifford_heavy_circuit(50, 5, 42);
+        c.num_classical_bits = 50;
+        for i in 0..50 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let packed = sampler.sample_bulk_packed(5_000);
+
+        let reference = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 5_000, 42).unwrap();
+
+        for q in 0..50 {
+            let bts_ones: usize = (0..5_000).filter(|&s| packed.get_bit(s, q)).count();
+            let ref_ones: usize = reference.shots.iter().filter(|s| s[q]).count();
+            let bts_frac = bts_ones as f64 / 5_000.0;
+            let ref_frac = ref_ones as f64 / 5_000.0;
+            assert!(
+                (bts_frac - ref_frac).abs() < 0.05,
+                "q{q}: bts={bts_frac:.3} ref={ref_frac:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_counts_ghz() {
+        let mut c = circuits::ghz_circuit(10);
+        c.num_classical_bits = 10;
+        for i in 0..10 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let counts = sampler.sample_counts_streaming(10_000, 1_000);
+
+        assert_eq!(counts.len(), 2, "GHZ should produce exactly 2 outcomes");
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, 10_000);
+    }
+
+    #[test]
+    fn marginal_probabilities_ghz() {
+        let mut c = circuits::ghz_circuit(8);
+        c.num_classical_bits = 8;
+        for i in 0..8 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_forward(&c, 42).unwrap();
+        let probs = sampler.marginal_probabilities();
+        assert_eq!(probs.len(), 8);
+        for &p in &probs {
+            assert!((p - 0.5).abs() < 1e-10, "GHZ marginals should be 0.5");
+        }
+    }
+
+    #[test]
+    fn marginal_probabilities_x_all_ones() {
+        let mut c = Circuit::new(4, 4);
+        for i in 0..4 {
+            c.add_gate(Gate::X, &[i]);
+            c.add_measure(i, i);
+        }
+        let sampler = compile_forward(&c, 42).unwrap();
+        let probs = sampler.marginal_probabilities();
+        for &p in &probs {
+            assert!(
+                (p - 1.0).abs() < 1e-10,
+                "X then measure should be deterministic 1"
+            );
+        }
+    }
+
+    #[test]
+    fn parity_report_not_empty() {
+        let mut c = circuits::ghz_circuit(8);
+        c.num_classical_bits = 8;
+        for i in 0..8 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_forward(&c, 42).unwrap();
+        let report = sampler.parity_report();
+        assert!(report.contains("measurements"));
+        assert!(report.contains("rank"));
+        assert!(report.contains("Weight"));
+    }
+
+    #[test]
+    fn weight_minimization_reduces_weight() {
+        let mut rows: Vec<Vec<u64>> = vec![vec![0b1111], vec![0b1110], vec![0b1100]];
+        let (before, after) = minimize_flip_row_weight(&mut rows);
+        assert!(
+            after <= before,
+            "weight should not increase: {} -> {}",
+            before,
+            after
+        );
+        assert!(
+            after < before,
+            "weight should decrease for reducible rows: {} -> {}",
+            before,
+            after
+        );
+        assert_eq!(before, 4 + 3 + 2);
+        assert_eq!(after, 1 + 1 + 2);
+    }
+
+    #[test]
+    fn weight_minimization_preserves_sampling() {
+        let mut c = circuits::clifford_random_pairs(16, 20, 42);
+        c.num_classical_bits = 16;
+        for i in 0..16 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let counts = sampler.sample_bulk_packed(50_000).counts();
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, 50_000);
+        assert!(counts.len() > 1);
+    }
+
+    #[test]
+    fn xor_dag_reduces_weight() {
+        let sp = SparseParity {
+            col_indices: vec![0, 1, 0, 1, 2, 1, 2],
+            row_offsets: vec![0, 2, 5, 7],
+            num_rows: 3,
+        };
+        let dag = sp.build_xor_dag();
+        assert!(
+            dag.dag_weight < dag.original_weight,
+            "DAG weight {} should be less than original {}",
+            dag.dag_weight,
+            dag.original_weight
+        );
+        assert_eq!(dag.original_weight, 2 + 3 + 2);
+        assert!(dag.entries[1].parent.is_some() || dag.entries[2].parent.is_some());
+    }
+
+    #[test]
+    fn xor_dag_bts_correctness() {
+        let mut c = circuits::clifford_random_pairs(16, 20, 42);
+        c.num_classical_bits = 16;
+        for i in 0..16 {
+            c.add_measure(i, i);
+        }
+        let mut sampler = compile_forward(&c, 42).unwrap();
+        let packed = sampler.sample_bulk_packed(10_000);
+        let counts = packed.counts();
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, 10_000);
+        assert!(counts.len() > 1);
+    }
+
+    #[test]
+    fn block_detection_independent_pairs() {
+        let mut c = circuits::independent_bell_pairs(4);
+        c.num_classical_bits = 8;
+        for i in 0..8 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_measurements(&c, 42).unwrap();
+        let sparse = sampler.sparse.as_ref().unwrap();
+        let blocks = sparse.find_blocks(sampler.rank);
+        assert!(blocks.is_some());
+        let blocks = blocks.unwrap();
+        assert_eq!(blocks.len(), 4);
+        for b in &blocks {
+            assert_eq!(b.len(), 2);
+        }
+    }
+
+    #[test]
+    fn block_detection_single_block() {
+        let mut c = circuits::clifford_random_pairs(8, 20, 42);
+        c.num_classical_bits = 8;
+        for i in 0..8 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_measurements(&c, 42).unwrap();
+        assert!(sampler.parity_blocks.is_none());
+    }
+
+    #[test]
+    fn block_parallel_bts_correctness() {
+        let mut c = circuits::independent_bell_pairs(8);
+        c.num_classical_bits = 16;
+        for i in 0..16 {
+            c.add_measure(i, i);
+        }
+
+        let mut sampler_block = compile_measurements(&c, 42).unwrap();
+        assert!(sampler_block.parity_blocks.is_some());
+
+        let packed = sampler_block.sample_bulk_packed(10_000);
+        let counts = packed.counts();
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, 10_000);
+
+        let shots = packed.to_shots();
+        for shot in &shots {
+            for pair in 0..8 {
+                let b0 = shot[2 * pair];
+                let b1 = shot[2 * pair + 1];
+                assert_eq!(b0, b1, "Bell pair {pair} must be correlated");
+            }
+        }
+    }
+
+    #[test]
+    fn gray_code_exact_counts_bell_pair() {
+        let mut c = Circuit::new(2, 2);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_measure(0, 0);
+        c.add_measure(1, 1);
+        let sampler = compile_measurements(&c, 42).unwrap();
+        let counts = sampler.exact_counts().unwrap();
+        let total: u64 = counts.values().sum();
+        assert!(total.is_power_of_two());
+        assert_eq!(counts.len(), 2);
+        let half = total / 2;
+        for &v in counts.values() {
+            assert_eq!(v, half);
+        }
+    }
+
+    #[test]
+    fn gray_code_exact_counts_ghz() {
+        let mut c = Circuit::new(4, 4);
+        c.add_gate(Gate::H, &[0]);
+        for i in 0..3 {
+            c.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for i in 0..4 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_measurements(&c, 42).unwrap();
+        let counts = sampler.exact_counts().unwrap();
+        assert_eq!(counts.len(), 2);
+        let total: u64 = counts.values().sum();
+        let half = total / 2;
+        for &v in counts.values() {
+            assert_eq!(v, half);
+        }
+    }
+
+    #[test]
+    fn gray_code_matches_sampling() {
+        let mut c = circuits::clifford_random_pairs(8, 10, 42);
+        c.num_classical_bits = 8;
+        for i in 0..8 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_measurements(&c, 42).unwrap();
+        let exact = sampler.exact_counts().unwrap();
+        let total: u64 = exact.values().sum();
+        let exact_probs: std::collections::HashMap<Vec<u64>, f64> = exact
+            .iter()
+            .map(|(k, &v)| (k.clone(), v as f64 / total as f64))
+            .collect();
+
+        let mut sampler2 = compile_measurements(&c, 123).unwrap();
+        let packed = sampler2.sample_bulk_packed(100_000);
+        let sample_counts = packed.counts();
+        for (outcome, &exact_p) in &exact_probs {
+            if exact_p > 0.01 {
+                let sampled = *sample_counts.get(outcome).unwrap_or(&0) as f64 / 100_000.0;
+                let diff = (sampled - exact_p).abs();
+                assert!(
+                    diff < 0.02,
+                    "outcome {outcome:?}: exact={exact_p:.4}, sampled={sampled:.4}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bts_batched_correctness() {
+        let mut c = Circuit::new(4, 4);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::H, &[2]);
+        c.add_gate(Gate::Cx, &[2, 3]);
+        for i in 0..4 {
+            c.add_measure(i, i);
+        }
+
+        let num_shots = BTS_BATCH_SHOTS * 3 + 100;
+        let mut sampler = compile_measurements(&c, 42).unwrap();
+        assert!(sampler.should_use_bts(num_shots));
+
+        let packed = sampler.sample_bulk_packed(num_shots);
+        assert_eq!(packed.num_shots, num_shots);
+        let counts = packed.counts();
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, num_shots as u64);
+
+        let shots = packed.to_shots();
+        for shot in &shots {
+            assert_eq!(shot[0], shot[1], "Bell pair 0 must be correlated");
+            assert_eq!(shot[2], shot[3], "Bell pair 1 must be correlated");
+        }
+    }
+
+    #[test]
+    fn memory_aware_bts_dispatch() {
+        let mut c = circuits::clifford_random_pairs(100, 20, 42);
+        c.num_classical_bits = 100;
+        for i in 0..100 {
+            c.add_measure(i, i);
+        }
+        let sampler = compile_measurements(&c, 42).unwrap();
+        assert!(sampler.should_use_bts(100_000_000));
+    }
+
+    #[test]
+    fn detection_event_parity_matrix() {
+        let mut c = Circuit::new(2, 4);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_measure(0, 0);
+        c.add_measure(1, 1);
+        c.add_measure(0, 2);
+        c.add_measure(1, 3);
+
+        let sampler = compile_measurements(&c, 42).unwrap();
+        let sparse = sampler.sparse.as_ref().unwrap();
+
+        let det = sparse.compile_detection_events(&[(2, 0), (3, 1)]);
+        assert_eq!(det.num_rows, 2);
+        for m in 0..2 {
+            assert_eq!(det.row_weight(m), 0, "same-stabilizer detection event must be deterministic");
+        }
+    }
+
+    #[test]
+    fn detection_event_sampling() {
+        let mut c = Circuit::new(4, 8);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::H, &[2]);
+        c.add_gate(Gate::Cx, &[2, 3]);
+        for i in 0..4 {
+            c.add_measure(i, i);
+        }
+        for i in 0..4 {
+            c.add_measure(i, i + 4);
+        }
+
+        let mut sampler = compile_measurements(&c, 42).unwrap();
+        let packed = sampler.sample_detection_events(
+            &[(4, 0), (5, 1), (6, 2), (7, 3)],
+            10_000,
+        );
+        assert_eq!(packed.num_shots, 10_000);
+        assert_eq!(packed.num_measurements, 4);
+
+        let shots = packed.to_shots();
+        for shot in &shots {
+            for (i, &val) in shot.iter().enumerate().take(4) {
+                assert!(!val, "detection event {i} must be 0");
+            }
         }
     }
 }

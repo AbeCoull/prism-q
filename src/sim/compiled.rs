@@ -1894,9 +1894,7 @@ impl CompiledSampler {
         let num_meas = self.num_measurements;
 
         if let Some(pb) = &self.parity_blocks {
-            let block_seeds: Vec<u64> = (0..pb.blocks.len())
-                .map(|_| self.rng.next_u64())
-                .collect();
+            let block_seeds: Vec<u64> = (0..pb.blocks.len()).map(|_| self.rng.next_u64()).collect();
 
             #[cfg(feature = "parallel")]
             let block_results: Vec<(Vec<u64>, &[usize])> = {
@@ -1905,7 +1903,8 @@ impl CompiledSampler {
                     .par_iter()
                     .zip(block_seeds.par_iter())
                     .map(|(block, &seed)| {
-                        let mut block_rng = ChaCha8Rng::seed_from_u64(seed);
+                        let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
+                        let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
                         let data = sample_bts_meas_major(
                             &block.sparse,
                             num_shots,
@@ -1924,7 +1923,8 @@ impl CompiledSampler {
                 .iter()
                 .zip(block_seeds.iter())
                 .map(|(block, &seed)| {
-                    let mut block_rng = ChaCha8Rng::seed_from_u64(seed);
+                    let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
+                    let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
                     let data = sample_bts_meas_major(
                         &block.sparse,
                         num_shots,
@@ -1955,7 +1955,12 @@ impl CompiledSampler {
             };
         }
 
-        let sparse = self.sparse.as_ref().unwrap();
+        let sparse = self
+            .sparse
+            .as_ref()
+            .expect("sparse parity required for BTS (should_use_bts guards this)");
+
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
 
         if num_shots <= BTS_BATCH_SHOTS {
             let data = bts_single_pass(
@@ -1963,7 +1968,7 @@ impl CompiledSampler {
                 self.xor_dag.as_ref(),
                 num_shots,
                 &self.ref_bits_packed,
-                &mut self.rng,
+                &mut fast_rng,
                 self.rank,
             );
             return PackedShots {
@@ -1982,7 +1987,7 @@ impl CompiledSampler {
             num_shots,
             s_words,
             &self.ref_bits_packed,
-            &mut self.rng,
+            &mut fast_rng,
             self.rank,
         );
         PackedShots {
@@ -2045,7 +2050,33 @@ impl CompiledSampler {
             };
         }
 
+        let det_weight = det_sparse.stats().total_weight;
+        let meas_weight = sparse.stats().total_weight;
+
+        if det_weight > meas_weight + num_events {
+            let meas_packed = self.sample_bulk_packed(num_shots);
+            let mut data = vec![0u64; num_events * s_words];
+            for (e, &(m_a, m_b)) in pairs.iter().enumerate() {
+                let src_a = &meas_packed.data[m_a * s_words..(m_a + 1) * s_words];
+                let src_b = &meas_packed.data[m_b * s_words..(m_b + 1) * s_words];
+                let dst = &mut data[e * s_words..(e + 1) * s_words];
+                for (d, (&a, &b)) in dst.iter_mut().zip(src_a.iter().zip(src_b.iter())) {
+                    *d = a ^ b;
+                }
+            }
+            return PackedShots {
+                data,
+                num_shots,
+                num_measurements: num_events,
+                m_words,
+                s_words,
+                layout: ShotLayout::MeasMajor,
+            };
+        }
+
         let det_ref = vec![0u64; m_words];
+
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
 
         let data = if num_shots > BTS_BATCH_SHOTS {
             bts_batched(
@@ -2054,17 +2085,11 @@ impl CompiledSampler {
                 num_shots,
                 s_words,
                 &det_ref,
-                &mut self.rng,
+                &mut fast_rng,
                 self.rank,
             )
         } else {
-            sample_bts_meas_major(
-                &det_sparse,
-                num_shots,
-                &det_ref,
-                &mut self.rng,
-                self.rank,
-            )
+            sample_bts_meas_major(&det_sparse, num_shots, &det_ref, &mut fast_rng, self.rank)
         };
 
         PackedShots {
@@ -2160,6 +2185,58 @@ impl CompiledSampler {
         }
         report
     }
+
+    pub fn detection_event_report(&self, pairs: &[(usize, usize)]) -> String {
+        let sparse = match &self.sparse {
+            Some(s) => s,
+            None => return "No sparse parity matrix available\n".to_string(),
+        };
+        let det_sparse = sparse.compile_detection_events(pairs);
+        let meas_stats = sparse.stats();
+        let det_stats = det_sparse.stats();
+
+        let mut report = format!(
+            "Detection events: {} pairs\n\
+             Measurement parity: total_weight={}, mean={:.2}\n\
+             Detection parity:   total_weight={}, mean={:.2}\n",
+            pairs.len(),
+            meas_stats.total_weight,
+            meas_stats.mean_weight,
+            det_stats.total_weight,
+            det_stats.mean_weight,
+        );
+
+        if meas_stats.total_weight > 0 {
+            let reduction = 1.0 - det_stats.total_weight as f64 / meas_stats.total_weight as f64;
+            report.push_str(&format!(
+                "Weight reduction: {:.1}% ({:.1}x less work)\n",
+                reduction * 100.0,
+                if det_stats.total_weight > 0 {
+                    meas_stats.total_weight as f64 / det_stats.total_weight as f64
+                } else {
+                    f64::INFINITY
+                },
+            ));
+        }
+
+        let mut histogram = [0usize; 8];
+        for m in 0..det_sparse.num_rows {
+            let w = det_sparse.row_weight(m);
+            histogram[w.min(7)] += 1;
+        }
+        report.push_str("Detection weight histogram: ");
+        for (i, &count) in histogram.iter().enumerate() {
+            if count > 0 {
+                if i < 7 {
+                    report.push_str(&format!("w{}={} ", i, count));
+                } else {
+                    report.push_str(&format!("w7+={} ", count));
+                }
+            }
+        }
+        report.push('\n');
+        report
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2179,40 +2256,6 @@ pub struct PackedShots {
 }
 
 impl PackedShots {
-    #[allow(dead_code)]
-    pub(crate) fn empty(
-        num_shots: usize,
-        num_measurements: usize,
-        m_words: usize,
-        s_words: usize,
-    ) -> Self {
-        Self {
-            data: Vec::new(),
-            num_shots,
-            num_measurements,
-            m_words,
-            s_words,
-            layout: ShotLayout::ShotMajor,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn from_shot_major(
-        data: Vec<u64>,
-        num_shots: usize,
-        num_measurements: usize,
-        m_words: usize,
-    ) -> Self {
-        Self {
-            data,
-            num_shots,
-            num_measurements,
-            m_words,
-            s_words: num_shots.div_ceil(64),
-            layout: ShotLayout::ShotMajor,
-        }
-    }
-
     pub fn num_shots(&self) -> usize {
         self.num_shots
     }
@@ -2223,11 +2266,6 @@ impl PackedShots {
 
     pub fn layout(&self) -> ShotLayout {
         self.layout
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn data_mut(&mut self) -> &mut [u64] {
-        &mut self.data
     }
 
     #[inline(always)]
@@ -2641,12 +2679,120 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
     }
 }
 
+struct Xoshiro256PlusPlus {
+    s: [u64; 4],
+}
+
+impl Xoshiro256PlusPlus {
+    #[inline(always)]
+    fn from_chacha(rng: &mut ChaCha8Rng) -> Self {
+        Self {
+            s: [
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+            ],
+        }
+    }
+
+    #[inline(always)]
+    fn next_u64(&mut self) -> u64 {
+        let result = (self.s[0].wrapping_add(self.s[3]))
+            .rotate_left(23)
+            .wrapping_add(self.s[0]);
+        let t = self.s[1] << 17;
+        self.s[2] ^= self.s[0];
+        self.s[3] ^= self.s[1];
+        self.s[1] ^= self.s[2];
+        self.s[0] ^= self.s[3];
+        self.s[2] ^= t;
+        self.s[3] = self.s[3].rotate_left(45);
+        result
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+struct Xoshiro256PlusPlusX4 {
+    s0: std::arch::x86_64::__m256i,
+    s1: std::arch::x86_64::__m256i,
+    s2: std::arch::x86_64::__m256i,
+    s3: std::arch::x86_64::__m256i,
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Xoshiro256PlusPlusX4 {
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    // SAFETY: caller must ensure AVX2 is available (checked via is_x86_feature_detected)
+    unsafe fn from_scalar(rng: &mut Xoshiro256PlusPlus) -> Self {
+        use std::arch::x86_64::*;
+        let mut seeds = [0u64; 16];
+        for s in &mut seeds {
+            *s = rng.next_u64();
+        }
+        Self {
+            s0: _mm256_set_epi64x(
+                seeds[12] as i64,
+                seeds[8] as i64,
+                seeds[4] as i64,
+                seeds[0] as i64,
+            ),
+            s1: _mm256_set_epi64x(
+                seeds[13] as i64,
+                seeds[9] as i64,
+                seeds[5] as i64,
+                seeds[1] as i64,
+            ),
+            s2: _mm256_set_epi64x(
+                seeds[14] as i64,
+                seeds[10] as i64,
+                seeds[6] as i64,
+                seeds[2] as i64,
+            ),
+            s3: _mm256_set_epi64x(
+                seeds[15] as i64,
+                seeds[11] as i64,
+                seeds[7] as i64,
+                seeds[3] as i64,
+            ),
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    // SAFETY: caller must ensure AVX2 is available (checked via is_x86_feature_detected)
+    unsafe fn next_m256i(&mut self) -> std::arch::x86_64::__m256i {
+        use std::arch::x86_64::*;
+
+        macro_rules! rotl64_avx2 {
+            ($x:expr, $k:literal) => {
+                _mm256_or_si256(_mm256_slli_epi64($x, $k), _mm256_srli_epi64($x, 64 - $k))
+            };
+        }
+
+        let sum = _mm256_add_epi64(self.s0, self.s3);
+        let result = _mm256_add_epi64(rotl64_avx2!(sum, 23), self.s0);
+
+        let t = _mm256_slli_epi64(self.s1, 17);
+
+        self.s2 = _mm256_xor_si256(self.s2, self.s0);
+        self.s3 = _mm256_xor_si256(self.s3, self.s1);
+        self.s1 = _mm256_xor_si256(self.s1, self.s2);
+        self.s0 = _mm256_xor_si256(self.s0, self.s3);
+        self.s2 = _mm256_xor_si256(self.s2, t);
+        self.s3 = rotl64_avx2!(self.s3, 45);
+
+        result
+    }
+}
+
 fn bts_single_pass(
     sparse: &SparseParity,
     xor_dag: Option<&XorDag>,
     num_shots: usize,
     ref_bits: &[u64],
-    rng: &mut ChaCha8Rng,
+    rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
     if let Some(dag) = xor_dag {
@@ -2662,7 +2808,7 @@ fn bts_batched(
     num_shots: usize,
     total_s_words: usize,
     ref_bits: &[u64],
-    rng: &mut ChaCha8Rng,
+    rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
     let num_meas = sparse.num_rows;
@@ -2671,10 +2817,18 @@ fn bts_batched(
     {
         let num_threads = rayon::current_num_threads();
         if num_threads > 1 {
-            let shots_per_thread =
-                (num_shots.div_ceil(num_threads) / 64) * 64;
+            let shots_per_thread = (num_shots.div_ceil(num_threads) / 64) * 64;
             if shots_per_thread >= 64 {
-                let base_seed = rng.next_u64();
+                let thread_seeds: Vec<[u64; 4]> = (0..num_threads)
+                    .map(|_| {
+                        [
+                            rng.next_u64(),
+                            rng.next_u64(),
+                            rng.next_u64(),
+                            rng.next_u64(),
+                        ]
+                    })
+                    .collect();
 
                 let chunks: Vec<(usize, usize)> = (0..num_threads)
                     .map(|t| {
@@ -2700,14 +2854,12 @@ fn bts_batched(
                         .map(|(t, (shot_start, shot_end))| {
                             let chunk_shots = shot_end - shot_start;
                             let word_offset = shot_start / 64;
-                            let mut thread_rng = ChaCha8Rng::seed_from_u64(base_seed);
-                            thread_rng.set_stream(t as u64 + 1);
+                            let mut thread_rng = Xoshiro256PlusPlus { s: thread_seeds[t] };
 
                             let mut results = Vec::new();
                             let mut chunk_done = 0usize;
                             while chunk_done < chunk_shots {
-                                let batch_shots =
-                                    (chunk_shots - chunk_done).min(BTS_BATCH_SHOTS);
+                                let batch_shots = (chunk_shots - chunk_done).min(BTS_BATCH_SHOTS);
                                 let batch_offset = word_offset + chunk_done / 64;
                                 let batch_data = sample_bts_meas_major(
                                     sparse,
@@ -2727,8 +2879,8 @@ fn bts_batched(
                             for (batch_data, batch_shots, batch_offset) in thread_results {
                                 let batch_s_words = batch_shots.div_ceil(64);
                                 for m in 0..nm {
-                                    let src = &batch_data
-                                        [m * batch_s_words..(m + 1) * batch_s_words];
+                                    let src =
+                                        &batch_data[m * batch_s_words..(m + 1) * batch_s_words];
                                     let dst_start = m * total_sw + batch_offset;
                                     out_slice[dst_start..dst_start + batch_s_words]
                                         .copy_from_slice(src);
@@ -2769,7 +2921,7 @@ fn sample_bts_meas_major(
     sparse: &SparseParity,
     num_shots: usize,
     ref_bits: &[u64],
-    rng: &mut ChaCha8Rng,
+    rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
     let num_meas = sparse.num_rows;
@@ -2820,8 +2972,7 @@ fn sample_bts_meas_major(
                         ^ random_bits[cols[2] as usize]
                 }
                 _ => {
-                    let mut a =
-                        random_bits[cols[0] as usize] ^ random_bits[cols[1] as usize];
+                    let mut a = random_bits[cols[0] as usize] ^ random_bits[cols[1] as usize];
                     for &c in &cols[2..] {
                         a ^= random_bits[c as usize];
                     }
@@ -2900,7 +3051,7 @@ fn sample_bts_meas_major_dag(
     dag: &XorDag,
     num_shots: usize,
     ref_bits: &[u64],
-    rng: &mut ChaCha8Rng,
+    rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
     let num_meas = sparse.num_rows;
@@ -2940,13 +3091,15 @@ fn sample_bts_meas_major_dag(
     meas_major
 }
 
+const BTS_QUAD_TILE: usize = 8;
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn sample_bts_meas_major_avx2(
     sparse: &SparseParity,
     num_shots: usize,
     ref_bits: &[u64],
-    rng: &mut ChaCha8Rng,
+    rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
     use std::arch::x86_64::*;
@@ -2956,38 +3109,273 @@ unsafe fn sample_bts_meas_major_avx2(
     let s_quads = num_shots.div_ceil(256);
 
     let mut meas_major = vec![0u64; num_meas * s_words];
-    let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
-    let mut rng_buf = vec![0u64; rank * 4];
+    let mut vrng = Xoshiro256PlusPlusX4::from_scalar(rng);
 
-    for quad in 0..s_quads {
-        let base_sw = quad * 4;
-        let words_this_quad = (s_words - base_sw).min(4);
+    let tile = if rank == 0 {
+        s_quads
+    } else {
+        (16384 / (rank * 32)).clamp(1, BTS_QUAD_TILE).min(s_quads)
+    };
 
-        for j in 0..rank {
-            for w in 0..4 {
-                rng_buf[j * 4 + w] = rng.next_u64();
+    let rem = num_shots % 256;
+    let full_quads = if rem == 0 { s_quads } else { s_quads - 1 };
+
+    if tile >= 2 && full_quads >= tile {
+        let mut random_tile: Vec<__m256i> = vec![_mm256_setzero_si256(); rank * tile];
+
+        let mut quad_start = 0;
+        while quad_start + tile <= full_quads {
+            for t in 0..tile {
+                for r in 0..rank {
+                    random_tile[r * tile + t] = vrng.next_m256i();
+                }
             }
-        }
 
-        let last_quad = quad == s_quads - 1;
-        if last_quad {
-            let rem = num_shots % 256;
-            if rem != 0 {
-                let full_words = rem / 64;
-                let tail_bits = rem % 64;
-                for j in 0..rank {
-                    for w in (full_words + usize::from(tail_bits > 0))..4 {
-                        rng_buf[j * 4 + w] = 0;
+            for m in 0..num_meas {
+                let cols = sparse.row_cols(m);
+                let out_base = m * s_words + quad_start * 4;
+
+                match cols.len() {
+                    0 => {
+                        let z = _mm256_setzero_si256();
+                        for t in 0..tile {
+                            _mm256_storeu_si256(
+                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                z,
+                            );
+                        }
                     }
-                    if tail_bits > 0 {
-                        rng_buf[j * 4 + full_words] &= (1u64 << tail_bits) - 1;
+                    1 => {
+                        let c0 = cols[0] as usize * tile;
+                        for t in 0..tile {
+                            _mm256_storeu_si256(
+                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                random_tile[c0 + t],
+                            );
+                        }
+                    }
+                    2 => {
+                        let c0 = cols[0] as usize * tile;
+                        let c1 = cols[1] as usize * tile;
+                        for t in 0..tile {
+                            _mm256_storeu_si256(
+                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
+                            );
+                        }
+                    }
+                    3 => {
+                        let c0 = cols[0] as usize * tile;
+                        let c1 = cols[1] as usize * tile;
+                        let c2 = cols[2] as usize * tile;
+                        for t in 0..tile {
+                            _mm256_storeu_si256(
+                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                _mm256_xor_si256(
+                                    _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
+                                    random_tile[c2 + t],
+                                ),
+                            );
+                        }
+                    }
+                    4 => {
+                        let c0 = cols[0] as usize * tile;
+                        let c1 = cols[1] as usize * tile;
+                        let c2 = cols[2] as usize * tile;
+                        let c3 = cols[3] as usize * tile;
+                        for t in 0..tile {
+                            _mm256_storeu_si256(
+                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                _mm256_xor_si256(
+                                    _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
+                                    _mm256_xor_si256(random_tile[c2 + t], random_tile[c3 + t]),
+                                ),
+                            );
+                        }
+                    }
+                    _ => {
+                        for t in 0..tile {
+                            let mut a = _mm256_xor_si256(
+                                random_tile[cols[0] as usize * tile + t],
+                                random_tile[cols[1] as usize * tile + t],
+                            );
+                            for &c in &cols[2..] {
+                                a = _mm256_xor_si256(a, random_tile[c as usize * tile + t]);
+                            }
+                            _mm256_storeu_si256(
+                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                a,
+                            );
+                        }
                     }
                 }
             }
+
+            quad_start += tile;
         }
 
-        for (j, avx) in random_avx.iter_mut().enumerate().take(rank) {
-            *avx = _mm256_loadu_si256(rng_buf[j * 4..].as_ptr() as *const __m256i);
+        bts_avx2_remainder(
+            sparse,
+            &mut meas_major,
+            &mut vrng,
+            &mut random_tile,
+            rank,
+            num_meas,
+            s_words,
+            s_quads,
+            quad_start,
+            tile,
+            rem,
+        );
+    } else {
+        let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
+        bts_avx2_per_quad(
+            sparse,
+            &mut meas_major,
+            &mut vrng,
+            &mut random_avx,
+            rank,
+            num_meas,
+            s_words,
+            s_quads,
+            0,
+            rem,
+        );
+    }
+
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    meas_major
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn bts_avx2_remainder(
+    sparse: &SparseParity,
+    meas_major: &mut [u64],
+    vrng: &mut Xoshiro256PlusPlusX4,
+    random_tile: &mut [std::arch::x86_64::__m256i],
+    rank: usize,
+    num_meas: usize,
+    s_words: usize,
+    s_quads: usize,
+    quad_start: usize,
+    tile: usize,
+    rem: usize,
+) {
+    use std::arch::x86_64::*;
+
+    for quad in quad_start..s_quads {
+        let base_sw = quad * 4;
+        let words_this_quad = (s_words - base_sw).min(4);
+
+        for r in 0..rank {
+            random_tile[r * tile] = vrng.next_m256i();
+        }
+
+        if quad == s_quads - 1 && rem != 0 {
+            let full_words = rem / 64;
+            let tail_bits = rem % 64;
+            let mut mask_buf = [!0u64; 4];
+            for val in mask_buf
+                .iter_mut()
+                .skip(full_words + usize::from(tail_bits > 0))
+            {
+                *val = 0;
+            }
+            if tail_bits > 0 {
+                mask_buf[full_words] = (1u64 << tail_bits) - 1;
+            }
+            let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
+            for r in 0..rank {
+                random_tile[r * tile] = _mm256_and_si256(random_tile[r * tile], mask_vec);
+            }
+        }
+
+        for m in 0..num_meas {
+            let cols = sparse.row_cols(m);
+            let acc = match cols.len() {
+                0 => _mm256_setzero_si256(),
+                1 => random_tile[cols[0] as usize * tile],
+                2 => _mm256_xor_si256(
+                    random_tile[cols[0] as usize * tile],
+                    random_tile[cols[1] as usize * tile],
+                ),
+                3 => _mm256_xor_si256(
+                    _mm256_xor_si256(
+                        random_tile[cols[0] as usize * tile],
+                        random_tile[cols[1] as usize * tile],
+                    ),
+                    random_tile[cols[2] as usize * tile],
+                ),
+                _ => {
+                    let mut a = _mm256_xor_si256(
+                        random_tile[cols[0] as usize * tile],
+                        random_tile[cols[1] as usize * tile],
+                    );
+                    for &c in &cols[2..] {
+                        a = _mm256_xor_si256(a, random_tile[c as usize * tile]);
+                    }
+                    a
+                }
+            };
+
+            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+            if words_this_quad == 4 {
+                _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
+            } else {
+                let mut tmp = [0u64; 4];
+                _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
+                for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
+                    *out_ptr.add(w) = val;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn bts_avx2_per_quad(
+    sparse: &SparseParity,
+    meas_major: &mut [u64],
+    vrng: &mut Xoshiro256PlusPlusX4,
+    random_avx: &mut [std::arch::x86_64::__m256i],
+    rank: usize,
+    num_meas: usize,
+    s_words: usize,
+    s_quads: usize,
+    start_quad: usize,
+    rem: usize,
+) {
+    use std::arch::x86_64::*;
+
+    for quad in start_quad..s_quads {
+        let base_sw = quad * 4;
+        let words_this_quad = (s_words - base_sw).min(4);
+
+        for avx in random_avx.iter_mut().take(rank) {
+            *avx = vrng.next_m256i();
+        }
+
+        if quad == s_quads - 1 && rem != 0 {
+            let full_words = rem / 64;
+            let tail_bits = rem % 64;
+            let mut mask_buf = [!0u64; 4];
+            for val in mask_buf
+                .iter_mut()
+                .skip(full_words + usize::from(tail_bits > 0))
+            {
+                *val = 0;
+            }
+            if tail_bits > 0 {
+                mask_buf[full_words] = (1u64 << tail_bits) - 1;
+            }
+            let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
+            for avx in random_avx.iter_mut().take(rank) {
+                *avx = _mm256_and_si256(*avx, mask_vec);
+            }
         }
 
         for m in 0..num_meas {
@@ -2995,26 +3383,14 @@ unsafe fn sample_bts_meas_major_avx2(
             let acc = match cols.len() {
                 0 => _mm256_setzero_si256(),
                 1 => random_avx[cols[0] as usize],
-                2 => _mm256_xor_si256(
-                    random_avx[cols[0] as usize],
-                    random_avx[cols[1] as usize],
-                ),
+                2 => _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize]),
                 3 => _mm256_xor_si256(
-                    _mm256_xor_si256(
-                        random_avx[cols[0] as usize],
-                        random_avx[cols[1] as usize],
-                    ),
+                    _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize]),
                     random_avx[cols[2] as usize],
                 ),
                 4 => _mm256_xor_si256(
-                    _mm256_xor_si256(
-                        random_avx[cols[0] as usize],
-                        random_avx[cols[1] as usize],
-                    ),
-                    _mm256_xor_si256(
-                        random_avx[cols[2] as usize],
-                        random_avx[cols[3] as usize],
-                    ),
+                    _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize]),
+                    _mm256_xor_si256(random_avx[cols[2] as usize], random_avx[cols[3] as usize]),
                 ),
                 _ => {
                     let mut a = _mm256_xor_si256(
@@ -3040,9 +3416,6 @@ unsafe fn sample_bts_meas_major_avx2(
             }
         }
     }
-
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
-    meas_major
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -3051,7 +3424,7 @@ unsafe fn sample_bts_meas_major_avx2(
     _sparse: &SparseParity,
     _num_shots: usize,
     _ref_bits: &[u64],
-    _rng: &mut ChaCha8Rng,
+    _rng: &mut Xoshiro256PlusPlus,
     _rank: usize,
 ) -> Vec<u64> {
     unreachable!()
@@ -3063,7 +3436,7 @@ unsafe fn sample_bts_meas_major_neon(
     sparse: &SparseParity,
     num_shots: usize,
     ref_bits: &[u64],
-    rng: &mut ChaCha8Rng,
+    rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
     use std::arch::aarch64::*;
@@ -3111,22 +3484,14 @@ unsafe fn sample_bts_meas_major_neon(
             let acc = match cols.len() {
                 0 => vdupq_n_u64(0),
                 1 => random_neon[cols[0] as usize],
-                2 => veorq_u64(
-                    random_neon[cols[0] as usize],
-                    random_neon[cols[1] as usize],
-                ),
+                2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
                 3 => veorq_u64(
-                    veorq_u64(
-                        random_neon[cols[0] as usize],
-                        random_neon[cols[1] as usize],
-                    ),
+                    veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
                     random_neon[cols[2] as usize],
                 ),
                 _ => {
-                    let mut a = veorq_u64(
-                        random_neon[cols[0] as usize],
-                        random_neon[cols[1] as usize],
-                    );
+                    let mut a =
+                        veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]);
                     for &c in &cols[2..] {
                         a = veorq_u64(a, random_neon[c as usize]);
                     }
@@ -3153,7 +3518,7 @@ unsafe fn sample_bts_meas_major_neon(
     _sparse: &SparseParity,
     _num_shots: usize,
     _ref_bits: &[u64],
-    _rng: &mut ChaCha8Rng,
+    _rng: &mut Xoshiro256PlusPlus,
     _rank: usize,
 ) -> Vec<u64> {
     unreachable!()
@@ -3739,10 +4104,7 @@ fn build_parity_blocks_if_useful(
     if block_meas.len() < MIN_BLOCKS_FOR_PARALLEL {
         return None;
     }
-    if block_meas
-        .iter()
-        .any(|b| b.len() < MIN_BLOCK_MEASUREMENTS)
-    {
+    if block_meas.iter().any(|b| b.len() < MIN_BLOCK_MEASUREMENTS) {
         return None;
     }
 
@@ -5198,7 +5560,11 @@ mod tests {
         let det = sparse.compile_detection_events(&[(2, 0), (3, 1)]);
         assert_eq!(det.num_rows, 2);
         for m in 0..2 {
-            assert_eq!(det.row_weight(m), 0, "same-stabilizer detection event must be deterministic");
+            assert_eq!(
+                det.row_weight(m),
+                0,
+                "same-stabilizer detection event must be deterministic"
+            );
         }
     }
 
@@ -5217,10 +5583,7 @@ mod tests {
         }
 
         let mut sampler = compile_measurements(&c, 42).unwrap();
-        let packed = sampler.sample_detection_events(
-            &[(4, 0), (5, 1), (6, 2), (7, 3)],
-            10_000,
-        );
+        let packed = sampler.sample_detection_events(&[(4, 0), (5, 1), (6, 2), (7, 3)], 10_000);
         assert_eq!(packed.num_shots, 10_000);
         assert_eq!(packed.num_measurements, 4);
 

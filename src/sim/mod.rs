@@ -59,8 +59,10 @@ fn detect_max_sv_qubits() -> Option<usize> {
         fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
     }
 
+    // SAFETY: zeroed MemoryStatusEx is valid (all-zero bit pattern is a valid repr(C) struct)
     let mut status: MemoryStatusEx = unsafe { std::mem::zeroed() };
     status.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
+    // SAFETY: status is a valid MemoryStatusEx with dw_length set; FFI call reads/writes only within the struct
     if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
         return None;
     }
@@ -310,6 +312,7 @@ fn extract_block_bits(global_index: usize, mask: u64) -> usize {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("bmi2") {
+            // SAFETY: BMI2 availability checked by is_x86_feature_detected above
             return unsafe { core::arch::x86_64::_pext_u64(global_index as u64, mask) as usize };
         }
     }

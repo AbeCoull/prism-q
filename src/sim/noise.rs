@@ -6,9 +6,7 @@ use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
-use crate::sim::compiled::{
-    batch_propagate_backward, compile_measurements, xor_words, PackedShots, ShotLayout,
-};
+use crate::sim::compiled::{batch_propagate_backward, compile_measurements, xor_words};
 use crate::sim::ShotsResult;
 
 pub struct NoiseModel {
@@ -53,56 +51,6 @@ impl NoiseModel {
     }
 }
 
-#[allow(dead_code)]
-struct SparseNoiseEvent {
-    z_cols: Vec<u32>,
-    x_cols: Vec<u32>,
-}
-
-#[allow(dead_code)]
-struct SparseNoiseSensitivity {
-    events: Vec<SparseNoiseEvent>,
-    probs: Vec<[f64; 3]>,
-}
-
-impl SparseNoiseSensitivity {
-    #[allow(dead_code)]
-    fn from_flat(flat: &FlatNoiseSensitivity, num_measurements: usize) -> Self {
-        let ne = flat.len();
-        let mut events = Vec::with_capacity(ne);
-        let mut probs = Vec::with_capacity(ne);
-
-        for i in 0..ne {
-            let z_flip = flat.z_flip(i);
-            let x_flip = flat.x_flip(i);
-            let mut z_cols = Vec::new();
-            let mut x_cols = Vec::new();
-
-            for m in 0..num_measurements {
-                let w = m / 64;
-                let b = m % 64;
-                if (z_flip[w] >> b) & 1 != 0 {
-                    z_cols.push(m as u32);
-                }
-                if (x_flip[w] >> b) & 1 != 0 {
-                    x_cols.push(m as u32);
-                }
-            }
-
-            events.push(SparseNoiseEvent { z_cols, x_cols });
-            probs.push(flat.probs[i]);
-        }
-
-        Self { events, probs }
-    }
-
-    #[allow(dead_code)]
-    #[inline(always)]
-    fn len(&self) -> usize {
-        self.probs.len()
-    }
-}
-
 struct FlatNoiseSensitivity {
     x_data: Vec<u64>,
     z_data: Vec<u64>,
@@ -129,6 +77,11 @@ impl FlatNoiseSensitivity {
     #[inline(always)]
     fn len(&self) -> usize {
         self.probs.len()
+    }
+
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.probs.is_empty()
     }
 
     #[inline(always)]
@@ -279,8 +232,6 @@ fn build_noise_luts(events: &FlatNoiseSensitivity) -> (Option<NoiseFlipLut>, Opt
 pub struct NoisyCompiledSampler {
     noiseless: crate::sim::compiled::CompiledSampler,
     events: FlatNoiseSensitivity,
-    #[allow(dead_code)]
-    sparse_noise: Option<SparseNoiseSensitivity>,
     num_measurements: usize,
     rng: ChaCha8Rng,
     z_lut: Option<NoiseFlipLut>,
@@ -372,7 +323,7 @@ impl NoisyCompiledSampler {
     }
 
     fn apply_noise_bulk(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
-        if self.events.len() == 0 {
+        if self.events.is_empty() {
             return;
         }
 
@@ -496,122 +447,13 @@ impl NoisyCompiledSampler {
             }
         }
     }
-
-    #[allow(dead_code)]
-    fn sample_packed_bts(&mut self, num_shots: usize) -> PackedShots {
-        let m_words = self.num_measurements.div_ceil(64);
-        let s_words = num_shots.div_ceil(64);
-
-        if num_shots == 0 || self.num_measurements == 0 {
-            return PackedShots::empty(num_shots, self.num_measurements, m_words, s_words);
-        }
-
-        if self.events.len() == 0 {
-            return self.noiseless.sample_bulk_packed(num_shots);
-        }
-
-        let mut packed = self.noiseless.sample_bulk_packed(num_shots);
-
-        if packed.layout() == ShotLayout::MeasMajor && self.sparse_noise.is_some() {
-            self.apply_noise_meas_major_sparse(packed.data_mut(), num_shots, s_words);
-            return packed;
-        }
-
-        let (mut accum, m_words) = self.noiseless.sample_bulk_words_shot_major(num_shots);
-        self.apply_noise_bulk(&mut accum, num_shots, m_words);
-
-        let ref_bits_packed = self.noiseless.ref_bits_packed();
-        for s in 0..num_shots {
-            let shot_base = s * m_words;
-            xor_words(&mut accum[shot_base..shot_base + m_words], ref_bits_packed);
-        }
-
-        PackedShots::from_shot_major(accum, num_shots, self.num_measurements, m_words)
-    }
-
-    #[allow(dead_code)]
-    fn apply_noise_meas_major_sparse(
-        &mut self,
-        meas_major: &mut [u64],
-        num_shots: usize,
-        s_words: usize,
-    ) {
-        let sparse = self.sparse_noise.as_ref().unwrap();
-        let mut z_bits = vec![0u64; s_words];
-        let mut x_bits = vec![0u64; s_words];
-
-        for i in 0..sparse.len() {
-            let [px, py, pz] = sparse.probs[i];
-            let p_event = px + py + pz;
-            if p_event == 0.0 {
-                continue;
-            }
-
-            let ev = &sparse.events[i];
-            if ev.z_cols.is_empty() && ev.x_cols.is_empty() {
-                continue;
-            }
-
-            z_bits.iter_mut().for_each(|w| *w = 0);
-            x_bits.iter_mut().for_each(|w| *w = 0);
-
-            let px_frac = px / p_event;
-            let pxy_frac = (px + py) / p_event;
-
-            if p_event >= 0.5 {
-                for s in 0..num_shots {
-                    let r: f64 = rand::Rng::gen(&mut self.rng);
-                    if r < p_event {
-                        let r2: f64 = rand::Rng::gen(&mut self.rng);
-                        let bit = 1u64 << (s % 64);
-                        let w = s / 64;
-                        if r2 < px_frac {
-                            z_bits[w] |= bit;
-                        } else if r2 < pxy_frac {
-                            z_bits[w] |= bit;
-                            x_bits[w] |= bit;
-                        } else {
-                            x_bits[w] |= bit;
-                        }
-                    }
-                }
-            } else {
-                let ln_1mp = (1.0 - p_event).ln();
-                let mut pos = geometric_sample(&mut self.rng, ln_1mp);
-                while pos < num_shots {
-                    let r: f64 = rand::Rng::gen(&mut self.rng);
-                    let bit = 1u64 << (pos % 64);
-                    let w = pos / 64;
-                    if r < px_frac {
-                        z_bits[w] |= bit;
-                    } else if r < pxy_frac {
-                        z_bits[w] |= bit;
-                        x_bits[w] |= bit;
-                    } else {
-                        x_bits[w] |= bit;
-                    }
-                    pos += 1 + geometric_sample(&mut self.rng, ln_1mp);
-                }
-            }
-
-            for &col in &ev.z_cols {
-                let row_base = col as usize * s_words;
-                for w in 0..s_words {
-                    meas_major[row_base + w] ^= z_bits[w];
-                }
-            }
-
-            for &col in &ev.x_cols {
-                let row_base = col as usize * s_words;
-                for w in 0..s_words {
-                    meas_major[row_base + w] ^= x_bits[w];
-                }
-            }
-        }
-    }
 }
 
-pub fn compile_noisy(circuit: &Circuit, noise: &NoiseModel, seed: u64) -> Result<NoisyCompiledSampler> {
+pub fn compile_noisy(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+) -> Result<NoisyCompiledSampler> {
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
         if blocks.len() > 1 {
@@ -648,7 +490,7 @@ fn compile_noisy_filtered(
         return Ok(NoisyCompiledSampler {
             noiseless,
             events: FlatNoiseSensitivity::new(1, 0),
-            sparse_noise: None,
+
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
@@ -768,7 +610,7 @@ fn compile_noisy_filtered(
     Ok(NoisyCompiledSampler {
         noiseless,
         events,
-        sparse_noise: None,
+
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,
@@ -811,7 +653,7 @@ fn compile_noisy_monolithic(
         return Ok(NoisyCompiledSampler {
             noiseless,
             events: FlatNoiseSensitivity::new(m_words, 0),
-            sparse_noise: None,
+
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
@@ -865,7 +707,7 @@ fn compile_noisy_monolithic(
     Ok(NoisyCompiledSampler {
         noiseless,
         events,
-        sparse_noise: None,
+
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,

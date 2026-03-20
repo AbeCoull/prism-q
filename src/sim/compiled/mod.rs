@@ -1,3 +1,4 @@
+mod accumulator;
 mod bts;
 mod parity;
 mod propagation;
@@ -17,6 +18,10 @@ use rand_chacha::ChaCha8Rng;
 use bts::{bts_batched, bts_single_pass, sample_bts_meas_major, BTS_BATCH_SHOTS};
 use rng::Xoshiro256PlusPlus;
 
+pub use accumulator::{
+    default_chunk_size, optimal_chunk_size, CorrelatorAccumulator, HistogramAccumulator,
+    MarginalsAccumulator, PauliExpectationAccumulator, ShotAccumulator,
+};
 use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
 pub use parity::{ParityBlock, ParityBlocks, ParityStats, SparseParity, XorDag, XorDagEntry};
 
@@ -637,32 +642,39 @@ impl CompiledSampler {
         }
     }
 
-    pub fn sample_streaming<F>(&mut self, total_shots: usize, batch_size: usize, mut callback: F)
-    where
-        F: FnMut(&PackedShots),
-    {
+    pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
+        let chunk_size = default_chunk_size(self.num_measurements);
+        self.sample_chunked_with_size(total_shots, chunk_size, acc);
+    }
+
+    pub fn sample_chunked_with_size<A: ShotAccumulator>(
+        &mut self,
+        total_shots: usize,
+        chunk_size: usize,
+        acc: &mut A,
+    ) {
         let mut remaining = total_shots;
         while remaining > 0 {
-            let this_batch = remaining.min(batch_size);
+            let this_batch = remaining.min(chunk_size);
             let packed = self.sample_bulk_packed(this_batch);
-            callback(&packed);
+            acc.accumulate(&packed);
             remaining -= this_batch;
         }
     }
 
-    pub fn sample_counts_streaming(
+    pub fn sample_counts(
         &mut self,
         total_shots: usize,
-        batch_size: usize,
     ) -> std::collections::HashMap<Vec<u64>, u64> {
-        use std::collections::HashMap;
-        let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
-        self.sample_streaming(total_shots, batch_size, |packed| {
-            for (key, count) in packed.counts() {
-                *counts.entry(key).or_insert(0) += count;
-            }
-        });
-        counts
+        let mut acc = HistogramAccumulator::new();
+        self.sample_chunked(total_shots, &mut acc);
+        acc.into_counts()
+    }
+
+    pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
+        let mut acc = MarginalsAccumulator::new(self.num_measurements);
+        self.sample_chunked(total_shots, &mut acc);
+        acc.marginals()
     }
 
     pub fn sample_detection_events(
@@ -921,6 +933,14 @@ impl PackedShots {
         }
     }
 
+    pub fn s_words(&self) -> usize {
+        self.s_words
+    }
+
+    pub fn m_words(&self) -> usize {
+        self.m_words
+    }
+
     pub fn shot_words(&self, shot: usize) -> &[u64] {
         assert!(
             self.layout == ShotLayout::ShotMajor,
@@ -928,6 +948,32 @@ impl PackedShots {
         );
         let base = shot * self.m_words;
         &self.data[base..base + self.m_words]
+    }
+
+    pub fn meas_words(&self, m: usize) -> &[u64] {
+        assert!(
+            self.layout == ShotLayout::MeasMajor,
+            "meas_words requires MeasMajor layout"
+        );
+        let base = m * self.s_words;
+        &self.data[base..base + self.s_words]
+    }
+
+    pub fn from_shot_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
+        let m_words = num_measurements.div_ceil(64);
+        let s_words = num_shots.div_ceil(64);
+        Self {
+            data,
+            num_shots,
+            num_measurements,
+            m_words,
+            s_words,
+            layout: ShotLayout::ShotMajor,
+        }
+    }
+
+    pub fn raw_data(&self) -> &[u64] {
+        &self.data
     }
 
     pub fn to_shots(&self) -> Vec<Vec<bool>> {
@@ -1510,6 +1556,11 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     })
 }
 
+/// Sample shots via the compiled (Heisenberg-picture) path.
+///
+/// Returns `Vec<Vec<bool>>` — inherently O(num_shots) memory.
+/// For bounded-memory streaming at large shot counts, use
+/// `compile_measurements` + `sample_chunked` / `sample_counts` directly.
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
     let packed = sampler.sample_bulk_packed(num_shots);

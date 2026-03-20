@@ -290,6 +290,41 @@ impl NoisyCompiledSampler {
         (accum, m_words)
     }
 
+    pub fn sample_chunked<A: crate::sim::compiled::ShotAccumulator>(
+        &mut self,
+        total_shots: usize,
+        acc: &mut A,
+    ) {
+        let chunk_size = crate::sim::compiled::default_chunk_size(self.num_measurements);
+        self.sample_chunked_with_size(total_shots, chunk_size, acc);
+    }
+
+    pub fn sample_chunked_with_size<A: crate::sim::compiled::ShotAccumulator>(
+        &mut self,
+        total_shots: usize,
+        chunk_size: usize,
+        acc: &mut A,
+    ) {
+        use crate::sim::compiled::PackedShots;
+        let mut remaining = total_shots;
+        while remaining > 0 {
+            let this_batch = remaining.min(chunk_size);
+            let (data, _m_words) = self.sample_bulk_packed(this_batch);
+            let packed = PackedShots::from_shot_major(data, this_batch, self.num_measurements);
+            acc.accumulate(&packed);
+            remaining -= this_batch;
+        }
+    }
+
+    pub fn sample_counts(
+        &mut self,
+        total_shots: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        let mut acc = crate::sim::compiled::HistogramAccumulator::new();
+        self.sample_chunked(total_shots, &mut acc);
+        acc.into_counts()
+    }
+
     #[allow(dead_code)]
     fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
         let (accum, m_words) = self.sample_bulk_packed(num_shots);

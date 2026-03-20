@@ -130,6 +130,7 @@ impl ShotAccumulator for MarginalsAccumulator {
 pub struct PauliExpectationAccumulator {
     observables: Vec<Vec<usize>>,
     parity_ones: Vec<u64>,
+    parity_buf: Vec<u64>,
     total_shots: u64,
 }
 
@@ -139,6 +140,7 @@ impl PauliExpectationAccumulator {
         Self {
             observables,
             parity_ones: vec![0u64; k],
+            parity_buf: Vec::new(),
             total_shots: 0,
         }
     }
@@ -172,21 +174,21 @@ impl ShotAccumulator for PauliExpectationAccumulator {
                 } else {
                     (1u64 << tail_bits) - 1
                 };
-                let mut parity_buf = vec![0u64; s_words];
+                self.parity_buf.resize(s_words, 0);
                 for (k, obs) in self.observables.iter().enumerate() {
-                    parity_buf.fill(0);
+                    self.parity_buf.fill(0);
                     for &mi in obs {
                         let row = chunk.meas_words(mi);
-                        for (p, &r) in parity_buf.iter_mut().zip(row.iter()) {
+                        for (p, &r) in self.parity_buf.iter_mut().zip(row.iter()) {
                             *p ^= r;
                         }
                     }
                     let mut count = 0u64;
                     if s_words > 0 {
-                        for &w in &parity_buf[..s_words - 1] {
+                        for &w in &self.parity_buf[..s_words - 1] {
                             count += w.count_ones() as u64;
                         }
-                        count += (parity_buf[s_words - 1] & tail_mask).count_ones() as u64;
+                        count += (self.parity_buf[s_words - 1] & tail_mask).count_ones() as u64;
                     }
                     self.parity_ones[k] += count;
                 }

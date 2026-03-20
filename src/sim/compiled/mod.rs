@@ -642,34 +642,6 @@ impl CompiledSampler {
         }
     }
 
-    pub fn sample_streaming<F>(&mut self, total_shots: usize, batch_size: usize, mut callback: F)
-    where
-        F: FnMut(&PackedShots),
-    {
-        let mut remaining = total_shots;
-        while remaining > 0 {
-            let this_batch = remaining.min(batch_size);
-            let packed = self.sample_bulk_packed(this_batch);
-            callback(&packed);
-            remaining -= this_batch;
-        }
-    }
-
-    pub fn sample_counts_streaming(
-        &mut self,
-        total_shots: usize,
-        batch_size: usize,
-    ) -> std::collections::HashMap<Vec<u64>, u64> {
-        use std::collections::HashMap;
-        let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
-        self.sample_streaming(total_shots, batch_size, |packed| {
-            for (key, count) in packed.counts() {
-                *counts.entry(key).or_insert(0) += count;
-            }
-        });
-        counts
-    }
-
     pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
         let chunk_size = default_chunk_size(self.num_measurements);
         self.sample_chunked_with_size(total_shots, chunk_size, acc);
@@ -985,6 +957,19 @@ impl PackedShots {
         );
         let base = m * self.s_words;
         &self.data[base..base + self.s_words]
+    }
+
+    pub fn from_shot_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
+        let m_words = num_measurements.div_ceil(64);
+        let s_words = num_shots.div_ceil(64);
+        Self {
+            data,
+            num_shots,
+            num_measurements,
+            m_words,
+            s_words,
+            layout: ShotLayout::ShotMajor,
+        }
     }
 
     pub fn raw_data(&self) -> &[u64] {
@@ -1571,45 +1556,16 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     })
 }
 
-const MAX_DIRECT_ALLOC_BYTES: u64 = 1024 * 1024 * 1024;
-
+/// Sample shots via the compiled (Heisenberg-picture) path.
+///
+/// Returns `Vec<Vec<bool>>` — inherently O(num_shots) memory.
+/// For bounded-memory streaming at large shot counts, use
+/// `compile_measurements` + `sample_chunked` / `sample_counts` directly.
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
-    let m_words = sampler.num_measurements.div_ceil(64) as u64;
-    let alloc_bytes = num_shots as u64 * m_words * 8;
-
-    if alloc_bytes > MAX_DIRECT_ALLOC_BYTES {
-        let num_meas = sampler.num_measurements;
-        let counts = sampler.sample_counts(num_shots);
-        let shots = expand_counts_to_shots(counts, num_meas);
-        return Ok(ShotsResult {
-            shots,
-            probabilities: None,
-        });
-    }
-
     let packed = sampler.sample_bulk_packed(num_shots);
     Ok(ShotsResult {
         shots: packed.to_shots(),
         probabilities: None,
     })
-}
-
-fn expand_counts_to_shots(
-    counts: std::collections::HashMap<Vec<u64>, u64>,
-    num_meas: usize,
-) -> Vec<Vec<bool>> {
-    let total: u64 = counts.values().sum();
-    let mut shots = Vec::with_capacity(total as usize);
-    for (words, &count) in &counts {
-        let mut bitstring = Vec::with_capacity(num_meas);
-        for m in 0..num_meas {
-            let w = m / 64;
-            bitstring.push((words[w] >> (m % 64)) & 1 != 0);
-        }
-        for _ in 0..count {
-            shots.push(bitstring.clone());
-        }
-    }
-    shots
 }

@@ -679,7 +679,7 @@ fn streaming_counts_ghz() {
         c.add_measure(i, i);
     }
     let mut sampler = compile_forward(&c, 42).unwrap();
-    let counts = sampler.sample_counts_streaming(10_000, 1_000);
+    let counts = sampler.sample_counts(10_000);
 
     assert_eq!(counts.len(), 2, "GHZ should produce exactly 2 outcomes");
     let total: u64 = counts.values().sum();
@@ -1203,4 +1203,34 @@ fn optimal_chunk_size_basic() {
     let cs_1000 = optimal_chunk_size(1000, 256 * 1024 * 1024);
     assert!(cs_1000 < cs, "more measurements should give smaller chunks");
     assert!(cs_1000 >= 64);
+}
+
+#[test]
+fn noisy_chunked_histogram_matches_direct() {
+    use crate::sim::noise::{compile_noisy, NoiseModel};
+
+    let mut c = circuits::ghz_circuit(10);
+    c.num_classical_bits = 10;
+    for i in 0..10 {
+        c.add_measure(i, i);
+    }
+    let noise = NoiseModel::uniform_depolarizing(&c, 0.001);
+    let num_shots = 10_000;
+
+    let mut sampler_direct = compile_noisy(&c, &noise, 42).unwrap();
+    let (accum, m_words) = sampler_direct.sample_bulk_packed(num_shots);
+    let mut direct_counts: std::collections::HashMap<Vec<u64>, u64> =
+        std::collections::HashMap::new();
+    for s in 0..num_shots {
+        let shot = accum[s * m_words..s * m_words + m_words].to_vec();
+        *direct_counts.entry(shot).or_insert(0) += 1;
+    }
+
+    let mut sampler_chunked = compile_noisy(&c, &noise, 42).unwrap();
+    let chunked_counts = sampler_chunked.sample_counts(num_shots);
+
+    assert_eq!(
+        direct_counts, chunked_counts,
+        "noisy chunked histogram must match direct"
+    );
 }

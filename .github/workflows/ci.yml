@@ -49,7 +49,9 @@ jobs:
       - name: Extract coverage percentage
         id: cov
         run: |
-          COVERAGE=$(cargo llvm-cov report --all-features 2>&1 | grep 'TOTAL' | awk '{print $NF}' | tr -d '%')
+          LF=$(grep '^LF:' lcov.info | awk -F: '{s+=$2} END {print s+0}')
+          LH=$(grep '^LH:' lcov.info | awk -F: '{s+=$2} END {print s+0}')
+          COVERAGE=$(awk "BEGIN {if ($LF>0) printf \"%.1f\", ($LH/$LF)*100; else print \"0\"}")
           echo "percentage=$COVERAGE" >> "$GITHUB_OUTPUT"
           echo "### Coverage: ${COVERAGE}%" >> "$GITHUB_STEP_SUMMARY"
       - name: Update coverage badge

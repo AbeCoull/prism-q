@@ -80,6 +80,11 @@ impl FlatNoiseSensitivity {
     }
 
     #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.probs.is_empty()
+    }
+
+    #[inline(always)]
     fn x_flip(&self, idx: usize) -> &[u64] {
         let off = idx * self.m_words;
         &self.x_data[off..off + self.m_words]
@@ -224,7 +229,7 @@ fn build_noise_luts(events: &FlatNoiseSensitivity) -> (Option<NoiseFlipLut>, Opt
     (Some(z_lut), Some(x_lut))
 }
 
-struct NoisyCompiledSampler {
+pub struct NoisyCompiledSampler {
     noiseless: crate::sim::compiled::CompiledSampler,
     events: FlatNoiseSensitivity,
     num_measurements: usize,
@@ -251,13 +256,13 @@ impl NoisyCompiledSampler {
         result
     }
 
-    fn sample_bulk_packed(&mut self, num_shots: usize) -> (Vec<u64>, usize) {
+    pub fn sample_bulk_packed(&mut self, num_shots: usize) -> (Vec<u64>, usize) {
         let m_words = self.num_measurements.div_ceil(64);
         if num_shots == 0 || self.num_measurements == 0 {
             return (vec![0u64; num_shots * m_words], m_words);
         }
 
-        let (mut accum, m_words) = self.noiseless.sample_bulk_words(num_shots);
+        let (mut accum, m_words) = self.noiseless.sample_bulk_words_shot_major(num_shots);
 
         self.apply_noise_bulk(&mut accum, num_shots, m_words);
 
@@ -318,7 +323,7 @@ impl NoisyCompiledSampler {
     }
 
     fn apply_noise_bulk(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
-        if self.events.len() == 0 {
+        if self.events.is_empty() {
             return;
         }
 
@@ -444,7 +449,11 @@ impl NoisyCompiledSampler {
     }
 }
 
-fn compile_noisy(circuit: &Circuit, noise: &NoiseModel, seed: u64) -> Result<NoisyCompiledSampler> {
+pub fn compile_noisy(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+) -> Result<NoisyCompiledSampler> {
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
         if blocks.len() > 1 {
@@ -481,6 +490,7 @@ fn compile_noisy_filtered(
         return Ok(NoisyCompiledSampler {
             noiseless,
             events: FlatNoiseSensitivity::new(1, 0),
+
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
@@ -600,6 +610,7 @@ fn compile_noisy_filtered(
     Ok(NoisyCompiledSampler {
         noiseless,
         events,
+
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,
@@ -642,6 +653,7 @@ fn compile_noisy_monolithic(
         return Ok(NoisyCompiledSampler {
             noiseless,
             events: FlatNoiseSensitivity::new(m_words, 0),
+
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
@@ -695,6 +707,7 @@ fn compile_noisy_monolithic(
     Ok(NoisyCompiledSampler {
         noiseless,
         events,
+
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,

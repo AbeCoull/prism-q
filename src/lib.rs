@@ -58,10 +58,10 @@ pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
 pub use sim::compiled::{
     compile_forward, compile_measurements, propagate_backward, run_shots_compiled, CompiledSampler,
-    PauliVec,
+    PackedShots, ParityStats, PauliVec, ShotLayout, SparseParity,
 };
 pub use sim::homological::{run_shots_homological, ErrorChainComplex, HomologicalSampler};
-pub use sim::noise::{run_shots_noisy, NoiseModel, NoiseOp};
+pub use sim::noise::{compile_noisy, run_shots_noisy, NoiseModel, NoiseOp, NoisyCompiledSampler};
 pub use sim::stabilizer_rank::{
     run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_overlap_sq, StabRankResult,
 };

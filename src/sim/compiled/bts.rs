@@ -269,6 +269,7 @@ fn sample_bts_meas_major_dag(
     meas_major
 }
 
+#[cfg(target_arch = "x86_64")]
 const BTS_QUAD_TILE: usize = 8;
 
 #[cfg(target_arch = "x86_64")]

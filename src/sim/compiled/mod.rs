@@ -1,3 +1,4 @@
+mod accumulator;
 mod bts;
 mod parity;
 mod propagation;
@@ -17,6 +18,10 @@ use rand_chacha::ChaCha8Rng;
 use bts::{bts_batched, bts_single_pass, sample_bts_meas_major, BTS_BATCH_SHOTS};
 use rng::Xoshiro256PlusPlus;
 
+pub use accumulator::{
+    default_chunk_size, optimal_chunk_size, CorrelatorAccumulator, HistogramAccumulator,
+    MarginalsAccumulator, PauliExpectationAccumulator, ShotAccumulator,
+};
 use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
 pub use parity::{ParityBlock, ParityBlocks, ParityStats, SparseParity, XorDag, XorDagEntry};
 
@@ -665,6 +670,41 @@ impl CompiledSampler {
         counts
     }
 
+    pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
+        let chunk_size = default_chunk_size(self.num_measurements);
+        self.sample_chunked_with_size(total_shots, chunk_size, acc);
+    }
+
+    pub fn sample_chunked_with_size<A: ShotAccumulator>(
+        &mut self,
+        total_shots: usize,
+        chunk_size: usize,
+        acc: &mut A,
+    ) {
+        let mut remaining = total_shots;
+        while remaining > 0 {
+            let this_batch = remaining.min(chunk_size);
+            let packed = self.sample_bulk_packed(this_batch);
+            acc.accumulate(&packed);
+            remaining -= this_batch;
+        }
+    }
+
+    pub fn sample_counts(
+        &mut self,
+        total_shots: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        let mut acc = HistogramAccumulator::new();
+        self.sample_chunked(total_shots, &mut acc);
+        acc.into_counts()
+    }
+
+    pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
+        let mut acc = MarginalsAccumulator::new(self.num_measurements);
+        self.sample_chunked(total_shots, &mut acc);
+        acc.marginals()
+    }
+
     pub fn sample_detection_events(
         &mut self,
         pairs: &[(usize, usize)],
@@ -921,6 +961,14 @@ impl PackedShots {
         }
     }
 
+    pub fn s_words(&self) -> usize {
+        self.s_words
+    }
+
+    pub fn m_words(&self) -> usize {
+        self.m_words
+    }
+
     pub fn shot_words(&self, shot: usize) -> &[u64] {
         assert!(
             self.layout == ShotLayout::ShotMajor,
@@ -928,6 +976,19 @@ impl PackedShots {
         );
         let base = shot * self.m_words;
         &self.data[base..base + self.m_words]
+    }
+
+    pub fn meas_words(&self, m: usize) -> &[u64] {
+        assert!(
+            self.layout == ShotLayout::MeasMajor,
+            "meas_words requires MeasMajor layout"
+        );
+        let base = m * self.s_words;
+        &self.data[base..base + self.s_words]
+    }
+
+    pub fn raw_data(&self) -> &[u64] {
+        &self.data
     }
 
     pub fn to_shots(&self) -> Vec<Vec<bool>> {
@@ -1510,11 +1571,45 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     })
 }
 
+const MAX_DIRECT_ALLOC_BYTES: u64 = 1024 * 1024 * 1024;
+
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
+    let m_words = sampler.num_measurements.div_ceil(64) as u64;
+    let alloc_bytes = num_shots as u64 * m_words * 8;
+
+    if alloc_bytes > MAX_DIRECT_ALLOC_BYTES {
+        let num_meas = sampler.num_measurements;
+        let counts = sampler.sample_counts(num_shots);
+        let shots = expand_counts_to_shots(counts, num_meas);
+        return Ok(ShotsResult {
+            shots,
+            probabilities: None,
+        });
+    }
+
     let packed = sampler.sample_bulk_packed(num_shots);
     Ok(ShotsResult {
         shots: packed.to_shots(),
         probabilities: None,
     })
+}
+
+fn expand_counts_to_shots(
+    counts: std::collections::HashMap<Vec<u64>, u64>,
+    num_meas: usize,
+) -> Vec<Vec<bool>> {
+    let total: u64 = counts.values().sum();
+    let mut shots = Vec::with_capacity(total as usize);
+    for (words, &count) in &counts {
+        let mut bitstring = Vec::with_capacity(num_meas);
+        for m in 0..num_meas {
+            let w = m / 64;
+            bitstring.push((words[w] >> (m % 64)) & 1 != 0);
+        }
+        for _ in 0..count {
+            shots.push(bitstring.clone());
+        }
+    }
+    shots
 }

@@ -403,6 +403,7 @@ pub(super) fn build_parity_blocks_if_useful(
 }
 
 const MAX_RANK_FOR_WEIGHT_MIN: usize = 500;
+const MAX_WEIGHT_MIN_ROUNDS: usize = 5;
 
 pub(super) fn minimize_flip_row_weight(flip_rows: &mut [Vec<u64>]) -> (usize, usize) {
     let rank = flip_rows.len();
@@ -414,9 +415,8 @@ pub(super) fn minimize_flip_row_weight(flip_rows: &mut [Vec<u64>]) -> (usize, us
     let before = total;
     let mut weights: Vec<u32> = flip_rows.iter().map(|r| row_weight(r)).collect();
 
-    let mut improved = true;
-    while improved {
-        improved = false;
+    for _round in 0..MAX_WEIGHT_MIN_ROUNDS {
+        let mut improved = false;
         for i in 0..rank {
             let wi = weights[i];
             if wi == 0 {
@@ -445,6 +445,9 @@ pub(super) fn minimize_flip_row_weight(flip_rows: &mut [Vec<u64>]) -> (usize, us
                 weights[i] = best_w;
                 improved = true;
             }
+        }
+        if !improved {
+            break;
         }
     }
 

@@ -58,8 +58,9 @@ pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
 pub use sim::compiled::{
     compile_forward, compile_measurements, propagate_backward, run_shots_compiled, CompiledSampler,
-    CorrelatorAccumulator, HistogramAccumulator, MarginalsAccumulator, PackedShots, ParityStats,
-    PauliExpectationAccumulator, PauliVec, ShotAccumulator, ShotLayout, SparseParity,
+    CorrelatorAccumulator, HistogramAccumulator, MarginalsAccumulator, NullAccumulator,
+    PackedShots, ParityStats, PauliExpectationAccumulator, PauliVec, ShotAccumulator, ShotLayout,
+    SparseParity,
 };
 pub use sim::homological::{run_shots_homological, ErrorChainComplex, HomologicalSampler};
 pub use sim::noise::{compile_noisy, run_shots_noisy, NoiseModel, NoiseOp, NoisyCompiledSampler};

@@ -6,7 +6,9 @@ use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
-use crate::sim::compiled::{batch_propagate_backward, compile_measurements, xor_words};
+use crate::sim::compiled::{
+    batch_propagate_backward, compile_measurements, xor_words, PackedShots,
+};
 use crate::sim::ShotsResult;
 
 pub struct NoiseModel {
@@ -142,6 +144,44 @@ fn unpack_and_remap(
         .collect()
 }
 
+fn unpack_and_remap_packed(
+    packed: &PackedShots,
+    num_shots: usize,
+    classical_bit_order: &[usize],
+    num_classical: usize,
+) -> Vec<Vec<bool>> {
+    fn unpack_one_packed(
+        packed: &PackedShots,
+        shot: usize,
+        classical_bit_order: &[usize],
+        num_classical: usize,
+    ) -> Vec<bool> {
+        let mut out = vec![false; num_classical];
+        for (mi, &cbit) in classical_bit_order.iter().enumerate() {
+            if cbit < num_classical {
+                out[cbit] = packed.get_bit(shot, mi);
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "parallel")]
+    if num_shots >= 256 {
+        use rayon::prelude::*;
+        return (0..num_shots)
+            .into_par_iter()
+            .map(|s| unpack_one_packed(packed, s, classical_bit_order, num_classical))
+            .collect();
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    let _ = num_shots;
+
+    (0..packed.num_shots())
+        .map(|s| unpack_one_packed(packed, s, classical_bit_order, num_classical))
+        .collect()
+}
+
 struct NoiseFlipLut {
     data: Vec<u64>,
     m_words: usize,
@@ -256,10 +296,14 @@ impl NoisyCompiledSampler {
         result
     }
 
-    pub fn sample_bulk_packed(&mut self, num_shots: usize) -> (Vec<u64>, usize) {
+    pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
         let m_words = self.num_measurements.div_ceil(64);
         if num_shots == 0 || self.num_measurements == 0 {
-            return (vec![0u64; num_shots * m_words], m_words);
+            return PackedShots::from_shot_major(
+                vec![0u64; num_shots * m_words],
+                num_shots,
+                self.num_measurements,
+            );
         }
 
         let (mut accum, m_words) = self.noiseless.sample_bulk_words_shot_major(num_shots);
@@ -287,7 +331,7 @@ impl NoisyCompiledSampler {
             xor_words(&mut accum[shot_base..shot_base + m_words], ref_bits_packed);
         }
 
-        (accum, m_words)
+        PackedShots::from_shot_major(accum, num_shots, self.num_measurements)
     }
 
     pub fn sample_chunked<A: crate::sim::compiled::ShotAccumulator>(
@@ -305,12 +349,10 @@ impl NoisyCompiledSampler {
         chunk_size: usize,
         acc: &mut A,
     ) {
-        use crate::sim::compiled::PackedShots;
         let mut remaining = total_shots;
         while remaining > 0 {
             let this_batch = remaining.min(chunk_size);
-            let (data, _m_words) = self.sample_bulk_packed(this_batch);
-            let packed = PackedShots::from_shot_major(data, this_batch, self.num_measurements);
+            let packed = self.sample_bulk_packed(this_batch);
             acc.accumulate(&packed);
             remaining -= this_batch;
         }
@@ -327,17 +369,7 @@ impl NoisyCompiledSampler {
 
     #[allow(dead_code)]
     fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
-        let (accum, m_words) = self.sample_bulk_packed(num_shots);
-        let mut shots = Vec::with_capacity(num_shots);
-        for s in 0..num_shots {
-            let src = &accum[s * m_words..s * m_words + m_words];
-            let mut result = Vec::with_capacity(self.num_measurements);
-            for m in 0..self.num_measurements {
-                result.push((src[m / 64] >> (m % 64)) & 1 != 0);
-            }
-            shots.push(result);
-        }
-        shots
+        self.sample_bulk_packed(num_shots).to_shots()
     }
 
     #[allow(dead_code)]
@@ -1111,15 +1143,9 @@ fn run_shots_noisy_compiled(
         .collect();
     let num_classical = circuit.num_classical_bits;
 
-    let (accum, m_words) = sampler.sample_bulk_packed(num_shots);
+    let packed = sampler.sample_bulk_packed(num_shots);
 
-    let shots = unpack_and_remap(
-        &accum,
-        m_words,
-        num_shots,
-        &classical_bit_order,
-        num_classical,
-    );
+    let shots = unpack_and_remap_packed(&packed, num_shots, &classical_bit_order, num_classical);
 
     Ok(ShotsResult {
         shots,

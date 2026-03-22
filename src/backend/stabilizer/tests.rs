@@ -626,6 +626,56 @@ fn test_rowmul_words_phase_y_times_x() {
 }
 
 #[test]
+fn test_rowmul_words_simd_large() {
+    for nw in [4, 5, 8, 9, 16, 17] {
+        let src_x: Vec<u64> = (0..nw)
+            .map(|i| 0xAAAA_BBBB_CCCC_0000u64 | i as u64)
+            .collect();
+        let src_z: Vec<u64> = (0..nw)
+            .map(|i| 0x1111_2222_3333_0000u64 | (i * 7) as u64)
+            .collect();
+        let orig_x: Vec<u64> = (0..nw)
+            .map(|i| 0x5555_6666_7777_0000u64 | (i * 3) as u64)
+            .collect();
+        let orig_z: Vec<u64> = (0..nw)
+            .map(|i| 0x9999_AAAA_BBBB_0000u64 | (i * 5) as u64)
+            .collect();
+
+        let mut ref_x = orig_x.clone();
+        let mut ref_z = orig_z.clone();
+        let mut ref_sum = 2u64;
+        for w in 0..nw {
+            let x1 = src_x[w];
+            let z1 = src_z[w];
+            let x2 = ref_x[w];
+            let z2 = ref_z[w];
+            let new_x = x1 ^ x2;
+            let new_z = z1 ^ z2;
+            ref_x[w] = new_x;
+            ref_z[w] = new_z;
+            if (x1 | z1 | x2 | z2) != 0 {
+                let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
+                let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+                ref_sum = ref_sum.wrapping_add(2 * pos.count_ones() as u64);
+                ref_sum = ref_sum.wrapping_sub(nonzero.count_ones() as u64);
+            }
+        }
+
+        let mut fn_x = orig_x.clone();
+        let mut fn_z = orig_z.clone();
+        let fn_sum = rowmul_words(&mut fn_x, &mut fn_z, &src_x, &src_z, 2);
+
+        assert_eq!(fn_x, ref_x, "XOR mismatch at nw={nw}");
+        assert_eq!(fn_z, ref_z, "XOR mismatch at nw={nw}");
+        assert_eq!(
+            fn_sum & 3,
+            ref_sum & 3,
+            "Phase mismatch at nw={nw}: fn_sum={fn_sum}, ref_sum={ref_sum}"
+        );
+    }
+}
+
+#[test]
 fn test_rowmul_refactor_preserves_ghz_correctness() {
     let n = 10;
     let mut c = Circuit::new(n, n);

@@ -20,7 +20,7 @@ use rng::Xoshiro256PlusPlus;
 
 pub use accumulator::{
     default_chunk_size, optimal_chunk_size, CorrelatorAccumulator, HistogramAccumulator,
-    MarginalsAccumulator, PauliExpectationAccumulator, ShotAccumulator,
+    MarginalsAccumulator, NullAccumulator, PauliExpectationAccumulator, ShotAccumulator,
 };
 use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
 pub use parity::{ParityBlock, ParityBlocks, ParityStats, SparseParity, XorDag, XorDagEntry};
@@ -969,6 +969,19 @@ impl PackedShots {
             m_words,
             s_words,
             layout: ShotLayout::ShotMajor,
+        }
+    }
+
+    pub fn from_meas_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
+        let m_words = num_measurements.div_ceil(64);
+        let s_words = num_shots.div_ceil(64);
+        Self {
+            data,
+            num_shots,
+            num_measurements,
+            m_words,
+            s_words,
+            layout: ShotLayout::MeasMajor,
         }
     }
 

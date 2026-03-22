@@ -1218,13 +1218,8 @@ fn noisy_chunked_histogram_matches_direct() {
     let num_shots = 10_000;
 
     let mut sampler_direct = compile_noisy(&c, &noise, 42).unwrap();
-    let (accum, m_words) = sampler_direct.sample_bulk_packed(num_shots);
-    let mut direct_counts: std::collections::HashMap<Vec<u64>, u64> =
-        std::collections::HashMap::new();
-    for s in 0..num_shots {
-        let shot = accum[s * m_words..s * m_words + m_words].to_vec();
-        *direct_counts.entry(shot).or_insert(0) += 1;
-    }
+    let packed = sampler_direct.sample_bulk_packed(num_shots);
+    let direct_counts = packed.counts();
 
     let mut sampler_chunked = compile_noisy(&c, &noise, 42).unwrap();
     let chunked_counts = sampler_chunked.sample_counts(num_shots);

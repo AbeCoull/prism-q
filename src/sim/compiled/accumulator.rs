@@ -314,6 +314,7 @@ fn transpose_64x64_dispatch(matrix: &mut [u64; 64]) {
         return;
     }
 
+    #[allow(unreachable_code)]
     transpose_64x64(matrix);
 }
 

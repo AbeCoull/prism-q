@@ -1009,11 +1009,26 @@ pub struct ShotsResult {
 impl ShotsResult {
     /// Build a frequency histogram of measurement outcomes.
     pub fn counts(&self) -> HashMap<Vec<bool>, usize> {
-        let mut map = HashMap::new();
+        let mut packed_map: HashMap<[u64; 8], usize> = HashMap::new();
         for shot in &self.shots {
-            *map.entry(shot.clone()).or_insert(0) += 1;
+            let mut key = [0u64; 8];
+            for (i, &b) in shot.iter().enumerate() {
+                if b {
+                    key[i / 64] |= 1u64 << (i % 64);
+                }
+            }
+            *packed_map.entry(key).or_insert(0) += 1;
         }
-        map
+        let num_bits = self.shots.first().map_or(0, |s| s.len());
+        packed_map
+            .into_iter()
+            .map(|(key, count)| {
+                let bits: Vec<bool> = (0..num_bits)
+                    .map(|i| key[i / 64] >> (i % 64) & 1 == 1)
+                    .collect();
+                (bits, count)
+            })
+            .collect()
     }
 }
 
@@ -1067,19 +1082,14 @@ fn sample_shots(
         return vec![vec![false; num_classical_bits]; num_shots];
     }
 
-    let mut shots = Vec::with_capacity(num_shots);
+    let mut indices = Vec::with_capacity(num_shots);
 
     match probs {
         Probabilities::Dense(v) => {
             let cdf = build_cdf(v);
             for _ in 0..num_shots {
                 let r: f64 = rng.gen();
-                let state_idx = sample_from_cdf(&cdf, r);
-                let mut bits = vec![false; num_classical_bits];
-                for &(qubit, cbit) in meas_map {
-                    bits[cbit] = (state_idx >> qubit) & 1 == 1;
-                }
-                shots.push(bits);
+                indices.push(sample_from_cdf(&cdf, r));
             }
         }
         Probabilities::Factored { blocks, .. } => {
@@ -1100,15 +1110,23 @@ fn sample_shots(
                         m &= m.wrapping_sub(1);
                     }
                 }
-                let mut bits = vec![false; num_classical_bits];
-                for &(qubit, cbit) in meas_map {
-                    bits[cbit] = (global_idx >> qubit) & 1 == 1;
-                }
-                shots.push(bits);
+                indices.push(global_idx);
             }
         }
     }
 
+    let mut flat = vec![false; num_shots * num_classical_bits];
+    for (s, &state_idx) in indices.iter().enumerate() {
+        let base = s * num_classical_bits;
+        for &(qubit, cbit) in meas_map {
+            flat[base + cbit] = (state_idx >> qubit) & 1 == 1;
+        }
+    }
+
+    let mut shots = Vec::with_capacity(num_shots);
+    for chunk in flat.chunks_exact(num_classical_bits) {
+        shots.push(chunk.to_vec());
+    }
     shots
 }
 

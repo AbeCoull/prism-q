@@ -239,37 +239,51 @@ impl CompiledSampler {
 
     pub(crate) fn sample_bulk_words_shot_major(&mut self, num_shots: usize) -> (Vec<u64>, usize) {
         let m_words = self.num_measurements.div_ceil(64);
+        let mut accum = vec![0u64; num_shots * m_words];
+        let mut rand_buf = Vec::new();
+        self.sample_bulk_words_shot_major_reuse(&mut accum, &mut rand_buf, num_shots);
+        (accum, m_words)
+    }
+
+    pub(crate) fn sample_bulk_words_shot_major_reuse(
+        &mut self,
+        accum: &mut Vec<u64>,
+        rand_buf: &mut Vec<u8>,
+        num_shots: usize,
+    ) -> usize {
+        let m_words = self.num_measurements.div_ceil(64);
+        let needed = num_shots * m_words;
+        accum.resize(needed, 0);
+        accum[..needed].fill(0);
         if num_shots == 0 || self.num_measurements == 0 || self.rank == 0 {
-            return (vec![0u64; num_shots * m_words], m_words);
+            return m_words;
         }
 
         if let Some(lut) = &self.lut {
             let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
             let bytes_per_shot = total_groups;
             let total_bytes = num_shots * bytes_per_shot;
-            let mut rand_bytes: Vec<u8> = vec![0u8; total_bytes];
+            rand_buf.resize(total_bytes, 0);
             {
                 let full_chunks = total_bytes / 8;
                 let tail = full_chunks * 8;
                 for i in 0..full_chunks {
                     let r = self.rng.next_u64();
-                    rand_bytes[i * 8..(i + 1) * 8].copy_from_slice(&r.to_le_bytes());
+                    rand_buf[i * 8..(i + 1) * 8].copy_from_slice(&r.to_le_bytes());
                 }
                 if tail < total_bytes {
                     let r = self.rng.next_u64();
                     let bytes = r.to_le_bytes();
-                    rand_bytes[tail..total_bytes].copy_from_slice(&bytes[..total_bytes - tail]);
+                    rand_buf[tail..total_bytes].copy_from_slice(&bytes[..total_bytes - tail]);
                 }
                 if lut.remainder_size > 0 {
                     let remainder_mask = (1u8 << lut.remainder_size) - 1;
                     let last_group = lut.num_full_groups;
                     for s in 0..num_shots {
-                        rand_bytes[s * bytes_per_shot + last_group] &= remainder_mask;
+                        rand_buf[s * bytes_per_shot + last_group] &= remainder_mask;
                     }
                 }
             }
-
-            let mut accum: Vec<u64> = vec![0u64; num_shots * m_words];
 
             let max_batch = if m_words > 0 {
                 (256 * 1024 / (m_words * 8)).max(64)
@@ -297,7 +311,7 @@ impl CompiledSampler {
                             for g in 0..total_groups {
                                 for s in tile_start..tile_end {
                                     let gs = chunk_start + s;
-                                    let byte = rand_bytes[gs * bytes_per_shot + g] as usize;
+                                    let byte = rand_buf[gs * bytes_per_shot + g] as usize;
                                     let entry = lut.lookup(g, byte);
                                     let base = s * m_words;
                                     xor_words(&mut chunk[base..base + m_words], entry);
@@ -310,7 +324,7 @@ impl CompiledSampler {
                     let tile_end = (tile_start + max_batch).min(num_shots);
                     for g in 0..total_groups {
                         for s in tile_start..tile_end {
-                            let byte = rand_bytes[s * bytes_per_shot + g] as usize;
+                            let byte = rand_buf[s * bytes_per_shot + g] as usize;
                             let entry = lut.lookup(g, byte);
                             let shot_base = s * m_words;
                             xor_words(&mut accum[shot_base..shot_base + m_words], entry);
@@ -325,7 +339,7 @@ impl CompiledSampler {
                     let tile_end = (tile_start + max_batch).min(num_shots);
                     for g in 0..total_groups {
                         for s in tile_start..tile_end {
-                            let byte = rand_bytes[s * bytes_per_shot + g] as usize;
+                            let byte = rand_buf[s * bytes_per_shot + g] as usize;
                             let entry = lut.lookup(g, byte);
                             let shot_base = s * m_words;
                             xor_words(&mut accum[shot_base..shot_base + m_words], entry);
@@ -334,9 +348,8 @@ impl CompiledSampler {
                 }
             }
 
-            (accum, m_words)
+            m_words
         } else {
-            let mut accum = vec![0u64; num_shots * m_words];
             for s in 0..num_shots {
                 let shot_base = s * m_words;
                 let shot_accum = &mut accum[shot_base..shot_base + m_words];
@@ -348,7 +361,7 @@ impl CompiledSampler {
                     }
                 }
             }
-            (accum, m_words)
+            m_words
         }
     }
 
@@ -989,6 +1002,10 @@ impl PackedShots {
         &self.data
     }
 
+    pub fn into_data(self) -> Vec<u64> {
+        self.data
+    }
+
     pub fn to_shots(&self) -> Vec<Vec<bool>> {
         let mut shots = Vec::with_capacity(self.num_shots);
         for s in 0..self.num_shots {
@@ -1002,45 +1019,56 @@ impl PackedShots {
     }
 
     pub fn counts(&self) -> std::collections::HashMap<Vec<u64>, u64> {
+        self.counts_packed()
+            .into_iter()
+            .map(|(k, v)| (k[..self.m_words].to_vec(), v))
+            .collect()
+    }
+
+    fn counts_packed(&self) -> std::collections::HashMap<[u64; 8], u64> {
         use std::collections::HashMap;
         let mut map = HashMap::new();
+        let mw = self.m_words;
+        debug_assert!(mw <= 8);
 
         match self.layout {
             ShotLayout::ShotMajor => {
                 for s in 0..self.num_shots {
-                    let base = s * self.m_words;
-                    let words = self.data[base..base + self.m_words].to_vec();
-                    *map.entry(words).or_insert(0) += 1;
+                    let base = s * mw;
+                    let mut key = [0u64; 8];
+                    key[..mw].copy_from_slice(&self.data[base..base + mw]);
+                    *map.entry(key).or_insert(0) += 1;
                 }
             }
             ShotLayout::MeasMajor => {
                 let batch_size = 64;
-                let mut shot_buf = vec![0u64; batch_size * self.m_words];
+                let mut shot_buf = vec![0u64; batch_size * mw];
                 for batch_start in (0..self.num_shots).step_by(batch_size) {
                     let batch_end = (batch_start + batch_size).min(self.num_shots);
                     let batch_len = batch_end - batch_start;
-                    shot_buf[..batch_len * self.m_words].fill(0);
+                    shot_buf[..batch_len * mw].fill(0);
 
                     let sw_base = batch_start / 64;
                     let bit_off = batch_start % 64;
 
                     for m in 0..self.num_measurements {
-                        let mw = m / 64;
+                        let mword = m / 64;
                         let mbit = m % 64;
                         let meas_row = &self.data[m * self.s_words..];
                         let word = meas_row[sw_base];
                         let shifted = word >> bit_off;
                         for s in 0..batch_len {
                             if (shifted >> s) & 1 != 0 {
-                                shot_buf[s * self.m_words + mw] |= 1u64 << mbit;
+                                shot_buf[s * mw + mword] |= 1u64 << mbit;
                             }
                         }
                     }
 
                     for s in 0..batch_len {
-                        let base = s * self.m_words;
-                        let words = shot_buf[base..base + self.m_words].to_vec();
-                        *map.entry(words).or_insert(0) += 1;
+                        let base = s * mw;
+                        let mut key = [0u64; 8];
+                        key[..mw].copy_from_slice(&shot_buf[base..base + mw]);
+                        *map.entry(key).or_insert(0) += 1;
                     }
                 }
             }

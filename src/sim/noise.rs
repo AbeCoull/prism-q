@@ -349,11 +349,50 @@ impl NoisyCompiledSampler {
         chunk_size: usize,
         acc: &mut A,
     ) {
+        let m_words = self.num_measurements.div_ceil(64);
+        let mut accum_buf: Vec<u64> = Vec::new();
+        let mut rand_buf: Vec<u8> = Vec::new();
+        let ref_bits_packed = self.noiseless.ref_bits_packed().to_vec();
         let mut remaining = total_shots;
         while remaining > 0 {
             let this_batch = remaining.min(chunk_size);
-            let packed = self.sample_bulk_packed(this_batch);
+            self.noiseless.sample_bulk_words_shot_major_reuse(
+                &mut accum_buf,
+                &mut rand_buf,
+                this_batch,
+            );
+
+            self.apply_noise_bulk(&mut accum_buf, this_batch, m_words);
+
+            #[cfg(feature = "parallel")]
+            if this_batch >= 256 {
+                use rayon::prelude::*;
+                accum_buf[..this_batch * m_words]
+                    .par_chunks_mut(m_words)
+                    .for_each(|shot| xor_words(shot, &ref_bits_packed));
+            } else {
+                for s in 0..this_batch {
+                    let shot_base = s * m_words;
+                    xor_words(
+                        &mut accum_buf[shot_base..shot_base + m_words],
+                        &ref_bits_packed,
+                    );
+                }
+            }
+
+            #[cfg(not(feature = "parallel"))]
+            for s in 0..this_batch {
+                let shot_base = s * m_words;
+                xor_words(
+                    &mut accum_buf[shot_base..shot_base + m_words],
+                    &ref_bits_packed,
+                );
+            }
+
+            let data = std::mem::take(&mut accum_buf);
+            let packed = PackedShots::from_shot_major(data, this_batch, self.num_measurements);
             acc.accumulate(&packed);
+            accum_buf = packed.into_data();
             remaining -= this_batch;
         }
     }
@@ -365,6 +404,13 @@ impl NoisyCompiledSampler {
         let mut acc = crate::sim::compiled::HistogramAccumulator::new();
         self.sample_chunked(total_shots, &mut acc);
         acc.into_counts()
+    }
+
+    pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
+        let mut acc =
+            crate::sim::compiled::MarginalsAccumulator::new(self.num_measurements);
+        self.sample_chunked(total_shots, &mut acc);
+        acc.marginals()
     }
 
     #[allow(dead_code)]
@@ -402,26 +448,76 @@ impl NoisyCompiledSampler {
     }
 
     fn apply_noise_bulk_scalar(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
-        for i in 0..self.events.len() {
-            let [px, py, pz] = self.events.probs[i];
+        #[cfg(feature = "parallel")]
+        if num_shots >= 4096 {
+            self.apply_noise_bulk_scalar_par(accum, num_shots, m_words);
+            return;
+        }
+
+        self.apply_noise_bulk_scalar_seq(accum, num_shots, m_words);
+    }
+
+    fn apply_noise_bulk_scalar_seq(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
+        Self::apply_noise_range(&self.events, accum, 0, num_shots, m_words, &mut self.rng);
+    }
+
+    #[cfg(feature = "parallel")]
+    fn apply_noise_bulk_scalar_par(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
+        use rayon::prelude::*;
+
+        let num_threads = rayon::current_num_threads().max(1);
+        let shots_per_thread = (num_shots.div_ceil(num_threads) + 63) & !63;
+
+        let seeds: Vec<u64> = (0..num_threads)
+            .map(|_| rand::Rng::gen(&mut self.rng))
+            .collect();
+
+        let events = &self.events;
+
+        accum
+            .par_chunks_mut(shots_per_thread * m_words)
+            .enumerate()
+            .for_each(|(tid, chunk)| {
+                let chunk_shots = chunk.len() / m_words;
+                if chunk_shots == 0 {
+                    return;
+                }
+                let mut rng = ChaCha8Rng::seed_from_u64(seeds[tid]);
+                Self::apply_noise_range(events, chunk, 0, chunk_shots, m_words, &mut rng);
+            });
+    }
+
+    fn apply_noise_range(
+        events: &FlatNoiseSensitivity,
+        accum: &mut [u64],
+        start: usize,
+        end: usize,
+        m_words: usize,
+        rng: &mut ChaCha8Rng,
+    ) {
+        let ne = events.len();
+        let num_shots = end - start;
+
+        for i in 0..ne {
+            let [px, py, pz] = events.probs[i];
             let p_event = px + py + pz;
             if p_event == 0.0 {
                 continue;
             }
 
             if p_event >= 0.5 || num_shots < 32 {
-                for s in 0..num_shots {
-                    let r: f64 = rand::Rng::gen(&mut self.rng);
+                for s in start..end {
+                    let r: f64 = rand::Rng::gen(rng);
                     if r < px {
                         let b = s * m_words;
-                        xor_words(&mut accum[b..b + m_words], self.events.z_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
                     } else if r < px + py {
                         let b = s * m_words;
-                        xor_words(&mut accum[b..b + m_words], self.events.x_flip(i));
-                        xor_words(&mut accum[b..b + m_words], self.events.z_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
                     } else if r < p_event {
                         let b = s * m_words;
-                        xor_words(&mut accum[b..b + m_words], self.events.x_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
                     }
                 }
             } else {
@@ -429,19 +525,19 @@ impl NoisyCompiledSampler {
                 let px_frac = px / p_event;
                 let pxy_frac = (px + py) / p_event;
 
-                let mut pos = geometric_sample(&mut self.rng, ln_1mp);
-                while pos < num_shots {
-                    let r: f64 = rand::Rng::gen(&mut self.rng);
+                let mut pos = start + geometric_sample(rng, ln_1mp);
+                while pos < end {
+                    let r: f64 = rand::Rng::gen(rng);
                     let b = pos * m_words;
                     if r < px_frac {
-                        xor_words(&mut accum[b..b + m_words], self.events.z_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
                     } else if r < pxy_frac {
-                        xor_words(&mut accum[b..b + m_words], self.events.x_flip(i));
-                        xor_words(&mut accum[b..b + m_words], self.events.z_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.z_flip(i));
                     } else {
-                        xor_words(&mut accum[b..b + m_words], self.events.x_flip(i));
+                        xor_words(&mut accum[b..b + m_words], events.x_flip(i));
                     }
-                    pos += 1 + geometric_sample(&mut self.rng, ln_1mp);
+                    pos += 1 + geometric_sample(rng, ln_1mp);
                 }
             }
         }

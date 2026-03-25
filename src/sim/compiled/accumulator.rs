@@ -783,6 +783,7 @@ impl ShotAccumulator for MarginalsAccumulator {
             ShotLayout::ShotMajor => {
                 let data = chunk.raw_data();
                 let m_words = chunk.m_words();
+                #[allow(clippy::needless_range_loop)]
                 if m_words == 1 {
                     for mi in 0..m {
                         let shift = mi as u32;

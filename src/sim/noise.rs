@@ -407,8 +407,7 @@ impl NoisyCompiledSampler {
     }
 
     pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
-        let mut acc =
-            crate::sim::compiled::MarginalsAccumulator::new(self.num_measurements);
+        let mut acc = crate::sim::compiled::MarginalsAccumulator::new(self.num_measurements);
         self.sample_chunked(total_shots, &mut acc);
         acc.marginals()
     }

@@ -553,7 +553,14 @@ impl TensorNetworkBackend {
                 self.apply_2q_matrix(targets[0], targets[1], &gate.matrix_4x4());
             }
             Gate::Cu(mat) => {
-                let m4 = Gate::Cu(mat.clone()).matrix_4x4();
+                let z = Complex64::new(0.0, 0.0);
+                let o = Complex64::new(1.0, 0.0);
+                let m4 = [
+                    [o, z, z, z],
+                    [z, o, z, z],
+                    [z, z, mat[0][0], mat[0][1]],
+                    [z, z, mat[1][0], mat[1][1]],
+                ];
                 self.apply_2q_matrix(targets[0], targets[1], &m4);
             }
             Gate::Fused2q(mat) => {
@@ -569,8 +576,12 @@ impl TensorNetworkBackend {
                 let one = Complex64::new(1.0, 0.0);
                 let zero = Complex64::new(0.0, 0.0);
                 for &(target_qubit, phase) in &data.phases {
-                    let mat = [[one, zero], [zero, phase]];
-                    let m4 = Gate::Cu(Box::new(mat)).matrix_4x4();
+                    let m4 = [
+                        [one, zero, zero, zero],
+                        [zero, one, zero, zero],
+                        [zero, zero, one, zero],
+                        [zero, zero, zero, phase],
+                    ];
                     self.apply_2q_matrix(control, target_qubit, &m4);
                 }
             }

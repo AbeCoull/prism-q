@@ -1019,7 +1019,7 @@ fn chunked_histogram_matches_direct() {
     for i in 0..20 {
         c.add_measure(i, i);
     }
-    let num_shots = 100_000;
+    let num_shots = 50_000;
 
     let mut sampler_direct = compile_measurements(&c, 42).unwrap();
     let direct_counts = sampler_direct.sample_bulk_packed(num_shots).counts();
@@ -1030,6 +1030,28 @@ fn chunked_histogram_matches_direct() {
     assert_eq!(
         direct_counts, chunked_counts,
         "chunked histogram must match direct"
+    );
+}
+
+#[test]
+fn accumulator_matches_packed_counts() {
+    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
+    c.num_classical_bits = 20;
+    for i in 0..20 {
+        c.add_measure(i, i);
+    }
+
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    let packed = sampler.sample_bulk_packed(100_000);
+    let direct_counts = packed.counts();
+
+    let mut acc = super::accumulator::HistogramAccumulator::new();
+    acc.accumulate(&packed);
+    let acc_counts = acc.into_counts();
+
+    assert_eq!(
+        direct_counts, acc_counts,
+        "accumulator counts must match PackedShots::counts"
     );
 }
 

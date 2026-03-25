@@ -435,6 +435,44 @@ fn count_shard_typed<const M: usize>(
     local
 }
 
+fn count_shard_shot_major_typed<const M: usize>(
+    data: &[u64],
+    shard_start: usize,
+    shard_end: usize,
+) -> FxHashMap<[u64; M], u64> {
+    let shard_len = shard_end - shard_start;
+    let mut local: FxHashMap<[u64; M], u64> = FxHashMap::default();
+    local.reserve(shard_len.min(65536));
+
+    for s in shard_start..shard_end {
+        let base = s * M;
+        let mut key = [0u64; M];
+        key.copy_from_slice(&data[base..base + M]);
+        count_shot_typed(&mut local, key);
+    }
+
+    local
+}
+
+fn count_shard_shot_major_wide(
+    data: &[u64],
+    shard_start: usize,
+    shard_end: usize,
+    m_words: usize,
+) -> FxHashMap<Vec<u64>, u64> {
+    let shard_len = shard_end - shard_start;
+    let mut local = FxHashMap::default();
+    local.reserve(shard_len.min(65536));
+
+    for s in shard_start..shard_end {
+        let base = s * m_words;
+        let key = &data[base..base + m_words];
+        count_shot_wide(&mut local, key);
+    }
+
+    local
+}
+
 fn count_shard_wide(
     data: &[u64],
     shard_start: usize,
@@ -527,7 +565,7 @@ impl ShotAccumulator for HistogramAccumulator {
         let m_words = chunk.m_words();
 
         if matches!(self.counts, InlineCounts::Uninit) {
-            self.counts = InlineCounts::init(m_words, n.min(65536));
+            self.counts = InlineCounts::init(m_words, n.min(1 << 18));
         }
 
         match chunk.layout() {
@@ -593,18 +631,82 @@ impl ShotAccumulator for HistogramAccumulator {
                 );
             }
             ShotLayout::ShotMajor => {
+                let data = chunk.raw_data();
+
                 macro_rules! shot_major_dispatch {
                     ($($variant:ident, $M:expr);+ $(;)?) => {
                         match &mut self.counts {
                             $(InlineCounts::$variant(counts) => {
+                                #[cfg(feature = "parallel")]
+                                if n >= MIN_SHOTS_FOR_PAR_HISTOGRAM {
+                                    use rayon::prelude::*;
+                                    let num_threads = rayon::current_num_threads();
+                                    let shots_per_thread = n.div_ceil(num_threads);
+
+                                    let thread_maps: Vec<FxHashMap<[u64; $M], u64>> =
+                                        (0..num_threads)
+                                            .into_par_iter()
+                                            .filter_map(|tid| {
+                                                let start = tid * shots_per_thread;
+                                                if start >= n { return None; }
+                                                let end = (start + shots_per_thread).min(n);
+                                                Some(count_shard_shot_major_typed::<$M>(
+                                                    data, start, end,
+                                                ))
+                                            })
+                                            .collect();
+
+                                    for shard in thread_maps {
+                                        merge_shard_typed(counts, shard);
+                                    }
+                                } else {
+                                    for s in 0..n {
+                                        let base = s * $M;
+                                        let mut key = [0u64; $M];
+                                        key.copy_from_slice(&data[base..base + $M]);
+                                        count_shot_typed(counts, key);
+                                    }
+                                }
+
+                                #[cfg(not(feature = "parallel"))]
                                 for s in 0..n {
-                                    let words = chunk.shot_words(s);
+                                    let base = s * $M;
                                     let mut key = [0u64; $M];
-                                    key.copy_from_slice(words);
+                                    key.copy_from_slice(&data[base..base + $M]);
                                     count_shot_typed(counts, key);
                                 }
                             })+
                             InlineCounts::Wide(counts) => {
+                                #[cfg(feature = "parallel")]
+                                if n >= MIN_SHOTS_FOR_PAR_HISTOGRAM {
+                                    use rayon::prelude::*;
+                                    let num_threads = rayon::current_num_threads();
+                                    let shots_per_thread = n.div_ceil(num_threads);
+
+                                    let thread_maps: Vec<FxHashMap<Vec<u64>, u64>> =
+                                        (0..num_threads)
+                                            .into_par_iter()
+                                            .filter_map(|tid| {
+                                                let start = tid * shots_per_thread;
+                                                if start >= n { return None; }
+                                                let end = (start + shots_per_thread).min(n);
+                                                Some(count_shard_shot_major_wide(
+                                                    data, start, end, m_words,
+                                                ))
+                                            })
+                                            .collect();
+
+                                    for shard in thread_maps {
+                                        merge_shard_wide(counts, shard);
+                                    }
+                                } else {
+                                    for s in 0..n {
+                                        let key = chunk.shot_words(s);
+                                        count_shot_wide(counts, key);
+                                    }
+                                }
+
+                                #[cfg(not(feature = "parallel"))]
                                 for s in 0..n {
                                     let key = chunk.shot_words(s);
                                     count_shot_wide(counts, key);
@@ -679,13 +781,27 @@ impl ShotAccumulator for MarginalsAccumulator {
                 }
             }
             ShotLayout::ShotMajor => {
-                for s in 0..n {
-                    let words = chunk.shot_words(s);
+                let data = chunk.raw_data();
+                let m_words = chunk.m_words();
+                #[allow(clippy::needless_range_loop)]
+                if m_words == 1 {
+                    for mi in 0..m {
+                        let shift = mi as u32;
+                        let mut count = 0u64;
+                        for s in 0..n {
+                            count += (data[s] >> shift) & 1;
+                        }
+                        self.ones[mi] += count;
+                    }
+                } else {
                     for mi in 0..m {
                         let w = mi / 64;
-                        if (words[w] >> (mi % 64)) & 1 != 0 {
-                            self.ones[mi] += 1;
+                        let shift = (mi % 64) as u32;
+                        let mut count = 0u64;
+                        for s in 0..n {
+                            count += (data[s * m_words + w] >> shift) & 1;
                         }
+                        self.ones[mi] += count;
                     }
                 }
             }

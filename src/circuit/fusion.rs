@@ -25,11 +25,14 @@ use num_complex::Complex64;
 
 use super::{smallvec, Circuit, Instruction, SmallVec};
 use crate::gates::{
-    kron_2x2, mat_mul_2x2, mat_mul_4x4, BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData,
-    Gate, Multi2qData, MultiFusedData,
+    kron_2x2, mat_mul_2x2, mat_mul_4x4, DiagEntry, DiagonalBatchData, Gate, Multi2qData,
+    MultiFusedData,
 };
 
-const IDENTITY_EPS: f64 = 1e-12;
+use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
+use super::fusion_rzz::{fuse_batch_rzz, fuse_rzz};
+
+pub(super) const IDENTITY_EPS: f64 = 1e-12;
 
 /// Minimum qubit count for 1q fusion, reorder, and batching passes.
 ///
@@ -68,9 +71,6 @@ const MIN_QUBITS_FOR_MULTI_2Q_FUSION: usize = MIN_QUBITS_FOR_2Q_FUSION;
 
 /// Minimum batch size for multi-2q fusion (single gate not worth wrapping).
 const MIN_MULTI_2Q_BATCH: usize = 2;
-
-/// Minimum batch size to justify controlled-phase fusion overhead.
-const MIN_BATCH_PHASES: usize = 2;
 
 /// Returns the qubits touched by an instruction.
 fn inst_qubits(inst: &Instruction) -> &[usize] {
@@ -600,9 +600,15 @@ fn flush_all_pending(
                 gates.push((q, mat));
             }
         }
+        let all_diagonal = gates
+            .iter()
+            .all(|(_, m)| m[0][1].norm() < IDENTITY_EPS && m[1][0].norm() < IDENTITY_EPS);
         let targets: SmallVec<[usize; 4]> = gates.iter().map(|&(t, _)| t).collect();
         output.push(Instruction::Gate {
-            gate: Gate::MultiFused(Box::new(MultiFusedData { gates })),
+            gate: Gate::MultiFused(Box::new(MultiFusedData {
+                gates,
+                all_diagonal,
+            })),
             targets,
         });
     } else {
@@ -626,131 +632,6 @@ fn has_multi_1q_run(circuit: &Circuit) -> bool {
                 total_1q += 1;
                 if total_1q >= 2 {
                     return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Fuse consecutive controlled-phase gates sharing the same control qubit.
-///
-/// Scans for runs of cphase gates (Cu with diagonal `[[1,0],[0,e^{iθ}]]`)
-/// that share a control qubit with no intervening gates touching that control.
-/// Batches of ≥2 are replaced with a single `Gate::BatchPhase` that applies
-/// all phases in one statevector pass.
-///
-/// Returns `Cow::Borrowed` when no fusion opportunities exist (zero overhead).
-pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
-    if !has_batchable_phases(&circuit) {
-        return circuit;
-    }
-
-    let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
-    let n = circuit.num_qubits;
-    type PhaseVec = SmallVec<[(usize, Complex64); 8]>;
-    let mut pending: Vec<Option<PhaseVec>> = (0..n).map(|_| None).collect();
-
-    let flush_qubit =
-        |q: usize, pending: &mut [Option<PhaseVec>], output: &mut Vec<Instruction>| {
-            if let Some(phases) = pending[q].take() {
-                if phases.len() >= MIN_BATCH_PHASES {
-                    output.push(Instruction::Gate {
-                        gate: Gate::BatchPhase(Box::new(BatchPhaseData { phases })),
-                        targets: smallvec![q],
-                    });
-                } else {
-                    for (target, phase) in phases {
-                        let one = Complex64::new(1.0, 0.0);
-                        let zero = Complex64::new(0.0, 0.0);
-                        output.push(Instruction::Gate {
-                            gate: Gate::cu([[one, zero], [zero, phase]]),
-                            targets: smallvec![q, target],
-                        });
-                    }
-                }
-            }
-        };
-
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate { gate, targets } => {
-                if let Some(phase) = gate.controlled_phase() {
-                    if gate.num_qubits() == 2 {
-                        let control = targets[0];
-                        let target = targets[1];
-                        flush_qubit(target, &mut pending, &mut output);
-                        match &mut pending[control] {
-                            Some(v) => v.push((target, phase)),
-                            slot => *slot = Some(smallvec![(target, phase)]),
-                        }
-                        continue;
-                    }
-                }
-                for &q in targets.iter() {
-                    flush_qubit(q, &mut pending, &mut output);
-                }
-                output.push(inst.clone());
-            }
-            Instruction::Measure { qubit, .. } => {
-                flush_qubit(*qubit, &mut pending, &mut output);
-                output.push(inst.clone());
-            }
-            Instruction::Barrier { qubits } => {
-                for &q in qubits.iter() {
-                    flush_qubit(q, &mut pending, &mut output);
-                }
-                output.push(inst.clone());
-            }
-            Instruction::Conditional { targets, .. } => {
-                for &q in targets.iter() {
-                    flush_qubit(q, &mut pending, &mut output);
-                }
-                output.push(inst.clone());
-            }
-        }
-    }
-
-    for q in 0..n {
-        flush_qubit(q, &mut pending, &mut output);
-    }
-
-    Cow::Owned(Circuit {
-        num_qubits: circuit.num_qubits,
-        num_classical_bits: circuit.num_classical_bits,
-        instructions: output,
-    })
-}
-
-fn has_batchable_phases(circuit: &Circuit) -> bool {
-    let mut has_pending = vec![false; circuit.num_qubits];
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate { gate, targets } => {
-                if gate.controlled_phase().is_some() && gate.num_qubits() == 2 {
-                    let control = targets[0];
-                    if has_pending[control] {
-                        return true;
-                    }
-                    has_pending[control] = true;
-                    has_pending[targets[1]] = false;
-                } else {
-                    for &q in targets.iter() {
-                        has_pending[q] = false;
-                    }
-                }
-            }
-            Instruction::Measure { qubit, .. } => {
-                has_pending[*qubit] = false;
-            }
-            Instruction::Barrier { qubits } => {
-                for &q in qubits {
-                    has_pending[q] = false;
-                }
-            }
-            Instruction::Conditional { targets, .. } => {
-                for &q in targets.iter() {
-                    has_pending[q] = false;
                 }
             }
         }
@@ -1036,181 +917,6 @@ fn has_multi_2q_opportunity(circuit: &Circuit) -> bool {
     false
 }
 
-fn is_batchable_1q(inst: &Instruction) -> bool {
-    matches!(
-        inst,
-        Instruction::Gate { targets, gate, .. }
-            if targets.len() == 1
-                && !matches!(gate, Gate::BatchPhase(_) | Gate::MultiFused(_) | Gate::Multi2q(_) | Gate::DiagonalBatch(_))
-    )
-}
-
-fn batch_post_phase_1q(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
-    let mut max_run = 0usize;
-    let mut run = 0usize;
-    for inst in &circuit.instructions {
-        if is_batchable_1q(inst) {
-            run += 1;
-            max_run = max_run.max(run);
-        } else {
-            run = 0;
-        }
-    }
-    if max_run < 2 {
-        return circuit;
-    }
-
-    let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
-    let mut pending: Vec<(usize, [[Complex64; 2]; 2])> = Vec::new();
-
-    let flush = |pending: &mut Vec<(usize, [[Complex64; 2]; 2])>, output: &mut Vec<Instruction>| {
-        if pending.len() >= 2 {
-            let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
-            for &(q, _) in pending.iter() {
-                if !targets.contains(&q) {
-                    targets.push(q);
-                }
-            }
-            targets.sort_unstable();
-            output.push(Instruction::Gate {
-                gate: Gate::MultiFused(Box::new(MultiFusedData {
-                    gates: std::mem::take(pending),
-                })),
-                targets,
-            });
-        } else {
-            for (q, mat) in pending.drain(..) {
-                output.push(Instruction::Gate {
-                    gate: Gate::Fused(Box::new(mat)),
-                    targets: smallvec![q],
-                });
-            }
-        }
-    };
-
-    for inst in &circuit.instructions {
-        if is_batchable_1q(inst) {
-            if let Instruction::Gate { gate, targets, .. } = inst {
-                pending.push((targets[0], gate.matrix_2x2()));
-            }
-        } else {
-            flush(&mut pending, &mut output);
-            output.push(inst.clone());
-        }
-    }
-
-    flush(&mut pending, &mut output);
-
-    Cow::Owned(Circuit {
-        num_qubits: circuit.num_qubits,
-        num_classical_bits: circuit.num_classical_bits,
-        instructions: output,
-    })
-}
-
-/// Batch consecutive Rzz gates into a single `BatchRzz` instruction.
-///
-/// Commutation-aware: diagonal 1q gates and non-overlapping 1q gates pass
-/// through without breaking a run.
-fn fuse_batch_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
-    let insts = &circuit.instructions;
-    let n = insts.len();
-    if n < 2 {
-        return Cow::Borrowed(circuit);
-    }
-
-    let rzz_count = insts
-        .iter()
-        .filter(|i| {
-            matches!(
-                i,
-                Instruction::Gate {
-                    gate: Gate::Rzz(_),
-                    ..
-                }
-            )
-        })
-        .count();
-    if rzz_count < 2 {
-        return Cow::Borrowed(circuit);
-    }
-
-    let mut output: Vec<Instruction> = Vec::with_capacity(n);
-    let mut rzz_run: Vec<(usize, usize, f64)> = Vec::new();
-    let mut deferred: Vec<Instruction> = Vec::new();
-    let mut rzz_qubits = vec![false; circuit.num_qubits];
-
-    for inst in insts {
-        if let Instruction::Gate {
-            gate: Gate::Rzz(theta),
-            targets,
-        } = inst
-        {
-            rzz_run.push((targets[0], targets[1], *theta));
-            rzz_qubits[targets[0]] = true;
-            rzz_qubits[targets[1]] = true;
-            continue;
-        }
-
-        if !rzz_run.is_empty() {
-            let can_pass = match inst {
-                Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
-                    gate.is_diagonal_1q() || !rzz_qubits[targets[0]]
-                }
-                _ => false,
-            };
-            if can_pass {
-                deferred.push(inst.clone());
-                continue;
-            }
-        }
-
-        flush_rzz_run(&mut output, &mut rzz_run, &mut deferred, &mut rzz_qubits);
-        output.push(inst.clone());
-    }
-
-    flush_rzz_run(&mut output, &mut rzz_run, &mut deferred, &mut rzz_qubits);
-
-    let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
-    c.instructions = output;
-    Cow::Owned(c)
-}
-
-fn flush_rzz_run(
-    output: &mut Vec<Instruction>,
-    rzz_run: &mut Vec<(usize, usize, f64)>,
-    deferred: &mut Vec<Instruction>,
-    rzz_qubits: &mut [bool],
-) {
-    if rzz_run.len() >= 2 {
-        let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
-        for &(q0, q1, _) in rzz_run.iter() {
-            if !tgts.contains(&q0) {
-                tgts.push(q0);
-            }
-            if !tgts.contains(&q1) {
-                tgts.push(q1);
-            }
-        }
-        output.push(Instruction::Gate {
-            gate: Gate::BatchRzz(Box::new(BatchRzzData {
-                edges: rzz_run.clone(),
-            })),
-            targets: tgts,
-        });
-    } else {
-        for &(q0, q1, theta) in rzz_run.iter() {
-            output.push(Instruction::Gate {
-                gate: Gate::Rzz(theta),
-                targets: smallvec![q0, q1],
-            });
-        }
-    }
-    output.append(deferred);
-    rzz_run.clear();
-    rzz_qubits.fill(false);
-}
-
 /// Returns true if `gate` is a diagonal gate that can be absorbed into a DiagonalBatch.
 fn is_diag_batchable(gate: &Gate) -> bool {
     match gate {
@@ -1354,64 +1060,6 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
     c.instructions = output;
     Cow::Owned(c)
-}
-
-/// Recognize CX(a,b) · Rz(θ,b) · CX(a,b) → Rzz(θ, a, b).
-///
-/// This is the standard decomposition of ZZ rotations used in QAOA and
-/// variational circuits. Fusing into a native diagonal 2q gate eliminates
-/// 2 of 3 full-state passes.
-fn fuse_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
-    let insts = &circuit.instructions;
-    let n = insts.len();
-    if n < 3 {
-        return Cow::Borrowed(circuit);
-    }
-
-    let mut out: Option<Vec<Instruction>> = None;
-    let mut i = 0;
-    while i < n {
-        if i + 2 < n {
-            if let (
-                Instruction::Gate {
-                    gate: Gate::Cx,
-                    targets: t1,
-                },
-                Instruction::Gate {
-                    gate: Gate::Rz(theta),
-                    targets: t2,
-                },
-                Instruction::Gate {
-                    gate: Gate::Cx,
-                    targets: t3,
-                },
-            ) = (&insts[i], &insts[i + 1], &insts[i + 2])
-            {
-                if t1.as_slice() == t3.as_slice() && t2.len() == 1 && t2[0] == t1[1] {
-                    let buf = out.get_or_insert_with(|| insts[..i].to_vec());
-                    buf.push(Instruction::Gate {
-                        gate: Gate::Rzz(*theta),
-                        targets: smallvec![t1[0], t1[1]],
-                    });
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        if let Some(buf) = out.as_mut() {
-            buf.push(insts[i].clone());
-        }
-        i += 1;
-    }
-
-    match out {
-        Some(new_insts) => {
-            let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
-            c.instructions = new_insts;
-            Cow::Owned(c)
-        }
-        None => Cow::Borrowed(circuit),
-    }
 }
 
 /// Returns `Cow::Borrowed` when no fusion is profitable (zero overhead).

@@ -16,7 +16,7 @@ use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use bts::{bts_batched, bts_single_pass, sample_bts_meas_major, BTS_BATCH_SHOTS};
-use rng::Xoshiro256PlusPlus;
+use rng::{binomial_sample, Xoshiro256PlusPlus};
 
 pub use accumulator::{
     default_chunk_size, optimal_chunk_size, CorrelatorAccumulator, HistogramAccumulator,
@@ -365,17 +365,6 @@ impl CompiledSampler {
         }
     }
 
-    fn bts_weight_threshold(&self, num_shots: usize) -> usize {
-        let s_words = num_shots.div_ceil(64);
-        let m_words = self.num_measurements.div_ceil(64);
-        let lut_groups = self.rank.div_ceil(LUT_GROUP_SIZE);
-        if s_words == 0 || self.num_measurements == 0 {
-            return 0;
-        }
-        (num_shots as u64 * lut_groups as u64 * m_words as u64
-            / (s_words as u64 * self.num_measurements as u64)) as usize
-    }
-
     fn should_use_bts(&self, num_shots: usize) -> bool {
         if let Some(sparse) = &self.sparse {
             if self.rank == 0 {
@@ -397,25 +386,6 @@ impl CompiledSampler {
         } else {
             false
         }
-    }
-
-    #[allow(dead_code)]
-    fn partition_measurements(&self, num_shots: usize) -> (Vec<usize>, Vec<usize>) {
-        let threshold = self.bts_weight_threshold(num_shots);
-        let sparse = match &self.sparse {
-            Some(s) => s,
-            None => return (Vec::new(), (0..self.num_measurements).collect()),
-        };
-        let mut light = Vec::new();
-        let mut heavy = Vec::new();
-        for m in 0..self.num_measurements {
-            if sparse.row_weight(m) <= threshold {
-                light.push(m);
-            } else {
-                heavy.push(m);
-            }
-        }
-        (light, heavy)
     }
 
     pub(crate) fn ref_bits_packed(&self) -> &[u64] {
@@ -679,9 +649,190 @@ impl CompiledSampler {
         &mut self,
         total_shots: usize,
     ) -> std::collections::HashMap<Vec<u64>, u64> {
+        if self.rank > 0 && self.parity_blocks.is_none() {
+            let num_outcomes = 1usize << self.rank;
+
+            if self.rank <= MAX_RANK_FOR_MULTINOMIAL
+                && total_shots >= num_outcomes * MIN_SHOTS_PER_OUTCOME_MULTINOMIAL
+            {
+                return self.sample_counts_multinomial(total_shots);
+            }
+
+            if self.rank <= MAX_RANK_FOR_RANK_SPACE
+                && total_shots >= num_outcomes * MIN_SHOTS_PER_OUTCOME
+            {
+                return self.sample_counts_rank_space(total_shots);
+            }
+        }
         let mut acc = HistogramAccumulator::new();
         self.sample_chunked(total_shots, &mut acc);
         acc.into_counts()
+    }
+
+    fn sample_counts_multinomial(
+        &mut self,
+        total_shots: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        use std::collections::HashMap;
+
+        let m_words = self.num_measurements.div_ceil(64);
+
+        if total_shots == 0 || self.num_measurements == 0 {
+            return HashMap::new();
+        }
+        if self.rank == 0 {
+            let mut counts = HashMap::new();
+            counts.insert(self.ref_bits_packed[..m_words].to_vec(), total_shots as u64);
+            return counts;
+        }
+
+        let rank = self.rank;
+        let num_outcomes = 1usize << rank;
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let mut counts = HashMap::new();
+        let mut remaining = total_shots;
+
+        for key in 0..num_outcomes {
+            if remaining == 0 {
+                break;
+            }
+            let outcomes_left = num_outcomes - key;
+            let count = if outcomes_left == 1 {
+                remaining
+            } else {
+                binomial_sample(&mut fast_rng, remaining, 1.0 / outcomes_left as f64)
+            };
+
+            if count > 0 {
+                let mut outcome = self.ref_bits_packed[..m_words].to_vec();
+                if let Some(lut) = &self.lut {
+                    let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
+                    for g in 0..total_groups {
+                        let byte = (key >> (g * 8)) & 0xFF;
+                        let entry = lut.lookup(g, byte);
+                        xor_words(&mut outcome, entry);
+                    }
+                } else {
+                    for j in 0..rank {
+                        if (key >> j) & 1 != 0 {
+                            xor_words(&mut outcome, &self.flip_rows[j]);
+                        }
+                    }
+                }
+                counts.insert(outcome, count as u64);
+            }
+            remaining -= count;
+        }
+
+        counts
+    }
+
+    fn sample_counts_rank_space(
+        &mut self,
+        total_shots: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        use std::collections::HashMap;
+
+        let m_words = self.num_measurements.div_ceil(64);
+
+        if total_shots == 0 || self.num_measurements == 0 {
+            return HashMap::new();
+        }
+        if self.rank == 0 {
+            let mut counts = HashMap::new();
+            counts.insert(self.ref_bits_packed[..m_words].to_vec(), total_shots as u64);
+            return counts;
+        }
+
+        let rank = self.rank;
+        let num_outcomes = 1usize << rank;
+        let mut rank_counts = vec![0u64; num_outcomes];
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+
+        if let Some(lut) = &self.lut {
+            let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
+            let bytes_per_shot = total_groups;
+            let remainder_mask: u8 = if lut.remainder_size > 0 {
+                (1u8 << lut.remainder_size) - 1
+            } else {
+                0xFF
+            };
+
+            let chunk_size = (32 * 1024 * 1024 / bytes_per_shot).max(64);
+            let mut rand_buf = vec![0u8; chunk_size * bytes_per_shot];
+            let mut remaining = total_shots;
+
+            while remaining > 0 {
+                let this_chunk = remaining.min(chunk_size);
+                let total_bytes = this_chunk * bytes_per_shot;
+
+                let full_chunks = total_bytes / 8;
+                let tail = full_chunks * 8;
+                for i in 0..full_chunks {
+                    let r = fast_rng.next_u64();
+                    rand_buf[i * 8..(i + 1) * 8].copy_from_slice(&r.to_le_bytes());
+                }
+                if tail < total_bytes {
+                    let r = fast_rng.next_u64();
+                    let bytes = r.to_le_bytes();
+                    rand_buf[tail..total_bytes].copy_from_slice(&bytes[..total_bytes - tail]);
+                }
+
+                if lut.remainder_size > 0 {
+                    let last_group = lut.num_full_groups;
+                    for s in 0..this_chunk {
+                        rand_buf[s * bytes_per_shot + last_group] &= remainder_mask;
+                    }
+                }
+
+                for s in 0..this_chunk {
+                    let base = s * bytes_per_shot;
+                    let mut key: usize = 0;
+                    for g in 0..bytes_per_shot {
+                        key |= (rand_buf[base + g] as usize) << (g * 8);
+                    }
+                    rank_counts[key] += 1;
+                }
+
+                remaining -= this_chunk;
+            }
+        } else {
+            let mut remaining = total_shots;
+            while remaining > 0 {
+                let this_chunk = remaining.min(4 * 1024 * 1024);
+                for _ in 0..this_chunk {
+                    let bits = fast_rng.next_u64();
+                    let key = (bits as usize) & (num_outcomes - 1);
+                    rank_counts[key] += 1;
+                }
+                remaining -= this_chunk;
+            }
+        }
+
+        let mut counts = HashMap::new();
+        for (key, &count) in rank_counts.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            let mut outcome = self.ref_bits_packed[..m_words].to_vec();
+            if let Some(lut) = &self.lut {
+                let total_groups = lut.num_full_groups + usize::from(lut.remainder_size > 0);
+                for g in 0..total_groups {
+                    let byte = (key >> (g * 8)) & 0xFF;
+                    let entry = lut.lookup(g, byte);
+                    xor_words(&mut outcome, entry);
+                }
+            } else {
+                for j in 0..rank {
+                    if (key >> j) & 1 != 0 {
+                        xor_words(&mut outcome, &self.flip_rows[j]);
+                    }
+                }
+            }
+            counts.insert(outcome, count);
+        }
+
+        counts
     }
 
     pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
@@ -1186,6 +1337,10 @@ fn gray_code_exact_counts(
 }
 
 const MAX_RANK_FOR_GRAY_CODE: usize = 25;
+const MAX_RANK_FOR_MULTINOMIAL: usize = 22;
+const MIN_SHOTS_PER_OUTCOME_MULTINOMIAL: usize = 8;
+const MAX_RANK_FOR_RANK_SPACE: usize = 20;
+const MIN_SHOTS_PER_OUTCOME: usize = 4;
 const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
 pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {

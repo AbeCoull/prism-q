@@ -405,6 +405,7 @@ fn accumulate_meas_major_wide(
     }
 }
 
+#[cfg(feature = "parallel")]
 fn count_shard_typed<const M: usize>(
     data: &[u64],
     shard_start: usize,
@@ -435,6 +436,7 @@ fn count_shard_typed<const M: usize>(
     local
 }
 
+#[cfg(feature = "parallel")]
 fn count_shard_shot_major_typed<const M: usize>(
     data: &[u64],
     shard_start: usize,
@@ -454,6 +456,7 @@ fn count_shard_shot_major_typed<const M: usize>(
     local
 }
 
+#[cfg(feature = "parallel")]
 fn count_shard_shot_major_wide(
     data: &[u64],
     shard_start: usize,
@@ -473,6 +476,7 @@ fn count_shard_shot_major_wide(
     local
 }
 
+#[cfg(feature = "parallel")]
 fn count_shard_wide(
     data: &[u64],
     shard_start: usize,
@@ -503,6 +507,7 @@ fn count_shard_wide(
     local
 }
 
+#[cfg(feature = "parallel")]
 fn merge_shard_typed<const M: usize>(
     dst: &mut FxHashMap<[u64; M], u64>,
     src: FxHashMap<[u64; M], u64>,
@@ -512,6 +517,7 @@ fn merge_shard_typed<const M: usize>(
     }
 }
 
+#[cfg(feature = "parallel")]
 fn merge_shard_wide(dst: &mut FxHashMap<Vec<u64>, u64>, src: FxHashMap<Vec<u64>, u64>) {
     for (key, count) in src {
         *dst.entry(key).or_insert(0) += count;

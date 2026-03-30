@@ -4,127 +4,31 @@
 //! the complexity lives in the backends and the parser.
 
 pub mod compiled;
+mod decomposed;
+mod dispatch;
 pub mod homological;
 pub mod noise;
 pub mod stabilizer_rank;
 pub mod unified_pauli;
 
+pub(crate) use decomposed::merge_probabilities;
+use decomposed::{
+    run_decomposed, run_decomposed_prefused, should_decompose, MIN_DECOMPOSITION_QUBITS,
+};
+pub use dispatch::BackendKind;
+use dispatch::{
+    has_temporal_clifford_opportunity, select_backend, supports_fused_for_kind,
+    try_temporal_clifford, validate_explicit_backend, AUTO_APPROX_MAX_TERMS, AUTO_SPD_MAX_TERMS,
+    MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
+    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
+    MIN_QUBITS_FOR_SPD_AUTO,
+};
+
 use std::collections::HashMap;
 
-use crate::backend::mps::MpsBackend;
-use crate::backend::product::ProductStateBackend;
-use crate::backend::sparse::SparseBackend;
-use crate::backend::stabilizer::StabilizerBackend;
-use crate::backend::statevector::StatevectorBackend;
-use crate::backend::tensornetwork::TensorNetworkBackend;
 use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction};
-use crate::error::{PrismError, Result};
-
-/// Maximum qubit count for statevector simulation in Auto dispatch.
-///
-/// Dynamically computed from available system memory (50% budget).
-/// Falls back to 28 (4 GB) when memory detection is unavailable.
-/// Can be overridden via `PRISM_MAX_SV_QUBITS` environment variable.
-fn max_statevector_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_MAX_SV_QUBITS") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n;
-            }
-        }
-        detect_max_sv_qubits().unwrap_or(28)
-    })
-}
-
-/// Detect system physical memory and compute the largest statevector qubit
-/// count that fits within 50% of it. Each qubit doubles memory: 2^n × 16 bytes.
-#[cfg(windows)]
-fn detect_max_sv_qubits() -> Option<usize> {
-    #[repr(C)]
-    struct MemoryStatusEx {
-        dw_length: u32,
-        dw_memory_load: u32,
-        ull_total_phys: u64,
-        ull_avail_phys: u64,
-        ull_total_page_file: u64,
-        ull_avail_page_file: u64,
-        ull_total_virtual: u64,
-        ull_avail_virtual: u64,
-        ull_avail_extended_virtual: u64,
-    }
-
-    extern "system" {
-        fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
-    }
-
-    // SAFETY: zeroed MemoryStatusEx is valid (all-zero bit pattern is a valid repr(C) struct)
-    let mut status: MemoryStatusEx = unsafe { std::mem::zeroed() };
-    status.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
-    // SAFETY: status is a valid MemoryStatusEx with dw_length set; FFI call reads/writes only within the struct
-    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
-        return None;
-    }
-
-    let budget = status.ull_total_phys / 2;
-    let max_elements = budget / 16;
-    if max_elements == 0 {
-        return Some(28);
-    }
-    let n = 63 - max_elements.leading_zeros() as usize;
-    Some(n.min(33)) // cap at 33 qubits (128 GB state)
-}
-
-#[cfg(unix)]
-fn detect_max_sv_qubits() -> Option<usize> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    for line in meminfo.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
-            let budget = (kb * 1024) / 2;
-            let max_elements = budget / 16;
-            if max_elements == 0 {
-                return Some(28);
-            }
-            let n = 63 - max_elements.leading_zeros() as usize;
-            return Some(n.min(33));
-        }
-    }
-    None
-}
-
-#[cfg(not(any(windows, unix)))]
-fn detect_max_sv_qubits() -> Option<usize> {
-    None
-}
-
-/// Default bond dimension for MPS when auto-selected.
-const AUTO_MPS_BOND_DIM: usize = 256;
-
-/// Maximum T-gate count for automatic Clifford+T dispatch.
-/// At t=12, stabilizer rank creates 2^12 = 4096 branches.
-const MAX_AUTO_T_COUNT: usize = 12;
-
-/// Maximum qubit count for stabilizer rank exact probability computation.
-const MAX_STABILIZER_RANK_QUBITS: usize = 25;
-
-/// Minimum qubit count for subsystem decomposition.
-///
-/// Below this threshold, statevector is tiny and the analysis overhead
-/// exceeds any savings from decomposition.
-const MIN_DECOMPOSITION_QUBITS: usize = 8;
-
-/// Check whether decomposition is worthwhile based on block structure.
-///
-/// Decomposition only helps when it meaningfully reduces the largest
-/// block size. If the largest block is nearly the full circuit, the
-/// Kronecker merge cost (~3 × 2^N alloc) exceeds the savings.
-fn should_decompose(components: &[Vec<usize>], total_qubits: usize) -> bool {
-    let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
-    // Require at least 3 qubits of savings to justify merge overhead.
-    max_block + 3 <= total_qubits
-}
+use crate::error::Result;
 
 /// Options controlling what `sim::run` computes.
 ///
@@ -342,516 +246,6 @@ pub struct SimulationResult {
     pub probabilities: Option<Probabilities>,
 }
 
-/// Backend selection for [`run_with`] and [`run_with_opts`].
-///
-/// Use `Auto` for automatic dispatch based on circuit properties, or specify
-/// a backend explicitly.
-#[derive(Debug, Clone)]
-pub enum BackendKind {
-    /// Automatically select the optimal backend based on circuit analysis.
-    ///
-    /// Decision tree:
-    /// 1. No entangling gates        → ProductState (O(n))
-    /// 2. All Clifford gates         → Stabilizer (O(n²))
-    /// 3. Clifford+T, t ≤ 12        → StabilizerRank (O(2^t · n²))
-    /// 4. Above memory limit:
-    ///    a. Sparse-friendly         → Sparse (O(k) where k = non-zero amplitudes)
-    ///    b. Otherwise               → MPS (bounded bond dimension)
-    /// 5. Otherwise                  → Statevector (exact, general-purpose)
-    Auto,
-    /// Full state-vector simulation (exact, exponential memory).
-    Statevector,
-    /// Clifford-only O(n^2) stabilizer tableau.
-    Stabilizer,
-    /// Sparse state-vector, O(k) in non-zero amplitudes.
-    Sparse,
-    /// Matrix Product State with bounded bond dimension.
-    Mps {
-        /// Maximum bond dimension (controls accuracy vs speed).
-        max_bond_dim: usize,
-    },
-    /// Per-qubit product state (non-entangling circuits only).
-    ProductState,
-    /// Tensor network with deferred contraction.
-    TensorNetwork,
-    /// Dynamic split-state with on-demand merging.
-    Factored,
-    /// Stabilizer rank decomposition for Clifford+T circuits.
-    ///
-    /// Maintains a weighted sum of stabilizer states. Clifford gates are O(n²)
-    /// per term. Each T gate doubles the term count via T = α·I + β·Z.
-    /// Accumulates weighted amplitudes for exact probabilities. Limits: t ≤ 20, n ≤ 25.
-    StabilizerRank,
-    /// Filtered stabilizer: per-cluster tableaux with dynamic merging.
-    ///
-    /// Starts with one qubit per cluster. Gates within a cluster operate on
-    /// a small tableau. Cross-cluster 2q gates merge tableaux. Independent
-    /// subsystems never merge, giving O(block_size²) per gate vs O(n²).
-    FilteredStabilizer,
-    /// Stochastic Pauli Propagation for Clifford+T circuits.
-    ///
-    /// Backward-propagates measurement observables through the circuit as Pauli
-    /// strings. Clifford gates conjugate in O(1). T gates branch stochastically.
-    /// Per-path cost O(d×n/64), independent of T-gate count. Returns marginal
-    /// probabilities via Monte Carlo estimation.
-    StochasticPauli {
-        /// Number of stochastic paths per measurement qubit.
-        num_samples: usize,
-    },
-    /// Deterministic Sparse Pauli Dynamics for Clifford+T circuits.
-    ///
-    /// Backward-propagates measurement observables as a weighted sum of Pauli
-    /// strings stored in a HashMap. T gates deterministically branch X/Y terms.
-    /// Identical strings auto-merge. Optional ε-truncation for approximate mode.
-    /// Exact for small T-counts, approximate with bounded error for larger ones.
-    DeterministicPauli {
-        /// Drop Pauli terms with coefficient magnitude below this threshold.
-        /// Use 0.0 for exact mode.
-        epsilon: f64,
-        /// Maximum number of terms before forced truncation. Use 0 for unlimited.
-        max_terms: usize,
-    },
-}
-
-/// Validate that an explicitly-chosen backend is compatible with the circuit.
-///
-/// Auto dispatch never fails — it always selects a valid backend. This
-/// validation only applies to explicit backend requests, catching mistakes
-/// early with clear error messages instead of cryptic backend errors later.
-fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
-    match kind {
-        BackendKind::Stabilizer | BackendKind::FilteredStabilizer => {
-            if !circuit.is_clifford_only() {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "stabilizer".into(),
-                    reason: "circuit contains non-Clifford gates".into(),
-                });
-            }
-        }
-        BackendKind::ProductState => {
-            if circuit.has_entangling_gates() {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "productstate".into(),
-                    reason: "circuit contains entangling gates".into(),
-                });
-            }
-        }
-        BackendKind::StabilizerRank => {
-            if !circuit.has_t_gates() {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "stabilizer_rank".into(),
-                    reason: "circuit has no T gates; use Stabilizer instead".into(),
-                });
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> bool {
-    match kind {
-        BackendKind::Stabilizer
-        | BackendKind::FilteredStabilizer
-        | BackendKind::StabilizerRank
-        | BackendKind::StochasticPauli { .. }
-        | BackendKind::DeterministicPauli { .. } => false,
-        BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
-        _ => true,
-    }
-}
-
-fn select_backend(
-    kind: &BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-    has_partial_independence: bool,
-) -> Box<dyn Backend> {
-    match kind {
-        BackendKind::Auto => {
-            if !circuit.has_entangling_gates() {
-                Box::new(ProductStateBackend::new(seed))
-            } else if circuit.is_clifford_only() {
-                Box::new(StabilizerBackend::new(seed))
-            } else if circuit.num_qubits > max_statevector_qubits() {
-                if circuit.is_sparse_friendly() {
-                    Box::new(SparseBackend::new(seed))
-                } else {
-                    Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM))
-                }
-            } else if has_partial_independence {
-                Box::new(crate::backend::factored::FactoredBackend::new(seed))
-            } else {
-                Box::new(StatevectorBackend::new(seed))
-            }
-        }
-        BackendKind::Statevector => Box::new(StatevectorBackend::new(seed)),
-        BackendKind::Stabilizer => Box::new(StabilizerBackend::new(seed)),
-        BackendKind::FilteredStabilizer => Box::new(
-            crate::backend::stabilizer::FilteredStabilizerBackend::new(seed),
-        ),
-        BackendKind::Sparse => Box::new(SparseBackend::new(seed)),
-        BackendKind::Mps { max_bond_dim } => Box::new(MpsBackend::new(seed, *max_bond_dim)),
-        BackendKind::ProductState => Box::new(ProductStateBackend::new(seed)),
-        BackendKind::TensorNetwork => Box::new(TensorNetworkBackend::new(seed)),
-        BackendKind::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
-        BackendKind::StabilizerRank => {
-            unreachable!("StabilizerRank is handled before select_backend")
-        }
-        BackendKind::StochasticPauli { .. } => {
-            unreachable!("StochasticPauli is handled before select_backend")
-        }
-        BackendKind::DeterministicPauli { .. } => {
-            unreachable!("DeterministicPauli is handled before select_backend")
-        }
-    }
-}
-
-/// Execute blocks, choosing between parallel and sequential dispatch.
-///
-/// When all blocks are small (< `MAX_BLOCK_QUBITS_FOR_PAR`), we run them
-/// concurrently via Rayon — each block's internal gate kernels stay sequential,
-/// and block-level parallelism uses the thread pool. When any block is large,
-/// each block already uses Rayon internally for gate kernels, so we run
-/// blocks sequentially to avoid thread oversubscription.
-fn run_blocks_maybe_par(
-    kind: &BackendKind,
-    partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
-    _components: &[Vec<usize>],
-    seed: u64,
-    opts: &SimOptions,
-    k: usize,
-) -> Vec<Result<SimulationResult>> {
-    #[cfg(feature = "parallel")]
-    {
-        let all_small = _components
-            .iter()
-            .all(|c| c.len() < MAX_BLOCK_QUBITS_FOR_PAR);
-        if all_small && k >= 2 {
-            use rayon::prelude::*;
-            crate::backend::init_thread_pool();
-            return (0..k)
-                .into_par_iter()
-                .map(|i| run_subcircuit(kind, &partitions[i].0, seed.wrapping_add(i as u64), opts))
-                .collect();
-        }
-    }
-    (0..k)
-        .map(|i| run_subcircuit(kind, &partitions[i].0, seed.wrapping_add(i as u64), opts))
-        .collect()
-}
-
-/// Execute a pre-extracted sub-circuit on an appropriate backend.
-///
-/// Delegates to `run_with_opts` so subcircuits benefit from the full Auto
-/// dispatch tree (Clifford+T → StabilizerRank, temporal Clifford, etc.).
-fn run_subcircuit(
-    kind: &BackendKind,
-    sub_circuit: &Circuit,
-    block_seed: u64,
-    opts: &SimOptions,
-) -> Result<SimulationResult> {
-    let block_kind = if matches!(kind, BackendKind::Auto) {
-        BackendKind::Auto
-    } else {
-        kind.clone()
-    };
-    run_with_opts(block_kind, sub_circuit, block_seed, opts.clone())
-}
-
-#[cfg(feature = "parallel")]
-const MAX_BLOCK_QUBITS_FOR_PAR: usize = 14;
-
-/// Simulate independent subsystems separately, then merge results.
-///
-/// Uses `partition_subcircuits` for O(N) instruction routing (single pass)
-/// instead of K calls to `extract_subcircuit` (K passes).
-fn run_decomposed(
-    kind: &BackendKind,
-    components: &[Vec<usize>],
-    circuit: &Circuit,
-    seed: u64,
-    opts: &SimOptions,
-) -> Result<SimulationResult> {
-    let partitions = circuit.partition_subcircuits(components);
-    let k = partitions.len();
-
-    let results: Vec<Result<SimulationResult>> =
-        run_blocks_maybe_par(kind, &partitions, components, seed, opts, k);
-
-    merge_decomposed_results(
-        results,
-        components,
-        &partitions,
-        circuit.num_classical_bits,
-        circuit.num_qubits,
-        opts,
-    )
-}
-
-fn merge_decomposed_results(
-    results: Vec<Result<SimulationResult>>,
-    components: &[Vec<usize>],
-    partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
-    num_classical_bits: usize,
-    num_qubits: usize,
-    opts: &SimOptions,
-) -> Result<SimulationResult> {
-    let mut factored_blocks: Vec<FactoredBlock> = Vec::new();
-    let mut merged_classical = vec![false; num_classical_bits];
-
-    for (i, result) in results.into_iter().enumerate() {
-        let result = result?;
-        let (_, ref qubit_map, ref classical_map) = partitions[i];
-
-        for (local_idx, &global_idx) in classical_map.iter().enumerate() {
-            merged_classical[global_idx] = result.classical_bits[local_idx];
-        }
-
-        if opts.probabilities && num_qubits <= 64 {
-            if let Some(probs) = result.probabilities {
-                let dense = probs.to_vec();
-                let mut mask = 0u64;
-                for &global_qubit in qubit_map {
-                    mask |= 1u64 << global_qubit;
-                }
-                factored_blocks.push(FactoredBlock { probs: dense, mask });
-            }
-        }
-    }
-
-    let probabilities = if opts.probabilities && factored_blocks.len() == components.len() {
-        Some(Probabilities::Factored {
-            blocks: factored_blocks,
-            total_qubits: num_qubits,
-        })
-    } else {
-        None
-    };
-
-    Ok(SimulationResult {
-        classical_bits: merged_classical,
-        probabilities,
-    })
-}
-
-fn run_decomposed_prefused(
-    kind: &BackendKind,
-    components: &[Vec<usize>],
-    partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
-    fused_blocks: &[std::borrow::Cow<'_, Circuit>],
-    seed: u64,
-    opts: &SimOptions,
-    original_circuit: &Circuit,
-) -> Result<SimulationResult> {
-    let k = partitions.len();
-    let results: Vec<Result<SimulationResult>> = (0..k)
-        .map(|i| {
-            let block_seed = seed.wrapping_add(i as u64);
-            let sub = &partitions[i].0;
-            let block_kind = if matches!(kind, BackendKind::Auto) {
-                BackendKind::Auto
-            } else {
-                kind.clone()
-            };
-            if !matches!(block_kind, BackendKind::Auto) {
-                validate_explicit_backend(&block_kind, sub)?;
-            }
-            let mut backend = select_backend(&block_kind, sub, block_seed, false);
-            execute_circuit(&mut *backend, &fused_blocks[i], opts)
-        })
-        .collect();
-    merge_decomposed_results(
-        results,
-        components,
-        partitions,
-        original_circuit.num_classical_bits,
-        original_circuit.num_qubits,
-        opts,
-    )
-}
-
-/// Combine per-block probability vectors via Kronecker product.
-///
-/// Two-pass O(2^N) algorithm:
-/// 1. In-place Kronecker product — single allocation, reverse-iteration expansion
-/// 2. Bit permutation to map natural (block-sequential) bit positions
-///    to global qubit positions (parallelized at ≥2^14 states)
-pub(crate) fn merge_probabilities(
-    blocks: &[(Vec<f64>, Vec<usize>)],
-    total_qubits: usize,
-) -> Vec<f64> {
-    let n_states = 1usize << total_qubits;
-
-    // Pass 1: In-place Kronecker product — single 2^N allocation.
-    // Expand in reverse order so writes never clobber unread source data.
-    let mut result = vec![0.0f64; n_states];
-    result[0] = 1.0;
-    let mut cur_len = 1usize;
-
-    for (probs, _) in blocks {
-        let block_len = probs.len();
-        let new_len = cur_len * block_len;
-        for i in (0..cur_len).rev() {
-            let r = result[i];
-            for j in 0..block_len {
-                result[i * block_len + j] = r * probs[j];
-            }
-        }
-        cur_len = new_len;
-    }
-    debug_assert_eq!(cur_len, n_states);
-
-    // Build natural-to-global bit position mapping.
-    // Kronecker A ⊗ B puts A's bits in the MSBs and B's in the LSBs.
-    // After iterating blocks in forward order, the LAST block occupies
-    // the lowest bit positions in the result index.
-    let mut natural_to_global = Vec::with_capacity(total_qubits);
-    for (_probs, qubits) in blocks.iter().rev() {
-        natural_to_global.extend_from_slice(qubits);
-    }
-
-    if natural_to_global.iter().enumerate().all(|(i, &g)| i == g) {
-        return result;
-    }
-
-    // Pass 2: Bit permutation via perm table.
-    let mut perm = vec![0usize; n_states];
-    for (nat_bit, &global_bit) in natural_to_global.iter().enumerate() {
-        let half = 1usize << nat_bit;
-        for i in 0..half {
-            perm[i | half] = perm[i] | (1 << global_bit);
-        }
-    }
-
-    let mut permuted = vec![0.0f64; n_states];
-
-    #[cfg(feature = "parallel")]
-    {
-        const MIN_PAR_PERM: usize = 1 << 14;
-        if n_states >= MIN_PAR_PERM {
-            use rayon::prelude::*;
-            result
-                .par_iter()
-                .zip(perm.par_iter())
-                .for_each(|(&prob, &global_idx)| {
-                    // SAFETY: perm is a bijection so each global_idx is written exactly once.
-                    // No two threads write to the same index.
-                    unsafe {
-                        let ptr = permuted.as_ptr() as *mut f64;
-                        *ptr.add(global_idx) = prob;
-                    }
-                });
-            return permuted;
-        }
-    }
-
-    for (nat_idx, &prob) in result.iter().enumerate() {
-        permuted[perm[nat_idx]] = prob;
-    }
-    permuted
-}
-
-/// Minimum Clifford prefix gate count for temporal decomposition to be worthwhile.
-///
-/// The stabilizer→statevector export costs O(2^n × n). Each prefix gate
-/// saved is ~2^n ops. At small n the export dominates; at large n the prefix
-/// savings dominate. Scale with qubit count: minimum 2*n gates, floor at 16.
-#[inline]
-fn min_clifford_prefix_gates(num_qubits: usize) -> usize {
-    (num_qubits * 2).max(16)
-}
-
-fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Circuit) -> bool {
-    if !matches!(kind, BackendKind::Auto) {
-        return false;
-    }
-    if circuit.num_qubits > max_statevector_qubits() {
-        return false;
-    }
-    let min_gates = min_clifford_prefix_gates(circuit.num_qubits);
-    let mut prefix_gates = 0;
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate { gate, .. } => {
-                if !gate.is_clifford() {
-                    break;
-                }
-                prefix_gates += 1;
-            }
-            Instruction::Measure { .. } | Instruction::Conditional { .. } => break,
-            Instruction::Barrier { .. } => {}
-        }
-    }
-    prefix_gates >= min_gates && prefix_gates < circuit.instructions.len()
-}
-
-/// Try temporal Clifford decomposition: run a Clifford prefix on Stabilizer,
-/// convert to statevector, then continue the tail on Statevector.
-///
-/// Returns `None` if the circuit doesn't qualify (no prefix, too few prefix
-/// gates, too many qubits for export, or not an Auto dispatch).
-fn try_temporal_clifford(
-    kind: &BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-    opts: &SimOptions,
-) -> Option<Result<SimulationResult>> {
-    if !matches!(kind, BackendKind::Auto) {
-        return None;
-    }
-    if circuit.num_qubits > max_statevector_qubits() {
-        return None;
-    }
-    let (prefix, tail) = circuit.clifford_prefix_split()?;
-    if prefix.gate_count() < min_clifford_prefix_gates(circuit.num_qubits) {
-        return None;
-    }
-
-    // Phase 1: Run Clifford prefix on Stabilizer
-    let mut stab = StabilizerBackend::new(seed);
-    if let Err(e) = stab.init(prefix.num_qubits, prefix.num_classical_bits) {
-        return Some(Err(e));
-    }
-    stab.enable_lazy_destab();
-    for inst in &prefix.instructions {
-        if let Err(e) = stab.apply(inst) {
-            return Some(Err(e));
-        }
-    }
-
-    // Phase 2: Export stabilizer state as dense statevector
-    let state = match stab.export_statevector() {
-        Ok(s) => s,
-        Err(e) => return Some(Err(e)),
-    };
-
-    // Phase 3: Initialize statevector backend from exported state
-    let mut sv = StatevectorBackend::new(seed);
-    if let Err(e) = sv.init_from_state(state, tail.num_classical_bits) {
-        return Some(Err(e));
-    }
-
-    // Phase 4: Fuse and execute the tail
-    let fused_tail = crate::circuit::fusion::fuse_circuit(&tail, sv.supports_fused_gates());
-    for inst in &fused_tail.instructions {
-        if let Err(e) = sv.apply(inst) {
-            return Some(Err(e));
-        }
-    }
-
-    let probs = if opts.probabilities {
-        sv.probabilities().ok().map(Probabilities::Dense)
-    } else {
-        None
-    };
-
-    Some(Ok(SimulationResult {
-        classical_bits: sv.classical_results().to_vec(),
-        probabilities: probs,
-    }))
-}
-
 /// Core execution: fuse, init, apply, extract.
 fn execute(
     backend: &mut dyn Backend,
@@ -917,6 +311,23 @@ pub fn run_with_opts(
         let components = circuit.independent_subsystems();
         if components.len() > 1 {
             if should_decompose(&components, circuit.num_qubits) {
+                let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
+                if matches!(kind, BackendKind::Auto)
+                    && circuit.is_clifford_only()
+                    && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
+                    && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
+                {
+                    let mut backend =
+                        crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed);
+                    let fs_opts = if circuit.num_qubits > 64 {
+                        SimOptions {
+                            probabilities: false,
+                        }
+                    } else {
+                        opts.clone()
+                    };
+                    return execute(&mut backend, circuit, &fs_opts);
+                }
                 return run_decomposed(&kind, &components, circuit, seed, &opts);
             }
             has_partial_independence = true;
@@ -945,20 +356,34 @@ pub fn run_with_opts(
             classical_bits: vec![],
         });
     }
-    // Auto: Clifford+T with small T-count → stabilizer rank decomposition.
-    // Each branch is O(n²) stabilizer instead of O(2^n) statevector, but we
-    // need 2^t branches for exact probabilities, so limit t ≤ 12 (4096 branches).
     if matches!(kind, BackendKind::Auto)
         && circuit.is_clifford_plus_t()
         && circuit.has_t_gates()
-        && circuit.t_count() <= MAX_AUTO_T_COUNT
         && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
     {
-        let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
-        return Ok(SimulationResult {
-            probabilities: Some(Probabilities::Dense(sr.probabilities)),
-            classical_bits: vec![],
-        });
+        let t = circuit.t_count();
+        let n = circuit.num_qubits;
+        let log2n = if n >= 2 {
+            (n as f64).log2().ceil() as usize * 2
+        } else {
+            0
+        };
+        let sr_budget = n.saturating_sub(log2n);
+        if t <= MAX_AUTO_T_COUNT_EXACT && t <= sr_budget {
+            let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
+            return Ok(SimulationResult {
+                probabilities: Some(Probabilities::Dense(sr.probabilities)),
+                classical_bits: vec![],
+            });
+        }
+        if t <= MAX_AUTO_T_COUNT_APPROX && t <= sr_budget {
+            let sr =
+                stabilizer_rank::run_stabilizer_rank_approx(circuit, AUTO_APPROX_MAX_TERMS, seed)?;
+            return Ok(SimulationResult {
+                probabilities: Some(Probabilities::Dense(sr.probabilities)),
+                classical_bits: vec![],
+            });
+        }
     }
     // Temporal Clifford decomposition: if the circuit has a substantial Clifford
     // prefix followed by non-Clifford gates, run the prefix on Stabilizer and
@@ -1143,6 +568,117 @@ pub fn run_shots_random(circuit: &Circuit, num_shots: usize) -> Result<ShotsResu
     run_shots_with(BackendKind::Auto, circuit, num_shots, rand::random())
 }
 
+/// Execute a circuit multiple times and return outcome counts directly.
+///
+/// For Clifford circuits with Auto/Stabilizer/FilteredStabilizer backends,
+/// routes through the compiled sampler's optimized counting path (rank-space
+/// counting for low-rank circuits, histogram accumulation for high-rank).
+/// For other backends, falls back to per-shot simulation with counting.
+pub fn run_counts(
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> Result<HashMap<Vec<u64>, u64>> {
+    run_counts_with(BackendKind::Auto, circuit, num_shots, seed)
+}
+
+/// Like [`run_counts`], but with explicit backend selection.
+pub fn run_counts_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> Result<HashMap<Vec<u64>, u64>> {
+    if (matches!(
+        kind,
+        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
+    )) && circuit.is_clifford_only()
+        && circuit
+            .instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::Measure { .. }))
+        && num_shots >= 2
+    {
+        let mut sampler = compiled::compile_measurements(circuit, seed)?;
+        return Ok(sampler.sample_counts(num_shots));
+    }
+
+    let result = run_shots_with(kind, circuit, num_shots, seed)?;
+    let m_words = circuit.num_classical_bits.div_ceil(64);
+    let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
+    for shot in &result.shots {
+        let mut key = vec![0u64; m_words];
+        for (i, &b) in shot.iter().enumerate() {
+            if b {
+                key[i / 64] |= 1u64 << (i % 64);
+            }
+        }
+        *counts.entry(key).or_insert(0) += 1;
+    }
+    Ok(counts)
+}
+
+/// Compute per-qubit marginal probabilities: P(q_i = 0) and P(q_i = 1) for each qubit.
+///
+/// Returns a `Vec<(f64, f64)>` of length `num_qubits`, where each element is `(p0, p1)`.
+///
+/// For Clifford+T circuits, uses Sparse Pauli Dynamics (SPD) — Heisenberg-picture
+/// backward propagation that scales with Pauli complexity, not 2^n. This is orders
+/// of magnitude faster than statevector for structured Clifford+T circuits (25-400x
+/// at 14-22 qubits).
+///
+/// For pure Clifford circuits, compiles and extracts marginals from the parity matrix.
+///
+/// For other circuits, falls back to statevector probabilities and extracts marginals.
+pub fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
+    run_marginals_with(BackendKind::Auto, circuit, seed)
+}
+
+/// Like [`run_marginals`], but with explicit backend selection.
+pub fn run_marginals_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> Result<Vec<(f64, f64)>> {
+    let n = circuit.num_qubits;
+
+    if (matches!(
+        kind,
+        BackendKind::Auto | BackendKind::DeterministicPauli { .. }
+    )) && circuit.is_clifford_plus_t()
+        && circuit.has_t_gates()
+        && n >= MIN_QUBITS_FOR_SPD_AUTO
+    {
+        let spd = unified_pauli::run_spd(circuit, 0.0, AUTO_SPD_MAX_TERMS)?;
+        return Ok(spd
+            .expectations
+            .iter()
+            .map(|ez| {
+                let p0 = ((1.0 + ez) / 2.0).clamp(0.0, 1.0);
+                (p0, 1.0 - p0)
+            })
+            .collect());
+    }
+
+    let result = run_with(kind, circuit, seed)?;
+    if let Some(probs) = &result.probabilities {
+        let mut marginals = vec![(0.0f64, 0.0f64); n];
+        let dense = probs.to_vec();
+        for (idx, &p) in dense.iter().enumerate() {
+            for (q, m) in marginals.iter_mut().enumerate() {
+                if (idx >> q) & 1 == 0 {
+                    m.0 += p;
+                } else {
+                    m.1 += p;
+                }
+            }
+        }
+        Ok(marginals)
+    } else {
+        Ok(vec![(0.5, 0.5); n])
+    }
+}
+
 /// Execute a circuit multiple times with explicit backend selection.
 pub fn run_shots_with(
     kind: BackendKind,
@@ -1210,15 +746,18 @@ pub fn run_shots_with(
     if matches!(kind, BackendKind::StabilizerRank) {
         return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
-    // Auto: Clifford+T with small T-count → stabilizer rank shot sampling.
-    // Each shot samples a random Clifford branch (O(n²) stabilizer), avoiding
-    // exponential statevector/MPS cost. No qubit limit for shots.
-    if matches!(kind, BackendKind::Auto)
-        && circuit.is_clifford_plus_t()
-        && circuit.has_t_gates()
-        && circuit.t_count() <= MAX_AUTO_T_COUNT
-    {
-        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+    if matches!(kind, BackendKind::Auto) && circuit.is_clifford_plus_t() && circuit.has_t_gates() {
+        let t = circuit.t_count();
+        let n = circuit.num_qubits;
+        let log2n = if n >= 2 {
+            (n as f64).log2().ceil() as usize * 2
+        } else {
+            0
+        };
+        let sr_budget = n.saturating_sub(log2n);
+        if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
+            return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+        }
     }
 
     if has_temporal_clifford_opportunity(&kind, circuit) {
@@ -1343,7 +882,14 @@ fn run_shots_fallback(
 
 #[cfg(test)]
 mod tests {
+    use super::dispatch::min_clifford_prefix_gates;
     use super::*;
+    use crate::backend::mps::MpsBackend;
+    use crate::backend::product::ProductStateBackend;
+    use crate::backend::sparse::SparseBackend;
+    use crate::backend::stabilizer::StabilizerBackend;
+    use crate::backend::statevector::StatevectorBackend;
+    use crate::backend::tensornetwork::TensorNetworkBackend;
     use crate::gates::Gate;
 
     fn make_clifford_circuit() -> Circuit {
@@ -1611,7 +1157,7 @@ mod tests {
         c.add_gate(Gate::Rz(1.2), &[2]);
 
         let (prefix, _tail) = c.clifford_prefix_split().unwrap();
-        assert!(prefix.gate_count() >= super::min_clifford_prefix_gates(c.num_qubits));
+        assert!(prefix.gate_count() >= min_clifford_prefix_gates(c.num_qubits));
 
         let auto_result = run(&c, 42).unwrap();
 
@@ -2398,5 +1944,50 @@ mod tests {
         let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.001);
         let result = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 100, 42).unwrap();
         assert_eq!(result.shots.len(), 100);
+    }
+
+    #[test]
+    fn test_run_marginals_bell_pair() {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        let m = run_marginals(&c, 42).unwrap();
+        assert_eq!(m.len(), 2);
+        assert!((m[0].0 - 0.5).abs() < 1e-10);
+        assert!((m[0].1 - 0.5).abs() < 1e-10);
+        assert!((m[1].0 - 0.5).abs() < 1e-10);
+        assert!((m[1].1 - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_run_marginals_x_gate() {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::X, &[0]);
+        let m = run_marginals(&c, 42).unwrap();
+        assert!((m[0].0 - 0.0).abs() < 1e-10);
+        assert!((m[0].1 - 1.0).abs() < 1e-10);
+        assert!((m[1].0 - 1.0).abs() < 1e-10);
+        assert!((m[1].1 - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_run_marginals_clifford_t_spd_path() {
+        let c = crate::circuits::clifford_t_circuit(14, 10, 0.1, 42);
+        let m_spd = run_marginals(&c, 42).unwrap();
+        assert_eq!(m_spd.len(), 14);
+        for (p0, p1) in &m_spd {
+            assert!(*p0 >= 0.0 && *p0 <= 1.0);
+            assert!((p0 + p1 - 1.0).abs() < 1e-10);
+        }
+
+        let m_sv = run_marginals_with(BackendKind::Statevector, &c, 42).unwrap();
+        for i in 0..14 {
+            assert!(
+                (m_spd[i].0 - m_sv[i].0).abs() < 1e-6,
+                "qubit {i}: SPD p0={} vs SV p0={}",
+                m_spd[i].0,
+                m_sv[i].0
+            );
+        }
     }
 }

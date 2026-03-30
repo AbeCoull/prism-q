@@ -11,7 +11,10 @@
 //!   cancellation) operate on the instruction stream via [`fusion::fuse_circuit`].
 
 pub mod builder;
+mod expr;
 pub mod fusion;
+mod fusion_phase;
+mod fusion_rzz;
 pub mod openqasm;
 
 use crate::gates::Gate;
@@ -167,6 +170,28 @@ impl Circuit {
             }
             _ => false,
         })
+    }
+
+    /// Herfindahl–Hirschman index of the qubit interaction graph partition.
+    ///
+    /// Returns Σ(sᵢ/n)² where sᵢ is the size of each connected component.
+    /// Ranges from 1/n (all singletons) to 1.0 (one component).
+    /// Low values indicate many independent subsystems where factored
+    /// backends amortize cost; 1.0 means fully connected (no benefit).
+    pub fn connectivity_hhi(&self) -> f64 {
+        let n = self.num_qubits;
+        if n == 0 {
+            return 1.0;
+        }
+        let components = self.independent_subsystems();
+        let nf = n as f64;
+        components
+            .iter()
+            .map(|c| {
+                let s = c.len() as f64;
+                (s * s) / (nf * nf)
+            })
+            .sum()
     }
 
     /// True if no gate or conditional appears after any measurement.

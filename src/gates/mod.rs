@@ -194,6 +194,7 @@ pub struct DiagonalBatchData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiFusedData {
     pub gates: Vec<(usize, [[Complex64; 2]; 2])>,
+    pub all_diagonal: bool,
 }
 
 /// Data for multi-2q tiled pass fusion.
@@ -552,6 +553,7 @@ impl Gate {
                     .iter()
                     .map(|&(target, mat)| (target, adjoint_2x2(&mat)))
                     .collect(),
+                all_diagonal: data.all_diagonal,
             })),
             Gate::Fused2q(mat) => Gate::Fused2q(Box::new(adjoint_4x4(mat))),
             Gate::Multi2q(data) => Gate::Multi2q(Box::new(Multi2qData {

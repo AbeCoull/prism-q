@@ -290,6 +290,42 @@ pub fn quantum_volume_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
+/// K independent Clifford-only blocks of `block_size` qubits each.
+///
+/// Total qubits = `num_blocks * block_size`. Each block has brick-layer CX
+/// entanglement with random Clifford 1q gates, but no inter-block connections.
+/// For benchmarking factored stabilizer vs monolithic stabilizer.
+pub fn local_clifford_blocks(
+    num_blocks: usize,
+    block_size: usize,
+    depth: usize,
+    seed: u64,
+) -> Circuit {
+    let n = num_blocks * block_size;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let cliffords = [Gate::H, Gate::S, Gate::X, Gate::Y, Gate::Z];
+
+    for block in 0..num_blocks {
+        let base = block * block_size;
+        for layer in 0..depth {
+            for q in 0..block_size {
+                c.add_gate(
+                    cliffords[rng.gen_range(0..cliffords.len())].clone(),
+                    &[base + q],
+                );
+            }
+            if block_size >= 2 {
+                let offset = layer % 2;
+                for q in (offset..block_size - 1).step_by(2) {
+                    c.add_gate(Gate::Cx, &[base + q, base + q + 1]);
+                }
+            }
+        }
+    }
+    c
+}
+
 /// Build a linearly-connected circuit with only CZ + single-qubit gates.
 ///
 /// `depth` layers of random {H, S, T, X} + linear CZ chain. CZ-heavy circuits

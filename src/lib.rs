@@ -46,6 +46,7 @@ pub mod gates;
 pub mod sim;
 
 pub use backend::factored::FactoredBackend;
+pub use backend::factored_stabilizer::FactoredStabilizerBackend;
 pub use backend::mps::MpsBackend;
 pub use backend::product::ProductStateBackend;
 pub use backend::sparse::SparseBackend;
@@ -62,7 +63,9 @@ pub use sim::compiled::{
     PackedShots, ParityStats, PauliExpectationAccumulator, PauliVec, ShotAccumulator, ShotLayout,
     SparseParity,
 };
-pub use sim::homological::{run_shots_homological, ErrorChainComplex, HomologicalSampler};
+pub use sim::homological::{
+    noisy_marginals_analytical, run_shots_homological, ErrorChainComplex, HomologicalSampler,
+};
 pub use sim::noise::{compile_noisy, run_shots_noisy, NoiseModel, NoiseOp, NoisyCompiledSampler};
 pub use sim::stabilizer_rank::{
     run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_overlap_sq, StabRankResult,
@@ -71,7 +74,8 @@ pub use sim::unified_pauli::{
     run_spd, run_spp, spd_to_probabilities, spp_to_probabilities, SpdResult, SppResult,
 };
 pub use sim::{
-    run, run_on, run_on_opts, run_qasm, run_shots, run_shots_random, run_shots_with,
-    run_shots_with_noise, run_with, run_with_opts, BackendKind, FactoredBlock, Probabilities,
-    ShotsResult, SimOptions, SimulationResult,
+    run, run_counts, run_counts_with, run_marginals, run_marginals_with, run_on, run_on_opts,
+    run_qasm, run_shots, run_shots_random, run_shots_with, run_shots_with_noise, run_with,
+    run_with_opts, BackendKind, FactoredBlock, Probabilities, ShotsResult, SimOptions,
+    SimulationResult,
 };

@@ -938,6 +938,7 @@ mod tests {
             .apply(&Instruction::Gate {
                 gate: Gate::MultiFused(Box::new(MultiFusedData {
                     gates: vec![(0, h_mat), (1, t_mat), (2, x_mat)],
+                    all_diagonal: false,
                 })),
                 targets: smallvec::smallvec![0, 1, 2],
             })

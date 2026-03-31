@@ -98,8 +98,12 @@ pub(super) fn bts_batched(
                 let chunks: Vec<(usize, usize)> = (0..num_threads)
                     .map(|t| {
                         let start = t * shots_per_thread;
-                        let end = ((t + 1) * shots_per_thread).min(num_shots);
-                        (start, end)
+                        let end = if t + 1 == num_threads {
+                            num_shots
+                        } else {
+                            (t + 1) * shots_per_thread
+                        };
+                        (start, end.min(num_shots))
                     })
                     .filter(|(s, e)| s < e)
                     .collect();

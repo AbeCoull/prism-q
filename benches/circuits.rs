@@ -333,6 +333,70 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
     group.finish();
 }
 
+// ---- Factored stabilizer backend ----
+
+fn bench_factored_stabilizer_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored_stabilizer/scaling");
+    configure_group(&mut group);
+
+    for &n in &[10, 50, 100, 500, 1000] {
+        let circuit = random_clifford_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                sim::run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_factored_stabilizer_local(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored_stabilizer/local_blocks");
+    configure_group(&mut group);
+
+    for &(blocks, block_size) in &[(5, 2), (5, 4), (10, 5), (20, 5), (50, 5)] {
+        let n = blocks * block_size;
+        let circuit = circuits::local_clifford_blocks(blocks, block_size, 10, SEED);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{}x{}", blocks, block_size), n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    sim::run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_factored_stabilizer_measurement(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored_stabilizer/measurement");
+    configure_group(&mut group);
+
+    for &n in &[10, 50, 100, 500] {
+        let mut circuit = Circuit::new(n, n);
+        circuit.add_gate(Gate::H, &[0]);
+        for i in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+
+        group.bench_with_input(
+            BenchmarkId::new("ghz_measure_all", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    sim::run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 // ---- Sparse backend ----
 
 fn bench_sparse_scaling(c: &mut Criterion) {
@@ -1101,6 +1165,10 @@ criterion_group!(
     // Stabilizer
     bench_stabilizer_scaling,
     bench_stabilizer_measurement,
+    // Factored stabilizer
+    bench_factored_stabilizer_scaling,
+    bench_factored_stabilizer_local,
+    bench_factored_stabilizer_measurement,
     // Sparse
     bench_sparse_scaling,
     bench_sparse_low_entanglement,

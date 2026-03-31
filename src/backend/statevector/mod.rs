@@ -194,7 +194,11 @@ impl StatevectorBackend {
                 self.apply_diagonal_batch(&data.entries);
             }
             Gate::MultiFused(data) => {
-                self.apply_multi_1q(&data.gates);
+                if data.all_diagonal {
+                    self.apply_multi_1q_diagonal(&data.gates);
+                } else {
+                    self.apply_multi_1q(&data.gates);
+                }
             }
             Gate::Fused2q(mat) => {
                 self.apply_fused_2q(targets[0], targets[1], mat);

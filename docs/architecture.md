@@ -26,17 +26,17 @@
 │          Circuit IR                 │  ← src/circuit/mod.rs
 │   (backend-agnostic instruction     │
 │    sequence: gates, measures,       │
-│    barriers)                        │
+│    barriers, conditionals)          │
 ├─────────────────────────────────────┤
 │        Fusion Pipeline              │  ← src/circuit/fusion.rs
 │   (cancel, fuse, reorder, batch)    │
 ├─────────────────────────────────────┤
 │        Simulation Engine            │  ← src/sim/mod.rs
 │   (dispatch, decompose, execute)    │
-├─────────────────────────────────────┤
-│        Backend Trait                │  ← src/backend/mod.rs
-│   init | apply | measure | probs   │
-├──────┬──────┬──────┬──────┬──────┬──────┬──────┤
+├──────────┬──────────────────────────┤
+│ Backends │  Compiled Samplers       │  ← src/sim/compiled/, noise.rs
+│          │  (shot-based simulation) │     homological.rs, unified_pauli.rs
+├──────┬───┴──┬──────┬──────┬──────┬──────┬──────┤
 │  SV  │  TN  │ MPS  │Sparse│ Prod │ Stab │ Fact │
 └──────┴──────┴──────┴──────┴──────┴──────┴──────┘
 ```
@@ -51,22 +51,74 @@ Hand-rolled line-by-line parser targeting a practical OpenQASM 3.0 subset. Conve
 
 ## Circuit IR
 
-`Circuit` holds `num_qubits`, `num_classical_bits`, and `Vec<Instruction>`. Instructions are an enum: `Gate { gate, targets }`, `Measure`, `Barrier`, `Conditional`. Targets use `SmallVec<[usize; 4]>` — inline storage for up to 4 qubits, no heap allocation for typical gates.
+`Circuit` holds `num_qubits`, `num_classical_bits`, and `Vec<Instruction>`. Instructions are an enum:
 
-`Gate` is a `Clone` enum kept at 16 bytes. Simple variants (e.g., `Rx(f64)`) carry parameters inline. Composite variants (`Fused`, `MultiFused`, `BatchPhase`, `BatchRzz`, `Cu`, `Mcu`) use `Box` to stay within the 16-byte budget for cache-friendly dispatch.
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `Gate` | `gate`, `targets` | Gate application |
+| `Measure` | `qubit`, `classical_bit` | Destructive measurement |
+| `Barrier` | `qubits` | Synchronization barrier |
+| `Conditional` | `condition`, `gate`, `targets` | Classical-controlled gate |
+
+Targets use `SmallVec<[usize; 4]>` — inline storage for up to 4 qubits, no heap allocation for typical gates.
+
+### Gate enum
+
+`Gate` is a `Clone` enum kept at **16 bytes**. Simple variants carry parameters inline. Composite variants use `Box` to stay within the 16-byte budget for cache-friendly dispatch.
+
+| Variant | Data | Size |
+|---------|------|------|
+| `Id`, `X`, `Y`, `Z`, `H`, `S`, `Sdg`, `T`, `Tdg`, `SX`, `SXdg` | None | 16B |
+| `Rx(f64)`, `Ry(f64)`, `Rz(f64)`, `P(f64)`, `Rzz(f64)` | Inline f64 | 16B |
+| `Cx`, `Cz`, `Swap` | None | 16B |
+| `Cu(Box<[[Complex64; 2]; 2]>)` | Boxed 2×2 | 16B |
+| `Mcu(Box<McuData>)` | Boxed matrix + control count | 16B |
+| `Fused(Box<[[Complex64; 2]; 2]>)` | Boxed pre-fused 1q matrix | 16B |
+| `Fused2q(Box<[[Complex64; 4]; 4]>)` | Boxed pre-fused 2q matrix | 16B |
+| `MultiFused(Box<MultiFusedData>)` | Batched 1q gates for tiled pass | 16B |
+| `Multi2q(Box<Multi2qData>)` | Batched 2q gates for tiled pass | 16B |
+| `BatchPhase(Box<BatchPhaseData>)` | Batched cphase with shared control | 16B |
+| `BatchRzz(Box<BatchRzzData>)` | Batched ZZ rotations | 16B |
+| `DiagonalBatch(Box<DiagonalBatchData>)` | Mixed diagonal 1q/2q batch | 16B |
 
 ## Fusion pipeline
 
-Six-pass gate optimization before execution, gated by qubit count thresholds:
+Thirteen-pass gate optimization before execution, gated by qubit count thresholds. Every pass returns `Cow<Circuit>` — `Borrowed` when no optimization applies, zero overhead for circuits that don't benefit.
 
-1. **Self-inverse cancellation** — removes CX·CX, CZ·CZ, SWAP·SWAP pairs. Non-adjacent cancellation via per-qubit tracking.
-2. **Rzz recognition** — CX(a,b)·Rz(θ,b)·CX(a,b) → native Rzz(θ,a,b). BatchRzz groups consecutive Rzz gates into a single LUT-based pass.
-3. **Single-qubit fusion** — fuses consecutive 1q gates on the same qubit into one precomputed matrix.
-4. **Commutation-aware reorder** — moves 1q gates earlier past non-conflicting 2q gates (diagonal gates commute through CX control, CZ, and Rzz).
-5. **Multi-gate tiling** — batches 1q and 2q gates into MultiFused/Multi2q for L2/L3-tiled execution.
-6. **Controlled-phase batching** — consecutive cphase gates sharing a control qubit collapse into BatchPhase with LUT+BMI2 kernels.
+```text
+  Input Circuit
+    │
+    ├─ pass0:  cancel_self_inverse_pairs     (always)
+    ├─ pass0r: fuse_rzz                      (always)  CX·Rz·CX → Rzz
+    ├─ pass0b: fuse_batch_rzz                (≥16q)    N×Rzz → BatchRzz
+    │
+    │  ─── MIN_QUBITS_FOR_FUSION (10) gate ───
+    │
+    ├─ pass1:  fuse_single_qubit_gates       (≥10q)    consecutive 1q → Fused
+    ├─ pass1r: reorder_1q_gates              (≥10q)    commutation-aware reorder
+    ├─ pass1c: cancel_self_inverse_pairs     (≥10q)    re-cancel after reorder
+    ├─ pass1f: fuse_single_qubit_gates       (≥10q)    re-fuse after reorder
+    │
+    ├─ pass_2q:  fuse_2q_gates              (≥20q)    CX + adjacent 1q → Fused2q
+    ├─ pass2:    fuse_multi_1q_gates        (≥14q)    1q batch → MultiFused
+    ├─ pass_m2q: fuse_multi_2q_gates        (≥20q)    2q batch → Multi2q
+    ├─ pass_cp:  fuse_controlled_phases     (≥16q)    cphase batch → BatchPhase
+    ├─ pass_db:  fuse_diagonal_batch        (≥16q)    mixed diagonal → DiagonalBatch
+    └─ pass_pp:  batch_post_phase_1q        (≥18q)    re-batch 1q after cphase
+    │
+    Output Circuit
+```
 
-Returns `Cow::Borrowed` at each stage when no optimization applies — zero overhead for circuits that don't benefit.
+**Threshold constants:**
+
+| Constant | Value | Rationale |
+|----------|-------|-----------|
+| `MIN_QUBITS_FOR_FUSION` | 10 | Below this, clone cost exceeds simulation savings |
+| `MIN_QUBITS_FOR_MULTI_FUSION` | 14 | MultiFused tiling overhead vs benefit |
+| `MIN_QUBITS_FOR_DIAG_BATCH` | 16 | Diagonal batch, cphase, and Rzz batching |
+| `MIN_QUBITS_FOR_POST_PHASE_BATCH` | 18 | Post-phase 1q re-batching |
+| `MIN_QUBITS_FOR_2Q_FUSION` | 20 | Generic 4×4 kernel only beats specialized at DRAM-bound sizes |
+| `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 20 | Same as 2q fusion |
 
 ## Backend trait
 
@@ -78,6 +130,11 @@ pub trait Backend {
     fn classical_results(&self) -> &[bool];
     fn probabilities(&self) -> Result<Vec<f64>>;
     fn num_qubits(&self) -> usize;
+
+    // Optional overrides:
+    fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()>;  // batch apply
+    fn supports_fused_gates(&self) -> bool;   // false for symbolic backends (stabilizer)
+    fn export_statevector(&self) -> Result<Vec<Complex64>>;  // for backend transitions
 }
 ```
 
@@ -85,11 +142,44 @@ Contract: `init` before `apply`. Instructions arrive in circuit order. Measureme
 
 ## Simulation engine
 
-Orchestration layer in `src/sim/mod.rs`. Entry points: `run()` (auto-dispatch), `run_with()` (explicit backend), `run_on()` (pre-constructed backend).
+Orchestration layer in `src/sim/mod.rs`. Entry points:
 
-- **Auto-dispatch**: `BackendKind::Auto` selects the optimal backend — ProductState for single-qubit-only circuits, Stabilizer for all-Clifford, MPS for >28 qubits, Factored when independent subsystems exist, Statevector otherwise.
-- **Subsystem decomposition**: Union-find detects independent qubit groups. Each block runs separately, results merge via Kronecker product.
-- **Temporal Clifford decomposition**: Clifford prefix runs on Stabilizer, non-Clifford tail on Statevector with the exported state.
+| Function | Description |
+|----------|-------------|
+| `run(circuit, seed)` | Auto-dispatch, full output |
+| `run_with(kind, circuit, seed)` | Explicit backend selection |
+| `run_with_opts(kind, circuit, seed, opts)` | With options (skip probabilities) |
+| `run_on(backend, circuit)` | Pre-constructed backend |
+| `run_on_opts(backend, circuit, opts)` | Pre-constructed with options |
+| `run_qasm(qasm, seed)` | Parse + simulate |
+| `run_shots(circuit, shots, seed)` | Multi-shot via stabilizer tableau |
+| `run_shots_with(kind, circuit, shots, seed)` | Multi-shot with backend selection |
+| `run_shots_with_noise(kind, circuit, noise, shots, seed)` | Noisy multi-shot |
+
+### Auto-dispatch decision tree
+
+```text
+BackendKind::Auto
+  ├─ No entangling gates        → ProductState (O(n))
+  ├─ All Clifford               → Stabilizer (O(n²))
+  ├─ Above memory limit:
+  │   ├─ Sparse-friendly        → Sparse (O(k))
+  │   └─ Otherwise              → MPS (bond dim 256)
+  ├─ Partial independence       → Factored (dynamic split-state)
+  └─ Otherwise                  → Statevector (exact)
+```
+
+Memory limit is dynamically computed from available system RAM (50% budget, capped at 33 qubits). Overridable via `PRISM_MAX_SV_QUBITS` environment variable. Falls back to 28 qubits (4 GB) when detection unavailable.
+
+### Subsystem decomposition
+
+Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately (with per-block Auto dispatch), results merge lazily via `Probabilities::Factored` — a Kronecker product computed on-demand per-element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
+
+Block-level Rayon parallelism when all blocks are <14 qubits (avoids oversubscription with block-internal parallelism).
+
+### Temporal Clifford decomposition
+
+For Clifford+T circuits: Clifford prefix runs on the Stabilizer backend, state is exported to Statevector for the non-Clifford tail. Saves exponential memory for circuits with a long Clifford preamble.
 
 ## Backends
 
@@ -97,41 +187,109 @@ Orchestration layer in `src/sim/mod.rs`. Entry points: `run()` (auto-dispatch), 
 
 Full-state simulation in a flat `Vec<Complex64>` of 2^n amplitudes. The primary backend for circuits up to ~28 qubits.
 
-Gate kernels use enum dispatch with specialized routines for CX, CZ, SWAP, Cu, MCU, Rzz, BatchRzz, and BatchPhase. Single-qubit gates go through `PreparedGate1q` with FMA-vectorized SIMD. MultiFused gates use a three-tier tiled kernel (L2/L3/individual passes) for cache locality.
+Gate kernels use enum dispatch with specialized routines for CX, CZ, SWAP, Cu, MCU, Rzz, BatchRzz, BatchPhase, DiagonalBatch, and MultiFused. Single-qubit gates go through `PreparedGate1q` with FMA-vectorized SIMD. MultiFused gates use a three-tier tiled kernel (L2 16K / L3 131K / individual passes) for cache locality. MultiFused batches where all gates are diagonal dispatch to a dedicated fast path (1 complex multiply/element vs 4+2 for full 2×2).
 
-Rayon parallelism kicks in at ≥14 qubits with `par_chunks_mut` and `MIN_PAR_ELEMS = 4096` per task. BMI2 `_pext_u64` accelerates BatchPhase and BatchRzz LUT indexing where available.
+Rayon parallelism at ≥14 qubits with `par_chunks_mut` and `MIN_PAR_ELEMS = 4096` per task. BMI2 `_pext_u64` accelerates BatchPhase, BatchRzz, and DiagonalBatch LUT indexing.
+
+Deferred measurement normalization: `pending_norm` accumulates normalization factors without full-state scaling passes. Zero-cost for circuits without measurements.
 
 ### Stabilizer
 
-Aaronson-Gottesman bit-packed tableau for Clifford circuits. O(n²) time and space — scales to thousands of qubits where statevector is impossible. Gate kernels use wordwise bitwise ops and `popcount` for phase computation. Supports H, S, Sdg, SX, SXdg, CX, CZ, SWAP, and measurement.
+Aaronson-Gottesman bit-packed tableau for Clifford circuits. O(n²) time and space — scales to thousands of qubits. Gate kernels use wordwise bitwise ops and `popcount` for phase computation. Supports H, S, Sdg, SX, SXdg, CX, CZ, SWAP, and measurement.
 
-Word-group batching fuses multiple 1q gate flushes into single tableau passes. Type-grouped masks apply all gates of the same Pauli type with one wordwise op instead of per-gate dispatch.
+Word-group batching fuses multiple 1q gate flushes into single tableau passes. Type-grouped masks apply all gates of the same Pauli type with one wordwise op instead of per-gate dispatch. Sparse Generator Indexing (SGI) tracks per-qubit active generator lists, enabling targeted row operations instead of full-tableau scans. Lazy destabilizer materialization defers destabilizer rows until probabilities are requested.
 
 Probability extraction uses coset-based enumeration with GF(2) Gaussian elimination — O(2^k) where k is the number of non-diagonal generators, rather than O(2^n).
 
+**Filtered Stabilizer** (`FilteredStabilizerBackend`): Per-cluster tableaux with dynamic merging. Starts with one qubit per cluster. Cross-cluster 2q gates merge tableaux. Independent subsystems never merge, giving O(block_size²) per gate vs O(n²).
+
 ### Sparse
 
-`HashMap<usize, Complex64>` for states with few non-zero amplitudes. O(k) memory where k = nonzero entries. Amplitude pruning (|a|² < 1e-16) after each gate keeps the map compact. Best for computational-basis-heavy circuits at large qubit counts.
+`HashMap<usize, Complex64>` for states with few non-zero amplitudes. O(k) memory. Amplitude pruning (|a|² < 1e-16) after each gate. Best for computational-basis-heavy circuits at large qubit counts.
 
 ### MPS (Matrix Product State)
 
-Chain of rank-3 tensors with adaptive bond dimension (default max 64). O(n·χ²) memory. Single-qubit gates absorb in-place using FMA-vectorized SIMD over bond-dimension slices. Two-qubit gates contract adjacent sites, apply the gate, then SVD-truncate back. Non-adjacent gates route through SWAP chains.
+Chain of rank-3 tensors with adaptive bond dimension (default max 256). O(n·χ²) memory. Single-qubit gates absorb via FMA-vectorized SIMD over bond-dimension slices. Two-qubit gates contract adjacent sites, apply the gate, then SVD-truncate back. Non-adjacent gates route through SWAP chains.
 
-SVD uses a hybrid dispatch: faer (bidiag+D&C) for matrices with m×n ≥ 256, hand-rolled Jacobi for small matrices. Right-tensor transposition before contraction ensures sequential memory access in the inner reduction loop.
+Hybrid SVD dispatch: faer (bidiag+D&C) for matrices with m×n ≥ 256, hand-rolled Jacobi for small matrices.
 
 ### Product State
 
-Per-qubit `[Complex64; 2]` storage. O(n) memory, O(1) per single-qubit gate. Rejects entangling gates with `BackendUnsupported`. Selected automatically for circuits with no 2q gates.
+Per-qubit `[Complex64; 2]` storage. O(n) memory, O(1) per single-qubit gate. Rejects entangling gates. Selected automatically for circuits with no 2q gates.
 
 ### Tensor Network
 
-Deferred contraction with a greedy min-size heuristic. Gates append tensors to the network; contraction happens lazily at measurement or probability extraction. Tensors use `SmallVec<[usize; 6]>` for shape and legs. Performance depends on circuit treewidth. `MAX_PROB_QUBITS = 25` guards against exponential blowup.
+Deferred contraction with a greedy min-size heuristic. Gates append tensors; contraction happens lazily at measurement or probability extraction. `MAX_PROB_QUBITS = 25` guards against exponential blowup.
 
 ### Factored
 
-Dynamic split-state simulation. Starts with n independent 1-qubit states, merges via tensor product only when 2q gates bridge groups. Gate dispatch translates global→local qubit indices per sub-state. Parallel kernels match the statevector patterns for sub-states ≥14 qubits. MultiFused gates group by sub-state for independent application.
+Dynamic split-state simulation. Starts with n independent 1-qubit states, merges via tensor product only when 2q gates bridge groups. Parallel kernels match statevector patterns for sub-states ≥14 qubits. Selected when subsystem decomposition detects partial independence.
 
-Selected automatically when subsystem decomposition detects partial independence but the blocks aren't large enough to justify separate simulations.
+## Compiled samplers
+
+For multi-shot sampling without materializing the full statevector on every shot.
+
+### Noiseless compiled sampler (`src/sim/compiled/`)
+
+**Backward path** (`compile_measurements`): Propagates Pauli Z observables backward through the circuit. Each measurement qubit becomes a row in a GF(2) parity matrix M. Clifford gates conjugate Pauli strings in O(1). The resulting M encodes which input qubits each measurement depends on.
+
+**Forward path** (`compile_forward`): Tracks stabilizer generator dependencies forward through the circuit. Produces the same parity matrix via dependency tracking.
+
+**Sampling**: Random bits for independent generators, then XOR-cascade through the parity matrix. Multiple dispatch tiers:
+
+| Strategy | Condition | Method |
+|----------|-----------|--------|
+| `FlipLut` | Small rank | 256-entry XOR lookup table |
+| `SparseParity` | Sparse rows | Only flip non-zero columns |
+| `XorDag` | General | Optimal XOR-reduction DAG |
+| `ParityBlocks` | Blocked structure | Per-block independent sampling |
+
+**ShotAccumulator trait**: Pluggable result collection.
+
+| Accumulator | Output | Use case |
+|-------------|--------|----------|
+| `HistogramAccumulator` | Bitstring → count map | Standard shot output |
+| `MarginalsAccumulator` | Per-qubit P(1) | Marginal probabilities |
+| `PauliExpectationAccumulator` | ⟨P⟩ for Pauli observables | VQE/QAOA |
+| `CorrelatorAccumulator` | ⟨Z_i Z_j⟩ correlations | Entanglement analysis |
+| `NullAccumulator` | Nothing | Benchmarking raw sampling speed |
+
+### Noisy compiled sampler (`src/sim/noise.rs`)
+
+Backward Pauli propagation through circuit + noise sensitivity analysis. Each noise location gets an X-flip and Z-flip sensitivity row. During sampling, Bernoulli coin flips determine which noise channels fire, then XOR the sensitivity rows into the sample.
+
+`NoiseModel`: Per-instruction depolarizing noise. `NoiseOp { qubit, px, py, pz }`.
+
+### Homological sampler (`src/sim/homological.rs`)
+
+`ErrorChainComplex`: GF(2) chain complex over the circuit's noise locations. Computes the kernel (null space) of the boundary map to identify error cycles that are undetectable by syndrome measurements. `HomologicalSampler` uses this for sampling with topological error correction awareness.
+
+`noisy_marginals_analytical`: Closed-form marginal computation using the parity matrix and noise rates — avoids Monte Carlo sampling entirely.
+
+## Clifford+T simulation
+
+Three strategies for circuits mixing Clifford and T gates:
+
+### Stabilizer rank (`src/sim/stabilizer_rank.rs`)
+
+Maintains a weighted sum of stabilizer states. Each T gate doubles the term count via T = α·I + β·Z decomposition. Clifford gates are O(n²) per term. Accumulates weighted amplitudes for exact probabilities.
+
+- `run_stabilizer_rank`: Exact probabilities (t ≤ 20, n ≤ 25)
+- `run_stabilizer_rank_approx`: Approximate with Monte Carlo (higher t counts)
+- `run_stabilizer_rank_shots`: Shot-based sampling
+- `stabilizer_overlap_sq`: Inner product between stabilizer states
+
+### Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
+
+Backward-propagates measurement observables as Pauli strings. Clifford gates conjugate in O(1). T gates branch stochastically into two Pauli paths with appropriate weights. Per-path cost O(d×n/64), independent of T-gate count. Returns marginal probabilities via Monte Carlo estimation.
+
+`run_spp(circuit, num_samples, seed) → SppResult`
+
+### Deterministic Sparse Pauli Dynamics (`src/sim/unified_pauli.rs`)
+
+Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T gates deterministically branch X/Y terms. Identical strings auto-merge. Optional ε-truncation for approximate mode. Exact for small T-counts, approximate with bounded error for larger ones.
+
+`run_spd(circuit, epsilon, max_terms) → SpdResult`
 
 ## Memory layout
 
@@ -154,21 +312,106 @@ Gate kernels have `_par` variants using `par_chunks_mut` for safe Rayon parallel
 - **<14 qubits**: Single-threaded. Thread-pool overhead exceeds computation.
 - **≥14 qubits**: Rayon parallel iterators with `MIN_PAR_ELEMS = 4096` (64KB per task).
 
+Thread pool defaults to all logical cores (HT helps at 24q+ by hiding memory latency). Overridable via `RAYON_NUM_THREADS`.
+
 ### SIMD
 
 `Complex64` maps to 128-bit SIMD naturally. Single-qubit gate kernels use `PreparedGate1q` with runtime CPU detection and tiered dispatch:
 
 1. **AVX2+FMA** (256-bit): 2 complex pairs per iteration. Gated by `MAX_AVX2_STATE` for full-state passes (Skylake frequency throttling), but used freely within MultiFused L2 tiles where data is cache-resident.
 2. **FMA** (128-bit): Default for larger states. 3-op complex multiply (permute + mul + fmaddsub).
-3. **BMI2**: `_pext_u64` for BatchPhase and BatchRzz LUT indexing. Single-instruction bit extraction replaces multi-iteration shift-and-or loops.
-4. **Scalar fallback**: No intrinsics.
+3. **BMI2**: `_pext_u64` for BatchPhase, BatchRzz, and DiagonalBatch LUT indexing. Single-instruction bit extraction replaces multi-iteration shift-and-or loops.
+4. **Scalar fallback**: No intrinsics. All SIMD functions have a `#[cfg(not(target_arch = "x86_64"))]` fallback.
+
+Two key SIMD structs hoist matrix broadcast at construction time, avoiding per-element dispatch:
+
+- **`PreparedGate1q`**: Broadcasts 2×2 matrix into SIMD registers. Methods: `apply_full_sequential` (full state), `apply_tiled` (cache-resident tile, no AVX2 throttle guard), `apply_slice_pairs` (MPS bond-dimension slices), `apply_pair_ptr` (Cu/Mcu parallel).
+- **`PreparedGate2q`**: Broadcasts 4×4 matrix. Methods: `apply_full` (mask-based iteration), `apply_group_ptr` (4 scattered indices).
 
 ### Determinism
 
 Same circuit + same seed = same result, regardless of thread count. Parallel backends use deterministic work partitioning.
 
+## Backend dispatch
+
+All `BackendKind` variants:
+
+| Variant | Backend | Selection |
+|---------|---------|-----------|
+| `Auto` | Decision tree (see above) | Default |
+| `Statevector` | Full state-vector | Explicit |
+| `Stabilizer` | Aaronson-Gottesman tableau | Explicit or auto (all Clifford) |
+| `FilteredStabilizer` | Per-cluster tableaux | Explicit |
+| `Sparse` | HashMap state | Explicit or auto (above memory limit, sparse-friendly) |
+| `Mps { max_bond_dim }` | Matrix Product State | Explicit or auto (above memory limit) |
+| `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
+| `TensorNetwork` | Deferred contraction | Explicit |
+| `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
+| `StabilizerRank` | Weighted stabilizer sum | Explicit |
+| `StochasticPauli { num_samples }` | SPP | Explicit |
+| `DeterministicPauli { epsilon, max_terms }` | SPD | Explicit |
+
+## Circuit builders
+
+Pre-built circuits for benchmarking and testing (`src/circuits.rs`):
+
+| Function | Description |
+|----------|-------------|
+| `qft_circuit(n)` | Quantum Fourier Transform |
+| `random_circuit(n, depth, seed)` | Random gates at given depth |
+| `hardware_efficient_ansatz(n, layers, seed)` | HEA with Ry/Rz + CX |
+| `clifford_heavy_circuit(n, depth, seed)` | Random Clifford (adjacent CX) |
+| `clifford_random_pairs(n, depth, seed)` | Random Clifford (random pair CX) |
+| `ghz_circuit(n)` | GHZ state (H + CX chain) |
+| `qaoa_circuit(n, layers, seed)` | QAOA MaxCut |
+| `single_qubit_rotation_circuit(n, depth, seed)` | 1q rotations only |
+| `clifford_t_circuit(n, depth, t_fraction, seed)` | Clifford+T with tunable T ratio |
+| `w_state_circuit(n)` | W state preparation |
+| `quantum_volume_circuit(n, depth, seed)` | Quantum volume (random SU(4)) |
+| `cz_chain_circuit(n, depth, seed)` | CZ chains |
+| `phase_estimation_circuit(n)` | Quantum phase estimation |
+| `independent_bell_pairs(n_pairs)` | Independent Bell pairs |
+| `independent_random_blocks(blocks, size, depth, seed)` | Independent random blocks |
+
 ## Error model
 
-All public APIs return `Result<T, PrismError>`. Error variants cover parsing (`Parse`, `UnsupportedConstruct`, `UndefinedRegister`), validation (`InvalidQubit`, `InvalidClassicalBit`, `GateArity`, `InvalidParameter`), and runtime (`BackendUnsupported`, `IncompatibleBackend`, `Simulation`).
+All public APIs return `Result<T, PrismError>`. Error variants:
+
+| Variant | Category | Description |
+|---------|----------|-------------|
+| `Parse` | Parsing | OpenQASM parse error with line number |
+| `UnsupportedConstruct` | Parsing | Valid OpenQASM not supported by PRISM-Q |
+| `UndefinedRegister` | Parsing | Reference to undeclared register |
+| `InvalidQubit` | Validation | Qubit index exceeds register size |
+| `InvalidClassicalBit` | Validation | Classical bit index exceeds register |
+| `GateArity` | Validation | Wrong number of qubits for gate |
+| `InvalidParameter` | Validation | Invalid gate parameter (NaN, etc.) |
+| `BackendUnsupported` | Runtime | Backend can't perform requested operation |
+| `IncompatibleBackend` | Runtime | Backend incompatible with circuit |
 
 No panics on user input. `debug_assert!` for internal invariants only.
+
+## Public API surface
+
+Top-level re-exports from `src/lib.rs`:
+
+**Simulation:**
+`run`, `run_with`, `run_with_opts`, `run_on`, `run_on_opts`, `run_qasm`, `run_shots`, `run_shots_random`, `run_shots_with`, `run_shots_with_noise`
+
+**Compiled sampling:**
+`compile_measurements`, `compile_forward`, `compile_noisy`, `run_shots_compiled`, `run_shots_noisy`, `run_shots_homological`, `noisy_marginals_analytical`
+
+**Clifford+T:**
+`run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `run_spp`, `run_spd`, `spp_to_probabilities`, `spd_to_probabilities`
+
+**Types:**
+`Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `Gate`, `BackendKind`, `SimOptions`, `SimulationResult`, `Probabilities`, `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`
+
+**Backends:**
+`StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`, `ProductStateBackend`, `TensorNetworkBackend`, `FactoredBackend`
+
+**Accumulators:**
+`ShotAccumulator`, `HistogramAccumulator`, `MarginalsAccumulator`, `PauliExpectationAccumulator`, `CorrelatorAccumulator`, `NullAccumulator`, `PackedShots`, `ShotLayout`
+
+**Data types:**
+`CompiledSampler`, `NoisyCompiledSampler`, `HomologicalSampler`, `ErrorChainComplex`, `NoiseModel`, `NoiseOp`, `StabRankResult`, `SppResult`, `SpdResult`, `SparseParity`, `ParityStats`, `PauliVec`, `MultiFusedData`, `BatchPhaseData`, `McuData`, `Multi2qData`

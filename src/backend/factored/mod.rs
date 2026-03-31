@@ -153,7 +153,7 @@ impl FactoredBackend {
     #[inline(always)]
     fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         if let Gate::MultiFused(data) = gate {
-            self.apply_multi_fused(&data.gates);
+            self.apply_multi_fused(&data.gates, data.all_diagonal);
             return Ok(());
         }
         if let Gate::Multi2q(data) = gate {
@@ -324,7 +324,7 @@ impl FactoredBackend {
     }
 
     /// Apply MultiFused gates grouped by sub-state — no merging needed.
-    fn apply_multi_fused(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
+    fn apply_multi_fused(&mut self, gates: &[(usize, [[Complex64; 2]; 2])], _all_diagonal: bool) {
         let mut groups: SmallVec<[(usize, GateList); 8]> = SmallVec::new();
 
         for &(global_q, mat) in gates {

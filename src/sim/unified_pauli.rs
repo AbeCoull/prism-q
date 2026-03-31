@@ -443,6 +443,93 @@ pub fn spp_to_probabilities(result: &SppResult) -> Vec<f64> {
 
 use std::collections::HashMap;
 
+#[inline(always)]
+fn pv_get_bit(words: &[u64], qubit: usize) -> bool {
+    (words[qubit / 64] >> (qubit % 64)) & 1 != 0
+}
+
+#[inline(always)]
+fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) -> Complex64 {
+    match gate {
+        Gate::H => {
+            let q = targets[0];
+            if pv_get_bit(&pauli.x, q) && pv_get_bit(&pauli.z, q) {
+                Complex64::new(-1.0, 0.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::S => {
+            let q = targets[0];
+            if pv_get_bit(&pauli.x, q) {
+                Complex64::new(0.0, -1.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::Sdg => {
+            let q = targets[0];
+            if pv_get_bit(&pauli.x, q) {
+                Complex64::new(0.0, 1.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::X => {
+            let q = targets[0];
+            if pv_get_bit(&pauli.z, q) {
+                Complex64::new(-1.0, 0.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::Y => {
+            let q = targets[0];
+            let xq = pv_get_bit(&pauli.x, q);
+            let zq = pv_get_bit(&pauli.z, q);
+            if xq ^ zq {
+                Complex64::new(-1.0, 0.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::Z => {
+            let q = targets[0];
+            if pv_get_bit(&pauli.x, q) {
+                Complex64::new(-1.0, 0.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::SX => {
+            let q = targets[0];
+            if pv_get_bit(&pauli.z, q) {
+                Complex64::new(0.0, 1.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::SXdg => {
+            let q = targets[0];
+            if pv_get_bit(&pauli.z, q) {
+                Complex64::new(0.0, -1.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        Gate::Cz => {
+            let q0 = targets[0];
+            let q1 = targets[1];
+            if pv_get_bit(&pauli.x, q0) && pv_get_bit(&pauli.x, q1) {
+                Complex64::new(-1.0, 0.0)
+            } else {
+                Complex64::new(1.0, 0.0)
+            }
+        }
+        _ => Complex64::new(1.0, 0.0),
+    }
+}
+
 struct WeightedPauliSum {
     terms: HashMap<PauliVec, Complex64>,
 }
@@ -459,25 +546,24 @@ impl WeightedPauliSum {
         *entry += coeff;
     }
 
-    fn conjugate_all_backward(&mut self, gate: &Gate, targets: &[usize]) {
+    fn conjugate_all_backward_phased(&mut self, gate: &Gate, targets: &[usize]) {
         let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
         for (mut pauli, coeff) in old_terms {
+            let phase = clifford_conjugation_phase(gate, targets, &pauli);
             propagate_backward(&mut pauli, gate, targets);
-            self.insert(pauli, coeff);
-        }
-    }
-
-    fn conjugate_all_map(&mut self, map: &CliffordMap) {
-        let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
-        for (mut pauli, coeff) in old_terms {
-            map.apply(&mut pauli);
-            self.insert(pauli, coeff);
+            self.insert(pauli, coeff * phase);
         }
     }
 
     fn branch_t_deterministic(&mut self, qubit: usize, is_dagger: bool) {
         let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
         let inv_sqrt2 = 1.0 / SQRT_2;
+        let keep_coeff = Complex64::new(inv_sqrt2, 0.0);
+        let flip_coeff = if is_dagger {
+            Complex64::new(0.0, inv_sqrt2)
+        } else {
+            Complex64::new(0.0, -inv_sqrt2)
+        };
 
         for (pauli, coeff) in old_terms {
             if !pauli.has_x_or_y(qubit) {
@@ -485,22 +571,12 @@ impl WeightedPauliSum {
                 continue;
             }
 
-            let has_z = (pauli.z[qubit / 64] >> (qubit % 64)) & 1 != 0;
-            let is_y = has_z;
-
             let pauli_keep = pauli.clone();
             let mut pauli_flip = pauli;
             flip_bit(&mut pauli_flip.z, qubit);
 
-            let (sign_keep, sign_flip) = match (is_y, is_dagger) {
-                (false, false) => (1.0, 1.0),
-                (false, true) => (1.0, -1.0),
-                (true, false) => (1.0, -1.0),
-                (true, true) => (1.0, 1.0),
-            };
-
-            self.insert(pauli_keep, coeff * sign_keep * inv_sqrt2);
-            self.insert(pauli_flip, coeff * sign_flip * inv_sqrt2);
+            self.insert(pauli_keep, coeff * keep_coeff);
+            self.insert(pauli_flip, coeff * flip_coeff);
         }
     }
 
@@ -539,7 +615,6 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_t_gates(circuit);
-    let ops = coalesce_cliffords(circuit);
 
     let mut expectations = Vec::with_capacity(n);
     let mut peak_terms = 0usize;
@@ -549,16 +624,12 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
         let mut sum = WeightedPauliSum::new();
         sum.insert(PauliVec::z_on_qubit(num_words, q), Complex64::new(1.0, 0.0));
 
-        for op in ops.iter().rev() {
-            match op {
-                CoalescedOp::Map(map) => sum.conjugate_all_map(map),
-                CoalescedOp::SmallCliff(gates) => {
-                    for (gate, targets) in gates.iter().rev() {
-                        sum.conjugate_all_backward(gate, targets);
-                    }
-                }
-                CoalescedOp::T { qubit, is_dagger } => {
-                    sum.branch_t_deterministic(*qubit, *is_dagger);
+        for inst in circuit.instructions.iter().rev() {
+            if let Instruction::Gate { gate, targets } = inst {
+                match gate {
+                    Gate::T => sum.branch_t_deterministic(targets[0], false),
+                    Gate::Tdg => sum.branch_t_deterministic(targets[0], true),
+                    _ => sum.conjugate_all_backward_phased(gate, targets),
                 }
             }
 
@@ -944,5 +1015,45 @@ mod tests {
         assert!((probs[1] - 0.25).abs() < 1e-14);
         assert!((probs[2] - 0.35).abs() < 1e-14);
         assert!((probs[3] - 0.65).abs() < 1e-14);
+    }
+
+    #[test]
+    fn test_spd_h_t_h_t_h_phase_regression() {
+        let mut circuit = Circuit::new(1, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::H, &[0]);
+
+        let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &circuit, 42).unwrap();
+        let sv_probs = sv.probabilities.unwrap().to_vec();
+        let exact_ez = 2.0 * sv_probs[0] - 1.0;
+
+        let spd = run_spd(&circuit, 0.0, 0).unwrap();
+        assert!(
+            (spd.expectations[0] - exact_ez).abs() < 1e-10,
+            "spd={}, exact={exact_ez}",
+            spd.expectations[0]
+        );
+    }
+
+    #[test]
+    fn test_spd_vs_statevector_14q_clifford_t() {
+        let c = crate::circuits::clifford_t_circuit(14, 10, 0.1, 42);
+        let spd = run_spd(&c, 0.0, 0).unwrap();
+
+        let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, &c, 42).unwrap();
+        let sv_probs = sv.probabilities.unwrap().to_vec();
+
+        for q in 0..14 {
+            let exact_p0 = marginal_p0(&sv_probs, 14, q);
+            let exact_ez = 2.0 * exact_p0 - 1.0;
+            assert!(
+                (spd.expectations[q] - exact_ez).abs() < 1e-8,
+                "qubit {q}: spd={}, exact={exact_ez}",
+                spd.expectations[q]
+            );
+        }
     }
 }

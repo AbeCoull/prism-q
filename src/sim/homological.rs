@@ -1,6 +1,7 @@
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use crate::sim::compiled::batch_propagate_backward;
+use crate::sim::compiled::{default_chunk_size, xor_words, PackedShots, ShotAccumulator};
 use crate::sim::noise::NoiseModel;
 use crate::sim::ShotsResult;
 use rand::SeedableRng;
@@ -155,7 +156,7 @@ fn gf2_kernel(matrix: &F2DenseMatrix) -> Vec<Vec<u64>> {
 /// - C₀ = F₂^m (measurement/detector space)
 /// - C₁ = F₂^p (error location space)
 /// - C₂ = F₂^s (stabilizer space)
-/// - ∂₁ = E^T (error propagation matrix, transposed)
+/// - ∂₁ = E (the m×p error propagation matrix)
 pub struct ErrorChainComplex {
     /// E-matrix: m × p binary matrix. E[d][e] = 1 if error e flips measurement d.
     e_matrix: F2DenseMatrix,
@@ -452,6 +453,49 @@ impl ErrorChainComplex {
     pub fn homology_dim(&self) -> usize {
         self.homology_dim
     }
+
+    /// Compute exact noisy marginals analytically. No sampling, no rank limit.
+    ///
+    /// For each measurement j, the noisy probability is:
+    ///   p_j^noisy = p_j + (1 - 2·p_j) · (1 - f_j) / 2
+    /// where f_j = Π_{e: E(j,e)=1} (1 - 2·p_e) is the flip attenuation factor
+    /// and p_j is the noiseless marginal (0, 0.5, or 1).
+    ///
+    /// Cost: O(nnz(E)). Works for any qubit count.
+    pub fn noisy_marginals(&self, noiseless_marginals: &[f64]) -> Vec<f64> {
+        let m = self.num_measurements;
+        let p = self.num_errors;
+        if m == 0 || p == 0 {
+            return noiseless_marginals.to_vec();
+        }
+
+        let mut flip_factor = vec![1.0f64; m];
+        let rw = self.e_matrix.row_words;
+
+        for e in 0..p {
+            let factor = 1.0 - 2.0 * self.error_probs[e];
+            if (factor - 1.0).abs() < 1e-15 {
+                continue;
+            }
+
+            let col_word = e / 64;
+            let col_bit = 1u64 << (e % 64);
+
+            for (j, ff) in flip_factor.iter_mut().enumerate() {
+                if self.e_matrix.data[j * rw + col_word] & col_bit != 0 {
+                    *ff *= factor;
+                }
+            }
+        }
+
+        let mut result = Vec::with_capacity(m);
+        for j in 0..m {
+            let p_j = noiseless_marginals[j];
+            let p_flip = (1.0 - flip_factor[j]) / 2.0;
+            result.push(p_j + (1.0 - 2.0 * p_j) * p_flip);
+        }
+        result
+    }
 }
 
 impl HomologicalSampler {
@@ -637,6 +681,60 @@ impl HomologicalSampler {
     pub fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
         (0..num_shots).map(|_| self.sample()).collect()
     }
+
+    pub fn sample_packed(&mut self, num_shots: usize) -> PackedShots {
+        let m = self.compiled.num_measurements();
+        let m_words = m.div_ceil(64);
+        if num_shots == 0 || m == 0 {
+            return PackedShots::from_shot_major(Vec::new(), num_shots, m);
+        }
+
+        let mut accum = Vec::new();
+        let mut rand_buf = Vec::new();
+        self.compiled
+            .sample_bulk_words_shot_major_reuse(&mut accum, &mut rand_buf, num_shots);
+
+        let ref_bits = self.compiled.ref_bits_packed();
+        for s in 0..num_shots {
+            let base = s * m_words;
+            xor_words(&mut accum[base..base + m_words], ref_bits);
+        }
+
+        for s in 0..num_shots {
+            let u: f64 = rand::Rng::gen(&mut self.rng);
+            let class = match self
+                .class_cdf
+                .binary_search_by(|p| p.partial_cmp(&u).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                Ok(i) => i,
+                Err(i) => i.min(self.class_cdf.len() - 1),
+            };
+
+            let det = &self.class_detections[class];
+            let base = s * m_words;
+            xor_words(&mut accum[base..base + m_words], det);
+        }
+
+        PackedShots::from_shot_major(accum, num_shots, m)
+    }
+
+    pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
+        let chunk_size = default_chunk_size(self.compiled.num_measurements());
+        let mut remaining = total_shots;
+        while remaining > 0 {
+            let batch = remaining.min(chunk_size);
+            let packed = self.sample_packed(batch);
+            acc.accumulate(&packed);
+            remaining -= batch;
+        }
+    }
+
+    pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
+        let mut acc =
+            crate::sim::compiled::MarginalsAccumulator::new(self.compiled.num_measurements());
+        self.sample_chunked(total_shots, &mut acc);
+        acc.marginals()
+    }
 }
 
 /// Run noisy shot sampling using the homological sampler.
@@ -685,6 +783,40 @@ pub(crate) fn run_shots_homological_inner(
         shots,
         probabilities: None,
     })
+}
+
+/// Compute exact noisy marginals analytically. No sampling, no rank limit.
+///
+/// Builds the error chain complex and compiled sampler, then computes
+/// exact per-measurement noisy probabilities in O(nnz(E)) time.
+/// Works for any qubit count — not limited by syndrome rank.
+pub fn noisy_marginals_analytical(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+) -> Result<Vec<f64>> {
+    let ecc = ErrorChainComplex::build(circuit, noise, seed)?;
+    let compiled = crate::sim::compiled::compile_measurements(circuit, seed)?;
+    let noiseless = compiled.marginal_probabilities();
+    let noisy = ecc.noisy_marginals(&noiseless);
+
+    let classical_bit_order: Vec<usize> = circuit
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Measure { classical_bit, .. } => Some(*classical_bit),
+            _ => None,
+        })
+        .collect();
+    let num_classical = circuit.num_classical_bits;
+
+    let mut result = vec![0.5f64; num_classical];
+    for (mi, &cbit) in classical_bit_order.iter().enumerate() {
+        if cbit < num_classical && mi < noisy.len() {
+            result[cbit] = noisy[mi];
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -942,5 +1074,226 @@ mod tests {
         // boundary_dim = 3-1 = 2, homology_dim = 3-1+1 = 3
         assert_eq!(ecc.boundary_dim(), 2);
         assert_eq!(ecc.homology_dim(), 3);
+    }
+
+    #[test]
+    fn packed_matches_unpacked() {
+        let n = 6;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+
+        let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
+        let mut s2 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
+
+        let unpacked = s1.sample_bulk(500);
+        let packed = s2.sample_packed(500);
+
+        assert_eq!(packed.num_shots(), 500);
+        assert_eq!(packed.num_measurements(), n);
+
+        for (s, shot) in unpacked.iter().enumerate() {
+            for (m, &val) in shot.iter().enumerate() {
+                assert_eq!(packed.get_bit(s, m), val, "mismatch at shot={s} meas={m}");
+            }
+        }
+    }
+
+    #[test]
+    fn marginals_matches_unpacked() {
+        let n = 6;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+
+        let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
+        let mut s2 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
+
+        let num_shots = 10_000;
+        let unpacked = s1.sample_bulk(num_shots);
+        let marginals = s2.sample_marginals(num_shots);
+
+        assert_eq!(marginals.len(), n);
+        for m in 0..n {
+            let unpacked_p = unpacked.iter().filter(|s| s[m]).count() as f64 / num_shots as f64;
+            assert!(
+                (marginals[m] - unpacked_p).abs() < 1e-10,
+                "marginal mismatch at meas={m}: packed={}, unpacked={unpacked_p}",
+                marginals[m],
+            );
+        }
+    }
+
+    #[test]
+    fn analytical_marginals_match_sampled_small() {
+        let n = 6;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+
+        let analytical = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+
+        let mut sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
+        let sampled = sampler.sample_marginals(100_000);
+
+        assert_eq!(analytical.len(), n);
+        assert_eq!(sampled.len(), n);
+        for i in 0..n {
+            assert!(
+                (analytical[i] - sampled[i]).abs() < 0.01,
+                "bit {i}: analytical={:.6}, sampled={:.6}",
+                analytical[i],
+                sampled[i],
+            );
+        }
+    }
+
+    #[test]
+    fn analytical_marginals_ghz_50q() {
+        let n = 50;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+
+        let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+        assert_eq!(marginals.len(), n);
+        for (i, &p) in marginals.iter().enumerate() {
+            assert!(p > 0.0 && p < 1.0, "bit {i}: marginal {p} out of range");
+            assert!(
+                (p - 0.5).abs() < 0.05,
+                "bit {i}: GHZ marginal should be near 0.5, got {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytical_marginals_ghz_100q() {
+        let n = 100;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+
+        let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+        assert_eq!(marginals.len(), n);
+        for (i, &p) in marginals.iter().enumerate() {
+            assert!(p > 0.0 && p < 1.0, "bit {i}: marginal {p} out of range");
+        }
+    }
+
+    #[test]
+    fn analytical_marginals_bell_pairs_100q() {
+        let n_pairs = 50;
+        let n = n_pairs * 2;
+        let mut circuit = circuits::independent_bell_pairs(n_pairs);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+
+        let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+        assert_eq!(marginals.len(), n);
+        for (i, &p) in marginals.iter().enumerate() {
+            assert!(
+                (p - 0.5).abs() < 0.05,
+                "bit {i}: bell pair marginal should be near 0.5, got {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytical_marginals_clifford_1000q() {
+        let n = 1000;
+        let mut circuit = circuits::clifford_heavy_circuit(n, 2, 42);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+
+        let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+        assert_eq!(marginals.len(), n);
+        for (i, &p) in marginals.iter().enumerate() {
+            assert!(
+                (0.0..=1.0).contains(&p),
+                "bit {i}: marginal {p} out of range"
+            );
+        }
+    }
+
+    #[test]
+    fn analytical_marginals_deterministic_bits() {
+        let mut circuit = crate::circuit::Circuit::new(4, 4);
+        for i in 0..4 {
+            circuit.add_gate(crate::gates::Gate::X, &[i]);
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+
+        let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+        for (i, &p) in marginals.iter().enumerate() {
+            assert!(
+                p > 0.95,
+                "bit {i}: X-then-measure should give p(1) near 1.0, got {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn analytical_marginals_no_noise() {
+        let n = 6;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+
+        let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+        for (i, &p) in marginals.iter().enumerate() {
+            assert!(
+                (p - 0.5).abs() < 1e-10,
+                "bit {i}: GHZ with no noise should have marginal 0.5, got {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn chunked_accumulator_matches_packed() {
+        let n = 6;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+
+        let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
+        let mut s2 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
+
+        let num_shots = 5_000;
+        let packed = s1.sample_packed(num_shots);
+        let direct_counts = packed.counts();
+
+        let mut acc = super::super::compiled::HistogramAccumulator::new();
+        s2.sample_chunked(num_shots, &mut acc);
+        let chunked_counts = acc.into_counts();
+
+        assert_eq!(direct_counts, chunked_counts);
     }
 }

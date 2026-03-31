@@ -41,7 +41,7 @@ use crate::gates::Gate;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-mod kernels;
+pub(crate) mod kernels;
 #[cfg(test)]
 mod tests;
 

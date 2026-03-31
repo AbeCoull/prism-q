@@ -1025,12 +1025,89 @@ fn chunked_histogram_matches_direct() {
     let direct_counts = sampler_direct.sample_bulk_packed(num_shots).counts();
 
     let mut sampler_chunked = compile_measurements(&c, 42).unwrap();
-    let chunked_counts = sampler_chunked.sample_counts(num_shots);
+    let mut acc = super::accumulator::HistogramAccumulator::new();
+    sampler_chunked.sample_chunked(num_shots, &mut acc);
+    let chunked_counts = acc.into_counts();
 
     assert_eq!(
         direct_counts, chunked_counts,
         "chunked histogram must match direct"
     );
+}
+
+#[test]
+fn rank_space_counts_valid() {
+    let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
+    c.num_classical_bits = 20;
+    for i in 0..20 {
+        c.add_measure(i, i);
+    }
+    let num_shots = 100_000;
+
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    let rank = sampler.rank();
+    assert!(
+        rank <= 20,
+        "rank {rank} should be ≤20 to use rank-space counting"
+    );
+    let counts = sampler.sample_counts(num_shots);
+
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, num_shots as u64, "total shots must match");
+    assert!(
+        counts.len() <= (1 << rank),
+        "distinct outcomes {} must be ≤ 2^rank={}",
+        counts.len(),
+        1 << rank
+    );
+
+    let m_words = 20usize.div_ceil(64);
+    for key in counts.keys() {
+        assert_eq!(
+            key.len(),
+            m_words,
+            "each key must have m_words={m_words} words"
+        );
+    }
+}
+
+#[test]
+fn rank_space_counts_matches_distribution() {
+    let mut c = circuits::ghz_circuit(10);
+    c.num_classical_bits = 10;
+    for i in 0..10 {
+        c.add_measure(i, i);
+    }
+    let num_shots = 100_000;
+
+    let mut sampler_rs = compile_measurements(&c, 42).unwrap();
+    let rs_counts = sampler_rs.sample_counts(num_shots);
+
+    let mut sampler_old = compile_measurements(&c, 99).unwrap();
+    let mut acc = super::accumulator::HistogramAccumulator::new();
+    sampler_old.sample_chunked(num_shots, &mut acc);
+    let old_counts = acc.into_counts();
+
+    assert_eq!(
+        rs_counts.keys().collect::<std::collections::HashSet<_>>(),
+        old_counts.keys().collect::<std::collections::HashSet<_>>(),
+        "rank-space and chunked must produce same outcome set for GHZ"
+    );
+
+    let total_rs: u64 = rs_counts.values().sum();
+    let total_old: u64 = old_counts.values().sum();
+    assert_eq!(total_rs, num_shots as u64);
+    assert_eq!(total_old, num_shots as u64);
+
+    for (key, &rs_count) in &rs_counts {
+        let old_count = old_counts[key];
+        let expected = num_shots as f64 / rs_counts.len() as f64;
+        let diff = (rs_count as f64 - old_count as f64).abs();
+        assert!(
+            diff < expected * 0.1,
+            "counts for {key:?} differ too much: rs={rs_count} old={old_count}"
+        );
+    }
 }
 
 #[test]
@@ -1250,4 +1327,129 @@ fn noisy_chunked_histogram_matches_direct() {
         direct_counts, chunked_counts,
         "noisy chunked histogram must match direct"
     );
+}
+
+#[test]
+fn multinomial_ghz_correct_outcomes() {
+    let mut c = circuits::ghz_circuit(10);
+    c.num_classical_bits = 10;
+    for i in 0..10 {
+        c.add_measure(i, i);
+    }
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    assert_eq!(sampler.rank(), 1);
+
+    let counts = sampler.sample_counts(100_000);
+    assert_eq!(counts.len(), 2, "GHZ should produce exactly 2 outcomes");
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 100_000);
+
+    for (key, &count) in &counts {
+        let frac = count as f64 / 100_000.0;
+        assert!(
+            (frac - 0.5).abs() < 0.02,
+            "GHZ outcome {key:?} fraction {frac:.4} should be ~0.5"
+        );
+    }
+}
+
+#[test]
+fn multinomial_bell_pairs_correlation() {
+    let n_pairs = 5;
+    let mut c = circuits::independent_bell_pairs(n_pairs);
+    let n = c.num_qubits;
+    c.num_classical_bits = n;
+    for i in 0..n {
+        c.add_measure(i, i);
+    }
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    assert_eq!(sampler.rank(), n_pairs);
+
+    let counts = sampler.sample_counts(100_000);
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 100_000);
+    assert_eq!(
+        counts.len(),
+        1 << n_pairs,
+        "5 Bell pairs should have 2^5=32 outcomes"
+    );
+
+    for key in counts.keys() {
+        for p in 0..n_pairs {
+            let b0 = (key[0] >> (2 * p)) & 1;
+            let b1 = (key[0] >> (2 * p + 1)) & 1;
+            assert_eq!(
+                b0, b1,
+                "Bell pair {p} must be correlated in outcome {key:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn multinomial_matches_exact_distribution() {
+    let mut c = circuits::clifford_random_pairs(8, 10, 42);
+    c.num_classical_bits = 8;
+    for i in 0..8 {
+        c.add_measure(i, i);
+    }
+
+    let sampler_exact = compile_measurements(&c, 42).unwrap();
+    let exact = sampler_exact.exact_counts().unwrap();
+    let exact_total: u64 = exact.values().sum();
+    let exact_probs: std::collections::HashMap<Vec<u64>, f64> = exact
+        .iter()
+        .map(|(k, &v)| (k.clone(), v as f64 / exact_total as f64))
+        .collect();
+
+    let num_shots = 200_000;
+    let mut sampler_multi = compile_measurements(&c, 42).unwrap();
+    let rank = sampler_multi.rank();
+    assert!(rank <= 8);
+    let multi_counts = sampler_multi.sample_counts(num_shots);
+
+    let total: u64 = multi_counts.values().sum();
+    assert_eq!(total, num_shots as u64);
+
+    for (key, &exact_p) in &exact_probs {
+        if exact_p > 0.005 {
+            let sampled = *multi_counts.get(key).unwrap_or(&0) as f64 / num_shots as f64;
+            assert!(
+                (sampled - exact_p).abs() < 0.02,
+                "outcome {key:?}: exact={exact_p:.4} multinomial={sampled:.4}"
+            );
+        }
+    }
+}
+
+#[test]
+fn multinomial_identity_all_zeros() {
+    let mut c = Circuit::new(4, 4);
+    for i in 0..4 {
+        c.add_measure(i, i);
+    }
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    assert_eq!(sampler.rank(), 0);
+
+    let counts = sampler.sample_counts(10_000);
+    assert_eq!(counts.len(), 1, "Identity circuit should produce 1 outcome");
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 10_000);
+}
+
+#[test]
+fn multinomial_high_rank_falls_through() {
+    let n = 50;
+    let mut c = circuits::clifford_heavy_circuit(n, 10, 42);
+    c.num_classical_bits = n;
+    for i in 0..n {
+        c.add_measure(i, i);
+    }
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    assert!(sampler.rank() > 22, "50q clifford should have rank > 22");
+
+    let counts = sampler.sample_counts(10_000);
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 10_000);
+    assert!(counts.len() > 1);
 }

@@ -22,6 +22,7 @@
 //! See `docs/architecture.md` § "Add a new backend" for the full playbook.
 
 pub mod factored;
+pub mod factored_stabilizer;
 pub mod mps;
 pub mod product;
 pub(crate) mod simd;

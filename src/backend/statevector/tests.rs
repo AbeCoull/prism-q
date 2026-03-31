@@ -738,6 +738,7 @@ fn test_multi_fused_matches_individual() {
     b2.apply(&Instruction::Gate {
         gate: Gate::MultiFused(Box::new(MultiFusedData {
             gates: gates_data.clone(),
+            all_diagonal: false,
         })),
         targets: gates_data.iter().map(|&(t, _)| t).collect(),
     })
@@ -799,6 +800,7 @@ fn test_multi_fused_mixed_targets() {
     b2.apply(&Instruction::Gate {
         gate: Gate::MultiFused(Box::new(MultiFusedData {
             gates: gates_data.clone(),
+            all_diagonal: false,
         })),
         targets: gates_data.iter().map(|&(t, _)| t).collect(),
     })
@@ -881,6 +883,7 @@ fn test_multi_fused_three_tier_targets() {
     b2.apply(&Instruction::Gate {
         gate: Gate::MultiFused(Box::new(MultiFusedData {
             gates: gates_data.clone(),
+            all_diagonal: false,
         })),
         targets: gates_data.iter().map(|&(t, _)| t).collect(),
     })

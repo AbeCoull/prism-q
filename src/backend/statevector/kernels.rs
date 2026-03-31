@@ -1330,6 +1330,132 @@ impl StatevectorBackend {
         }
     }
 
+    pub(super) fn apply_multi_1q_diagonal(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
+        if gates.is_empty() {
+            return;
+        }
+        if gates.len() == 1 {
+            self.apply_diagonal_gate(gates[0].0, gates[0].1[0][0], gates[0].1[1][1]);
+            return;
+        }
+
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.apply_multi_1q_diagonal_par(gates);
+            return;
+        }
+
+        const MULTI_TILE: usize = 16384;
+        const L3_TILE: usize = 131072;
+
+        let max_l2_target = max_target_for_tile(MULTI_TILE);
+        let max_l3_target = max_target_for_tile(L3_TILE);
+
+        let mut small_gates: SmallVec<[(usize, Complex64, Complex64, bool); 16]> = SmallVec::new();
+        let mut medium_gates: SmallVec<[(usize, Complex64, Complex64, bool); 4]> = SmallVec::new();
+        let mut large_gates: SmallVec<[(usize, Complex64, Complex64); 4]> = SmallVec::new();
+
+        for &(target, mat) in gates {
+            let d0 = mat[0][0];
+            let d1 = mat[1][1];
+            let skip_lo = is_phase_one(d0);
+            if target <= max_l2_target {
+                small_gates.push((target, d0, d1, skip_lo));
+            } else if target <= max_l3_target {
+                medium_gates.push((target, d0, d1, skip_lo));
+            } else {
+                large_gates.push((target, d0, d1));
+            }
+        }
+
+        if !small_gates.is_empty() {
+            let outer_block = 1usize << (max_l2_target + 1);
+            let tile_size = MULTI_TILE.max(outer_block);
+            for tile in self.state.chunks_mut(tile_size) {
+                for &(target, d0, d1, skip_lo) in &small_gates {
+                    simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+                }
+            }
+        }
+
+        if !medium_gates.is_empty() {
+            let outer_block = 1usize << (max_l3_target + 1);
+            let tile_size = L3_TILE.max(outer_block);
+            for tile in self.state.chunks_mut(tile_size) {
+                for &(target, d0, d1, skip_lo) in &medium_gates {
+                    simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+                }
+            }
+        }
+
+        for (target, d0, d1) in large_gates {
+            let skip_lo = is_phase_one(d0);
+            simd::apply_diagonal_sequential(&mut self.state, target, d0, d1, skip_lo);
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[inline(always)]
+    fn apply_multi_1q_diagonal_par(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
+        const MULTI_TILE: usize = 16384;
+        const L3_TILE: usize = 131072;
+
+        let max_l2_target = max_target_for_tile(MULTI_TILE);
+        let max_l3_target = max_target_for_tile(L3_TILE);
+
+        let mut small_gates: SmallVec<[(usize, Complex64, Complex64, bool); 16]> = SmallVec::new();
+        let mut medium_gates: SmallVec<[(usize, Complex64, Complex64, bool); 4]> = SmallVec::new();
+        let mut large_gates: SmallVec<[(usize, Complex64, Complex64); 4]> = SmallVec::new();
+
+        for &(target, mat) in gates {
+            let d0 = mat[0][0];
+            let d1 = mat[1][1];
+            let skip_lo = is_phase_one(d0);
+            if target <= max_l2_target {
+                small_gates.push((target, d0, d1, skip_lo));
+            } else if target <= max_l3_target {
+                medium_gates.push((target, d0, d1, skip_lo));
+            } else {
+                large_gates.push((target, d0, d1));
+            }
+        }
+
+        if !small_gates.is_empty() {
+            let outer_block = 1usize << (max_l2_target + 1);
+            let tile_size = MULTI_TILE.max(outer_block);
+            self.state
+                .par_chunks_mut(tile_size)
+                .with_min_len(chunk_min_len(tile_size))
+                .for_each(|tile| {
+                    for &(target, d0, d1, skip_lo) in &small_gates {
+                        simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+                    }
+                });
+        }
+
+        if !medium_gates.is_empty() {
+            let outer_block = 1usize << (max_l3_target + 1);
+            let tile_size = L3_TILE.max(outer_block);
+            self.state
+                .par_chunks_mut(tile_size)
+                .with_min_len(chunk_min_len(tile_size))
+                .for_each(|tile| {
+                    for &(target, d0, d1, skip_lo) in &medium_gates {
+                        simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+                    }
+                });
+        }
+
+        for (target, d0, d1) in large_gates {
+            let skip_lo = is_phase_one(d0);
+            let min_tile = 1usize << (target + 1);
+            let tile_size = min_tile.max(MIN_PAR_ELEMS);
+            self.state.par_chunks_mut(tile_size).for_each(|tile| {
+                simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
+            });
+        }
+    }
+
     /// Apply multiple two-qubit gates in a cache-tiled pass.
     ///
     /// Partitions gates by `max(q0, q1)` into three tiers matching `apply_multi_1q`:

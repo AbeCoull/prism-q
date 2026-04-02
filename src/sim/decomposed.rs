@@ -54,7 +54,7 @@ fn run_subcircuit(
     } else {
         kind.clone()
     };
-    super::run_with_opts(block_kind, sub_circuit, block_seed, opts.clone())
+    super::run_with_internal(block_kind, sub_circuit, block_seed, *opts)
 }
 
 pub(super) fn run_decomposed(
@@ -70,7 +70,7 @@ pub(super) fn run_decomposed(
     let block_opts = if circuit.num_qubits > 64 {
         SimOptions::classical_only()
     } else {
-        opts.clone()
+        *opts
     };
     let results: Vec<Result<SimulationResult>> =
         run_blocks_maybe_par(kind, &partitions, components, seed, &block_opts, k);
@@ -144,7 +144,7 @@ pub(super) fn run_decomposed_prefused(
     let block_opts = if original_circuit.num_qubits > 64 {
         SimOptions::classical_only()
     } else {
-        opts.clone()
+        *opts
     };
     let results: Vec<Result<SimulationResult>> = (0..k)
         .map(|i| {

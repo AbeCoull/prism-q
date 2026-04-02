@@ -98,11 +98,11 @@ fn ghz_distribution() {
     let result = run_shots_compiled(&c, 10_000, 42).unwrap();
     let counts = result.counts();
 
-    let all_zero: Vec<bool> = vec![false; n];
-    let all_one: Vec<bool> = vec![true; n];
+    let key_zero = vec![0u64];
+    let key_one = vec![(1u64 << n) - 1];
 
-    let n_zero = counts.get(&all_zero).copied().unwrap_or(0);
-    let n_one = counts.get(&all_one).copied().unwrap_or(0);
+    let n_zero = counts.get(&key_zero).copied().unwrap_or(0);
+    let n_one = counts.get(&key_one).copied().unwrap_or(0);
 
     assert_eq!(
         counts.len(),

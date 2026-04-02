@@ -809,21 +809,17 @@ fn bench_factored_independent(c: &mut Criterion) {
 }
 
 fn bench_factored_sim_only(c: &mut Criterion) {
-    use prism_q::SimOptions;
     let mut group = c.benchmark_group("factored/sim_only_d10");
     configure_group(&mut group);
-    let opts = SimOptions::classical_only();
 
     for &n in &[16, 20, 24] {
         let circuit = circuits::random_circuit(n, 10, SEED);
 
         group.bench_with_input(BenchmarkId::new("statevector", n), &circuit, |b, circ| {
-            b.iter(|| {
-                sim::run_with_opts(BackendKind::Statevector, circ, 42, opts.clone()).unwrap()
-            });
+            b.iter(|| sim::run_with(BackendKind::Statevector, circ, 42).unwrap());
         });
         group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
-            b.iter(|| sim::run_with_opts(BackendKind::Factored, circ, 42, opts.clone()).unwrap());
+            b.iter(|| sim::run_with(BackendKind::Factored, circ, 42).unwrap());
         });
     }
 

@@ -621,7 +621,7 @@ fn run_shots_via_qasm() {
     let result = prism_q::run_shots(&circuit, 100, 42).unwrap();
     let counts = result.counts();
     assert_eq!(counts.len(), 1);
-    assert_eq!(*counts.get(&vec![true, false]).unwrap_or(&0), 100);
+    assert_eq!(*counts.get(&vec![1u64]).unwrap_or(&0), 100);
 }
 
 #[test]
@@ -636,8 +636,8 @@ fn run_shots_superposition_via_qasm() {
     let circuit = openqasm::parse(qasm).unwrap();
     let result = prism_q::run_shots(&circuit, 1000, 42).unwrap();
     let counts = result.counts();
-    let zeros = *counts.get(&vec![false]).unwrap_or(&0);
-    let ones = *counts.get(&vec![true]).unwrap_or(&0);
+    let zeros = *counts.get(&vec![0u64]).unwrap_or(&0);
+    let ones = *counts.get(&vec![1u64]).unwrap_or(&0);
     assert!(zeros > 100, "expected >100 zeros, got {zeros}");
     assert!(ones > 100, "expected >100 ones, got {ones}");
     assert_eq!(zeros + ones, 1000);

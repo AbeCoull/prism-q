@@ -17,9 +17,9 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    has_temporal_clifford_opportunity, select_backend, supports_fused_for_kind,
-    try_temporal_clifford, validate_explicit_backend, AUTO_APPROX_MAX_TERMS, AUTO_SPD_MAX_TERMS,
-    MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
+    has_temporal_clifford_opportunity, select_backend, select_dispatch, supports_fused_for_kind,
+    try_temporal_clifford, validate_explicit_backend, DispatchAction, AUTO_APPROX_MAX_TERMS,
+    AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
     MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
     MIN_QUBITS_FOR_SPD_AUTO,
 };
@@ -30,17 +30,9 @@ use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 
-/// Options controlling what `sim::run` computes.
-///
-/// Use [`Default`] for full output (probabilities included), or
-/// [`SimOptions::classical_only`] to skip the probabilities pass.
-#[derive(Debug, Clone)]
-pub struct SimOptions {
-    /// Whether to compute the full probability vector after simulation.
-    ///
-    /// Skipping this saves one complete statevector pass (~2 ms at 20 qubits).
-    /// When `false`, `SimulationResult::probabilities` will be `None`.
-    pub probabilities: bool,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SimOptions {
+    pub(crate) probabilities: bool,
 }
 
 impl Default for SimOptions {
@@ -52,8 +44,7 @@ impl Default for SimOptions {
 }
 
 impl SimOptions {
-    /// Options for measurement-only runs: skip probability extraction.
-    pub fn classical_only() -> Self {
+    pub(crate) fn classical_only() -> Self {
         Self {
             probabilities: false,
         }
@@ -241,8 +232,7 @@ pub struct SimulationResult {
     /// `true` = measured |1⟩.
     pub classical_bits: Vec<bool>,
     /// Probability of each computational basis state (length 2^n).
-    /// `None` if the backend does not support probability extraction,
-    /// or if [`SimOptions::probabilities`] was `false`.
+    /// `None` if the backend does not support probability extraction.
     pub probabilities: Option<Probabilities>,
 }
 
@@ -290,14 +280,10 @@ pub fn run(circuit: &Circuit, seed: u64) -> Result<SimulationResult> {
 /// Constructs the backend internally based on [`BackendKind`], then runs
 /// the circuit. For a pre-constructed backend instance, use [`run_on`].
 pub fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<SimulationResult> {
-    run_with_opts(kind, circuit, seed, SimOptions::default())
+    run_with_internal(kind, circuit, seed, SimOptions::default())
 }
 
-/// Execute a circuit with explicit backend selection and output options.
-///
-/// Like [`run_with`], but accepts [`SimOptions`] to skip expensive outputs
-/// (e.g., probability extraction) when only classical results are needed.
-pub fn run_with_opts(
+fn run_with_internal(
     kind: BackendKind,
     circuit: &Circuit,
     seed: u64,
@@ -324,7 +310,7 @@ pub fn run_with_opts(
                             probabilities: false,
                         }
                     } else {
-                        opts.clone()
+                        opts
                     };
                     return execute(&mut backend, circuit, &fs_opts);
                 }
@@ -332,29 +318,6 @@ pub fn run_with_opts(
             }
             has_partial_independence = true;
         }
-    }
-    if matches!(kind, BackendKind::StabilizerRank) {
-        let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
-        return Ok(SimulationResult {
-            probabilities: Some(Probabilities::Dense(sr.probabilities)),
-            classical_bits: vec![],
-        });
-    }
-    if let BackendKind::StochasticPauli { num_samples } = kind {
-        let spp = unified_pauli::run_spp(circuit, num_samples, seed)?;
-        let probs = unified_pauli::spp_to_probabilities(&spp);
-        return Ok(SimulationResult {
-            probabilities: Some(Probabilities::Dense(probs)),
-            classical_bits: vec![],
-        });
-    }
-    if let BackendKind::DeterministicPauli { epsilon, max_terms } = kind {
-        let spd = unified_pauli::run_spd(circuit, epsilon, max_terms)?;
-        let probs = unified_pauli::spd_to_probabilities(&spd);
-        return Ok(SimulationResult {
-            probabilities: Some(Probabilities::Dense(probs)),
-            classical_bits: vec![],
-        });
     }
     if matches!(kind, BackendKind::Auto)
         && circuit.is_clifford_plus_t()
@@ -385,14 +348,35 @@ pub fn run_with_opts(
             });
         }
     }
-    // Temporal Clifford decomposition: if the circuit has a substantial Clifford
-    // prefix followed by non-Clifford gates, run the prefix on Stabilizer and
-    // the tail on Statevector with the exported state.
-    if let Some(result) = try_temporal_clifford(&kind, circuit, seed, &opts) {
+    if let Some(result) = try_temporal_clifford(&kind, circuit, seed) {
         return result;
     }
-    let mut backend = select_backend(&kind, circuit, seed, has_partial_independence);
-    execute(&mut *backend, circuit, &opts)
+    match select_dispatch(&kind, circuit, seed, has_partial_independence) {
+        DispatchAction::Backend(mut backend) => execute(&mut *backend, circuit, &opts),
+        DispatchAction::StabilizerRank => {
+            let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
+            Ok(SimulationResult {
+                probabilities: Some(Probabilities::Dense(sr.probabilities)),
+                classical_bits: vec![],
+            })
+        }
+        DispatchAction::StochasticPauli { num_samples } => {
+            let spp = unified_pauli::run_spp(circuit, num_samples, seed)?;
+            let probs = unified_pauli::spp_to_probabilities(&spp);
+            Ok(SimulationResult {
+                probabilities: Some(Probabilities::Dense(probs)),
+                classical_bits: vec![],
+            })
+        }
+        DispatchAction::DeterministicPauli { epsilon, max_terms } => {
+            let spd = unified_pauli::run_spd(circuit, epsilon, max_terms)?;
+            let probs = unified_pauli::spd_to_probabilities(&spd);
+            Ok(SimulationResult {
+                probabilities: Some(Probabilities::Dense(probs)),
+                classical_bits: vec![],
+            })
+        }
+    }
 }
 
 /// Execute a circuit on a pre-constructed backend.
@@ -400,18 +384,7 @@ pub fn run_with_opts(
 /// Use this when you need direct control over the backend instance
 /// (e.g., testing a specific backend). For automatic dispatch, use [`run`].
 pub fn run_on(backend: &mut dyn Backend, circuit: &Circuit) -> Result<SimulationResult> {
-    run_on_opts(backend, circuit, &SimOptions::default())
-}
-
-/// Execute a circuit on a pre-constructed backend with output options.
-///
-/// Like [`run_on`], but accepts [`SimOptions`] to skip expensive outputs.
-pub fn run_on_opts(
-    backend: &mut dyn Backend,
-    circuit: &Circuit,
-    opts: &SimOptions,
-) -> Result<SimulationResult> {
-    execute(backend, circuit, opts)
+    execute(backend, circuit, &SimOptions::default())
 }
 
 /// Parse an OpenQASM string and execute with automatic backend selection.
@@ -426,34 +399,35 @@ pub struct ShotsResult {
     /// Classical measurement outcomes for each shot.
     /// `shots[i][j]` is the j-th classical bit from the i-th shot.
     pub shots: Vec<Vec<bool>>,
-    /// Probability distribution from the final shot (pre-measurement state
-    /// is identical across shots, so one extraction suffices).
-    pub probabilities: Option<Probabilities>,
+    num_classical_bits: usize,
 }
 
 impl ShotsResult {
     /// Build a frequency histogram of measurement outcomes.
-    pub fn counts(&self) -> HashMap<Vec<bool>, usize> {
-        let mut packed_map: HashMap<[u64; 8], usize> = HashMap::new();
+    ///
+    /// Keys are packed `Vec<u64>` where bit `i` of word `i/64` corresponds
+    /// to classical bit `i`. Use [`bitstring`] to format keys for display.
+    pub fn counts(&self) -> HashMap<Vec<u64>, u64> {
+        let m_words = self.num_classical_bits.div_ceil(64).max(1);
+        let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
         for shot in &self.shots {
-            let mut key = [0u64; 8];
+            let mut key = vec![0u64; m_words];
             for (i, &b) in shot.iter().enumerate() {
                 if b {
                     key[i / 64] |= 1u64 << (i % 64);
                 }
             }
-            *packed_map.entry(key).or_insert(0) += 1;
+            *counts.entry(key).or_insert(0) += 1;
         }
-        let num_bits = self.shots.first().map_or(0, |s| s.len());
-        packed_map
-            .into_iter()
-            .map(|(key, count)| {
-                let bits: Vec<bool> = (0..num_bits)
-                    .map(|i| key[i / 64] >> (i % 64) & 1 == 1)
-                    .collect();
-                (bits, count)
-            })
-            .collect()
+        counts
+    }
+
+    pub fn num_shots(&self) -> usize {
+        self.shots.len()
+    }
+
+    pub fn num_classical_bits(&self) -> usize {
+        self.num_classical_bits
     }
 }
 
@@ -463,11 +437,28 @@ impl std::fmt::Display for ShotsResult {
         let mut entries: Vec<_> = counts.into_iter().collect();
         entries.sort_by(|a, b| b.1.cmp(&a.1));
         for (bits, count) in &entries {
-            let bitstring: String = bits.iter().map(|&b| if b { '1' } else { '0' }).collect();
-            writeln!(f, "{bitstring}: {count}")?;
+            let bs = bitstring(bits, self.num_classical_bits);
+            writeln!(f, "{bs}: {count}")?;
         }
         Ok(())
     }
+}
+
+/// Format a packed `Vec<u64>` key (from [`ShotsResult::counts`]) as a binary string.
+///
+/// Bit 0 of the first word corresponds to classical bit 0 (leftmost character).
+pub fn bitstring(key: &[u64], num_bits: usize) -> String {
+    let mut s = String::with_capacity(num_bits);
+    for i in 0..num_bits {
+        let word = i / 64;
+        let bit = i % 64;
+        if word < key.len() && (key[word] >> bit) & 1 == 1 {
+            s.push('1');
+        } else {
+            s.push('0');
+        }
+    }
+    s
 }
 
 fn build_cdf(probs: &[f64]) -> Vec<f64> {
@@ -560,14 +551,6 @@ pub fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<Shots
     run_shots_with(BackendKind::Auto, circuit, num_shots, seed)
 }
 
-/// Execute a circuit multiple times with a random seed.
-///
-/// Like [`run_shots`], but generates a random base seed using system
-/// entropy. Results are non-deterministic across runs.
-pub fn run_shots_random(circuit: &Circuit, num_shots: usize) -> Result<ShotsResult> {
-    run_shots_with(BackendKind::Auto, circuit, num_shots, rand::random())
-}
-
 /// Execute a circuit multiple times and return outcome counts directly.
 ///
 /// For Clifford circuits with Auto/Stabilizer/FilteredStabilizer backends,
@@ -575,15 +558,6 @@ pub fn run_shots_random(circuit: &Circuit, num_shots: usize) -> Result<ShotsResu
 /// counting for low-rank circuits, histogram accumulation for high-rank).
 /// For other backends, falls back to per-shot simulation with counting.
 pub fn run_counts(
-    circuit: &Circuit,
-    num_shots: usize,
-    seed: u64,
-) -> Result<HashMap<Vec<u64>, u64>> {
-    run_counts_with(BackendKind::Auto, circuit, num_shots, seed)
-}
-
-/// Like [`run_counts`], but with explicit backend selection.
-pub fn run_counts_with(
     kind: BackendKind,
     circuit: &Circuit,
     num_shots: usize,
@@ -604,7 +578,7 @@ pub fn run_counts_with(
     }
 
     let result = run_shots_with(kind, circuit, num_shots, seed)?;
-    let m_words = circuit.num_classical_bits.div_ceil(64);
+    let m_words = circuit.num_classical_bits.div_ceil(64).max(1);
     let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
     for shot in &result.shots {
         let mut key = vec![0u64; m_words];
@@ -630,16 +604,7 @@ pub fn run_counts_with(
 /// For pure Clifford circuits, compiles and extracts marginals from the parity matrix.
 ///
 /// For other circuits, falls back to statevector probabilities and extracts marginals.
-pub fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
-    run_marginals_with(BackendKind::Auto, circuit, seed)
-}
-
-/// Like [`run_marginals`], but with explicit backend selection.
-pub fn run_marginals_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-) -> Result<Vec<(f64, f64)>> {
+pub fn run_marginals(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
     let n = circuit.num_qubits;
 
     if (matches!(
@@ -703,7 +668,7 @@ pub fn run_shots_with(
 
     if circuit.has_terminal_measurements_only() {
         let stripped = circuit.without_measurements();
-        let result = run_with_opts(kind.clone(), &stripped, seed, SimOptions::default())?;
+        let result = run_with_internal(kind.clone(), &stripped, seed, SimOptions::default())?;
         if let Some(probs) = result.probabilities {
             let meas_map = circuit.measurement_map();
             let shots = sample_shots(
@@ -715,7 +680,7 @@ pub fn run_shots_with(
             );
             return Ok(ShotsResult {
                 shots,
-                probabilities: Some(probs),
+                num_classical_bits: circuit.num_classical_bits,
             });
         }
     }
@@ -746,6 +711,15 @@ pub fn run_shots_with(
     if matches!(kind, BackendKind::StabilizerRank) {
         return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
+    if matches!(
+        kind,
+        BackendKind::StochasticPauli { .. } | BackendKind::DeterministicPauli { .. }
+    ) {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "Pauli propagation backends do not support mid-circuit measurements".into(),
+        });
+    }
     if matches!(kind, BackendKind::Auto) && circuit.is_clifford_plus_t() && circuit.has_t_gates() {
         let t = circuit.t_count();
         let n = circuit.num_qubits;
@@ -766,7 +740,7 @@ pub fn run_shots_with(
 
     let supports_fused = supports_fused_for_kind(&kind, circuit);
     let mut shots = Vec::with_capacity(num_shots);
-    let mut probabilities = None;
+    let opts = SimOptions::classical_only();
 
     if let Some(ref comps) = decompose {
         let partitions = circuit.partition_subcircuits(comps);
@@ -779,11 +753,6 @@ pub fn run_shots_with(
 
         for i in 0..num_shots {
             let shot_seed = seed.wrapping_add(i as u64);
-            let opts = if i == num_shots - 1 {
-                SimOptions::default()
-            } else {
-                SimOptions::classical_only()
-            };
             let result = run_decomposed_prefused(
                 &kind,
                 comps,
@@ -794,32 +763,21 @@ pub fn run_shots_with(
                 circuit,
             )?;
             shots.push(result.classical_bits);
-            if i == num_shots - 1 {
-                probabilities = result.probabilities;
-            }
         }
     } else {
         let fused = crate::circuit::fusion::fuse_circuit(circuit, supports_fused);
 
         for i in 0..num_shots {
             let shot_seed = seed.wrapping_add(i as u64);
-            let opts = if i == num_shots - 1 {
-                SimOptions::default()
-            } else {
-                SimOptions::classical_only()
-            };
             let mut backend = select_backend(&kind, circuit, shot_seed, has_partial_independence);
             let result = execute_circuit(&mut *backend, &fused, &opts)?;
             shots.push(result.classical_bits);
-            if i == num_shots - 1 {
-                probabilities = result.probabilities;
-            }
         }
     }
 
     Ok(ShotsResult {
         shots,
-        probabilities,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }
 
@@ -844,6 +802,18 @@ pub fn run_shots_with_noise(
         return noise::run_shots_noisy(circuit, noise_model, num_shots, seed);
     }
 
+    if matches!(
+        kind,
+        BackendKind::StabilizerRank
+            | BackendKind::StochasticPauli { .. }
+            | BackendKind::DeterministicPauli { .. }
+    ) {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "this backend does not support noisy per-shot simulation".into(),
+        });
+    }
+
     noise::run_shots_noisy_brute_with(
         |s| select_backend(&kind, circuit, s, false),
         circuit,
@@ -860,23 +830,15 @@ fn run_shots_fallback(
     seed: u64,
 ) -> Result<ShotsResult> {
     let mut shots = Vec::with_capacity(num_shots);
-    let mut probabilities = None;
+    let opts = SimOptions::classical_only();
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
-        let opts = if i == num_shots - 1 {
-            SimOptions::default()
-        } else {
-            SimOptions::classical_only()
-        };
-        let result = run_with_opts(kind.clone(), circuit, shot_seed, opts)?;
+        let result = run_with_internal(kind.clone(), circuit, shot_seed, opts)?;
         shots.push(result.classical_bits);
-        if i == num_shots - 1 {
-            probabilities = result.probabilities;
-        }
     }
     Ok(ShotsResult {
         shots,
-        probabilities,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }
 
@@ -1090,7 +1052,7 @@ mod tests {
         let qasm =
             "OPENQASM 3.0;\nqubit[2] q;\nbit[1] c;\nh q[0];\ncx q[0], q[1];\nc[0] = measure q[0];";
         let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
-        let result = run_with_opts(
+        let result = run_with_internal(
             BackendKind::Statevector,
             &circuit,
             42,
@@ -1104,7 +1066,7 @@ mod tests {
     #[test]
     fn test_default_options_include_probabilities() {
         let circuit = make_general_circuit();
-        let result = run_with_opts(
+        let result = run_with_internal(
             BackendKind::Statevector,
             &circuit,
             42,
@@ -1115,18 +1077,10 @@ mod tests {
     }
 
     #[test]
-    fn test_run_opts_classical_only() {
+    fn test_run_on_always_computes_probabilities() {
         let circuit = make_clifford_circuit();
         let mut backend = StatevectorBackend::new(42);
-        let result = run_on_opts(&mut backend, &circuit, &SimOptions::classical_only()).unwrap();
-        assert!(result.probabilities.is_none());
-    }
-
-    #[test]
-    fn test_run_opts_with_probabilities() {
-        let circuit = make_clifford_circuit();
-        let mut backend = StatevectorBackend::new(42);
-        let result = run_on_opts(&mut backend, &circuit, &SimOptions::default()).unwrap();
+        let result = run_on(&mut backend, &circuit).unwrap();
         assert!(result.probabilities.is_some());
         let probs = result.probabilities.unwrap().to_vec();
         let sum: f64 = probs.iter().sum();
@@ -1424,10 +1378,10 @@ mod tests {
         let circuit = make_bell_with_measure();
         let result = run_shots(&circuit, 10000, 42).unwrap();
         let counts = result.counts();
-        let n_00 = counts.get(&vec![false, false]).copied().unwrap_or(0);
-        let n_11 = counts.get(&vec![true, true]).copied().unwrap_or(0);
-        let n_01 = counts.get(&vec![false, true]).copied().unwrap_or(0);
-        let n_10 = counts.get(&vec![true, false]).copied().unwrap_or(0);
+        let n_00 = counts.get(&vec![0u64]).copied().unwrap_or(0);
+        let n_11 = counts.get(&vec![3u64]).copied().unwrap_or(0);
+        let n_01 = counts.get(&vec![2u64]).copied().unwrap_or(0);
+        let n_10 = counts.get(&vec![1u64]).copied().unwrap_or(0);
         assert!(
             (4500..=5500).contains(&n_00),
             "|00> count {n_00} outside [4500, 5500]"
@@ -1488,22 +1442,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shots_has_probabilities() {
-        let mut circuit = Circuit::new(2, 2);
-        circuit.add_gate(Gate::Rx(std::f64::consts::FRAC_PI_4), &[0]);
-        circuit.add_gate(Gate::Cx, &[0, 1]);
-        circuit.add_measure(0, 0);
-        circuit.add_measure(1, 1);
-        let result = run_shots(&circuit, 5, 42).unwrap();
-        assert!(result.probabilities.is_some());
-    }
-
-    #[test]
     fn test_shots_counts_sum() {
         let circuit = make_bell_with_measure();
         let result = run_shots(&circuit, 500, 42).unwrap();
         let counts = result.counts();
-        let total: usize = counts.values().sum();
+        let total: u64 = counts.values().sum();
         assert_eq!(total, 500);
     }
 
@@ -1623,12 +1566,12 @@ mod tests {
     #[test]
     fn test_shots_random_convergence() {
         let circuit = make_bell_with_measure();
-        let result = run_shots_random(&circuit, 10000).unwrap();
+        let result = run_shots(&circuit, 10000, rand::random()).unwrap();
         let counts = result.counts();
-        let n_00 = counts.get(&vec![false, false]).copied().unwrap_or(0);
-        let n_11 = counts.get(&vec![true, true]).copied().unwrap_or(0);
-        let n_01 = counts.get(&vec![false, true]).copied().unwrap_or(0);
-        let n_10 = counts.get(&vec![true, false]).copied().unwrap_or(0);
+        let n_00 = counts.get(&vec![0u64]).copied().unwrap_or(0);
+        let n_11 = counts.get(&vec![3u64]).copied().unwrap_or(0);
+        let n_01 = counts.get(&vec![2u64]).copied().unwrap_or(0);
+        let n_10 = counts.get(&vec![1u64]).copied().unwrap_or(0);
         // p=0.5, n=10000 → σ=50. Bounds at ±10σ: failure prob < 10^-23.
         assert!(
             (4500..=5500).contains(&n_00),
@@ -1755,7 +1698,7 @@ mod tests {
         let cached = run_shots_with(BackendKind::Statevector, &circuit, 20, 42).unwrap();
         for i in 0..20 {
             let seed_i = 42u64.wrapping_add(i as u64);
-            let single = run_with_opts(
+            let single = run_with_internal(
                 BackendKind::Statevector,
                 &circuit,
                 seed_i,
@@ -1951,7 +1894,7 @@ mod tests {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
-        let m = run_marginals(&c, 42).unwrap();
+        let m = run_marginals(BackendKind::Auto, &c, 42).unwrap();
         assert_eq!(m.len(), 2);
         assert!((m[0].0 - 0.5).abs() < 1e-10);
         assert!((m[0].1 - 0.5).abs() < 1e-10);
@@ -1963,7 +1906,7 @@ mod tests {
     fn test_run_marginals_x_gate() {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::X, &[0]);
-        let m = run_marginals(&c, 42).unwrap();
+        let m = run_marginals(BackendKind::Auto, &c, 42).unwrap();
         assert!((m[0].0 - 0.0).abs() < 1e-10);
         assert!((m[0].1 - 1.0).abs() < 1e-10);
         assert!((m[1].0 - 1.0).abs() < 1e-10);
@@ -1973,14 +1916,14 @@ mod tests {
     #[test]
     fn test_run_marginals_clifford_t_spd_path() {
         let c = crate::circuits::clifford_t_circuit(14, 10, 0.1, 42);
-        let m_spd = run_marginals(&c, 42).unwrap();
+        let m_spd = run_marginals(BackendKind::Auto, &c, 42).unwrap();
         assert_eq!(m_spd.len(), 14);
         for (p0, p1) in &m_spd {
             assert!(*p0 >= 0.0 && *p0 <= 1.0);
             assert!((p0 + p1 - 1.0).abs() < 1e-10);
         }
 
-        let m_sv = run_marginals_with(BackendKind::Statevector, &c, 42).unwrap();
+        let m_sv = run_marginals(BackendKind::Statevector, &c, 42).unwrap();
         for i in 0..14 {
             assert!(
                 (m_spd[i].0 - m_sv[i].0).abs() < 1e-6,

@@ -1762,6 +1762,6 @@ pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Res
     let packed = sampler.sample_bulk_packed(num_shots);
     Ok(ShotsResult {
         shots: packed.to_shots(),
-        probabilities: None,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }

@@ -1,5 +1,5 @@
 use prism_q::circuit::openqasm;
-use prism_q::{run_shots, run_shots_random};
+use prism_q::run_shots;
 
 fn main() {
     let qasm = r#"
@@ -21,7 +21,7 @@ fn main() {
     print!("{result}");
 
     // Random seed: non-deterministic sampling
-    let result = run_shots_random(&circuit, 1024).expect("shots failed");
+    let result = run_shots(&circuit, 1024, rand::random()).expect("shots failed");
     println!("Random seed, 1024 shots:");
     print!("{result}");
 }

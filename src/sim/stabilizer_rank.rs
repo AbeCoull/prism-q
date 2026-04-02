@@ -577,7 +577,7 @@ pub fn run_stabilizer_rank_shots(
 
     Ok(super::ShotsResult {
         shots,
-        probabilities: None,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }
 

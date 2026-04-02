@@ -74,8 +74,7 @@ pub use sim::unified_pauli::{
     run_spd, run_spp, spd_to_probabilities, spp_to_probabilities, SpdResult, SppResult,
 };
 pub use sim::{
-    run, run_counts, run_counts_with, run_marginals, run_marginals_with, run_on, run_on_opts,
-    run_qasm, run_shots, run_shots_random, run_shots_with, run_shots_with_noise, run_with,
-    run_with_opts, BackendKind, FactoredBlock, Probabilities, ShotsResult, SimOptions,
+    bitstring, run, run_counts, run_marginals, run_on, run_qasm, run_shots, run_shots_with,
+    run_shots_with_noise, run_with, BackendKind, FactoredBlock, Probabilities, ShotsResult,
     SimulationResult,
 };

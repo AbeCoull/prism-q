@@ -7,7 +7,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
-use prism_q::{BackendKind, SimOptions};
+use prism_q::BackendKind;
 use std::time::Duration;
 
 fn is_fast() -> bool {
@@ -345,13 +345,7 @@ fn bench_classical_only(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with_opts(
-                        BackendKind::Statevector,
-                        circ,
-                        42,
-                        SimOptions::classical_only(),
-                    )
-                    .unwrap();
+                    sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
                 });
             },
         );

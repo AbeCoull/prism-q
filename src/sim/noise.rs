@@ -1170,7 +1170,7 @@ fn run_shots_noisy_frame(
 
     Ok(ShotsResult {
         shots,
-        probabilities: None,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }
 
@@ -1244,7 +1244,7 @@ fn run_shots_noisy_compiled(
 
     Ok(ShotsResult {
         shots,
-        probabilities: None,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }
 
@@ -1293,7 +1293,7 @@ pub(crate) fn run_shots_noisy_brute_with(
 
     Ok(ShotsResult {
         shots,
-        probabilities: None,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }
 

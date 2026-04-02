@@ -781,7 +781,7 @@ pub(crate) fn run_shots_homological_inner(
 
     Ok(ShotsResult {
         shots,
-        probabilities: None,
+        num_classical_bits: circuit.num_classical_bits,
     })
 }
 

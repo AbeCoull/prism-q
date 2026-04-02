@@ -8,7 +8,14 @@ use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
-use super::{Probabilities, SimOptions, SimulationResult};
+use super::{Probabilities, SimulationResult};
+
+pub(super) enum DispatchAction {
+    Backend(Box<dyn Backend>),
+    StabilizerRank,
+    StochasticPauli { num_samples: usize },
+    DeterministicPauli { epsilon: f64, max_terms: usize },
+}
 
 pub(super) fn max_statevector_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -174,52 +181,77 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
     }
 }
 
+pub(super) fn select_dispatch(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    has_partial_independence: bool,
+) -> DispatchAction {
+    match kind {
+        BackendKind::Auto => {
+            if !circuit.has_entangling_gates() {
+                DispatchAction::Backend(Box::new(ProductStateBackend::new(seed)))
+            } else if circuit.is_clifford_only() {
+                DispatchAction::Backend(Box::new(StabilizerBackend::new(seed)))
+            } else if circuit.num_qubits > max_statevector_qubits() {
+                if circuit.is_sparse_friendly() {
+                    DispatchAction::Backend(Box::new(SparseBackend::new(seed)))
+                } else {
+                    DispatchAction::Backend(Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM)))
+                }
+            } else if has_partial_independence {
+                DispatchAction::Backend(Box::new(crate::backend::factored::FactoredBackend::new(
+                    seed,
+                )))
+            } else {
+                DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
+            }
+        }
+        BackendKind::Statevector => {
+            DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
+        }
+        BackendKind::Stabilizer => DispatchAction::Backend(Box::new(StabilizerBackend::new(seed))),
+        BackendKind::FilteredStabilizer => DispatchAction::Backend(Box::new(
+            crate::backend::stabilizer::FilteredStabilizerBackend::new(seed),
+        )),
+        BackendKind::Sparse => DispatchAction::Backend(Box::new(SparseBackend::new(seed))),
+        BackendKind::Mps { max_bond_dim } => {
+            DispatchAction::Backend(Box::new(MpsBackend::new(seed, *max_bond_dim)))
+        }
+        BackendKind::ProductState => {
+            DispatchAction::Backend(Box::new(ProductStateBackend::new(seed)))
+        }
+        BackendKind::TensorNetwork => {
+            DispatchAction::Backend(Box::new(TensorNetworkBackend::new(seed)))
+        }
+        BackendKind::Factored => DispatchAction::Backend(Box::new(
+            crate::backend::factored::FactoredBackend::new(seed),
+        )),
+        BackendKind::FactoredStabilizer => DispatchAction::Backend(Box::new(
+            crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed),
+        )),
+        BackendKind::StabilizerRank => DispatchAction::StabilizerRank,
+        BackendKind::StochasticPauli { num_samples } => DispatchAction::StochasticPauli {
+            num_samples: *num_samples,
+        },
+        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+            DispatchAction::DeterministicPauli {
+                epsilon: *epsilon,
+                max_terms: *max_terms,
+            }
+        }
+    }
+}
+
 pub(super) fn select_backend(
     kind: &BackendKind,
     circuit: &Circuit,
     seed: u64,
     has_partial_independence: bool,
 ) -> Box<dyn Backend> {
-    match kind {
-        BackendKind::Auto => {
-            if !circuit.has_entangling_gates() {
-                Box::new(ProductStateBackend::new(seed))
-            } else if circuit.is_clifford_only() {
-                Box::new(StabilizerBackend::new(seed))
-            } else if circuit.num_qubits > max_statevector_qubits() {
-                if circuit.is_sparse_friendly() {
-                    Box::new(SparseBackend::new(seed))
-                } else {
-                    Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM))
-                }
-            } else if has_partial_independence {
-                Box::new(crate::backend::factored::FactoredBackend::new(seed))
-            } else {
-                Box::new(StatevectorBackend::new(seed))
-            }
-        }
-        BackendKind::Statevector => Box::new(StatevectorBackend::new(seed)),
-        BackendKind::Stabilizer => Box::new(StabilizerBackend::new(seed)),
-        BackendKind::FilteredStabilizer => Box::new(
-            crate::backend::stabilizer::FilteredStabilizerBackend::new(seed),
-        ),
-        BackendKind::Sparse => Box::new(SparseBackend::new(seed)),
-        BackendKind::Mps { max_bond_dim } => Box::new(MpsBackend::new(seed, *max_bond_dim)),
-        BackendKind::ProductState => Box::new(ProductStateBackend::new(seed)),
-        BackendKind::TensorNetwork => Box::new(TensorNetworkBackend::new(seed)),
-        BackendKind::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
-        BackendKind::FactoredStabilizer => {
-            Box::new(crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed))
-        }
-        BackendKind::StabilizerRank => {
-            unreachable!("StabilizerRank is handled before select_backend")
-        }
-        BackendKind::StochasticPauli { .. } => {
-            unreachable!("StochasticPauli is handled before select_backend")
-        }
-        BackendKind::DeterministicPauli { .. } => {
-            unreachable!("DeterministicPauli is handled before select_backend")
-        }
+    match select_dispatch(kind, circuit, seed, has_partial_independence) {
+        DispatchAction::Backend(b) => b,
+        _ => unreachable!("non-backend dispatch should be handled by caller"),
     }
 }
 
@@ -256,7 +288,6 @@ pub(super) fn try_temporal_clifford(
     kind: &BackendKind,
     circuit: &Circuit,
     seed: u64,
-    opts: &SimOptions,
 ) -> Option<Result<SimulationResult>> {
     if !matches!(kind, BackendKind::Auto) {
         return None;
@@ -297,11 +328,7 @@ pub(super) fn try_temporal_clifford(
         }
     }
 
-    let probs = if opts.probabilities {
-        sv.probabilities().ok().map(Probabilities::Dense)
-    } else {
-        None
-    };
+    let probs = sv.probabilities().ok().map(Probabilities::Dense);
 
     Some(Ok(SimulationResult {
         classical_bits: sv.classical_results().to_vec(),

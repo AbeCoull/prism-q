@@ -148,13 +148,13 @@ Orchestration layer in `src/sim/mod.rs`. Entry points:
 |----------|-------------|
 | `run(circuit, seed)` | Auto-dispatch, full output |
 | `run_with(kind, circuit, seed)` | Explicit backend selection |
-| `run_with_opts(kind, circuit, seed, opts)` | With options (skip probabilities) |
 | `run_on(backend, circuit)` | Pre-constructed backend |
-| `run_on_opts(backend, circuit, opts)` | Pre-constructed with options |
 | `run_qasm(qasm, seed)` | Parse + simulate |
-| `run_shots(circuit, shots, seed)` | Multi-shot via stabilizer tableau |
+| `run_shots(circuit, shots, seed)` | Multi-shot sampling |
 | `run_shots_with(kind, circuit, shots, seed)` | Multi-shot with backend selection |
 | `run_shots_with_noise(kind, circuit, noise, shots, seed)` | Noisy multi-shot |
+| `run_counts(kind, circuit, shots, seed)` | Frequency histogram |
+| `run_marginals(kind, circuit, seed)` | Per-qubit marginal probabilities |
 
 ### Auto-dispatch decision tree
 
@@ -396,7 +396,7 @@ No panics on user input. `debug_assert!` for internal invariants only.
 Top-level re-exports from `src/lib.rs`:
 
 **Simulation:**
-`run`, `run_with`, `run_with_opts`, `run_on`, `run_on_opts`, `run_qasm`, `run_shots`, `run_shots_random`, `run_shots_with`, `run_shots_with_noise`
+`run`, `run_with`, `run_on`, `run_qasm`, `run_shots`, `run_shots_with`, `run_shots_with_noise`, `run_counts`, `run_marginals`, `bitstring`
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_noisy`, `run_shots_compiled`, `run_shots_noisy`, `run_shots_homological`, `noisy_marginals_analytical`
@@ -405,7 +405,7 @@ Top-level re-exports from `src/lib.rs`:
 `run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `run_spp`, `run_spd`, `spp_to_probabilities`, `spd_to_probabilities`
 
 **Types:**
-`Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `Gate`, `BackendKind`, `SimOptions`, `SimulationResult`, `Probabilities`, `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`
+`Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `Gate`, `BackendKind`, `SimulationResult`, `Probabilities`, `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`
 
 **Backends:**
 `StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`, `ProductStateBackend`, `TensorNetworkBackend`, `FactoredBackend`

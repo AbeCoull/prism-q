@@ -47,7 +47,7 @@ Initial release.
 
 - **Subsystem decomposition** for circuits with independent qubit groups (union-find analysis, per-block execution, Kronecker product merge)
 
-- **Shot-based sampling** (`run_shots`, `run_shots_with`, `run_shots_random`) with deterministic and random seeding
+- **Shot-based sampling** (`run_shots`, `run_shots_with`, `run_counts`) with deterministic seeding
 
 - **SIMD kernels:** AVX2+FMA for 1q/2q gates, diagonal gates, complex scaling, batch phase (BMI2 PEXT), rowmul XOR. Runtime feature detection with scalar fallbacks.
 

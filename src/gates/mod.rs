@@ -177,6 +177,48 @@ pub enum DiagEntry {
     },
 }
 
+impl DiagEntry {
+    pub fn as_1q_matrix(&self) -> Option<(usize, [[Complex64; 2]; 2])> {
+        match *self {
+            DiagEntry::Phase1q { qubit, d0, d1 } => {
+                let z = Complex64::new(0.0, 0.0);
+                Some((qubit, [[d0, z], [z, d1]]))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_2q_matrix(&self) -> Option<(usize, usize, [[Complex64; 4]; 4])> {
+        let z = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        match *self {
+            DiagEntry::Phase2q { q0, q1, phase } => Some((
+                q0,
+                q1,
+                [
+                    [one, z, z, z],
+                    [z, one, z, z],
+                    [z, z, one, z],
+                    [z, z, z, phase],
+                ],
+            )),
+            DiagEntry::Parity2q {
+                q0, q1, same, diff, ..
+            } => Some((
+                q0,
+                q1,
+                [
+                    [same, z, z, z],
+                    [z, diff, z, z],
+                    [z, z, diff, z],
+                    [z, z, z, same],
+                ],
+            )),
+            _ => None,
+        }
+    }
+}
+
 /// Data for a batched diagonal gate pass.
 ///
 /// A contiguous run of diagonal gates collapsed into a precomputed phase LUT.

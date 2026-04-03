@@ -22,20 +22,21 @@ pub use accumulator::{
     default_chunk_size, optimal_chunk_size, CorrelatorAccumulator, HistogramAccumulator,
     MarginalsAccumulator, NullAccumulator, PauliExpectationAccumulator, ShotAccumulator,
 };
+pub use parity::ParityStats;
 use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
-pub use parity::{ParityBlock, ParityBlocks, ParityStats, SparseParity, XorDag, XorDagEntry};
+pub(crate) use parity::{ParityBlocks, SparseParity, XorDag};
 
 pub(crate) use propagation::batch_propagate_backward;
-pub use propagation::propagate_backward;
+pub(crate) use propagation::propagate_backward;
 use propagation::{
     build_measurement_rows, colmajor_forward_sim, compute_reference_bits, rowmul_phase,
     rowmul_phase_into,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PauliVec {
-    pub x: Vec<u64>,
-    pub z: Vec<u64>,
+pub(crate) struct PauliVec {
+    pub(crate) x: Vec<u64>,
+    pub(crate) z: Vec<u64>,
 }
 
 impl PauliVec {
@@ -456,10 +457,6 @@ impl CompiledSampler {
             result.push(bit);
         }
         result
-    }
-
-    pub(crate) fn apply_ref_bits(&self, accum: &mut [u64]) {
-        xor_words(accum, &self.ref_bits_packed);
     }
 
     pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {

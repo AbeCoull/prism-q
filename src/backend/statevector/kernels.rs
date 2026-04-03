@@ -19,7 +19,7 @@ use crate::gates::DiagEntry;
 use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
-const MIN_PAR_ITERS: usize = 2048;
+use crate::backend::MIN_PAR_ITERS;
 
 #[cfg(feature = "parallel")]
 #[inline(always)]

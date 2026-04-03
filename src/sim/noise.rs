@@ -279,23 +279,6 @@ pub struct NoisyCompiledSampler {
 }
 
 impl NoisyCompiledSampler {
-    #[allow(dead_code)]
-    fn sample(&mut self) -> Vec<bool> {
-        let num_meas_words = self.num_measurements.div_ceil(64);
-        let mut accum = vec![0u64; num_meas_words];
-
-        self.noiseless.sample_into_raw(&mut accum);
-        self.apply_noise_single(&mut accum);
-
-        self.noiseless.apply_ref_bits(&mut accum);
-        let mut result = Vec::with_capacity(self.num_measurements);
-        for m in 0..self.num_measurements {
-            let bit = (accum[m / 64] >> (m % 64)) & 1 != 0;
-            result.push(bit);
-        }
-        result
-    }
-
     pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
         let m_words = self.num_measurements.div_ceil(64);
         if num_shots == 0 || self.num_measurements == 0 {
@@ -412,26 +395,9 @@ impl NoisyCompiledSampler {
         acc.marginals()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
         self.sample_bulk_packed(num_shots).to_shots()
-    }
-
-    #[allow(dead_code)]
-    #[inline(always)]
-    fn apply_noise_single(&mut self, accum: &mut [u64]) {
-        for i in 0..self.events.len() {
-            let [px, py, pz] = self.events.probs[i];
-            let r: f64 = rand::Rng::gen(&mut self.rng);
-            if r < px {
-                xor_words(accum, self.events.z_flip(i));
-            } else if r < px + py {
-                xor_words(accum, self.events.x_flip(i));
-                xor_words(accum, self.events.z_flip(i));
-            } else if r < px + py + pz {
-                xor_words(accum, self.events.x_flip(i));
-            }
-        }
     }
 
     fn apply_noise_bulk(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {

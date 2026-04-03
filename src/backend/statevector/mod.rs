@@ -55,10 +55,7 @@ use crate::gates::Gate;
 use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
-pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
-
-#[cfg(feature = "parallel")]
-pub(crate) const MIN_PAR_ELEMS: usize = 4096;
+pub(crate) use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
 
 /// Insert a zero bit at `bit_pos`, shifting all higher bits left by one.
 ///

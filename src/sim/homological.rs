@@ -191,9 +191,6 @@ pub struct HomologicalSampler {
     /// 2^r detection signatures: for class c, which measurements are flipped.
     /// Stored as packed u64 vectors, each of length ceil(m/64).
     class_detections: Vec<Vec<u64>>,
-    /// Number of measurements
-    #[allow(dead_code)]
-    num_measurements: usize,
     /// dim(im(∂₂) ∩ ker(∂₁)): undetectable stabilizer generators
     boundary_dim: usize,
     /// dim(H₁ = ker(∂₁)/im(∂₂)): independent logical error classes
@@ -521,7 +518,6 @@ impl HomologicalSampler {
                 class_probs: vec![1.0],
                 class_cdf: vec![1.0],
                 class_detections: vec![vec![0u64; m.div_ceil(64)]],
-                num_measurements: m,
                 boundary_dim: ecc.boundary_dim,
                 homology_dim: ecc.homology_dim,
                 rng: ChaCha8Rng::seed_from_u64(seed),
@@ -635,7 +631,6 @@ impl HomologicalSampler {
             class_probs,
             class_cdf,
             class_detections,
-            num_measurements: m,
             boundary_dim: ecc.boundary_dim,
             homology_dim: ecc.homology_dim,
             rng: ChaCha8Rng::seed_from_u64(seed),

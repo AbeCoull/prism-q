@@ -22,14 +22,13 @@ use crate::error::Result;
 use crate::gates::{DiagEntry, Gate};
 
 #[cfg(feature = "parallel")]
-use crate::backend::statevector::{SendPtr, MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
+use crate::backend::statevector::SendPtr;
+#[cfg(feature = "parallel")]
+use crate::backend::{MIN_PAR_ELEMS, MIN_PAR_ITERS, PARALLEL_THRESHOLD_QUBITS};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 type GateList = SmallVec<[(usize, [[Complex64; 2]; 2]); 4]>;
-
-#[cfg(feature = "parallel")]
-const PAR_MIN_ITERS: usize = 2048;
 
 #[cfg(feature = "parallel")]
 #[inline(always)]
@@ -1028,7 +1027,7 @@ fn par_apply_cu(
         // SAFETY: insert_zero_bit bijection produces disjoint index pairs.
         (0..num_iters)
             .into_par_iter()
-            .with_min_len(PAR_MIN_ITERS)
+            .with_min_len(MIN_PAR_ITERS)
             .for_each(move |i| {
                 let base = insert_zero_bit(insert_zero_bit(i, control), target);
                 let idx0 = base | ctrl_mask;
@@ -1093,7 +1092,7 @@ fn par_apply_mcu(
     // SAFETY: insert_zero_bit bijection produces disjoint index pairs.
     (0..num_iters)
         .into_par_iter()
-        .with_min_len(PAR_MIN_ITERS)
+        .with_min_len(MIN_PAR_ITERS)
         .for_each(move |i| {
             let mut base = i;
             for &q in sorted {
@@ -1132,7 +1131,7 @@ fn par_apply_mcu_phase(
     // SAFETY: insert_zero_bit bijection produces disjoint indices.
     (0..num_iters)
         .into_par_iter()
-        .with_min_len(PAR_MIN_ITERS)
+        .with_min_len(MIN_PAR_ITERS)
         .for_each(move |i| {
             let mut base = i;
             for &q in sorted {
@@ -1195,7 +1194,7 @@ fn par_apply_fused2q(
     // SAFETY: insert_zero_bit bijection produces disjoint index groups.
     (0..n_iter)
         .into_par_iter()
-        .with_min_len(PAR_MIN_ITERS)
+        .with_min_len(MIN_PAR_ITERS)
         .for_each(move |k| {
             let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
             let i = [base, base | mask1, base | mask0, base | mask0 | mask1];

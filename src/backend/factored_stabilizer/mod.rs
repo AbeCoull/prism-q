@@ -18,10 +18,7 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
 #[cfg(feature = "parallel")]
-const MIN_QUBITS_FOR_PAR_GATES: usize = 128;
-
-#[cfg(feature = "parallel")]
-const MIN_ANTI_ROWS_FOR_PAR: usize = 4;
+use crate::backend::{MIN_ANTI_ROWS_FOR_PAR, MIN_QUBITS_FOR_PAR_GATES};
 
 #[cfg(test)]
 mod tests;

@@ -36,6 +36,21 @@ use num_complex::Complex64;
 use crate::circuit::Instruction;
 use crate::error::Result;
 
+#[cfg(feature = "parallel")]
+pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
+
+#[cfg(feature = "parallel")]
+pub(crate) const MIN_PAR_ELEMS: usize = 4096;
+
+#[cfg(feature = "parallel")]
+pub(crate) const MIN_PAR_ITERS: usize = 2048;
+
+#[cfg(feature = "parallel")]
+pub(crate) const MIN_QUBITS_FOR_PAR_GATES: usize = 128;
+
+#[cfg(feature = "parallel")]
+pub(crate) const MIN_ANTI_ROWS_FOR_PAR: usize = 4;
+
 /// Minimum probability/norm value for measurement normalization.
 ///
 /// Used as `prob.clamp(NORM_CLAMP_MIN, 1.0).sqrt()` to avoid division by zero

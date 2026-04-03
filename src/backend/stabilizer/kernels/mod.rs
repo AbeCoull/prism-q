@@ -15,10 +15,10 @@ use rand::Rng;
 use super::StabilizerBackend;
 
 #[cfg(feature = "parallel")]
-pub(super) const MIN_QUBITS_FOR_PAR_GATES: usize = 128;
+pub(super) use crate::backend::MIN_QUBITS_FOR_PAR_GATES;
 
 #[cfg(feature = "parallel")]
-const MIN_ANTI_ROWS_FOR_PAR: usize = 4;
+use crate::backend::MIN_ANTI_ROWS_FOR_PAR;
 
 #[cfg(feature = "parallel")]
 struct SendU64Ptr(*mut u64);

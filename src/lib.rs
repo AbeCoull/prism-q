@@ -54,7 +54,7 @@ pub use backend::stabilizer::StabilizerBackend;
 pub use backend::statevector::StatevectorBackend;
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;
-pub use circuit::{Circuit, ClassicalCondition, Instruction};
+pub use circuit::{Circuit, ClassicalCondition, Instruction, SvgOptions, TextOptions};
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
 pub use sim::compiled::{

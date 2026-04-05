@@ -11,6 +11,10 @@
 //!   cancellation) operate on the instruction stream via [`fusion::fuse_circuit`].
 
 pub mod builder;
+mod draw;
+pub use draw::TextOptions;
+mod svg;
+pub use svg::SvgOptions;
 mod expr;
 pub mod fusion;
 mod fusion_phase;

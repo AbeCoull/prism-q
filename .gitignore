@@ -4,6 +4,7 @@
 # Profiling & benchmarks
 bench_results/
 benchmark_internal/
+svg_output/
 profile.json.gz
 flamegraph.svg
 perf.data

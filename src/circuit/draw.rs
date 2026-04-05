@@ -27,73 +27,6 @@ impl Default for TextOptions {
     }
 }
 
-pub(super) fn format_angle(theta: f64) -> String {
-    let fractions: &[(f64, &str)] = &[
-        (1.0, "π"),
-        (-1.0, "-π"),
-        (0.5, "π/2"),
-        (-0.5, "-π/2"),
-        (0.25, "π/4"),
-        (-0.25, "-π/4"),
-        (1.0 / 3.0, "π/3"),
-        (-1.0 / 3.0, "-π/3"),
-        (2.0 / 3.0, "2π/3"),
-        (-2.0 / 3.0, "-2π/3"),
-        (1.0 / 6.0, "π/6"),
-        (-1.0 / 6.0, "-π/6"),
-        (5.0 / 6.0, "5π/6"),
-        (-5.0 / 6.0, "-5π/6"),
-        (1.0 / 8.0, "π/8"),
-        (-1.0 / 8.0, "-π/8"),
-        (3.0 / 8.0, "3π/8"),
-        (-3.0 / 8.0, "-3π/8"),
-        (1.5, "3π/2"),
-        (-1.5, "-3π/2"),
-        (2.0, "2π"),
-        (-2.0, "-2π"),
-    ];
-    let ratio = theta / std::f64::consts::PI;
-    for &(frac, label) in fractions {
-        if (ratio - frac).abs() < 1e-10 {
-            return label.to_string();
-        }
-    }
-    format!("{:.4}", theta)
-}
-
-pub(super) fn gate_label(gate: &Gate) -> String {
-    match gate {
-        Gate::Id => "I".into(),
-        Gate::X => "X".into(),
-        Gate::Y => "Y".into(),
-        Gate::Z => "Z".into(),
-        Gate::H => "H".into(),
-        Gate::S => "S".into(),
-        Gate::Sdg => "Sdg".into(),
-        Gate::T => "T".into(),
-        Gate::Tdg => "Tdg".into(),
-        Gate::SX => "SX".into(),
-        Gate::SXdg => "SXdg".into(),
-        Gate::Rx(t) => format!("Rx({})", format_angle(*t)),
-        Gate::Ry(t) => format!("Ry({})", format_angle(*t)),
-        Gate::Rz(t) => format!("Rz({})", format_angle(*t)),
-        Gate::P(t) => format!("P({})", format_angle(*t)),
-        Gate::Rzz(t) => format!("Rzz({})", format_angle(*t)),
-        Gate::Cx => "CX".into(),
-        Gate::Cz => "CZ".into(),
-        Gate::Swap => "SWAP".into(),
-        Gate::Cu(_) => "CU".into(),
-        Gate::Mcu(data) => format!("MCU({}ctrl)", data.num_controls),
-        Gate::Fused(_) => "U".into(),
-        Gate::Fused2q(_) => "U2".into(),
-        Gate::MultiFused(data) => format!("MF[{}]", data.gates.len()),
-        Gate::BatchPhase(data) => format!("BP[{}]", data.phases.len()),
-        Gate::BatchRzz(data) => format!("BZZ[{}]", data.edges.len()),
-        Gate::DiagonalBatch(data) => format!("BD[{}]", data.entries.len()),
-        Gate::Multi2q(data) => format!("M2[{}]", data.gates.len()),
-    }
-}
-
 pub(super) struct PlacedOp {
     pub(super) label: String,
     pub(super) qubits: SmallVec<[usize; 4]>,
@@ -112,7 +45,7 @@ pub(super) enum OpKind {
 }
 
 fn classify_op(gate: &Gate, targets: &[usize]) -> (String, OpKind) {
-    let label = gate_label(gate);
+    let label = gate.to_string();
     let kind = match gate {
         Gate::Cx => OpKind::Controlled {
             controls: vec![targets[0]],
@@ -221,9 +154,8 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                         format!("c[{}..{}]=={}", offset, offset + size, value)
                     }
                 };
-                let label = gate_label(gate);
                 let op = PlacedOp {
-                    label,
+                    label: gate.to_string(),
                     qubits: SmallVec::from_slice(targets),
                     kind: OpKind::Conditional { cbit_label },
                 };
@@ -1039,24 +971,11 @@ mod tests {
     use crate::circuit::builder::CircuitBuilder;
 
     #[test]
-    fn format_angle_pi_fractions() {
-        assert_eq!(format_angle(std::f64::consts::PI), "π");
-        assert_eq!(format_angle(std::f64::consts::FRAC_PI_2), "π/2");
-        assert_eq!(format_angle(std::f64::consts::FRAC_PI_4), "π/4");
-        assert_eq!(format_angle(-std::f64::consts::FRAC_PI_4), "-π/4");
-        assert_eq!(format_angle(std::f64::consts::PI / 3.0), "π/3");
-        assert_eq!(format_angle(0.123), "0.1230");
-    }
-
-    #[test]
-    fn gate_labels() {
-        assert_eq!(gate_label(&Gate::H), "H");
-        assert_eq!(gate_label(&Gate::Cx), "CX");
-        assert_eq!(
-            gate_label(&Gate::Rx(std::f64::consts::FRAC_PI_2)),
-            "Rx(π/2)"
-        );
-        assert_eq!(gate_label(&Gate::Rz(0.5)), "Rz(0.5000)");
+    fn gate_display_labels() {
+        assert_eq!(Gate::H.to_string(), "H");
+        assert_eq!(Gate::Cx.to_string(), "CX");
+        assert_eq!(Gate::Rx(std::f64::consts::FRAC_PI_2).to_string(), "Rx(π/2)");
+        assert_eq!(Gate::Rz(0.5).to_string(), "Rz(0.5000)");
     }
 
     #[test]

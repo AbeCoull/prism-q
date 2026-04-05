@@ -13,6 +13,7 @@
 use num_complex::Complex64;
 use smallvec::SmallVec;
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
+use std::fmt;
 
 /// Threshold for detecting near-zero matrix elements (norm_sqr).
 ///
@@ -841,9 +842,98 @@ fn matrices_equal_up_to_phase(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], 
     true
 }
 
+fn format_angle(theta: f64) -> String {
+    const FRACTIONS: &[(f64, &str)] = &[
+        (1.0, "π"),
+        (-1.0, "-π"),
+        (0.5, "π/2"),
+        (-0.5, "-π/2"),
+        (0.25, "π/4"),
+        (-0.25, "-π/4"),
+        (1.0 / 3.0, "π/3"),
+        (-1.0 / 3.0, "-π/3"),
+        (2.0 / 3.0, "2π/3"),
+        (-2.0 / 3.0, "-2π/3"),
+        (1.0 / 6.0, "π/6"),
+        (-1.0 / 6.0, "-π/6"),
+        (5.0 / 6.0, "5π/6"),
+        (-5.0 / 6.0, "-5π/6"),
+        (1.0 / 8.0, "π/8"),
+        (-1.0 / 8.0, "-π/8"),
+        (3.0 / 8.0, "3π/8"),
+        (-3.0 / 8.0, "-3π/8"),
+        (1.5, "3π/2"),
+        (-1.5, "-3π/2"),
+        (2.0, "2π"),
+        (-2.0, "-2π"),
+    ];
+    let ratio = theta / std::f64::consts::PI;
+    for &(frac, label) in FRACTIONS {
+        if (ratio - frac).abs() < 1e-10 {
+            return label.to_string();
+        }
+    }
+    format!("{:.4}", theta)
+}
+
+impl fmt::Display for Gate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Gate::Id => f.write_str("I"),
+            Gate::X => f.write_str("X"),
+            Gate::Y => f.write_str("Y"),
+            Gate::Z => f.write_str("Z"),
+            Gate::H => f.write_str("H"),
+            Gate::S => f.write_str("S"),
+            Gate::Sdg => f.write_str("Sdg"),
+            Gate::T => f.write_str("T"),
+            Gate::Tdg => f.write_str("Tdg"),
+            Gate::SX => f.write_str("SX"),
+            Gate::SXdg => f.write_str("SXdg"),
+            Gate::Rx(t) => write!(f, "Rx({})", format_angle(*t)),
+            Gate::Ry(t) => write!(f, "Ry({})", format_angle(*t)),
+            Gate::Rz(t) => write!(f, "Rz({})", format_angle(*t)),
+            Gate::P(t) => write!(f, "P({})", format_angle(*t)),
+            Gate::Rzz(t) => write!(f, "Rzz({})", format_angle(*t)),
+            Gate::Cx => f.write_str("CX"),
+            Gate::Cz => f.write_str("CZ"),
+            Gate::Swap => f.write_str("SWAP"),
+            Gate::Cu(_) => f.write_str("CU"),
+            Gate::Mcu(data) => write!(f, "MCU({}ctrl)", data.num_controls),
+            Gate::Fused(_) => f.write_str("U"),
+            Gate::Fused2q(_) => f.write_str("U2"),
+            Gate::MultiFused(data) => write!(f, "MF[{}]", data.gates.len()),
+            Gate::BatchPhase(data) => write!(f, "BP[{}]", data.phases.len()),
+            Gate::BatchRzz(data) => write!(f, "BZZ[{}]", data.edges.len()),
+            Gate::DiagonalBatch(data) => write!(f, "BD[{}]", data.entries.len()),
+            Gate::Multi2q(data) => write!(f, "M2[{}]", data.gates.len()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_angle_pi_fractions() {
+        assert_eq!(format_angle(std::f64::consts::PI), "π");
+        assert_eq!(format_angle(std::f64::consts::FRAC_PI_2), "π/2");
+        assert_eq!(format_angle(std::f64::consts::FRAC_PI_4), "π/4");
+        assert_eq!(format_angle(-std::f64::consts::FRAC_PI_4), "-π/4");
+        assert_eq!(format_angle(std::f64::consts::PI / 3.0), "π/3");
+        assert_eq!(format_angle(0.123), "0.1230");
+    }
+
+    #[test]
+    fn display_labels() {
+        assert_eq!(Gate::H.to_string(), "H");
+        assert_eq!(Gate::Cx.to_string(), "CX");
+        assert_eq!(Gate::Rx(std::f64::consts::FRAC_PI_2).to_string(), "Rx(π/2)");
+        assert_eq!(Gate::Rz(0.5).to_string(), "Rz(0.5000)");
+        assert_eq!(Gate::Id.to_string(), "I");
+        assert_eq!(Gate::Swap.to_string(), "SWAP");
+    }
 
     #[test]
     fn test_gate_arity() {

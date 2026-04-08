@@ -1209,6 +1209,76 @@ impl StatevectorBackend {
         self.pending_norm *= inv_norm;
     }
 
+    #[inline(always)]
+    pub(super) fn qubit_probability_one(&self, qubit: usize) -> f64 {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            return self.qubit_probability_one_par(qubit);
+        }
+
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+
+        let mut prob_one = 0.0f64;
+        for block in self.state.chunks(block_size) {
+            prob_one += simd::norm_sqr_sum(&block[half..]);
+        }
+        prob_one * norm_sq
+    }
+
+    #[cfg(feature = "parallel")]
+    fn qubit_probability_one_par(&self, qubit: usize) -> f64 {
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+
+        self.state
+            .par_chunks(block_size)
+            .with_min_len(chunk_min_len(block_size))
+            .map(|chunk| simd::norm_sqr_sum(&chunk[half..]))
+            .sum::<f64>()
+            * norm_sq
+    }
+
+    #[inline(always)]
+    pub(super) fn apply_reset(&mut self, qubit: usize) {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.apply_reset_par(qubit);
+            return;
+        }
+
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+        let zero = Complex64::new(0.0, 0.0);
+
+        let mut prob_zero = 0.0f64;
+        for block in self.state.chunks(block_size) {
+            for amp in &block[..half] {
+                prob_zero += amp.norm_sqr();
+            }
+        }
+        prob_zero *= norm_sq;
+
+        if prob_zero > 0.0 {
+            for block in self.state.chunks_mut(block_size) {
+                for amp in &mut block[half..] {
+                    *amp = zero;
+                }
+            }
+            let inv_norm = 1.0 / prob_zero.sqrt();
+            self.pending_norm *= inv_norm;
+        } else {
+            for amp in self.state.iter_mut() {
+                *amp = zero;
+            }
+            self.state[0] = Complex64::new(1.0, 0.0);
+            self.pending_norm = 1.0;
+        }
+    }
+
     /// Apply multiple single-qubit gates in a multi-tier tiled pass.
     ///
     /// Three tiers based on gate target qubit:
@@ -1616,6 +1686,39 @@ impl StatevectorBackend {
             });
 
         self.pending_norm *= inv_norm;
+    }
+
+    #[cfg(feature = "parallel")]
+    fn apply_reset_par(&mut self, qubit: usize) {
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+
+        let prob_zero: f64 = self
+            .state
+            .par_chunks(block_size)
+            .with_min_len(chunk_min_len(block_size))
+            .map(|chunk| simd::norm_sqr_sum(&chunk[..half]))
+            .sum::<f64>()
+            * norm_sq;
+
+        if prob_zero > 0.0 {
+            self.state
+                .par_chunks_mut(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .for_each(|chunk| {
+                    let (_, hi) = chunk.split_at_mut(half);
+                    simd::zero_slice(hi);
+                });
+            let inv_norm = 1.0 / prob_zero.sqrt();
+            self.pending_norm *= inv_norm;
+        } else {
+            self.state
+                .par_chunks_mut(crate::backend::MIN_PAR_ELEMS)
+                .for_each(simd::zero_slice);
+            self.state[0] = Complex64::new(1.0, 0.0);
+            self.pending_norm = 1.0;
+        }
     }
 
     pub(super) fn apply_diagonal_batch(&mut self, entries: &[DiagEntry]) {

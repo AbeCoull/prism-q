@@ -1,5 +1,7 @@
+use num_complex::Complex64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use smallvec::smallvec;
 
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::Backend;
@@ -11,15 +13,116 @@ use crate::sim::compiled::{
 };
 use crate::sim::ShotsResult;
 
-pub struct NoiseModel {
-    pub after_gate: Vec<Vec<NoiseOp>>,
+/// A single-qubit (or two-qubit, for `TwoQubitDepolarizing`) noise channel.
+///
+/// Channels are applied by the trajectory engine after each gate whose
+/// `NoiseModel::after_gate` entry contains a matching `NoiseEvent`. For
+/// Pauli-only noise on Clifford circuits, the compiled stabilizer sampler
+/// is used instead — see [`NoiseModel::is_pauli_only`].
+#[derive(Debug, Clone)]
+pub enum NoiseChannel {
+    /// Independent Pauli X/Y/Z error with given per-branch probabilities.
+    Pauli { px: f64, py: f64, pz: f64 },
+    /// Symmetric depolarizing: `I` with probability `1-p`, each of `X/Y/Z`
+    /// with probability `p/3`.
+    Depolarizing { p: f64 },
+    /// T1 relaxation: `|1⟩ → |0⟩` with amplitude `sqrt(gamma)`.
+    AmplitudeDamping { gamma: f64 },
+    /// Pure dephasing: phase randomisation with amplitude `sqrt(gamma)` on the
+    /// `|1⟩` state. Populations are preserved.
+    PhaseDamping { gamma: f64 },
+    /// Combined T1 + T2 relaxation over a gate of duration `gate_time`.
+    /// Sampled as a population reset (prob. `1 - exp(-gate_time/t1)`) followed
+    /// by a pure-dephasing branch when `t2 < 2·t1`.
+    ThermalRelaxation { t1: f64, t2: f64, gate_time: f64 },
+    /// Symmetric two-qubit depolarizing: each of the 15 non-identity
+    /// two-qubit Paulis occurs with probability `p/15`.
+    TwoQubitDepolarizing { p: f64 },
+    /// General single-qubit channel described by a set of Kraus operators.
+    ///
+    /// **Restriction — supported Kraus class.** Each operator `K_k` must
+    /// satisfy that `K_k† K_k` is diagonal. This class is rich enough to
+    /// cover all diagonal channels (amplitude / phase damping, dephasing)
+    /// plus the Pauli channels (bit flip, phase flip, bit-phase flip, and
+    /// arbitrary mixtures of `X`, `Y`, `Z`), which is every standard
+    /// single-qubit noise channel in the literature.
+    ///
+    /// **Rejected Kraus class.** General dense operators such as
+    /// `[[a, b], [0, 0]]` whose `K_k† K_k` has non-zero off-diagonal entries
+    /// require access to the qubit's coherence `⟨0|ρ|1⟩`, which the
+    /// trajectory engine cannot extract from a pure state without cloning
+    /// the backend. If you pass such an operator, the trajectory engine
+    /// returns [`PrismError::BackendUnsupported`] at runtime.
+    ///
+    /// **Workarounds for dense Kraus ops:** decompose the channel into a
+    /// unitary dilation plus an ancilla measurement, or use a density-matrix
+    /// simulator (not provided by PRISM-Q).
+    ///
+    /// [`PrismError::BackendUnsupported`]: crate::error::PrismError::BackendUnsupported
+    Custom { kraus: Vec<[[Complex64; 2]; 2]> },
 }
 
-pub struct NoiseOp {
-    pub qubit: usize,
-    pub px: f64,
-    pub py: f64,
-    pub pz: f64,
+impl NoiseChannel {
+    pub fn as_pauli(&self) -> Option<(f64, f64, f64)> {
+        match self {
+            NoiseChannel::Pauli { px, py, pz } => Some((*px, *py, *pz)),
+            NoiseChannel::Depolarizing { p } => {
+                let pp = p / 3.0;
+                Some((pp, pp, pp))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_pauli(&self) -> bool {
+        matches!(
+            self,
+            NoiseChannel::Pauli { .. } | NoiseChannel::Depolarizing { .. }
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NoiseEvent {
+    pub channel: NoiseChannel,
+    pub qubits: SmallVec<[usize; 2]>,
+}
+
+impl NoiseEvent {
+    pub fn pauli(qubit: usize, px: f64, py: f64, pz: f64) -> Self {
+        Self {
+            channel: NoiseChannel::Pauli { px, py, pz },
+            qubits: smallvec![qubit],
+        }
+    }
+
+    pub fn qubit(&self) -> usize {
+        self.qubits[0]
+    }
+
+    /// Return the per-Pauli probabilities for a Pauli/Depolarizing channel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the channel is not Pauli or Depolarizing. Callers on the
+    /// compiled stabilizer sampler path must guard with
+    /// [`NoiseModel::ensure_pauli_only`] before invoking this method.
+    pub fn pauli_probs(&self) -> (f64, f64, f64) {
+        self.channel
+            .as_pauli()
+            .expect("pauli_probs called on non-Pauli channel; caller must use ensure_pauli_only")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReadoutError {
+    pub p01: f64,
+    pub p10: f64,
+}
+
+pub struct NoiseModel {
+    pub after_gate: Vec<Vec<NoiseEvent>>,
+    pub readout: Vec<Option<ReadoutError>>,
 }
 
 impl NoiseModel {
@@ -32,13 +135,34 @@ impl NoiseModel {
         for instr in &circuit.instructions {
             match instr {
                 Instruction::Gate { targets, .. } => {
-                    let ops: Vec<NoiseOp> = targets
+                    let ops: Vec<NoiseEvent> = targets
                         .iter()
-                        .map(|&q| NoiseOp {
-                            qubit: q,
-                            px,
-                            py,
-                            pz,
+                        .map(|&q| NoiseEvent::pauli(q, px, py, pz))
+                        .collect();
+                    after_gate.push(ops);
+                }
+                _ => {
+                    after_gate.push(Vec::new());
+                }
+            }
+        }
+
+        Self {
+            after_gate,
+            readout: vec![None; circuit.num_classical_bits],
+        }
+    }
+
+    pub fn with_amplitude_damping(circuit: &Circuit, gamma: f64) -> Self {
+        let mut after_gate = Vec::with_capacity(circuit.instructions.len());
+        for instr in &circuit.instructions {
+            match instr {
+                Instruction::Gate { targets, .. } => {
+                    let ops: Vec<NoiseEvent> = targets
+                        .iter()
+                        .map(|&q| NoiseEvent {
+                            channel: NoiseChannel::AmplitudeDamping { gamma },
+                            qubits: smallvec![q],
                         })
                         .collect();
                     after_gate.push(ops);
@@ -49,7 +173,45 @@ impl NoiseModel {
             }
         }
 
-        Self { after_gate }
+        Self {
+            after_gate,
+            readout: vec![None; circuit.num_classical_bits],
+        }
+    }
+
+    pub fn with_readout_error(&mut self, p01: f64, p10: f64) -> &mut Self {
+        self.readout.fill(Some(ReadoutError { p01, p10 }));
+        self
+    }
+
+    pub fn is_pauli_only(&self) -> bool {
+        self.after_gate
+            .iter()
+            .flat_map(|events| events.iter())
+            .all(|e| e.channel.is_pauli())
+            && self.readout.iter().all(|r| r.is_none())
+    }
+
+    pub fn has_noise(&self) -> bool {
+        self.after_gate.iter().any(|events| !events.is_empty())
+            || self.readout.iter().any(|r| r.is_some())
+    }
+
+    /// Return an error if the noise model contains any non-Pauli channels
+    /// or readout errors. Used as a precondition check by the compiled
+    /// sampler path, which can only handle Pauli noise on Clifford circuits.
+    pub fn ensure_pauli_only(&self) -> Result<()> {
+        if !self.is_pauli_only() {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "compiled stabilizer sampler".into(),
+                reason: "non-Pauli noise channels (amplitude damping, phase damping, \
+                         thermal relaxation, custom Kraus) or readout errors require \
+                         the trajectory engine; use a non-stabilizer backend or a \
+                         Pauli-only noise model"
+                    .into(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -582,6 +744,7 @@ pub fn compile_noisy(
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<NoisyCompiledSampler> {
+    noise.ensure_pauli_only()?;
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
         if blocks.len() > 1 {
@@ -695,8 +858,9 @@ fn compile_noisy_filtered(
         for (instr_idx, gate, local_targets) in block_gates.iter().rev() {
             let noise_ops = &noise.after_gate[*instr_idx];
             if !noise_ops.is_empty() {
-                for noise_op in noise_ops {
-                    let local_q = qubit_to_local[noise_op.qubit];
+                for event in noise_ops {
+                    let (px, py, pz) = event.pauli_probs();
+                    let local_q = qubit_to_local[event.qubit()];
 
                     let has_any = x_packed[local_q].iter().any(|&w| w != 0)
                         || z_packed[local_q].iter().any(|&w| w != 0);
@@ -711,13 +875,7 @@ fn compile_noisy_filtered(
                                 global_z_buf[global_mi / 64] |= 1u64 << (global_mi % 64);
                             }
                         }
-                        events.push(
-                            &global_x_buf,
-                            &global_z_buf,
-                            noise_op.px,
-                            noise_op.py,
-                            noise_op.pz,
-                        );
+                        events.push(&global_x_buf, &global_z_buf, px, py, pz);
                     }
                 }
             }
@@ -803,19 +961,14 @@ fn compile_noisy_monolithic(
     for &(instr_idx, gate, targets) in gate_indices.iter().rev() {
         let noise_ops = &noise.after_gate[instr_idx];
         if !noise_ops.is_empty() {
-            for noise_op in noise_ops {
-                let q = noise_op.qubit;
+            for event in noise_ops {
+                let (px, py, pz) = event.pauli_probs();
+                let q = event.qubit();
 
                 let has_any =
                     x_packed[q].iter().any(|&w| w != 0) || z_packed[q].iter().any(|&w| w != 0);
                 if has_any {
-                    events.push(
-                        &x_packed[q],
-                        &z_packed[q],
-                        noise_op.px,
-                        noise_op.py,
-                        noise_op.pz,
-                    );
+                    events.push(&x_packed[q], &z_packed[q], px, py, pz);
                 }
             }
         }
@@ -1029,15 +1182,16 @@ fn run_shots_noisy_frame(
                 | Instruction::Conditional { gate, targets, .. } => {
                     apply_gate_to_frame(gate, targets.as_slice(), &mut x_frame, &mut z_frame, bw);
 
-                    for noise_op in &noise.after_gate[idx] {
-                        let q = noise_op.qubit;
-                        let p_event = noise_op.px + noise_op.py + noise_op.pz;
+                    for event in &noise.after_gate[idx] {
+                        let (px, py, pz) = event.pauli_probs();
+                        let q = event.qubit();
+                        let p_event = px + py + pz;
                         if p_event == 0.0 {
                             continue;
                         }
 
-                        let px_frac = noise_op.px / p_event;
-                        let pxy_frac = (noise_op.px + noise_op.py) / p_event;
+                        let px_frac = px / p_event;
+                        let pxy_frac = (px + py) / p_event;
 
                         if p_event < 0.5 && batch_n >= 32 {
                             let ln_1mp = (1.0 - p_event).ln();
@@ -1059,9 +1213,9 @@ fn run_shots_noisy_frame(
                         } else {
                             for s in 0..batch_n {
                                 let r: f64 = rand::Rng::gen(&mut rng);
-                                if r < noise_op.px {
+                                if r < px {
                                     x_frame[q][s / 64] ^= 1u64 << (s % 64);
-                                } else if r < noise_op.px + noise_op.py {
+                                } else if r < px + py {
                                     x_frame[q][s / 64] ^= 1u64 << (s % 64);
                                     z_frame[q][s / 64] ^= 1u64 << (s % 64);
                                 } else if r < p_event {
@@ -1146,6 +1300,7 @@ pub fn run_shots_noisy(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    noise.ensure_pauli_only()?;
     if !circuit.is_clifford_only() {
         return run_shots_noisy_brute_with(
             |s| Box::new(StabilizerBackend::new(s)),
@@ -1232,23 +1387,25 @@ pub(crate) fn run_shots_noisy_brute_with(
         for (idx, instr) in circuit.instructions.iter().enumerate() {
             backend.apply(instr)?;
 
-            let noise_ops = &noise.after_gate[idx];
-            for op in noise_ops {
+            let noise_events = &noise.after_gate[idx];
+            for event in noise_events {
+                let (px, py, pz) = event.pauli_probs();
+                let q = event.qubit();
                 let r: f64 = rand::Rng::gen(&mut rng);
-                if r < op.px {
+                if r < px {
                     backend.apply(&Instruction::Gate {
                         gate: Gate::X,
-                        targets: SmallVec::from_elem(op.qubit, 1),
+                        targets: SmallVec::from_elem(q, 1),
                     })?;
-                } else if r < op.px + op.py {
+                } else if r < px + py {
                     backend.apply(&Instruction::Gate {
                         gate: Gate::Y,
-                        targets: SmallVec::from_elem(op.qubit, 1),
+                        targets: SmallVec::from_elem(q, 1),
                     })?;
-                } else if r < op.px + op.py + op.pz {
+                } else if r < px + py + pz {
                     backend.apply(&Instruction::Gate {
                         gate: Gate::Z,
-                        targets: SmallVec::from_elem(op.qubit, 1),
+                        targets: SmallVec::from_elem(q, 1),
                     })?;
                 }
             }

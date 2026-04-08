@@ -9,6 +9,7 @@ mod dispatch;
 pub mod homological;
 pub mod noise;
 pub mod stabilizer_rank;
+mod trajectory;
 pub mod unified_pauli;
 
 pub(crate) use decomposed::merge_probabilities;
@@ -793,15 +794,6 @@ pub fn run_shots_with_noise(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
-    let use_compiled = matches!(
-        kind,
-        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
-    ) && circuit.is_clifford_only();
-
-    if use_compiled {
-        return noise::run_shots_noisy(circuit, noise_model, num_shots, seed);
-    }
-
     if matches!(
         kind,
         BackendKind::StabilizerRank
@@ -814,7 +806,40 @@ pub fn run_shots_with_noise(
         });
     }
 
-    noise::run_shots_noisy_brute_with(
+    let is_stabilizer_kind = matches!(
+        kind,
+        BackendKind::Stabilizer | BackendKind::FilteredStabilizer | BackendKind::FactoredStabilizer
+    );
+
+    if is_stabilizer_kind && !noise_model.is_pauli_only() {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "stabilizer backends only support Pauli/depolarizing noise; \
+                     use Statevector or MPS for amplitude damping, phase damping, \
+                     thermal relaxation, custom Kraus, or readout errors"
+                .into(),
+        });
+    }
+
+    if is_stabilizer_kind && !circuit.is_clifford_only() {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "circuit contains non-Clifford gates".into(),
+        });
+    }
+
+    if noise_model.is_pauli_only() {
+        let use_compiled = matches!(
+            kind,
+            BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
+        ) && circuit.is_clifford_only();
+
+        if use_compiled {
+            return noise::run_shots_noisy(circuit, noise_model, num_shots, seed);
+        }
+    }
+
+    trajectory::run_trajectories(
         |s| select_backend(&kind, circuit, s, false),
         circuit,
         noise_model,

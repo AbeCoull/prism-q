@@ -499,6 +499,39 @@ impl FactoredBackend {
         Ok(())
     }
 
+    fn apply_reset(&mut self, qubit: usize) {
+        let ss_idx = self.qubit_to_substate[qubit];
+        let sub = self.substates[ss_idx].as_mut().unwrap();
+        let local = Self::local_qubit(sub, qubit);
+
+        let mask = 1usize << local;
+        let n = sub.state.len();
+        let zero = Complex64::new(0.0, 0.0);
+
+        let mut prob_zero = 0.0f64;
+        for i in 0..n {
+            if (i & mask) == 0 {
+                prob_zero += sub.state[i].norm_sqr();
+            }
+        }
+
+        if prob_zero > 0.0 {
+            let inv_norm = 1.0 / prob_zero.sqrt();
+            for i in 0..n {
+                if (i & mask) == 0 {
+                    sub.state[i] *= inv_norm;
+                } else {
+                    sub.state[i] = zero;
+                }
+            }
+        } else {
+            for amp in sub.state.iter_mut() {
+                *amp = zero;
+            }
+            sub.state[0] = Complex64::new(1.0, 0.0);
+        }
+    }
+
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
         let ss_idx = self.qubit_to_substate[qubit];
         let sub = self.substates[ss_idx].as_mut().unwrap();
@@ -569,6 +602,10 @@ impl Backend for FactoredBackend {
                 self.apply_measure(*qubit, *classical_bit);
                 Ok(())
             }
+            Instruction::Reset { qubit } => {
+                self.apply_reset(*qubit);
+                Ok(())
+            }
             Instruction::Barrier { .. } => Ok(()),
             Instruction::Conditional {
                 condition,
@@ -581,6 +618,11 @@ impl Backend for FactoredBackend {
                 Ok(())
             }
         }
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset(qubit);
+        Ok(())
     }
 
     fn classical_results(&self) -> &[bool] {

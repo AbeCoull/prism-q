@@ -1250,6 +1250,53 @@ impl MpsBackend {
         env
     }
 
+    fn apply_reset(&mut self, qubit: usize) {
+        let l_env = self.compute_left_env(qubit);
+        let r_env = self.compute_right_env(qubit);
+        let t = &self.sites[qubit];
+        let bl = t.bond_left;
+        let br = t.bond_right;
+
+        let mut prob_zero = 0.0f64;
+        for alpha in 0..bl {
+            for alpha_p in 0..bl {
+                let l_val = l_env[alpha * bl + alpha_p];
+                if l_val == ZERO {
+                    continue;
+                }
+                for beta in 0..br {
+                    for beta_p in 0..br {
+                        let r_val = r_env[beta * br + beta_p];
+                        if r_val == ZERO {
+                            continue;
+                        }
+                        prob_zero += (l_val
+                            * t.data[t.idx(alpha, 0, beta)]
+                            * t.data[t.idx(alpha_p, 0, beta_p)].conj()
+                            * r_val)
+                            .re;
+                    }
+                }
+            }
+        }
+
+        if prob_zero > NORM_CLAMP_MIN {
+            let inv_sqrt = 1.0 / prob_zero.sqrt();
+            let scale = Complex64::new(inv_sqrt, 0.0);
+            let t = &mut self.sites[qubit];
+            for alpha in 0..bl {
+                for beta in 0..br {
+                    let idx_0 = alpha * (2 * br) + beta;
+                    let idx_1 = alpha * (2 * br) + br + beta;
+                    t.data[idx_0] *= scale;
+                    t.data[idx_1] = ZERO;
+                }
+            }
+        } else {
+            self.apply_single_qubit_gate(qubit, &[[ZERO, ONE], [ONE, ZERO]]);
+        }
+    }
+
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
         let l_env = self.compute_left_env(qubit);
         let r_env = self.compute_right_env(qubit);
@@ -1451,6 +1498,9 @@ impl Backend for MpsBackend {
             } => {
                 self.apply_measure(*qubit, *classical_bit);
             }
+            Instruction::Reset { qubit } => {
+                self.apply_reset(*qubit);
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -1462,6 +1512,11 @@ impl Backend for MpsBackend {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset(qubit);
         Ok(())
     }
 

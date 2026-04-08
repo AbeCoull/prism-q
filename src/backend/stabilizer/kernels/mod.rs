@@ -967,6 +967,9 @@ impl StabilizerBackend {
                 } => {
                     self.sgi_measure(*qubit, *classical_bit);
                 }
+                Instruction::Reset { qubit } => {
+                    self.apply_reset(*qubit)?;
+                }
                 Instruction::Barrier { .. } => {}
                 Instruction::Conditional {
                     condition,

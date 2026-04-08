@@ -949,6 +949,17 @@ fn render_svg(
                     }
                 }
 
+                OpKind::Reset => {
+                    present_cats.insert(GateCategory::Measure);
+                    let cls = GateCategory::Measure.css_class();
+                    for &q in &op.qubits {
+                        if let Some(row) = row_of(q) {
+                            let cy = wire_y(row);
+                            emit_gate_box(&mut svg, center_x, cy, &op.label, opts, cls, &tip, &mc);
+                        }
+                    }
+                }
+
                 OpKind::Measure { cbit } => {
                     present_cats.insert(GateCategory::Measure);
                     if let Some(row) = op.qubits.first().and_then(|&q| row_of(q)) {

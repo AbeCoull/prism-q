@@ -60,7 +60,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                 }
                 output.push(inst.clone());
             }
-            Instruction::Measure { qubit, .. } => {
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 flush_qubit(*qubit, &mut pending, &mut output);
                 output.push(inst.clone());
             }
@@ -108,7 +108,7 @@ fn has_batchable_phases(circuit: &Circuit) -> bool {
                     }
                 }
             }
-            Instruction::Measure { qubit, .. } => {
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 has_pending[*qubit] = false;
             }
             Instruction::Barrier { qubits } => {

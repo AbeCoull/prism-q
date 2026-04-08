@@ -76,7 +76,9 @@ const MIN_MULTI_2Q_BATCH: usize = 2;
 fn inst_qubits(inst: &Instruction) -> &[usize] {
     match inst {
         Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
-        Instruction::Measure { qubit, .. } => std::slice::from_ref(qubit),
+        Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
+            std::slice::from_ref(qubit)
+        }
         Instruction::Barrier { qubits } => qubits,
     }
 }
@@ -255,7 +257,7 @@ fn has_fusable_gates(circuit: &Circuit) -> bool {
                     has_pending[q] = false;
                 }
             }
-            Instruction::Measure { qubit, .. } => {
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 has_pending[*qubit] = false;
             }
             Instruction::Barrier { qubits } => {
@@ -305,7 +307,7 @@ pub fn fuse_single_qubit_gates(circuit: &Circuit) -> Cow<'_, Circuit> {
                 }
                 output.push(inst.clone());
             }
-            Instruction::Measure { qubit, .. } => {
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 flush(&mut pending[*qubit], &mut output);
                 output.push(inst.clone());
             }
@@ -391,7 +393,7 @@ fn has_reorder_opportunity(circuit: &Circuit) -> bool {
                     }
                 }
             }
-            Instruction::Measure { qubit, .. } => {
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 last_non1q_pos = Some(i);
                 block_all[*qubit] = Some(i);
                 block_diag[*qubit] = Some(i);
@@ -486,7 +488,7 @@ pub fn reorder_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                             }
                         }
                     },
-                    Instruction::Measure { qubit, .. } => {
+                    Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                         block_all[*qubit] = idx;
                         block_diag[*qubit] = idx;
                     }
@@ -714,7 +716,7 @@ pub fn fuse_2q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                 }
                 output.push(inst.clone());
             }
-            Instruction::Measure { qubit, .. } => {
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 flush_1q(*qubit, &mut pending_1q, &mut output);
                 output.push(inst.clone());
             }
@@ -767,7 +769,7 @@ fn has_2q_fusion_opportunity(circuit: &Circuit) -> bool {
                     has_pending_1q[q] = false;
                 }
             }
-            Instruction::Measure { qubit, .. } => {
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 has_pending_1q[*qubit] = false;
             }
             Instruction::Barrier { qubits } => {

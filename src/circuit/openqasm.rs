@@ -177,6 +177,11 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
+            if line.starts_with("reset") {
+                instructions.extend(self.parse_reset(line, line_num)?);
+                continue;
+            }
+
             if line.starts_with("if") {
                 instructions.extend(self.parse_if_statement(line, line_num)?);
                 continue;
@@ -604,6 +609,25 @@ impl<'a> Parser<'a> {
             qubits.extend(self.resolve_qubit_arg(token.trim(), line_num)?);
         }
         Ok(Instruction::Barrier { qubits })
+    }
+
+    /// Parse `reset q[i];` or `reset q;` (broadcast over register).
+    fn parse_reset(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        let rest = line.strip_prefix("reset").unwrap().trim();
+        if rest.is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: "expected qubit argument after `reset`".to_string(),
+            });
+        }
+        let mut out = Vec::new();
+        for token in rest.split(',') {
+            let qubits = self.resolve_qubit_arg(token.trim(), line_num)?;
+            for q in qubits {
+                out.push(Instruction::Reset { qubit: q });
+            }
+        }
+        Ok(out)
     }
 
     /// Parse `if(creg==value) gate args` (OQ2) or `if (c[i]) gate args` (OQ3).

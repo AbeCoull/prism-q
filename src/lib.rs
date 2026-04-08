@@ -65,7 +65,10 @@ pub use sim::compiled::{
 pub use sim::homological::{
     noisy_marginals_analytical, run_shots_homological, ErrorChainComplex, HomologicalSampler,
 };
-pub use sim::noise::{compile_noisy, run_shots_noisy, NoiseModel, NoiseOp, NoisyCompiledSampler};
+pub use sim::noise::{
+    compile_noisy, run_shots_noisy, NoiseChannel, NoiseEvent, NoiseModel, NoisyCompiledSampler,
+    ReadoutError,
+};
 pub use sim::stabilizer_rank::{
     run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_overlap_sq, StabRankResult,
 };

@@ -64,6 +64,7 @@ fn profile_one(circuit: &Circuit) -> IterProfile {
         let name = match instruction {
             Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => gate.name(),
             Instruction::Measure { .. } => "measure",
+            Instruction::Reset { .. } => "reset",
             Instruction::Barrier { .. } => continue,
         };
 

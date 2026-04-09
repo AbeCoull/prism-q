@@ -957,7 +957,7 @@ pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn norm_sqr_sum_avx2fma(slice: &[Complex64]) -> f64 {
     let ptr = slice.as_ptr() as *const f64;
@@ -1001,7 +1001,6 @@ unsafe fn norm_sqr_sum_avx2fma(slice: &[Complex64]) -> f64 {
     result
 }
 
-#[cfg(any(feature = "parallel", test))]
 pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
@@ -1009,35 +1008,38 @@ pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
-        return unsafe {
-            let ptr = slice.as_ptr() as *const f64;
-            let mut a0 = vdupq_n_f64(0.0);
-            let mut a1 = vdupq_n_f64(0.0);
-            let mut a2 = vdupq_n_f64(0.0);
-            let mut a3 = vdupq_n_f64(0.0);
-            let unrolled = slice.len() / 4;
-            let remainder = slice.len() % 4;
-            for i in 0..unrolled {
-                let base = i * 8;
-                let v0 = vld1q_f64(ptr.add(base));
-                let v1 = vld1q_f64(ptr.add(base + 2));
-                let v2 = vld1q_f64(ptr.add(base + 4));
-                let v3 = vld1q_f64(ptr.add(base + 6));
-                a0 = vfmaq_f64(a0, v0, v0);
-                a1 = vfmaq_f64(a1, v1, v1);
-                a2 = vfmaq_f64(a2, v2, v2);
-                a3 = vfmaq_f64(a3, v3, v3);
-            }
-            let mut acc = vaddq_f64(vaddq_f64(a0, a1), vaddq_f64(a2, a3));
-            let tail = unrolled * 4;
-            for i in 0..remainder {
-                let v = vld1q_f64(ptr.add((tail + i) * 2));
-                acc = vfmaq_f64(acc, v, v);
-            }
-            vaddvq_f64(acc)
-        };
+        return unsafe { norm_sqr_sum_neon(slice) };
     }
     slice.iter().map(|c| c.norm_sqr()).sum()
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn norm_sqr_sum_neon(slice: &[Complex64]) -> f64 {
+    let ptr = slice.as_ptr() as *const f64;
+    let mut a0 = vdupq_n_f64(0.0);
+    let mut a1 = vdupq_n_f64(0.0);
+    let mut a2 = vdupq_n_f64(0.0);
+    let mut a3 = vdupq_n_f64(0.0);
+    let unrolled = slice.len() / 4;
+    let remainder = slice.len() % 4;
+    for i in 0..unrolled {
+        let base = i * 8;
+        let v0 = vld1q_f64(ptr.add(base));
+        let v1 = vld1q_f64(ptr.add(base + 2));
+        let v2 = vld1q_f64(ptr.add(base + 4));
+        let v3 = vld1q_f64(ptr.add(base + 6));
+        a0 = vfmaq_f64(a0, v0, v0);
+        a1 = vfmaq_f64(a1, v1, v1);
+        a2 = vfmaq_f64(a2, v2, v2);
+        a3 = vfmaq_f64(a3, v3, v3);
+    }
+    let mut acc = vaddq_f64(vaddq_f64(a0, a1), vaddq_f64(a2, a3));
+    let tail = unrolled * 4;
+    for i in 0..remainder {
+        let v = vld1q_f64(ptr.add((tail + i) * 2));
+        acc = vfmaq_f64(acc, v, v);
+    }
+    vaddvq_f64(acc)
 }
 
 #[cfg(target_arch = "x86_64")]

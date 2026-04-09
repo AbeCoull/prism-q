@@ -244,10 +244,11 @@ impl ErrorChainComplex {
         for (instr_idx, instr) in circuit.instructions.iter().enumerate().rev() {
             match instr {
                 Instruction::Gate { gate, targets } => {
-                    let noise_ops = &noise.after_gate[instr_idx];
-                    for op in noise_ops {
-                        let q = op.qubit;
-                        let p_total = op.px + op.py + op.pz;
+                    let noise_events = &noise.after_gate[instr_idx];
+                    for event in noise_events {
+                        let (px, py, pz) = event.pauli_probs();
+                        let q = event.qubit();
+                        let p_total = px + py + pz;
                         if p_total < 1e-15 {
                             continue;
                         }
@@ -255,23 +256,23 @@ impl ErrorChainComplex {
                         let x_sens = &z_packed[q];
                         let z_sens = &x_packed[q];
 
-                        if op.px > 1e-15 && x_sens.iter().any(|&w| w != 0) {
-                            error_probs.push(op.px);
+                        if px > 1e-15 && x_sens.iter().any(|&w| w != 0) {
+                            error_probs.push(px);
                             e_cols.push(x_sens.clone());
                         }
 
-                        if op.pz > 1e-15 && z_sens.iter().any(|&w| w != 0) {
-                            error_probs.push(op.pz);
+                        if pz > 1e-15 && z_sens.iter().any(|&w| w != 0) {
+                            error_probs.push(pz);
                             e_cols.push(z_sens.clone());
                         }
 
-                        if op.py > 1e-15 {
+                        if py > 1e-15 {
                             let mut y_sens = vec![0u64; m_words];
                             for w in 0..m_words {
                                 y_sens[w] = x_sens[w] ^ z_sens[w];
                             }
                             if y_sens.iter().any(|&w| w != 0) {
-                                error_probs.push(op.py);
+                                error_probs.push(py);
                                 e_cols.push(y_sens);
                             }
                         }
@@ -286,7 +287,9 @@ impl ErrorChainComplex {
                         m_words,
                     );
                 }
-                Instruction::Measure { .. } | Instruction::Barrier { .. } => {}
+                Instruction::Measure { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Barrier { .. } => {}
                 Instruction::Conditional { gate, targets, .. } => {
                     batch_propagate_backward(
                         &mut x_packed,

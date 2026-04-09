@@ -330,6 +330,20 @@ impl StabilizerBackend {
         self.apply_measure_with_info(qubit, classical_bit);
     }
 
+    pub(super) fn apply_reset(&mut self, qubit: usize) -> Result<()> {
+        self.ensure_destabilizers();
+        let prev_len = self.classical_bits.len();
+        self.classical_bits.push(false);
+        let scratch = prev_len;
+        self.apply_measure_with_info(qubit, scratch);
+        let outcome = self.classical_bits[scratch];
+        self.classical_bits.truncate(prev_len);
+        if outcome {
+            self.dispatch_gate(&Gate::X, &[qubit])?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply_measure_with_info(
         &mut self,
         qubit: usize,
@@ -946,6 +960,9 @@ impl Backend for StabilizerBackend {
             } => {
                 self.apply_measure(*qubit, *classical_bit);
             }
+            Instruction::Reset { qubit } => {
+                self.apply_reset(*qubit)?;
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -958,6 +975,10 @@ impl Backend for StabilizerBackend {
             }
         }
         Ok(())
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset(qubit)
     }
 
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
@@ -1177,6 +1198,13 @@ impl FilteredStabilizerBackend {
         cluster.backend.apply_measure(local_q, local_cbit);
         self.classical_bits[classical_bit] = cluster.backend.classical_bits[local_cbit];
     }
+
+    fn apply_reset_cluster(&mut self, qubit: usize) -> Result<()> {
+        let ci = self.qubit_to_cluster[qubit];
+        let cluster = self.clusters[ci].as_mut().unwrap();
+        let local_q = cluster.global_to_local[qubit];
+        cluster.backend.apply_reset(local_q)
+    }
 }
 
 fn copy_tableau_into(src: &StabilizerBackend, dst: &mut StabilizerBackend, qubit_offset: usize) {
@@ -1303,6 +1331,9 @@ impl Backend for FilteredStabilizerBackend {
             } => {
                 self.apply_measure(*qubit, *classical_bit);
             }
+            Instruction::Reset { qubit } => {
+                self.apply_reset_cluster(*qubit)?;
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -1315,6 +1346,10 @@ impl Backend for FilteredStabilizerBackend {
             }
         }
         Ok(())
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset_cluster(qubit)
     }
 
     fn classical_results(&self) -> &[bool] {

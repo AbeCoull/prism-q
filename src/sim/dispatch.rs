@@ -277,7 +277,9 @@ pub(super) fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Ci
                 }
                 prefix_gates += 1;
             }
-            Instruction::Measure { .. } | Instruction::Conditional { .. } => break,
+            Instruction::Measure { .. }
+            | Instruction::Reset { .. }
+            | Instruction::Conditional { .. } => break,
             Instruction::Barrier { .. } => {}
         }
     }

@@ -505,6 +505,51 @@ impl TensorNetworkBackend {
         }
     }
 
+    fn apply_reset(&mut self, qubit: usize) -> Result<()> {
+        let amplitudes = self.contract_to_statevector()?;
+        let n = self.num_qubits;
+
+        let mut collapsed = amplitudes;
+        let mut prob_zero = 0.0f64;
+        for (idx, amp) in collapsed.iter_mut().enumerate() {
+            let bit = (idx >> (n - 1 - qubit)) & 1 == 1;
+            if bit {
+                *amp = Complex64::new(0.0, 0.0);
+            } else {
+                prob_zero += amp.norm_sqr();
+            }
+        }
+        if prob_zero > NORM_CLAMP_MIN {
+            let norm = prob_zero.sqrt();
+            for amp in &mut collapsed {
+                *amp /= norm;
+            }
+        } else {
+            for amp in collapsed.iter_mut() {
+                *amp = Complex64::new(0.0, 0.0);
+            }
+            collapsed[0] = Complex64::new(1.0, 0.0);
+        }
+
+        self.tensors.clear();
+        self.next_leg = 0;
+        self.output_legs.clear();
+        let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
+        let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
+        for _ in 0..n {
+            let leg = self.fresh_leg();
+            self.output_legs.push(leg);
+            shape.push(2);
+            legs.push(leg);
+        }
+        self.tensors.push(Tensor {
+            data: collapsed,
+            shape,
+            legs,
+        });
+        Ok(())
+    }
+
     /// Contract the full network and return the amplitude vector in
     /// computational basis order.
     fn contract_to_statevector(&self) -> Result<Vec<Complex64>> {
@@ -697,6 +742,9 @@ impl Backend for TensorNetworkBackend {
                     legs,
                 });
             }
+            Instruction::Reset { qubit } => {
+                self.apply_reset(*qubit)?;
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -709,6 +757,10 @@ impl Backend for TensorNetworkBackend {
             }
         }
         Ok(())
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset(qubit)
     }
 
     fn classical_results(&self) -> &[bool] {

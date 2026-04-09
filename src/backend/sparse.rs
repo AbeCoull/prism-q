@@ -245,6 +245,48 @@ impl SparseBackend {
         self.prune();
     }
 
+    fn apply_reset(&mut self, qubit: usize) {
+        let mask = 1usize << qubit;
+
+        #[cfg(feature = "parallel")]
+        let prob_zero: f64 = if self.state.len() >= MIN_STATES_FOR_PAR {
+            self.state
+                .par_iter()
+                .filter(|(&idx, _)| idx & mask == 0)
+                .map(|(_, amp)| amp.norm_sqr())
+                .sum()
+        } else {
+            self.state
+                .iter()
+                .filter(|(&idx, _)| idx & mask == 0)
+                .map(|(_, amp)| amp.norm_sqr())
+                .sum()
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let prob_zero: f64 = self
+            .state
+            .iter()
+            .filter(|(&idx, _)| idx & mask == 0)
+            .map(|(_, amp)| amp.norm_sqr())
+            .sum();
+
+        if prob_zero > 0.0 {
+            let inv_norm = 1.0 / prob_zero.sqrt();
+            self.state.retain(|&idx, amp| {
+                if idx & mask == 0 {
+                    *amp *= inv_norm;
+                    true
+                } else {
+                    false
+                }
+            });
+        } else {
+            self.state.clear();
+            self.state.insert(0, Complex64::new(1.0, 0.0));
+        }
+    }
+
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
         let mask = 1usize << qubit;
 
@@ -412,6 +454,9 @@ impl Backend for SparseBackend {
             } => {
                 self.apply_measure(*qubit, *classical_bit);
             }
+            Instruction::Reset { qubit } => {
+                self.apply_reset(*qubit);
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -423,6 +468,11 @@ impl Backend for SparseBackend {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset(qubit);
         Ok(())
     }
 

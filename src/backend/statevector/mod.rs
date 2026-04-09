@@ -248,6 +248,9 @@ impl Backend for StatevectorBackend {
             } => {
                 self.apply_measure(*qubit, *classical_bit);
             }
+            Instruction::Reset { qubit } => {
+                self.apply_reset(*qubit);
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -305,5 +308,24 @@ impl Backend for StatevectorBackend {
         }
         let s = Complex64::new(self.pending_norm, 0.0);
         Ok(self.state.iter().map(|&c| c * s).collect())
+    }
+
+    fn qubit_probability(&self, qubit: usize) -> crate::error::Result<f64> {
+        Ok(self.qubit_probability_one(qubit))
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.apply_reset(qubit);
+        Ok(())
+    }
+
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        let is_diagonal = matrix[0][1].norm() < 1e-14 && matrix[1][0].norm() < 1e-14;
+        if is_diagonal {
+            self.apply_diagonal_gate(qubit, matrix[0][0], matrix[1][1]);
+        } else {
+            self.apply_single_gate(qubit, *matrix);
+        }
+        Ok(())
     }
 }

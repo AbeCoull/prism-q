@@ -84,6 +84,13 @@ impl Circuit {
         });
     }
 
+    /// Append a reset operation, returning the qubit to |0⟩.
+    #[inline]
+    pub fn add_reset(&mut self, qubit: usize) {
+        debug_assert!(qubit < self.num_qubits, "qubit index out of bounds");
+        self.instructions.push(Instruction::Reset { qubit });
+    }
+
     /// Append a barrier (scheduling hint, no physical operation).
     #[inline]
     pub fn add_barrier(&mut self, qubits: &[usize]) {
@@ -207,7 +214,7 @@ impl Circuit {
                 Instruction::Measure { .. } => {
                     seen_measurement = true;
                 }
-                Instruction::Gate { .. } => {
+                Instruction::Gate { .. } | Instruction::Reset { .. } => {
                     if seen_measurement {
                         return false;
                     }
@@ -242,6 +249,13 @@ impl Circuit {
             .cloned()
             .collect();
         c
+    }
+
+    /// True if the circuit contains any reset instruction.
+    pub fn has_resets(&self) -> bool {
+        self.instructions
+            .iter()
+            .any(|i| matches!(i, Instruction::Reset { .. }))
     }
 
     /// Partition qubits into independent (non-interacting) subsystems.
@@ -399,6 +413,11 @@ impl Circuit {
                         });
                     }
                 }
+                Instruction::Reset { qubit } => {
+                    if let Some(nq) = old_to_new_qubit[*qubit] {
+                        sub.instructions.push(Instruction::Reset { qubit: nq });
+                    }
+                }
                 Instruction::Barrier { qubits } => {
                     let new_qs: SmallVec<[usize; 4]> =
                         qubits.iter().filter_map(|&q| old_to_new_qubit[q]).collect();
@@ -513,6 +532,12 @@ impl Circuit {
                         });
                     }
                 }
+                Instruction::Reset { qubit } => {
+                    let (comp_idx, nq) = qubit_map[*qubit];
+                    subs[comp_idx]
+                        .instructions
+                        .push(Instruction::Reset { qubit: nq });
+                }
                 Instruction::Barrier { qubits } => {
                     for buf in barrier_buf.iter_mut() {
                         buf.clear();
@@ -599,7 +624,9 @@ impl Circuit {
                         break;
                     }
                 }
-                Instruction::Measure { .. } | Instruction::Conditional { .. } => {
+                Instruction::Measure { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Conditional { .. } => {
                     split_at = i;
                     break;
                 }
@@ -640,7 +667,7 @@ impl Circuit {
                         qubit_depth[q] = max_d + 1;
                     }
                 }
-                Instruction::Measure { qubit, .. } => {
+                Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                     qubit_depth[*qubit] += 1;
                 }
                 Instruction::Barrier { qubits } => {
@@ -700,6 +727,8 @@ pub enum Instruction {
     },
     /// Measure a qubit, storing the outcome in a classical bit.
     Measure { qubit: usize, classical_bit: usize },
+    /// Reset a qubit to |0⟩. Destructive, non-unitary.
+    Reset { qubit: usize },
     /// Barrier — scheduling hint, no physical operation.
     /// Backends should treat this as a no-op.
     Barrier { qubits: SmallVec<[usize; 4]> },

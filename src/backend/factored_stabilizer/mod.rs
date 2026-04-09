@@ -576,6 +576,14 @@ impl SubTableau {
         }
     }
 
+    fn reset_qubit(&mut self, local_q: usize, rng: &mut ChaCha8Rng) -> Result<()> {
+        let outcome = self.measure(local_q, rng);
+        if outcome {
+            self.apply_x(local_q);
+        }
+        Ok(())
+    }
+
     fn compute_probabilities(&self) -> Result<Vec<f64>> {
         let n = self.n;
         if n > crate::backend::MAX_PROB_QUBITS {
@@ -1101,6 +1109,13 @@ impl Backend for FactoredStabilizerBackend {
                 self.classical_bits[*classical_bit] = outcome;
                 self.try_split(ss);
             }
+            Instruction::Reset { qubit } => {
+                let ss = self.qubit_to_sub[*qubit];
+                let sub = self.subs[ss].as_mut().unwrap();
+                let local_q = sub.local_qubit(*qubit);
+                sub.reset_qubit(local_q, &mut self.rng)?;
+                self.try_split(ss);
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -1152,6 +1167,15 @@ impl Backend for FactoredStabilizerBackend {
 
     fn supports_fused_gates(&self) -> bool {
         false
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        let ss = self.qubit_to_sub[qubit];
+        let sub = self.subs[ss].as_mut().unwrap();
+        let local_q = sub.local_qubit(qubit);
+        sub.reset_qubit(local_q, &mut self.rng)?;
+        self.try_split(ss);
+        Ok(())
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {

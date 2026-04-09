@@ -124,6 +124,9 @@ impl Backend for ProductStateBackend {
                     self.qubits[*qubit] = [alpha / norm, Complex64::new(0.0, 0.0)];
                 }
             }
+            Instruction::Reset { qubit } => {
+                self.qubits[*qubit] = [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];
+            }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
                 condition,
@@ -135,6 +138,11 @@ impl Backend for ProductStateBackend {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn reset(&mut self, qubit: usize) -> Result<()> {
+        self.qubits[qubit] = [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];
         Ok(())
     }
 

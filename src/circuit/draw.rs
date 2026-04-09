@@ -40,6 +40,7 @@ pub(super) enum OpKind {
     Swap,
     Barrier,
     Measure { cbit: usize },
+    Reset,
     Conditional { cbit_label: String },
     MultiFused,
 }
@@ -116,6 +117,19 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                     kind: OpKind::Measure {
                         cbit: *classical_bit,
                     },
+                };
+                if d >= moments.len() {
+                    moments.resize_with(d + 1, Vec::new);
+                }
+                moments[d].push(op);
+                qubit_depth[*qubit] = d + 1;
+            }
+            Instruction::Reset { qubit } => {
+                let d = qubit_depth[*qubit];
+                let op = PlacedOp {
+                    label: "|0⟩".into(),
+                    qubits: smallvec::smallvec![*qubit],
+                    kind: OpKind::Reset,
                 };
                 if d >= moments.len() {
                     moments.resize_with(d + 1, Vec::new);
@@ -429,6 +443,15 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                     {
                         let label = format!("M{}", cbit);
                         grid[row * 2][m_idx] = GridCell::gate(&label, w);
+                    }
+                }
+                OpKind::Reset => {
+                    if let Some(row) = op
+                        .qubits
+                        .first()
+                        .and_then(|&q| qubit_to_row.get(q).copied().flatten())
+                    {
+                        grid[row * 2][m_idx] = GridCell::gate("|0⟩", w);
                     }
                 }
                 OpKind::Conditional { cbit_label } => {
@@ -785,6 +808,9 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
                 *gate_counts.entry(gate.name()).or_default() += 1;
             }
             Instruction::Measure { .. } => measure_count += 1,
+            Instruction::Reset { .. } => {
+                *gate_counts.entry("reset").or_default() += 1;
+            }
             Instruction::Barrier { .. } => barrier_count += 1,
             Instruction::Conditional { gate, .. } => {
                 conditional_count += 1;
@@ -837,7 +863,9 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
     for inst in &circuit.instructions {
         let targets: &[usize] = match inst {
             Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
-            Instruction::Measure { qubit, .. } => std::slice::from_ref(qubit),
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
+                std::slice::from_ref(qubit)
+            }
             Instruction::Barrier { .. } => continue,
         };
         for &q in targets {

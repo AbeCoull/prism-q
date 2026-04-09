@@ -183,4 +183,42 @@ pub trait Backend {
             operation: "statevector export".to_string(),
         })
     }
+
+    /// Compute P(qubit = |1⟩) without collapsing the state.
+    ///
+    /// Used by the trajectory engine for state-dependent noise channels
+    /// (amplitude damping, phase damping). The default returns `BackendUnsupported`.
+    fn qubit_probability(&self, _qubit: usize) -> Result<f64> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "qubit_probability".to_string(),
+        })
+    }
+
+    /// Reset a qubit to |0⟩, discarding any prior amplitude on that qubit.
+    ///
+    /// Destructive, non-unitary. Used by OpenQASM `reset` and as a primitive
+    /// for thermal relaxation trajectory simulation. The default returns
+    /// `BackendUnsupported`; backends override for their native representation.
+    fn reset(&mut self, _qubit: usize) -> Result<()> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "reset".to_string(),
+        })
+    }
+
+    /// Apply a 2×2 matrix to a single qubit without allocating.
+    ///
+    /// Used by the trajectory engine to apply Kraus operators (amplitude
+    /// damping, phase damping, thermal relaxation) without boxing into a
+    /// `Gate::Fused` on every call. The default falls back to building a
+    /// `Gate::Fused` and dispatching via `apply`; backends may override for a
+    /// zero-allocation fast path.
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        use crate::circuit::smallvec;
+        self.apply(&crate::circuit::Instruction::Gate {
+            gate: crate::gates::Gate::Fused(Box::new(*matrix)),
+            targets: smallvec![qubit],
+        })
+    }
 }

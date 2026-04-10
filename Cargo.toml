@@ -54,7 +54,7 @@ debug = true
 strip = "none"
 
 [package.metadata.release]
-pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "v{{version}}"]
 sign-commit = false
 sign-tag = false
 push-remote = "origin"

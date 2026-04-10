@@ -68,4 +68,4 @@ and readout error. Pauli noise on Clifford circuits routes to the compiled sampl
 - Circuit builders for QFT, random, HEA, QPE, Clifford, GHZ, and QAOA
 - aarch64 NEON fallbacks for all SIMD kernels
 
-[0.1.0]: https://github.com/AbeCoull/prism-q/releases/tag/v0.1.0
+[0.2.0]: https://github.com/AbeCoull/prism-q/releases/tag/v0.2.0

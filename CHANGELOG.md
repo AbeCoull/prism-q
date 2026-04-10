@@ -2,70 +2,48 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.2.1] - 2026-04-10
 
-## [0.2.0] - 2026-04-10
+### Bug Fixes
 
-First release. This is a hobby project born out of wanting to see how fast a quantum circuit
-simulator could get in Rust. It's been a fun ride and there's still a lot to do, but it's
-still v0, there will be bugs. If you run into something, open an issue on GitHub and I'll
-get to it. Contributions are also very welcome.
+- Update release flows (#21)([31ba60a](https://github.com/AbeCoull/prism-q/commit/31ba60a35788cc23b189fc8b41d268ff87e1b5c6))
+## [0.1.0] - 2026-04-10
 
-### Backends
+### Bug Fixes
 
-Eight simulation backends, each suited to different circuit shapes:
+- Add shot accumulator for clifford sims (#12)([9c8ab55](https://github.com/AbeCoull/prism-q/commit/9c8ab55fd3d29b43f75cfbcaee680d5035effd4a))
+- Update coverage github badge action (#11)([5be3a43](https://github.com/AbeCoull/prism-q/commit/5be3a43316303f6baeeb3f0e29a6e7c056b6036e))
+- Update shot processing to end of the simulation (#2)([3a2a9ca](https://github.com/AbeCoull/prism-q/commit/3a2a9cad39718e5bdaaf8b6684a881317b0de5aa))
 
-- **Statevector** -- full 2^n state vector with AVX2/FMA/BMI2 SIMD kernels and Rayon
-  parallelism at 14+ qubits. Deferred measurement normalization.
-- **Stabilizer** -- Aaronson-Gottesman tableau with word-group gate batching, type-grouped
-  masks, and SIMD rowmul. Scales to thousands of qubits for Clifford-only circuits.
-- **Factored** -- dynamic split state that starts as n independent qubits and merges
-  sub-states on demand when entangling gates connect groups.
-- **Sparse** -- HashMap based, O(k) in the number of nonzero amplitudes.
-- **MPS** -- matrix product state with hybrid faer/Jacobi SVD. Configurable bond dimension.
-- **Product State** -- per qubit storage, O(n). Nonentangling circuits only.
-- **Tensor Network** -- deferred contraction with greedy min size heuristic.
-- **Compiled Sampler** -- Heisenberg picture parity tracking for Clifford circuits. O(n) per
-  sample without ever building the state vector.
+### CI
 
-Automatic backend dispatch picks the right one based on circuit structure.
+- Update to include coverage and docs runs (#4)([709a629](https://github.com/AbeCoull/prism-q/commit/709a6292bef82d5210dd372303327376c3c227fd))
 
-### Parser
+### Features
 
-OpenQASM 3.0 parser. Gate modifiers
-(`ctrl @`, `inv @`, `pow(k) @`) compose and resolve at parse time. User-defined gates,
-classical `if` control flow, multi-register broadcast, and a recursive descent expression
-evaluator with 13 math functions.
+- Add crate publishing workflow (#20)([9307d81](https://github.com/AbeCoull/prism-q/commit/9307d8165af2cc63942d21e90860e54f8f37aea7))
+- Add quantum trajectories (#19)([ec30253](https://github.com/AbeCoull/prism-q/commit/ec302534e93341b7dcbd8305d4fcbe614647a70d))
+- Add circuit visualizer (#18)([88251f6](https://github.com/AbeCoull/prism-q/commit/88251f64ed0630a5f54117eccbea14038a8da0e0))
+- Refactor the stabilizer backend (#7)([7648541](https://github.com/AbeCoull/prism-q/commit/7648541ff9a8bc272d5eeceff2c426b66335bf7e))
+- Add arm support for kernel (#1)([7016588](https://github.com/AbeCoull/prism-q/commit/70165887d9b0ea7f3d9476e46c5583f1f97d5744))
 
-34 gate types supported including the IBM basis set (U1/U2/U3), multi-controlled unitaries,
-and native Rzz/Rxx/Ryy rotations.
+### Performance
 
-### Fusion
+- Add better stabilizer perf at higher shot count and benchmarking (#14)([cfe251d](https://github.com/AbeCoull/prism-q/commit/cfe251d44c5df1b3741c4d31de29ca4eb05ab06b))
+- Optimize stabilizer measurement and Gaussian elimination (#6)([6ff849b](https://github.com/AbeCoull/prism-q/commit/6ff849b0259e75973302aa12b70ee8ab03503a1c))
+- Cache fusion across shots in run_shots_with slow path (#5)([7a0f7b9](https://github.com/AbeCoull/prism-q/commit/7a0f7b91dcfc8d4659fd820953c94bb435fab17c))
+- Optimize rowmul phase and inline measurement rowmul (#3)([c579931](https://github.com/AbeCoull/prism-q/commit/c5799311309ea1f8beb95857076995dcab12d3a1))
 
-12-pass fusion pipeline that rewrites circuits before execution:
+### Refactor
 
-- Self inverse cancellation (non-adjacent CX/CZ/SWAP pairs)
-- Rzz synthesis and BatchRzz grouping with LUT kernels
-- Single qubit fusion and commutation-aware reorder through CX/CZ
-- Recancel and refuse after reorder to catch newly exposed opportunities
-- MultiFused batching with per-qubit accumulation across 2q boundaries
-- Controlled-phase batching with BMI2 PEXT + LUT
-- Post-phase 1q re-batching
+- Move items to shared file path and fix visibility (#17)([1583b9a](https://github.com/AbeCoull/prism-q/commit/1583b9a3eced48274a4c44245b1e2f30ddbec13e))
+- Clean up the way users interface with the package (#16)([263ecdc](https://github.com/AbeCoull/prism-q/commit/263ecdc81109f4c1010fe21f1b0930925520df3e))
+- Split larger files and better organize dispatch utils (#15)([bca4c1d](https://github.com/AbeCoull/prism-q/commit/bca4c1d165c69fe223c604bb74f55bc4e474d17b))
+- Add nullAccum for testing paths and speed up histogram (#13)([9846b5f](https://github.com/AbeCoull/prism-q/commit/9846b5f43bb7a896eed5d66746f0bfc600edcab0))
+- Rewriting to speed up shots at higher values and changing output type (#10)([b3f1ab5](https://github.com/AbeCoull/prism-q/commit/b3f1ab55dfc09685975743a7065c326f9861e8d2))
+- Replace quasi_prob with unified SPP/SPD backends (#9)([c1e1d25](https://github.com/AbeCoull/prism-q/commit/c1e1d25744e2b746e5a1853850db50edaca804fa))
 
-Returns `Cow<Circuit>` so there's zero cost when nothing fires.
+### `fix
 
-### Noise
+- Fusion pass fixes with temporal blocking (#8)([eb9fc76](https://github.com/AbeCoull/prism-q/commit/eb9fc762a122e66903defb793a1345b3b3e2a5ad))
 
-General noise model with quantum trajectory (Monte Carlo wavefunction) execution.
-Channels: Pauli, depolarizing, amplitude damping, phase damping, two-qubit depolarizing,
-and readout error. Pauli noise on Clifford circuits routes to the compiled sampler.
-
-### Everything else
-
-- Subsystem decomposition via union-find for independent qubit groups
-- Shot based sampling with deterministic seeding (`run_shots`, `run_counts`)
-- Circuit builders for QFT, random, HEA, QPE, Clifford, GHZ, and QAOA
-- aarch64 NEON fallbacks for all SIMD kernels
-
-[0.2.0]: https://github.com/AbeCoull/prism-q/releases/tag/v0.2.0

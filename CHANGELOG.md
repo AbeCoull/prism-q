@@ -5,54 +5,67 @@ All notable changes to PRISM-Q will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-02-26
+## [0.1.0] - 2026-04-10
 
-Initial release.
+First release. This is a hobby project born out of wanting to see how fast a quantum circuit
+simulator could get in Rust. It's been a fun ride and there's still a lot to do, but it's
+still v0, there will be bugs. If you run into something, open an issue on GitHub and I'll
+get to it. Contributions are also very welcome.
 
-### Added
+### Backends
 
-- **Seven simulation backends:**
-  - Statevector (full state-vector, AVX2/FMA SIMD, Rayon parallelism at 14q+)
-  - Stabilizer (Aaronson-Gottesman tableau, O(n^2), gate batching by word-group)
-  - Sparse (hash-map state, O(k) for k non-zero amplitudes)
-  - MPS (matrix product state, hybrid faer/Jacobi SVD, configurable bond dimension)
-  - Product State (per-qubit O(n), non-entangling circuits only)
-  - Tensor Network (deferred contraction, greedy min-size heuristic)
-  - Factored (dynamic split-state, automatic sub-state merging)
+Eight simulation backends, each suited to different circuit shapes:
 
-- **OpenQASM 3.0 parser** with backward-compatible OpenQASM 2.0 support:
-  - `qubit[n]`/`bit[n]` declarations (OQ3) and `qreg`/`creg` (OQ2)
-  - Gate modifiers: `ctrl @`, `inv @`, `pow(k) @` (chainable)
-  - User-defined gates (`gate` keyword) with parameter expressions
-  - Classical `if` control flow (OQ2 `if(creg==val)` and OQ3 `if(c[i])`)
-  - Multi-register broadcast (`h q;` applies to all qubits)
-  - Recursive descent expression evaluator (13 math functions, `pi`/`tau`/`e`)
+- **Statevector** -- full 2^n state vector with AVX2/FMA/BMI2 SIMD kernels and Rayon
+  parallelism at 14+ qubits. Deferred measurement normalization.
+- **Stabilizer** -- Aaronson-Gottesman tableau with word-group gate batching, type-grouped
+  masks, and SIMD rowmul. Scales to thousands of qubits for Clifford-only circuits.
+- **Factored** -- dynamic split state that starts as n independent qubits and merges
+  sub-states on demand when entangling gates connect groups.
+- **Sparse** -- HashMap based, O(k) in the number of nonzero amplitudes.
+- **MPS** -- matrix product state with hybrid faer/Jacobi SVD. Configurable bond dimension.
+- **Product State** -- per qubit storage, O(n). Nonentangling circuits only.
+- **Tensor Network** -- deferred contraction with greedy min size heuristic.
+- **Compiled Sampler** -- Heisenberg picture parity tracking for Clifford circuits. O(n) per
+  sample without ever building the state vector.
 
-- **Expanded gate set:** H, X, Y, Z, S, Sdg, T, Tdg, SX, SXdg, Rx, Ry, Rz, P, CX, CY, CZ, CH, CRX, CRY, CRZ, CSX, CCX, CCZ, SWAP, CSWAP, RXX, RYY, RZZ, ECR, iSWAP, DCX, U1, U2, U3
+Automatic backend dispatch picks the right one based on circuit structure.
 
-- **7-pass fusion optimizer:**
-  - Self-inverse pair cancellation (CX, CZ, SWAP)
-  - Single-qubit gate fusion (matrix multiplication)
-  - Commutation-aware reorder (diagonal gates through CX/CZ)
-  - 2-qubit CX fusion (20q+)
-  - MultiFused batching with three-tier tiled kernel (L2/L3/individual)
-  - Controlled-phase batching with BMI2 PEXT + LUT
-  - Post-phase 1q batching (18q+)
+### Parser
 
-- **Automatic backend dispatch** (`BackendKind::Auto`):
-  - Non-entangling circuits -> Product State
-  - All-Clifford circuits -> Stabilizer
-  - Large circuits (>28q) -> MPS
-  - Default -> Statevector
+OpenQASM 3.0 parser. Gate modifiers
+(`ctrl @`, `inv @`, `pow(k) @`) compose and resolve at parse time. User-defined gates,
+classical `if` control flow, multi-register broadcast, and a recursive descent expression
+evaluator with 13 math functions.
 
-- **Subsystem decomposition** for circuits with independent qubit groups (union-find analysis, per-block execution, Kronecker product merge)
+34 gate types supported including the IBM basis set (U1/U2/U3), multi-controlled unitaries,
+and native Rzz/Rxx/Ryy rotations.
 
-- **Shot-based sampling** (`run_shots`, `run_shots_with`, `run_counts`) with deterministic seeding
+### Fusion
 
-- **SIMD kernels:** AVX2+FMA for 1q/2q gates, diagonal gates, complex scaling, batch phase (BMI2 PEXT), rowmul XOR. Runtime feature detection with scalar fallbacks.
+12-pass fusion pipeline that rewrites circuits before execution:
 
-- **Reusable circuit builders:** `qft_circuit`, `random_circuit`, `hea_circuit`, `phase_estimation_circuit`, `clifford_circuit`, `ghz_circuit`, `qaoa_circuit`
+- Self inverse cancellation (non-adjacent CX/CZ/SWAP pairs)
+- Rzz synthesis and BatchRzz grouping with LUT kernels
+- Single qubit fusion and commutation-aware reorder through CX/CZ
+- Recancel and refuse after reorder to catch newly exposed opportunities
+- MultiFused batching with per-qubit accumulation across 2q boundaries
+- Controlled-phase batching with BMI2 PEXT + LUT
+- Post-phase 1q re-batching
 
-- **675 tests** (unit, fusion correctness, cross-backend golden, parser smoke, SIMD)
+Returns `Cow<Circuit>` so there's zero cost when nothing fires.
+
+### Noise
+
+General noise model with quantum trajectory (Monte Carlo wavefunction) execution.
+Channels: Pauli, depolarizing, amplitude damping, phase damping, two-qubit depolarizing,
+and readout error. Pauli noise on Clifford circuits routes to the compiled sampler.
+
+### Everything else
+
+- Subsystem decomposition via union-find for independent qubit groups
+- Shot based sampling with deterministic seeding (`run_shots`, `run_counts`)
+- Circuit builders for QFT, random, HEA, QPE, Clifford, GHZ, and QAOA
+- aarch64 NEON fallbacks for all SIMD kernels
 
 [0.1.0]: https://github.com/AbeCoull/prism-q/releases/tag/v0.1.0

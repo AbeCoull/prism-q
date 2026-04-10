@@ -53,6 +53,17 @@ inherits = "release"
 debug = true
 strip = "none"
 
+[package.metadata.release]
+pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+sign-commit = false
+sign-tag = false
+push-remote = "origin"
+publish = true
+pre-release-commit-message = "chore(release): {{version}}"
+tag-message = "{{version}}"
+tag-prefix = "v"
+tag = true
+
 [[bench]]
 name = "bench_driver"
 harness = false

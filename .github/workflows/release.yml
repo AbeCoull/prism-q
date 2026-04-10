@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Determine & Publish Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install tools
+        run: cargo install git-cliff cargo-release
+
+      - name: Determine bump level from conventional commits
+        id: bump
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${LAST_TAG}..HEAD"
+          fi
+
+          COMMITS=$(git log --format="%s" $RANGE 2>/dev/null || true)
+          if [ -z "$COMMITS" ]; then
+            echo "level=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LEVEL="none"
+
+          # Check for breaking changes
+          if echo "$COMMITS" | grep -qiE '^[a-z]+(\(.+\))?!:'; then
+            LEVEL="major"
+          elif git log --format="%b" $RANGE 2>/dev/null | grep -q "^BREAKING CHANGE:"; then
+            LEVEL="major"
+          # Check for features
+          elif echo "$COMMITS" | grep -qE '^feat(\(.+\))?:'; then
+            LEVEL="minor"
+          # Check for fixes or perf
+          elif echo "$COMMITS" | grep -qE '^(fix|perf)(\(.+\))?:'; then
+            LEVEL="patch"
+          fi
+
+          echo "level=$LEVEL" >> "$GITHUB_OUTPUT"
+          echo "### Bump level: \`$LEVEL\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Skip if no release needed
+        if: steps.bump.outputs.level == 'none'
+        run: echo "No release-worthy commits. Skipping."
+
+      - name: Configure git
+        if: steps.bump.outputs.level != 'none'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run cargo release
+        if: steps.bump.outputs.level != 'none'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo release ${{ steps.bump.outputs.level }} \
+            --no-confirm \
+            --execute
+
+      - name: Get new version tag
+        if: steps.bump.outputs.level != 'none'
+        id: tag
+        run: |
+          TAG=$(git describe --tags --abbrev=0)
+          VERSION=${TAG#v}
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog for this version
+        if: steps.bump.outputs.level != 'none'
+        id: changelog
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          # Extract the section for this version from CHANGELOG.md
+          awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found" CHANGELOG.md > /tmp/release_notes.md
+          echo "body_path=/tmp/release_notes.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.level != 'none'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          body_path: ${{ steps.changelog.outputs.body_path }}
+          generate_release_notes: false

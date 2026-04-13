@@ -393,6 +393,8 @@ pub struct MpsBackend {
     max_bond_dim: usize,
     svd_epsilon: f64,
     sites: Vec<SiteTensor>,
+    logical_to_site: Vec<usize>,
+    site_to_logical: Vec<usize>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
 }
@@ -405,9 +407,34 @@ impl MpsBackend {
             max_bond_dim,
             svd_epsilon: DEFAULT_SVD_EPSILON,
             sites: Vec::new(),
+            logical_to_site: Vec::new(),
+            site_to_logical: Vec::new(),
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
         }
+    }
+
+    #[inline(always)]
+    fn site_for_logical(&self, qubit: usize) -> usize {
+        self.logical_to_site[qubit]
+    }
+
+    #[inline(always)]
+    fn logical_for_site(&self, site: usize) -> usize {
+        self.site_to_logical[site]
+    }
+
+    fn swap_layout_labels(&mut self, left_site: usize) {
+        let left_logical = self.site_to_logical[left_site];
+        let right_logical = self.site_to_logical[left_site + 1];
+        self.site_to_logical.swap(left_site, left_site + 1);
+        self.logical_to_site[left_logical] = left_site + 1;
+        self.logical_to_site[right_logical] = left_site;
+    }
+
+    fn apply_virtual_swap(&mut self, left_site: usize, swap_mat: &[[Complex64; 4]; 4]) {
+        self.apply_adjacent_two_qubit(swap_mat, left_site, true);
+        self.swap_layout_labels(left_site);
     }
 
     #[inline(always)]
@@ -646,21 +673,20 @@ impl MpsBackend {
     }
 
     fn apply_two_qubit_gate(&mut self, gate: &[[Complex64; 4]; 4], q0: usize, q1: usize) {
-        let k = q0.min(q1);
-        let m = q0.max(q1);
-        let left_is_first = q0 < q1;
+        let p0 = self.site_for_logical(q0);
+        let p1 = self.site_for_logical(q1);
+        let k = p0.min(p1);
+        let m = p0.max(p1);
+        let left_is_first = p0 < p1;
 
         if m - k == 1 {
             self.apply_adjacent_two_qubit(gate, k, left_is_first);
         } else {
             let swap_mat = swap_matrix_4x4();
             for s in (k + 1..m).rev() {
-                self.apply_adjacent_two_qubit(&swap_mat, s, true);
+                self.apply_virtual_swap(s, &swap_mat);
             }
             self.apply_adjacent_two_qubit(gate, k, left_is_first);
-            for s in k + 1..m {
-                self.apply_adjacent_two_qubit(&swap_mat, s, true);
-            }
         }
     }
 
@@ -1387,7 +1413,8 @@ impl MpsBackend {
         let n = self.num_qubits;
         let mut vec_data = vec![ONE];
         for site in 0..n {
-            let bit = (basis >> site) & 1;
+            let logical = self.logical_for_site(site);
+            let bit = (basis >> logical) & 1;
             let t = &self.sites[site];
             let br = t.bond_right;
             let new_vec: Vec<Complex64> = (0..br)
@@ -1428,7 +1455,10 @@ impl MpsBackend {
             }
             Gate::Mcu(data) => {
                 let num_ctrl = data.num_controls as usize;
-                let all_qubits: Vec<usize> = targets.to_vec();
+                let all_qubits: Vec<usize> = targets
+                    .iter()
+                    .map(|&qubit| self.site_for_logical(qubit))
+                    .collect();
                 let n = num_ctrl + 1;
                 let dim = 1usize << n;
                 let role_order: Vec<usize> = (0..n).collect();
@@ -1436,8 +1466,13 @@ impl MpsBackend {
                 self.apply_n_qubit_gate(&gate_mat, dim, &all_qubits);
             }
             Gate::BatchPhase(data) => {
-                let control = targets[0];
-                self.apply_batch_phase_bubble(control, &data.phases);
+                let control = self.site_for_logical(targets[0]);
+                let phases: Vec<(usize, Complex64)> = data
+                    .phases
+                    .iter()
+                    .map(|&(qubit, phase)| (self.site_for_logical(qubit), phase))
+                    .collect();
+                self.apply_batch_phase_bubble(control, &phases);
             }
             Gate::BatchRzz(data) => {
                 for &(q0, q1, theta) in &data.edges {
@@ -1448,7 +1483,7 @@ impl MpsBackend {
             Gate::DiagonalBatch(data) => {
                 for entry in &data.entries {
                     if let Some((q, mat)) = entry.as_1q_matrix() {
-                        self.apply_single_qubit_gate(q, &mat);
+                        self.apply_single_qubit_gate(self.site_for_logical(q), &mat);
                     } else if let Some((q0, q1, mat)) = entry.as_2q_matrix() {
                         self.apply_two_qubit_gate(&mat, q0, q1);
                     }
@@ -1456,7 +1491,7 @@ impl MpsBackend {
             }
             Gate::MultiFused(data) => {
                 for &(target, ref mat) in &data.gates {
-                    self.apply_single_qubit_gate(target, mat);
+                    self.apply_single_qubit_gate(self.site_for_logical(target), mat);
                 }
             }
             Gate::Fused2q(mat) => {
@@ -1469,7 +1504,7 @@ impl MpsBackend {
             }
             single_qubit => {
                 let mat = single_qubit.matrix_2x2();
-                self.apply_single_qubit_gate(targets[0], &mat);
+                self.apply_single_qubit_gate(self.site_for_logical(targets[0]), &mat);
             }
         }
     }
@@ -1486,6 +1521,8 @@ impl Backend for MpsBackend {
         self.sites = (0..num_qubits)
             .map(|_| SiteTensor::new_zero_state())
             .collect();
+        self.logical_to_site = (0..num_qubits).collect();
+        self.site_to_logical = (0..num_qubits).collect();
         Ok(())
     }
 
@@ -1496,10 +1533,10 @@ impl Backend for MpsBackend {
                 qubit,
                 classical_bit,
             } => {
-                self.apply_measure(*qubit, *classical_bit);
+                self.apply_measure(self.site_for_logical(*qubit), *classical_bit);
             }
             Instruction::Reset { qubit } => {
-                self.apply_reset(*qubit);
+                self.apply_reset(self.site_for_logical(*qubit));
             }
             Instruction::Barrier { .. } => {}
             Instruction::Conditional {
@@ -1516,7 +1553,7 @@ impl Backend for MpsBackend {
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {
-        self.apply_reset(qubit);
+        self.apply_reset(self.site_for_logical(qubit));
         Ok(())
     }
 
@@ -1997,6 +2034,43 @@ mod tests {
             })),
             &[0, 1, 2],
         );
+        assert_mps_matches_statevector(&c);
+    }
+
+    #[test]
+    fn test_non_adjacent_layout_tracks_logical_targets() {
+        let mut c = Circuit::new(6, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::X, &[5]);
+        c.add_gate(Gate::Cx, &[0, 5]);
+        c.add_gate(Gate::Ry(0.37), &[0]);
+        c.add_gate(Gate::Rz(-0.52), &[5]);
+        c.add_gate(Gate::Swap, &[0, 3]);
+        c.add_gate(Gate::S, &[3]);
+        c.add_gate(Gate::Cx, &[1, 4]);
+        c.add_gate(Gate::H, &[4]);
+        assert_mps_matches_statevector(&c);
+    }
+
+    #[test]
+    fn test_measure_after_non_adjacent_routing_uses_logical_qubit() {
+        let mut c = Circuit::new(5, 1);
+        c.add_gate(Gate::X, &[0]);
+        c.add_gate(Gate::Cx, &[0, 4]);
+        c.add_measure(4, 0);
+        assert_mps_matches_statevector(&c);
+
+        let b = run_mps(&c);
+        assert_eq!(b.classical_results(), &[true]);
+    }
+
+    #[test]
+    fn test_reset_after_non_adjacent_routing_uses_logical_qubit() {
+        let mut c = Circuit::new(5, 0);
+        c.add_gate(Gate::X, &[0]);
+        c.add_gate(Gate::Cx, &[0, 4]);
+        c.add_reset(0);
+        c.add_gate(Gate::H, &[4]);
         assert_mps_matches_statevector(&c);
     }
 

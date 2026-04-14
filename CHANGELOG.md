@@ -2,7 +2,17 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.2.2] - 2026-04-14
+
+### Performance
+
+- **mps:** Keep routed qubits in a persistent logical layout (#22)([24d3788](https://github.com/AbeCoull/prism-q/commit/24d3788a969a5ee6727eda793dab7afbfbea30c8))
 ## [0.2.1] - 2026-04-10
+
+### Miscellaneous
+
+- **release:** 0.2.1([ef6e5c7](https://github.com/AbeCoull/prism-q/commit/ef6e5c7c145f1e716a83af25de3feaa96a12dc8c))
+## [0.2.0] - 2026-04-10
 
 ### Bug Fixes
 

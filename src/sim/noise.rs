@@ -263,7 +263,7 @@ impl FlatNoiseSensitivity {
 
 #[inline(always)]
 fn geometric_sample(rng: &mut ChaCha8Rng, ln_1mp: f64) -> usize {
-    let u: f64 = 1.0 - rand::Rng::gen::<f64>(rng);
+    let u: f64 = 1.0 - rand::Rng::random::<f64>(rng);
     (u.ln() / ln_1mp) as usize
 }
 
@@ -596,7 +596,7 @@ impl NoisyCompiledSampler {
         let shots_per_thread = (num_shots.div_ceil(num_threads) + 63) & !63;
 
         let seeds: Vec<u64> = (0..num_threads)
-            .map(|_| rand::Rng::gen(&mut self.rng))
+            .map(|_| rand::Rng::random(&mut self.rng))
             .collect();
 
         let events = &self.events;
@@ -634,7 +634,7 @@ impl NoisyCompiledSampler {
 
             if p_event >= 0.5 || num_shots < 32 {
                 for s in start..end {
-                    let r: f64 = rand::Rng::gen(rng);
+                    let r: f64 = rand::Rng::random(rng);
                     if r < px {
                         let b = s * m_words;
                         xor_words(&mut accum[b..b + m_words], events.z_flip(i));
@@ -654,7 +654,7 @@ impl NoisyCompiledSampler {
 
                 let mut pos = start + geometric_sample(rng, ln_1mp);
                 while pos < end {
-                    let r: f64 = rand::Rng::gen(rng);
+                    let r: f64 = rand::Rng::random(rng);
                     let b = pos * m_words;
                     if r < px_frac {
                         xor_words(&mut accum[b..b + m_words], events.z_flip(i));
@@ -693,7 +693,7 @@ impl NoisyCompiledSampler {
 
                 if p_event >= 0.5 || tile_n < 32 {
                     for s in 0..tile_n {
-                        let r: f64 = rand::Rng::gen(&mut self.rng);
+                        let r: f64 = rand::Rng::random(&mut self.rng);
                         if r < px {
                             z_mask[s * e_words + ew] |= eb;
                         } else if r < px + py {
@@ -710,7 +710,7 @@ impl NoisyCompiledSampler {
 
                     let mut pos = geometric_sample(&mut self.rng, ln_1mp);
                     while pos < tile_n {
-                        let r: f64 = rand::Rng::gen(&mut self.rng);
+                        let r: f64 = rand::Rng::random(&mut self.rng);
                         if r < px_frac {
                             z_mask[pos * e_words + ew] |= eb;
                         } else if r < pxy_frac {
@@ -1197,7 +1197,7 @@ fn run_shots_noisy_frame(
                             let ln_1mp = (1.0 - p_event).ln();
                             let mut pos = geometric_sample(&mut rng, ln_1mp);
                             while pos < batch_n {
-                                let r: f64 = rand::Rng::gen(&mut rng);
+                                let r: f64 = rand::Rng::random(&mut rng);
                                 let bit = 1u64 << (pos % 64);
                                 let w = pos / 64;
                                 if r < px_frac {
@@ -1212,7 +1212,7 @@ fn run_shots_noisy_frame(
                             }
                         } else {
                             for s in 0..batch_n {
-                                let r: f64 = rand::Rng::gen(&mut rng);
+                                let r: f64 = rand::Rng::random(&mut rng);
                                 if r < px {
                                     x_frame[q][s / 64] ^= 1u64 << (s % 64);
                                 } else if r < px + py {
@@ -1233,7 +1233,7 @@ fn run_shots_noisy_frame(
                         let support = &ref_info.random_x_support[meas_idx];
                         #[allow(clippy::needless_range_loop)]
                         for w in 0..bw {
-                            let random_word: u64 = rand::Rng::gen(&mut rng);
+                            let random_word: u64 = rand::Rng::random(&mut rng);
                             let mask = if w == bw - 1 && batch_n % 64 != 0 {
                                 random_word & ((1u64 << (batch_n % 64)) - 1)
                             } else {
@@ -1391,7 +1391,7 @@ pub(crate) fn run_shots_noisy_brute_with(
             for event in noise_events {
                 let (px, py, pz) = event.pauli_probs();
                 let q = event.qubit();
-                let r: f64 = rand::Rng::gen(&mut rng);
+                let r: f64 = rand::Rng::random(&mut rng);
                 if r < px {
                     backend.apply(&Instruction::Gate {
                         gate: Gate::X,

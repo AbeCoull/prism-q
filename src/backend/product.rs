@@ -113,7 +113,7 @@ impl Backend for ProductStateBackend {
             } => {
                 let [alpha, beta] = self.qubits[*qubit];
                 let prob_one = beta.norm_sqr().clamp(0.0, 1.0);
-                let outcome = self.rng.gen::<f64>() < prob_one;
+                let outcome = self.rng.random::<f64>() < prob_one;
                 self.classical_bits[*classical_bit] = outcome;
 
                 if outcome {

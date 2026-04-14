@@ -266,7 +266,7 @@ fn branch_t_gate(
     let has_z = (pauli.z[qubit / 64] >> (qubit % 64)) & 1 != 0;
     let is_y = has_z;
 
-    let keep = rng.gen_bool(0.5);
+    let keep = rng.random_bool(0.5);
     if !keep {
         flip_bit(&mut pauli.z, qubit);
     }

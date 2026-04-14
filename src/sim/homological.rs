@@ -658,7 +658,7 @@ impl HomologicalSampler {
     pub fn sample(&mut self) -> Vec<bool> {
         let mut outcome = self.compiled.sample();
 
-        let u: f64 = rand::Rng::gen(&mut self.rng);
+        let u: f64 = rand::Rng::random(&mut self.rng);
         let class = match self
             .class_cdf
             .binary_search_by(|p| p.partial_cmp(&u).unwrap_or(std::cmp::Ordering::Equal))
@@ -699,7 +699,7 @@ impl HomologicalSampler {
         }
 
         for s in 0..num_shots {
-            let u: f64 = rand::Rng::gen(&mut self.rng);
+            let u: f64 = rand::Rng::random(&mut self.rng);
             let class = match self
                 .class_cdf
                 .binary_search_by(|p| p.partial_cmp(&u).unwrap_or(std::cmp::Ordering::Equal))

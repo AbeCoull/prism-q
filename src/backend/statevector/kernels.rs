@@ -1189,7 +1189,7 @@ impl StatevectorBackend {
         }
         prob_one *= norm_sq;
 
-        let outcome = self.rng.gen::<f64>() < prob_one;
+        let outcome = self.rng.random::<f64>() < prob_one;
         self.classical_bits[classical_bit] = outcome;
 
         let inv_norm = measurement_inv_norm(outcome, prob_one);
@@ -1668,7 +1668,7 @@ impl StatevectorBackend {
             .sum::<f64>()
             * norm_sq;
 
-        let outcome = self.rng.gen::<f64>() < prob_one;
+        let outcome = self.rng.random::<f64>() < prob_one;
         self.classical_bits[classical_bit] = outcome;
 
         let inv_norm = measurement_inv_norm(outcome, prob_one);

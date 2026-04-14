@@ -1387,7 +1387,7 @@ impl MpsBackend {
             *prob_out = val.re;
         }
 
-        let measured = if self.rng.gen::<f64>() < prob[1] {
+        let measured = if self.rng.random::<f64>() < prob[1] {
             1usize
         } else {
             0usize

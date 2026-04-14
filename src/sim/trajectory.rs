@@ -21,7 +21,7 @@ fn apply_pauli(
     pz: f64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    let r: f64 = rand::Rng::gen(rng);
+    let r: f64 = rand::Rng::random(rng);
     if r < px {
         backend.apply(&Instruction::Gate {
             gate: Gate::X,
@@ -61,7 +61,7 @@ fn apply_diagonal_kraus_2op(
 ) -> Result<()> {
     let p1 = backend.qubit_probability(qubit)?;
     let p_jump = gamma * p1;
-    let r: f64 = rand::Rng::gen(rng);
+    let r: f64 = rand::Rng::random(rng);
 
     let zero = Complex64::new(0.0, 0.0);
 
@@ -124,11 +124,11 @@ fn apply_thermal_relaxation(
         0.0
     };
 
-    let r: f64 = rand::Rng::gen(rng);
+    let r: f64 = rand::Rng::random(rng);
     if r < p_reset {
         backend.reset(qubit)?;
     } else {
-        let r2: f64 = rand::Rng::gen(rng);
+        let r2: f64 = rand::Rng::random(rng);
         if r2 < p_dephase {
             backend.apply(&Instruction::Gate {
                 gate: Gate::Z,
@@ -149,7 +149,7 @@ fn apply_two_qubit_depolarizing(
     // 16 Pauli products: I⊗I, I⊗X, I⊗Y, I⊗Z, X⊗I, ..., Z⊗Z
     // Each non-identity term has probability p/15
     let pp = p / 15.0;
-    let r: f64 = rand::Rng::gen(rng);
+    let r: f64 = rand::Rng::random(rng);
 
     if r >= p {
         return Ok(()); // I⊗I (no error)
@@ -286,7 +286,7 @@ fn apply_custom_kraus(
         return Ok(());
     }
 
-    let r: f64 = rand::Rng::gen::<f64>(rng) * total;
+    let r: f64 = rand::Rng::random::<f64>(rng) * total;
     let chosen = cumulative
         .iter()
         .position(|&c| r < c)
@@ -346,7 +346,7 @@ fn apply_readout_errors(
 ) {
     for (bit, ro) in results.iter_mut().zip(readout.iter()) {
         if let Some(err) = ro {
-            let r: f64 = rand::Rng::gen(rng);
+            let r: f64 = rand::Rng::random(rng);
             if *bit {
                 // 1→0 with probability p10
                 if r < err.p10 {

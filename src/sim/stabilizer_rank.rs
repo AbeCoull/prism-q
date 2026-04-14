@@ -558,17 +558,17 @@ pub fn run_stabilizer_rank_shots(
     while shots.len() < num_shots {
         let mut branch_bits = 0u64;
         for i in 0..t_count {
-            if rng.gen::<f64>() >= p_alpha {
+            if rng.random::<f64>() >= p_alpha {
                 branch_bits |= 1u64 << i;
             }
         }
 
-        let branch_seed = rng.gen::<u64>();
+        let branch_seed = rng.random::<u64>();
         shots.push(run_branch(circuit, &t_locations, branch_bits, branch_seed)?);
 
         if shots.len() < num_shots {
             let anti_bits = !branch_bits & t_mask;
-            let anti_seed = rng.gen::<u64>();
+            let anti_seed = rng.random::<u64>();
             shots.push(run_branch(circuit, &t_locations, anti_bits, anti_seed)?);
         }
     }

@@ -84,12 +84,12 @@ fn random_clifford_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit 
 
     for layer in 0..depth {
         for q in 0..n_qubits {
-            let gate_idx = rng.gen_range(0..cliffords.len());
+            let gate_idx = rng.random_range(0..cliffords.len());
             circuit.add_gate(cliffords[gate_idx].clone(), &[q]);
         }
         let offset = layer % 2;
         for q in (offset..n_qubits - 1).step_by(2) {
-            if rng.gen_bool(0.5) {
+            if rng.random_bool(0.5) {
                 circuit.add_gate(Gate::Cx, &[q, q + 1]);
             }
         }
@@ -104,7 +104,7 @@ fn random_single_qubit_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circ
 
     for _ in 0..depth {
         for q in 0..n_qubits {
-            let gate_idx = rng.gen_range(0..gates.len());
+            let gate_idx = rng.random_range(0..gates.len());
             circuit.add_gate(gates[gate_idx].clone(), &[q]);
         }
     }
@@ -993,25 +993,25 @@ fn clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
         circuit.add_gate(Gate::H, &[q]);
     }
     for q in 0..n_qubits - 1 {
-        if rng.gen_bool(0.5) {
+        if rng.random_bool(0.5) {
             circuit.add_gate(Gate::Cx, &[q, q + 1]);
         }
     }
 
     // Insert T gates on random qubits
     for _ in 0..t_count {
-        let q = rng.gen_range(0..n_qubits);
+        let q = rng.random_range(0..n_qubits);
         circuit.add_gate(Gate::T, &[q]);
     }
 
     // More Clifford layers
     for _ in 0..3 {
         for q in 0..n_qubits {
-            let gate_idx = rng.gen_range(0..cliffords.len());
+            let gate_idx = rng.random_range(0..cliffords.len());
             circuit.add_gate(cliffords[gate_idx].clone(), &[q]);
         }
         for q in 0..n_qubits - 1 {
-            if rng.gen_bool(0.5) {
+            if rng.random_bool(0.5) {
                 circuit.add_gate(Gate::Cx, &[q, q + 1]);
             }
         }

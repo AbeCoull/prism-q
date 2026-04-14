@@ -12,7 +12,7 @@ use prism_q::backend::mps::svd_faer;
 fn random_matrix(m: usize, n: usize, seed: u64) -> Vec<Complex64> {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     (0..m * n)
-        .map(|_| Complex64::new(rng.gen_range(-1.0..1.0), rng.gen_range(-1.0..1.0)))
+        .map(|_| Complex64::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)))
         .collect()
 }
 

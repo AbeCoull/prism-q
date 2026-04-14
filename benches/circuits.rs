@@ -3,12 +3,13 @@
 //! Use `--features bench-fast` for a quick run that reduces warmup and
 //! measurement time. Omit for the full suite with default Criterion timing.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
-use prism_q::BackendKind;
+use prism_q::{BackendKind, MpsBackend};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -83,12 +84,12 @@ fn random_clifford_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit 
 
     for layer in 0..depth {
         for q in 0..n_qubits {
-            let gate_idx = rng.gen_range(0..cliffords.len());
+            let gate_idx = rng.random_range(0..cliffords.len());
             circuit.add_gate(cliffords[gate_idx].clone(), &[q]);
         }
         let offset = layer % 2;
         for q in (offset..n_qubits - 1).step_by(2) {
-            if rng.gen_bool(0.5) {
+            if rng.random_bool(0.5) {
                 circuit.add_gate(Gate::Cx, &[q, q + 1]);
             }
         }
@@ -103,11 +104,84 @@ fn random_single_qubit_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circ
 
     for _ in 0..depth {
         for q in 0..n_qubits {
-            let gate_idx = rng.gen_range(0..gates.len());
+            let gate_idx = rng.random_range(0..gates.len());
             circuit.add_gate(gates[gate_idx].clone(), &[q]);
         }
     }
     circuit
+}
+
+fn mps_adjacent_phase_circuit(n_qubits: usize, rounds: usize) -> Circuit {
+    let mut circuit = Circuit::new(n_qubits, 0);
+
+    for q in 0..n_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    for _ in 0..rounds {
+        for q in 0..n_qubits {
+            circuit.add_gate(Gate::Ry(0.17 + q as f64 * 0.003), &[q]);
+        }
+        for q in (0..n_qubits.saturating_sub(1)).step_by(2) {
+            circuit.add_gate(Gate::cphase(std::f64::consts::FRAC_PI_8), &[q, q + 1]);
+        }
+    }
+
+    circuit
+}
+
+fn mps_long_range_phase_circuit(n_qubits: usize, rounds: usize) -> Circuit {
+    let mut circuit = Circuit::new(n_qubits, 0);
+
+    for q in 0..n_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    for _ in 0..rounds {
+        for q in 0..n_qubits {
+            circuit.add_gate(Gate::Ry(0.17 + q as f64 * 0.003), &[q]);
+        }
+        for q in 0..(n_qubits / 2) {
+            let partner = n_qubits - 1 - q;
+            circuit.add_gate(Gate::cphase(std::f64::consts::FRAC_PI_8), &[q, partner]);
+        }
+    }
+
+    circuit
+}
+
+fn mps_measure_reset_circuit(n_qubits: usize, rounds: usize) -> Circuit {
+    let mut circuit = Circuit::new(n_qubits, n_qubits);
+
+    for q in 0..n_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n_qubits.saturating_sub(1) {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+
+    for round in 0..rounds {
+        let parity = round % 2;
+        for q in (parity..n_qubits).step_by(2) {
+            circuit.add_measure(q, q);
+            circuit.add_reset(q);
+            circuit.add_gate(Gate::H, &[q]);
+            if q + 1 < n_qubits {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    }
+
+    circuit
+}
+
+fn run_mps_apply_only(circuit: &Circuit, max_bond_dim: usize) {
+    let mut backend = MpsBackend::new(SEED, max_bond_dim);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    black_box(backend.classical_results());
 }
 
 // ---- Statevector: qubit-count sweeps ----
@@ -458,6 +532,38 @@ fn bench_mps_linear_chain(c: &mut Criterion) {
             });
         });
     }
+    group.finish();
+}
+
+fn bench_mps_hotspots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/hotspots");
+    configure_group(&mut group);
+
+    for &n in &[16, 32] {
+        let adjacent = mps_adjacent_phase_circuit(n, 4);
+        group.bench_with_input(
+            BenchmarkId::new("adjacent_cp_r4", n),
+            &adjacent,
+            |b, circ| {
+                b.iter(|| run_mps_apply_only(circ, 64));
+            },
+        );
+
+        let long_range = mps_long_range_phase_circuit(n, 4);
+        group.bench_with_input(
+            BenchmarkId::new("long_range_cp_r4", n),
+            &long_range,
+            |b, circ| {
+                b.iter(|| run_mps_apply_only(circ, 64));
+            },
+        );
+    }
+
+    let meas_reset = mps_measure_reset_circuit(32, 3);
+    group.bench_function("measure_reset_32q_r3", |b| {
+        b.iter(|| run_mps_apply_only(&meas_reset, 64));
+    });
+
     group.finish();
 }
 
@@ -887,25 +993,25 @@ fn clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
         circuit.add_gate(Gate::H, &[q]);
     }
     for q in 0..n_qubits - 1 {
-        if rng.gen_bool(0.5) {
+        if rng.random_bool(0.5) {
             circuit.add_gate(Gate::Cx, &[q, q + 1]);
         }
     }
 
     // Insert T gates on random qubits
     for _ in 0..t_count {
-        let q = rng.gen_range(0..n_qubits);
+        let q = rng.random_range(0..n_qubits);
         circuit.add_gate(Gate::T, &[q]);
     }
 
     // More Clifford layers
     for _ in 0..3 {
         for q in 0..n_qubits {
-            let gate_idx = rng.gen_range(0..cliffords.len());
+            let gate_idx = rng.random_range(0..cliffords.len());
             circuit.add_gate(cliffords[gate_idx].clone(), &[q]);
         }
         for q in 0..n_qubits - 1 {
-            if rng.gen_bool(0.5) {
+            if rng.random_bool(0.5) {
                 circuit.add_gate(Gate::Cx, &[q, q + 1]);
             }
         }
@@ -1171,6 +1277,7 @@ criterion_group!(
     // MPS
     bench_mps_scaling,
     bench_mps_linear_chain,
+    bench_mps_hotspots,
     // Product state
     bench_product_scaling,
     // Tensor network

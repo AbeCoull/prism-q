@@ -707,7 +707,7 @@ impl Backend for TensorNetworkBackend {
                     }
                 }
 
-                let outcome = self.rng.gen::<f64>() < prob_one;
+                let outcome = self.rng.random::<f64>() < prob_one;
                 self.classical_bits[*classical_bit] = outcome;
 
                 let mut collapsed = amplitudes;

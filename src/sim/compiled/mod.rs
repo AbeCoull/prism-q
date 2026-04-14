@@ -11,8 +11,7 @@ use std::hash::{Hash, Hasher};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::sim::ShotsResult;
-use rand::RngCore;
-use rand_chacha::rand_core::SeedableRng;
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use bts::{bts_batched, bts_single_pass, sample_bts_meas_major, BTS_BATCH_SHOTS};

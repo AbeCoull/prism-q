@@ -560,7 +560,7 @@ impl SubTableau {
 
             self.copy_row(p_row - n, p_row);
             self.zero_row(p_row);
-            let outcome: bool = rng.gen();
+            let outcome: bool = rng.random();
             self.xz[p_row * stride + nw + word] |= bit_mask;
             self.phase[p_row] = outcome;
             outcome

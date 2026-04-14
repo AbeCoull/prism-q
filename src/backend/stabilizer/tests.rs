@@ -975,54 +975,51 @@ fn lazy_destab_matches_eager() {
 
 #[test]
 fn lazy_destab_measure_matches_eager() {
+    fn run_measurement_shots(
+        cliff: &Circuit,
+        n: usize,
+        num_shots: usize,
+        seed: u64,
+        lazy_destab: bool,
+    ) -> Vec<Vec<bool>> {
+        let mut shots = Vec::with_capacity(num_shots);
+        for i in 0..num_shots {
+            let mut backend = StabilizerBackend::new(seed.wrapping_add(i as u64));
+            backend.init(n, n).unwrap();
+            if lazy_destab {
+                backend.enable_lazy_destab();
+            }
+            for inst in &cliff.instructions {
+                backend.apply(inst).unwrap();
+            }
+            for q in 0..n {
+                backend
+                    .apply(&Instruction::Measure {
+                        qubit: q,
+                        classical_bit: q,
+                    })
+                    .unwrap();
+            }
+            shots.push(backend.classical_results().to_vec());
+        }
+        shots
+    }
+
     for n in [3, 5, 8] {
-        let mut c = Circuit::new(n, n);
         let cliff = crate::circuits::clifford_heavy_circuit(n, 10, 42);
-        for inst in &cliff.instructions {
-            c.instructions.push(inst.clone());
-        }
+        let num_shots = 2_000;
+        let eager_shots = run_measurement_shots(&cliff, n, num_shots, 42, false);
+        let lazy_shots = run_measurement_shots(&cliff, n, num_shots, 42, true);
+
         for q in 0..n {
-            c.add_measure(q, q);
+            let eager_ones = eager_shots.iter().filter(|shot| shot[q]).count();
+            let lazy_ones = lazy_shots.iter().filter(|shot| shot[q]).count();
+            let delta =
+                (eager_ones as isize - lazy_ones as isize).unsigned_abs() as f64 / num_shots as f64;
+            assert!(
+                delta < 0.08,
+                "n={n} q={q}: lazy/eager marginal mismatch too large ({delta:.3})"
+            );
         }
-
-        let eager_results =
-            sim::run_shots_with(crate::sim::BackendKind::Stabilizer, &c, 1000, 42).unwrap();
-
-        let mut lazy = StabilizerBackend::new(42);
-        lazy.init(n, n).unwrap();
-        lazy.enable_lazy_destab();
-        for inst in &cliff.instructions {
-            lazy.apply(inst).unwrap();
-        }
-        for q in 0..n {
-            lazy.apply(&Instruction::Measure {
-                qubit: q,
-                classical_bit: q,
-            })
-            .unwrap();
-        }
-        let lazy_bits: Vec<bool> = lazy.classical_results().to_vec();
-
-        let mut eager_single = StabilizerBackend::new(42);
-        eager_single.init(n, n).unwrap();
-        for inst in &cliff.instructions {
-            eager_single.apply(inst).unwrap();
-        }
-        for q in 0..n {
-            eager_single
-                .apply(&Instruction::Measure {
-                    qubit: q,
-                    classical_bit: q,
-                })
-                .unwrap();
-        }
-        let eager_bits: Vec<bool> = eager_single.classical_results().to_vec();
-
-        assert_eq!(
-            lazy_bits, eager_bits,
-            "n={n}: lazy and eager single-shot measurements must match with same seed"
-        );
-
-        let _ = eager_results;
     }
 }

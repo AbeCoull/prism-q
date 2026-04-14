@@ -505,7 +505,7 @@ fn sample_shots(
         Probabilities::Dense(v) => {
             let cdf = build_cdf(v);
             for _ in 0..num_shots {
-                let r: f64 = rng.gen();
+                let r: f64 = rng.random();
                 indices.push(sample_from_cdf(&cdf, r));
             }
         }
@@ -514,7 +514,7 @@ fn sample_shots(
             for _ in 0..num_shots {
                 let mut global_idx = 0usize;
                 for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
-                    let r: f64 = rng.gen();
+                    let r: f64 = rng.random();
                     let local_idx = sample_from_cdf(cdf, r);
                     let mut m = block.mask;
                     let mut bit = 0;

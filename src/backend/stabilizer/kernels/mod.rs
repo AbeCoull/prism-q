@@ -759,7 +759,7 @@ impl StabilizerBackend {
         self.phase[d_row] = self.phase[p_row];
 
         self.zero_row(p_row);
-        let outcome: bool = self.rng.gen();
+        let outcome: bool = self.rng.random();
         self.phase[p_row] = outcome;
         self.xz[p_row * stride + nw + word] |= bit_mask;
 
@@ -888,7 +888,7 @@ impl StabilizerBackend {
         self.zero_row(p_row);
         self.xz[p_row * stride + nw + word] |= bit_mask;
 
-        let outcome: bool = self.rng.gen();
+        let outcome: bool = self.rng.random();
         self.phase[p_row] = outcome;
         self.classical_bits[classical_bit] = outcome;
     }

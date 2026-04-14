@@ -952,6 +952,18 @@ impl Backend for StabilizerBackend {
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
+        if self.lazy_destab
+            && matches!(
+                instruction,
+                Instruction::Gate { .. } | Instruction::Conditional { .. }
+            )
+        {
+            // Lazy destabilizer mode is optimized for bulk apply paths.
+            // If callers drive the backend instruction-by-instruction, switch
+            // back to an eager tableau before the first gate to preserve the
+            // standard `apply` semantics.
+            self.ensure_destabilizers();
+        }
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets)?,
             Instruction::Measure {

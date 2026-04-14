@@ -313,7 +313,7 @@ impl SparseBackend {
             .map(|(_, amp)| amp.norm_sqr())
             .sum();
 
-        let outcome = self.rng.gen::<f64>() < prob_one;
+        let outcome = self.rng.random::<f64>() < prob_one;
         self.classical_bits[classical_bit] = outcome;
 
         let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);

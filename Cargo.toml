@@ -59,8 +59,8 @@ sign-tag = false
 push-remote = "origin"
 publish = true
 pre-release-commit-message = "chore(release): {{version}}"
+tag-name = "v{{version}}"
 tag-message = "{{version}}"
-tag-prefix = "v"
 tag = true
 
 [[bench]]

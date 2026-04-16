@@ -85,7 +85,7 @@ jobs:
         id: tag
         run: |
           TAG=$(git describe --tags --abbrev=0)
-          VERSION=${TAG#v}
+          VERSION=$(printf '%s' "$TAG" | sed -E 's/^v+//')
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 

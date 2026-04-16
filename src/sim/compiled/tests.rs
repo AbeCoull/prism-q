@@ -568,6 +568,23 @@ fn packed_shots_counts() {
 }
 
 #[test]
+fn packed_shots_counts_support_wide_outputs() {
+    let n = 600;
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+        c.add_measure(q, q);
+    }
+
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    let packed = sampler.sample_bulk_packed(256);
+    let counts = packed.counts();
+    let total: u64 = counts.values().sum();
+    assert_eq!(total, 256);
+    assert!(counts.keys().all(|key| key.len() == n.div_ceil(64)));
+}
+
+#[test]
 fn sparse_parity_ghz() {
     let mut c = circuits::ghz_circuit(4);
     c.num_classical_bits = 4;

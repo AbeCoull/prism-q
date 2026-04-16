@@ -281,6 +281,7 @@ pub struct ParityStats {
     pub num_deterministic: usize,
 }
 
+#[derive(Debug, Clone)]
 pub struct ParityBlock {
     pub meas_indices: Vec<usize>,
     pub sparse: SparseParity,
@@ -288,8 +289,10 @@ pub struct ParityBlock {
     pub ref_bits_packed: Vec<u64>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ParityBlocks {
     pub blocks: Vec<ParityBlock>,
+    pub direct_scatter: bool,
 }
 
 impl ParityBlocks {
@@ -349,7 +352,26 @@ impl ParityBlocks {
                 ref_bits_packed: block_ref,
             });
         }
-        ParityBlocks { blocks }
+        ParityBlocks {
+            blocks,
+            direct_scatter: false,
+        }
+    }
+
+    pub(super) fn from_blocks_if_useful(blocks: Vec<ParityBlock>) -> Option<Self> {
+        if blocks.len() < MIN_BLOCKS_FOR_PARALLEL {
+            return None;
+        }
+        if blocks
+            .iter()
+            .any(|block| block.meas_indices.len() < MIN_BLOCK_MEASUREMENTS)
+        {
+            return None;
+        }
+        Some(Self {
+            blocks,
+            direct_scatter: false,
+        })
     }
 }
 

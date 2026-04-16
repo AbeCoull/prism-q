@@ -3,6 +3,7 @@ pub struct SparseParity {
     pub col_indices: Vec<u32>,
     pub row_offsets: Vec<u32>,
     pub num_rows: usize,
+    pub non_det_rows: Vec<u32>,
 }
 
 impl SparseParity {
@@ -24,10 +25,15 @@ impl SparseParity {
         }
         row_offsets.push(col_indices.len() as u32);
 
+        let non_det_rows: Vec<u32> = (0..num_rows as u32)
+            .filter(|&m| row_offsets[m as usize + 1] != row_offsets[m as usize])
+            .collect();
+
         Self {
             col_indices,
             row_offsets,
             num_rows,
+            non_det_rows,
         }
     }
 
@@ -205,10 +211,15 @@ impl SparseParity {
         }
         row_offsets.push(col_indices.len() as u32);
 
+        let non_det_rows: Vec<u32> = (0..num_events as u32)
+            .filter(|&m| row_offsets[m as usize + 1] != row_offsets[m as usize])
+            .collect();
+
         SparseParity {
             col_indices,
             row_offsets,
             num_rows: num_events,
+            non_det_rows,
         }
     }
 }
@@ -330,10 +341,15 @@ impl ParityBlocks {
             }
             row_offsets.push(col_indices.len() as u32);
 
+            let non_det_rows: Vec<u32> = (0..num_rows as u32)
+                .filter(|&m| row_offsets[m as usize + 1] != row_offsets[m as usize])
+                .collect();
+
             let sparse = SparseParity {
                 col_indices,
                 row_offsets,
                 num_rows,
+                non_det_rows,
             };
 
             let ref_words = num_rows.div_ceil(64);

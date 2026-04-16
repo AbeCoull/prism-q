@@ -187,7 +187,7 @@ fn main() {
     }
 
     // Sort by time descending (hotspots first)
-    gate_rows.sort_by(|a, b| b.median_ns.cmp(&a.median_ns));
+    gate_rows.sort_by_key(|r| std::cmp::Reverse(r.median_ns));
 
     let total_gates_ns: u64 = gate_rows.iter().map(|r| r.median_ns).sum();
     let grand_total = med_fusion + med_init + total_gates_ns + med_probs;
@@ -272,7 +272,7 @@ fn main() {
         .collect();
 
     let mut sorted_phases = all_phases;
-    sorted_phases.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted_phases.sort_by_key(|e| std::cmp::Reverse(e.1));
     for (i, (name, ns)) in sorted_phases.iter().take(3).enumerate() {
         eprintln!(
             "    {}. {:<18} {:>6.1}%  ({})",

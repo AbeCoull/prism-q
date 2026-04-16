@@ -436,7 +436,7 @@ impl std::fmt::Display for ShotsResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let counts = self.counts();
         let mut entries: Vec<_> = counts.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         for (bits, count) in &entries {
             let bs = bitstring(bits, self.num_classical_bits);
             writeln!(f, "{bs}: {count}")?;

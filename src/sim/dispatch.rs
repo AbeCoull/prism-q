@@ -139,29 +139,25 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
     match kind {
         BackendKind::Stabilizer
         | BackendKind::FilteredStabilizer
-        | BackendKind::FactoredStabilizer => {
-            if !circuit.is_clifford_only() {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "stabilizer".into(),
-                    reason: "circuit contains non-Clifford gates".into(),
-                });
-            }
+        | BackendKind::FactoredStabilizer
+            if !circuit.is_clifford_only() =>
+        {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "stabilizer".into(),
+                reason: "circuit contains non-Clifford gates".into(),
+            });
         }
-        BackendKind::ProductState => {
-            if circuit.has_entangling_gates() {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "productstate".into(),
-                    reason: "circuit contains entangling gates".into(),
-                });
-            }
+        BackendKind::ProductState if circuit.has_entangling_gates() => {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "productstate".into(),
+                reason: "circuit contains entangling gates".into(),
+            });
         }
-        BackendKind::StabilizerRank => {
-            if !circuit.has_t_gates() {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "stabilizer_rank".into(),
-                    reason: "circuit has no T gates; use Stabilizer instead".into(),
-                });
-            }
+        BackendKind::StabilizerRank if !circuit.has_t_gates() => {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "stabilizer_rank".into(),
+                reason: "circuit has no T gates; use Stabilizer instead".into(),
+            });
         }
         _ => {}
     }

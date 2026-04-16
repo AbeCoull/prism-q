@@ -975,11 +975,10 @@ impl StabilizerBackend {
                     condition,
                     gate,
                     targets,
-                } => {
-                    if condition.evaluate(&self.classical_bits) {
-                        self.sgi_dispatch_gate(gate, targets)?;
-                    }
+                } if condition.evaluate(&self.classical_bits) => {
+                    self.sgi_dispatch_gate(gate, targets)?;
                 }
+                _ => {}
             }
         }
         Ok(())
@@ -1026,10 +1025,8 @@ impl StabilizerBackend {
                     condition,
                     gate,
                     targets,
-                } => {
-                    if condition.evaluate(&self.classical_bits) {
-                        self.sgi_dispatch_gate(gate, targets)?;
-                    }
+                } if condition.evaluate(&self.classical_bits) => {
+                    self.sgi_dispatch_gate(gate, targets)?;
                 }
                 _ => {}
             }

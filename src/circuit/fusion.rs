@@ -1030,7 +1030,7 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                 for t in targets.iter() {
                     run_qubits[*t] = true;
                 }
-                run_entries.extend(new_entries.into_iter());
+                run_entries.extend(new_entries);
                 run_originals.push(inst.clone());
                 continue;
             }

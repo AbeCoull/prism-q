@@ -1991,12 +1991,22 @@ mod tests {
 
     #[test]
     fn test_validate_filtered_stabilizer_accepts_clifford() {
-        assert!(run_with(BackendKind::FilteredStabilizer, &make_clifford_circuit(), 42).is_ok());
+        assert!(run_with(
+            BackendKind::FilteredStabilizer,
+            &make_clifford_circuit(),
+            42
+        )
+        .is_ok());
     }
 
     #[test]
     fn test_validate_factored_stabilizer_accepts_clifford() {
-        assert!(run_with(BackendKind::FactoredStabilizer, &make_clifford_circuit(), 42).is_ok());
+        assert!(run_with(
+            BackendKind::FactoredStabilizer,
+            &make_clifford_circuit(),
+            42
+        )
+        .is_ok());
     }
 
     // ── Pauli backend error paths ───────────────────────────────────────
@@ -2015,15 +2025,26 @@ mod tests {
         let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
 
         assert!(matches!(
-            run_shots_with(BackendKind::StochasticPauli { num_samples: 100 }, &circuit, 10, 42)
-                .unwrap_err(),
+            run_shots_with(
+                BackendKind::StochasticPauli { num_samples: 100 },
+                &circuit,
+                10,
+                42
+            )
+            .unwrap_err(),
             crate::error::PrismError::IncompatibleBackend { .. }
         ));
         assert!(matches!(
             run_shots_with(
-                BackendKind::DeterministicPauli { epsilon: 1e-3, max_terms: 1000 },
-                &circuit, 10, 42,
-            ).unwrap_err(),
+                BackendKind::DeterministicPauli {
+                    epsilon: 1e-3,
+                    max_terms: 1000
+                },
+                &circuit,
+                10,
+                42,
+            )
+            .unwrap_err(),
             crate::error::PrismError::IncompatibleBackend { .. }
         ));
     }
@@ -2047,15 +2068,27 @@ mod tests {
 
         assert!(matches!(
             run_shots_with_noise(
-                BackendKind::StochasticPauli { num_samples: 100 }, &circuit, &nm, 10, 42,
-            ).unwrap_err(),
+                BackendKind::StochasticPauli { num_samples: 100 },
+                &circuit,
+                &nm,
+                10,
+                42,
+            )
+            .unwrap_err(),
             crate::error::PrismError::IncompatibleBackend { .. }
         ));
         assert!(matches!(
             run_shots_with_noise(
-                BackendKind::DeterministicPauli { epsilon: 1e-3, max_terms: 1000 },
-                &circuit, &nm, 10, 42,
-            ).unwrap_err(),
+                BackendKind::DeterministicPauli {
+                    epsilon: 1e-3,
+                    max_terms: 1000
+                },
+                &circuit,
+                &nm,
+                10,
+                42,
+            )
+            .unwrap_err(),
             crate::error::PrismError::IncompatibleBackend { .. }
         ));
     }
@@ -2098,7 +2131,10 @@ mod tests {
         let probs = result.probabilities.unwrap().to_vec();
         assert_eq!(probs.len(), expected.len(), "{label}: length mismatch");
         for (i, (a, b)) in probs.iter().zip(expected.iter()).enumerate() {
-            assert!((a - b).abs() < tol, "{label}: prob[{i}] = {a}, expected {b}");
+            assert!(
+                (a - b).abs() < tol,
+                "{label}: prob[{i}] = {a}, expected {b}"
+            );
         }
     }
 

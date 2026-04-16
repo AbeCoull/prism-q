@@ -2,7 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.2.4] - 2026-04-16
+
+### Performance
+
+- **compiled:** Skip deterministic rows in BTS sampling (#25)([533495b](https://github.com/AbeCoull/prism-q/commit/533495ba0995d6b161fcf286be71e5910526481b))
+
+### Testing
+
+- **dispatch:** Add validation, error path, and smoke tests for Backe… (#24)([f6950b8](https://github.com/AbeCoull/prism-q/commit/f6950b8d7534c9467882e1d99aebc3a51a3fc34b))
 ## [0.2.3] - 2026-04-16
+
+### Miscellaneous
+
+- **release:** 0.2.3([ce31d89](https://github.com/AbeCoull/prism-q/commit/ce31d898219da3e4915c36fba1606674633345b9))
 
 ### Performance
 

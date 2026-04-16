@@ -23,7 +23,7 @@ pub use accumulator::{
 };
 pub use parity::ParityStats;
 use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
-pub(crate) use parity::{ParityBlocks, SparseParity, XorDag};
+pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity, XorDag};
 
 pub(crate) use propagation::batch_propagate_backward;
 pub(crate) use propagation::propagate_backward;
@@ -211,6 +211,128 @@ fn pack_bools(bools: &[bool]) -> Vec<u64> {
         }
     }
     packed
+}
+
+#[cfg(feature = "parallel")]
+#[derive(Clone, Copy)]
+struct SendPtrU64(*mut u64);
+#[cfg(feature = "parallel")]
+unsafe impl Send for SendPtrU64 {}
+#[cfg(feature = "parallel")]
+unsafe impl Sync for SendPtrU64 {}
+#[cfg(feature = "parallel")]
+impl SendPtrU64 {
+    #[inline(always)]
+    unsafe fn copy_from_slice(self, dst_offset: usize, src: &[u64]) {
+        std::ptr::copy_nonoverlapping(src.as_ptr(), self.0.add(dst_offset), src.len());
+    }
+}
+
+#[inline(always)]
+fn scatter_meas_major_rows(
+    dst: &mut [u64],
+    dst_s_words: usize,
+    src: &[u64],
+    src_s_words: usize,
+    meas_indices: &[usize],
+) {
+    debug_assert_eq!(src.len(), meas_indices.len() * src_s_words);
+    for (local_m, &global_m) in meas_indices.iter().enumerate() {
+        let src_row = &src[local_m * src_s_words..(local_m + 1) * src_s_words];
+        let dst_offset = global_m * dst_s_words;
+        dst[dst_offset..dst_offset + src_s_words].copy_from_slice(src_row);
+    }
+}
+
+#[inline(always)]
+fn project_local_flip_row(local_row: &[u64], mapping: &[usize], m_words: usize) -> Vec<u64> {
+    let mut global_row = vec![0u64; m_words];
+    for (local_word, &word) in local_row.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            let local_m = local_word * 64 + bit;
+            debug_assert!(local_m < mapping.len());
+            let global_m = mapping[local_m];
+            global_row[global_m / 64] |= 1u64 << (global_m % 64);
+            bits &= bits - 1;
+        }
+    }
+    global_row
+}
+
+fn build_sparse_from_filtered_blocks(
+    block_samplers: &[CompiledSampler],
+    meas_map: &[(usize, usize)],
+    rank_offsets: &[usize],
+    num_global_measurements: usize,
+) -> SparseParity {
+    let mut row_offsets = Vec::with_capacity(num_global_measurements + 1);
+    let mut col_indices = Vec::new();
+
+    for &(block_idx, local_meas) in meas_map {
+        row_offsets.push(col_indices.len() as u32);
+        let sparse = block_samplers[block_idx]
+            .sparse
+            .as_ref()
+            .expect("filtered block samplers must retain sparse parity");
+        let rank_offset = rank_offsets[block_idx] as u32;
+        for &col in sparse.row_cols(local_meas) {
+            col_indices.push(rank_offset + col);
+        }
+    }
+    row_offsets.push(col_indices.len() as u32);
+
+    SparseParity {
+        col_indices,
+        row_offsets,
+        num_rows: num_global_measurements,
+    }
+}
+
+fn build_filtered_parity_blocks(
+    block_samplers: &[CompiledSampler],
+    local_to_global: &[Vec<usize>],
+) -> Option<ParityBlocks> {
+    let mut blocks = Vec::new();
+
+    for (block_idx, sampler) in block_samplers.iter().enumerate() {
+        let mapping = &local_to_global[block_idx];
+        if mapping.is_empty() {
+            continue;
+        }
+
+        if let Some(parity_blocks) = &sampler.parity_blocks {
+            for block in &parity_blocks.blocks {
+                let meas_indices = block
+                    .meas_indices
+                    .iter()
+                    .map(|&local_m| mapping[local_m])
+                    .collect();
+                blocks.push(ParityBlock {
+                    meas_indices,
+                    sparse: block.sparse.clone(),
+                    block_rank: block.block_rank,
+                    ref_bits_packed: block.ref_bits_packed.clone(),
+                });
+            }
+            continue;
+        }
+
+        let sparse = sampler
+            .sparse
+            .as_ref()
+            .expect("filtered block samplers must retain sparse parity")
+            .clone();
+        blocks.push(ParityBlock {
+            meas_indices: mapping.clone(),
+            sparse,
+            block_rank: sampler.rank,
+            ref_bits_packed: sampler.ref_bits_packed.clone(),
+        });
+    }
+
+    ParityBlocks::from_blocks_if_useful(blocks)
 }
 
 impl CompiledSampler {
@@ -516,13 +638,100 @@ impl CompiledSampler {
 
         if let Some(pb) = &self.parity_blocks {
             let block_seeds: Vec<u64> = (0..pb.blocks.len()).map(|_| self.rng.next_u64()).collect();
+            let meas_major = if pb.direct_scatter {
+                let total_len = num_meas * s_words;
+                #[allow(clippy::uninit_vec)]
+                let mut meas_major = {
+                    let mut v = Vec::with_capacity(total_len);
+                    // SAFETY: Every measurement row is written exactly once by one parity
+                    // block before the buffer is read. The filtered parity blocks form a
+                    // partition of the global measurement rows.
+                    unsafe { v.set_len(total_len) };
+                    v
+                };
 
-            #[cfg(feature = "parallel")]
-            let block_results: Vec<(Vec<u64>, &[usize])> = {
-                use rayon::prelude::*;
-                pb.blocks
-                    .par_iter()
-                    .zip(block_seeds.par_iter())
+                #[cfg(feature = "parallel")]
+                {
+                    use rayon::prelude::*;
+
+                    let ptr = SendPtrU64(meas_major.as_mut_ptr());
+                    pb.blocks
+                        .par_iter()
+                        .zip(block_seeds.par_iter())
+                        .for_each(|(block, &seed)| {
+                            let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
+                            let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
+                            let block_data = sample_bts_meas_major(
+                                &block.sparse,
+                                num_shots,
+                                &block.ref_bits_packed,
+                                &mut block_rng,
+                                block.block_rank,
+                            );
+
+                            // SAFETY: Each parity block owns a disjoint set of global
+                            // measurement rows, so these row copies target non-overlapping
+                            // regions of the final meas-major output.
+                            unsafe {
+                                for (local_m, &global_m) in block.meas_indices.iter().enumerate() {
+                                    let row =
+                                        &block_data[local_m * s_words..(local_m + 1) * s_words];
+                                    ptr.copy_from_slice(global_m * s_words, row);
+                                }
+                            }
+                        });
+                }
+
+                #[cfg(not(feature = "parallel"))]
+                {
+                    for (block, &seed) in pb.blocks.iter().zip(block_seeds.iter()) {
+                        let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
+                        let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
+                        let block_data = sample_bts_meas_major(
+                            &block.sparse,
+                            num_shots,
+                            &block.ref_bits_packed,
+                            &mut block_rng,
+                            block.block_rank,
+                        );
+                        scatter_meas_major_rows(
+                            &mut meas_major,
+                            s_words,
+                            &block_data,
+                            s_words,
+                            &block.meas_indices,
+                        );
+                    }
+                }
+
+                meas_major
+            } else {
+                #[cfg(feature = "parallel")]
+                let block_results: Vec<(Vec<u64>, &[usize])> = {
+                    use rayon::prelude::*;
+                    pb.blocks
+                        .par_iter()
+                        .zip(block_seeds.par_iter())
+                        .map(|(block, &seed)| {
+                            let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
+                            let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
+                            let data = sample_bts_meas_major(
+                                &block.sparse,
+                                num_shots,
+                                &block.ref_bits_packed,
+                                &mut block_rng,
+                                block.block_rank,
+                            );
+                            (data, block.meas_indices.as_slice())
+                        })
+                        .collect()
+                };
+
+                #[cfg(not(feature = "parallel"))]
+                let block_results: Vec<(Vec<u64>, &[usize])> = pb
+                    .blocks
+                    .iter()
+                    .zip(block_seeds.iter())
                     .map(|(block, &seed)| {
                         let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
                         let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
@@ -535,36 +744,20 @@ impl CompiledSampler {
                         );
                         (data, block.meas_indices.as_slice())
                     })
-                    .collect()
-            };
+                    .collect();
 
-            #[cfg(not(feature = "parallel"))]
-            let block_results: Vec<(Vec<u64>, &[usize])> = pb
-                .blocks
-                .iter()
-                .zip(block_seeds.iter())
-                .map(|(block, &seed)| {
-                    let mut block_chacha = ChaCha8Rng::seed_from_u64(seed);
-                    let mut block_rng = Xoshiro256PlusPlus::from_chacha(&mut block_chacha);
-                    let data = sample_bts_meas_major(
-                        &block.sparse,
-                        num_shots,
-                        &block.ref_bits_packed,
-                        &mut block_rng,
-                        block.block_rank,
+                let mut meas_major = vec![0u64; num_meas * s_words];
+                for (block_data, meas_indices) in &block_results {
+                    scatter_meas_major_rows(
+                        &mut meas_major,
+                        s_words,
+                        block_data,
+                        s_words,
+                        meas_indices,
                     );
-                    (data, block.meas_indices.as_slice())
-                })
-                .collect();
-
-            let mut meas_major = vec![0u64; num_meas * s_words];
-            for (block_data, meas_indices) in &block_results {
-                for (local_m, &global_m) in meas_indices.iter().enumerate() {
-                    let src = &block_data[local_m * s_words..(local_m + 1) * s_words];
-                    let dst = &mut meas_major[global_m * s_words..(global_m + 1) * s_words];
-                    dst.copy_from_slice(src);
                 }
-            }
+                meas_major
+            };
 
             return PackedShots {
                 data: meas_major,
@@ -1166,10 +1359,61 @@ impl PackedShots {
     }
 
     pub fn counts(&self) -> std::collections::HashMap<Vec<u64>, u64> {
+        if self.m_words > 8 {
+            return self.counts_wide();
+        }
         self.counts_packed()
             .into_iter()
             .map(|(k, v)| (k[..self.m_words].to_vec(), v))
             .collect()
+    }
+
+    fn counts_wide(&self) -> std::collections::HashMap<Vec<u64>, u64> {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        let mw = self.m_words;
+
+        match self.layout {
+            ShotLayout::ShotMajor => {
+                for s in 0..self.num_shots {
+                    let base = s * mw;
+                    *map.entry(self.data[base..base + mw].to_vec()).or_insert(0) += 1;
+                }
+            }
+            ShotLayout::MeasMajor => {
+                let batch_size = 64;
+                let mut shot_buf = vec![0u64; batch_size * mw];
+                for batch_start in (0..self.num_shots).step_by(batch_size) {
+                    let batch_end = (batch_start + batch_size).min(self.num_shots);
+                    let batch_len = batch_end - batch_start;
+                    shot_buf[..batch_len * mw].fill(0);
+
+                    let sw_base = batch_start / 64;
+                    let bit_off = batch_start % 64;
+
+                    for m in 0..self.num_measurements {
+                        let mword = m / 64;
+                        let mbit = m % 64;
+                        let meas_row = &self.data[m * self.s_words..];
+                        let word = meas_row[sw_base];
+                        let shifted = word >> bit_off;
+                        for s in 0..batch_len {
+                            if (shifted >> s) & 1 != 0 {
+                                shot_buf[s * mw + mword] |= 1u64 << mbit;
+                            }
+                        }
+                    }
+
+                    for s in 0..batch_len {
+                        let base = s * mw;
+                        *map.entry(shot_buf[base..base + mw].to_vec()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        map
     }
 
     fn counts_packed(&self) -> std::collections::HashMap<[u64; 8], u64> {
@@ -1563,8 +1807,6 @@ fn compile_measurements_filtered(
 
     let m_words = num_global_measurements.div_ceil(64);
     let total_rank: usize = block_samplers.iter().map(|s| s.rank).sum();
-
-    let mut flip_rows: Vec<Vec<u64>> = Vec::with_capacity(total_rank);
     let mut ref_bits_packed: Vec<u64> = vec![0u64; num_global_measurements.div_ceil(64)];
 
     for (gi, &(bi, li)) in meas_map.iter().enumerate() {
@@ -1580,20 +1822,21 @@ fn compile_measurements_filtered(
         local_to_global[bi].push(gi);
     }
 
+    let mut rank_offsets = Vec::with_capacity(block_samplers.len());
+    let mut rank_prefix = 0usize;
+    for sampler in &block_samplers {
+        rank_offsets.push(rank_prefix);
+        rank_prefix += sampler.rank;
+    }
+    debug_assert_eq!(rank_prefix, total_rank);
+
+    let mut flip_rows: Vec<Vec<u64>> = Vec::with_capacity(total_rank);
     for (bi, sampler) in block_samplers.iter().enumerate() {
         let mapping = &local_to_global[bi];
         for local_row in &sampler.flip_rows {
-            let mut global_row = vec![0u64; m_words];
-            for (lm, &gi) in mapping.iter().enumerate() {
-                if (local_row[lm / 64] >> (lm % 64)) & 1 != 0 {
-                    global_row[gi / 64] |= 1u64 << (gi % 64);
-                }
-            }
-            flip_rows.push(global_row);
+            flip_rows.push(project_local_flip_row(local_row, mapping, m_words));
         }
     }
-
-    minimize_flip_row_weight(&mut flip_rows);
 
     let lut = if total_rank >= LUT_MIN_RANK {
         Some(FlipLut::build(&flip_rows, m_words))
@@ -1601,9 +1844,18 @@ fn compile_measurements_filtered(
         None
     };
 
-    let sparse = SparseParity::from_flip_rows(&flip_rows, num_global_measurements);
+    let sparse = build_sparse_from_filtered_blocks(
+        &block_samplers,
+        &meas_map,
+        &rank_offsets,
+        num_global_measurements,
+    );
     let xor_dag = build_xor_dag_if_useful(&sparse);
-    let parity_blocks = build_parity_blocks_if_useful(&sparse, total_rank, &ref_bits_packed);
+    let parity_blocks =
+        build_filtered_parity_blocks(&block_samplers, &local_to_global).map(|mut blocks| {
+            blocks.direct_scatter = true;
+            blocks
+        });
 
     Ok(CompiledSampler {
         flip_rows,

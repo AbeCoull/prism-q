@@ -175,6 +175,16 @@ fn mps_measure_reset_circuit(n_qubits: usize, rounds: usize) -> Circuit {
     circuit
 }
 
+fn compiled_filtered_bell_pairs_circuit(n_pairs: usize) -> Circuit {
+    let mut circuit = circuits::independent_bell_pairs(n_pairs);
+    let n = circuit.num_qubits;
+    circuit.num_classical_bits = n;
+    for i in 0..n {
+        circuit.add_measure(i, i);
+    }
+    circuit
+}
+
 fn run_mps_apply_only(circuit: &Circuit, max_bond_dim: usize) {
     let mut backend = MpsBackend::new(SEED, max_bond_dim);
     backend
@@ -1173,6 +1183,35 @@ fn bench_compiled_sampler_scale(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_compiled_sampler_filtered(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compiled_sampler_filtered");
+    configure_group(&mut group);
+
+    for &n_pairs in &[50, 250, 500] {
+        let circuit = compiled_filtered_bell_pairs_circuit(n_pairs);
+        let n = circuit.num_qubits;
+
+        let compile_id = format!("bell_pairs_{n}q");
+        group.bench_function(BenchmarkId::new("compile", &compile_id), |b| {
+            b.iter(|| prism_q::compile_measurements(&circuit, SEED).unwrap());
+        });
+
+        let packed_id = format!("bell_pairs_{n}q_10k");
+        group.bench_function(BenchmarkId::new("packed", &packed_id), |b| {
+            let mut sampler = prism_q::compile_measurements(&circuit, SEED).unwrap();
+            b.iter(|| sampler.sample_bulk_packed(10_000));
+        });
+
+        let counts_id = format!("bell_pairs_{n}q_10k");
+        group.bench_function(BenchmarkId::new("counts", &counts_id), |b| {
+            let mut sampler = prism_q::compile_measurements(&circuit, SEED).unwrap();
+            b.iter(|| sampler.sample_counts(10_000));
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_spp(c: &mut Criterion) {
     let mut group = c.benchmark_group("spp");
     configure_group(&mut group);
@@ -1311,6 +1350,8 @@ criterion_group!(
     bench_compiled_sampler,
     // Compiled sampler at scale (high shot counts)
     bench_compiled_sampler_scale,
+    // Filtered compiled sampler (independent subsystem path)
+    bench_compiled_sampler_filtered,
     // Stochastic Pauli Propagation (Clifford+T)
     bench_spp,
     // Coalescing baseline (interleaved Clifford+T)

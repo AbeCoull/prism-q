@@ -262,10 +262,8 @@ impl StabilizerBackend {
                         condition,
                         gate,
                         targets,
-                    } => {
-                        if condition.evaluate(&self.classical_bits) {
-                            self.dispatch_gate(gate, targets)?;
-                        }
+                    } if condition.evaluate(&self.classical_bits) => {
+                        self.dispatch_gate(gate, targets)?;
                     }
                     _ => {}
                 }

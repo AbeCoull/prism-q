@@ -978,6 +978,7 @@ impl StabilizerBackend {
                 } if condition.evaluate(&self.classical_bits) => {
                     self.sgi_dispatch_gate(gate, targets)?;
                 }
+                _ => {}
             }
         }
         Ok(())

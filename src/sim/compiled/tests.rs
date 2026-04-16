@@ -789,6 +789,7 @@ fn xor_dag_reduces_weight() {
         col_indices: vec![0, 1, 0, 1, 2, 1, 2],
         row_offsets: vec![0, 2, 5, 7],
         num_rows: 3,
+        non_det_rows: vec![0, 1, 2],
     };
     let dag = sp.build_xor_dag();
     assert!(

@@ -283,10 +283,15 @@ fn build_sparse_from_filtered_blocks(
     }
     row_offsets.push(col_indices.len() as u32);
 
+    let non_det_rows: Vec<u32> = (0..num_global_measurements as u32)
+        .filter(|&m| row_offsets[m as usize + 1] != row_offsets[m as usize])
+        .collect();
+
     SparseParity {
         col_indices,
         row_offsets,
         num_rows: num_global_measurements,
+        non_det_rows,
     }
 }
 

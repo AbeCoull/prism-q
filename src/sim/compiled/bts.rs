@@ -245,7 +245,8 @@ pub(super) fn sample_bts_meas_major(
             }
         }
 
-        for m in 0..num_meas {
+        for &m in &sparse.non_det_rows {
+            let m = m as usize;
             let cols = sparse.row_cols(m);
             let acc = xor_reduce_scalar(cols, &random_bits);
             meas_major[m * s_words + batch] = acc;
@@ -312,6 +313,9 @@ fn sample_bts_meas_major_dag(
         }
 
         for (m, entry) in dag.entries.iter().enumerate() {
+            if entry.parent.is_none() && entry.residual_cols.is_empty() {
+                continue;
+            }
             let mut acc = if let Some(p) = entry.parent {
                 meas_major[p * s_words + batch]
             } else {
@@ -369,20 +373,13 @@ unsafe fn sample_bts_meas_major_avx2(
                 }
             }
 
-            for m in 0..num_meas {
+            for &m in &sparse.non_det_rows {
+                let m = m as usize;
                 let cols = sparse.row_cols(m);
                 let out_base = m * s_words + quad_start * 4;
 
                 match cols.len() {
-                    0 => {
-                        let z = _mm256_setzero_si256();
-                        for t in 0..tile {
-                            _mm256_storeu_si256(
-                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
-                                z,
-                            );
-                        }
-                    }
+                    0 => unreachable!(),
                     1 => {
                         let c0 = cols[0] as usize * tile;
                         for t in 0..tile {
@@ -452,7 +449,6 @@ unsafe fn sample_bts_meas_major_avx2(
             &mut vrng,
             &mut random_tile,
             rank,
-            num_meas,
             s_words,
             s_quads,
             quad_start,
@@ -467,7 +463,6 @@ unsafe fn sample_bts_meas_major_avx2(
             &mut vrng,
             &mut random_avx,
             rank,
-            num_meas,
             s_words,
             s_quads,
             0,
@@ -488,7 +483,6 @@ unsafe fn bts_avx2_remainder(
     vrng: &mut Xoshiro256PlusPlusX4,
     random_tile: &mut [std::arch::x86_64::__m256i],
     rank: usize,
-    num_meas: usize,
     s_words: usize,
     s_quads: usize,
     quad_start: usize,
@@ -524,10 +518,11 @@ unsafe fn bts_avx2_remainder(
             }
         }
 
-        for m in 0..num_meas {
+        for &m in &sparse.non_det_rows {
+            let m = m as usize;
             let cols = sparse.row_cols(m);
             let acc = match cols.len() {
-                0 => _mm256_setzero_si256(),
+                0 => unreachable!(),
                 1 => random_tile[cols[0] as usize * tile],
                 2 => _mm256_xor_si256(
                     random_tile[cols[0] as usize * tile],
@@ -566,7 +561,6 @@ unsafe fn bts_avx2_per_quad(
     vrng: &mut Xoshiro256PlusPlusX4,
     random_avx: &mut [std::arch::x86_64::__m256i],
     rank: usize,
-    num_meas: usize,
     s_words: usize,
     s_quads: usize,
     start_quad: usize,
@@ -601,10 +595,11 @@ unsafe fn bts_avx2_per_quad(
             }
         }
 
-        for m in 0..num_meas {
+        for &m in &sparse.non_det_rows {
+            let m = m as usize;
             let cols = sparse.row_cols(m);
             let acc = match cols.len() {
-                0 => _mm256_setzero_si256(),
+                0 => unreachable!(),
                 1 => random_avx[cols[0] as usize],
                 2 => _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize]),
                 3 => _mm256_xor_si256(
@@ -749,6 +744,9 @@ unsafe fn sample_bts_meas_major_dag_avx2(
         }
 
         for (m, entry) in dag.entries.iter().enumerate() {
+            if entry.parent.is_none() && entry.residual_cols.is_empty() {
+                continue;
+            }
             let mut acc = if let Some(p) = entry.parent {
                 let parent_ptr = meas_major[p * s_words + base_sw..].as_ptr();
                 if words_this_quad == 4 {
@@ -839,17 +837,13 @@ unsafe fn sample_bts_meas_major_neon(
                 }
             }
 
-            for m in 0..num_meas {
+            for &m in &sparse.non_det_rows {
+                let m = m as usize;
                 let cols = sparse.row_cols(m);
                 let out_base = m * s_words + pair_start * 2;
 
                 match cols.len() {
-                    0 => {
-                        let z = vdupq_n_u64(0);
-                        for t in 0..tile {
-                            vst1q_u64(meas_major[out_base + t * 2..].as_mut_ptr(), z);
-                        }
-                    }
+                    0 => unreachable!(),
                     1 => {
                         let c0 = cols[0] as usize * tile;
                         for t in 0..tile {
@@ -915,7 +909,6 @@ unsafe fn sample_bts_meas_major_neon(
             &mut meas_major,
             &mut vrng,
             rank,
-            num_meas,
             s_words,
             s_pairs,
             pair_start,
@@ -927,7 +920,6 @@ unsafe fn sample_bts_meas_major_neon(
             &mut meas_major,
             &mut vrng,
             rank,
-            num_meas,
             s_words,
             s_pairs,
             0,
@@ -946,7 +938,6 @@ unsafe fn bts_neon_remainder(
     meas_major: &mut [u64],
     vrng: &mut Xoshiro256PlusPlusX2,
     rank: usize,
-    num_meas: usize,
     s_words: usize,
     s_pairs: usize,
     pair_start: usize,
@@ -983,10 +974,11 @@ unsafe fn bts_neon_remainder(
             }
         }
 
-        for m in 0..num_meas {
+        for &m in &sparse.non_det_rows {
+            let m = m as usize;
             let cols = sparse.row_cols(m);
             let acc = match cols.len() {
-                0 => vdupq_n_u64(0),
+                0 => unreachable!(),
                 1 => random_neon[cols[0] as usize],
                 2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
                 3 => veorq_u64(
@@ -1017,7 +1009,6 @@ unsafe fn bts_neon_per_pair(
     meas_major: &mut [u64],
     vrng: &mut Xoshiro256PlusPlusX2,
     rank: usize,
-    num_meas: usize,
     s_words: usize,
     s_pairs: usize,
     start_pair: usize,
@@ -1054,10 +1045,11 @@ unsafe fn bts_neon_per_pair(
             }
         }
 
-        for m in 0..num_meas {
+        for &m in &sparse.non_det_rows {
+            let m = m as usize;
             let cols = sparse.row_cols(m);
             let acc = match cols.len() {
-                0 => vdupq_n_u64(0),
+                0 => unreachable!(),
                 1 => random_neon[cols[0] as usize],
                 2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
                 3 => veorq_u64(

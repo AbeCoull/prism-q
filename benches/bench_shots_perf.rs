@@ -289,6 +289,37 @@ fn bench_homological_sample(c: &mut Criterion) {
     group.finish();
 }
 
+fn sparse_active_circuit(n_qubits: usize, n_active: usize) -> Circuit {
+    let mut active = prism_q::circuits::clifford_heavy_circuit(n_active, 10, SEED);
+    active.num_qubits = n_qubits;
+    active.num_classical_bits = n_qubits;
+    for q in 0..n_qubits {
+        active.add_measure(q, q);
+    }
+    active
+}
+
+fn bench_sparse_deterministic(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse_deterministic");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    for &(n_qubits, n_active) in &[(100, 10), (200, 20), (500, 50), (1000, 100)] {
+        let circuit = sparse_active_circuit(n_qubits, n_active);
+        let det_pct = 100 * (n_qubits - n_active) / n_qubits;
+        for &n_shots in &[10_000, 100_000, 1_000_000] {
+            let label = format!("{n_qubits}q_{n_active}active_{det_pct}pct_det");
+            group.bench_with_input(BenchmarkId::new(&label, n_shots), &n_shots, |b, &shots| {
+                let mut sampler = prism_q::compile_measurements(&circuit, SEED).unwrap();
+                b.iter(|| sampler.sample_counts(shots));
+            });
+        }
+    }
+
+    group.finish();
+}
+
 fn bench_analytical_marginals(c: &mut Criterion) {
     let mut group = c.benchmark_group("analytical_marginals");
     group.sample_size(10);
@@ -321,6 +352,7 @@ criterion_group!(
     bench_compiled_counts,
     bench_histogram_counts,
     bench_rank_space_counts,
+    bench_sparse_deterministic,
     bench_homological_compile,
     bench_homological_sample,
     bench_analytical_marginals,

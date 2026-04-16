@@ -1,5 +1,4 @@
 use prism_q::circuit::Circuit;
-use prism_q::gates::Gate;
 use std::time::Instant;
 
 const SEED: u64 = 0xDEAD_BEEF;

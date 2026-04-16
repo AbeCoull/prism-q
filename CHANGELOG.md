@@ -2,7 +2,16 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.2.3] - 2026-04-16
+
+### Performance
+
+- **compiled:** AVX2 DAG kernel + parallel BTS DAG pass-through (#23)([4be7d31](https://github.com/AbeCoull/prism-q/commit/4be7d313c11fc01e612294da3906be573a34aa96))
 ## [0.2.2] - 2026-04-14
+
+### Miscellaneous
+
+- **release:** 0.2.2([77e2bcd](https://github.com/AbeCoull/prism-q/commit/77e2bcd77e3fc6a52e25915fa172c35fec9ed909))
 
 ### Performance
 

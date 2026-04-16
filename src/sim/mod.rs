@@ -877,6 +877,7 @@ mod tests {
     use crate::backend::stabilizer::StabilizerBackend;
     use crate::backend::statevector::StatevectorBackend;
     use crate::backend::tensornetwork::TensorNetworkBackend;
+    use crate::circuit::smallvec;
     use crate::gates::Gate;
 
     fn make_clifford_circuit() -> Circuit {
@@ -1957,5 +1958,216 @@ mod tests {
                 m_sv[i].0
             );
         }
+    }
+
+    // ── Dispatch validation ───────────────────────────────────────────
+
+    #[test]
+    fn test_validate_filtered_stabilizer_rejects_non_clifford() {
+        let circuit = make_general_circuit();
+        assert!(matches!(
+            run_with(BackendKind::FilteredStabilizer, &circuit, 42).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_factored_stabilizer_rejects_non_clifford() {
+        let circuit = make_general_circuit();
+        assert!(matches!(
+            run_with(BackendKind::FactoredStabilizer, &circuit, 42).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_stabilizer_rank_rejects_no_t_gates() {
+        let circuit = make_clifford_circuit();
+        assert!(matches!(
+            run_with(BackendKind::StabilizerRank, &circuit, 42).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_filtered_stabilizer_accepts_clifford() {
+        assert!(run_with(BackendKind::FilteredStabilizer, &make_clifford_circuit(), 42).is_ok());
+    }
+
+    #[test]
+    fn test_validate_factored_stabilizer_accepts_clifford() {
+        assert!(run_with(BackendKind::FactoredStabilizer, &make_clifford_circuit(), 42).is_ok());
+    }
+
+    // ── Pauli backend error paths ───────────────────────────────────────
+
+    #[test]
+    fn test_pauli_backends_reject_mid_circuit_measurements() {
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[2] q;
+            bit[2] c;
+            h q[0];
+            c[0] = measure q[0];
+            cx q[0], q[1];
+            c[1] = measure q[1];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+
+        assert!(matches!(
+            run_shots_with(BackendKind::StochasticPauli { num_samples: 100 }, &circuit, 10, 42)
+                .unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+        assert!(matches!(
+            run_shots_with(
+                BackendKind::DeterministicPauli { epsilon: 1e-3, max_terms: 1000 },
+                &circuit, 10, 42,
+            ).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    // ── Noisy simulation error paths ────────────────────────────────────
+
+    #[test]
+    fn test_noise_rejects_stabilizer_rank() {
+        let circuit = make_general_circuit();
+        let nm = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        assert!(matches!(
+            run_shots_with_noise(BackendKind::StabilizerRank, &circuit, &nm, 10, 42).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn test_noise_rejects_pauli_backends() {
+        let circuit = make_general_circuit();
+        let nm = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+
+        assert!(matches!(
+            run_shots_with_noise(
+                BackendKind::StochasticPauli { num_samples: 100 }, &circuit, &nm, 10, 42,
+            ).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+        assert!(matches!(
+            run_shots_with_noise(
+                BackendKind::DeterministicPauli { epsilon: 1e-3, max_terms: 1000 },
+                &circuit, &nm, 10, 42,
+            ).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn test_noise_stabilizer_rejects_non_pauli_noise() {
+        let circuit = make_clifford_circuit();
+        let nm = noise::NoiseModel {
+            after_gate: {
+                let mut ag = vec![Vec::new(); circuit.instructions.len()];
+                ag[0].push(noise::NoiseEvent {
+                    channel: noise::NoiseChannel::AmplitudeDamping { gamma: 0.1 },
+                    qubits: smallvec![0],
+                });
+                ag
+            },
+            readout: vec![None; circuit.num_qubits],
+        };
+        assert!(matches!(
+            run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn test_noise_stabilizer_rejects_non_clifford() {
+        let circuit = make_general_circuit();
+        let nm = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        assert!(matches!(
+            run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    // ── Backend smoke tests ─────────────────────────────────────────────
+
+    fn assert_probs_match(kind: BackendKind, circuit: &Circuit, expected: &[f64], tol: f64) {
+        let label = format!("{kind:?}");
+        let result = run_with(kind, circuit, 42).unwrap();
+        let probs = result.probabilities.unwrap().to_vec();
+        assert_eq!(probs.len(), expected.len(), "{label}: length mismatch");
+        for (i, (a, b)) in probs.iter().zip(expected.iter()).enumerate() {
+            assert!((a - b).abs() < tol, "{label}: prob[{i}] = {a}, expected {b}");
+        }
+    }
+
+    #[test]
+    fn test_smoke_all_backends_clifford() {
+        let circuit = make_clifford_circuit();
+        let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
+            .unwrap()
+            .probabilities
+            .unwrap()
+            .to_vec();
+
+        for kind in [
+            BackendKind::Stabilizer,
+            BackendKind::FilteredStabilizer,
+            BackendKind::FactoredStabilizer,
+            BackendKind::Sparse,
+            BackendKind::Mps { max_bond_dim: 64 },
+            BackendKind::TensorNetwork,
+            BackendKind::Factored,
+        ] {
+            assert_probs_match(kind, &circuit, &sv_probs, 1e-8);
+        }
+    }
+
+    #[test]
+    fn test_smoke_all_backends_general() {
+        let circuit = make_general_circuit();
+        let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
+            .unwrap()
+            .probabilities
+            .unwrap()
+            .to_vec();
+
+        for kind in [
+            BackendKind::Sparse,
+            BackendKind::Mps { max_bond_dim: 64 },
+            BackendKind::TensorNetwork,
+            BackendKind::Factored,
+        ] {
+            assert_probs_match(kind, &circuit, &sv_probs, 1e-8);
+        }
+    }
+
+    #[test]
+    fn test_smoke_product_state() {
+        let circuit = make_product_circuit();
+        let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
+            .unwrap()
+            .probabilities
+            .unwrap()
+            .to_vec();
+        assert_probs_match(BackendKind::ProductState, &circuit, &sv_probs, 1e-8);
+    }
+
+    #[test]
+    fn test_smoke_stabilizer_rank() {
+        let mut circuit = Circuit::new(3, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::H, &[2]);
+        circuit.add_gate(Gate::T, &[2]);
+
+        let sv_probs = run_with(BackendKind::Statevector, &circuit, 42)
+            .unwrap()
+            .probabilities
+            .unwrap()
+            .to_vec();
+        assert_probs_match(BackendKind::StabilizerRank, &circuit, &sv_probs, 1e-6);
     }
 }

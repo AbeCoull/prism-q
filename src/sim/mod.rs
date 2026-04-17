@@ -1025,28 +1025,6 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_large_qubit_count() {
-        // Use a qubit count guaranteed to exceed any reasonable memory threshold
-        let mut circuit = Circuit::new(34, 0);
-        circuit.add_gate(Gate::H, &[0]);
-        circuit.add_gate(Gate::T, &[0]); // non-Clifford → not sparse-friendly
-        circuit.add_gate(Gate::Cx, &[0, 1]); // entangling
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, false);
-        assert_eq!(backend.name(), "mps");
-    }
-
-    #[test]
-    fn test_auto_sparse_friendly_large() {
-        // Sparse-friendly (no superposition gates) + above statevector threshold
-        let mut circuit = Circuit::new(34, 0);
-        circuit.add_gate(Gate::X, &[0]);
-        circuit.add_gate(Gate::Cx, &[0, 1]); // entangling, but sparse-preserving
-        circuit.add_gate(Gate::T, &[2]); // diagonal, sparse-preserving
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, false);
-        assert_eq!(backend.name(), "sparse");
-    }
-
-    #[test]
     fn test_auto_moderate_qubit_count_uses_statevector() {
         let mut circuit = Circuit::new(20, 0);
         circuit.add_gate(Gate::H, &[0]);

@@ -68,6 +68,13 @@ impl GpuContext {
     pub(crate) fn device(&self) -> &GpuDevice {
         &self.device
     }
+
+    #[cfg(test)]
+    pub(crate) fn stub_for_tests() -> Arc<Self> {
+        Arc::new(Self {
+            device: Arc::new(GpuDevice::stub_for_tests()),
+        })
+    }
 }
 
 /// Per-simulation device-resident state.

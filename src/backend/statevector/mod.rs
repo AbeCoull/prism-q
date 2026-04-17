@@ -45,11 +45,19 @@ use num_complex::Complex64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
+
 use crate::backend::simd;
 use crate::backend::Backend;
 use crate::circuit::Instruction;
+#[cfg(feature = "gpu")]
+use crate::error::PrismError;
 use crate::error::Result;
 use crate::gates::Gate;
+
+#[cfg(feature = "gpu")]
+use crate::gpu::{GpuContext, GpuState};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -108,6 +116,10 @@ pub struct StatevectorBackend {
     pub(crate) classical_bits: Vec<bool>,
     pub(crate) rng: ChaCha8Rng,
     pub(crate) pending_norm: f64,
+    #[cfg(feature = "gpu")]
+    gpu_context: Option<Arc<GpuContext>>,
+    #[cfg(feature = "gpu")]
+    gpu_state: Option<GpuState>,
 }
 
 impl StatevectorBackend {
@@ -119,6 +131,28 @@ impl StatevectorBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             pending_norm: 1.0,
+            #[cfg(feature = "gpu")]
+            gpu_context: None,
+            #[cfg(feature = "gpu")]
+            gpu_state: None,
+        }
+    }
+
+    /// Opt into GPU acceleration using the given shared execution context.
+    ///
+    /// When set, [`Backend::init`] allocates a device-resident state instead of a host
+    /// `Vec<Complex64>` and gate application routes through GPU kernels.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(mut self, context: Arc<GpuContext>) -> Self {
+        self.gpu_context = Some(context);
+        self
+    }
+
+    #[cfg(feature = "gpu")]
+    fn gpu_unsupported(op: &str) -> PrismError {
+        PrismError::BackendUnsupported {
+            backend: "statevector/gpu".to_string(),
+            operation: format!("{op} (GPU kernels not yet wired)"),
         }
     }
 
@@ -225,21 +259,40 @@ impl Backend for StatevectorBackend {
         crate::backend::init_thread_pool();
 
         self.num_qubits = num_qubits;
-        let dim = 1usize << num_qubits;
+        self.pending_norm = 1.0;
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
 
+        #[cfg(feature = "gpu")]
+        if let Some(ctx) = self.gpu_context.clone() {
+            self.state.clear();
+            self.gpu_state = Some(GpuState::new(ctx, num_qubits)?);
+            return Ok(());
+        }
+
+        let dim = 1usize << num_qubits;
         if self.state.len() == dim {
             self.state.fill(Complex64::new(0.0, 0.0));
         } else {
             self.state = vec![Complex64::new(0.0, 0.0); dim];
         }
         self.state[0] = Complex64::new(1.0, 0.0);
-        self.pending_norm = 1.0;
-
-        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         Ok(())
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            let op = match instruction {
+                Instruction::Gate { gate, .. } => format!("gate `{}`", gate.name()),
+                Instruction::Measure { .. } => "measure".to_string(),
+                Instruction::Reset { .. } => "reset".to_string(),
+                Instruction::Barrier { .. } => return Ok(()),
+                Instruction::Conditional { gate, .. } => {
+                    format!("conditional gate `{}`", gate.name())
+                }
+            };
+            return Err(Self::gpu_unsupported(&op));
+        }
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets),
             Instruction::Measure {
@@ -270,6 +323,10 @@ impl Backend for StatevectorBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            return Err(Self::gpu_unsupported("probabilities"));
+        }
         let norm_sq = self.pending_norm * self.pending_norm;
         let dim = self.state.len();
         let mut probs = vec![0.0_f64; dim];
@@ -303,6 +360,10 @@ impl Backend for StatevectorBackend {
     }
 
     fn export_statevector(&self) -> crate::error::Result<Vec<Complex64>> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            return Err(Self::gpu_unsupported("export_statevector"));
+        }
         if self.pending_norm == 1.0 {
             return Ok(self.state.clone());
         }
@@ -311,15 +372,27 @@ impl Backend for StatevectorBackend {
     }
 
     fn qubit_probability(&self, qubit: usize) -> crate::error::Result<f64> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            return Err(Self::gpu_unsupported("qubit_probability"));
+        }
         Ok(self.qubit_probability_one(qubit))
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            return Err(Self::gpu_unsupported("reset"));
+        }
         self.apply_reset(qubit);
         Ok(())
     }
 
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            return Err(Self::gpu_unsupported("apply_1q_matrix"));
+        }
         let is_diagonal = matrix[0][1].norm() < 1e-14 && matrix[1][0].norm() < 1e-14;
         if is_diagonal {
             self.apply_diagonal_gate(qubit, matrix[0][0], matrix[1][1]);

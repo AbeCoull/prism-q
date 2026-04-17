@@ -1234,3 +1234,32 @@ fn test_deferred_norm_export_statevector() {
         sv[1]
     );
 }
+
+#[cfg(feature = "gpu")]
+mod gpu_scaffold {
+    use super::*;
+    use crate::error::PrismError;
+    use crate::gpu::GpuContext;
+
+    #[test]
+    fn with_gpu_stores_context() {
+        let ctx = GpuContext::stub_for_tests();
+        let backend = StatevectorBackend::new(42).with_gpu(ctx);
+        assert_eq!(backend.name(), "statevector");
+    }
+
+    #[test]
+    fn init_with_gpu_returns_unsupported_until_kernels_land() {
+        let ctx = GpuContext::stub_for_tests();
+        let mut backend = StatevectorBackend::new(42).with_gpu(ctx);
+        let err = backend.init(4, 0).unwrap_err();
+        assert!(matches!(err, PrismError::BackendUnsupported { .. }));
+    }
+
+    #[test]
+    fn without_gpu_init_still_works() {
+        let mut backend = StatevectorBackend::new(42);
+        assert!(backend.init(4, 0).is_ok());
+        assert_eq!(backend.num_qubits(), 4);
+    }
+}

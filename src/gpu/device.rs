@@ -45,6 +45,11 @@ impl GpuDevice {
         self.device_id
     }
 
+    #[cfg(test)]
+    pub(crate) fn stub_for_tests() -> Self {
+        Self { device_id: 0 }
+    }
+
     fn unsupported(op: &str) -> PrismError {
         PrismError::BackendUnsupported {
             backend: "gpu".to_string(),

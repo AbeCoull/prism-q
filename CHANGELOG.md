@@ -2,7 +2,16 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.3.0] - 2026-04-17
+
+### Features
+
+- **gpu:** Shared GPU execution resource scaffold (#26)([9132747](https://github.com/AbeCoull/prism-q/commit/9132747bc5e30032c52b235b775f596b8c3b360c))
 ## [0.2.4] - 2026-04-16
+
+### Miscellaneous
+
+- **release:** 0.2.4([fa01a49](https://github.com/AbeCoull/prism-q/commit/fa01a49171c9510b0756ef4371b0984e0a9a27a1))
 
 ### Performance
 

@@ -24,7 +24,7 @@ num_cpus = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 faer = { version = "0.20", optional = true, default-features = false, features = ["std", "rayon", "linalg"] }
-cudarc = { version = "0.19", optional = true, default-features = false, features = ["cuda-13020", "dynamic-linking", "driver", "nvrtc", "std"] }
+cudarc = { version = "0.19", optional = true, default-features = false, features = ["cuda-12040", "dynamic-linking", "driver", "nvrtc", "std"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

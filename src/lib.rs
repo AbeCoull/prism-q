@@ -43,6 +43,8 @@ pub mod circuit;
 pub mod circuits;
 pub mod error;
 pub mod gates;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod sim;
 
 pub use backend::factored::FactoredBackend;

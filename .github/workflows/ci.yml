@@ -8,6 +8,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Features exercised on runners without CUDA. The `gpu` feature links against CUDA via
+  # cudarc's dynamic-linking mode and can't build on hosts that don't have the NVIDIA
+  # toolkit installed, so we enumerate features instead of using --all-features.
+  CI_FEATURES: parallel,serialization
 
 jobs:
   check:
@@ -24,13 +28,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings
 
       - name: Tests
-        run: cargo test --all-features
+        run: cargo test --features "$CI_FEATURES"
 
       - name: Doc build
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features "$CI_FEATURES"
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -45,7 +49,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --features "$CI_FEATURES" --lcov --output-path lcov.info
       - name: Extract coverage percentage
         id: cov
         run: |
@@ -82,8 +86,8 @@ jobs:
         run: cargo check --target aarch64-unknown-linux-gnu
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      - name: Check (all features)
-        run: cargo check --target aarch64-unknown-linux-gnu --all-features
+      - name: Check (CI features)
+        run: cargo check --target aarch64-unknown-linux-gnu --features "$CI_FEATURES"
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -97,9 +101,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings
       - name: Tests
-        run: cargo test --all-features
+        run: cargo test --features "$CI_FEATURES"
 
   security:
     name: Security & Licenses

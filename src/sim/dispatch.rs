@@ -25,7 +25,16 @@ pub(super) fn max_statevector_qubits() -> usize {
                 return n;
             }
         }
-        detect_max_sv_qubits().unwrap_or(28)
+        match detect_max_sv_qubits() {
+            Some(n) => n,
+            None => {
+                eprintln!(
+                    "warning: could not detect system memory; statevector qubit cap is disabled. \
+                     Large circuits may abort on allocation. Set PRISM_MAX_SV_QUBITS to suppress."
+                );
+                usize::MAX
+            }
+        }
     })
 }
 
@@ -59,7 +68,7 @@ fn detect_max_sv_qubits() -> Option<usize> {
     let budget = status.ull_total_phys / 2;
     let max_elements = budget / 16;
     if max_elements == 0 {
-        return Some(28);
+        return None;
     }
     let n = 63 - max_elements.leading_zeros() as usize;
     Some(n.min(33))
@@ -74,7 +83,7 @@ fn detect_max_sv_qubits() -> Option<usize> {
             let budget = (kb * 1024) / 2;
             let max_elements = budget / 16;
             if max_elements == 0 {
-                return Some(28);
+                return None;
             }
             let n = 63 - max_elements.leading_zeros() as usize;
             return Some(n.min(33));

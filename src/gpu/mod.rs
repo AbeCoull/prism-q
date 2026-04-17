@@ -9,7 +9,7 @@
 //! # Module layout
 //!
 //! - [`device`] — cudarc device wrapper, availability checks, VRAM queries
-//! - [`memory`] — [`GpuBuffer`][memory::GpuBuffer] RAII wrapper over device allocations
+//! - [`memory`] — [`GpuBuffer`] RAII wrapper over device allocations
 //! - (future) `kernels::dense` — statevector 1q/2q/Cu/Mcu/measurement/fused kernels
 //! - (future) `kernels::svd` — MPS SVD via cuSolver
 //! - (future) `kernels::tn` — TensorNetwork contraction via cuBLAS

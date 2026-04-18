@@ -4,7 +4,7 @@
 
 - **Primary**: Fastest practical quantum circuit simulation in Rust.
 - Correct simulation of supported gate sets across multiple backend strategies.
-- Clean backend plugin model — add new simulation strategies without touching the core.
+- Clean backend plugin model. New simulation strategies can be added without touching the core.
 
 ## Non-goals
 
@@ -60,7 +60,7 @@ Hand-rolled line-by-line parser targeting a practical OpenQASM 3.0 subset. Conve
 | `Barrier` | `qubits` | Synchronization barrier |
 | `Conditional` | `condition`, `gate`, `targets` | Classical-controlled gate |
 
-Targets use `SmallVec<[usize; 4]>` — inline storage for up to 4 qubits, no heap allocation for typical gates.
+Targets use `SmallVec<[usize; 4]>`, inline storage for up to 4 qubits, no heap allocation for typical gates.
 
 ### Gate enum
 
@@ -83,7 +83,7 @@ Targets use `SmallVec<[usize; 4]>` — inline storage for up to 4 qubits, no hea
 
 ## Fusion pipeline
 
-Thirteen-pass gate optimization before execution, gated by qubit count thresholds. Every pass returns `Cow<Circuit>` — `Borrowed` when no optimization applies, zero overhead for circuits that don't benefit.
+Thirteen-pass gate optimization before execution, gated by qubit count thresholds. Every pass returns `Cow<Circuit>`. `Borrowed` when no optimization applies, so circuits that do not benefit pay zero overhead.
 
 ```text
   Input Circuit
@@ -173,7 +173,7 @@ Memory limit is dynamically computed from available system RAM (50% budget, capp
 
 ### Subsystem decomposition
 
-Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately (with per-block Auto dispatch), results merge lazily via `Probabilities::Factored` — a Kronecker product computed on-demand per-element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
+Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately with per-block Auto dispatch. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
 
 Block-level Rayon parallelism when all blocks are <14 qubits (avoids oversubscription with block-internal parallelism).
 
@@ -195,11 +195,11 @@ Deferred measurement normalization: `pending_norm` accumulates normalization fac
 
 ### Stabilizer
 
-Aaronson-Gottesman bit-packed tableau for Clifford circuits. O(n²) time and space — scales to thousands of qubits. Gate kernels use wordwise bitwise ops and `popcount` for phase computation. Supports H, S, Sdg, SX, SXdg, CX, CZ, SWAP, and measurement.
+Aaronson-Gottesman bit-packed tableau for Clifford circuits. O(n²) time and space. Scales to thousands of qubits. Gate kernels use wordwise bitwise ops and `popcount` for phase computation. Supports H, S, Sdg, SX, SXdg, CX, CZ, SWAP, and measurement.
 
 Word-group batching fuses multiple 1q gate flushes into single tableau passes. Type-grouped masks apply all gates of the same Pauli type with one wordwise op instead of per-gate dispatch. Sparse Generator Indexing (SGI) tracks per-qubit active generator lists, enabling targeted row operations instead of full-tableau scans. Lazy destabilizer materialization defers destabilizer rows until probabilities are requested.
 
-Probability extraction uses coset-based enumeration with GF(2) Gaussian elimination — O(2^k) where k is the number of non-diagonal generators, rather than O(2^n).
+Probability extraction uses coset-based enumeration with GF(2) Gaussian elimination. O(2^k) where k is the number of non-diagonal generators, rather than O(2^n).
 
 **Filtered Stabilizer** (`FilteredStabilizerBackend`): Per-cluster tableaux with dynamic merging. Starts with one qubit per cluster. Cross-cluster 2q gates merge tableaux. Independent subsystems never merge, giving O(block_size²) per gate vs O(n²).
 
@@ -224,6 +224,51 @@ Deferred contraction with a greedy min-size heuristic. Gates append tensors; con
 ### Factored
 
 Dynamic split-state simulation. Starts with n independent 1-qubit states, merges via tensor product only when 2q gates bridge groups. Parallel kernels match statevector patterns for sub-states ≥14 qubits. Selected when subsystem decomposition detects partial independence.
+
+## GPU backend (optional, `gpu` feature)
+
+CUDA statevector acceleration layered onto the primary backend. Opt in via
+`StatevectorBackend::new(seed).with_gpu(ctx)` where `ctx` is an `Arc<GpuContext>`. When a
+GPU context is attached, `Backend::init` allocates a device-resident state instead of a
+host `Vec<Complex64>` and every instruction routes to a CUDA kernel.
+
+**Module layout** (`src/gpu/`):
+
+| File | Role |
+| ---- | ---- |
+| `mod.rs` | `GpuContext`, `GpuState` public entry points |
+| `device.rs` | `GpuDevice`: cudarc wrapper, compiles PTX at device construction |
+| `memory.rs` | `GpuBuffer`: device-side `Complex64` storage |
+| `kernels/mod.rs` | `KERNEL_NAMES`, `kernel_source()` template substitution |
+| `kernels/dense.rs` | PTX source and Rust launcher for every `Gate` variant |
+
+**Kernel coverage:** every variant in the `Gate` enum has a dedicated kernel. Batched
+variants (`BatchPhase`, `BatchRzz`, `DiagonalBatch`, `MultiFused { all_diagonal: true }`)
+use LUT-based kernels that consume the same host-side table builders as the CPU path.
+Non-diagonal `MultiFused` uses a shared-memory tiled kernel (`apply_multi_fused_tiled`,
+`TILE_Q = 10`, `TILE_SIZE = 1024`). Sub-gates whose target bit is inside the tile apply in
+shared memory. Sub-gates whose target bit is outside the tile fall back to per-gate
+launches. `Multi2q` still launches once per sub-gate; rare in practice.
+
+**PTX template substitution:** the CUDA C source is held as a template string
+(`KERNEL_SOURCE_TEMPLATE`) with placeholders such as `{{BP_TABLE_SIZE}}` and
+`{{TILE_Q}}`. The `kernel_source()` function substitutes them at device construction from
+the Rust constants in `src/backend/statevector/kernels.rs`, keeping CPU and GPU in sync.
+
+**Correctness:** `tests/golden_gpu.rs` drives 19 cross-checks comparing GPU amplitudes
+against the CPU statevector within 1e-10. Covers every gate variant plus fusion paths.
+
+**Current limits:**
+
+- `BackendKind::Auto` does not yet dispatch to GPU. Opt in explicitly on
+  `StatevectorBackend`.
+- The GPU entry point does not honor `run_decomposed`, so circuits whose qubit graph
+  splits into independent blocks run at full size on device when dispatched through the
+  `prismq_runner` harness. Resolving this is the primary blocker before Auto dispatch
+  can add a GPU branch.
+- Kernel design and crossover analysis live in the module docstrings on
+  `src/gpu/kernels/dense.rs`. Cross-simulator comparison scripts are provided outside
+  the public surface of the crate.
 
 ## Compiled samplers
 
@@ -264,7 +309,7 @@ Backward Pauli propagation through circuit + noise sensitivity analysis. Each no
 
 `ErrorChainComplex`: GF(2) chain complex over the circuit's noise locations. Computes the kernel (null space) of the boundary map to identify error cycles that are undetectable by syndrome measurements. `HomologicalSampler` uses this for sampling with topological error correction awareness.
 
-`noisy_marginals_analytical`: Closed-form marginal computation using the parity matrix and noise rates — avoids Monte Carlo sampling entirely.
+`noisy_marginals_analytical`: Closed-form marginal computation using the parity matrix and noise rates. Avoids Monte Carlo sampling entirely.
 
 ## Clifford+T simulation
 

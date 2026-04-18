@@ -280,6 +280,7 @@ pub(crate) struct DiagBatchTables {
     /// rebuilds the equivalent `group_shifts` array from `unique_qubits + group_sizes`
     /// because PTX has no PEXT; non-x86_64 CPU builds don't use this either. Kept
     /// populated regardless (the fill is trivial) so the struct has one layout.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     pub(crate) group_pext_masks: [u64; MAX_DIAG_BATCH_GROUPS],
     pub(crate) num_groups: usize,
 }

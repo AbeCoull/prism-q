@@ -50,7 +50,6 @@ flamegraph output showing where time went. If no hot paths were touched, write "
 
 - [ ] `docs/architecture.md` updated if the change is structural
 - [ ] Design or research notes added where required for new subsystems
-- [ ] `task_tracker.md` updated to mark items done and record measured deltas
 
 ## Breaking changes
 

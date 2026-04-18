@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.5.0] - 2026-04-18
+
+### Features
+
+- **statevector:** Add optional CUDA GPU backend for processing gates (#29)([61d56a1](https://github.com/AbeCoull/prism-q/commit/61d56a1300cd63592dc2c053476752814c248a08))
 ## [0.4.0] - 2026-04-17
 
 ### Features
 
 - **statevector:** Add optional GPU acceleration (#27)([c99c752](https://github.com/AbeCoull/prism-q/commit/c99c7528bcb16c0acc38261e006077183a97721c))
+
+### Miscellaneous
+
+- **release:** 0.4.0([036a349](https://github.com/AbeCoull/prism-q/commit/036a3491ff560e4847d992bd4d88302d3c35814b))
 ## [0.3.0] - 2026-04-17
 
 ### Features

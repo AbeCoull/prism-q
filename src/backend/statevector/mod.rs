@@ -51,8 +51,6 @@ use std::sync::Arc;
 use crate::backend::simd;
 use crate::backend::Backend;
 use crate::circuit::Instruction;
-#[cfg(feature = "gpu")]
-use crate::error::PrismError;
 use crate::error::Result;
 use crate::gates::Gate;
 
@@ -149,10 +147,198 @@ impl StatevectorBackend {
     }
 
     #[cfg(feature = "gpu")]
-    fn gpu_unsupported(op: &str) -> PrismError {
-        PrismError::BackendUnsupported {
-            backend: "statevector/gpu".to_string(),
-            operation: format!("{op} (GPU kernels not yet wired)"),
+    fn apply_gpu(&mut self, instruction: &Instruction) -> Result<()> {
+        debug_assert!(
+            self.gpu_state.is_some(),
+            "apply_gpu called without gpu_state (callers must check self.gpu_state.is_some() first)"
+        );
+        // TODO(gpu-crossover): dispatch here is unconditional — every instruction routes to
+        // GPU when `gpu_state` is Some. This is wrong for small states that fit in L3 and
+        // for post-fusion instructions (MultiFused / BatchPhase) where the CPU path runs
+        // the whole batch in a single tiled pass while the GPU path currently launches one
+        // kernel per sub-gate. Until a crossover heuristic (or batched GPU fused kernels)
+        // lands, users opting into `with_gpu()` on small or heavily-fused workloads can
+        // see regressions versus plain CPU.
+        match instruction {
+            Instruction::Gate { gate, targets } => self.dispatch_gate_gpu(gate, targets),
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => self.apply_measure_gpu(*qubit, *classical_bit),
+            Instruction::Reset { qubit } => self.apply_reset_gpu(*qubit),
+            Instruction::Barrier { .. } => Ok(()),
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } => {
+                if condition.evaluate(&self.classical_bits) {
+                    self.dispatch_gate_gpu(gate, targets)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn dispatch_gate_gpu(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
+        use crate::gates::DiagEntry;
+        use crate::gpu::kernels::dense as k;
+
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("dispatch_gate_gpu called without gpu_state");
+        let ctx = gpu.context().clone();
+
+        match gate {
+            Gate::Rzz(theta) => k::launch_apply_rzz(&ctx, gpu, targets[0], targets[1], *theta),
+            Gate::Cx => k::launch_apply_cx(&ctx, gpu, targets[0], targets[1]),
+            Gate::Cz => k::launch_apply_cz(&ctx, gpu, targets[0], targets[1]),
+            Gate::Swap => k::launch_apply_swap(&ctx, gpu, targets[0], targets[1]),
+            Gate::Cu(mat) => {
+                if let Some(phase) = gate.controlled_phase() {
+                    k::launch_apply_cu_phase(&ctx, gpu, targets[0], targets[1], phase)
+                } else {
+                    k::launch_apply_cu(&ctx, gpu, targets[0], targets[1], **mat)
+                }
+            }
+            Gate::Mcu(data) => {
+                let num_ctrl = data.num_controls as usize;
+                let controls = &targets[..num_ctrl];
+                let target = targets[num_ctrl];
+                if let Some(phase) = gate.controlled_phase() {
+                    k::launch_apply_mcu_phase(&ctx, gpu, controls, target, phase)
+                } else {
+                    k::launch_apply_mcu(&ctx, gpu, controls, target, data.mat)
+                }
+            }
+            Gate::BatchPhase(data) => {
+                let control = targets[0];
+                for &(tgt, phase) in &data.phases {
+                    k::launch_apply_cu_phase(&ctx, gpu, control, tgt, phase)?;
+                }
+                Ok(())
+            }
+            Gate::BatchRzz(data) => {
+                for &(q0, q1, theta) in &data.edges {
+                    k::launch_apply_rzz(&ctx, gpu, q0, q1, theta)?;
+                }
+                Ok(())
+            }
+            Gate::DiagonalBatch(data) => {
+                for entry in &data.entries {
+                    match *entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            k::launch_apply_diagonal_1q(&ctx, gpu, qubit, d0, d1)?;
+                        }
+                        DiagEntry::Phase2q { q0, q1, phase } => {
+                            k::launch_apply_cu_phase(&ctx, gpu, q0, q1, phase)?;
+                        }
+                        DiagEntry::Parity2q { q0, q1, same, diff } => {
+                            k::launch_apply_parity_phase(&ctx, gpu, q0, q1, same, diff)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Gate::MultiFused(data) => {
+                if data.all_diagonal {
+                    for &(tgt, mat) in &data.gates {
+                        k::launch_apply_diagonal_1q(&ctx, gpu, tgt, mat[0][0], mat[1][1])?;
+                    }
+                } else {
+                    for &(tgt, mat) in &data.gates {
+                        k::launch_apply_gate_1q(&ctx, gpu, tgt, mat)?;
+                    }
+                }
+                Ok(())
+            }
+            Gate::Fused2q(mat) => k::launch_apply_fused_2q(&ctx, gpu, targets[0], targets[1], mat),
+            Gate::Multi2q(data) => {
+                for &(q0, q1, mat) in &data.gates {
+                    k::launch_apply_fused_2q(&ctx, gpu, q0, q1, &mat)?;
+                }
+                Ok(())
+            }
+            _ => {
+                let mat = gate.matrix_2x2();
+                if gate.is_diagonal_1q() {
+                    k::launch_apply_diagonal_1q(&ctx, gpu, targets[0], mat[0][0], mat[1][1])
+                } else {
+                    k::launch_apply_gate_1q(&ctx, gpu, targets[0], mat)
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn apply_measure_gpu(&mut self, qubit: usize, classical_bit: usize) -> Result<()> {
+        use crate::gpu::kernels::dense as k;
+        use rand::Rng;
+
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("apply_measure_gpu called without gpu_state");
+        let ctx = gpu.context().clone();
+
+        let prob_one = k::measure_prob_one(&ctx, gpu, qubit)?;
+        let u: f64 = self.rng.random();
+        let outcome = u < prob_one;
+        self.classical_bits[classical_bit] = outcome;
+
+        k::measure_collapse(&ctx, gpu, qubit, outcome)?;
+
+        let inv_sqrt = crate::backend::measurement_inv_norm(outcome, prob_one);
+        gpu.set_pending_norm(gpu.pending_norm() * inv_sqrt);
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu")]
+    fn apply_reset_gpu(&mut self, qubit: usize) -> Result<()> {
+        use crate::gpu::kernels::dense as k;
+
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("apply_reset_gpu called without gpu_state");
+        let ctx = gpu.context().clone();
+
+        // Match CPU semantics (src/backend/statevector/kernels.rs::apply_reset):
+        // deterministic projection onto |0⟩ irrespective of the current amplitude on |1⟩.
+        let prob_one = k::measure_prob_one(&ctx, gpu, qubit)?;
+        let prob_zero = (1.0 - prob_one).clamp(0.0, 1.0);
+
+        k::measure_collapse(&ctx, gpu, qubit, false)?;
+
+        if prob_zero > crate::backend::NORM_CLAMP_MIN {
+            let inv_norm = 1.0 / prob_zero.sqrt();
+            gpu.set_pending_norm(gpu.pending_norm() * inv_norm);
+        } else {
+            // |0⟩ half was empty — reinitialise to |0…0⟩ (CPU does the same).
+            k::launch_set_initial_state(&ctx, gpu)?;
+            gpu.set_pending_norm(1.0);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu")]
+    fn apply_1q_matrix_gpu(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        use crate::gpu::kernels::dense as k;
+
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("apply_1q_matrix_gpu called without gpu_state");
+        let ctx = gpu.context().clone();
+
+        let is_diagonal = matrix[0][1].norm() < 1e-14 && matrix[1][0].norm() < 1e-14;
+        if is_diagonal {
+            k::launch_apply_diagonal_1q(&ctx, gpu, qubit, matrix[0][0], matrix[1][1])
+        } else {
+            k::launch_apply_gate_1q(&ctx, gpu, qubit, *matrix)
         }
     }
 
@@ -282,16 +468,7 @@ impl Backend for StatevectorBackend {
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         #[cfg(feature = "gpu")]
         if self.gpu_state.is_some() {
-            let op = match instruction {
-                Instruction::Gate { gate, .. } => format!("gate `{}`", gate.name()),
-                Instruction::Measure { .. } => "measure".to_string(),
-                Instruction::Reset { .. } => "reset".to_string(),
-                Instruction::Barrier { .. } => return Ok(()),
-                Instruction::Conditional { gate, .. } => {
-                    format!("conditional gate `{}`", gate.name())
-                }
-            };
-            return Err(Self::gpu_unsupported(&op));
+            return self.apply_gpu(instruction);
         }
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets),
@@ -324,8 +501,8 @@ impl Backend for StatevectorBackend {
 
     fn probabilities(&self) -> Result<Vec<f64>> {
         #[cfg(feature = "gpu")]
-        if self.gpu_state.is_some() {
-            return Err(Self::gpu_unsupported("probabilities"));
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            return gpu.probabilities();
         }
         let norm_sq = self.pending_norm * self.pending_norm;
         let dim = self.state.len();
@@ -361,8 +538,8 @@ impl Backend for StatevectorBackend {
 
     fn export_statevector(&self) -> crate::error::Result<Vec<Complex64>> {
         #[cfg(feature = "gpu")]
-        if self.gpu_state.is_some() {
-            return Err(Self::gpu_unsupported("export_statevector"));
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            return gpu.export_statevector();
         }
         if self.pending_norm == 1.0 {
             return Ok(self.state.clone());
@@ -373,8 +550,8 @@ impl Backend for StatevectorBackend {
 
     fn qubit_probability(&self, qubit: usize) -> crate::error::Result<f64> {
         #[cfg(feature = "gpu")]
-        if self.gpu_state.is_some() {
-            return Err(Self::gpu_unsupported("qubit_probability"));
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            return crate::gpu::kernels::dense::measure_prob_one(gpu.context(), gpu, qubit);
         }
         Ok(self.qubit_probability_one(qubit))
     }
@@ -382,7 +559,7 @@ impl Backend for StatevectorBackend {
     fn reset(&mut self, qubit: usize) -> Result<()> {
         #[cfg(feature = "gpu")]
         if self.gpu_state.is_some() {
-            return Err(Self::gpu_unsupported("reset"));
+            return self.apply_reset_gpu(qubit);
         }
         self.apply_reset(qubit);
         Ok(())
@@ -391,7 +568,7 @@ impl Backend for StatevectorBackend {
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
         #[cfg(feature = "gpu")]
         if self.gpu_state.is_some() {
-            return Err(Self::gpu_unsupported("apply_1q_matrix"));
+            return self.apply_1q_matrix_gpu(qubit, matrix);
         }
         let is_diagonal = matrix[0][1].norm() < 1e-14 && matrix[1][0].norm() < 1e-14;
         if is_diagonal {

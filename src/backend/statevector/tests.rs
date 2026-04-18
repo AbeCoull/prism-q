@@ -1262,4 +1262,88 @@ mod gpu_scaffold {
         assert!(backend.init(4, 0).is_ok());
         assert_eq!(backend.num_qubits(), 4);
     }
+
+    /// Real-device smoke test: |0000⟩ state round-trips correctly through the GPU path.
+    ///
+    /// When CUDA is not available or the driver rejects the PTX, prints a SKIP message and
+    /// returns without failing. This avoids fighting CI on machines without a usable GPU.
+    #[test]
+    fn gpu_init_and_readback_zero_state() {
+        let ctx = match GpuContext::new(0) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                eprintln!("SKIP: no usable GPU ({e})");
+                return;
+            }
+        };
+        let mut backend = StatevectorBackend::new(42).with_gpu(ctx);
+        backend.init(4, 0).expect("GPU init failed");
+
+        let probs = backend.probabilities().expect("GPU probabilities failed");
+        assert_eq!(probs.len(), 16);
+        assert!((probs[0] - 1.0).abs() < 1e-12, "p[0] = {}", probs[0]);
+        for (i, &p) in probs.iter().enumerate().skip(1) {
+            assert!(p.abs() < 1e-12, "p[{}] = {} should be 0", i, p);
+        }
+
+        let sv = backend.export_statevector().expect("GPU export failed");
+        assert_eq!(sv.len(), 16);
+        assert!((sv[0].re - 1.0).abs() < 1e-12 && sv[0].im.abs() < 1e-12);
+        for amp in &sv[1..] {
+            assert!(amp.norm() < 1e-12);
+        }
+    }
+
+    /// Bell state end-to-end on GPU, comparing against CPU. Exercises H (1q) + CX (2q)
+    /// kernels, host↔device transfer, and the full dispatcher.
+    #[test]
+    fn gpu_bell_state_matches_cpu() {
+        let ctx = match GpuContext::new(0) {
+            Ok(ctx) => ctx,
+            Err(_) => return,
+        };
+        use crate::circuit::{Circuit, Instruction};
+        use crate::gates::Gate;
+
+        let mut circuit = Circuit::new(2, 0);
+        circuit.instructions.push(Instruction::Gate {
+            gate: Gate::H,
+            targets: crate::circuit::smallvec![0],
+        });
+        circuit.instructions.push(Instruction::Gate {
+            gate: Gate::Cx,
+            targets: crate::circuit::smallvec![0, 1],
+        });
+
+        let mut cpu = StatevectorBackend::new(42);
+        cpu.init(2, 0).unwrap();
+        for inst in &circuit.instructions {
+            cpu.apply(inst).unwrap();
+        }
+        let cpu_probs = cpu.probabilities().unwrap();
+
+        let mut gpu = StatevectorBackend::new(42).with_gpu(ctx);
+        gpu.init(2, 0).unwrap();
+        for inst in &circuit.instructions {
+            gpu.apply(inst).unwrap();
+        }
+        let gpu_probs = gpu.probabilities().unwrap();
+
+        assert_eq!(cpu_probs.len(), gpu_probs.len());
+        for (i, (c, g)) in cpu_probs.iter().zip(gpu_probs.iter()).enumerate() {
+            assert!(
+                (c - g).abs() < 1e-12,
+                "p[{}]: cpu={}, gpu={}, diff={}",
+                i,
+                c,
+                g,
+                (c - g).abs()
+            );
+        }
+        // Bell state: p[00] ≈ p[11] ≈ 0.5; p[01] = p[10] = 0.
+        assert!((gpu_probs[0] - 0.5).abs() < 1e-12);
+        assert!((gpu_probs[3] - 0.5).abs() < 1e-12);
+        assert!(gpu_probs[1].abs() < 1e-12);
+        assert!(gpu_probs[2].abs() < 1e-12);
+    }
 }

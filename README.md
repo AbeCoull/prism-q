@@ -15,18 +15,11 @@
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 
-A performance oriented quantum circuit simulator written in Rust.
+A quantum circuit simulator written in Rust attempting to run circuits quickly.
 
-## Highlights
-
-- **simulation backends** with automatic selection based on circuit structure
-- **OpenQASM 3.0** parser with backward-compatible 2.0 support
-- **Gate modifiers** — `inv @`, `ctrl @`, `pow(k) @` with arbitrary chaining
-- **SIMD-optimized kernels** — AVX2, FMA, and BMI2 with runtime feature detection
-- **Seven-stage fusion pipeline** — gate cancellation, 1q/2q fusion, commutation-aware reordering, multi-gate batching, controlled-phase batching with PEXT lookup tables
-- **Shot-based sampling** with deterministic or random seeding
-- **Rayon parallelism** at 14+ qubits with auto-tuned chunking
-- **Subsystem decomposition** — independent qubit groups simulated in parallel and merged via Kronecker product
+Automatic dispatch across multiple simulation strategies picks the engine that best
+fits each circuit's structure. CPU kernels use SIMD with an optional CUDA path for the
+statevector backend. Input is OpenQASM 3.0, with backward-compatible 2.0 syntax.
 
 ## Quick start
 
@@ -68,10 +61,10 @@ use prism_q::{circuit::openqasm, run_with, BackendKind};
 
 let circuit = openqasm::parse(qasm).unwrap();
 
-// Auto picks the optimal backend based on circuit properties
+// Auto picks the optimal backend based on circuit properties.
 let auto   = run_with(BackendKind::Auto, &circuit, 42).unwrap();
 
-// Or choose explicitly
+// Or choose explicitly.
 let stab   = run_with(BackendKind::Stabilizer, &circuit, 42).unwrap();
 let mps    = run_with(BackendKind::Mps { max_bond_dim: 64 }, &circuit, 42).unwrap();
 let sparse = run_with(BackendKind::Sparse, &circuit, 42).unwrap();
@@ -90,7 +83,8 @@ let result = CircuitBuilder::new(3)
     .unwrap();
 ```
 
-`CircuitBuilder` supports fluent method chaining with 44 gate/control/execution methods. For lower-level access, use `Circuit` directly:
+`CircuitBuilder` chains gate, control, and execution methods. For lower-level access,
+use `Circuit` directly:
 
 ```rust
 use prism_q::{Circuit, sim, gates::Gate};
@@ -105,24 +99,34 @@ let result = sim::run(&c, 42).unwrap();
 ## Backends
 
 | Backend | Best for | Scaling | Key property |
-| ------- | -------- | ------- | ------------ |
-| **Statevector** | General circuits | O(2^n) | Full SIMD, tiled L2/L3 kernels |
-| **Stabilizer** | Clifford-only | O(n^2) | SIMD-optimized, handles 5000+ qubits |
+| --- | --- | --- | --- |
+| **Statevector** | General circuits | O(2^n) | Full SIMD, tiled L2/L3 kernels, optional CUDA path |
+| **Stabilizer** | Clifford-only | O(n^2) | SIMD-optimized, scales to thousands of qubits |
 | **Sparse** | Few live amplitudes | O(k) | HashMap with parallel measurement |
-| **MPS** | Low-entanglement / 1D | O(n chi^2) | Hybrid faer/Jacobi SVD |
+| **MPS** | Low-entanglement or 1D | O(n chi^2) | Hybrid faer / Jacobi SVD |
 | **Product State** | No entanglement | O(n) | Per-qubit, instant |
 | **Tensor Network** | Low treewidth | Contraction-dependent | Greedy min-size heuristic |
 | **Factored** | Partial entanglement | Dynamic | Tracks independent sub-states |
 
-`BackendKind::Auto` selects at dispatch time: non-entangling circuits go to Product State, all-Clifford to Stabilizer, large circuits (>28q) to MPS, and everything else to Statevector.
+`BackendKind::Auto` selects at dispatch time. Non-entangling circuits go to Product
+State, all-Clifford circuits go to Stabilizer, large circuits fall through to MPS with
+bond dimension 256 once they exceed the statevector memory budget, and everything else
+runs on Statevector. The memory budget is dynamic, derived from available RAM at
+dispatch time, and can be overridden with `PRISM_MAX_SV_QUBITS`.
 
-## Gates & OpenQASM support
+## Gates and OpenQASM support
 
-15 single-qubit gates, 4 two-qubit gates, 6 controlled variants, 2 multi-controlled gates, 8 decomposed multi-instruction gates, and 3 IBM legacy gates — plus `inv @`, `ctrl @`, `pow(k) @` modifiers with arbitrary chaining and user-defined `gate` definitions.
+Covers the standard OpenQASM `stdgates.inc` set, common controlled and multi-controlled
+variants, decomposed multi-instruction gates, and IBM legacy u1/u2/u3 syntax. Modifiers
+`inv @`, `ctrl @`, `pow(k) @` chain arbitrarily, and user-defined `gate` declarations
+are supported.
 
-The complete list of supported gate keywords, language features, and modifiers is defined in the parser at [`src/circuit/openqasm.rs`](src/circuit/openqasm.rs) (see `resolve_gate()` and `resolve_decomposed_gate()`). Smoke tests in [`tests/smoke_openqasm.rs`](tests/smoke_openqasm.rs) exercise each feature end-to-end.
+The authoritative list of supported gate keywords, language features, and modifiers
+lives in the parser at [`src/circuit/openqasm.rs`](src/circuit/openqasm.rs). See
+`resolve_gate()` and `resolve_decomposed_gate()`. Smoke tests in
+[`tests/smoke_openqasm.rs`](tests/smoke_openqasm.rs) exercise each feature end to end.
 
-## Build & test
+## Build and test
 
 ```bash
 cargo build --release
@@ -132,56 +136,82 @@ cargo fmt --check
 cargo doc --no-deps --all-features
 ```
 
-## Parallelism
-
-Rayon threading kicks in at 14+ qubits:
+For Rayon parallelism on larger circuits:
 
 ```bash
 cargo build --release --features parallel
 ```
 
-Defaults to logical core count. Set `RAYON_NUM_THREADS` to override.
+Thread count defaults to logical cores. Set `RAYON_NUM_THREADS` to override.
+
+## GPU backend (optional)
+
+The `gpu` feature enables a CUDA statevector path.
+
+```bash
+cargo build --release --features "parallel gpu"
+cargo test  --features "parallel gpu" --test golden_gpu
+```
+
+Requires the CUDA toolkit (12.x or newer) and a CUDA-capable device. PTX is compiled at
+runtime via NVRTC against the device's compute capability. Every `Gate` variant is
+covered by a dedicated kernel, including batched kernels for `BatchPhase`, `BatchRzz`,
+`DiagonalBatch`, and both diagonal and non-diagonal `MultiFused`. Golden tests in
+[`tests/golden_gpu.rs`](tests/golden_gpu.rs) verify amplitude equivalence against the
+CPU statevector within 1e-10.
+
+The backend-level crossover between CPU and GPU is still in progress, so
+`BackendKind::Auto` does not yet route to GPU. Opt in explicitly:
+
+```rust
+use prism_q::{gpu::GpuContext, StatevectorBackend};
+
+let ctx = GpuContext::new(0)?;
+let mut backend = StatevectorBackend::new(42).with_gpu(ctx);
+```
+
+See [`docs/architecture.md`](docs/architecture.md) for the kernel design and crossover
+analysis.
 
 ## Coverage
 
 Requires `rustup component add llvm-tools-preview` and `cargo install cargo-llvm-cov`.
 
 ```bash
-cargo llvm-cov --all-features                     # terminal summary
-cargo llvm-cov --all-features --html --open       # browseable HTML report
+cargo llvm-cov --all-features                # terminal summary
+cargo llvm-cov --all-features --html --open  # browseable HTML report
 ```
 
-CI generates coverage on every push/PR and updates the badge automatically.
+CI generates coverage on every push and PR, and updates the badge automatically.
 
 ## Benchmarks
 
 ```bash
-# full suite
-cargo bench --bench circuits --features parallel
-
-# gate-level microbenchmarks
-cargo bench --bench bench_driver --features parallel
-
-# quick smoke test (fewer iterations)
-cargo bench --features "parallel,bench-fast"
+cargo bench --bench circuits     --features parallel   # circuit macrobenchmarks
+cargo bench --bench bench_driver --features parallel   # gate microbenchmarks
+cargo bench --features "parallel,bench-fast"           # quick smoke test
 ```
+
+Always use `--features parallel`. Baselines were taken with Rayon enabled. Never run
+two `cargo bench` invocations at the same time on the same machine. Rayon thread pools
+fight for cores and produce large swings in results.
 
 ### Regression checks
 
 ```bash
-# save baseline
+# Save a baseline.
 cargo bench --features parallel
 ./scripts/bench_check.sh save --name "before"         # unix
 .\scripts\bench_check.ps1 save -Name "before"         # windows
 
-# make changes, bench again
+# Make changes, bench again.
 cargo bench --features parallel
 
-# compare (exits 1 on regression)
+# Compare (exits 1 on regression).
 ./scripts/bench_check.sh compare --baseline "before"
 .\scripts\bench_check.ps1 compare -Baseline "before"
 
-# markdown table for PRs
+# Markdown table for PRs.
 ./scripts/bench_check.sh table --baseline "before"
 .\scripts\bench_check.ps1 table -Baseline "before"
 ```
@@ -191,19 +221,29 @@ cargo bench --features parallel
 Needs `cargo install flamegraph`:
 
 ```bash
-./scripts/flamegraph.sh "qft_textbook/16"             # unix
+./scripts/flamegraph.sh "qft_textbook/16"              # unix
 .\scripts\flamegraph.ps1 "qft_textbook/16"             # windows
 ```
 
-SVGs go to `bench_results/` (gitignored).
+SVGs land in `bench_results/` (gitignored).
 
 ## Roadmap
 
-- **Expanded OpenQASM 3.0** — `reset` instruction, `for` loop unrolling, `def` subroutines
-- **Expectation values** — `<psi|O|psi>` for Pauli strings (VQE/QAOA support)
-- **Density matrix backend** — mixed-state simulation for noise and decoherence modeling
-- **GPU acceleration** — CUDA/Vulkan compute backend for large qubit counts
+- Expanded OpenQASM 3.0: `reset` instruction, `for` loop unrolling, `def` subroutines.
+- Expectation values: `<psi|O|psi>` for Pauli strings (VQE and QAOA).
+- Density matrix backend: mixed-state simulation for noise and decoherence modeling.
+- GPU auto-dispatch: size-aware crossover so `BackendKind::Auto` can route to GPU when
+  it wins. Blocked on reconciling `run_decomposed` with the GPU entry point.
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for the full picture — layered design, backend trait contract, SIMD strategy, and how to add a new backend.
+See [`docs/architecture.md`](docs/architecture.md) for the full picture: layered design,
+backend trait contract, SIMD strategy, fusion pipeline, compiled samplers, and how to
+add a new backend.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build, test, and benchmark workflow.
+The pull request template at
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) captures the
+required checklist.

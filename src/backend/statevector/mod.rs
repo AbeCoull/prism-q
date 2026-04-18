@@ -37,7 +37,7 @@
 //! (`negate_slice`, `swap_slices`, `norm_sqr_sum`, `zero_slice`)
 //! that dispatch to AVX2 implementations when available.
 
-mod kernels;
+pub(crate) mod kernels;
 #[cfg(test)]
 mod tests;
 
@@ -152,13 +152,13 @@ impl StatevectorBackend {
             self.gpu_state.is_some(),
             "apply_gpu called without gpu_state (callers must check self.gpu_state.is_some() first)"
         );
-        // TODO(gpu-crossover): dispatch here is unconditional — every instruction routes to
-        // GPU when `gpu_state` is Some. This is wrong for small states that fit in L3 and
-        // for post-fusion instructions (MultiFused / BatchPhase) where the CPU path runs
-        // the whole batch in a single tiled pass while the GPU path currently launches one
-        // kernel per sub-gate. Until a crossover heuristic (or batched GPU fused kernels)
-        // lands, users opting into `with_gpu()` on small or heavily-fused workloads can
-        // see regressions versus plain CPU.
+        // GPU dispatch is unconditional here: every instruction routes to GPU when
+        // `gpu_state` is Some. Two known caveats:
+        //   1. Multi2q launches one kernel per sub-gate (rare in practice).
+        //   2. sim::run_with's run_decomposed path is CPU-only, so circuits whose
+        //      qubit graph splits into independent blocks run larger on GPU than
+        //      on CPU. A dispatch-level crossover that honors decomposition (or
+        //      routes small circuits back to CPU) is future work.
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate_gpu(gate, targets),
             Instruction::Measure {
@@ -183,7 +183,6 @@ impl StatevectorBackend {
 
     #[cfg(feature = "gpu")]
     fn dispatch_gate_gpu(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
-        use crate::gates::DiagEntry;
         use crate::gpu::kernels::dense as k;
 
         let gpu = self
@@ -216,44 +215,16 @@ impl StatevectorBackend {
             }
             Gate::BatchPhase(data) => {
                 let control = targets[0];
-                for &(tgt, phase) in &data.phases {
-                    k::launch_apply_cu_phase(&ctx, gpu, control, tgt, phase)?;
-                }
-                Ok(())
+                k::launch_apply_batch_phase(&ctx, gpu, control, &data.phases)
             }
-            Gate::BatchRzz(data) => {
-                for &(q0, q1, theta) in &data.edges {
-                    k::launch_apply_rzz(&ctx, gpu, q0, q1, theta)?;
-                }
-                Ok(())
-            }
-            Gate::DiagonalBatch(data) => {
-                for entry in &data.entries {
-                    match *entry {
-                        DiagEntry::Phase1q { qubit, d0, d1 } => {
-                            k::launch_apply_diagonal_1q(&ctx, gpu, qubit, d0, d1)?;
-                        }
-                        DiagEntry::Phase2q { q0, q1, phase } => {
-                            k::launch_apply_cu_phase(&ctx, gpu, q0, q1, phase)?;
-                        }
-                        DiagEntry::Parity2q { q0, q1, same, diff } => {
-                            k::launch_apply_parity_phase(&ctx, gpu, q0, q1, same, diff)?;
-                        }
-                    }
-                }
-                Ok(())
-            }
+            Gate::BatchRzz(data) => k::launch_apply_batch_rzz(&ctx, gpu, &data.edges),
+            Gate::DiagonalBatch(data) => k::launch_apply_diagonal_batch(&ctx, gpu, &data.entries),
             Gate::MultiFused(data) => {
                 if data.all_diagonal {
-                    for &(tgt, mat) in &data.gates {
-                        k::launch_apply_diagonal_1q(&ctx, gpu, tgt, mat[0][0], mat[1][1])?;
-                    }
+                    k::launch_apply_multi_fused_diagonal(&ctx, gpu, &data.gates)
                 } else {
-                    for &(tgt, mat) in &data.gates {
-                        k::launch_apply_gate_1q(&ctx, gpu, tgt, mat)?;
-                    }
+                    k::launch_apply_multi_fused_nondiag(&ctx, gpu, &data.gates)
                 }
-                Ok(())
             }
             Gate::Fused2q(mat) => k::launch_apply_fused_2q(&ctx, gpu, targets[0], targets[1], mat),
             Gate::Multi2q(data) => {

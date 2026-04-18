@@ -3,9 +3,9 @@
 
 pub(crate) mod dense;
 
-pub(crate) use dense::KERNEL_SOURCE;
+pub(crate) use dense::kernel_source;
 
-/// Every kernel entry point that appears in `KERNEL_SOURCE`.
+/// Every kernel entry point that appears in the materialised PTX source.
 ///
 /// `GpuDevice::new` pre-resolves each name once so gate dispatch does not pay the
 /// driver-lookup cost per launch.
@@ -26,4 +26,9 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "measure_collapse",
     "compute_probabilities",
     "scale_state",
+    "apply_multi_fused_diagonal",
+    "apply_batch_phase",
+    "apply_batch_rzz",
+    "apply_diagonal_batch",
+    "apply_multi_fused_tiled",
 ];

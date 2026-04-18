@@ -9,7 +9,7 @@ use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 
 use crate::error::{PrismError, Result};
 
-use super::kernels::{KERNEL_NAMES, KERNEL_SOURCE};
+use super::kernels::{kernel_source, KERNEL_NAMES};
 
 /// Handle to a CUDA-capable device.
 ///
@@ -45,12 +45,12 @@ impl GpuDevice {
             arch: Some(arch),
             ..Default::default()
         };
-        let ptx = compile_ptx_with_opts(KERNEL_SOURCE, opts).map_err(|e| {
-            PrismError::BackendUnsupported {
+        let source = kernel_source();
+        let ptx =
+            compile_ptx_with_opts(&source, opts).map_err(|e| PrismError::BackendUnsupported {
                 backend: "gpu".to_string(),
                 operation: format!("PTX compilation (arch={arch}): {e}"),
-            }
-        })?;
+            })?;
         let module = context
             .load_module(ptx)
             .map_err(|e| Self::driver_err("load_module", e))?;

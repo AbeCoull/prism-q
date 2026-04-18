@@ -402,6 +402,182 @@ fn reset_to_zero() {
 // ============================================================================
 
 #[test]
+fn diagonal_batch_14q_mixed_entries_matches_cpu() {
+    // Drive a mixed DiagonalBatch (all three DiagEntry kinds across overlapping qubits)
+    // through the batched GPU kernel at a size that forces real DRAM passes.
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 14;
+    let mut insts = vec![];
+    for q in 0..n {
+        insts.push(g(Gate::H, &[q]));
+    }
+    let entries = vec![
+        DiagEntry::Phase1q {
+            qubit: 0,
+            d0: Complex64::from_polar(1.0, 0.3),
+            d1: Complex64::from_polar(1.0, -0.7),
+        },
+        DiagEntry::Phase1q {
+            qubit: 5,
+            d0: Complex64::from_polar(1.0, 1.1),
+            d1: Complex64::from_polar(1.0, -0.4),
+        },
+        DiagEntry::Phase2q {
+            q0: 1,
+            q1: 2,
+            phase: Complex64::from_polar(1.0, 0.8),
+        },
+        DiagEntry::Parity2q {
+            q0: 3,
+            q1: 7,
+            same: Complex64::from_polar(1.0, 0.2),
+            diff: Complex64::from_polar(1.0, -1.3),
+        },
+    ];
+    insts.push(g(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
+        &(0..8).collect::<Vec<_>>(),
+    ));
+    f.compare(n, &insts);
+}
+
+#[test]
+fn batch_rzz_14q_qaoa_matches_cpu() {
+    // QAOA emits `Gate::BatchRzz` once fusion groups consecutive Rzz gates. At 14q
+    // (the MIN_QUBITS_FOR_BATCH_RZZ threshold), the batched GPU kernel must match the
+    // CPU LUT kernel.
+    let Some(f) = Fixture::try_new() else { return };
+    let circuit = prism_q::circuits::qaoa_circuit(14, 2, 42);
+
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(14, 0).unwrap();
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(14, 0).unwrap();
+    for inst in &circuit.instructions {
+        cpu.apply(inst).unwrap();
+        gpu.apply(inst).unwrap();
+    }
+    let cpu_sv = cpu.export_statevector().unwrap();
+    let gpu_sv = gpu.export_statevector().unwrap();
+    let eps = 1e-10;
+    for (i, (c, g)) in cpu_sv.iter().zip(gpu_sv.iter()).enumerate() {
+        let diff = (c - g).norm();
+        assert!(
+            diff < eps,
+            "qaoa_14q mismatch at {i}: cpu={c:?} gpu={g:?} |diff|={diff}"
+        );
+    }
+}
+
+#[test]
+fn batch_phase_16q_matches_cpu() {
+    // QFT at 16q exercises the `fuse_controlled_phases` pass which emits
+    // `Gate::BatchPhase`. The batched GPU kernel must match the CPU tiled kernel
+    // within tolerance. The test drives through `sim::run_with` so fusion fires
+    // normally, then compares probabilities between plain statevector and GPU statevector.
+    let Some(f) = Fixture::try_new() else { return };
+
+    let circuit = prism_q::circuits::qft_circuit(16);
+
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(16, 0).unwrap();
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(16, 0).unwrap();
+    for inst in &circuit.instructions {
+        cpu.apply(inst).unwrap();
+        gpu.apply(inst).unwrap();
+    }
+    let cpu_sv = cpu.export_statevector().unwrap();
+    let gpu_sv = gpu.export_statevector().unwrap();
+    let eps = 1e-10; // looser than default 1e-12 for 16q × ~130 gates
+    for (i, (c, g)) in cpu_sv.iter().zip(gpu_sv.iter()).enumerate() {
+        let diff = (c - g).norm();
+        assert!(
+            diff < eps,
+            "qft_16q mismatch at {i}: cpu={c:?} gpu={g:?} |diff|={diff}"
+        );
+    }
+}
+
+#[test]
+fn multi_fused_nondiag_tiled_matches_cpu() {
+    // Exercise the tiled non-diagonal MultiFused kernel with a mix of low-target gates
+    // (go through shared memory) and high-target gates (fall back to per-gate launches).
+    // 14 qubits: TILE_Q=10 so targets 0..9 are tile-local, targets 10..13 are external.
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 14;
+    let mat_h = [
+        [
+            Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0),
+            Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0),
+        ],
+        [
+            Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0),
+            Complex64::new(-std::f64::consts::FRAC_1_SQRT_2, 0.0),
+        ],
+    ];
+    let mat_ry = [
+        [Complex64::new(0.8, 0.0), Complex64::new(-0.6, 0.0)],
+        [Complex64::new(0.6, 0.0), Complex64::new(0.8, 0.0)],
+    ];
+    // Mix tile-local (targets 0..9) and external (targets 10..13).
+    let gates: Vec<(usize, [[Complex64; 2]; 2])> = vec![
+        (0, mat_h),
+        (3, mat_ry),
+        (5, mat_h),
+        (7, mat_ry),
+        (9, mat_h), // boundary of tile (TILE_Q=10, so target 9 is the highest tile-local)
+        (10, mat_ry),
+        (12, mat_h),
+        (13, mat_ry),
+    ];
+
+    let mut insts = vec![];
+    for q in 0..n {
+        insts.push(g(Gate::H, &[q]));
+    }
+    insts.push(g(
+        Gate::MultiFused(Box::new(MultiFusedData {
+            gates,
+            all_diagonal: false,
+        })),
+        &(0..8).collect::<Vec<_>>(),
+    ));
+    f.compare(n, &insts);
+}
+
+#[test]
+fn multi_fused_diagonal_batched_matches_cpu() {
+    // Constructs a MultiFused of 8 diagonal 1q gates on 14 qubits (above
+    // MIN_QUBITS_FOR_MULTI_FUSION so the batched path is the one being exercised) and
+    // proves the single-launch batched GPU kernel matches the CPU tiled kernel.
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 14;
+    let gates: Vec<(usize, [[Complex64; 2]; 2])> = (0..8)
+        .map(|i| {
+            let q = i;
+            let phase_0 = Complex64::from_polar(1.0, 0.1 * (i as f64 + 1.0));
+            let phase_1 = Complex64::from_polar(1.0, -0.07 * (i as f64 + 3.0));
+            let z = Complex64::new(0.0, 0.0);
+            (q, [[phase_0, z], [z, phase_1]])
+        })
+        .collect();
+
+    let mut insts = vec![];
+    for q in 0..n {
+        insts.push(g(Gate::H, &[q]));
+    }
+    insts.push(g(
+        Gate::MultiFused(Box::new(MultiFusedData {
+            gates: gates.clone(),
+            all_diagonal: true,
+        })),
+        &(0..8).collect::<Vec<_>>(),
+    ));
+    f.compare(n, &insts);
+}
+
+#[test]
 fn probabilities_match_cpu_on_random_circuit() {
     let Some(f) = Fixture::try_new() else { return };
     let circuit = prism_q::circuits::random_circuit(6, 30, 42);

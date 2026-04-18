@@ -37,31 +37,31 @@ const fn max_target_for_tile(tile_size: usize) -> usize {
     t - 1
 }
 
-const BATCH_PHASE_GROUP_SIZE: usize = 10;
-const BATCH_PHASE_TABLE_SIZE: usize = 1024;
-const MAX_BATCH_PHASE_GROUPS: usize = 4;
+pub(crate) const BATCH_PHASE_GROUP_SIZE: usize = 10;
+pub(crate) const BATCH_PHASE_TABLE_SIZE: usize = 1024;
+pub(crate) const MAX_BATCH_PHASE_GROUPS: usize = 4;
 
-const BATCH_RZZ_GROUP_SIZE: usize = 8;
-const BATCH_RZZ_TABLE_SIZE: usize = 256;
-const MAX_BATCH_RZZ_GROUPS: usize = 4;
+pub(crate) const BATCH_RZZ_GROUP_SIZE: usize = 8;
+pub(crate) const BATCH_RZZ_TABLE_SIZE: usize = 256;
+pub(crate) const MAX_BATCH_RZZ_GROUPS: usize = 4;
 #[cfg(target_arch = "x86_64")]
 const BATCH_RZZ_BMI2_MAX_UNIQUE: usize = 10;
 #[cfg(target_arch = "x86_64")]
 const BATCH_RZZ_BMI2_TABLE_SIZE: usize = 1024;
 
-const DIAG_BATCH_MAX_QUBITS_PER_GROUP: usize = 10;
-const DIAG_BATCH_TABLE_SIZE: usize = 1024; // 2^10
-const MAX_DIAG_BATCH_GROUPS: usize = 4;
+pub(crate) const DIAG_BATCH_MAX_QUBITS_PER_GROUP: usize = 10;
+pub(crate) const DIAG_BATCH_TABLE_SIZE: usize = 1024; // 2^10
+pub(crate) const MAX_DIAG_BATCH_GROUPS: usize = 4;
 
 #[derive(Clone, Copy)]
-struct BatchRzzGroup {
-    table: [Complex64; BATCH_RZZ_TABLE_SIZE],
-    q0s: [usize; BATCH_RZZ_GROUP_SIZE],
-    q1s: [usize; BATCH_RZZ_GROUP_SIZE],
-    len: usize,
+pub(crate) struct BatchRzzGroup {
+    pub(crate) table: [Complex64; BATCH_RZZ_TABLE_SIZE],
+    pub(crate) q0s: [usize; BATCH_RZZ_GROUP_SIZE],
+    pub(crate) q1s: [usize; BATCH_RZZ_GROUP_SIZE],
+    pub(crate) len: usize,
 }
 
-fn build_batch_rzz_tables(
+pub(crate) fn build_batch_rzz_tables(
     edges: &[(usize, usize, f64)],
     groups: &mut [BatchRzzGroup; MAX_BATCH_RZZ_GROUPS],
 ) -> usize {
@@ -207,11 +207,11 @@ unsafe fn batch_rzz_tile_bmi2(
 }
 
 #[derive(Clone, Copy)]
-struct BatchPhaseGroup {
-    table: [Complex64; BATCH_PHASE_TABLE_SIZE],
-    shifts: [usize; BATCH_PHASE_GROUP_SIZE],
-    len: usize,
-    pext_mask: u64,
+pub(crate) struct BatchPhaseGroup {
+    pub(crate) table: [Complex64; BATCH_PHASE_TABLE_SIZE],
+    pub(crate) shifts: [usize; BATCH_PHASE_GROUP_SIZE],
+    pub(crate) len: usize,
+    pub(crate) pext_mask: u64,
 }
 
 /// Build lookup tables for batched controlled-phase application.
@@ -219,7 +219,7 @@ struct BatchPhaseGroup {
 /// Partitions `phases` into groups of up to 10. For each group, builds a
 /// 1024-entry table mapping every combination of target-bit patterns to the
 /// combined phase. Returns the number of groups filled.
-fn build_batch_phase_tables(
+pub(crate) fn build_batch_phase_tables(
     phases: &[(usize, Complex64)],
     groups: &mut [BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS],
 ) -> usize {
@@ -265,6 +265,138 @@ fn extract_bits(idx: usize, shifts: &[usize; BATCH_PHASE_GROUP_SIZE], len: usize
         bits |= ((idx >> shift) & 1) << j;
     }
     bits
+}
+
+/// Pre-built LUT data for `apply_diagonal_batch`.
+///
+/// Returned by [`build_diagonal_batch_tables`]. The statevector backend consumes this
+/// directly; the GPU backend uploads the tables + per-group metadata to the device and
+/// launches a batched kernel.
+pub(crate) struct DiagBatchTables {
+    pub(crate) tables: [[Complex64; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
+    pub(crate) unique_qubits: SmallVec<[usize; 32]>,
+    pub(crate) group_sizes: [usize; MAX_DIAG_BATCH_GROUPS],
+    /// Per-group PEXT masks used by the x86_64 BMI2 CPU path only. The GPU path
+    /// rebuilds the equivalent `group_shifts` array from `unique_qubits + group_sizes`
+    /// because PTX has no PEXT; non-x86_64 CPU builds don't use this either. Kept
+    /// populated regardless (the fill is trivial) so the struct has one layout.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    pub(crate) group_pext_masks: [u64; MAX_DIAG_BATCH_GROUPS],
+    pub(crate) num_groups: usize,
+}
+
+/// Group `entries` by qubit affinity and build per-group phase LUTs.
+///
+/// Returns `None` when the grouping requires more than `MAX_DIAG_BATCH_GROUPS` groups, or
+/// when a 2-qubit entry spans two groups. Both cases need the per-element fallback path.
+/// Returns `Some` with `num_groups == 0` when `entries` is empty (no-op).
+pub(crate) fn build_diagonal_batch_tables(entries: &[DiagEntry]) -> Option<DiagBatchTables> {
+    let mut unique_qubits = SmallVec::<[usize; 32]>::new();
+    let add_qubit = |q: usize, uq: &mut SmallVec<[usize; 32]>| {
+        if !uq.contains(&q) {
+            uq.push(q);
+        }
+    };
+    for e in entries {
+        match e {
+            DiagEntry::Phase1q { qubit, .. } => add_qubit(*qubit, &mut unique_qubits),
+            DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                add_qubit(*q0, &mut unique_qubits);
+                add_qubit(*q1, &mut unique_qubits);
+            }
+        }
+    }
+    unique_qubits.sort_unstable();
+    let num_unique = unique_qubits.len();
+
+    let one = Complex64::new(1.0, 0.0);
+    let empty_tables = [[one; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS];
+
+    if num_unique == 0 {
+        return Some(DiagBatchTables {
+            tables: empty_tables,
+            unique_qubits,
+            group_sizes: [0; MAX_DIAG_BATCH_GROUPS],
+            group_pext_masks: [0; MAX_DIAG_BATCH_GROUPS],
+            num_groups: 0,
+        });
+    }
+
+    let num_groups = num_unique.div_ceil(DIAG_BATCH_MAX_QUBITS_PER_GROUP);
+    if num_groups > MAX_DIAG_BATCH_GROUPS {
+        return None;
+    }
+
+    let mut qubit_group = [0u8; 64];
+    let mut qubit_pos = [0u8; 64];
+    let mut group_sizes = [0usize; MAX_DIAG_BATCH_GROUPS];
+    let mut group_pext_masks = [0u64; MAX_DIAG_BATCH_GROUPS];
+    for (idx, &q) in unique_qubits.iter().enumerate() {
+        let g = idx / DIAG_BATCH_MAX_QUBITS_PER_GROUP;
+        let pos = idx % DIAG_BATCH_MAX_QUBITS_PER_GROUP;
+        qubit_group[q] = g as u8;
+        qubit_pos[q] = pos as u8;
+        group_sizes[g] = pos + 1;
+        group_pext_masks[g] |= 1u64 << q;
+    }
+
+    let mut tables = empty_tables;
+
+    for e in entries {
+        match e {
+            DiagEntry::Phase1q { qubit, d0, d1 } => {
+                let g = qubit_group[*qubit] as usize;
+                let p = qubit_pos[*qubit] as usize;
+                let k = group_sizes[g];
+                for (bits, entry) in tables[g][..1 << k].iter_mut().enumerate() {
+                    if (bits >> p) & 1 == 1 {
+                        *entry *= d1;
+                    } else {
+                        *entry *= d0;
+                    }
+                }
+            }
+            DiagEntry::Phase2q { q0, q1, phase } => {
+                let g0 = qubit_group[*q0] as usize;
+                let g1 = qubit_group[*q1] as usize;
+                let p0 = qubit_pos[*q0] as usize;
+                let p1 = qubit_pos[*q1] as usize;
+                if g0 != g1 {
+                    return None;
+                }
+                let g = g0;
+                let k = group_sizes[g];
+                for (bits, entry) in tables[g][..1 << k].iter_mut().enumerate() {
+                    if ((bits >> p0) & 1 == 1) && ((bits >> p1) & 1 == 1) {
+                        *entry *= phase;
+                    }
+                }
+            }
+            DiagEntry::Parity2q { q0, q1, same, diff } => {
+                let g0 = qubit_group[*q0] as usize;
+                let g1 = qubit_group[*q1] as usize;
+                let p0 = qubit_pos[*q0] as usize;
+                let p1 = qubit_pos[*q1] as usize;
+                if g0 != g1 {
+                    return None;
+                }
+                let g = g0;
+                let k = group_sizes[g];
+                for (bits, entry) in tables[g][..1 << k].iter_mut().enumerate() {
+                    let parity = ((bits >> p0) ^ (bits >> p1)) & 1;
+                    *entry *= if parity == 0 { *same } else { *diff };
+                }
+            }
+        }
+    }
+
+    Some(DiagBatchTables {
+        tables,
+        unique_qubits,
+        group_sizes,
+        group_pext_masks,
+        num_groups,
+    })
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1722,118 +1854,34 @@ impl StatevectorBackend {
     }
 
     pub(super) fn apply_diagonal_batch(&mut self, entries: &[DiagEntry]) {
-        let mut unique_qubits = SmallVec::<[usize; 32]>::new();
-        let add_qubit = |q: usize, uq: &mut SmallVec<[usize; 32]>| {
-            if !uq.contains(&q) {
-                uq.push(q);
-            }
-        };
-        for e in entries {
-            match e {
-                DiagEntry::Phase1q { qubit, .. } => add_qubit(*qubit, &mut unique_qubits),
-                DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
-                    add_qubit(*q0, &mut unique_qubits);
-                    add_qubit(*q1, &mut unique_qubits);
-                }
-            }
-        }
-        unique_qubits.sort_unstable();
-        let num_unique = unique_qubits.len();
-
-        if num_unique == 0 {
-            return;
-        }
-
-        let num_groups = num_unique.div_ceil(DIAG_BATCH_MAX_QUBITS_PER_GROUP);
-        if num_groups > MAX_DIAG_BATCH_GROUPS {
+        let Some(built) = build_diagonal_batch_tables(entries) else {
             self.apply_diagonal_batch_fallback(entries);
             return;
-        }
-
-        let mut qubit_group = [0u8; 64];
-        let mut qubit_pos = [0u8; 64];
-        let mut group_sizes = [0usize; MAX_DIAG_BATCH_GROUPS];
-        let mut group_pext_masks = [0u64; MAX_DIAG_BATCH_GROUPS];
-
-        for (idx, &q) in unique_qubits.iter().enumerate() {
-            let g = idx / DIAG_BATCH_MAX_QUBITS_PER_GROUP;
-            let pos = idx % DIAG_BATCH_MAX_QUBITS_PER_GROUP;
-            qubit_group[q] = g as u8;
-            qubit_pos[q] = pos as u8;
-            group_sizes[g] = pos + 1;
-            group_pext_masks[g] |= 1u64 << q;
-        }
-
-        let one = Complex64::new(1.0, 0.0);
-        let mut tables = [[one; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS];
-
-        for e in entries {
-            match e {
-                DiagEntry::Phase1q { qubit, d0, d1 } => {
-                    let g = qubit_group[*qubit] as usize;
-                    let p = qubit_pos[*qubit] as usize;
-                    let k = group_sizes[g];
-                    for (bits, entry) in tables[g][..1 << k].iter_mut().enumerate() {
-                        if (bits >> p) & 1 == 1 {
-                            *entry *= d1;
-                        } else {
-                            *entry *= d0;
-                        }
-                    }
-                }
-                DiagEntry::Phase2q { q0, q1, phase } => {
-                    let g0 = qubit_group[*q0] as usize;
-                    let g1 = qubit_group[*q1] as usize;
-                    let p0 = qubit_pos[*q0] as usize;
-                    let p1 = qubit_pos[*q1] as usize;
-                    if g0 == g1 {
-                        let g = g0;
-                        let k = group_sizes[g];
-                        for (bits, entry) in tables[g][..1 << k].iter_mut().enumerate() {
-                            if ((bits >> p0) & 1 == 1) && ((bits >> p1) & 1 == 1) {
-                                *entry *= phase;
-                            }
-                        }
-                    } else {
-                        self.apply_diagonal_batch_fallback(entries);
-                        return;
-                    }
-                }
-                DiagEntry::Parity2q { q0, q1, same, diff } => {
-                    let g0 = qubit_group[*q0] as usize;
-                    let g1 = qubit_group[*q1] as usize;
-                    let p0 = qubit_pos[*q0] as usize;
-                    let p1 = qubit_pos[*q1] as usize;
-                    if g0 == g1 {
-                        let g = g0;
-                        let k = group_sizes[g];
-                        for (bits, entry) in tables[g][..1 << k].iter_mut().enumerate() {
-                            let parity = ((bits >> p0) ^ (bits >> p1)) & 1;
-                            *entry *= if parity == 0 { *same } else { *diff };
-                        }
-                    } else {
-                        self.apply_diagonal_batch_fallback(entries);
-                        return;
-                    }
-                }
-            }
+        };
+        if built.num_groups == 0 {
+            return;
         }
 
         #[cfg(target_arch = "x86_64")]
         if simd::has_bmi2() && simd::has_fma() {
             // SAFETY: has_bmi2() + has_fma() confirmed above
             unsafe {
-                apply_diagonal_batch_bmi2(&mut self.state, &tables, &group_pext_masks, num_groups);
+                apply_diagonal_batch_bmi2(
+                    &mut self.state,
+                    &built.tables,
+                    &built.group_pext_masks,
+                    built.num_groups,
+                );
             }
             return;
         }
 
         apply_diagonal_batch_scalar(
             &mut self.state,
-            &tables,
-            &unique_qubits,
-            &group_sizes,
-            num_groups,
+            &built.tables,
+            &built.unique_qubits,
+            &built.group_sizes,
+            built.num_groups,
         );
     }
 
@@ -1886,8 +1934,6 @@ unsafe fn apply_diagonal_batch_bmi2(
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[allow(dead_code)]
 fn apply_diagonal_batch_scalar(
     state: &mut [Complex64],
     tables: &[[Complex64; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
@@ -1898,39 +1944,8 @@ fn apply_diagonal_batch_scalar(
     let one = Complex64::new(1.0, 0.0);
     let mut group_shifts = [[0usize; DIAG_BATCH_MAX_QUBITS_PER_GROUP]; MAX_DIAG_BATCH_GROUPS];
     for (idx, &q) in unique_qubits.iter().enumerate() {
-        let g = idx / DIAG_BATCH_MAX_QUBITS_PER_GROUP;
-        let pos = idx % DIAG_BATCH_MAX_QUBITS_PER_GROUP;
-        group_shifts[g][pos] = q;
-    }
-
-    for (i, amp) in state.iter_mut().enumerate() {
-        let mut combined = one;
-        for g in 0..num_groups {
-            let k = group_sizes[g];
-            let mut bits = 0usize;
-            for (p, &shift) in group_shifts[g][..k].iter().enumerate() {
-                bits |= ((i >> shift) & 1) << p;
-            }
-            combined *= tables[g][bits];
-        }
-        *amp *= combined;
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-fn apply_diagonal_batch_scalar(
-    state: &mut [Complex64],
-    tables: &[[Complex64; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
-    unique_qubits: &SmallVec<[usize; 32]>,
-    group_sizes: &[usize; MAX_DIAG_BATCH_GROUPS],
-    num_groups: usize,
-) {
-    let one = Complex64::new(1.0, 0.0);
-    let mut group_shifts = [[0usize; DIAG_BATCH_MAX_QUBITS_PER_GROUP]; MAX_DIAG_BATCH_GROUPS];
-    for (idx, &q) in unique_qubits.iter().enumerate() {
-        let g = idx / DIAG_BATCH_MAX_QUBITS_PER_GROUP;
-        let pos = idx % DIAG_BATCH_MAX_QUBITS_PER_GROUP;
-        group_shifts[g][pos] = q;
+        group_shifts[idx / DIAG_BATCH_MAX_QUBITS_PER_GROUP]
+            [idx % DIAG_BATCH_MAX_QUBITS_PER_GROUP] = q;
     }
 
     for (i, amp) in state.iter_mut().enumerate() {

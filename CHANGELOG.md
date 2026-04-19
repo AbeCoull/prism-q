@@ -2,11 +2,24 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.7.0] - 2026-04-19
+
+### Documentation
+
+- Update docs and add a pull request template (#31)([13b381e](https://github.com/AbeCoull/prism-q/commit/13b381efd7da4556ca8ed84f3fbafb67a2dfffd7))
+
+### Features
+
+- **gpu:** Dispatch-level crossover and decomposition-aware routing (#32)([1c2627d](https://github.com/AbeCoull/prism-q/commit/1c2627d92c3ecdaca9d62da092f73f8b857292f7))
 ## [0.6.0] - 2026-04-18
 
 ### Features
 
 - **gpu:** Batched kernels for fused gate variants (#30)([02bb5fb](https://github.com/AbeCoull/prism-q/commit/02bb5fb15fe24024696210c93562eefb88ce717c))
+
+### Miscellaneous
+
+- **release:** 0.6.0([3b0df64](https://github.com/AbeCoull/prism-q/commit/3b0df64d62418cf90c330547ba3f610939736736))
 ## [0.5.0] - 2026-04-18
 
 ### Features

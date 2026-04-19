@@ -152,13 +152,15 @@ impl StatevectorBackend {
             self.gpu_state.is_some(),
             "apply_gpu called without gpu_state (callers must check self.gpu_state.is_some() first)"
         );
-        // GPU dispatch is unconditional here: every instruction routes to GPU when
-        // `gpu_state` is Some. Two known caveats:
-        //   1. Multi2q launches one kernel per sub-gate (rare in practice).
-        //   2. sim::run_with's run_decomposed path is CPU-only, so circuits whose
-        //      qubit graph splits into independent blocks run larger on GPU than
-        //      on CPU. A dispatch-level crossover that honors decomposition (or
-        //      routes small circuits back to CPU) is future work.
+        // Unconditional GPU dispatch: every instruction routes to a kernel once
+        // `gpu_state` is Some. This path is the explicit opt-in surface
+        // (`StatevectorBackend::with_gpu(ctx)`) and intentionally skips the
+        // dispatch-level crossover — users calling `with_gpu` directly are asking
+        // for kernel-level behavior. For size-aware crossover + decomposition-
+        // aware routing, enter via `sim::run_with(BackendKind::StatevectorGpu
+        // { context })`, which honors `gpu_min_qubits()` per sub-block.
+        //
+        // Caveat: Multi2q launches one kernel per sub-gate (rare in practice).
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate_gpu(gate, targets),
             Instruction::Measure {

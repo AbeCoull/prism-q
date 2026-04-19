@@ -8,6 +8,12 @@ use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
+
+#[cfg(feature = "gpu")]
+use crate::gpu::GpuContext;
+
 use super::{Probabilities, SimulationResult};
 
 pub(super) enum DispatchAction {
@@ -117,6 +123,32 @@ pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 128;
 
 pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 16;
 
+/// Minimum qubit count to route a sub-circuit to GPU when
+/// [`BackendKind::StatevectorGpu`] is selected.
+///
+/// Below this threshold the dispatch layer builds a plain host-side
+/// `StatevectorBackend` instead, keeping PCIe round-trips and kernel launch
+/// latency off the critical path for circuits that fit comfortably in L3.
+/// Empirically (GTX 1080 Ti, 2026-04-18), 10q random-depth-20 is 0.18x on
+/// GPU vs CPU while 14q is 9.37x. 14 is the lowest known-win point; users
+/// with faster GPUs or different workloads can override via the
+/// `PRISM_GPU_MIN_QUBITS` environment variable.
+#[cfg(feature = "gpu")]
+pub(super) const GPU_MIN_QUBITS_DEFAULT: usize = 14;
+
+#[cfg(feature = "gpu")]
+pub(super) fn gpu_min_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val) = std::env::var("PRISM_GPU_MIN_QUBITS") {
+            if let Ok(n) = val.parse::<usize>() {
+                return n;
+            }
+        }
+        GPU_MIN_QUBITS_DEFAULT
+    })
+}
+
 /// Automatically select the optimal backend based on circuit analysis.
 ///
 /// Decision tree:
@@ -133,15 +165,37 @@ pub enum BackendKind {
     Statevector,
     Stabilizer,
     Sparse,
-    Mps { max_bond_dim: usize },
+    Mps {
+        max_bond_dim: usize,
+    },
     ProductState,
     TensorNetwork,
     Factored,
     StabilizerRank,
     FilteredStabilizer,
     FactoredStabilizer,
-    StochasticPauli { num_samples: usize },
-    DeterministicPauli { epsilon: f64, max_terms: usize },
+    StochasticPauli {
+        num_samples: usize,
+    },
+    DeterministicPauli {
+        epsilon: f64,
+        max_terms: usize,
+    },
+    /// Statevector backed by a CUDA GPU execution context.
+    ///
+    /// Circuits (or decomposed sub-blocks) with fewer than 14 qubits
+    /// (tunable via `PRISM_GPU_MIN_QUBITS`) transparently fall back to the
+    /// host-side statevector path — small states do not survive PCIe and
+    /// launch-latency overhead. Larger circuits allocate a device-resident
+    /// state and route gate application through GPU kernels.
+    ///
+    /// Compose with [`crate::sim::run_with`] to get fusion + independent-
+    /// subsystem decomposition for free; each sub-block is evaluated against
+    /// the crossover independently.
+    #[cfg(feature = "gpu")]
+    StatevectorGpu {
+        context: Arc<GpuContext>,
+    },
 }
 
 pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
@@ -183,6 +237,23 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
         | BackendKind::DeterministicPauli { .. } => false,
         BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
         _ => true,
+    }
+}
+
+/// Build a `StatevectorBackend` configured for GPU execution if the circuit
+/// is large enough to clear the crossover, otherwise a plain host-side
+/// backend. Called from `select_dispatch` (which runs per sub-block after
+/// decomposition) so small blocks transparently stay on CPU.
+#[cfg(feature = "gpu")]
+fn statevector_gpu_with_crossover(
+    context: &Arc<GpuContext>,
+    circuit: &Circuit,
+    seed: u64,
+) -> StatevectorBackend {
+    if circuit.num_qubits >= gpu_min_qubits() {
+        StatevectorBackend::new(seed).with_gpu(context.clone())
+    } else {
+        StatevectorBackend::new(seed)
     }
 }
 
@@ -245,6 +316,10 @@ pub(super) fn select_dispatch(
                 max_terms: *max_terms,
             }
         }
+        #[cfg(feature = "gpu")]
+        BackendKind::StatevectorGpu { context } => DispatchAction::Backend(Box::new(
+            statevector_gpu_with_crossover(context, circuit, seed),
+        )),
     }
 }
 
@@ -341,4 +416,73 @@ pub(super) fn try_temporal_clifford(
         classical_bits: sv.classical_results().to_vec(),
         probabilities: probs,
     }))
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod gpu_crossover_tests {
+    use super::*;
+    use crate::gates::Gate;
+    use crate::sim::run_with;
+
+    fn stub_kind() -> BackendKind {
+        BackendKind::StatevectorGpu {
+            context: GpuContext::stub_for_tests(),
+        }
+    }
+
+    /// A 4q circuit is far below the default 14q threshold. If the dispatch
+    /// layer were to build a GPU backend anyway, `GpuState::new` on the stub
+    /// context would return `BackendUnsupported`. Success proves the
+    /// crossover in `select_dispatch` is routing small circuits to the host
+    /// path.
+    #[test]
+    fn small_circuit_routes_to_cpu() {
+        let mut circuit = Circuit::new(4, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::H, &[2]);
+        circuit.add_gate(Gate::Cx, &[2, 3]);
+
+        let result = run_with(stub_kind(), &circuit, 42)
+            .expect("stub context must not be touched for a 4q circuit");
+        let probs = result
+            .probabilities
+            .expect("probabilities missing")
+            .to_vec();
+
+        let mut expected = [0.0_f64; 16];
+        expected[0b0000] = 0.25;
+        expected[0b0011] = 0.25;
+        expected[0b1100] = 0.25;
+        expected[0b1111] = 0.25;
+        for (i, (p, e)) in probs.iter().zip(&expected).enumerate() {
+            assert!((p - e).abs() < 1e-10, "p[{i}] = {p}, expected {e}");
+        }
+    }
+
+    /// `independent_bell_pairs(8)` spans 16 qubits but decomposes into 8
+    /// independent 2q blocks. With `BackendKind::StatevectorGpu`, each
+    /// sub-block is below the 14q threshold and must route to CPU. If
+    /// decomposition failed to fire, the 16q monolithic path would attempt
+    /// `GpuState::new` through the stub and return `BackendUnsupported`.
+    /// Success here proves decomposition survives across the GPU dispatch.
+    #[test]
+    fn decomposable_16q_circuit_runs_per_block_on_cpu() {
+        let circuit = crate::circuits::independent_bell_pairs(8);
+        assert_eq!(circuit.num_qubits, 16);
+
+        let cpu = run_with(BackendKind::Statevector, &circuit, 42).expect("cpu baseline");
+        let gpu = run_with(stub_kind(), &circuit, 42).expect("stub must stay out of the way");
+
+        let cpu_p = cpu.probabilities.expect("cpu probs").to_vec();
+        let gpu_p = gpu.probabilities.expect("gpu probs").to_vec();
+        assert_eq!(cpu_p.len(), gpu_p.len());
+        for (i, (c, g)) in cpu_p.iter().zip(gpu_p.iter()).enumerate() {
+            assert!(
+                (c - g).abs() < 1e-10,
+                "prob[{i}] cpu={c}, gpu={g}, diff={}",
+                (c - g).abs()
+            );
+        }
+    }
 }

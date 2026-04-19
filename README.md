@@ -160,15 +160,21 @@ covered by a dedicated kernel, including batched kernels for `BatchPhase`, `Batc
 [`tests/golden_gpu.rs`](tests/golden_gpu.rs) verify amplitude equivalence against the
 CPU statevector within 1e-10.
 
-The backend-level crossover between CPU and GPU is still in progress, so
-`BackendKind::Auto` does not yet route to GPU. Opt in explicitly:
+`BackendKind::Auto` does not yet route to GPU. Opt in explicitly. The recommended
+entry point is `BackendKind::StatevectorGpu`, which inherits the fusion pipeline plus
+independent-subsystem decomposition and applies a size-aware crossover (default: GPU
+only for ≥14 qubit sub-circuits, overridable via `PRISM_GPU_MIN_QUBITS`):
 
 ```rust
-use prism_q::{gpu::GpuContext, StatevectorBackend};
+use prism_q::{gpu::GpuContext, run_with, BackendKind};
 
 let ctx = GpuContext::new(0)?;
-let mut backend = StatevectorBackend::new(42).with_gpu(ctx);
+let result = run_with(BackendKind::StatevectorGpu { context: ctx }, &circuit, 42)?;
 ```
+
+For kernel-level experiments where every gate must hit the device, use the low-level
+`StatevectorBackend::new(seed).with_gpu(ctx)` builder instead — this bypasses the
+dispatch crossover by design.
 
 See [`docs/architecture.md`](docs/architecture.md) for the kernel design and crossover
 analysis.
@@ -232,8 +238,9 @@ SVGs land in `bench_results/` (gitignored).
 - Expanded OpenQASM 3.0: `reset` instruction, `for` loop unrolling, `def` subroutines.
 - Expectation values: `<psi|O|psi>` for Pauli strings (VQE and QAOA).
 - Density matrix backend: mixed-state simulation for noise and decoherence modeling.
-- GPU auto-dispatch: size-aware crossover so `BackendKind::Auto` can route to GPU when
-  it wins. Blocked on reconciling `run_decomposed` with the GPU entry point.
+- GPU auto-dispatch: thread a GPU context into `BackendKind::Auto` so large circuits
+  route to GPU without an explicit `BackendKind::StatevectorGpu`. Crossover and
+  decomposition already work through the explicit variant.
 
 ## Architecture
 

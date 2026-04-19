@@ -227,10 +227,20 @@ Dynamic split-state simulation. Starts with n independent 1-qubit states, merges
 
 ## GPU backend (optional, `gpu` feature)
 
-CUDA statevector acceleration layered onto the primary backend. Opt in via
-`StatevectorBackend::new(seed).with_gpu(ctx)` where `ctx` is an `Arc<GpuContext>`. When a
-GPU context is attached, `Backend::init` allocates a device-resident state instead of a
-host `Vec<Complex64>` and every instruction routes to a CUDA kernel.
+CUDA statevector acceleration layered onto the primary backend. Two entry points:
+
+- **`BackendKind::StatevectorGpu { context }`** (recommended) — routes through
+  `sim::run_with`, so the circuit picks up fusion plus independent-subsystem
+  decomposition, and each sub-block consults `gpu_min_qubits()` (default 14,
+  `PRISM_GPU_MIN_QUBITS` env override) to decide between the GPU path and a host
+  statevector. Disconnected sub-circuits below the threshold run on CPU regardless of
+  total qubit count.
+- **`StatevectorBackend::new(seed).with_gpu(ctx)`** — direct opt-in. Every instruction
+  routes to a CUDA kernel once the context is attached; no crossover, no decomposition.
+  Use this for kernel-level benchmarks and targeted correctness tests.
+
+When a GPU context is attached, `Backend::init` allocates a device-resident state
+instead of a host `Vec<Complex64>` and every instruction routes to a CUDA kernel.
 
 **Module layout** (`src/gpu/`):
 
@@ -255,17 +265,20 @@ launches. `Multi2q` still launches once per sub-gate; rare in practice.
 `{{TILE_Q}}`. The `kernel_source()` function substitutes them at device construction from
 the Rust constants in `src/backend/statevector/kernels.rs`, keeping CPU and GPU in sync.
 
-**Correctness:** `tests/golden_gpu.rs` drives 19 cross-checks comparing GPU amplitudes
-against the CPU statevector within 1e-10. Covers every gate variant plus fusion paths.
+**Correctness:** `tests/golden_gpu.rs` drives 20 cross-checks comparing GPU amplitudes
+against the CPU statevector within 1e-10. Covers every gate variant, fusion paths, and
+the `BackendKind::StatevectorGpu` end-to-end dispatch at the crossover boundary.
 
 **Current limits:**
 
-- `BackendKind::Auto` does not yet dispatch to GPU. Opt in explicitly on
-  `StatevectorBackend`.
-- The GPU entry point does not honor `run_decomposed`, so circuits whose qubit graph
-  splits into independent blocks run at full size on device when dispatched through the
-  `prismq_runner` harness. Resolving this is the primary blocker before Auto dispatch
-  can add a GPU branch.
+- `BackendKind::Auto` does not yet dispatch to GPU. The `StatevectorGpu` variant is the
+  explicit opt-in; wiring a default GPU context into `Auto`.
+- Several fused launchers (`launch_apply_fused_2q`, `launch_apply_mcu`,
+  `launch_apply_mcu_phase`, `launch_apply_batch_phase`, `launch_apply_batch_rzz`,
+  `launch_apply_diagonal_batch`, `launch_apply_multi_fused_nondiag`) upload small
+  metadata tables per dispatch via `clone_htod`; the next launch-tax target.
+- `measure_prob_one` allocates a device partials buffer and reduces on the host every
+  call. Matters for measurement-heavy circuits.
 - Kernel design and crossover analysis live in the module docstrings on
   `src/gpu/kernels/dense.rs`. Cross-simulator comparison scripts are provided outside
   the public surface of the crate.

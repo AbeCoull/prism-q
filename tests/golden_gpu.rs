@@ -599,3 +599,41 @@ fn probabilities_match_cpu_on_random_circuit() {
         );
     }
 }
+
+// ============================================================================
+// BackendKind::StatevectorGpu end-to-end (real GPU required)
+// ============================================================================
+
+/// `run_with(BackendKind::StatevectorGpu)` on a non-decomposable random
+/// circuit at 14q (at the crossover threshold) must match CPU to within
+/// 1e-10. Exercises the dispatch → fusion → GPU kernel → probabilities path.
+#[test]
+fn statevector_gpu_run_with_matches_cpu_random() {
+    use prism_q::BackendKind;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let circuit = prism_q::circuits::random_circuit(14, 10, 0xDEAD_BEEF);
+
+    let cpu = prism_q::sim::run_with(BackendKind::Statevector, &circuit, 42)
+        .expect("cpu run_with failed");
+    let gpu = prism_q::sim::run_with(
+        BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        },
+        &circuit,
+        42,
+    )
+    .expect("gpu run_with failed");
+
+    let cpu_p = cpu.probabilities.expect("cpu probs missing").to_vec();
+    let gpu_p = gpu.probabilities.expect("gpu probs missing").to_vec();
+    assert_eq!(cpu_p.len(), gpu_p.len());
+    for (i, (c, g_)) in cpu_p.iter().zip(gpu_p.iter()).enumerate() {
+        assert!(
+            (c - g_).abs() < 1e-10,
+            "prob[{i}] cpu={c}, gpu={g_}, diff={}",
+            (c - g_).abs()
+        );
+    }
+}

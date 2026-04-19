@@ -61,6 +61,17 @@ fn g(gate: Gate, targets: &[usize]) -> Instruction {
     Instruction::Gate { gate, targets: tv }
 }
 
+fn assert_probs_match(cpu_p: &[f64], gpu_p: &[f64], eps: f64) {
+    assert_eq!(cpu_p.len(), gpu_p.len());
+    for (i, (c, g_)) in cpu_p.iter().zip(gpu_p.iter()).enumerate() {
+        assert!(
+            (c - g_).abs() < eps,
+            "prob[{i}] cpu={c}, gpu={g_}, diff={}",
+            (c - g_).abs()
+        );
+    }
+}
+
 // ============================================================================
 // Single-qubit kernels
 // ============================================================================
@@ -591,11 +602,72 @@ fn probabilities_match_cpu_on_random_circuit() {
     }
     let cpu_p = cpu.probabilities().unwrap();
     let gpu_p = gpu.probabilities().unwrap();
-    assert_eq!(cpu_p.len(), gpu_p.len());
-    for (i, (c, g_)) in cpu_p.iter().zip(gpu_p.iter()).enumerate() {
-        assert!(
-            (c - g_).abs() < EPS,
-            "prob[{i}] mismatch: cpu={c}, gpu={g_}"
-        );
+    assert_probs_match(&cpu_p, &gpu_p, EPS);
+}
+
+// ============================================================================
+// BackendKind::StatevectorGpu end-to-end (real GPU required)
+// ============================================================================
+
+/// `run_with(BackendKind::StatevectorGpu)` on a non-decomposable random
+/// circuit at 14q (at the crossover threshold) must match CPU to within
+/// 1e-10. Exercises the dispatch → fusion → GPU kernel → probabilities path.
+#[test]
+fn statevector_gpu_run_with_matches_cpu_random() {
+    use prism_q::BackendKind;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let circuit = prism_q::circuits::random_circuit(14, 10, 0xDEAD_BEEF);
+
+    let cpu = prism_q::sim::run_with(BackendKind::Statevector, &circuit, 42)
+        .expect("cpu run_with failed");
+    let gpu = prism_q::sim::run_with(
+        BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        },
+        &circuit,
+        42,
+    )
+    .expect("gpu run_with failed");
+
+    let cpu_p = cpu.probabilities.expect("cpu probs missing").to_vec();
+    let gpu_p = gpu.probabilities.expect("gpu probs missing").to_vec();
+    assert_probs_match(&cpu_p, &gpu_p, 1e-10);
+}
+
+/// Multi-shot sampling with a mid-circuit measurement takes the per-shot
+/// slow path, which reuses one GPU backend across shots (`Backend::reseed`
+/// plus `GpuState::reset` in place of a fresh device allocation per shot).
+/// Shot outcomes must match the host statevector shot-for-shot: both
+/// backends draw the same RNG stream for the same shot seed.
+#[test]
+fn statevector_gpu_run_shots_mid_measure_matches_cpu() {
+    use prism_q::circuit::Circuit;
+    use prism_q::BackendKind;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let mut circuit = Circuit::new(14, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 0..13 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_measure(1, 1);
+
+    let cpu = prism_q::sim::run_shots_with(BackendKind::Statevector, &circuit, 16, 42)
+        .expect("cpu shots failed");
+    let gpu = prism_q::sim::run_shots_with(
+        BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        },
+        &circuit,
+        16,
+        42,
+    )
+    .expect("gpu shots failed");
+
+    assert_eq!(cpu.shots, gpu.shots);
 }

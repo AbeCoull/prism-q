@@ -1,6 +1,9 @@
 # Build
 /target/
 
+# Rendered documentation site (built in CI)
+docs/book/
+
 # Profiling & benchmarks
 bench_results/
 benchmark_internal/
@@ -9,6 +12,16 @@ profile.json.gz
 flamegraph.svg
 perf.data
 perf.data.old
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+bindings/python/dist/
+bindings/python/uv.lock
+bindings/python/python/prism_q/*.pyd
+bindings/python/python/prism_q/*.so
+bindings/python/python/prism_q/*.dylib
 
 # Project tracking I use locally. No need to see how disorganized it is...
 TASK_TRACKER.md

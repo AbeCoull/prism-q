@@ -24,6 +24,14 @@ impl<T: DeviceRepr + ValidAsZeroBits> GpuBuffer<T> {
             .map_err(|e| driver_err("alloc_zeros", e))?;
         Ok(Self { slice })
     }
+
+    /// Zero every element of the allocation in place.
+    pub fn fill_zeros(&mut self, device: &GpuDevice) -> Result<()> {
+        let stream = device.stream()?;
+        stream
+            .memset_zeros(&mut self.slice)
+            .map_err(|e| driver_err("fill_zeros", e))
+    }
 }
 
 impl<T: DeviceRepr> GpuBuffer<T> {

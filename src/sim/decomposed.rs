@@ -29,6 +29,11 @@ fn run_blocks_maybe_par(
         let all_small = _components
             .iter()
             .all(|c| c.len() < MAX_BLOCK_QUBITS_FOR_PAR);
+        #[cfg(feature = "gpu")]
+        let all_small = all_small
+            && _components
+                .iter()
+                .all(|c| !super::dispatch::may_route_to_gpu(kind, c.len()));
         if all_small && k >= 2 {
             use rayon::prelude::*;
             crate::backend::init_thread_pool();

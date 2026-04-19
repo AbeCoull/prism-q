@@ -16,6 +16,8 @@ pub(crate) use decomposed::merge_probabilities;
 use decomposed::{
     run_decomposed, run_decomposed_prefused, should_decompose, MIN_DECOMPOSITION_QUBITS,
 };
+#[cfg(feature = "gpu")]
+use dispatch::may_route_to_gpu;
 pub use dispatch::BackendKind;
 use dispatch::{
     has_temporal_clifford_opportunity, select_backend, select_dispatch, supports_fused_for_kind,
@@ -768,9 +770,12 @@ pub fn run_shots_with(
     } else {
         let fused = crate::circuit::fusion::fuse_circuit(circuit, supports_fused);
 
+        let mut backend = select_backend(&kind, circuit, seed, has_partial_independence);
         for i in 0..num_shots {
             let shot_seed = seed.wrapping_add(i as u64);
-            let mut backend = select_backend(&kind, circuit, shot_seed, has_partial_independence);
+            if i > 0 && !backend.reseed(shot_seed) {
+                backend = select_backend(&kind, circuit, shot_seed, has_partial_independence);
+            }
             let result = execute_circuit(&mut *backend, &fused, &opts)?;
             shots.push(result.classical_bits);
         }
@@ -839,12 +844,18 @@ pub fn run_shots_with_noise(
         }
     }
 
+    #[cfg(feature = "gpu")]
+    let parallel_ok = !may_route_to_gpu(&kind, circuit.num_qubits);
+    #[cfg(not(feature = "gpu"))]
+    let parallel_ok = true;
+
     trajectory::run_trajectories(
         |s| select_backend(&kind, circuit, s, false),
         circuit,
         noise_model,
         num_shots,
         seed,
+        parallel_ok,
     )
 }
 

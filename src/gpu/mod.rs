@@ -113,6 +113,17 @@ impl GpuState {
         Ok(state)
     }
 
+    /// Reset the existing buffer to |0…0⟩ without reallocating.
+    ///
+    /// Multi-shot drivers call this between shots so the device allocation is
+    /// paid once per run instead of once per shot.
+    pub fn reset(&mut self) -> Result<()> {
+        let context = self.context.clone();
+        self.buffer.fill_zeros(context.device())?;
+        self.pending_norm = 1.0;
+        kernels::dense::launch_set_initial_state(&context, self)
+    }
+
     /// Number of qubits the buffer is sized for.
     pub fn num_qubits(&self) -> usize {
         self.num_qubits

@@ -139,6 +139,17 @@ pub trait Backend {
     /// Returns a slice indexed by classical bit number. `true` = measured |1⟩.
     fn classical_results(&self) -> &[bool];
 
+    /// Re-seed the backend's RNG for a fresh simulation run, returning `true`
+    /// when supported.
+    ///
+    /// Multi-shot drivers use this to reuse one backend instance (and its
+    /// state allocation) across shots instead of constructing a backend per
+    /// shot; [`init`](Backend::init) still resets the quantum state. Backends
+    /// that return `false` are reconstructed per shot.
+    fn reseed(&mut self, _seed: u64) -> bool {
+        false
+    }
+
     /// Compute the probability of each computational basis state.
     ///
     /// Returns a `Vec<f64>` of length 2^num_qubits. Not all backends can

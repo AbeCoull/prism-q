@@ -80,3 +80,8 @@ harness = false
 [[bench]]
 name = "bench_shots_perf"
 harness = false
+
+[[bench]]
+name = "bench_gpu"
+harness = false
+required-features = ["gpu"]

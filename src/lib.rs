@@ -82,3 +82,6 @@ pub use sim::{
     run_shots_with_noise, run_with, BackendKind, FactoredBlock, Probabilities, ShotsResult,
     SimulationResult,
 };
+
+#[cfg(feature = "gpu")]
+pub use sim::run_with_gpu;

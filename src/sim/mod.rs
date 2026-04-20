@@ -284,6 +284,32 @@ pub fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Simul
     run_with_internal(kind, circuit, seed, SimOptions::default())
 }
 
+/// Execute a circuit on the CUDA GPU statevector dispatch.
+///
+/// Wraps [`run_with`] with `BackendKind::StatevectorGpu { context }`. The
+/// dispatch still applies fusion, independent-subsystem decomposition, and
+/// the qubit-count crossover ([`crate::gpu::min_qubits`]); sub-circuits
+/// below threshold automatically run on the host-side statevector.
+///
+/// ```no_run
+/// # #[cfg(feature = "gpu")] {
+/// use prism_q::gpu::GpuContext;
+/// use prism_q::{run_with_gpu, Circuit};
+///
+/// let ctx = GpuContext::new(0).expect("no usable GPU");
+/// let circuit = Circuit::new(16, 0);
+/// let _result = run_with_gpu(&circuit, 42, ctx).unwrap();
+/// # }
+/// ```
+#[cfg(feature = "gpu")]
+pub fn run_with_gpu(
+    circuit: &Circuit,
+    seed: u64,
+    context: std::sync::Arc<crate::gpu::GpuContext>,
+) -> Result<SimulationResult> {
+    run_with(BackendKind::StatevectorGpu { context }, circuit, seed)
+}
+
 fn run_with_internal(
     kind: BackendKind,
     circuit: &Circuit,

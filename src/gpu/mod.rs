@@ -30,6 +30,38 @@ use crate::error::Result;
 pub use self::device::GpuDevice;
 pub use self::memory::GpuBuffer;
 
+/// Default minimum qubit count for routing a sub-circuit to GPU when
+/// [`crate::BackendKind::StatevectorGpu`] is selected.
+///
+/// Below this threshold the dispatch layer builds a plain host-side
+/// `StatevectorBackend` instead, keeping PCIe round-trips and kernel launch
+/// latency off the critical path for small circuits that fit in L3.
+/// Empirically measured at 14 on GTX 1080 Ti; override at runtime via the
+/// `PRISM_GPU_MIN_QUBITS` environment variable.
+pub const MIN_QUBITS_DEFAULT: usize = 14;
+
+/// Whether a CUDA device is present and usable in this process.
+///
+/// Safe to call without a [`GpuContext`] and without the `cudarc` dynamic
+/// library loaded. Returns `false` if detection fails for any reason.
+pub fn is_available() -> bool {
+    GpuContext::is_available()
+}
+
+/// Effective GPU crossover threshold. Reads `PRISM_GPU_MIN_QUBITS` once per
+/// process and caches the result.
+pub fn min_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val) = std::env::var("PRISM_GPU_MIN_QUBITS") {
+            if let Ok(n) = val.parse::<usize>() {
+                return n;
+            }
+        }
+        MIN_QUBITS_DEFAULT
+    })
+}
+
 /// Shared GPU execution context.
 ///
 /// Holds the device handle and compiled kernel module. Cheap to clone via `Arc`. Pass by
@@ -59,9 +91,39 @@ impl GpuContext {
         self.device.vram_bytes()
     }
 
+    /// Free VRAM currently available on the device bound to this context.
+    ///
+    /// Reflects allocations by all processes sharing the device, not only those
+    /// made through this `GpuContext`. Use this before allocating a large
+    /// statevector to avoid trial-and-error out-of-memory failures.
+    pub fn vram_available(&self) -> Result<usize> {
+        self.device.vram_available()
+    }
+
     /// Maximum qubit count for a dense Complex64 statevector on this device.
     pub fn max_qubits_for_statevector(&self) -> Result<usize> {
         self.device.max_qubits_for_statevector()
+    }
+
+    /// Whether the currently-available VRAM can hold a dense Complex64
+    /// statevector for `num_qubits` qubits.
+    ///
+    /// Counts only the main amplitude buffer (`2 * 2^num_qubits` f64s,
+    /// 16 bytes per amplitude). Auxiliary scratch (probabilities kernel,
+    /// measurement partials) typically adds up to 2^num_qubits additional
+    /// f64s; callers expecting many concurrent measurements should leave
+    /// headroom by checking against a smaller qubit count.
+    pub fn fits_statevector(&self, num_qubits: usize) -> Result<bool> {
+        if num_qubits >= usize::BITS as usize - 4 {
+            return Ok(false);
+        }
+        let amplitude_bytes = (1usize << num_qubits).checked_mul(16).ok_or_else(|| {
+            crate::error::PrismError::InvalidParameter {
+                message: format!("num_qubits={num_qubits} overflows usize"),
+            }
+        })?;
+        let available = self.vram_available()?;
+        Ok(amplitude_bytes <= available)
     }
 
     pub(crate) fn device(&self) -> &GpuDevice {
@@ -190,5 +252,46 @@ mod tests {
             GpuState::new(ctx, 4).unwrap_err(),
             PrismError::BackendUnsupported { .. }
         ));
+    }
+
+    #[test]
+    fn min_qubits_default_when_env_unset() {
+        // `min_qubits()` caches its result in a OnceLock at first call. Other
+        // tests and benchmarks in the same process also read it. The invariant
+        // this test enforces is that the cached value is a plausible threshold,
+        // not a specific number (the env var may legitimately override it).
+        let n = min_qubits();
+        assert!(
+            (1..=32).contains(&n),
+            "implausible gpu crossover threshold: {n}"
+        );
+    }
+
+    #[test]
+    fn stub_vram_available_rejects_cleanly() {
+        let ctx = GpuContext::stub_for_tests();
+        assert!(matches!(
+            ctx.vram_available().unwrap_err(),
+            PrismError::BackendUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn stub_fits_statevector_rejects_cleanly() {
+        let ctx = GpuContext::stub_for_tests();
+        // Any query should surface the underlying unsupported error.
+        assert!(matches!(
+            ctx.fits_statevector(4).unwrap_err(),
+            PrismError::BackendUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn fits_statevector_rejects_overflowing_qubit_counts() {
+        let ctx = GpuContext::stub_for_tests();
+        // usize::BITS - 4 boundary: `1 << 60` times 16 bytes is already 16 EiB
+        // which no GPU has. The function clamps these to `Ok(false)` before
+        // touching the device, so even the stub context returns cleanly.
+        assert!(!ctx.fits_statevector(128).unwrap());
     }
 }

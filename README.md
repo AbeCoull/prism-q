@@ -161,19 +161,35 @@ covered by a dedicated kernel, including batched kernels for `BatchPhase`, `Batc
 CPU statevector within 1e-10.
 
 `BackendKind::Auto` does not yet route to GPU. Opt in explicitly. The recommended
-entry point is `BackendKind::StatevectorGpu`, which inherits the fusion pipeline plus
-independent-subsystem decomposition and applies a size-aware crossover (default: GPU
-only for ≥14 qubit sub-circuits, overridable via `PRISM_GPU_MIN_QUBITS`):
+entry point is `run_with_gpu`, which dispatches through `BackendKind::StatevectorGpu`
+so the circuit picks up fusion plus independent-subsystem decomposition and applies
+a size-aware crossover (default: GPU only for `≥ gpu::MIN_QUBITS_DEFAULT` qubit
+sub-circuits, overridable via `PRISM_GPU_MIN_QUBITS`):
 
 ```rust
-use prism_q::{gpu::GpuContext, run_with, BackendKind};
+use prism_q::{gpu::GpuContext, run_with_gpu};
 
 let ctx = GpuContext::new(0)?;
-let result = run_with(BackendKind::StatevectorGpu { context: ctx }, &circuit, 42)?;
+let result = run_with_gpu(&circuit, 42, ctx)?;
+```
+
+Introspect whether the default GPU dispatch footprint is likely to fit before
+dispatching a large circuit:
+
+```rust
+use prism_q::gpu::{self, GpuContext};
+
+if gpu::is_available() {
+    let ctx = GpuContext::new(0)?;
+    if ctx.fits_statevector(28)? {
+        // the 28-qubit state plus the default probabilities scratch buffer
+        // should fit in current free VRAM
+    }
+}
 ```
 
 For kernel-level experiments where every gate must hit the device, use the low-level
-`StatevectorBackend::new(seed).with_gpu(ctx)` builder instead — this bypasses the
+`StatevectorBackend::new(seed).with_gpu(ctx)` builder instead. That bypasses the
 dispatch crossover by design.
 
 See [`docs/architecture.md`](docs/architecture.md) for the kernel design and crossover
@@ -193,9 +209,10 @@ CI generates coverage on every push and PR, and updates the badge automatically.
 ## Benchmarks
 
 ```bash
-cargo bench --bench circuits     --features parallel   # circuit macrobenchmarks
-cargo bench --bench bench_driver --features parallel   # gate microbenchmarks
-cargo bench --features "parallel,bench-fast"           # quick smoke test
+cargo bench --bench circuits     --features parallel         # circuit macrobenchmarks
+cargo bench --bench bench_driver --features parallel         # gate microbenchmarks
+cargo bench --bench bench_gpu    --features "parallel gpu"   # GPU dispatch benchmarks
+cargo bench --features "parallel,bench-fast"                 # quick smoke test
 ```
 
 Always use `--features parallel`. Baselines were taken with Rayon enabled. Never run

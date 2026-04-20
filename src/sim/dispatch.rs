@@ -123,31 +123,10 @@ pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 128;
 
 pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 16;
 
-/// Minimum qubit count to route a sub-circuit to GPU when
-/// [`BackendKind::StatevectorGpu`] is selected.
-///
-/// Below this threshold the dispatch layer builds a plain host-side
-/// `StatevectorBackend` instead, keeping PCIe round-trips and kernel launch
-/// latency off the critical path for circuits that fit comfortably in L3.
-/// Empirically (GTX 1080 Ti, 2026-04-18), 10q random-depth-20 is 0.18x on
-/// GPU vs CPU while 14q is 9.37x. 14 is the lowest known-win point; users
-/// with faster GPUs or different workloads can override via the
-/// `PRISM_GPU_MIN_QUBITS` environment variable.
-#[cfg(feature = "gpu")]
-pub(super) const GPU_MIN_QUBITS_DEFAULT: usize = 14;
-
-#[cfg(feature = "gpu")]
-pub(super) fn gpu_min_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_GPU_MIN_QUBITS") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n;
-            }
-        }
-        GPU_MIN_QUBITS_DEFAULT
-    })
-}
+// GPU crossover threshold and its env override live in `crate::gpu` so users
+// can introspect them without depending on internal dispatch plumbing. The
+// dispatch layer calls `crate::gpu::min_qubits()` directly; there is no
+// private duplicate.
 
 /// Automatically select the optimal backend based on circuit analysis.
 ///
@@ -183,15 +162,18 @@ pub enum BackendKind {
     },
     /// Statevector backed by a CUDA GPU execution context.
     ///
-    /// Circuits (or decomposed sub-blocks) with fewer than 14 qubits
-    /// (tunable via `PRISM_GPU_MIN_QUBITS`) transparently fall back to the
-    /// host-side statevector path — small states do not survive PCIe and
-    /// launch-latency overhead. Larger circuits allocate a device-resident
-    /// state and route gate application through GPU kernels.
+    /// Circuits (or decomposed sub-blocks) with fewer than
+    /// [`crate::gpu::min_qubits()`] qubits (tunable via
+    /// `PRISM_GPU_MIN_QUBITS`, default [`crate::gpu::MIN_QUBITS_DEFAULT`])
+    /// transparently fall back to the host-side statevector path, since
+    /// small states do not survive PCIe and launch-latency overhead.
+    /// Larger circuits allocate a device-resident state and route gate
+    /// application through GPU kernels.
     ///
     /// Compose with [`crate::sim::run_with`] to get fusion + independent-
     /// subsystem decomposition for free; each sub-block is evaluated against
-    /// the crossover independently.
+    /// the crossover independently. See [`crate::sim::run_with_gpu`] for a
+    /// one-liner wrapper when you already have an `Arc<GpuContext>`.
     #[cfg(feature = "gpu")]
     StatevectorGpu {
         context: Arc<GpuContext>,
@@ -250,7 +232,7 @@ fn statevector_gpu_with_crossover(
     circuit: &Circuit,
     seed: u64,
 ) -> StatevectorBackend {
-    if circuit.num_qubits >= gpu_min_qubits() {
+    if circuit.num_qubits >= crate::gpu::min_qubits() {
         StatevectorBackend::new(seed).with_gpu(context.clone())
     } else {
         StatevectorBackend::new(seed)
@@ -428,6 +410,25 @@ mod gpu_crossover_tests {
         BackendKind::StatevectorGpu {
             context: GpuContext::stub_for_tests(),
         }
+    }
+
+    /// `run_with_gpu` must compose identically to constructing the variant
+    /// manually. Uses the stub context at a small circuit so crossover fires
+    /// and proves the composition is side-effect equivalent.
+    #[test]
+    fn run_with_gpu_wraps_statevector_gpu_variant() {
+        let ctx = GpuContext::stub_for_tests();
+        let mut circuit = Circuit::new(4, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+
+        let direct = crate::sim::run_with_gpu(&circuit, 42, ctx.clone())
+            .expect("run_with_gpu must honor crossover and route to CPU");
+        let manual = run_with(stub_kind(), &circuit, 42).expect("manual variant reference");
+
+        let dp = direct.probabilities.expect("direct probs").to_vec();
+        let mp = manual.probabilities.expect("manual probs").to_vec();
+        assert_eq!(dp, mp);
     }
 
     /// A 4q circuit is far below the default 14q threshold. If the dispatch

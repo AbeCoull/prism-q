@@ -90,7 +90,22 @@ impl GpuDevice {
         }
     }
 
-    /// Maximum qubits representable as a Complex64 statevector in the available VRAM.
+    /// Free VRAM currently available on the selected device in bytes.
+    ///
+    /// Reflects allocations by all processes sharing the device, including the
+    /// current process's own outstanding `GpuBuffer`s. Useful for deciding
+    /// whether a pending statevector allocation is likely to fit.
+    pub fn vram_available(&self) -> Result<usize> {
+        match &self.inner {
+            DeviceInner::Real { context, .. } => context
+                .mem_get_info()
+                .map(|(free, _total)| free)
+                .map_err(|e| Self::driver_err("vram_available", e)),
+            DeviceInner::Stub => Err(Self::stub_unsupported("vram_available")),
+        }
+    }
+
+    /// Maximum qubits representable as a Complex64 statevector in the total VRAM.
     ///
     /// Computed as `floor(log2(vram_bytes / 16))` — each amplitude is two f64s = 16 bytes.
     pub fn max_qubits_for_statevector(&self) -> Result<usize> {

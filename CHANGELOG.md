@@ -2,6 +2,11 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.8.0] - 2026-04-20
+
+### Features
+
+- **gpu:** Observability  and benchmarking infra for gpu code (#33)([d133066](https://github.com/AbeCoull/prism-q/commit/d133066c1abf8f61253c1606f4e2a738d737d9f6))
 ## [0.7.0] - 2026-04-19
 
 ### Documentation
@@ -11,6 +16,10 @@ All notable changes to PRISM-Q will be documented in this file.
 ### Features
 
 - **gpu:** Dispatch-level crossover and decomposition-aware routing (#32)([1c2627d](https://github.com/AbeCoull/prism-q/commit/1c2627d92c3ecdaca9d62da092f73f8b857292f7))
+
+### Miscellaneous
+
+- **release:** 0.7.0([d4c3007](https://github.com/AbeCoull/prism-q/commit/d4c3007153e6bd0fe09c02573e664eb3ef70d231))
 ## [0.6.0] - 2026-04-18
 
 ### Features

@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.9.0] - 2026-04-21
+
+### Features
+
+- **gpu:** Stabilizer GPU scaffol (#34)([30d7d42](https://github.com/AbeCoull/prism-q/commit/30d7d42df89ac1758b3baa1aeba2a7063f427fd3))
 ## [0.8.0] - 2026-04-20
 
 ### Features
 
 - **gpu:** Observability  and benchmarking infra for gpu code (#33)([d133066](https://github.com/AbeCoull/prism-q/commit/d133066c1abf8f61253c1606f4e2a738d737d9f6))
+
+### Miscellaneous
+
+- **release:** 0.8.0([c5120bb](https://github.com/AbeCoull/prism-q/commit/c5120bb70846f176196bbd6943643542e981b9ab))
 ## [0.7.0] - 2026-04-19
 
 ### Documentation

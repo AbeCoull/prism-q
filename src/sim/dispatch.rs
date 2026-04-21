@@ -178,6 +178,23 @@ pub enum BackendKind {
     StatevectorGpu {
         context: Arc<GpuContext>,
     },
+    /// Stabilizer backend backed by a CUDA GPU tableau.
+    ///
+    /// Circuits (or decomposed sub-blocks) with fewer than
+    /// [`crate::gpu::stabilizer_min_qubits()`] qubits (tunable via
+    /// `PRISM_STABILIZER_GPU_MIN_QUBITS`, default
+    /// [`crate::gpu::STABILIZER_MIN_QUBITS_DEFAULT`]) fall back to the CPU
+    /// stabilizer path. The GPU path routes gate application to device
+    /// kernels. Measurement and reset stay on device, while probabilities and
+    /// export-style helpers still read back to the CPU algorithms.
+    ///
+    /// Compose with [`crate::sim::run_with`] to pick up independent-subsystem
+    /// decomposition; non-Clifford circuits are rejected at dispatch time with
+    /// the same error shape as [`BackendKind::Stabilizer`].
+    #[cfg(feature = "gpu")]
+    StabilizerGpu {
+        context: Arc<GpuContext>,
+    },
 }
 
 pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
@@ -187,6 +204,13 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
         | BackendKind::FactoredStabilizer
             if !circuit.is_clifford_only() =>
         {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "stabilizer".into(),
+                reason: "circuit contains non-Clifford gates".into(),
+            });
+        }
+        #[cfg(feature = "gpu")]
+        BackendKind::StabilizerGpu { .. } if !circuit.is_clifford_only() => {
             return Err(PrismError::IncompatibleBackend {
                 backend: "stabilizer".into(),
                 reason: "circuit contains non-Clifford gates".into(),
@@ -217,6 +241,8 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
         | BackendKind::StabilizerRank
         | BackendKind::StochasticPauli { .. }
         | BackendKind::DeterministicPauli { .. } => false,
+        #[cfg(feature = "gpu")]
+        BackendKind::StabilizerGpu { .. } => false,
         BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
         _ => true,
     }
@@ -236,6 +262,22 @@ fn statevector_gpu_with_crossover(
         StatevectorBackend::new(seed).with_gpu(context.clone())
     } else {
         StatevectorBackend::new(seed)
+    }
+}
+
+/// Build a `StabilizerBackend` configured for GPU execution if the circuit
+/// is large enough to clear the stabilizer crossover, otherwise a plain
+/// host-side backend.
+#[cfg(feature = "gpu")]
+fn stabilizer_gpu_with_crossover(
+    context: &Arc<GpuContext>,
+    circuit: &Circuit,
+    seed: u64,
+) -> StabilizerBackend {
+    if circuit.num_qubits >= crate::gpu::stabilizer_min_qubits() {
+        StabilizerBackend::new(seed).with_gpu(context.clone())
+    } else {
+        StabilizerBackend::new(seed)
     }
 }
 
@@ -301,6 +343,10 @@ pub(super) fn select_dispatch(
         #[cfg(feature = "gpu")]
         BackendKind::StatevectorGpu { context } => DispatchAction::Backend(Box::new(
             statevector_gpu_with_crossover(context, circuit, seed),
+        )),
+        #[cfg(feature = "gpu")]
+        BackendKind::StabilizerGpu { context } => DispatchAction::Backend(Box::new(
+            stabilizer_gpu_with_crossover(context, circuit, seed),
         )),
     }
 }
@@ -485,5 +531,42 @@ mod gpu_crossover_tests {
                 (c - g).abs()
             );
         }
+    }
+
+    fn stabilizer_stub_kind() -> BackendKind {
+        BackendKind::StabilizerGpu {
+            context: GpuContext::stub_for_tests(),
+        }
+    }
+
+    /// A 4q Clifford circuit is far below the stabilizer GPU threshold, so the
+    /// stub context must never be touched. Produces the same measurement bits
+    /// as a plain CPU stabilizer run.
+    #[test]
+    fn stabilizer_gpu_small_circuit_routes_to_cpu() {
+        let mut circuit = Circuit::new(4, 4);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::Cx, &[1, 2]);
+        circuit.add_gate(Gate::Cx, &[2, 3]);
+        circuit.add_measure(0, 0);
+        circuit.add_measure(1, 1);
+        circuit.add_measure(2, 2);
+        circuit.add_measure(3, 3);
+
+        let cpu_run = run_with(BackendKind::Stabilizer, &circuit, 42).expect("cpu baseline");
+        let gpu_run = run_with(stabilizer_stub_kind(), &circuit, 42)
+            .expect("stub must stay out of the way for small circuits");
+        assert_eq!(cpu_run.classical_bits, gpu_run.classical_bits);
+    }
+
+    /// Non-Clifford circuits are rejected at dispatch time with the same error
+    /// shape as `BackendKind::Stabilizer`.
+    #[test]
+    fn stabilizer_gpu_rejects_non_clifford_at_dispatch() {
+        let mut circuit = Circuit::new(2, 0);
+        circuit.add_gate(Gate::T, &[0]);
+        let err = run_with(stabilizer_stub_kind(), &circuit, 42).unwrap_err();
+        assert!(matches!(err, PrismError::IncompatibleBackend { .. }));
     }
 }

@@ -1,4 +1,4 @@
-//! GPU dispatch benchmarks for `BackendKind::StatevectorGpu`.
+//! GPU benchmarks for the statevector and stabilizer GPU paths.
 //!
 //! Measures the end-to-end dispatch path (fusion plus independent-subsystem
 //! decomposition plus crossover plus kernel execution) against the same set
@@ -18,6 +18,7 @@
 
 #![cfg(feature = "gpu")]
 
+use std::hint::black_box;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,7 @@ use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::gpu::GpuContext;
-use prism_q::{sim, BackendKind, StatevectorBackend};
+use prism_q::{sim, BackendKind, StabilizerBackend, StatevectorBackend};
 
 const SEED: u64 = 0xDEAD_BEEF;
 
@@ -249,6 +250,487 @@ fn bench_gpu_measurement(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Stabilizer GPU
+// ============================================================================
+
+fn stab_sweep_sizes() -> &'static [usize] {
+    if is_fast() {
+        // One below threshold, one above, to show crossover flipping.
+        &[256, 1024]
+    } else if std::env::var("PRISM_STAB_HIGH_N").is_ok() {
+        // Temporary sweep for crossover exploration at very large tableaus.
+        // CPU tableau exceeds L3 by ~10x at n=10000 and ~80x at n=20000, so
+        // this is where any bandwidth-bound GPU advantage would surface.
+        &[10000, 20000, 30000, 50000]
+    } else {
+        // Covers the crossover zone (~256-1024) plus the at-scale regimes
+        // where GPU rowmul should clearly dominate.
+        &[100, 500, 1000, 2000, 5000]
+    }
+}
+
+fn stabilizer_dispatch_enabled(max_qubits: usize) -> bool {
+    let threshold = prism_q::gpu::stabilizer_min_qubits();
+    if threshold <= max_qubits {
+        return true;
+    }
+    eprintln!(
+        "SKIP: explicit StabilizerGpu dispatch benches require PRISM_STABILIZER_GPU_MIN_QUBITS<={max_qubits}, got {threshold}"
+    );
+    false
+}
+
+fn bts_gpu_shot_sizes() -> Vec<usize> {
+    let threshold = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT);
+    if is_fast() {
+        vec![threshold.max(64)]
+    } else {
+        let mut sizes = vec![threshold.max(64), 1_000_000];
+        sizes.sort_unstable();
+        sizes.dedup();
+        sizes
+    }
+}
+
+/// Stabilizer CPU dispatch baseline through `sim::run_with`.
+///
+/// Includes the default probability extraction at the end of the run, so this
+/// is an API-level end-to-end measurement rather than the hot-path throughput
+/// number used for crossover tuning.
+fn bench_stab_cpu_clifford_d10(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gpu_stab_cpu/clifford_d10");
+    configure_group(&mut group);
+    for &n in stab_sweep_sizes() {
+        let circuit = prism_q::circuits::clifford_heavy_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                sim::run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Stabilizer GPU dispatch through `run_with_stabilizer_gpu`.
+///
+/// Includes the default probability extraction at the end of the run. Use the
+/// direct backend groups below for hot-path throughput comparisons.
+fn bench_stab_gpu_clifford_d10(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    if !stabilizer_dispatch_enabled(stab_sweep_sizes().iter().copied().max().unwrap_or(0)) {
+        return;
+    }
+    let mut group = c.benchmark_group("gpu_stab/clifford_d10");
+    configure_group(&mut group);
+    let kind = BackendKind::StabilizerGpu {
+        context: ctx.clone(),
+    };
+    for &n in stab_sweep_sizes() {
+        let circuit = prism_q::circuits::clifford_heavy_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                sim::run_with(kind.clone(), circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Direct backend CPU timing for the stabilizer hot path.
+///
+/// Excludes the `run_with` probability readback and performs one untimed warm
+/// pass plus a re-init before each timed iteration so backend scratch growth is
+/// not charged to the measured apply.
+fn bench_stab_direct_cpu_clifford_d10(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gpu_stab_direct_cpu/clifford_d10");
+    configure_group(&mut group);
+    for &n in stab_sweep_sizes() {
+        let circuit = prism_q::circuits::clifford_heavy_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut backend = StabilizerBackend::new(42);
+                    backend
+                        .init(circ.num_qubits, circ.num_classical_bits)
+                        .unwrap();
+                    backend.apply_instructions(&circ.instructions).unwrap();
+                    backend
+                        .init(circ.num_qubits, circ.num_classical_bits)
+                        .unwrap();
+                    let start = Instant::now();
+                    backend.apply_instructions(&circ.instructions).unwrap();
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Direct backend GPU timing for the stabilizer hot path.
+///
+/// Uses `StabilizerBackend::with_gpu(ctx)` directly so the timed region tracks
+/// queued Clifford application and measurement kernels without the end-of-run
+/// probability readback.
+fn bench_stab_direct_gpu_clifford_d10(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu_stab_direct/clifford_d10");
+    configure_group(&mut group);
+    for &n in stab_sweep_sizes() {
+        let circuit = prism_q::circuits::clifford_heavy_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut backend = StabilizerBackend::new(42).with_gpu(ctx.clone());
+                    backend
+                        .init(circ.num_qubits, circ.num_classical_bits)
+                        .unwrap();
+                    backend.apply_instructions(&circ.instructions).unwrap();
+                    backend
+                        .init(circ.num_qubits, circ.num_classical_bits)
+                        .unwrap();
+                    let start = Instant::now();
+                    backend.apply_instructions(&circ.instructions).unwrap();
+                    total += start.elapsed();
+                }
+                total
+            });
+        });
+    }
+    group.finish();
+}
+
+/// GHZ-measure stress test: one H + chained CX over n qubits, then measure
+/// every qubit. The group skips unless the process was launched with a low
+/// enough `PRISM_STABILIZER_GPU_MIN_QUBITS` value to reach the GPU path.
+fn bench_stab_gpu_ghz_measure(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let sizes: &[usize] = if is_fast() {
+        &[512]
+    } else {
+        &[200, 1000, 2000]
+    };
+    if !stabilizer_dispatch_enabled(sizes.iter().copied().max().unwrap_or(0)) {
+        return;
+    }
+    let mut group = c.benchmark_group("gpu_stab/ghz_measure");
+    configure_group(&mut group);
+    let kind = BackendKind::StabilizerGpu {
+        context: ctx.clone(),
+    };
+    for &n in sizes {
+        let mut circuit = Circuit::new(n, n);
+        circuit.add_gate(Gate::H, &[0]);
+        for i in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                sim::run_with(kind.clone(), circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_stab_bts_cpu_vs_gpu(c: &mut Criterion) {
+    use prism_q::{run_shots_compiled, run_shots_compiled_with_gpu};
+    let Some(ctx) = shared_ctx() else { return };
+
+    let qubit_sizes: &[usize] = if is_fast() { &[512] } else { &[512, 2048] };
+    let shot_sizes = bts_gpu_shot_sizes();
+
+    for &n in qubit_sizes {
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for i in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+
+        let mut cpu_group = c.benchmark_group(format!("gpu_bts_cpu/n{}", n));
+        configure_group(&mut cpu_group);
+        for &shots in &shot_sizes {
+            cpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter(|| {
+                    run_shots_compiled(circ, shots, SEED).unwrap();
+                });
+            });
+        }
+        cpu_group.finish();
+
+        let mut gpu_group = c.benchmark_group(format!("gpu_bts/n{}", n));
+        configure_group(&mut gpu_group);
+        for &shots in &shot_sizes {
+            let ctx_clone = ctx.clone();
+            gpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter(|| {
+                    run_shots_compiled_with_gpu(circ, shots, SEED, ctx_clone.clone()).unwrap();
+                });
+            });
+        }
+        gpu_group.finish();
+    }
+}
+
+/// Packed-shot sampling through `CompiledSampler::sample_bulk_packed`.
+/// Excludes compilation from the timed region so the group isolates the
+/// CPU and GPU sampling kernels plus packed-result materialization.
+fn bench_stab_bts_packed_cpu_vs_gpu(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+
+    let qubit_sizes: &[usize] = if is_fast() { &[512] } else { &[512, 2048] };
+    let shot_sizes = bts_gpu_shot_sizes();
+
+    for &n in qubit_sizes {
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for i in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+
+        let mut cpu_group = c.benchmark_group(format!("gpu_bts_packed_cpu/n{}", n));
+        configure_group(&mut cpu_group);
+        for &shots in &shot_sizes {
+            cpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut sampler = prism_q::compile_measurements(circ, SEED).unwrap();
+                        let start = Instant::now();
+                        black_box(sampler.sample_bulk_packed(shots));
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            });
+        }
+        cpu_group.finish();
+
+        let mut gpu_group = c.benchmark_group(format!("gpu_bts_packed/n{}", n));
+        configure_group(&mut gpu_group);
+        for &shots in &shot_sizes {
+            let ctx_clone = ctx.clone();
+            gpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut sampler = prism_q::compile_measurements(circ, SEED)
+                            .unwrap()
+                            .with_gpu(ctx_clone.clone());
+                        let start = Instant::now();
+                        black_box(sampler.sample_bulk_packed(shots));
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            });
+        }
+        gpu_group.finish();
+    }
+}
+
+fn bts_low_rank_wide_circuit(num_qubits: usize, rank: usize) -> Circuit {
+    let mut circuit = Circuit::new(num_qubits, num_qubits);
+    for q in 0..rank {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..num_qubits {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+/// Marginal extraction through `CompiledSampler::sample_marginals`.
+/// The GPU path now keeps packed shots on device and copies back only one
+/// counter per measurement row.
+fn bench_stab_bts_marginals_cpu_vs_gpu(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+
+    let qubit_sizes: &[usize] = if is_fast() { &[512] } else { &[512, 2048] };
+    let shot_sizes = bts_gpu_shot_sizes();
+
+    for &n in qubit_sizes {
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for i in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+
+        let mut cpu_group = c.benchmark_group(format!("gpu_bts_marginals_cpu/n{}", n));
+        configure_group(&mut cpu_group);
+        for &shots in &shot_sizes {
+            cpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut sampler = prism_q::compile_measurements(circ, SEED).unwrap();
+                        let start = Instant::now();
+                        black_box(sampler.sample_marginals(shots));
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            });
+        }
+        cpu_group.finish();
+
+        let mut gpu_group = c.benchmark_group(format!("gpu_bts_marginals/n{}", n));
+        configure_group(&mut gpu_group);
+        for &shots in &shot_sizes {
+            let ctx_clone = ctx.clone();
+            gpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut sampler = prism_q::compile_measurements(circ, SEED)
+                            .unwrap()
+                            .with_gpu(ctx_clone.clone());
+                        let start = Instant::now();
+                        black_box(sampler.sample_marginals(shots));
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            });
+        }
+        gpu_group.finish();
+    }
+}
+
+/// Explicit device counts over a low-rank, wide-measurement workload.
+/// This exercises `sample_bulk_packed_device().counts()` where the compacted
+/// `(bitstring, count)` output is far smaller than the full packed shot matrix.
+fn bench_stab_bts_device_counts_explicit(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+
+    let threshold = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT);
+    let shot_sizes: Vec<usize> = if is_fast() {
+        vec![threshold.max(64)]
+    } else {
+        vec![threshold.max(64), 1_000_000]
+    };
+    let qubit_sizes: &[(usize, usize)] = if is_fast() {
+        &[(512, 12)]
+    } else {
+        &[(512, 12), (1024, 12)]
+    };
+
+    for &(n, rank) in qubit_sizes {
+        let circuit = bts_low_rank_wide_circuit(n, rank);
+
+        let mut cpu_group =
+            c.benchmark_group(format!("gpu_bts_device_counts_cpu/n{}_r{}", n, rank));
+        configure_group(&mut cpu_group);
+        for &shots in &shot_sizes {
+            cpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut sampler = prism_q::compile_measurements(circ, SEED).unwrap();
+                        let start = Instant::now();
+                        black_box(sampler.sample_bulk_packed(shots).counts());
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            });
+        }
+        cpu_group.finish();
+
+        let mut gpu_group = c.benchmark_group(format!("gpu_bts_device_counts/n{}_r{}", n, rank));
+        configure_group(&mut gpu_group);
+        for &shots in &shot_sizes {
+            let ctx_clone = ctx.clone();
+            gpu_group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let mut sampler = prism_q::compile_measurements(circ, SEED)
+                            .unwrap()
+                            .with_gpu(ctx_clone.clone());
+                        let start = Instant::now();
+                        black_box(
+                            sampler
+                                .sample_bulk_packed_device(shots)
+                                .unwrap()
+                                .counts()
+                                .unwrap(),
+                        );
+                        total += start.elapsed();
+                    }
+                    total
+                });
+            });
+        }
+        gpu_group.finish();
+    }
+}
+
+/// Explicit `BackendKind::StabilizerGpu` shot sampling. This covers the
+/// `run_shots_with` dispatch path that now forwards Clifford measurement
+/// workloads into the compiled sampler with the attached GPU context.
+fn bench_stab_gpu_shots_explicit(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+
+    let qubit_sizes: &[usize] = if is_fast() { &[512] } else { &[512, 2048] };
+    let shot_sizes = bts_gpu_shot_sizes();
+
+    for &n in qubit_sizes {
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for i in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+
+        let mut group = c.benchmark_group(format!("gpu_stab_shots/n{}", n));
+        configure_group(&mut group);
+        let kind = BackendKind::StabilizerGpu {
+            context: ctx.clone(),
+        };
+        for &shots in &shot_sizes {
+            group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
+                b.iter(|| {
+                    sim::run_shots_with(kind.clone(), circ, shots, SEED).unwrap();
+                });
+            });
+        }
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_gpu_random,
@@ -258,5 +740,15 @@ criterion_group!(
     bench_gpu_decomposed,
     bench_gpu_direct_kernel,
     bench_gpu_measurement,
+    bench_stab_cpu_clifford_d10,
+    bench_stab_gpu_clifford_d10,
+    bench_stab_direct_cpu_clifford_d10,
+    bench_stab_direct_gpu_clifford_d10,
+    bench_stab_gpu_ghz_measure,
+    bench_stab_bts_cpu_vs_gpu,
+    bench_stab_bts_packed_cpu_vs_gpu,
+    bench_stab_bts_marginals_cpu_vs_gpu,
+    bench_stab_bts_device_counts_explicit,
+    bench_stab_gpu_shots_explicit,
 );
 criterion_main!(benches);

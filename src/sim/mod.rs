@@ -1,6 +1,6 @@
 //! Simulation orchestration.
 //!
-//! Connects the circuit IR to a backend. This module is deliberately thin —
+//! Connects the circuit IR to a backend. This module is deliberately thin,
 //! the complexity lives in the backends and the parser.
 
 pub mod compiled;
@@ -69,7 +69,7 @@ pub struct FactoredBlock {
 ///
 /// For monolithic simulations this wraps a dense `Vec<f64>` of length 2^n.
 /// For decomposed simulations with independent subsystems, this stores
-/// per-block marginal distributions that are multiplied on demand —
+/// per-block marginal distributions that are multiplied on demand,
 /// avoiding the O(2^N) Kronecker product unless explicitly requested.
 #[derive(Debug, Clone)]
 pub enum Probabilities {
@@ -93,7 +93,7 @@ impl Probabilities {
         }
     }
 
-    /// Always false — a probability distribution has at least one state.
+    /// Always false, a probability distribution has at least one state.
     pub fn is_empty(&self) -> bool {
         false
     }
@@ -308,6 +308,34 @@ pub fn run_with_gpu(
     context: std::sync::Arc<crate::gpu::GpuContext>,
 ) -> Result<SimulationResult> {
     run_with(BackendKind::StatevectorGpu { context }, circuit, seed)
+}
+
+/// Execute a Clifford-only circuit on the CUDA GPU stabilizer dispatch.
+///
+/// Wraps [`run_with`] with `BackendKind::StabilizerGpu { context }`. The
+/// dispatch applies independent-subsystem decomposition and the qubit-count
+/// crossover ([`crate::gpu::stabilizer_min_qubits`]); sub-circuits below
+/// threshold automatically run on the CPU stabilizer. Non-Clifford circuits
+/// are rejected at dispatch time with the same error shape as
+/// [`BackendKind::Stabilizer`].
+///
+/// ```no_run
+/// # #[cfg(feature = "gpu")] {
+/// use prism_q::gpu::GpuContext;
+/// use prism_q::{run_with_stabilizer_gpu, Circuit};
+///
+/// let ctx = GpuContext::new(0).expect("no usable GPU");
+/// let circuit = Circuit::new(1024, 0);
+/// let _result = run_with_stabilizer_gpu(&circuit, 42, ctx).unwrap();
+/// # }
+/// ```
+#[cfg(feature = "gpu")]
+pub fn run_with_stabilizer_gpu(
+    circuit: &Circuit,
+    seed: u64,
+    context: std::sync::Arc<crate::gpu::GpuContext>,
+) -> Result<SimulationResult> {
+    run_with(BackendKind::StabilizerGpu { context }, circuit, seed)
 }
 
 fn run_with_internal(
@@ -578,30 +606,68 @@ pub fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<Shots
     run_shots_with(BackendKind::Auto, circuit, num_shots, seed)
 }
 
+pub(crate) fn supports_compiled_measurement_sampling(circuit: &Circuit) -> bool {
+    circuit.is_clifford_only()
+        && !circuit.has_resets()
+        && circuit.has_terminal_measurements_only()
+        && circuit
+            .instructions
+            .iter()
+            .any(|inst| matches!(inst, Instruction::Measure { .. }))
+}
+
+fn should_use_compiled_clifford_sampling(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+) -> bool {
+    if num_shots < 2 || !supports_compiled_measurement_sampling(circuit) {
+        return false;
+    }
+
+    match kind {
+        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer => true,
+        #[cfg(feature = "gpu")]
+        BackendKind::StabilizerGpu { .. } => true,
+        _ => false,
+    }
+}
+
+fn compile_measurements_for_kind(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> Result<compiled::CompiledSampler> {
+    #[cfg(not(feature = "gpu"))]
+    let _ = kind;
+
+    let sampler = compiled::compile_measurements(circuit, seed)?;
+
+    #[cfg(feature = "gpu")]
+    if let BackendKind::StabilizerGpu { context } = kind {
+        return Ok(sampler.with_gpu(context.clone()));
+    }
+
+    Ok(sampler)
+}
+
 /// Execute a circuit multiple times and return outcome counts directly.
 ///
-/// For Clifford circuits with Auto/Stabilizer/FilteredStabilizer backends,
-/// routes through the compiled sampler's optimized counting path (rank-space
-/// counting for low-rank circuits, histogram accumulation for high-rank).
-/// For other backends, falls back to per-shot simulation with counting.
+/// For Clifford circuits with terminal measurements and no resets, Auto,
+/// Stabilizer, FilteredStabilizer, and explicit `StabilizerGpu` route through
+/// the compiled sampler's optimized counting path. Explicit `StabilizerGpu`
+/// carries its GPU context into the compiled sampler so large shot runs avoid
+/// the raw tableau measurement round-trips. Other circuits fall back to
+/// per-shot simulation with counting.
 pub fn run_counts(
     kind: BackendKind,
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
 ) -> Result<HashMap<Vec<u64>, u64>> {
-    if (matches!(
-        kind,
-        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
-    )) && circuit.is_clifford_only()
-        && circuit
-            .instructions
-            .iter()
-            .any(|i| matches!(i, Instruction::Measure { .. }))
-        && num_shots >= 2
-    {
-        let mut sampler = compiled::compile_measurements(circuit, seed)?;
-        return Ok(sampler.sample_counts(num_shots));
+    if should_use_compiled_clifford_sampling(&kind, circuit, num_shots) {
+        let mut sampler = compile_measurements_for_kind(&kind, circuit, seed)?;
+        return sampler.try_sample_counts(num_shots);
     }
 
     let result = run_shots_with(kind, circuit, num_shots, seed)?;
@@ -623,14 +689,17 @@ pub fn run_counts(
 ///
 /// Returns a `Vec<(f64, f64)>` of length `num_qubits`, where each element is `(p0, p1)`.
 ///
-/// For Clifford+T circuits, uses Sparse Pauli Dynamics (SPD) — Heisenberg-picture
+/// For Clifford+T circuits, uses Sparse Pauli Dynamics (SPD), Heisenberg-picture
 /// backward propagation that scales with Pauli complexity, not 2^n. This is orders
 /// of magnitude faster than statevector for structured Clifford+T circuits (25-400x
 /// at 14-22 qubits).
 ///
-/// For pure Clifford circuits, compiles and extracts marginals from the parity matrix.
+/// For pure Clifford circuits, exact marginals still come from backend
+/// probabilities. Sampled parity-matrix marginals remain available through
+/// `compile_measurements(...).sample_marginals(...)`.
 ///
-/// For other circuits, falls back to statevector probabilities and extracts marginals.
+/// For other circuits, falls back to statevector probabilities and extracts
+/// marginals.
 pub fn run_marginals(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
     let n = circuit.num_qubits;
 
@@ -679,18 +748,18 @@ pub fn run_shots_with(
     seed: u64,
 ) -> Result<ShotsResult> {
     // Compiled sampler: O(n²·m) compile + O(r·m/64) per shot with LUT.
-    // Always polynomial — avoids the O(2^k) probability computation path.
-    if (matches!(
-        kind,
-        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
-    )) && circuit.is_clifford_only()
-        && circuit
-            .instructions
-            .iter()
-            .any(|i| matches!(i, Instruction::Measure { .. }))
-        && num_shots >= 2
-    {
-        return compiled::run_shots_compiled(circuit, num_shots, seed);
+    // Always polynomial, avoids the O(2^k) probability computation path.
+    // Explicit `StabilizerGpu` attaches its CUDA context here so repeated shot
+    // runs use the compiled GPU sampling path instead of the raw GPU tableau
+    // measurement loop, but only for circuits the compiled sampler models
+    // exactly.
+    if should_use_compiled_clifford_sampling(&kind, circuit, num_shots) {
+        let mut sampler = compile_measurements_for_kind(&kind, circuit, seed)?;
+        let packed = sampler.try_sample_bulk_packed(num_shots)?;
+        return Ok(ShotsResult {
+            shots: packed.to_shots(),
+            num_classical_bits: circuit.num_classical_bits,
+        });
     }
 
     if circuit.has_terminal_measurements_only() {
@@ -813,6 +882,8 @@ pub fn run_shots_with(
 /// For Clifford circuits with Auto/Stabilizer/FilteredStabilizer backends,
 /// uses the compiled noisy sampler (fast O(n²·m) compile + O(events·m/64) per shot).
 /// For all other cases, falls back to per-shot simulation with noise injection.
+/// The compiled noisy path is limited to terminal measurements with no resets
+/// or classical conditionals.
 pub fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
@@ -835,7 +906,16 @@ pub fn run_shots_with_noise(
     let is_stabilizer_kind = matches!(
         kind,
         BackendKind::Stabilizer | BackendKind::FilteredStabilizer | BackendKind::FactoredStabilizer
-    );
+    ) || {
+        #[cfg(feature = "gpu")]
+        {
+            matches!(kind, BackendKind::StabilizerGpu { .. })
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
+    };
 
     if is_stabilizer_kind && !noise_model.is_pauli_only() {
         return Err(crate::error::PrismError::IncompatibleBackend {
@@ -858,9 +938,30 @@ pub fn run_shots_with_noise(
         let use_compiled = matches!(
             kind,
             BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
-        ) && circuit.is_clifford_only();
+        ) && supports_compiled_measurement_sampling(circuit)
+            || {
+                #[cfg(feature = "gpu")]
+                {
+                    matches!(kind, BackendKind::StabilizerGpu { .. })
+                        && supports_compiled_measurement_sampling(circuit)
+                }
+                #[cfg(not(feature = "gpu"))]
+                {
+                    false
+                }
+            };
 
         if use_compiled {
+            #[cfg(feature = "gpu")]
+            if let BackendKind::StabilizerGpu { context } = &kind {
+                return noise::run_shots_noisy_with_gpu(
+                    circuit,
+                    noise_model,
+                    num_shots,
+                    seed,
+                    context.clone(),
+                );
+            }
             return noise::run_shots_noisy(circuit, noise_model, num_shots, seed);
         }
     }
@@ -1198,7 +1299,7 @@ mod tests {
 
     #[test]
     fn test_temporal_clifford_skipped_when_prefix_too_short() {
-        // Short Clifford prefix — should NOT use temporal decomposition,
+        // Short Clifford prefix, should NOT use temporal decomposition,
         // but result must still be correct.
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::H, &[0]);
@@ -1919,6 +2020,81 @@ mod tests {
         assert_eq!(result.shots.len(), 100);
     }
 
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_run_shots_with_stabilizer_gpu_falls_back_for_reset_circuits() {
+        let mut circuit = Circuit::new(1, 1);
+        circuit.add_gate(Gate::X, &[0]);
+        circuit.add_reset(0);
+        circuit.add_measure(0, 0);
+
+        let cpu = run_shots_with(BackendKind::Stabilizer, &circuit, 8, 42).unwrap();
+        let gpu = run_shots_with(
+            BackendKind::StabilizerGpu {
+                context: crate::gpu::GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            8,
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(gpu.shots, cpu.shots);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_run_shots_with_stabilizer_gpu_falls_back_for_conditionals() {
+        let mut circuit = Circuit::new(2, 2);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_measure(0, 0);
+        circuit.instructions.push(Instruction::Conditional {
+            condition: crate::circuit::ClassicalCondition::BitIsOne(0),
+            gate: Gate::X,
+            targets: crate::circuit::smallvec![1],
+        });
+        circuit.add_measure(1, 1);
+
+        let cpu = run_shots_with(BackendKind::Stabilizer, &circuit, 256, 42).unwrap();
+        let gpu = run_shots_with(
+            BackendKind::StabilizerGpu {
+                context: crate::gpu::GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            256,
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(gpu.shots, cpu.shots);
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_run_shots_with_noise_stabilizer_gpu_matches_stabilizer() {
+        let n = 8;
+        let mut circuit = crate::circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+        let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+
+        let cpu = run_shots_with_noise(BackendKind::Stabilizer, &circuit, &noise, 128, 42).unwrap();
+        let gpu = run_shots_with_noise(
+            BackendKind::StabilizerGpu {
+                context: crate::gpu::GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            &noise,
+            128,
+            42,
+        )
+        .unwrap();
+
+        assert_eq!(gpu.shots, cpu.shots);
+    }
+
     #[test]
     fn test_run_marginals_bell_pair() {
         let mut c = Circuit::new(2, 0);
@@ -2117,12 +2293,62 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_noise_stabilizer_gpu_rejects_non_pauli_noise() {
+        let circuit = make_clifford_circuit();
+        let nm = noise::NoiseModel {
+            after_gate: {
+                let mut ag = vec![Vec::new(); circuit.instructions.len()];
+                ag[0].push(noise::NoiseEvent {
+                    channel: noise::NoiseChannel::AmplitudeDamping { gamma: 0.1 },
+                    qubits: smallvec![0],
+                });
+                ag
+            },
+            readout: vec![None; circuit.num_qubits],
+        };
+        assert!(matches!(
+            run_shots_with_noise(
+                BackendKind::StabilizerGpu {
+                    context: crate::gpu::GpuContext::stub_for_tests(),
+                },
+                &circuit,
+                &nm,
+                10,
+                42,
+            )
+            .unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
     #[test]
     fn test_noise_stabilizer_rejects_non_clifford() {
         let circuit = make_general_circuit();
         let nm = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
         assert!(matches!(
             run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_noise_stabilizer_gpu_rejects_non_clifford() {
+        let circuit = make_general_circuit();
+        let nm = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        assert!(matches!(
+            run_shots_with_noise(
+                BackendKind::StabilizerGpu {
+                    context: crate::gpu::GpuContext::stub_for_tests(),
+                },
+                &circuit,
+                &nm,
+                10,
+                42,
+            )
+            .unwrap_err(),
             crate::error::PrismError::IncompatibleBackend { .. }
         ));
     }

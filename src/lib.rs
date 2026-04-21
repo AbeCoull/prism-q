@@ -84,4 +84,6 @@ pub use sim::{
 };
 
 #[cfg(feature = "gpu")]
-pub use sim::run_with_gpu;
+pub use sim::compiled::{run_shots_compiled_with_gpu, DevicePackedShots};
+#[cfg(feature = "gpu")]
+pub use sim::{run_with_gpu, run_with_stabilizer_gpu};

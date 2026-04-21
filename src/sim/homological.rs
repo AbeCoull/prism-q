@@ -1239,6 +1239,8 @@ mod tests {
         let mut circuit = crate::circuit::Circuit::new(4, 4);
         for i in 0..4 {
             circuit.add_gate(crate::gates::Gate::X, &[i]);
+        }
+        for i in 0..4 {
             circuit.add_measure(i, i);
         }
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);

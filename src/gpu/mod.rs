@@ -1,15 +1,17 @@
 //! Shared GPU execution resource.
 //!
-//! GPU support in PRISM-Q is not a standalone backend. It is an execution context that CPU
-//! backends (Statevector first, MPS and TensorNetwork later) opt into for their hot
-//! operations. Each backend that wants GPU acceleration holds an `Option<Arc<GpuContext>>`
-//! and routes through this module's kernel namespaces when the context is present.
+//! GPU support in PRISM-Q is not a standalone backend. It is an execution
+//! context that CPU backends opt into for hot operations. Today the
+//! statevector and stabilizer backends can attach an `Arc<GpuContext>` and
+//! route their heavy kernels through this module.
 //!
 //! # Module layout
 //!
-//! - [`device`] — cudarc device wrapper, availability checks, VRAM queries
-//! - [`memory`] — [`GpuBuffer`] RAII wrapper over device allocations
-//! - `kernels::dense` — statevector kernels (CUDA C source + launch helpers)
+//! - [`device`]: cudarc device wrapper, availability checks, VRAM queries
+//! - [`memory`]: [`GpuBuffer`] RAII wrapper over device allocations
+//! - `kernels::dense`: statevector kernels (CUDA C source plus launch helpers)
+//! - `kernels::stabilizer`: stabilizer tableau and measurement kernels
+//! - `kernels::bts`: compiled-sampler BTS kernels
 //!
 //! # Device state layout
 //!
@@ -59,6 +61,99 @@ pub fn min_qubits() -> usize {
             }
         }
         MIN_QUBITS_DEFAULT
+    })
+}
+
+/// Default minimum shot count for routing compiled BTS sampling to the GPU.
+///
+/// Below this threshold the compiled sampler stays on the CPU BTS path, even
+/// when a GPU context is attached, so repeated small shot batches do not pay
+/// the device launch and transfer setup cost. Override at runtime via
+/// `PRISM_GPU_BTS_MIN_SHOTS`.
+pub const BTS_MIN_SHOTS_DEFAULT: usize = 131_072;
+
+/// Default minimum compiled-sampler rank for routing BTS sampling to the GPU.
+///
+/// Very low-rank circuits such as GHZ or independent H layers are typically
+/// faster on the CPU even at large shot counts because the host path can
+/// expand each shot from a tiny number of random bits. Override at runtime via
+/// `PRISM_GPU_BTS_MIN_RANK`.
+pub const BTS_MIN_RANK_DEFAULT: usize = 4;
+
+/// Default minimum average parity-row weight factor for routing compiled BTS
+/// sampling to the GPU.
+///
+/// The effective requirement is `total_weight >= num_measurements * factor`,
+/// which filters out low-weight parity maps whose device launch overhead tends
+/// to dominate. Override at runtime via `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR`.
+pub const BTS_MIN_WEIGHT_FACTOR_DEFAULT: usize = 2;
+
+/// Effective GPU BTS shot threshold. Reads `PRISM_GPU_BTS_MIN_SHOTS` once per
+/// process and caches the result.
+pub(crate) fn bts_min_shots() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val) = std::env::var("PRISM_GPU_BTS_MIN_SHOTS") {
+            if let Ok(n) = val.parse::<usize>() {
+                return n;
+            }
+        }
+        BTS_MIN_SHOTS_DEFAULT
+    })
+}
+
+/// Effective GPU BTS rank threshold. Reads `PRISM_GPU_BTS_MIN_RANK` once per
+/// process and caches the result.
+pub(crate) fn bts_min_rank() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val) = std::env::var("PRISM_GPU_BTS_MIN_RANK") {
+            if let Ok(n) = val.parse::<usize>() {
+                return n.max(1);
+            }
+        }
+        BTS_MIN_RANK_DEFAULT
+    })
+}
+
+/// Effective GPU BTS parity-weight threshold factor. Reads
+/// `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR` once per process.
+pub(crate) fn bts_min_weight_factor() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val) = std::env::var("PRISM_GPU_BTS_MIN_WEIGHT_FACTOR") {
+            if let Ok(n) = val.parse::<usize>() {
+                return n.max(1);
+            }
+        }
+        BTS_MIN_WEIGHT_FACTOR_DEFAULT
+    })
+}
+
+/// Default minimum qubit count for routing a sub-circuit to GPU when
+/// [`crate::BackendKind::StabilizerGpu`] is selected.
+///
+/// Set deliberately high. The stabilizer device path now batches Clifford
+/// launches and keeps measurement on device, but the product still defaults to
+/// the host path until direct backend benchmarks justify lowering the
+/// crossover.
+///
+/// Until then, opt in explicitly via `PRISM_STABILIZER_GPU_MIN_QUBITS=0` or
+/// a similar low value for experimentation. The dispatch is correct; only
+/// the performance story is pending.
+pub const STABILIZER_MIN_QUBITS_DEFAULT: usize = 100_000;
+
+/// Effective stabilizer GPU crossover threshold. Reads
+/// `PRISM_STABILIZER_GPU_MIN_QUBITS` once per process.
+pub fn stabilizer_min_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Ok(val) = std::env::var("PRISM_STABILIZER_GPU_MIN_QUBITS") {
+            if let Ok(n) = val.parse::<usize>() {
+                return n;
+            }
+        }
+        STABILIZER_MIN_QUBITS_DEFAULT
     })
 }
 
@@ -141,7 +236,7 @@ impl GpuContext {
 /// Per-simulation device-resident state.
 ///
 /// Owns a `GpuBuffer<f64>` holding `2 * 2^num_qubits` f64s (interleaved re/im). Tracks
-/// `pending_norm` the same way the CPU statevector backend does — measurement collapse
+/// `pending_norm` the same way the CPU statevector backend does, measurement collapse
 /// accumulates into this scalar and the final scale is applied at `export_statevector` or
 /// `probabilities` time.
 #[derive(Debug)]
@@ -251,6 +346,8 @@ pub struct GpuTableau {
     xz: GpuBuffer<u64>,
     #[allow(dead_code)]
     phase: GpuBuffer<u8>,
+    measure_pivot: GpuBuffer<i32>,
+    measure_outcome: GpuBuffer<u8>,
     num_qubits: usize,
     num_words: usize,
 }
@@ -269,11 +366,15 @@ impl GpuTableau {
 
         let xz = GpuBuffer::<u64>::alloc_zeros(context.device(), xz_len)?;
         let phase = GpuBuffer::<u8>::alloc_zeros(context.device(), phase_len)?;
+        let measure_pivot = GpuBuffer::<i32>::alloc_zeros(context.device(), 1)?;
+        let measure_outcome = GpuBuffer::<u8>::alloc_zeros(context.device(), 1)?;
 
         let mut tableau = Self {
             context: context.clone(),
             xz,
             phase,
+            measure_pivot,
+            measure_outcome,
             num_qubits,
             num_words,
         };
@@ -293,6 +394,58 @@ impl GpuTableau {
 
     pub(crate) fn xz_mut(&mut self) -> &mut GpuBuffer<u64> {
         &mut self.xz
+    }
+
+    /// Split-borrow accessor returning both `xz` and `phase` buffers mutably.
+    /// Kernel launchers need to pass both buffers as arguments to the same
+    /// CUDA function, which requires holding concurrent mutable borrows of
+    /// separate fields on the tableau.
+    pub(crate) fn xz_phase_mut(&mut self) -> (&mut GpuBuffer<u64>, &mut GpuBuffer<u8>) {
+        (&mut self.xz, &mut self.phase)
+    }
+
+    /// Split-borrow accessor returning the tableau XZ buffer and the cached
+    /// pivot sentinel scratch used by `stab_measure_find_pivot`.
+    pub(crate) fn xz_pivot_mut(&mut self) -> (&mut GpuBuffer<u64>, &mut GpuBuffer<i32>) {
+        (&mut self.xz, &mut self.measure_pivot)
+    }
+
+    /// Split-borrow accessor returning the tableau XZ and phase buffers plus
+    /// the cached one-byte deterministic outcome scratch.
+    pub(crate) fn xz_phase_outcome_mut(
+        &mut self,
+    ) -> (&mut GpuBuffer<u64>, &mut GpuBuffer<u8>, &mut GpuBuffer<u8>) {
+        (&mut self.xz, &mut self.phase, &mut self.measure_outcome)
+    }
+
+    pub(crate) fn total_rows(&self) -> usize {
+        2 * self.num_qubits + 1
+    }
+
+    /// Copy the full tableau back to host: `xz` as `Vec<u64>`, `phase` as
+    /// `Vec<bool>` (0 → false, non-zero → true). Host shape mirrors the CPU
+    /// `StabilizerBackend` layout exactly; lets golden tests compare tableau
+    /// state byte for byte.
+    pub fn copy_to_host(&self) -> Result<(Vec<u64>, Vec<bool>)> {
+        let device = self.context.device();
+        let mut xz = vec![0u64; self.xz.len()];
+        self.xz.copy_to_host(device, &mut xz)?;
+        let mut phase_bytes = vec![0u8; self.phase.len()];
+        self.phase.copy_to_host(device, &mut phase_bytes)?;
+        let phase = phase_bytes.iter().map(|&b| b != 0).collect();
+        Ok((xz, phase))
+    }
+
+    /// Upload `xz` and `phase` host buffers back into the device tableau.
+    /// Used by the GPU measurement path's host copy-back: the CPU measurement
+    /// routine mutates the tableau in-place, then this call syncs the result
+    /// back to device so subsequent gate kernels see the collapsed state.
+    pub fn copy_from_host(&mut self, xz: &[u64], phase: &[bool]) -> Result<()> {
+        let device = self.context.device();
+        self.xz.copy_from_host(device, xz)?;
+        let phase_bytes: Vec<u8> = phase.iter().map(|&b| u8::from(b)).collect();
+        self.phase.copy_from_host(device, &phase_bytes)?;
+        Ok(())
     }
 }
 

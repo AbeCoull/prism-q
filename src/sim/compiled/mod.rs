@@ -1,8 +1,8 @@
 mod accumulator;
 mod bts;
-mod parity;
+pub(crate) mod parity;
 mod propagation;
-mod rng;
+pub(crate) mod rng;
 #[cfg(test)]
 mod tests;
 
@@ -10,6 +10,8 @@ use std::hash::{Hash, Hasher};
 
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
+#[cfg(feature = "gpu")]
+use crate::gpu::kernels::bts::GpuBtsCache;
 use crate::sim::ShotsResult;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -200,6 +202,10 @@ pub struct CompiledSampler {
     sparse: Option<SparseParity>,
     xor_dag: Option<XorDag>,
     parity_blocks: Option<ParityBlocks>,
+    #[cfg(feature = "gpu")]
+    gpu_context: Option<std::sync::Arc<crate::gpu::GpuContext>>,
+    #[cfg(feature = "gpu")]
+    gpu_bts_cache: Option<GpuBtsCache>,
 }
 
 fn pack_bools(bools: &[bool]) -> Vec<u64> {
@@ -343,6 +349,90 @@ fn build_filtered_parity_blocks(
 impl CompiledSampler {
     pub fn rank(&self) -> usize {
         self.rank
+    }
+
+    /// Opt in to GPU-accelerated BTS sampling. The sampler routes
+    /// `sample_bulk_packed` through the GPU path when the circuit compiled
+    /// to a flat sparse parity (no parity blocks) and the shot count
+    /// crosses the GPU BTS threshold.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(mut self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
+        self.gpu_context = Some(context);
+        self.gpu_bts_cache = None;
+        self
+    }
+
+    #[cfg(feature = "gpu")]
+    fn can_use_gpu_bts(&self) -> bool {
+        self.gpu_context.is_some()
+            && self.sparse.is_some()
+            && self.rank > 0
+            && self.parity_blocks.is_none()
+            && self.xor_dag.is_none()
+    }
+
+    #[cfg(feature = "gpu")]
+    pub(crate) fn should_use_gpu_bts(&self, num_shots: usize) -> bool {
+        let Some(sparse) = &self.sparse else {
+            return false;
+        };
+        if !self.can_use_gpu_bts()
+            || num_shots < crate::gpu::bts_min_shots()
+            || self.rank < crate::gpu::bts_min_rank()
+        {
+            return false;
+        }
+
+        let stats = sparse.stats();
+        let min_total_weight = sparse
+            .num_rows
+            .saturating_mul(crate::gpu::bts_min_weight_factor());
+        stats.total_weight >= min_total_weight
+    }
+
+    #[cfg(feature = "gpu")]
+    pub(crate) fn has_gpu_context(&self) -> bool {
+        self.gpu_context.is_some()
+    }
+
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_context(&self) -> Option<std::sync::Arc<crate::gpu::GpuContext>> {
+        self.gpu_context.clone()
+    }
+
+    #[cfg(feature = "gpu")]
+    fn should_try_gpu_counts(&self, total_shots: usize) -> bool {
+        if !self.should_use_gpu_bts(total_shots) || self.rank <= MAX_RANK_FOR_RANK_SPACE {
+            return false;
+        }
+
+        let m_words = self.num_measurements.div_ceil(64);
+        if m_words == 0 || m_words > crate::gpu::kernels::bts::GPU_COUNTS_MAX_WORDS {
+            return false;
+        }
+
+        let entropy_guard = total_shots.ilog2() as usize + 8;
+        self.rank <= entropy_guard
+    }
+
+    #[cfg(feature = "gpu")]
+    fn ensure_gpu_bts_cache(&mut self) -> Result<&mut GpuBtsCache> {
+        if self.gpu_bts_cache.is_none() {
+            let ctx = self
+                .gpu_context
+                .as_ref()
+                .expect("gpu BTS cache requested without gpu_context")
+                .clone();
+            let sparse = self
+                .sparse
+                .as_ref()
+                .expect("gpu BTS cache requested without sparse parity");
+            self.gpu_bts_cache = Some(GpuBtsCache::new(&ctx, sparse, &self.ref_bits_packed)?);
+        }
+        Ok(self
+            .gpu_bts_cache
+            .as_mut()
+            .expect("gpu BTS cache initialized above"))
     }
 
     pub fn num_measurements(&self) -> usize {
@@ -523,6 +613,87 @@ impl CompiledSampler {
         self.sample_bulk_packed(num_shots).to_shots()
     }
 
+    /// Materialise packed shots directly on the GPU.
+    ///
+    /// This is available only when the sampler has a GPU context and the
+    /// compiled circuit routes through the flat sparse BTS path. Use
+    /// [`DevicePackedShots::to_host`] to copy the full packed payload back, or
+    /// [`DevicePackedShots::marginals`] / [`DevicePackedShots::counts`] to
+    /// reduce on device first.
+    #[cfg(feature = "gpu")]
+    pub fn sample_bulk_packed_device(&mut self, num_shots: usize) -> Result<DevicePackedShots> {
+        if !self.can_use_gpu_bts() {
+            return Err(PrismError::BackendUnsupported {
+                backend: "CompiledSampler".to_string(),
+                operation: "sample_bulk_packed_device requires with_gpu() and flat sparse BTS"
+                    .to_string(),
+            });
+        }
+
+        let ctx = self
+            .gpu_context
+            .as_ref()
+            .expect("gpu BTS selected without gpu_context")
+            .clone();
+        let rank = self.rank;
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let cache = self.ensure_gpu_bts_cache()?;
+        let data = crate::gpu::kernels::bts::launch_bts_sample_device(
+            &ctx,
+            &mut fast_rng,
+            rank,
+            num_shots,
+            cache,
+        )?;
+
+        Ok(DevicePackedShots {
+            context: ctx,
+            data,
+            num_shots,
+            num_measurements: self.num_measurements,
+            m_words: self.num_measurements.div_ceil(64),
+            s_words: num_shots.div_ceil(64),
+            layout: ShotLayout::MeasMajor,
+            rank,
+        })
+    }
+
+    /// GPU BTS sampling with on-device meas-major to shot-major bit-transpose.
+    ///
+    /// Returns `Some(Ok(data))` when the compiled circuit matches the GPU BTS
+    /// path (flat sparse, no xor_dag, shot threshold crossed). `data` is in
+    /// shot-major layout (`num_shots * m_words` u64s) so callers can skip the
+    /// host `into_shot_major_data()` transpose for downstream
+    /// shot-major consumers (noise apply, etc.). `None` signals "use the CPU
+    /// path for this sampler/shot-count combination".
+    #[cfg(feature = "gpu")]
+    pub(crate) fn try_sample_bulk_shot_major_gpu(
+        &mut self,
+        num_shots: usize,
+    ) -> Option<Result<Vec<u64>>> {
+        if !self.should_use_gpu_bts(num_shots) {
+            return None;
+        }
+        let ctx = self
+            .gpu_context
+            .as_ref()
+            .expect("gpu BTS selected without gpu_context")
+            .clone();
+        let rank = self.rank;
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let cache = match self.ensure_gpu_bts_cache() {
+            Ok(c) => c,
+            Err(e) => return Some(Err(e)),
+        };
+        Some(crate::gpu::kernels::bts::launch_bts_sample_shot_major_host(
+            &ctx,
+            &mut fast_rng,
+            rank,
+            num_shots,
+            cache,
+        ))
+    }
+
     #[inline(always)]
     #[allow(dead_code)]
     pub(crate) fn sample_into_raw(&mut self, accum: &mut [u64]) {
@@ -586,17 +757,32 @@ impl CompiledSampler {
     }
 
     pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
+        match self.sample_bulk_packed_inner(num_shots, false) {
+            Ok(packed) => packed,
+            Err(_) => unreachable!("compiled sampler CPU fallback should not fail"),
+        }
+    }
+
+    pub fn try_sample_bulk_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
+        self.sample_bulk_packed_inner(num_shots, true)
+    }
+
+    fn sample_bulk_packed_inner(
+        &mut self,
+        num_shots: usize,
+        propagate_gpu_errors: bool,
+    ) -> Result<PackedShots> {
         let m_words = self.num_measurements.div_ceil(64);
         let s_words = num_shots.div_ceil(64);
         if num_shots == 0 || self.num_measurements == 0 {
-            return PackedShots {
+            return Ok(PackedShots {
                 data: Vec::new(),
                 num_shots,
                 num_measurements: self.num_measurements,
                 m_words,
                 s_words,
                 layout: ShotLayout::ShotMajor,
-            };
+            });
         }
         if self.rank == 0 {
             let mut data = vec![0u64; num_shots * m_words];
@@ -604,18 +790,18 @@ impl CompiledSampler {
                 let base = s * m_words;
                 data[base..base + m_words].copy_from_slice(&self.ref_bits_packed);
             }
-            return PackedShots {
+            return Ok(PackedShots {
                 data,
                 num_shots,
                 num_measurements: self.num_measurements,
                 m_words,
                 s_words,
                 layout: ShotLayout::ShotMajor,
-            };
+            });
         }
 
         if self.should_use_bts(num_shots) {
-            return self.sample_bulk_packed_bts(num_shots, m_words, s_words);
+            return self.sample_bulk_packed_bts(num_shots, m_words, s_words, propagate_gpu_errors);
         }
 
         let (mut data, _) = self.sample_bulk_words_shot_major(num_shots);
@@ -623,14 +809,14 @@ impl CompiledSampler {
             let base = s * m_words;
             xor_words(&mut data[base..base + m_words], &self.ref_bits_packed);
         }
-        PackedShots {
+        Ok(PackedShots {
             data,
             num_shots,
             num_measurements: self.num_measurements,
             m_words,
             s_words,
             layout: ShotLayout::ShotMajor,
-        }
+        })
     }
 
     fn sample_bulk_packed_bts(
@@ -638,7 +824,11 @@ impl CompiledSampler {
         num_shots: usize,
         m_words: usize,
         s_words: usize,
-    ) -> PackedShots {
+        propagate_gpu_errors: bool,
+    ) -> Result<PackedShots> {
+        #[cfg(not(feature = "gpu"))]
+        let _ = propagate_gpu_errors;
+
         let num_meas = self.num_measurements;
 
         if let Some(pb) = &self.parity_blocks {
@@ -764,14 +954,23 @@ impl CompiledSampler {
                 meas_major
             };
 
-            return PackedShots {
+            return Ok(PackedShots {
                 data: meas_major,
                 num_shots,
                 num_measurements: num_meas,
                 m_words,
                 s_words,
                 layout: ShotLayout::MeasMajor,
-            };
+            });
+        }
+
+        #[cfg(feature = "gpu")]
+        if self.should_use_gpu_bts(num_shots) {
+            match self.sample_bulk_packed_bts_gpu(num_shots, m_words, s_words) {
+                Ok(packed) => return Ok(packed),
+                Err(e) if propagate_gpu_errors => return Err(e),
+                Err(_) => {}
+            }
         }
 
         let sparse = self
@@ -790,14 +989,14 @@ impl CompiledSampler {
                 &mut fast_rng,
                 self.rank,
             );
-            return PackedShots {
+            return Ok(PackedShots {
                 data,
                 num_shots,
                 num_measurements: num_meas,
                 m_words,
                 s_words,
                 layout: ShotLayout::MeasMajor,
-            };
+            });
         }
 
         let data = bts_batched(
@@ -809,14 +1008,46 @@ impl CompiledSampler {
             &mut fast_rng,
             self.rank,
         );
-        PackedShots {
+        Ok(PackedShots {
             data,
             num_shots,
             num_measurements: num_meas,
             m_words,
             s_words,
             layout: ShotLayout::MeasMajor,
-        }
+        })
+    }
+
+    #[cfg(feature = "gpu")]
+    fn sample_bulk_packed_bts_gpu(
+        &mut self,
+        num_shots: usize,
+        m_words: usize,
+        s_words: usize,
+    ) -> Result<PackedShots> {
+        let ctx = self
+            .gpu_context
+            .as_ref()
+            .expect("gpu BTS selected without gpu_context")
+            .clone();
+        let rank = self.rank;
+        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+        let cache = self.ensure_gpu_bts_cache()?;
+        let data = crate::gpu::kernels::bts::launch_bts_sample(
+            &ctx,
+            &mut fast_rng,
+            rank,
+            num_shots,
+            cache,
+        )?;
+        Ok(PackedShots {
+            data,
+            num_shots,
+            num_measurements: self.num_measurements,
+            m_words,
+            s_words,
+            layout: ShotLayout::MeasMajor,
+        })
     }
 
     pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
@@ -840,6 +1071,28 @@ impl CompiledSampler {
     }
 
     pub fn sample_counts(
+        &mut self,
+        total_shots: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        match self.try_sample_counts(total_shots) {
+            Ok(counts) => counts,
+            Err(_) => self.sample_counts_cpu(total_shots),
+        }
+    }
+
+    pub fn try_sample_counts(
+        &mut self,
+        total_shots: usize,
+    ) -> Result<std::collections::HashMap<Vec<u64>, u64>> {
+        #[cfg(feature = "gpu")]
+        if self.should_try_gpu_counts(total_shots) {
+            return self.sample_bulk_packed_device(total_shots)?.counts();
+        }
+
+        Ok(self.sample_counts_cpu(total_shots))
+    }
+
+    fn sample_counts_cpu(
         &mut self,
         total_shots: usize,
     ) -> std::collections::HashMap<Vec<u64>, u64> {
@@ -1030,6 +1283,22 @@ impl CompiledSampler {
     }
 
     pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
+        match self.try_sample_marginals(total_shots) {
+            Ok(marginals) => marginals,
+            Err(_) => self.sample_marginals_cpu(total_shots),
+        }
+    }
+
+    pub fn try_sample_marginals(&mut self, total_shots: usize) -> Result<Vec<f64>> {
+        #[cfg(feature = "gpu")]
+        if self.should_use_gpu_bts(total_shots) {
+            return self.sample_bulk_packed_device(total_shots)?.marginals();
+        }
+
+        Ok(self.sample_marginals_cpu(total_shots))
+    }
+
+    fn sample_marginals_cpu(&mut self, total_shots: usize) -> Vec<f64> {
         let mut acc = MarginalsAccumulator::new(self.num_measurements);
         self.sample_chunked(total_shots, &mut acc);
         acc.marginals()
@@ -1351,6 +1620,46 @@ impl PackedShots {
         self.data
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn into_shot_major_data(self) -> Vec<u64> {
+        if self.layout == ShotLayout::ShotMajor {
+            return self.data;
+        }
+
+        let mut shot_major = vec![0u64; self.num_shots * self.m_words];
+        for batch_start in (0..self.num_shots).step_by(64) {
+            let batch_end = (batch_start + 64).min(self.num_shots);
+            let batch_len = batch_end - batch_start;
+            let sw_base = batch_start / 64;
+            let bit_off = batch_start % 64;
+            let batch_mask = if batch_len == 64 {
+                u64::MAX
+            } else {
+                (1u64 << batch_len) - 1
+            };
+
+            for m in 0..self.num_measurements {
+                let mword = m / 64;
+                let mbit = m % 64;
+                let meas_row = &self.data[m * self.s_words..(m + 1) * self.s_words];
+                let mut bits = meas_row[sw_base] >> bit_off;
+                if bit_off != 0 && sw_base + 1 < self.s_words {
+                    bits |= meas_row[sw_base + 1] << (64 - bit_off);
+                }
+                bits &= batch_mask;
+
+                while bits != 0 {
+                    let shot_in_batch = bits.trailing_zeros() as usize;
+                    let shot_base = (batch_start + shot_in_batch) * self.m_words;
+                    shot_major[shot_base + mword] |= 1u64 << mbit;
+                    bits &= bits - 1;
+                }
+            }
+        }
+
+        shot_major
+    }
+
     pub fn to_shots(&self) -> Vec<Vec<bool>> {
         let mut shots = Vec::with_capacity(self.num_shots);
         for s in 0..self.num_shots {
@@ -1470,6 +1779,161 @@ impl PackedShots {
             }
         }
         map
+    }
+}
+
+/// Device-resident packed shots emitted by the GPU BTS path.
+///
+/// The payload stays in measurement-major layout on the device until an
+/// explicit host copy via [`Self::to_host`]. Marginals and exact counts can be
+/// reduced first so higher-level workflows do not have to transfer the full
+/// shot matrix.
+#[cfg(feature = "gpu")]
+#[derive(Debug)]
+pub struct DevicePackedShots {
+    context: std::sync::Arc<crate::gpu::GpuContext>,
+    data: crate::gpu::GpuBuffer<u64>,
+    num_shots: usize,
+    num_measurements: usize,
+    m_words: usize,
+    s_words: usize,
+    layout: ShotLayout,
+    rank: usize,
+}
+
+#[cfg(feature = "gpu")]
+impl DevicePackedShots {
+    pub fn num_shots(&self) -> usize {
+        self.num_shots
+    }
+
+    pub fn num_measurements(&self) -> usize {
+        self.num_measurements
+    }
+
+    pub fn layout(&self) -> ShotLayout {
+        self.layout
+    }
+
+    pub(crate) fn context(&self) -> &std::sync::Arc<crate::gpu::GpuContext> {
+        &self.context
+    }
+
+    pub fn m_words(&self) -> usize {
+        self.m_words
+    }
+
+    pub fn s_words(&self) -> usize {
+        self.s_words
+    }
+
+    pub(crate) fn data_mut(&mut self) -> &mut crate::gpu::GpuBuffer<u64> {
+        &mut self.data
+    }
+
+    /// Copy the full packed payload back to host memory.
+    pub fn to_host(&self) -> Result<PackedShots> {
+        let len = match self.layout {
+            ShotLayout::ShotMajor => self.num_shots * self.m_words,
+            ShotLayout::MeasMajor => self.num_measurements * self.s_words,
+        };
+        let mut host = vec![0u64; len];
+        if len > 0 {
+            self.data
+                .copy_to_host(self.context.device(), &mut host)
+                .map_err(|e| PrismError::BackendUnsupported {
+                    backend: "gpu".to_string(),
+                    operation: format!("copy device packed shots to host: {e}"),
+                })?;
+        }
+
+        Ok(match self.layout {
+            ShotLayout::ShotMajor => {
+                PackedShots::from_shot_major(host, self.num_shots, self.num_measurements)
+            }
+            ShotLayout::MeasMajor => {
+                PackedShots::from_meas_major(host, self.num_shots, self.num_measurements)
+            }
+        })
+    }
+
+    /// Return per-measurement one-counts without copying the full shot matrix.
+    pub fn marginal_counts(&self) -> Result<Vec<u64>> {
+        match self.layout {
+            ShotLayout::MeasMajor => crate::gpu::kernels::bts::count_meas_major_marginals(
+                &self.context,
+                &self.data,
+                self.num_measurements,
+                self.num_shots,
+                self.s_words,
+            ),
+            ShotLayout::ShotMajor => Ok(self.to_host()?.counts().into_iter().fold(
+                vec![0u64; self.num_measurements],
+                |mut acc, (key, count)| {
+                    for m in 0..self.num_measurements {
+                        if (key[m / 64] >> (m % 64)) & 1 != 0 {
+                            acc[m] += count;
+                        }
+                    }
+                    acc
+                },
+            )),
+        }
+    }
+
+    /// Return per-measurement marginal probabilities.
+    pub fn marginals(&self) -> Result<Vec<f64>> {
+        if self.num_shots == 0 {
+            return Ok(vec![0.0; self.num_measurements]);
+        }
+        Ok(self
+            .marginal_counts()?
+            .into_iter()
+            .map(|count| count as f64 / self.num_shots as f64)
+            .collect())
+    }
+
+    /// Return exact counts, using a GPU reduction when it reduces transfer.
+    pub fn counts(&self) -> Result<std::collections::HashMap<Vec<u64>, u64>> {
+        self.counts_with_rank_hint(self.rank)
+    }
+
+    pub(crate) fn counts_with_rank_hint(
+        &self,
+        rank_hint: usize,
+    ) -> Result<std::collections::HashMap<Vec<u64>, u64>> {
+        match self.layout {
+            ShotLayout::MeasMajor => {
+                if let Some(counts) = crate::gpu::kernels::bts::try_count_meas_major(
+                    &self.context,
+                    &self.data,
+                    self.num_measurements,
+                    self.num_shots,
+                    self.m_words,
+                    self.s_words,
+                    rank_hint,
+                )? {
+                    return Ok(counts);
+                }
+            }
+            ShotLayout::ShotMajor => {
+                let raw_transfer_bytes = self
+                    .num_shots
+                    .saturating_mul(self.m_words)
+                    .saturating_mul(std::mem::size_of::<u64>());
+                if let Some(counts) = crate::gpu::kernels::bts::try_count_shot_major(
+                    &self.context,
+                    &self.data,
+                    self.num_shots,
+                    self.m_words,
+                    rank_hint,
+                    raw_transfer_bytes,
+                )? {
+                    return Ok(counts);
+                }
+            }
+        }
+        Ok(self.to_host()?.counts())
     }
 }
 
@@ -1620,6 +2084,10 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
             sparse: None,
             xor_dag: None,
             parity_blocks: None,
+            #[cfg(feature = "gpu")]
+            gpu_context: None,
+            #[cfg(feature = "gpu")]
+            gpu_bts_cache: None,
         });
     }
 
@@ -1655,7 +2123,7 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
         }
 
         if let Some(p_row) = p {
-            // Random measurement — this is the k-th random degree of freedom
+            // Random measurement, this is the k-th random degree of freedom
             let k = rank;
             rank += 1;
             flip_rows.push(vec![0u64; m_words]);
@@ -1757,6 +2225,10 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
         sparse: Some(sparse),
         xor_dag,
         parity_blocks,
+        #[cfg(feature = "gpu")]
+        gpu_context: None,
+        #[cfg(feature = "gpu")]
+        gpu_bts_cache: None,
     })
 }
 
@@ -1782,6 +2254,10 @@ fn compile_measurements_filtered(
             sparse: None,
             xor_dag: None,
             parity_blocks: None,
+            #[cfg(feature = "gpu")]
+            gpu_context: None,
+            #[cfg(feature = "gpu")]
+            gpu_bts_cache: None,
         });
     }
 
@@ -1872,6 +2348,10 @@ fn compile_measurements_filtered(
         sparse: Some(sparse),
         xor_dag,
         parity_blocks,
+        #[cfg(feature = "gpu")]
+        gpu_context: None,
+        #[cfg(feature = "gpu")]
+        gpu_bts_cache: None,
     })
 }
 
@@ -1880,11 +2360,30 @@ fn compile_measurements_filtered(
 /// Selects forward (SGI stabilizer + dependency tracking) or backward (Pauli
 /// propagation + Gaussian elimination) based on circuit depth. Forward wins
 /// for deep circuits (gate_count >= 5×measurements).
+/// Requires terminal measurements and does not support reset or conditional
+/// operations on measured data.
 pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     if !circuit.is_clifford_only() {
         return Err(PrismError::IncompatibleBackend {
             backend: "CompiledSampler".to_string(),
             reason: "circuit contains non-Clifford gates".to_string(),
+        });
+    }
+
+    let has_measurements = circuit
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst, Instruction::Measure { .. }));
+    if has_measurements && circuit.has_resets() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "compiled measurement sampling does not support reset instructions".to_string(),
+        });
+    }
+    if has_measurements && !circuit.has_terminal_measurements_only() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "compiled measurement sampling requires terminal measurements and does not support classical conditionals".to_string(),
         });
     }
 
@@ -1916,6 +2415,10 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
             sparse: None,
             xor_dag: None,
             parity_blocks: None,
+            #[cfg(feature = "gpu")]
+            gpu_context: None,
+            #[cfg(feature = "gpu")]
+            gpu_bts_cache: None,
         });
     }
 
@@ -2002,16 +2505,44 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
         sparse: Some(sparse),
         xor_dag,
         parity_blocks,
+        #[cfg(feature = "gpu")]
+        gpu_context: None,
+        #[cfg(feature = "gpu")]
+        gpu_bts_cache: None,
     })
 }
 
 /// Sample shots via the compiled (Heisenberg-picture) path.
 ///
-/// Returns `Vec<Vec<bool>>` — inherently O(num_shots) memory.
+/// Returns `Vec<Vec<bool>>`, inherently O(num_shots) memory.
 /// For bounded-memory streaming at large shot counts, use
 /// `compile_measurements` + `sample_chunked` / `sample_counts` directly.
+///
+/// Requires the same circuit subset as [`compile_measurements`], namely
+/// terminal measurements with no resets or classical conditionals.
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
+    let packed = sampler.sample_bulk_packed(num_shots);
+    Ok(ShotsResult {
+        shots: packed.to_shots(),
+        num_classical_bits: circuit.num_classical_bits,
+    })
+}
+
+/// Like [`run_shots_compiled`] but routes BTS sampling through the GPU when the
+/// circuit compiles to a flat sparse parity matrix and `num_shots` reaches the
+/// GPU BTS threshold. The threshold defaults to
+/// [`crate::gpu::BTS_MIN_SHOTS_DEFAULT`] and can be overridden with
+/// `PRISM_GPU_BTS_MIN_SHOTS`. Requires the `gpu` feature and a working CUDA
+/// context.
+#[cfg(feature = "gpu")]
+pub fn run_shots_compiled_with_gpu(
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+    context: std::sync::Arc<crate::gpu::GpuContext>,
+) -> Result<ShotsResult> {
+    let mut sampler = compile_measurements(circuit, seed)?.with_gpu(context);
     let packed = sampler.sample_bulk_packed(num_shots);
     Ok(ShotsResult {
         shots: packed.to_shots(),

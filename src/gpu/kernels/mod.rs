@@ -1,4 +1,4 @@
-//! GPU kernels — PTX source, compiled once at device construction, plus per-operation
+//! GPU kernels, PTX source compiled once at device construction, plus per-operation
 //! launcher functions.
 //!
 //! The PTX module is composed by concatenating each backend's CUDA C source (dense for
@@ -6,6 +6,7 @@
 //! combined source once per `GpuContext`; `KERNEL_NAMES` lists every entry point from
 //! every backend so `GpuDevice::new` can pre-resolve them all.
 
+pub(crate) mod bts;
 pub(crate) mod dense;
 pub(crate) mod stabilizer;
 
@@ -18,6 +19,8 @@ pub(crate) fn kernel_source() -> String {
     let mut src = dense::kernel_source();
     src.push('\n');
     src.push_str(&stabilizer::kernel_source());
+    src.push('\n');
+    src.push_str(&bts::kernel_source());
     src
 }
 
@@ -51,4 +54,20 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "apply_multi_fused_tiled",
     // Stabilizer tableau kernels.
     "stab_set_initial_tableau",
+    "stab_apply_word_grouped",
+    "stab_rowmul_words",
+    "stab_measure_find_pivot",
+    "stab_measure_cascade",
+    "stab_measure_fixup",
+    "stab_measure_deterministic",
+    // Block-triangular sampling.
+    "bts_sample_meas_major",
+    "bts_popcount_rows",
+    "bts_count_meas_major_upto8",
+    "bts_count_shot_major_upto8",
+    "bts_count_used_slots",
+    "bts_compact_counts_upto8",
+    "bts_transpose_meas_to_shot",
+    "bts_apply_noise_masks_meas_major",
+    "bts_generate_and_apply_noise_meas_major_by_row",
 ];

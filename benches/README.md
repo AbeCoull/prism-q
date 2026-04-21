@@ -4,8 +4,8 @@
 
 Criterion.rs with HTML reports. Two benchmark binaries:
 
-- **bench_driver** — Microbenchmarks: individual gate kernels, measurement, end-to-end QASM.
-- **circuits** — Macrobenchmarks: circuit family sweeps across qubit counts and depths.
+- **bench_driver**: Microbenchmarks for individual gate kernels, measurement, and end-to-end QASM.
+- **circuits**: Macrobenchmarks for circuit family sweeps across qubit counts and depths.
 
 ## Benchmark categories
 
@@ -96,6 +96,6 @@ Criterion reports regressions in its console output. The compare scripts parse t
 ## Output
 
 Criterion stores results in `target/criterion/`. Each benchmark gets:
-- `estimates.json` — statistical estimates (mean, median, std dev)
-- `benchmark.json` — configuration
+- `estimates.json`: statistical estimates (mean, median, std dev)
+- `benchmark.json`: configuration
 - HTML reports in `target/criterion/report/`

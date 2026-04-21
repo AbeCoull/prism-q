@@ -18,7 +18,7 @@ use crate::sim::ShotsResult;
 /// Channels are applied by the trajectory engine after each gate whose
 /// `NoiseModel::after_gate` entry contains a matching `NoiseEvent`. For
 /// Pauli-only noise on Clifford circuits, the compiled stabilizer sampler
-/// is used instead — see [`NoiseModel::is_pauli_only`].
+/// is used instead, see [`NoiseModel::is_pauli_only`].
 #[derive(Debug, Clone)]
 pub enum NoiseChannel {
     /// Independent Pauli X/Y/Z error with given per-branch probabilities.
@@ -40,7 +40,7 @@ pub enum NoiseChannel {
     TwoQubitDepolarizing { p: f64 },
     /// General single-qubit channel described by a set of Kraus operators.
     ///
-    /// **Restriction — supported Kraus class.** Each operator `K_k` must
+    /// **Restriction: supported Kraus class.** Each operator `K_k` must
     /// satisfy that `K_k† K_k` is diagonal. This class is rich enough to
     /// cover all diagonal channels (amplitude / phase damping, dephasing)
     /// plus the Pauli channels (bit flip, phase flip, bit-phase flip, and
@@ -267,6 +267,109 @@ fn geometric_sample(rng: &mut ChaCha8Rng, ln_1mp: f64) -> usize {
     (u.ln() / ln_1mp) as usize
 }
 
+#[cfg(feature = "gpu")]
+fn geometric_sample_xoshiro(
+    rng: &mut crate::sim::compiled::rng::Xoshiro256PlusPlus,
+    ln_1mp: f64,
+) -> usize {
+    // `next_f64` returns [0, 1); shift to (0, 1] so `ln` stays finite.
+    let u: f64 = 1.0 - rng.next_f64();
+    (u.ln() / ln_1mp) as usize
+}
+
+/// RNG source for [`fill_one_event`]. Bundles uniform and geometric draws
+/// onto a single trait so the shared body can use one `&mut` borrow instead
+/// of two concurrent closures over the underlying generator.
+#[cfg(feature = "gpu")]
+trait EventRng {
+    fn uniform(&mut self) -> f64;
+    fn geom(&mut self, ln_1mp: f64) -> usize;
+}
+
+#[cfg(feature = "gpu")]
+impl EventRng for ChaCha8Rng {
+    #[inline]
+    fn uniform(&mut self) -> f64 {
+        rand::Rng::random::<f64>(self)
+    }
+    #[inline]
+    fn geom(&mut self, ln_1mp: f64) -> usize {
+        geometric_sample(self, ln_1mp)
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl EventRng for crate::sim::compiled::rng::Xoshiro256PlusPlus {
+    #[inline]
+    fn uniform(&mut self) -> f64 {
+        self.next_f64()
+    }
+    #[inline]
+    fn geom(&mut self, ln_1mp: f64) -> usize {
+        geometric_sample_xoshiro(self, ln_1mp)
+    }
+}
+
+/// Fill one event's portion of the noise masks. Shared by the serial master
+/// ChaCha path and the parallel per-event Xoshiro path, so the bernoulli
+/// and geometric branches live in exactly one place.
+#[cfg(feature = "gpu")]
+#[inline]
+fn fill_one_event(
+    x_slot: &mut [u64],
+    z_slot: &mut [u64],
+    probs: [f64; 3],
+    chunk_shots: usize,
+    rng: &mut dyn EventRng,
+) {
+    let [px, py, pz] = probs;
+    let p_event = px + py + pz;
+    if p_event == 0.0 {
+        return;
+    }
+    let pxy = px + py;
+
+    // High-p or tiny chunk: a per-shot bernoulli sweep dominates geometric
+    // skipping overhead because most shots flip anyway.
+    if p_event >= 0.5 || chunk_shots < 32 {
+        for s in 0..chunk_shots {
+            let r = rng.uniform();
+            let slot_idx = s / 64;
+            let bit = 1u64 << (s % 64);
+            if r < px {
+                z_slot[slot_idx] |= bit;
+            } else if r < pxy {
+                z_slot[slot_idx] |= bit;
+                x_slot[slot_idx] |= bit;
+            } else if r < p_event {
+                x_slot[slot_idx] |= bit;
+            }
+        }
+        return;
+    }
+
+    // Low-p: skip inactive shots via geometric sampling. `px_frac` / `pxy_frac`
+    // rescale to the conditional distribution given an event fired.
+    let ln_1mp = (1.0 - p_event).ln();
+    let px_frac = px / p_event;
+    let pxy_frac = pxy / p_event;
+    let mut pos = rng.geom(ln_1mp);
+    while pos < chunk_shots {
+        let r = rng.uniform();
+        let slot_idx = pos / 64;
+        let bit = 1u64 << (pos % 64);
+        if r < px_frac {
+            z_slot[slot_idx] |= bit;
+        } else if r < pxy_frac {
+            z_slot[slot_idx] |= bit;
+            x_slot[slot_idx] |= bit;
+        } else {
+            x_slot[slot_idx] |= bit;
+        }
+        pos += 1 + rng.geom(ln_1mp);
+    }
+}
+
 const NOISE_LUT_K: usize = 8;
 const NOISE_LUT_MIN_EVENTS: usize = 16;
 const NOISE_LUT_TILE: usize = 4096;
@@ -431,6 +534,273 @@ fn build_noise_luts(events: &FlatNoiseSensitivity) -> (Option<NoiseFlipLut>, Opt
     (Some(z_lut), Some(x_lut))
 }
 
+/// Pack `(px, py, pz)` per event into three `u64` thresholds for the fused
+/// noise kernel. Each threshold is `p * 2^64` rounded down, so a uniform
+/// `u64` random compares below it with probability `p`. Returns the flat
+/// buffer along with `false` when any event's probabilities are out of range
+/// (negative, NaN, or sum greater than 1). The caller then falls back to the
+/// host mask path.
+#[cfg(feature = "gpu")]
+fn flatten_event_thresholds_u64(probs: &[[f64; 3]]) -> (Vec<u64>, bool) {
+    // Nearest f64 below 2^64. Scaling by 2^64 exactly rounds to 2^64 which
+    // doesn't fit in a u64; this preserves `u64_rand < threshold` at the
+    // intended probability.
+    const SCALE: f64 = 18446744073709549568.0_f64;
+    const PROB_SUM_SLACK: f64 = 1e-12;
+
+    let mut out = Vec::with_capacity(probs.len() * 3);
+    let mut valid = true;
+    for &[px, py, pz] in probs {
+        let finite = px.is_finite() && py.is_finite() && pz.is_finite();
+        let sum = px + py + pz;
+        if !finite || px < 0.0 || py < 0.0 || pz < 0.0 || sum > 1.0 + PROB_SUM_SLACK {
+            valid = false;
+        }
+        let to_u64 = |p: f64| -> u64 {
+            if !p.is_finite() || p <= 0.0 {
+                0
+            } else if p >= 1.0 {
+                u64::MAX
+            } else {
+                (p * SCALE) as u64
+            }
+        };
+        out.push(to_u64(px));
+        out.push(to_u64(px + py));
+        out.push(to_u64(sum));
+    }
+    (out, valid)
+}
+
+/// Transpose the event-major `(x_data, z_data)` bitmaps in a
+/// `FlatNoiseSensitivity` into a row-major CSR. Each row's entry list names
+/// the events that touch it, packed as `event << 2 | flag`: flag bit 0 for
+/// an X contribution, bit 1 for Z, both set for a Y contribution. Lets the
+/// per-(row, batch) kernel accumulate XORs in a register without atomics.
+/// Paired with `bts_generate_and_apply_noise_meas_major_by_row`.
+#[cfg(feature = "gpu")]
+fn transpose_events_to_row_major(
+    events: &FlatNoiseSensitivity,
+    num_meas: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let num_events = events.len();
+    let m_words = events.m_words;
+
+    // First pass: count per-row entries.
+    let mut row_counts = vec![0u32; num_meas];
+    for e in 0..num_events {
+        let x = &events.x_data[e * m_words..(e + 1) * m_words];
+        let z = &events.z_data[e * m_words..(e + 1) * m_words];
+        for w in 0..m_words {
+            let union = x[w] | z[w];
+            let mut bits = union;
+            while bits != 0 {
+                let row = w * 64 + bits.trailing_zeros() as usize;
+                if row < num_meas {
+                    row_counts[row] += 1;
+                }
+                bits &= bits - 1;
+            }
+        }
+    }
+
+    let mut offsets = Vec::with_capacity(num_meas + 1);
+    offsets.push(0u32);
+    let mut running = 0u32;
+    for c in &row_counts {
+        running += c;
+        offsets.push(running);
+    }
+    let total = running as usize;
+
+    // Second pass: write entries. Use a fresh cursor array because
+    // `row_counts` is still needed to validate; cheaper to just reuse it as
+    // a write cursor starting at `offsets[row]`.
+    let mut entries = vec![0u32; total];
+    let mut cursor: Vec<u32> = offsets[..num_meas].to_vec();
+    for e in 0..num_events {
+        let x = &events.x_data[e * m_words..(e + 1) * m_words];
+        let z = &events.z_data[e * m_words..(e + 1) * m_words];
+        for w in 0..m_words {
+            let union = x[w] | z[w];
+            let mut bits = union;
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                let row = w * 64 + b;
+                if row >= num_meas {
+                    continue;
+                }
+                let bit_mask = 1u64 << b;
+                let flag: u32 = (if x[w] & bit_mask != 0 { 1 } else { 0 })
+                    | (if z[w] & bit_mask != 0 { 2 } else { 0 });
+                let slot = cursor[row] as usize;
+                entries[slot] = ((e as u32) << 2) | flag;
+                cursor[row] += 1;
+            }
+        }
+    }
+
+    (offsets, entries)
+}
+
+#[cfg(feature = "gpu")]
+fn flatten_event_rows_to_csr(
+    flat_data: &[u64],
+    num_rows: usize,
+    m_words: usize,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut row_offsets = Vec::with_capacity(num_rows + 1);
+    let mut row_indices = Vec::new();
+
+    for row in 0..num_rows {
+        row_offsets.push(row_indices.len() as u32);
+        let base = row * m_words;
+        for word in 0..m_words {
+            let mut bits = flat_data[base + word];
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                row_indices.push((word * 64 + bit) as u32);
+                bits &= bits - 1;
+            }
+        }
+    }
+    row_offsets.push(row_indices.len() as u32);
+
+    (row_offsets, row_indices)
+}
+
+#[cfg(feature = "gpu")]
+struct GpuNoiseCache {
+    context: std::sync::Arc<crate::gpu::GpuContext>,
+    x_row_offsets_dev: crate::gpu::GpuBuffer<u32>,
+    x_row_indices_dev: crate::gpu::GpuBuffer<u32>,
+    z_row_offsets_dev: crate::gpu::GpuBuffer<u32>,
+    z_row_indices_dev: crate::gpu::GpuBuffer<u32>,
+    x_masks_dev: crate::gpu::GpuBuffer<u64>,
+    z_masks_dev: crate::gpu::GpuBuffer<u64>,
+    x_masks_host: Vec<u64>,
+    z_masks_host: Vec<u64>,
+    /// Precomputed per-event thresholds for the fused generator. Three u64s
+    /// per event hold `[px, px+py, px+py+pz]` scaled to `2^64`, so the
+    /// kernel's inner loop replaces a floating-point multiply and branch per
+    /// shot with a `u64 <` compare. Stays resident across sampling calls.
+    event_thresholds_dev: crate::gpu::GpuBuffer<u64>,
+    /// True when every event's probabilities can be represented as a `u64`
+    /// threshold. A NaN or a sum greater than 1 flips this to false and
+    /// routes the caller to the host mask path.
+    event_thresholds_valid: bool,
+    /// Row-major event CSR for the per-(row, batch) fused kernel. Each entry
+    /// packs `event << 2 | flag`, where bit 0 means the event contributes X
+    /// to this row and bit 1 means Z. The row-major layout lets one thread
+    /// accumulate every XOR for its output word in a register instead of
+    /// broadcasting `(event, batch)` writes across rows with atomics.
+    row_event_offsets_dev: crate::gpu::GpuBuffer<u32>,
+    row_event_entries_dev: crate::gpu::GpuBuffer<u32>,
+}
+
+#[cfg(feature = "gpu")]
+impl GpuNoiseCache {
+    fn new(
+        context: std::sync::Arc<crate::gpu::GpuContext>,
+        events: &FlatNoiseSensitivity,
+    ) -> Result<Self> {
+        let device = context.device();
+        let num_events = events.len();
+        let (x_row_offsets, x_row_indices) =
+            flatten_event_rows_to_csr(&events.x_data, num_events, events.m_words);
+        let (z_row_offsets, z_row_indices) =
+            flatten_event_rows_to_csr(&events.z_data, num_events, events.m_words);
+
+        let mut x_row_offsets_dev =
+            crate::gpu::GpuBuffer::<u32>::alloc_zeros(device, x_row_offsets.len().max(1))?;
+        let mut x_row_indices_dev =
+            crate::gpu::GpuBuffer::<u32>::alloc_zeros(device, x_row_indices.len().max(1))?;
+        let mut z_row_offsets_dev =
+            crate::gpu::GpuBuffer::<u32>::alloc_zeros(device, z_row_offsets.len().max(1))?;
+        let mut z_row_indices_dev =
+            crate::gpu::GpuBuffer::<u32>::alloc_zeros(device, z_row_indices.len().max(1))?;
+
+        if !x_row_offsets.is_empty() {
+            x_row_offsets_dev.copy_from_host(device, &x_row_offsets)?;
+        }
+        if !x_row_indices.is_empty() {
+            x_row_indices_dev.copy_from_host(device, &x_row_indices)?;
+        }
+        if !z_row_offsets.is_empty() {
+            z_row_offsets_dev.copy_from_host(device, &z_row_offsets)?;
+        }
+        if !z_row_indices.is_empty() {
+            z_row_indices_dev.copy_from_host(device, &z_row_indices)?;
+        }
+
+        let (thresholds_host, thresholds_valid) = flatten_event_thresholds_u64(&events.probs);
+        let mut event_thresholds_dev =
+            crate::gpu::GpuBuffer::<u64>::alloc_zeros(device, thresholds_host.len().max(1))?;
+        if !thresholds_host.is_empty() {
+            event_thresholds_dev.copy_from_host(device, &thresholds_host)?;
+        }
+
+        // Row-major transpose for the per-(row, batch) fused kernel. Cheap
+        // bit-scan over events.x_data | events.z_data at cache init time.
+        let (row_event_offsets_host, row_event_entries_host) =
+            transpose_events_to_row_major(events, events.m_words * 64);
+        let mut row_event_offsets_dev =
+            crate::gpu::GpuBuffer::<u32>::alloc_zeros(device, row_event_offsets_host.len().max(1))?;
+        let mut row_event_entries_dev =
+            crate::gpu::GpuBuffer::<u32>::alloc_zeros(device, row_event_entries_host.len().max(1))?;
+        if !row_event_offsets_host.is_empty() {
+            row_event_offsets_dev.copy_from_host(device, &row_event_offsets_host)?;
+        }
+        if !row_event_entries_host.is_empty() {
+            row_event_entries_dev.copy_from_host(device, &row_event_entries_host)?;
+        }
+
+        Ok(Self {
+            context: context.clone(),
+            x_row_offsets_dev,
+            x_row_indices_dev,
+            z_row_offsets_dev,
+            z_row_indices_dev,
+            x_masks_dev: crate::gpu::GpuBuffer::<u64>::alloc_zeros(device, 1)?,
+            z_masks_dev: crate::gpu::GpuBuffer::<u64>::alloc_zeros(device, 1)?,
+            x_masks_host: Vec::new(),
+            z_masks_host: Vec::new(),
+            event_thresholds_dev,
+            event_thresholds_valid: thresholds_valid,
+            row_event_offsets_dev,
+            row_event_entries_dev,
+        })
+    }
+
+    fn ensure_mask_capacity(&mut self, len: usize) -> Result<()> {
+        let needed = len.max(1);
+        let device = self.context.device();
+        if self.x_masks_dev.len() < needed {
+            self.x_masks_dev = crate::gpu::GpuBuffer::<u64>::alloc_zeros(device, needed)?;
+        }
+        if self.z_masks_dev.len() < needed {
+            self.z_masks_dev = crate::gpu::GpuBuffer::<u64>::alloc_zeros(device, needed)?;
+        }
+        if self.x_masks_host.len() < needed {
+            self.x_masks_host.resize(needed, 0);
+        }
+        if self.z_masks_host.len() < needed {
+            self.z_masks_host.resize(needed, 0);
+        }
+        Ok(())
+    }
+}
+
+/// Compiled sampler for Clifford circuits with Pauli noise.
+///
+/// The sampler reuses the compiled measurement parity map for the noiseless
+/// circuit, then applies the requested Pauli noise model across batches of
+/// shots. When a GPU context is attached with [`Self::with_gpu`], the
+/// underlying parity sampling stage may use the GPU BTS path. Materialized
+/// shot output still returns to the CPU in shot-major form, while exact
+/// counts and marginals can keep the packed measurement-major buffer on the
+/// device through noise application and reduction.
 pub struct NoisyCompiledSampler {
     noiseless: crate::sim::compiled::CompiledSampler,
     events: FlatNoiseSensitivity,
@@ -438,21 +808,27 @@ pub struct NoisyCompiledSampler {
     rng: ChaCha8Rng,
     z_lut: Option<NoiseFlipLut>,
     x_lut: Option<NoiseFlipLut>,
+    #[cfg(feature = "gpu")]
+    gpu_noise_cache: Option<GpuNoiseCache>,
 }
 
 impl NoisyCompiledSampler {
-    pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
-        let m_words = self.num_measurements.div_ceil(64);
-        if num_shots == 0 || self.num_measurements == 0 {
-            return PackedShots::from_shot_major(
-                vec![0u64; num_shots * m_words],
-                num_shots,
-                self.num_measurements,
-            );
-        }
+    /// Opt in to GPU-accelerated sampling for the underlying compiled
+    /// noiseless sampler.
+    ///
+    /// Small shot batches may continue to use the CPU path when the compiled
+    /// sampler stays below the GPU BTS threshold. Noise masks are still
+    /// generated on the CPU; counts and marginals can then apply them and
+    /// reduce on the device.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(mut self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
+        self.noiseless = self.noiseless.with_gpu(context);
+        self.gpu_noise_cache = None;
+        self
+    }
 
+    fn sample_bulk_words_shot_major_cpu(&mut self, num_shots: usize) -> (Vec<u64>, usize) {
         let (mut accum, m_words) = self.noiseless.sample_bulk_words_shot_major(num_shots);
-
         self.apply_noise_bulk(&mut accum, num_shots, m_words);
 
         let ref_bits_packed = self.noiseless.ref_bits_packed();
@@ -476,9 +852,301 @@ impl NoisyCompiledSampler {
             xor_words(&mut accum[shot_base..shot_base + m_words], ref_bits_packed);
         }
 
+        (accum, m_words)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn try_sample_bulk_packed_with_gpu_context(&mut self, num_shots: usize) -> Result<PackedShots> {
+        let m_words = self.num_measurements.div_ceil(64);
+        if num_shots == 0 || self.num_measurements == 0 {
+            return Ok(PackedShots::from_shot_major(
+                vec![0u64; num_shots * m_words],
+                num_shots,
+                self.num_measurements,
+            ));
+        }
+
+        // Prefer the GPU shot-major path: BTS plus on-device bit-transpose
+        // into shot-major layout eliminates the host `into_shot_major_data()`
+        // transpose that otherwise dominates noisy sampling at large shot
+        // counts. Falls back to the default sampler (which may itself dispatch
+        // to the GPU meas-major BTS) when the shot-major path does not apply.
+        let mut accum = match self.noiseless.try_sample_bulk_shot_major_gpu(num_shots) {
+            Some(Ok(data)) => data,
+            Some(Err(e)) => return Err(e),
+            None => {
+                let (accum, _m_words) = self.sample_bulk_words_shot_major_cpu(num_shots);
+                return Ok(PackedShots::from_shot_major(
+                    accum,
+                    num_shots,
+                    self.num_measurements,
+                ));
+            }
+        };
+        self.apply_noise_bulk(&mut accum, num_shots, m_words);
+        Ok(PackedShots::from_shot_major(
+            accum,
+            num_shots,
+            self.num_measurements,
+        ))
+    }
+
+    #[cfg(feature = "gpu")]
+    fn take_gpu_noise_cache(&mut self) -> Result<GpuNoiseCache> {
+        if let Some(cache) = self.gpu_noise_cache.take() {
+            return Ok(cache);
+        }
+        let context = self
+            .noiseless
+            .gpu_context()
+            .expect("gpu noise cache requested without gpu_context");
+        GpuNoiseCache::new(context, &self.events)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn fill_noise_masks_event_major(
+        events: &FlatNoiseSensitivity,
+        rng: &mut ChaCha8Rng,
+        x_masks: &mut [u64],
+        z_masks: &mut [u64],
+        chunk_shots: usize,
+        chunk_s_words: usize,
+    ) {
+        x_masks.fill(0);
+        z_masks.fill(0);
+
+        // Events touch disjoint per-event slots of `x_masks` / `z_masks`, so
+        // they parallelise cleanly once each worker has its own RNG stream.
+        // Seed one Xoshiro per event from the master ChaCha so the draws are
+        // independent of Rayon's thread count while matching the serial
+        // reference statistically.
+        #[cfg(feature = "parallel")]
+        {
+            use rand::RngCore;
+            use rayon::prelude::*;
+            // Rayon split + per-event seed draw has to be dominated by real
+            // work; below this threshold the serial master-rng loop wins.
+            // Tuned against the noisy-sampling bench at 1M shots where
+            // num_events is small and the tile is also small.
+            const MIN_PAR_EVENTS: usize = 64;
+            const MIN_PAR_SLOTS: usize = 32_768;
+            let work_slots = events.len().saturating_mul(chunk_s_words);
+            if events.len() >= MIN_PAR_EVENTS
+                && work_slots >= MIN_PAR_SLOTS
+                && x_masks.len() == events.len() * chunk_s_words
+                && z_masks.len() == events.len() * chunk_s_words
+            {
+                let thread_seeds: Vec<[u64; 4]> = (0..events.len())
+                    .map(|_| {
+                        [
+                            rng.next_u64(),
+                            rng.next_u64(),
+                            rng.next_u64(),
+                            rng.next_u64(),
+                        ]
+                    })
+                    .collect();
+
+                x_masks
+                    .par_chunks_mut(chunk_s_words)
+                    .zip(z_masks.par_chunks_mut(chunk_s_words))
+                    .zip(thread_seeds.par_iter())
+                    .enumerate()
+                    .for_each(|(i, ((x_slot, z_slot), seed))| {
+                        let mut trng =
+                            crate::sim::compiled::rng::Xoshiro256PlusPlus::from_seeds(*seed);
+                        fill_one_event(x_slot, z_slot, events.probs[i], chunk_shots, &mut trng);
+                    });
+                return;
+            }
+        }
+
+        for (i, &probs) in events.probs.iter().enumerate() {
+            let base = i * chunk_s_words;
+            let end = base + chunk_s_words;
+            fill_one_event(
+                &mut x_masks[base..end],
+                &mut z_masks[base..end],
+                probs,
+                chunk_shots,
+                rng,
+            );
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    fn apply_noise_device_meas_major(
+        &mut self,
+        packed: &mut crate::sim::compiled::DevicePackedShots,
+    ) -> Result<()> {
+        if self.events.is_empty() || packed.num_shots() == 0 || self.num_measurements == 0 {
+            return Ok(());
+        }
+
+        let num_events = self.events.len();
+        let mut cache = self.take_gpu_noise_cache()?;
+        let total_s_words = packed.s_words();
+        let context = packed.context().clone();
+        let num_shots = packed.num_shots();
+
+        // Fused path: the kernel seeds a per-(event, batch) xoshiro stream
+        // from a master seed drawn on the host, then generates and XORs the
+        // noise masks in one launch per tile. Drops the per-tile mask fill
+        // and ~25-50 MB PCIe upload that the fallback branch pays at large
+        // shot counts. The fallback runs only when compiled event
+        // probabilities fail the `u64` threshold check.
+        let use_fused = cache.event_thresholds_valid;
+        let master_seed: u64 = if use_fused {
+            rand::RngCore::next_u64(&mut self.rng)
+        } else {
+            0
+        };
+
+        let mut shot_start = 0;
+        while shot_start < num_shots {
+            let chunk_shots = (shot_start + NOISE_LUT_TILE).min(num_shots) - shot_start;
+            let chunk_s_words = chunk_shots.div_ceil(64);
+            let word_offset = shot_start / 64;
+
+            if use_fused {
+                crate::gpu::kernels::bts::generate_and_apply_noise_masks_meas_major_by_row(
+                    &context,
+                    crate::gpu::kernels::bts::NoiseDeviceGenApplyByRow {
+                        meas_major: packed.data_mut(),
+                        num_meas: self.num_measurements,
+                        s_words: total_s_words,
+                        word_offset,
+                        chunk_s_words,
+                        row_event_offsets: &cache.row_event_offsets_dev,
+                        row_event_entries: &cache.row_event_entries_dev,
+                        event_thresholds: &cache.event_thresholds_dev,
+                        master_seed,
+                        batch_offset: word_offset as u64,
+                    },
+                )?;
+            } else {
+                let mask_len = num_events * chunk_s_words;
+                cache.ensure_mask_capacity(mask_len)?;
+                Self::fill_noise_masks_event_major(
+                    &self.events,
+                    &mut self.rng,
+                    &mut cache.x_masks_host[..mask_len],
+                    &mut cache.z_masks_host[..mask_len],
+                    chunk_shots,
+                    chunk_s_words,
+                );
+                if mask_len > 0 {
+                    cache
+                        .x_masks_dev
+                        .copy_from_host(cache.context.device(), &cache.x_masks_host[..mask_len])?;
+                    cache
+                        .z_masks_dev
+                        .copy_from_host(cache.context.device(), &cache.z_masks_host[..mask_len])?;
+                    let base = crate::gpu::kernels::bts::NoiseApplyBase {
+                        meas_major: packed.data_mut(),
+                        num_meas: self.num_measurements,
+                        s_words: total_s_words,
+                        word_offset,
+                        chunk_s_words,
+                        num_events,
+                        x_row_offsets: &cache.x_row_offsets_dev,
+                        x_row_indices: &cache.x_row_indices_dev,
+                        z_row_offsets: &cache.z_row_offsets_dev,
+                        z_row_indices: &cache.z_row_indices_dev,
+                    };
+                    crate::gpu::kernels::bts::apply_noise_masks_meas_major(
+                        &context,
+                        crate::gpu::kernels::bts::NoiseMaskApply {
+                            base,
+                            x_masks: &cache.x_masks_dev,
+                            z_masks: &cache.z_masks_dev,
+                        },
+                    )?;
+                }
+            }
+
+            shot_start += chunk_shots;
+        }
+
+        self.gpu_noise_cache = Some(cache);
+        Ok(())
+    }
+
+    #[cfg(feature = "gpu")]
+    fn try_sample_marginals_gpu(&mut self, total_shots: usize) -> Option<Result<Vec<f64>>> {
+        if !self.noiseless.should_use_gpu_bts(total_shots) {
+            return None;
+        }
+
+        let mut packed = match self.noiseless.sample_bulk_packed_device(total_shots) {
+            Ok(packed) => packed,
+            Err(e) => return Some(Err(e)),
+        };
+        if let Err(e) = self.apply_noise_device_meas_major(&mut packed) {
+            return Some(Err(e));
+        }
+        Some(packed.marginals())
+    }
+
+    #[cfg(feature = "gpu")]
+    fn try_sample_counts_gpu(
+        &mut self,
+        total_shots: usize,
+    ) -> Option<Result<std::collections::HashMap<Vec<u64>, u64>>> {
+        if !self.noiseless.should_use_gpu_bts(total_shots) {
+            return None;
+        }
+
+        let mut packed = match self.noiseless.sample_bulk_packed_device(total_shots) {
+            Ok(packed) => packed,
+            Err(e) => return Some(Err(e)),
+        };
+        if let Err(e) = self.apply_noise_device_meas_major(&mut packed) {
+            return Some(Err(e));
+        }
+        Some(packed.counts_with_rank_hint(self.num_measurements))
+    }
+
+    /// Sample `num_shots` noisy outcomes and return them in packed form.
+    ///
+    /// The returned [`PackedShots`] value uses shot-major layout. With a GPU
+    /// context attached, the underlying parity sampling stage may run on the
+    /// GPU before noise is applied and the packed output is materialized on
+    /// the CPU.
+    pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
+        match self.try_sample_bulk_packed(num_shots) {
+            Ok(packed) => packed,
+            Err(_) => self.sample_bulk_packed_cpu(num_shots),
+        }
+    }
+
+    pub fn try_sample_bulk_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
+        #[cfg(feature = "gpu")]
+        if self.noiseless.has_gpu_context() {
+            return self.try_sample_bulk_packed_with_gpu_context(num_shots);
+        }
+
+        Ok(self.sample_bulk_packed_cpu(num_shots))
+    }
+
+    fn sample_bulk_packed_cpu(&mut self, num_shots: usize) -> PackedShots {
+        let m_words = self.num_measurements.div_ceil(64);
+        if num_shots == 0 || self.num_measurements == 0 {
+            return PackedShots::from_shot_major(
+                vec![0u64; num_shots * m_words],
+                num_shots,
+                self.num_measurements,
+            );
+        }
+
+        let (accum, _m_words) = self.sample_bulk_words_shot_major_cpu(num_shots);
         PackedShots::from_shot_major(accum, num_shots, self.num_measurements)
     }
 
+    /// Stream noisy shots into `acc` using the default chunk size.
+    ///
+    /// This avoids materializing the full shot matrix when the caller only
+    /// needs derived aggregates such as counts or marginals.
     pub fn sample_chunked<A: crate::sim::compiled::ShotAccumulator>(
         &mut self,
         total_shots: usize,
@@ -488,12 +1156,35 @@ impl NoisyCompiledSampler {
         self.sample_chunked_with_size(total_shots, chunk_size, acc);
     }
 
+    /// Stream noisy shots into `acc` with an explicit chunk size.
+    ///
+    /// When a GPU context is attached, each chunk may use GPU BTS sampling for
+    /// the noiseless parity stage before noise is applied.
     pub fn sample_chunked_with_size<A: crate::sim::compiled::ShotAccumulator>(
         &mut self,
         total_shots: usize,
         chunk_size: usize,
         acc: &mut A,
     ) {
+        #[cfg(feature = "gpu")]
+        if self.noiseless.has_gpu_context()
+            && self
+                .noiseless
+                .should_use_gpu_bts(total_shots.min(chunk_size.max(1)))
+        {
+            let mut remaining = total_shots;
+            while remaining > 0 {
+                let this_batch = remaining.min(chunk_size);
+                let packed = match self.try_sample_bulk_packed_with_gpu_context(this_batch) {
+                    Ok(packed) => packed,
+                    Err(_) => self.sample_bulk_packed_cpu(this_batch),
+                };
+                acc.accumulate(&packed);
+                remaining -= this_batch;
+            }
+            return;
+        }
+
         let m_words = self.num_measurements.div_ceil(64);
         let mut accum_buf: Vec<u64> = Vec::new();
         let mut rand_buf: Vec<u8> = Vec::new();
@@ -542,7 +1233,30 @@ impl NoisyCompiledSampler {
         }
     }
 
+    /// Sample noisy outcomes and return exact packed counts.
     pub fn sample_counts(
+        &mut self,
+        total_shots: usize,
+    ) -> std::collections::HashMap<Vec<u64>, u64> {
+        match self.try_sample_counts(total_shots) {
+            Ok(counts) => counts,
+            Err(_) => self.sample_counts_cpu(total_shots),
+        }
+    }
+
+    pub fn try_sample_counts(
+        &mut self,
+        total_shots: usize,
+    ) -> Result<std::collections::HashMap<Vec<u64>, u64>> {
+        #[cfg(feature = "gpu")]
+        if let Some(counts) = self.try_sample_counts_gpu(total_shots) {
+            return counts;
+        }
+
+        Ok(self.sample_counts_cpu(total_shots))
+    }
+
+    fn sample_counts_cpu(
         &mut self,
         total_shots: usize,
     ) -> std::collections::HashMap<Vec<u64>, u64> {
@@ -551,7 +1265,24 @@ impl NoisyCompiledSampler {
         acc.into_counts()
     }
 
+    /// Sample noisy outcomes and return per-measurement `P(bit = 1)`.
     pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
+        match self.try_sample_marginals(total_shots) {
+            Ok(marginals) => marginals,
+            Err(_) => self.sample_marginals_cpu(total_shots),
+        }
+    }
+
+    pub fn try_sample_marginals(&mut self, total_shots: usize) -> Result<Vec<f64>> {
+        #[cfg(feature = "gpu")]
+        if let Some(marginals) = self.try_sample_marginals_gpu(total_shots) {
+            return marginals;
+        }
+
+        Ok(self.sample_marginals_cpu(total_shots))
+    }
+
+    fn sample_marginals_cpu(&mut self, total_shots: usize) -> Vec<f64> {
         let mut acc = crate::sim::compiled::MarginalsAccumulator::new(self.num_measurements);
         self.sample_chunked(total_shots, &mut acc);
         acc.marginals()
@@ -739,6 +1470,10 @@ impl NoisyCompiledSampler {
     }
 }
 
+/// Compile a Clifford circuit with Pauli noise into a reusable noisy sampler.
+///
+/// Requires the same circuit subset as [`crate::compile_measurements`],
+/// namely terminal measurements with no resets or classical conditionals.
 pub fn compile_noisy(
     circuit: &Circuit,
     noise: &NoiseModel,
@@ -786,6 +1521,8 @@ fn compile_noisy_filtered(
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
             x_lut: None,
+            #[cfg(feature = "gpu")]
+            gpu_noise_cache: None,
         });
     }
 
@@ -901,6 +1638,8 @@ fn compile_noisy_filtered(
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,
         x_lut,
+        #[cfg(feature = "gpu")]
+        gpu_noise_cache: None,
     })
 }
 
@@ -944,6 +1683,8 @@ fn compile_noisy_monolithic(
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
             x_lut: None,
+            #[cfg(feature = "gpu")]
+            gpu_noise_cache: None,
         });
     }
 
@@ -993,6 +1734,8 @@ fn compile_noisy_monolithic(
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,
         x_lut,
+        #[cfg(feature = "gpu")]
+        gpu_noise_cache: None,
     })
 }
 
@@ -1294,6 +2037,11 @@ fn run_shots_noisy_frame(
     })
 }
 
+/// Sample a Pauli-noisy Clifford circuit through the compiled noisy sampler,
+/// frame sampler, or homological path as appropriate.
+///
+/// Circuits with resets or classical conditionals fall back to brute-force
+/// stabilizer simulation so the public API stays correct.
 pub fn run_shots_noisy(
     circuit: &Circuit,
     noise: &NoiseModel,
@@ -1311,7 +2059,17 @@ pub fn run_shots_noisy(
         );
     }
 
-    // Try homological sampler for high shot counts — O(r_quantum + 1) per shot
+    if !super::supports_compiled_measurement_sampling(circuit) {
+        return run_shots_noisy_brute_with(
+            |s| Box::new(StabilizerBackend::new(s)),
+            circuit,
+            noise,
+            num_shots,
+            seed,
+        );
+    }
+
+    // Try homological sampler for high shot counts, O(r_quantum + 1) per shot
     // when syndrome rank ≤ 20. Falls back to compiled/frame if rank too high.
     if num_shots >= 1000 {
         if let Ok(sampler) = super::homological::HomologicalSampler::compile(circuit, noise, seed) {
@@ -1341,14 +2099,11 @@ pub fn run_shots_noisy(
     }
 }
 
-fn run_shots_noisy_compiled(
+fn finish_noisy_compiled_run(
+    mut sampler: NoisyCompiledSampler,
     circuit: &Circuit,
-    noise: &NoiseModel,
     num_shots: usize,
-    seed: u64,
 ) -> Result<ShotsResult> {
-    let mut sampler = compile_noisy(circuit, noise, seed)?;
-
     let classical_bit_order: Vec<usize> = circuit
         .instructions
         .iter()
@@ -1359,14 +2114,80 @@ fn run_shots_noisy_compiled(
         .collect();
     let num_classical = circuit.num_classical_bits;
 
-    let packed = sampler.sample_bulk_packed(num_shots);
-
+    let packed = sampler.try_sample_bulk_packed(num_shots)?;
     let shots = unpack_and_remap_packed(&packed, num_shots, &classical_bit_order, num_classical);
 
     Ok(ShotsResult {
         shots,
         num_classical_bits: circuit.num_classical_bits,
     })
+}
+
+fn run_shots_noisy_compiled(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let sampler = compile_noisy(circuit, noise, seed)?;
+    finish_noisy_compiled_run(sampler, circuit, num_shots)
+}
+
+#[cfg(feature = "gpu")]
+pub(crate) fn run_shots_noisy_with_gpu(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+    context: std::sync::Arc<crate::gpu::GpuContext>,
+) -> Result<ShotsResult> {
+    noise.ensure_pauli_only()?;
+    if !circuit.is_clifford_only() {
+        return run_shots_noisy_brute_with(
+            |s| Box::new(StabilizerBackend::new(s)),
+            circuit,
+            noise,
+            num_shots,
+            seed,
+        );
+    }
+
+    if !super::supports_compiled_measurement_sampling(circuit) {
+        return run_shots_noisy_brute_with(
+            |s| Box::new(StabilizerBackend::new(s)),
+            circuit,
+            noise,
+            num_shots,
+            seed,
+        );
+    }
+
+    if num_shots >= 1000 {
+        if let Ok(sampler) = super::homological::HomologicalSampler::compile(circuit, noise, seed) {
+            return super::homological::run_shots_homological_inner(sampler, circuit, num_shots);
+        }
+    }
+
+    let n = circuit.num_qubits;
+    let gate_count = circuit
+        .instructions
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Instruction::Gate { .. } | Instruction::Conditional { .. }
+            )
+        })
+        .count();
+
+    let depth_ratio = gate_count as f64 / n.max(1) as f64;
+    let use_frame = depth_ratio < 3.0 || (n >= 200 && depth_ratio < 5.0);
+    if use_frame {
+        return run_shots_noisy_frame(circuit, noise, num_shots, seed);
+    }
+
+    let sampler = compile_noisy(circuit, noise, seed)?.with_gpu(context);
+    finish_noisy_compiled_run(sampler, circuit, num_shots)
 }
 
 pub(crate) fn run_shots_noisy_brute_with(
@@ -1559,6 +2380,57 @@ mod tests {
     }
 
     #[test]
+    fn compile_noisy_rejects_reset_circuits() {
+        let mut circuit = Circuit::new(1, 1);
+        circuit.add_reset(0);
+        circuit.add_measure(0, 0);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        assert!(compile_noisy(&circuit, &noise, 42).is_err());
+    }
+
+    #[test]
+    fn compile_noisy_rejects_conditionals() {
+        let mut circuit = Circuit::new(2, 2);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_measure(0, 0);
+        circuit.instructions.push(Instruction::Conditional {
+            condition: crate::circuit::ClassicalCondition::BitIsOne(0),
+            gate: Gate::X,
+            targets: crate::circuit::smallvec![1],
+        });
+        circuit.add_measure(1, 1);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        assert!(compile_noisy(&circuit, &noise, 42).is_err());
+    }
+
+    #[test]
+    fn run_shots_noisy_handles_reset_circuits() {
+        let mut circuit = Circuit::new(1, 1);
+        circuit.add_gate(Gate::X, &[0]);
+        circuit.add_reset(0);
+        circuit.add_measure(0, 0);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        let result = run_shots_noisy(&circuit, &noise, 32, 42).unwrap();
+        assert!(result.shots.iter().all(|shot| !shot[0]));
+    }
+
+    #[test]
+    fn run_shots_noisy_handles_conditionals() {
+        let mut circuit = Circuit::new(2, 2);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_measure(0, 0);
+        circuit.instructions.push(Instruction::Conditional {
+            condition: crate::circuit::ClassicalCondition::BitIsOne(0),
+            gate: Gate::X,
+            targets: crate::circuit::smallvec![1],
+        });
+        circuit.add_measure(1, 1);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        let result = run_shots_noisy(&circuit, &noise, 256, 42).unwrap();
+        assert!(result.shots.iter().all(|shot| shot[0] == shot[1]));
+    }
+
+    #[test]
     fn frame_ghz_100q_produces_varied_outcomes() {
         let n = 100;
         let mut circuit = circuits::ghz_circuit(n);
@@ -1715,5 +2587,56 @@ mod tests {
             (agree_rate_f - agree_rate_m).abs() < 0.02,
             "filtered ({agree_rate_f:.4}) and monolithic ({agree_rate_m:.4}) should have similar agreement rates"
         );
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn compiled_noisy_with_stub_gpu_matches_cpu_below_threshold() {
+        let n = 12;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let shots = 20_000;
+
+        let mut cpu = compile_noisy(&circuit, &noise, 42).unwrap();
+        let cpu_marginals = cpu.sample_marginals(shots);
+
+        let mut gpu = compile_noisy(&circuit, &noise, 42)
+            .unwrap()
+            .with_gpu(crate::gpu::GpuContext::stub_for_tests());
+        let gpu_marginals = gpu.sample_marginals(shots);
+
+        for (idx, (cpu_p1, gpu_p1)) in cpu_marginals.iter().zip(gpu_marginals.iter()).enumerate() {
+            assert!(
+                (cpu_p1 - gpu_p1).abs() < 0.03,
+                "marginal[{idx}] diverged too much: cpu={cpu_p1}, gpu={gpu_p1}"
+            );
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn compiled_noisy_with_stub_gpu_low_rank_above_threshold_uses_cpu_fallback() {
+        let shots = crate::gpu::bts_min_shots().max(1);
+        let n = 12;
+        let mut circuit = circuits::ghz_circuit(n);
+        circuit.num_classical_bits = n;
+        for i in 0..n {
+            circuit.add_measure(i, i);
+        }
+
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let mut gpu = compile_noisy(&circuit, &noise, 42)
+            .unwrap()
+            .with_gpu(crate::gpu::GpuContext::stub_for_tests());
+
+        assert!(!gpu.noiseless.should_use_gpu_bts(shots));
+        let counts = gpu.sample_counts(shots);
+        let total: u64 = counts.values().sum();
+        assert_eq!(total, shots as u64);
     }
 }

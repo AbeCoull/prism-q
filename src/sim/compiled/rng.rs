@@ -1,19 +1,19 @@
 use rand::RngCore;
 use rand_chacha::ChaCha8Rng;
 
-pub(super) struct Xoshiro256PlusPlus {
+pub(crate) struct Xoshiro256PlusPlus {
     s: [u64; 4],
 }
 
 impl Xoshiro256PlusPlus {
     #[cfg(feature = "parallel")]
     #[inline(always)]
-    pub(super) fn from_seeds(s: [u64; 4]) -> Self {
+    pub(crate) fn from_seeds(s: [u64; 4]) -> Self {
         Self { s }
     }
 
     #[inline(always)]
-    pub(super) fn from_chacha(rng: &mut ChaCha8Rng) -> Self {
+    pub(crate) fn from_chacha(rng: &mut ChaCha8Rng) -> Self {
         Self {
             s: [
                 rng.next_u64(),
@@ -25,7 +25,7 @@ impl Xoshiro256PlusPlus {
     }
 
     #[inline(always)]
-    pub(super) fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         let result = (self.s[0].wrapping_add(self.s[3]))
             .rotate_left(23)
             .wrapping_add(self.s[0]);
@@ -40,7 +40,7 @@ impl Xoshiro256PlusPlus {
     }
 
     #[inline(always)]
-    pub(super) fn next_f64(&mut self) -> f64 {
+    pub(crate) fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 }

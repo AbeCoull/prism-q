@@ -1,15 +1,33 @@
 //! GPU kernels — PTX source, compiled once at device construction, plus per-operation
 //! launcher functions.
+//!
+//! The PTX module is composed by concatenating each backend's CUDA C source (dense for
+//! the statevector path, stabilizer for the stabilizer path). NVRTC compiles the
+//! combined source once per `GpuContext`; `KERNEL_NAMES` lists every entry point from
+//! every backend so `GpuDevice::new` can pre-resolve them all.
 
 pub(crate) mod dense;
+pub(crate) mod stabilizer;
 
-pub(crate) use dense::kernel_source;
+/// Combined CUDA C source for the GPU PTX module.
+///
+/// Concatenates each backend's kernel source. Any new backend that adds its own
+/// module here (for example an MPS GPU path later) would append its source the same
+/// way and register its entry-point names in [`KERNEL_NAMES`].
+pub(crate) fn kernel_source() -> String {
+    let mut src = dense::kernel_source();
+    src.push('\n');
+    src.push_str(&stabilizer::kernel_source());
+    src
+}
 
 /// Every kernel entry point that appears in the materialised PTX source.
 ///
 /// `GpuDevice::new` pre-resolves each name once so gate dispatch does not pay the
-/// driver-lookup cost per launch.
+/// driver-lookup cost per launch. New backends extend this list with their own
+/// entry-point names.
 pub(crate) const KERNEL_NAMES: &[&str] = &[
+    // Dense statevector kernels.
     "set_initial_state",
     "apply_gate_1q",
     "apply_diagonal_1q",
@@ -31,4 +49,6 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "apply_batch_rzz",
     "apply_diagonal_batch",
     "apply_multi_fused_tiled",
+    // Stabilizer tableau kernels.
+    "stab_set_initial_tableau",
 ];

@@ -41,14 +41,26 @@ use crate::gates::Gate;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
+
 pub(crate) mod kernels;
 #[cfg(test)]
 mod tests;
 
 use kernels::{rowmul_words, xor_words, MIN_WORDS_FOR_BATCH};
 
+#[cfg(feature = "gpu")]
+use crate::gpu::{GpuContext, GpuTableau};
+
 /// Clifford-only O(n^2) stabilizer simulation (Aaronson-Gottesman tableau).
-#[derive(Clone)]
+///
+/// Manually implements `Clone`: the CPU tableau fields (`xz`, `phase`, SGI
+/// buffers, etc.) clone element-for-element just like the old derived impl.
+/// Cloning while the GPU tableau is attached panics, because the device-side
+/// `CudaSlice` cannot be duplicated and cloning to a "GPU context without a
+/// tableau" state would silently corrupt subsequent CPU-path calls. Existing
+/// call sites (`sim::stabilizer_rank`) only clone CPU-mode backends.
 pub struct StabilizerBackend {
     pub(super) n: usize,
     pub(super) num_words: usize,
@@ -64,6 +76,47 @@ pub struct StabilizerBackend {
     pub(super) sgi_max_active: usize,
     pub(super) lazy_destab: bool,
     pub(super) gate_row_start: usize,
+    #[cfg(feature = "gpu")]
+    pub(super) gpu_context: Option<Arc<GpuContext>>,
+    #[cfg(feature = "gpu")]
+    pub(super) gpu_tableau: Option<GpuTableau>,
+}
+
+impl Clone for StabilizerBackend {
+    fn clone(&self) -> Self {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            // CPU host buffers are cleared while the tableau lives on device. A
+            // silent clone would produce a backend with `n > 0`, empty `xz`, and
+            // `gpu_tableau: None`, which would panic on the next CPU-path access.
+            // No existing caller clones a GPU-attached backend; surface the
+            // misuse loudly rather than corrupting state.
+            panic!(
+                "StabilizerBackend::clone is unsupported while a GPU tableau is attached; \
+                 copy the tableau back to host first"
+            );
+        }
+        Self {
+            n: self.n,
+            num_words: self.num_words,
+            xz: self.xz.clone(),
+            phase: self.phase.clone(),
+            classical_bits: self.classical_bits.clone(),
+            rng: self.rng.clone(),
+            qubit_active: self.qubit_active.clone(),
+            total_weight: self.total_weight,
+            sgi_merge_buf: self.sgi_merge_buf.clone(),
+            sgi_new_a: self.sgi_new_a.clone(),
+            sgi_new_b: self.sgi_new_b.clone(),
+            sgi_max_active: self.sgi_max_active,
+            lazy_destab: self.lazy_destab,
+            gate_row_start: self.gate_row_start,
+            #[cfg(feature = "gpu")]
+            gpu_context: self.gpu_context.clone(),
+            #[cfg(feature = "gpu")]
+            gpu_tableau: None,
+        }
+    }
 }
 
 impl StabilizerBackend {
@@ -84,7 +137,21 @@ impl StabilizerBackend {
             sgi_max_active: 0,
             lazy_destab: false,
             gate_row_start: 0,
+            #[cfg(feature = "gpu")]
+            gpu_context: None,
+            #[cfg(feature = "gpu")]
+            gpu_tableau: None,
         }
+    }
+
+    /// Opt into GPU acceleration using the given shared execution context.
+    ///
+    /// When set, [`Backend::init`] allocates a device-resident tableau instead of a
+    /// host `Vec<u64>` and gate application routes through GPU kernels.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(mut self, context: Arc<GpuContext>) -> Self {
+        self.gpu_context = Some(context);
+        self
     }
 
     pub fn new_lazy(seed: u64) -> Self {
@@ -918,11 +985,32 @@ impl Backend for StabilizerBackend {
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         let n = num_qubits;
         let nw = n.div_ceil(64);
-        let total_rows = 2 * n + 1;
-        let stride = 2 * nw;
+
+        #[cfg(feature = "gpu")]
+        if let Some(ctx) = self.gpu_context.clone() {
+            // Allocate the device tableau first so an allocation failure returns
+            // cleanly without touching any existing state. Only once the tableau
+            // is in hand do we commit the transition to GPU mode.
+            let tableau = GpuTableau::new(ctx, n)?;
+            self.n = n;
+            self.num_words = nw;
+            self.xz.clear();
+            self.phase.clear();
+            self.qubit_active = Vec::new();
+            self.total_weight = 0;
+            self.sgi_max_active = 0;
+            self.lazy_destab = false;
+            self.gate_row_start = 0;
+            self.gpu_tableau = Some(tableau);
+            crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+            return Ok(());
+        }
 
         self.n = n;
         self.num_words = nw;
+
+        let total_rows = 2 * n + 1;
+        let stride = 2 * nw;
 
         self.xz = vec![0u64; total_rows * stride];
         self.phase = vec![false; total_rows];
@@ -950,6 +1038,42 @@ impl Backend for StabilizerBackend {
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            // Handle instructions that need no device work even in GPU mode.
+            // Barriers are no-ops everywhere; a false-predicate conditional
+            // has no gate to apply. Everything else needs a kernel that later
+            // milestones add.
+            match instruction {
+                Instruction::Barrier { .. } => return Ok(()),
+                Instruction::Conditional { condition, .. }
+                    if !condition.evaluate(&self.classical_bits) =>
+                {
+                    return Ok(());
+                }
+                Instruction::Gate { .. } | Instruction::Conditional { .. } => {
+                    return Err(PrismError::BackendUnsupported {
+                        backend: self.name().to_string(),
+                        operation: "gpu stabilizer gate kernels not yet implemented (M2 scaffold)"
+                            .to_string(),
+                    });
+                }
+                Instruction::Measure { .. } => {
+                    return Err(PrismError::BackendUnsupported {
+                        backend: self.name().to_string(),
+                        operation: "gpu stabilizer measurement not yet implemented (M2 scaffold)"
+                            .to_string(),
+                    });
+                }
+                Instruction::Reset { .. } => {
+                    return Err(PrismError::BackendUnsupported {
+                        backend: self.name().to_string(),
+                        operation: "gpu stabilizer reset not yet implemented (M2 scaffold)"
+                            .to_string(),
+                    });
+                }
+            }
+        }
         if self.lazy_destab
             && matches!(
                 instruction,
@@ -988,10 +1112,26 @@ impl Backend for StabilizerBackend {
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            return Err(PrismError::BackendUnsupported {
+                backend: self.name().to_string(),
+                operation: "gpu stabilizer reset not yet implemented (M2 scaffold)".to_string(),
+            });
+        }
         self.apply_reset(qubit)
     }
 
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            // Route through the per-instruction path so each op hits the GPU
+            // not-yet-implemented rejection with a consistent error message.
+            for instruction in instructions {
+                self.apply(instruction)?;
+            }
+            return Ok(());
+        }
         let nw = self.num_words;
         if nw < MIN_WORDS_FOR_BATCH {
             for instruction in instructions {
@@ -1012,6 +1152,14 @@ impl Backend for StabilizerBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            return Err(PrismError::BackendUnsupported {
+                backend: self.name().to_string(),
+                operation: "gpu stabilizer probabilities not yet implemented (M2 scaffold)"
+                    .to_string(),
+            });
+        }
         if self.n >= usize::BITS as usize {
             return Err(PrismError::BackendUnsupported {
                 backend: self.name().to_string(),
@@ -1046,6 +1194,14 @@ impl Backend for StabilizerBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            return Err(PrismError::BackendUnsupported {
+                backend: self.name().to_string(),
+                operation: "gpu stabilizer statevector export not yet implemented (M2 scaffold)"
+                    .to_string(),
+            });
+        }
         self.export_statevector()
     }
 }

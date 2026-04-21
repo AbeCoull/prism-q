@@ -637,3 +637,89 @@ fn statevector_gpu_run_with_matches_cpu_random() {
         );
     }
 }
+
+// ============================================================================
+// Stabilizer GPU scaffold (M2)
+// ============================================================================
+
+/// `StabilizerBackend::with_gpu(ctx).init(n, 0)` must allocate the device tableau
+/// successfully on a real GPU. Any gate application or probability query must
+/// then surface `BackendUnsupported` (until subsequent milestones add kernels).
+#[test]
+fn stabilizer_gpu_init_allocates_tableau_and_rejects_apply() {
+    use prism_q::error::PrismError;
+    use prism_q::StabilizerBackend;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let mut backend = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    backend.init(4, 0).expect("GPU tableau init should succeed");
+    assert_eq!(backend.num_qubits(), 4);
+
+    let apply_err = backend
+        .apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec![0],
+        })
+        .unwrap_err();
+    assert!(
+        matches!(apply_err, PrismError::BackendUnsupported { .. }),
+        "apply returned unexpected error: {apply_err:?}"
+    );
+
+    let probs_err = backend.probabilities().unwrap_err();
+    assert!(
+        matches!(probs_err, PrismError::BackendUnsupported { .. }),
+        "probabilities returned unexpected error: {probs_err:?}"
+    );
+}
+
+/// `Barrier` must succeed on the GPU path (no-op), and a `Conditional` whose
+/// predicate evaluates to false must succeed without attempting to apply the
+/// gate. Both instructions need no device work.
+#[test]
+fn stabilizer_gpu_accepts_barrier_and_false_conditional() {
+    use prism_q::circuit::ClassicalCondition;
+    use prism_q::StabilizerBackend;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let mut backend = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    backend.init(4, 1).expect("GPU tableau init should succeed");
+
+    backend
+        .apply(&Instruction::Barrier {
+            qubits: smallvec![0_usize, 1_usize, 2_usize, 3_usize],
+        })
+        .expect("barrier must be a no-op on the GPU path");
+
+    // Classical bit 0 starts false, so `BitIsOne(0)` evaluates to false and
+    // the gate is never applied.
+    backend
+        .apply(&Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(0),
+            gate: Gate::H,
+            targets: smallvec![0],
+        })
+        .expect("false-predicate conditional must be a no-op on the GPU path");
+}
+
+/// Cloning a GPU-attached `StabilizerBackend` must panic loudly rather than
+/// silently produce an invalid state. The `#[should_panic]` matcher fires
+/// whether we reach the `backend.clone()` call (real GPU available) or the
+/// explicit skip panic below (no GPU available).
+#[test]
+#[should_panic(expected = "StabilizerBackend::clone is unsupported")]
+fn stabilizer_gpu_clone_panics() {
+    use prism_q::StabilizerBackend;
+
+    let Some(f) = Fixture::try_new() else {
+        // Satisfy `#[should_panic]` even on CPU-only runners so the test
+        // reports pass rather than "did not panic".
+        panic!("StabilizerBackend::clone is unsupported (skipped: no GPU)");
+    };
+
+    let mut backend = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
+    backend.init(4, 0).expect("GPU tableau init should succeed");
+    let _cloned = backend.clone();
+}

@@ -233,6 +233,69 @@ impl GpuState {
     }
 }
 
+/// Per-simulation device-resident stabilizer tableau.
+///
+/// Owns two buffers that mirror the CPU tableau layout in
+/// [`crate::backend::stabilizer::StabilizerBackend`]:
+///
+/// - `xz`: `(2n+1)` rows × `2 * num_words` u64s per row. Word ordering per row is
+///   X-bits in `[0, num_words)` then Z-bits in `[num_words, 2*num_words)`.
+/// - `phase`: `(2n+1)` bytes, one per row (0 = +1, 1 = -1).
+///
+/// `num_words = ceil(n / 64)`. The scratch row at index `2n` is reserved for
+/// measurement computations.
+#[derive(Debug)]
+pub struct GpuTableau {
+    #[allow(dead_code)]
+    context: Arc<GpuContext>,
+    xz: GpuBuffer<u64>,
+    #[allow(dead_code)]
+    phase: GpuBuffer<u8>,
+    num_qubits: usize,
+    num_words: usize,
+}
+
+impl GpuTableau {
+    /// Allocate a fresh identity tableau on the device bound to `context`.
+    ///
+    /// Both buffers are zero-initialised by `GpuBuffer::alloc_zeros`, then a
+    /// `stab_set_initial_tableau` kernel launch sets the destabilizer X-bits
+    /// and stabilizer Z-bits in place. Phase stays all zero (identity).
+    pub fn new(context: Arc<GpuContext>, num_qubits: usize) -> Result<Self> {
+        let num_words = num_qubits.div_ceil(64);
+        let total_rows = 2 * num_qubits + 1;
+        let xz_len = total_rows * 2 * num_words.max(1);
+        let phase_len = total_rows;
+
+        let xz = GpuBuffer::<u64>::alloc_zeros(context.device(), xz_len)?;
+        let phase = GpuBuffer::<u8>::alloc_zeros(context.device(), phase_len)?;
+
+        let mut tableau = Self {
+            context: context.clone(),
+            xz,
+            phase,
+            num_qubits,
+            num_words,
+        };
+        kernels::stabilizer::launch_set_initial_tableau(&context, &mut tableau)?;
+        Ok(tableau)
+    }
+
+    /// Qubit count the tableau is sized for.
+    pub fn num_qubits(&self) -> usize {
+        self.num_qubits
+    }
+
+    /// Number of u64 words per bit-packed row half (ceil(n / 64)).
+    pub fn num_words(&self) -> usize {
+        self.num_words
+    }
+
+    pub(crate) fn xz_mut(&mut self) -> &mut GpuBuffer<u64> {
+        &mut self.xz
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +313,15 @@ mod tests {
         let ctx = GpuContext::stub_for_tests();
         assert!(matches!(
             GpuState::new(ctx, 4).unwrap_err(),
+            PrismError::BackendUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn tableau_new_on_stub_returns_unsupported() {
+        let ctx = GpuContext::stub_for_tests();
+        assert!(matches!(
+            GpuTableau::new(ctx, 4).unwrap_err(),
             PrismError::BackendUnsupported { .. }
         ));
     }

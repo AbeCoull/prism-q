@@ -1023,3 +1023,54 @@ fn lazy_destab_measure_matches_eager() {
         }
     }
 }
+
+#[cfg(feature = "gpu")]
+mod gpu_scaffold {
+    use super::*;
+    use crate::gpu::GpuContext;
+
+    /// With the stub context, `GpuTableau::new` returns `BackendUnsupported` at
+    /// `alloc_zeros` time. `StabilizerBackend::init` must surface that error
+    /// cleanly rather than panicking.
+    #[test]
+    fn with_gpu_init_on_stub_returns_unsupported() {
+        let ctx = GpuContext::stub_for_tests();
+        let mut backend = StabilizerBackend::new(42).with_gpu(ctx);
+        let err = backend.init(4, 0).unwrap_err();
+        assert!(matches!(err, PrismError::BackendUnsupported { .. }));
+    }
+
+    /// Constructing with `with_gpu(ctx)` but then not initialising must leave
+    /// the backend in a usable (context-only) state.
+    #[test]
+    fn with_gpu_stores_context_without_panicking() {
+        let ctx = GpuContext::stub_for_tests();
+        let backend = StabilizerBackend::new(42).with_gpu(ctx);
+        assert_eq!(backend.name(), "stabilizer");
+    }
+
+    /// Transactional init: if `GpuTableau::new` fails, the backend must retain
+    /// its pre-init state so subsequent calls do not touch partially-updated
+    /// host buffers. Here the backend is fresh (`n == 0`), and the invariant
+    /// is that it stays that way after the failure.
+    #[test]
+    fn failed_gpu_init_leaves_backend_uninitialised() {
+        let ctx = GpuContext::stub_for_tests();
+        let mut backend = StabilizerBackend::new(42).with_gpu(ctx);
+        let _ = backend.init(4, 0).unwrap_err();
+        assert_eq!(backend.num_qubits(), 0);
+    }
+
+    /// Cloning a CPU-only backend preserves state; this covers the common
+    /// `stabilizer_rank` path and confirms the GPU-gated Clone impl still
+    /// works for non-GPU callers.
+    #[test]
+    fn clone_cpu_only_preserves_tableau() {
+        let mut backend = StabilizerBackend::new(42);
+        backend.init(3, 0).unwrap();
+        let cloned = backend.clone();
+        assert_eq!(cloned.n, 3);
+        assert_eq!(cloned.xz, backend.xz);
+        assert_eq!(cloned.phase, backend.phase);
+    }
+}

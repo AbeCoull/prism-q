@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "prism-q"
-version = "0.9.1"
+version = "0.10.0"
 dependencies = [
  "approx",
  "criterion",

@@ -15,11 +15,48 @@
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 
-A quantum circuit simulator written in Rust attempting to run circuits quickly.
+PRISM-Q is a Rust quantum circuit simulator focused on practical throughput.
 
-Automatic dispatch across multiple simulation strategies picks the engine that best
-fits each circuit's structure. CPU kernels use SIMD with an optional CUDA path for the
-statevector backend. Input is OpenQASM 3.0, with backward-compatible 2.0 syntax.
+Automatic dispatch selects the simulation strategy that best fits each circuit's
+structure. CPU kernels use SIMD, with optional CUDA paths for statevector and
+experimental stabilizer workloads. Input is OpenQASM 3.0, with backward-compatible 2.0
+syntax.
+
+## Installation
+
+Add PRISM-Q to a Rust project:
+
+```bash
+cargo add prism-q
+```
+
+Enable Rayon parallelism for larger circuits:
+
+```bash
+cargo add prism-q --features parallel
+```
+
+Use the latest repository version:
+
+```bash
+cargo add prism-q --git https://github.com/AbeCoull/prism-q --features parallel
+```
+
+Build from source:
+
+```bash
+git clone https://github.com/AbeCoull/prism-q.git
+cd prism-q
+cargo build --release --features parallel
+```
+
+For CUDA support, install CUDA Toolkit 12.x or newer, then build with:
+
+```bash
+cargo build --release --features "parallel gpu"
+```
+
+The crate exposes library APIs under `prism_q`.
 
 ## Quick start
 

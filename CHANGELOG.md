@@ -2,6 +2,15 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.11.0] - 2026-04-24
+
+### Documentation
+
+- Add install instructions to the README (#39)([d255725](https://github.com/AbeCoull/prism-q/commit/d255725b4600a779b94f673ea0ed87533cc7e4b4))
+
+### Features
+
+- **noise:** Support dense custom Kraus trajectory noise (#40)([0816f3a](https://github.com/AbeCoull/prism-q/commit/0816f3a6567b7852c823a9f92c2f2168381fe629))
 ## [0.10.0] - 2026-04-24
 
 ### Documentation
@@ -11,6 +20,10 @@ All notable changes to PRISM-Q will be documented in this file.
 ### Features
 
 - **gpu:** Stabilizer GPU kernels, dispatch, and bench group (#38)([e76a621](https://github.com/AbeCoull/prism-q/commit/e76a621c57560b6a805ec456002abe4c0d7def5b))
+
+### Miscellaneous
+
+- **release:** 0.10.0([69d8fa4](https://github.com/AbeCoull/prism-q/commit/69d8fa4005af92989d99aec46b7d09283c52a629))
 ## [0.9.1] - 2026-04-24
 
 ### Bug Fixes

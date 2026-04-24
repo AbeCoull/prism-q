@@ -625,6 +625,31 @@ impl Backend for FactoredBackend {
         Ok(())
     }
 
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        let ss_idx = self.qubit_to_substate[qubit];
+        let sub = self.substates[ss_idx].as_ref().unwrap();
+        let local = Self::local_qubit(sub, qubit);
+        let mask = 1usize << local;
+
+        let mut p0 = 0.0f64;
+        let mut p1 = 0.0f64;
+        let mut r = Complex64::new(0.0, 0.0);
+        for idx in 0..sub.state.len() {
+            let amp = sub.state[idx];
+            if idx & mask == 0 {
+                p0 += amp.norm_sqr();
+                r += sub.state[idx | mask] * amp.conj();
+            } else {
+                p1 += amp.norm_sqr();
+            }
+        }
+
+        Ok([
+            [Complex64::new(p0, 0.0), r.conj()],
+            [r, Complex64::new(p1, 0.0)],
+        ])
+    }
+
     fn classical_results(&self) -> &[bool] {
         &self.classical_bits
     }

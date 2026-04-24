@@ -185,6 +185,30 @@ fn compiled_filtered_bell_pairs_circuit(n_pairs: usize) -> Circuit {
     circuit
 }
 
+fn with_terminal_measurements(mut circuit: Circuit) -> Circuit {
+    let n = circuit.num_qubits;
+    circuit.num_classical_bits = n;
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+fn non_clifford_noise_circuit(n_qubits: usize, depth: usize) -> Circuit {
+    let mut circuit = Circuit::new(n_qubits, 0);
+    for layer in 0..depth {
+        for q in 0..n_qubits {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::Rz(0.03 * (layer + q + 1) as f64), &[q]);
+        }
+        for q in 0..n_qubits.saturating_sub(1) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    with_terminal_measurements(circuit)
+}
+
 fn run_mps_apply_only(circuit: &Circuit, max_bond_dim: usize) {
     let mut backend = MpsBackend::new(SEED, max_bond_dim);
     backend
@@ -1161,6 +1185,49 @@ fn bench_compiled_sampler(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_noisy_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("noisy_sampling");
+    configure_group(&mut group);
+
+    let clifford = with_terminal_measurements(circuits::clifford_heavy_circuit(100, 10, SEED));
+    let clifford_noise = prism_q::NoiseModel::uniform_depolarizing(&clifford, 0.001);
+    group.bench_function(
+        BenchmarkId::new("compiled_pauli", "clifford_100q_10k"),
+        |b| {
+            b.iter(|| {
+                prism_q::run_shots_with_noise(
+                    BackendKind::Auto,
+                    &clifford,
+                    &clifford_noise,
+                    10_000,
+                    SEED,
+                )
+                .unwrap();
+            });
+        },
+    );
+
+    let non_clifford = non_clifford_noise_circuit(12, 4);
+    let non_clifford_noise = prism_q::NoiseModel::uniform_depolarizing(&non_clifford, 0.001);
+    group.bench_function(
+        BenchmarkId::new("trajectory_pauli", "non_clifford_12q_512"),
+        |b| {
+            b.iter(|| {
+                prism_q::run_shots_with_noise(
+                    BackendKind::Auto,
+                    &non_clifford,
+                    &non_clifford_noise,
+                    512,
+                    SEED,
+                )
+                .unwrap();
+            });
+        },
+    );
+
+    group.finish();
+}
+
 fn bench_compiled_sampler_scale(c: &mut Criterion) {
     let mut group = c.benchmark_group("compiled_sampler_scale");
     configure_group(&mut group);
@@ -1348,6 +1415,8 @@ criterion_group!(
     bench_stabilizer_rank,
     // Compiled sampler (noiseless + noisy shot sampling)
     bench_compiled_sampler,
+    // Noisy trajectory dispatch and compiled Pauli sampling
+    bench_noisy_sampling,
     // Compiled sampler at scale (high shot counts)
     bench_compiled_sampler_scale,
     // Filtered compiled sampler (independent subsystem path)

@@ -362,15 +362,16 @@ fn custom_kraus_bit_flip_channel() {
 }
 
 #[test]
-fn custom_kraus_rejects_non_diagonal_kdagger_k() {
+fn custom_kraus_dense_channel_uses_coherence() {
     use num_complex::Complex64;
 
+    let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
     let zero = Complex64::new(0.0, 0.0);
-    let half = Complex64::new(0.5, 0.0);
-    let one = Complex64::new(1.0, 0.0);
+    let plus = Complex64::new(inv_sqrt2, 0.0);
+    let minus = Complex64::new(-inv_sqrt2, 0.0);
 
-    let k0 = [[half, half], [zero, zero]];
-    let k1 = [[half, half.conj() * Complex64::new(-1.0, 0.0)], [zero, one]];
+    let k0 = [[plus, plus], [zero, zero]];
+    let k1 = [[zero, zero], [plus, minus]];
 
     let mut circuit = Circuit::new(1, 1);
     circuit.add_gate(Gate::H, &[0]);
@@ -384,14 +385,48 @@ fn custom_kraus_rejects_non_diagonal_kdagger_k() {
         qubits: SmallVec::from_slice(&[0]),
     }];
 
-    let err = run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, 10, 42);
-    assert!(
-        err.is_err(),
-        "non-diagonal K†K must be rejected, got {err:?}"
-    );
-    let msg = format!("{:?}", err.unwrap_err());
-    assert!(
-        msg.contains("K†K") && msg.contains("Custom"),
-        "error should name the Custom channel and K†K condition, got: {msg}"
-    );
+    let backends = vec![
+        BackendKind::Statevector,
+        BackendKind::Sparse,
+        BackendKind::Mps { max_bond_dim: 64 },
+        BackendKind::ProductState,
+        BackendKind::Factored,
+    ];
+
+    for backend in backends {
+        let result = run_shots_with_noise(backend.clone(), &circuit, &noise, 200, 42).unwrap();
+
+        let num_one = result.shots.iter().filter(|s| s[0]).count();
+        assert_eq!(
+            num_one, 0,
+            "dense custom Kraus should project |+> through the K0 branch deterministically on {backend:?}"
+        );
+    }
+}
+
+#[test]
+fn noise_model_validate_catches_invalid_custom_channel() {
+    use num_complex::Complex64;
+
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::Id, &[0]);
+    circuit.add_measure(0, 0);
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate[0] = vec![NoiseEvent {
+        channel: NoiseChannel::Custom { kraus: Vec::new() },
+        qubits: SmallVec::from_slice(&[0]),
+    }];
+
+    assert!(noise.validate().is_err());
+    assert!(!noise.after_gate[0][0].channel.is_exactly_samplable());
+
+    let one = Complex64::new(1.0, 0.0);
+    let zero = Complex64::new(0.0, 0.0);
+    noise.after_gate[0][0].channel = NoiseChannel::Custom {
+        kraus: vec![[[one, zero], [zero, one]]],
+    };
+
+    assert!(noise.validate().is_ok());
+    assert!(noise.after_gate[0][0].channel.is_exactly_samplable());
 }

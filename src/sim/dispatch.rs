@@ -197,6 +197,60 @@ pub enum BackendKind {
     },
 }
 
+impl BackendKind {
+    pub fn supports_noisy_per_shot(&self) -> bool {
+        !matches!(
+            self,
+            BackendKind::StabilizerRank
+                | BackendKind::StochasticPauli { .. }
+                | BackendKind::DeterministicPauli { .. }
+        )
+    }
+
+    pub fn supports_general_noise(&self) -> bool {
+        match self {
+            BackendKind::Auto
+            | BackendKind::Statevector
+            | BackendKind::Sparse
+            | BackendKind::Mps { .. }
+            | BackendKind::ProductState
+            | BackendKind::Factored => true,
+            #[cfg(feature = "gpu")]
+            BackendKind::StatevectorGpu { .. } => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_stabilizer_family(&self) -> bool {
+        matches!(
+            self,
+            BackendKind::Stabilizer
+                | BackendKind::FilteredStabilizer
+                | BackendKind::FactoredStabilizer
+        ) || {
+            #[cfg(feature = "gpu")]
+            {
+                matches!(self, BackendKind::StabilizerGpu { .. })
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                false
+            }
+        }
+    }
+
+    pub(crate) fn general_noise_backend_names() -> &'static str {
+        #[cfg(feature = "gpu")]
+        {
+            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, or Factored"
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            "Auto, Statevector, Sparse, Mps, ProductState, or Factored"
+        }
+    }
+}
+
 pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
     match kind {
         BackendKind::Stabilizer

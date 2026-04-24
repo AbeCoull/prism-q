@@ -476,6 +476,29 @@ impl Backend for SparseBackend {
         Ok(())
     }
 
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        let mask = 1usize << qubit;
+        let mut p0 = 0.0f64;
+        let mut p1 = 0.0f64;
+        let mut r = Complex64::new(0.0, 0.0);
+
+        for (&idx, &amp) in &self.state {
+            if idx & mask == 0 {
+                p0 += amp.norm_sqr();
+                if let Some(&amp_one) = self.state.get(&(idx | mask)) {
+                    r += amp_one * amp.conj();
+                }
+            } else {
+                p1 += amp.norm_sqr();
+            }
+        }
+
+        Ok([
+            [Complex64::new(p0, 0.0), r.conj()],
+            [r, Complex64::new(p1, 0.0)],
+        ])
+    }
+
     fn classical_results(&self) -> &[bool] {
         &self.classical_bits
     }

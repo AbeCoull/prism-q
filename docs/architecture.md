@@ -45,7 +45,7 @@ See the [Architecture Glossary](./glossary.md) for definitions of terms used thr
 
 ## Parser
 
-Hand-rolled line-by-line parser targeting a practical OpenQASM 3.0 subset. Converts `&str` directly to `Circuit` IR with no intermediate AST.
+Handwritten parser targeting a practical OpenQASM 3.0 subset. It processes input line by line and converts `&str` directly to `Circuit` IR with no intermediate AST.
 
 **Supported**: `qubit`/`bit` declarations, standard gates (x, y, z, h, s, sdg, t, tdg, rx, ry, rz, cx, cz, swap, sx, sxdg, p, cy, ch, crx, cry, crz, csx, ccx/toffoli, ccz, cswap/fredkin, rzz, rxx, ryy, ecr, iswap, dcx, u1, u2, u3/u), gate modifiers (`ctrl @`, `inv @`, `pow(k) @`), user-defined `gate` blocks, classical `if` conditionals, multi-register broadcast, measure, barrier, expression evaluator with math functions. OpenQASM 2.0 backward compatibility (`qreg`/`creg`, `measure q -> c` syntax).
 
@@ -207,7 +207,7 @@ Probability extraction uses coset-based enumeration with GF(2) Gaussian eliminat
 
 ### Sparse
 
-`HashMap<usize, Complex64>` for states with few non-zero amplitudes. O(k) memory. Amplitude pruning (|a|² < 1e-16) after each gate. Best for computational-basis-heavy circuits at large qubit counts.
+`HashMap<usize, Complex64>` for states with few non-zero amplitudes. O(k) memory. Amplitude pruning (|a|² < 1e-16) after each gate. Best for circuits whose support stays concentrated in computational-basis states at large qubit counts.
 
 ### MPS (Matrix Product State)
 
@@ -229,20 +229,42 @@ Dynamic split-state simulation. Starts with n independent 1-qubit states, merges
 
 ## GPU backend (optional, `gpu` feature)
 
-CUDA statevector acceleration layered onto the primary backend. Two entry points:
+CUDA acceleration covers statevector execution, stabilizer execution, and compiled
+BTS sampling. Five entry points are available:
 
-- **`BackendKind::StatevectorGpu { context }`** (recommended) — routes through
-  `sim::run_with`, so the circuit picks up fusion plus independent-subsystem
-  decomposition, and each sub-block consults `gpu_min_qubits()` (default 14,
-  `PRISM_GPU_MIN_QUBITS` env override) to decide between the GPU path and a host
-  statevector. Disconnected sub-circuits below the threshold run on CPU regardless of
-  total qubit count.
-- **`StatevectorBackend::new(seed).with_gpu(ctx)`** — direct opt-in. Every instruction
-  routes to a CUDA kernel once the context is attached; no crossover, no decomposition.
-  Use this for kernel-level benchmarks and targeted correctness tests.
+- **`BackendKind::StatevectorGpu { context }`**. Public dispatch path for statevector
+  GPU execution. It routes through `sim::run_with`, keeps fusion and subsystem
+  decomposition, and uses `crate::gpu::min_qubits()` (default 14,
+  `PRISM_GPU_MIN_QUBITS` override) to keep small sub-circuits on CPU.
+- **`BackendKind::StabilizerGpu { context }`**. Public dispatch path for stabilizer
+  GPU execution. Gate application uses a device tableau and one batched Clifford
+  kernel (`stab_apply_batch`). Measurement and reset keep pivot search, row cascade,
+  phase fixup, and deterministic outcomes on the device. The default crossover stays
+  conservative (`STABILIZER_MIN_QUBITS_DEFAULT = 100_000`,
+  `PRISM_STABILIZER_GPU_MIN_QUBITS` override) until benchmarks justify lowering it.
+  Direct backend benchmarks should use `StabilizerBackend::with_gpu(ctx)` to exclude
+  diagnostic readbacks from `probabilities()`, `export_tableau()`, and
+  `export_statevector()`. Golden tests cover every kernel path, including 500q GHZ
+  measure-all.
+- **`StatevectorBackend::new(seed).with_gpu(ctx)`**. Direct statevector GPU opt-in.
+  Every instruction routes to CUDA after the context is attached. No crossover or
+  subsystem decomposition applies.
+- **`StabilizerBackend::new(seed).with_gpu(ctx)`**. Direct stabilizer GPU opt-in for
+  kernel benchmarks and targeted correctness tests.
+- **`run_shots_compiled_with_gpu`** (or `CompiledSampler::with_gpu(ctx)`). GPU BTS
+  sampling for flat sparse parity. The path launches one kernel per `65_536`-shot
+  chunk, uses random bits generated on the host, and preserves the CPU
+  `sample_bts_meas_major` layout. The sampler caches sparse parity CSR arrays, packed
+  reference bits, and reusable scratch on the device. It is active only when
+  `num_shots >= BTS_MIN_SHOTS_DEFAULT` (`131_072` by default,
+  `PRISM_GPU_BTS_MIN_SHOTS` override). `sample_bulk_packed_device` returns a
+  `DevicePackedShots` handle. Marginals reduce to one counter per measurement row on
+  the device. Exact counts use a bounded device hash reduction for up to 8 packed
+  measurement words when the compact result is cheaper to transfer than the full shot
+  matrix. Otherwise the API uses a host copy for correctness.
 
-When a GPU context is attached, `Backend::init` allocates a device-resident state
-instead of a host `Vec<Complex64>` and every instruction routes to a CUDA kernel.
+When a GPU context is attached, `Backend::init` allocates state on the device instead
+of a host `Vec<Complex64>` and every instruction routes to a CUDA kernel.
 
 **Module layout** (`src/gpu/`):
 
@@ -250,16 +272,17 @@ instead of a host `Vec<Complex64>` and every instruction routes to a CUDA kernel
 | ---- | ---- |
 | `mod.rs` | `GpuContext`, `GpuState` public entry points |
 | `device.rs` | `GpuDevice`: cudarc wrapper, compiles PTX at device construction |
-| `memory.rs` | `GpuBuffer`: device-side `Complex64` storage |
-| `kernels/mod.rs` | `KERNEL_NAMES`, `kernel_source()` template substitution |
+| `memory.rs` | `GpuBuffer`: device `Complex64` storage |
+| `kernels/mod.rs` | `KERNEL_NAMES`, composed `kernel_source()` concatenating dense + stabilizer |
 | `kernels/dense.rs` | PTX source and Rust launcher for every `Gate` variant |
+| `kernels/stabilizer.rs` | PTX source and launchers for tableau init, 11 Clifford gates, `rowmul_words` |
 
 **Kernel coverage:** every variant in the `Gate` enum has a dedicated kernel. Batched
 variants (`BatchPhase`, `BatchRzz`, `DiagonalBatch`, `MultiFused { all_diagonal: true }`)
-use LUT-based kernels that consume the same host-side table builders as the CPU path.
-Non-diagonal `MultiFused` uses a shared-memory tiled kernel (`apply_multi_fused_tiled`,
+use LUT kernels that consume the same host table builders as the CPU path.
+Non-diagonal `MultiFused` uses a shared memory tiled kernel (`apply_multi_fused_tiled`,
 `TILE_Q = 10`, `TILE_SIZE = 1024`). Sub-gates whose target bit is inside the tile apply in
-shared memory. Sub-gates whose target bit is outside the tile fall back to per-gate
+shared memory. Sub-gates whose target bit is outside the tile fall back to per gate
 launches. `Multi2q` still launches once per sub-gate; rare in practice.
 
 **PTX template substitution:** the CUDA C source is held as a template string
@@ -269,16 +292,17 @@ the Rust constants in `src/backend/statevector/kernels.rs`, keeping CPU and GPU 
 
 **Correctness:** `tests/golden_gpu.rs` drives 20 cross-checks comparing GPU amplitudes
 against the CPU statevector within 1e-10. Covers every gate variant, fusion paths, and
-the `BackendKind::StatevectorGpu` end-to-end dispatch at the crossover boundary.
+the `BackendKind::StatevectorGpu` public dispatch path at the crossover boundary.
 
 **Current limits:**
 
 - `BackendKind::Auto` does not yet dispatch to GPU. The `StatevectorGpu` variant is the
-  explicit opt-in; wiring a default GPU context into `Auto`.
+  explicit opt-in until `Auto` can receive a default GPU context.
 - Several fused launchers (`launch_apply_fused_2q`, `launch_apply_mcu`,
   `launch_apply_mcu_phase`, `launch_apply_batch_phase`, `launch_apply_batch_rzz`,
   `launch_apply_diagonal_batch`, `launch_apply_multi_fused_nondiag`) upload small
-  metadata tables per dispatch via `clone_htod`; the next launch-tax target.
+  metadata tables per dispatch via `clone_htod`. This is the next launch overhead
+  target.
 - `measure_prob_one` allocates a device partials buffer and reduces on the host every
   call. Matters for measurement-heavy circuits.
 - Kernel design and crossover analysis live in the module docstrings on
@@ -361,7 +385,7 @@ Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T ga
 | MPS | Chain of rank-3 tensors | O(n·χ²) | Sequential site access |
 | Product | `Vec<[Complex64; 2]>` | O(n) | Per-qubit independent |
 | Tensor Network | Network of dense tensors | O(gates × local dim) | Contraction-order dependent |
-| Factored | `Vec<Option<SubState>>` | O(2^n) worst case | Per-sub-state dispatch |
+| Factored | `Vec<Option<SubState>>` | O(2^n) worst case | Dispatch per substate |
 
 ## Threading and SIMD
 
@@ -380,7 +404,7 @@ Thread pool defaults to all logical cores (HT helps at 24q+ by hiding memory lat
 
 1. **AVX2+FMA** (256-bit): 2 complex pairs per iteration. Gated by `MAX_AVX2_STATE` for full-state passes (Skylake frequency throttling), but used freely within MultiFused L2 tiles where data is cache-resident.
 2. **FMA** (128-bit): Default for larger states. 3-op complex multiply (permute + mul + fmaddsub).
-3. **BMI2**: `_pext_u64` for BatchPhase, BatchRzz, and DiagonalBatch LUT indexing. Single-instruction bit extraction replaces multi-iteration shift-and-or loops.
+3. **BMI2**: `_pext_u64` for BatchPhase, BatchRzz, and DiagonalBatch LUT indexing. One BMI2 bit extraction replaces loops with repeated shifts and ORs.
 4. **Scalar fallback**: No intrinsics. All SIMD functions have a `#[cfg(not(target_arch = "x86_64"))]` fallback.
 
 Two key SIMD structs hoist matrix broadcast at construction time, avoiding per-element dispatch:

@@ -188,9 +188,33 @@ if gpu::is_available() {
 }
 ```
 
-For kernel-level experiments where every gate must hit the device, use the low-level
-`StatevectorBackend::new(seed).with_gpu(ctx)` builder instead. That bypasses the
-dispatch crossover by design.
+For kernel experiments where every gate must hit the device, use
+`StatevectorBackend::new(seed).with_gpu(ctx)` directly. That bypasses the dispatch
+crossover by design.
+
+### Stabilizer GPU (experimental)
+
+`BackendKind::StabilizerGpu` and `run_with_stabilizer_gpu` route Clifford
+circuits through CUDA. Gate application uses one batched kernel
+(`stab_apply_batch`). Measurement and reset stay on the device, including pivot
+search, row operations, phase fixup, and deterministic outcomes. Golden tests
+cover 100 to 5000 qubits.
+
+Compiled BTS sampling can use the GPU through `run_shots_compiled_with_gpu` or
+`CompiledSampler::with_gpu(ctx)`. The GPU path activates only for flat sparse
+parity data and shot counts at or above `gpu::BTS_MIN_SHOTS_DEFAULT`
+(`131_072` by default, override with `PRISM_GPU_BTS_MIN_SHOTS`). The sampler
+caches parity data and reusable scratch on the device across repeated calls.
+`DevicePackedShots::marginals()` and `DevicePackedShots::counts()` reduce on the
+device before falling back to a full shot copy.
+
+The stabilizer GPU dispatch crossover is conservative by default:
+`STABILIZER_MIN_QUBITS_DEFAULT = 100_000`. Set
+`PRISM_STABILIZER_GPU_MIN_QUBITS` for experiments.
+
+Benchmark direct stabilizer backend groups for throughput claims.
+`probabilities()`, `export_tableau()`, and `export_statevector()` are diagnostic
+readback helpers, not the throughput path.
 
 See [`docs/architecture.md`](docs/architecture.md) for the kernel design and crossover
 analysis.
@@ -214,6 +238,12 @@ cargo bench --bench bench_driver --features parallel         # gate microbenchma
 cargo bench --bench bench_gpu    --features "parallel gpu"   # GPU dispatch benchmarks
 cargo bench --features "parallel,bench-fast"                 # quick smoke test
 ```
+
+`bench_gpu` includes direct stabilizer backend groups that time
+`StabilizerBackend::apply_instructions` without probability readback. It also
+includes GPU BTS marginal and device count groups for the reduced transfer
+compiled sampler path. Use direct stabilizer groups for GPU crossover and
+throughput claims. Treat `run_with` groups as public API timings.
 
 Always use `--features parallel`. Baselines were taken with Rayon enabled. Never run
 two `cargo bench` invocations at the same time on the same machine. Rayon thread pools

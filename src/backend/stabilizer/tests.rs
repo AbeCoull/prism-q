@@ -255,6 +255,19 @@ fn test_probs_ghz_4() {
 }
 
 #[test]
+fn test_probabilities_reject_large_qubit_counts() {
+    let mut b = StabilizerBackend::new(42);
+    b.init(usize::BITS as usize, 0).unwrap();
+    let err = b.probabilities().unwrap_err();
+    match err {
+        PrismError::BackendUnsupported { operation, .. } => {
+            assert!(operation.contains("exceeds addressable memory"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
 fn test_1000_qubit_ghz() {
     let n = 1000;
     let mut c = Circuit::new(n, n);

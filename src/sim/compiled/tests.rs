@@ -1,4 +1,5 @@
 use super::*;
+use crate::circuit::{smallvec, ClassicalCondition, Instruction};
 use crate::circuits;
 use crate::gates::Gate;
 use crate::sim::BackendKind;
@@ -49,6 +50,31 @@ fn non_clifford_rejected() {
     c.add_gate(Gate::Rx(0.5), &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    let result = compile_measurements(&c, 42);
+    assert!(result.is_err());
+}
+
+#[test]
+fn reset_rejected() {
+    let mut c = Circuit::new(1, 1);
+    c.add_gate(Gate::X, &[0]);
+    c.add_reset(0);
+    c.add_measure(0, 0);
+    let result = compile_measurements(&c, 42);
+    assert!(result.is_err());
+}
+
+#[test]
+fn conditional_rejected() {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_measure(0, 0);
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: smallvec![1],
+    });
     c.add_measure(1, 1);
     let result = compile_measurements(&c, 42);
     assert!(result.is_err());
@@ -396,6 +422,8 @@ fn rank_analysis_across_circuit_types() {
         let mut c = Circuit::new(n, n);
         for i in 0..n {
             c.add_gate(Gate::H, &[i]);
+        }
+        for i in 0..n {
             c.add_measure(i, i);
         }
         let sampler = compile_measurements(&c, 42).unwrap();
@@ -456,6 +484,8 @@ fn filtered_product_h_matches_monolithic() {
     let mut c = Circuit::new(n, n);
     for i in 0..n {
         c.add_gate(Gate::H, &[i]);
+    }
+    for i in 0..n {
         c.add_measure(i, i);
     }
 
@@ -573,6 +603,8 @@ fn packed_shots_counts_support_wide_outputs() {
     let mut c = Circuit::new(n, n);
     for q in 0..n {
         c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n {
         c.add_measure(q, q);
     }
 
@@ -1470,4 +1502,78 @@ fn multinomial_high_rank_falls_through() {
     let total: u64 = counts.values().sum();
     assert_eq!(total, 10_000);
     assert!(counts.len() > 1);
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn gpu_bts_below_threshold_with_stub_context_stays_on_cpu() {
+    let threshold = crate::gpu::bts_min_shots();
+    if threshold <= 1 {
+        return;
+    }
+
+    let n = 128;
+    let shots = threshold.min(1024).saturating_sub(1).max(1);
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n {
+        c.add_measure(q, q);
+    }
+
+    let mut cpu = compile_measurements(&c, 42).unwrap();
+    assert!(cpu.should_use_bts(shots));
+    assert!(cpu.parity_blocks.is_none());
+    assert!(cpu.xor_dag.is_none());
+    let cpu_counts = cpu.sample_bulk_packed(shots).counts();
+
+    let mut gpu = compile_measurements(&c, 42)
+        .unwrap()
+        .with_gpu(crate::gpu::GpuContext::stub_for_tests());
+    assert!(gpu.should_use_bts(shots));
+    assert!(!gpu.should_use_gpu_bts(shots));
+    let gpu_counts = gpu.sample_bulk_packed(shots).counts();
+
+    assert!(gpu.gpu_bts_cache.is_none());
+    assert_eq!(cpu_counts, gpu_counts);
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn gpu_bts_low_rank_ghz_stays_on_cpu_above_threshold() {
+    let shots = crate::gpu::bts_min_shots().max(1);
+    let n = 128;
+    let mut c = circuits::ghz_circuit(n);
+    c.num_classical_bits = n;
+    for q in 0..n {
+        c.add_measure(q, q);
+    }
+
+    let gpu = compile_measurements(&c, 42)
+        .unwrap()
+        .with_gpu(crate::gpu::GpuContext::stub_for_tests());
+    assert_eq!(gpu.rank(), 1, "GHZ should compile to rank 1");
+    assert!(!gpu.should_use_gpu_bts(shots));
+}
+
+#[cfg(feature = "gpu")]
+#[test]
+fn gpu_bts_low_weight_h_layer_stays_on_cpu_above_threshold() {
+    let shots = crate::gpu::bts_min_shots().max(1);
+    let n = 128;
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n {
+        c.add_measure(q, q);
+    }
+
+    let gpu = compile_measurements(&c, 42)
+        .unwrap()
+        .with_gpu(crate::gpu::GpuContext::stub_for_tests());
+    assert!(gpu.should_use_bts(shots));
+    assert_eq!(gpu.rank(), n, "independent H layer should have full rank");
+    assert!(!gpu.should_use_gpu_bts(shots));
 }

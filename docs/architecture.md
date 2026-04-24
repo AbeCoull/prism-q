@@ -6,6 +6,8 @@
 - Correct simulation of supported gate sets across multiple backend strategies.
 - Clean backend plugin model. New simulation strategies can be added without touching the core.
 
+See the [Architecture Glossary](./glossary.md) for definitions of terms used throughout this document.
+
 ## Non-goals
 
 - Full OpenQASM 3.0 compliance (supports a practical subset).

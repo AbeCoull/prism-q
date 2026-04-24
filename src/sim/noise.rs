@@ -40,25 +40,11 @@ pub enum NoiseChannel {
     TwoQubitDepolarizing { p: f64 },
     /// General single-qubit channel described by a set of Kraus operators.
     ///
-    /// **Restriction: supported Kraus class.** Each operator `K_k` must
-    /// satisfy that `K_k† K_k` is diagonal. This class is rich enough to
-    /// cover all diagonal channels (amplitude / phase damping, dephasing)
-    /// plus the Pauli channels (bit flip, phase flip, bit-phase flip, and
-    /// arbitrary mixtures of `X`, `Y`, `Z`), which is every standard
-    /// single-qubit noise channel in the literature.
-    ///
-    /// **Rejected Kraus class.** General dense operators such as
-    /// `[[a, b], [0, 0]]` whose `K_k† K_k` has non-zero off-diagonal entries
-    /// require access to the qubit's coherence `⟨0|ρ|1⟩`, which the
-    /// trajectory engine cannot extract from a pure state without cloning
-    /// the backend. If you pass such an operator, the trajectory engine
-    /// returns [`PrismError::BackendUnsupported`] at runtime.
-    ///
-    /// **Workarounds for dense Kraus ops:** decompose the channel into a
-    /// unitary dilation plus an ancilla measurement, or use a density-matrix
-    /// simulator (not provided by PRISM-Q).
-    ///
-    /// [`PrismError::BackendUnsupported`]: crate::error::PrismError::BackendUnsupported
+    /// Dense Kraus operators are supported by trajectory backends that expose
+    /// `Backend::reduced_density_matrix_1q`. Branch probabilities use the full
+    /// one-qubit reduced density matrix, so channels may depend on coherence
+    /// as well as populations. Call [`NoiseModel::validate`] in setup code to
+    /// catch empty or non-finite custom channels before sampling.
     Custom { kraus: Vec<[[Complex64; 2]; 2]> },
 }
 
@@ -80,6 +66,81 @@ impl NoiseChannel {
             NoiseChannel::Pauli { .. } | NoiseChannel::Depolarizing { .. }
         )
     }
+
+    /// Return true when the trajectory engine can sample this channel exactly.
+    pub fn is_exactly_samplable(&self) -> bool {
+        self.validate().is_ok()
+    }
+
+    /// Validate that this channel is usable by the trajectory engine.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            NoiseChannel::Pauli { px, py, pz } => {
+                validate_probability("px", *px)?;
+                validate_probability("py", *py)?;
+                validate_probability("pz", *pz)?;
+                if *px + *py + *pz > 1.0 + 1e-12 {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: "Pauli channel probabilities must sum to <= 1".into(),
+                    });
+                }
+            }
+            NoiseChannel::Depolarizing { p } | NoiseChannel::TwoQubitDepolarizing { p } => {
+                validate_probability("p", *p)?;
+            }
+            NoiseChannel::AmplitudeDamping { gamma } | NoiseChannel::PhaseDamping { gamma } => {
+                validate_probability("gamma", *gamma)?;
+            }
+            NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
+                if !t1.is_finite() || *t1 <= 0.0 {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: "thermal relaxation t1 must be finite and positive".into(),
+                    });
+                }
+                if !t2.is_finite() || *t2 <= 0.0 {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: "thermal relaxation t2 must be finite and positive".into(),
+                    });
+                }
+                if !gate_time.is_finite() || *gate_time < 0.0 {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: "thermal relaxation gate_time must be finite and non-negative"
+                            .into(),
+                    });
+                }
+            }
+            NoiseChannel::Custom { kraus } => {
+                if kraus.is_empty() {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: "Custom Kraus channel must contain at least one operator".into(),
+                    });
+                }
+                for (op_idx, op) in kraus.iter().enumerate() {
+                    for (row_idx, row) in op.iter().enumerate() {
+                        for (col_idx, val) in row.iter().enumerate() {
+                            if !val.re.is_finite() || !val.im.is_finite() {
+                                return Err(crate::error::PrismError::InvalidParameter {
+                                    message: format!(
+                                        "Custom Kraus operator {op_idx} entry ({row_idx},{col_idx}) must be finite"
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_probability(name: &str, value: f64) -> Result<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: format!("{name} must be finite and in [0, 1]"),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +272,51 @@ impl NoiseModel {
                     .into(),
             });
         }
+        Ok(())
+    }
+
+    /// Validate all channels and readout errors in this noise model.
+    pub fn validate(&self) -> Result<()> {
+        for (instr_idx, events) in self.after_gate.iter().enumerate() {
+            for (event_idx, event) in events.iter().enumerate() {
+                event.channel.validate().map_err(|err| {
+                    crate::error::PrismError::InvalidParameter {
+                        message: format!(
+                            "noise event {event_idx} after instruction {instr_idx}: {err}"
+                        ),
+                    }
+                })?;
+
+                let expected_qubits = match &event.channel {
+                    NoiseChannel::TwoQubitDepolarizing { .. } => 2,
+                    _ => 1,
+                };
+                if event.qubits.len() != expected_qubits {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: format!(
+                            "noise event {event_idx} after instruction {instr_idx}: expected {expected_qubits} qubit(s), got {}",
+                            event.qubits.len()
+                        ),
+                    });
+                }
+            }
+        }
+
+        for (bit_idx, readout) in self.readout.iter().enumerate() {
+            if let Some(readout) = readout {
+                validate_probability("readout p01", readout.p01).map_err(|err| {
+                    crate::error::PrismError::InvalidParameter {
+                        message: format!("readout error {bit_idx}: {err}"),
+                    }
+                })?;
+                validate_probability("readout p10", readout.p10).map_err(|err| {
+                    crate::error::PrismError::InvalidParameter {
+                        message: format!("readout error {bit_idx}: {err}"),
+                    }
+                })?;
+            }
+        }
+
         Ok(())
     }
 }
@@ -796,8 +902,9 @@ impl GpuNoiseCache {
 ///
 /// The sampler reuses the compiled measurement parity map for the noiseless
 /// circuit, then applies the requested Pauli noise model across batches of
-/// shots. When a GPU context is attached with [`Self::with_gpu`], the
-/// underlying parity sampling stage may use the GPU BTS path. Materialized
+/// shots. When a GPU context is attached via `with_gpu` (available with the
+/// `gpu` feature), the underlying parity sampling stage may use the GPU BTS
+/// path. Materialized
 /// shot output still returns to the CPU in shot-major form, while exact
 /// counts and marginals can keep the packed measurement-major buffer on the
 /// device through noise application and reduction.

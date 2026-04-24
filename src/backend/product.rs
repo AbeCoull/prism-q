@@ -146,6 +146,15 @@ impl Backend for ProductStateBackend {
         Ok(())
     }
 
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        let [alpha, beta] = self.qubits[qubit];
+        let r = beta * alpha.conj();
+        Ok([
+            [Complex64::new(alpha.norm_sqr(), 0.0), r.conj()],
+            [r, Complex64::new(beta.norm_sqr(), 0.0)],
+        ])
+    }
+
     fn classical_results(&self) -> &[bool] {
         &self.classical_bits
     }

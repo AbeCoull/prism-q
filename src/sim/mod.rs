@@ -18,11 +18,11 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    has_temporal_clifford_opportunity, select_backend, select_dispatch, supports_fused_for_kind,
-    try_temporal_clifford, validate_explicit_backend, DispatchAction, AUTO_APPROX_MAX_TERMS,
-    AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
-    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO,
+    has_temporal_clifford_opportunity, max_statevector_qubits, select_backend, select_dispatch,
+    supports_fused_for_kind, try_temporal_clifford, validate_explicit_backend, DispatchAction,
+    AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM, AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX,
+    MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
+    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
 };
 
 use std::collections::HashMap;
@@ -884,6 +884,22 @@ pub fn run_shots_with(
 /// For all other cases, falls back to per-shot simulation with noise injection.
 /// The compiled noisy path is limited to terminal measurements with no resets
 /// or classical conditionals.
+fn auto_general_noise_backend(circuit: &Circuit) -> BackendKind {
+    if !circuit.has_entangling_gates() {
+        BackendKind::ProductState
+    } else if circuit.num_qubits > max_statevector_qubits() {
+        if circuit.is_sparse_friendly() {
+            BackendKind::Sparse
+        } else {
+            BackendKind::Mps {
+                max_bond_dim: AUTO_MPS_BOND_DIM,
+            }
+        }
+    } else {
+        BackendKind::Statevector
+    }
+}
+
 pub fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
@@ -891,39 +907,32 @@ pub fn run_shots_with_noise(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
-    if matches!(
-        kind,
-        BackendKind::StabilizerRank
-            | BackendKind::StochasticPauli { .. }
-            | BackendKind::DeterministicPauli { .. }
-    ) {
+    if !kind.supports_noisy_per_shot() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),
             reason: "this backend does not support noisy per-shot simulation".into(),
         });
     }
 
-    let is_stabilizer_kind = matches!(
-        kind,
-        BackendKind::Stabilizer | BackendKind::FilteredStabilizer | BackendKind::FactoredStabilizer
-    ) || {
-        #[cfg(feature = "gpu")]
-        {
-            matches!(kind, BackendKind::StabilizerGpu { .. })
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            false
-        }
-    };
+    let is_stabilizer_kind = kind.is_stabilizer_family();
 
     if is_stabilizer_kind && !noise_model.is_pauli_only() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),
-            reason: "stabilizer backends only support Pauli/depolarizing noise; \
-                     use Statevector or MPS for amplitude damping, phase damping, \
-                     thermal relaxation, custom Kraus, or readout errors"
-                .into(),
+            reason: format!(
+                "stabilizer backends only support Pauli/depolarizing noise; use {} for amplitude damping, phase damping, thermal relaxation, custom Kraus, or readout errors",
+                BackendKind::general_noise_backend_names()
+            ),
+        });
+    }
+
+    if !noise_model.is_pauli_only() && !kind.supports_general_noise() {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: format!(
+                "non-Pauli noise requires {}",
+                BackendKind::general_noise_backend_names()
+            ),
         });
     }
 
@@ -932,6 +941,10 @@ pub fn run_shots_with_noise(
             backend: format!("{kind:?}"),
             reason: "circuit contains non-Clifford gates".into(),
         });
+    }
+
+    if !matches!(kind, BackendKind::Auto) {
+        validate_explicit_backend(&kind, circuit)?;
     }
 
     if noise_model.is_pauli_only() {
@@ -966,8 +979,14 @@ pub fn run_shots_with_noise(
         }
     }
 
+    let trajectory_kind = if matches!(kind, BackendKind::Auto) && !noise_model.is_pauli_only() {
+        auto_general_noise_backend(circuit)
+    } else {
+        kind
+    };
+
     trajectory::run_trajectories(
-        |s| select_backend(&kind, circuit, s, false),
+        |s| select_backend(&trajectory_kind, circuit, s, false),
         circuit,
         noise_model,
         num_shots,
@@ -2287,10 +2306,23 @@ mod tests {
             },
             readout: vec![None; circuit.num_qubits],
         };
-        assert!(matches!(
-            run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err(),
-            crate::error::PrismError::IncompatibleBackend { .. }
-        ));
+        let err = run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err();
+        match err {
+            crate::error::PrismError::IncompatibleBackend { reason, .. } => {
+                assert!(reason.contains("Statevector"));
+                assert!(reason.contains("Sparse"));
+                assert!(reason.contains("Factored"));
+            }
+            other => panic!("expected IncompatibleBackend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_noise_auto_general_noise_avoids_stabilizer_dispatch() {
+        let circuit = make_clifford_circuit();
+        let nm = noise::NoiseModel::with_amplitude_damping(&circuit, 0.1);
+        let result = run_shots_with_noise(BackendKind::Auto, &circuit, &nm, 16, 42);
+        assert!(result.is_ok());
     }
 
     #[cfg(feature = "gpu")]

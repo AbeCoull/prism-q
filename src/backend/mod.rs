@@ -187,11 +187,25 @@ pub trait Backend {
     /// Compute P(qubit = |1⟩) without collapsing the state.
     ///
     /// Used by the trajectory engine for state-dependent noise channels
-    /// (amplitude damping, phase damping). The default returns `BackendUnsupported`.
-    fn qubit_probability(&self, _qubit: usize) -> Result<f64> {
+    /// (amplitude damping, phase damping). The default derives from
+    /// [`Backend::reduced_density_matrix_1q`].
+    fn qubit_probability(&self, qubit: usize) -> Result<f64> {
+        let rho = self.reduced_density_matrix_1q(qubit)?;
+        Ok(rho[1][1].re.clamp(0.0, 1.0))
+    }
+
+    /// Compute the one-qubit reduced density matrix without collapsing the state.
+    ///
+    /// Returned as `[[p0, r*], [r, p1]]`, where `r = <1|rho|0>`.
+    /// Used by the trajectory engine for dense custom Kraus channels whose
+    /// branch probabilities depend on coherence, not just populations. The
+    /// default returns `BackendUnsupported`; backends override when their
+    /// representation can expose this quantity efficiently enough for noise
+    /// sampling.
+    fn reduced_density_matrix_1q(&self, _qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
-            operation: "qubit_probability".to_string(),
+            operation: "reduced_density_matrix_1q".to_string(),
         })
     }
 

@@ -206,78 +206,48 @@ fn apply_pauli_op(backend: &mut dyn Backend, qubit: usize, op: PauliOp) -> Resul
     })
 }
 
-/// Threshold at which a Kraus operator's `K†K` off-diagonal element is
-/// considered non-zero. Used to reject Kraus ops whose `K†K` is not diagonal,
-/// because such ops require knowing the reduced density matrix's coherences
-/// which we cannot extract from a pure state without cloning the backend.
-const KRAUS_DIAGONAL_TOL: f64 = 1e-10;
-
-/// Return true if `K†K` is diagonal (within `KRAUS_DIAGONAL_TOL`).
-///
-/// `K†K` is diagonal iff its (0,1) entry vanishes:
-///   `(K†K)[0][1] = k00*·k01 + k10*·k11 = 0`
-/// When this holds, `Tr(K†K ρ) = (|k00|²+|k10|²)·p0 + (|k01|²+|k11|²)·p1`,
-/// which depends only on populations (not coherences) and can be computed
-/// exactly from `qubit_probability` alone. Diagonal Kraus ops and all pure
-/// Paulis (X, Y, Z, and their scaled versions) satisfy this.
+/// Compute the branch effect `Kdagger K` for a single-qubit Kraus operator.
 #[inline]
-fn is_kdagger_k_diagonal(k: &[[Complex64; 2]; 2]) -> bool {
-    let cross = k[0][0].conj() * k[0][1] + k[1][0].conj() * k[1][1];
-    cross.norm() < KRAUS_DIAGONAL_TOL
+fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
+    [
+        [
+            k[0][0].conj() * k[0][0] + k[1][0].conj() * k[1][0],
+            k[0][0].conj() * k[0][1] + k[1][0].conj() * k[1][1],
+        ],
+        [
+            k[0][1].conj() * k[0][0] + k[1][1].conj() * k[1][0],
+            k[0][1].conj() * k[0][1] + k[1][1].conj() * k[1][1],
+        ],
+    ]
+}
+
+#[inline]
+fn kraus_probability(k: &[[Complex64; 2]; 2], rho: &[[Complex64; 2]; 2]) -> f64 {
+    let effect = kdagger_k(k);
+    let p = effect[0][0] * rho[0][0]
+        + effect[0][1] * rho[1][0]
+        + effect[1][0] * rho[0][1]
+        + effect[1][1] * rho[1][1];
+    p.re.max(0.0)
 }
 
 /// Sample and apply one of a set of 1-qubit Kraus operators.
 ///
-/// **Supported Kraus operators.** Each operator `K_k` must satisfy `K_k† K_k`
-/// is diagonal. This is the class of Kraus ops for which the per-branch
-/// probability `p_k = Tr(K_k† K_k ρ)` depends only on the qubit's populations
-/// (not its coherences), so the trajectory branch can be selected exactly
-/// from `qubit_probability` alone without cloning the full state. This class
-/// includes:
-///
-/// - All diagonal Kraus operators (amplitude/phase damping, dephasing, Z).
-/// - All pure Paulis (X, Y, Z) and their scaled versions.
-/// - The standard bit-flip / phase-flip / bit-phase-flip channels.
-///
-/// It **excludes** Kraus operators like `[[a,b],[0,0]]` or general dense
-/// matrices where the (0,1) entry of `K_k† K_k` is non-zero. For those, the
-/// trajectory branching depends on the off-diagonal coherence `⟨0|ρ|1⟩`,
-/// which is not accessible via a single-qubit probability query.
-///
-/// Users needing general dense Kraus support on entangled qubits should
-/// either decompose the channel into a unitary dilation + measurement on an
-/// ancilla, or use a density-matrix simulator (not provided by PRISM-Q).
+/// Branch probabilities use `p_k = Tr(Kdagger K rho_q)`, where `rho_q` is
+/// the qubit's reduced density matrix. This handles dense Kraus operators
+/// whose branch probabilities depend on coherence.
 fn apply_custom_kraus(
     backend: &mut dyn Backend,
     qubit: usize,
     kraus: &[[[Complex64; 2]; 2]],
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    for (i, k) in kraus.iter().enumerate() {
-        if !is_kdagger_k_diagonal(k) {
-            return Err(crate::error::PrismError::BackendUnsupported {
-                backend: "trajectory engine".to_string(),
-                operation: format!(
-                    "NoiseChannel::Custom: Kraus operator {i} has non-diagonal K†K \
-                     (off-diagonal magnitude {:.3e} > {KRAUS_DIAGONAL_TOL:.0e}). \
-                     Only Kraus ops whose K†K is diagonal are supported (diagonal \
-                     matrices, Paulis, and their scaled versions). Decompose your \
-                     channel into a unitary dilation + ancilla measurement, or use \
-                     a density-matrix simulator for general dense Kraus channels.",
-                    (k[0][0].conj() * k[0][1] + k[1][0].conj() * k[1][1]).norm()
-                ),
-            });
-        }
-    }
-
-    let p1 = backend.qubit_probability(qubit)?;
-    let p0 = 1.0 - p1;
+    let rho = backend.reduced_density_matrix_1q(qubit)?;
 
     let mut cumulative: smallvec::SmallVec<[f64; 8]> = smallvec::SmallVec::new();
     let mut total = 0.0;
     for k in kraus {
-        let pk = p0 * (k[0][0].norm_sqr() + k[1][0].norm_sqr())
-            + p1 * (k[0][1].norm_sqr() + k[1][1].norm_sqr());
+        let pk = kraus_probability(k, &rho);
         total += pk;
         cumulative.push(total);
     }

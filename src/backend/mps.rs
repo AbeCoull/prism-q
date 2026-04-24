@@ -1409,6 +1409,44 @@ impl MpsBackend {
         }
     }
 
+    fn reduced_density_site(&self, site: usize) -> [[Complex64; 2]; 2] {
+        let l_env = self.compute_left_env(site);
+        let r_env = self.compute_right_env(site);
+        let t = &self.sites[site];
+        let bl = t.bond_left;
+        let br = t.bond_right;
+        let mut rho = [[ZERO; 2]; 2];
+
+        for (row, rho_row) in rho.iter_mut().enumerate() {
+            for (col, rho_cell) in rho_row.iter_mut().enumerate() {
+                let mut val = ZERO;
+                for alpha in 0..bl {
+                    for alpha_p in 0..bl {
+                        let l_val = l_env[alpha * bl + alpha_p];
+                        if l_val == ZERO {
+                            continue;
+                        }
+                        for beta in 0..br {
+                            for beta_p in 0..br {
+                                let r_val = r_env[beta * br + beta_p];
+                                if r_val == ZERO {
+                                    continue;
+                                }
+                                val += l_val
+                                    * t.data[t.idx(alpha, row, beta)]
+                                    * t.data[t.idx(alpha_p, col, beta_p)].conj()
+                                    * r_val;
+                            }
+                        }
+                    }
+                }
+                *rho_cell = val;
+            }
+        }
+
+        rho
+    }
+
     fn chain_amplitude(&self, basis: usize) -> Complex64 {
         let n = self.num_qubits;
         let mut vec_data = vec![ONE];
@@ -1555,6 +1593,10 @@ impl Backend for MpsBackend {
     fn reset(&mut self, qubit: usize) -> Result<()> {
         self.apply_reset(self.site_for_logical(qubit));
         Ok(())
+    }
+
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        Ok(self.reduced_density_site(self.site_for_logical(qubit)))
     }
 
     fn classical_results(&self) -> &[bool] {

@@ -63,6 +63,31 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 pub(crate) use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
 
+#[cfg(feature = "gpu")]
+fn reduced_density_matrix_from_state(state: &[Complex64], qubit: usize) -> [[Complex64; 2]; 2] {
+    let half = 1usize << qubit;
+    let block_size = half << 1;
+    let mut p0 = 0.0f64;
+    let mut p1 = 0.0f64;
+    let mut r = Complex64::new(0.0, 0.0);
+
+    for block in state.chunks(block_size) {
+        let (lo, hi) = block.split_at(half);
+        for i in 0..half {
+            let a0 = lo[i];
+            let a1 = hi[i];
+            p0 += a0.norm_sqr();
+            p1 += a1.norm_sqr();
+            r += a1 * a0.conj();
+        }
+    }
+
+    [
+        [Complex64::new(p0, 0.0), r.conj()],
+        [r, Complex64::new(p1, 0.0)],
+    ]
+}
+
 /// Insert a zero bit at `bit_pos`, shifting all higher bits left by one.
 ///
 /// Maps a compact iteration index to a state-vector index with a gap at
@@ -527,6 +552,15 @@ impl Backend for StatevectorBackend {
             return crate::gpu::kernels::dense::measure_prob_one(gpu.context(), gpu, qubit);
         }
         Ok(self.qubit_probability_one(qubit))
+    }
+
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            let state = gpu.export_statevector()?;
+            return Ok(reduced_density_matrix_from_state(&state, qubit));
+        }
+        Ok(self.reduced_density_matrix_one(qubit))
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

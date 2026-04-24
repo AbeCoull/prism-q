@@ -1374,6 +1374,76 @@ impl StatevectorBackend {
     }
 
     #[inline(always)]
+    pub(super) fn reduced_density_matrix_one(&self, qubit: usize) -> [[Complex64; 2]; 2] {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            return self.reduced_density_matrix_one_par(qubit);
+        }
+
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+
+        let mut p0 = 0.0f64;
+        let mut p1 = 0.0f64;
+        let mut r = Complex64::new(0.0, 0.0);
+        for block in self.state.chunks(block_size) {
+            let (lo, hi) = block.split_at(half);
+            for i in 0..half {
+                let a0 = lo[i];
+                let a1 = hi[i];
+                p0 += a0.norm_sqr();
+                p1 += a1.norm_sqr();
+                r += a1 * a0.conj();
+            }
+        }
+
+        let scale = Complex64::new(norm_sq, 0.0);
+        let r = r * scale;
+        [
+            [Complex64::new(p0 * norm_sq, 0.0), r.conj()],
+            [r, Complex64::new(p1 * norm_sq, 0.0)],
+        ]
+    }
+
+    #[cfg(feature = "parallel")]
+    fn reduced_density_matrix_one_par(&self, qubit: usize) -> [[Complex64; 2]; 2] {
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let norm_sq = self.pending_norm * self.pending_norm;
+
+        let (p0, p1, r) = self
+            .state
+            .par_chunks(block_size)
+            .with_min_len(chunk_min_len(block_size))
+            .map(|block| {
+                let (lo, hi) = block.split_at(half);
+                let mut p0 = 0.0f64;
+                let mut p1 = 0.0f64;
+                let mut r = Complex64::new(0.0, 0.0);
+                for i in 0..half {
+                    let a0 = lo[i];
+                    let a1 = hi[i];
+                    p0 += a0.norm_sqr();
+                    p1 += a1.norm_sqr();
+                    r += a1 * a0.conj();
+                }
+                (p0, p1, r)
+            })
+            .reduce(
+                || (0.0, 0.0, Complex64::new(0.0, 0.0)),
+                |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+            );
+
+        let scale = Complex64::new(norm_sq, 0.0);
+        let r = r * scale;
+        [
+            [Complex64::new(p0 * norm_sq, 0.0), r.conj()],
+            [r, Complex64::new(p1 * norm_sq, 0.0)],
+        ]
+    }
+
+    #[inline(always)]
     pub(super) fn apply_reset(&mut self, qubit: usize) {
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {

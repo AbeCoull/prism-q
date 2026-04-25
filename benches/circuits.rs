@@ -335,6 +335,38 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_statevector_qv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/qv");
+    configure_group(&mut group);
+
+    for &n in &[8, 12, 16, 20] {
+        let circuit = circuits::quantum_volume_circuit(n, n, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_statevector_w_state(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/w_state");
+    configure_group(&mut group);
+
+    for &n in &[8, 12, 16, 20] {
+        let circuit = circuits::w_state_circuit(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // ---- Statevector: depth sweep ----
 
 fn bench_statevector_depth_sweep(c: &mut Criterion) {
@@ -1366,6 +1398,8 @@ criterion_group!(
     bench_statevector_qpe,
     bench_statevector_hea,
     bench_statevector_qaoa,
+    bench_statevector_qv,
+    bench_statevector_w_state,
     bench_statevector_clifford,
     bench_statevector_depth_sweep,
     bench_statevector_entanglement,

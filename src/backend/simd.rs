@@ -1389,7 +1389,7 @@ unsafe fn apply_fused_2q_loop_fma(
     }
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "parallel"))]
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "fma")]
 unsafe fn apply_fused_2q_group_fma(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
@@ -1626,12 +1626,12 @@ impl PreparedGate2q {
         }
     }
 
-    /// Apply one group at scattered indices. Safe to call from Rayon closures.
+    /// Apply one group at scattered indices. Safe to call from Rayon closures
+    /// when callers partition indices across threads.
     ///
     /// # Safety
     /// Caller must ensure `i[0..4]` are valid indices into the state array
     /// and that no other thread is accessing the same indices.
-    #[cfg(feature = "parallel")]
     #[inline(always)]
     pub(crate) unsafe fn apply_group_ptr(&self, state: *mut f64, i: [usize; 4]) {
         #[cfg(target_arch = "x86_64")]

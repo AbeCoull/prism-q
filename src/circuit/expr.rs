@@ -275,6 +275,17 @@ pub(super) fn eval_expr(
             ),
         });
     }
+    if !val.is_finite() {
+        return Err(PrismError::Parse {
+            line: line_num,
+            message: format!(
+                "expression `{}` evaluates to {} (must be finite); this typically \
+                 means a divide by zero, log/sqrt of a non-positive value, or an \
+                 overflow",
+                s, val
+            ),
+        });
+    }
     Ok(val)
 }
 

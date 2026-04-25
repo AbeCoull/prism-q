@@ -352,6 +352,28 @@ extern "C" __global__ void measure_prob_one(
     if (tid == 0) out_partials[blockIdx.x] = sdata[0];
 }
 
+// Single-block reduction over `partials` (length `count`) into a single f64
+// at `result[0]`. Caller launches with a single block of `blockDim.x` threads;
+// each thread loops with stride `blockDim.x` over `partials` to accumulate.
+// Replaces a num_blocks-element D2H plus a host sum with one 8-byte D2H.
+extern "C" __global__ void measure_prob_one_finalize(
+    const double *partials, unsigned int count, double *result)
+{
+    extern __shared__ double sdata[];
+    unsigned int tid = threadIdx.x;
+    double s = 0.0;
+    for (unsigned int i = tid; i < count; i += blockDim.x) {
+        s += partials[i];
+    }
+    sdata[tid] = s;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) sdata[tid] += sdata[tid + stride];
+        __syncthreads();
+    }
+    if (tid == 0) result[0] = sdata[0];
+}
+
 // measure_collapse: zero amplitudes where qubit bit != outcome.
 // Launch over 2^n threads, block size BLOCK_SIZE.
 
@@ -1130,9 +1152,8 @@ pub(crate) fn launch_apply_mcu(
         block_dim: (BLOCK_SIZE, 1, 1),
         shared_mem_bytes: 0,
     };
-    let sorted_dev = stream
-        .clone_htod(&sorted)
-        .map_err(|e| launch_err("upload mcu sorted", e))?;
+    let mut scratch = ctx.launcher_scratch();
+    let sorted_buf = super::ensure_scratch(&mut scratch.u32_a, device, &sorted)?;
     let m00r = matrix[0][0].re;
     let m00i = matrix[0][0].im;
     let m01r = matrix[0][1].re;
@@ -1146,7 +1167,7 @@ pub(crate) fn launch_apply_mcu(
     builder
         .arg(buffer)
         .arg(&iter_count)
-        .arg(&sorted_dev)
+        .arg(sorted_buf.raw())
         .arg(&num_sorted)
         .arg(&ctrl_mask)
         .arg(&tgt_mask)
@@ -1158,7 +1179,8 @@ pub(crate) fn launch_apply_mcu(
         .arg(&m10i)
         .arg(&m11r)
         .arg(&m11i);
-    // SAFETY: signature matches; sorted_dev lives until launch returns (kept in scope).
+    // SAFETY: signature matches; sorted_buf lives in the launcher scratch and is held by
+    // the mutex guard until after the launch is queued on the stream.
     unsafe {
         builder
             .launch(cfg)
@@ -1191,9 +1213,8 @@ pub(crate) fn launch_apply_mcu_phase(
         block_dim: (BLOCK_SIZE, 1, 1),
         shared_mem_bytes: 0,
     };
-    let sorted_dev = stream
-        .clone_htod(&sorted)
-        .map_err(|e| launch_err("upload mcu_phase sorted", e))?;
+    let mut scratch = ctx.launcher_scratch();
+    let sorted_buf = super::ensure_scratch(&mut scratch.u32_a, device, &sorted)?;
     let pr = phase.re;
     let pi = phase.im;
     let mut builder = stream.launch_builder(&func);
@@ -1201,12 +1222,12 @@ pub(crate) fn launch_apply_mcu_phase(
     builder
         .arg(buffer)
         .arg(&iter_count)
-        .arg(&sorted_dev)
+        .arg(sorted_buf.raw())
         .arg(&num_sorted)
         .arg(&all_mask)
         .arg(&pr)
         .arg(&pi);
-    // SAFETY: signature matches kernel; sorted_dev retained.
+    // SAFETY: signature matches; sorted_buf is held by the launcher scratch guard.
     unsafe {
         builder
             .launch(cfg)
@@ -1245,9 +1266,8 @@ pub(crate) fn launch_apply_fused_2q(
             flat[2 * (row * 4 + col) + 1] = matrix[row][col].im;
         }
     }
-    let mat_dev = stream
-        .clone_htod(&flat)
-        .map_err(|e| launch_err("upload fused_2q mat", e))?;
+    let mut scratch = ctx.launcher_scratch();
+    let mat_buf = super::ensure_scratch(&mut scratch.f64_a, device, &flat)?;
     let q0_i = q0 as i32;
     let q1_i = q1 as i32;
     let mut builder = stream.launch_builder(&func);
@@ -1257,8 +1277,8 @@ pub(crate) fn launch_apply_fused_2q(
         .arg(&pair_count)
         .arg(&q0_i)
         .arg(&q1_i)
-        .arg(&mat_dev);
-    // SAFETY: signature matches; mat_dev retained until after launch.
+        .arg(mat_buf.raw());
+    // SAFETY: signature matches; mat_buf is held by the launcher scratch guard.
     unsafe {
         builder
             .launch(cfg)
@@ -1276,41 +1296,71 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
         });
     }
     let dim: u64 = 1u64 << n;
-    // Each block processes 2*BLOCK_SIZE elements.
+    // Each block of stage 1 processes 2*BLOCK_SIZE elements.
     let elems_per_block = 2u64 * BLOCK_SIZE as u64;
     let num_blocks = dim.div_ceil(elems_per_block).max(1) as u32;
 
     let device = ctx.device();
     let stream = device.stream()?;
-    let func = device.function("measure_prob_one")?;
-    let cfg = LaunchConfig {
+    let stage1 = device.function("measure_prob_one")?;
+    let stage2 = device.function("measure_prob_one_finalize")?;
+    let stage1_cfg = LaunchConfig {
         grid_dim: (num_blocks, 1, 1),
         block_dim: (BLOCK_SIZE, 1, 1),
         shared_mem_bytes: BLOCK_SIZE * std::mem::size_of::<f64>() as u32,
     };
-    let mut partials = stream
-        .alloc_zeros::<f64>(num_blocks as usize)
-        .map_err(|e| launch_err("alloc partials", e))?;
+    let stage2_cfg = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (BLOCK_SIZE, 1, 1),
+        shared_mem_bytes: BLOCK_SIZE * std::mem::size_of::<f64>() as u32,
+    };
+
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let partials =
+        super::ensure_capacity(&mut scratch.measure_partials, device, num_blocks as usize)?;
 
     let qubit_i = qubit as i32;
-    let mut builder = stream.launch_builder(&func);
-    let state_buf = state.buffer().raw();
-    builder
-        .arg(state_buf)
-        .arg(&dim)
-        .arg(&qubit_i)
-        .arg(&mut partials);
-    // SAFETY: signature matches kernel; num_blocks × 2*BLOCK_SIZE covers dim.
-    unsafe {
+    {
+        let mut builder = stream.launch_builder(&stage1);
+        let state_buf = state.buffer().raw();
         builder
-            .launch(cfg)
-            .map_err(|e| launch_err("measure_prob_one", e))?;
+            .arg(state_buf)
+            .arg(&dim)
+            .arg(&qubit_i)
+            .arg(partials.raw_mut());
+        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers dim.
+        unsafe {
+            builder
+                .launch(stage1_cfg)
+                .map_err(|e| launch_err("measure_prob_one", e))?;
+        }
     }
-    let mut host_partials = vec![0.0_f64; num_blocks as usize];
-    stream
-        .memcpy_dtoh(&partials, &mut host_partials)
-        .map_err(|e| launch_err("measure partials dtoh", e))?;
-    let prob_raw: f64 = host_partials.iter().sum();
+
+    let result = super::ensure_capacity(&mut scratch.measure_result, device, 1)?;
+    let count_u32 = num_blocks;
+    {
+        let mut builder = stream.launch_builder(&stage2);
+        builder
+            .arg(scratch.measure_partials.as_ref().unwrap().raw())
+            .arg(&count_u32)
+            .arg(result.raw_mut());
+        // SAFETY: signature matches kernel; one block of BLOCK_SIZE threads, grid-stride
+        // loop over `count_u32` partials. Both buffers held by the scratch guard.
+        unsafe {
+            builder
+                .launch(stage2_cfg)
+                .map_err(|e| launch_err("measure_prob_one_finalize", e))?;
+        }
+    }
+
+    let mut host_result = [0.0_f64];
+    scratch
+        .measure_result
+        .as_ref()
+        .unwrap()
+        .copy_to_host(device, &mut host_result)?;
+    let prob_raw = host_result[0];
     let norm_sq = state.pending_norm() * state.pending_norm();
     Ok((prob_raw * norm_sq).clamp(0.0, 1.0))
 }
@@ -1393,12 +1443,10 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
         shared_mem_bytes: 0,
     };
 
-    let targets_dev = stream
-        .clone_htod(&targets)
-        .map_err(|e| launch_err("upload targets", e))?;
-    let diags_dev = stream
-        .clone_htod(&diags)
-        .map_err(|e| launch_err("upload diags", e))?;
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let targets_buf = super::ensure_scratch(&mut scratch.i32_a, device, &targets)?;
+    let diags_buf = super::ensure_scratch(&mut scratch.f64_a, device, &diags)?;
 
     let num_gates_i = num_gates as i32;
     let mut builder = stream.launch_builder(&func);
@@ -1406,11 +1454,11 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
     builder
         .arg(buffer)
         .arg(&dim)
-        .arg(&targets_dev)
-        .arg(&diags_dev)
+        .arg(targets_buf.raw())
+        .arg(diags_buf.raw())
         .arg(&num_gates_i);
     // SAFETY: signature matches; targets has num_gates i32s; diags has 2*num_gates double2s
-    // (= 4*num_gates f64s); grid covers dim.
+    // (= 4*num_gates f64s); grid covers dim. Buffers held by the scratch guard.
     unsafe {
         builder
             .launch(cfg)
@@ -1490,15 +1538,11 @@ pub(crate) fn launch_apply_batch_phase(
         shared_mem_bytes: 0,
     };
 
-    let tables_dev = stream
-        .clone_htod(&tables_flat)
-        .map_err(|e| launch_err("upload batch_phase tables", e))?;
-    let shifts_dev = stream
-        .clone_htod(&shifts_flat)
-        .map_err(|e| launch_err("upload batch_phase shifts", e))?;
-    let lens_dev = stream
-        .clone_htod(&lens)
-        .map_err(|e| launch_err("upload batch_phase lens", e))?;
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let tables_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tables_flat)?;
+    let shifts_buf = super::ensure_scratch(&mut scratch.i32_a, device, &shifts_flat)?;
+    let lens_buf = super::ensure_scratch(&mut scratch.i32_b, device, &lens)?;
 
     let control_i = control as i32;
     let num_groups_i = num_groups as i32;
@@ -1508,11 +1552,12 @@ pub(crate) fn launch_apply_batch_phase(
         .arg(buffer)
         .arg(&half_count)
         .arg(&control_i)
-        .arg(&tables_dev)
-        .arg(&shifts_dev)
-        .arg(&lens_dev)
+        .arg(tables_buf.raw())
+        .arg(shifts_buf.raw())
+        .arg(lens_buf.raw())
         .arg(&num_groups_i);
     // SAFETY: signature matches kernel; device slices sized for num_groups; grid covers half.
+    // Scratch guard keeps all three buffers alive.
     unsafe {
         builder
             .launch(cfg)
@@ -1581,18 +1626,12 @@ pub(crate) fn launch_apply_batch_rzz(
         shared_mem_bytes: 0,
     };
 
-    let tables_dev = stream
-        .clone_htod(&tables_flat)
-        .map_err(|e| launch_err("upload batch_rzz tables", e))?;
-    let q0s_dev = stream
-        .clone_htod(&q0s_flat)
-        .map_err(|e| launch_err("upload batch_rzz q0s", e))?;
-    let q1s_dev = stream
-        .clone_htod(&q1s_flat)
-        .map_err(|e| launch_err("upload batch_rzz q1s", e))?;
-    let lens_dev = stream
-        .clone_htod(&lens)
-        .map_err(|e| launch_err("upload batch_rzz lens", e))?;
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let tables_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tables_flat)?;
+    let q0s_buf = super::ensure_scratch(&mut scratch.i32_a, device, &q0s_flat)?;
+    let q1s_buf = super::ensure_scratch(&mut scratch.i32_b, device, &q1s_flat)?;
+    let lens_buf = super::ensure_scratch(&mut scratch.i32_c, device, &lens)?;
 
     let num_groups_i = num_groups as i32;
     let mut builder = stream.launch_builder(&func);
@@ -1600,12 +1639,13 @@ pub(crate) fn launch_apply_batch_rzz(
     builder
         .arg(buffer)
         .arg(&dim)
-        .arg(&tables_dev)
-        .arg(&q0s_dev)
-        .arg(&q1s_dev)
-        .arg(&lens_dev)
+        .arg(tables_buf.raw())
+        .arg(q0s_buf.raw())
+        .arg(q1s_buf.raw())
+        .arg(lens_buf.raw())
         .arg(&num_groups_i);
     // SAFETY: signature matches kernel; device slices sized for num_groups; grid covers dim.
+    // Scratch guard keeps all four buffers alive.
     unsafe {
         builder
             .launch(cfg)
@@ -1692,15 +1732,11 @@ pub(crate) fn launch_apply_diagonal_batch(
         shared_mem_bytes: 0,
     };
 
-    let tables_dev = stream
-        .clone_htod(&tables_flat)
-        .map_err(|e| launch_err("upload diag_batch tables", e))?;
-    let shifts_dev = stream
-        .clone_htod(&shifts_flat)
-        .map_err(|e| launch_err("upload diag_batch shifts", e))?;
-    let lens_dev = stream
-        .clone_htod(&lens)
-        .map_err(|e| launch_err("upload diag_batch lens", e))?;
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let tables_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tables_flat)?;
+    let shifts_buf = super::ensure_scratch(&mut scratch.i32_a, device, &shifts_flat)?;
+    let lens_buf = super::ensure_scratch(&mut scratch.i32_b, device, &lens)?;
 
     let num_groups_i = num_groups as i32;
     let mut builder = stream.launch_builder(&func);
@@ -1708,11 +1744,12 @@ pub(crate) fn launch_apply_diagonal_batch(
     builder
         .arg(buffer)
         .arg(&dim)
-        .arg(&tables_dev)
-        .arg(&shifts_dev)
-        .arg(&lens_dev)
+        .arg(tables_buf.raw())
+        .arg(shifts_buf.raw())
+        .arg(lens_buf.raw())
         .arg(&num_groups_i);
     // SAFETY: signature matches kernel; device slices sized for num_groups; grid covers dim.
+    // Scratch guard keeps all three buffers alive.
     unsafe {
         builder
             .launch(cfg)
@@ -1813,32 +1850,35 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
         shared_mem_bytes: 0,
     };
 
-    let targets_dev = stream
-        .clone_htod(&tile_targets)
-        .map_err(|e| launch_err("upload tiled targets", e))?;
-    let matrices_dev = stream
-        .clone_htod(&tile_matrices)
-        .map_err(|e| launch_err("upload tiled matrices", e))?;
-
     let num_gates_i = tile_targets.len() as i32;
-    let mut builder = stream.launch_builder(&func);
-    let buffer = state.buffer_mut().raw_mut();
-    builder
-        .arg(buffer)
-        .arg(&dim)
-        .arg(&targets_dev)
-        .arg(&matrices_dev)
-        .arg(&num_gates_i);
-    // SAFETY: signature matches kernel; num_tiles * TILE_SIZE = dim; device slices sized
-    // for num_gates; all targets checked < MULTI_FUSED_TILE_Q above.
-    unsafe {
+    {
+        let mut scratch = ctx.launcher_scratch();
+        let scratch = &mut *scratch;
+        let targets_buf = super::ensure_scratch(&mut scratch.i32_a, device, &tile_targets)?;
+        let matrices_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tile_matrices)?;
+
+        let mut builder = stream.launch_builder(&func);
+        let buffer = state.buffer_mut().raw_mut();
         builder
-            .launch(cfg)
-            .map_err(|e| launch_err("apply_multi_fused_tiled", e))?;
+            .arg(buffer)
+            .arg(&dim)
+            .arg(targets_buf.raw())
+            .arg(matrices_buf.raw())
+            .arg(&num_gates_i);
+        // SAFETY: signature matches; num_tiles * TILE_SIZE = dim; device slices sized for
+        // num_gates; all targets checked < MULTI_FUSED_TILE_Q above. Scratch guard holds
+        // both buffers alive.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| launch_err("apply_multi_fused_tiled", e))?;
+        }
     }
 
     // Third pass: launch per-gate kernels for the external (target >= TILE_Q) sub-gates
     // whose pairs span tiles. Order matters; these must run after the tiled kernel.
+    // The scratch guard from the tiled launch is dropped before re-acquiring it inside
+    // each per-gate launcher, avoiding deadlock.
     for &(target, mat) in gates {
         if target >= MULTI_FUSED_TILE_Q {
             launch_apply_gate_1q(ctx, state, target, mat)?;

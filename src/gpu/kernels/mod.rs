@@ -10,6 +10,78 @@ pub(crate) mod bts;
 pub(crate) mod dense;
 pub(crate) mod stabilizer;
 
+use cudarc::driver::{DeviceRepr, ValidAsZeroBits};
+
+use crate::error::Result;
+use crate::gpu::device::GpuDevice;
+use crate::gpu::memory::GpuBuffer;
+
+/// Scratch buffers reused across launches that need to upload small per-call
+/// metadata (sorted-qubit lists, packed lookup tables, fused gate matrices).
+///
+/// Replaces the per-call `clone_htod` allocate-and-upload pattern with a
+/// grow-only resident allocation that callers fill via `copy_from_host`. The
+/// allocation is tied to the `GpuContext`; access is serialised through a
+/// `Mutex` because all dense launches share the same CUDA stream anyway.
+///
+/// Worst case across the dense launchers is one f64 buffer plus three i32
+/// buffers (`launch_apply_batch_rzz`); the four named slots cover every
+/// existing call site without sharing across overlapping arguments.
+#[derive(Default)]
+pub(crate) struct LauncherScratch {
+    pub(crate) f64_a: Option<GpuBuffer<f64>>,
+    pub(crate) i32_a: Option<GpuBuffer<i32>>,
+    pub(crate) i32_b: Option<GpuBuffer<i32>>,
+    pub(crate) i32_c: Option<GpuBuffer<i32>>,
+    pub(crate) u32_a: Option<GpuBuffer<u32>>,
+    /// Per-block partials for [`super::dense::measure_prob_one`]. Sized by the
+    /// number of grid blocks at the largest qubit count seen so far.
+    pub(crate) measure_partials: Option<GpuBuffer<f64>>,
+    /// One-element output for the measure-prob finalize reduction.
+    pub(crate) measure_result: Option<GpuBuffer<f64>>,
+}
+
+/// Ensure `slot` has at least `host.len()` elements allocated, growing if not,
+/// and copy `host` into the slot. Returns the device buffer for argument
+/// passing.
+pub(crate) fn ensure_scratch<'a, T: DeviceRepr + ValidAsZeroBits>(
+    slot: &'a mut Option<GpuBuffer<T>>,
+    device: &GpuDevice,
+    host: &[T],
+) -> Result<&'a GpuBuffer<T>> {
+    let needed = host.len().max(1);
+    let realloc = match slot.as_ref() {
+        Some(buf) => buf.len() < needed,
+        None => true,
+    };
+    if realloc {
+        *slot = Some(GpuBuffer::<T>::alloc_zeros(device, needed)?);
+    }
+    if !host.is_empty() {
+        slot.as_mut().unwrap().copy_from_host(device, host)?;
+    }
+    Ok(slot.as_ref().unwrap())
+}
+
+/// Ensure `slot` has at least `needed` elements allocated, growing if not.
+/// Returns a mutable reference suitable for kernel write-targets. Unlike
+/// [`ensure_scratch`], does not perform any host-to-device copy.
+pub(crate) fn ensure_capacity<'a, T: DeviceRepr + ValidAsZeroBits>(
+    slot: &'a mut Option<GpuBuffer<T>>,
+    device: &GpuDevice,
+    needed: usize,
+) -> Result<&'a mut GpuBuffer<T>> {
+    let needed = needed.max(1);
+    let realloc = match slot.as_ref() {
+        Some(buf) => buf.len() < needed,
+        None => true,
+    };
+    if realloc {
+        *slot = Some(GpuBuffer::<T>::alloc_zeros(device, needed)?);
+    }
+    Ok(slot.as_mut().unwrap())
+}
+
 /// Combined CUDA C source for the GPU PTX module.
 ///
 /// Concatenates each backend's kernel source. Any new backend that adds its own
@@ -44,6 +116,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "apply_mcu_phase",
     "apply_fused_2q",
     "measure_prob_one",
+    "measure_prob_one_finalize",
     "measure_collapse",
     "compute_probabilities",
     "scale_state",

@@ -162,9 +162,17 @@ pub fn stabilizer_min_qubits() -> usize {
 /// Holds the device handle and compiled kernel module. Cheap to clone via `Arc`. Pass by
 /// `Arc<GpuContext>` so multiple backends or multiple simulations can share one device
 /// initialisation.
-#[derive(Debug)]
 pub struct GpuContext {
     device: Arc<GpuDevice>,
+    launcher_scratch: std::sync::Mutex<kernels::LauncherScratch>,
+}
+
+impl std::fmt::Debug for GpuContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuContext")
+            .field("device", &self.device)
+            .finish_non_exhaustive()
+    }
 }
 
 impl GpuContext {
@@ -173,7 +181,10 @@ impl GpuContext {
     /// Compiles the kernel module at construction. Subsequent calls reuse the cached PTX.
     pub fn new(device_id: usize) -> Result<Arc<Self>> {
         let device = Arc::new(GpuDevice::new(device_id)?);
-        Ok(Arc::new(Self { device }))
+        Ok(Arc::new(Self {
+            device,
+            launcher_scratch: std::sync::Mutex::new(kernels::LauncherScratch::default()),
+        }))
     }
 
     /// Whether a CUDA device is present and usable.
@@ -225,10 +236,17 @@ impl GpuContext {
         &self.device
     }
 
+    pub(crate) fn launcher_scratch(&self) -> std::sync::MutexGuard<'_, kernels::LauncherScratch> {
+        self.launcher_scratch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[cfg(test)]
     pub(crate) fn stub_for_tests() -> Arc<Self> {
         Arc::new(Self {
             device: Arc::new(GpuDevice::stub_for_tests()),
+            launcher_scratch: std::sync::Mutex::new(kernels::LauncherScratch::default()),
         })
     }
 }

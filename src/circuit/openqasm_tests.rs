@@ -1435,3 +1435,82 @@ fn test_split_top_level_commas_simple() {
     let parts = split_top_level_commas("pi/2, pi/4, 0.1");
     assert_eq!(parts.len(), 3);
 }
+
+#[test]
+fn rx_with_arithmetic_overflow_rejected_as_non_finite() {
+    // Pure arithmetic overflow: each literal is finite, but the product
+    // exceeds f64::MAX. The top-level eval_expr finiteness check catches this
+    // path; the per-function and per-literal checks do not.
+    let qasm = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[1] q;
+        rx(1e308 * 1e308) q[0];
+    "#;
+    let err = parse(qasm).expect_err("expected non-finite parameter rejection");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("must be finite"),
+        "expected finiteness error, got: {msg}"
+    );
+}
+
+#[test]
+fn rx_with_sqrt_of_negative_rejected_as_non_finite() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[1] q;
+        rx(sqrt(-1)) q[0];
+    "#;
+    let err = parse(qasm).expect_err("expected non-finite parameter rejection");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("non-finite"),
+        "expected finiteness error, got: {msg}"
+    );
+}
+
+#[test]
+fn rx_with_acos_out_of_domain_rejected_as_non_finite() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[1] q;
+        rx(acos(2)) q[0];
+    "#;
+    let err = parse(qasm).expect_err("expected non-finite parameter rejection");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("non-finite"),
+        "expected finiteness error, got: {msg}"
+    );
+}
+
+#[test]
+fn rx_with_division_by_zero_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[1] q;
+        rx(1.0 / (1.0 - 1.0)) q[0];
+    "#;
+    let err = parse(qasm).expect_err("expected division-by-zero rejection");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("division by zero"),
+        "expected division-by-zero error, got: {msg}"
+    );
+}
+
+#[test]
+fn rx_with_finite_expression_still_parses() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[1] q;
+        rx(pi/4) q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 1);
+}

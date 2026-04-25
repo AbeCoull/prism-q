@@ -47,12 +47,14 @@ impl Circuit {
 
     /// Append a gate operation.
     ///
-    /// # Panics (debug only)
-    /// Debug-asserts that all target indices are within bounds and that the
-    /// gate arity matches the target count.
+    /// # Panics
+    /// Panics if any target index is out of bounds or if the gate's arity
+    /// does not match `targets.len()`. Bounds checks run in both debug and
+    /// release builds: a bad index propagates into kernel pointer math and
+    /// would corrupt or read uninitialised memory otherwise.
     #[inline]
     pub fn add_gate(&mut self, gate: Gate, targets: &[usize]) {
-        debug_assert_eq!(
+        assert_eq!(
             gate.num_qubits(),
             targets.len(),
             "gate `{}` expects {} qubits, got {}",
@@ -60,10 +62,14 @@ impl Circuit {
             gate.num_qubits(),
             targets.len()
         );
-        debug_assert!(
-            targets.iter().all(|&t| t < self.num_qubits),
-            "qubit index out of bounds"
-        );
+        for &t in targets {
+            assert!(
+                t < self.num_qubits,
+                "qubit index {} out of bounds (circuit has {} qubits)",
+                t,
+                self.num_qubits
+            );
+        }
         self.instructions.push(Instruction::Gate {
             gate,
             targets: SmallVec::from_slice(targets),
@@ -71,12 +77,22 @@ impl Circuit {
     }
 
     /// Append a measurement operation.
+    ///
+    /// # Panics
+    /// Panics if `qubit` or `classical_bit` is out of bounds.
     #[inline]
     pub fn add_measure(&mut self, qubit: usize, classical_bit: usize) {
-        debug_assert!(qubit < self.num_qubits, "qubit index out of bounds");
-        debug_assert!(
+        assert!(
+            qubit < self.num_qubits,
+            "qubit index {} out of bounds (circuit has {} qubits)",
+            qubit,
+            self.num_qubits
+        );
+        assert!(
             classical_bit < self.num_classical_bits,
-            "classical bit index out of bounds"
+            "classical bit index {} out of bounds (circuit has {} classical bits)",
+            classical_bit,
+            self.num_classical_bits
         );
         self.instructions.push(Instruction::Measure {
             qubit,
@@ -85,15 +101,34 @@ impl Circuit {
     }
 
     /// Append a reset operation, returning the qubit to |0⟩.
+    ///
+    /// # Panics
+    /// Panics if `qubit` is out of bounds.
     #[inline]
     pub fn add_reset(&mut self, qubit: usize) {
-        debug_assert!(qubit < self.num_qubits, "qubit index out of bounds");
+        assert!(
+            qubit < self.num_qubits,
+            "qubit index {} out of bounds (circuit has {} qubits)",
+            qubit,
+            self.num_qubits
+        );
         self.instructions.push(Instruction::Reset { qubit });
     }
 
     /// Append a barrier (scheduling hint, no physical operation).
+    ///
+    /// # Panics
+    /// Panics if any qubit index is out of bounds.
     #[inline]
     pub fn add_barrier(&mut self, qubits: &[usize]) {
+        for &q in qubits {
+            assert!(
+                q < self.num_qubits,
+                "qubit index {} out of bounds (circuit has {} qubits)",
+                q,
+                self.num_qubits
+            );
+        }
         self.instructions.push(Instruction::Barrier {
             qubits: SmallVec::from_slice(qubits),
         });
@@ -942,5 +977,54 @@ mod tests {
         } else {
             panic!("expected gate instruction");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "qubit index 5 out of bounds (circuit has 3 qubits)")]
+    fn add_gate_panics_on_out_of_bounds_target_in_release() {
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::H, &[5]);
+    }
+
+    #[test]
+    #[should_panic(expected = "qubit index 4 out of bounds (circuit has 3 qubits)")]
+    fn add_gate_panics_on_second_target_out_of_bounds() {
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::Cx, &[0, 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "expects 2 qubits, got 1")]
+    fn add_gate_panics_on_arity_mismatch() {
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::Cx, &[0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "qubit index 2 out of bounds (circuit has 2 qubits)")]
+    fn add_measure_panics_on_out_of_bounds_qubit() {
+        let mut c = Circuit::new(2, 2);
+        c.add_measure(2, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "classical bit index 5 out of bounds (circuit has 2 classical bits)")]
+    fn add_measure_panics_on_out_of_bounds_classical_bit() {
+        let mut c = Circuit::new(2, 2);
+        c.add_measure(0, 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "qubit index 9 out of bounds (circuit has 2 qubits)")]
+    fn add_reset_panics_on_out_of_bounds() {
+        let mut c = Circuit::new(2, 0);
+        c.add_reset(9);
+    }
+
+    #[test]
+    #[should_panic(expected = "qubit index 7 out of bounds (circuit has 4 qubits)")]
+    fn add_barrier_panics_on_out_of_bounds() {
+        let mut c = Circuit::new(4, 0);
+        c.add_barrier(&[0, 7]);
     }
 }

@@ -2,6 +2,15 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.11.1] - 2026-04-25
+
+### Bug Fixes
+
+- Enforce qubit bounds and finite gate parameters in release builds (#42)([54dc825](https://github.com/AbeCoull/prism-q/commit/54dc825feaa754fa60339ac40687f366d964b51d))
+
+### Refactor
+
+- **gpu:** Cache launcher metadata and reduce measure-prob on device (#41)([2df45d3](https://github.com/AbeCoull/prism-q/commit/2df45d3aa163b3f7c09d265476076952f27b44c0))
 ## [0.11.0] - 2026-04-24
 
 ### Documentation
@@ -11,6 +20,10 @@ All notable changes to PRISM-Q will be documented in this file.
 ### Features
 
 - **noise:** Support dense custom Kraus trajectory noise (#40)([0816f3a](https://github.com/AbeCoull/prism-q/commit/0816f3a6567b7852c823a9f92c2f2168381fe629))
+
+### Miscellaneous
+
+- **release:** 0.11.0([6d33f13](https://github.com/AbeCoull/prism-q/commit/6d33f13b607b05fced0016540477b2c9d5c28b93))
 ## [0.10.0] - 2026-04-24
 
 ### Documentation

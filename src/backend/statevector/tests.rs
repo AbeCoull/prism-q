@@ -17,6 +17,28 @@ fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
     }
 }
 
+fn assert_state_close(actual: &[Complex64], expected: &[Complex64], eps: f64) {
+    assert_eq!(actual.len(), expected.len(), "state vector length mismatch");
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (*a - *e).norm() < eps,
+            "amp[{i}]: expected {e}, got {a} (diff {})",
+            (*a - *e).norm()
+        );
+    }
+}
+
+fn run_manual_state(circuit: &Circuit) -> Vec<Complex64> {
+    let mut backend = StatevectorBackend::new(42);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for inst in &circuit.instructions {
+        backend.apply(inst).unwrap();
+    }
+    backend.export_statevector().unwrap()
+}
+
 #[test]
 fn test_x_gate() {
     let mut c = Circuit::new(1, 0);
@@ -205,6 +227,67 @@ fn test_cu_matches_cx() {
     for (a, b) in sv1.iter().zip(sv2) {
         assert!((a - b).norm() < 1e-12);
     }
+}
+
+#[test]
+fn test_adjacent_fused_2q_matches_cx_low_high() {
+    let mut fused = Circuit::new(6, 0);
+    fused.add_gate(Gate::H, &[2]);
+    fused.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[2, 3]);
+
+    let mut direct = Circuit::new(6, 0);
+    direct.add_gate(Gate::H, &[2]);
+    direct.add_gate(Gate::Cx, &[2, 3]);
+
+    let fused_state = run_manual_state(&fused);
+    let direct_state = run_manual_state(&direct);
+    assert_state_close(&fused_state, &direct_state, 1e-12);
+}
+
+#[test]
+fn test_adjacent_fused_2q_matches_cx_high_low() {
+    let mut fused = Circuit::new(6, 0);
+    fused.add_gate(Gate::H, &[3]);
+    fused.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[3, 2]);
+
+    let mut direct = Circuit::new(6, 0);
+    direct.add_gate(Gate::H, &[3]);
+    direct.add_gate(Gate::Cx, &[3, 2]);
+
+    let fused_state = run_manual_state(&fused);
+    let direct_state = run_manual_state(&direct);
+    assert_state_close(&fused_state, &direct_state, 1e-12);
+}
+
+#[test]
+fn test_nonadjacent_fused_2q_fallback_matches_cx() {
+    let mut fused = Circuit::new(6, 0);
+    fused.add_gate(Gate::H, &[0]);
+    fused.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[0, 2]);
+
+    let mut direct = Circuit::new(6, 0);
+    direct.add_gate(Gate::H, &[0]);
+    direct.add_gate(Gate::Cx, &[0, 2]);
+
+    let fused_state = run_manual_state(&fused);
+    let direct_state = run_manual_state(&direct);
+    assert_state_close(&fused_state, &direct_state, 1e-12);
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn test_parallel_adjacent_fused_2q_20q() {
+    let mut fused = Circuit::new(20, 0);
+    fused.add_gate(Gate::H, &[17]);
+    fused.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[17, 18]);
+
+    let mut direct = Circuit::new(20, 0);
+    direct.add_gate(Gate::H, &[17]);
+    direct.add_gate(Gate::Cx, &[17, 18]);
+
+    let fused_state = run_manual_state(&fused);
+    let direct_state = run_manual_state(&direct);
+    assert_state_close(&fused_state, &direct_state, 1e-12);
 }
 
 #[cfg(feature = "parallel")]

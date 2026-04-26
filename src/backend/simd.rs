@@ -1277,6 +1277,98 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn scale_complex_to_slice_avx2fma(
+    dst: &mut [Complex64],
+    src: &[Complex64],
+    factor: Complex64,
+) {
+    debug_assert!(dst.len() >= src.len());
+    let rr = _mm256_set1_pd(factor.re);
+    let ii = _mm256_set1_pd(factor.im);
+    let dp = dst.as_mut_ptr() as *mut f64;
+    let sp = src.as_ptr() as *const f64;
+    let pairs = src.len() / 2;
+    for i in 0..pairs {
+        let off = i * 4;
+        let v = _mm256_loadu_pd(sp.add(off));
+        let v_swap = _mm256_permute_pd(v, 0b0101);
+        let t = _mm256_mul_pd(ii, v_swap);
+        let result = _mm256_fmaddsub_pd(rr, v, t);
+        _mm256_storeu_pd(dp.add(off), result);
+    }
+    if src.len() % 2 != 0 {
+        let last = src.len() - 1;
+        dst[last] = src[last] * factor;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "fma")]
+unsafe fn scale_complex_to_slice_fma(dst: &mut [Complex64], src: &[Complex64], factor: Complex64) {
+    debug_assert!(dst.len() >= src.len());
+    let rr = _mm_set1_pd(factor.re);
+    let ii = _mm_set1_pd(factor.im);
+    let dp = dst.as_mut_ptr() as *mut f64;
+    let sp = src.as_ptr() as *const f64;
+    for i in 0..src.len() {
+        let v = _mm_loadu_pd(sp.add(i * 2));
+        let v_swap = _mm_shuffle_pd(v, v, 0b01);
+        let t = _mm_mul_pd(ii, v_swap);
+        let result = _mm_fmaddsub_pd(rr, v, t);
+        _mm_storeu_pd(dp.add(i * 2), result);
+    }
+}
+
+/// Out-of-place complex scaling: `dst[i] = src[i] * factor`.
+pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], factor: Complex64) {
+    assert!(
+        dst.len() >= src.len(),
+        "destination slice shorter than source slice"
+    );
+    #[cfg(target_arch = "x86_64")]
+    {
+        if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+            // SAFETY: AVX2 and FMA support are checked above. The assert keeps
+            // every load and store in bounds, Rust references provide valid
+            // slices, and SIMD avoids the measured scalar bottleneck in large
+            // factored merge copies.
+            unsafe { scale_complex_to_slice_avx2fma(dst, src, factor) };
+            return;
+        }
+        if src.len() >= 2 && has_fma() {
+            // SAFETY: FMA support is checked above. The assert keeps every
+            // load and store in bounds, Rust references provide valid slices,
+            // and SIMD avoids the measured scalar bottleneck in factored merge
+            // copies.
+            unsafe { scale_complex_to_slice_fma(dst, src, factor) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if src.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available on supported aarch64 targets. The assert
+        // keeps pointer arithmetic in bounds, Rust references provide valid
+        // slices, and vector loads avoid the measured scalar bottleneck in
+        // large factored merge copies.
+        unsafe {
+            let c_rr = vdupq_n_f64(factor.re);
+            let c_ii_as = vcombine_f64(vdup_n_f64(-factor.im), vdup_n_f64(factor.im));
+            let dp = dst.as_mut_ptr() as *mut f64;
+            let sp = src.as_ptr() as *const f64;
+            for i in 0..src.len() {
+                let v = vld1q_f64(sp.add(i * 2));
+                vst1q_f64(dp.add(i * 2), complex_mul_neon(c_rr, c_ii_as, v));
+            }
+        }
+        return;
+    }
+    for (i, &c) in src.iter().enumerate() {
+        dst[i] = c * factor;
+    }
+}
+
 #[cfg(test)]
 fn scale_slice(slice: &mut [Complex64], factor: f64) {
     #[cfg(target_arch = "x86_64")]
@@ -1881,6 +1973,21 @@ mod tests {
         let expected = slice[0] * phase;
         scale_complex_slice(&mut slice, phase);
         assert_complex_close(slice[0], expected);
+    }
+
+    #[test]
+    fn test_scale_complex_to_slice_lengths() {
+        let factor = Complex64::from_polar(1.3, 0.7);
+        for len in [1usize, 2, 3, 4, 5, 7, 8, 16, 17, 33] {
+            let src: Vec<Complex64> = (0..len)
+                .map(|i| c((i as f64) + 0.25, (i as f64) * 0.5 - 1.0))
+                .collect();
+            let mut dst = vec![c(99.0, 99.0); len];
+            scale_complex_to_slice(&mut dst, &src, factor);
+            for i in 0..len {
+                assert_complex_close(dst[i], src[i] * factor);
+            }
+        }
     }
 
     fn identity_4x4() -> [[Complex64; 4]; 4] {

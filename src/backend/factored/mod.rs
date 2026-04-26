@@ -93,8 +93,10 @@ impl FactoredBackend {
 
     /// Merge sub-state `src_idx` into `dst_idx` via tensor product.
     ///
-    /// Single-pass with correct bit placement: the merged state vector has
-    /// qubit-to-bit mapping determined by the sorted merge of both qubit lists.
+    /// Both sub-states maintain `qubits` sorted ascending. The merged sub-state
+    /// also has sorted qubits. When one set of qubits is wholly less than the
+    /// other, the kernel reduces to a SIMD-friendly Kronecker product with a
+    /// contiguous inner loop. The interleaved case falls back to scalar scatter.
     fn merge_substates(&mut self, dst_idx: usize, src_idx: usize) {
         let src = self.substates[src_idx].take().unwrap();
         let dst = self.substates[dst_idx].as_ref().unwrap();
@@ -121,22 +123,22 @@ impl FactoredBackend {
             }
         }
 
-        let dst_state = &dst.state;
-        let zero = Complex64::new(0.0, 0.0);
-        let mut merged_state = vec![zero; total_dim];
+        let dst_low = dst_n > 0 && (src_n == 0 || dst.qubits[dst_n - 1] < src.qubits[0]);
+        let src_low = src_n > 0 && (dst_n == 0 || src.qubits[src_n - 1] < dst.qubits[0]);
 
-        for (merged_idx, amp) in merged_state.iter_mut().enumerate() {
-            let mut dst_local = 0usize;
-            for (local_bit, &merged_bit) in dst_bit_positions.iter().enumerate() {
-                dst_local |= ((merged_idx >> merged_bit) & 1) << local_bit;
-            }
-            let mut src_local = 0usize;
-            for (local_bit, &merged_bit) in src_bit_positions.iter().enumerate() {
-                src_local |= ((merged_idx >> merged_bit) & 1) << local_bit;
-            }
-
-            *amp = dst_state[dst_local] * src.state[src_local];
-        }
+        let merged_state = if dst_low {
+            kron_low_high(&dst.state, &src.state, dst_n, src_n)
+        } else if src_low {
+            kron_low_high(&src.state, &dst.state, src_n, dst_n)
+        } else {
+            kron_scatter(
+                &dst.state,
+                &src.state,
+                &dst_bit_positions,
+                &src_bit_positions,
+                total_dim,
+            )
+        };
 
         let dst = self.substates[dst_idx].as_mut().unwrap();
         dst.state = merged_state;
@@ -693,6 +695,65 @@ impl Backend for FactoredBackend {
     fn num_qubits(&self) -> usize {
         self.num_qubits
     }
+}
+
+/// Kronecker product where `low_state` occupies the low `low_n` bits of the
+/// merged index and `high_state` occupies the upper `high_n` bits.
+///
+/// `merged[h * low_dim + l] = low_state[l] * high_state[h]`. Inner loop is a
+/// contiguous SIMD scaled copy, parallelized across `h` for large merges.
+fn kron_low_high(
+    low_state: &[Complex64],
+    high_state: &[Complex64],
+    low_n: usize,
+    high_n: usize,
+) -> Vec<Complex64> {
+    let low_dim = 1usize << low_n;
+    let high_dim = 1usize << high_n;
+    let total_dim = low_dim * high_dim;
+    let mut merged = vec![Complex64::new(0.0, 0.0); total_dim];
+
+    #[cfg(feature = "parallel")]
+    if (low_n + high_n) >= PARALLEL_THRESHOLD_QUBITS {
+        merged
+            .par_chunks_mut(low_dim)
+            .with_min_len(par_chunk_min_len(low_dim))
+            .enumerate()
+            .for_each(|(h, chunk)| {
+                simd::scale_complex_to_slice(chunk, low_state, high_state[h]);
+            });
+        return merged;
+    }
+
+    for (h, chunk) in merged.chunks_mut(low_dim).enumerate() {
+        simd::scale_complex_to_slice(chunk, low_state, high_state[h]);
+    }
+    merged
+}
+
+/// General Kronecker product where dst and src bits are interleaved across
+/// the merged index. Per-element scatter, no SIMD inner loop.
+fn kron_scatter(
+    dst_state: &[Complex64],
+    src_state: &[Complex64],
+    dst_bit_positions: &[usize],
+    src_bit_positions: &[usize],
+    total_dim: usize,
+) -> Vec<Complex64> {
+    let mut merged = vec![Complex64::new(0.0, 0.0); total_dim];
+
+    for (merged_idx, amp) in merged.iter_mut().enumerate() {
+        let mut dst_local = 0usize;
+        for (local_bit, &merged_bit) in dst_bit_positions.iter().enumerate() {
+            dst_local |= ((merged_idx >> merged_bit) & 1) << local_bit;
+        }
+        let mut src_local = 0usize;
+        for (local_bit, &merged_bit) in src_bit_positions.iter().enumerate() {
+            src_local |= ((merged_idx >> merged_bit) & 1) << local_bit;
+        }
+        *amp = dst_state[dst_local] * src_state[src_local];
+    }
+    merged
 }
 
 #[inline(always)]

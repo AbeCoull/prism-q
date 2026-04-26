@@ -2,7 +2,16 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.11.3] - 2026-04-26
+
+### Performance
+
+- **factored:** SIMD inner loop on substate tensor product merge (#44)([6e632ba](https://github.com/AbeCoull/prism-q/commit/6e632ba608f8bdce000042f098338e8230a74229))
 ## [0.11.2] - 2026-04-25
+
+### Miscellaneous
+
+- **release:** 0.11.2([354d23d](https://github.com/AbeCoull/prism-q/commit/354d23dfb0dfa39f809dd8d65a5cb29d4e65350a))
 
 ### Performance
 

@@ -381,3 +381,122 @@ fn test_factored_parallel_measure_16q() {
     let bits = fac.classical_results();
     assert!(bits[0]);
 }
+
+// ---- merge_substates path coverage ----
+//
+// These tests exercise specific branches in `merge_substates`: the dst-low
+// SIMD Kronecker fast path with both arg orders (dst-low and src-low), the
+// interleaved-qubit scatter fallback, and the Rayon-parallel branch under
+// both balanced and imbalanced sub-state sizes.
+
+#[test]
+fn test_merge_src_low_path() {
+    // Build {2,3} (the substate that will become dst because targets[0]=q[2]),
+    // then build {0,1} (the substate that will become src). CX[2,0] dispatches
+    // merge_substates(dst={2,3}, src={0,1}); src.qubits all below dst.qubits
+    // forces the src_low branch (kron_low_high with args swapped).
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::T, &[3]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::Cx, &[2, 0]);
+    compare_with_statevector(&c, 1e-10);
+}
+
+#[test]
+fn test_merge_interleaved_qubits_path() {
+    // Build {0,2} and {1,3} sub-states, then merge them. Neither side's
+    // qubits are wholly below the other, so merge_substates falls through
+    // to kron_scatter (per-element interleaved scatter).
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 2]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 3]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::S, &[2]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::S, &[3]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    compare_with_statevector(&c, 1e-10);
+}
+
+#[test]
+fn test_merge_interleaved_three_way() {
+    // Three-way interleave: {0,4} and {1,2,3}. After merging, qubits 1-3 sit
+    // between dst's two qubits, exercising scatter with multiple bit hops.
+    let mut c = Circuit::new(5, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 4]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::T, &[4]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    compare_with_statevector(&c, 1e-10);
+}
+
+#[test]
+fn test_merge_parallel_balanced_14q() {
+    // Build two 7-qubit sub-states then merge: 7+7=14q hits the parallel
+    // branch in kron_low_high with high_dim=128 chunks of 128 elements each.
+    let mut c = Circuit::new(14, 0);
+    for q in 0..7 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..6 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 7..14 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 7..13 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c.add_gate(Gate::Cx, &[0, 7]);
+    compare_with_statevector(&c, 1e-10);
+}
+
+#[test]
+fn test_merge_parallel_imbalanced_15q() {
+    // 14q substate merged with a singleton to 15q: high_dim=2 chunks of
+    // 16384 elements. Stresses kron_low_high under-parallel high dimension.
+    let mut c = Circuit::new(15, 0);
+    for q in 0..14 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..13 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c.add_gate(Gate::X, &[14]);
+    c.add_gate(Gate::Cx, &[0, 14]);
+    compare_with_statevector(&c, 1e-10);
+}
+
+#[test]
+fn test_merge_parallel_interleaved_14q() {
+    // Build two interleaved 7-qubit sub-states ({even} and {odd}) then merge,
+    // exercising kron_scatter on a state large enough that performance matters
+    // even if the scatter path is scalar.
+    let mut c = Circuit::new(14, 0);
+    for q in (0..14).step_by(2) {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in (0..12).step_by(2) {
+        c.add_gate(Gate::Cx, &[q, q + 2]);
+    }
+    for q in (1..14).step_by(2) {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in (1..12).step_by(2) {
+        c.add_gate(Gate::Cx, &[q, q + 2]);
+    }
+    c.add_gate(Gate::Cx, &[0, 1]);
+    compare_with_statevector(&c, 1e-10);
+}

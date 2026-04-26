@@ -810,6 +810,183 @@ fn classify_2q_tier(q0: usize, q1: usize) -> Tier2q {
     }
 }
 
+#[inline]
+fn swap_order_4x4(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let swap = Gate::Swap.matrix_4x4();
+    mat_mul_4x4(&swap, &mat_mul_4x4(mat, &swap))
+}
+
+#[inline]
+fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
+    for (r, row) in mat.iter().enumerate() {
+        for (c, value) in row.iter().enumerate() {
+            if r != c && value.norm() >= IDENTITY_EPS {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[inline]
+fn same_unordered_pair(a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
+    (a0 == b0 && a1 == b1) || (a0 == b1 && a1 == b0)
+}
+
+#[inline]
+fn orient_2q_matrix(
+    mat: &[[Complex64; 4]; 4],
+    targets: &[usize],
+    q0: usize,
+    q1: usize,
+) -> [[Complex64; 4]; 4] {
+    if targets[0] == q0 && targets[1] == q1 {
+        *mat
+    } else {
+        swap_order_4x4(mat)
+    }
+}
+
+#[inline]
+fn embed_1q_matrix(mat: &[[Complex64; 2]; 2], target: usize, q0: usize) -> [[Complex64; 4]; 4] {
+    let id = Gate::Id.matrix_2x2();
+    if target == q0 {
+        kron_2x2(mat, &id)
+    } else {
+        kron_2x2(&id, mat)
+    }
+}
+
+struct PairRun {
+    q0: usize,
+    q1: usize,
+    acc: [[Complex64; 4]; 4],
+    fused_2q_count: usize,
+    has_nondiagonal_2q: bool,
+    originals: Vec<Instruction>,
+}
+
+impl PairRun {
+    fn new(q0: usize, q1: usize, mat: [[Complex64; 4]; 4], original: Instruction) -> Self {
+        Self {
+            q0,
+            q1,
+            acc: mat,
+            fused_2q_count: 1,
+            has_nondiagonal_2q: !is_diagonal_4x4(&mat),
+            originals: vec![original],
+        }
+    }
+
+    #[inline]
+    fn can_accept_pair(&self, q0: usize, q1: usize) -> bool {
+        same_unordered_pair(self.q0, self.q1, q0, q1)
+    }
+
+    #[inline]
+    fn can_accept_1q(&self, q: usize) -> bool {
+        q == self.q0 || q == self.q1
+    }
+
+    fn push_2q(&mut self, mat: [[Complex64; 4]; 4], targets: &[usize], original: Instruction) {
+        let oriented = orient_2q_matrix(&mat, targets, self.q0, self.q1);
+        self.acc = mat_mul_4x4(&oriented, &self.acc);
+        self.fused_2q_count += 1;
+        self.has_nondiagonal_2q |= !is_diagonal_4x4(&oriented);
+        self.originals.push(original);
+    }
+
+    fn push_1q(&mut self, mat: [[Complex64; 2]; 2], target: usize, original: Instruction) {
+        let embedded = embed_1q_matrix(&mat, target, self.q0);
+        self.acc = mat_mul_4x4(&embedded, &self.acc);
+        self.originals.push(original);
+    }
+
+    fn should_fuse(&self) -> bool {
+        self.fused_2q_count >= 2 && self.has_nondiagonal_2q
+    }
+}
+
+fn flush_pair_run(run: &mut Option<PairRun>, output: &mut Vec<Instruction>, changed: &mut bool) {
+    let Some(run) = run.take() else {
+        return;
+    };
+    if run.should_fuse() {
+        output.push(Instruction::Gate {
+            gate: Gate::Fused2q(Box::new(run.acc)),
+            targets: smallvec![run.q0, run.q1],
+        });
+        *changed = true;
+    } else {
+        output.extend(run.originals);
+    }
+}
+
+/// Fuse contiguous same-pair `Fused2q` runs into one larger `Fused2q`.
+///
+/// This pass is deliberately narrow: it only consumes existing `Fused2q` gates
+/// and single-qubit gates on the same two qubits, and only emits a fused block
+/// when at least two 2q units are present. All-diagonal runs are left alone so
+/// diagonal batch passes keep their cheaper kernels.
+fn fuse_same_pair_2q_blocks(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+    let circuit = input.as_ref();
+    let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
+    let mut run: Option<PairRun> = None;
+    let mut changed = false;
+
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate {
+                gate: Gate::Fused2q(mat),
+                targets,
+            } => {
+                if let Some(active) = &mut run {
+                    if active.can_accept_pair(targets[0], targets[1]) {
+                        active.push_2q(**mat, targets, inst.clone());
+                    } else {
+                        flush_pair_run(&mut run, &mut output, &mut changed);
+                        run = Some(PairRun::new(targets[0], targets[1], **mat, inst.clone()));
+                    }
+                } else {
+                    run = Some(PairRun::new(targets[0], targets[1], **mat, inst.clone()));
+                }
+            }
+            Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
+                if let Some(active) = &mut run {
+                    if active.can_accept_1q(targets[0]) {
+                        let mat = match gate {
+                            Gate::Fused(m) => **m,
+                            _ => gate.matrix_2x2(),
+                        };
+                        active.push_1q(mat, targets[0], inst.clone());
+                    } else {
+                        flush_pair_run(&mut run, &mut output, &mut changed);
+                        output.push(inst.clone());
+                    }
+                } else {
+                    output.push(inst.clone());
+                }
+            }
+            _ => {
+                flush_pair_run(&mut run, &mut output, &mut changed);
+                output.push(inst.clone());
+            }
+        }
+    }
+
+    flush_pair_run(&mut run, &mut output, &mut changed);
+
+    if changed {
+        Cow::Owned(Circuit {
+            num_qubits: circuit.num_qubits,
+            num_classical_bits: circuit.num_classical_bits,
+            instructions: output,
+        })
+    } else {
+        input
+    }
+}
+
 /// Batch consecutive `Fused2q` gates into `Multi2q` for cache-tiled execution.
 ///
 /// Scans for runs of consecutive `Fused2q` instructions within the same cache
@@ -1120,10 +1297,15 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
     } else {
         pass1f
     };
-    let pass2 = if circuit.num_qubits >= MIN_QUBITS_FOR_MULTI_FUSION {
-        fuse_multi_1q_gates(pass_2q)
+    let pass_2qb = if circuit.num_qubits >= MIN_QUBITS_FOR_2Q_FUSION {
+        fuse_same_pair_2q_blocks(pass_2q)
     } else {
         pass_2q
+    };
+    let pass2 = if circuit.num_qubits >= MIN_QUBITS_FOR_MULTI_FUSION {
+        fuse_multi_1q_gates(pass_2qb)
+    } else {
+        pass_2qb
     };
     let pass_m2q = if circuit.num_qubits >= MIN_QUBITS_FOR_MULTI_2Q_FUSION {
         fuse_multi_2q_gates(pass2)
@@ -1170,6 +1352,22 @@ mod tests {
         let zero = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
         [[one, zero], [zero, one]]
+    }
+
+    fn count_fused_2q(circuit: &Circuit) -> usize {
+        circuit
+            .instructions
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::Fused2q(_),
+                        ..
+                    }
+                )
+            })
+            .count()
     }
 
     #[test]
@@ -2107,6 +2305,77 @@ mod tests {
             .filter(|i| matches!(i, Instruction::Gate { .. }))
             .count();
         assert_eq!(gate_count, 1, "CZ pair should cancel after reorder");
+    }
+
+    #[test]
+    fn same_pair_2q_block_fuses_w_state_pairs() {
+        let circuit = crate::circuits::w_state_circuit(20);
+        let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+        let before = count_fused_2q(&pass_2q);
+        let fused = fuse_same_pair_2q_blocks(pass_2q);
+        let after = count_fused_2q(&fused);
+
+        assert!(before >= 2, "w-state should expose paired Fused2q gates");
+        assert!(
+            after < before,
+            "same-pair block fusion should reduce Fused2q count"
+        );
+    }
+
+    #[test]
+    fn same_pair_2q_block_fuses_qv_blocks() {
+        let circuit = crate::circuits::quantum_volume_circuit(20, 1, 42);
+        let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+        let before = count_fused_2q(&pass_2q);
+        let fused = fuse_same_pair_2q_blocks(pass_2q);
+        let after = count_fused_2q(&fused);
+
+        assert!(before >= 2, "qv block should expose paired Fused2q gates");
+        assert!(
+            after < before,
+            "same-pair block fusion should reduce Fused2q count"
+        );
+    }
+
+    #[test]
+    fn same_pair_2q_block_accepts_reversed_targets() {
+        let mut circuit = Circuit::new(20, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::Ry(0.7), &[1]);
+        circuit.add_gate(Gate::Cx, &[1, 0]);
+
+        let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+        let before = count_fused_2q(&pass_2q);
+        let fused = fuse_same_pair_2q_blocks(pass_2q);
+        let after = count_fused_2q(&fused);
+
+        assert_eq!(before, 2);
+        assert_eq!(after, 1, "reversed pair order should still fuse");
+        assert!(matches!(
+            &fused.instructions[0],
+            Instruction::Gate {
+                gate: Gate::Fused2q(_),
+                targets
+            } if targets.as_slice() == [0, 1]
+        ));
+    }
+
+    #[test]
+    fn same_pair_2q_block_leaves_diagonal_runs() {
+        let mut circuit = Circuit::new(20, 0);
+        circuit.add_gate(Gate::Rz(0.3), &[0]);
+        circuit.add_gate(Gate::Cz, &[0, 1]);
+        circuit.add_gate(Gate::T, &[1]);
+        circuit.add_gate(Gate::Cz, &[1, 0]);
+
+        let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+        let before = count_fused_2q(&pass_2q);
+        let fused = fuse_same_pair_2q_blocks(pass_2q);
+        let after = count_fused_2q(&fused);
+
+        assert_eq!(before, 2);
+        assert_eq!(after, 2, "all-diagonal Fused2q runs should stay split");
     }
 
     #[test]

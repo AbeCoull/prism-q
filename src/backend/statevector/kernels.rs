@@ -37,6 +37,25 @@ const fn max_target_for_tile(tile_size: usize) -> usize {
     t - 1
 }
 
+#[inline(always)]
+fn adjacent_2q_indices(offset: usize, stride: usize, q0_is_lo: bool) -> [usize; 4] {
+    if q0_is_lo {
+        [
+            offset,
+            offset + (stride << 1),
+            offset + stride,
+            offset + (stride * 3),
+        ]
+    } else {
+        [
+            offset,
+            offset + stride,
+            offset + (stride << 1),
+            offset + (stride * 3),
+        ]
+    }
+}
+
 pub(crate) const BATCH_PHASE_GROUP_SIZE: usize = 10;
 pub(crate) const BATCH_PHASE_TABLE_SIZE: usize = 1024;
 pub(crate) const MAX_BATCH_PHASE_GROUPS: usize = 4;
@@ -1164,6 +1183,17 @@ impl StatevectorBackend {
 
     #[inline(always)]
     pub(super) fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        if q0.max(q1) - q0.min(q1) == 1 {
+            #[cfg(feature = "parallel")]
+            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+                self.apply_fused_2q_adjacent_par(q0, q1, mat);
+                return;
+            }
+
+            self.apply_fused_2q_adjacent(q0, q1, mat);
+            return;
+        }
+
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
             self.apply_fused_2q_par(q0, q1, mat);
@@ -1172,6 +1202,55 @@ impl StatevectorBackend {
 
         let prepared = simd::PreparedGate2q::new(mat);
         prepared.apply_full(&mut self.state, self.num_qubits, q0, q1);
+    }
+
+    #[inline(always)]
+    fn apply_fused_2q_adjacent(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        let lo = q0.min(q1);
+        let stride = 1usize << lo;
+        let block_size = stride << 2;
+        let q0_is_lo = q0 == lo;
+        let prepared = simd::PreparedGate2q::new(mat);
+
+        for chunk in self.state.chunks_mut(block_size) {
+            let ptr = chunk.as_mut_ptr() as *mut f64;
+            for offset in 0..stride {
+                let i = adjacent_2q_indices(offset, stride, q0_is_lo);
+                // SAFETY: each offset maps to one disjoint 4-amplitude group in
+                // this chunk, and all indices are below block_size.
+                unsafe {
+                    prepared.apply_group_ptr(ptr, i);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[inline(always)]
+    fn apply_fused_2q_adjacent_group(
+        ptr: SendPtr,
+        group: usize,
+        lo: usize,
+        stride: usize,
+        block_size: usize,
+        q0_is_lo: bool,
+        prepared: &simd::PreparedGate2q,
+    ) {
+        let block = group >> lo;
+        let offset = group & (stride - 1);
+        let base = block * block_size;
+        let local = adjacent_2q_indices(offset, stride, q0_is_lo);
+        let i = [
+            base + local[0],
+            base + local[1],
+            base + local[2],
+            base + local[3],
+        ];
+        // SAFETY: adjacent group mapping partitions the state into disjoint
+        // 4-amplitude groups, and group < state.len() / 4.
+        unsafe {
+            prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
+        }
     }
 
     #[cfg(feature = "parallel")]
@@ -1195,6 +1274,27 @@ impl StatevectorBackend {
                 unsafe {
                     prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
                 }
+            });
+    }
+
+    #[cfg(feature = "parallel")]
+    #[inline(always)]
+    fn apply_fused_2q_adjacent_par(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        let lo = q0.min(q1);
+        let stride = 1usize << lo;
+        let block_size = stride << 2;
+        let q0_is_lo = q0 == lo;
+        let n_groups = self.state.len() >> 2;
+        let ptr = SendPtr(self.state.as_mut_ptr());
+        let prepared = simd::PreparedGate2q::new(mat);
+
+        (0..n_groups)
+            .into_par_iter()
+            .with_min_len(MIN_PAR_ITERS)
+            .for_each(move |group| {
+                Self::apply_fused_2q_adjacent_group(
+                    ptr, group, lo, stride, block_size, q0_is_lo, &prepared,
+                );
             });
     }
 

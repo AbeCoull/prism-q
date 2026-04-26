@@ -5,6 +5,7 @@
 //! **unfused** execution (manual backend.apply loop) against **fused** execution
 //! (sim::run_on, which applies the full fusion pipeline internally).
 
+use num_complex::Complex64;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
@@ -33,6 +34,23 @@ fn run_fused(circuit: &Circuit) -> Vec<f64> {
     backend.probabilities().unwrap()
 }
 
+fn run_unfused_state(circuit: &Circuit) -> Vec<Complex64> {
+    let mut backend = StatevectorBackend::new(42);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for instr in &circuit.instructions {
+        backend.apply(instr).unwrap();
+    }
+    backend.export_statevector().unwrap()
+}
+
+fn run_fused_state(circuit: &Circuit) -> Vec<Complex64> {
+    let mut backend = StatevectorBackend::new(42);
+    sim::run_on(&mut backend, circuit).unwrap();
+    backend.export_statevector().unwrap()
+}
+
 fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
     assert_eq!(actual.len(), expected.len(), "length mismatch");
     for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
@@ -44,10 +62,27 @@ fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
     }
 }
 
+fn assert_state_close(actual: &[Complex64], expected: &[Complex64], eps: f64) {
+    assert_eq!(actual.len(), expected.len(), "state vector length mismatch");
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (*a - *e).norm() < eps,
+            "amp[{i}]: expected {e}, got {a} (diff {})",
+            (*a - *e).norm()
+        );
+    }
+}
+
 fn assert_fusion_preserves_correctness(circuit: &Circuit) {
     let unfused = run_unfused(circuit);
     let fused = run_fused(circuit);
     assert_probs_close(&fused, &unfused, EPS);
+}
+
+fn assert_fusion_preserves_state(circuit: &Circuit) {
+    let unfused = run_unfused_state(circuit);
+    let fused = run_fused_state(circuit);
+    assert_state_close(&fused, &unfused, EPS);
 }
 
 // ===== QFT =====
@@ -528,6 +563,89 @@ fn fusion_2q_mixed_2q_gates_20q() {
         }
     }
     assert_fusion_preserves_correctness(&c);
+}
+
+#[test]
+fn fusion_same_pair_w_state_20q() {
+    assert_fusion_preserves_correctness(&circuits::w_state_circuit(20));
+}
+
+#[test]
+fn fusion_same_pair_qv_20q() {
+    assert_fusion_preserves_correctness(&circuits::quantum_volume_circuit(20, 1, 42));
+}
+
+#[test]
+fn fusion_same_pair_reversed_targets_20q() {
+    let mut c = Circuit::new(20, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Rx(0.31), &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rz(0.7), &[0]);
+    c.add_gate(Gate::Ry(-0.4), &[1]);
+    c.add_gate(Gate::Cx, &[1, 0]);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Rx(0.2), &[1]);
+    assert_fusion_preserves_state(&c);
+}
+
+#[test]
+fn fusion_same_pair_keeps_diagonal_batch_paths() {
+    let qaoa = circuits::qaoa_circuit(20, 3, 42);
+    let qaoa_fused = prism_q::circuit::fusion::fuse_circuit(&qaoa, true);
+    let batch_rzz = qaoa_fused
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                prism_q::circuit::Instruction::Gate {
+                    gate: Gate::BatchRzz(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(batch_rzz, 3, "qaoa should keep BatchRzz fusion");
+
+    let qft = circuits::qft_circuit(20);
+    let qft_fused = prism_q::circuit::fusion::fuse_circuit(&qft, true);
+    let batch_phase = qft_fused
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                prism_q::circuit::Instruction::Gate {
+                    gate: Gate::BatchPhase(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert!(batch_phase > 0, "qft should keep BatchPhase fusion");
+
+    let mut diagonal = Circuit::new(20, 0);
+    diagonal.add_gate(Gate::Rzz(0.1), &[0, 1]);
+    diagonal.add_gate(Gate::Rz(0.2), &[0]);
+    let diagonal_fused = prism_q::circuit::fusion::fuse_circuit(&diagonal, true);
+    let diagonal_batch = diagonal_fused
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                prism_q::circuit::Instruction::Gate {
+                    gate: Gate::DiagonalBatch(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert!(
+        diagonal_batch > 0,
+        "diagonal runs should keep DiagonalBatch fusion"
+    );
 }
 
 #[test]

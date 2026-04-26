@@ -1,0 +1,109 @@
+name: Bug report
+description: Report incorrect behavior, performance regressions, panics, or build failures.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Include enough detail to reproduce the issue and assess performance impact.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the problem and why it matters.
+      placeholder: "Example: Applying a controlled gate with adjacent qubits returns an incorrect amplitude."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: bug-type
+    attributes:
+      label: Bug category
+      description: Select the primary category.
+      options:
+        - Incorrect simulation result
+        - Performance regression
+        - Panic or crash
+        - Build, CI, or tooling failure
+        - Documentation mismatch
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide a minimal command, circuit, test case, or code snippet that triggers the issue.
+      placeholder: |
+        1. Run `cargo test ...`
+        2. Execute this circuit:
+           ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: State the correct result, timing, output, or error handling.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste the observed result, error output, panic, or benchmark regression.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected-area
+    attributes:
+      label: Affected area
+      description: List the backend, gate, parser, fusion pass, benchmark, or public API involved.
+      placeholder: "Example: statevector backend, controlled-X kernel, benches/circuits.rs"
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include enough system detail to reproduce correctness or performance issues.
+      value: |
+        - OS:
+        - CPU model:
+        - Rust version:
+        - PRISM-Q commit:
+        - Feature flags:
+        - Compiler flags:
+    validations:
+      required: true
+
+  - type: textarea
+    id: benchmarks
+    attributes:
+      label: Benchmark or profiling data
+      description: Required for performance regressions. Include before and after numbers if available.
+      placeholder: |
+        | Benchmark | Before | After | Change |
+        | --- | --- | --- | --- |
+        |  |  |  |  |
+
+        Regression verdict: PASS / FAIL / WAIVER
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add links, related issues, screenshots, logs, or proposed fixes.
+    validations:
+      required: false

@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.11.2] - 2026-04-25
+
+### Performance
+
+- **statevector:** Fuse repeated 2q blocks and optimize adjacent fused gates (#43)([b8fe8d9](https://github.com/AbeCoull/prism-q/commit/b8fe8d931b7b3fbc10b624cc7201f7ee52b2a6ad))
 ## [0.11.1] - 2026-04-25
 
 ### Bug Fixes
 
 - Enforce qubit bounds and finite gate parameters in release builds (#42)([54dc825](https://github.com/AbeCoull/prism-q/commit/54dc825feaa754fa60339ac40687f366d964b51d))
+
+### Miscellaneous
+
+- **release:** 0.11.1([5b3994b](https://github.com/AbeCoull/prism-q/commit/5b3994b74d9535ee7e0846b52b7caaed4f2d152e))
 
 ### Refactor
 

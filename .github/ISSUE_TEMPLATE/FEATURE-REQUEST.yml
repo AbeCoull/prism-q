@@ -1,0 +1,99 @@
+name: Feature request
+description: Propose a new capability, backend, gate, optimization, or developer workflow.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. Ground the request in performance, correctness, and maintainability impact.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the requested feature and the problem it solves.
+      placeholder: "Example: Add a sparse state backend for circuits with limited basis support."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature-type
+    attributes:
+      label: Feature category
+      description: Select the primary category.
+      options:
+        - Simulation backend
+        - Gate or circuit operation
+        - Performance optimization
+        - Parser or input format
+        - Benchmarking or profiling
+        - Developer tooling
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Explain the use case, target workload, or limitation in the current implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: Describe the desired behavior, API, backend contract, or workflow.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: List other approaches and why this proposal is preferred.
+    validations:
+      required: false
+
+  - type: textarea
+    id: performance-impact
+    attributes:
+      label: Performance impact
+      description: Describe expected throughput, latency, memory, allocation, or benchmark impact.
+      placeholder: |
+        - Affected benchmark or workload:
+        - Expected speedup or tradeoff:
+        - Measurement plan:
+    validations:
+      required: true
+
+  - type: textarea
+    id: correctness-impact
+    attributes:
+      label: Correctness and testing plan
+      description: List the tests, golden comparisons, seeds, or numerical tolerances needed.
+      placeholder: |
+        - Unit tests:
+        - Golden tests:
+        - Fixed RNG seed:
+    validations:
+      required: true
+
+  - type: textarea
+    id: docs-impact
+    attributes:
+      label: Documentation impact
+      description: Note public API docs, architecture documentation, or benchmark notes that need updates.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add links, examples, related issues, or implementation notes.
+    validations:
+      required: false

@@ -1874,13 +1874,12 @@ impl PreparedGate2q {
         q0: usize,
         q1: usize,
     ) {
-        let mask0 = 1usize << q0;
-        let mask1 = 1usize << q1;
-        let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
-        let n_iter = 1usize << (num_qubits - 2);
-
         #[cfg(target_arch = "x86_64")]
         {
+            let mask0 = 1usize << q0;
+            let mask1 = 1usize << q1;
+            let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+            let n_iter = 1usize << (num_qubits - 2);
             let base = state.as_mut_ptr() as *mut f64;
             unsafe {
                 match self.tier {

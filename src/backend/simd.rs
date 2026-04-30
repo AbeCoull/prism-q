@@ -483,6 +483,19 @@ enum SimdTier {
     Sse2,
 }
 
+/// Bench-only kill switch for the AVX2 paired-group 2q kernel.
+///
+/// Reads `PRISM_NO_AVX2_2Q` once and caches the result. Set the variable
+/// to disable the kernel and exercise the 128-bit FMA fallback for A/B
+/// timing comparison without rebuilding.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn avx2_2q_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PRISM_NO_AVX2_2Q").is_none())
+}
+
 /// Precomputed single-qubit gate ready for repeated application.
 ///
 /// Create once per gate via [`PreparedGate1q::new`], then call [`apply`]
@@ -1406,6 +1419,34 @@ struct Mat4x4Broadcast {
     ii: [__m128d; 16],
 }
 
+/// 256-bit broadcast variant of [`Mat4x4Broadcast`] for AVX2 paired-group kernels.
+///
+/// Each register holds the same `re` (or `im`) value broadcast across 4 lanes,
+/// so a single `_mm256_fmaddsub_pd` performs the complex multiply for two
+/// 4-element groups simultaneously.
+#[cfg(target_arch = "x86_64")]
+struct Mat4x4Broadcast256 {
+    rr: [__m256d; 16],
+    ii: [__m256d; 16],
+}
+
+#[cfg(target_arch = "x86_64")]
+impl Mat4x4Broadcast256 {
+    #[inline(always)]
+    unsafe fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
+        let mut rr = [_mm256_setzero_pd(); 16];
+        let mut ii = [_mm256_setzero_pd(); 16];
+        for (r, row) in mat.iter().enumerate() {
+            for (c, elem) in row.iter().enumerate() {
+                let idx = r * 4 + c;
+                rr[idx] = _mm256_set1_pd(elem.re);
+                ii[idx] = _mm256_set1_pd(elem.im);
+            }
+        }
+        Self { rr, ii }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 impl Mat4x4Broadcast {
     #[inline(always)]
@@ -1486,6 +1527,88 @@ unsafe fn apply_fused_2q_loop_fma(
 #[target_feature(enable = "fma")]
 unsafe fn apply_fused_2q_group_fma(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
     apply_fused_2q_group_fma_inner(state, i, mat);
+}
+
+/// Apply two consecutive 4-element groups (k and k+1) of a 2q gate using AVX2.
+///
+/// Precondition: `iA[r]` and `iA[r] + 1` must be the indices of group A's row r
+/// and group B's row r respectively, so a single 256-bit load reads both
+/// `state[iA[r]]` and `state[iB[r]]` contiguously. This holds when the lower
+/// gate qubit `lo` is > 0 and the caller pairs `k` with `k+1`.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_fused_2q_pair_avx2_inner(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast256) {
+    let s0 = _mm256_loadu_pd(state.add(i[0] * 2));
+    let s1 = _mm256_loadu_pd(state.add(i[1] * 2));
+    let s2 = _mm256_loadu_pd(state.add(i[2] * 2));
+    let s3 = _mm256_loadu_pd(state.add(i[3] * 2));
+
+    let sf0 = _mm256_shuffle_pd(s0, s0, 0b0101);
+    let sf1 = _mm256_shuffle_pd(s1, s1, 0b0101);
+    let sf2 = _mm256_shuffle_pd(s2, s2, 0b0101);
+    let sf3 = _mm256_shuffle_pd(s3, s3, 0b0101);
+
+    macro_rules! row {
+        ($r:expr) => {{
+            let off = $r * 4;
+            let t = _mm256_mul_pd(mat.ii[off], sf0);
+            let mut acc = _mm256_fmaddsub_pd(mat.rr[off], s0, t);
+            let t = _mm256_mul_pd(mat.ii[off + 1], sf1);
+            acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 1], s1, t));
+            let t = _mm256_mul_pd(mat.ii[off + 2], sf2);
+            acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 2], s2, t));
+            let t = _mm256_mul_pd(mat.ii[off + 3], sf3);
+            acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 3], s3, t));
+            _mm256_storeu_pd(state.add(i[$r] * 2), acc);
+        }};
+    }
+    row!(0);
+    row!(1);
+    row!(2);
+    row!(3);
+}
+
+/// Pair-batched 2q kernel main loop. Requires `lo > 0` so that paired k/k+1
+/// values map to adjacent state positions; falls back to the 128-bit FMA
+/// kernel when `lo == 0`.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn apply_fused_2q_loop_avx2(
+    state: *mut f64,
+    n_iter: usize,
+    lo: usize,
+    hi: usize,
+    mask0: usize,
+    mask1: usize,
+    mat256: &Mat4x4Broadcast256,
+    mat128: &Mat4x4Broadcast,
+) {
+    use crate::backend::statevector::insert_zero_bit;
+
+    if lo == 0 {
+        for k in 0..n_iter {
+            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+            apply_fused_2q_group_fma_inner(state, i, mat128);
+        }
+        return;
+    }
+
+    let pairs = n_iter / 2;
+    for pk in 0..pairs {
+        let k = pk * 2;
+        let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+        let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+        apply_fused_2q_pair_avx2_inner(state, i, mat256);
+    }
+    if n_iter & 1 == 1 {
+        let k = n_iter - 1;
+        let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+        let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+        apply_fused_2q_group_fma_inner(state, i, mat128);
+    }
 }
 
 /// Apply one 4-element group of a 2q gate using SSE2 intrinsics.
@@ -1631,7 +1754,9 @@ pub(crate) struct PreparedGate2q {
     #[cfg(target_arch = "x86_64")]
     broadcast: Mat4x4Broadcast,
     #[cfg(target_arch = "x86_64")]
-    use_fma: bool,
+    broadcast256: Option<Mat4x4Broadcast256>,
+    #[cfg(target_arch = "x86_64")]
+    tier: SimdTier,
     #[cfg(target_arch = "aarch64")]
     broadcast: Mat4x4Broadcast,
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -1643,9 +1768,24 @@ impl PreparedGate2q {
     pub(crate) fn new(mat: &[[Complex64; 4]; 4]) -> Self {
         #[cfg(target_arch = "x86_64")]
         {
+            let broadcast = Mat4x4Broadcast::from_matrix(mat);
+            let has_avx2_fma = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+            let tier = if has_avx2_fma {
+                SimdTier::Avx2Fma
+            } else if is_x86_feature_detected!("fma") {
+                SimdTier::Fma
+            } else {
+                SimdTier::Sse2
+            };
+            let broadcast256 = if has_avx2_fma {
+                Some(unsafe { Mat4x4Broadcast256::from_matrix(mat) })
+            } else {
+                None
+            };
             Self {
-                broadcast: Mat4x4Broadcast::from_matrix(mat),
-                use_fma: is_x86_feature_detected!("fma"),
+                broadcast,
+                broadcast256,
+                tier,
             }
         }
         #[cfg(target_arch = "aarch64")]
@@ -1661,6 +1801,10 @@ impl PreparedGate2q {
     }
 
     /// Apply the full 2q gate to the statevector sequentially.
+    ///
+    /// Uses 128-bit FMA on x86_64 even when AVX2 is available; the AVX2
+    /// paired-group kernel is reserved for [`apply_tiled`] where the slice
+    /// is known to be cache-resident.
     pub(crate) fn apply_full(
         &self,
         state: &mut [Complex64],
@@ -1676,13 +1820,12 @@ impl PreparedGate2q {
         #[cfg(target_arch = "x86_64")]
         {
             let base = state.as_mut_ptr() as *mut f64;
-            if self.use_fma {
+            if !matches!(self.tier, SimdTier::Sse2) {
                 unsafe {
                     apply_fused_2q_loop_fma(base, n_iter, lo, hi, mask0, mask1, &self.broadcast);
                 }
                 return;
             }
-            // SSE2 fallback (always available on x86_64)
             unsafe {
                 use crate::backend::statevector::insert_zero_bit;
                 for k in 0..n_iter {
@@ -1718,6 +1861,72 @@ impl PreparedGate2q {
         }
     }
 
+    /// Apply the 2q gate to a slice that is known to be cache-resident.
+    ///
+    /// Prefers the AVX2 paired-group kernel when available and `lo > 0`,
+    /// falling back to 128-bit FMA per-group otherwise. Use from `Multi2q`
+    /// tile loops where the slice fits in L2/L3 and the kernel is
+    /// compute-bound; the AVX2 throttle is justified by ~2× FMA throughput.
+    pub(crate) fn apply_tiled(
+        &self,
+        state: &mut [Complex64],
+        num_qubits: usize,
+        q0: usize,
+        q1: usize,
+    ) {
+        let mask0 = 1usize << q0;
+        let mask1 = 1usize << q1;
+        let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+        let n_iter = 1usize << (num_qubits - 2);
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            let base = state.as_mut_ptr() as *mut f64;
+            unsafe {
+                match self.tier {
+                    SimdTier::Avx2Fma if avx2_2q_enabled() => {
+                        // SAFETY: broadcast256 is Some whenever tier is Avx2Fma (constructor invariant).
+                        let mat256 = self.broadcast256.as_ref().unwrap_unchecked();
+                        apply_fused_2q_loop_avx2(
+                            base,
+                            n_iter,
+                            lo,
+                            hi,
+                            mask0,
+                            mask1,
+                            mat256,
+                            &self.broadcast,
+                        );
+                    }
+                    SimdTier::Avx2Fma | SimdTier::Fma => {
+                        apply_fused_2q_loop_fma(
+                            base,
+                            n_iter,
+                            lo,
+                            hi,
+                            mask0,
+                            mask1,
+                            &self.broadcast,
+                        );
+                    }
+                    SimdTier::Sse2 => {
+                        use crate::backend::statevector::insert_zero_bit;
+                        for k in 0..n_iter {
+                            let idx = insert_zero_bit(insert_zero_bit(k, lo), hi);
+                            let i = [idx, idx | mask1, idx | mask0, idx | mask0 | mask1];
+                            apply_fused_2q_group_sse2(base, i, &self.broadcast);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.apply_full(state, num_qubits, q0, q1);
+        }
+    }
+
     /// Apply one group at scattered indices. Safe to call from Rayon closures
     /// when callers partition indices across threads.
     ///
@@ -1728,7 +1937,7 @@ impl PreparedGate2q {
     pub(crate) unsafe fn apply_group_ptr(&self, state: *mut f64, i: [usize; 4]) {
         #[cfg(target_arch = "x86_64")]
         {
-            if self.use_fma {
+            if !matches!(self.tier, SimdTier::Sse2) {
                 apply_fused_2q_group_fma(state, i, &self.broadcast);
             } else {
                 apply_fused_2q_group_sse2(state, i, &self.broadcast);
@@ -2085,6 +2294,109 @@ mod tests {
         apply_2q_reference(&mut ref_state, &mat, 0, 2);
         for (i, (a, e)) in state.iter().zip(ref_state.iter()).enumerate() {
             assert!((a - e).norm() < EPS, "state[{i}]: expected {e}, got {a}");
+        }
+    }
+
+    /// A dense, asymmetric 4×4 matrix that exercises every coefficient slot.
+    /// Built from a non-special unitary so any indexing bug in the AVX2
+    /// paired-group kernel surfaces as a numerical mismatch.
+    fn dense_4x4() -> [[Complex64; 4]; 4] {
+        let s = FRAC_1_SQRT_2;
+        let h2 = [
+            [c(0.5, 0.0), c(0.5, 0.0), c(0.5, 0.0), c(0.5, 0.0)],
+            [c(0.5, 0.0), c(-0.5, 0.0), c(0.5, 0.0), c(-0.5, 0.0)],
+            [c(0.5, 0.0), c(0.5, 0.0), c(-0.5, 0.0), c(-0.5, 0.0)],
+            [c(0.5, 0.0), c(-0.5, 0.0), c(-0.5, 0.0), c(0.5, 0.0)],
+        ];
+        let phase = [
+            [c(1.0, 0.0), c(0.0, 0.0), c(0.0, 0.0), c(0.0, 0.0)],
+            [c(0.0, 0.0), c(s, s), c(0.0, 0.0), c(0.0, 0.0)],
+            [c(0.0, 0.0), c(0.0, 0.0), c(0.0, 1.0), c(0.0, 0.0)],
+            [c(0.0, 0.0), c(0.0, 0.0), c(0.0, 0.0), c(-s, s)],
+        ];
+        let mut out = [[c(0.0, 0.0); 4]; 4];
+        for r in 0..4 {
+            for col in 0..4 {
+                let mut acc = c(0.0, 0.0);
+                for k in 0..4 {
+                    acc += phase[r][k] * h2[k][col];
+                }
+                out[r][col] = acc;
+            }
+        }
+        out
+    }
+
+    fn random_state(num_qubits: usize, seed: u64) -> Vec<Complex64> {
+        use rand::Rng;
+        use rand::SeedableRng;
+        use rand_chacha::ChaCha8Rng;
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let n = 1usize << num_qubits;
+        let mut s = Vec::with_capacity(n);
+        let mut norm = 0.0;
+        for _ in 0..n {
+            let re: f64 = rng.random_range(-1.0..1.0);
+            let im: f64 = rng.random_range(-1.0..1.0);
+            norm += re * re + im * im;
+            s.push(c(re, im));
+        }
+        let inv = norm.sqrt().recip();
+        for v in &mut s {
+            v.re *= inv;
+            v.im *= inv;
+        }
+        s
+    }
+
+    fn assert_state_close(actual: &[Complex64], expected: &[Complex64], label: &str) {
+        assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
+        for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+            let d = (*a - *e).norm();
+            assert!(
+                d < 1e-10,
+                "{label} state[{i}]: expected {e}, got {a} (diff {d:.2e})"
+            );
+        }
+    }
+
+    /// Reference test: AVX2 paired-group kernel must agree with the 128-bit
+    /// FMA per-group kernel across (q0, q1) configurations covering adjacent,
+    /// non-adjacent, reversed-order, and the lo == 0 fallback path.
+    #[test]
+    fn test_prepared_2q_apply_tiled_matches_apply_full() {
+        let mat = dense_4x4();
+        let configs: &[(usize, usize, usize)] = &[
+            (4, 0, 1),  // adjacent, lo == 0 (forces 128-bit fallback inside apply_tiled)
+            (4, 1, 0),  // reversed, lo == 0
+            (4, 1, 2),  // adjacent, lo > 0 (AVX2 path)
+            (4, 2, 1),  // reversed, lo > 0
+            (5, 0, 4),  // far apart, lo == 0
+            (5, 4, 0),  // reversed, lo == 0
+            (5, 1, 4),  // far apart, lo > 0
+            (5, 4, 1),  // reversed, lo > 0
+            (6, 2, 5),  // mid-range, lo > 0
+            (8, 0, 7),  // 8-qubit, span entire register, lo == 0
+            (8, 1, 7),  // 8-qubit, span entire register, lo > 0
+            (8, 7, 1),  // reversed
+            (10, 3, 6), // 10-qubit AVX2 path
+        ];
+
+        for &(nq, q0, q1) in configs {
+            let state_init = random_state(nq, 0xCAFE_F00D);
+            let prepared = PreparedGate2q::new(&mat);
+
+            let mut via_full = state_init.clone();
+            prepared.apply_full(&mut via_full, nq, q0, q1);
+
+            let mut via_tiled = state_init.clone();
+            prepared.apply_tiled(&mut via_tiled, nq, q0, q1);
+
+            assert_state_close(
+                &via_tiled,
+                &via_full,
+                &format!("nq={nq} q0={q0} q1={q1} apply_tiled vs apply_full"),
+            );
         }
     }
 }

@@ -60,13 +60,23 @@ const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 18;
 /// Minimum qubit count for two-qubit gate fusion (absorb 1q into CX/CZ) to be profitable.
 ///
 /// The generic 4×4 kernel does ~4x the FLOPs of specialized CX/CZ + SIMD 1q kernels.
-/// Below this threshold, extra compute cost exceeds memory-pass savings.
-const MIN_QUBITS_FOR_2Q_FUSION: usize = 20;
+/// Benchmarked QV and random sweeps show memory-pass reduction wins from 12q.
+const MIN_QUBITS_FOR_2Q_FUSION: usize = 12;
+
+/// Bench-only kill switch for `reorder_disjoint_fused2q`. Reads
+/// `PRISM_NO_REORDER` once and caches the result. Toggle for A/B timing
+/// comparisons without rebuilding.
+#[inline]
+fn reorder_2q_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PRISM_NO_REORDER").is_none())
+}
 
 /// Minimum qubit count for multi-2q tiled fusion to be profitable.
 ///
 /// Batches consecutive Fused2q gates into a single cache-tiled pass. Only
-/// created when Fused2q gates exist (which requires ≥20q), so threshold matches.
+/// created when Fused2q gates exist, so threshold matches.
 const MIN_QUBITS_FOR_MULTI_2Q_FUSION: usize = MIN_QUBITS_FOR_2Q_FUSION;
 
 /// Minimum batch size for multi-2q fusion (single gate not worth wrapping).
@@ -987,6 +997,83 @@ fn fuse_same_pair_2q_blocks(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     }
 }
 
+/// Reorder consecutive `Fused2q` gates with pairwise-disjoint qubit supports
+/// so that gates of the same `Tier2q` are grouped together. Disjoint-support
+/// 2q gates commute, so reordering is identity-preserving.
+///
+/// Random pair circuits (notably Quantum Volume) emit `Fused2q` streams whose
+/// tiers are interleaved. The downstream `fuse_multi_2q_gates` only batches
+/// consecutive same-tier gates, so without this pass tier transitions break
+/// the run after every one or two gates.
+///
+/// Returns `Cow::Borrowed` when no reorder happens.
+pub fn reorder_disjoint_fused2q(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+    let circuit = input.as_ref();
+    let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
+    let mut window: Vec<(Tier2q, Instruction)> = Vec::new();
+    let mut window_qubits = vec![false; circuit.num_qubits];
+    let mut changed = false;
+
+    for inst in &circuit.instructions {
+        if let Instruction::Gate {
+            gate: Gate::Fused2q(_),
+            targets,
+        } = inst
+        {
+            let q0 = targets[0];
+            let q1 = targets[1];
+            if window_qubits[q0] || window_qubits[q1] {
+                flush_disjoint_window(&mut window, &mut window_qubits, &mut output, &mut changed);
+            }
+            window_qubits[q0] = true;
+            window_qubits[q1] = true;
+            window.push((classify_2q_tier(q0, q1), inst.clone()));
+        } else {
+            flush_disjoint_window(&mut window, &mut window_qubits, &mut output, &mut changed);
+            output.push(inst.clone());
+        }
+    }
+    flush_disjoint_window(&mut window, &mut window_qubits, &mut output, &mut changed);
+
+    if changed {
+        Cow::Owned(Circuit {
+            num_qubits: circuit.num_qubits,
+            num_classical_bits: circuit.num_classical_bits,
+            instructions: output,
+        })
+    } else {
+        input
+    }
+}
+
+fn flush_disjoint_window(
+    window: &mut Vec<(Tier2q, Instruction)>,
+    window_qubits: &mut [bool],
+    output: &mut Vec<Instruction>,
+    changed: &mut bool,
+) {
+    if window.len() >= 2 {
+        let mut tier_counts = [0u32; 3];
+        for (t, _) in window.iter() {
+            tier_counts[*t as usize] += 1;
+        }
+        let any_tier_batchable = tier_counts.iter().any(|&c| c >= MIN_MULTI_2Q_BATCH as u32);
+        if any_tier_batchable {
+            let already_sorted = window.windows(2).all(|w| (w[0].0 as u8) <= (w[1].0 as u8));
+            if !already_sorted {
+                window.sort_by_key(|(t, _)| *t as u8);
+                *changed = true;
+            }
+        }
+    }
+    for (_, inst) in window.drain(..) {
+        output.push(inst);
+    }
+    for q in window_qubits.iter_mut() {
+        *q = false;
+    }
+}
+
 /// Batch consecutive `Fused2q` gates into `Multi2q` for cache-tiled execution.
 ///
 /// Scans for runs of consecutive `Fused2q` instructions within the same cache
@@ -1272,7 +1359,7 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
         return pass0b;
     }
 
-    // 1q fusion + reorder — clone cost justified at ≥10q
+    // 1q fusion plus reorder, clone cost justified at 10q and above.
     let pass1 = match pass0b {
         Cow::Borrowed(c) => fuse_single_qubit_gates(c),
         Cow::Owned(c) => Cow::Owned(fuse_single_qubit_gates(&c).into_owned()),
@@ -1307,10 +1394,15 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
     } else {
         pass_2qb
     };
-    let pass_m2q = if circuit.num_qubits >= MIN_QUBITS_FOR_MULTI_2Q_FUSION {
-        fuse_multi_2q_gates(pass2)
+    let pass_2qr = if circuit.num_qubits >= MIN_QUBITS_FOR_MULTI_2Q_FUSION && reorder_2q_enabled() {
+        reorder_disjoint_fused2q(pass2)
     } else {
         pass2
+    };
+    let pass_m2q = if circuit.num_qubits >= MIN_QUBITS_FOR_MULTI_2Q_FUSION {
+        fuse_multi_2q_gates(pass_2qr)
+    } else {
+        pass_2qr
     };
     let pass_cp = if circuit.num_qubits >= MIN_QUBITS_FOR_DIAG_BATCH {
         fuse_controlled_phases(pass_m2q)
@@ -2412,6 +2504,26 @@ mod tests {
             .count();
         assert_eq!(batch_rzz_count, 3);
         assert_eq!(multi_fused_count, 3);
+    }
+
+    #[test]
+    fn qv_12_uses_multi_2q_fusion() {
+        let circuit = crate::circuits::quantum_volume_circuit(12, 1, 42);
+        let fused = fuse_circuit(&circuit, true);
+        let multi_2q_count = fused
+            .instructions
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    Instruction::Gate {
+                        gate: Gate::Multi2q(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(multi_2q_count > 0, "QV 12q should use Multi2q fusion");
     }
 
     #[test]

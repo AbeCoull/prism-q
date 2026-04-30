@@ -2,7 +2,24 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.11.4] - 2026-04-30
+
+### Documentation
+
+- **ci:** Add github issues template (#45)([4782b6f](https://github.com/AbeCoull/prism-q/commit/4782b6f695de0c188b434f3424f250762adb050f))
+
+### Performance
+
+- **statevector:** AVX2 paired-group 2q kernel and Fused2q reorder (#52)([12f51a7](https://github.com/AbeCoull/prism-q/commit/12f51a7f6bdea070bdd757d1488ef2ace906604e))
+
+### Testing
+
+- **correctness:** Add cross-backend correctness suite scaffolding (#51)([43031a7](https://github.com/AbeCoull/prism-q/commit/43031a7b49b33ad6183f5ab8ef9bc992678be337))
 ## [0.11.3] - 2026-04-26
+
+### Miscellaneous
+
+- **release:** 0.11.3([55943d8](https://github.com/AbeCoull/prism-q/commit/55943d8992b8baad12209a2a073cf192b25917ff))
 
 ### Performance
 

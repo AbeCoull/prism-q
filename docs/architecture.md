@@ -85,7 +85,7 @@ Targets use `SmallVec<[usize; 4]>`, inline storage for up to 4 qubits, no heap a
 
 ## Fusion pipeline
 
-Thirteen-pass gate optimization before execution, gated by qubit count thresholds. Every pass returns `Cow<Circuit>`. `Borrowed` when no optimization applies, so circuits that do not benefit pay zero overhead.
+Gate optimizations before execution, gated by qubit count thresholds. Every pass returns `Cow<Circuit>`. `Borrowed` when no optimization applies, so circuits that do not benefit pay zero overhead.
 
 ```text
   Input Circuit
@@ -101,9 +101,11 @@ Thirteen-pass gate optimization before execution, gated by qubit count threshold
     ├─ pass1c: cancel_self_inverse_pairs     (≥10q)    re-cancel after reorder
     ├─ pass1f: fuse_single_qubit_gates       (≥10q)    re-fuse after reorder
     │
-    ├─ pass_2q:  fuse_2q_gates              (≥20q)    CX + adjacent 1q → Fused2q
+    ├─ pass_2q:  fuse_2q_gates              (≥12q)    CX/CZ + adjacent 1q → Fused2q
+    ├─ pass_2qb: fuse_same_pair_2q_blocks   (≥12q)    same-pair Fused2q blocks → Fused2q
     ├─ pass2:    fuse_multi_1q_gates        (≥14q)    1q batch → MultiFused
-    ├─ pass_m2q: fuse_multi_2q_gates        (≥20q)    2q batch → Multi2q
+    ├─ pass_2qr: reorder_disjoint_fused2q   (≥12q)    disjoint Fused2q tier grouping
+    ├─ pass_m2q: fuse_multi_2q_gates        (≥12q)    2q batch → Multi2q
     ├─ pass_cp:  fuse_controlled_phases     (≥16q)    cphase batch → BatchPhase
     ├─ pass_db:  fuse_diagonal_batch        (≥16q)    mixed diagonal → DiagonalBatch
     └─ pass_pp:  batch_post_phase_1q        (≥18q)    re-batch 1q after cphase
@@ -119,8 +121,8 @@ Thirteen-pass gate optimization before execution, gated by qubit count threshold
 | `MIN_QUBITS_FOR_MULTI_FUSION` | 14 | MultiFused tiling overhead vs benefit |
 | `MIN_QUBITS_FOR_DIAG_BATCH` | 16 | Diagonal batch, cphase, and Rzz batching |
 | `MIN_QUBITS_FOR_POST_PHASE_BATCH` | 18 | Post-phase 1q re-batching |
-| `MIN_QUBITS_FOR_2Q_FUSION` | 20 | Generic 4×4 kernel only beats specialized at DRAM-bound sizes |
-| `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 20 | Same as 2q fusion |
+| `MIN_QUBITS_FOR_2Q_FUSION` | 12 | Benchmarked QV and random sweeps show memory-pass reduction wins from 12q |
+| `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 12 | Same as 2q fusion |
 
 ## Backend trait
 
@@ -410,11 +412,14 @@ Thread pool defaults to all logical cores (HT helps at 24q+ by hiding memory lat
 Two key SIMD structs hoist matrix broadcast at construction time, avoiding per-element dispatch:
 
 - **`PreparedGate1q`**: Broadcasts 2×2 matrix into SIMD registers. Methods: `apply_full_sequential` (full state), `apply_tiled` (cache-resident tile, no AVX2 throttle guard), `apply_slice_pairs` (MPS bond-dimension slices), `apply_pair_ptr` (Cu/Mcu parallel).
-- **`PreparedGate2q`**: Broadcasts 4×4 matrix. Methods: `apply_full` (mask-based iteration), `apply_group_ptr` (4 scattered indices).
+- **`PreparedGate2q`**: Broadcasts 4×4 matrix. Methods: `apply_full` (mask-based iteration), `apply_tiled` (cache-resident Multi2q tiles, AVX2 paired-group kernel when available), `apply_group_ptr` (4 scattered indices).
+
+The 2q tiled AVX2 path processes paired `k` and `k + 1` groups when the lower target qubit is above 0, which makes each row load contiguous. It falls back to the 128-bit FMA kernel for `lo == 0` and when AVX2+FMA is unavailable. Set `PRISM_NO_AVX2_2Q` to compare against the 128-bit FMA path, or `PRISM_NO_REORDER` to disable disjoint Fused2q tier grouping for A/B timing.
 
 ### Determinism
 
 Same circuit + same seed = same result, regardless of thread count. Parallel backends use deterministic work partitioning.
+
 
 ## Backend dispatch
 

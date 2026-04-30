@@ -1876,8 +1876,9 @@ impl StatevectorBackend {
             let tile_size = MULTI_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
+                let n = tile.len().trailing_zeros() as usize;
                 for &(q0, q1, ref prepared) in &small_gates {
-                    prepared.apply_full(tile, tile_qubits, q0, q1);
+                    prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
                 }
             }
         }
@@ -1886,8 +1887,9 @@ impl StatevectorBackend {
             let tile_size = L3_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
+                let n = tile.len().trailing_zeros() as usize;
                 for &(q0, q1, ref prepared) in &medium_gates {
-                    prepared.apply_full(tile, tile_qubits, q0, q1);
+                    prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
                 }
             }
         }
@@ -1929,7 +1931,7 @@ impl StatevectorBackend {
                 .for_each(|tile| {
                     let n = tile.len().trailing_zeros() as usize;
                     for &(q0, q1, ref prepared) in &small_gates {
-                        prepared.apply_full(tile, n.min(tile_qubits), q0, q1);
+                        prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
                     }
                 });
         }
@@ -1943,7 +1945,7 @@ impl StatevectorBackend {
                 .for_each(|tile| {
                     let n = tile.len().trailing_zeros() as usize;
                     for &(q0, q1, ref prepared) in &medium_gates {
-                        prepared.apply_full(tile, n.min(tile_qubits), q0, q1);
+                        prepared.apply_tiled(tile, n.min(tile_qubits), q0, q1);
                     }
                 });
         }

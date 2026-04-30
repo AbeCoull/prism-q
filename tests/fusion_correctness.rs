@@ -8,7 +8,7 @@
 use num_complex::Complex64;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::Backend;
-use prism_q::circuit::Circuit;
+use prism_q::circuit::{Circuit, Instruction};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
@@ -83,6 +83,19 @@ fn assert_fusion_preserves_state(circuit: &Circuit) {
     let unfused = run_unfused_state(circuit);
     let fused = run_fused_state(circuit);
     assert_state_close(&fused, &unfused, EPS);
+}
+
+fn has_2q_fusion(circuit: &Circuit) -> bool {
+    let fused = prism_q::circuit::fusion::fuse_circuit(circuit, true);
+    fused.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Fused2q(_) | Gate::Multi2q(_),
+                ..
+            }
+        )
+    })
 }
 
 // ===== QFT =====
@@ -440,13 +453,13 @@ fn fusion_random_18q() {
 
 // ===== 2q fusion specific tests =====
 // These test circuits where 1q gates are absorbed into adjacent 2q gates.
-// The fuse_2q_gates pass activates at ≥20 qubits.
+// The fuse_2q_gates pass activates at 12 qubits and above.
 
 #[test]
-fn fusion_2q_hea_pattern_20q() {
-    // HEA: Ry-Rz per qubit, then CX ladder — classic 2q fusion target
-    // At 20q, 2q fusion is active (MIN_QUBITS_FOR_2Q_FUSION = 20)
-    assert_fusion_preserves_correctness(&circuits::hardware_efficient_ansatz(20, 3, 42));
+fn fusion_2q_hea_pattern_12q() {
+    let circuit = circuits::hardware_efficient_ansatz(12, 3, 42);
+    assert!(has_2q_fusion(&circuit), "12q HEA should use 2q fusion");
+    assert_fusion_preserves_correctness(&circuit);
 }
 
 #[test]
@@ -473,8 +486,7 @@ fn fusion_2q_cx_sandwich_20q() {
 
 #[test]
 fn fusion_2q_cz_with_1q_gates_12q() {
-    // CZ gates are NOT absorbed by 2q fusion (specialized SIMD kernel is faster),
-    // but correctness should still hold through other fusion passes.
+    // CZ gates are absorbed by 2q fusion like CX.
     let mut c = Circuit::new(12, 0);
     for _ in 0..3 {
         for q in 0..12 {
@@ -528,20 +540,22 @@ fn fusion_2q_cu_with_1q_gates_12q() {
 }
 
 #[test]
-fn fusion_2q_threshold_19q_no_2q_fusion() {
-    // 19q: below MIN_QUBITS_FOR_2Q_FUSION (20), should still work
-    assert_fusion_preserves_correctness(&circuits::hardware_efficient_ansatz(19, 3, 42));
+fn fusion_2q_threshold_11q_no_2q_fusion() {
+    let circuit = circuits::hardware_efficient_ansatz(11, 3, 42);
+    assert!(!has_2q_fusion(&circuit), "11q HEA should skip 2q fusion");
+    assert_fusion_preserves_correctness(&circuit);
 }
 
 #[test]
-fn fusion_2q_threshold_20q_2q_fusion_active() {
-    // 20q: at threshold, 2q fusion is active
-    assert_fusion_preserves_correctness(&circuits::hardware_efficient_ansatz(20, 3, 42));
+fn fusion_2q_threshold_12q_2q_fusion_active() {
+    let circuit = circuits::hardware_efficient_ansatz(12, 3, 42);
+    assert!(has_2q_fusion(&circuit), "12q HEA should use 2q fusion");
+    assert_fusion_preserves_correctness(&circuit);
 }
 
 #[test]
 fn fusion_2q_mixed_2q_gates_20q() {
-    // Mix of CX, CZ, SWAP, Cu — only CX gets 2q-fused at ≥20q
+    // Mix of CX, CZ, SWAP, Cu. CX and CZ get 2q-fused at 12q and above.
     let h_mat = Gate::H.matrix_2x2();
     let mut c = Circuit::new(20, 0);
     for _ in 0..3 {
@@ -571,8 +585,32 @@ fn fusion_same_pair_w_state_20q() {
 }
 
 #[test]
+fn fusion_same_pair_qv_8q() {
+    assert_fusion_preserves_correctness(&circuits::quantum_volume_circuit(8, 1, 42));
+}
+
+#[test]
+fn fusion_same_pair_qv_12q() {
+    assert_fusion_preserves_correctness(&circuits::quantum_volume_circuit(12, 1, 42));
+}
+
+#[test]
+fn fusion_same_pair_qv_16q() {
+    assert_fusion_preserves_correctness(&circuits::quantum_volume_circuit(16, 1, 42));
+}
+
+#[test]
 fn fusion_same_pair_qv_20q() {
     assert_fusion_preserves_correctness(&circuits::quantum_volume_circuit(20, 1, 42));
+}
+
+#[test]
+fn fusion_qv_20q_depth_4() {
+    // Multi-layer QV at 20q exercises `reorder_disjoint_fused2q`: each layer
+    // emits ~10 disjoint Fused2q gates with mixed L2/L3/Individual tiers,
+    // and the reorder must commute them into tier-grouped order without
+    // changing the final state.
+    assert_fusion_preserves_state(&circuits::quantum_volume_circuit(20, 4, 42));
 }
 
 #[test]
@@ -774,7 +812,8 @@ fn fusion_non_adjacent_cancel_blocked_by_conflict() {
 // ===== Multi-2q fusion threshold tests =====
 
 #[test]
-fn fusion_multi_2q_threshold_19q_not_active() {
-    // 19q < MIN_QUBITS_FOR_2Q_FUSION(20) — 2q fusion should not fire
-    assert_fusion_preserves_correctness(&circuits::hardware_efficient_ansatz(19, 3, 42));
+fn fusion_multi_2q_threshold_12q_active() {
+    let circuit = circuits::quantum_volume_circuit(12, 1, 42);
+    assert!(has_2q_fusion(&circuit), "12q QV should use Multi2q fusion");
+    assert_fusion_preserves_correctness(&circuit);
 }

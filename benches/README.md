@@ -86,11 +86,13 @@ checks out the base commit and PR head on the same runner, runs
 `scripts/bench_check.sh`, then fails if any matching benchmark regresses beyond
 the configured threshold.
 
-The CI subset uses `CI_BENCH_FEATURES=parallel,bench-fast` and covers
-representative statevector kernels, measurement, OpenQASM parse plus simulate,
-macro circuit fusion, stabilizer dispatch, auto dispatch, and compiled sampling.
-It is a smoke gate, not a replacement for the full local benchmark suite required
-for performance-sensitive changes.
+The CI subset uses `CI_BENCH_FEATURES=parallel,bench-fast` and covers specific
+larger parameter points for representative statevector kernels, gate kernels,
+measurement, OpenQASM parse plus simulate, stabilizer dispatch, auto dispatch,
+and compiled sampling. The filters are intentionally narrow so GitHub hosted
+runner noise from tiny parameter sweeps does not dominate the gate. It is a
+smoke gate, not a replacement for the full local benchmark suite required for
+performance-sensitive changes.
 
 Local reproduction:
 

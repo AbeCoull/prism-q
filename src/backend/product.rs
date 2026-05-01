@@ -5,12 +5,12 @@
 //!
 //! # Memory layout
 //!
-//! - `Vec<[Complex64; 2]>` — one state per qubit, `[α, β]` where `|ψ⟩ = α|0⟩ + β|1⟩`.
-//! - Total memory: O(n) — 32 bytes per qubit vs O(2^n) for statevector.
+//! - `Vec<[Complex64; 2]>`: one state per qubit, `[α, β]` where `|ψ⟩ = α|0⟩ + β|1⟩`.
+//! - Total memory: O(n), 32 bytes per qubit vs O(2^n) for statevector.
 //!
 //! # Gate support
 //!
-//! All single-qubit gates are applied as a 2×2 matrix–vector multiply on the
+//! All single-qubit gates are applied as a 2×2 matrix-vector multiply on the
 //! per-qubit state. Two-qubit and multi-qubit gates return `BackendUnsupported`
 //! since product states cannot represent entanglement.
 //!
@@ -28,7 +28,7 @@ use rand_chacha::ChaCha8Rng;
 use crate::backend::{Backend, MAX_PROB_QUBITS, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
+use crate::gates::{DiagEntry, Gate};
 
 /// Per-qubit O(n) backend for non-entangling circuits.
 pub struct ProductStateBackend {
@@ -51,12 +51,14 @@ impl ProductStateBackend {
 
     fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         match gate {
-            Gate::Cx
+            Gate::Rzz(_)
+            | Gate::Cx
             | Gate::Cz
             | Gate::Swap
             | Gate::Cu(_)
             | Gate::Mcu(_)
             | Gate::BatchPhase(_)
+            | Gate::BatchRzz(_)
             | Gate::Fused2q(_)
             | Gate::Multi2q(_) => Err(PrismError::BackendUnsupported {
                 backend: "productstate".to_string(),
@@ -70,6 +72,25 @@ impl ProductStateBackend {
                     let [a, b] = self.qubits[target];
                     self.qubits[target] =
                         [mat[0][0] * a + mat[0][1] * b, mat[1][0] * a + mat[1][1] * b];
+                }
+                Ok(())
+            }
+            Gate::DiagonalBatch(data) => {
+                for entry in &data.entries {
+                    match entry {
+                        DiagEntry::Phase1q { qubit, d0, d1 } => {
+                            let [a, b] = self.qubits[*qubit];
+                            self.qubits[*qubit] = [*d0 * a, *d1 * b];
+                        }
+                        DiagEntry::Phase2q { .. } | DiagEntry::Parity2q { .. } => {
+                            return Err(PrismError::BackendUnsupported {
+                                backend: "productstate".to_string(),
+                                operation:
+                                    "multi-qubit diagonal batch (product state backend supports single-qubit gates only)"
+                                        .to_string(),
+                            });
+                        }
+                    }
                 }
                 Ok(())
             }

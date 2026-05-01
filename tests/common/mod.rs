@@ -13,8 +13,11 @@ use prism_q::sim;
 
 pub const SV_EPS: f64 = 1e-10;
 pub const STAB_EPS: f64 = 1e-12;
+pub const SPARSE_EPS: f64 = 1e-10;
 pub const MPS_EPS: f64 = 1e-9;
 pub const TN_EPS: f64 = 1e-10;
+pub const PRODUCT_EPS: f64 = 1e-12;
+pub const FACTORED_EPS: f64 = 1e-10;
 
 pub const SEED: u64 = 42;
 
@@ -51,6 +54,34 @@ pub fn assert_backend_matches_sv<B: Backend>(
     let actual = backend.probabilities().unwrap();
     let expected = sv_reference_probs(circuit);
     assert_probs_close(&actual, &expected, eps, label);
+}
+
+pub fn run_unfused_probs<B: Backend>(backend: &mut B, circuit: &Circuit) -> Vec<f64> {
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for instr in &circuit.instructions {
+        backend.apply(instr).unwrap();
+    }
+    backend.probabilities().unwrap()
+}
+
+pub fn run_fused_probs<B: Backend>(backend: &mut B, circuit: &Circuit) -> Vec<f64> {
+    sim::run_on(backend, circuit).unwrap();
+    backend.probabilities().unwrap()
+}
+
+pub fn assert_fused_matches_unfused<B: Backend, F: Fn() -> B>(
+    new_backend: F,
+    circuit: &Circuit,
+    eps: f64,
+    label: &str,
+) {
+    let mut unfused_backend = new_backend();
+    let unfused = run_unfused_probs(&mut unfused_backend, circuit);
+    let mut fused_backend = new_backend();
+    let fused = run_fused_probs(&mut fused_backend, circuit);
+    assert_probs_close(&fused, &unfused, eps, label);
 }
 
 pub fn is_clifford(circuit: &Circuit) -> bool {

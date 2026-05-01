@@ -170,7 +170,20 @@ impl FactoredBackend {
             return Ok(());
         }
         // All other gates require targets in the same sub-state.
-        let ss_idx = self.ensure_same_substate(targets);
+        // BatchPhase carries phase target qubits inside its data, not in the
+        // instruction-level `targets` list, so the merge must include them.
+        let ss_idx = if let Gate::BatchPhase(data) = gate {
+            let mut all_qubits: SmallVec<[usize; 16]> = SmallVec::new();
+            all_qubits.extend_from_slice(targets);
+            for &(q, _) in &data.phases {
+                if !all_qubits.contains(&q) {
+                    all_qubits.push(q);
+                }
+            }
+            self.ensure_same_substate(&all_qubits)
+        } else {
+            self.ensure_same_substate(targets)
+        };
 
         #[cfg(feature = "parallel")]
         {

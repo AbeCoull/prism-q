@@ -12,6 +12,8 @@ env:
   # cudarc's dynamic-linking mode and can't build on hosts that don't have the NVIDIA
   # toolkit installed, so we enumerate features instead of using --all-features.
   CI_FEATURES: parallel,serialization
+  CI_BENCH_FEATURES: parallel,bench-fast
+  REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
 
 jobs:
   check:
@@ -37,6 +39,98 @@ jobs:
         run: cargo doc --no-deps --features "$CI_FEATURES"
         env:
           RUSTDOCFLAGS: -D warnings
+
+  benchmark-regression:
+    name: Benchmark Regression
+    runs-on: ubuntu-latest
+    needs: check
+    if: github.event_name == 'pull_request'
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          fetch-depth: 1
+
+      - name: Checkout head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            base -> target
+            head -> target
+
+      - name: Install benchmark tools
+        run: sudo apt-get update && sudo apt-get install -y bc jq
+
+      - name: Benchmark base
+        working-directory: base
+        run: bash ../head/scripts/bench_ci.sh
+        env:
+          PRISM_BENCH_PROJECT_DIR: ${{ github.workspace }}/base
+
+      - name: Save base baseline
+        working-directory: base
+        run: bash scripts/bench_check.sh save --name ci-base
+
+      - name: Copy base baseline
+        run: |
+          mkdir -p head/bench_results/baselines
+          cp base/bench_results/baselines/ci-base.json head/bench_results/baselines/ci-base.json
+
+      - name: Benchmark head
+        working-directory: head
+        run: bash scripts/bench_ci.sh
+
+      - name: Compare benchmark results
+        working-directory: head
+        run: |
+          set +e
+          bash scripts/bench_check.sh table --baseline ci-base | tee ../benchmark-summary.md
+          table_status=${PIPESTATUS[0]}
+          bash scripts/bench_check.sh compare --baseline ci-base | tee ../benchmark-compare.txt
+          compare_status=${PIPESTATUS[0]}
+
+          {
+            echo "## Benchmark Regression Gate"
+            echo ""
+            cat ../benchmark-summary.md
+            echo ""
+            echo '```text'
+            cat ../benchmark-compare.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$table_status" -ne 0 ]]; then
+            exit "$table_status"
+          fi
+          exit "$compare_status"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-regression
+          if-no-files-found: ignore
+          path: |
+            benchmark-summary.md
+            benchmark-compare.txt
+            base/bench_results/baselines/ci-base.json
+            head/bench_results/baselines/ci-base.json
+            head/target/criterion/**/benchmark.json
+            head/target/criterion/**/new/estimates.json
 
   coverage:
     name: Coverage

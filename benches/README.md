@@ -78,11 +78,40 @@ cargo bench -- --baseline my_baseline
 REGRESSION_THRESHOLD=10 ./scripts/bench_compare.sh
 ```
 
+## CI regression gate
+
+Pull requests run a focused benchmark gate after lint and tests pass. The job
+checks out the base commit and PR head on the same runner, runs
+`scripts/bench_ci.sh` in both worktrees, saves the base results with
+`scripts/bench_check.sh`, then fails if any matching benchmark regresses beyond
+the configured threshold.
+
+The CI subset uses `CI_BENCH_FEATURES=parallel,bench-fast` and covers
+representative statevector kernels, measurement, OpenQASM parse plus simulate,
+macro circuit fusion, stabilizer dispatch, auto dispatch, and compiled sampling.
+It is a smoke gate, not a replacement for the full local benchmark suite required
+for performance-sensitive changes.
+
+Local reproduction:
+
+```bash
+CI_BENCH_FEATURES=parallel,bench-fast ./scripts/bench_ci.sh
+./scripts/bench_check.sh save --name ci-base
+
+# After applying changes:
+CI_BENCH_FEATURES=parallel,bench-fast ./scripts/bench_ci.sh
+./scripts/bench_check.sh table --baseline ci-base
+./scripts/bench_check.sh compare --baseline ci-base
+```
+
 ## Regression detection
 
 Default threshold: **5%** per benchmark (configurable via `REGRESSION_THRESHOLD`).
 
-Criterion reports regressions in its console output. The compare scripts parse this output and exit with code 1 if any regression is detected.
+`bench_check.*` reads Criterion JSON from `target/criterion/`, compares matching
+benchmark means, and exits with code 1 when any benchmark exceeds the threshold.
+The older `bench_compare.*` wrappers still parse Criterion console output for
+quick baseline checks.
 
 ## Reproducibility checklist
 

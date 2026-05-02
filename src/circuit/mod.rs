@@ -352,12 +352,13 @@ impl Circuit {
                     condition, targets, ..
                 } => {
                     match condition {
-                        ClassicalCondition::BitIsOne(bit) => {
+                        ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => {
                             if let Some(mq) = cbit_to_qubit[*bit] {
                                 union(&mut parent, &mut rank, targets[0], mq);
                             }
                         }
-                        ClassicalCondition::RegisterEquals { offset, size, .. } => {
+                        ClassicalCondition::RegisterEquals { offset, size, .. }
+                        | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
                             for mq in cbit_to_qubit.iter().skip(*offset).take(*size).flatten() {
                                 union(&mut parent, &mut rank, targets[0], *mq);
                             }
@@ -475,11 +476,23 @@ impl Circuit {
                             ClassicalCondition::BitIsOne(bit) => ClassicalCondition::BitIsOne(
                                 old_to_new_classical[*bit].unwrap_or(*bit),
                             ),
+                            ClassicalCondition::BitIsZero(bit) => ClassicalCondition::BitIsZero(
+                                old_to_new_classical[*bit].unwrap_or(*bit),
+                            ),
                             ClassicalCondition::RegisterEquals {
                                 offset,
                                 size,
                                 value,
                             } => ClassicalCondition::RegisterEquals {
+                                offset: old_to_new_classical[*offset].unwrap_or(*offset),
+                                size: *size,
+                                value: *value,
+                            },
+                            ClassicalCondition::RegisterNotEquals {
+                                offset,
+                                size,
+                                value,
+                            } => ClassicalCondition::RegisterNotEquals {
                                 offset: old_to_new_classical[*offset].unwrap_or(*offset),
                                 size: *size,
                                 value: *value,
@@ -602,6 +615,10 @@ impl Circuit {
                             let (_, nc) = cbit_map[*bit].unwrap_or((comp_idx, *bit));
                             ClassicalCondition::BitIsOne(nc)
                         }
+                        ClassicalCondition::BitIsZero(bit) => {
+                            let (_, nc) = cbit_map[*bit].unwrap_or((comp_idx, *bit));
+                            ClassicalCondition::BitIsZero(nc)
+                        }
                         ClassicalCondition::RegisterEquals {
                             offset,
                             size,
@@ -609,6 +626,18 @@ impl Circuit {
                         } => {
                             let new_offset = cbit_map[*offset].map(|(_, nc)| nc).unwrap_or(*offset);
                             ClassicalCondition::RegisterEquals {
+                                offset: new_offset,
+                                size: *size,
+                                value: *value,
+                            }
+                        }
+                        ClassicalCondition::RegisterNotEquals {
+                            offset,
+                            size,
+                            value,
+                        } => {
+                            let new_offset = cbit_map[*offset].map(|(_, nc)| nc).unwrap_or(*offset);
+                            ClassicalCondition::RegisterNotEquals {
                                 offset: new_offset,
                                 size: *size,
                                 value: *value,
@@ -722,8 +751,16 @@ impl Circuit {
 pub enum ClassicalCondition {
     /// True when the classical bit at `bit` is 1.
     BitIsOne(usize),
+    /// True when the classical bit at `bit` is 0.
+    BitIsZero(usize),
     /// True when the classical register (bits `offset..offset+size`) equals `value`.
     RegisterEquals {
+        offset: usize,
+        size: usize,
+        value: u64,
+    },
+    /// True when the classical register (bits `offset..offset+size`) does not equal `value`.
+    RegisterNotEquals {
         offset: usize,
         size: usize,
         value: u64,
@@ -735,7 +772,13 @@ impl ClassicalCondition {
     pub fn evaluate(&self, classical_bits: &[bool]) -> bool {
         match self {
             ClassicalCondition::BitIsOne(bit) => classical_bits[*bit],
+            ClassicalCondition::BitIsZero(bit) => !classical_bits[*bit],
             ClassicalCondition::RegisterEquals {
+                offset,
+                size,
+                value,
+            }
+            | ClassicalCondition::RegisterNotEquals {
                 offset,
                 size,
                 value,
@@ -746,7 +789,12 @@ impl ClassicalCondition {
                         reg_val |= 1u64 << i;
                     }
                 }
-                reg_val == *value
+                let eq = reg_val == *value;
+                if matches!(self, ClassicalCondition::RegisterEquals { .. }) {
+                    eq
+                } else {
+                    !eq
+                }
             }
         }
     }

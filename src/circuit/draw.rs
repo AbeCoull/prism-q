@@ -160,12 +160,20 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                 let max_d = targets.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
                 let cbit_label = match condition {
                     ClassicalCondition::BitIsOne(b) => format!("c[{}]", b),
+                    ClassicalCondition::BitIsZero(b) => format!("!c[{}]", b),
                     ClassicalCondition::RegisterEquals {
                         offset,
                         size,
                         value,
                     } => {
                         format!("c[{}..{}]=={}", offset, offset + size, value)
+                    }
+                    ClassicalCondition::RegisterNotEquals {
+                        offset,
+                        size,
+                        value,
+                    } => {
+                        format!("c[{}..{}]!={}", offset, offset + size, value)
                     }
                 };
                 let op = PlacedOp {

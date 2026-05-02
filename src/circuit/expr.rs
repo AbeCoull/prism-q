@@ -104,6 +104,58 @@ impl<'e> ExprParser<'e> {
 
     fn parse_number(&mut self) -> Result<f64> {
         let start = self.pos;
+
+        if self.pos + 1 < self.chars.len()
+            && self.chars[self.pos] == b'0'
+            && (self.chars[self.pos + 1] == b'x'
+                || self.chars[self.pos + 1] == b'X'
+                || self.chars[self.pos + 1] == b'b'
+                || self.chars[self.pos + 1] == b'B'
+                || self.chars[self.pos + 1] == b'o'
+                || self.chars[self.pos + 1] == b'O')
+        {
+            let prefix = self.chars[self.pos + 1];
+            self.pos += 2;
+            let lit_start = self.pos;
+            let radix = match prefix {
+                b'x' | b'X' => 16,
+                b'b' | b'B' => 2,
+                _ => 8,
+            };
+            while self.pos < self.chars.len() {
+                let c = self.chars[self.pos];
+                let valid = match radix {
+                    16 => c.is_ascii_hexdigit() || c == b'_',
+                    2 => c == b'0' || c == b'1' || c == b'_',
+                    8 => (b'0'..=b'7').contains(&c) || c == b'_',
+                    _ => false,
+                };
+                if !valid {
+                    break;
+                }
+                self.pos += 1;
+            }
+            let s = std::str::from_utf8(&self.chars[lit_start..self.pos]).unwrap_or("");
+            let cleaned: String = s.chars().filter(|c| *c != '_').collect();
+            if cleaned.is_empty() {
+                return Err(PrismError::Parse {
+                    line: self.line,
+                    message: format!(
+                        "missing digits after `{}` integer prefix",
+                        std::str::from_utf8(&self.chars[start..start + 2]).unwrap_or("0?")
+                    ),
+                });
+            }
+            let val = u64::from_str_radix(&cleaned, radix).map_err(|_| PrismError::Parse {
+                line: self.line,
+                message: format!(
+                    "invalid integer literal: `{}`",
+                    std::str::from_utf8(&self.chars[start..self.pos]).unwrap_or("")
+                ),
+            })?;
+            return Ok(val as f64);
+        }
+
         while self.pos < self.chars.len()
             && (self.chars[self.pos].is_ascii_digit()
                 || self.chars[self.pos] == b'.'
@@ -237,6 +289,8 @@ impl<'e> ExprParser<'e> {
             "pi" => return Ok(std::f64::consts::PI),
             "tau" => return Ok(std::f64::consts::TAU),
             "euler" | "e" => return Ok(std::f64::consts::E),
+            "true" => return Ok(1.0),
+            "false" => return Ok(0.0),
             _ => {}
         }
         if let Some(vars) = self.vars {

@@ -340,6 +340,14 @@ For multi-shot sampling without materializing the full statevector on every shot
 | `CorrelatorAccumulator` | ⟨Z_i Z_j⟩ correlations | Entanglement analysis |
 | `NullAccumulator` | Nothing | Benchmarking raw sampling speed |
 
+**Detector sampler** (`compile_detector_sampler`): Compiles Clifford circuits
+with measurement and reset reuse into the same packed measurement sampler, then
+derives detector and observable records as packed parity rows over measurement
+record indices. Reset reuse is represented by fresh qubit aliases, so repeated
+syndrome extraction avoids per-shot tableau replay. The sampler can return
+packed measurements, packed detectors, packed observables, detector counts, or
+feed packed detector chunks into any `ShotAccumulator`.
+
 ### Noisy compiled sampler (`src/sim/noise.rs`)
 
 Backward Pauli propagation through circuit + noise sensitivity analysis. Each noise location gets an X-flip and Z-flip sensitivity row. During sampling, Bernoulli coin flips determine which noise channels fire, then XOR the sensitivity rows into the sample.
@@ -488,7 +496,7 @@ Top-level re-exports from `src/lib.rs`:
 `run`, `run_with`, `run_on`, `run_qasm`, `run_shots`, `run_shots_with`, `run_shots_with_noise`, `run_counts`, `run_marginals`, `bitstring`
 
 **Compiled sampling:**
-`compile_measurements`, `compile_forward`, `compile_noisy`, `run_shots_compiled`, `run_shots_noisy`, `run_shots_homological`, `noisy_marginals_analytical`
+`compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`, `run_shots_compiled`, `run_shots_noisy`, `run_shots_homological`, `noisy_marginals_analytical`
 
 **Clifford+T:**
 `run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `run_spp`, `run_spd`, `spp_to_probabilities`, `spd_to_probabilities`
@@ -503,4 +511,4 @@ Top-level re-exports from `src/lib.rs`:
 `ShotAccumulator`, `HistogramAccumulator`, `MarginalsAccumulator`, `PauliExpectationAccumulator`, `CorrelatorAccumulator`, `NullAccumulator`, `PackedShots`, `ShotLayout`
 
 **Data types:**
-`CompiledSampler`, `NoisyCompiledSampler`, `HomologicalSampler`, `ErrorChainComplex`, `NoiseModel`, `NoiseOp`, `StabRankResult`, `SppResult`, `SpdResult`, `SparseParity`, `ParityStats`, `PauliVec`, `MultiFusedData`, `BatchPhaseData`, `McuData`, `Multi2qData`
+`CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`, `NoisyCompiledSampler`, `HomologicalSampler`, `ErrorChainComplex`, `NoiseModel`, `NoiseOp`, `StabRankResult`, `SppResult`, `SpdResult`, `SparseParity`, `ParityStats`, `PauliVec`, `MultiFusedData`, `BatchPhaseData`, `McuData`, `Multi2qData`

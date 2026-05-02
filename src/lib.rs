@@ -60,9 +60,10 @@ pub use circuit::{Circuit, ClassicalCondition, Instruction, SvgOptions, TextOpti
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
 pub use sim::compiled::{
-    compile_forward, compile_measurements, run_shots_compiled, CompiledSampler,
-    CorrelatorAccumulator, HistogramAccumulator, MarginalsAccumulator, NullAccumulator,
-    PackedShots, ParityStats, PauliExpectationAccumulator, ShotAccumulator, ShotLayout,
+    compile_detector_sampler, compile_forward, compile_measurements, run_shots_compiled,
+    CompiledDetectorSampler, CompiledSampler, CorrelatorAccumulator, DetectorSampleBatch,
+    HistogramAccumulator, MarginalsAccumulator, NullAccumulator, PackedShots, ParityStats,
+    PauliExpectationAccumulator, ShotAccumulator, ShotLayout,
 };
 pub use sim::homological::{
     noisy_marginals_analytical, run_shots_homological, ErrorChainComplex, HomologicalSampler,

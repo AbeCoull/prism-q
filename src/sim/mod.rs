@@ -616,12 +616,42 @@ pub(crate) fn supports_compiled_measurement_sampling(circuit: &Circuit) -> bool 
             .any(|inst| matches!(inst, Instruction::Measure { .. }))
 }
 
+fn supports_deferred_measurement_sampling(circuit: &Circuit) -> bool {
+    circuit.is_clifford_only()
+        && (circuit.has_resets() || !circuit.has_terminal_measurements_only())
+        && circuit
+            .instructions
+            .iter()
+            .any(|inst| matches!(inst, Instruction::Measure { .. }))
+        && !circuit
+            .instructions
+            .iter()
+            .any(|inst| matches!(inst, Instruction::Conditional { .. }))
+}
+
 fn should_use_compiled_clifford_sampling(
     kind: &BackendKind,
     circuit: &Circuit,
     num_shots: usize,
 ) -> bool {
     if num_shots < 2 || !supports_compiled_measurement_sampling(circuit) {
+        return false;
+    }
+
+    match kind {
+        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer => true,
+        #[cfg(feature = "gpu")]
+        BackendKind::StabilizerGpu { .. } => true,
+        _ => false,
+    }
+}
+
+fn should_use_deferred_clifford_sampling(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+) -> bool {
+    if num_shots < 2 || !supports_deferred_measurement_sampling(circuit) {
         return false;
     }
 
@@ -649,6 +679,32 @@ fn compile_measurements_for_kind(
     }
 
     Ok(sampler)
+}
+
+fn packed_shots_to_classical_bits(
+    packed: &compiled::PackedShots,
+    meas_map: &[(usize, usize)],
+    num_classical_bits: usize,
+) -> Vec<Vec<bool>> {
+    let dense_identity_map = meas_map.len() == num_classical_bits
+        && meas_map
+            .iter()
+            .enumerate()
+            .all(|(idx, &(_, classical_bit))| idx == classical_bit);
+    if dense_identity_map {
+        return packed.to_shots();
+    }
+
+    let mut shots = vec![vec![false; num_classical_bits]; packed.num_shots()];
+    for (measurement, &(_, classical_bit)) in meas_map.iter().enumerate() {
+        if classical_bit >= num_classical_bits {
+            continue;
+        }
+        for (shot_idx, shot) in shots.iter_mut().enumerate() {
+            shot[classical_bit] = packed.get_bit(shot_idx, measurement);
+        }
+    }
+    shots
 }
 
 /// Execute a circuit multiple times and return outcome counts directly.
@@ -756,10 +812,27 @@ pub fn run_shots_with(
     if should_use_compiled_clifford_sampling(&kind, circuit, num_shots) {
         let mut sampler = compile_measurements_for_kind(&kind, circuit, seed)?;
         let packed = sampler.try_sample_bulk_packed(num_shots)?;
+        let meas_map = circuit.measurement_map();
         return Ok(ShotsResult {
-            shots: packed.to_shots(),
+            shots: packed_shots_to_classical_bits(&packed, &meas_map, circuit.num_classical_bits),
             num_classical_bits: circuit.num_classical_bits,
         });
+    }
+
+    if should_use_deferred_clifford_sampling(&kind, circuit, num_shots) {
+        if let Ok(deferred) = compiled::defer_measure_reset_circuit(circuit) {
+            let mut sampler = compile_measurements_for_kind(&kind, &deferred, seed)?;
+            let packed = sampler.try_sample_bulk_packed(num_shots)?;
+            let meas_map = deferred.measurement_map();
+            return Ok(ShotsResult {
+                shots: packed_shots_to_classical_bits(
+                    &packed,
+                    &meas_map,
+                    circuit.num_classical_bits,
+                ),
+                num_classical_bits: circuit.num_classical_bits,
+            });
+        }
     }
 
     if circuit.has_terminal_measurements_only() {
@@ -1816,6 +1889,23 @@ mod tests {
         let result = run_shots(&circuit, 100, 42).unwrap();
         for (i, shot) in result.shots.iter().enumerate() {
             assert!(shot[0], "shot {i}: X|0> should always measure 1");
+        }
+    }
+
+    #[test]
+    fn test_fast_path_preserves_classical_bit_index() {
+        let qasm = r#"
+            OPENQASM 3.0;
+            qubit[1] q;
+            bit[3] c;
+            x q[0];
+            c[2] = measure q[0];
+        "#;
+        let circuit = crate::circuit::openqasm::parse(qasm).unwrap();
+        let result = run_shots(&circuit, 16, 42).unwrap();
+        assert_eq!(result.num_classical_bits, 3);
+        for shot in &result.shots {
+            assert_eq!(shot, &vec![false, false, true]);
         }
     }
 

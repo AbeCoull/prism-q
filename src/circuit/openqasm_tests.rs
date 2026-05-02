@@ -1,5 +1,34 @@
 use super::*;
 
+fn assert_complex_close(actual: num_complex::Complex64, expected: num_complex::Complex64) {
+    assert!(
+        (actual - expected).norm() < 1e-12,
+        "expected {expected:?}, got {actual:?}"
+    );
+}
+
+fn assert_mat2_close(
+    actual: &[[num_complex::Complex64; 2]; 2],
+    expected: [[num_complex::Complex64; 2]; 2],
+) {
+    for i in 0..2 {
+        for j in 0..2 {
+            assert_complex_close(actual[i][j], expected[i][j]);
+        }
+    }
+}
+
+fn assert_mat4_close(
+    actual: &[[num_complex::Complex64; 4]; 4],
+    expected: [[num_complex::Complex64; 4]; 4],
+) {
+    for i in 0..4 {
+        for j in 0..4 {
+            assert_complex_close(actual[i][j], expected[i][j]);
+        }
+    }
+}
+
 #[test]
 fn test_oq3_minimal_circuit() {
     let qasm = "OPENQASM 3.0;\nqubit[1] q;\nh q[0];";
@@ -421,6 +450,76 @@ fn test_p_gate() {
 }
 
 #[test]
+fn test_phase_alias() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nphase(pi/4) q[0];";
+    let c = parse(qasm).unwrap();
+    if let Instruction::Gate { gate, .. } = &c.instructions[0] {
+        assert_eq!(*gate, Gate::P(std::f64::consts::FRAC_PI_4));
+    } else {
+        panic!("expected gate");
+    }
+}
+
+#[test]
+fn test_uppercase_u_gate() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nU(pi/2, 0, pi) q[0];";
+    let c = parse(qasm).unwrap();
+    if let Instruction::Gate { gate, .. } = &c.instructions[0] {
+        if let Gate::Fused(mat) = gate {
+            assert_mat2_close(mat, Gate::H.matrix_2x2());
+        } else {
+            panic!("expected Fused");
+        }
+    } else {
+        panic!("expected gate");
+    }
+}
+
+#[test]
+fn test_qiskit_exported_r_definition_uses_uppercase_u() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        gate r(p0, p1) _gate_q_0 {
+          U(p0, -pi/2 + p1, pi/2 - p1) _gate_q_0;
+        }
+        qubit[1] q;
+        r(pi/3, pi/7) q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 1);
+    assert!(matches!(
+        &c.instructions[0],
+        Instruction::Gate {
+            gate: Gate::Fused(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_r_gate_matrix() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nr(pi/2, pi/4) q[0];";
+    let c = parse(qasm).unwrap();
+    let theta = std::f64::consts::FRAC_PI_2;
+    let phi = std::f64::consts::FRAC_PI_4;
+    let c0 = num_complex::Complex64::new((theta / 2.0).cos(), 0.0);
+    let off = num_complex::Complex64::new(0.0, -1.0) * (theta / 2.0).sin();
+    let expected = [
+        [c0, off * num_complex::Complex64::from_polar(1.0, -phi)],
+        [off * num_complex::Complex64::from_polar(1.0, phi), c0],
+    ];
+    if let Instruction::Gate { gate, .. } = &c.instructions[0] {
+        if let Gate::Fused(mat) = gate {
+            assert_mat2_close(mat, expected);
+        } else {
+            panic!("expected Fused");
+        }
+    } else {
+        panic!("expected gate");
+    }
+}
+
+#[test]
 fn test_cy_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\ncy q[0], q[1];";
     let c = parse(qasm).unwrap();
@@ -434,6 +533,58 @@ fn test_cy_gate() {
                     assert!((mat[i][j] - expected[i][j]).norm() < 1e-12);
                 }
             }
+        } else {
+            panic!("expected Cu");
+        }
+    } else {
+        panic!("expected gate");
+    }
+}
+
+#[test]
+fn test_cs_and_csdg_gates() {
+    let qasm = "OPENQASM 3.0;\nqubit[2] q;\ncs q[0], q[1];\ncsdg q[0], q[1];";
+    let c = parse(qasm).unwrap();
+    let expected = [Gate::S.matrix_2x2(), Gate::Sdg.matrix_2x2()];
+    for (inst, expected_mat) in c.instructions.iter().zip(expected) {
+        if let Instruction::Gate { gate, targets } = inst {
+            assert_eq!(targets.as_slice(), &[0, 1]);
+            if let Gate::Cu(mat) = gate {
+                assert_mat2_close(mat, expected_mat);
+            } else {
+                panic!("expected Cu");
+            }
+        } else {
+            panic!("expected gate");
+        }
+    }
+}
+
+#[test]
+fn test_cu_gate_matrix() {
+    let qasm = "OPENQASM 3.0;\nqubit[2] q;\ncu(pi/2, pi/5, pi/7, pi/11) q[0], q[1];";
+    let c = parse(qasm).unwrap();
+    let theta = std::f64::consts::FRAC_PI_2;
+    let phi = std::f64::consts::PI / 5.0;
+    let lam = std::f64::consts::PI / 7.0;
+    let gamma = std::f64::consts::PI / 11.0;
+    let c0 = (theta / 2.0).cos();
+    let s0 = (theta / 2.0).sin();
+    let phase = num_complex::Complex64::from_polar(1.0, gamma);
+    let expected = [
+        [
+            phase * num_complex::Complex64::new(c0, 0.0),
+            -phase * num_complex::Complex64::from_polar(s0, lam),
+        ],
+        [
+            phase * num_complex::Complex64::from_polar(s0, phi),
+            phase * num_complex::Complex64::from_polar(c0, phi + lam),
+        ],
+    ];
+    if let Instruction::Gate { gate, targets } = &c.instructions[0] {
+        assert_eq!(targets.as_slice(), &[0, 1]);
+        if let Gate::Cu(mat) = gate {
+            assert_mat2_close(mat, expected);
         } else {
             panic!("expected Cu");
         }
@@ -508,6 +659,63 @@ fn test_ccz_gate() {
 }
 
 #[test]
+fn test_multi_controlled_x_aliases() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[6] q;
+        c3x q[0], q[1], q[2], q[3];
+        c4x q[0], q[1], q[2], q[3], q[4];
+        mcx q[0], q[1], q[2], q[3], q[4], q[5];
+    "#;
+    let c = parse(qasm).unwrap();
+    let expected_controls = [3, 4, 5];
+    for (inst, expected) in c.instructions.iter().zip(expected_controls) {
+        if let Instruction::Gate { gate, .. } = inst {
+            if let Gate::Mcu(data) = gate {
+                assert_eq!(data.num_controls, expected);
+                assert_mat2_close(&data.mat, Gate::X.matrix_2x2());
+            } else {
+                panic!("expected Mcu");
+            }
+        } else {
+            panic!("expected gate");
+        }
+    }
+}
+
+#[test]
+fn test_relative_phase_x_decompositions() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[4] q;
+        rccx q[0], q[1], q[2];
+        rcccx q[0], q[1], q[2], q[3];
+        rc3x q[0], q[1], q[2], q[3];
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.instructions.len(), 45);
+    assert!(
+        matches!(&c.instructions[0], Instruction::Gate { gate: Gate::H, targets } if targets.as_slice() == [2])
+    );
+    assert!(
+        matches!(&c.instructions[8], Instruction::Gate { gate: Gate::H, targets } if targets.as_slice() == [2])
+    );
+    assert!(
+        matches!(&c.instructions[9], Instruction::Gate { gate: Gate::H, targets } if targets.as_slice() == [3])
+    );
+    assert!(
+        matches!(&c.instructions[27], Instruction::Gate { gate: Gate::H, targets } if targets.as_slice() == [3])
+    );
+}
+
+#[test]
+fn test_modifier_on_decomposed_gate_rejected() {
+    let qasm = "OPENQASM 3.0;\nqubit[2] q;\ninv @ rxx(pi/4) q[0], q[1];";
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::UnsupportedConstruct { .. }));
+}
+
+#[test]
 fn test_cswap_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[3] q;\ncswap q[0], q[1], q[2];";
     let c = parse(qasm).unwrap();
@@ -552,10 +760,246 @@ fn test_ryy_gate() {
 }
 
 #[test]
+fn test_xx_plus_minus_yy_matrices() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        xx_plus_yy(pi/3, pi/5) q[0], q[1];
+        xx_minus_yy(pi/7, pi/11) q[0], q[1];
+    "#;
+    let c = parse(qasm).unwrap();
+
+    let zero = num_complex::Complex64::new(0.0, 0.0);
+    let one = num_complex::Complex64::new(1.0, 0.0);
+    let plus_theta = std::f64::consts::PI / 3.0;
+    let plus_beta = std::f64::consts::PI / 5.0;
+    let plus_c = num_complex::Complex64::new((plus_theta / 2.0).cos(), 0.0);
+    let plus_s = num_complex::Complex64::new(0.0, -(plus_theta / 2.0).sin());
+    let expected_plus = [
+        [one, zero, zero, zero],
+        [
+            zero,
+            plus_c,
+            plus_s * num_complex::Complex64::from_polar(1.0, -plus_beta),
+            zero,
+        ],
+        [
+            zero,
+            plus_s * num_complex::Complex64::from_polar(1.0, plus_beta),
+            plus_c,
+            zero,
+        ],
+        [zero, zero, zero, one],
+    ];
+
+    let minus_theta = std::f64::consts::PI / 7.0;
+    let minus_beta = std::f64::consts::PI / 11.0;
+    let minus_c = num_complex::Complex64::new((minus_theta / 2.0).cos(), 0.0);
+    let minus_s = num_complex::Complex64::new(0.0, -(minus_theta / 2.0).sin());
+    let expected_minus = [
+        [
+            minus_c,
+            zero,
+            zero,
+            minus_s * num_complex::Complex64::from_polar(1.0, -minus_beta),
+        ],
+        [zero, one, zero, zero],
+        [zero, zero, one, zero],
+        [
+            minus_s * num_complex::Complex64::from_polar(1.0, minus_beta),
+            zero,
+            zero,
+            minus_c,
+        ],
+    ];
+
+    if let Instruction::Gate { gate, targets } = &c.instructions[0] {
+        assert_eq!(targets.as_slice(), &[0, 1]);
+        if let Gate::Fused2q(mat) = gate {
+            assert_mat4_close(mat, expected_plus);
+        } else {
+            panic!("expected Fused2q");
+        }
+    } else {
+        panic!("expected gate");
+    }
+    if let Instruction::Gate { gate, targets } = &c.instructions[1] {
+        assert_eq!(targets.as_slice(), &[0, 1]);
+        if let Gate::Fused2q(mat) = gate {
+            assert_mat4_close(mat, expected_minus);
+        } else {
+            panic!("expected Fused2q");
+        }
+    } else {
+        panic!("expected gate");
+    }
+}
+
+#[test]
 fn test_iswap_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\niswap q[0], q[1];";
     let c = parse(qasm).unwrap();
     assert_eq!(c.instructions.len(), 6);
+}
+
+#[test]
+fn test_google_cirq_native_matrices() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        syc q[0], q[1];
+        sqrt_iswap q[0], q[1];
+        sqrt_iswap_inv q[0], q[1];
+    "#;
+    let c = parse(qasm).unwrap();
+    let zero = num_complex::Complex64::new(0.0, 0.0);
+    let one = num_complex::Complex64::new(1.0, 0.0);
+    let neg_i = num_complex::Complex64::new(0.0, -1.0);
+    let half = num_complex::Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+    let pos_half_i = num_complex::Complex64::new(0.0, std::f64::consts::FRAC_1_SQRT_2);
+    let neg_half_i = num_complex::Complex64::new(0.0, -std::f64::consts::FRAC_1_SQRT_2);
+    let expected = [
+        [
+            [one, zero, zero, zero],
+            [zero, zero, neg_i, zero],
+            [zero, neg_i, zero, zero],
+            [
+                zero,
+                zero,
+                zero,
+                num_complex::Complex64::from_polar(1.0, -std::f64::consts::PI / 6.0),
+            ],
+        ],
+        [
+            [one, zero, zero, zero],
+            [zero, half, pos_half_i, zero],
+            [zero, pos_half_i, half, zero],
+            [zero, zero, zero, one],
+        ],
+        [
+            [one, zero, zero, zero],
+            [zero, half, neg_half_i, zero],
+            [zero, neg_half_i, half, zero],
+            [zero, zero, zero, one],
+        ],
+    ];
+
+    for (inst, expected_mat) in c.instructions.iter().zip(expected) {
+        if let Instruction::Gate { gate, targets } = inst {
+            assert_eq!(targets.as_slice(), &[0, 1]);
+            if let Gate::Fused2q(mat) = gate {
+                assert_mat4_close(mat, expected_mat);
+            } else {
+                panic!("expected Fused2q");
+            }
+        } else {
+            panic!("expected gate");
+        }
+    }
+}
+
+#[test]
+fn test_ionq_native_gate_matrices() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        gpi(0.25) q[0];
+        gpi2(0.5) q[0];
+        ms(0.125, 0.25, 0.125) q[0], q[1];
+        ms(0.0, 0.0) q[0], q[1];
+    "#;
+    let c = parse(qasm).unwrap();
+    let zero = num_complex::Complex64::new(0.0, 0.0);
+    let i = num_complex::Complex64::new(0.0, 1.0);
+    if let Instruction::Gate { gate, .. } = &c.instructions[0] {
+        if let Gate::Fused(mat) = gate {
+            assert_mat2_close(mat, [[zero, -i], [i, zero]]);
+        } else {
+            panic!("expected Fused");
+        }
+    } else {
+        panic!("expected gate");
+    }
+
+    if let Instruction::Gate { gate, .. } = &c.instructions[1] {
+        if let Gate::Fused(mat) = gate {
+            let h = std::f64::consts::FRAC_1_SQRT_2;
+            let expected = [
+                [
+                    num_complex::Complex64::new(h, 0.0),
+                    num_complex::Complex64::new(0.0, h),
+                ],
+                [
+                    num_complex::Complex64::new(0.0, h),
+                    num_complex::Complex64::new(h, 0.0),
+                ],
+            ];
+            assert_mat2_close(mat, expected);
+        } else {
+            panic!("expected Fused");
+        }
+    } else {
+        panic!("expected gate");
+    }
+
+    let theta = 0.125;
+    let phi0 = 0.125;
+    let phi1 = 0.25;
+    let c0 = num_complex::Complex64::new((std::f64::consts::PI * theta).cos(), 0.0);
+    let s0 = num_complex::Complex64::new(0.0, -(std::f64::consts::PI * theta).sin());
+    let expected_ms = [
+        [
+            c0,
+            zero,
+            zero,
+            s0 * num_complex::Complex64::from_polar(1.0, -std::f64::consts::TAU * (phi0 + phi1)),
+        ],
+        [
+            zero,
+            c0,
+            s0 * num_complex::Complex64::from_polar(1.0, -std::f64::consts::TAU * (phi0 - phi1)),
+            zero,
+        ],
+        [
+            zero,
+            s0 * num_complex::Complex64::from_polar(1.0, std::f64::consts::TAU * (phi0 - phi1)),
+            c0,
+            zero,
+        ],
+        [
+            s0 * num_complex::Complex64::from_polar(1.0, std::f64::consts::TAU * (phi0 + phi1)),
+            zero,
+            zero,
+            c0,
+        ],
+    ];
+    if let Instruction::Gate { gate, .. } = &c.instructions[2] {
+        if let Gate::Fused2q(mat) = gate {
+            assert_mat4_close(mat, expected_ms);
+        } else {
+            panic!("expected Fused2q");
+        }
+    } else {
+        panic!("expected gate");
+    }
+
+    let c_default = num_complex::Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+    let s_default = num_complex::Complex64::new(0.0, -std::f64::consts::FRAC_1_SQRT_2);
+    let expected_default_ms = [
+        [c_default, zero, zero, s_default],
+        [zero, c_default, s_default, zero],
+        [zero, s_default, c_default, zero],
+        [s_default, zero, zero, c_default],
+    ];
+    if let Instruction::Gate { gate, .. } = &c.instructions[3] {
+        if let Gate::Fused2q(mat) = gate {
+            assert_mat4_close(mat, expected_default_ms);
+        } else {
+            panic!("expected Fused2q");
+        }
+    } else {
+        panic!("expected gate");
+    }
 }
 
 #[test]

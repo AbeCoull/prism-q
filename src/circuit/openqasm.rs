@@ -1,4 +1,4 @@
-//! OpenQASM 3.0 parser — v0 subset.
+//! OpenQASM 3.0 parser, v0 subset.
 //!
 //! # Supported constructs
 //!
@@ -9,10 +9,11 @@
 //! | Qubit declaration | `qubit[4] q;` | OQ3 syntax (primary) |
 //! | Bit declaration | `bit[4] c;` | OQ3 syntax (primary) |
 //! | Legacy qreg/creg | `qreg q[4]; creg c[4];` | OQ2 compat |
-//! | 1-qubit gates | `h q[0]; x q[1];` | id, x, y, z, h, s, sdg, t, tdg |
-//! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz — arithmetic expressions with `pi`, math functions |
-//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cz, swap |
-//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) |
+//! | 1-qubit gates | `h q[0]; x q[1];` | id, x, y, z, h, s, sdg, t, tdg, sx, sxdg, p/phase, r, gpi, gpi2, u/U forms |
+//! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz, cu, ms, arithmetic expressions with `pi`, math functions |
+//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase, crx, cry, crz, csx, swap, rzz, rxx, ryy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
+//! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
+//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) for direct gates |
 //! | Measurement (OQ3) | `c[0] = measure q[0];` | Assignment syntax (primary) |
 //! | Measurement (OQ2) | `measure q[0] -> c[0];` | Arrow syntax (compat) |
 //! | Register broadcast | `h q;` / `cx q, r;` | Applies gate to all qubits in register |
@@ -718,6 +719,12 @@ impl<'a> Parser<'a> {
             if let Some(instrs) =
                 Self::resolve_decomposed_gate(&gate_name, &params, &qubits, line_num)?
             {
+                if !modifiers.is_empty() {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!("modifier on decomposed gate `{gate_name}`"),
+                        line: line_num,
+                    });
+                }
                 return Ok(instrs);
             }
 
@@ -753,6 +760,12 @@ impl<'a> Parser<'a> {
             if let Some(mut instrs) =
                 Self::resolve_decomposed_gate(&gate_name, &params, &qubits, line_num)?
             {
+                if !modifiers.is_empty() {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!("modifier on decomposed gate `{gate_name}`"),
+                        line: line_num,
+                    });
+                }
                 all_instrs.append(&mut instrs);
                 continue;
             }
@@ -1069,9 +1082,13 @@ impl<'a> Parser<'a> {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::Rz(params[0]))
             }
-            "p" => {
+            "p" | "phase" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::P(params[0]))
+            }
+            "r" => {
+                Self::expect_param_count(name, params, 2, line_num)?;
+                Ok(Gate::Fused(Box::new(Self::r_matrix(params[0], params[1]))))
             }
             "sx" => Ok(Gate::SX),
             "sxdg" => Ok(Gate::SXdg),
@@ -1085,7 +1102,15 @@ impl<'a> Parser<'a> {
             }
             "cx" | "CX" | "cnot" => Ok(Gate::Cx),
             "cy" => Ok(Gate::cu(Gate::Y.matrix_2x2())),
+            "cs" => Ok(Gate::cu(Gate::S.matrix_2x2())),
+            "csdg" => Ok(Gate::cu(Gate::Sdg.matrix_2x2())),
             "ch" => Ok(Gate::cu(Gate::H.matrix_2x2())),
+            "cu" => {
+                Self::expect_param_count(name, params, 4, line_num)?;
+                Ok(Gate::cu(Self::cu_target_matrix(
+                    params[0], params[1], params[2], params[3],
+                )))
+            }
             "crx" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::cu(Gate::Rx(params[0]).matrix_2x2()))
@@ -1103,6 +1128,45 @@ impl<'a> Parser<'a> {
             "swap" => Ok(Gate::Swap),
             "ccx" | "toffoli" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 2)),
             "ccz" => Ok(Gate::mcu(Gate::Z.matrix_2x2(), 2)),
+            "c3x" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 3)),
+            "c4x" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 4)),
+            "xx_plus_yy" => {
+                Self::expect_param_count(name, params, 2, line_num)?;
+                Ok(Gate::Fused2q(Box::new(Self::xx_plus_yy_matrix(
+                    params[0], params[1],
+                ))))
+            }
+            "xx_minus_yy" => {
+                Self::expect_param_count(name, params, 2, line_num)?;
+                Ok(Gate::Fused2q(Box::new(Self::xx_minus_yy_matrix(
+                    params[0], params[1],
+                ))))
+            }
+            "gpi" => {
+                Self::expect_param_count(name, params, 1, line_num)?;
+                Ok(Gate::Fused(Box::new(Self::gpi_matrix(params[0]))))
+            }
+            "gpi2" => {
+                Self::expect_param_count(name, params, 1, line_num)?;
+                Ok(Gate::Fused(Box::new(Self::gpi2_matrix(params[0]))))
+            }
+            "ms" => {
+                if !(params.len() == 2 || params.len() == 3) {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!(
+                            "`{name}` at line {line_num} requires 2 or 3 parameter(s), got {}",
+                            params.len()
+                        ),
+                    });
+                }
+                let theta = params.get(2).copied().unwrap_or(0.25);
+                Ok(Gate::Fused2q(Box::new(Self::ms_matrix(
+                    params[0], params[1], theta,
+                ))))
+            }
+            "syc" => Ok(Gate::Fused2q(Box::new(Self::syc_matrix()))),
+            "sqrt_iswap" => Ok(Gate::Fused2q(Box::new(Self::sqrt_iswap_matrix(1.0)))),
+            "sqrt_iswap_inv" => Ok(Gate::Fused2q(Box::new(Self::sqrt_iswap_matrix(-1.0)))),
             _ => Err(PrismError::UnsupportedConstruct {
                 construct: name.to_string(),
                 line: line_num,
@@ -1122,6 +1186,153 @@ impl<'a> Parser<'a> {
         line_num: usize,
     ) -> Result<Option<Vec<Instruction>>> {
         match name {
+            "mcx" => {
+                if qubits.len() < 2 {
+                    return Err(PrismError::GateArity {
+                        gate: name.to_string(),
+                        expected: 2,
+                        got: qubits.len(),
+                    });
+                }
+                let controls = qubits.len() - 1;
+                if controls > u8::MAX as usize {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!(
+                            "`{name}` at line {line_num} supports at most {} controls, got {controls}",
+                            u8::MAX
+                        ),
+                    });
+                }
+                Ok(Some(vec![Instruction::Gate {
+                    gate: Gate::mcu(Gate::X.matrix_2x2(), controls as u8),
+                    targets: SmallVec::from_slice(qubits),
+                }]))
+            }
+            "rccx" => {
+                Self::check_arity(name, qubits, 3)?;
+                let c0 = qubits[0];
+                let c1 = qubits[1];
+                let target = qubits[2];
+                Ok(Some(vec![
+                    Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::T,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c1, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Tdg,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c0, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::T,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c1, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Tdg,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![target],
+                    },
+                ]))
+            }
+            "rc3x" | "rcccx" => {
+                Self::check_arity(name, qubits, 4)?;
+                let c0 = qubits[0];
+                let c1 = qubits[1];
+                let c2 = qubits[2];
+                let target = qubits[3];
+                Ok(Some(vec![
+                    Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::T,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c2, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Tdg,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c0, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::T,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c1, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Tdg,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c0, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::T,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c1, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Tdg,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::T,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Cx,
+                        targets: smallvec![c2, target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::Tdg,
+                        targets: smallvec![target],
+                    },
+                    Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![target],
+                    },
+                ]))
+            }
             "cswap" | "fredkin" => {
                 Self::check_arity(name, qubits, 3)?;
                 let ctrl = qubits[0];
@@ -1311,21 +1522,13 @@ impl<'a> Parser<'a> {
                     targets: smallvec![qubits[0]],
                 }]))
             }
-            "u3" | "u" => {
+            "u3" | "u" | "U" => {
                 Self::expect_param_count(name, params, 3, line_num)?;
                 Self::check_arity(name, qubits, 1)?;
                 let theta = params[0];
                 let phi = params[1];
                 let lam = params[2];
-                let c = (theta / 2.0).cos();
-                let s = (theta / 2.0).sin();
-                let mat = [
-                    [Complex64::new(c, 0.0), -Complex64::from_polar(s, lam)],
-                    [
-                        Complex64::from_polar(s, phi),
-                        Complex64::from_polar(c, phi + lam),
-                    ],
-                ];
+                let mat = Self::u_matrix(theta, phi, lam);
                 Ok(Some(vec![Instruction::Gate {
                     gate: Gate::Fused(Box::new(mat)),
                     targets: smallvec![qubits[0]],
@@ -1344,6 +1547,155 @@ impl<'a> Parser<'a> {
             });
         }
         Ok(())
+    }
+
+    fn u_matrix(theta: f64, phi: f64, lam: f64) -> [[Complex64; 2]; 2] {
+        let c = (theta / 2.0).cos();
+        let s = (theta / 2.0).sin();
+        [
+            [Complex64::new(c, 0.0), -Complex64::from_polar(s, lam)],
+            [
+                Complex64::from_polar(s, phi),
+                Complex64::from_polar(c, phi + lam),
+            ],
+        ]
+    }
+
+    fn r_matrix(theta: f64, phi: f64) -> [[Complex64; 2]; 2] {
+        let zero_phase = Complex64::new((theta / 2.0).cos(), 0.0);
+        let off = Complex64::new(0.0, -1.0) * (theta / 2.0).sin();
+        [
+            [zero_phase, off * Complex64::from_polar(1.0, -phi)],
+            [off * Complex64::from_polar(1.0, phi), zero_phase],
+        ]
+    }
+
+    fn cu_target_matrix(theta: f64, phi: f64, lam: f64, gamma: f64) -> [[Complex64; 2]; 2] {
+        let phase = Complex64::from_polar(1.0, gamma);
+        let u = Self::u_matrix(theta, phi, lam);
+        [
+            [phase * u[0][0], phase * u[0][1]],
+            [phase * u[1][0], phase * u[1][1]],
+        ]
+    }
+
+    fn xx_plus_yy_matrix(theta: f64, beta: f64) -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let c = Complex64::new((theta / 2.0).cos(), 0.0);
+        let s = Complex64::new(0.0, -(theta / 2.0).sin());
+        [
+            [one, zero, zero, zero],
+            [zero, c, s * Complex64::from_polar(1.0, -beta), zero],
+            [zero, s * Complex64::from_polar(1.0, beta), c, zero],
+            [zero, zero, zero, one],
+        ]
+    }
+
+    fn xx_minus_yy_matrix(theta: f64, beta: f64) -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let c = Complex64::new((theta / 2.0).cos(), 0.0);
+        let s = Complex64::new(0.0, -(theta / 2.0).sin());
+        [
+            [c, zero, zero, s * Complex64::from_polar(1.0, -beta)],
+            [zero, one, zero, zero],
+            [zero, zero, one, zero],
+            [s * Complex64::from_polar(1.0, beta), zero, zero, c],
+        ]
+    }
+
+    fn gpi_matrix(phi: f64) -> [[Complex64; 2]; 2] {
+        let zero = Complex64::new(0.0, 0.0);
+        [
+            [
+                zero,
+                Complex64::from_polar(1.0, -std::f64::consts::TAU * phi),
+            ],
+            [
+                Complex64::from_polar(1.0, std::f64::consts::TAU * phi),
+                zero,
+            ],
+        ]
+    }
+
+    fn gpi2_matrix(phi: f64) -> [[Complex64; 2]; 2] {
+        let one = Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+        let off = Complex64::new(0.0, -std::f64::consts::FRAC_1_SQRT_2);
+        [
+            [
+                one,
+                off * Complex64::from_polar(1.0, -std::f64::consts::TAU * phi),
+            ],
+            [
+                off * Complex64::from_polar(1.0, std::f64::consts::TAU * phi),
+                one,
+            ],
+        ]
+    }
+
+    fn ms_matrix(phi0: f64, phi1: f64, theta: f64) -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let c = Complex64::new((std::f64::consts::PI * theta).cos(), 0.0);
+        let s = Complex64::new(0.0, -(std::f64::consts::PI * theta).sin());
+        let sum = phi0 + phi1;
+        let diff = phi0 - phi1;
+        [
+            [
+                c,
+                zero,
+                zero,
+                s * Complex64::from_polar(1.0, -std::f64::consts::TAU * sum),
+            ],
+            [
+                zero,
+                c,
+                s * Complex64::from_polar(1.0, -std::f64::consts::TAU * diff),
+                zero,
+            ],
+            [
+                zero,
+                s * Complex64::from_polar(1.0, std::f64::consts::TAU * diff),
+                c,
+                zero,
+            ],
+            [
+                s * Complex64::from_polar(1.0, std::f64::consts::TAU * sum),
+                zero,
+                zero,
+                c,
+            ],
+        ]
+    }
+
+    fn syc_matrix() -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let neg_i = Complex64::new(0.0, -1.0);
+        [
+            [one, zero, zero, zero],
+            [zero, zero, neg_i, zero],
+            [zero, neg_i, zero, zero],
+            [
+                zero,
+                zero,
+                zero,
+                Complex64::from_polar(1.0, -std::f64::consts::PI / 6.0),
+            ],
+        ]
+    }
+
+    fn sqrt_iswap_matrix(sign: f64) -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let half = Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+        let off = Complex64::new(0.0, sign * std::f64::consts::FRAC_1_SQRT_2);
+        [
+            [one, zero, zero, zero],
+            [zero, half, off, zero],
+            [zero, off, half, zero],
+            [zero, zero, zero, one],
+        ]
     }
 
     fn expect_param_count(

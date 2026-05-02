@@ -47,7 +47,7 @@ See the [Architecture Glossary](./glossary.md) for definitions of terms used thr
 
 Handwritten parser targeting a practical OpenQASM 3.0 subset. It processes input line by line and converts `&str` directly to `Circuit` IR with no intermediate AST.
 
-**Supported**: `qubit`/`bit` declarations, standard gates (x, y, z, h, s, sdg, t, tdg, rx, ry, rz, cx, cz, swap, sx, sxdg, p, cy, ch, crx, cry, crz, csx, ccx/toffoli, ccz, cswap/fredkin, rzz, rxx, ryy, ecr, iswap, dcx, u1, u2, u3/u), gate modifiers (`ctrl @`, `inv @`, `pow(k) @`), user-defined `gate` blocks, classical `if` conditionals, multi-register broadcast, measure, barrier, expression evaluator with math functions. OpenQASM 2.0 backward compatibility (`qreg`/`creg`, `measure q -> c` syntax).
+**Supported**: `qubit`/`bit` declarations, OpenQASM standard gates and aliases (x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase, cx/CX/cnot, cy, cz, cp/cphase, crx, cry, crz, ch, swap, ccx/toffoli, cswap/fredkin, cu, u1, u2, u3/u/U), Qiskit and exporter gates (sxdg, cs, csdg, csx, ccz, r, rzz, rxx, ryy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, c3x, c4x, mcx, rccx, rc3x/rcccx), hardware-native gates (gpi, gpi2, ms, syc, sqrt_iswap, sqrt_iswap_inv), gate modifiers (`ctrl @`, `inv @`, `pow(k) @`), user-defined `gate` blocks, classical `if` conditionals, multi-register broadcast, measure, barrier, expression evaluator with math functions. OpenQASM 2.0 backward compatibility (`qreg`/`creg`, `measure q -> c` syntax).
 
 **Unsupported**: `for`/`while` loops, subroutines, classical expressions beyond `if`.
 

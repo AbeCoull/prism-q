@@ -154,9 +154,10 @@ dispatch time, and can be overridden with `PRISM_MAX_SV_QUBITS`.
 ## Gates and OpenQASM support
 
 Covers the standard OpenQASM `stdgates.inc` set, common controlled and multi-controlled
-variants, decomposed multi-instruction gates, and IBM legacy u1/u2/u3 syntax. Modifiers
-`inv @`, `ctrl @`, `pow(k) @` chain arbitrarily, and user-defined `gate` declarations
-are supported.
+variants, Qiskit exporter gates, IonQ and Google/Cirq native gate names, decomposed
+multi-instruction gates, and IBM legacy u1/u2/u3 syntax. Modifiers `inv @`, `ctrl @`,
+`pow(k) @` chain arbitrarily for direct gates, and user-defined `gate` declarations are
+supported.
 
 The authoritative list of supported gate keywords, language features, and modifiers
 lives in the parser at [`src/circuit/openqasm.rs`](src/circuit/openqasm.rs). See

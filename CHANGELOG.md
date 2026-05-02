@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.12.2] - 2026-05-02
+
+### Bug Fixes
+
+- **openqasm:** Support for-loops, def subroutines, classical expressions (#59)([37743a4](https://github.com/AbeCoull/prism-q/commit/37743a45cd448278e5938d709223503f0fa7330f))
 ## [0.12.1] - 2026-05-02
 
 ### Bug Fixes
 
 - **openqasm:** Support Qiskit and native hardware gates (#58)([f831f43](https://github.com/AbeCoull/prism-q/commit/f831f43c12dc84fd22ebd4772ff5a83b7e9472df))
+
+### Miscellaneous
+
+- **release:** 0.12.1([a968a99](https://github.com/AbeCoull/prism-q/commit/a968a990cd37628e9de1d3123e03fc8b7d2af112))
 ## [0.12.0] - 2026-05-02
 
 ### CI

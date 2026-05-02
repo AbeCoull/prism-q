@@ -2,11 +2,32 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.12.0] - 2026-05-02
+
+### CI
+
+- Add benchmark regression workflow (#56)([291f26b](https://github.com/AbeCoull/prism-q/commit/291f26bff6c6ae96c657f2a310a45c1f0d0bed0f))
+
+### Documentation
+
+- **general:** Add code of conduct (#54)([3114ef4](https://github.com/AbeCoull/prism-q/commit/3114ef4bf15cab194c02cb143319accfd9ab474f))
+
+### Features
+
+- **qec:** Add packed detector sampler (#57)([e245a30](https://github.com/AbeCoull/prism-q/commit/e245a3087fc68b7137860335c6605a54eb110402))
+
+### Testing
+
+- **correctness:** Complete per-backend correctness matrix (#55)([3bb6204](https://github.com/AbeCoull/prism-q/commit/3bb62046fc8cba7e24cece2a90e2488eec71705a))
 ## [0.11.4] - 2026-04-30
 
 ### Documentation
 
 - **ci:** Add github issues template (#45)([4782b6f](https://github.com/AbeCoull/prism-q/commit/4782b6f695de0c188b434f3424f250762adb050f))
+
+### Miscellaneous
+
+- **release:** 0.11.4([c98c763](https://github.com/AbeCoull/prism-q/commit/c98c76366702a84ca45b3b0891dde03417a68edd))
 
 ### Performance
 

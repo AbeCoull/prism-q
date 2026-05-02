@@ -148,7 +148,7 @@ fn parse_error_undefined_register() {
 
 #[test]
 fn parse_error_unsupported_construct() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\ndef myg(qubit q) { x q; }";
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nwhile (true) { x q[0]; }";
     let err = openqasm::parse(qasm).unwrap_err();
     assert!(
         format!("{err}").contains("unsupported"),

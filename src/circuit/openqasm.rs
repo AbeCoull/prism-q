@@ -19,18 +19,28 @@
 //! | Register broadcast | `h q;` / `cx q, r;` | Applies gate to all qubits in register |
 //! | Conditional (OQ2) | `if(c==1) x q[0];` | Classical register equality |
 //! | Conditional (OQ3) | `if (c[0]) x q[0];` | Single classical bit test |
+//! | Conditional inequality | `if (c != 0) x q[0];` | Register or bit `!=` |
+//! | Conditional bit literal | `if (c[0] == 1) x q[0];` | Bit equality vs `0` / `1` |
+//! | Conditional negation | `if (!c[0]) x q[0];` | Negated bit truthy test |
+//! | Hex / binary literals | `if (c == 0xff) ...` | `0x`, `0b`, `0o` integer prefixes with optional `_` separators |
+//! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
+//! | Subroutine definition | `def myg(qubit a, float t) { ... }` | Unitary `def` bodies, inlined at the call site |
+//! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
 //! | Barrier | `barrier q[0], q[1];` | |
 //! | Line comments | `// comment` | |
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `def` / `defcal` definitions
-//! - `for` / `while` loops
+//! - `defcal`, `extern`, `opaque`, `box`, `while`
+//! - `def` bodies that contain `measure`, `reset`, `bit`, `creg`, `return`,
+//!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
+//! - `def` declarations with a return type
 //! - `ctrl @ swap` modifier form (use `cswap` or `fredkin` keyword instead)
 //! - `pow(k) @` with non-integer k (fractional powers)
-//! - Classical expressions and types beyond `bit`
-//! - Subroutines, `extern`, `box`, `duration`, `stretch`
+//! - Bit literal comparisons against integers other than `0` / `1`
+//! - Negative integer literals in `if` register comparisons
+//! - `duration`, `stretch` outside `def` parameter lists
 //!
 //! # Error behaviour
 //!
@@ -73,20 +83,334 @@ struct GateDefinition {
     body: Vec<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefParamKind {
+    Float,
+    Int,
+}
+
+enum DefArg {
+    Qubit(String),
+    Param { name: String, kind: DefParamKind },
+}
+
+struct DefDefinition {
+    args: Vec<DefArg>,
+    body: Vec<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Gate,
+    Def,
+    For,
+}
+
+struct BlockState {
+    kind: BlockKind,
+    buf: String,
+    start_line: usize,
+    depth: usize,
+}
+
 struct Parser<'a> {
     input: &'a str,
     qregs: HashMap<String, Register>,
     cregs: HashMap<String, Register>,
     gate_defs: HashMap<String, GateDefinition>,
+    def_defs: HashMap<String, DefDefinition>,
     total_qubits: usize,
     total_cbits: usize,
     gate_expansion_depth: usize,
     param_vars: Option<HashMap<String, f64>>,
+    int_vars: Option<HashMap<String, i64>>,
 }
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
+const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 
 use super::expr::{eval_expr, replace_word, split_top_level_commas};
+
+fn strip_comment(line: &str) -> &str {
+    match line.find("//") {
+        Some(pos) => &line[..pos],
+        None => line,
+    }
+}
+
+fn block_kind_name(kind: BlockKind) -> &'static str {
+    match kind {
+        BlockKind::Gate => "gate",
+        BlockKind::Def => "def",
+        BlockKind::For => "for",
+    }
+}
+
+fn update_brace_depth(mut depth: usize, line: &str) -> usize {
+    for ch in line.chars() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
+}
+
+fn extract_top_braced_body(s: &str) -> Option<(usize, usize)> {
+    let open = s.find('{')?;
+    let mut depth = 0usize;
+    for (i, ch) in s[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((open, open + i));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_matching_close_paren(s: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_matching_close_brace(s: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_ident_char_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn find_keyword(haystack: &str, needle: &str) -> Option<usize> {
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    let nlen = nb.len();
+    let mut i = 0;
+    while i + nlen <= hb.len() {
+        if &hb[i..i + nlen] == nb {
+            let before_ok = i == 0 || !is_ident_char_byte(hb[i - 1]);
+            let after_ok = i + nlen >= hb.len() || !is_ident_char_byte(hb[i + nlen]);
+            if before_ok && after_ok {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_for_var(lhs: &str, line_num: usize) -> Result<String> {
+    let mut tokens = lhs.split_whitespace();
+    let first = tokens.next().ok_or_else(|| PrismError::Parse {
+        line: line_num,
+        message: "missing loop variable in for header".to_string(),
+    })?;
+
+    let var = if matches!(first, "int" | "uint") {
+        let next = tokens.next().ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "missing loop variable name after type in for header".to_string(),
+        })?;
+        next.trim_end_matches(',').to_string()
+    } else if first.starts_with("int[") || first.starts_with("uint[") {
+        let next = tokens.next().ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "missing loop variable name after type in for header".to_string(),
+        })?;
+        next.trim_end_matches(',').to_string()
+    } else {
+        first.to_string()
+    };
+
+    if tokens.next().is_some() {
+        return Err(PrismError::Parse {
+            line: line_num,
+            message: format!("unexpected tokens in for loop variable spec: `{lhs}`"),
+        });
+    }
+
+    if var.is_empty()
+        || !var.chars().next().unwrap().is_ascii_alphabetic()
+        || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(PrismError::Parse {
+            line: line_num,
+            message: format!("invalid loop variable name: `{var}`"),
+        });
+    }
+
+    Ok(var)
+}
+
+fn eval_int_expr(s: &str, line_num: usize, vars: Option<&HashMap<String, i64>>) -> Result<i64> {
+    let float_vars: Option<HashMap<String, f64>> = vars.map(|m| {
+        m.iter()
+            .map(|(k, v)| (k.clone(), *v as f64))
+            .collect::<HashMap<_, _>>()
+    });
+    let val = eval_expr(s, line_num, float_vars.as_ref())?;
+    if val.fract() != 0.0 || !val.is_finite() {
+        return Err(PrismError::Parse {
+            line: line_num,
+            message: format!("expected integer expression, got `{s}` = {val}"),
+        });
+    }
+    if val > i64::MAX as f64 || val < i64::MIN as f64 {
+        return Err(PrismError::Parse {
+            line: line_num,
+            message: format!("integer expression `{s}` out of range"),
+        });
+    }
+    Ok(val as i64)
+}
+
+fn parse_for_range(
+    rhs: &str,
+    line_num: usize,
+    int_vars: Option<&HashMap<String, i64>>,
+) -> Result<Vec<i64>> {
+    let rhs = rhs.trim();
+    if let Some(inner) = rhs.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        let parts: Vec<&str> = inner.split(':').collect();
+        let (start, step, stop) = match parts.len() {
+            2 => (
+                eval_int_expr(parts[0].trim(), line_num, int_vars)?,
+                1i64,
+                eval_int_expr(parts[1].trim(), line_num, int_vars)?,
+            ),
+            3 => (
+                eval_int_expr(parts[0].trim(), line_num, int_vars)?,
+                eval_int_expr(parts[1].trim(), line_num, int_vars)?,
+                eval_int_expr(parts[2].trim(), line_num, int_vars)?,
+            ),
+            _ => {
+                return Err(PrismError::Parse {
+                    line: line_num,
+                    message: format!("malformed range `[{inner}]` in for loop"),
+                });
+            }
+        };
+        if step == 0 {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: "for loop range step must be non-zero".to_string(),
+            });
+        }
+        let mut values = Vec::new();
+        let mut i = start;
+        if step > 0 {
+            while i <= stop {
+                values.push(i);
+                if values.len() as i64 > MAX_FOR_ITERATIONS {
+                    return Err(PrismError::Parse {
+                        line: line_num,
+                        message: format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
+                    });
+                }
+                i += step;
+            }
+        } else {
+            while i >= stop {
+                values.push(i);
+                if values.len() as i64 > MAX_FOR_ITERATIONS {
+                    return Err(PrismError::Parse {
+                        line: line_num,
+                        message: format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
+                    });
+                }
+                i += step;
+            }
+        }
+        return Ok(values);
+    }
+    if let Some(inner) = rhs.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        let mut values = Vec::new();
+        for raw in split_top_level_commas(inner) {
+            let token = raw.trim();
+            if token.is_empty() {
+                continue;
+            }
+            values.push(eval_int_expr(token, line_num, int_vars)?);
+        }
+        return Ok(values);
+    }
+    Err(PrismError::UnsupportedConstruct {
+        construct: format!(
+            "for loop range `{rhs}` (only `[start:stop]`, `[start:step:stop]`, or `{{a,b,c}}` supported)"
+        ),
+        line: line_num,
+    })
+}
+
+fn split_body_into_lines(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for ch in body.chars() {
+        match ch {
+            '{' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '}' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+                if depth == 0 {
+                    let trimmed = current.trim().to_string();
+                    if !trimmed.is_empty() {
+                        out.push(trimmed);
+                    }
+                    current.clear();
+                }
+            }
+            ';' if depth == 0 => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    out.push(trimmed);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim().to_string();
+    if !trimmed.is_empty() {
+        out.push(trimmed);
+    }
+    out
+}
 
 impl<'a> Parser<'a> {
     fn new(input: &'a str) -> Self {
@@ -95,130 +419,182 @@ impl<'a> Parser<'a> {
             qregs: HashMap::new(),
             cregs: HashMap::new(),
             gate_defs: HashMap::new(),
+            def_defs: HashMap::new(),
             total_qubits: 0,
             total_cbits: 0,
             gate_expansion_depth: 0,
             param_vars: None,
+            int_vars: None,
         }
     }
 
     fn parse(mut self) -> Result<Circuit> {
-        let mut instructions = Vec::new();
-        let mut gate_def_buf: Option<(String, usize)> = None;
-
-        for (line_idx, raw_line) in self.input.lines().enumerate() {
-            let line_num = line_idx + 1;
-
-            let line = match raw_line.find("//") {
-                Some(pos) => &raw_line[..pos],
-                None => raw_line,
-            };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            if let Some((ref mut buf, _start_line)) = gate_def_buf {
-                buf.push(' ');
-                buf.push_str(line);
-                if line.contains('}') {
-                    let (name, start) = gate_def_buf.take().unwrap();
-                    self.parse_gate_def(&name, start)?;
-                }
-                continue;
-            }
-
-            let line = line.strip_suffix(';').unwrap_or(line).trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            if line.starts_with("OPENQASM") {
-                continue;
-            }
-            if line.starts_with("include") {
-                continue;
-            }
-
-            // OQ3: qubit[n] name;
-            if line.starts_with("qubit") {
-                self.parse_qubit_decl(line, line_num)?;
-                continue;
-            }
-            // OQ3: bit[n] name;
-            if line.starts_with("bit") && !line.starts_with("bits") {
-                self.parse_bit_decl(line, line_num)?;
-                continue;
-            }
-            // OQ2 compat: qreg name[n];
-            if line.starts_with("qreg") {
-                self.parse_qreg_legacy(line, line_num)?;
-                continue;
-            }
-            // OQ2 compat: creg name[n];
-            if line.starts_with("creg") {
-                self.parse_creg_legacy(line, line_num)?;
-                continue;
-            }
-
-            // OQ2 compat: measure q[0] -> c[0];
-            if line.starts_with("measure") {
-                instructions.extend(self.parse_measure_arrow(line, line_num)?);
-                continue;
-            }
-
-            // OQ3: c[0] = measure q[0];
-            if line.contains("= measure") || line.contains("=measure") {
-                instructions.extend(self.parse_measure_assign(line, line_num)?);
-                continue;
-            }
-
-            if line.starts_with("barrier") {
-                instructions.push(self.parse_barrier(line, line_num)?);
-                continue;
-            }
-
-            if line.starts_with("reset") {
-                instructions.extend(self.parse_reset(line, line_num)?);
-                continue;
-            }
-
-            if line.starts_with("if") {
-                instructions.extend(self.parse_if_statement(line, line_num)?);
-                continue;
-            }
-
-            if line.starts_with("gate ") || line.starts_with("gate(") {
-                if line.contains('}') {
-                    self.parse_gate_def(line, line_num)?;
-                } else {
-                    gate_def_buf = Some((line.to_string(), line_num));
-                }
-                continue;
-            }
-
-            let first_word = line
-                .split(|c: char| c.is_whitespace() || c == '(')
-                .next()
-                .unwrap_or(line);
-            if matches!(
-                first_word,
-                "def" | "defcal" | "opaque" | "for" | "while" | "box" | "extern" | "return"
-            ) {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: first_word.to_string(),
-                    line: line_num,
-                });
-            }
-
-            instructions.extend(self.parse_gate_application(line, line_num)?);
-        }
+        let lines: Vec<&str> = self.input.lines().collect();
+        let instructions = self.parse_lines(&lines, 0)?;
 
         Ok(Circuit {
             num_qubits: self.total_qubits,
             num_classical_bits: self.total_cbits,
             instructions,
         })
+    }
+
+    fn parse_lines(&mut self, lines: &[&str], line_offset: usize) -> Result<Vec<Instruction>> {
+        let mut instructions = Vec::new();
+        let mut block: Option<BlockState> = None;
+
+        for (line_idx, raw_line) in lines.iter().enumerate() {
+            let line_num = line_offset + line_idx + 1;
+
+            let line = strip_comment(raw_line).trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            if let Some(state) = block.as_mut() {
+                state.buf.push(' ');
+                state.buf.push_str(line);
+                state.depth = update_brace_depth(state.depth, line);
+                if state.depth == 0 {
+                    let finished = block.take().unwrap();
+                    instructions.extend(self.dispatch_block(&finished)?);
+                }
+                continue;
+            }
+
+            instructions.extend(self.process_top_line(line, line_num, &mut block)?);
+        }
+
+        if let Some(state) = block {
+            return Err(PrismError::Parse {
+                line: state.start_line,
+                message: format!(
+                    "unterminated `{}` block (missing `}}`)",
+                    block_kind_name(state.kind)
+                ),
+            });
+        }
+
+        Ok(instructions)
+    }
+
+    fn process_top_line(
+        &mut self,
+        line: &str,
+        line_num: usize,
+        block: &mut Option<BlockState>,
+    ) -> Result<Vec<Instruction>> {
+        let first_word = line
+            .split(|c: char| c.is_whitespace() || c == '(')
+            .next()
+            .unwrap_or(line);
+
+        if matches!(first_word, "gate" | "def" | "for") {
+            let kind = match first_word {
+                "gate" => BlockKind::Gate,
+                "def" => BlockKind::Def,
+                "for" => BlockKind::For,
+                _ => unreachable!(),
+            };
+            let depth = update_brace_depth(0, line);
+            if line.contains('{') && depth == 0 {
+                let state = BlockState {
+                    kind,
+                    buf: line.to_string(),
+                    start_line: line_num,
+                    depth: 0,
+                };
+                return self.dispatch_block(&state);
+            }
+            if !line.contains('{') {
+                return Err(PrismError::Parse {
+                    line: line_num,
+                    message: format!("expected `{{` in `{}` block", first_word),
+                });
+            }
+            *block = Some(BlockState {
+                kind,
+                buf: line.to_string(),
+                start_line: line_num,
+                depth,
+            });
+            return Ok(Vec::new());
+        }
+
+        let line = line.strip_suffix(';').unwrap_or(line).trim();
+        if line.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if line.starts_with("OPENQASM") {
+            return Ok(Vec::new());
+        }
+        if line.starts_with("include") {
+            return Ok(Vec::new());
+        }
+
+        if line.starts_with("qubit") {
+            self.parse_qubit_decl(line, line_num)?;
+            return Ok(Vec::new());
+        }
+        if line.starts_with("bit") && !line.starts_with("bits") {
+            self.parse_bit_decl(line, line_num)?;
+            return Ok(Vec::new());
+        }
+        if line.starts_with("qreg") {
+            self.parse_qreg_legacy(line, line_num)?;
+            return Ok(Vec::new());
+        }
+        if line.starts_with("creg") {
+            self.parse_creg_legacy(line, line_num)?;
+            return Ok(Vec::new());
+        }
+
+        if line.starts_with("measure") {
+            return self.parse_measure_arrow(line, line_num);
+        }
+
+        if line.contains("= measure") || line.contains("=measure") {
+            return self.parse_measure_assign(line, line_num);
+        }
+
+        if line.starts_with("barrier") {
+            return Ok(vec![self.parse_barrier(line, line_num)?]);
+        }
+
+        if line.starts_with("reset") {
+            return self.parse_reset(line, line_num);
+        }
+
+        if line.starts_with("if") {
+            return self.parse_if_statement(line, line_num);
+        }
+
+        if matches!(
+            first_word,
+            "defcal" | "opaque" | "while" | "box" | "extern" | "return"
+        ) {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: first_word.to_string(),
+                line: line_num,
+            });
+        }
+
+        self.parse_gate_application(line, line_num)
+    }
+
+    fn dispatch_block(&mut self, state: &BlockState) -> Result<Vec<Instruction>> {
+        match state.kind {
+            BlockKind::Gate => {
+                self.parse_gate_def(&state.buf, state.start_line)?;
+                Ok(Vec::new())
+            }
+            BlockKind::Def => {
+                self.parse_def_block(&state.buf, state.start_line)?;
+                Ok(Vec::new())
+            }
+            BlockKind::For => self.expand_for_block(&state.buf, state.start_line),
+        }
     }
 
     /// OQ3 syntax: `qubit[4] q` or `qubit q` (single qubit).
@@ -371,7 +747,7 @@ impl<'a> Parser<'a> {
     }
 
     fn resolve_qubit(&self, token: &str, line_num: usize) -> Result<usize> {
-        let (name, idx) = Self::parse_indexed_ref(token, line_num)?;
+        let (name, idx) = self.parse_indexed_ref(token, line_num)?;
         let reg = self
             .qregs
             .get(name)
@@ -422,7 +798,7 @@ impl<'a> Parser<'a> {
     }
 
     fn resolve_cbit(&self, token: &str, line_num: usize) -> Result<usize> {
-        let (name, idx) = Self::parse_indexed_ref(token, line_num)?;
+        let (name, idx) = self.parse_indexed_ref(token, line_num)?;
         let reg = self
             .cregs
             .get(name)
@@ -439,7 +815,7 @@ impl<'a> Parser<'a> {
         Ok(reg.offset + idx)
     }
 
-    fn parse_indexed_ref(token: &str, line_num: usize) -> Result<(&str, usize)> {
+    fn parse_indexed_ref<'b>(&self, token: &'b str, line_num: usize) -> Result<(&'b str, usize)> {
         let bracket = token.find('[').ok_or_else(|| PrismError::Parse {
             line: line_num,
             message: format!("expected indexed reference (e.g. `q[0]`), got: `{token}`"),
@@ -449,14 +825,20 @@ impl<'a> Parser<'a> {
             message: format!("expected `]` in reference: `{token}`"),
         })?;
         let name = token[..bracket].trim();
-        let idx: usize = token[bracket + 1..end]
-            .trim()
-            .parse()
-            .map_err(|_| PrismError::Parse {
+        let idx_str = token[bracket + 1..end].trim();
+        let idx_val = eval_int_expr(idx_str, line_num, self.int_vars.as_ref()).map_err(|_| {
+            PrismError::Parse {
                 line: line_num,
                 message: format!("invalid index in `{token}`"),
-            })?;
-        Ok((name, idx))
+            }
+        })?;
+        if idx_val < 0 {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("negative index in `{token}`"),
+            });
+        }
+        Ok((name, idx_val as usize))
     }
 
     /// OQ2 compat: `measure q[0] -> c[0]` or `measure q -> c` (broadcast)
@@ -603,6 +985,234 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Parse a `def name(args) { body }` subroutine definition.
+    ///
+    /// V1 supports unitary subroutines: parameters may be `qubit`, `int`/`uint`,
+    /// `float`/`angle`. Return types and measurement, reset, classical side
+    /// effects in the body are rejected.
+    fn parse_def_block(&mut self, buf: &str, line_num: usize) -> Result<()> {
+        let rest = buf.trim_start().strip_prefix("def").unwrap().trim();
+
+        let (open, close) = extract_top_braced_body(rest).ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "expected `{ ... }` body in def".to_string(),
+        })?;
+        let header = rest[..open].trim();
+        let body_str = rest[open + 1..close].trim();
+
+        if header.contains("->") {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "def with return type".to_string(),
+                line: line_num,
+            });
+        }
+
+        let paren_open = header.find('(').ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "expected `(` in def parameter list".to_string(),
+        })?;
+        let name = header[..paren_open].trim().to_string();
+        if name.is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: "missing name in def".to_string(),
+            });
+        }
+
+        let after_open = &header[paren_open + 1..];
+        let close_paren =
+            find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
+                line: line_num,
+                message: "unmatched `(` in def parameter list".to_string(),
+            })?;
+        let params_str = &after_open[..close_paren];
+        let trailing = after_open[close_paren + 1..].trim();
+        if !trailing.is_empty() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("trailing tokens after def parameter list: `{trailing}`"),
+                line: line_num,
+            });
+        }
+
+        let mut args: Vec<DefArg> = Vec::new();
+        for raw in split_top_level_commas(params_str) {
+            let p = raw.trim();
+            if p.is_empty() {
+                continue;
+            }
+            let last_ws = p
+                .rfind(char::is_whitespace)
+                .ok_or_else(|| PrismError::Parse {
+                    line: line_num,
+                    message: format!("malformed def parameter: `{p}` (expected `<type> <name>`)"),
+                })?;
+            let ty = p[..last_ws].trim();
+            let arg_name = p[last_ws..].trim().to_string();
+            if arg_name.is_empty() {
+                return Err(PrismError::Parse {
+                    line: line_num,
+                    message: format!("missing name in def parameter: `{p}`"),
+                });
+            }
+            let base_ty = ty.split('[').next().unwrap().trim();
+            match base_ty {
+                "qubit" => args.push(DefArg::Qubit(arg_name)),
+                "int" | "uint" => args.push(DefArg::Param {
+                    name: arg_name,
+                    kind: DefParamKind::Int,
+                }),
+                "float" | "angle" | "complex" | "duration" | "stretch" => {
+                    args.push(DefArg::Param {
+                        name: arg_name,
+                        kind: DefParamKind::Float,
+                    })
+                }
+                "bit" | "creg" => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "classical bit parameters in def `{name}` (V1 supports unitary subroutines only)"
+                        ),
+                        line: line_num,
+                    });
+                }
+                other => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!("def parameter type `{other}`"),
+                        line: line_num,
+                    });
+                }
+            }
+        }
+
+        let body = split_body_into_lines(body_str);
+        if body.is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("def `{name}` has an empty body"),
+            });
+        }
+        for stmt in &body {
+            let first = stmt
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or("");
+            match first {
+                "measure" | "reset" | "return" | "bit" | "creg" => {
+                    return Err(PrismError::UnsupportedConstruct {
+                        construct: format!(
+                            "`{first}` inside def `{name}` (V1 supports unitary subroutines only)"
+                        ),
+                        line: line_num,
+                    });
+                }
+                _ => {}
+            }
+            if stmt.contains("= measure") || stmt.contains("=measure") {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("measurement inside def `{name}`"),
+                    line: line_num,
+                });
+            }
+        }
+
+        self.def_defs.insert(name, DefDefinition { args, body });
+        Ok(())
+    }
+
+    /// Expand a `for <type>? <var> in <range_or_set> { body }` loop into
+    /// a sequence of instructions.
+    fn expand_for_block(&mut self, buf: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        let rest = buf.trim_start().strip_prefix("for").unwrap().trim();
+
+        let in_pos = find_keyword(rest, "in").ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "expected `in` keyword in for loop".to_string(),
+        })?;
+        let lhs = rest[..in_pos].trim();
+        let after_in = rest[in_pos + 2..].trim_start();
+
+        let (range_str, after_range) = if let Some(remainder) = after_in.strip_prefix('[') {
+            let close = remainder.find(']').ok_or_else(|| PrismError::Parse {
+                line: line_num,
+                message: "expected `]` in for loop range".to_string(),
+            })?;
+            (
+                format!("[{}]", &remainder[..close]),
+                remainder[close + 1..].trim_start(),
+            )
+        } else if let Some(set_inner_start) = after_in.strip_prefix('{') {
+            let close_offset =
+                find_matching_close_brace(set_inner_start).ok_or_else(|| PrismError::Parse {
+                    line: line_num,
+                    message: "unmatched `{` in for loop set".to_string(),
+                })?;
+            (
+                format!("{{{}}}", &set_inner_start[..close_offset]),
+                set_inner_start[close_offset + 1..].trim_start(),
+            )
+        } else {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("for loop range starting with `{after_in}`"),
+                line: line_num,
+            });
+        };
+
+        let body_open = after_range.find('{').ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "expected `{` opening for loop body".to_string(),
+        })?;
+        let after_body_open = &after_range[body_open + 1..];
+        let body_close =
+            find_matching_close_brace(after_body_open).ok_or_else(|| PrismError::Parse {
+                line: line_num,
+                message: "unmatched `{` in for loop body".to_string(),
+            })?;
+        let body_str = after_body_open[..body_close].trim();
+        let trailing = after_body_open[body_close + 1..].trim();
+        if !trailing.is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("unexpected tokens after for loop body: `{trailing}`"),
+            });
+        }
+
+        let var_name = parse_for_var(lhs, line_num)?;
+        let values = parse_for_range(&range_str, line_num, self.int_vars.as_ref())?;
+
+        if values.len() as i64 > MAX_FOR_ITERATIONS {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!(
+                    "for loop iterates {} times (max {MAX_FOR_ITERATIONS})",
+                    values.len()
+                ),
+            });
+        }
+
+        let body_lines = split_body_into_lines(body_str);
+        let mut all_instrs = Vec::new();
+
+        for v in values {
+            let substituted: Vec<String> = body_lines
+                .iter()
+                .map(|s| replace_word(s, &var_name, &v.to_string()))
+                .collect();
+
+            let saved = self.int_vars.clone();
+            let mut new_vars = saved.clone().unwrap_or_default();
+            new_vars.insert(var_name.clone(), v);
+            self.int_vars = Some(new_vars);
+
+            let lines: Vec<&str> = substituted.iter().map(String::as_str).collect();
+            let result = self.parse_lines(&lines, line_num.saturating_sub(1));
+
+            self.int_vars = saved;
+            all_instrs.extend(result?);
+        }
+
+        Ok(all_instrs)
+    }
+
     fn parse_barrier(&self, line: &str, line_num: usize) -> Result<Instruction> {
         let rest = line.strip_prefix("barrier").unwrap().trim();
         let mut qubits = SmallVec::<[usize; 4]>::new();
@@ -638,12 +1248,14 @@ impl<'a> Parser<'a> {
             line: line_num,
             message: "expected `(` after `if`".to_string(),
         })?;
-        let close = rest.find(')').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `)` in `if` condition".to_string(),
-        })?;
-        let cond_str = rest[open + 1..close].trim();
-        let body_str = rest[close + 1..].trim();
+        let after_open = &rest[open + 1..];
+        let close_offset =
+            find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
+                line: line_num,
+                message: "expected `)` in `if` condition".to_string(),
+            })?;
+        let cond_str = after_open[..close_offset].trim();
+        let body_str = after_open[close_offset + 1..].trim();
 
         if body_str.is_empty() {
             return Err(PrismError::Parse {
@@ -652,36 +1264,7 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let condition = if let Some(eq_pos) = cond_str.find("==") {
-            let reg_name = cond_str[..eq_pos].trim();
-            let value_str = cond_str[eq_pos + 2..].trim();
-            let value: u64 = value_str.parse().map_err(|_| PrismError::Parse {
-                line: line_num,
-                message: format!("invalid integer in `if` condition: `{value_str}`"),
-            })?;
-            let reg = self
-                .cregs
-                .get(reg_name)
-                .ok_or_else(|| PrismError::UndefinedRegister {
-                    name: reg_name.to_string(),
-                    line: line_num,
-                })?;
-            ClassicalCondition::RegisterEquals {
-                offset: reg.offset,
-                size: reg.size,
-                value,
-            }
-        } else if cond_str.contains('[') {
-            let bit = self.resolve_cbit(cond_str, line_num)?;
-            ClassicalCondition::BitIsOne(bit)
-        } else {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!(
-                    "expected `creg==value` or `c[i]` in `if` condition, got: `{cond_str}`"
-                ),
-            });
-        };
+        let condition = self.parse_classical_condition(cond_str, line_num)?;
 
         let gate_instrs = self.parse_gate_application(body_str, line_num)?;
         Ok(gate_instrs
@@ -697,8 +1280,116 @@ impl<'a> Parser<'a> {
             .collect())
     }
 
+    /// Parse a classical condition expression for `if (...)`.
+    ///
+    /// Supported forms:
+    /// - `c == n`, `c != n` (register vs integer)
+    /// - `c[i] == 0`, `c[i] == 1`, `c[i] != 0`, `c[i] != 1` (bit vs literal)
+    /// - `c[i]` (bit truthy)
+    /// - `!c[i]` (bit falsy)
+    fn parse_classical_condition(
+        &self,
+        cond_str: &str,
+        line_num: usize,
+    ) -> Result<ClassicalCondition> {
+        let cond_str = cond_str.trim();
+
+        if let Some(rest) = cond_str.strip_prefix('!') {
+            let inner = rest.trim();
+            if !inner.contains('[') {
+                return Err(PrismError::Parse {
+                    line: line_num,
+                    message: format!("expected `!c[i]` form in `if` condition, got: `{cond_str}`"),
+                });
+            }
+            let bit = self.resolve_cbit(inner, line_num)?;
+            return Ok(ClassicalCondition::BitIsZero(bit));
+        }
+
+        let (op_pos, op_len, negate) = if let Some(p) = cond_str.find("!=") {
+            (Some(p), 2usize, true)
+        } else if let Some(p) = cond_str.find("==") {
+            (Some(p), 2usize, false)
+        } else {
+            (None, 0, false)
+        };
+
+        if let Some(pos) = op_pos {
+            let lhs = cond_str[..pos].trim();
+            let rhs = cond_str[pos + op_len..].trim();
+            let value = eval_int_expr(rhs, line_num, self.int_vars.as_ref())?;
+            if value < 0 {
+                return Err(PrismError::Parse {
+                    line: line_num,
+                    message: format!(
+                        "negative integer in `if` condition is not supported: `{rhs}`"
+                    ),
+                });
+            }
+            let value = value as u64;
+
+            if lhs.contains('[') {
+                let bit = self.resolve_cbit(lhs, line_num)?;
+                return Ok(match (value, negate) {
+                    (0, false) => ClassicalCondition::BitIsZero(bit),
+                    (0, true) => ClassicalCondition::BitIsOne(bit),
+                    (1, false) => ClassicalCondition::BitIsOne(bit),
+                    (1, true) => ClassicalCondition::BitIsZero(bit),
+                    (other, _) => {
+                        return Err(PrismError::Parse {
+                            line: line_num,
+                            message: format!(
+                                "bit comparison must be against 0 or 1, got `{other}`"
+                            ),
+                        });
+                    }
+                });
+            }
+
+            let reg = self
+                .cregs
+                .get(lhs)
+                .ok_or_else(|| PrismError::UndefinedRegister {
+                    name: lhs.to_string(),
+                    line: line_num,
+                })?;
+            return Ok(if negate {
+                ClassicalCondition::RegisterNotEquals {
+                    offset: reg.offset,
+                    size: reg.size,
+                    value,
+                }
+            } else {
+                ClassicalCondition::RegisterEquals {
+                    offset: reg.offset,
+                    size: reg.size,
+                    value,
+                }
+            });
+        }
+
+        if cond_str.contains('[') {
+            let bit = self.resolve_cbit(cond_str, line_num)?;
+            return Ok(ClassicalCondition::BitIsOne(bit));
+        }
+
+        Err(PrismError::Parse {
+            line: line_num,
+            message: format!(
+                "expected `creg==value`, `creg!=value`, `c[i]`, `!c[i]`, or `c[i]==0/1` in `if` condition, got: `{cond_str}`"
+            ),
+        })
+    }
+
     fn parse_gate_application(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
         let (modifiers, gate_line) = Self::strip_modifiers(line, line_num)?;
+
+        if modifiers.is_empty() {
+            if let Some(instrs) = self.try_expand_def_call(gate_line, line_num)? {
+                return Ok(instrs);
+            }
+        }
+
         let (gate_name, params, args_str) = self.split_gate_line(gate_line, line_num)?;
 
         let qubit_tokens: Vec<&str> = args_str
@@ -879,10 +1570,12 @@ impl<'a> Parser<'a> {
                 qregs: HashMap::new(),
                 cregs: HashMap::new(),
                 gate_defs: HashMap::new(),
+                def_defs: HashMap::new(),
                 total_qubits: max_qubit,
-                total_cbits: 0,
+                total_cbits: self.total_cbits,
                 gate_expansion_depth: self.gate_expansion_depth + 1,
                 param_vars: Some(var_map.clone()),
+                int_vars: self.int_vars.clone(),
             };
             sub_parser.qregs.insert(
                 "__q__".to_string(),
@@ -900,6 +1593,15 @@ impl<'a> Parser<'a> {
                     },
                 );
             }
+            for (k, v) in &self.cregs {
+                sub_parser.cregs.insert(
+                    k.clone(),
+                    Register {
+                        offset: v.offset,
+                        size: v.size,
+                    },
+                );
+            }
             for (k, v) in &self.gate_defs {
                 sub_parser.gate_defs.insert(
                     k.clone(),
@@ -910,12 +1612,202 @@ impl<'a> Parser<'a> {
                     },
                 );
             }
+            self.copy_def_defs_into(&mut sub_parser);
 
             let instrs = sub_parser.parse_gate_application(expanded.trim(), line_num)?;
             all_instrs.extend(instrs);
         }
 
         Ok(Some(all_instrs))
+    }
+
+    fn copy_def_defs_into(&self, sub: &mut Parser<'_>) {
+        for (k, v) in &self.def_defs {
+            let cloned_args = v
+                .args
+                .iter()
+                .map(|a| match a {
+                    DefArg::Qubit(name) => DefArg::Qubit(name.clone()),
+                    DefArg::Param { name, kind } => DefArg::Param {
+                        name: name.clone(),
+                        kind: *kind,
+                    },
+                })
+                .collect();
+            sub.def_defs.insert(
+                k.clone(),
+                DefDefinition {
+                    args: cloned_args,
+                    body: v.body.clone(),
+                },
+            );
+        }
+    }
+
+    /// Detect and inline a `def` subroutine call of the form `name(arg1, arg2, ...)`.
+    ///
+    /// Returns `Ok(None)` if the line is not a known def call so the caller can
+    /// fall through to standard gate-application parsing.
+    fn try_expand_def_call(&self, line: &str, line_num: usize) -> Result<Option<Vec<Instruction>>> {
+        let line = line.trim();
+        let paren_open = match line.find('(') {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let name = line[..paren_open].trim();
+        if name.is_empty() {
+            return Ok(None);
+        }
+        let def = match self.def_defs.get(name) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        if self.gate_expansion_depth >= MAX_GATE_EXPANSION_DEPTH {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!(
+                    "def expansion depth exceeds maximum ({MAX_GATE_EXPANSION_DEPTH}); \
+                     possible recursive call to `{name}`"
+                ),
+            });
+        }
+
+        let after_open = &line[paren_open + 1..];
+        let close = find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: format!("unmatched `(` in def call `{name}`"),
+        })?;
+        let args_str = &after_open[..close];
+        let trailing = after_open[close + 1..].trim();
+        let trailing = trailing.strip_suffix(';').unwrap_or(trailing).trim();
+        if !trailing.is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("unexpected tokens after def call `{name}(...)`: `{trailing}`"),
+            });
+        }
+
+        let raw_args: Vec<&str> = split_top_level_commas(args_str)
+            .into_iter()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if raw_args.len() != def.args.len() {
+            return Err(PrismError::GateArity {
+                gate: name.to_string(),
+                expected: def.args.len(),
+                got: raw_args.len(),
+            });
+        }
+
+        let mut qubit_substs: Vec<(String, usize)> = Vec::new();
+        let mut float_vars: HashMap<String, f64> = self.param_vars.clone().unwrap_or_default();
+        let mut int_vars: HashMap<String, i64> = self.int_vars.clone().unwrap_or_default();
+        let mut int_substs: Vec<(String, i64)> = Vec::new();
+
+        for (slot, arg) in def.args.iter().zip(raw_args.iter()) {
+            match slot {
+                DefArg::Qubit(param_name) => {
+                    let resolved = self.resolve_qubit_arg(arg, line_num)?;
+                    if resolved.len() != 1 {
+                        return Err(PrismError::Parse {
+                            line: line_num,
+                            message: format!(
+                                "def `{name}` qubit parameter `{param_name}` requires a single qubit, got register `{arg}`"
+                            ),
+                        });
+                    }
+                    qubit_substs.push((param_name.clone(), resolved[0]));
+                }
+                DefArg::Param { name: pname, kind } => match kind {
+                    DefParamKind::Float => {
+                        let val = eval_expr(arg, line_num, Some(&float_vars))?;
+                        float_vars.insert(pname.clone(), val);
+                    }
+                    DefParamKind::Int => {
+                        let val = eval_int_expr(arg, line_num, Some(&int_vars))?;
+                        int_vars.insert(pname.clone(), val);
+                        float_vars.insert(pname.clone(), val as f64);
+                        int_substs.push((pname.clone(), val));
+                    }
+                },
+            }
+        }
+
+        let max_qubit = qubit_substs
+            .iter()
+            .map(|(_, q)| *q)
+            .max()
+            .unwrap_or(0)
+            .max(self.total_qubits.saturating_sub(1))
+            + 1;
+
+        let mut sub_parser = Parser {
+            input: "",
+            qregs: HashMap::new(),
+            cregs: HashMap::new(),
+            gate_defs: HashMap::new(),
+            def_defs: HashMap::new(),
+            total_qubits: max_qubit,
+            total_cbits: self.total_cbits,
+            gate_expansion_depth: self.gate_expansion_depth + 1,
+            param_vars: Some(float_vars),
+            int_vars: Some(int_vars),
+        };
+        sub_parser.qregs.insert(
+            "__q__".to_string(),
+            Register {
+                offset: 0,
+                size: max_qubit,
+            },
+        );
+        for (k, v) in &self.qregs {
+            sub_parser.qregs.insert(
+                k.clone(),
+                Register {
+                    offset: v.offset,
+                    size: v.size,
+                },
+            );
+        }
+        for (k, v) in &self.cregs {
+            sub_parser.cregs.insert(
+                k.clone(),
+                Register {
+                    offset: v.offset,
+                    size: v.size,
+                },
+            );
+        }
+        for (k, v) in &self.gate_defs {
+            sub_parser.gate_defs.insert(
+                k.clone(),
+                GateDefinition {
+                    params: v.params.clone(),
+                    qubits: v.qubits.clone(),
+                    body: v.body.clone(),
+                },
+            );
+        }
+        self.copy_def_defs_into(&mut sub_parser);
+
+        let mut substituted: Vec<String> = Vec::with_capacity(def.body.len());
+        for stmt in &def.body {
+            let mut expanded = stmt.clone();
+            for (qname, qidx) in &qubit_substs {
+                expanded = replace_word(&expanded, qname, &format!("__q__[{}]", qidx));
+            }
+            for (iname, ival) in &int_substs {
+                expanded = replace_word(&expanded, iname, &ival.to_string());
+            }
+            substituted.push(expanded);
+        }
+
+        let lines: Vec<&str> = substituted.iter().map(String::as_str).collect();
+        let instrs = sub_parser.parse_lines(&lines, line_num.saturating_sub(1))?;
+        Ok(Some(instrs))
     }
 
     fn strip_modifiers(line: &str, line_num: usize) -> Result<(Vec<Modifier>, &str)> {

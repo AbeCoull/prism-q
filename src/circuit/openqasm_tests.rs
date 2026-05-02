@@ -90,8 +90,8 @@ fn test_parametric_gates() {
 }
 
 #[test]
-fn test_unsupported_gate_def() {
-    let qasm = "OPENQASM 3.0;\nqubit[1] q;\ndef mygate(qubit q) { x q; }";
+fn test_unsupported_def_with_measurement() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\ndef mygate(qubit q) { measure q -> c[0]; }";
     let err = parse(qasm).unwrap_err();
     assert!(matches!(err, PrismError::UnsupportedConstruct { .. }));
 }
@@ -1957,4 +1957,630 @@ fn rx_with_finite_expression_still_parses() {
     "#;
     let c = parse(qasm).unwrap();
     assert_eq!(c.gate_count(), 1);
+}
+
+#[test]
+fn for_loop_unrolls_inclusive_range() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[4] q;
+        for int i in [0:3] {
+            h q[i];
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 4);
+    for (idx, instr) in c.instructions.iter().enumerate() {
+        match instr {
+            Instruction::Gate {
+                gate: Gate::H,
+                targets,
+            } => {
+                assert_eq!(targets.as_slice(), &[idx]);
+            }
+            _ => panic!("expected H gate at slot {idx}"),
+        }
+    }
+}
+
+#[test]
+fn for_loop_with_step() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[6] q;
+        for int i in [0:2:4] {
+            x q[i];
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 3);
+    let expected = [0usize, 2, 4];
+    for (idx, &qi) in expected.iter().enumerate() {
+        match &c.instructions[idx] {
+            Instruction::Gate {
+                gate: Gate::X,
+                targets,
+            } => {
+                assert_eq!(targets.as_slice(), &[qi]);
+            }
+            _ => panic!("expected X gate at slot {idx}"),
+        }
+    }
+}
+
+#[test]
+fn for_loop_set_form() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[5] q;
+        for int i in {0, 2, 4} {
+            x q[i];
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 3);
+    let expected = [0usize, 2, 4];
+    for (idx, &qi) in expected.iter().enumerate() {
+        match &c.instructions[idx] {
+            Instruction::Gate {
+                gate: Gate::X,
+                targets,
+            } => {
+                assert_eq!(targets.as_slice(), &[qi]);
+            }
+            _ => panic!("expected X gate at slot {idx}"),
+        }
+    }
+}
+
+#[test]
+fn for_loop_negative_step() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[4] q;
+        for int i in [3:-1:0] {
+            x q[i];
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 4);
+    let expected = [3usize, 2, 1, 0];
+    for (idx, &qi) in expected.iter().enumerate() {
+        match &c.instructions[idx] {
+            Instruction::Gate {
+                gate: Gate::X,
+                targets,
+            } => {
+                assert_eq!(targets.as_slice(), &[qi]);
+            }
+            _ => panic!("expected X gate at slot {idx}"),
+        }
+    }
+}
+
+#[test]
+fn for_loop_uses_loop_variable_in_param_expression() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for int i in [0:2] {
+            rx(i * pi / 4) q[i];
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 3);
+    for (idx, instr) in c.instructions.iter().enumerate() {
+        match instr {
+            Instruction::Gate {
+                gate: Gate::Rx(theta),
+                targets,
+            } => {
+                let expected = idx as f64 * std::f64::consts::PI / 4.0;
+                assert!((theta - expected).abs() < 1e-12);
+                assert_eq!(targets.as_slice(), &[idx]);
+            }
+            _ => panic!("expected Rx gate at slot {idx}"),
+        }
+    }
+}
+
+#[test]
+fn for_loop_nested() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[4] q;
+        for int i in [0:1] {
+            for int j in [0:1] {
+                cx q[i], q[j+2];
+            }
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 4);
+    let expected = [(0usize, 2usize), (0, 3), (1, 2), (1, 3)];
+    for (idx, &(ci, ti)) in expected.iter().enumerate() {
+        match &c.instructions[idx] {
+            Instruction::Gate {
+                gate: Gate::Cx,
+                targets,
+            } => {
+                assert_eq!(targets.as_slice(), &[ci, ti]);
+            }
+            _ => panic!("expected CX at slot {idx}"),
+        }
+    }
+}
+
+#[test]
+fn for_loop_uint_keyword_accepted() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for uint i in [0:2] {
+            x q[i];
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 3);
+}
+
+#[test]
+fn for_loop_unterminated_brace_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for int i in [0:2] {
+            x q[i];
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::Parse { .. }));
+}
+
+#[test]
+fn for_loop_zero_step_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for int i in [0:0:2] {
+            x q[i];
+        }
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::Parse { .. }));
+}
+
+#[test]
+fn for_loop_non_integer_bound_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        for int i in [0:pi] {
+            x q[i];
+        }
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::Parse { .. }));
+}
+
+#[test]
+fn def_subroutine_basic_inlines() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        def bell(qubit a, qubit b) {
+            h a;
+            cx a, b;
+        }
+        bell(q[0], q[1]);
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 2);
+    match &c.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::H,
+            targets,
+        } => {
+            assert_eq!(targets.as_slice(), &[0]);
+        }
+        _ => panic!("expected H"),
+    }
+    match &c.instructions[1] {
+        Instruction::Gate {
+            gate: Gate::Cx,
+            targets,
+        } => {
+            assert_eq!(targets.as_slice(), &[0, 1]);
+        }
+        _ => panic!("expected CX"),
+    }
+}
+
+#[test]
+fn def_subroutine_with_float_parameter() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        def my_rx(float theta, qubit a) {
+            rx(theta) a;
+        }
+        my_rx(0.5, q[0]);
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 1);
+    match &c.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rx(theta),
+            targets,
+        } => {
+            assert!((theta - 0.5).abs() < 1e-12);
+            assert_eq!(targets.as_slice(), &[0]);
+        }
+        _ => panic!("expected Rx"),
+    }
+}
+
+#[test]
+fn def_subroutine_with_int_parameter_used_as_index() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        def at_idx(int i, qubit a) {
+            rx(i * pi / 2) a;
+        }
+        at_idx(2, q[1]);
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 1);
+    match &c.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rx(theta),
+            targets,
+        } => {
+            assert!((theta - std::f64::consts::PI).abs() < 1e-12);
+            assert_eq!(targets.as_slice(), &[1]);
+        }
+        _ => panic!("expected Rx"),
+    }
+}
+
+#[test]
+fn def_subroutine_with_for_loop_inside_body() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        def all_h(qubit a, qubit b, qubit c) {
+            for int i in [0:2] {
+                rx(i * pi / 2) a;
+            }
+            h b;
+            h c;
+        }
+        all_h(q[0], q[1], q[2]);
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 5);
+}
+
+#[test]
+fn def_subroutine_with_return_type_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        def measure_qubit(qubit a) -> bit {
+            return 0;
+        }
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::UnsupportedConstruct { .. }));
+}
+
+#[test]
+fn def_subroutine_arity_mismatch_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        def bell(qubit a, qubit b) {
+            h a;
+            cx a, b;
+        }
+        bell(q[0]);
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::GateArity { .. }));
+}
+
+#[test]
+fn def_subroutine_recursion_capped() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        def loop(qubit a) {
+            loop(a);
+        }
+        loop(q[0]);
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::Parse { .. }));
+}
+
+#[test]
+fn def_subroutine_called_inside_for() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[4] q;
+        def step(qubit a) {
+            h a;
+        }
+        for int i in [0:3] {
+            step(q[i]);
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 4);
+    for (idx, instr) in c.instructions.iter().enumerate() {
+        match instr {
+            Instruction::Gate {
+                gate: Gate::H,
+                targets,
+            } => {
+                assert_eq!(targets.as_slice(), &[idx]);
+            }
+            _ => panic!("expected H gate at slot {idx}"),
+        }
+    }
+}
+
+#[test]
+fn if_bit_equals_one_form_parses() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[1] c;
+        if (c[0] == 1) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional {
+            condition,
+            gate: Gate::X,
+            targets,
+        } => {
+            assert!(matches!(condition, ClassicalCondition::BitIsOne(0)));
+            assert_eq!(targets.as_slice(), &[0]);
+        }
+        _ => panic!("expected conditional X gate"),
+    }
+}
+
+#[test]
+fn if_bit_equals_zero_form_parses() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[1] c;
+        if (c[0] == 0) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(condition, ClassicalCondition::BitIsZero(0)));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn if_bit_not_equal_one_negates() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[1] c;
+        if (c[0] != 1) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(condition, ClassicalCondition::BitIsZero(0)));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn if_bit_not_equal_zero_is_one() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[1] c;
+        if (c[0] != 0) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(condition, ClassicalCondition::BitIsOne(0)));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn if_negated_bit_truthy_check() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[1] c;
+        if (!c[0]) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(condition, ClassicalCondition::BitIsZero(0)));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn if_register_not_equals() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[3] c;
+        if (c != 5) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(
+                condition,
+                ClassicalCondition::RegisterNotEquals { value: 5, .. }
+            ));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn if_register_equals_hex_literal() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[8] c;
+        if (c == 0xff) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(
+                condition,
+                ClassicalCondition::RegisterEquals { value: 255, .. }
+            ));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn if_register_equals_binary_literal() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[4] c;
+        if (c == 0b1010) x q[0];
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(
+                condition,
+                ClassicalCondition::RegisterEquals { value: 10, .. }
+            ));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn parametric_gate_accepts_hex_literal() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nrx(0x2 * pi / 8) q[0];";
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rx(theta),
+            ..
+        } => {
+            assert!((theta - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
+        }
+        _ => panic!("expected Rx"),
+    }
+}
+
+#[test]
+fn parametric_gate_accepts_underscore_in_hex() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nrz(0xff_ff * 0) q[0];";
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rz(theta),
+            ..
+        } => {
+            assert!(theta.abs() < 1e-12);
+        }
+        _ => panic!("expected Rz"),
+    }
+}
+
+#[test]
+fn parametric_gate_accepts_boolean_literal() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nrx(true * pi) q[0];";
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rx(theta),
+            ..
+        } => {
+            assert!((theta - std::f64::consts::PI).abs() < 1e-12);
+        }
+        _ => panic!("expected Rx"),
+    }
+}
+
+#[test]
+fn for_loop_accepts_hex_bound() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[8] q;
+        for int i in [0:0x3] {
+            x q[i];
+        }
+    "#;
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.gate_count(), 4);
+}
+
+#[test]
+fn if_register_compare_with_int_var_in_def() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[4] c;
+        def cond(int n, qubit a) {
+            if (c == n) x a;
+        }
+        cond(3, q[0]);
+    "#;
+    let c = parse(qasm).unwrap();
+    match &c.instructions[0] {
+        Instruction::Conditional { condition, .. } => {
+            assert!(matches!(
+                condition,
+                ClassicalCondition::RegisterEquals { value: 3, .. }
+            ));
+        }
+        _ => panic!("expected conditional"),
+    }
+}
+
+#[test]
+fn if_negative_value_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[4] c;
+        if (c == -1) x q[0];
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::Parse { .. }));
+}
+
+#[test]
+fn if_bit_compare_against_two_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        bit[1] c;
+        if (c[0] == 2) x q[0];
+    "#;
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::Parse { .. }));
 }

@@ -86,13 +86,27 @@ checks out the base commit and PR head on the same runner, runs
 `scripts/bench_check.sh`, then fails if any matching benchmark regresses beyond
 the configured threshold.
 
-The CI subset uses `CI_BENCH_FEATURES=parallel,bench-fast` and covers specific
-larger parameter points for representative statevector kernels, gate kernels,
-measurement, OpenQASM parse plus simulate, stabilizer dispatch, auto dispatch,
-and compiled sampling. The filters are intentionally narrow so GitHub hosted
-runner noise from tiny parameter sweeps does not dominate the gate. It is a
-smoke gate, not a replacement for the full local benchmark suite required for
-performance-sensitive changes.
+The CI subset uses `CI_BENCH_FEATURES=parallel,bench-fast` and covers larger
+CPU-only parameter points that are already present on the base branch. The
+filters are intentionally narrow so GitHub hosted runner noise from tiny
+parameter sweeps does not dominate the gate. It is a regression gate, not a
+replacement for the full local benchmark suite required for performance
+sensitive changes.
+
+Representative CI workloads:
+
+| Filter | Coverage |
+|--------|----------|
+| `statevector/scalability_d5/22` | Dense statevector scaling at a larger qubit count |
+| `statevector/qft_textbook/22` | Structured controlled phase and swap workload |
+| `statevector/qpe_t_gate/22q` | Phase estimation with non-Clifford gates |
+| `stabilizer/scaling/1000` | Large Clifford stabilizer backend path |
+| `auto/qft_textbook/22` | Auto dispatch on a structured dense circuit |
+| `compiled_sampler/noiseless/noiseless_1000q_10k` | Compiled shot sampling path |
+
+The script builds the `circuits` benchmark binary once with
+`cargo bench --no-run`, then runs the compiled executable directly with
+Criterion filters. This keeps Cargo setup out of the timed regression subset.
 
 Local reproduction:
 

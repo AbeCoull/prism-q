@@ -66,6 +66,61 @@ fn reset_rejected() {
 }
 
 #[test]
+fn defer_measure_reset_rewrites_reuse() {
+    let mut c = Circuit::new(1, 2);
+    c.add_gate(Gate::X, &[0]);
+    c.add_measure(0, 0);
+    c.add_reset(0);
+    c.add_measure(0, 1);
+
+    let deferred = defer_measure_reset_circuit(&c).unwrap();
+    assert_eq!(deferred.num_qubits, 2);
+    assert!(!deferred.has_resets());
+    assert!(deferred.has_terminal_measurements_only());
+    assert_eq!(deferred.measurement_map(), vec![(0, 0), (1, 1)]);
+
+    let mut sampler = compile_measurements(&deferred, 42).unwrap();
+    for shot in sampler.sample_bulk(64) {
+        assert!(shot[0]);
+        assert!(!shot[1]);
+    }
+}
+
+#[test]
+fn defer_measure_reset_rejects_measured_qubit_reuse() {
+    let mut c = Circuit::new(1, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_measure(0, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_measure(0, 1);
+
+    let result = defer_measure_reset_circuit(&c);
+    assert!(result.is_err());
+}
+
+#[test]
+fn run_shots_deferred_reset_preserves_bell_correlation() {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_measure(1, 0);
+    c.add_reset(1);
+    c.add_measure(0, 1);
+
+    let result = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 1024, 42).unwrap();
+    assert_eq!(result.num_classical_bits, 2);
+    let mut saw_zero = false;
+    let mut saw_one = false;
+    for shot in &result.shots {
+        assert_eq!(shot[0], shot[1]);
+        saw_zero |= !shot[0];
+        saw_one |= shot[0];
+    }
+    assert!(saw_zero);
+    assert!(saw_one);
+}
+
+#[test]
 fn conditional_rejected() {
     let mut c = Circuit::new(2, 2);
     c.add_gate(Gate::H, &[0]);
@@ -579,6 +634,83 @@ fn packed_shots_get_bit() {
             assert_eq!(packed.get_bit(s, m), first);
         }
     }
+}
+
+#[test]
+fn packed_shots_parity_rows_shot_major() {
+    let packed = PackedShots::from_shot_major(vec![0b001, 0b011, 0b110], 3, 3);
+    let rows = vec![vec![0, 1], vec![1, 2], Vec::new()];
+    let parity = packed.parity_rows(&rows).unwrap();
+    let shots = parity.to_shots();
+    assert_eq!(
+        shots,
+        vec![
+            vec![true, false, false],
+            vec![false, true, false],
+            vec![true, false, false],
+        ]
+    );
+}
+
+#[test]
+fn packed_shots_parity_rows_meas_major() {
+    let packed = PackedShots::from_meas_major(vec![0b011, 0b110, 0b100], 3, 3);
+    let rows = vec![vec![0, 1], vec![1, 2], Vec::new()];
+    let parity = packed.parity_rows(&rows).unwrap();
+    assert_eq!(parity.layout(), ShotLayout::MeasMajor);
+    assert_eq!(
+        parity.to_shots(),
+        vec![
+            vec![true, false, false],
+            vec![false, true, false],
+            vec![true, false, false],
+        ]
+    );
+}
+
+#[test]
+fn packed_shots_parity_rows_rejects_bad_index() {
+    let packed = PackedShots::from_shot_major(vec![0], 1, 1);
+    assert!(packed.parity_rows(&[vec![1]]).is_err());
+}
+
+#[test]
+fn detector_sampler_preserves_bell_measure_reset_correlation() {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_measure(1, 0);
+    c.add_reset(1);
+    c.add_measure(0, 1);
+
+    let detector_rows = vec![vec![0, 1], vec![0]];
+    let observable_rows = vec![vec![1]];
+    let mut sampler = compile_detector_sampler(&c, detector_rows, observable_rows, 42).unwrap();
+    assert_eq!(sampler.num_measurements(), 2);
+    assert_eq!(sampler.num_detectors(), 2);
+    assert_eq!(sampler.num_observables(), 1);
+
+    let batch = sampler.sample_packed(1024).unwrap();
+    assert_eq!(batch.detectors.num_measurements(), 2);
+    assert_eq!(batch.observables.num_measurements(), 1);
+
+    let detector_shots = batch.detectors.to_shots();
+    let observable_shots = batch.observables.to_shots();
+    let measurement_shots = batch.measurements.to_shots();
+    let mut saw_zero = false;
+    let mut saw_one = false;
+    for shot_idx in 0..detector_shots.len() {
+        assert!(!detector_shots[shot_idx][0]);
+        assert_eq!(detector_shots[shot_idx][1], measurement_shots[shot_idx][0]);
+        assert_eq!(
+            observable_shots[shot_idx][0],
+            measurement_shots[shot_idx][1]
+        );
+        saw_zero |= !detector_shots[shot_idx][1];
+        saw_one |= detector_shots[shot_idx][1];
+    }
+    assert!(saw_zero);
+    assert!(saw_one);
 }
 
 #[test]

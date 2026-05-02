@@ -8,7 +8,7 @@ mod tests;
 
 use std::hash::{Hash, Hasher};
 
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 #[cfg(feature = "gpu")]
 use crate::gpu::kernels::bts::GpuBtsCache;
@@ -206,6 +206,22 @@ pub struct CompiledSampler {
     gpu_context: Option<std::sync::Arc<crate::gpu::GpuContext>>,
     #[cfg(feature = "gpu")]
     gpu_bts_cache: Option<GpuBtsCache>,
+}
+
+/// Compiled sampler for measurement, detector, and observable records.
+pub struct CompiledDetectorSampler {
+    measurement_sampler: CompiledSampler,
+    detector_rows: Vec<Vec<usize>>,
+    observable_rows: Vec<Vec<usize>>,
+    num_measurements: usize,
+}
+
+/// Packed measurement, detector, and observable samples from one shot batch.
+#[derive(Debug, Clone)]
+pub struct DetectorSampleBatch {
+    pub measurements: PackedShots,
+    pub detectors: PackedShots,
+    pub observables: PackedShots,
 }
 
 fn pack_bools(bools: &[bool]) -> Vec<u64> {
@@ -1672,6 +1688,71 @@ impl PackedShots {
         shots
     }
 
+    /// Compute packed parity rows over this packed shot matrix.
+    ///
+    /// Each row lists measurement indices to XOR into one output bit.
+    pub fn parity_rows(&self, rows: &[Vec<usize>]) -> Result<PackedShots> {
+        validate_parity_rows(rows, self.num_measurements)?;
+
+        match self.layout {
+            ShotLayout::MeasMajor => {
+                let mut data = vec![0u64; rows.len() * self.s_words];
+
+                #[cfg(feature = "parallel")]
+                if rows.len() * self.s_words >= 16_384 {
+                    use rayon::prelude::*;
+                    data.par_chunks_mut(self.s_words)
+                        .zip(rows.par_iter())
+                        .for_each(|(dst, row)| {
+                            for &measurement in row {
+                                let src_start = measurement * self.s_words;
+                                xor_words(dst, &self.data[src_start..src_start + self.s_words]);
+                            }
+                        });
+                    return Ok(PackedShots::from_meas_major(
+                        data,
+                        self.num_shots,
+                        rows.len(),
+                    ));
+                }
+
+                for (out_idx, row) in rows.iter().enumerate() {
+                    let dst = &mut data[out_idx * self.s_words..(out_idx + 1) * self.s_words];
+                    for &measurement in row {
+                        let src_start = measurement * self.s_words;
+                        xor_words(dst, &self.data[src_start..src_start + self.s_words]);
+                    }
+                }
+                Ok(PackedShots::from_meas_major(
+                    data,
+                    self.num_shots,
+                    rows.len(),
+                ))
+            }
+            ShotLayout::ShotMajor => {
+                let out_words = rows.len().div_ceil(64);
+                let mut data = vec![0u64; self.num_shots * out_words];
+                for shot in 0..self.num_shots {
+                    let base = shot * out_words;
+                    for (out_idx, row) in rows.iter().enumerate() {
+                        let mut bit = false;
+                        for &measurement in row {
+                            bit ^= self.get_bit(shot, measurement);
+                        }
+                        if bit {
+                            data[base + out_idx / 64] |= 1u64 << (out_idx % 64);
+                        }
+                    }
+                }
+                Ok(PackedShots::from_shot_major(
+                    data,
+                    self.num_shots,
+                    rows.len(),
+                ))
+            }
+        }
+    }
+
     pub fn counts(&self) -> std::collections::HashMap<Vec<u64>, u64> {
         if self.m_words > 8 {
             return self.counts_wide();
@@ -1779,6 +1860,103 @@ impl PackedShots {
             }
         }
         map
+    }
+}
+
+fn validate_parity_rows(rows: &[Vec<usize>], num_measurements: usize) -> Result<()> {
+    for row in rows {
+        for &measurement in row {
+            if measurement >= num_measurements {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "measurement index {measurement} out of bounds for {num_measurements} measurements"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+impl CompiledDetectorSampler {
+    pub fn num_measurements(&self) -> usize {
+        self.num_measurements
+    }
+
+    pub fn num_detectors(&self) -> usize {
+        self.detector_rows.len()
+    }
+
+    pub fn num_observables(&self) -> usize {
+        self.observable_rows.len()
+    }
+
+    pub fn rank(&self) -> usize {
+        self.measurement_sampler.rank()
+    }
+
+    pub fn detector_rows(&self) -> &[Vec<usize>] {
+        &self.detector_rows
+    }
+
+    pub fn observable_rows(&self) -> &[Vec<usize>] {
+        &self.observable_rows
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(mut self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
+        self.measurement_sampler = self.measurement_sampler.with_gpu(context);
+        self
+    }
+
+    pub fn sample_measurements_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
+        self.measurement_sampler.try_sample_bulk_packed(num_shots)
+    }
+
+    pub fn sample_detectors_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
+        let measurements = self.sample_measurements_packed(num_shots)?;
+        measurements.parity_rows(&self.detector_rows)
+    }
+
+    pub fn sample_observables_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
+        let measurements = self.sample_measurements_packed(num_shots)?;
+        measurements.parity_rows(&self.observable_rows)
+    }
+
+    pub fn sample_packed(&mut self, num_shots: usize) -> Result<DetectorSampleBatch> {
+        let measurements = self.sample_measurements_packed(num_shots)?;
+        let detectors = measurements.parity_rows(&self.detector_rows)?;
+        let observables = measurements.parity_rows(&self.observable_rows)?;
+        Ok(DetectorSampleBatch {
+            measurements,
+            detectors,
+            observables,
+        })
+    }
+
+    pub fn sample_detectors_chunked<A: ShotAccumulator>(
+        &mut self,
+        total_shots: usize,
+        acc: &mut A,
+    ) -> Result<()> {
+        let chunk_size = default_chunk_size(self.detector_rows.len());
+        let mut remaining = total_shots;
+        while remaining > 0 {
+            let batch = remaining.min(chunk_size);
+            let packed = self.sample_detectors_packed(batch)?;
+            acc.accumulate(&packed);
+            remaining -= batch;
+        }
+        Ok(())
+    }
+
+    pub fn sample_detector_counts(
+        &mut self,
+        total_shots: usize,
+    ) -> Result<std::collections::HashMap<Vec<u64>, u64>> {
+        let mut acc = HistogramAccumulator::new();
+        self.sample_detectors_chunked(total_shots, &mut acc)?;
+        Ok(acc.into_counts())
     }
 }
 
@@ -2352,6 +2530,173 @@ fn compile_measurements_filtered(
         gpu_context: None,
         #[cfg(feature = "gpu")]
         gpu_bts_cache: None,
+    })
+}
+
+/// Convert reset reuse into fresh qubit aliases and move measurements to the end.
+pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> {
+    if !circuit.is_clifford_only() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "deferred measurement sampling requires Clifford gates".to_string(),
+        });
+    }
+
+    let has_measurements = circuit
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst, Instruction::Measure { .. }));
+    if !has_measurements {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "CompiledSampler".to_string(),
+            reason: "deferred measurement sampling requires measurements".to_string(),
+        });
+    }
+
+    let mut aliases: Vec<usize> = (0..circuit.num_qubits).collect();
+    let mut measured_aliases = vec![false; circuit.num_qubits];
+    let mut next_qubit = circuit.num_qubits;
+    let mut deferred_measurements: Vec<(usize, usize)> = Vec::new();
+    let mut transformed = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
+
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate { gate, targets } => {
+                let mapped = map_deferred_targets(targets, &aliases, &measured_aliases)?;
+                transformed.instructions.push(Instruction::Gate {
+                    gate: gate.clone(),
+                    targets: mapped,
+                });
+            }
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => {
+                if *qubit >= aliases.len() {
+                    return Err(PrismError::InvalidQubit {
+                        index: *qubit,
+                        register_size: aliases.len(),
+                    });
+                }
+                if *classical_bit >= circuit.num_classical_bits {
+                    return Err(PrismError::InvalidClassicalBit {
+                        index: *classical_bit,
+                        register_size: circuit.num_classical_bits,
+                    });
+                }
+                let alias = aliases[*qubit];
+                deferred_measurements.push((alias, *classical_bit));
+                measured_aliases[alias] = true;
+            }
+            Instruction::Reset { qubit } => {
+                if *qubit >= aliases.len() {
+                    return Err(PrismError::InvalidQubit {
+                        index: *qubit,
+                        register_size: aliases.len(),
+                    });
+                }
+                aliases[*qubit] = next_qubit;
+                next_qubit += 1;
+                measured_aliases.push(false);
+                transformed.num_qubits = next_qubit;
+            }
+            Instruction::Barrier { qubits } => {
+                let mut mapped = SmallVec::<[usize; 4]>::with_capacity(qubits.len());
+                for &q in qubits {
+                    if q >= aliases.len() {
+                        return Err(PrismError::InvalidQubit {
+                            index: q,
+                            register_size: aliases.len(),
+                        });
+                    }
+                    mapped.push(aliases[q]);
+                }
+                transformed
+                    .instructions
+                    .push(Instruction::Barrier { qubits: mapped });
+            }
+            Instruction::Conditional { .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "CompiledSampler".to_string(),
+                    reason: "deferred measurement sampling does not support classical conditionals"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    transformed.num_qubits = next_qubit;
+    transformed
+        .instructions
+        .reserve(deferred_measurements.len());
+    for (qubit, classical_bit) in deferred_measurements {
+        transformed.instructions.push(Instruction::Measure {
+            qubit,
+            classical_bit,
+        });
+    }
+
+    Ok(transformed)
+}
+
+fn map_deferred_targets(
+    targets: &SmallVec<[usize; 4]>,
+    aliases: &[usize],
+    measured_aliases: &[bool],
+) -> Result<SmallVec<[usize; 4]>> {
+    let mut mapped = SmallVec::<[usize; 4]>::with_capacity(targets.len());
+    for &target in targets {
+        if target >= aliases.len() {
+            return Err(PrismError::InvalidQubit {
+                index: target,
+                register_size: aliases.len(),
+            });
+        }
+        let alias = aliases[target];
+        if measured_aliases[alias] {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "CompiledSampler".to_string(),
+                reason:
+                    "deferred measurement sampling requires reset before reusing a measured qubit"
+                        .to_string(),
+            });
+        }
+        mapped.push(alias);
+    }
+    Ok(mapped)
+}
+
+/// Compile a Clifford measurement circuit plus detector parity metadata.
+///
+/// `detector_rows` and `observable_rows` contain measurement record indices
+/// in circuit measurement order. Circuits with reset reuse are rewritten to
+/// terminal measurements before compiling.
+pub fn compile_detector_sampler(
+    circuit: &Circuit,
+    detector_rows: Vec<Vec<usize>>,
+    observable_rows: Vec<Vec<usize>>,
+    seed: u64,
+) -> Result<CompiledDetectorSampler> {
+    let measurement_circuit = if circuit.has_resets() || !circuit.has_terminal_measurements_only() {
+        defer_measure_reset_circuit(circuit)?
+    } else {
+        circuit.clone()
+    };
+
+    let num_measurements = measurement_circuit
+        .instructions
+        .iter()
+        .filter(|inst| matches!(inst, Instruction::Measure { .. }))
+        .count();
+    validate_parity_rows(&detector_rows, num_measurements)?;
+    validate_parity_rows(&observable_rows, num_measurements)?;
+
+    let measurement_sampler = compile_measurements(&measurement_circuit, seed)?;
+    Ok(CompiledDetectorSampler {
+        measurement_sampler,
+        detector_rows,
+        observable_rows,
+        num_measurements,
     })
 }
 

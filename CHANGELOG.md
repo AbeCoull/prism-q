@@ -2,6 +2,11 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.12.1] - 2026-05-02
+
+### Bug Fixes
+
+- **openqasm:** Support Qiskit and native hardware gates (#58)([f831f43](https://github.com/AbeCoull/prism-q/commit/f831f43c12dc84fd22ebd4772ff5a83b7e9472df))
 ## [0.12.0] - 2026-05-02
 
 ### CI
@@ -15,6 +20,10 @@ All notable changes to PRISM-Q will be documented in this file.
 ### Features
 
 - **qec:** Add packed detector sampler (#57)([e245a30](https://github.com/AbeCoull/prism-q/commit/e245a3087fc68b7137860335c6605a54eb110402))
+
+### Miscellaneous
+
+- **release:** 0.12.0([6709b85](https://github.com/AbeCoull/prism-q/commit/6709b8519ff04bb0ef6e5fdd624849eeec483d34))
 
 ### Testing
 

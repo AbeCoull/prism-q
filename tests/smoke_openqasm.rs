@@ -193,6 +193,40 @@ fn all_two_qubit_gates_parse() {
     assert_eq!(circuit.gate_count(), 3);
 }
 
+#[test]
+fn ecosystem_gate_bundle_parses_and_runs() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        include "stdgates.inc";
+        qubit[5] q;
+        h q[0];
+        r(pi/3, pi/7) q[0];
+        phase(pi/9) q[1];
+        gpi(0.25) q[2];
+        gpi2(0.5) q[3];
+        xx_plus_yy(pi/5, pi/11) q[0], q[1];
+        xx_minus_yy(pi/7, pi/13) q[1], q[2];
+        syc q[2], q[3];
+        sqrt_iswap q[3], q[4];
+        sqrt_iswap_inv q[3], q[4];
+        ms(0.125, 0.25, 0.125) q[0], q[4];
+        cs q[0], q[1];
+        csdg q[1], q[2];
+        cu(pi/3, pi/5, pi/7, pi/11) q[2], q[3];
+        c3x q[0], q[1], q[2], q[3];
+        c4x q[0], q[1], q[2], q[3], q[4];
+        rccx q[0], q[1], q[2];
+        rcccx q[0], q[1], q[2], q[3];
+    "#;
+
+    let circuit = openqasm::parse(qasm).unwrap();
+    let mut backend = StatevectorBackend::new(42);
+    let result = sim::run_on(&mut backend, &circuit).unwrap();
+    let probabilities = result.probabilities.unwrap();
+    let total: f64 = probabilities.iter().sum();
+    assert!((total - 1.0).abs() < 1e-10);
+}
+
 // -- Gate modifier tests --
 
 #[test]

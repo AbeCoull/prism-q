@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.13.0] - 2026-05-04
+
+### Features
+
+- **qec:** Add native Clifford QEC program runner with Pauli noise (#60)([93e91fe](https://github.com/AbeCoull/prism-q/commit/93e91fedb98c35b4929d91cceb889f187010074e))
 ## [0.12.2] - 2026-05-02
 
 ### Bug Fixes
 
 - **openqasm:** Support for-loops, def subroutines, classical expressions (#59)([37743a4](https://github.com/AbeCoull/prism-q/commit/37743a45cd448278e5938d709223503f0fa7330f))
+
+### Miscellaneous
+
+- **release:** 0.12.2([fcfcdeb](https://github.com/AbeCoull/prism-q/commit/fcfcdeb5fabcaa9ad0b10cfbc808e5c585d94c73))
 ## [0.12.1] - 2026-05-02
 
 ### Bug Fixes

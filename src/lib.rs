@@ -1,4 +1,4 @@
-//! PRISM-Q — Performance Rust Interoperable Simulator for Quantum
+//! PRISM-Q: Performance Rust Interoperable Simulator for Quantum
 //!
 //! A performance-first quantum circuit simulator with pluggable backends.
 //!
@@ -18,7 +18,7 @@
 //!
 //! let result = run_qasm(qasm, 42).expect("parse/sim failed");
 //! let probs = result.probabilities.expect("no probabilities").to_vec();
-//! // Bell state: ~50% |00⟩, ~50% |11⟩
+//! // Bell state: ~50% |00>, ~50% |11>
 //! assert!((probs[0] - 0.5).abs() < 1e-10);
 //! assert!((probs[3] - 0.5).abs() < 1e-10);
 //! ```
@@ -30,13 +30,20 @@
 //!
 //! # Backends
 //!
-//! - [`StatevectorBackend`] — full state-vector simulation (implemented)
-//! - [`StabilizerBackend`] — Clifford-only O(n²) simulation (implemented)
-//! - [`SparseBackend`] — sparse state-vector O(k) simulation (implemented)
-//! - [`MpsBackend`] — Matrix Product State O(nχ²) simulation (implemented)
-//! - [`ProductStateBackend`] — per-qubit O(n) simulation for non-entangling circuits (implemented)
-//! - [`TensorNetworkBackend`] — deferred contraction for low-treewidth circuits (implemented)
-//! - [`FactoredBackend`] — dynamic split-state simulation for sparse-entanglement circuits (implemented)
+//! - [`StatevectorBackend`]: full state-vector simulation (implemented)
+//! - [`StabilizerBackend`]: Clifford-only O(n^2) simulation (implemented)
+//! - [`SparseBackend`]: sparse state-vector O(k) simulation (implemented)
+//! - [`MpsBackend`]: Matrix Product State O(n * chi^2) simulation (implemented)
+//! - [`ProductStateBackend`]: per-qubit O(n) simulation for non-entangling circuits (implemented)
+//! - [`TensorNetworkBackend`]: deferred contraction for low-treewidth circuits (implemented)
+//! - [`FactoredBackend`]: dynamic split-state simulation for sparse-entanglement circuits (implemented)
+//!
+//! # Native QEC
+//!
+//! Measurement-record QEC programs use [`QecProgram`] or [`parse_qec_program`].
+//! [`run_qec_program`] executes supported Clifford QEC programs through packed
+//! compiled sampling with Pauli-noise annotations. [`run_qec_program_reference`]
+//! runs small correctness checks through the reference path.
 
 pub mod backend;
 pub mod circuit;
@@ -45,6 +52,7 @@ pub mod error;
 pub mod gates;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+pub mod qec;
 pub mod sim;
 
 pub use backend::factored::FactoredBackend;
@@ -59,6 +67,11 @@ pub use circuit::builder::CircuitBuilder;
 pub use circuit::{Circuit, ClassicalCondition, Instruction, SvgOptions, TextOptions};
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
+pub use qec::{
+    compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
+    QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise, QecOp, QecOptions, QecPauli,
+    QecProgram, QecRecordRef, QecSampleResult,
+};
 pub use sim::compiled::{
     compile_detector_sampler, compile_forward, compile_measurements, run_shots_compiled,
     CompiledDetectorSampler, CompiledSampler, CorrelatorAccumulator, DetectorSampleBatch,

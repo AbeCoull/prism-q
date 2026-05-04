@@ -1,10 +1,10 @@
 //! Focused benchmark for shot-sampling and counting performance.
 //!
 //! Measures:
-//! 1. `sample_shots` (Dense path) — per-shot bit extraction
-//! 2. `ShotsResult::counts()` — histogram building from Vec<Vec<bool>>
-//! 3. `PackedShots::counts()` — histogram from packed u64 representation
-//! 4. `run_shots_compiled` round-trip — compile + sample + to_shots
+//! 1. `sample_shots` (Dense path): per-shot bit extraction
+//! 2. `ShotsResult::counts()`: histogram building from Vec<Vec<bool>>
+//! 3. `PackedShots::counts()`: histogram from packed u64 representation
+//! 4. `run_shots_compiled` round-trip: compile + sample + to_shots
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use prism_q::circuit::Circuit;
@@ -12,7 +12,9 @@ use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::sim::noise::NoiseModel;
 use prism_q::BackendKind;
-use prism_q::HomologicalSampler;
+use prism_q::{
+    run_qec_program, HomologicalSampler, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef,
+};
 use std::time::Duration;
 
 const SEED: u64 = 0xDEAD_BEEF;
@@ -199,6 +201,97 @@ fn clifford_circuit_with_measurements(n_qubits: usize, depth: usize) -> Circuit 
     c
 }
 
+fn qec_repetition_program(
+    n_data: usize,
+    rounds: usize,
+    shots: usize,
+    noise_rate: Option<f64>,
+) -> QecProgram {
+    assert!(n_data > 0);
+    let options = QecOptions {
+        shots,
+        seed: SEED,
+        chunk_size: Some(10_000),
+        keep_measurements: false,
+    };
+    let mut program = QecProgram::with_options(n_data, options);
+    let checks = n_data.saturating_sub(1);
+    let mut previous_round = Vec::with_capacity(checks);
+
+    for _ in 0..rounds {
+        let mut current_round = Vec::with_capacity(checks);
+        for q in 0..checks {
+            if let Some(p) = noise_rate {
+                program
+                    .noise(QecNoise::Depolarize1(p), &[q, q + 1])
+                    .unwrap();
+            }
+            let record = program
+                .measure_pauli_product(&[QecPauli::z(q), QecPauli::z(q + 1)])
+                .unwrap();
+            if let Some(previous) = previous_round.get(q) {
+                program
+                    .detector(&[
+                        QecRecordRef::absolute(*previous),
+                        QecRecordRef::absolute(record),
+                    ])
+                    .unwrap();
+            }
+            current_round.push(record);
+        }
+        previous_round = current_round;
+    }
+
+    let logical = program.measure_z(0).unwrap();
+    program
+        .observable_include(0, &[QecRecordRef::absolute(logical)])
+        .unwrap();
+    program
+}
+
+fn bench_qec_clifford_runner(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_clifford_runner");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    for &(n_data, rounds, shots) in &[(25, 5, 10_000), (25, 5, 100_000), (100, 3, 100_000)] {
+        let program = qec_repetition_program(n_data, rounds, shots, None);
+        let label = format!("{n_data}q_r{rounds}");
+        group.bench_with_input(BenchmarkId::new(&label, shots), &program, |b, program| {
+            b.iter(|| run_qec_program(program).unwrap());
+        });
+    }
+
+    let zero_noise_program = qec_repetition_program(25, 5, 100_000, Some(0.0));
+    group.bench_with_input(
+        BenchmarkId::new("25q_r5_p0", 100_000),
+        &zero_noise_program,
+        |b, program| {
+            b.iter(|| run_qec_program(program).unwrap());
+        },
+    );
+
+    group.finish();
+}
+
+fn bench_qec_noisy_runner(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_noisy_runner");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    for &(n_data, rounds, shots) in &[(25, 5, 10_000), (25, 5, 100_000)] {
+        let program = qec_repetition_program(n_data, rounds, shots, Some(0.001));
+        let label = format!("{n_data}q_r{rounds}_p001");
+        group.bench_with_input(BenchmarkId::new(&label, shots), &program, |b, program| {
+            b.iter(|| run_qec_program(program).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_homological_compile(c: &mut Criterion) {
     let mut group = c.benchmark_group("homological_compile");
     group.sample_size(10);
@@ -353,6 +446,8 @@ criterion_group!(
     bench_histogram_counts,
     bench_rank_space_counts,
     bench_sparse_deterministic,
+    bench_qec_clifford_runner,
+    bench_qec_noisy_runner,
     bench_homological_compile,
     bench_homological_sample,
     bench_analytical_marginals,

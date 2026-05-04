@@ -73,12 +73,12 @@ impl Hash for PauliVec {
 }
 
 #[inline(always)]
-pub(super) fn get_bit(words: &[u64], qubit: usize) -> bool {
+pub(crate) fn get_bit(words: &[u64], qubit: usize) -> bool {
     (words[qubit / 64] >> (qubit % 64)) & 1 != 0
 }
 
 #[inline(always)]
-pub(super) fn set_bit(words: &mut [u64], qubit: usize, val: bool) {
+pub(crate) fn set_bit(words: &mut [u64], qubit: usize, val: bool) {
     let word = qubit / 64;
     let bit = qubit % 64;
     if val {

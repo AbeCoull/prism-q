@@ -5,15 +5,15 @@ use crate::sim::compiled::PackedShots;
 ///
 /// `accepted_shots + discarded_shots == total_shots`. `logical_errors[i]` is
 /// the number of accepted shots whose `i`-th observable parity is 1. When
-/// [`QecOptions::keep_measurements`] is `false`, [`Self::measurements`] is
-/// returned with zero shots; detector and observable shots are always
+/// [`super::QecOptions::keep_measurements`] is `false`, [`Self::measurements`]
+/// is returned with zero shots; detector and observable shots are always
 /// populated.
 #[derive(Debug, Clone)]
 pub struct QecSampleResult {
     /// Number of shots requested from the sampler.
     pub total_shots: usize,
     /// Raw measurement records, or a zero-shot buffer when
-    /// [`QecOptions::keep_measurements`] is `false`.
+    /// [`super::QecOptions::keep_measurements`] is `false`.
     pub measurements: PackedShots,
     /// Detector records: one bit per detector per shot.
     pub detectors: PackedShots,

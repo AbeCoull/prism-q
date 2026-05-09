@@ -102,6 +102,8 @@ struct MatBroadcast {
 impl MatBroadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 2]; 2]) -> Self {
+        // SAFETY: NEON is available on supported aarch64 targets, and these
+        // intrinsics only broadcast scalar f64 values into SIMD registers.
         unsafe {
             Self {
                 m00_rr: vdupq_n_f64(mat[0][0].re),
@@ -667,6 +669,8 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: NEON is available on supported aarch64 targets. Tile
+            // indices are validated by callers.
             unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
         }
 
@@ -1442,6 +1446,8 @@ fn scale_slice(slice: &mut [Complex64], factor: f64) {
         }
     }
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is available on supported aarch64 targets, and the loop
+    // only touches elements inside the mutable slice.
     unsafe {
         let f = vdupq_n_f64(factor);
         let ptr = slice.as_mut_ptr() as *mut f64;
@@ -1710,6 +1716,8 @@ struct Mat4x4Broadcast {
 impl Mat4x4Broadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
+        // SAFETY: NEON is available on supported aarch64 targets, and these
+        // intrinsics only broadcast scalar f64 values into SIMD registers.
         unsafe {
             let mut rr = [vdupq_n_f64(0.0); 16];
             let mut ii_as = [vdupq_n_f64(0.0); 16];

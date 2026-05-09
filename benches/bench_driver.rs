@@ -3,11 +3,12 @@
 //! Use `--features bench-fast` for a quick run that reduces warmup and
 //! measurement time. Omit for the full suite with default Criterion timing.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
-use prism_q::BackendKind;
+use prism_q::{BackendKind, StatevectorBackend};
 use std::time::Duration;
 
 fn is_fast() -> bool {
@@ -72,9 +73,53 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
             });
         });
 
+        group.bench_with_input(
+            BenchmarkId::new("cx_ctrl_gt_adjacent", n_qubits),
+            &n_qubits,
+            |b, &n| {
+                let mut circuit = Circuit::new(n, 0);
+                circuit.add_gate(Gate::Cx, &[1, 0]);
+                b.iter(|| {
+                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("cx_ctrl_lt_high", n_qubits),
+            &n_qubits,
+            |b, &n| {
+                let mut circuit = Circuit::new(n, 0);
+                circuit.add_gate(Gate::Cx, &[0, n - 1]);
+                b.iter(|| {
+                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("cx_ctrl_gt_high", n_qubits),
+            &n_qubits,
+            |b, &n| {
+                let mut circuit = Circuit::new(n, 0);
+                circuit.add_gate(Gate::Cx, &[n - 1, 0]);
+                b.iter(|| {
+                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                });
+            },
+        );
+
         group.bench_with_input(BenchmarkId::new("cz_gate", n_qubits), &n_qubits, |b, &n| {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::Cz, &[0, 1]);
+            b.iter(|| {
+                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("cz_high", n_qubits), &n_qubits, |b, &n| {
+            let mut circuit = Circuit::new(n, 0);
+            circuit.add_gate(Gate::Cz, &[0, n - 1]);
             b.iter(|| {
                 sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
@@ -91,6 +136,141 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
                 });
             },
         );
+
+        group.bench_with_input(
+            BenchmarkId::new("fused2q_adjacent", n_qubits),
+            &n_qubits,
+            |b, &n| {
+                let mut circuit = Circuit::new(n, 0);
+                circuit.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[0, 1]);
+                b.iter(|| {
+                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("fused2q_high", n_qubits),
+            &n_qubits,
+            |b, &n| {
+                let mut circuit = Circuit::new(n, 0);
+                circuit.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[0, n - 1]);
+                b.iter(|| {
+                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_two_qubit_gate_kernels(c: &mut Criterion) {
+    let mut group = c.benchmark_group("two_qubit_gate_kernels");
+    configure_group(&mut group);
+
+    for &n_qubits in &[12, 16, 20, 22] {
+        let mut cx_lt_adj = Circuit::new(n_qubits, 0);
+        cx_lt_adj.add_gate(Gate::Cx, &[0, 1]);
+        group.bench_function(BenchmarkId::new("cx_ctrl_lt_adjacent", n_qubits), |b| {
+            b.iter_batched(
+                || {
+                    let mut backend = StatevectorBackend::new(42);
+                    backend.init(n_qubits, 0).unwrap();
+                    backend
+                },
+                |mut backend| {
+                    backend.apply(&cx_lt_adj.instructions[0]).unwrap();
+                    black_box(backend.state_vector());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        let mut cx_gt_adj = Circuit::new(n_qubits, 0);
+        cx_gt_adj.add_gate(Gate::Cx, &[1, 0]);
+        group.bench_function(BenchmarkId::new("cx_ctrl_gt_adjacent", n_qubits), |b| {
+            b.iter_batched(
+                || {
+                    let mut backend = StatevectorBackend::new(42);
+                    backend.init(n_qubits, 0).unwrap();
+                    backend
+                },
+                |mut backend| {
+                    backend.apply(&cx_gt_adj.instructions[0]).unwrap();
+                    black_box(backend.state_vector());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        let mut cx_lt_high = Circuit::new(n_qubits, 0);
+        cx_lt_high.add_gate(Gate::Cx, &[0, n_qubits - 1]);
+        group.bench_function(BenchmarkId::new("cx_ctrl_lt_high", n_qubits), |b| {
+            b.iter_batched(
+                || {
+                    let mut backend = StatevectorBackend::new(42);
+                    backend.init(n_qubits, 0).unwrap();
+                    backend
+                },
+                |mut backend| {
+                    backend.apply(&cx_lt_high.instructions[0]).unwrap();
+                    black_box(backend.state_vector());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        let mut cx_gt_high = Circuit::new(n_qubits, 0);
+        cx_gt_high.add_gate(Gate::Cx, &[n_qubits - 1, 0]);
+        group.bench_function(BenchmarkId::new("cx_ctrl_gt_high", n_qubits), |b| {
+            b.iter_batched(
+                || {
+                    let mut backend = StatevectorBackend::new(42);
+                    backend.init(n_qubits, 0).unwrap();
+                    backend
+                },
+                |mut backend| {
+                    backend.apply(&cx_gt_high.instructions[0]).unwrap();
+                    black_box(backend.state_vector());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        let mut cz_adj = Circuit::new(n_qubits, 0);
+        cz_adj.add_gate(Gate::Cz, &[0, 1]);
+        group.bench_function(BenchmarkId::new("cz_adjacent", n_qubits), |b| {
+            b.iter_batched(
+                || {
+                    let mut backend = StatevectorBackend::new(42);
+                    backend.init(n_qubits, 0).unwrap();
+                    backend
+                },
+                |mut backend| {
+                    backend.apply(&cz_adj.instructions[0]).unwrap();
+                    black_box(backend.state_vector());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        let mut cz_high = Circuit::new(n_qubits, 0);
+        cz_high.add_gate(Gate::Cz, &[0, n_qubits - 1]);
+        group.bench_function(BenchmarkId::new("cz_high", n_qubits), |b| {
+            b.iter_batched(
+                || {
+                    let mut backend = StatevectorBackend::new(42);
+                    backend.init(n_qubits, 0).unwrap();
+                    backend
+                },
+                |mut backend| {
+                    backend.apply(&cz_high.instructions[0]).unwrap();
+                    black_box(backend.state_vector());
+                },
+                BatchSize::SmallInput,
+            );
+        });
     }
 
     group.finish();
@@ -358,6 +538,7 @@ criterion_group!(
     benches,
     bench_single_qubit_gates,
     bench_two_qubit_gates,
+    bench_two_qubit_gate_kernels,
     bench_measurement,
     bench_qasm_parse_and_simulate,
     bench_high_target_qubit,

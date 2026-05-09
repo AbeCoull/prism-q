@@ -919,7 +919,7 @@ unsafe fn negate_slice_avx2(slice: &mut [Complex64]) {
 
 const MIN_SIMD_SLICE: usize = 4;
 
-#[cfg(any(feature = "parallel", test))]
+#[inline(always)]
 pub(crate) fn negate_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
@@ -968,6 +968,7 @@ unsafe fn swap_slices_avx2(a: &mut [Complex64], b: &mut [Complex64]) {
     }
 }
 
+#[inline(always)]
 pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]

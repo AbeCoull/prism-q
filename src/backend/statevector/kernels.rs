@@ -56,6 +56,29 @@ fn adjacent_2q_indices(offset: usize, stride: usize, q0_is_lo: bool) -> [usize; 
     }
 }
 
+#[inline(always)]
+fn swap_slices_kernel(a: &mut [Complex64], b: &mut [Complex64]) {
+    debug_assert_eq!(a.len(), b.len());
+    if a.len() < 4 {
+        for (x, y) in a.iter_mut().zip(b.iter_mut()) {
+            std::mem::swap(x, y);
+        }
+    } else {
+        simd::swap_slices(a, b);
+    }
+}
+
+#[inline(always)]
+fn negate_slice_kernel(slice: &mut [Complex64]) {
+    if slice.len() < 4 {
+        for amp in slice {
+            *amp = -*amp;
+        }
+    } else {
+        simd::negate_slice(slice);
+    }
+}
+
 pub(crate) const BATCH_PHASE_GROUP_SIZE: usize = 10;
 pub(crate) const BATCH_PHASE_TABLE_SIZE: usize = 1024;
 pub(crate) const MAX_BATCH_PHASE_GROUPS: usize = 4;
@@ -566,14 +589,32 @@ impl StatevectorBackend {
             return;
         }
 
-        let ctrl_mask = 1usize << control;
-        let tgt_mask = 1usize << target;
-        let n = 1usize << self.num_qubits;
+        if control > target {
+            let ctrl_half = 1usize << control;
+            let block_size = ctrl_half << 1;
+            let tgt_half = 1usize << target;
+            let tgt_block = tgt_half << 1;
 
-        for i in 0..n {
-            if (i & ctrl_mask) != 0 && (i & tgt_mask) == 0 {
-                let j = i | tgt_mask;
-                self.state.swap(i, j);
+            for chunk in self.state.chunks_mut(block_size) {
+                let (_, hi) = chunk.split_at_mut(ctrl_half);
+                for sub in hi.chunks_mut(tgt_block) {
+                    let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
+                    swap_slices_kernel(sub_lo, sub_hi);
+                }
+            }
+        } else {
+            let ctrl_half = 1usize << control;
+            let ctrl_block = ctrl_half << 1;
+            let tgt_half = 1usize << target;
+            let block_size = tgt_half << 1;
+
+            for chunk in self.state.chunks_mut(block_size) {
+                let (lo, hi) = chunk.split_at_mut(tgt_half);
+                for (lo_sub, hi_sub) in lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block)) {
+                    let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                    let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                    swap_slices_kernel(lo_active, hi_active);
+                }
             }
         }
     }
@@ -596,7 +637,7 @@ impl StatevectorBackend {
                         let (_, hi) = chunk.split_at_mut(ctrl_half);
                         for sub in hi.chunks_mut(tgt_block) {
                             let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
-                            simd::swap_slices(sub_lo, sub_hi);
+                            swap_slices_kernel(sub_lo, sub_hi);
                         }
                     });
             } else {
@@ -606,15 +647,16 @@ impl StatevectorBackend {
                     hi.par_chunks_mut(inner_tile).for_each(|tile| {
                         for sub in tile.chunks_mut(tgt_block) {
                             let (sub_lo, sub_hi) = sub.split_at_mut(tgt_half);
-                            simd::swap_slices(sub_lo, sub_hi);
+                            swap_slices_kernel(sub_lo, sub_hi);
                         }
                     });
                 }
             }
         } else {
+            let ctrl_half = 1usize << control;
+            let ctrl_block = ctrl_half << 1;
             let tgt_half = 1usize << target;
             let block_size = tgt_half << 1;
-            let ctrl_mask = 1usize << control;
             let num_blocks = self.state.len() / block_size;
 
             if num_blocks >= 4 {
@@ -623,24 +665,28 @@ impl StatevectorBackend {
                     .with_min_len(chunk_min_len(block_size))
                     .for_each(|chunk| {
                         let (lo, hi) = chunk.split_at_mut(tgt_half);
-                        for k in 0..tgt_half {
-                            if k & ctrl_mask != 0 {
-                                std::mem::swap(&mut lo[k], &mut hi[k]);
-                            }
+                        for (lo_sub, hi_sub) in
+                            lo.chunks_mut(ctrl_block).zip(hi.chunks_mut(ctrl_block))
+                        {
+                            let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                            let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                            swap_slices_kernel(lo_active, hi_active);
                         }
                     });
             } else {
+                let inner_tile = MIN_PAR_ELEMS.max(ctrl_block);
                 for chunk in self.state.chunks_mut(block_size) {
                     let (lo, hi) = chunk.split_at_mut(tgt_half);
-                    lo.par_chunks_mut(MIN_PAR_ELEMS)
-                        .zip(hi.par_chunks_mut(MIN_PAR_ELEMS))
-                        .enumerate()
-                        .for_each(|(tile_idx, (lo_tile, hi_tile))| {
-                            let offset = tile_idx * MIN_PAR_ELEMS;
-                            for k in 0..lo_tile.len() {
-                                if (offset + k) & ctrl_mask != 0 {
-                                    std::mem::swap(&mut lo_tile[k], &mut hi_tile[k]);
-                                }
+                    lo.par_chunks_mut(inner_tile)
+                        .zip(hi.par_chunks_mut(inner_tile))
+                        .for_each(|(lo_tile, hi_tile)| {
+                            for (lo_sub, hi_sub) in lo_tile
+                                .chunks_mut(ctrl_block)
+                                .zip(hi_tile.chunks_mut(ctrl_block))
+                            {
+                                let (_, lo_active) = lo_sub.split_at_mut(ctrl_half);
+                                let (_, hi_active) = hi_sub.split_at_mut(ctrl_half);
+                                swap_slices_kernel(lo_active, hi_active);
                             }
                         });
                 }
@@ -656,13 +702,17 @@ impl StatevectorBackend {
             return;
         }
 
-        let mask0 = 1usize << q0;
-        let mask1 = 1usize << q1;
-        let n = 1usize << self.num_qubits;
+        let (lo_q, hi_q) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
+        let lo_half = 1usize << lo_q;
+        let lo_block = lo_half << 1;
+        let hi_half = 1usize << hi_q;
+        let block_size = hi_half << 1;
 
-        for i in 0..n {
-            if (i & mask0) != 0 && (i & mask1) != 0 {
-                self.state[i] = -self.state[i];
+        for chunk in self.state.chunks_mut(block_size) {
+            let (_, hi_group) = chunk.split_at_mut(hi_half);
+            for sub in hi_group.chunks_mut(lo_block) {
+                let (_, sub_hi) = sub.split_at_mut(lo_half);
+                negate_slice_kernel(sub_hi);
             }
         }
     }
@@ -685,7 +735,7 @@ impl StatevectorBackend {
                     let (_, hi_group) = chunk.split_at_mut(hi_half);
                     for sub in hi_group.chunks_mut(lo_block) {
                         let (_, sub_hi) = sub.split_at_mut(lo_half);
-                        simd::negate_slice(sub_hi);
+                        negate_slice_kernel(sub_hi);
                     }
                 });
         } else {
@@ -695,7 +745,7 @@ impl StatevectorBackend {
                 hi_group.par_chunks_mut(inner_tile).for_each(|tile| {
                     for sub in tile.chunks_mut(lo_block) {
                         let (_, sub_hi) = sub.split_at_mut(lo_half);
-                        simd::negate_slice(sub_hi);
+                        negate_slice_kernel(sub_hi);
                     }
                 });
             }

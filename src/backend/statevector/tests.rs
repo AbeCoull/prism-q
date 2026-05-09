@@ -93,6 +93,36 @@ fn test_cz() {
 }
 
 #[test]
+fn test_cx_high_target_both_orders() {
+    let n = 6;
+    for &(control, target) in &[(0, n - 1), (n - 1, 0)] {
+        let mut c = Circuit::new(n, 0);
+        c.add_gate(Gate::X, &[control]);
+        c.add_gate(Gate::Cx, &[control, target]);
+        let mut b = StatevectorBackend::new(42);
+        sim::run_on(&mut b, &c).unwrap();
+        let probs = b.probabilities().unwrap();
+        let expected = (1usize << control) | (1usize << target);
+        assert!((probs[expected] - 1.0).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn test_cz_high_pair() {
+    let n = 6;
+    let hi = n - 1;
+    let mut c = Circuit::new(n, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[hi]);
+    c.add_gate(Gate::Cz, &[0, hi]);
+    let mut b = StatevectorBackend::new(42);
+    sim::run_on(&mut b, &c).unwrap();
+    let sv = b.state_vector();
+    let idx = (1usize << hi) | 1;
+    assert!((sv[idx].re - (-0.5)).abs() < 1e-12);
+}
+
+#[test]
 fn test_measurement_deterministic() {
     let mut c = Circuit::new(1, 1);
     c.add_gate(Gate::X, &[0]);

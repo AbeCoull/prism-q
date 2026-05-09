@@ -29,6 +29,14 @@ Criterion.rs with HTML reports. Two benchmark binaries:
 | `depth_sweep/12q_random` | 12-qubit random circuits, depth 5–100 |
 | `entanglement_structure` | Sparse vs dense entanglement, 16 qubits |
 
+### Shot and QEC benchmarks (bench_shots_perf)
+
+| Group | What it measures |
+|-------|-----------------|
+| `qec_clifford_runner` | Packed native Clifford QEC execution |
+| `qec_noisy_runner` | Packed native QEC execution with Pauli-noise rows |
+| `qec_noisy_runner_split` | Parse, compile, sample, noise, detector, postselection, logical count, and total QEC timings |
+
 ## Circuit families
 
 All seeded with `0xDEAD_BEEF` for reproducibility.

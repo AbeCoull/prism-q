@@ -41,6 +41,7 @@ parallel = ["rayon", "num_cpus", "faer"]
 serialization = ["serde", "serde_json"]
 gpu = ["dep:cudarc"]
 bench-fast = []
+bench-internal = []
 
 [profile.release]
 opt-level = 3

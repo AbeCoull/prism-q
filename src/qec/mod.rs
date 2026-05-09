@@ -31,6 +31,8 @@ mod runner;
 
 pub use parse::parse_qec_program;
 pub use result::QecSampleResult;
+#[cfg(feature = "bench-internal")]
+pub use runner::{compile_qec_profiled_sampler, QecProfiledCounts, QecProfiledSampler};
 pub use runner::{run_qec_program, run_qec_program_reference};
 
 use crate::circuit::Circuit;

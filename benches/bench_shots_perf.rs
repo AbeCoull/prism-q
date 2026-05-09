@@ -6,15 +6,21 @@
 //! 3. `PackedShots::counts()`: histogram from packed u64 representation
 //! 4. `run_shots_compiled` round-trip: compile + sample + to_shots
 
+#[cfg(feature = "bench-internal")]
+use criterion::BatchSize;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::sim::noise::NoiseModel;
 use prism_q::BackendKind;
+#[cfg(feature = "bench-internal")]
+use prism_q::{compile_qec_profiled_sampler, parse_qec_program};
 use prism_q::{
     run_qec_program, HomologicalSampler, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef,
 };
+#[cfg(feature = "bench-internal")]
+use std::hint::black_box;
 use std::time::Duration;
 
 const SEED: u64 = 0xDEAD_BEEF;
@@ -207,6 +213,16 @@ fn qec_repetition_program(
     shots: usize,
     noise_rate: Option<f64>,
 ) -> QecProgram {
+    qec_repetition_program_with_postselection(n_data, rounds, shots, noise_rate, false)
+}
+
+fn qec_repetition_program_with_postselection(
+    n_data: usize,
+    rounds: usize,
+    shots: usize,
+    noise_rate: Option<f64>,
+    include_postselection: bool,
+) -> QecProgram {
     assert!(n_data > 0);
     let options = QecOptions {
         shots,
@@ -217,6 +233,7 @@ fn qec_repetition_program(
     let mut program = QecProgram::with_options(n_data, options);
     let checks = n_data.saturating_sub(1);
     let mut previous_round = Vec::with_capacity(checks);
+    let mut first_check = None;
 
     for _ in 0..rounds {
         let mut current_round = Vec::with_capacity(checks);
@@ -229,6 +246,7 @@ fn qec_repetition_program(
             let record = program
                 .measure_pauli_product(&[QecPauli::z(q), QecPauli::z(q + 1)])
                 .unwrap();
+            first_check.get_or_insert(record);
             if let Some(previous) = previous_round.get(q) {
                 program
                     .detector(&[
@@ -246,7 +264,59 @@ fn qec_repetition_program(
     program
         .observable_include(0, &[QecRecordRef::absolute(logical)])
         .unwrap();
+    if include_postselection {
+        if let Some(first_check) = first_check {
+            program
+                .postselect(&[QecRecordRef::absolute(first_check)], false)
+                .unwrap();
+        }
+    }
     program
+}
+
+#[cfg(feature = "bench-internal")]
+fn qec_repetition_program_text(
+    n_data: usize,
+    rounds: usize,
+    noise_rate: Option<f64>,
+    include_postselection: bool,
+) -> String {
+    assert!(n_data > 0);
+    let checks = n_data.saturating_sub(1);
+    let mut text = String::new();
+    let mut previous_round = Vec::with_capacity(checks);
+    let mut first_check = None;
+    let mut records = 0usize;
+
+    for _ in 0..rounds {
+        let mut current_round = Vec::with_capacity(checks);
+        for q in 0..checks {
+            if let Some(p) = noise_rate {
+                text.push_str(&format!("DEPOLARIZE1({p}) {q} {}\n", q + 1));
+            }
+            text.push_str(&format!("MPP Z{q}*Z{}\n", q + 1));
+            let record = records;
+            records += 1;
+            first_check.get_or_insert(record);
+            if let Some(previous) = previous_round.get(q) {
+                let previous_distance = records - previous;
+                text.push_str(&format!("DETECTOR rec[-{previous_distance}] rec[-1]\n"));
+            }
+            current_round.push(record);
+        }
+        previous_round = current_round;
+    }
+
+    text.push_str("M 0\n");
+    records += 1;
+    text.push_str("OBSERVABLE_INCLUDE(0) rec[-1]\n");
+    if include_postselection {
+        if let Some(first_check) = first_check {
+            let first_distance = records - first_check;
+            text.push_str(&format!("POSTSELECT rec[-{first_distance}]\n"));
+        }
+    }
+    text
 }
 
 fn bench_qec_clifford_runner(c: &mut Criterion) {
@@ -288,6 +358,112 @@ fn bench_qec_noisy_runner(c: &mut Criterion) {
             b.iter(|| run_qec_program(program).unwrap());
         });
     }
+
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internal"))]
+fn bench_qec_noisy_runner_split(_c: &mut Criterion) {}
+
+#[cfg(feature = "bench-internal")]
+fn bench_qec_noisy_runner_split(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_noisy_runner_split");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let n_data = 25;
+    let rounds = 5;
+    let shots = 100_000;
+    let noise_rate = 0.001;
+    let label = format!("{n_data}q_r{rounds}_p001_post");
+    let text = qec_repetition_program_text(n_data, rounds, Some(noise_rate), true);
+    let program =
+        qec_repetition_program_with_postselection(n_data, rounds, shots, Some(noise_rate), true);
+
+    group.bench_with_input(BenchmarkId::new("parse", &label), &text, |b, text| {
+        b.iter(|| {
+            let mut program = parse_qec_program(black_box(text)).unwrap();
+            let mut options = program.options();
+            options.shots = shots;
+            options.seed = SEED;
+            options.chunk_size = Some(10_000);
+            options.keep_measurements = false;
+            program.set_options(options);
+            black_box(program.num_measurements());
+        });
+    });
+
+    group.bench_with_input(
+        BenchmarkId::new("compile", &label),
+        &program,
+        |b, program| {
+            b.iter(|| compile_qec_profiled_sampler(black_box(program)).unwrap());
+        },
+    );
+
+    let mut sample_sampler = compile_qec_profiled_sampler(&program).unwrap();
+    group.bench_with_input(BenchmarkId::new("sample", &label), &shots, |b, &shots| {
+        b.iter(|| {
+            sample_sampler
+                .sample_noiseless_measurements_packed(black_box(shots))
+                .unwrap()
+        });
+    });
+
+    let mut noise_sampler = compile_qec_profiled_sampler(&program).unwrap();
+    let noiseless = noise_sampler
+        .sample_noiseless_measurements_packed(shots)
+        .unwrap();
+    group.bench_with_input(
+        BenchmarkId::new("noise_generation", &label),
+        &noiseless,
+        |b, measurements| {
+            b.iter_batched(
+                || measurements.clone(),
+                |measurements| {
+                    noise_sampler
+                        .apply_noise_to_measurements(measurements)
+                        .unwrap()
+                },
+                BatchSize::LargeInput,
+            );
+        },
+    );
+
+    let mut staged_sampler = compile_qec_profiled_sampler(&program).unwrap();
+    let noisy_measurements = staged_sampler.sample_measurements_packed(shots).unwrap();
+    let observables = staged_sampler
+        .observable_records(&noisy_measurements)
+        .unwrap();
+
+    group.bench_with_input(
+        BenchmarkId::new("detector_projection", &label),
+        &noisy_measurements,
+        |b, measurements| {
+            b.iter(|| {
+                staged_sampler
+                    .detector_records(black_box(measurements))
+                    .unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(
+        BenchmarkId::new("postselection_logical_count", &label),
+        &noisy_measurements,
+        |b, measurements| {
+            b.iter(|| {
+                staged_sampler
+                    .postselection_and_logical_counts(black_box(measurements), &observables)
+                    .unwrap()
+            });
+        },
+    );
+
+    group.bench_with_input(BenchmarkId::new("total", &label), &program, |b, program| {
+        b.iter(|| run_qec_program(black_box(program)).unwrap());
+    });
 
     group.finish();
 }
@@ -448,6 +624,7 @@ criterion_group!(
     bench_sparse_deterministic,
     bench_qec_clifford_runner,
     bench_qec_noisy_runner,
+    bench_qec_noisy_runner_split,
     bench_homological_compile,
     bench_homological_sample,
     bench_analytical_marginals,

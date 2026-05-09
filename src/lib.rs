@@ -67,6 +67,8 @@ pub use circuit::builder::CircuitBuilder;
 pub use circuit::{Circuit, ClassicalCondition, Instruction, SvgOptions, TextOptions};
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
+#[cfg(feature = "bench-internal")]
+pub use qec::{compile_qec_profiled_sampler, QecProfiledCounts, QecProfiledSampler};
 pub use qec::{
     compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
     QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise, QecOp, QecOptions, QecPauli,

@@ -103,6 +103,17 @@ impl QecSampleResult {
                 ),
             });
         }
+        if let Some((observable, count)) = logical_errors
+            .iter()
+            .enumerate()
+            .find(|(_, count)| **count > accepted_shots as u64)
+        {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "logical error count {count} for observable {observable} exceeds {accepted_shots} accepted shots"
+                ),
+            });
+        }
         Ok(Self {
             total_shots,
             measurements,
@@ -113,6 +124,60 @@ impl QecSampleResult {
             logical_errors,
         })
     }
+
+    /// Fraction of requested shots accepted after postselection.
+    pub fn survivor_rate(&self) -> f64 {
+        qec_binomial_rate(self.accepted_shots as u64, self.total_shots)
+    }
+
+    /// Per-observable logical-error rates among accepted shots.
+    pub fn logical_error_rates(&self) -> Vec<f64> {
+        self.logical_errors
+            .iter()
+            .map(|&count| qec_binomial_rate(count, self.accepted_shots))
+            .collect()
+    }
+
+    /// Wilson score interval for the survivor rate.
+    ///
+    /// `z_score` controls the confidence level. For example, use
+    /// `1.959963984540054` for a two-sided 95 percent interval.
+    pub fn survivor_rate_wilson_interval(&self, z_score: f64) -> (f64, f64) {
+        qec_wilson_interval(self.accepted_shots as u64, self.total_shots, z_score)
+    }
+
+    /// Wilson score intervals for logical-error rates among accepted shots.
+    ///
+    /// `z_score` controls the confidence level. For example, use
+    /// `1.959963984540054` for a two-sided 95 percent interval.
+    pub fn logical_error_rate_wilson_intervals(&self, z_score: f64) -> Vec<(f64, f64)> {
+        self.logical_errors
+            .iter()
+            .map(|&count| qec_wilson_interval(count, self.accepted_shots, z_score))
+            .collect()
+    }
+}
+
+fn qec_binomial_rate(successes: u64, trials: usize) -> f64 {
+    if trials == 0 {
+        return 0.0;
+    }
+    successes as f64 / trials as f64
+}
+
+fn qec_wilson_interval(successes: u64, trials: usize, z_score: f64) -> (f64, f64) {
+    if trials == 0 {
+        return (0.0, 0.0);
+    }
+
+    let n = trials as f64;
+    let p = successes as f64 / n;
+    let z = z_score.abs();
+    let z2 = z * z;
+    let denom = 1.0 + z2 / n;
+    let center = (p + z2 / (2.0 * n)) / denom;
+    let spread = z * ((p * (1.0 - p) + z2 / (4.0 * n)) / n).sqrt() / denom;
+    ((center - spread).max(0.0), (center + spread).min(1.0))
 }
 
 fn infer_qec_result_total_shots(

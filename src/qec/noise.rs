@@ -33,7 +33,31 @@ pub(super) struct QecCompiledNoiseSampler {
 
 impl QecCompiledNoiseSampler {
     pub(super) fn sample_measurements_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
-        let measurements = self.noiseless.try_sample_bulk_packed(num_shots)?;
+        let measurements = self.sample_noiseless_measurements_packed(num_shots)?;
+        self.apply_noise_to_measurements(measurements)
+    }
+
+    pub(super) fn sample_noiseless_measurements_packed(
+        &mut self,
+        num_shots: usize,
+    ) -> Result<PackedShots> {
+        self.noiseless.try_sample_bulk_packed(num_shots)
+    }
+
+    pub(super) fn apply_noise_to_measurements(
+        &mut self,
+        measurements: PackedShots,
+    ) -> Result<PackedShots> {
+        let num_shots = measurements.num_shots();
+        if measurements.num_measurements() != self.num_measurements {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "QEC noisy sampler expected {} measurement records, got {}",
+                    self.num_measurements,
+                    measurements.num_measurements()
+                ),
+            });
+        }
         if self.events.is_empty() || num_shots == 0 || self.num_measurements == 0 {
             return Ok(measurements);
         }

@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.14.0] - 2026-05-09
+
+### Features
+
+- **qec:** Add noisy validation and staged profiling benchmarks (#61)([d351102](https://github.com/AbeCoull/prism-q/commit/d3511026228cd890b3695969bfc46f2218911d68))
 ## [0.13.0] - 2026-05-04
 
 ### Features
 
 - **qec:** Add native Clifford QEC program runner with Pauli noise (#60)([93e91fe](https://github.com/AbeCoull/prism-q/commit/93e91fedb98c35b4929d91cceb889f187010074e))
+
+### Miscellaneous
+
+- **release:** 0.13.0([1668d93](https://github.com/AbeCoull/prism-q/commit/1668d931ede825902d0c3e568d9d6774d1baed93))
 ## [0.12.2] - 2026-05-02
 
 ### Bug Fixes

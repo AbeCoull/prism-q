@@ -903,7 +903,7 @@ impl StatevectorBackend {
             let ptr = SendPtr(self.state.as_mut_ptr());
             let prepared = simd::PreparedGate1q::new(&mat);
 
-            // SAFETY: insert_zero_bit bijection → disjoint index pairs per iteration.
+            // SAFETY: insert_zero_bit bijection gives disjoint index pairs per iteration.
             (0..num_iters)
                 .into_par_iter()
                 .with_min_len(MIN_PAR_ITERS)
@@ -911,6 +911,8 @@ impl StatevectorBackend {
                     let base = insert_zero_bit(insert_zero_bit(i, lo), hi);
                     let idx0 = base | ctrl_mask;
                     let idx1 = idx0 | tgt_mask;
+                    // SAFETY: idx0 and idx1 are in bounds and unique for this iteration.
+                    // The outer iterator maps every pair once, so Rayon tasks do not alias.
                     unsafe {
                         let fp = ptr.as_f64_ptr();
                         prepared.apply_pair_ptr(fp.add(idx0 * 2), fp.add(idx1 * 2));
@@ -969,7 +971,7 @@ impl StatevectorBackend {
         let ptr = SendPtr(self.state.as_mut_ptr());
         let prepared = simd::PreparedGate1q::new(&mat);
 
-        // SAFETY: insert_zero_bit bijection → disjoint index pairs per iteration.
+        // SAFETY: insert_zero_bit bijection gives disjoint index pairs per iteration.
         (0..num_iters)
             .into_par_iter()
             .with_min_len(MIN_PAR_ITERS)
@@ -980,6 +982,8 @@ impl StatevectorBackend {
                 }
                 let idx0 = base | ctrl_mask;
                 let idx1 = idx0 | tgt_mask;
+                // SAFETY: idx0 and idx1 are in bounds and unique for this iteration.
+                // The outer iterator maps every pair once, so Rayon tasks do not alias.
                 unsafe {
                     let fp = ptr.as_f64_ptr();
                     prepared.apply_pair_ptr(fp.add(idx0 * 2), fp.add(idx1 * 2));
@@ -1092,7 +1096,7 @@ impl StatevectorBackend {
         let num_iters = 1usize << (self.num_qubits - num_special);
         let ptr = SendPtr(self.state.as_mut_ptr());
 
-        // SAFETY: insert_zero_bit bijection → disjoint indices per iteration.
+        // SAFETY: insert_zero_bit bijection gives disjoint indices per iteration.
         (0..num_iters)
             .into_par_iter()
             .with_min_len(MIN_PAR_ITERS)
@@ -1102,6 +1106,8 @@ impl StatevectorBackend {
                     base = insert_zero_bit(base, q);
                 }
                 let idx = base | all_mask;
+                // SAFETY: idx is in bounds and unique for this iteration. The
+                // insert_zero_bit mapping excludes all special qubits before masks are set.
                 unsafe {
                     let val = ptr.load(idx);
                     ptr.store(idx, val * phase);
@@ -1584,8 +1590,8 @@ impl StatevectorBackend {
     /// Apply multiple single-qubit gates in a multi-tier tiled pass.
     ///
     /// Three tiers based on gate target qubit:
-    /// - **L2 tier** (target 0–13): 256KB tiles, all applied per-tile in L2 cache
-    /// - **L3 tier** (target 14–16): 2MB tiles, applied per-tile in L3 cache
+    /// - **L2 tier** (target 0..13): 256KB tiles, all applied per tile in L2 cache
+    /// - **L3 tier** (target 14..16): 2MB tiles, applied per tile in L3 cache
     /// - **Individual** (target 17+): separate full-state passes
     #[inline(always)]
     pub(super) fn apply_multi_1q(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {

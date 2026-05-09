@@ -175,7 +175,7 @@ pub(super) fn run_decomposed_prefused(
 /// Combine per-block probability vectors via Kronecker product.
 ///
 /// Two-pass O(2^N) algorithm:
-/// 1. In-place Kronecker product — single allocation, reverse-iteration expansion
+/// 1. In-place Kronecker product: single allocation, reverse-iteration expansion
 /// 2. Bit permutation to map natural (block-sequential) bit positions
 ///    to global qubit positions (parallelized at ≥2^14 states)
 pub(crate) fn merge_probabilities(

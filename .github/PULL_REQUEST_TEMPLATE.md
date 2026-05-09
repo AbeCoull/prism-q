@@ -34,7 +34,7 @@ If WAIVER, explain why the regression is acceptable and what future work will re
 ## Correctness
 
 - [ ] `cargo test --all-features` passes locally
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes
+- [ ] `cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks` passes
 - [ ] `cargo fmt --check` passes
 - [ ] `cargo doc --no-deps --all-features` passes
 - [ ] New public API has docstrings

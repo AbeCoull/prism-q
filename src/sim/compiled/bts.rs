@@ -11,8 +11,12 @@ pub(super) const BTS_BATCH_SHOTS: usize = 65536;
 #[derive(Clone, Copy)]
 struct SendPtrU64(*mut u64);
 #[cfg(feature = "parallel")]
+// SAFETY: SendPtrU64 is used only for packed shot buffers partitioned by
+// disjoint word ranges before entering parallel workers.
 unsafe impl Send for SendPtrU64 {}
 #[cfg(feature = "parallel")]
+// SAFETY: The raw pointer wrapper is shared, but each worker writes only its
+// assigned non-overlapping range.
 unsafe impl Sync for SendPtrU64 {}
 #[cfg(feature = "parallel")]
 impl SendPtrU64 {

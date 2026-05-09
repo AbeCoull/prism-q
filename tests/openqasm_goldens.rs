@@ -221,7 +221,7 @@ fn google_style_qft_with_cphase_alias() {
 }
 
 /// Combined: a circuit that mixes static for-loop unrolling, a parametric
-/// def subroutine, and binary integer literals — the kind of structure
+/// def subroutine, and binary integer literals, the kind of structure
 /// Qiskit produces when exporting a compiled QAOA layer.
 #[test]
 fn qiskit_style_qaoa_layer_with_for_and_def() {

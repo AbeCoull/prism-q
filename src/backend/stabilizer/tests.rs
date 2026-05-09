@@ -553,6 +553,7 @@ fn test_xor_words_various_lengths() {
 
         let mut actual = original.clone();
         if len > 0 {
+            // SAFETY: actual and src are valid for len elements and do not overlap.
             unsafe { xor_words(actual.as_mut_ptr(), src.as_ptr(), len) };
         }
 
@@ -565,9 +566,11 @@ fn test_xor_words_all_ones_and_zeros() {
     let len = 8;
     let src = vec![u64::MAX; len];
     let mut dst = vec![0u64; len];
+    // SAFETY: dst and src are valid for len elements and do not overlap.
     unsafe { xor_words(dst.as_mut_ptr(), src.as_ptr(), len) };
     assert!(dst.iter().all(|&v| v == u64::MAX));
 
+    // SAFETY: dst and src are valid for len elements and do not overlap.
     unsafe { xor_words(dst.as_mut_ptr(), src.as_ptr(), len) };
     assert!(dst.iter().all(|&v| v == 0));
 }

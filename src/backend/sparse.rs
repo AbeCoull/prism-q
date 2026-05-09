@@ -35,7 +35,7 @@ use crate::gates::{DiagEntry, Gate};
 
 const DEFAULT_EPSILON: f64 = 1e-16;
 
-/// Sparse state-vector backend — O(k) where k is the number of non-zero amplitudes.
+/// Sparse state-vector backend, O(k) where k is the number of non-zero amplitudes.
 pub struct SparseBackend {
     num_qubits: usize,
     state: HashMap<usize, Complex64>,
@@ -83,7 +83,7 @@ impl SparseBackend {
         self.prune();
     }
 
-    /// CX is a deterministic 1:1 index mapping — no near-zero amplitudes created.
+    /// CX is a deterministic 1:1 index mapping. No near-zero amplitudes are created.
     #[inline(always)]
     fn apply_cx(&mut self, control: usize, target: usize) {
         let ctrl_mask = 1usize << control;

@@ -79,7 +79,7 @@ extern "C" __global__ void apply_gate_1q(
 }
 
 // Diagonal 2x2 specialisation.
-// state[i0] *= d0, state[i1] *= d1 — no cross terms.
+// state[i0] *= d0, state[i1] *= d1, no cross terms.
 
 extern "C" __global__ void apply_diagonal_1q(
     double2 *state, unsigned long long pair_count, int target,
@@ -391,7 +391,7 @@ extern "C" __global__ void measure_collapse(
 
 // compute_probabilities: out[i] = (amp.x² + amp.y²) * norm_sq for every basis state.
 // Launched over 2^n threads. Saves half the PCIe traffic compared to dtoh'ing raw amplitudes
-// and squaring host-side.
+// and squaring on the host.
 
 extern "C" __global__ void compute_probabilities(
     const double2 *state, unsigned long long dim, double norm_sq, double *out)
@@ -483,7 +483,7 @@ extern "C" __global__ void apply_multi_fused_tiled(
 }
 
 // apply_diagonal_batch: applies a mixed batch of diagonal entries (1q / 2q / parity-2q)
-// via precomputed per-group LUTs (built host-side by build_diagonal_batch_tables).
+// via precomputed per-group LUTs (built on the host by build_diagonal_batch_tables).
 // Replaces per-entry dispatch. Launches 2^n threads; each thread folds all group phases.
 //
 // Table layout:
@@ -521,7 +521,7 @@ extern "C" __global__ void apply_diagonal_batch(
 }
 
 // apply_batch_rzz: applies a batch of Rzz gates via precomputed parity-phase LUTs (built
-// host-side by build_batch_rzz_tables). Replaces per-edge apply_parity_phase launches.
+// built on the host by build_batch_rzz_tables). Replaces per-edge apply_parity_phase launches.
 // Launches 2^n threads across the full state; each thread computes parity bits per edge
 // per group, indexes the 256-entry LUT, chains multiplies.
 //
@@ -563,7 +563,7 @@ extern "C" __global__ void apply_batch_rzz(
 }
 
 // apply_batch_phase: applies a batch of controlled-phase gates sharing a control qubit via
-// precomputed LUTs (built host-side by build_batch_phase_tables). Replaces per-phase
+// precomputed LUTs (built on the host by build_batch_phase_tables). Replaces per-phase
 // launches of apply_cu_phase. One DRAM read/write per amplitude in the ctrl=1 subspace.
 //
 // Table layout (row-major per group, length MAX_BATCH_PHASE_GROUPS * BP_TABLE_SIZE):
@@ -605,7 +605,7 @@ extern "C" __global__ void apply_batch_phase(
 }
 
 // apply_multi_fused_diagonal: batch of diagonal 1q gates in a single pass. Replaces the
-// per-sub-gate host-side decomposition for `Gate::MultiFused { all_diagonal: true }`.
+// per sub-gate decomposition on the host for `Gate::MultiFused { all_diagonal: true }`.
 //
 // Each thread handles one amplitude and folds all `num_gates` diagonal multiplications
 // based on the bit pattern of its own index. One DRAM read + one DRAM write per thread;
@@ -640,7 +640,7 @@ extern "C" __global__ void apply_multi_fused_diagonal(
 /// Called once per device, at `GpuDevice::new`. The substitution is the bridge between
 /// the Rust constants in [`crate::backend::statevector::kernels`] (and the `MULTI_FUSED_*`
 /// constants in this file) and the `#define`s at the top of [`KERNEL_SOURCE_TEMPLATE`].
-/// Adding a kernel that depends on a new host-side constant: add a `{{PLACEHOLDER}}` to
+/// Adding a kernel that depends on a new host constant: add a `{{PLACEHOLDER}}` to
 /// the template header, add a matching `.replace(...)` call below, done.
 pub(crate) fn kernel_source() -> String {
     use crate::backend::statevector::kernels as cpu_k;
@@ -1779,7 +1779,7 @@ const MULTI_FUSED_TILE_MIN_GATES: usize = 3;
 
 /// Apply a non-diagonal `MultiFused` via a shared-memory tiled kernel for sub-gates with
 /// low targets, plus per-gate launches for sub-gates whose target bit lies outside the
-/// tile. Replaces the previous pure per-sub-gate decomposition.
+/// tile. Replaces the previous pure per sub-gate decomposition.
 pub(crate) fn launch_apply_multi_fused_nondiag(
     ctx: &GpuContext,
     state: &mut GpuState,

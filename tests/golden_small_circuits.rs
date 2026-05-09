@@ -136,7 +136,7 @@ fn t_tdg_cancel() {
 
 #[test]
 fn s_squared_is_z() {
-    // S^2 = Z. Apply H, S, S, H — should be same as H, Z, H = X, so |0⟩ → |1⟩
+    // S^2 = Z. Apply H, S, S, H, should be same as H, Z, H = X, so |0⟩ → |1⟩
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::S, &[0]);
@@ -293,9 +293,9 @@ fn depth_calculation() {
     c.add_gate(Gate::H, &[2]);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cx, &[1, 2]);
-    // Layer 1: H(0), H(1), H(2) — all parallel
-    // Layer 2: CX(0,1) — needs q0,q1 free after layer 1
-    // Layer 3: CX(1,2) — needs q1 free after layer 2
+    // Layer 1: H(0), H(1), H(2), all parallel
+    // Layer 2: CX(0,1), needs q0,q1 free after layer 1
+    // Layer 3: CX(1,2), needs q1 free after layer 2
     assert_eq!(c.depth(), 3);
 }
 
@@ -695,7 +695,7 @@ fn mcu_inv_ctrl_ctrl_rz() {
         num_controls: 2,
     }));
 
-    // Apply forward then inverse — should cancel to identity on target
+    // Apply forward then inverse, should cancel to identity on target
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::X, &[0]);
     c.add_gate(Gate::X, &[1]);
@@ -1155,12 +1155,12 @@ fn decomposed_fully_entangled_same_as_monolithic() {
 #[test]
 fn decomposed_auto_mixed_backends() {
     let mut c = Circuit::new(6, 0);
-    // Block (0,1,2): Clifford only — Auto should pick Stabilizer
+    // Block (0,1,2): Clifford only, Auto should pick Stabilizer
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cx, &[1, 2]);
     c.add_gate(Gate::S, &[0]);
-    // Block (3,4,5): Non-Clifford — Auto should pick Statevector
+    // Block (3,4,5): Non-Clifford, Auto should pick Statevector
     c.add_gate(Gate::H, &[3]);
     c.add_gate(Gate::T, &[3]);
     c.add_gate(Gate::Cx, &[3, 4]);

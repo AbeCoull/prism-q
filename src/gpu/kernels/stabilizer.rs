@@ -109,7 +109,7 @@ extern "C" __global__ void stab_set_initial_tableau(
 //   0  H     1  S    2  Sdg   3  X    4  Y    5  Z    6  SX   7  SXdg
 //   8  Cx   9  Cz   10  Swap
 //
-// Commutation discipline (enforced host-side before the launch, mirrors
+// Commutation discipline (enforced on the host before the launch, mirrors
 // `apply_instructions_word_batch` in the CPU path):
 //   - Different word groups always commute on a row (disjoint target words
 //     mean disjoint qubits), so they can be applied in word-index order.

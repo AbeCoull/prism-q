@@ -2,16 +2,21 @@
 pub(crate) unsafe fn xor_words(dst: *mut u64, src: *const u64, len: usize) {
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
+        // SAFETY: AVX2 support is checked above. The caller guarantees both
+        // pointers are valid for len u64 values.
         unsafe { xor_words_avx2(dst, src, len) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     {
+        // SAFETY: NEON is available on supported aarch64 targets. The caller
+        // guarantees both pointers are valid for len u64 values.
         unsafe { xor_words_neon(dst, src, len) };
         return;
     }
     #[allow(unreachable_code)]
     for i in 0..len {
+        // SAFETY: The caller guarantees both pointers are valid for len u64 values.
         unsafe { *dst.add(i) ^= *src.add(i) };
     }
 }

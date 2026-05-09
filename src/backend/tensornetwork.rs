@@ -568,8 +568,8 @@ impl TensorNetworkBackend {
 
         // The result tensor's legs should be exactly the output_legs.
         // PRISM-Q convention: q[0] = LSB of state index. In row-major
-        // tensor layout, the last axis is LSB. So we want leg order
-        // [q_{n-1}, q_{n-2}, ..., q_0] — reversed.
+        // tensor layout, the last axis is LSB. Use leg order
+        // [q_{n-1}, q_{n-2}, ..., q_0], reversed.
         let target_order: Vec<LegId> = self.output_legs.iter().rev().copied().collect();
         let perm: SmallVec<[usize; 6]> = target_order
             .iter()

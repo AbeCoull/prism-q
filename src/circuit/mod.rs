@@ -194,7 +194,7 @@ impl Circuit {
     }
 
     /// True if every gate preserves computational basis states (diagonal or
-    /// permutation). When true, the sparse backend is optimal — the state
+    /// permutation). When true, the sparse backend is optimal: the state
     /// always has exactly one non-zero amplitude, giving O(1) memory and O(n)
     /// per-gate cost regardless of qubit count.
     pub fn is_sparse_friendly(&self) -> bool {
@@ -218,7 +218,7 @@ impl Circuit {
         })
     }
 
-    /// Herfindahl–Hirschman index of the qubit interaction graph partition.
+    /// Herfindahl-Hirschman index of the qubit interaction graph partition.
     ///
     /// Returns Σ(sᵢ/n)² where sᵢ is the size of each connected component.
     /// Ranges from 1/n (all singletons) to 1.0 (one component).
@@ -812,7 +812,7 @@ pub enum Instruction {
     Measure { qubit: usize, classical_bit: usize },
     /// Reset a qubit to |0⟩. Destructive, non-unitary.
     Reset { qubit: usize },
-    /// Barrier — scheduling hint, no physical operation.
+    /// Barrier: scheduling hint, no physical operation.
     /// Backends should treat this as a no-op.
     Barrier { qubits: SmallVec<[usize; 4]> },
     /// Conditionally apply a gate based on classical measurement results.
@@ -844,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_depth_linear() {
-        // H(0), CX(0,1), CX(1,2) — depth 3 (serial chain)
+        // H(0), CX(0,1), CX(1,2): depth 3 (serial chain)
         let mut c = Circuit::new(3, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
@@ -854,7 +854,7 @@ mod tests {
 
     #[test]
     fn test_depth_parallel() {
-        // H(0), H(1), H(2) — depth 1 (all parallel)
+        // H(0), H(1), H(2): depth 1 (all parallel)
         let mut c = Circuit::new(3, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::H, &[1]);
@@ -990,7 +990,7 @@ mod tests {
         c.add_gate(Gate::Cx, &[2, 3]);
         c.add_measure(0, 0);
         c.add_measure(2, 1);
-        // No conditionals — subsystems remain independent
+        // No conditionals, subsystems remain independent
         let subs = c.independent_subsystems();
         assert_eq!(subs.len(), 2);
     }

@@ -2,10 +2,10 @@
 //!
 //! Scans the instruction stream and fuses consecutive single-qubit gates on the
 //! same target qubit into a single `Gate::Fused` carrying the product matrix.
-//! Gates on different qubits are transparent — they don't break a pending fusion.
+//! Gates on different qubits are transparent. They do not break a pending fusion.
 //!
 //! When the pass creates a new instruction stream, ALL single-qubit gates are
-//! emitted as `Gate::Fused` with precomputed matrices — including isolated gates
+//! emitted as `Gate::Fused` with precomputed matrices, including isolated gates
 //! that have no fusion partner. This avoids redundant `matrix_2x2()` dispatch
 //! during simulation. Identity matrices (from inverse cancellation) are elided.
 //!
@@ -127,7 +127,7 @@ fn is_cancelling_pair(a: &Instruction, b: &Instruction) -> bool {
             if ta.as_slice() == tb.as_slice() {
                 return true;
             }
-            // CZ and SWAP are symmetric — reversed order also cancels
+            // CZ and SWAP are symmetric, reversed order also cancels
             matches!(ga, Gate::Cz | Gate::Swap)
                 && ta.len() == 2
                 && tb.len() == 2
@@ -351,7 +351,7 @@ fn has_reorder_opportunity(circuit: &Circuit) -> bool {
     }
     // block_all[q] = position of last instruction that blocks ALL 1q gates on q
     // block_diag[q] = position of last instruction that blocks diagonal 1q gates on q
-    // None means "never blocked" — the 1q gate can move to position 0.
+    // None means "never blocked", the 1q gate can move to position 0.
     let mut block_all: Vec<Option<usize>> = vec![None; circuit.num_qubits];
     let mut block_diag: Vec<Option<usize>> = vec![None; circuit.num_qubits];
     let mut last_non1q_pos: Option<usize> = None;
@@ -380,20 +380,20 @@ fn has_reorder_opportunity(circuit: &Circuit) -> bool {
                 match gate {
                     Gate::Cx => {
                         block_all[targets[0]] = Some(i);
-                        // block_diag[targets[0]] unchanged — diagonal commutes on control
+                        // block_diag[targets[0]] unchanged, diagonal commutes on control
                         block_all[targets[1]] = Some(i);
                         block_diag[targets[1]] = Some(i);
                     }
                     Gate::Cz | Gate::Rzz(_) => {
                         block_all[targets[0]] = Some(i);
                         block_all[targets[1]] = Some(i);
-                        // block_diag unchanged — diagonal commutes on both
+                        // block_diag unchanged, diagonal commutes on both
                     }
                     Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => {
                         for &q in targets.iter() {
                             block_all[q] = Some(i);
                         }
-                        // block_diag unchanged — all-diagonal gate
+                        // block_diag unchanged, all-diagonal gate
                     }
                     _ => {
                         for &q in targets.iter() {
@@ -476,20 +476,20 @@ pub fn reorder_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                     Instruction::Gate { gate, targets } => match gate {
                         Gate::Cx => {
                             block_all[targets[0]] = idx;
-                            // block_diag[targets[0]] unchanged — diagonal commutes on control
+                            // block_diag[targets[0]] unchanged, diagonal commutes on control
                             block_all[targets[1]] = idx;
                             block_diag[targets[1]] = idx;
                         }
                         Gate::Cz | Gate::Rzz(_) => {
                             block_all[targets[0]] = idx;
                             block_all[targets[1]] = idx;
-                            // block_diag unchanged for both — diagonal commutes on both
+                            // block_diag unchanged for both, diagonal commutes on both
                         }
                         Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => {
                             for &q in targets.iter() {
                                 block_all[q] = idx;
                             }
-                            // block_diag unchanged — all-diagonal gate
+                            // block_diag unchanged, all-diagonal gate
                         }
                         _ => {
                             for &q in targets.iter() {
@@ -537,7 +537,7 @@ pub fn reorder_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
 ///
 /// Accumulates 1q gates per-qubit across the instruction stream. When a non-1q
 /// instruction is encountered, only the pending gates on the **affected qubits**
-/// are flushed — gates on unrelated qubits continue accumulating. This produces
+/// are flushed. Gates on unrelated qubits continue accumulating. This produces
 /// fewer but larger MultiFused batches than flushing the entire run at every 2q gate.
 ///
 /// Correctness: a 1q gate on qubit q commutes with any multi-qubit gate not
@@ -1328,6 +1328,19 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     Cow::Owned(c)
 }
 
+/// Threads a `&Circuit -> Cow<Circuit>` pass over a `Cow<Circuit>` while
+/// preserving zero-copy when both input and output are borrowed.
+#[inline]
+fn apply_pass<'a, F>(input: Cow<'a, Circuit>, pass: F) -> Cow<'a, Circuit>
+where
+    F: for<'b> Fn(&'b Circuit) -> Cow<'b, Circuit>,
+{
+    match input {
+        Cow::Borrowed(c) => pass(c),
+        Cow::Owned(c) => Cow::Owned(pass(&c).into_owned()),
+    }
+}
+
 /// Returns `Cow::Borrowed` when no fusion is profitable (zero overhead).
 /// Set `supports_fused` to `false` for backends that cannot handle fused gates
 /// (e.g., stabilizer).
@@ -1336,21 +1349,10 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
         return Cow::Borrowed(circuit);
     }
 
-    // Pair cancellation — always applied (zero-cost when no pairs found)
     let pass0 = cancel_self_inverse_pairs(circuit);
-
-    // CX·Rz·CX → Rzz — always applied (zero-cost when no patterns found)
-    let pass0r = match pass0 {
-        Cow::Borrowed(c) => fuse_rzz(c),
-        Cow::Owned(c) => Cow::Owned(fuse_rzz(&c).into_owned()),
-    };
-
-    // Batch consecutive Rzz gates (≥16q) — collapses N Rzz into 1 BatchRzz pass
+    let pass0r = apply_pass(pass0, fuse_rzz);
     let pass0b = if circuit.num_qubits >= MIN_QUBITS_FOR_DIAG_BATCH {
-        match pass0r {
-            Cow::Borrowed(c) => fuse_batch_rzz(c),
-            Cow::Owned(c) => Cow::Owned(fuse_batch_rzz(&c).into_owned()),
-        }
+        apply_pass(pass0r, fuse_batch_rzz)
     } else {
         pass0r
     };
@@ -1359,26 +1361,12 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
         return pass0b;
     }
 
-    // 1q fusion plus reorder, clone cost justified at 10q and above.
-    let pass1 = match pass0b {
-        Cow::Borrowed(c) => fuse_single_qubit_gates(c),
-        Cow::Owned(c) => Cow::Owned(fuse_single_qubit_gates(&c).into_owned()),
-    };
+    let pass1 = apply_pass(pass0b, fuse_single_qubit_gates);
     let pass1r = reorder_1q_gates(pass1);
+    let pass1c = apply_pass(pass1r, cancel_self_inverse_pairs);
+    let pass1f = apply_pass(pass1c, fuse_single_qubit_gates);
 
-    // Re-run cancel + 1q-fuse after reorder: commutation may expose new
-    // adjacent pairs. E.g. CX·T·CX → T·CX·CX (cancellable), or
-    // H·CZ·T → H·T·CZ (fusable). Zero-cost via Cow when no new opportunities.
-    let pass1c = match pass1r {
-        Cow::Borrowed(c) => cancel_self_inverse_pairs(c),
-        Cow::Owned(c) => Cow::Owned(cancel_self_inverse_pairs(&c).into_owned()),
-    };
-    let pass1f = match pass1c {
-        Cow::Borrowed(c) => fuse_single_qubit_gates(c),
-        Cow::Owned(c) => Cow::Owned(fuse_single_qubit_gates(&c).into_owned()),
-    };
-
-    // Expensive passes — gated by qubit count
+    // Expensive passes, gated by qubit count
     let pass_2q = if circuit.num_qubits >= MIN_QUBITS_FOR_2Q_FUSION {
         fuse_2q_gates(pass1f)
     } else {
@@ -1911,10 +1899,10 @@ mod tests {
     fn test_no_cancel_cx_with_conflicting_between() {
         let mut c = Circuit::new(3, 0);
         c.add_gate(Gate::Cx, &[0, 1]);
-        c.add_gate(Gate::H, &[0]); // touches q0 — breaks the chain
+        c.add_gate(Gate::H, &[0]); // touches q0, breaks the chain
         c.add_gate(Gate::Cx, &[0, 1]);
         let result = cancel_self_inverse_pairs(&c);
-        // No cancellation — H on q0 intervenes
+        // No cancellation, H on q0 intervenes
         assert_eq!(result.instructions.len(), 3);
     }
 
@@ -1922,7 +1910,7 @@ mod tests {
     fn test_no_cancel_cx_reversed_targets() {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Cx, &[0, 1]);
-        c.add_gate(Gate::Cx, &[1, 0]); // reversed — CX is NOT symmetric
+        c.add_gate(Gate::Cx, &[1, 0]); // reversed, CX is NOT symmetric
         let result = cancel_self_inverse_pairs(&c);
         assert_eq!(result.instructions.len(), 2);
     }
@@ -1931,7 +1919,7 @@ mod tests {
     fn test_cancel_cz_symmetric() {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Cz, &[0, 1]);
-        c.add_gate(Gate::Cz, &[1, 0]); // reversed — CZ IS symmetric
+        c.add_gate(Gate::Cz, &[1, 0]); // reversed, CZ IS symmetric
         let result = cancel_self_inverse_pairs(&c);
         assert_eq!(result.instructions.len(), 0);
     }
@@ -2134,7 +2122,7 @@ mod tests {
         // Rz(0) should move past CX(0,1) since diagonal commutes on control
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Cx, &[0, 1]);
-        c.add_gate(Gate::Rz(0.5), &[0]); // diagonal on control — should commute
+        c.add_gate(Gate::Rz(0.5), &[0]); // diagonal on control, should commute
 
         let result = reorder_1q_gates(Cow::Borrowed(&c));
         assert!(matches!(result, Cow::Owned(_)));
@@ -2155,19 +2143,19 @@ mod tests {
 
     #[test]
     fn test_reorder_nondiagonal_blocked_by_cx_control() {
-        // H(0) should NOT move past CX(0,1) — H is not diagonal
+        // H(0) should NOT move past CX(0,1), H is not diagonal
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Cx, &[0, 1]);
         c.add_gate(Gate::H, &[0]);
 
         let result = reorder_1q_gates(Cow::Borrowed(&c));
-        // No reorder — H is blocked by CX on q0
+        // No reorder, H is blocked by CX on q0
         assert!(matches!(result, Cow::Borrowed(_)));
     }
 
     #[test]
     fn test_reorder_diagonal_blocked_on_cx_target() {
-        // Rz(1) should NOT move past CX(0,1) — q1 is the target
+        // Rz(1) should NOT move past CX(0,1), q1 is the target
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Cx, &[0, 1]);
         c.add_gate(Gate::Rz(0.5), &[1]);
@@ -2178,7 +2166,7 @@ mod tests {
 
     #[test]
     fn test_reorder_diagonal_commutes_through_cz() {
-        // T(0) and T(1) should both move past CZ(0,1) — diagonal commutes
+        // T(0) and T(1) should both move past CZ(0,1), diagonal commutes
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Cz, &[0, 1]);
         c.add_gate(Gate::T, &[0]);
@@ -2205,10 +2193,10 @@ mod tests {
         let mut c = Circuit::new(3, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
-        c.add_gate(Gate::Rz(0.7), &[0]); // diagonal on CX control — commutes
+        c.add_gate(Gate::Rz(0.7), &[0]); // diagonal on CX control, commutes
         c.add_gate(Gate::Cz, &[1, 2]);
-        c.add_gate(Gate::T, &[1]); // diagonal — commutes through CZ
-        c.add_gate(Gate::S, &[2]); // diagonal — commutes through CZ
+        c.add_gate(Gate::T, &[1]); // diagonal, commutes through CZ
+        c.add_gate(Gate::S, &[2]); // diagonal, commutes through CZ
 
         let mut b1 = StatevectorBackend::new(42);
         b1.init(3, 0).unwrap();
@@ -2329,7 +2317,7 @@ mod tests {
 
     #[test]
     fn reorder_exposes_cx_cancellation() {
-        // CX q0,q1; T q0; CX q0,q1 — T is diagonal on CX control,
+        // CX q0,q1; T q0; CX q0,q1. T is diagonal on CX control,
         // reorder moves it past CX, exposing CX·CX cancellation.
         let mut c = Circuit::new(10, 0);
         c.add_gate(Gate::Cx, &[0, 1]);
@@ -2348,8 +2336,8 @@ mod tests {
 
     #[test]
     fn reorder_exposes_1q_fusion() {
-        // H q0; CZ q0,q1; T q0 — T is diagonal, commutes through CZ on either qubit.
-        // After reorder: H q0; T q0; CZ q0,q1 — H and T fuse.
+        // H q0; CZ q0,q1; T q0. T is diagonal, commutes through CZ on either qubit.
+        // After reorder: H q0; T q0; CZ q0,q1. H and T fuse.
         let mut c = Circuit::new(10, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cz, &[0, 1]);
@@ -2383,7 +2371,7 @@ mod tests {
 
     #[test]
     fn reorder_exposes_cz_cancellation() {
-        // CZ q0,q1; S q0; CZ q0,q1 — S is diagonal, commutes through CZ.
+        // CZ q0,q1; S q0; CZ q0,q1. S is diagonal, commutes through CZ.
         // After reorder: S q0; CZ q0,q1; CZ q0,q1 → CZ pair cancels.
         let mut c = Circuit::new(10, 0);
         c.add_gate(Gate::Cz, &[0, 1]);

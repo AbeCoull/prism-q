@@ -15,7 +15,7 @@ use prism_q::sim;
 
 const EPS: f64 = 1e-10;
 
-/// Run a circuit without any fusion — manual init + apply loop.
+/// Run a circuit without any fusion (manual init + apply loop).
 fn run_unfused(circuit: &Circuit) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(42);
     backend
@@ -727,7 +727,7 @@ fn fusion_dynamic_threshold_shallow_10q() {
 
 #[test]
 fn fusion_dynamic_threshold_deep_10q() {
-    // 10q circuit with many instructions — fusion should be active
+    // 10q circuit with many instructions; fusion should be active
     assert_fusion_preserves_correctness(&circuits::random_circuit(10, 20, 42));
 }
 
@@ -762,7 +762,7 @@ fn fusion_all_passes_hea_20q() {
 fn fusion_non_adjacent_cx_cancel() {
     let mut c = Circuit::new(4, 0);
     c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::H, &[2]); // unrelated qubit — doesn't block cancellation
+    c.add_gate(Gate::H, &[2]); // unrelated qubit, doesn't block cancellation
     c.add_gate(Gate::T, &[3]); // unrelated qubit
     c.add_gate(Gate::Cx, &[0, 1]); // should cancel with first CX
     c.add_gate(Gate::H, &[0]);
@@ -802,7 +802,7 @@ fn fusion_non_adjacent_cancel_blocked_by_conflict() {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::H, &[0]); // touches q0 — blocks cancellation of CX pair
+    c.add_gate(Gate::H, &[0]); // touches q0, blocks cancellation of CX pair
     c.add_gate(Gate::Cx, &[0, 1]);
     let unfused = run_unfused(&c);
     let fused = run_fused(&c);

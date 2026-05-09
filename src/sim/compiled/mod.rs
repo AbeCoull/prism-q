@@ -239,8 +239,12 @@ fn pack_bools(bools: &[bool]) -> Vec<u64> {
 #[derive(Clone, Copy)]
 struct SendPtrU64(*mut u64);
 #[cfg(feature = "parallel")]
+// SAFETY: SendPtrU64 is used only for packed shot buffers partitioned by
+// disjoint word ranges before entering parallel workers.
 unsafe impl Send for SendPtrU64 {}
 #[cfg(feature = "parallel")]
+// SAFETY: The raw pointer wrapper is shared, but each worker writes only its
+// assigned non-overlapping range.
 unsafe impl Sync for SendPtrU64 {}
 #[cfg(feature = "parallel")]
 impl SendPtrU64 {
@@ -708,12 +712,6 @@ impl CompiledSampler {
             num_shots,
             cache,
         ))
-    }
-
-    #[inline(always)]
-    #[allow(dead_code)]
-    pub(crate) fn sample_into_raw(&mut self, accum: &mut [u64]) {
-        self.sample_into(accum);
     }
 
     #[inline(always)]

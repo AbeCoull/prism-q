@@ -8,6 +8,8 @@ mod decomposed;
 mod dispatch;
 pub mod homological;
 pub mod noise;
+mod probability;
+mod shots;
 pub mod stabilizer_rank;
 mod trajectory;
 pub mod unified_pauli;
@@ -24,12 +26,15 @@ use dispatch::{
     MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
     MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
 };
+pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
+pub use shots::{bitstring, ShotsResult};
 
 use std::collections::HashMap;
 
 use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
+use shots::{packed_shots_to_classical_bits, sample_shots};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SimOptions {
@@ -50,180 +55,6 @@ impl SimOptions {
             probabilities: false,
         }
     }
-}
-
-/// A single block in a factored probability distribution.
-///
-/// Each block represents the marginal probabilities for one independent
-/// subsystem. The `mask` indicates which global qubit positions belong
-/// to this block, and `probs` holds the 2^k marginal distribution.
-#[derive(Debug, Clone)]
-pub struct FactoredBlock {
-    /// Marginal probability vector for this block (length 2^k).
-    pub probs: Vec<f64>,
-    /// Bitmask of global qubit positions belonging to this block.
-    pub mask: u64,
-}
-
-/// Probability distribution over computational basis states.
-///
-/// For monolithic simulations this wraps a dense `Vec<f64>` of length 2^n.
-/// For decomposed simulations with independent subsystems, this stores
-/// per-block marginal distributions that are multiplied on demand,
-/// avoiding the O(2^N) Kronecker product unless explicitly requested.
-#[derive(Debug, Clone)]
-pub enum Probabilities {
-    /// Full probability vector of length 2^n.
-    Dense(Vec<f64>),
-    /// Lazy Kronecker product of independent block distributions.
-    Factored {
-        /// Per-block marginal probability vectors and bitmasks.
-        blocks: Vec<FactoredBlock>,
-        /// Total qubit count across all blocks.
-        total_qubits: usize,
-    },
-}
-
-impl Probabilities {
-    /// Number of basis states (2^n).
-    pub fn len(&self) -> usize {
-        match self {
-            Probabilities::Dense(v) => v.len(),
-            Probabilities::Factored { total_qubits, .. } => 1 << total_qubits,
-        }
-    }
-
-    /// Always false, a probability distribution has at least one state.
-    pub fn is_empty(&self) -> bool {
-        false
-    }
-
-    /// Probability of a single computational basis state. O(1) for dense,
-    /// O(K) for factored where K is the number of independent blocks.
-    ///
-    /// # Panics
-    /// Panics if `index >= self.len()`.
-    pub fn get(&self, index: usize) -> f64 {
-        match self {
-            Probabilities::Dense(v) => v[index],
-            Probabilities::Factored { blocks, .. } => {
-                let mut p = 1.0;
-                for block in blocks {
-                    let local = extract_block_bits(index, block.mask);
-                    p *= block.probs[local];
-                }
-                p
-            }
-        }
-    }
-
-    /// Iterate over all basis-state probabilities in order.
-    ///
-    /// For `Dense` this is a direct slice iteration. For `Factored` each
-    /// probability is computed on the fly in O(K) per element.
-    pub fn iter(&self) -> Box<dyn Iterator<Item = f64> + '_> {
-        match self {
-            Probabilities::Dense(v) => Box::new(v.iter().copied()),
-            Probabilities::Factored {
-                blocks,
-                total_qubits,
-            } => {
-                let n = 1usize << total_qubits;
-                Box::new((0..n).map(move |i| {
-                    let mut p = 1.0;
-                    for block in blocks {
-                        let local = extract_block_bits(i, block.mask);
-                        p *= block.probs[local];
-                    }
-                    p
-                }))
-            }
-        }
-    }
-
-    /// Materialize the full probability vector. O(1) clone for dense,
-    /// O(K × 2^N) for factored. Prefer [`Probabilities::get`] for spot-checking.
-    pub fn to_vec(&self) -> Vec<f64> {
-        match self {
-            Probabilities::Dense(v) => v.clone(),
-            Probabilities::Factored {
-                blocks,
-                total_qubits,
-            } => {
-                let n = 1usize << total_qubits;
-                let mut result = vec![0.0f64; n];
-                #[cfg(feature = "parallel")]
-                {
-                    const MIN_PAR_STATES: usize = 1 << 14;
-                    if n >= MIN_PAR_STATES {
-                        use rayon::prelude::*;
-                        crate::backend::init_thread_pool();
-                        result.par_iter_mut().enumerate().for_each(|(i, slot)| {
-                            let mut p = 1.0;
-                            for block in blocks {
-                                let local = extract_block_bits(i, block.mask);
-                                p *= block.probs[local];
-                            }
-                            *slot = p;
-                        });
-                        return result;
-                    }
-                }
-                for (i, slot) in result.iter_mut().enumerate() {
-                    let mut p = 1.0;
-                    for block in blocks {
-                        let local = extract_block_bits(i, block.mask);
-                        p *= block.probs[local];
-                    }
-                    *slot = p;
-                }
-                result
-            }
-        }
-    }
-}
-
-impl std::ops::Index<usize> for Probabilities {
-    type Output = f64;
-
-    /// Index into a dense probability vector.
-    ///
-    /// Only works for `Dense`. Panics on `Factored` because `Index` must
-    /// return `&f64` and factored values are computed, not stored.
-    /// Use [`Probabilities::get`] or [`Probabilities::iter`] instead.
-    fn index(&self, index: usize) -> &f64 {
-        match self {
-            Probabilities::Dense(v) => &v[index],
-            Probabilities::Factored { .. } => {
-                panic!("cannot index Factored probabilities; use .get(i) or .to_vec()")
-            }
-        }
-    }
-}
-
-/// Extract the bits of `global_index` at positions set in `mask`,
-/// packing them into contiguous low bits.
-#[inline]
-fn extract_block_bits(global_index: usize, mask: u64) -> usize {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("bmi2") {
-            // SAFETY: BMI2 availability checked by is_x86_feature_detected above
-            return unsafe { core::arch::x86_64::_pext_u64(global_index as u64, mask) as usize };
-        }
-    }
-    let mut result = 0usize;
-    let mut bit = 0;
-    let mut m = mask;
-    while m != 0 {
-        let pos = m.trailing_zeros() as usize;
-        if global_index & (1 << pos) != 0 {
-            result |= 1 << bit;
-        }
-        bit += 1;
-        m &= m.wrapping_sub(1);
-    }
-    result
 }
 
 /// Result of a simulation run.
@@ -289,7 +120,7 @@ pub fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Simul
 /// Wraps [`run_with`] with `BackendKind::StatevectorGpu { context }`. The
 /// dispatch still applies fusion, independent-subsystem decomposition, and
 /// the qubit-count crossover ([`crate::gpu::min_qubits`]); sub-circuits
-/// below threshold automatically run on the host-side statevector.
+/// below threshold automatically run on the host statevector.
 ///
 /// ```no_run
 /// # #[cfg(feature = "gpu")] {
@@ -448,159 +279,6 @@ pub fn run_qasm(qasm: &str, seed: u64) -> Result<SimulationResult> {
     run(&circuit, seed)
 }
 
-/// Result of a multi-shot simulation run.
-#[derive(Debug, Clone)]
-pub struct ShotsResult {
-    /// Classical measurement outcomes for each shot.
-    /// `shots[i][j]` is the j-th classical bit from the i-th shot.
-    pub shots: Vec<Vec<bool>>,
-    num_classical_bits: usize,
-}
-
-impl ShotsResult {
-    /// Build a frequency histogram of measurement outcomes.
-    ///
-    /// Keys are packed `Vec<u64>` where bit `i` of word `i/64` corresponds
-    /// to classical bit `i`. Use [`bitstring`] to format keys for display.
-    pub fn counts(&self) -> HashMap<Vec<u64>, u64> {
-        let m_words = self.num_classical_bits.div_ceil(64).max(1);
-        let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
-        for shot in &self.shots {
-            let mut key = vec![0u64; m_words];
-            for (i, &b) in shot.iter().enumerate() {
-                if b {
-                    key[i / 64] |= 1u64 << (i % 64);
-                }
-            }
-            *counts.entry(key).or_insert(0) += 1;
-        }
-        counts
-    }
-
-    pub fn num_shots(&self) -> usize {
-        self.shots.len()
-    }
-
-    pub fn num_classical_bits(&self) -> usize {
-        self.num_classical_bits
-    }
-}
-
-impl std::fmt::Display for ShotsResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let counts = self.counts();
-        let mut entries: Vec<_> = counts.into_iter().collect();
-        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
-        for (bits, count) in &entries {
-            let bs = bitstring(bits, self.num_classical_bits);
-            writeln!(f, "{bs}: {count}")?;
-        }
-        Ok(())
-    }
-}
-
-/// Format a packed `Vec<u64>` key (from [`ShotsResult::counts`]) as a binary string.
-///
-/// Bit 0 of the first word corresponds to classical bit 0 (leftmost character).
-pub fn bitstring(key: &[u64], num_bits: usize) -> String {
-    let mut s = String::with_capacity(num_bits);
-    for i in 0..num_bits {
-        let word = i / 64;
-        let bit = i % 64;
-        if word < key.len() && (key[word] >> bit) & 1 == 1 {
-            s.push('1');
-        } else {
-            s.push('0');
-        }
-    }
-    s
-}
-
-fn build_cdf(probs: &[f64]) -> Vec<f64> {
-    let mut cdf = Vec::with_capacity(probs.len());
-    let mut acc = 0.0;
-    for &p in probs {
-        acc += p;
-        cdf.push(acc);
-    }
-    if let Some(last) = cdf.last_mut() {
-        *last = 1.0;
-    }
-    cdf
-}
-
-fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
-    match cdf.binary_search_by(|p| p.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal)) {
-        Ok(i) => i,
-        Err(i) => i.min(cdf.len() - 1),
-    }
-}
-
-fn sample_shots(
-    probs: &Probabilities,
-    meas_map: &[(usize, usize)],
-    num_classical_bits: usize,
-    num_shots: usize,
-    seed: u64,
-) -> Vec<Vec<bool>> {
-    use rand::Rng;
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
-
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
-
-    if meas_map.is_empty() {
-        return vec![vec![false; num_classical_bits]; num_shots];
-    }
-
-    let mut indices = Vec::with_capacity(num_shots);
-
-    match probs {
-        Probabilities::Dense(v) => {
-            let cdf = build_cdf(v);
-            for _ in 0..num_shots {
-                let r: f64 = rng.random();
-                indices.push(sample_from_cdf(&cdf, r));
-            }
-        }
-        Probabilities::Factored { blocks, .. } => {
-            let block_cdfs: Vec<Vec<f64>> = blocks.iter().map(|b| build_cdf(&b.probs)).collect();
-            for _ in 0..num_shots {
-                let mut global_idx = 0usize;
-                for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
-                    let r: f64 = rng.random();
-                    let local_idx = sample_from_cdf(cdf, r);
-                    let mut m = block.mask;
-                    let mut bit = 0;
-                    while m != 0 {
-                        let pos = m.trailing_zeros() as usize;
-                        if local_idx & (1 << bit) != 0 {
-                            global_idx |= 1 << pos;
-                        }
-                        bit += 1;
-                        m &= m.wrapping_sub(1);
-                    }
-                }
-                indices.push(global_idx);
-            }
-        }
-    }
-
-    let mut flat = vec![false; num_shots * num_classical_bits];
-    for (s, &state_idx) in indices.iter().enumerate() {
-        let base = s * num_classical_bits;
-        for &(qubit, cbit) in meas_map {
-            flat[base + cbit] = (state_idx >> qubit) & 1 == 1;
-        }
-    }
-
-    let mut shots = Vec::with_capacity(num_shots);
-    for chunk in flat.chunks_exact(num_classical_bits) {
-        shots.push(chunk.to_vec());
-    }
-    shots
-}
-
 /// Execute a circuit multiple times, collecting measurement outcomes.
 pub fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     run_shots_with(BackendKind::Auto, circuit, num_shots, seed)
@@ -679,32 +357,6 @@ fn compile_measurements_for_kind(
     }
 
     Ok(sampler)
-}
-
-fn packed_shots_to_classical_bits(
-    packed: &compiled::PackedShots,
-    meas_map: &[(usize, usize)],
-    num_classical_bits: usize,
-) -> Vec<Vec<bool>> {
-    let dense_identity_map = meas_map.len() == num_classical_bits
-        && meas_map
-            .iter()
-            .enumerate()
-            .all(|(idx, &(_, classical_bit))| idx == classical_bit);
-    if dense_identity_map {
-        return packed.to_shots();
-    }
-
-    let mut shots = vec![vec![false; num_classical_bits]; packed.num_shots()];
-    for (measurement, &(_, classical_bit)) in meas_map.iter().enumerate() {
-        if classical_bit >= num_classical_bits {
-            continue;
-        }
-        for (shot_idx, shot) in shots.iter_mut().enumerate() {
-            shot[classical_bit] = packed.get_bit(shot_idx, measurement);
-        }
-    }
-    shots
 }
 
 /// Execute a circuit multiple times and return outcome counts directly.
@@ -1431,7 +1083,7 @@ mod tests {
         // 6-qubit circuit: qubits 0-2 = Clifford block, qubits 3-5 = non-Clifford block.
         // The two blocks are independent (no gates bridge them).
         // Under Auto dispatch with decomposition, block 0-2 should use Stabilizer
-        // and block 3-5 should use Statevector. We verify correctness by comparing
+        // and block 3-5 should use Statevector. Correctness is checked by comparing
         // against a monolithic statevector run.
         let mut c = Circuit::new(6, 0);
 

@@ -505,9 +505,13 @@ impl SubTableau {
                 // Row regions [r*stride .. (r+1)*stride] are non-overlapping.
                 // p_data is a separate copy.
                 anti_rows.par_iter().for_each(|&r| {
+                    // SAFETY: r is unique within anti_rows and identifies one
+                    // in-bounds row region of length stride.
                     let row = unsafe {
                         std::slice::from_raw_parts_mut(xz_ptr.ptr().add(r * stride), stride)
                     };
+                    // SAFETY: r is unique within anti_rows, so this mutable
+                    // reference targets one distinct phase element.
                     let phase = unsafe { &mut *phase_ptr.ptr().add(r) };
                     let initial = if p_phase { 2u64 } else { 0 } + if *phase { 2u64 } else { 0 };
                     let (rx, rz) = row.split_at_mut(nw);

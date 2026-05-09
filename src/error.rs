@@ -1,6 +1,6 @@
 //! Error types for PRISM-Q.
 //!
-//! All public APIs return structured errors — never panics for user-facing operations.
+//! All public APIs return structured errors. User-facing operations never panic.
 //! Internal debug_assert! may fire in debug builds for invariant violations.
 
 use thiserror::Error;

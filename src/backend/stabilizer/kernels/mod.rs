@@ -827,13 +827,17 @@ impl StabilizerBackend {
 
             // SAFETY: Each row index in anti_rows is unique (collected from a filter
             // with no duplicates) and none equals p_row. Each row occupies
-            // [row*stride .. (row+1)*stride] in xz — non-overlapping regions.
+            // [row*stride .. (row+1)*stride] in xz, non-overlapping regions.
             // Phase elements are at distinct indices. p_data is a separate copy.
             anti_rows.par_iter().for_each(|&r| {
                 let xz_base = xz_ptr.ptr();
                 let ph_base = phase_ptr.ptr();
+                // SAFETY: r is unique within anti_rows and identifies one
+                // in-bounds row region of length stride.
                 let row =
                     unsafe { std::slice::from_raw_parts_mut(xz_base.add(r * stride), stride) };
+                // SAFETY: r is unique within anti_rows, so this mutable
+                // reference targets one distinct phase element.
                 let phase = unsafe { &mut *ph_base.add(r) };
 
                 let initial_sum = if p_phase { 2u64 } else { 0 } + if *phase { 2u64 } else { 0 };

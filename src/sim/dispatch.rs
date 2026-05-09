@@ -165,7 +165,7 @@ pub enum BackendKind {
     /// Circuits (or decomposed sub-blocks) with fewer than
     /// [`crate::gpu::min_qubits()`] qubits (tunable via
     /// `PRISM_GPU_MIN_QUBITS`, default [`crate::gpu::MIN_QUBITS_DEFAULT`])
-    /// transparently fall back to the host-side statevector path, since
+    /// transparently fall back to the host statevector path, since
     /// small states do not survive PCIe and launch-latency overhead.
     /// Larger circuits allocate a device-resident state and route gate
     /// application through GPU kernels.
@@ -303,7 +303,7 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
 }
 
 /// Build a `StatevectorBackend` configured for GPU execution if the circuit
-/// is large enough to clear the crossover, otherwise a plain host-side
+/// is large enough to clear the crossover, otherwise a plain host
 /// backend. Called from `select_dispatch` (which runs per sub-block after
 /// decomposition) so small blocks transparently stay on CPU.
 #[cfg(feature = "gpu")]
@@ -321,7 +321,7 @@ fn statevector_gpu_with_crossover(
 
 /// Build a `StabilizerBackend` configured for GPU execution if the circuit
 /// is large enough to clear the stabilizer crossover, otherwise a plain
-/// host-side backend.
+/// host backend.
 #[cfg(feature = "gpu")]
 fn stabilizer_gpu_with_crossover(
     context: &Arc<GpuContext>,

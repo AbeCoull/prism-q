@@ -3,7 +3,7 @@
 //! Represents an n-qubit state as a chain of rank-3 tensors:
 //!
 //! ```text
-//!   A[0] — A[1] — A[2] — ... — A[n-1]
+//!   A[0] - A[1] - A[2] - ... - A[n-1]
 //! ```
 //!
 //! Each tensor `A[k]` has shape (χ_left, 2, χ_right) where χ is the bond dimension.
@@ -320,7 +320,7 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
     }
 
     if transpose {
-        // We computed SVD of A^H (shape n×m): A^H = U_h * S * V_h^H
+        // SVD is computed from A^H (shape n x m): A^H = U_h * S * V_h^H
         // So A = V_h * S * U_h^H
         // U_A = V_h (m×k col-major): conj of vt_sorted (which stores V_h^H row-major)
         // V_A^H = U_h^H (k×n row-major): conj of u_sorted (which stores U_h col-major)
@@ -1943,7 +1943,7 @@ mod tests {
     #[test]
     fn test_mcu_matrix_toffoli() {
         let x_mat = Gate::X.matrix_2x2();
-        let order = vec![0, 1, 2]; // ctrl0, ctrl1, target — identity order
+        let order = vec![0, 1, 2]; // ctrl0, ctrl1, target, identity order
         let gate = mcu_matrix(2, &x_mat, &order);
         // 8×8 matrix: identity for states 0..5, then X on target for states 6,7
         // state 6 = |110⟩, state 7 = |111⟩ → swap these
@@ -2009,7 +2009,7 @@ mod tests {
 
         let x_mat = Gate::X.matrix_2x2();
         let mut c = Circuit::new(3, 0);
-        // Only one control set — should NOT flip target
+        // Only one control is set, should NOT flip target
         c.add_gate(Gate::X, &[0]);
         c.add_gate(
             Gate::Mcu(Box::new(McuData {

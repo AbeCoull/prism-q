@@ -18,7 +18,7 @@ pub(crate) const MIN_WORDS_FOR_BATCH: usize = 4;
 /// Compact gate representation for batched word-group execution.
 ///
 /// All gates in a word group target the same u64 word. `a_bit` and `b_bit`
-/// are bit positions (0–63) within that word.
+/// are bit positions (0..63) within that word.
 #[derive(Clone, Copy)]
 pub(crate) struct BatchGate {
     kind: u8,
@@ -472,7 +472,7 @@ impl StabilizerBackend {
     ///
     /// This eliminates the cascading flush pattern where each cross-word CX
     /// forces an immediate flush of its two word groups. Instead, all word-group
-    /// ops are applied first, then all cross-word gates — in one pass over rows.
+    /// ops are applied first, then all cross-word gates in one pass over rows.
     fn flush_all_with_cross_word(
         &mut self,
         word_groups: &mut [Vec<BatchGate>],

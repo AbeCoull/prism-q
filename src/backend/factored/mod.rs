@@ -337,7 +337,7 @@ impl FactoredBackend {
         Ok(())
     }
 
-    /// Apply MultiFused gates grouped by sub-state — no merging needed.
+    /// Apply MultiFused gates grouped by sub-state, no merging needed.
     fn apply_multi_fused(&mut self, gates: &[(usize, [[Complex64; 2]; 2])], _all_diagonal: bool) {
         let mut groups: SmallVec<[(usize, GateList); 8]> = SmallVec::new();
 
@@ -1173,6 +1173,8 @@ fn par_apply_cu(
                 let base = insert_zero_bit(insert_zero_bit(i, control), target);
                 let idx0 = base | ctrl_mask;
                 let idx1 = idx0 | tgt_mask;
+                // SAFETY: idx0 and idx1 are in bounds and unique for this iteration.
+                // The outer iterator maps every pair once, so Rayon tasks do not alias.
                 unsafe {
                     let fp = ptr.as_f64_ptr();
                     prepared.apply_pair_ptr(fp.add(idx0 * 2), fp.add(idx1 * 2));
@@ -1241,6 +1243,8 @@ fn par_apply_mcu(
             }
             let idx0 = base | ctrl_mask;
             let idx1 = idx0 | tgt_mask;
+            // SAFETY: idx0 and idx1 are in bounds and unique for this iteration.
+            // The outer iterator maps every pair once, so Rayon tasks do not alias.
             unsafe {
                 let fp = ptr.as_f64_ptr();
                 prepared.apply_pair_ptr(fp.add(idx0 * 2), fp.add(idx1 * 2));
@@ -1279,6 +1283,8 @@ fn par_apply_mcu_phase(
                 base = insert_zero_bit(base, q);
             }
             let idx = base | all_mask;
+            // SAFETY: idx is in bounds and unique for this iteration. The
+            // insert_zero_bit mapping excludes all special qubits before masks are set.
             unsafe {
                 let val = ptr.load(idx);
                 ptr.store(idx, val * phase);
@@ -1339,6 +1345,8 @@ fn par_apply_fused2q(
         .for_each(move |k| {
             let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
             let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+            // SAFETY: the four indices are in bounds and the pair of inserted
+            // zero bits gives each iteration a disjoint 4-amplitude group.
             unsafe {
                 prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
             }

@@ -107,7 +107,7 @@ impl GpuDevice {
 
     /// Maximum qubits representable as a Complex64 statevector in the total VRAM.
     ///
-    /// Computed as `floor(log2(vram_bytes / 16))` — each amplitude is two f64s = 16 bytes.
+    /// Computed as `floor(log2(vram_bytes / 16))`. Each amplitude is two f64s = 16 bytes.
     pub fn max_qubits_for_statevector(&self) -> Result<usize> {
         let bytes = self.vram_bytes()?;
         let elements = bytes / 16;

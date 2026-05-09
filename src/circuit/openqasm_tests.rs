@@ -1469,7 +1469,7 @@ fn test_empty_gate_body() {
 fn test_register_name_collision() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nqubit[2] q;";
     let err = parse(qasm);
-    // Either error or silently overwrite — both acceptable, just don't panic
+    // Either error or silent overwrite is acceptable, just do not panic.
     assert!(err.is_ok() || err.is_err());
 }
 

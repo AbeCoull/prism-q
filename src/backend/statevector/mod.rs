@@ -1,7 +1,7 @@
 //! Full state-vector simulation backend.
 //!
 //! Stores the complete 2^n amplitude vector and applies gates via direct
-//! index manipulation. This is the reference backend,,
+//! index manipulation. This is the reference backend,
 //! but memory-limited to ~25-30 qubits on typical hardware.
 //!
 //! # Memory layout
@@ -102,7 +102,7 @@ pub(crate) fn insert_zero_bit(val: usize, bit_pos: usize) -> usize {
 
 /// Wrapper to send a raw pointer across Rayon threads.
 ///
-/// SAFETY: Callers must ensure no data races — each thread must access
+/// SAFETY: Callers must ensure no data races. Each thread must access
 /// disjoint elements. The mask-based index bijection guarantees this for
 /// controlled-gate kernels.
 #[cfg(feature = "parallel")]
@@ -110,8 +110,12 @@ pub(crate) fn insert_zero_bit(val: usize, bit_pos: usize) -> usize {
 pub(crate) struct SendPtr(pub(crate) *mut Complex64);
 
 #[cfg(feature = "parallel")]
+// SAFETY: SendPtr is only used by kernels that partition the state into
+// disjoint mutable indices before entering Rayon work.
 unsafe impl Send for SendPtr {}
 #[cfg(feature = "parallel")]
+// SAFETY: Sharing the pointer wrapper is sound because mutation happens only
+// through disjoint indices established by each caller's index bijection.
 unsafe impl Sync for SendPtr {}
 
 #[cfg(feature = "parallel")]
@@ -180,12 +184,12 @@ impl StatevectorBackend {
         // Unconditional GPU dispatch: every instruction routes to a kernel once
         // `gpu_state` is Some. This path is the explicit opt-in surface
         // (`StatevectorBackend::with_gpu(ctx)`) and intentionally skips the
-        // dispatch-level crossover — users calling `with_gpu` directly are asking
-        // for kernel-level behavior. For size-aware crossover + decomposition-
-        // aware routing, enter via `sim::run_with(BackendKind::StatevectorGpu
+        // dispatch-level crossover. Direct `with_gpu` callers request
+        // kernel behavior. For size-based crossover plus decomposition-aware
+        // routing, enter via `sim::run_with(BackendKind::StatevectorGpu
         // { context })`, which honors `gpu_min_qubits()` per sub-block.
         //
-        // Caveat: Multi2q launches one kernel per sub-gate (rare in practice).
+        // Caveat: Multi2q launches one kernel for each subgate (rare in practice).
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate_gpu(gate, targets),
             Instruction::Measure {
@@ -315,7 +319,7 @@ impl StatevectorBackend {
             let inv_norm = 1.0 / prob_zero.sqrt();
             gpu.set_pending_norm(gpu.pending_norm() * inv_norm);
         } else {
-            // |0⟩ half was empty — reinitialise to |0…0⟩ (CPU does the same).
+            // |0> half was empty, reinitialize to |0...0> (CPU does the same).
             k::launch_set_initial_state(&ctx, gpu)?;
             gpu.set_pending_norm(1.0);
         }

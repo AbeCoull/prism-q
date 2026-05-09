@@ -169,7 +169,7 @@ lives in the parser at [`src/circuit/openqasm.rs`](src/circuit/openqasm.rs). See
 ```bash
 cargo build --release
 cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
 cargo fmt --check
 cargo doc --no-deps --all-features
 ```

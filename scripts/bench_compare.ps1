@@ -6,8 +6,8 @@
 #   .\scripts\bench_compare.ps1 -Quick                            # smoke subset
 #
 # Exit code:
-#   0 — no regressions above threshold
-#   1 — regressions detected
+#   0: no regressions above threshold
+#   1: regressions detected
 
 param(
     [switch]$Quick
@@ -66,7 +66,7 @@ try {
     Write-Host ""
 
     if ($Regressed) {
-        Write-Host "VERDICT: FAIL — regressions detected" -ForegroundColor Red
+        Write-Host "VERDICT: FAIL (regressions detected)" -ForegroundColor Red
         Write-Host "Review the output above. If acceptable, re-run baseline:"
         Write-Host "  .\scripts\bench_baseline.ps1"
         exit 1

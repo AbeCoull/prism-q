@@ -39,6 +39,8 @@ struct MatBroadcast {
 impl MatBroadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 2]; 2]) -> Self {
+        // SAFETY: x86_64 guarantees SSE2, and _mm_set1_pd only broadcasts
+        // scalar f64 values into SIMD registers.
         unsafe {
             Self {
                 m00_rr: _mm_set1_pd(mat[0][0].re),
@@ -100,6 +102,8 @@ struct MatBroadcast {
 impl MatBroadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 2]; 2]) -> Self {
+        // SAFETY: NEON is available on supported aarch64 targets, and these
+        // intrinsics only broadcast scalar f64 values into SIMD registers.
         unsafe {
             Self {
                 m00_rr: vdupq_n_f64(mat[0][0].re),
@@ -529,6 +533,7 @@ impl PreparedGate1q {
                 SimdTier::Sse2
             };
             let broadcast256 = if has_avx2_fma {
+                // SAFETY: AVX support is implied by the detected AVX2 feature.
                 Some(unsafe { MatBroadcast256::from_matrix(mat) })
             } else {
                 None
@@ -558,6 +563,8 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "x86_64")]
         {
+            // SAFETY: The selected tier is guarded by runtime feature checks
+            // in the constructor. Slices have matching lengths by debug assert.
             unsafe {
                 match self.tier {
                     SimdTier::Avx2Fma => {
@@ -572,6 +579,8 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: NEON is available on supported aarch64 targets, and the
+            // caller provides equally sized, non-overlapping slices.
             unsafe { apply_slices_neon(lo, hi, &self.broadcast) };
         }
 
@@ -589,6 +598,8 @@ impl PreparedGate1q {
     pub(crate) fn apply_full_sequential(&self, state: &mut [Complex64], target: usize) {
         #[cfg(target_arch = "x86_64")]
         {
+            // SAFETY: The selected tier is guarded by runtime feature checks
+            // in the constructor. The target index is validated by circuit construction.
             unsafe {
                 match self.tier {
                     SimdTier::Avx2Fma => {
@@ -609,6 +620,8 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: NEON is available on supported aarch64 targets. The
+            // target index is validated by circuit construction.
             unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
         }
 
@@ -636,6 +649,8 @@ impl PreparedGate1q {
     pub(crate) fn apply_tiled(&self, state: &mut [Complex64], target: usize) {
         #[cfg(target_arch = "x86_64")]
         {
+            // SAFETY: The selected tier is guarded by runtime feature checks
+            // in the constructor. Tile indices are validated by callers.
             unsafe {
                 match self.tier {
                     SimdTier::Avx2Fma => {
@@ -654,6 +669,8 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "aarch64")]
         {
+            // SAFETY: NEON is available on supported aarch64 targets. Tile
+            // indices are validated by callers.
             unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
         }
 
@@ -809,6 +826,8 @@ pub(crate) fn apply_diagonal_sequential(
     #[cfg(target_arch = "x86_64")]
     {
         if has_fma() {
+            // SAFETY: FMA support is checked above. State indexing is handled
+            // by the diagonal loop using validated target positions.
             unsafe {
                 let d0_rr = _mm_set1_pd(d0.re);
                 let d0_ii = _mm_set1_pd(d0.im);
@@ -822,6 +841,8 @@ pub(crate) fn apply_diagonal_sequential(
     }
 
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is available on supported aarch64 targets. State indexing
+    // is handled by the diagonal loop using validated target positions.
     unsafe {
         let d0_rr = vdupq_n_f64(d0.re);
         let d0_ii_as = vcombine_f64(vdup_n_f64(-d0.im), vdup_n_f64(d0.im));
@@ -902,11 +923,15 @@ const MIN_SIMD_SLICE: usize = 4;
 pub(crate) fn negate_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+        // SAFETY: AVX2 support is checked above, and the slice bounds drive
+        // all pointer arithmetic inside the helper.
         unsafe { negate_slice_avx2(slice) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available on supported aarch64 targets, and the loop
+        // only touches elements inside the mutable slice.
         unsafe {
             let ptr = slice.as_mut_ptr() as *mut f64;
             for i in 0..slice.len() {
@@ -947,11 +972,15 @@ pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     if a.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+        // SAFETY: AVX2 support is checked above, slices have equal length,
+        // and Rust's two mutable references guarantee non-overlap.
         unsafe { swap_slices_avx2(a, b) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if a.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available on supported aarch64 targets, slices have
+        // equal length, and Rust's two mutable references guarantee non-overlap.
         unsafe {
             let ap = a.as_mut_ptr() as *mut f64;
             let bp = b.as_mut_ptr() as *mut f64;
@@ -1017,10 +1046,14 @@ unsafe fn norm_sqr_sum_avx2fma(slice: &[Complex64]) -> f64 {
 pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+        // SAFETY: AVX2 and FMA support are checked above, and the helper reads
+        // only within the shared slice.
         return unsafe { norm_sqr_sum_avx2fma(slice) };
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available on supported aarch64 targets, and the
+        // helper reads only within the shared slice.
         return unsafe { norm_sqr_sum_neon(slice) };
     }
     slice.iter().map(|c| c.norm_sqr()).sum()
@@ -1088,11 +1121,15 @@ pub(crate) fn norm_sqr_to_slice(src: &[Complex64], dst: &mut [f64]) {
     debug_assert!(dst.len() >= src.len());
     #[cfg(target_arch = "x86_64")]
     if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+        // SAFETY: AVX2 support is checked above. The destination length debug
+        // assert keeps all stores in bounds.
         unsafe { norm_sqr_to_slice_avx2(src, dst) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if src.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available on supported aarch64 targets. The
+        // destination length debug assert keeps all stores in bounds.
         unsafe {
             let inp = src.as_ptr() as *const f64;
             let out = dst.as_mut_ptr();
@@ -1149,11 +1186,15 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
     debug_assert!(dst.len() >= src.len());
     #[cfg(target_arch = "x86_64")]
     if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+        // SAFETY: AVX2 support is checked above. The destination length debug
+        // assert keeps all stores in bounds.
         unsafe { norm_sqr_to_slice_scaled_avx2(src, dst, scale) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if src.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available on supported aarch64 targets. The
+        // destination length debug assert keeps all stores in bounds.
         unsafe {
             let inp = src.as_ptr() as *const f64;
             let out = dst.as_mut_ptr();
@@ -1198,6 +1239,8 @@ unsafe fn zero_slice_avx2(slice: &mut [Complex64]) {
 pub(crate) fn zero_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+        // SAFETY: AVX2 support is checked above, and the helper writes only
+        // within the mutable slice.
         unsafe { zero_slice_avx2(slice) };
         return;
     }
@@ -1263,16 +1306,22 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     #[cfg(target_arch = "x86_64")]
     {
         if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+            // SAFETY: AVX2 and FMA support are checked above, and the helper
+            // writes only within the mutable slice.
             unsafe { scale_complex_slice_avx2fma(slice, factor) };
             return;
         }
         if slice.len() >= 2 && has_fma() {
+            // SAFETY: FMA support is checked above, and the helper writes only
+            // within the mutable slice.
             unsafe { scale_complex_slice_fma(slice, factor) };
             return;
         }
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available on supported aarch64 targets, and the loop
+        // writes only within the mutable slice.
         unsafe {
             let c_rr = vdupq_n_f64(factor.re);
             let c_ii_as = vcombine_f64(vdup_n_f64(-factor.im), vdup_n_f64(factor.im));
@@ -1387,6 +1436,8 @@ fn scale_slice(slice: &mut [Complex64], factor: f64) {
     #[cfg(target_arch = "x86_64")]
     {
         if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+            // SAFETY: AVX2 support is checked above, and the helper writes
+            // only within the mutable slice.
             unsafe { scale_slice_avx2(slice, factor) };
         } else {
             for amp in slice.iter_mut() {
@@ -1395,6 +1446,8 @@ fn scale_slice(slice: &mut [Complex64], factor: f64) {
         }
     }
     #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is available on supported aarch64 targets, and the loop
+    // only touches elements inside the mutable slice.
     unsafe {
         let f = vdupq_n_f64(factor);
         let ptr = slice.as_mut_ptr() as *mut f64;
@@ -1451,6 +1504,8 @@ impl Mat4x4Broadcast256 {
 impl Mat4x4Broadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
+        // SAFETY: x86_64 guarantees SSE2, and these intrinsics only broadcast
+        // scalar f64 values into SIMD registers.
         unsafe {
             let mut rr = [_mm_setzero_pd(); 16];
             let mut ii = [_mm_setzero_pd(); 16];
@@ -1614,7 +1669,7 @@ unsafe fn apply_fused_2q_loop_avx2(
 /// Apply one 4-element group of a 2q gate using SSE2 intrinsics.
 ///
 /// Uses the 5-op complex multiply (shuffle + 2×mul + xor + add) since SSE2
-/// is always available on x86_64 — safe to call from Rayon closures without
+/// is always available on x86_64. Safe to call from Rayon closures without
 /// `#[target_feature]`.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -1661,6 +1716,8 @@ struct Mat4x4Broadcast {
 impl Mat4x4Broadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
+        // SAFETY: NEON is available on supported aarch64 targets, and these
+        // intrinsics only broadcast scalar f64 values into SIMD registers.
         unsafe {
             let mut rr = [vdupq_n_f64(0.0); 16];
             let mut ii_as = [vdupq_n_f64(0.0); 16];
@@ -1778,6 +1835,7 @@ impl PreparedGate2q {
                 SimdTier::Sse2
             };
             let broadcast256 = if has_avx2_fma {
+                // SAFETY: AVX support is implied by the detected AVX2 feature.
                 Some(unsafe { Mat4x4Broadcast256::from_matrix(mat) })
             } else {
                 None
@@ -1821,11 +1879,15 @@ impl PreparedGate2q {
         {
             let base = state.as_mut_ptr() as *mut f64;
             if !matches!(self.tier, SimdTier::Sse2) {
+                // SAFETY: FMA support is guaranteed by the selected tier. The
+                // loop builds in-bounds, disjoint 4-amplitude groups.
                 unsafe {
                     apply_fused_2q_loop_fma(base, n_iter, lo, hi, mask0, mask1, &self.broadcast);
                 }
                 return;
             }
+            // SAFETY: x86_64 guarantees SSE2, and the loop builds in-bounds,
+            // disjoint 4-amplitude groups.
             unsafe {
                 use crate::backend::statevector::insert_zero_bit;
                 for k in 0..n_iter {
@@ -1839,6 +1901,8 @@ impl PreparedGate2q {
         #[cfg(target_arch = "aarch64")]
         {
             let base = state.as_mut_ptr() as *mut f64;
+            // SAFETY: NEON is available on supported aarch64 targets. The
+            // loop builds in-bounds, disjoint 4-amplitude groups.
             unsafe {
                 apply_fused_2q_loop_neon(base, n_iter, lo, hi, mask0, mask1, &self.broadcast);
             }
@@ -1881,6 +1945,8 @@ impl PreparedGate2q {
             let (lo, hi) = if q0 < q1 { (q0, q1) } else { (q1, q0) };
             let n_iter = 1usize << (num_qubits - 2);
             let base = state.as_mut_ptr() as *mut f64;
+            // SAFETY: The selected tier is guarded by runtime feature checks
+            // in the constructor. The loop builds disjoint 4-amplitude groups.
             unsafe {
                 match self.tier {
                     SimdTier::Avx2Fma if avx2_2q_enabled() => {
@@ -1965,17 +2031,21 @@ impl PreparedGate2q {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 // SAFETY: Mat4x4Broadcast contains only SIMD register values (pure data, no pointers).
-#[cfg(target_arch = "x86_64")]
 unsafe impl Send for Mat4x4Broadcast {}
 #[cfg(target_arch = "x86_64")]
+// SAFETY: Mat4x4Broadcast contains only SIMD register values (pure data, no pointers).
 unsafe impl Sync for Mat4x4Broadcast {}
+#[cfg(target_arch = "aarch64")]
 // SAFETY: Mat4x4Broadcast on aarch64 contains only float64x2_t values (pure SIMD data).
-#[cfg(target_arch = "aarch64")]
 unsafe impl Send for Mat4x4Broadcast {}
 #[cfg(target_arch = "aarch64")]
+// SAFETY: Mat4x4Broadcast on aarch64 contains only float64x2_t values (pure SIMD data).
 unsafe impl Sync for Mat4x4Broadcast {}
+// SAFETY: PreparedGate2q contains immutable SIMD broadcast data and no raw pointers.
 unsafe impl Send for PreparedGate2q {}
+// SAFETY: PreparedGate2q contains immutable SIMD broadcast data and no raw pointers.
 unsafe impl Sync for PreparedGate2q {}
 
 #[cfg(test)]

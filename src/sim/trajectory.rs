@@ -41,15 +41,15 @@ fn apply_pauli(
     Ok(())
 }
 
-/// Minimum p_jump for which we apply the jump branch instead of the no-jump
+/// Minimum p_jump for applying the jump branch instead of the no-jump
 /// branch. Below this, the jump is numerically indistinguishable from zero and
 /// dividing by sqrt(p_jump) produces NaN/inf.
 const JUMP_EPSILON: f64 = 1e-12;
 
 /// Apply a single-qubit diagonal Kraus channel with 2 operators of the form:
-///   K_0 = diag(1, c)        — no-jump
-///   K_1 = [[0, s01_upper], [0, s11_lower]]   — jump (AD)
-///       or diag(0, s)       — jump (PD, pass s01_upper=0)
+///   K_0 = diag(1, c), no-jump
+///   K_1 = [[0, s01_upper], [0, s11_lower]], jump (AD)
+///       or diag(0, s), jump (PD, pass s01_upper=0)
 ///
 /// where c = sqrt(1-gamma). The effective jump probability is gamma * p1.
 fn apply_diagonal_kraus_2op(
@@ -530,7 +530,7 @@ mod tests {
         };
 
         let result = run_trajectories(factory, &circuit, &noise, 1000, 42).unwrap();
-        // With 50% 2q depolarizing, we should see varied outcomes
+        // With 50% 2q depolarizing, varied outcomes should appear.
         let num_00 = result.shots.iter().filter(|s| !s[0] && !s[1]).count();
         assert!(
             num_00 < 900,

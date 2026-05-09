@@ -57,7 +57,7 @@ use std::collections::HashMap;
 /// Parse an OpenQASM 3.0 string into a PRISM-Q [`Circuit`].
 ///
 /// This is the primary input entrypoint. The entire parse happens in-memory
-/// from the provided `&str` — no file I/O.
+/// from the provided `&str`, no file I/O.
 ///
 /// # Errors
 ///

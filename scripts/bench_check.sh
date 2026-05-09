@@ -17,7 +17,7 @@
 #   REGRESSION_THRESHOLD  Override default 5% threshold
 #
 # Prerequisites:
-#   - Run `cargo bench` first — this tool reads stored results.
+#   - Run `cargo bench` first; this tool reads stored results.
 #   - Requires: jq, bc
 
 set -euo pipefail
@@ -78,7 +78,7 @@ get_criterion_estimates() {
     local subdir="${1:-new}"
 
     if [[ ! -d "$CRITERION_DIR" ]]; then
-        echo "Error: No Criterion data at $CRITERION_DIR — run 'cargo bench' first." >&2
+        echo "Error: No Criterion data at $CRITERION_DIR; run 'cargo bench' first." >&2
         exit 1
     fi
 

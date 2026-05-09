@@ -15,7 +15,7 @@ fmt:
 	cargo fmt --all -- --check
 
 clippy:
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
 
 test:
 	cargo test

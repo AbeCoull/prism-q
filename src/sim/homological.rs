@@ -506,7 +506,7 @@ impl HomologicalSampler {
     /// r = rank(E). Also builds a compiled sampler for quantum randomness.
     ///
     /// Total per-shot cost: O(r_quantum + 1) where r_quantum is the stabilizer
-    /// rank (number of random measurements) — versus O(p) for brute-force
+    /// rank (number of random measurements), versus O(p) for brute-force
     /// where p is the number of error locations.
     pub fn compile(circuit: &Circuit, noise: &NoiseModel, seed: u64) -> Result<Self> {
         let ecc = ErrorChainComplex::build(circuit, noise, seed)?;
@@ -787,7 +787,7 @@ pub(crate) fn run_shots_homological_inner(
 ///
 /// Builds the error chain complex and compiled sampler, then computes
 /// exact per-measurement noisy probabilities in O(nnz(E)) time.
-/// Works for any qubit count — not limited by syndrome rank.
+/// Works for any qubit count, not limited by syndrome rank.
 pub fn noisy_marginals_analytical(
     circuit: &Circuit,
     noise: &NoiseModel,

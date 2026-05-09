@@ -10,7 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   # Features exercised on runners without CUDA. The `gpu` feature links against CUDA via
   # cudarc's dynamic-linking mode and can't build on hosts that don't have the NVIDIA
-  # toolkit installed, so we enumerate features instead of using --all-features.
+  # toolkit installed, so CI enumerates features instead of using --all-features.
   CI_FEATURES: parallel,serialization
   CI_BENCH_FEATURES: parallel,bench-fast
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
@@ -30,7 +30,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings
+        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Tests
         run: cargo test --features "$CI_FEATURES"
@@ -195,7 +195,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings
+        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
       - name: Tests
         run: cargo test --features "$CI_FEATURES"
 

@@ -5,7 +5,7 @@
 //! to avoid heap allocation during gate application.
 //!
 //! # Hot-path design notes
-//! - `Gate` methods take `&self` — the enum is 16 bytes (Box indirection for `Fused`).
+//! - `Gate` methods take `&self`, the enum is 16 bytes (Box indirection for `Fused`).
 //! - `matrix_2x2` returns `[[Complex64; 2]; 2]` on the stack.
 //! - Two-qubit gates (CX, CZ, SWAP) have dedicated application routines in
 //!   backends rather than materializing a 4×4 matrix.
@@ -1213,14 +1213,14 @@ mod tests {
         let cu_h = Gate::Cu(Box::new(h_mat));
         assert!(cu_h.controlled_phase().is_none());
 
-        // CZ is Cu([[1,0],[0,-1]]) — should be detected (phase = -1)
+        // CZ is Cu([[1,0],[0,-1]]), should be detected (phase = -1)
         let z_mat = Gate::Z.matrix_2x2();
         let cu_z = Gate::Cu(Box::new(z_mat));
         assert!(cu_z.controlled_phase().is_some());
         let z_phase = cu_z.controlled_phase().unwrap();
         assert!((z_phase.re - (-1.0)).abs() < 1e-14);
 
-        // Rz-based Cu is diagonal but mat[0][0] != 1 — should NOT be detected
+        // Rz-based Cu is diagonal but mat[0][0] != 1, should NOT be detected
         let rz_mat = Gate::Rz(0.5).matrix_2x2();
         let cu_rz = Gate::Cu(Box::new(rz_mat));
         assert!(cu_rz.controlled_phase().is_none());

@@ -1292,7 +1292,7 @@ pub(super) fn rowmul_phase_into(
 
 /// Compute reference measurement outcomes by simulating measurements of the
 /// propagated Paulis on |0⟩^n using the Aaronson-Gottesman measurement protocol.
-/// O(m × n²/64) — avoids re-simulating all T circuit gates through the stabilizer.
+/// O(m x n^2/64), avoids re-simulating all T circuit gates through the stabilizer.
 #[allow(clippy::needless_range_loop)]
 pub(super) fn compute_reference_bits(
     measurement_rows: &[(PauliVec, usize, bool)],

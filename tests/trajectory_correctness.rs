@@ -232,7 +232,7 @@ fn thermal_relaxation_strong_reset_to_ground() {
 
 #[test]
 fn reset_after_superposition() {
-    // Prepare |+⟩, reset to |0⟩, then measure — should always be 0.
+    // Prepare |+⟩, reset to |0⟩, then measure. Should always be 0.
     let mut circuit = Circuit::new(1, 1);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_reset(0);

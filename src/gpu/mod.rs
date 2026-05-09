@@ -35,7 +35,7 @@ pub use self::memory::GpuBuffer;
 /// Default minimum qubit count for routing a sub-circuit to GPU when
 /// [`crate::BackendKind::StatevectorGpu`] is selected.
 ///
-/// Below this threshold the dispatch layer builds a plain host-side
+/// Below this threshold the dispatch layer builds a plain host
 /// `StatevectorBackend` instead, keeping PCIe round-trips and kernel launch
 /// latency off the critical path for small circuits that fit in L3.
 /// Empirically measured at 14 on GTX 1080 Ti; override at runtime via the

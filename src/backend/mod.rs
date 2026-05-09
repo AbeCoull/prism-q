@@ -7,7 +7,7 @@
 //!
 //! 1. Call [`Backend::init`] before any [`Backend::apply`] calls.
 //! 2. Call [`Backend::apply`] for each instruction in circuit order.
-//! 3. Measurement is destructive — it collapses the state.
+//! 3. Measurement is destructive, it collapses the state.
 //! 4. Given the same circuit and RNG seed, results must be deterministic.
 //!
 //! # Performance requirements for implementors
@@ -92,7 +92,7 @@ pub(crate) fn init_classical_bits(bits: &mut Vec<bool>, num: usize) {
 /// latency. Benchmarks show 17% improvement with logical cores at 24q.
 /// The user can override via `RAYON_NUM_THREADS`.
 ///
-/// Safe to call multiple times — only the first call takes effect.
+/// Safe to call multiple times. Only the first call takes effect.
 #[cfg(feature = "parallel")]
 pub(crate) fn init_thread_pool() {
     use std::sync::Once;
@@ -142,7 +142,7 @@ pub trait Backend {
     /// Compute the probability of each computational basis state.
     ///
     /// Returns a `Vec<f64>` of length 2^num_qubits. Not all backends can
-    /// provide this efficiently — they may return `Err(BackendUnsupported)`.
+    /// provide this efficiently, they may return `Err(BackendUnsupported)`.
     fn probabilities(&self) -> Result<Vec<f64>>;
 
     /// Number of qubits the backend is currently configured for.

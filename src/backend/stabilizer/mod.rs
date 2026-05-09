@@ -29,7 +29,7 @@
 //! - Gate application: O(n) per gate (iterates 2n+1 rows, constant work per row)
 //! - Measurement: O(n²) worst case (rowmul is O(n), applied to up to 2n rows)
 //! - Memory: n=1000 → ~500 KB, n=10000 → ~50 MB
-//! - Probability extraction: O(2^n * n) — only available for n ≤ 20
+//! - Probability extraction: O(2^n * n), only available for n <= 20
 
 use num_complex::Complex64;
 use smallvec::SmallVec;
@@ -973,7 +973,7 @@ impl StabilizerBackend {
     /// stabilizer generator: |ψ⟩ = ∏_i (I + g_i)/2 |seed⟩, normalized.
     ///
     /// Each projection applies Pauli string g_i to the dense vector in O(2^n),
-    /// giving O(n × 2^n) total — same complexity as `compute_probabilities`.
+    /// giving O(n x 2^n) total, same complexity as `compute_probabilities`.
     pub fn export_statevector(&self) -> Result<Vec<Complex64>> {
         #[cfg(feature = "gpu")]
         if self.gpu_tableau.is_some() {
@@ -1349,7 +1349,7 @@ impl Backend for StabilizerBackend {
         if let Some(ctx) = self.gpu_context.clone() {
             // Allocate the device tableau first so an allocation failure returns
             // cleanly without touching any existing state. Only once the tableau
-            // is in hand do we commit the transition to GPU mode.
+            // Commit the transition to GPU mode only after the device state is available.
             let tableau = GpuTableau::new(ctx, n)?;
             self.n = n;
             self.num_words = nw;

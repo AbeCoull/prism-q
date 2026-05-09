@@ -17,7 +17,7 @@ PTX is compiled at runtime via NVRTC against the device's compute capability.
 ```bash
 cargo test --all-features
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
 cargo doc --no-deps --all-features
 ```
 

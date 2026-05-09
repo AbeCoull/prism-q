@@ -7,8 +7,8 @@
 #   ./scripts/bench_compare.sh --quick               # smoke subset only
 #
 # Exit code:
-#   0 — no regressions above threshold
-#   1 — regressions detected
+#   0: no regressions above threshold
+#   1: regressions detected
 
 set -euo pipefail
 
@@ -61,7 +61,7 @@ echo "Full output: $OUTPUT_FILE"
 echo ""
 
 if [[ "$REGRESSED" -eq 1 ]]; then
-    echo "VERDICT: FAIL — regressions detected"
+    echo "VERDICT: FAIL (regressions detected)"
     echo "Review the output above. If acceptable, re-run baseline:"
     echo "  ./scripts/bench_baseline.sh"
     exit 1

@@ -1,4 +1,6 @@
 use super::noise::compile_qec_noisy_sampler;
+#[cfg(feature = "bench-internal")]
+use super::noise::QecCompiledNoiseSampler;
 use super::{
     append_basis_to_z_rotation, append_z_to_basis_rotation, QecBasis, QecNoise, QecOp, QecOptions,
     QecPauli, QecProgram, QecSampleResult,
@@ -7,6 +9,8 @@ use crate::backend::{statevector::StatevectorBackend, Backend};
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+#[cfg(feature = "bench-internal")]
+use crate::sim::compiled::CompiledDetectorSampler;
 use crate::sim::compiled::{compile_detector_sampler, PackedShots, ShotLayout};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -64,6 +68,211 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         return qec_result_from_measurements(program, measurements);
     }
     qec_result_from_measurement_chunks(program, |chunk| sampler.sample_measurements_packed(chunk))
+}
+
+/// Internal staged QEC sampler used by benchmark harnesses.
+///
+/// The ordinary public execution API is [`run_qec_program`]. This type exposes
+/// the same packed Clifford path in smaller pieces so benchmarks can measure
+/// compile, noiseless sampling, noise application, detector projection,
+/// postselection, logical counting, and total execution separately. Gated
+/// behind the `bench-internal` feature; not part of the stable API.
+#[cfg(feature = "bench-internal")]
+pub struct QecProfiledSampler {
+    sampler: QecProfiledMeasurementSampler,
+    num_measurements: usize,
+    detector_rows: Vec<Vec<usize>>,
+    observable_rows: Vec<Vec<usize>>,
+    postselection_rows: Vec<(Vec<usize>, bool)>,
+    keep_measurements: bool,
+}
+
+#[cfg(feature = "bench-internal")]
+enum QecProfiledMeasurementSampler {
+    Empty,
+    Clean(CompiledDetectorSampler),
+    Noisy(QecCompiledNoiseSampler),
+}
+
+/// Internal postselection and logical count summary.
+///
+/// Used internally by the QEC runner and exposed publicly only under the
+/// `bench-internal` feature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QecProfiledCounts {
+    /// Shots accepted after postselection.
+    pub accepted_shots: usize,
+    /// Shots discarded by postselection.
+    pub discarded_shots: usize,
+    /// Per-observable logical error counts among accepted shots.
+    pub logical_errors: Vec<u64>,
+}
+
+/// Compile a native QEC program into a staged sampler for benchmarks.
+///
+/// Prefer [`run_qec_program`] for application code. Gated behind the
+/// `bench-internal` feature; not part of the stable API.
+#[cfg(feature = "bench-internal")]
+pub fn compile_qec_profiled_sampler(program: &QecProgram) -> Result<QecProfiledSampler> {
+    let has_noise = validate_qec_compiled_program(program)?;
+    qec_runner_chunk_size(program.options())?;
+
+    let detector_rows = program.detector_rows()?;
+    let observable_rows = program.observable_rows()?;
+    let postselection_rows = program.postselection_rows()?;
+    let num_measurements = program.num_measurements();
+    let sampler = if num_measurements == 0 {
+        QecProfiledMeasurementSampler::Empty
+    } else if has_noise {
+        QecProfiledMeasurementSampler::Noisy(compile_qec_noisy_sampler(program)?)
+    } else {
+        let circuit = lower_qec_program_to_clifford_circuit(program)?;
+        QecProfiledMeasurementSampler::Clean(compile_detector_sampler(
+            &circuit,
+            detector_rows.clone(),
+            observable_rows.clone(),
+            program.options().seed,
+        )?)
+    };
+
+    Ok(QecProfiledSampler {
+        sampler,
+        num_measurements,
+        detector_rows,
+        observable_rows,
+        postselection_rows,
+        keep_measurements: program.options().keep_measurements,
+    })
+}
+
+#[cfg(feature = "bench-internal")]
+impl QecProfiledSampler {
+    /// Number of measurement records produced per shot.
+    pub fn num_measurements(&self) -> usize {
+        self.num_measurements
+    }
+
+    /// Number of detector records produced per shot.
+    pub fn num_detectors(&self) -> usize {
+        self.detector_rows.len()
+    }
+
+    /// Number of observable records produced per shot.
+    pub fn num_observables(&self) -> usize {
+        self.observable_rows.len()
+    }
+
+    /// Number of postselection predicates.
+    pub fn num_postselections(&self) -> usize {
+        self.postselection_rows.len()
+    }
+
+    /// Whether active Pauli-noise rows were compiled.
+    pub fn has_noise(&self) -> bool {
+        matches!(self.sampler, QecProfiledMeasurementSampler::Noisy(_))
+    }
+
+    /// Sample noiseless measurement records.
+    pub fn sample_noiseless_measurements_packed(
+        &mut self,
+        num_shots: usize,
+    ) -> Result<PackedShots> {
+        match &mut self.sampler {
+            QecProfiledMeasurementSampler::Empty => Ok(PackedShots::from_shot_major(
+                Vec::new(),
+                num_shots,
+                self.num_measurements,
+            )),
+            QecProfiledMeasurementSampler::Clean(sampler) => {
+                sampler.sample_measurements_packed(num_shots)
+            }
+            QecProfiledMeasurementSampler::Noisy(sampler) => {
+                sampler.sample_noiseless_measurements_packed(num_shots)
+            }
+        }
+    }
+
+    /// Apply compiled Pauli-noise rows to measurement records.
+    pub fn apply_noise_to_measurements(
+        &mut self,
+        measurements: PackedShots,
+    ) -> Result<PackedShots> {
+        match &mut self.sampler {
+            QecProfiledMeasurementSampler::Noisy(sampler) => {
+                sampler.apply_noise_to_measurements(measurements)
+            }
+            QecProfiledMeasurementSampler::Empty | QecProfiledMeasurementSampler::Clean(_) => {
+                Ok(measurements)
+            }
+        }
+    }
+
+    /// Sample measurement records with compiled noise applied.
+    pub fn sample_measurements_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
+        let measurements = self.sample_noiseless_measurements_packed(num_shots)?;
+        self.apply_noise_to_measurements(measurements)
+    }
+
+    /// Project detector parity rows from measurement records.
+    pub fn detector_records(&self, measurements: &PackedShots) -> Result<PackedShots> {
+        validate_qec_measurement_shape(
+            "QEC detector projection input",
+            measurements,
+            measurements.num_shots(),
+            self.num_measurements,
+        )?;
+        parity_rows_or_empty(measurements, &self.detector_rows)
+    }
+
+    /// Project observable parity rows from measurement records.
+    pub fn observable_records(&self, measurements: &PackedShots) -> Result<PackedShots> {
+        validate_qec_measurement_shape(
+            "QEC observable projection input",
+            measurements,
+            measurements.num_shots(),
+            self.num_measurements,
+        )?;
+        parity_rows_or_empty(measurements, &self.observable_rows)
+    }
+
+    /// Count postselection survivors and logical errors from packed records.
+    pub fn postselection_and_logical_counts(
+        &self,
+        measurements: &PackedShots,
+        observables: &PackedShots,
+    ) -> Result<QecProfiledCounts> {
+        validate_qec_measurement_shape(
+            "QEC postselection input",
+            measurements,
+            observables.num_shots(),
+            self.num_measurements,
+        )?;
+        validate_qec_measurement_shape(
+            "QEC logical count observable input",
+            observables,
+            measurements.num_shots(),
+            self.observable_rows.len(),
+        )?;
+        qec_count_postselection_and_logical(
+            observables.num_shots(),
+            &self.postselection_rows,
+            measurements,
+            observables,
+        )
+    }
+
+    /// Build the regular QEC result from staged measurement records.
+    pub fn result_from_measurements(&self, measurements: PackedShots) -> Result<QecSampleResult> {
+        qec_result_from_measurement_rows(
+            measurements.num_shots(),
+            self.num_measurements,
+            self.keep_measurements,
+            &self.detector_rows,
+            &self.observable_rows,
+            &self.postselection_rows,
+            measurements,
+        )
+    }
 }
 
 /// Run a native QEC program through the correctness-first reference path.
@@ -152,29 +361,99 @@ fn qec_result_from_measurements(
     program: &QecProgram,
     all_measurements: PackedShots,
 ) -> Result<QecSampleResult> {
-    let shots = program.options().shots;
-    let num_measurements = program.num_measurements();
-    if all_measurements.num_shots() != shots
-        || all_measurements.num_measurements() != num_measurements
-    {
-        return Err(PrismError::InvalidParameter {
-            message: format!(
-                "QEC measurement sample shape must be {shots} shots by {num_measurements} records, got {} by {}",
-                all_measurements.num_shots(),
-                all_measurements.num_measurements()
-            ),
-        });
-    }
     let detector_rows = program.detector_rows()?;
     let observable_rows = program.observable_rows()?;
     let postselection_rows = program.postselection_rows()?;
-    let detectors = parity_rows_or_empty(&all_measurements, &detector_rows)?;
-    let observables = parity_rows_or_empty(&all_measurements, &observable_rows)?;
+    qec_result_from_measurement_rows(
+        program.options().shots,
+        program.num_measurements(),
+        program.options().keep_measurements,
+        &detector_rows,
+        &observable_rows,
+        &postselection_rows,
+        all_measurements,
+    )
+}
+
+fn qec_result_from_measurement_rows(
+    shots: usize,
+    num_measurements: usize,
+    keep_measurements: bool,
+    detector_rows: &[Vec<usize>],
+    observable_rows: &[Vec<usize>],
+    postselection_rows: &[(Vec<usize>, bool)],
+    all_measurements: PackedShots,
+) -> Result<QecSampleResult> {
+    validate_qec_measurement_shape(
+        "QEC measurement sample",
+        &all_measurements,
+        shots,
+        num_measurements,
+    )?;
+    let detectors = parity_rows_or_empty(&all_measurements, detector_rows)?;
+    let observables = parity_rows_or_empty(&all_measurements, observable_rows)?;
+    let counts = qec_count_postselection_and_logical(
+        shots,
+        postselection_rows,
+        &all_measurements,
+        &observables,
+    )?;
+    let measurements = if keep_measurements {
+        all_measurements
+    } else {
+        PackedShots::from_meas_major(Vec::new(), 0, num_measurements)
+    };
+
+    QecSampleResult::new_with_total_shots(
+        shots,
+        measurements,
+        detectors,
+        observables,
+        counts.accepted_shots,
+        counts.discarded_shots,
+        counts.logical_errors,
+    )
+}
+
+fn validate_qec_measurement_shape(
+    label: &str,
+    measurements: &PackedShots,
+    expected_shots: usize,
+    expected_measurements: usize,
+) -> Result<()> {
+    if measurements.num_shots() == expected_shots
+        && measurements.num_measurements() == expected_measurements
+    {
+        return Ok(());
+    }
+    Err(PrismError::InvalidParameter {
+        message: format!(
+            "{label} shape must be {expected_shots} shots by {expected_measurements} records, got {} by {}",
+            measurements.num_shots(),
+            measurements.num_measurements()
+        ),
+    })
+}
+
+fn qec_count_postselection_and_logical(
+    shots: usize,
+    postselection_rows: &[(Vec<usize>, bool)],
+    all_measurements: &PackedShots,
+    observables: &PackedShots,
+) -> Result<QecProfiledCounts> {
+    if observables.num_shots() != shots {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "QEC observable shot count {} does not match {shots}",
+                observables.num_shots()
+            ),
+        });
+    }
+
     let mut accepted_shots = shots;
     let mut logical_errors = vec![0u64; observables.num_measurements()];
-
     if postselection_rows.is_empty() {
-        add_qec_logical_error_counts(&observables, &mut logical_errors);
+        add_qec_logical_error_counts(observables, &mut logical_errors);
     } else {
         accepted_shots = 0;
         let postselection_only: Vec<Vec<usize>> = postselection_rows
@@ -199,22 +478,11 @@ fn qec_result_from_measurements(
         }
     }
 
-    let discarded_shots = shots - accepted_shots;
-    let measurements = if program.options().keep_measurements {
-        all_measurements
-    } else {
-        PackedShots::from_meas_major(Vec::new(), 0, num_measurements)
-    };
-
-    QecSampleResult::new_with_total_shots(
-        shots,
-        measurements,
-        detectors,
-        observables,
+    Ok(QecProfiledCounts {
         accepted_shots,
-        discarded_shots,
+        discarded_shots: shots - accepted_shots,
         logical_errors,
-    )
+    })
 }
 
 fn qec_result_from_measurement_chunks<F>(
@@ -374,8 +642,9 @@ fn parity_rows_for_repeated_shot(
 ) -> PackedShots {
     let out_words = rows.len().div_ceil(64);
     let mut pattern = vec![0u64; out_words];
-    for (out_idx, row) in rows.iter().enumerate() {
-        pattern[out_idx / 64] |= qec_row_parity_word(shot_words, row) << (out_idx % 64);
+    let prepared_rows = prepare_qec_parity_rows(rows);
+    for (out_idx, row) in prepared_rows.iter().enumerate() {
+        pattern[out_idx / 64] |= row.parity(shot_words) << (out_idx % 64);
     }
 
     let mut data = vec![0u64; num_shots * out_words];
@@ -393,44 +662,90 @@ fn parity_rows_for_shot_major(measurements: &PackedShots, rows: &[Vec<usize>]) -
     let m_words = measurements.m_words();
     let mut data = vec![0u64; measurements.num_shots() * out_words];
     let measurement_data = measurements.raw_data();
+    let prepared_rows = prepare_qec_parity_rows(rows);
 
     for shot in 0..measurements.num_shots() {
         let src_base = shot * m_words;
         let dst_base = shot * out_words;
         let shot_words = &measurement_data[src_base..src_base + m_words];
         let dst = &mut data[dst_base..dst_base + out_words];
-        for (out_idx, row) in rows.iter().enumerate() {
-            dst[out_idx / 64] |= qec_row_parity_word(shot_words, row) << (out_idx % 64);
+        for (out_idx, row) in prepared_rows.iter().enumerate() {
+            dst[out_idx / 64] |= row.parity(shot_words) << (out_idx % 64);
         }
     }
 
     PackedShots::from_shot_major(data, measurements.num_shots(), rows.len())
 }
 
-#[inline(always)]
-fn qec_row_parity_word(shot_words: &[u64], row: &[usize]) -> u64 {
-    match row {
-        [] => 0,
-        [a] => qec_measurement_word(shot_words, *a),
-        [a, b] => qec_measurement_word(shot_words, *a) ^ qec_measurement_word(shot_words, *b),
-        [a, b, c] => {
-            qec_measurement_word(shot_words, *a)
-                ^ qec_measurement_word(shot_words, *b)
-                ^ qec_measurement_word(shot_words, *c)
-        }
-        _ => {
-            let mut parity = 0u64;
-            for &measurement in row {
-                parity ^= qec_measurement_word(shot_words, measurement);
+enum QecPreparedParityRow {
+    Empty,
+    Single(QecPreparedMeasurement),
+    Pair(QecPreparedMeasurement, QecPreparedMeasurement),
+    Triple(
+        QecPreparedMeasurement,
+        QecPreparedMeasurement,
+        QecPreparedMeasurement,
+    ),
+    Many(Vec<QecPreparedMeasurement>),
+}
+
+#[derive(Clone, Copy)]
+struct QecPreparedMeasurement {
+    word: usize,
+    bit: u32,
+}
+
+fn prepare_qec_parity_rows(rows: &[Vec<usize>]) -> Vec<QecPreparedParityRow> {
+    rows.iter()
+        .map(|row| {
+            let prepared: Vec<_> = row
+                .iter()
+                .copied()
+                .map(QecPreparedMeasurement::new)
+                .collect();
+            match prepared.as_slice() {
+                [] => QecPreparedParityRow::Empty,
+                [a] => QecPreparedParityRow::Single(*a),
+                [a, b] => QecPreparedParityRow::Pair(*a, *b),
+                [a, b, c] => QecPreparedParityRow::Triple(*a, *b, *c),
+                _ => QecPreparedParityRow::Many(prepared),
             }
-            parity
+        })
+        .collect()
+}
+
+impl QecPreparedMeasurement {
+    #[inline(always)]
+    fn new(measurement: usize) -> Self {
+        Self {
+            word: measurement / 64,
+            bit: (measurement % 64) as u32,
         }
+    }
+
+    #[inline(always)]
+    fn read(self, shot_words: &[u64]) -> u64 {
+        (shot_words[self.word] >> self.bit) & 1
     }
 }
 
-#[inline(always)]
-fn qec_measurement_word(shot_words: &[u64], measurement: usize) -> u64 {
-    (shot_words[measurement / 64] >> (measurement % 64)) & 1
+impl QecPreparedParityRow {
+    #[inline(always)]
+    fn parity(&self, shot_words: &[u64]) -> u64 {
+        match self {
+            Self::Empty => 0,
+            Self::Single(a) => a.read(shot_words),
+            Self::Pair(a, b) => a.read(shot_words) ^ b.read(shot_words),
+            Self::Triple(a, b, c) => a.read(shot_words) ^ b.read(shot_words) ^ c.read(shot_words),
+            Self::Many(row) => {
+                let mut parity = 0u64;
+                for measurement in row {
+                    parity ^= measurement.read(shot_words);
+                }
+                parity
+            }
+        }
+    }
 }
 
 fn add_qec_logical_error_counts(observables: &PackedShots, counts: &mut [u64]) {

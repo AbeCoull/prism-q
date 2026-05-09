@@ -5,6 +5,18 @@ use prism_q::{
     QecSampleResult,
 };
 
+fn assert_f64_close(actual: f64, expected: f64, tolerance: f64) {
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "expected {actual} to be within {tolerance} of {expected}"
+    );
+}
+
+fn assert_interval_close(actual: (f64, f64), expected: (f64, f64), tolerance: f64) {
+    assert_f64_close(actual.0, expected.0, tolerance);
+    assert_f64_close(actual.1, expected.1, tolerance);
+}
+
 #[test]
 fn qec_program_builds_measurement_record_rows() {
     let mut program = QecProgram::new(2);
@@ -135,6 +147,70 @@ fn qec_sample_result_allows_omitted_raw_measurements() {
     assert_eq!(result.total_shots, 2);
     assert_eq!(result.measurements.num_shots(), 0);
     assert_eq!(result.measurements.num_measurements(), 2);
+}
+
+#[test]
+fn qec_sample_result_rejects_impossible_logical_error_counts() {
+    let measurements = PackedShots::from_shot_major(vec![0, 1], 2, 1);
+    let detectors = PackedShots::from_shot_major(vec![1, 0], 2, 1);
+    let observables = PackedShots::from_shot_major(vec![1, 1], 2, 1);
+
+    let result = QecSampleResult::new(measurements, detectors, observables, 1, 1, vec![2]);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn qec_sample_result_reports_rates_and_wilson_intervals() {
+    let measurements = PackedShots::from_shot_major(vec![0; 100], 100, 1);
+    let detectors = PackedShots::from_shot_major(vec![0; 100], 100, 1);
+    let observables = PackedShots::from_shot_major(vec![0; 100], 100, 2);
+
+    let result = QecSampleResult::new_with_total_shots(
+        100,
+        measurements,
+        detectors,
+        observables,
+        40,
+        60,
+        vec![5, 20],
+    )
+    .unwrap();
+    let z_95 = 1.959_963_984_540_054;
+
+    assert_f64_close(result.survivor_rate(), 0.4, 1e-12);
+    assert_eq!(result.logical_error_rates().len(), 2);
+    assert_f64_close(result.logical_error_rates()[0], 0.125, 1e-12);
+    assert_f64_close(result.logical_error_rates()[1], 0.5, 1e-12);
+    assert_interval_close(
+        result.survivor_rate_wilson_interval(z_95),
+        (0.309_401_286_432_459, 0.497_997_413_208_938),
+        1e-12,
+    );
+    assert_eq!(result.logical_error_rate_wilson_intervals(z_95).len(), 2);
+    assert_interval_close(
+        result.logical_error_rate_wilson_intervals(z_95)[0],
+        (0.054_595_002_509_454, 0.261_121_198_388_511),
+        1e-12,
+    );
+    assert_interval_close(
+        result.logical_error_rate_wilson_intervals(z_95)[1],
+        (0.351_995_269_334_654, 0.648_004_730_665_346),
+        1e-12,
+    );
+}
+
+#[test]
+fn qec_sample_result_reports_zero_rates_for_empty_results() {
+    let result = QecSampleResult::empty(2, 1, 2);
+
+    assert_eq!(result.survivor_rate(), 0.0);
+    assert_eq!(result.logical_error_rates(), vec![0.0, 0.0]);
+    assert_eq!(result.survivor_rate_wilson_interval(1.96), (0.0, 0.0));
+    assert_eq!(
+        result.logical_error_rate_wilson_intervals(1.96),
+        vec![(0.0, 0.0), (0.0, 0.0)]
+    );
 }
 
 #[test]

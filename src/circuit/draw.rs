@@ -1170,11 +1170,17 @@ mod tests {
 
     #[test]
     fn qft_4q_diagram() {
+        // `qft_circuit` emits a single `Gate::QftBlock`.
+        // The block renders as a labelled box; users wanting the unrolled
+        // H + cphase diagram can call `expand_qft_blocks` first.
         let circuit = crate::circuits::qft_circuit(4);
         let text = circuit.draw(&TextOptions::default());
         assert!(text.contains("q[0]"));
         assert!(text.contains("q[3]"));
-        assert!(text.contains("H"));
+
+        let unrolled = crate::circuit::expand_qft_blocks(&circuit);
+        let unrolled_text = unrolled.draw(&TextOptions::default());
+        assert!(unrolled_text.contains("H"));
     }
 
     #[test]

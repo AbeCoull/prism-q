@@ -11,19 +11,21 @@ use rand_chacha::ChaCha8Rng;
 use crate::circuit::Circuit;
 use crate::gates::Gate;
 
-/// Build an n-qubit textbook QFT circuit (Hadamard + controlled-phase + SWAP).
+/// Build an n-qubit QFT circuit.
+///
+/// Emits one `Gate::QftBlock` over `0..n`. CPU statevector runs the native
+/// FFT path; other backends expand the block before execution.
 pub fn qft_circuit(n: usize) -> Circuit {
     let mut c = Circuit::new(n, 0);
-    for i in 0..n {
-        c.add_gate(Gate::H, &[i]);
-        for j in (i + 1)..n {
-            let theta = std::f64::consts::TAU / (1u64 << (j - i)) as f64;
-            c.add_gate(Gate::cphase(theta), &[i, j]);
-        }
-    }
-    for i in 0..n / 2 {
-        c.add_gate(Gate::Swap, &[i, n - 1 - i]);
-    }
+    debug_assert!(n <= u8::MAX as usize, "QFT block size must fit in u8");
+    let targets: Vec<usize> = (0..n).collect();
+    c.add_gate(
+        Gate::QftBlock {
+            start: 0,
+            num: n as u8,
+        },
+        &targets,
+    );
     c
 }
 

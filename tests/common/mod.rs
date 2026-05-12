@@ -60,7 +60,12 @@ pub fn run_unfused_probs<B: Backend>(backend: &mut B, circuit: &Circuit) -> Vec<
     backend
         .init(circuit.num_qubits, circuit.num_classical_bits)
         .unwrap();
-    for instr in &circuit.instructions {
+    let expanded = if backend.supports_qft_block() {
+        std::borrow::Cow::Borrowed(circuit)
+    } else {
+        prism_q::circuit::expand_qft_blocks(circuit)
+    };
+    for instr in &expanded.instructions {
         backend.apply(instr).unwrap();
     }
     backend.probabilities().unwrap()

@@ -2,11 +2,25 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.14.1] - 2026-05-13
+
+### Documentation
+
+- Cleanup safety with docstrings, consolidate code, and general housekeeping (#62)([59dfc93](https://github.com/AbeCoull/prism-q/commit/59dfc93f1ef32588975a6f78261565174ed8a2fd))
+
+### Performance
+
+- **qft:** Add native statevector QFT block kernel (#64)([203290b](https://github.com/AbeCoull/prism-q/commit/203290b46d009354aeccc46101d0fd3e1edde6f9))
+- **backend:** Block-based CX kernels and NT-store rowmul for stabilizer (#63)([faa6227](https://github.com/AbeCoull/prism-q/commit/faa6227e262c09eadf3c094d1c0f8efdab9cbf6e))
 ## [0.14.0] - 2026-05-09
 
 ### Features
 
 - **qec:** Add noisy validation and staged profiling benchmarks (#61)([d351102](https://github.com/AbeCoull/prism-q/commit/d3511026228cd890b3695969bfc46f2218911d68))
+
+### Miscellaneous
+
+- **release:** 0.14.0([38f07ee](https://github.com/AbeCoull/prism-q/commit/38f07ee6e23b9bff7e8aedc71390d2a29449a3ef))
 ## [0.13.0] - 2026-05-04
 
 ### Features

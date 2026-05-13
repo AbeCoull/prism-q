@@ -1250,7 +1250,6 @@ fn apply_radix4_groups(
                 }
             }
         }
-        return;
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -1442,7 +1441,6 @@ fn fft_stage_pair_par(
                                 );
                             }
                         }
-                        return;
                     }
                     #[cfg(not(target_arch = "aarch64"))]
                     {

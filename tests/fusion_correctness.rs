@@ -16,12 +16,18 @@ use prism_q::sim;
 const EPS: f64 = 1e-10;
 
 /// Run a circuit without any fusion (manual init + apply loop).
+///
+/// The statevector backend supports `Gate::QftBlock` natively, so this
+/// helper still tests "without fusion" rather than "without QftBlock".
+/// Expand here so the unfused reference path uses raw textbook gates and
+/// remains comparable with fused execution.
 fn run_unfused(circuit: &Circuit) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(42);
     backend
         .init(circuit.num_qubits, circuit.num_classical_bits)
         .unwrap();
-    for instr in &circuit.instructions {
+    let expanded = prism_q::circuit::expand_qft_blocks(circuit);
+    for instr in &expanded.instructions {
         backend.apply(instr).unwrap();
     }
     backend.probabilities().unwrap()
@@ -39,7 +45,8 @@ fn run_unfused_state(circuit: &Circuit) -> Vec<Complex64> {
     backend
         .init(circuit.num_qubits, circuit.num_classical_bits)
         .unwrap();
-    for instr in &circuit.instructions {
+    let expanded = prism_q::circuit::expand_qft_blocks(circuit);
+    for instr in &expanded.instructions {
         backend.apply(instr).unwrap();
     }
     backend.export_statevector().unwrap()
@@ -85,6 +92,17 @@ fn assert_fusion_preserves_state(circuit: &Circuit) {
     assert_state_close(&fused, &unfused, EPS);
 }
 
+#[test]
+fn subrange_qft_block_matches_textbook_expansion() {
+    let mut c = Circuit::new(5, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::X, &[4]);
+    c.add_gate(Gate::QftBlock { start: 1, num: 3 }, &[1, 2, 3]);
+    c.add_gate(Gate::Ry(0.37), &[2]);
+
+    assert_fusion_preserves_state(&c);
+}
+
 fn has_2q_fusion(circuit: &Circuit) -> bool {
     let fused = prism_q::circuit::fusion::fuse_circuit(circuit, true);
     fused.instructions.iter().any(|inst| {
@@ -128,6 +146,45 @@ fn fusion_qft_14q() {
 #[test]
 fn fusion_qft_16q() {
     assert_fusion_preserves_correctness(&circuits::qft_circuit(16));
+}
+
+// ===== QFT amplitude-level checks (locks the FP-3 fix) =====
+//
+// Probability-only goldens are sign-invariant. Until 2026-05-11, fusion's
+// `fuse_controlled_phases` pass reordered `cphase(c, t)` past non-diagonal
+// 1q gates on `t` (notably `H[t]` immediately after, in the textbook QFT
+// pattern). The result was probability-correct but amplitude-wrong on
+// QFT-style circuits at >= 16q. These tests compare the full state vector
+// element-wise so any future regression on the same shape will fail.
+
+#[test]
+fn fusion_qft_state_amplitude_8q() {
+    assert_fusion_preserves_state(&circuits::qft_circuit(8));
+}
+
+#[test]
+fn fusion_qft_state_amplitude_12q() {
+    assert_fusion_preserves_state(&circuits::qft_circuit(12));
+}
+
+#[test]
+fn fusion_qft_state_amplitude_16q() {
+    assert_fusion_preserves_state(&circuits::qft_circuit(16));
+}
+
+#[test]
+fn fusion_qft_state_amplitude_20q() {
+    assert_fusion_preserves_state(&circuits::qft_circuit(20));
+}
+
+#[test]
+fn fusion_phase_estimation_state_amplitude_12q() {
+    assert_fusion_preserves_state(&circuits::phase_estimation_circuit(12));
+}
+
+#[test]
+fn fusion_phase_estimation_state_amplitude_16q() {
+    assert_fusion_preserves_state(&circuits::phase_estimation_circuit(16));
 }
 
 // ===== Hardware-Efficient Ansatz =====
@@ -646,9 +703,27 @@ fn fusion_same_pair_keeps_diagonal_batch_paths() {
         .count();
     assert_eq!(batch_rzz, 3, "qaoa should keep BatchRzz fusion");
 
+    // QFT emits one QftBlock. Expanded QFT still exercises BatchPhase.
     let qft = circuits::qft_circuit(20);
     let qft_fused = prism_q::circuit::fusion::fuse_circuit(&qft, true);
-    let batch_phase = qft_fused
+    let qft_block = qft_fused
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                prism_q::circuit::Instruction::Gate {
+                    gate: Gate::QftBlock { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(qft_block, 1, "qft should emit a single QftBlock");
+
+    let expanded = prism_q::circuit::expand_qft_blocks(&qft);
+    let expanded_fused = prism_q::circuit::fusion::fuse_circuit(&expanded, true);
+    let batch_phase_after_expand = expanded_fused
         .instructions
         .iter()
         .filter(|inst| {
@@ -661,7 +736,10 @@ fn fusion_same_pair_keeps_diagonal_batch_paths() {
             )
         })
         .count();
-    assert!(batch_phase > 0, "qft should keep BatchPhase fusion");
+    assert!(
+        batch_phase_after_expand > 0,
+        "expanded qft should still hit BatchPhase fusion"
+    );
 
     let mut diagonal = Circuit::new(20, 0);
     diagonal.add_gate(Gate::Rzz(0.1), &[0, 1]);

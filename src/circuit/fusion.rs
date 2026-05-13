@@ -1366,7 +1366,6 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
     let pass1c = apply_pass(pass1r, cancel_self_inverse_pairs);
     let pass1f = apply_pass(pass1c, fuse_single_qubit_gates);
 
-    // Expensive passes, gated by qubit count
     let pass_2q = if circuit.num_qubits >= MIN_QUBITS_FOR_2Q_FUSION {
         fuse_2q_gates(pass1f)
     } else {

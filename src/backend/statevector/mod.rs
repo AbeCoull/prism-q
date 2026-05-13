@@ -15,16 +15,18 @@
 //! - CX/CZ/SWAP: specialized routines avoid materializing a 4×4 matrix.
 //! - All gate kernels are `#[inline(always)]` to enable LTO to inline across
 //!   the dispatch boundary.
-//! - No heap allocation during gate application.
+//! - No heap allocation in per-amplitude inner loops. QFT twiddle tables may
+//!   allocate once outside the loop and are bounded by cache policy.
 //!
 //! # Threading strategy
 //!
 //! The pair-iteration loops are embarrassingly parallel. When the `parallel`
 //! feature is enabled and the qubit count meets `PARALLEL_THRESHOLD_QUBITS`
 //! (default: 14), each kernel dispatches to a Rayon-parallelized variant
-//! using `par_chunks_mut` / `split_at_mut`. All parallel code is fully safe
-//! (no `unsafe`). The sequential path is unchanged when the feature is off
-//! or the circuit is below threshold.
+//! using `par_chunks_mut` / `split_at_mut`. Most partitioning uses safe
+//! slices; a few hot kernels use raw pointers after proving disjoint access.
+//! The sequential path is unchanged when the feature is off or the circuit is
+//! below threshold.
 //!
 //! # SIMD strategy
 //!
@@ -51,6 +53,8 @@ use std::sync::Arc;
 use crate::backend::simd;
 use crate::backend::Backend;
 use crate::circuit::Instruction;
+#[cfg(feature = "gpu")]
+use crate::circuit::{qft_textbook_steps, QftTextbookStep};
 use crate::error::Result;
 use crate::gates::Gate;
 
@@ -147,6 +151,16 @@ pub struct StatevectorBackend {
     gpu_context: Option<Arc<GpuContext>>,
     #[cfg(feature = "gpu")]
     gpu_state: Option<GpuState>,
+}
+
+/// Kill switch for the native whole-state `QftBlock` FFT path.
+///
+/// Set `PRISM_NO_QFT_BLOCK=1` to force textbook expansion for A/B runs.
+#[inline]
+fn qft_block_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PRISM_NO_QFT_BLOCK").is_none())
 }
 
 impl StatevectorBackend {
@@ -250,6 +264,27 @@ impl StatevectorBackend {
             }
             Gate::BatchRzz(data) => k::launch_apply_batch_rzz(&ctx, gpu, &data.edges),
             Gate::DiagonalBatch(data) => k::launch_apply_diagonal_batch(&ctx, gpu, &data.entries),
+            Gate::QftBlock { start, num } => {
+                let h = Gate::H.matrix_2x2();
+                for step in qft_textbook_steps(*start as usize, *num as usize) {
+                    match step {
+                        QftTextbookStep::Hadamard(q) => k::launch_apply_gate_1q(&ctx, gpu, q, h)?,
+                        QftTextbookStep::CPhase {
+                            control,
+                            target,
+                            theta,
+                        } => k::launch_apply_cu_phase(
+                            &ctx,
+                            gpu,
+                            control,
+                            target,
+                            Complex64::from_polar(1.0, theta),
+                        )?,
+                        QftTextbookStep::Swap(a, b) => k::launch_apply_swap(&ctx, gpu, a, b)?,
+                    }
+                }
+                Ok(())
+            }
             Gate::MultiFused(data) => {
                 if data.all_diagonal {
                     k::launch_apply_multi_fused_diagonal(&ctx, gpu, &data.gates)
@@ -406,6 +441,15 @@ impl StatevectorBackend {
             Gate::BatchPhase(data) => {
                 self.apply_batch_phase(targets[0], &data.phases);
             }
+            Gate::QftBlock { start, num } => {
+                let start = *start as usize;
+                let num = *num as usize;
+                if start == 0 && num == self.num_qubits {
+                    self.apply_qft_block(start, num);
+                } else {
+                    self.apply_qft_block_textbook(start, num);
+                }
+            }
             Gate::BatchRzz(data) => {
                 self.apply_batch_rzz(&data.edges);
             }
@@ -440,6 +484,20 @@ impl StatevectorBackend {
 impl Backend for StatevectorBackend {
     fn name(&self) -> &'static str {
         "statevector"
+    }
+
+    fn supports_qft_block(&self) -> bool {
+        if !qft_block_enabled() {
+            return false;
+        }
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_context.is_none()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            true
+        }
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {

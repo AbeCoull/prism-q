@@ -169,6 +169,14 @@ pub trait Backend {
         true
     }
 
+    /// Whether this backend has a native kernel for `Gate::QftBlock`.
+    ///
+    /// Native support is currently limited to whole-state CPU statevector QFT.
+    /// Other backends expand the block to textbook gates before dispatch.
+    fn supports_qft_block(&self) -> bool {
+        false
+    }
+
     /// Export the current quantum state as a dense statevector.
     ///
     /// Returns a `Vec<Complex64>` of length 2^n containing the full amplitude

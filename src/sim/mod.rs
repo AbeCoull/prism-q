@@ -74,7 +74,12 @@ fn execute(
     circuit: &Circuit,
     opts: &SimOptions,
 ) -> Result<SimulationResult> {
-    let fused = crate::circuit::fusion::fuse_circuit(circuit, backend.supports_fused_gates());
+    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
+        std::borrow::Cow::Borrowed(circuit)
+    } else {
+        crate::circuit::expand_qft_blocks(circuit)
+    };
+    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
     execute_circuit(backend, &fused, opts)
 }
 

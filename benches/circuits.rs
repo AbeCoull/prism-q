@@ -288,7 +288,7 @@ fn bench_statevector_qft_textbook(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qft_textbook");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 12, 16, 20, 22] {
+    for &n in &[4, 8, 12, 16, 20, 22, 24, 26] {
         let circuit = circuits::qft_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {

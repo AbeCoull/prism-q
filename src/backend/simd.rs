@@ -121,7 +121,11 @@ impl MatBroadcast {
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn complex_mul_neon(c_rr: float64x2_t, c_ii_as: float64x2_t, z: float64x2_t) -> float64x2_t {
+pub(crate) unsafe fn complex_mul_neon(
+    c_rr: float64x2_t,
+    c_ii_as: float64x2_t,
+    z: float64x2_t,
+) -> float64x2_t {
     let z_swap = vextq_f64(z, z, 1);
     let prod = vmulq_f64(c_rr, z);
     vfmaq_f64(prod, c_ii_as, z_swap)
@@ -174,7 +178,7 @@ unsafe fn apply_slices_sse2(lo: &mut [Complex64], hi: &mut [Complex64], mat: &Ma
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "fma")]
-unsafe fn complex_mul_fma(c_rr: __m128d, c_ii: __m128d, z: __m128d) -> __m128d {
+pub(crate) unsafe fn complex_mul_fma(c_rr: __m128d, c_ii: __m128d, z: __m128d) -> __m128d {
     let z_swap = _mm_shuffle_pd(z, z, 0b01);
     let t = _mm_mul_pd(c_ii, z_swap);
     _mm_fmaddsub_pd(c_rr, z, t)
@@ -239,7 +243,7 @@ unsafe fn apply_slices_neon(lo: &mut [Complex64], hi: &mut [Complex64], mat: &Ma
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn complex_mul_avx2fma(c_rr: __m256d, c_ii: __m256d, z: __m256d) -> __m256d {
+pub(crate) unsafe fn complex_mul_avx2fma(c_rr: __m256d, c_ii: __m256d, z: __m256d) -> __m256d {
     let z_swap = _mm256_permute_pd(z, 0b0101);
     let t = _mm256_mul_pd(c_ii, z_swap);
     _mm256_fmaddsub_pd(c_rr, z, t)
@@ -900,7 +904,7 @@ pub(crate) fn has_bmi2() -> bool {
     *CACHED.get_or_init(|| is_x86_feature_detected!("bmi2"))
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn negate_slice_avx2(slice: &mut [Complex64]) {
     let sign = _mm256_set1_pd(-0.0_f64);

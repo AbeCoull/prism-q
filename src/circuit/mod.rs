@@ -746,6 +746,94 @@ impl Circuit {
     }
 }
 
+/// One step in the textbook QFT decomposition. Yielded by
+/// [`qft_textbook_steps`] so backends and the sim layer share a single
+/// definition of the H + controlled-phase + Swap pattern.
+#[derive(Debug, Clone, Copy)]
+pub enum QftTextbookStep {
+    Hadamard(usize),
+    CPhase {
+        control: usize,
+        target: usize,
+        theta: f64,
+    },
+    Swap(usize, usize),
+}
+
+/// Yield the textbook QFT decomposition for `num` qubits starting at `start`.
+/// Order: for each `i in 0..num`, `H q[start+i]` followed by
+/// `cphase(TAU / 2^(j-i))` for `j in i+1..num`, then bit-reversal swaps.
+pub fn qft_textbook_steps(start: usize, num: usize) -> impl Iterator<Item = QftTextbookStep> {
+    let outer = (0..num).flat_map(move |i| {
+        let head = std::iter::once(QftTextbookStep::Hadamard(start + i));
+        let phases = ((i + 1)..num).map(move |j| QftTextbookStep::CPhase {
+            control: start + i,
+            target: start + j,
+            theta: std::f64::consts::TAU / (1u64 << (j - i)) as f64,
+        });
+        head.chain(phases)
+    });
+    let swaps = (0..num / 2).map(move |i| QftTextbookStep::Swap(start + i, start + num - 1 - i));
+    outer.chain(swaps)
+}
+
+/// Expand `Gate::QftBlock` instructions to textbook QFT gates.
+///
+/// Backends without native support call this before dispatch. Returns
+/// `Cow::Borrowed` when there is nothing to expand.
+pub fn expand_qft_blocks(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
+    let has_qft = circuit.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::QftBlock { .. },
+                ..
+            }
+        )
+    });
+    if !has_qft {
+        return std::borrow::Cow::Borrowed(circuit);
+    }
+
+    let mut out: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len() * 2);
+    for inst in &circuit.instructions {
+        if let Instruction::Gate {
+            gate: Gate::QftBlock { start, num },
+            ..
+        } = inst
+        {
+            for step in qft_textbook_steps(*start as usize, *num as usize) {
+                match step {
+                    QftTextbookStep::Hadamard(q) => out.push(Instruction::Gate {
+                        gate: Gate::H,
+                        targets: smallvec![q],
+                    }),
+                    QftTextbookStep::CPhase {
+                        control,
+                        target,
+                        theta,
+                    } => out.push(Instruction::Gate {
+                        gate: Gate::cphase(theta),
+                        targets: smallvec![control, target],
+                    }),
+                    QftTextbookStep::Swap(a, b) => out.push(Instruction::Gate {
+                        gate: Gate::Swap,
+                        targets: smallvec![a, b],
+                    }),
+                }
+            }
+        } else {
+            out.push(inst.clone());
+        }
+    }
+
+    std::borrow::Cow::Owned(Circuit {
+        num_qubits: circuit.num_qubits,
+        num_classical_bits: circuit.num_classical_bits,
+        instructions: out,
+    })
+}
+
 /// Condition for classically-controlled gate execution.
 #[derive(Debug, Clone)]
 pub enum ClassicalCondition {

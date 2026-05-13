@@ -122,6 +122,14 @@ pub enum Gate {
     /// statevector. Created by the multi-2q fusion pass. Each entry stores
     /// `(q0, q1, 4×4 matrix)`. Boxed to keep `Gate` at 16 bytes.
     Multi2q(Box<Multi2qData>),
+
+    /// Quantum Fourier Transform on `start..start+num`.
+    ///
+    /// The CPU statevector backend has a fast whole-state FFT path. Subrange
+    /// blocks and non-native backends expand to textbook H, cphase, and swap
+    /// gates before execution.
+    /// Boxless: `(u8, u8)` fits within the 16-byte enum slot.
+    QftBlock { start: u8, num: u8 },
 }
 
 /// Data for a multi-controlled unitary gate.
@@ -328,6 +336,7 @@ impl Gate {
             Gate::Rzz(_) | Gate::Cx | Gate::Cz | Gate::Swap | Gate::Cu(_) | Gate::Fused2q(_) => 2,
             Gate::Mcu(data) => data.num_controls as usize + 1,
             Gate::BatchPhase(data) => 1 + data.phases.len(),
+            Gate::QftBlock { num, .. } => *num as usize,
             Gate::BatchRzz(data) => {
                 let mut count = 0;
                 let mut seen = [false; 64];
@@ -454,6 +463,7 @@ impl Gate {
             | Gate::Cu(_)
             | Gate::Mcu(_)
             | Gate::BatchPhase(_)
+            | Gate::QftBlock { .. }
             | Gate::BatchRzz(_)
             | Gate::DiagonalBatch(_)
             | Gate::MultiFused(_)
@@ -529,6 +539,7 @@ impl Gate {
             Gate::Mcu(_) => "mcu",
             Gate::Fused(_) => "fused",
             Gate::BatchPhase(_) => "batch_phase",
+            Gate::QftBlock { .. } => "qft_block",
             Gate::BatchRzz(_) => "batch_rzz",
             Gate::DiagonalBatch(_) => "diagonal_batch",
             Gate::MultiFused(_) => "multi_fused",
@@ -559,6 +570,13 @@ impl Gate {
             Gate::BatchPhase(data) => Gate::BatchPhase(Box::new(BatchPhaseData {
                 phases: data.phases.iter().map(|&(q, p)| (q, p.conj())).collect(),
             })),
+            Gate::QftBlock { .. } => {
+                panic!(
+                    "Gate::QftBlock has no in-place inverse. Run \
+                     circuit::expand_qft_blocks before applying `inv @` or any \
+                     transform that calls Gate::inverse()."
+                )
+            }
             Gate::BatchRzz(data) => Gate::BatchRzz(Box::new(BatchRzzData {
                 edges: data
                     .edges
@@ -904,6 +922,7 @@ impl fmt::Display for Gate {
             Gate::Fused2q(_) => f.write_str("U2"),
             Gate::MultiFused(data) => write!(f, "MF[{}]", data.gates.len()),
             Gate::BatchPhase(data) => write!(f, "BP[{}]", data.phases.len()),
+            Gate::QftBlock { start, num } => write!(f, "QFT[{}..{}]", start, start + num),
             Gate::BatchRzz(data) => write!(f, "BZZ[{}]", data.edges.len()),
             Gate::DiagonalBatch(data) => write!(f, "BD[{}]", data.entries.len()),
             Gate::Multi2q(data) => write!(f, "M2[{}]", data.gates.len()),

@@ -1,3 +1,4 @@
+#[cfg(target_arch = "x86_64")]
 use crate::backend::word_ops::has_avx2;
 pub(crate) use crate::backend::word_ops::xor_words_ptr as xor_words;
 

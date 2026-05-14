@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 use super::draw::{assign_moments, OpKind, PlacedOp};
 use super::Circuit;
+use crate::gates::Gate;
 
 const GATE_CORNER_RADIUS: f64 = 1.0;
 const JUNCTION_DOT_RADIUS: f64 = 1.5;
@@ -265,16 +266,10 @@ impl Theme {
     }
 }
 
-fn classify_gate(label: &str) -> GateCategory {
-    match label {
-        "S" | "T" | "Sdg" | "Tdg" => GateCategory::Phase,
-        "H" | "X" | "Y" | "Z" | "Id" | "SX" | "SXdg" => GateCategory::Standard,
-        _ if label.starts_with("Rx(")
-            || label.starts_with("Ry(")
-            || label.starts_with("Rz(")
-            || label.starts_with("P(")
-            || label.starts_with("Rzz(") =>
-        {
+fn classify_gate(gate: Option<&Gate>) -> GateCategory {
+    match gate {
+        Some(Gate::S | Gate::T | Gate::Sdg | Gate::Tdg) => GateCategory::Phase,
+        Some(Gate::Rx(_) | Gate::Ry(_) | Gate::Rz(_) | Gate::P(_) | Gate::Rzz(_)) => {
             GateCategory::Parametric
         }
         _ => GateCategory::Standard,
@@ -770,7 +765,7 @@ fn render_svg(
 
             match &op.kind {
                 OpKind::Single => {
-                    let cat = classify_gate(&op.label);
+                    let cat = classify_gate(op.gate.as_ref());
                     present_cats.insert(cat);
                     let cls = cat.css_class();
                     for &q in &op.qubits {
@@ -859,7 +854,7 @@ fn render_svg(
 
                 OpKind::TwoQubit => {
                     let rows: Vec<usize> = op.qubits.iter().filter_map(|&q| row_of(q)).collect();
-                    let cat = classify_gate(&op.label);
+                    let cat = classify_gate(op.gate.as_ref());
                     present_cats.insert(cat);
 
                     if rows.len() >= 2 {
@@ -983,7 +978,7 @@ fn render_svg(
                 }
 
                 OpKind::Conditional { cbit_label } => {
-                    let cat = classify_gate(&op.label);
+                    let cat = classify_gate(op.gate.as_ref());
                     present_cats.insert(cat);
                     for &q in &op.qubits {
                         if let Some(row) = row_of(q) {

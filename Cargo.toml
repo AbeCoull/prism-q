@@ -10,8 +10,8 @@ readme = "README.md"
 documentation = "https://docs.rs/prism-q"
 repository = "https://github.com/AbeCoull/prism-q"
 homepage = "https://github.com/AbeCoull/prism-q"
-keywords = ["quantum", "simulator", "openqasm", "circuit", "statevector"]
-categories = ["science", "simulation"]
+keywords = ["quantum", "quantum-computing", "simulator", "stabilizer", "qec"]
+categories = ["science", "simulation", "mathematics"]
 
 [dependencies]
 num-complex = "0.4"

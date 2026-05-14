@@ -24,6 +24,7 @@ use num_complex::Complex64;
 use crate::error::{PrismError, Result};
 
 use super::super::{GpuContext, GpuState};
+use super::launch_err;
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -676,13 +677,6 @@ pub(crate) fn kernel_source() -> String {
 // ============================================================================
 // Rust-side launchers
 // ============================================================================
-
-fn launch_err(op: &str, err: impl std::fmt::Display) -> PrismError {
-    PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("{op}: {err}"),
-    }
-}
 
 fn grid_for(count: u64) -> u32 {
     count.div_ceil(BLOCK_SIZE as u64).max(1) as u32

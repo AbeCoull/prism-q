@@ -1,61 +1,5 @@
-#[inline(always)]
-pub(crate) unsafe fn xor_words(dst: *mut u64, src: *const u64, len: usize) {
-    #[cfg(target_arch = "x86_64")]
-    if has_avx2() {
-        // SAFETY: AVX2 support is checked above. The caller guarantees both
-        // pointers are valid for len u64 values.
-        unsafe { xor_words_avx2(dst, src, len) };
-        return;
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: NEON is available on supported aarch64 targets. The caller
-        // guarantees both pointers are valid for len u64 values.
-        unsafe { xor_words_neon(dst, src, len) };
-        return;
-    }
-    #[allow(unreachable_code)]
-    for i in 0..len {
-        // SAFETY: The caller guarantees both pointers are valid for len u64 values.
-        unsafe { *dst.add(i) ^= *src.add(i) };
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn xor_words_avx2(dst: *mut u64, src: *const u64, len: usize) {
-    #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::*;
-
-    let chunks = len / 4;
-    for i in 0..chunks {
-        let off = i * 4;
-        let d = _mm256_loadu_si256(dst.add(off) as *const __m256i);
-        let s = _mm256_loadu_si256(src.add(off) as *const __m256i);
-        _mm256_storeu_si256(dst.add(off) as *mut __m256i, _mm256_xor_si256(d, s));
-    }
-    let tail = chunks * 4;
-    for i in tail..len {
-        *dst.add(i) ^= *src.add(i);
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[target_feature(enable = "neon")]
-unsafe fn xor_words_neon(dst: *mut u64, src: *const u64, len: usize) {
-    use std::arch::aarch64::*;
-
-    let chunks = len / 2;
-    for i in 0..chunks {
-        let off = i * 2;
-        let d = vld1q_u64(dst.add(off));
-        let s = vld1q_u64(src.add(off));
-        vst1q_u64(dst.add(off), veorq_u64(d, s));
-    }
-    if len & 1 != 0 {
-        *dst.add(len - 1) ^= *src.add(len - 1);
-    }
-}
+use crate::backend::word_ops::has_avx2;
+pub(crate) use crate::backend::word_ops::xor_words_ptr as xor_words;
 
 /// Rowmul word loop: XOR x/z words from src into dst, returning the
 /// accumulated phase sum (caller applies `sum & 3 >= 2`).
@@ -439,16 +383,4 @@ unsafe fn rowmul_words_neon(
     }
 
     sum
-}
-
-#[cfg(target_arch = "x86_64")]
-fn has_avx2() -> bool {
-    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| is_x86_feature_detected!("avx2"))
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[allow(dead_code)]
-fn has_avx2() -> bool {
-    false
 }

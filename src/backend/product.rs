@@ -25,7 +25,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::backend::{Backend, MAX_PROB_QUBITS, NORM_CLAMP_MIN};
+use crate::backend::{max_qubits_unsupported, Backend, MAX_PROB_QUBITS, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::{DiagEntry, Gate};
@@ -49,6 +49,12 @@ impl ProductStateBackend {
         }
     }
 
+    #[inline(always)]
+    fn apply_single_qubit_matrix(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
+        let [a, b] = self.qubits[target];
+        self.qubits[target] = [mat[0][0] * a + mat[0][1] * b, mat[1][0] * a + mat[1][1] * b];
+    }
+
     fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         match gate {
             Gate::Rzz(_)
@@ -69,9 +75,7 @@ impl ProductStateBackend {
             }),
             Gate::MultiFused(data) => {
                 for &(target, mat) in &data.gates {
-                    let [a, b] = self.qubits[target];
-                    self.qubits[target] =
-                        [mat[0][0] * a + mat[0][1] * b, mat[1][0] * a + mat[1][1] * b];
+                    self.apply_single_qubit_matrix(target, mat);
                 }
                 Ok(())
             }
@@ -96,10 +100,7 @@ impl ProductStateBackend {
             }
             _ => {
                 let target = targets[0];
-                let mat = gate.matrix_2x2();
-                let [a, b] = self.qubits[target];
-                self.qubits[target] =
-                    [mat[0][0] * a + mat[0][1] * b, mat[1][0] * a + mat[1][1] * b];
+                self.apply_single_qubit_matrix(target, gate.matrix_2x2());
                 Ok(())
             }
         }
@@ -167,6 +168,11 @@ impl Backend for ProductStateBackend {
         Ok(())
     }
 
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        self.apply_single_qubit_matrix(qubit, *matrix);
+        Ok(())
+    }
+
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         let [alpha, beta] = self.qubits[qubit];
         let r = beta * alpha.conj();
@@ -182,13 +188,12 @@ impl Backend for ProductStateBackend {
 
     fn probabilities(&self) -> Result<Vec<f64>> {
         if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "probabilities for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
+            return Err(max_qubits_unsupported(
+                self.name(),
+                "probabilities",
+                self.num_qubits,
+                MAX_PROB_QUBITS,
+            ));
         }
 
         #[cfg(feature = "parallel")]
@@ -236,13 +241,12 @@ impl Backend for ProductStateBackend {
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "statevector export for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
+            return Err(max_qubits_unsupported(
+                self.name(),
+                "statevector export",
+                self.num_qubits,
+                MAX_PROB_QUBITS,
+            ));
         }
 
         #[cfg(feature = "parallel")]

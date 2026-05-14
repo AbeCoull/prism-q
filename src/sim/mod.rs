@@ -21,10 +21,11 @@ use decomposed::{
 pub use dispatch::BackendKind;
 use dispatch::{
     has_temporal_clifford_opportunity, max_statevector_qubits, select_backend, select_dispatch,
-    supports_fused_for_kind, try_temporal_clifford, validate_explicit_backend, DispatchAction,
-    AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM, AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX,
-    MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
-    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
+    stabilizer_rank_budget, supports_fused_for_kind, try_temporal_clifford,
+    validate_explicit_backend, DispatchAction, AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM,
+    AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
+    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
+    MIN_QUBITS_FOR_SPD_AUTO,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{bitstring, ShotsResult};
@@ -66,6 +67,14 @@ pub struct SimulationResult {
     /// Probability of each computational basis state (length 2^n).
     /// `None` if the backend does not support probability extraction.
     pub probabilities: Option<Probabilities>,
+}
+
+#[inline]
+fn probs_only_result(probs: Vec<f64>) -> SimulationResult {
+    SimulationResult {
+        probabilities: Some(Probabilities::Dense(probs)),
+        classical_bits: vec![],
+    }
 }
 
 /// Core execution: fuse, init, apply, extract.
@@ -216,27 +225,15 @@ fn run_with_internal(
         && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
     {
         let t = circuit.t_count();
-        let n = circuit.num_qubits;
-        let log2n = if n >= 2 {
-            (n as f64).log2().ceil() as usize * 2
-        } else {
-            0
-        };
-        let sr_budget = n.saturating_sub(log2n);
+        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
         if t <= MAX_AUTO_T_COUNT_EXACT && t <= sr_budget {
             let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
-            return Ok(SimulationResult {
-                probabilities: Some(Probabilities::Dense(sr.probabilities)),
-                classical_bits: vec![],
-            });
+            return Ok(probs_only_result(sr.probabilities));
         }
         if t <= MAX_AUTO_T_COUNT_APPROX && t <= sr_budget {
             let sr =
                 stabilizer_rank::run_stabilizer_rank_approx(circuit, AUTO_APPROX_MAX_TERMS, seed)?;
-            return Ok(SimulationResult {
-                probabilities: Some(Probabilities::Dense(sr.probabilities)),
-                classical_bits: vec![],
-            });
+            return Ok(probs_only_result(sr.probabilities));
         }
     }
     if let Some(result) = try_temporal_clifford(&kind, circuit, seed) {
@@ -246,26 +243,15 @@ fn run_with_internal(
         DispatchAction::Backend(mut backend) => execute(&mut *backend, circuit, &opts),
         DispatchAction::StabilizerRank => {
             let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
-            Ok(SimulationResult {
-                probabilities: Some(Probabilities::Dense(sr.probabilities)),
-                classical_bits: vec![],
-            })
+            Ok(probs_only_result(sr.probabilities))
         }
         DispatchAction::StochasticPauli { num_samples } => {
             let spp = unified_pauli::run_spp(circuit, num_samples, seed)?;
-            let probs = unified_pauli::spp_to_probabilities(&spp);
-            Ok(SimulationResult {
-                probabilities: Some(Probabilities::Dense(probs)),
-                classical_bits: vec![],
-            })
+            Ok(probs_only_result(unified_pauli::spp_to_probabilities(&spp)))
         }
         DispatchAction::DeterministicPauli { epsilon, max_terms } => {
             let spd = unified_pauli::run_spd(circuit, epsilon, max_terms)?;
-            let probs = unified_pauli::spd_to_probabilities(&spd);
-            Ok(SimulationResult {
-                probabilities: Some(Probabilities::Dense(probs)),
-                classical_bits: vec![],
-            })
+            Ok(probs_only_result(unified_pauli::spd_to_probabilities(&spd)))
         }
     }
 }
@@ -312,15 +298,7 @@ fn supports_deferred_measurement_sampling(circuit: &Circuit) -> bool {
             .any(|inst| matches!(inst, Instruction::Conditional { .. }))
 }
 
-fn should_use_compiled_clifford_sampling(
-    kind: &BackendKind,
-    circuit: &Circuit,
-    num_shots: usize,
-) -> bool {
-    if num_shots < 2 || !supports_compiled_measurement_sampling(circuit) {
-        return false;
-    }
-
+fn is_clifford_sampler_kind(kind: &BackendKind) -> bool {
     match kind {
         BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer => true,
         #[cfg(feature = "gpu")]
@@ -329,21 +307,24 @@ fn should_use_compiled_clifford_sampling(
     }
 }
 
+fn should_use_compiled_clifford_sampling(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+) -> bool {
+    num_shots >= 2
+        && supports_compiled_measurement_sampling(circuit)
+        && is_clifford_sampler_kind(kind)
+}
+
 fn should_use_deferred_clifford_sampling(
     kind: &BackendKind,
     circuit: &Circuit,
     num_shots: usize,
 ) -> bool {
-    if num_shots < 2 || !supports_deferred_measurement_sampling(circuit) {
-        return false;
-    }
-
-    match kind {
-        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer => true,
-        #[cfg(feature = "gpu")]
-        BackendKind::StabilizerGpu { .. } => true,
-        _ => false,
-    }
+    num_shots >= 2
+        && supports_deferred_measurement_sampling(circuit)
+        && is_clifford_sampler_kind(kind)
 }
 
 fn compile_measurements_for_kind(
@@ -384,18 +365,7 @@ pub fn run_counts(
     }
 
     let result = run_shots_with(kind, circuit, num_shots, seed)?;
-    let m_words = circuit.num_classical_bits.div_ceil(64).max(1);
-    let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
-    for shot in &result.shots {
-        let mut key = vec![0u64; m_words];
-        for (i, &b) in shot.iter().enumerate() {
-            if b {
-                key[i / 64] |= 1u64 << (i % 64);
-            }
-        }
-        *counts.entry(key).or_insert(0) += 1;
-    }
-    Ok(counts)
+    Ok(result.counts())
 }
 
 /// Compute per-qubit marginal probabilities: P(q_i = 0) and P(q_i = 1) for each qubit.
@@ -548,13 +518,7 @@ pub fn run_shots_with(
     }
     if matches!(kind, BackendKind::Auto) && circuit.is_clifford_plus_t() && circuit.has_t_gates() {
         let t = circuit.t_count();
-        let n = circuit.num_qubits;
-        let log2n = if n >= 2 {
-            (n as f64).log2().ceil() as usize * 2
-        } else {
-            0
-        };
-        let sr_budget = n.saturating_sub(log2n);
+        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
         if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
             return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
         }

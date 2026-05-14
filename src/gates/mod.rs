@@ -313,6 +313,19 @@ fn adjoint_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     ]
 }
 
+#[inline]
+fn count_unique_qubits<I: IntoIterator<Item = usize>>(iter: I) -> usize {
+    let mut seen = [false; 64];
+    let mut count = 0;
+    for q in iter {
+        if q < 64 && !seen[q] {
+            seen[q] = true;
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Product of two 2×2 matrices: A · B.
 #[inline]
 pub(crate) fn mat_mul_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
@@ -338,54 +351,19 @@ impl Gate {
             Gate::BatchPhase(data) => 1 + data.phases.len(),
             Gate::QftBlock { num, .. } => *num as usize,
             Gate::BatchRzz(data) => {
-                let mut count = 0;
-                let mut seen = [false; 64];
-                for &(q0, q1, _) in &data.edges {
-                    if !seen[q0] {
-                        seen[q0] = true;
-                        count += 1;
-                    }
-                    if !seen[q1] {
-                        seen[q1] = true;
-                        count += 1;
-                    }
-                }
-                count
+                count_unique_qubits(data.edges.iter().flat_map(|&(q0, q1, _)| [q0, q1]))
             }
             Gate::DiagonalBatch(data) => {
-                let mut count = 0;
-                let mut seen = [false; 64];
-                for e in &data.entries {
-                    let qs = match e {
-                        DiagEntry::Phase1q { qubit, .. } => [*qubit, usize::MAX],
-                        DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
-                            [*q0, *q1]
-                        }
-                    };
-                    for &q in &qs {
-                        if q < 64 && !seen[q] {
-                            seen[q] = true;
-                            count += 1;
-                        }
+                count_unique_qubits(data.entries.iter().flat_map(|e| match e {
+                    DiagEntry::Phase1q { qubit, .. } => [*qubit, usize::MAX],
+                    DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                        [*q0, *q1]
                     }
-                }
-                count
+                }))
             }
             Gate::MultiFused(data) => data.gates.len(),
             Gate::Multi2q(data) => {
-                let mut count = 0;
-                let mut seen = [false; 64];
-                for &(q0, q1, _) in &data.gates {
-                    if !seen[q0] {
-                        seen[q0] = true;
-                        count += 1;
-                    }
-                    if !seen[q1] {
-                        seen[q1] = true;
-                        count += 1;
-                    }
-                }
-                count
+                count_unique_qubits(data.gates.iter().flat_map(|&(q0, q1, _)| [q0, q1]))
             }
             _ => 1,
         }

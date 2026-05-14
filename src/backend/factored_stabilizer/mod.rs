@@ -12,7 +12,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::stabilizer::kernels::rowmul_words;
-use crate::backend::Backend;
+use crate::backend::{max_qubits_unsupported, Backend};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -591,14 +591,12 @@ impl SubTableau {
     fn compute_probabilities(&self) -> Result<Vec<f64>> {
         let n = self.n;
         if n > crate::backend::MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: "factored-stabilizer".to_string(),
-                operation: format!(
-                    "probabilities for {} qubits (max {})",
-                    n,
-                    crate::backend::MAX_PROB_QUBITS
-                ),
-            });
+            return Err(max_qubits_unsupported(
+                "factored-stabilizer",
+                "probabilities",
+                n,
+                crate::backend::MAX_PROB_QUBITS,
+            ));
         }
 
         let mut work_xz = self.xz.clone();

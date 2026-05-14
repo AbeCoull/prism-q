@@ -123,6 +123,16 @@ pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 128;
 
 pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 16;
 
+#[inline]
+pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
+    let log2n = if num_qubits >= 2 {
+        (num_qubits as f64).log2().ceil() as usize * 2
+    } else {
+        0
+    };
+    num_qubits.saturating_sub(log2n)
+}
+
 // GPU crossover threshold and its env override live in `crate::gpu` so users
 // can introspect them without depending on internal dispatch plumbing. The
 // dispatch layer calls `crate::gpu::min_qubits()` directly; there is no
@@ -252,24 +262,13 @@ impl BackendKind {
 }
 
 pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
+    if kind.is_stabilizer_family() && !circuit.is_clifford_only() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "stabilizer".into(),
+            reason: "circuit contains non-Clifford gates".into(),
+        });
+    }
     match kind {
-        BackendKind::Stabilizer
-        | BackendKind::FilteredStabilizer
-        | BackendKind::FactoredStabilizer
-            if !circuit.is_clifford_only() =>
-        {
-            return Err(PrismError::IncompatibleBackend {
-                backend: "stabilizer".into(),
-                reason: "circuit contains non-Clifford gates".into(),
-            });
-        }
-        #[cfg(feature = "gpu")]
-        BackendKind::StabilizerGpu { .. } if !circuit.is_clifford_only() => {
-            return Err(PrismError::IncompatibleBackend {
-                backend: "stabilizer".into(),
-                reason: "circuit contains non-Clifford gates".into(),
-            });
-        }
         BackendKind::ProductState if circuit.has_entangling_gates() => {
             return Err(PrismError::IncompatibleBackend {
                 backend: "productstate".into(),

@@ -399,7 +399,7 @@ impl TensorNetworkBackend {
         id
     }
 
-    fn apply_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
+    fn append_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
         let in_leg = self.output_legs[target];
         let out_leg = self.fresh_leg();
 
@@ -639,7 +639,7 @@ impl TensorNetworkBackend {
             Gate::DiagonalBatch(data) => {
                 for entry in &data.entries {
                     if let Some((q, mat)) = entry.as_1q_matrix() {
-                        self.apply_1q_matrix(q, &mat);
+                        self.append_1q_matrix(q, &mat);
                     } else if let Some((q0, q1, mat)) = entry.as_2q_matrix() {
                         self.apply_2q_matrix(q0, q1, &mat);
                     }
@@ -647,7 +647,7 @@ impl TensorNetworkBackend {
             }
             Gate::MultiFused(data) => {
                 for &(target, ref mat) in &data.gates {
-                    self.apply_1q_matrix(target, mat);
+                    self.append_1q_matrix(target, mat);
                 }
             }
             Gate::Multi2q(data) => {
@@ -657,7 +657,7 @@ impl TensorNetworkBackend {
             }
             _ => {
                 let mat = gate.matrix_2x2();
-                self.apply_1q_matrix(targets[0], &mat);
+                self.append_1q_matrix(targets[0], &mat);
             }
         }
     }
@@ -761,6 +761,11 @@ impl Backend for TensorNetworkBackend {
 
     fn reset(&mut self, qubit: usize) -> Result<()> {
         self.apply_reset(qubit)
+    }
+
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        self.append_1q_matrix(qubit, matrix);
+        Ok(())
     }
 
     fn classical_results(&self) -> &[bool] {

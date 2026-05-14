@@ -34,9 +34,9 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::backend::{simd, Backend, NORM_CLAMP_MIN};
+use crate::backend::{max_qubits_unsupported, simd, Backend, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 use crate::gates::Gate;
 
 #[cfg(feature = "parallel")]
@@ -189,6 +189,52 @@ pub fn svd(a: &[Complex64], m: usize, n: usize) -> SvdResult {
         return svd_faer(a, m, n);
     }
     svd_jacobi(a, m, n)
+}
+
+fn truncated_svd_rank(singular_values: &[f64], epsilon: f64, max_bond_dim: usize) -> usize {
+    let s_max = singular_values.first().copied().unwrap_or(0.0);
+    let threshold = epsilon * s_max;
+    singular_values
+        .iter()
+        .take_while(|&&s| s > threshold)
+        .count()
+        .max(1)
+        .min(max_bond_dim)
+}
+
+fn svd_left_site_data(svd_result: &SvdResult, bond_left: usize, chi: usize) -> Vec<Complex64> {
+    let mut left_data = vec![ZERO; bond_left * 2 * chi];
+    for alpha in 0..bond_left {
+        for i in 0..2 {
+            for gamma in 0..chi {
+                let r = alpha * 2 + i;
+                left_data[alpha * (2 * chi) + i * chi + gamma] =
+                    svd_result.u[gamma * svd_result.u_rows + r];
+            }
+        }
+    }
+    left_data
+}
+
+fn fill_scaled_vt_data(
+    out: &mut Vec<Complex64>,
+    svd_result: &SvdResult,
+    chi: usize,
+    physical_dim: usize,
+    bond_right: usize,
+) {
+    out.clear();
+    out.resize(chi * physical_dim * bond_right, ZERO);
+    for gamma in 0..chi {
+        let s_val = Complex64::new(svd_result.s[gamma], 0.0);
+        for s in 0..physical_dim {
+            for beta in 0..bond_right {
+                let c = s * bond_right + beta;
+                out[gamma * (physical_dim * bond_right) + s * bond_right + beta] =
+                    s_val * svd_result.vt[gamma * svd_result.vt_cols + c];
+            }
+        }
+    }
 }
 
 /// Compute thin SVD using Jacobi one-sided rotations (column-major storage).
@@ -622,43 +668,16 @@ impl MpsBackend {
         }
 
         let svd_result = svd(&mat, rows, cols);
-
-        let s_max = svd_result.s.first().copied().unwrap_or(0.0);
-        let thresh = self.svd_epsilon * s_max;
-        let mut chi_new = svd_result
-            .s
-            .iter()
-            .take_while(|&&s| s > thresh)
-            .count()
-            .max(1);
-        chi_new = chi_new.min(self.max_bond_dim);
+        let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
 
         // A[k] from U: shape (bl, 2, chi_new)
         // U is column-major: U[col * rows + row]
-        let mut left_data = vec![ZERO; bl * 2 * chi_new];
-        for alpha in 0..bl {
-            for i in 0..2 {
-                for gamma in 0..chi_new {
-                    let r = alpha * 2 + i;
-                    left_data[alpha * (2 * chi_new) + i * chi_new + gamma] =
-                        svd_result.u[gamma * svd_result.u_rows + r];
-                }
-            }
-        }
+        let left_data = svd_left_site_data(&svd_result, bl, chi_new);
 
         // A[k+1] from S·V†: shape (chi_new, 2, br)
         // V† is row-major: Vt[row * cols + col]
-        let mut right_data = vec![ZERO; chi_new * 2 * br];
-        for gamma in 0..chi_new {
-            let s_val = Complex64::new(svd_result.s[gamma], 0.0);
-            for j in 0..2 {
-                for beta in 0..br {
-                    let c = j * br + beta;
-                    right_data[gamma * (2 * br) + j * br + beta] =
-                        s_val * svd_result.vt[gamma * svd_result.vt_cols + c];
-                }
-            }
-        }
+        let mut right_data = Vec::new();
+        fill_scaled_vt_data(&mut right_data, &svd_result, chi_new, 2, br);
 
         self.sites[left_site] = SiteTensor {
             bond_left: bl,
@@ -982,28 +1001,10 @@ impl MpsBackend {
             }
 
             let svd_result = svd(&mat, rows, cols);
-
-            let s_max = svd_result.s.first().copied().unwrap_or(0.0);
-            let thresh = self.svd_epsilon * s_max;
-            let mut chi_new = svd_result
-                .s
-                .iter()
-                .take_while(|&&s| s > thresh)
-                .count()
-                .max(1);
-            chi_new = chi_new.min(self.max_bond_dim);
+            let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
 
             // Extract left site from U: shape (cur_bl, 2, chi_new)
-            let mut left_data = vec![ZERO; cur_bl * 2 * chi_new];
-            for alpha in 0..cur_bl {
-                for i in 0..2 {
-                    for gamma in 0..chi_new {
-                        let r = alpha * 2 + i;
-                        left_data[alpha * (2 * chi_new) + i * chi_new + gamma] =
-                            svd_result.u[gamma * svd_result.u_rows + r];
-                    }
-                }
-            }
+            let left_data = svd_left_site_data(&svd_result, cur_bl, chi_new);
 
             self.sites[start + k] = SiteTensor {
                 bond_left: cur_bl,
@@ -1013,34 +1014,13 @@ impl MpsBackend {
 
             if k < n - 2 {
                 // Build remainder from S·V†: shape (chi_new, remaining_dim, br)
-                let nr_len = chi_new * remaining_dim * br;
-                new_remaining.clear();
-                new_remaining.resize(nr_len, ZERO);
-                for gamma in 0..chi_new {
-                    let s_val = Complex64::new(svd_result.s[gamma], 0.0);
-                    for s_rest in 0..remaining_dim {
-                        for beta in 0..br {
-                            let c = s_rest * br + beta;
-                            new_remaining[gamma * (remaining_dim * br) + s_rest * br + beta] =
-                                s_val * svd_result.vt[gamma * svd_result.vt_cols + c];
-                        }
-                    }
-                }
+                fill_scaled_vt_data(&mut new_remaining, &svd_result, chi_new, remaining_dim, br);
                 std::mem::swap(&mut remaining, &mut new_remaining);
                 cur_bl = chi_new;
             } else {
                 // Last site: S·V† reshaped to (chi_new, 2, br)
-                let mut right_data = vec![ZERO; chi_new * 2 * br];
-                for gamma in 0..chi_new {
-                    let s_val = Complex64::new(svd_result.s[gamma], 0.0);
-                    for j in 0..2 {
-                        for beta in 0..br {
-                            let c = j * br + beta;
-                            right_data[gamma * (2 * br) + j * br + beta] =
-                                s_val * svd_result.vt[gamma * svd_result.vt_cols + c];
-                        }
-                    }
-                }
+                let mut right_data = Vec::new();
+                fill_scaled_vt_data(&mut right_data, &svd_result, chi_new, 2, br);
                 self.sites[start + n - 1] = SiteTensor {
                     bond_left: chi_new,
                     bond_right: br,
@@ -1595,6 +1575,11 @@ impl Backend for MpsBackend {
         Ok(())
     }
 
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        self.apply_single_qubit_gate(self.site_for_logical(qubit), matrix);
+        Ok(())
+    }
+
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         Ok(self.reduced_density_site(self.site_for_logical(qubit)))
     }
@@ -1605,13 +1590,12 @@ impl Backend for MpsBackend {
 
     fn probabilities(&self) -> Result<Vec<f64>> {
         if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "probabilities for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
+            return Err(max_qubits_unsupported(
+                self.name(),
+                "probabilities",
+                self.num_qubits,
+                MAX_PROB_QUBITS,
+            ));
         }
 
         let dim = 1usize << self.num_qubits;
@@ -1635,13 +1619,12 @@ impl Backend for MpsBackend {
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "statevector export for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
+            return Err(max_qubits_unsupported(
+                self.name(),
+                "statevector export",
+                self.num_qubits,
+                MAX_PROB_QUBITS,
+            ));
         }
 
         let dim = 1usize << self.num_qubits;

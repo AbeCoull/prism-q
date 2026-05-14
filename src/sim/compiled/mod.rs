@@ -27,6 +27,7 @@ pub use parity::ParityStats;
 use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
 pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity, XorDag};
 
+pub(crate) use crate::backend::word_ops::xor_words;
 pub(crate) use propagation::batch_propagate_backward;
 pub(crate) use propagation::propagate_backward;
 use propagation::{
@@ -528,6 +529,20 @@ impl CompiledSampler {
                 num_shots
             };
 
+            let apply_seq = |dst: &mut [u64]| {
+                for tile_start in (0..num_shots).step_by(max_batch) {
+                    let tile_end = (tile_start + max_batch).min(num_shots);
+                    for g in 0..total_groups {
+                        for s in tile_start..tile_end {
+                            let byte = rand_buf[s * bytes_per_shot + g] as usize;
+                            let entry = lut.lookup(g, byte);
+                            let shot_base = s * m_words;
+                            xor_words(&mut dst[shot_base..shot_base + m_words], entry);
+                        }
+                    }
+                }
+            };
+
             #[cfg(feature = "parallel")]
             const PAR_SHOT_THRESHOLD: usize = 256;
 
@@ -557,33 +572,11 @@ impl CompiledSampler {
                         }
                     });
             } else {
-                for tile_start in (0..num_shots).step_by(max_batch) {
-                    let tile_end = (tile_start + max_batch).min(num_shots);
-                    for g in 0..total_groups {
-                        for s in tile_start..tile_end {
-                            let byte = rand_buf[s * bytes_per_shot + g] as usize;
-                            let entry = lut.lookup(g, byte);
-                            let shot_base = s * m_words;
-                            xor_words(&mut accum[shot_base..shot_base + m_words], entry);
-                        }
-                    }
-                }
+                apply_seq(accum);
             }
 
             #[cfg(not(feature = "parallel"))]
-            {
-                for tile_start in (0..num_shots).step_by(max_batch) {
-                    let tile_end = (tile_start + max_batch).min(num_shots);
-                    for g in 0..total_groups {
-                        for s in tile_start..tile_end {
-                            let byte = rand_buf[s * bytes_per_shot + g] as usize;
-                            let entry = lut.lookup(g, byte);
-                            let shot_base = s * m_words;
-                            xor_words(&mut accum[shot_base..shot_base + m_words], entry);
-                        }
-                    }
-                }
-            }
+            apply_seq(accum);
 
             m_words
         } else {
@@ -1634,7 +1627,6 @@ impl PackedShots {
         self.data
     }
 
-    #[allow(dead_code)]
     pub(crate) fn into_shot_major_data(self) -> Vec<u64> {
         if self.layout == ShotLayout::ShotMajor {
             return self.data;
@@ -2110,72 +2102,6 @@ impl DevicePackedShots {
             }
         }
         Ok(self.to_host()?.counts())
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn xor_words_avx2(dst: &mut [u64], src: &[u64]) {
-    use std::arch::x86_64::*;
-    let len = dst.len().min(src.len());
-    let chunks = len / 4;
-    let dp = dst.as_mut_ptr() as *mut __m256i;
-    let sp = src.as_ptr() as *const __m256i;
-    for i in 0..chunks {
-        let d = _mm256_loadu_si256(dp.add(i));
-        let s = _mm256_loadu_si256(sp.add(i));
-        _mm256_storeu_si256(dp.add(i), _mm256_xor_si256(d, s));
-    }
-    let tail = chunks * 4;
-    for i in tail..len {
-        *dst.get_unchecked_mut(i) ^= *src.get_unchecked(i);
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[allow(dead_code)]
-unsafe fn xor_words_neon(dst: &mut [u64], src: &[u64]) {
-    use std::arch::aarch64::*;
-    let len = dst.len().min(src.len());
-    let chunks = len / 2;
-    let dp = dst.as_mut_ptr();
-    let sp = src.as_ptr();
-    for i in 0..chunks {
-        let off = i * 2;
-        let d = vld1q_u64(dp.add(off));
-        let s = vld1q_u64(sp.add(off));
-        vst1q_u64(dp.add(off), veorq_u64(d, s));
-    }
-    let tail = chunks * 2;
-    for i in tail..len {
-        *dst.get_unchecked_mut(i) ^= *src.get_unchecked(i);
-    }
-}
-
-#[inline(always)]
-pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") && dst.len() >= 4 {
-            // SAFETY: AVX2 detected, pointers are valid u64 slices
-            unsafe {
-                xor_words_avx2(dst, src);
-            }
-            return;
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    {
-        if dst.len() >= 2 {
-            // SAFETY: NEON is baseline on aarch64, pointers are valid u64 slices
-            unsafe {
-                xor_words_neon(dst, src);
-            }
-            return;
-        }
-    }
-    for (d, &s) in dst.iter_mut().zip(src) {
-        *d ^= s;
     }
 }
 

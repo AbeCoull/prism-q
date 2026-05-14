@@ -30,11 +30,12 @@ pub mod sparse;
 pub mod stabilizer;
 pub mod statevector;
 pub mod tensornetwork;
+pub(crate) mod word_ops;
 
 use num_complex::Complex64;
 
 use crate::circuit::Instruction;
-use crate::error::Result;
+use crate::error::{PrismError, Result};
 
 #[cfg(feature = "parallel")]
 pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
@@ -65,6 +66,19 @@ pub(crate) const NORM_CLAMP_MIN: f64 = 1e-30;
 pub(crate) const PHASE_IS_ONE_EPS: f64 = 1e-15;
 
 pub(crate) const MAX_PROB_QUBITS: usize = 25;
+
+#[inline]
+pub(crate) fn max_qubits_unsupported(
+    backend: &str,
+    operation: &str,
+    num_qubits: usize,
+    max_qubits: usize,
+) -> PrismError {
+    PrismError::BackendUnsupported {
+        backend: backend.to_string(),
+        operation: format!("{operation} for {num_qubits} qubits (max {max_qubits})"),
+    }
+}
 
 #[inline(always)]
 pub(crate) fn is_phase_one(phase: Complex64) -> bool {

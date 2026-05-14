@@ -20,19 +20,18 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    has_temporal_clifford_opportunity, max_statevector_qubits, select_backend, select_dispatch,
-    stabilizer_rank_budget, supports_fused_for_kind, try_temporal_clifford,
-    validate_explicit_backend, DispatchAction, AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM,
-    AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
-    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO,
+    has_temporal_clifford_opportunity, select_backend, select_dispatch, stabilizer_rank_budget,
+    supports_fused_for_kind, try_temporal_clifford, validate_explicit_backend, DispatchAction,
+    AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM, AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX,
+    MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
+    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{bitstring, ShotsResult};
 
 use std::collections::HashMap;
 
-use crate::backend::Backend;
+use crate::backend::{max_statevector_qubits, Backend};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use shots::{packed_shots_to_classical_bits, sample_shots};

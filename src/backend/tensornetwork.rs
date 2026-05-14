@@ -20,9 +20,9 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
-use crate::backend::{Backend, MAX_PROB_QUBITS, NORM_CLAMP_MIN};
+use crate::backend::{dense_statevector_len, tensor_probability_len, Backend, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 use crate::gates::Gate;
 
 #[cfg(feature = "parallel")]
@@ -553,15 +553,7 @@ impl TensorNetworkBackend {
     /// Contract the full network and return the amplitude vector in
     /// computational basis order.
     fn contract_to_statevector(&self) -> Result<Vec<Complex64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "contraction for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
-        }
+        dense_statevector_len(self.name(), "contraction", self.num_qubits)?;
 
         let mut tensors = self.tensors.clone();
         let result = greedy_contract(&mut tensors);
@@ -773,6 +765,7 @@ impl Backend for TensorNetworkBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        tensor_probability_len(self.name(), self.num_qubits)?;
         let amplitudes = self.contract_to_statevector()?;
         #[cfg(feature = "parallel")]
         if amplitudes.len() >= MIN_PAR_ELEMS {

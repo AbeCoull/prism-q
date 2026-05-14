@@ -28,7 +28,9 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 const MIN_STATES_FOR_PAR: usize = 4096;
 
-use crate::backend::{is_phase_one, max_qubits_unsupported, Backend, MAX_PROB_QUBITS};
+use crate::backend::{
+    dense_probability_len, dense_statevector_len, is_phase_one, reserve_dense_output, Backend,
+};
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate};
@@ -507,16 +509,10 @@ impl Backend for SparseBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(max_qubits_unsupported(
-                self.name(),
-                "probabilities",
-                self.num_qubits,
-                MAX_PROB_QUBITS,
-            ));
-        }
-        let dim = 1usize << self.num_qubits;
-        let mut probs = vec![0.0f64; dim];
+        let dim = dense_probability_len(self.name(), self.num_qubits)?;
+        let mut probs = Vec::new();
+        reserve_dense_output(&mut probs, dim, self.name(), "probabilities")?;
+        probs.resize(dim, 0.0f64);
         for (&idx, amp) in &self.state {
             probs[idx] = amp.norm_sqr();
         }
@@ -528,16 +524,10 @@ impl Backend for SparseBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(max_qubits_unsupported(
-                self.name(),
-                "statevector export",
-                self.num_qubits,
-                MAX_PROB_QUBITS,
-            ));
-        }
-        let dim = 1usize << self.num_qubits;
-        let mut sv = vec![Complex64::new(0.0, 0.0); dim];
+        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        let mut sv = Vec::new();
+        reserve_dense_output(&mut sv, dim, self.name(), "statevector export")?;
+        sv.resize(dim, Complex64::new(0.0, 0.0));
         for (&idx, &amp) in &self.state {
             sv[idx] = amp;
         }

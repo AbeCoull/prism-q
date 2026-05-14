@@ -34,7 +34,10 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::backend::{max_qubits_unsupported, simd, Backend, NORM_CLAMP_MIN};
+use crate::backend::{
+    dense_probability_len, dense_statevector_len, reserve_dense_output, simd, Backend,
+    NORM_CLAMP_MIN,
+};
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::Gate;
@@ -47,7 +50,6 @@ const ONE: Complex64 = Complex64::new(1.0, 0.0);
 const DEFAULT_SVD_EPSILON: f64 = 1e-12;
 const MAX_SVD_SWEEPS: usize = 100;
 const SVD_CONVERGENCE: f64 = 1e-14;
-const MAX_PROB_QUBITS: usize = 20;
 #[cfg(feature = "parallel")]
 const MIN_DIM_FOR_PAR: usize = 1 << 14;
 #[cfg(feature = "parallel")]
@@ -1589,28 +1591,23 @@ impl Backend for MpsBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(max_qubits_unsupported(
-                self.name(),
-                "probabilities",
-                self.num_qubits,
-                MAX_PROB_QUBITS,
-            ));
-        }
-
-        let dim = 1usize << self.num_qubits;
+        let dim = dense_probability_len(self.name(), self.num_qubits)?;
+        let mut probs = Vec::new();
+        reserve_dense_output(&mut probs, dim, self.name(), "probabilities")?;
+        probs.resize(dim, 0.0);
 
         #[cfg(feature = "parallel")]
         if dim >= MIN_DIM_FOR_PAR {
-            return Ok((0..dim)
-                .into_par_iter()
-                .map(|basis| self.chain_amplitude(basis).norm_sqr())
-                .collect());
+            probs.par_iter_mut().enumerate().for_each(|(basis, prob)| {
+                *prob = self.chain_amplitude(basis).norm_sqr();
+            });
+            return Ok(probs);
         }
 
-        Ok((0..dim)
-            .map(|basis| self.chain_amplitude(basis).norm_sqr())
-            .collect())
+        for (basis, prob) in probs.iter_mut().enumerate() {
+            *prob = self.chain_amplitude(basis).norm_sqr();
+        }
+        Ok(probs)
     }
 
     fn num_qubits(&self) -> usize {
@@ -1618,26 +1615,23 @@ impl Backend for MpsBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(max_qubits_unsupported(
-                self.name(),
-                "statevector export",
-                self.num_qubits,
-                MAX_PROB_QUBITS,
-            ));
-        }
-
-        let dim = 1usize << self.num_qubits;
+        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        let mut state = Vec::new();
+        reserve_dense_output(&mut state, dim, self.name(), "statevector export")?;
+        state.resize(dim, ZERO);
 
         #[cfg(feature = "parallel")]
         if dim >= MIN_DIM_FOR_PAR {
-            return Ok((0..dim)
-                .into_par_iter()
-                .map(|basis| self.chain_amplitude(basis))
-                .collect());
+            state.par_iter_mut().enumerate().for_each(|(basis, amp)| {
+                *amp = self.chain_amplitude(basis);
+            });
+            return Ok(state);
         }
 
-        Ok((0..dim).map(|basis| self.chain_amplitude(basis)).collect())
+        for (basis, amp) in state.iter_mut().enumerate() {
+            *amp = self.chain_amplitude(basis);
+        }
+        Ok(state)
     }
 }
 
@@ -1919,7 +1913,7 @@ mod tests {
     #[test]
     fn test_probabilities_cap() {
         let mut b = MpsBackend::new(42, 64);
-        b.init(21, 0).unwrap();
+        b.init(usize::BITS as usize, 0).unwrap();
         assert!(b.probabilities().is_err());
     }
 

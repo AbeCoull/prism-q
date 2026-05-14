@@ -25,7 +25,9 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use crate::backend::{max_qubits_unsupported, Backend, MAX_PROB_QUBITS, NORM_CLAMP_MIN};
+use crate::backend::{
+    dense_probability_len, dense_statevector_len, reserve_dense_output, Backend, NORM_CLAMP_MIN,
+};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::{DiagEntry, Gate};
@@ -187,44 +189,37 @@ impl Backend for ProductStateBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(max_qubits_unsupported(
-                self.name(),
-                "probabilities",
-                self.num_qubits,
-                MAX_PROB_QUBITS,
-            ));
-        }
+        let dim = dense_probability_len(self.name(), self.num_qubits)?;
 
         #[cfg(feature = "parallel")]
         if self.num_qubits >= 14 {
             use rayon::prelude::*;
             let n = self.num_qubits;
-            let dim = 1usize << n;
             let qubit_probs: Vec<[f64; 2]> = self
                 .qubits
                 .iter()
                 .map(|q| [q[0].norm_sqr(), q[1].norm_sqr()])
                 .collect();
-            let probs: Vec<f64> = (0..dim)
-                .into_par_iter()
-                .map(|idx| {
-                    let mut p = 1.0f64;
-                    for q in 0..n {
-                        p *= qubit_probs[q][(idx >> q) & 1];
-                    }
-                    p
-                })
-                .collect();
+            let mut probs = Vec::new();
+            reserve_dense_output(&mut probs, dim, self.name(), "probabilities")?;
+            probs.resize(dim, 0.0);
+            probs.par_iter_mut().enumerate().for_each(|(idx, prob)| {
+                let mut p = 1.0f64;
+                for q in 0..n {
+                    p *= qubit_probs[q][(idx >> q) & 1];
+                }
+                *prob = p;
+            });
             return Ok(probs);
         }
 
-        let mut probs = vec![1.0f64];
+        let mut probs = Vec::new();
+        reserve_dense_output(&mut probs, dim, self.name(), "probabilities")?;
+        probs.push(1.0f64);
         for q in 0..self.num_qubits {
             let p0 = self.qubits[q][0].norm_sqr();
             let p1 = self.qubits[q][1].norm_sqr();
             let len = probs.len();
-            probs.reserve(len);
             for i in 0..len {
                 probs.push(probs[i] * p1);
             }
@@ -240,41 +235,34 @@ impl Backend for ProductStateBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(max_qubits_unsupported(
-                self.name(),
-                "statevector export",
-                self.num_qubits,
-                MAX_PROB_QUBITS,
-            ));
-        }
+        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
 
         #[cfg(feature = "parallel")]
         if self.num_qubits >= 14 {
             use rayon::prelude::*;
             let n = self.num_qubits;
-            let dim = 1usize << n;
             let qubits = &self.qubits;
-            let sv: Vec<Complex64> = (0..dim)
-                .into_par_iter()
-                .map(|idx| {
-                    let mut amp = Complex64::new(1.0, 0.0);
-                    for q in 0..n {
-                        amp *= qubits[q][(idx >> q) & 1];
-                    }
-                    amp
-                })
-                .collect();
+            let mut sv = Vec::new();
+            reserve_dense_output(&mut sv, dim, self.name(), "statevector export")?;
+            sv.resize(dim, Complex64::new(0.0, 0.0));
+            sv.par_iter_mut().enumerate().for_each(|(idx, amp_out)| {
+                let mut amp = Complex64::new(1.0, 0.0);
+                for q in 0..n {
+                    amp *= qubits[q][(idx >> q) & 1];
+                }
+                *amp_out = amp;
+            });
             return Ok(sv);
         }
 
         // Qubit 0 is LSB: index bit 0 selects qubit 0's state.
-        let mut sv = vec![Complex64::new(1.0, 0.0)];
+        let mut sv = Vec::new();
+        reserve_dense_output(&mut sv, dim, self.name(), "statevector export")?;
+        sv.push(Complex64::new(1.0, 0.0));
         for q in 0..self.num_qubits {
             let a = self.qubits[q][0]; // α = ⟨0|ψ_q⟩
             let b = self.qubits[q][1]; // β = ⟨1|ψ_q⟩
             let len = sv.len();
-            sv.reserve(len);
             for i in 0..len {
                 sv.push(sv[i] * b);
             }

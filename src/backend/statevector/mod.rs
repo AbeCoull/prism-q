@@ -51,7 +51,7 @@ use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
 
 use crate::backend::simd;
-use crate::backend::Backend;
+use crate::backend::{dense_probability_len, dense_statevector_len, Backend};
 use crate::circuit::Instruction;
 #[cfg(feature = "gpu")]
 use crate::circuit::{qft_textbook_steps, QftTextbookStep};
@@ -564,8 +564,8 @@ impl Backend for StatevectorBackend {
         if let Some(gpu) = self.gpu_state.as_ref() {
             return gpu.probabilities();
         }
+        let dim = dense_probability_len(self.name(), self.num_qubits)?;
         let norm_sq = self.pending_norm * self.pending_norm;
-        let dim = self.state.len();
         let mut probs = vec![0.0_f64; dim];
 
         #[cfg(feature = "parallel")]
@@ -601,6 +601,7 @@ impl Backend for StatevectorBackend {
         if let Some(gpu) = self.gpu_state.as_ref() {
             return gpu.export_statevector();
         }
+        dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
         if self.pending_norm == 1.0 {
             return Ok(self.state.clone());
         }

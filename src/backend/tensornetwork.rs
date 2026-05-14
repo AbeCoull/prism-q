@@ -20,9 +20,9 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
-use crate::backend::{Backend, MAX_PROB_QUBITS, NORM_CLAMP_MIN};
+use crate::backend::{dense_statevector_len, tensor_probability_len, Backend, NORM_CLAMP_MIN};
 use crate::circuit::Instruction;
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 use crate::gates::Gate;
 
 #[cfg(feature = "parallel")]
@@ -399,7 +399,7 @@ impl TensorNetworkBackend {
         id
     }
 
-    fn apply_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
+    fn append_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
         let in_leg = self.output_legs[target];
         let out_leg = self.fresh_leg();
 
@@ -553,15 +553,7 @@ impl TensorNetworkBackend {
     /// Contract the full network and return the amplitude vector in
     /// computational basis order.
     fn contract_to_statevector(&self) -> Result<Vec<Complex64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "contraction for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
-        }
+        dense_statevector_len(self.name(), "contraction", self.num_qubits)?;
 
         let mut tensors = self.tensors.clone();
         let result = greedy_contract(&mut tensors);
@@ -639,7 +631,7 @@ impl TensorNetworkBackend {
             Gate::DiagonalBatch(data) => {
                 for entry in &data.entries {
                     if let Some((q, mat)) = entry.as_1q_matrix() {
-                        self.apply_1q_matrix(q, &mat);
+                        self.append_1q_matrix(q, &mat);
                     } else if let Some((q0, q1, mat)) = entry.as_2q_matrix() {
                         self.apply_2q_matrix(q0, q1, &mat);
                     }
@@ -647,7 +639,7 @@ impl TensorNetworkBackend {
             }
             Gate::MultiFused(data) => {
                 for &(target, ref mat) in &data.gates {
-                    self.apply_1q_matrix(target, mat);
+                    self.append_1q_matrix(target, mat);
                 }
             }
             Gate::Multi2q(data) => {
@@ -657,7 +649,7 @@ impl TensorNetworkBackend {
             }
             _ => {
                 let mat = gate.matrix_2x2();
-                self.apply_1q_matrix(targets[0], &mat);
+                self.append_1q_matrix(targets[0], &mat);
             }
         }
     }
@@ -763,11 +755,17 @@ impl Backend for TensorNetworkBackend {
         self.apply_reset(qubit)
     }
 
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        self.append_1q_matrix(qubit, matrix);
+        Ok(())
+    }
+
     fn classical_results(&self) -> &[bool] {
         &self.classical_bits
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        tensor_probability_len(self.name(), self.num_qubits)?;
         let amplitudes = self.contract_to_statevector()?;
         #[cfg(feature = "parallel")]
         if amplitudes.len() >= MIN_PAR_ELEMS {

@@ -4,7 +4,7 @@ use crate::backend::sparse::SparseBackend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
-use crate::backend::Backend;
+use crate::backend::{max_statevector_qubits, Backend};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
@@ -21,86 +21,6 @@ pub(super) enum DispatchAction {
     StabilizerRank,
     StochasticPauli { num_samples: usize },
     DeterministicPauli { epsilon: f64, max_terms: usize },
-}
-
-pub(super) fn max_statevector_qubits() -> usize {
-    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_MAX_SV_QUBITS") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n;
-            }
-        }
-        match detect_max_sv_qubits() {
-            Some(n) => n,
-            None => {
-                eprintln!(
-                    "warning: could not detect system memory; statevector qubit cap is disabled. \
-                     Large circuits may abort on allocation. Set PRISM_MAX_SV_QUBITS to suppress."
-                );
-                usize::MAX
-            }
-        }
-    })
-}
-
-#[cfg(windows)]
-fn detect_max_sv_qubits() -> Option<usize> {
-    #[repr(C)]
-    struct MemoryStatusEx {
-        dw_length: u32,
-        dw_memory_load: u32,
-        ull_total_phys: u64,
-        ull_avail_phys: u64,
-        ull_total_page_file: u64,
-        ull_avail_page_file: u64,
-        ull_total_virtual: u64,
-        ull_avail_virtual: u64,
-        ull_avail_extended_virtual: u64,
-    }
-
-    extern "system" {
-        fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
-    }
-
-    // SAFETY: zeroed MemoryStatusEx is valid (all-zero bit pattern is a valid repr(C) struct)
-    let mut status: MemoryStatusEx = unsafe { std::mem::zeroed() };
-    status.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
-    // SAFETY: status is a valid MemoryStatusEx with dw_length set; FFI call reads/writes only within the struct
-    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
-        return None;
-    }
-
-    let budget = status.ull_total_phys / 2;
-    let max_elements = budget / 16;
-    if max_elements == 0 {
-        return None;
-    }
-    let n = 63 - max_elements.leading_zeros() as usize;
-    Some(n.min(33))
-}
-
-#[cfg(unix)]
-fn detect_max_sv_qubits() -> Option<usize> {
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    for line in meminfo.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
-            let budget = (kb * 1024) / 2;
-            let max_elements = budget / 16;
-            if max_elements == 0 {
-                return None;
-            }
-            let n = 63 - max_elements.leading_zeros() as usize;
-            return Some(n.min(33));
-        }
-    }
-    None
-}
-
-#[cfg(not(any(windows, unix)))]
-fn detect_max_sv_qubits() -> Option<usize> {
-    None
 }
 
 pub(super) const AUTO_MPS_BOND_DIM: usize = 256;
@@ -122,6 +42,16 @@ pub(super) const AUTO_SPD_MAX_TERMS: usize = 65536;
 pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 128;
 
 pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 16;
+
+#[inline]
+pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
+    let log2n = if num_qubits >= 2 {
+        (num_qubits as f64).log2().ceil() as usize * 2
+    } else {
+        0
+    };
+    num_qubits.saturating_sub(log2n)
+}
 
 // GPU crossover threshold and its env override live in `crate::gpu` so users
 // can introspect them without depending on internal dispatch plumbing. The
@@ -252,24 +182,13 @@ impl BackendKind {
 }
 
 pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
+    if kind.is_stabilizer_family() && !circuit.is_clifford_only() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "stabilizer".into(),
+            reason: "circuit contains non-Clifford gates".into(),
+        });
+    }
     match kind {
-        BackendKind::Stabilizer
-        | BackendKind::FilteredStabilizer
-        | BackendKind::FactoredStabilizer
-            if !circuit.is_clifford_only() =>
-        {
-            return Err(PrismError::IncompatibleBackend {
-                backend: "stabilizer".into(),
-                reason: "circuit contains non-Clifford gates".into(),
-            });
-        }
-        #[cfg(feature = "gpu")]
-        BackendKind::StabilizerGpu { .. } if !circuit.is_clifford_only() => {
-            return Err(PrismError::IncompatibleBackend {
-                backend: "stabilizer".into(),
-                reason: "circuit contains non-Clifford gates".into(),
-            });
-        }
         BackendKind::ProductState if circuit.has_entangling_gates() => {
             return Err(PrismError::IncompatibleBackend {
                 backend: "productstate".into(),

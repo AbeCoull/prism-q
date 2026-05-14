@@ -528,10 +528,10 @@ impl PreparedGate1q {
         #[cfg(target_arch = "x86_64")]
         {
             let broadcast = MatBroadcast::from_matrix(mat);
-            let has_avx2_fma = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+            let has_avx2_fma = has_avx2_fma();
             let tier = if has_avx2_fma {
                 SimdTier::Avx2Fma
-            } else if is_x86_feature_detected!("fma") {
+            } else if has_fma() {
                 SimdTier::Fma
             } else {
                 SimdTier::Sse2
@@ -1831,10 +1831,10 @@ impl PreparedGate2q {
         #[cfg(target_arch = "x86_64")]
         {
             let broadcast = Mat4x4Broadcast::from_matrix(mat);
-            let has_avx2_fma = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+            let has_avx2_fma = has_avx2_fma();
             let tier = if has_avx2_fma {
                 SimdTier::Avx2Fma
-            } else if is_x86_feature_detected!("fma") {
+            } else if has_fma() {
                 SimdTier::Fma
             } else {
                 SimdTier::Sse2

@@ -106,6 +106,34 @@ enum BlockKind {
     For,
 }
 
+#[derive(Clone, Copy)]
+enum RegisterKind {
+    Qubit,
+    Classical,
+}
+
+impl RegisterKind {
+    fn name(self) -> &'static str {
+        match self {
+            RegisterKind::Qubit => "qubit",
+            RegisterKind::Classical => "bit",
+        }
+    }
+
+    fn invalid_index(self, index: usize, register_size: usize) -> PrismError {
+        match self {
+            RegisterKind::Qubit => PrismError::InvalidQubit {
+                index,
+                register_size,
+            },
+            RegisterKind::Classical => PrismError::InvalidClassicalBit {
+                index,
+                register_size,
+            },
+        }
+    }
+}
+
 struct BlockState {
     kind: BlockKind,
     buf: String,
@@ -599,94 +627,67 @@ impl<'a> Parser<'a> {
 
     /// OQ3 syntax: `qubit[4] q` or `qubit q` (single qubit).
     fn parse_qubit_decl(&mut self, line: &str, line_num: usize) -> Result<()> {
-        let rest = line.strip_prefix("qubit").unwrap();
-
-        if rest.trim_start().starts_with('[') {
-            let bracket_content = Self::extract_bracket(rest).ok_or(PrismError::Parse {
-                line: line_num,
-                message: "missing `]` in qubit declaration".to_string(),
-            })?;
-            let size: usize = bracket_content.parse().map_err(|_| PrismError::Parse {
-                line: line_num,
-                message: format!("invalid qubit count: `{bracket_content}`"),
-            })?;
-            if size == 0 {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: "qubit count must be > 0".to_string(),
-                });
-            }
-            let end = rest.find(']').unwrap(); // safe: extract_bracket succeeded
-            let after_bracket = rest[end + 1..].trim();
-            let name = after_bracket.to_string();
-            if name.is_empty() {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: "qubit declaration missing name".to_string(),
-                });
-            }
-            let offset = self.total_qubits;
-            self.total_qubits += size;
-            self.qregs.insert(name, Register { offset, size });
-        } else {
-            let name = rest.trim().to_string();
-            if name.is_empty() {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: "qubit declaration missing name".to_string(),
-                });
-            }
-            let offset = self.total_qubits;
-            self.total_qubits += 1;
-            self.qregs.insert(name, Register { offset, size: 1 });
-        }
+        let (name, size) =
+            Self::parse_oq3_register_decl(line, "qubit", RegisterKind::Qubit, line_num)?;
+        let offset = self.total_qubits;
+        self.total_qubits += size;
+        self.qregs.insert(name, Register { offset, size });
         Ok(())
     }
 
     /// OQ3 syntax: `bit[4] c` or `bit c` (single bit).
     fn parse_bit_decl(&mut self, line: &str, line_num: usize) -> Result<()> {
-        let rest = line.strip_prefix("bit").unwrap();
+        let (name, size) =
+            Self::parse_oq3_register_decl(line, "bit", RegisterKind::Classical, line_num)?;
+        let offset = self.total_cbits;
+        self.total_cbits += size;
+        self.cregs.insert(name, Register { offset, size });
+        Ok(())
+    }
+
+    fn parse_oq3_register_decl(
+        line: &str,
+        keyword: &str,
+        kind: RegisterKind,
+        line_num: usize,
+    ) -> Result<(String, usize)> {
+        let rest = line.strip_prefix(keyword).unwrap();
+        let kind_name = kind.name();
 
         if rest.trim_start().starts_with('[') {
             let bracket_content = Self::extract_bracket(rest).ok_or(PrismError::Parse {
                 line: line_num,
-                message: "missing `]` in bit declaration".to_string(),
+                message: format!("missing `]` in {kind_name} declaration"),
             })?;
             let size: usize = bracket_content.parse().map_err(|_| PrismError::Parse {
                 line: line_num,
-                message: format!("invalid bit count: `{bracket_content}`"),
+                message: format!("invalid {kind_name} count: `{bracket_content}`"),
             })?;
             if size == 0 {
                 return Err(PrismError::Parse {
                     line: line_num,
-                    message: "bit count must be > 0".to_string(),
+                    message: format!("{kind_name} count must be > 0"),
                 });
             }
             let end = rest.find(']').unwrap(); // safe: extract_bracket succeeded
-            let after_bracket = rest[end + 1..].trim();
-            let name = after_bracket.to_string();
+            let name = rest[end + 1..].trim().to_string();
             if name.is_empty() {
                 return Err(PrismError::Parse {
                     line: line_num,
-                    message: "bit declaration missing name".to_string(),
+                    message: format!("{kind_name} declaration missing name"),
                 });
             }
-            let offset = self.total_cbits;
-            self.total_cbits += size;
-            self.cregs.insert(name, Register { offset, size });
-        } else {
-            let name = rest.trim().to_string();
-            if name.is_empty() {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: "bit declaration missing name".to_string(),
-                });
-            }
-            let offset = self.total_cbits;
-            self.total_cbits += 1;
-            self.cregs.insert(name, Register { offset, size: 1 });
+            return Ok((name, size));
         }
-        Ok(())
+
+        let name = rest.trim().to_string();
+        if name.is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("{kind_name} declaration missing name"),
+            });
+        }
+        Ok((name, 1))
     }
 
     /// Extract content between first `[` and `]`, if present.
@@ -746,48 +747,34 @@ impl<'a> Parser<'a> {
         Ok((name, size))
     }
 
-    fn resolve_qubit(&self, token: &str, line_num: usize) -> Result<usize> {
-        let (name, idx) = self.parse_indexed_ref(token, line_num)?;
-        let reg = self
-            .qregs
-            .get(name)
-            .ok_or_else(|| PrismError::UndefinedRegister {
-                name: name.to_string(),
-                line: line_num,
-            })?;
-        if idx >= reg.size {
-            return Err(PrismError::InvalidQubit {
-                index: idx,
-                register_size: reg.size,
-            });
-        }
-        Ok(reg.offset + idx)
-    }
-
     /// Resolve a qubit argument that may be indexed (`q[0]`) or a bare register (`q`).
     /// Returns all matching qubit indices.
     fn resolve_qubit_arg(&self, token: &str, line_num: usize) -> Result<SmallVec<[usize; 4]>> {
-        if token.contains('[') {
-            Ok(smallvec![self.resolve_qubit(token, line_num)?])
-        } else {
-            let reg = self
-                .qregs
-                .get(token)
-                .ok_or_else(|| PrismError::UndefinedRegister {
-                    name: token.to_string(),
-                    line: line_num,
-                })?;
-            Ok((0..reg.size).map(|i| reg.offset + i).collect())
-        }
+        self.resolve_register_arg(&self.qregs, RegisterKind::Qubit, token, line_num)
     }
 
     /// Resolve a classical bit argument that may be indexed (`c[0]`) or a bare register (`c`).
     fn resolve_cbit_arg(&self, token: &str, line_num: usize) -> Result<SmallVec<[usize; 4]>> {
+        self.resolve_register_arg(&self.cregs, RegisterKind::Classical, token, line_num)
+    }
+
+    fn resolve_cbit(&self, token: &str, line_num: usize) -> Result<usize> {
+        self.resolve_register_index(&self.cregs, RegisterKind::Classical, token, line_num)
+    }
+
+    fn resolve_register_arg(
+        &self,
+        registers: &HashMap<String, Register>,
+        kind: RegisterKind,
+        token: &str,
+        line_num: usize,
+    ) -> Result<SmallVec<[usize; 4]>> {
         if token.contains('[') {
-            Ok(smallvec![self.resolve_cbit(token, line_num)?])
+            Ok(smallvec![self.resolve_register_index(
+                registers, kind, token, line_num
+            )?])
         } else {
-            let reg = self
-                .cregs
+            let reg = registers
                 .get(token)
                 .ok_or_else(|| PrismError::UndefinedRegister {
                     name: token.to_string(),
@@ -797,20 +784,22 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn resolve_cbit(&self, token: &str, line_num: usize) -> Result<usize> {
+    fn resolve_register_index(
+        &self,
+        registers: &HashMap<String, Register>,
+        kind: RegisterKind,
+        token: &str,
+        line_num: usize,
+    ) -> Result<usize> {
         let (name, idx) = self.parse_indexed_ref(token, line_num)?;
-        let reg = self
-            .cregs
+        let reg = registers
             .get(name)
             .ok_or_else(|| PrismError::UndefinedRegister {
                 name: name.to_string(),
                 line: line_num,
             })?;
         if idx >= reg.size {
-            return Err(PrismError::InvalidClassicalBit {
-                index: idx,
-                register_size: reg.size,
-            });
+            return Err(kind.invalid_index(idx, reg.size));
         }
         Ok(reg.offset + idx)
     }
@@ -853,24 +842,7 @@ impl<'a> Parser<'a> {
         }
         let qubits = self.resolve_qubit_arg(parts[0].trim(), line_num)?;
         let cbits = self.resolve_cbit_arg(parts[1].trim(), line_num)?;
-        if qubits.len() != cbits.len() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!(
-                    "register size mismatch in measure: {} qubits vs {} classical bits",
-                    qubits.len(),
-                    cbits.len()
-                ),
-            });
-        }
-        Ok(qubits
-            .iter()
-            .zip(cbits.iter())
-            .map(|(&qubit, &classical_bit)| Instruction::Measure {
-                qubit,
-                classical_bit,
-            })
-            .collect())
+        Self::build_measurements(qubits, cbits, line_num)
     }
 
     /// OQ3: `c[0] = measure q[0]` or `c = measure q` (broadcast)
@@ -894,6 +866,14 @@ impl<'a> Parser<'a> {
 
         let cbits = self.resolve_cbit_arg(cbit_token, line_num)?;
         let qubits = self.resolve_qubit_arg(qubit_token, line_num)?;
+        Self::build_measurements(qubits, cbits, line_num)
+    }
+
+    fn build_measurements(
+        qubits: SmallVec<[usize; 4]>,
+        cbits: SmallVec<[usize; 4]>,
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
         if qubits.len() != cbits.len() {
             return Err(PrismError::Parse {
                 line: line_num,
@@ -905,9 +885,9 @@ impl<'a> Parser<'a> {
             });
         }
         Ok(qubits
-            .iter()
-            .zip(cbits.iter())
-            .map(|(&qubit, &classical_bit)| Instruction::Measure {
+            .into_iter()
+            .zip(cbits)
+            .map(|(qubit, classical_bit)| Instruction::Measure {
                 qubit,
                 classical_bit,
             })
@@ -1406,39 +1386,8 @@ impl<'a> Parser<'a> {
 
         if broadcast_len <= 1 {
             let qubits: SmallVec<[usize; 4]> = resolved.iter().map(|v| v[0]).collect();
-
-            if let Some(instrs) =
-                Self::resolve_decomposed_gate(&gate_name, &params, &qubits, line_num)?
-            {
-                if !modifiers.is_empty() {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!("modifier on decomposed gate `{gate_name}`"),
-                        line: line_num,
-                    });
-                }
-                return Ok(instrs);
-            }
-
-            if let Some(instrs) = self.expand_user_gate(&gate_name, &params, &qubits, line_num)? {
-                return Ok(instrs);
-            }
-
-            let mut gate = Self::resolve_gate(&gate_name, &params, line_num)?;
-            for modifier in modifiers.iter().rev() {
-                gate = Self::apply_modifier(gate, modifier, line_num)?;
-            }
-            let expected = gate.num_qubits();
-            if qubits.len() != expected {
-                return Err(PrismError::GateArity {
-                    gate: gate_name,
-                    expected,
-                    got: qubits.len(),
-                });
-            }
-            return Ok(vec![Instruction::Gate {
-                gate,
-                targets: qubits,
-            }]);
+            return self
+                .resolve_gate_application_once(&gate_name, &params, &modifiers, &qubits, line_num);
         }
 
         let mut all_instrs = Vec::with_capacity(broadcast_len);
@@ -1448,36 +1397,51 @@ impl<'a> Parser<'a> {
                 .map(|v| if v.len() == 1 { v[0] } else { v[i] })
                 .collect();
 
-            if let Some(mut instrs) =
-                Self::resolve_decomposed_gate(&gate_name, &params, &qubits, line_num)?
-            {
-                if !modifiers.is_empty() {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!("modifier on decomposed gate `{gate_name}`"),
-                        line: line_num,
-                    });
-                }
-                all_instrs.append(&mut instrs);
-                continue;
-            }
-
-            if let Some(mut instrs) =
-                self.expand_user_gate(&gate_name, &params, &qubits, line_num)?
-            {
-                all_instrs.append(&mut instrs);
-                continue;
-            }
-
-            let mut gate = Self::resolve_gate(&gate_name, &params, line_num)?;
-            for modifier in modifiers.iter().rev() {
-                gate = Self::apply_modifier(gate, modifier, line_num)?;
-            }
-            all_instrs.push(Instruction::Gate {
-                gate,
-                targets: qubits,
-            });
+            all_instrs.append(&mut self.resolve_gate_application_once(
+                &gate_name, &params, &modifiers, &qubits, line_num,
+            )?);
         }
         Ok(all_instrs)
+    }
+
+    fn resolve_gate_application_once(
+        &self,
+        gate_name: &str,
+        params: &[f64],
+        modifiers: &[Modifier],
+        qubits: &SmallVec<[usize; 4]>,
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        if let Some(instrs) = Self::resolve_decomposed_gate(gate_name, params, qubits, line_num)? {
+            if !modifiers.is_empty() {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("modifier on decomposed gate `{gate_name}`"),
+                    line: line_num,
+                });
+            }
+            return Ok(instrs);
+        }
+
+        if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
+            return Ok(instrs);
+        }
+
+        let mut gate = Self::resolve_gate(gate_name, params, line_num)?;
+        for modifier in modifiers.iter().rev() {
+            gate = Self::apply_modifier(gate, modifier, line_num)?;
+        }
+        let expected = gate.num_qubits();
+        if qubits.len() != expected {
+            return Err(PrismError::GateArity {
+                gate: gate_name.to_string(),
+                expected,
+                got: qubits.len(),
+            });
+        }
+        Ok(vec![Instruction::Gate {
+            gate,
+            targets: qubits.clone(),
+        }])
     }
 
     /// Determine the broadcast length from resolved qubit arguments.

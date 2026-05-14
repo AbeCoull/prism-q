@@ -29,14 +29,18 @@
 //! - Gate application: O(n) per gate (iterates 2n+1 rows, constant work per row)
 //! - Measurement: O(n²) worst case (rowmul is O(n), applied to up to 2n rows)
 //! - Memory: n=1000 → ~500 KB, n=10000 → ~50 MB
-//! - Probability extraction: O(2^n * n), only available for n <= 20
+//! - Probability extraction: O(2^n * n), limited by dense output memory budget
 
 use num_complex::Complex64;
 use smallvec::SmallVec;
 
-use crate::backend::{Backend, NORM_CLAMP_MIN};
+use crate::backend::{
+    dense_probability_len, dense_statevector_len, reserve_dense_output, Backend, NORM_CLAMP_MIN,
+};
 use crate::circuit::Instruction;
-use crate::error::{PrismError, Result};
+#[cfg(feature = "gpu")]
+use crate::error::PrismError;
+use crate::error::Result;
 use crate::gates::Gate;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -323,27 +327,9 @@ impl StabilizerBackend {
 
     #[inline]
     fn validate_probability_capacity(&self) -> Result<()> {
-        if self.n >= usize::BITS as usize {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "probability extraction for {} qubits (exceeds addressable memory)",
-                    self.n
-                ),
-            });
-        }
-        let dim = 1usize << self.n;
+        let dim = dense_probability_len(self.name(), self.n)?;
         let mut check = Vec::<f64>::new();
-        if check.try_reserve_exact(dim).is_err() {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "probability extraction for {} qubits ({} bytes required)",
-                    self.n,
-                    dim * std::mem::size_of::<f64>()
-                ),
-            });
-        }
+        reserve_dense_output(&mut check, dim, self.name(), "probabilities")?;
         drop(check);
         Ok(())
     }
@@ -990,27 +976,9 @@ impl StabilizerBackend {
             cpu.classical_bits = self.classical_bits.clone();
             return cpu.export_statevector();
         }
-        if self.n >= usize::BITS as usize {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "statevector export for {} qubits (exceeds addressable memory)",
-                    self.n
-                ),
-            });
-        }
-        let dim = 1usize << self.n;
+        let dim = dense_statevector_len(self.name(), "statevector export", self.n)?;
         let mut check = Vec::<Complex64>::new();
-        if check.try_reserve_exact(dim).is_err() {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "statevector export for {} qubits ({} bytes required)",
-                    self.n,
-                    dim * std::mem::size_of::<Complex64>()
-                ),
-            });
-        }
+        reserve_dense_output(&mut check, dim, self.name(), "statevector export")?;
         drop(check);
         Ok(self.compute_statevector())
     }
@@ -1846,12 +1814,7 @@ impl Backend for FilteredStabilizerBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        if self.num_qubits >= crate::backend::MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!("probability extraction for {} qubits", self.num_qubits),
-            });
-        }
+        dense_probability_len(self.name(), self.num_qubits)?;
 
         let mut blocks: Vec<(Vec<f64>, Vec<usize>)> = Vec::new();
         for cluster in self.clusters.iter().flatten() {

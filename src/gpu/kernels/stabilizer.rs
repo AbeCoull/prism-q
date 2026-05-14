@@ -47,9 +47,10 @@
 
 use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
 
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 
 use super::super::{GpuContext, GpuTableau};
+use super::{div_ceil_grid, launch_err, require_i32, require_u32};
 
 const BLOCK_SIZE: u32 = 128;
 
@@ -609,32 +610,6 @@ extern "C" __global__ void stab_measure_deterministic(
 /// Return the stabilizer CUDA C source for concatenation into the shared PTX module.
 pub(crate) fn kernel_source() -> String {
     KERNEL_SOURCE.to_string()
-}
-
-fn launch_err(op: &str, err: impl std::fmt::Display) -> PrismError {
-    PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("{op}: {err}"),
-    }
-}
-
-fn launch_limit_err(op: &str, name: &str, value: usize, limit: &str) -> PrismError {
-    PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("{op}: {name}={value} exceeds {limit} kernel limit"),
-    }
-}
-
-fn require_i32(op: &str, name: &str, value: usize) -> Result<i32> {
-    i32::try_from(value).map_err(|_| launch_limit_err(op, name, value, "i32"))
-}
-
-fn require_u32(op: &str, name: &str, value: usize) -> Result<u32> {
-    u32::try_from(value).map_err(|_| launch_limit_err(op, name, value, "u32"))
-}
-
-fn div_ceil_grid(op: &str, name: &str, value: usize, block: u32) -> Result<u32> {
-    Ok(require_u32(op, name, value)?.div_ceil(block).max(1))
 }
 
 /// Initialise a freshly-allocated `GpuTableau` to the identity tableau: destabilizer

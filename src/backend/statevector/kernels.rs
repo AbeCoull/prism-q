@@ -39,6 +39,11 @@ const fn max_target_for_tile(tile_size: usize) -> usize {
     t - 1
 }
 
+const MULTI_GATE_L2_TILE: usize = 16_384;
+const MULTI_GATE_L3_TILE: usize = 131_072;
+const MULTI_GATE_MAX_L2_TARGET: usize = max_target_for_tile(MULTI_GATE_L2_TILE);
+const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
+
 #[inline(always)]
 fn adjacent_2q_indices(offset: usize, stride: usize, q0_is_lo: bool) -> [usize; 4] {
     if q0_is_lo {
@@ -2758,20 +2763,14 @@ impl StatevectorBackend {
             return;
         }
 
-        const MULTI_TILE: usize = 16384;
-        const L3_TILE: usize = 131072;
-
-        let max_l2_target = max_target_for_tile(MULTI_TILE);
-        let max_l3_target = max_target_for_tile(L3_TILE);
-
         let mut small_gates: SmallVec<[(usize, simd::PreparedGate1q); 16]> = SmallVec::new();
         let mut medium_gates: SmallVec<[(usize, simd::PreparedGate1q); 4]> = SmallVec::new();
         let mut large_gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = SmallVec::new();
 
         for &(target, mat) in gates {
-            if target <= max_l2_target {
+            if target <= MULTI_GATE_MAX_L2_TARGET {
                 small_gates.push((target, simd::PreparedGate1q::new(&mat)));
-            } else if target <= max_l3_target {
+            } else if target <= MULTI_GATE_MAX_L3_TARGET {
                 medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
             } else {
                 large_gates.push((target, mat));
@@ -2779,8 +2778,8 @@ impl StatevectorBackend {
         }
 
         if !small_gates.is_empty() {
-            let outer_block = 1usize << (max_l2_target + 1);
-            let tile_size = MULTI_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
+            let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, ref prepared) in &small_gates {
                     prepared.apply_tiled(tile, target);
@@ -2789,8 +2788,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
-            let outer_block = 1usize << (max_l3_target + 1);
-            let tile_size = L3_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
+            let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, ref prepared) in &medium_gates {
                     prepared.apply_tiled(tile, target);
@@ -2806,20 +2805,14 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_multi_1q_par(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
-        const MULTI_TILE: usize = 16384;
-        const L3_TILE: usize = 131072;
-
-        let max_l2_target = max_target_for_tile(MULTI_TILE);
-        let max_l3_target = max_target_for_tile(L3_TILE);
-
         let mut small_gates: SmallVec<[(usize, simd::PreparedGate1q); 16]> = SmallVec::new();
         let mut medium_gates: SmallVec<[(usize, simd::PreparedGate1q); 4]> = SmallVec::new();
         let mut large_gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = SmallVec::new();
 
         for &(target, mat) in gates {
-            if target <= max_l2_target {
+            if target <= MULTI_GATE_MAX_L2_TARGET {
                 small_gates.push((target, simd::PreparedGate1q::new(&mat)));
-            } else if target <= max_l3_target {
+            } else if target <= MULTI_GATE_MAX_L3_TARGET {
                 medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
             } else {
                 large_gates.push((target, mat));
@@ -2827,8 +2820,8 @@ impl StatevectorBackend {
         }
 
         if !small_gates.is_empty() {
-            let outer_block = 1usize << (max_l2_target + 1);
-            let tile_size = MULTI_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
+            let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
             self.state
                 .par_chunks_mut(tile_size)
                 .with_min_len(chunk_min_len(tile_size))
@@ -2840,8 +2833,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
-            let outer_block = 1usize << (max_l3_target + 1);
-            let tile_size = L3_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
+            let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
             self.state
                 .par_chunks_mut(tile_size)
                 .with_min_len(chunk_min_len(tile_size))
@@ -2872,12 +2865,6 @@ impl StatevectorBackend {
             return;
         }
 
-        const MULTI_TILE: usize = 16384;
-        const L3_TILE: usize = 131072;
-
-        let max_l2_target = max_target_for_tile(MULTI_TILE);
-        let max_l3_target = max_target_for_tile(L3_TILE);
-
         let mut small_gates: SmallVec<[(usize, Complex64, Complex64, bool); 16]> = SmallVec::new();
         let mut medium_gates: SmallVec<[(usize, Complex64, Complex64, bool); 4]> = SmallVec::new();
         let mut large_gates: SmallVec<[(usize, Complex64, Complex64); 4]> = SmallVec::new();
@@ -2886,9 +2873,9 @@ impl StatevectorBackend {
             let d0 = mat[0][0];
             let d1 = mat[1][1];
             let skip_lo = is_phase_one(d0);
-            if target <= max_l2_target {
+            if target <= MULTI_GATE_MAX_L2_TARGET {
                 small_gates.push((target, d0, d1, skip_lo));
-            } else if target <= max_l3_target {
+            } else if target <= MULTI_GATE_MAX_L3_TARGET {
                 medium_gates.push((target, d0, d1, skip_lo));
             } else {
                 large_gates.push((target, d0, d1));
@@ -2896,8 +2883,8 @@ impl StatevectorBackend {
         }
 
         if !small_gates.is_empty() {
-            let outer_block = 1usize << (max_l2_target + 1);
-            let tile_size = MULTI_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
+            let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, d0, d1, skip_lo) in &small_gates {
                     simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
@@ -2906,8 +2893,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
-            let outer_block = 1usize << (max_l3_target + 1);
-            let tile_size = L3_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
+            let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, d0, d1, skip_lo) in &medium_gates {
                     simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
@@ -2924,12 +2911,6 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_multi_1q_diagonal_par(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
-        const MULTI_TILE: usize = 16384;
-        const L3_TILE: usize = 131072;
-
-        let max_l2_target = max_target_for_tile(MULTI_TILE);
-        let max_l3_target = max_target_for_tile(L3_TILE);
-
         let mut small_gates: SmallVec<[(usize, Complex64, Complex64, bool); 16]> = SmallVec::new();
         let mut medium_gates: SmallVec<[(usize, Complex64, Complex64, bool); 4]> = SmallVec::new();
         let mut large_gates: SmallVec<[(usize, Complex64, Complex64); 4]> = SmallVec::new();
@@ -2938,9 +2919,9 @@ impl StatevectorBackend {
             let d0 = mat[0][0];
             let d1 = mat[1][1];
             let skip_lo = is_phase_one(d0);
-            if target <= max_l2_target {
+            if target <= MULTI_GATE_MAX_L2_TARGET {
                 small_gates.push((target, d0, d1, skip_lo));
-            } else if target <= max_l3_target {
+            } else if target <= MULTI_GATE_MAX_L3_TARGET {
                 medium_gates.push((target, d0, d1, skip_lo));
             } else {
                 large_gates.push((target, d0, d1));
@@ -2948,8 +2929,8 @@ impl StatevectorBackend {
         }
 
         if !small_gates.is_empty() {
-            let outer_block = 1usize << (max_l2_target + 1);
-            let tile_size = MULTI_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
+            let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
             self.state
                 .par_chunks_mut(tile_size)
                 .with_min_len(chunk_min_len(tile_size))
@@ -2961,8 +2942,8 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
-            let outer_block = 1usize << (max_l3_target + 1);
-            let tile_size = L3_TILE.max(outer_block);
+            let outer_block = 1usize << (MULTI_GATE_MAX_L3_TARGET + 1);
+            let tile_size = MULTI_GATE_L3_TILE.max(outer_block);
             self.state
                 .par_chunks_mut(tile_size)
                 .with_min_len(chunk_min_len(tile_size))
@@ -3009,26 +2990,20 @@ impl StatevectorBackend {
             return;
         }
 
-        const MULTI_TILE: usize = 16384;
-        const L3_TILE: usize = 131072;
-
-        let max_l2_target = max_target_for_tile(MULTI_TILE);
-        let max_l3_target = max_target_for_tile(L3_TILE);
-
         let mut small_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
         let mut medium_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
 
         for &(q0, q1, ref mat) in gates {
             let max_q = q0.max(q1);
-            if max_q <= max_l2_target {
+            if max_q <= MULTI_GATE_MAX_L2_TARGET {
                 small_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
-            } else if max_q <= max_l3_target {
+            } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
                 medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
             }
         }
 
         if !small_gates.is_empty() {
-            let tile_size = MULTI_TILE;
+            let tile_size = MULTI_GATE_L2_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
                 let n = tile.len().trailing_zeros() as usize;
@@ -3039,7 +3014,7 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
-            let tile_size = L3_TILE;
+            let tile_size = MULTI_GATE_L3_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
                 let n = tile.len().trailing_zeros() as usize;
@@ -3050,7 +3025,7 @@ impl StatevectorBackend {
         }
 
         for &(q0, q1, ref mat) in gates {
-            if q0.max(q1) > max_l3_target {
+            if q0.max(q1) > MULTI_GATE_MAX_L3_TARGET {
                 self.apply_fused_2q(q0, q1, mat);
             }
         }
@@ -3059,26 +3034,20 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_multi_2q_par(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
-        const MULTI_TILE: usize = 16384;
-        const L3_TILE: usize = 131072;
-
-        let max_l2_target = max_target_for_tile(MULTI_TILE);
-        let max_l3_target = max_target_for_tile(L3_TILE);
-
         let mut small_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
         let mut medium_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
 
         for &(q0, q1, ref mat) in gates {
             let max_q = q0.max(q1);
-            if max_q <= max_l2_target {
+            if max_q <= MULTI_GATE_MAX_L2_TARGET {
                 small_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
-            } else if max_q <= max_l3_target {
+            } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
                 medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
             }
         }
 
         if !small_gates.is_empty() {
-            let tile_size = MULTI_TILE;
+            let tile_size = MULTI_GATE_L2_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             self.state
                 .par_chunks_mut(tile_size)
@@ -3092,7 +3061,7 @@ impl StatevectorBackend {
         }
 
         if !medium_gates.is_empty() {
-            let tile_size = L3_TILE;
+            let tile_size = MULTI_GATE_L3_TILE;
             let tile_qubits = tile_size.trailing_zeros() as usize;
             self.state
                 .par_chunks_mut(tile_size)
@@ -3106,7 +3075,7 @@ impl StatevectorBackend {
         }
 
         for &(q0, q1, ref mat) in gates {
-            if q0.max(q1) > max_l3_target {
+            if q0.max(q1) > MULTI_GATE_MAX_L3_TARGET {
                 self.apply_fused_2q(q0, q1, mat);
             }
         }

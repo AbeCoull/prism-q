@@ -12,7 +12,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::stabilizer::kernels::rowmul_words;
-use crate::backend::Backend;
+use crate::backend::{dense_probability_len, dense_statevector_len, reserve_dense_output, Backend};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -590,16 +590,7 @@ impl SubTableau {
 
     fn compute_probabilities(&self) -> Result<Vec<f64>> {
         let n = self.n;
-        if n > crate::backend::MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: "factored-stabilizer".to_string(),
-                operation: format!(
-                    "probabilities for {} qubits (max {})",
-                    n,
-                    crate::backend::MAX_PROB_QUBITS
-                ),
-            });
-        }
+        let dim = dense_probability_len("factored-stabilizer", n)?;
 
         let mut work_xz = self.xz.clone();
         let mut work_phase = self.phase.clone();
@@ -610,8 +601,9 @@ impl SubTableau {
 
         let seed = solve_diagonal_seed(&work_xz, &work_phase, n, nw, stride, &col_map, k);
 
-        let dim = 1usize << n;
-        let mut probs = vec![0.0f64; dim];
+        let mut probs = Vec::new();
+        reserve_dense_output(&mut probs, dim, "factored-stabilizer", "probabilities")?;
+        probs.resize(dim, 0.0f64);
         let num_coset = 1usize << k;
         let amp_sq = 1.0 / num_coset as f64;
 
@@ -642,12 +634,7 @@ impl SubTableau {
 
     fn compute_statevector(&self) -> Result<Vec<Complex64>> {
         let n = self.n;
-        if n > crate::backend::MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: "factored-stabilizer".to_string(),
-                operation: format!("statevector for {} qubits", n),
-            });
-        }
+        let dim = dense_statevector_len("factored-stabilizer", "statevector", n)?;
 
         let mut work_xz = self.xz.clone();
         let mut work_phase = self.phase.clone();
@@ -657,9 +644,10 @@ impl SubTableau {
         let (k, col_map) = gauss_eliminate_x(&mut work_xz, &mut work_phase, n, nw, stride);
         let seed = solve_diagonal_seed(&work_xz, &work_phase, n, nw, stride, &col_map, k);
 
-        let dim = 1usize << n;
         let zero = Complex64::new(0.0, 0.0);
-        let mut sv = vec![zero; dim];
+        let mut sv = Vec::new();
+        reserve_dense_output(&mut sv, dim, "factored-stabilizer", "statevector")?;
+        sv.resize(dim, zero);
         sv[seed] = Complex64::new(1.0, 0.0);
 
         let powers_of_i = [
@@ -669,7 +657,9 @@ impl SubTableau {
             Complex64::new(0.0, -1.0),
         ];
 
-        let mut visited_gen = vec![0u32; dim];
+        let mut visited_gen = Vec::new();
+        reserve_dense_output(&mut visited_gen, dim, "factored-stabilizer", "statevector")?;
+        visited_gen.resize(dim, 0u32);
         let mut current_gen = 0u32;
         for i in 0..n {
             let row = (i + n) * stride;
@@ -1145,6 +1135,7 @@ impl Backend for FactoredStabilizerBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        dense_probability_len(self.name(), self.num_qubits)?;
         let active: Vec<&SubTableau> = self.subs.iter().filter_map(|s| s.as_ref()).collect();
 
         if active.len() == 1 && active[0].n == self.num_qubits {
@@ -1154,13 +1145,11 @@ impl Backend for FactoredStabilizerBackend {
         let blocks: Vec<(Vec<f64>, Vec<usize>)> = active
             .iter()
             .map(|sub| {
-                let probs = sub
-                    .compute_probabilities()
-                    .unwrap_or_else(|_| vec![0.0; 1 << sub.n]);
+                let probs = sub.compute_probabilities()?;
                 let qubits: Vec<usize> = sub.qubits.to_vec();
-                (probs, qubits)
+                Ok((probs, qubits))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(crate::sim::merge_probabilities(&blocks, self.num_qubits))
     }

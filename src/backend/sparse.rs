@@ -28,9 +28,11 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 const MIN_STATES_FOR_PAR: usize = 4096;
 
-use crate::backend::{is_phase_one, Backend, MAX_PROB_QUBITS};
+use crate::backend::{
+    dense_probability_len, dense_statevector_len, is_phase_one, reserve_dense_output, Backend,
+};
 use crate::circuit::Instruction;
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 use crate::gates::{DiagEntry, Gate};
 
 const DEFAULT_EPSILON: f64 = 1e-16;
@@ -197,6 +199,16 @@ impl SparseBackend {
         }
     }
 
+    #[inline(always)]
+    fn apply_rzz(&mut self, q0: usize, q1: usize, theta: f64) {
+        let phase_same = Complex64::from_polar(1.0, -theta / 2.0);
+        let phase_diff = Complex64::from_polar(1.0, theta / 2.0);
+        for (idx, amp) in self.state.iter_mut() {
+            let parity = ((*idx >> q0) ^ (*idx >> q1)) & 1;
+            *amp *= if parity == 0 { phase_same } else { phase_diff };
+        }
+    }
+
     fn apply_batch_phase(&mut self, control: usize, phases: &[(usize, Complex64)]) {
         let ctrl_mask = 1usize << control;
         let one = Complex64::new(1.0, 0.0);
@@ -330,14 +342,7 @@ impl SparseBackend {
     fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) {
         match gate {
             Gate::Rzz(theta) => {
-                let phase_same = Complex64::from_polar(1.0, -theta / 2.0);
-                let phase_diff = Complex64::from_polar(1.0, theta / 2.0);
-                let q0 = targets[0];
-                let q1 = targets[1];
-                for (idx, amp) in self.state.iter_mut() {
-                    let parity = ((*idx >> q0) ^ (*idx >> q1)) & 1;
-                    *amp *= if parity == 0 { phase_same } else { phase_diff };
-                }
+                self.apply_rzz(targets[0], targets[1], *theta);
             }
             Gate::Cx => {
                 self.apply_cx(targets[0], targets[1]);
@@ -368,12 +373,7 @@ impl SparseBackend {
             }
             Gate::BatchRzz(data) => {
                 for &(q0, q1, theta) in &data.edges {
-                    let phase_same = Complex64::from_polar(1.0, -theta / 2.0);
-                    let phase_diff = Complex64::from_polar(1.0, theta / 2.0);
-                    for (idx, amp) in self.state.iter_mut() {
-                        let parity = ((*idx >> q0) ^ (*idx >> q1)) & 1;
-                        *amp *= if parity == 0 { phase_same } else { phase_diff };
-                    }
+                    self.apply_rzz(q0, q1, theta);
                 }
             }
             Gate::DiagonalBatch(data) => {
@@ -476,6 +476,11 @@ impl Backend for SparseBackend {
         Ok(())
     }
 
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        self.apply_single_qubit(qubit, *matrix);
+        Ok(())
+    }
+
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         let mask = 1usize << qubit;
         let mut p0 = 0.0f64;
@@ -504,17 +509,10 @@ impl Backend for SparseBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "probabilities for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
-        }
-        let dim = 1usize << self.num_qubits;
-        let mut probs = vec![0.0f64; dim];
+        let dim = dense_probability_len(self.name(), self.num_qubits)?;
+        let mut probs = Vec::new();
+        reserve_dense_output(&mut probs, dim, self.name(), "probabilities")?;
+        probs.resize(dim, 0.0f64);
         for (&idx, amp) in &self.state {
             probs[idx] = amp.norm_sqr();
         }
@@ -526,17 +524,10 @@ impl Backend for SparseBackend {
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        if self.num_qubits > MAX_PROB_QUBITS {
-            return Err(PrismError::BackendUnsupported {
-                backend: self.name().to_string(),
-                operation: format!(
-                    "statevector export for {} qubits (max {})",
-                    self.num_qubits, MAX_PROB_QUBITS
-                ),
-            });
-        }
-        let dim = 1usize << self.num_qubits;
-        let mut sv = vec![Complex64::new(0.0, 0.0); dim];
+        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+        let mut sv = Vec::new();
+        reserve_dense_output(&mut sv, dim, self.name(), "statevector export")?;
+        sv.resize(dim, Complex64::new(0.0, 0.0));
         for (&idx, &amp) in &self.state {
             sv[idx] = amp;
         }

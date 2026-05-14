@@ -313,6 +313,39 @@ fn adjoint_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     ]
 }
 
+#[inline]
+fn count_unique_qubits<I: IntoIterator<Item = usize>>(iter: I) -> usize {
+    let mut seen: SmallVec<[usize; 8]> = SmallVec::new();
+    for q in iter {
+        if !seen.contains(&q) {
+            seen.push(q);
+        }
+    }
+    seen.len()
+}
+
+#[inline]
+fn push_unique_qubit(seen: &mut SmallVec<[usize; 8]>, qubit: usize) {
+    if !seen.contains(&qubit) {
+        seen.push(qubit);
+    }
+}
+
+#[inline]
+fn count_unique_diag_qubits(entries: &[DiagEntry]) -> usize {
+    let mut seen: SmallVec<[usize; 8]> = SmallVec::new();
+    for entry in entries {
+        match entry {
+            DiagEntry::Phase1q { qubit, .. } => push_unique_qubit(&mut seen, *qubit),
+            DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                push_unique_qubit(&mut seen, *q0);
+                push_unique_qubit(&mut seen, *q1);
+            }
+        }
+    }
+    seen.len()
+}
+
 /// Product of two 2×2 matrices: A · B.
 #[inline]
 pub(crate) fn mat_mul_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
@@ -338,54 +371,12 @@ impl Gate {
             Gate::BatchPhase(data) => 1 + data.phases.len(),
             Gate::QftBlock { num, .. } => *num as usize,
             Gate::BatchRzz(data) => {
-                let mut count = 0;
-                let mut seen = [false; 64];
-                for &(q0, q1, _) in &data.edges {
-                    if !seen[q0] {
-                        seen[q0] = true;
-                        count += 1;
-                    }
-                    if !seen[q1] {
-                        seen[q1] = true;
-                        count += 1;
-                    }
-                }
-                count
+                count_unique_qubits(data.edges.iter().flat_map(|&(q0, q1, _)| [q0, q1]))
             }
-            Gate::DiagonalBatch(data) => {
-                let mut count = 0;
-                let mut seen = [false; 64];
-                for e in &data.entries {
-                    let qs = match e {
-                        DiagEntry::Phase1q { qubit, .. } => [*qubit, usize::MAX],
-                        DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
-                            [*q0, *q1]
-                        }
-                    };
-                    for &q in &qs {
-                        if q < 64 && !seen[q] {
-                            seen[q] = true;
-                            count += 1;
-                        }
-                    }
-                }
-                count
-            }
+            Gate::DiagonalBatch(data) => count_unique_diag_qubits(&data.entries),
             Gate::MultiFused(data) => data.gates.len(),
             Gate::Multi2q(data) => {
-                let mut count = 0;
-                let mut seen = [false; 64];
-                for &(q0, q1, _) in &data.gates {
-                    if !seen[q0] {
-                        seen[q0] = true;
-                        count += 1;
-                    }
-                    if !seen[q1] {
-                        seen[q1] = true;
-                        count += 1;
-                    }
-                }
-                count
+                count_unique_qubits(data.gates.iter().flat_map(|&(q0, q1, _)| [q0, q1]))
             }
             _ => 1,
         }
@@ -960,6 +951,39 @@ mod tests {
         assert_eq!(Gate::Rx(0.5).num_qubits(), 1);
         assert_eq!(Gate::Cx.num_qubits(), 2);
         assert_eq!(Gate::Swap.num_qubits(), 2);
+    }
+
+    #[test]
+    fn batch_gate_arity_counts_qubits_above_word_boundary() {
+        let one = Complex64::new(1.0, 0.0);
+        let batch_rzz = Gate::BatchRzz(Box::new(BatchRzzData {
+            edges: vec![(0, 64, 0.25), (64, 129, 0.5)],
+        }));
+        assert_eq!(batch_rzz.num_qubits(), 3);
+
+        let diagonal_batch = Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+            entries: vec![
+                DiagEntry::Phase1q {
+                    qubit: 64,
+                    d0: one,
+                    d1: -one,
+                },
+                DiagEntry::Phase2q {
+                    q0: 64,
+                    q1: 130,
+                    phase: -one,
+                },
+            ],
+        }));
+        assert_eq!(diagonal_batch.num_qubits(), 2);
+
+        let multi_2q = Gate::Multi2q(Box::new(Multi2qData {
+            gates: vec![
+                (63, 64, Gate::Cx.matrix_4x4()),
+                (64, 130, Gate::Cz.matrix_4x4()),
+            ],
+        }));
+        assert_eq!(multi_2q.num_qubits(), 3);
     }
 
     #[test]

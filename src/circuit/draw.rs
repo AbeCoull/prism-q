@@ -31,6 +31,7 @@ pub(super) struct PlacedOp {
     pub(super) label: String,
     pub(super) qubits: SmallVec<[usize; 4]>,
     pub(super) kind: OpKind,
+    pub(super) gate: Option<Gate>,
 }
 
 pub(super) enum OpKind {
@@ -97,6 +98,7 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                     label,
                     qubits: SmallVec::from_slice(targets),
                     kind,
+                    gate: Some(gate.clone()),
                 };
                 if max_d >= moments.len() {
                     moments.resize_with(max_d + 1, Vec::new);
@@ -117,6 +119,7 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                     kind: OpKind::Measure {
                         cbit: *classical_bit,
                     },
+                    gate: None,
                 };
                 if d >= moments.len() {
                     moments.resize_with(d + 1, Vec::new);
@@ -130,6 +133,7 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                     label: "|0⟩".into(),
                     qubits: smallvec::smallvec![*qubit],
                     kind: OpKind::Reset,
+                    gate: None,
                 };
                 if d >= moments.len() {
                     moments.resize_with(d + 1, Vec::new);
@@ -143,6 +147,7 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                     label: String::new(),
                     qubits: SmallVec::from_slice(qubits),
                     kind: OpKind::Barrier,
+                    gate: None,
                 };
                 if max_d >= moments.len() {
                     moments.resize_with(max_d + 1, Vec::new);
@@ -180,6 +185,7 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                     label: gate.to_string(),
                     qubits: SmallVec::from_slice(targets),
                     kind: OpKind::Conditional { cbit_label },
+                    gate: Some(gate.clone()),
                 };
                 if max_d >= moments.len() {
                     moments.resize_with(max_d + 1, Vec::new);

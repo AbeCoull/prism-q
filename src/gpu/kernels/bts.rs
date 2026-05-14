@@ -13,12 +13,13 @@
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 use crate::gpu::GpuBuffer;
 use crate::sim::compiled::parity::SparseParity;
 use crate::sim::compiled::rng::Xoshiro256PlusPlus;
 
 use super::super::GpuContext;
+use super::{div_ceil_grid, launch_err, require_i32, require_u32};
 
 const SAMPLE_BLOCK_SIZE: u32 = 128;
 const NOISE_BLOCK_SIZE: u32 = 128;
@@ -581,32 +582,6 @@ extern "C" __global__ void bts_apply_noise_masks_meas_major(
 
 pub(crate) fn kernel_source() -> String {
     KERNEL_SOURCE.to_string()
-}
-
-fn launch_err(op: &str, err: impl std::fmt::Display) -> PrismError {
-    PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("{op}: {err}"),
-    }
-}
-
-fn launch_limit_err(op: &str, name: &str, value: usize, limit: &str) -> PrismError {
-    PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("{op}: {name}={value} exceeds {limit} kernel limit"),
-    }
-}
-
-fn require_i32(op: &str, name: &str, value: usize) -> Result<i32> {
-    i32::try_from(value).map_err(|_| launch_limit_err(op, name, value, "i32"))
-}
-
-fn require_u32(op: &str, name: &str, value: usize) -> Result<u32> {
-    u32::try_from(value).map_err(|_| launch_limit_err(op, name, value, "u32"))
-}
-
-fn div_ceil_grid(op: &str, name: &str, value: usize, block: u32) -> Result<u32> {
-    Ok(require_u32(op, name, value)?.div_ceil(block).max(1))
 }
 
 /// Pick a block size for the noise kernels that doesn't leave the back half

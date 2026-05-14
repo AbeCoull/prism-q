@@ -50,18 +50,20 @@ pub fn is_available() -> bool {
     GpuContext::is_available()
 }
 
+#[inline]
+fn env_usize_or(var: &str, default: usize, min: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.max(min))
+        .unwrap_or(default)
+}
+
 /// Effective GPU crossover threshold. Reads `PRISM_GPU_MIN_QUBITS` once per
 /// process and caches the result.
 pub fn min_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_GPU_MIN_QUBITS") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n;
-            }
-        }
-        MIN_QUBITS_DEFAULT
-    })
+    *CACHED.get_or_init(|| env_usize_or("PRISM_GPU_MIN_QUBITS", MIN_QUBITS_DEFAULT, 0))
 }
 
 /// Default minimum shot count for routing compiled BTS sampling to the GPU.
@@ -92,28 +94,14 @@ pub const BTS_MIN_WEIGHT_FACTOR_DEFAULT: usize = 2;
 /// process and caches the result.
 pub(crate) fn bts_min_shots() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_GPU_BTS_MIN_SHOTS") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n;
-            }
-        }
-        BTS_MIN_SHOTS_DEFAULT
-    })
+    *CACHED.get_or_init(|| env_usize_or("PRISM_GPU_BTS_MIN_SHOTS", BTS_MIN_SHOTS_DEFAULT, 0))
 }
 
 /// Effective GPU BTS rank threshold. Reads `PRISM_GPU_BTS_MIN_RANK` once per
 /// process and caches the result.
 pub(crate) fn bts_min_rank() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_GPU_BTS_MIN_RANK") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n.max(1);
-            }
-        }
-        BTS_MIN_RANK_DEFAULT
-    })
+    *CACHED.get_or_init(|| env_usize_or("PRISM_GPU_BTS_MIN_RANK", BTS_MIN_RANK_DEFAULT, 1))
 }
 
 /// Effective GPU BTS parity-weight threshold factor. Reads
@@ -121,12 +109,11 @@ pub(crate) fn bts_min_rank() -> usize {
 pub(crate) fn bts_min_weight_factor() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_GPU_BTS_MIN_WEIGHT_FACTOR") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n.max(1);
-            }
-        }
-        BTS_MIN_WEIGHT_FACTOR_DEFAULT
+        env_usize_or(
+            "PRISM_GPU_BTS_MIN_WEIGHT_FACTOR",
+            BTS_MIN_WEIGHT_FACTOR_DEFAULT,
+            1,
+        )
     })
 }
 
@@ -148,12 +135,11 @@ pub const STABILIZER_MIN_QUBITS_DEFAULT: usize = 100_000;
 pub fn stabilizer_min_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        if let Ok(val) = std::env::var("PRISM_STABILIZER_GPU_MIN_QUBITS") {
-            if let Ok(n) = val.parse::<usize>() {
-                return n;
-            }
-        }
-        STABILIZER_MIN_QUBITS_DEFAULT
+        env_usize_or(
+            "PRISM_STABILIZER_GPU_MIN_QUBITS",
+            STABILIZER_MIN_QUBITS_DEFAULT,
+            0,
+        )
     })
 }
 

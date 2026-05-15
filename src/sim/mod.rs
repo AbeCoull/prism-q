@@ -299,7 +299,7 @@ fn supports_deferred_measurement_sampling(circuit: &Circuit) -> bool {
 
 fn is_clifford_sampler_kind(kind: &BackendKind) -> bool {
     match kind {
-        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer => true,
+        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FactoredStabilizer => true,
         #[cfg(feature = "gpu")]
         BackendKind::StabilizerGpu { .. } => true,
         _ => false,
@@ -347,7 +347,7 @@ fn compile_measurements_for_kind(
 /// Execute a circuit multiple times and return outcome counts directly.
 ///
 /// For Clifford circuits with terminal measurements and no resets, Auto,
-/// Stabilizer, FilteredStabilizer, and explicit `StabilizerGpu` route through
+/// Stabilizer, FactoredStabilizer, and explicit `StabilizerGpu` route through
 /// the compiled sampler's optimized counting path. Explicit `StabilizerGpu`
 /// carries its GPU context into the compiled sampler so large shot runs avoid
 /// the raw tableau measurement round-trips. Other circuits fall back to
@@ -572,7 +572,7 @@ pub fn run_shots_with(
 
 /// Execute a noisy circuit for multiple shots with explicit backend selection.
 ///
-/// For Clifford circuits with Auto/Stabilizer/FilteredStabilizer backends,
+/// For Clifford circuits with Auto/Stabilizer/FactoredStabilizer backends,
 /// uses the compiled noisy sampler (fast O(n²·m) compile + O(events·m/64) per shot).
 /// For all other cases, falls back to per-shot simulation with noise injection.
 /// The compiled noisy path is limited to terminal measurements with no resets
@@ -643,7 +643,7 @@ pub fn run_shots_with_noise(
     if noise_model.is_pauli_only() {
         let use_compiled = matches!(
             kind,
-            BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FilteredStabilizer
+            BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FactoredStabilizer
         ) && supports_compiled_measurement_sampling(circuit)
             || {
                 #[cfg(feature = "gpu")]
@@ -1293,6 +1293,18 @@ mod tests {
         assert_eq!(total, 500);
     }
 
+    #[test]
+    fn test_run_counts_factored_stabilizer() {
+        let circuit = make_bell_with_measure();
+        let counts = run_counts(BackendKind::FactoredStabilizer, &circuit, 128, 42).unwrap();
+        let total: u64 = counts.values().sum();
+        let bell_total = counts.get(&vec![0u64]).copied().unwrap_or(0)
+            + counts.get(&vec![3u64]).copied().unwrap_or(0);
+
+        assert_eq!(total, 128);
+        assert_eq!(bell_total, 128);
+    }
+
     fn assert_unit_norm(state: &[num_complex::Complex64], label: &str) {
         let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
         assert!(
@@ -1872,15 +1884,6 @@ mod tests {
     // ── Dispatch validation ───────────────────────────────────────────
 
     #[test]
-    fn test_validate_filtered_stabilizer_rejects_non_clifford() {
-        let circuit = make_general_circuit();
-        assert!(matches!(
-            run_with(BackendKind::FilteredStabilizer, &circuit, 42).unwrap_err(),
-            crate::error::PrismError::IncompatibleBackend { .. }
-        ));
-    }
-
-    #[test]
     fn test_validate_factored_stabilizer_rejects_non_clifford() {
         let circuit = make_general_circuit();
         assert!(matches!(
@@ -1896,16 +1899,6 @@ mod tests {
             run_with(BackendKind::StabilizerRank, &circuit, 42).unwrap_err(),
             crate::error::PrismError::IncompatibleBackend { .. }
         ));
-    }
-
-    #[test]
-    fn test_validate_filtered_stabilizer_accepts_clifford() {
-        assert!(run_with(
-            BackendKind::FilteredStabilizer,
-            &make_clifford_circuit(),
-            42
-        )
-        .is_ok());
     }
 
     #[test]
@@ -2121,7 +2114,6 @@ mod tests {
 
         for kind in [
             BackendKind::Stabilizer,
-            BackendKind::FilteredStabilizer,
             BackendKind::FactoredStabilizer,
             BackendKind::Sparse,
             BackendKind::Mps { max_bond_dim: 64 },

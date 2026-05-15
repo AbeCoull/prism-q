@@ -1144,3 +1144,113 @@ unsafe fn sample_bts_meas_major_neon(
 ) -> Vec<u64> {
     unreachable!()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    fn rng(seed: u64) -> Xoshiro256PlusPlus {
+        let mut c = ChaCha8Rng::seed_from_u64(seed);
+        Xoshiro256PlusPlus::from_chacha(&mut c)
+    }
+
+    #[test]
+    fn xor_reduce_scalar_arities() {
+        let bits = vec![0x01u64, 0x02, 0x04, 0x08, 0x10, 0x20];
+        assert_eq!(xor_reduce_scalar(&[], &bits), 0);
+        assert_eq!(xor_reduce_scalar(&[0], &bits), 0x01);
+        assert_eq!(xor_reduce_scalar(&[0, 1], &bits), 0x03);
+        assert_eq!(xor_reduce_scalar(&[0, 1, 2], &bits), 0x07);
+        assert_eq!(xor_reduce_scalar(&[0, 1, 2, 3], &bits), 0x0F);
+        assert_eq!(xor_reduce_scalar(&[0, 1, 2, 3, 4], &bits), 0x1F);
+        assert_eq!(xor_reduce_scalar(&[0, 1, 2, 3, 4, 5], &bits), 0x3F);
+    }
+
+    #[test]
+    fn apply_ref_bits_flips_set_rows() {
+        let num_meas = 3;
+        let s_words = 1;
+        let mut m = vec![0u64; num_meas * s_words];
+        m[0] = 0x0F;
+        m[1] = 0x0F;
+        m[2] = 0x0F;
+        let ref_bits = vec![0b101u64];
+        apply_ref_bits_meas_major(&mut m, &ref_bits, num_meas, s_words);
+        assert_eq!(m[0], !0x0Fu64);
+        assert_eq!(m[1], 0x0F);
+        assert_eq!(m[2], !0x0Fu64);
+    }
+
+    #[test]
+    fn sample_bts_small_runs() {
+        let rank = 2;
+        let num_meas = 4;
+        let flip_rows = vec![vec![0b0011u64], vec![0b0101u64]];
+        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+        let ref_bits = vec![0u64];
+        let mut r = rng(42);
+        let num_shots = 32;
+        let out = sample_bts_meas_major(&sparse, num_shots, &ref_bits, &mut r, rank);
+        assert_eq!(out.len(), num_meas * num_shots.div_ceil(64));
+    }
+
+    #[test]
+    fn sample_bts_dag_path() {
+        let rank = 3;
+        let num_meas = 5;
+        let flip_rows = vec![vec![0b11111u64], vec![0b01010u64], vec![0b10001u64]];
+        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+        let dag = sparse.build_xor_dag();
+        let ref_bits = vec![0u64];
+        let mut r = rng(7);
+        let out = bts_single_pass(&sparse, Some(&dag), 64, &ref_bits, &mut r, rank);
+        assert_eq!(out.len(), num_meas);
+    }
+
+    #[test]
+    fn bts_batched_matches_single_pass_layout() {
+        let rank = 2;
+        let num_meas = 3;
+        let flip_rows = vec![vec![0b101u64], vec![0b011u64]];
+        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+        let ref_bits = vec![0u64];
+        let num_shots: usize = 128;
+        let total_s_words = num_shots.div_ceil(64);
+        let mut r = rng(13);
+        let out = bts_batched(
+            &sparse,
+            None,
+            num_shots,
+            total_s_words,
+            &ref_bits,
+            &mut r,
+            rank,
+        );
+        assert_eq!(out.len(), num_meas * total_s_words);
+    }
+
+    #[test]
+    fn bts_batched_dag_runs() {
+        let rank = 2;
+        let num_meas = 4;
+        let flip_rows = vec![vec![0xFu64], vec![0xAu64]];
+        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+        let dag = sparse.build_xor_dag();
+        let ref_bits = vec![0u64];
+        let num_shots: usize = 200;
+        let total_s_words = num_shots.div_ceil(64);
+        let mut r = rng(99);
+        let out = bts_batched(
+            &sparse,
+            Some(&dag),
+            num_shots,
+            total_s_words,
+            &ref_bits,
+            &mut r,
+            rank,
+        );
+        assert_eq!(out.len(), num_meas * total_s_words);
+    }
+}

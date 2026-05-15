@@ -1056,4 +1056,57 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn clifford_map_identity_and_apply_all() {
+        let mut m = CliffordMap::identity(5);
+        m.apply_h(0);
+        m.apply_s(1);
+        m.apply_sx(2);
+        m.apply_cx(0, 1);
+        m.apply_cz(2, 3);
+        assert_eq!(m.num_words, 1);
+        assert_eq!(m.col_xx.len(), 5);
+    }
+
+    #[test]
+    fn coalesce_cliffords_triggers_map_path() {
+        let mut circuit = Circuit::new(4, 0);
+        for _ in 0..20 {
+            for q in 0..4 {
+                circuit.add_gate(Gate::H, &[q]);
+                circuit.add_gate(Gate::S, &[q]);
+            }
+            circuit.add_gate(Gate::Cx, &[0, 1]);
+            circuit.add_gate(Gate::Cz, &[2, 3]);
+        }
+        let ops = coalesce_cliffords(&circuit);
+        assert!(!ops.is_empty());
+        let result = run_spp(&circuit, 32, 42).unwrap();
+        assert_eq!(result.expectations.len(), 4);
+        let probs = spp_to_probabilities(&result);
+        assert_eq!(probs.len(), 8);
+    }
+
+    #[test]
+    fn run_spp_pure_clifford() {
+        let mut circuit = Circuit::new(2, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        let result = run_spp(&circuit, 16, 42).unwrap();
+        assert_eq!(result.expectations.len(), 2);
+        assert!(result.t_count == 0);
+    }
+
+    #[test]
+    fn run_spd_pure_clifford() {
+        let mut circuit = Circuit::new(2, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        let result = run_spd(&circuit, 0.0, 1024).unwrap();
+        let probs = spd_to_probabilities(&result);
+        assert_eq!(probs.len(), 4);
+        let sum: f64 = probs.iter().sum();
+        assert!((sum - 2.0).abs() < 1e-9);
+    }
 }

@@ -261,7 +261,7 @@ Word-group batching fuses multiple 1q gate flushes into single tableau passes. T
 
 Probability extraction uses coset-based enumeration with GF(2) Gaussian elimination. O(2^k) where k is the number of non-diagonal generators, rather than O(2^n).
 
-**Filtered Stabilizer** (`FilteredStabilizerBackend`): Per-cluster tableaux with dynamic merging. Starts with one qubit per cluster. Cross-cluster 2q gates merge tableaux. Independent subsystems never merge, giving O(block_size²) per gate vs O(n²).
+**Factored Stabilizer** (`FactoredStabilizerBackend`): Per-cluster tableaux with dynamic merging. Starts with one qubit per cluster. Cross-cluster 2q gates merge tableaux. Measurement and reset can split independent sub-tableaux again. Independent subsystems avoid full-tableau work when product structure is preserved.
 
 ### Sparse
 
@@ -494,7 +494,7 @@ All `BackendKind` variants:
 | `Auto` | Decision tree (see above) | Default |
 | `Statevector` | Full state-vector | Explicit |
 | `Stabilizer` | Aaronson-Gottesman tableau | Explicit or auto (all Clifford) |
-| `FilteredStabilizer` | Per-cluster tableaux | Explicit |
+| `FactoredStabilizer` | Per-cluster tableaux | Explicit or auto (large independent Clifford blocks) |
 | `Sparse` | HashMap state | Explicit or auto (above memory limit, sparse-friendly) |
 | `Mps { max_bond_dim }` | Matrix Product State | Explicit or auto (above memory limit) |
 | `ProductState` | Per-qubit product | Explicit or auto (no entangling) |

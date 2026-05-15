@@ -81,7 +81,6 @@ pub enum BackendKind {
     TensorNetwork,
     Factored,
     StabilizerRank,
-    FilteredStabilizer,
     FactoredStabilizer,
     StochasticPauli {
         num_samples: usize,
@@ -154,9 +153,7 @@ impl BackendKind {
     pub(crate) fn is_stabilizer_family(&self) -> bool {
         matches!(
             self,
-            BackendKind::Stabilizer
-                | BackendKind::FilteredStabilizer
-                | BackendKind::FactoredStabilizer
+            BackendKind::Stabilizer | BackendKind::FactoredStabilizer
         ) || {
             #[cfg(feature = "gpu")]
             {
@@ -209,7 +206,6 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
 pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> bool {
     match kind {
         BackendKind::Stabilizer
-        | BackendKind::FilteredStabilizer
         | BackendKind::FactoredStabilizer
         | BackendKind::StabilizerRank
         | BackendKind::StochasticPauli { .. }
@@ -284,9 +280,6 @@ pub(super) fn select_dispatch(
             DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
         }
         BackendKind::Stabilizer => DispatchAction::Backend(Box::new(StabilizerBackend::new(seed))),
-        BackendKind::FilteredStabilizer => DispatchAction::Backend(Box::new(
-            crate::backend::stabilizer::FilteredStabilizerBackend::new(seed),
-        )),
         BackendKind::Sparse => DispatchAction::Backend(Box::new(SparseBackend::new(seed))),
         BackendKind::Mps { max_bond_dim } => {
             DispatchAction::Backend(Box::new(MpsBackend::new(seed, *max_bond_dim)))

@@ -21,14 +21,15 @@ pub struct GpuDevice {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 enum DeviceInner {
     Real {
         context: Arc<CudaContext>,
         stream: Arc<CudaStream>,
+        #[allow(dead_code)]
         module: Arc<CudaModule>,
         functions: HashMap<&'static str, CudaFunction>,
     },
+    #[allow(dead_code)]
     Stub,
 }
 

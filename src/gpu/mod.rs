@@ -345,10 +345,8 @@ impl GpuState {
 /// measurement computations.
 #[derive(Debug)]
 pub struct GpuTableau {
-    #[allow(dead_code)]
     context: Arc<GpuContext>,
     xz: GpuBuffer<u64>,
-    #[allow(dead_code)]
     phase: GpuBuffer<u8>,
     measure_pivot: GpuBuffer<i32>,
     measure_outcome: GpuBuffer<u8>,

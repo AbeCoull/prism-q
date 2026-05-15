@@ -10,6 +10,12 @@ flamegraph.svg
 perf.data
 perf.data.old
 
+# Coverage
+lcov.info
+codecov.json
+*.profraw
+*.profdata
+
 # Project tracking I use locally. No need to see how disorganized it is...
 TASK_TRACKER.md
 

@@ -1667,13 +1667,54 @@ impl PackedShots {
     }
 
     pub fn to_shots(&self) -> Vec<Vec<bool>> {
-        let mut shots = Vec::with_capacity(self.num_shots);
-        for s in 0..self.num_shots {
-            let mut shot = Vec::with_capacity(self.num_measurements);
-            for m in 0..self.num_measurements {
-                shot.push(self.get_bit(s, m));
+        let mut shots = vec![vec![false; self.num_measurements]; self.num_shots];
+        match self.layout {
+            ShotLayout::ShotMajor => {
+                let tail = self.num_measurements % 64;
+                let last_mask = if tail == 0 {
+                    u64::MAX
+                } else {
+                    (1u64 << tail) - 1
+                };
+                for (s, shot) in shots.iter_mut().enumerate() {
+                    let row = &self.data[s * self.m_words..(s + 1) * self.m_words];
+                    for (mw, mut bits) in row.iter().copied().enumerate() {
+                        let base = mw * 64;
+                        if mw + 1 == self.m_words {
+                            bits &= last_mask;
+                        }
+                        while bits != 0 {
+                            let measurement = base + bits.trailing_zeros() as usize;
+                            shot[measurement] = true;
+                            bits &= bits - 1;
+                        }
+                    }
+                }
             }
-            shots.push(shot);
+            ShotLayout::MeasMajor => {
+                let tail = self.num_shots % 64;
+                let last_mask = if tail == 0 {
+                    u64::MAX
+                } else {
+                    (1u64 << tail) - 1
+                };
+                let mut measurement = 0;
+                while measurement < self.num_measurements {
+                    let row =
+                        &self.data[measurement * self.s_words..(measurement + 1) * self.s_words];
+                    for (sw, mut bits) in row.iter().copied().enumerate() {
+                        if sw + 1 == self.s_words {
+                            bits &= last_mask;
+                        }
+                        while bits != 0 {
+                            let shot = sw * 64 + bits.trailing_zeros() as usize;
+                            shots[shot][measurement] = true;
+                            bits &= bits - 1;
+                        }
+                    }
+                    measurement += 1;
+                }
+            }
         }
         shots
     }

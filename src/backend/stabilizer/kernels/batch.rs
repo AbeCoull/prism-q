@@ -827,3 +827,101 @@ impl StabilizerBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::stabilizer::StabilizerBackend;
+    use crate::backend::Backend;
+    use crate::circuit::Circuit;
+    use crate::gates::Gate;
+    use crate::sim;
+
+    fn run_and_count_zero(circuit: &Circuit) -> usize {
+        let mut b = StabilizerBackend::new(42);
+        sim::run_on(&mut b, circuit).unwrap();
+        b.classical_results().iter().filter(|x| !**x).count()
+    }
+
+    fn assert_runs(circuit: &Circuit) {
+        let mut b = StabilizerBackend::new(42);
+        sim::run_on(&mut b, circuit).unwrap();
+    }
+
+    #[test]
+    fn batch_path_193q_basic_clifford() {
+        let n = 200;
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..n {
+            c.add_gate(Gate::S, &[q]);
+            c.add_gate(Gate::Z, &[q]);
+        }
+        assert_runs(&c);
+    }
+
+    #[test]
+    fn batch_path_overlapping_1q_targets_segment_flush() {
+        let n = 200;
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::S, &[q]);
+            c.add_gate(Gate::Sdg, &[q]);
+        }
+        assert_runs(&c);
+    }
+
+    #[test]
+    fn batch_path_cross_word_two_qubit_gates() {
+        let n = 200;
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        c.add_gate(Gate::Cx, &[0, 128]);
+        c.add_gate(Gate::Cz, &[5, 192]);
+        c.add_gate(Gate::Swap, &[60, 199]);
+        assert_runs(&c);
+    }
+
+    #[test]
+    fn batch_path_all_1q_gate_types() {
+        let n = 200;
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::S, &[q]);
+            c.add_gate(Gate::Sdg, &[q]);
+            c.add_gate(Gate::X, &[q]);
+            c.add_gate(Gate::Y, &[q]);
+            c.add_gate(Gate::Z, &[q]);
+            c.add_gate(Gate::SX, &[q]);
+            c.add_gate(Gate::SXdg, &[q]);
+            c.add_gate(Gate::Id, &[q]);
+        }
+        assert_runs(&c);
+    }
+
+    #[test]
+    fn batch_path_zero_state_unchanged_after_identity_loop() {
+        let n = 200;
+        let mut c = Circuit::new(n, n);
+        for q in 0..n {
+            c.add_gate(Gate::Id, &[q]);
+        }
+        for q in 0..n {
+            c.instructions.push(crate::circuit::Instruction::Measure {
+                qubit: q,
+                classical_bit: q,
+            });
+        }
+        let zeros = run_and_count_zero(&c);
+        assert_eq!(zeros, n);
+    }
+}

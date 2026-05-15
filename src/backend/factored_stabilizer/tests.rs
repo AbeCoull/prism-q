@@ -570,3 +570,26 @@ fn non_clifford_rejected() {
     let result = fact.apply(&c.instructions[0]);
     assert!(result.is_err());
 }
+
+#[test]
+fn par_path_128q_all_clifford_gates() {
+    let n = 130;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::S, &[q]);
+        c.add_gate(Gate::Sdg, &[q]);
+        c.add_gate(Gate::X, &[q]);
+        c.add_gate(Gate::Y, &[q]);
+        c.add_gate(Gate::Z, &[q]);
+        c.add_gate(Gate::SX, &[q]);
+        c.add_gate(Gate::SXdg, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c.add_gate(Gate::Cz, &[0, n - 1]);
+    c.add_gate(Gate::Swap, &[1, n - 2]);
+    let mut b = FactoredStabilizerBackend::new(42);
+    crate::sim::run_on(&mut b, &c).unwrap();
+}

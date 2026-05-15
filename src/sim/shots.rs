@@ -108,19 +108,22 @@ pub(super) fn sample_shots(
         return vec![vec![false; num_classical_bits]; num_shots];
     }
 
-    let mut indices = Vec::with_capacity(num_shots);
+    let mut shots = vec![vec![false; num_classical_bits]; num_shots];
 
     match probs {
         Probabilities::Dense(v) => {
             let cdf = build_cdf(v);
-            for _ in 0..num_shots {
+            for shot in &mut shots {
                 let r: f64 = rng.random();
-                indices.push(sample_from_cdf(&cdf, r));
+                let state_idx = sample_from_cdf(&cdf, r);
+                for &(qubit, cbit) in meas_map {
+                    shot[cbit] = (state_idx >> qubit) & 1 == 1;
+                }
             }
         }
         Probabilities::Factored { blocks, .. } => {
             let block_cdfs: Vec<Vec<f64>> = blocks.iter().map(|b| build_cdf(&b.probs)).collect();
-            for _ in 0..num_shots {
+            for shot in &mut shots {
                 let mut global_idx = 0usize;
                 for (block, cdf) in blocks.iter().zip(block_cdfs.iter()) {
                     let r: f64 = rng.random();
@@ -136,23 +139,13 @@ pub(super) fn sample_shots(
                         m &= m.wrapping_sub(1);
                     }
                 }
-                indices.push(global_idx);
+                for &(qubit, cbit) in meas_map {
+                    shot[cbit] = (global_idx >> qubit) & 1 == 1;
+                }
             }
         }
     }
 
-    let mut flat = vec![false; num_shots * num_classical_bits];
-    for (s, &state_idx) in indices.iter().enumerate() {
-        let base = s * num_classical_bits;
-        for &(qubit, cbit) in meas_map {
-            flat[base + cbit] = (state_idx >> qubit) & 1 == 1;
-        }
-    }
-
-    let mut shots = Vec::with_capacity(num_shots);
-    for chunk in flat.chunks_exact(num_classical_bits) {
-        shots.push(chunk.to_vec());
-    }
     shots
 }
 
@@ -171,6 +164,65 @@ pub(super) fn packed_shots_to_classical_bits(
     }
 
     let mut shots = vec![vec![false; num_classical_bits]; packed.num_shots()];
+    let mut seen = vec![false; num_classical_bits];
+    let unique_classical_bits = meas_map.iter().all(|&(_, classical_bit)| {
+        if classical_bit >= num_classical_bits {
+            return true;
+        }
+        if seen[classical_bit] {
+            false
+        } else {
+            seen[classical_bit] = true;
+            true
+        }
+    });
+
+    if unique_classical_bits {
+        match packed.layout() {
+            compiled::ShotLayout::ShotMajor => {
+                let m_words = packed.m_words();
+                let data = packed.raw_data();
+                for (shot_idx, shot) in shots.iter_mut().enumerate() {
+                    let row = &data[shot_idx * m_words..(shot_idx + 1) * m_words];
+                    for (measurement, &(_, classical_bit)) in meas_map.iter().enumerate() {
+                        if classical_bit >= num_classical_bits {
+                            continue;
+                        }
+                        let word = row[measurement / 64];
+                        shot[classical_bit] = (word >> (measurement % 64)) & 1 != 0;
+                    }
+                }
+            }
+            compiled::ShotLayout::MeasMajor => {
+                let s_words = packed.s_words();
+                let data = packed.raw_data();
+                let tail = packed.num_shots() % 64;
+                let last_mask = if tail == 0 {
+                    u64::MAX
+                } else {
+                    (1u64 << tail) - 1
+                };
+                for (measurement, &(_, classical_bit)) in meas_map.iter().enumerate() {
+                    if classical_bit >= num_classical_bits {
+                        continue;
+                    }
+                    let row = &data[measurement * s_words..(measurement + 1) * s_words];
+                    for (sw, mut bits) in row.iter().copied().enumerate() {
+                        if sw + 1 == s_words {
+                            bits &= last_mask;
+                        }
+                        while bits != 0 {
+                            let shot = sw * 64 + bits.trailing_zeros() as usize;
+                            shots[shot][classical_bit] = true;
+                            bits &= bits - 1;
+                        }
+                    }
+                }
+            }
+        }
+        return shots;
+    }
+
     for (measurement, &(_, classical_bit)) in meas_map.iter().enumerate() {
         if classical_bit >= num_classical_bits {
             continue;
@@ -180,4 +232,143 @@ pub(super) fn packed_shots_to_classical_bits(
         }
     }
     shots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::compiled::PackedShots;
+    use crate::sim::probability::{FactoredBlock, Probabilities};
+
+    #[test]
+    fn build_cdf_normalizes_last_to_one() {
+        let cdf = build_cdf(&[0.2, 0.3, 0.4999]);
+        assert_eq!(cdf.len(), 3);
+        assert!((cdf[0] - 0.2).abs() < 1e-12);
+        assert!((cdf[1] - 0.5).abs() < 1e-12);
+        assert!((cdf[2] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn build_cdf_empty_and_single() {
+        let empty = build_cdf(&[]);
+        assert!(empty.is_empty());
+        let single = build_cdf(&[0.42]);
+        assert_eq!(single, vec![1.0]);
+    }
+
+    #[test]
+    fn sample_from_cdf_bounds() {
+        let cdf = [0.25, 0.5, 0.75, 1.0];
+        assert_eq!(sample_from_cdf(&cdf, 0.0), 0);
+        assert_eq!(sample_from_cdf(&cdf, 0.3), 1);
+        assert_eq!(sample_from_cdf(&cdf, 0.99), 3);
+        assert_eq!(sample_from_cdf(&cdf, 1.0), 3);
+    }
+
+    #[test]
+    fn bitstring_packs_bits_lsb_first() {
+        let bits = vec![0b1011u64];
+        let s = bitstring(&bits, 4);
+        assert_eq!(s, "1101");
+    }
+
+    #[test]
+    fn bitstring_short_key_pads_zero() {
+        let s = bitstring(&[], 3);
+        assert_eq!(s, "000");
+    }
+
+    #[test]
+    fn shots_result_counts_and_display() {
+        let result = ShotsResult {
+            shots: vec![vec![true, false], vec![true, false], vec![false, true]],
+            num_classical_bits: 2,
+        };
+        assert_eq!(result.num_shots(), 3);
+        assert_eq!(result.num_classical_bits(), 2);
+        let counts = result.counts();
+        assert_eq!(counts.len(), 2);
+        let s = format!("{}", result);
+        assert!(s.contains("10: 2"));
+        assert!(s.contains("01: 1"));
+    }
+
+    #[test]
+    fn sample_shots_empty_meas_map_returns_all_false() {
+        let probs = Probabilities::Dense(vec![1.0]);
+        let shots = sample_shots(&probs, &[], 3, 4, 42);
+        assert_eq!(shots.len(), 4);
+        for shot in shots {
+            assert_eq!(shot, vec![false, false, false]);
+        }
+    }
+
+    #[test]
+    fn sample_shots_dense_deterministic() {
+        let probs = Probabilities::Dense(vec![0.0, 1.0]);
+        let shots = sample_shots(&probs, &[(0, 0)], 1, 5, 42);
+        for shot in shots {
+            assert_eq!(shot, vec![true]);
+        }
+    }
+
+    #[test]
+    fn sample_shots_factored_reconstructs_global_index() {
+        let probs = Probabilities::Factored {
+            blocks: vec![
+                FactoredBlock {
+                    probs: vec![0.0, 1.0],
+                    mask: 0b001,
+                },
+                FactoredBlock {
+                    probs: vec![0.0, 0.0, 0.0, 1.0],
+                    mask: 0b110,
+                },
+            ],
+            total_qubits: 3,
+        };
+        let shots = sample_shots(&probs, &[(0, 0), (1, 1), (2, 2)], 3, 10, 42);
+        for shot in shots {
+            assert_eq!(shot, vec![true, true, true]);
+        }
+    }
+
+    #[test]
+    fn packed_shots_identity_fast_path() {
+        let mut data = vec![0u64; 4];
+        data[0] = 0b101;
+        data[1] = 0b010;
+        data[2] = 0b111;
+        data[3] = 0b000;
+        let packed = PackedShots::from_shot_major(data, 4, 3);
+        let meas_map = [(0, 0), (0, 1), (0, 2)];
+        let shots = packed_shots_to_classical_bits(&packed, &meas_map, 3);
+        assert_eq!(shots.len(), 4);
+        assert_eq!(shots[0], vec![true, false, true]);
+        assert_eq!(shots[1], vec![false, true, false]);
+        assert_eq!(shots[2], vec![true, true, true]);
+        assert_eq!(shots[3], vec![false, false, false]);
+    }
+
+    #[test]
+    fn packed_shots_non_identity_mapping() {
+        let mut data = vec![0u64; 2];
+        data[0] = 0b011;
+        data[1] = 0b100;
+        let packed = PackedShots::from_shot_major(data, 2, 3);
+        let meas_map = [(0, 2), (0, 1), (0, 0)];
+        let shots = packed_shots_to_classical_bits(&packed, &meas_map, 3);
+        assert_eq!(shots[0], vec![false, true, true]);
+        assert_eq!(shots[1], vec![true, false, false]);
+    }
+
+    #[test]
+    fn packed_shots_out_of_range_classical_bit_skipped() {
+        let data = vec![0b111u64];
+        let packed = PackedShots::from_shot_major(data, 1, 3);
+        let meas_map = [(0, 0), (0, 5), (0, 1)];
+        let shots = packed_shots_to_classical_bits(&packed, &meas_map, 2);
+        assert_eq!(shots[0], vec![true, true]);
+    }
 }

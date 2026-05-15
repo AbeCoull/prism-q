@@ -306,6 +306,59 @@ impl Xoshiro256PlusPlusX4 {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+pub(super) struct Xoshiro256PlusPlusX2 {
+    s0: std::arch::aarch64::uint64x2_t,
+    s1: std::arch::aarch64::uint64x2_t,
+    s2: std::arch::aarch64::uint64x2_t,
+    s3: std::arch::aarch64::uint64x2_t,
+}
+
+#[cfg(target_arch = "aarch64")]
+impl Xoshiro256PlusPlusX2 {
+    #[inline]
+    // SAFETY: NEON is baseline on aarch64; caller provides valid scalar RNG
+    pub(super) unsafe fn from_scalar(rng: &mut Xoshiro256PlusPlus) -> Self {
+        use std::arch::aarch64::*;
+        let mut seeds = [0u64; 8];
+        for s in &mut seeds {
+            *s = rng.next_u64();
+        }
+        Self {
+            s0: vld1q_u64([seeds[0], seeds[4]].as_ptr()),
+            s1: vld1q_u64([seeds[1], seeds[5]].as_ptr()),
+            s2: vld1q_u64([seeds[2], seeds[6]].as_ptr()),
+            s3: vld1q_u64([seeds[3], seeds[7]].as_ptr()),
+        }
+    }
+
+    #[inline]
+    // SAFETY: NEON is baseline on aarch64
+    pub(super) unsafe fn next_uint64x2(&mut self) -> std::arch::aarch64::uint64x2_t {
+        use std::arch::aarch64::*;
+
+        macro_rules! rotl64_neon {
+            ($x:expr, $k:literal) => {
+                vorrq_u64(vshlq_n_u64($x, $k), vshrq_n_u64($x, 64 - $k))
+            };
+        }
+
+        let sum = vaddq_u64(self.s0, self.s3);
+        let result = vaddq_u64(rotl64_neon!(sum, 23), self.s0);
+
+        let t = vshlq_n_u64(self.s1, 17);
+
+        self.s2 = veorq_u64(self.s2, self.s0);
+        self.s3 = veorq_u64(self.s3, self.s1);
+        self.s1 = veorq_u64(self.s1, self.s2);
+        self.s0 = veorq_u64(self.s0, self.s3);
+        self.s2 = veorq_u64(self.s2, t);
+        self.s3 = rotl64_neon!(self.s3, 45);
+
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,58 +459,5 @@ mod tests {
         let mut a = Xoshiro256PlusPlus::from_seeds([1, 2, 3, 4]);
         let mut b = Xoshiro256PlusPlus::from_seeds([5, 6, 7, 8]);
         assert_ne!(a.next_u64(), b.next_u64());
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-pub(super) struct Xoshiro256PlusPlusX2 {
-    s0: std::arch::aarch64::uint64x2_t,
-    s1: std::arch::aarch64::uint64x2_t,
-    s2: std::arch::aarch64::uint64x2_t,
-    s3: std::arch::aarch64::uint64x2_t,
-}
-
-#[cfg(target_arch = "aarch64")]
-impl Xoshiro256PlusPlusX2 {
-    #[inline]
-    // SAFETY: NEON is baseline on aarch64; caller provides valid scalar RNG
-    pub(super) unsafe fn from_scalar(rng: &mut Xoshiro256PlusPlus) -> Self {
-        use std::arch::aarch64::*;
-        let mut seeds = [0u64; 8];
-        for s in &mut seeds {
-            *s = rng.next_u64();
-        }
-        Self {
-            s0: vld1q_u64([seeds[0], seeds[4]].as_ptr()),
-            s1: vld1q_u64([seeds[1], seeds[5]].as_ptr()),
-            s2: vld1q_u64([seeds[2], seeds[6]].as_ptr()),
-            s3: vld1q_u64([seeds[3], seeds[7]].as_ptr()),
-        }
-    }
-
-    #[inline]
-    // SAFETY: NEON is baseline on aarch64
-    pub(super) unsafe fn next_uint64x2(&mut self) -> std::arch::aarch64::uint64x2_t {
-        use std::arch::aarch64::*;
-
-        macro_rules! rotl64_neon {
-            ($x:expr, $k:literal) => {
-                vorrq_u64(vshlq_n_u64($x, $k), vshrq_n_u64($x, 64 - $k))
-            };
-        }
-
-        let sum = vaddq_u64(self.s0, self.s3);
-        let result = vaddq_u64(rotl64_neon!(sum, 23), self.s0);
-
-        let t = vshlq_n_u64(self.s1, 17);
-
-        self.s2 = veorq_u64(self.s2, self.s0);
-        self.s3 = veorq_u64(self.s3, self.s1);
-        self.s1 = veorq_u64(self.s1, self.s2);
-        self.s0 = veorq_u64(self.s0, self.s3);
-        self.s2 = veorq_u64(self.s2, t);
-        self.s3 = rotl64_neon!(self.s3, 45);
-
-        result
     }
 }

@@ -2,20 +2,24 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.14.3] - 2026-05-18
+
+### Performance
+
+- **sim:** Streamline query APIs with terminal sampling fast paths (#69)([6d328d6](https://github.com/AbeCoull/prism-q/commit/6d328d61db6ba2bf4bc54b23f8352c3fbc755c1b))
 ## [0.14.2] - 2026-05-18
 
 ### Bug Fixes
 
 - **sim:** Correct backward sign for SX, SXdg, and CZ in compiled Pauli propagation (#68)([6a2c273](https://github.com/AbeCoull/prism-q/commit/6a2c273ffeb8f901416dd2a2316a0e293862a858))
 
+### Miscellaneous
+
+- **release:** 0.14.2([6c88249](https://github.com/AbeCoull/prism-q/commit/6c882499c8c55445d0b3c18c146f0b93ca3fbcde))
+
 ### Refactor
 
-- **sim:** Replace public free-function simulation aliases with the query-aware builder API.
 - **sim:** Consolidate simulator hot path helpers (#65)([5ebb2b8](https://github.com/AbeCoull/prism-q/commit/5ebb2b885035a0ad185a78fbe9d77b318d8cbab9))
-
-### Performance
-
-- **sim:** Add terminal statevector shot and count fast paths with high-shot Criterion coverage.
 
 ### Testing
 
@@ -321,3 +325,4 @@ All notable changes to PRISM-Q will be documented in this file.
 ### `fix
 
 - Fusion pass fixes with temporal blocking (#8)([eb9fc76](https://github.com/AbeCoull/prism-q/commit/eb9fc762a122e66903defb793a1345b3b3e2a5ad))
+

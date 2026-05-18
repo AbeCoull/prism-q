@@ -10,7 +10,12 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Refactor
 
+- **sim:** Replace public free-function simulation aliases with the query-aware builder API.
 - **sim:** Consolidate simulator hot path helpers (#65)([5ebb2b8](https://github.com/AbeCoull/prism-q/commit/5ebb2b885035a0ad185a78fbe9d77b318d8cbab9))
+
+### Performance
+
+- **sim:** Add terminal statevector shot and count fast paths with high-shot Criterion coverage.
 
 ### Testing
 
@@ -316,4 +321,3 @@ All notable changes to PRISM-Q will be documented in this file.
 ### `fix
 
 - Fusion pass fixes with temporal blocking (#8)([eb9fc76](https://github.com/AbeCoull/prism-q/commit/eb9fc762a122e66903defb793a1345b3b3e2a5ad))
-

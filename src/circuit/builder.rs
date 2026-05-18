@@ -177,8 +177,8 @@ impl CircuitBuilder {
     }
 
     /// Execute with automatic backend selection.
-    pub fn run(&self, seed: u64) -> crate::Result<crate::sim::SimulationResult> {
-        crate::sim::run(&self.circuit, seed)
+    pub fn run(&self, seed: u64) -> crate::Result<crate::sim::RunOutcome> {
+        crate::sim::simulate(&self.circuit).seed(seed).run()
     }
 
     /// Execute with explicit backend selection.
@@ -186,13 +186,18 @@ impl CircuitBuilder {
         &self,
         kind: crate::sim::BackendKind,
         seed: u64,
-    ) -> crate::Result<crate::sim::SimulationResult> {
-        crate::sim::run_with(kind, &self.circuit, seed)
+    ) -> crate::Result<crate::sim::RunOutcome> {
+        crate::sim::simulate(&self.circuit)
+            .backend(kind)
+            .seed(seed)
+            .run()
     }
 
     /// Execute multi-shot sampling.
     pub fn run_shots(&self, num_shots: usize, seed: u64) -> crate::Result<crate::sim::ShotsResult> {
-        crate::sim::run_shots(&self.circuit, num_shots, seed)
+        crate::sim::simulate(&self.circuit)
+            .seed(seed)
+            .shots(num_shots)
     }
 }
 
@@ -260,7 +265,10 @@ mod tests {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
-        let direct_result = crate::sim::run(&c, 42).expect("direct run failed");
+        let direct_result = crate::sim::simulate(&c)
+            .seed(42)
+            .run()
+            .expect("direct run failed");
         let dp = direct_result.probabilities.expect("no probs").to_vec();
 
         assert_eq!(bp.len(), dp.len());

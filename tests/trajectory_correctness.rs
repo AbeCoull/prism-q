@@ -1,6 +1,29 @@
 use prism_q::circuit::SmallVec;
 use prism_q::*;
 
+fn run_shots_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    simulate(circuit).backend(kind).seed(seed).shots(num_shots)
+}
+
+fn run_shots_with_noise(
+    kind: BackendKind,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    simulate(circuit)
+        .backend(kind)
+        .noise(noise)
+        .seed(seed)
+        .shots(num_shots)
+}
+
 #[test]
 fn depolarizing_trajectory_cross_check_with_compiled() {
     let n = 6;

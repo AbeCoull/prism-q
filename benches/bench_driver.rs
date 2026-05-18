@@ -11,6 +11,14 @@ use prism_q::sim;
 use prism_q::{BackendKind, StatevectorBackend};
 use std::time::Duration;
 
+fn run_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> prism_q::Result<prism_q::RunOutcome> {
+    sim::simulate(circuit).backend(kind).seed(seed).run()
+}
+
 fn is_fast() -> bool {
     cfg!(feature = "bench-fast")
 }
@@ -36,7 +44,7 @@ fn bench_single_qubit_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::H, &[0]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -44,7 +52,7 @@ fn bench_single_qubit_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::Rx(1.234), &[0]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -52,7 +60,7 @@ fn bench_single_qubit_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::T, &[0]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
     }
@@ -69,7 +77,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::Cx, &[0, 1]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -80,7 +88,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::Cx, &[1, 0]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -92,7 +100,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::Cx, &[0, n - 1]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -104,7 +112,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::Cx, &[n - 1, 0]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -113,7 +121,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::Cz, &[0, 1]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -121,7 +129,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::Cz, &[0, n - 1]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -132,7 +140,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::Swap, &[0, 1]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -144,7 +152,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[0, 1]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -156,7 +164,7 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[0, n - 1]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -289,7 +297,7 @@ fn bench_measurement(c: &mut Criterion) {
                 circuit.add_gate(Gate::H, &[0]);
                 circuit.add_measure(0, 0);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -348,7 +356,7 @@ fn bench_high_target_qubit(c: &mut Criterion) {
             let mut circuit = Circuit::new(n_qubits, 0);
             circuit.add_gate(Gate::H, &[target]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
     }
@@ -367,7 +375,7 @@ fn bench_controlled_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::cu(h_mat), &[0, 1]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
     }
@@ -381,7 +389,7 @@ fn bench_controlled_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::mcu(x_mat, 2), &[0, 1, 2]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -390,7 +398,7 @@ fn bench_controlled_gates(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::mcu(x_mat, 3), &[0, 1, 2, 3]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             });
         }
@@ -408,7 +416,7 @@ fn bench_diagonal_parametric_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::Rz(1.234), &[0]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -416,7 +424,7 @@ fn bench_diagonal_parametric_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::Ry(1.234), &[0]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -424,7 +432,7 @@ fn bench_diagonal_parametric_gates(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::P(1.234), &[0]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
     }
@@ -446,7 +454,7 @@ fn bench_cphase_kernel(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::cphase(theta), &[0, 1]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -458,7 +466,7 @@ fn bench_cphase_kernel(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::cphase(theta), &[1, 0]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -476,7 +484,7 @@ fn bench_new_gate_types(c: &mut Criterion) {
             let mut circuit = Circuit::new(n, 0);
             circuit.add_gate(Gate::SX, &[0]);
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
 
@@ -487,7 +495,7 @@ fn bench_new_gate_types(c: &mut Criterion) {
                 let mut circuit = Circuit::new(n, 0);
                 circuit.add_gate(Gate::SXdg, &[0]);
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
                 });
             },
         );
@@ -515,7 +523,7 @@ fn bench_classical_only(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                    run_with(BackendKind::Statevector, circ, 42).unwrap();
                 });
             },
         );
@@ -525,7 +533,7 @@ fn bench_classical_only(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                    run_with(BackendKind::Statevector, circ, 42).unwrap();
                 });
             },
         );

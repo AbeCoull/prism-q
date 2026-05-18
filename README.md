@@ -82,29 +82,49 @@ println!("{:?}", result.probabilities);
 ### Shot-based sampling
 
 ```rust
-use prism_q::{circuit::openqasm, run_shots};
+use prism_q::{bitstring, circuit::openqasm, simulate};
 
 let circuit = openqasm::parse(qasm).unwrap();
-let result = run_shots(&circuit, 1024, 42).unwrap();
+let result = simulate(&circuit).seed(42).shots(1024).unwrap();
 println!("{result}");
 // 00: 512
 // 11: 512
+
+let counts = simulate(&circuit)
+    .seed(42)
+    .sample_counts(1024)
+    .unwrap();
+for (bits, count) in counts.into_counts() {
+    println!("{}: {count}", bitstring(&bits, circuit.num_classical_bits));
+}
 ```
 
 ### Backend dispatch
 
 ```rust
-use prism_q::{circuit::openqasm, run_with, BackendKind};
+use prism_q::{circuit::openqasm, simulate, BackendKind};
 
 let circuit = openqasm::parse(qasm).unwrap();
 
 // Auto picks the optimal backend based on circuit properties.
-let auto   = run_with(BackendKind::Auto, &circuit, 42).unwrap();
+let auto = simulate(&circuit).seed(42).run().unwrap();
 
 // Or choose explicitly.
-let stab   = run_with(BackendKind::Stabilizer, &circuit, 42).unwrap();
-let mps    = run_with(BackendKind::Mps { max_bond_dim: 64 }, &circuit, 42).unwrap();
-let sparse = run_with(BackendKind::Sparse, &circuit, 42).unwrap();
+let stab = simulate(&circuit)
+    .backend(BackendKind::Stabilizer)
+    .seed(42)
+    .run()
+    .unwrap();
+let mps = simulate(&circuit)
+    .backend(BackendKind::Mps { max_bond_dim: 64 })
+    .seed(42)
+    .run()
+    .unwrap();
+let sparse = simulate(&circuit)
+    .backend(BackendKind::Sparse)
+    .seed(42)
+    .run()
+    .unwrap();
 ```
 
 ### Programmatic circuit construction
@@ -124,13 +144,13 @@ let result = CircuitBuilder::new(3)
 use `Circuit` directly:
 
 ```rust
-use prism_q::{Circuit, sim, gates::Gate};
+use prism_q::{simulate, Circuit, gates::Gate};
 
 let mut c = Circuit::new(3, 0);
 c.add_gate(Gate::H, &[0]);
 c.add_gate(Gate::Cx, &[0, 1]);
 c.add_gate(Gate::Cx, &[1, 2]);
-let result = sim::run(&c, 42).unwrap();
+let result = simulate(&c).seed(42).run().unwrap();
 ```
 
 ## Backends
@@ -198,17 +218,16 @@ covered by a dedicated kernel, including batched kernels for `BatchPhase`, `Batc
 [`tests/golden_gpu.rs`](tests/golden_gpu.rs) verify amplitude equivalence against the
 CPU statevector within 1e-10.
 
-`BackendKind::Auto` does not yet route to GPU. Opt in explicitly. The recommended
-entry point is `run_with_gpu`, which dispatches through `BackendKind::StatevectorGpu`
-so the circuit picks up fusion plus independent-subsystem decomposition and applies
+`BackendKind::Auto` does not yet route to GPU. Opt in explicitly with the
+simulation builder so the circuit picks up fusion plus independent-subsystem decomposition and applies
 a size-aware crossover (default: GPU only for `≥ gpu::MIN_QUBITS_DEFAULT` qubit
 sub-circuits, overridable via `PRISM_GPU_MIN_QUBITS`):
 
 ```rust
-use prism_q::{gpu::GpuContext, run_with_gpu};
+use prism_q::{gpu::GpuContext, simulate};
 
 let ctx = GpuContext::new(0)?;
-let result = run_with_gpu(&circuit, 42, ctx)?;
+let result = simulate(&circuit).gpu(ctx).seed(42).run()?;
 ```
 
 Introspect whether the default GPU dispatch footprint is likely to fit before
@@ -232,8 +251,7 @@ crossover by design.
 
 ### Stabilizer GPU (experimental)
 
-`BackendKind::StabilizerGpu` and `run_with_stabilizer_gpu` route Clifford
-circuits through CUDA. Gate application uses one batched kernel
+`BackendKind::StabilizerGpu` routes Clifford circuits through CUDA. Gate application uses one batched kernel
 (`stab_apply_batch`). Measurement and reset stay on the device, including pivot
 search, row operations, phase fixup, and deterministic outcomes. Golden tests
 cover 100 to 5000 qubits.
@@ -281,7 +299,7 @@ cargo bench --features "parallel,bench-fast"                 # quick smoke test
 `StabilizerBackend::apply_instructions` without probability readback. It also
 includes GPU BTS marginal and device count groups for the reduced transfer
 compiled sampler path. Use direct stabilizer groups for GPU crossover and
-throughput claims. Treat `run_with` groups as public API timings.
+throughput claims. Treat `simulate(...).run()` groups as public API timings.
 
 Always use `--features parallel`. Baselines were taken with Rayon enabled. Never run
 two `cargo bench` invocations at the same time on the same machine. Rayon thread pools

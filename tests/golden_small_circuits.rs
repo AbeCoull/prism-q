@@ -18,6 +18,14 @@ use prism_q::Instruction;
 
 const EPS: f64 = 1e-12;
 
+fn run_with(
+    kind: prism_q::BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> prism_q::Result<prism_q::RunOutcome> {
+    sim::simulate(circuit).backend(kind).seed(seed).run()
+}
+
 fn run_and_probs(circuit: &Circuit) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(42);
     sim::run_on(&mut backend, circuit).unwrap();
@@ -1068,7 +1076,7 @@ fn decomposed_two_independent_bell_pairs() {
     assert_eq!(subs.len(), 2);
 
     // Decomposed via run_with (triggers decomposition)
-    let decomposed = sim::run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
+    let decomposed = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
     // Monolithic via run_on (skips decomposition)
     let mut sv = StatevectorBackend::new(42);
     let monolithic = sim::run_on(&mut sv, &c).unwrap();
@@ -1100,7 +1108,7 @@ fn decomposed_three_independent_blocks() {
     let subs = c.independent_subsystems();
     assert_eq!(subs.len(), 3);
 
-    let decomposed = sim::run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
+    let decomposed = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
     let mut sv = StatevectorBackend::new(42);
     let monolithic = sim::run_on(&mut sv, &c).unwrap();
 
@@ -1126,7 +1134,7 @@ fn decomposed_with_measurements() {
     c.add_gate(Gate::Cx, &[2, 3]);
     c.add_measure(2, 1);
 
-    let result = sim::run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
+    let result = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
     assert_eq!(result.classical_bits.len(), 2);
 }
 
@@ -1141,7 +1149,7 @@ fn decomposed_fully_entangled_same_as_monolithic() {
     let subs = c.independent_subsystems();
     assert_eq!(subs.len(), 1); // no decomposition
 
-    let via_run_with = sim::run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
+    let via_run_with = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
     let mut sv = StatevectorBackend::new(42);
     let via_run_on = sim::run_on(&mut sv, &c).unwrap();
 
@@ -1166,7 +1174,7 @@ fn decomposed_auto_mixed_backends() {
     c.add_gate(Gate::Cx, &[3, 4]);
     c.add_gate(Gate::Cx, &[4, 5]);
 
-    let result = sim::run_with(prism_q::BackendKind::Auto, &c, 42).unwrap();
+    let result = run_with(prism_q::BackendKind::Auto, &c, 42).unwrap();
     let mut sv = StatevectorBackend::new(42);
     let monolithic = sim::run_on(&mut sv, &c).unwrap();
 

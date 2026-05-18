@@ -1,5 +1,5 @@
 use prism_q::circuit::openqasm;
-use prism_q::run_shots;
+use prism_q::simulate;
 
 fn main() {
     let qasm = r#"
@@ -16,12 +16,18 @@ fn main() {
     let circuit = openqasm::parse(qasm).expect("failed to parse QASM");
 
     // Deterministic: 1024 shots with fixed seed
-    let result = run_shots(&circuit, 1024, 42).expect("shots failed");
+    let result = simulate(&circuit)
+        .seed(42)
+        .shots(1024)
+        .expect("shots failed");
     println!("Deterministic (seed=42), 1024 shots:");
     print!("{result}");
 
     // Random seed: non-deterministic sampling
-    let result = run_shots(&circuit, 1024, rand::random()).expect("shots failed");
+    let result = simulate(&circuit)
+        .seed(rand::random())
+        .shots(1024)
+        .expect("shots failed");
     println!("Random seed, 1024 shots:");
     print!("{result}");
 }

@@ -200,7 +200,7 @@ impl StatevectorBackend {
         // (`StatevectorBackend::with_gpu(ctx)`) and intentionally skips the
         // dispatch-level crossover. Direct `with_gpu` callers request
         // kernel behavior. For size-based crossover plus decomposition-aware
-        // routing, enter via `sim::run_with(BackendKind::StatevectorGpu
+        // routing, use `sim::simulate(...).backend(BackendKind::StatevectorGpu
         // { context })`, which honors `gpu_min_qubits()` per sub-block.
         //
         // Caveat: Multi2q launches one kernel for each subgate (rare in practice).
@@ -386,6 +386,10 @@ impl StatevectorBackend {
     /// for a properly normalized copy.
     pub fn state_vector(&self) -> &[Complex64] {
         &self.state
+    }
+
+    pub(crate) fn probability_scale(&self) -> f64 {
+        self.pending_norm * self.pending_norm
     }
 
     /// Initialize the backend from a pre-computed state vector.

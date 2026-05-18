@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuContext;
 
-use super::{Probabilities, SimulationResult};
+use super::{Probabilities, RunOutcome};
 
 pub(super) enum DispatchAction {
     Backend(Box<dyn Backend>),
@@ -99,10 +99,9 @@ pub enum BackendKind {
     /// Larger circuits allocate a device-resident state and route gate
     /// application through GPU kernels.
     ///
-    /// Compose with [`crate::sim::run_with`] to get fusion + independent-
-    /// subsystem decomposition for free; each sub-block is evaluated against
-    /// the crossover independently. See [`crate::sim::run_with_gpu`] for a
-    /// one-liner wrapper when you already have an `Arc<GpuContext>`.
+    /// Compose with `simulate(...).backend(...).seed(...).run()` to get fusion
+    /// plus independent-subsystem decomposition; each sub-block is evaluated
+    /// against the crossover independently.
     #[cfg(feature = "gpu")]
     StatevectorGpu {
         context: Arc<GpuContext>,
@@ -117,9 +116,9 @@ pub enum BackendKind {
     /// kernels. Measurement and reset stay on device, while probabilities and
     /// export-style helpers still read back to the CPU algorithms.
     ///
-    /// Compose with [`crate::sim::run_with`] to pick up independent-subsystem
-    /// decomposition; non-Clifford circuits are rejected at dispatch time with
-    /// the same error shape as [`BackendKind::Stabilizer`].
+    /// Compose with `simulate(...).backend(...).seed(...).run()` to pick up
+    /// independent-subsystem decomposition; non-Clifford circuits are rejected
+    /// at dispatch time with the same error shape as [`BackendKind::Stabilizer`].
     #[cfg(feature = "gpu")]
     StabilizerGpu {
         context: Arc<GpuContext>,
@@ -217,6 +216,47 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoBackendChoice {
+    ProductState,
+    Stabilizer,
+    Sparse,
+    Mps,
+    Factored,
+    Statevector,
+}
+
+fn select_auto_backend_choice(
+    circuit: &Circuit,
+    has_partial_independence: bool,
+) -> AutoBackendChoice {
+    if !circuit.has_entangling_gates() {
+        AutoBackendChoice::ProductState
+    } else if circuit.is_clifford_only() {
+        AutoBackendChoice::Stabilizer
+    } else if circuit.num_qubits > max_statevector_qubits() {
+        if circuit.is_sparse_friendly() {
+            AutoBackendChoice::Sparse
+        } else {
+            AutoBackendChoice::Mps
+        }
+    } else if has_partial_independence {
+        AutoBackendChoice::Factored
+    } else {
+        AutoBackendChoice::Statevector
+    }
+}
+
+pub(super) fn auto_selects_cpu_statevector(
+    circuit: &Circuit,
+    has_partial_independence: bool,
+) -> bool {
+    matches!(
+        select_auto_backend_choice(circuit, has_partial_independence),
+        AutoBackendChoice::Statevector
+    )
+}
+
 /// Build a `StatevectorBackend` configured for GPU execution if the circuit
 /// is large enough to clear the crossover, otherwise a plain host
 /// backend. Called from `select_dispatch` (which runs per sub-block after
@@ -257,25 +297,26 @@ pub(super) fn select_dispatch(
     has_partial_independence: bool,
 ) -> DispatchAction {
     match kind {
-        BackendKind::Auto => {
-            if !circuit.has_entangling_gates() {
+        BackendKind::Auto => match select_auto_backend_choice(circuit, has_partial_independence) {
+            AutoBackendChoice::ProductState => {
                 DispatchAction::Backend(Box::new(ProductStateBackend::new(seed)))
-            } else if circuit.is_clifford_only() {
+            }
+            AutoBackendChoice::Stabilizer => {
                 DispatchAction::Backend(Box::new(StabilizerBackend::new(seed)))
-            } else if circuit.num_qubits > max_statevector_qubits() {
-                if circuit.is_sparse_friendly() {
-                    DispatchAction::Backend(Box::new(SparseBackend::new(seed)))
-                } else {
-                    DispatchAction::Backend(Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM)))
-                }
-            } else if has_partial_independence {
-                DispatchAction::Backend(Box::new(crate::backend::factored::FactoredBackend::new(
-                    seed,
-                )))
-            } else {
+            }
+            AutoBackendChoice::Sparse => {
+                DispatchAction::Backend(Box::new(SparseBackend::new(seed)))
+            }
+            AutoBackendChoice::Mps => {
+                DispatchAction::Backend(Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM)))
+            }
+            AutoBackendChoice::Factored => DispatchAction::Backend(Box::new(
+                crate::backend::factored::FactoredBackend::new(seed),
+            )),
+            AutoBackendChoice::Statevector => {
                 DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
             }
-        }
+        },
         BackendKind::Statevector => {
             DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
         }
@@ -364,7 +405,7 @@ pub(super) fn try_temporal_clifford(
     kind: &BackendKind,
     circuit: &Circuit,
     seed: u64,
-) -> Option<Result<SimulationResult>> {
+) -> Option<Result<RunOutcome>> {
     if !matches!(kind, BackendKind::Auto) {
         return None;
     }
@@ -406,7 +447,7 @@ pub(super) fn try_temporal_clifford(
 
     let probs = sv.probabilities().ok().map(Probabilities::Dense);
 
-    Some(Ok(SimulationResult {
+    Some(Ok(RunOutcome {
         classical_bits: sv.classical_results().to_vec(),
         probabilities: probs,
     }))
@@ -416,7 +457,6 @@ pub(super) fn try_temporal_clifford(
 mod gpu_crossover_tests {
     use super::*;
     use crate::gates::Gate;
-    use crate::sim::run_with;
 
     fn stub_kind() -> BackendKind {
         BackendKind::StatevectorGpu {
@@ -424,19 +464,30 @@ mod gpu_crossover_tests {
         }
     }
 
-    /// `run_with_gpu` must compose identically to constructing the variant
-    /// manually. Uses the stub context at a small circuit so crossover fires
-    /// and proves the composition is side-effect equivalent.
+    fn run_query(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
+        crate::sim::simulate(circuit).backend(kind).seed(seed).run()
+    }
+
+    /// The builder GPU shortcut must compose identically to constructing the
+    /// variant manually. Uses the stub context at a small circuit so crossover
+    /// fires and proves the composition is side-effect equivalent.
     #[test]
-    fn run_with_gpu_wraps_statevector_gpu_variant() {
+    fn builder_gpu_wraps_statevector_gpu_variant() {
         let ctx = GpuContext::stub_for_tests();
         let mut circuit = Circuit::new(4, 0);
         circuit.add_gate(Gate::H, &[0]);
         circuit.add_gate(Gate::Cx, &[0, 1]);
 
-        let direct = crate::sim::run_with_gpu(&circuit, 42, ctx.clone())
-            .expect("run_with_gpu must honor crossover and route to CPU");
-        let manual = run_with(stub_kind(), &circuit, 42).expect("manual variant reference");
+        let direct = crate::sim::simulate(&circuit)
+            .gpu(ctx.clone())
+            .seed(42)
+            .run()
+            .expect("builder GPU shortcut must honor crossover and route to CPU");
+        let manual = crate::sim::simulate(&circuit)
+            .backend(stub_kind())
+            .seed(42)
+            .run()
+            .expect("manual variant reference");
 
         let dp = direct.probabilities.expect("direct probs").to_vec();
         let mp = manual.probabilities.expect("manual probs").to_vec();
@@ -456,7 +507,7 @@ mod gpu_crossover_tests {
         circuit.add_gate(Gate::H, &[2]);
         circuit.add_gate(Gate::Cx, &[2, 3]);
 
-        let result = run_with(stub_kind(), &circuit, 42)
+        let result = run_query(stub_kind(), &circuit, 42)
             .expect("stub context must not be touched for a 4q circuit");
         let probs = result
             .probabilities
@@ -484,8 +535,8 @@ mod gpu_crossover_tests {
         let circuit = crate::circuits::independent_bell_pairs(8);
         assert_eq!(circuit.num_qubits, 16);
 
-        let cpu = run_with(BackendKind::Statevector, &circuit, 42).expect("cpu baseline");
-        let gpu = run_with(stub_kind(), &circuit, 42).expect("stub must stay out of the way");
+        let cpu = run_query(BackendKind::Statevector, &circuit, 42).expect("cpu baseline");
+        let gpu = run_query(stub_kind(), &circuit, 42).expect("stub must stay out of the way");
 
         let cpu_p = cpu.probabilities.expect("cpu probs").to_vec();
         let gpu_p = gpu.probabilities.expect("gpu probs").to_vec();
@@ -520,8 +571,8 @@ mod gpu_crossover_tests {
         circuit.add_measure(2, 2);
         circuit.add_measure(3, 3);
 
-        let cpu_run = run_with(BackendKind::Stabilizer, &circuit, 42).expect("cpu baseline");
-        let gpu_run = run_with(stabilizer_stub_kind(), &circuit, 42)
+        let cpu_run = run_query(BackendKind::Stabilizer, &circuit, 42).expect("cpu baseline");
+        let gpu_run = run_query(stabilizer_stub_kind(), &circuit, 42)
             .expect("stub must stay out of the way for small circuits");
         assert_eq!(cpu_run.classical_bits, gpu_run.classical_bits);
     }
@@ -532,7 +583,7 @@ mod gpu_crossover_tests {
     fn stabilizer_gpu_rejects_non_clifford_at_dispatch() {
         let mut circuit = Circuit::new(2, 0);
         circuit.add_gate(Gate::T, &[0]);
-        let err = run_with(stabilizer_stub_kind(), &circuit, 42).unwrap_err();
+        let err = run_query(stabilizer_stub_kind(), &circuit, 42).unwrap_err();
         assert!(matches!(err, PrismError::IncompatibleBackend { .. }));
     }
 }

@@ -1,5 +1,5 @@
 //! Three-path timing for the GPU crossover work: CPU direct, GPU direct
-//! (`.with_gpu(ctx)`), GPU dispatched (`run_with(BackendKind::StatevectorGpu)`).
+//! (`.with_gpu(ctx)`), GPU dispatched (`simulate(...).gpu(ctx)`).
 //!
 //! Runs each path three times per (circuit, qubits) pair and reports the minimum.
 //! The "GPU direct" path bypasses fusion + decomposition + crossover; the "GPU
@@ -19,9 +19,6 @@ use prism_q::{sim, BackendKind, Circuit, StatevectorBackend};
 
 #[cfg(feature = "gpu")]
 use prism_q::gpu::GpuContext;
-
-#[cfg(feature = "gpu")]
-use prism_q::run_with_gpu;
 
 #[cfg(feature = "gpu")]
 const SEED: u64 = 0xDEAD_BEEF;
@@ -53,7 +50,11 @@ fn time_cpu_dispatched(circuit: &Circuit) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..REPS {
         let start = Instant::now();
-        let _ = sim::run_with(BackendKind::Statevector, circuit, 42).unwrap();
+        let _ = sim::simulate(circuit)
+            .backend(BackendKind::Statevector)
+            .seed(42)
+            .run()
+            .unwrap();
         let t = start.elapsed().as_secs_f64();
         if t < best {
             best = t;
@@ -87,7 +88,11 @@ fn time_gpu_dispatched(circuit: &Circuit, ctx: &std::sync::Arc<GpuContext>) -> f
     let mut best = f64::INFINITY;
     for _ in 0..REPS {
         let start = Instant::now();
-        let _ = run_with_gpu(circuit, 42, ctx.clone()).unwrap();
+        let _ = sim::simulate(circuit)
+            .gpu(ctx.clone())
+            .seed(42)
+            .run()
+            .unwrap();
         let t = start.elapsed().as_secs_f64();
         if t < best {
             best = t;

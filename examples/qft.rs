@@ -34,5 +34,5 @@ fn main() {
 
     // Alternative: use the pre-built qft_circuit() from circuits module
     // let circuit = prism_q::circuits::qft_circuit(n);
-    // let result = prism_q::run(&circuit, 42).expect("simulation failed");
+    // let result = prism_q::simulate(&circuit).seed(42).run().expect("simulation failed");
 }

@@ -32,6 +32,26 @@ use prism_q::{sim, BackendKind, StabilizerBackend, StatevectorBackend};
 
 const SEED: u64 = 0xDEAD_BEEF;
 
+fn run_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> prism_q::Result<prism_q::RunOutcome> {
+    sim::simulate(circuit).backend(kind).seed(seed).run()
+}
+
+fn run_shots_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<prism_q::ShotsResult> {
+    sim::simulate(circuit)
+        .backend(kind)
+        .seed(seed)
+        .shots(num_shots)
+}
+
 fn is_fast() -> bool {
     cfg!(feature = "bench-fast")
 }
@@ -86,7 +106,7 @@ fn bench_gpu_random(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -104,7 +124,7 @@ fn bench_gpu_qft(c: &mut Criterion) {
         let circuit = circuits::qft_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -122,7 +142,7 @@ fn bench_gpu_hea(c: &mut Criterion) {
         let circuit = circuits::hardware_efficient_ansatz(n, 5, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -140,7 +160,7 @@ fn bench_gpu_qaoa(c: &mut Criterion) {
         let circuit = circuits::qaoa_circuit(n, 3, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -163,7 +183,7 @@ fn bench_gpu_decomposed(c: &mut Criterion) {
         let n = circuit.num_qubits;
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -172,7 +192,7 @@ fn bench_gpu_decomposed(c: &mut Criterion) {
 }
 
 /// Direct-kernel path via `StatevectorBackend::new(seed).with_gpu(ctx)`.
-/// Bypasses `sim::run_with`, so fusion, decomposition, and crossover do not
+/// Bypasses `simulate(...).run()`, so fusion, decomposition, and crossover do not
 /// run. Excludes backend init and first-use scratch allocation from the timed
 /// region so it tracks kernel and launcher cost more directly than the
 /// dispatched groups above.
@@ -242,7 +262,7 @@ fn bench_gpu_measurement(c: &mut Criterion) {
         let circuit = mid_measure_circuit(n, 4);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -296,7 +316,7 @@ fn bts_gpu_shot_sizes() -> Vec<usize> {
     }
 }
 
-/// Stabilizer CPU dispatch baseline through `sim::run_with`.
+/// Stabilizer CPU dispatch baseline through `simulate(...).run()`.
 ///
 /// Includes the default probability extraction at the end of the run, so this
 /// is an API-level end-to-end measurement rather than the hot-path throughput
@@ -308,14 +328,14 @@ fn bench_stab_cpu_clifford_d10(c: &mut Criterion) {
         let circuit = prism_q::circuits::clifford_heavy_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
             });
         });
     }
     group.finish();
 }
 
-/// Stabilizer GPU dispatch through `run_with_stabilizer_gpu`.
+/// Stabilizer GPU dispatch through `BackendKind::StabilizerGpu`.
 ///
 /// Includes the default probability extraction at the end of the run. Use the
 /// direct backend groups below for hot-path throughput comparisons.
@@ -333,7 +353,7 @@ fn bench_stab_gpu_clifford_d10(c: &mut Criterion) {
         let circuit = prism_q::circuits::clifford_heavy_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -436,7 +456,7 @@ fn bench_stab_gpu_ghz_measure(c: &mut Criterion) {
         }
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(kind.clone(), circ, 42).unwrap();
+                run_with(kind.clone(), circ, 42).unwrap();
             });
         });
     }
@@ -723,7 +743,7 @@ fn bench_stab_gpu_shots_explicit(c: &mut Criterion) {
         for &shots in &shot_sizes {
             group.bench_with_input(BenchmarkId::from_parameter(shots), &circuit, |b, circ| {
                 b.iter(|| {
-                    sim::run_shots_with(kind.clone(), circ, shots, SEED).unwrap();
+                    run_shots_with(kind.clone(), circ, shots, SEED).unwrap();
                 });
             });
         }

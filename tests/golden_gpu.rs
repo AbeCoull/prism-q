@@ -473,7 +473,7 @@ fn batch_rzz_14q_qaoa_matches_cpu() {
 fn batch_phase_16q_matches_cpu() {
     // QFT at 16q exercises the `fuse_controlled_phases` pass which emits
     // `Gate::BatchPhase`. The batched GPU kernel must match the CPU tiled kernel
-    // within tolerance. The test drives through `sim::run_with` so fusion fires
+    // within tolerance. The test drives through `simulate(...).run()` so fusion fires
     // normally, then compares probabilities between plain statevector and GPU statevector.
     let Some(f) = Fixture::try_new() else { return };
 
@@ -608,23 +608,25 @@ fn probabilities_match_cpu_on_random_circuit() {
 /// circuit at 14q (at the crossover threshold) must match CPU to within
 /// 1e-10. Exercises the dispatch → fusion → GPU kernel → probabilities path.
 #[test]
-fn statevector_gpu_run_with_matches_cpu_random() {
+fn statevector_gpu_builder_matches_cpu_random() {
     use prism_q::BackendKind;
 
     let Some(f) = Fixture::try_new() else { return };
 
     let circuit = prism_q::circuits::random_circuit(14, 10, 0xDEAD_BEEF);
 
-    let cpu = prism_q::sim::run_with(BackendKind::Statevector, &circuit, 42)
-        .expect("cpu run_with failed");
-    let gpu = prism_q::sim::run_with(
-        BackendKind::StatevectorGpu {
+    let cpu = prism_q::simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .run()
+        .expect("cpu run failed");
+    let gpu = prism_q::simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
             context: f.ctx.clone(),
-        },
-        &circuit,
-        42,
-    )
-    .expect("gpu run_with failed");
+        })
+        .seed(42)
+        .run()
+        .expect("gpu run failed");
 
     let cpu_p = cpu.probabilities.expect("cpu probs missing").to_vec();
     let gpu_p = gpu.probabilities.expect("gpu probs missing").to_vec();
@@ -1335,13 +1337,13 @@ fn stabilizer_gpu_export_statevector_matches_cpu() {
 // Stabilizer GPU public dispatch
 // ============================================================================
 
-/// `run_with_stabilizer_gpu` routes through `BackendKind::StabilizerGpu` and the
+/// `simulate(...).backend(BackendKind::StabilizerGpu)` routes through the
 /// crossover. For small n the crossover sends the circuit to the CPU
 /// stabilizer automatically. Verifies end-to-end dispatch matches a direct
 /// `BackendKind::Stabilizer` run.
 #[test]
-fn run_with_stabilizer_gpu_matches_cpu_below_threshold() {
-    use prism_q::{run_with, run_with_stabilizer_gpu, BackendKind, Circuit};
+fn stabilizer_gpu_builder_matches_cpu_below_threshold() {
+    use prism_q::{simulate, BackendKind, Circuit};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1354,8 +1356,18 @@ fn run_with_stabilizer_gpu_matches_cpu_below_threshold() {
         circuit.add_measure(i, i);
     }
 
-    let cpu = run_with(BackendKind::Stabilizer, &circuit, 42).unwrap();
-    let gpu = run_with_stabilizer_gpu(&circuit, 42, f.ctx.clone()).unwrap();
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Stabilizer)
+        .seed(42)
+        .run()
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .backend(BackendKind::StabilizerGpu {
+            context: f.ctx.clone(),
+        })
+        .seed(42)
+        .run()
+        .unwrap();
     assert_eq!(cpu.classical_bits, gpu.classical_bits);
 }
 
@@ -1365,8 +1377,8 @@ fn run_with_stabilizer_gpu_matches_cpu_below_threshold() {
 /// threshold the same test exercises the real GPU path and the assertion
 /// still holds.
 #[test]
-fn run_with_stabilizer_gpu_matches_cpu_at_scale() {
-    use prism_q::{run_with, run_with_stabilizer_gpu, BackendKind};
+fn stabilizer_gpu_builder_matches_cpu_at_scale() {
+    use prism_q::{simulate, BackendKind};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1379,8 +1391,18 @@ fn run_with_stabilizer_gpu_matches_cpu_at_scale() {
         circuit.add_measure(i, i);
     }
 
-    let cpu = run_with(BackendKind::Stabilizer, &circuit, 42).unwrap();
-    let gpu = run_with_stabilizer_gpu(&circuit, 42, f.ctx.clone()).unwrap();
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Stabilizer)
+        .seed(42)
+        .run()
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .backend(BackendKind::StabilizerGpu {
+            context: f.ctx.clone(),
+        })
+        .seed(42)
+        .run()
+        .unwrap();
     assert_eq!(
         cpu.classical_bits, gpu.classical_bits,
         "CPU and GPU stabilizer measurement bits must agree"
@@ -1478,12 +1500,12 @@ fn run_shots_compiled_with_gpu_distribution_matches_cpu() {
     }
 }
 
-/// `run_shots_with(BackendKind::StabilizerGpu)` should route Clifford shot
-/// sampling through the same compiled GPU sampler as
+/// `simulate(...).backend(BackendKind::StabilizerGpu).shots(...)` should route
+/// Clifford shot sampling through the same compiled GPU sampler as
 /// `run_shots_compiled_with_gpu`, not the raw tableau measurement loop.
 #[test]
-fn run_shots_with_stabilizer_gpu_matches_compiled_gpu_sampling() {
-    use prism_q::{run_shots_compiled_with_gpu, run_shots_with, BackendKind, Circuit};
+fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
+    use prism_q::{run_shots_compiled_with_gpu, simulate, BackendKind, Circuit};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1498,15 +1520,13 @@ fn run_shots_with_stabilizer_gpu_matches_compiled_gpu_sampling() {
     }
 
     let compiled = run_shots_compiled_with_gpu(&circuit, num_shots, 42, f.ctx.clone()).unwrap();
-    let explicit = run_shots_with(
-        BackendKind::StabilizerGpu {
+    let explicit = simulate(&circuit)
+        .backend(BackendKind::StabilizerGpu {
             context: f.ctx.clone(),
-        },
-        &circuit,
-        num_shots,
-        42,
-    )
-    .unwrap();
+        })
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
 
     assert_eq!(explicit.shots, compiled.shots);
 }

@@ -1,5 +1,5 @@
 use prism_q::circuits::clifford_heavy_circuit;
-use prism_q::{run_with, BackendKind};
+use prism_q::{simulate, BackendKind};
 
 fn main() {
     // A Clifford-only 4-qubit circuit with entangling gates.
@@ -17,7 +17,11 @@ fn main() {
     ];
 
     for (name, kind) in &backends {
-        let result = run_with(kind.clone(), &circuit, 42).expect("simulation failed");
+        let result = simulate(&circuit)
+            .backend(kind.clone())
+            .seed(42)
+            .run()
+            .expect("simulation failed");
         let probs = result.probabilities.expect("no probabilities").to_vec();
 
         let nonzero: Vec<(usize, f64)> = probs

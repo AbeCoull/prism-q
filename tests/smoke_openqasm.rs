@@ -5,6 +5,18 @@ use prism_q::backend::Backend;
 use prism_q::circuit::openqasm;
 use prism_q::sim;
 
+fn run(circuit: &prism_q::Circuit, seed: u64) -> prism_q::Result<prism_q::RunOutcome> {
+    sim::simulate(circuit).seed(seed).run()
+}
+
+fn run_shots(
+    circuit: &prism_q::Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<prism_q::ShotsResult> {
+    sim::simulate(circuit).seed(seed).shots(num_shots)
+}
+
 fn assert_probs(probs: &[f64], expected: &[f64], eps: f64) {
     assert_eq!(probs.len(), expected.len());
     for (i, (a, e)) in probs.iter().zip(expected).enumerate() {
@@ -502,7 +514,7 @@ fn conditional_gate_executed() {
         if (c[0]) x q[1];
     "#;
     let circuit = openqasm::parse(qasm).unwrap();
-    let result = sim::run(&circuit, 42).unwrap();
+    let result = run(&circuit, 42).unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     // q[0] measured |1⟩, so c[0]=1, conditional fires, q[1] → |1⟩
     // After measurement q[0] collapsed to |1⟩, q[1] flipped to |1⟩ → state |11⟩ = index 3
@@ -519,7 +531,7 @@ fn conditional_gate_not_executed() {
         if (c[0]) x q[1];
     "#;
     let circuit = openqasm::parse(qasm).unwrap();
-    let result = sim::run(&circuit, 42).unwrap();
+    let result = run(&circuit, 42).unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     // q[0] starts as |0⟩, measured → c[0]=0, conditional doesn't fire
     // State stays |00⟩ = index 0
@@ -537,7 +549,7 @@ fn conditional_oq2_register_equals() {
         if(c==1) x q[1];
     "#;
     let circuit = openqasm::parse(qasm).unwrap();
-    let result = sim::run(&circuit, 42).unwrap();
+    let result = run(&circuit, 42).unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     // c[0]=1 (from X then measure), c[1]=0 → c = 0b01 = 1
     // Condition c==1 is true → X applied to q[1] → state |11⟩
@@ -555,7 +567,7 @@ fn conditional_oq2_register_no_match() {
         if(c==2) x q[1];
     "#;
     let circuit = openqasm::parse(qasm).unwrap();
-    let result = sim::run(&circuit, 42).unwrap();
+    let result = run(&circuit, 42).unwrap();
     let probs = result.probabilities.unwrap().to_vec();
     // c = 0b01 = 1, condition c==2 is false → q[1] stays |0⟩
     // q[0] collapsed to |1⟩ → state |01⟩ = index 1
@@ -612,7 +624,7 @@ fn broadcast_measure_all() {
         c[1] = measure q[1];
     "#;
     let circuit = openqasm::parse(qasm).unwrap();
-    let result = sim::run(&circuit, 42).unwrap();
+    let result = run(&circuit, 42).unwrap();
     assert!(result.classical_bits[0]);
     assert!(!result.classical_bits[1]);
 }
@@ -652,7 +664,7 @@ fn run_shots_via_qasm() {
         c[1] = measure q[1];
     "#;
     let circuit = openqasm::parse(qasm).unwrap();
-    let result = prism_q::run_shots(&circuit, 100, 42).unwrap();
+    let result = run_shots(&circuit, 100, 42).unwrap();
     let counts = result.counts();
     assert_eq!(counts.len(), 1);
     assert_eq!(*counts.get(&vec![1u64]).unwrap_or(&0), 100);
@@ -668,7 +680,7 @@ fn run_shots_superposition_via_qasm() {
         c[0] = measure q[0];
     "#;
     let circuit = openqasm::parse(qasm).unwrap();
-    let result = prism_q::run_shots(&circuit, 1000, 42).unwrap();
+    let result = run_shots(&circuit, 1000, 42).unwrap();
     let counts = result.counts();
     let zeros = *counts.get(&vec![0u64]).unwrap_or(&0);
     let ones = *counts.get(&vec![1u64]).unwrap_or(&0);

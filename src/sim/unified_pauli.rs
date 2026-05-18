@@ -426,7 +426,8 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
     })
 }
 
-pub fn spp_to_probabilities(result: &SppResult) -> Vec<f64> {
+#[cfg(test)]
+fn spp_to_probabilities(result: &SppResult) -> Vec<f64> {
     result
         .expectations
         .iter()
@@ -657,7 +658,8 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
     })
 }
 
-pub fn spd_to_probabilities(result: &SpdResult) -> Vec<f64> {
+#[cfg(test)]
+fn spd_to_probabilities(result: &SpdResult) -> Vec<f64> {
     result
         .expectations
         .iter()

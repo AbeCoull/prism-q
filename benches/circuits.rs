@@ -17,6 +17,28 @@ use std::time::Duration;
 
 const SEED: u64 = 0xDEAD_BEEF;
 
+fn run_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> prism_q::Result<prism_q::RunOutcome> {
+    sim::simulate(circuit).backend(kind).seed(seed).run()
+}
+
+fn run_shots_with_noise(
+    kind: BackendKind,
+    circuit: &Circuit,
+    noise: &prism_q::NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<prism_q::ShotsResult> {
+    sim::simulate(circuit)
+        .backend(kind)
+        .noise(noise)
+        .seed(seed)
+        .shots(num_shots)
+}
+
 fn is_fast() -> bool {
     cfg!(feature = "bench-fast")
 }
@@ -228,7 +250,7 @@ fn bench_statevector_random(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -244,7 +266,7 @@ fn bench_statevector_qft(c: &mut Criterion) {
         let circuit = qft_like_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -260,7 +282,7 @@ fn bench_statevector_hea(c: &mut Criterion) {
         let circuit = circuits::hardware_efficient_ansatz(n, 5, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -276,7 +298,7 @@ fn bench_statevector_clifford(c: &mut Criterion) {
         let circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -292,7 +314,7 @@ fn bench_statevector_qft_textbook(c: &mut Criterion) {
         let circuit = circuits::qft_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -309,7 +331,7 @@ fn bench_statevector_qpe(c: &mut Criterion) {
         let label = format!("{}q", n);
         group.bench_with_input(BenchmarkId::from_parameter(label), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -327,7 +349,7 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
         let circuit = circuits::qaoa_circuit(n, 3, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -343,7 +365,7 @@ fn bench_statevector_qv(c: &mut Criterion) {
         let circuit = circuits::quantum_volume_circuit(n, n, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -359,7 +381,7 @@ fn bench_statevector_w_state(c: &mut Criterion) {
         let circuit = circuits::w_state_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -378,7 +400,7 @@ fn bench_statevector_depth_sweep(c: &mut Criterion) {
         let circuit = circuits::random_circuit(12, depth, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(depth), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -395,14 +417,14 @@ fn bench_statevector_entanglement(c: &mut Criterion) {
     let sparse = sparse_entanglement_circuit(16, 10);
     group.bench_function("sparse", |b| {
         b.iter(|| {
-            sim::run_with(BackendKind::Statevector, &sparse, 42).unwrap();
+            run_with(BackendKind::Statevector, &sparse, 42).unwrap();
         });
     });
 
     let dense = dense_entanglement_circuit(16, 10);
     group.bench_function("dense", |b| {
         b.iter(|| {
-            sim::run_with(BackendKind::Statevector, &dense, 42).unwrap();
+            run_with(BackendKind::Statevector, &dense, 42).unwrap();
         });
     });
 
@@ -421,7 +443,7 @@ fn bench_statevector_scalability(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 5, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
         });
     }
@@ -439,7 +461,7 @@ fn bench_stabilizer_scaling(c: &mut Criterion) {
         let circuit = random_clifford_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
             });
         });
     }
@@ -465,7 +487,7 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+                    run_with(BackendKind::Stabilizer, circ, 42).unwrap();
                 });
             },
         );
@@ -483,7 +505,7 @@ fn bench_factored_stabilizer_scaling(c: &mut Criterion) {
         let circuit = random_clifford_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
             });
         });
     }
@@ -502,7 +524,7 @@ fn bench_factored_stabilizer_local(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                    run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
                 });
             },
         );
@@ -529,7 +551,7 @@ fn bench_factored_stabilizer_measurement(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                    run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
                 });
             },
         );
@@ -547,7 +569,7 @@ fn bench_sparse_scaling(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Sparse, circ, 42).unwrap();
+                run_with(BackendKind::Sparse, circ, 42).unwrap();
             });
         });
     }
@@ -562,7 +584,7 @@ fn bench_sparse_low_entanglement(c: &mut Criterion) {
         let circuit = sparse_entanglement_circuit(n, 5);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Sparse, circ, 42).unwrap();
+                run_with(BackendKind::Sparse, circ, 42).unwrap();
             });
         });
     }
@@ -579,7 +601,7 @@ fn bench_mps_scaling(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Mps { max_bond_dim: 64 }, circ, 42).unwrap();
+                run_with(BackendKind::Mps { max_bond_dim: 64 }, circ, 42).unwrap();
             });
         });
     }
@@ -594,7 +616,7 @@ fn bench_mps_linear_chain(c: &mut Criterion) {
         let circuit = dense_entanglement_circuit(n, 10);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Mps { max_bond_dim: 64 }, circ, 42).unwrap();
+                run_with(BackendKind::Mps { max_bond_dim: 64 }, circ, 42).unwrap();
             });
         });
     }
@@ -643,7 +665,7 @@ fn bench_product_scaling(c: &mut Criterion) {
         let circuit = random_single_qubit_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::ProductState, circ, 42).unwrap();
+                run_with(BackendKind::ProductState, circ, 42).unwrap();
             });
         });
     }
@@ -660,7 +682,7 @@ fn bench_tn_scaling(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
             });
         });
     }
@@ -675,7 +697,7 @@ fn bench_tn_linear_chain(c: &mut Criterion) {
         let circuit = dense_entanglement_circuit(n, 5);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
             });
         });
     }
@@ -701,7 +723,7 @@ fn bench_compare_clifford(c: &mut Criterion) {
         for &(name, ref kind) in backends {
             group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
                 b.iter(|| {
-                    sim::run_with(kind.clone(), circ, 42).unwrap();
+                    run_with(kind.clone(), circ, 42).unwrap();
                 });
             });
         }
@@ -724,7 +746,7 @@ fn bench_compare_single_qubit(c: &mut Criterion) {
         for &(name, ref kind) in backends {
             group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
                 b.iter(|| {
-                    sim::run_with(kind.clone(), circ, 42).unwrap();
+                    run_with(kind.clone(), circ, 42).unwrap();
                 });
             });
         }
@@ -748,7 +770,7 @@ fn bench_compare_general(c: &mut Criterion) {
         for &(name, ref kind) in backends {
             group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
                 b.iter(|| {
-                    sim::run_with(kind.clone(), circ, 42).unwrap();
+                    run_with(kind.clone(), circ, 42).unwrap();
                 });
             });
         }
@@ -766,7 +788,7 @@ fn bench_auto_random(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Auto, circ, 42).unwrap();
+                run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
     }
@@ -782,7 +804,7 @@ fn bench_auto_qft(c: &mut Criterion) {
         let circuit = qft_like_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Auto, circ, 42).unwrap();
+                run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
     }
@@ -798,7 +820,7 @@ fn bench_auto_qft_textbook(c: &mut Criterion) {
         let circuit = circuits::qft_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Auto, circ, 42).unwrap();
+                run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
     }
@@ -815,7 +837,7 @@ fn bench_auto_qpe(c: &mut Criterion) {
         let label = format!("{}q", n);
         group.bench_with_input(BenchmarkId::from_parameter(label), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Auto, circ, 42).unwrap();
+                run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
     }
@@ -831,7 +853,7 @@ fn bench_auto_hea(c: &mut Criterion) {
         let circuit = circuits::hardware_efficient_ansatz(n, 5, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Auto, circ, 42).unwrap();
+                run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
     }
@@ -847,7 +869,7 @@ fn bench_auto_clifford(c: &mut Criterion) {
         let circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Auto, circ, 42).unwrap();
+                run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
     }
@@ -865,7 +887,7 @@ fn bench_auto_scalability(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 5, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                sim::run_with(BackendKind::Auto, circ, 42).unwrap();
+                run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
     }
@@ -888,7 +910,7 @@ fn bench_decomposition(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                    run_with(BackendKind::Statevector, circ, 42).unwrap();
                 });
             },
         );
@@ -914,7 +936,7 @@ fn bench_decomposition(c: &mut Criterion) {
             &circuit,
             |b, circ| {
                 b.iter(|| {
-                    sim::run_with(BackendKind::Statevector, circ, 42).unwrap();
+                    run_with(BackendKind::Statevector, circ, 42).unwrap();
                 });
             },
         );
@@ -944,10 +966,10 @@ fn bench_factored_random(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
 
         group.bench_with_input(BenchmarkId::new("statevector", n), &circuit, |b, circ| {
-            b.iter(|| sim::run_with(BackendKind::Statevector, circ, 42).unwrap());
+            b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
         });
         group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
-            b.iter(|| sim::run_with(BackendKind::Factored, circ, 42).unwrap());
+            b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
         });
     }
 
@@ -965,14 +987,14 @@ fn bench_factored_independent(c: &mut Criterion) {
             BenchmarkId::new("statevector", total_q),
             &circuit,
             |b, circ| {
-                b.iter(|| sim::run_with(BackendKind::Statevector, circ, 42).unwrap());
+                b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
             },
         );
         group.bench_with_input(
             BenchmarkId::new("factored", total_q),
             &circuit,
             |b, circ| {
-                b.iter(|| sim::run_with(BackendKind::Factored, circ, 42).unwrap());
+                b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
             },
         );
     }
@@ -988,10 +1010,10 @@ fn bench_factored_sim_only(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
 
         group.bench_with_input(BenchmarkId::new("statevector", n), &circuit, |b, circ| {
-            b.iter(|| sim::run_with(BackendKind::Statevector, circ, 42).unwrap());
+            b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
         });
         group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
-            b.iter(|| sim::run_with(BackendKind::Factored, circ, 42).unwrap());
+            b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
         });
     }
 
@@ -1016,14 +1038,14 @@ fn bench_factored_dynamic(c: &mut Criterion) {
             BenchmarkId::new("statevector", total_q),
             &circuit,
             |b, circ| {
-                b.iter(|| sim::run_with(BackendKind::Statevector, circ, 42).unwrap());
+                b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
             },
         );
         group.bench_with_input(
             BenchmarkId::new("factored", total_q),
             &circuit,
             |b, circ| {
-                b.iter(|| sim::run_with(BackendKind::Factored, circ, 42).unwrap());
+                b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
             },
         );
     }
@@ -1039,10 +1061,10 @@ fn bench_factored_dense(c: &mut Criterion) {
         let circuit = circuits::hardware_efficient_ansatz(n, 3, SEED);
 
         group.bench_with_input(BenchmarkId::new("statevector", n), &circuit, |b, circ| {
-            b.iter(|| sim::run_with(BackendKind::Statevector, circ, 42).unwrap());
+            b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
         });
         group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
-            b.iter(|| sim::run_with(BackendKind::Factored, circ, 42).unwrap());
+            b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
         });
     }
 
@@ -1107,7 +1129,7 @@ fn bench_clifford_t(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("statevector", format!("{n}q_{t}t")), |b| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
     }
@@ -1123,7 +1145,7 @@ fn bench_clifford_t(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("statevector", format!("{n}q_4t")), |b| {
             b.iter(|| {
-                sim::run_with(BackendKind::Statevector, &circuit, 42).unwrap();
+                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
         });
     }
@@ -1227,14 +1249,8 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         BenchmarkId::new("compiled_pauli", "clifford_100q_10k"),
         |b| {
             b.iter(|| {
-                prism_q::run_shots_with_noise(
-                    BackendKind::Auto,
-                    &clifford,
-                    &clifford_noise,
-                    10_000,
-                    SEED,
-                )
-                .unwrap();
+                run_shots_with_noise(BackendKind::Auto, &clifford, &clifford_noise, 10_000, SEED)
+                    .unwrap();
             });
         },
     );
@@ -1245,7 +1261,7 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         BenchmarkId::new("trajectory_pauli", "non_clifford_12q_512"),
         |b| {
             b.iter(|| {
-                prism_q::run_shots_with_noise(
+                run_shots_with_noise(
                     BackendKind::Auto,
                     &non_clifford,
                     &non_clifford_noise,

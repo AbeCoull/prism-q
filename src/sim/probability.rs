@@ -44,6 +44,55 @@ impl Probabilities {
         false
     }
 
+    /// Compute per-qubit marginal probabilities from an existing joint distribution.
+    ///
+    /// Returns `(P(0), P(1))` for each qubit. This is a view over already
+    /// materialized probability data. Query APIs can still choose faster direct
+    /// marginal algorithms before producing a joint distribution.
+    pub fn marginals(&self) -> Vec<(f64, f64)> {
+        match self {
+            Probabilities::Dense(v) => {
+                let n = v.len().ilog2() as usize;
+                let mut marginals = vec![(0.0f64, 0.0f64); n];
+                for (idx, &p) in v.iter().enumerate() {
+                    for (q, m) in marginals.iter_mut().enumerate() {
+                        if (idx >> q) & 1 == 0 {
+                            m.0 += p;
+                        } else {
+                            m.1 += p;
+                        }
+                    }
+                }
+                marginals
+            }
+            Probabilities::Factored {
+                blocks,
+                total_qubits,
+            } => {
+                let mut marginals = vec![(0.0f64, 0.0f64); *total_qubits];
+                for block in blocks {
+                    let mut qubits = Vec::new();
+                    let mut mask = block.mask;
+                    while mask != 0 {
+                        qubits.push(mask.trailing_zeros() as usize);
+                        mask &= mask.wrapping_sub(1);
+                    }
+
+                    for (idx, &p) in block.probs.iter().enumerate() {
+                        for (local_bit, &qubit) in qubits.iter().enumerate() {
+                            if (idx >> local_bit) & 1 == 0 {
+                                marginals[qubit].0 += p;
+                            } else {
+                                marginals[qubit].1 += p;
+                            }
+                        }
+                    }
+                }
+                marginals
+            }
+        }
+    }
+
     /// Probability of a single computational basis state. O(1) for dense,
     /// O(K) for factored where K is the number of independent blocks.
     ///

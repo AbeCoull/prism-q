@@ -19,11 +19,38 @@ use prism_q::{compile_qec_profiled_sampler, parse_qec_program};
 use prism_q::{
     run_qec_program, HomologicalSampler, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef,
 };
+use std::collections::HashMap;
 #[cfg(feature = "bench-internal")]
 use std::hint::black_box;
 use std::time::Duration;
 
 const SEED: u64 = 0xDEAD_BEEF;
+const API_QUERY_SHOTS: usize = 100_000;
+
+fn run_shots_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<prism_q::ShotsResult> {
+    sim::simulate(circuit)
+        .backend(kind)
+        .seed(seed)
+        .shots(num_shots)
+}
+
+fn run_counts_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<HashMap<Vec<u64>, u64>> {
+    Ok(sim::simulate(circuit)
+        .backend(kind)
+        .seed(seed)
+        .sample_counts(num_shots)?
+        .into_counts())
+}
 
 fn bell_circuit_with_measurements(n_qubits: usize) -> Circuit {
     let mut c = Circuit::new(n_qubits, n_qubits);
@@ -51,6 +78,104 @@ fn ghz_circuit_with_measurements(n_qubits: usize) -> Circuit {
     c
 }
 
+fn non_clifford_terminal_circuit(n_qubits: usize, measured_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(n_qubits, n_qubits);
+    for q in 0..n_qubits {
+        c.add_gate(Gate::Ry(0.17 + q as f64 * 0.013), &[q]);
+        c.add_gate(Gate::Rz(0.29 + q as f64 * 0.017), &[q]);
+    }
+    for q in 0..n_qubits - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n_qubits {
+        c.add_gate(Gate::Rx(0.11 + q as f64 * 0.019), &[q]);
+    }
+    for q in 0..measured_qubits.min(n_qubits) {
+        c.add_measure(q, q);
+    }
+    c
+}
+
+fn api_redesign_circuit(n_qubits: usize, with_measurements: bool) -> Circuit {
+    let mut c = Circuit::new(n_qubits, if with_measurements { n_qubits } else { 0 });
+    for q in 0..n_qubits {
+        c.add_gate(Gate::Ry(0.13 + q as f64 * 0.011), &[q]);
+        c.add_gate(Gate::Rz(0.19 + q as f64 * 0.017), &[q]);
+    }
+    for q in 0..n_qubits - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n_qubits {
+        c.add_gate(Gate::Rx(0.07 + q as f64 * 0.023), &[q]);
+    }
+    if with_measurements {
+        for q in 0..n_qubits {
+            c.add_measure(q, q);
+        }
+    }
+    c
+}
+
+fn clifford_t_marginal_circuit(n_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(n_qubits, 0);
+    for q in 0..n_qubits {
+        c.add_gate(Gate::H, &[q]);
+        if q % 3 == 0 {
+            c.add_gate(Gate::T, &[q]);
+        }
+    }
+    for q in 0..n_qubits - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in (1..n_qubits).step_by(4) {
+        c.add_gate(Gate::Tdg, &[q]);
+    }
+    c
+}
+
+fn bench_api_queries(c: &mut Criterion) {
+    let mut group = c.benchmark_group("api_queries");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(3));
+
+    let run_circuit = api_redesign_circuit(12, false);
+    group.bench_function("run_auto_12q", |b| {
+        b.iter(|| sim::simulate(&run_circuit).seed(SEED).run().unwrap());
+    });
+
+    let shots_circuit = api_redesign_circuit(12, true);
+    group.bench_function("shots_terminal_12q_100000", |b| {
+        b.iter(|| {
+            sim::simulate(&shots_circuit)
+                .seed(SEED)
+                .shots(API_QUERY_SHOTS)
+                .unwrap()
+        });
+    });
+
+    group.bench_function("sample_counts_terminal_12q_100000", |b| {
+        b.iter(|| {
+            sim::simulate(&shots_circuit)
+                .seed(SEED)
+                .sample_counts(API_QUERY_SHOTS)
+                .unwrap()
+        });
+    });
+
+    let marginal_circuit = clifford_t_marginal_circuit(14);
+    group.bench_function("marginals_auto_clifford_t_14q", |b| {
+        b.iter(|| {
+            sim::simulate(&marginal_circuit)
+                .seed(SEED)
+                .marginals()
+                .unwrap()
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_run_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("run_shots");
     group.sample_size(10);
@@ -63,7 +188,7 @@ fn bench_run_shots(c: &mut Criterion) {
             BenchmarkId::new("bell_16q", n_shots),
             &n_shots,
             |b, &shots| {
-                b.iter(|| sim::run_shots_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
+                b.iter(|| run_shots_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
             },
         );
     }
@@ -74,7 +199,29 @@ fn bench_run_shots(c: &mut Criterion) {
             BenchmarkId::new("ghz_20q", n_shots),
             &n_shots,
             |b, &shots| {
-                b.iter(|| sim::run_shots_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
+                b.iter(|| run_shots_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
+            },
+        );
+    }
+
+    for &n_shots in &[1_000, 10_000, 100_000] {
+        let circuit = non_clifford_terminal_circuit(18, 18);
+        group.bench_with_input(
+            BenchmarkId::new("nonclifford_full_18q", n_shots),
+            &n_shots,
+            |b, &shots| {
+                b.iter(|| run_shots_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
+            },
+        );
+    }
+
+    for &n_shots in &[1_000, 10_000, 100_000] {
+        let circuit = non_clifford_terminal_circuit(20, 8);
+        group.bench_with_input(
+            BenchmarkId::new("nonclifford_subset_20q_8m", n_shots),
+            &n_shots,
+            |b, &shots| {
+                b.iter(|| run_shots_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
             },
         );
     }
@@ -90,13 +237,44 @@ fn bench_counts(c: &mut Criterion) {
 
     for &n_shots in &[10_000, 100_000, 1_000_000] {
         let circuit = bell_circuit_with_measurements(16);
-        let result = sim::run_shots_with(BackendKind::Auto, &circuit, n_shots, SEED).unwrap();
+        let result = run_shots_with(BackendKind::Auto, &circuit, n_shots, SEED).unwrap();
 
         group.bench_with_input(
             BenchmarkId::new("ShotsResult_counts_16q", n_shots),
             &result,
             |b, res| {
                 b.iter(|| res.counts());
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_run_counts_terminal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("run_counts_terminal");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(3));
+
+    for &n_shots in &[10_000, 100_000] {
+        let circuit = non_clifford_terminal_circuit(18, 18);
+        group.bench_with_input(
+            BenchmarkId::new("nonclifford_full_18q", n_shots),
+            &n_shots,
+            |b, &shots| {
+                b.iter(|| run_counts_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
+            },
+        );
+    }
+
+    for &n_shots in &[10_000, 100_000] {
+        let circuit = non_clifford_terminal_circuit(20, 8);
+        group.bench_with_input(
+            BenchmarkId::new("nonclifford_subset_20q_8m", n_shots),
+            &n_shots,
+            |b, &shots| {
+                b.iter(|| run_counts_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
             },
         );
     }
@@ -616,8 +794,10 @@ fn bench_analytical_marginals(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_api_queries,
     bench_run_shots,
     bench_counts,
+    bench_run_counts_terminal,
     bench_compiled_counts,
     bench_histogram_counts,
     bench_rank_space_counts,

@@ -11,7 +11,7 @@ A simulation strategy implementing the `Backend` trait (e.g., statevector, stabi
 A class of quantum gates (H, S, CNOT, etc.) that can be simulated efficiently on stabilizer tableaus in O(n²) time.
 
 **Count**
-A frequency histogram of measured bitstrings across multiple shots, returned by `run_counts`.
+A frequency histogram of measured bitstrings across multiple shots, returned by `simulate(circuit).seed(seed).sample_counts(shots)`.
 
 **Fusion**
 The pre-simulation optimization pipeline that merges, cancels, and reorders gates to reduce execution cost.

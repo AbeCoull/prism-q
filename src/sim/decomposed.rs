@@ -3,7 +3,7 @@ use crate::error::Result;
 
 use super::{
     execute_circuit, select_backend, validate_explicit_backend, BackendKind, FactoredBlock,
-    Probabilities, SimOptions, SimulationResult,
+    Probabilities, RunOutcome, SimOptions,
 };
 
 pub(super) const MIN_DECOMPOSITION_QUBITS: usize = 8;
@@ -23,7 +23,7 @@ fn run_blocks_maybe_par(
     seed: u64,
     opts: &SimOptions,
     k: usize,
-) -> Vec<Result<SimulationResult>> {
+) -> Vec<Result<RunOutcome>> {
     #[cfg(feature = "parallel")]
     {
         let all_small = _components
@@ -48,7 +48,7 @@ fn run_subcircuit(
     sub_circuit: &Circuit,
     block_seed: u64,
     opts: &SimOptions,
-) -> Result<SimulationResult> {
+) -> Result<RunOutcome> {
     let block_kind = if matches!(kind, BackendKind::Auto) {
         BackendKind::Auto
     } else {
@@ -63,7 +63,7 @@ pub(super) fn run_decomposed(
     circuit: &Circuit,
     seed: u64,
     opts: &SimOptions,
-) -> Result<SimulationResult> {
+) -> Result<RunOutcome> {
     let partitions = circuit.partition_subcircuits(components);
     let k = partitions.len();
 
@@ -72,7 +72,7 @@ pub(super) fn run_decomposed(
     } else {
         *opts
     };
-    let results: Vec<Result<SimulationResult>> =
+    let results: Vec<Result<RunOutcome>> =
         run_blocks_maybe_par(kind, &partitions, components, seed, &block_opts, k);
 
     merge_decomposed_results(
@@ -86,13 +86,13 @@ pub(super) fn run_decomposed(
 }
 
 fn merge_decomposed_results(
-    results: Vec<Result<SimulationResult>>,
+    results: Vec<Result<RunOutcome>>,
     components: &[Vec<usize>],
     partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
     num_classical_bits: usize,
     num_qubits: usize,
     opts: &SimOptions,
-) -> Result<SimulationResult> {
+) -> Result<RunOutcome> {
     let mut factored_blocks: Vec<FactoredBlock> = Vec::new();
     let mut merged_classical = vec![false; num_classical_bits];
 
@@ -125,7 +125,7 @@ fn merge_decomposed_results(
         None
     };
 
-    Ok(SimulationResult {
+    Ok(RunOutcome {
         classical_bits: merged_classical,
         probabilities,
     })
@@ -139,14 +139,14 @@ pub(super) fn run_decomposed_prefused(
     seed: u64,
     opts: &SimOptions,
     original_circuit: &Circuit,
-) -> Result<SimulationResult> {
+) -> Result<RunOutcome> {
     let k = partitions.len();
     let block_opts = if original_circuit.num_qubits > 64 {
         SimOptions::classical_only()
     } else {
         *opts
     };
-    let results: Vec<Result<SimulationResult>> = (0..k)
+    let results: Vec<Result<RunOutcome>> = (0..k)
         .map(|i| {
             let block_seed = seed.wrapping_add(i as u64);
             let sub = &partitions[i].0;

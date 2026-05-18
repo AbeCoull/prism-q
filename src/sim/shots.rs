@@ -75,7 +75,7 @@ pub fn bitstring(key: &[u64], num_bits: usize) -> String {
     s
 }
 
-fn build_cdf(probs: &[f64]) -> Vec<f64> {
+pub(super) fn build_cdf(probs: &[f64]) -> Vec<f64> {
     let mut cdf = Vec::with_capacity(probs.len());
     let mut acc = 0.0;
     for &p in probs {
@@ -88,7 +88,7 @@ fn build_cdf(probs: &[f64]) -> Vec<f64> {
     cdf
 }
 
-fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
+pub(super) fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
     match cdf.binary_search_by(|p| p.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal)) {
         Ok(i) => i,
         Err(i) => i.min(cdf.len() - 1),

@@ -11,6 +11,7 @@ pub mod noise;
 mod probability;
 mod shots;
 pub mod stabilizer_rank;
+mod terminal_sampling;
 mod trajectory;
 pub mod unified_pauli;
 
@@ -20,21 +21,26 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    has_temporal_clifford_opportunity, select_backend, select_dispatch, stabilizer_rank_budget,
-    supports_fused_for_kind, try_temporal_clifford, validate_explicit_backend, DispatchAction,
-    AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM, AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX,
-    MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
-    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
+    auto_selects_cpu_statevector, has_temporal_clifford_opportunity, select_backend,
+    select_dispatch, stabilizer_rank_budget, supports_fused_for_kind, try_temporal_clifford,
+    validate_explicit_backend, DispatchAction, AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM,
+    AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
+    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
+    MIN_QUBITS_FOR_SPD_AUTO,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{bitstring, ShotsResult};
 
 use std::collections::HashMap;
 
+use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{max_statevector_qubits, Backend};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use shots::{packed_shots_to_classical_bits, sample_shots};
+use terminal_sampling::{sample_counts_from_state, sample_shots_from_state};
+
+type TerminalStatevector = (StatevectorBackend, Vec<(usize, usize)>);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SimOptions {
@@ -57,9 +63,9 @@ impl SimOptions {
     }
 }
 
-/// Result of a simulation run.
+/// Result of a generic simulation run.
 #[derive(Debug, Clone)]
-pub struct SimulationResult {
+pub struct RunOutcome {
     /// Classical measurement outcomes, indexed by classical bit number.
     /// `true` = measured |1⟩.
     pub classical_bits: Vec<bool>,
@@ -68,20 +74,154 @@ pub struct SimulationResult {
     pub probabilities: Option<Probabilities>,
 }
 
+/// Frequency histogram returned by query-aware count sampling.
+#[derive(Debug, Clone)]
+pub struct CountsResult {
+    pub counts: HashMap<Vec<u64>, u64>,
+    pub num_classical_bits: usize,
+}
+
+impl CountsResult {
+    pub fn into_counts(self) -> HashMap<Vec<u64>, u64> {
+        self.counts
+    }
+}
+
+/// Per-qubit marginal probabilities returned by query-aware marginal sampling.
+#[derive(Debug, Clone)]
+pub struct MarginalsResult {
+    pub marginals: Vec<(f64, f64)>,
+}
+
+impl MarginalsResult {
+    pub fn into_vec(self) -> Vec<(f64, f64)> {
+        self.marginals
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Unseeded;
+
+#[derive(Debug, Clone, Copy)]
+pub struct Seeded {
+    seed: u64,
+}
+
+/// Builder for query-aware simulation requests.
+pub struct Simulate<'c, SeedState> {
+    circuit: &'c Circuit,
+    kind: BackendKind,
+    seed: SeedState,
+    noise_model: Option<&'c noise::NoiseModel>,
+}
+
+impl<'c, SeedState> Simulate<'c, SeedState> {
+    #[inline]
+    pub fn backend(mut self, kind: BackendKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    #[inline]
+    pub fn noise(mut self, model: &'c noise::NoiseModel) -> Self {
+        self.noise_model = Some(model);
+        self
+    }
+
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub fn gpu(self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
+        self.backend(BackendKind::StatevectorGpu { context })
+    }
+}
+
+impl<'c> Simulate<'c, Unseeded> {
+    #[inline]
+    pub fn seed(self, seed: u64) -> Simulate<'c, Seeded> {
+        Simulate {
+            circuit: self.circuit,
+            kind: self.kind,
+            seed: Seeded { seed },
+            noise_model: self.noise_model,
+        }
+    }
+}
+
+impl<'c> Simulate<'c, Seeded> {
+    #[inline]
+    fn seed_value(&self) -> u64 {
+        self.seed.seed
+    }
+
+    #[inline]
+    pub fn run(self) -> Result<RunOutcome> {
+        let seed = self.seed_value();
+        if self.noise_model.is_some() {
+            return Err(crate::error::PrismError::BackendUnsupported {
+                backend: format!("{:?}", self.kind),
+                operation: "single-run noisy simulation through `run`".into(),
+            });
+        }
+        run_with_internal(self.kind, self.circuit, seed, SimOptions::default())
+    }
+
+    #[inline]
+    pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
+        let seed = self.seed_value();
+        if let Some(noise_model) = self.noise_model {
+            run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)
+        } else {
+            run_shots_with(self.kind, self.circuit, num_shots, seed)
+        }
+    }
+
+    #[inline]
+    pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
+        let seed = self.seed_value();
+        let counts = if let Some(noise_model) = self.noise_model {
+            run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)?.counts()
+        } else {
+            run_counts_with(self.kind, self.circuit, num_shots, seed)?
+        };
+        Ok(CountsResult {
+            counts,
+            num_classical_bits: self.circuit.num_classical_bits,
+        })
+    }
+
+    #[inline]
+    pub fn marginals(self) -> Result<MarginalsResult> {
+        let seed = self.seed_value();
+        if self.noise_model.is_some() {
+            return Err(crate::error::PrismError::BackendUnsupported {
+                backend: format!("{:?}", self.kind),
+                operation: "marginals with inline noise model".into(),
+            });
+        }
+        run_marginals_result_with(self.kind, self.circuit, seed)
+    }
+}
+
 #[inline]
-fn probs_only_result(probs: Vec<f64>) -> SimulationResult {
-    SimulationResult {
+pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
+    Simulate {
+        circuit,
+        kind: BackendKind::Auto,
+        seed: Unseeded,
+        noise_model: None,
+    }
+}
+
+#[inline]
+fn probs_only_result(probs: Vec<f64>) -> RunOutcome {
+    RunOutcome {
         probabilities: Some(Probabilities::Dense(probs)),
         classical_bits: vec![],
     }
 }
 
 /// Core execution: fuse, init, apply, extract.
-fn execute(
-    backend: &mut dyn Backend,
-    circuit: &Circuit,
-    opts: &SimOptions,
-) -> Result<SimulationResult> {
+fn execute(backend: &mut dyn Backend, circuit: &Circuit, opts: &SimOptions) -> Result<RunOutcome> {
     let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
         std::borrow::Cow::Borrowed(circuit)
     } else {
@@ -96,7 +236,7 @@ fn execute_circuit(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     opts: &SimOptions,
-) -> Result<SimulationResult> {
+) -> Result<RunOutcome> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
     backend.apply_instructions(&circuit.instructions)?;
 
@@ -106,7 +246,7 @@ fn execute_circuit(
         None
     };
 
-    Ok(SimulationResult {
+    Ok(RunOutcome {
         classical_bits: backend.classical_results().to_vec(),
         probabilities: probs,
     })
@@ -116,7 +256,8 @@ fn execute_circuit(
 ///
 /// The simplest entry point. Uses [`BackendKind::Auto`] to select the
 /// optimal backend based on circuit properties, then runs the circuit.
-pub fn run(circuit: &Circuit, seed: u64) -> Result<SimulationResult> {
+#[cfg(test)]
+fn run(circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
     run_with(BackendKind::Auto, circuit, seed)
 }
 
@@ -124,62 +265,8 @@ pub fn run(circuit: &Circuit, seed: u64) -> Result<SimulationResult> {
 ///
 /// Constructs the backend internally based on [`BackendKind`], then runs
 /// the circuit. For a pre-constructed backend instance, use [`run_on`].
-pub fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<SimulationResult> {
+pub(crate) fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
     run_with_internal(kind, circuit, seed, SimOptions::default())
-}
-
-/// Execute a circuit on the CUDA GPU statevector dispatch.
-///
-/// Wraps [`run_with`] with `BackendKind::StatevectorGpu { context }`. The
-/// dispatch still applies fusion, independent-subsystem decomposition, and
-/// the qubit-count crossover ([`crate::gpu::min_qubits`]); sub-circuits
-/// below threshold automatically run on the host statevector.
-///
-/// ```no_run
-/// # #[cfg(feature = "gpu")] {
-/// use prism_q::gpu::GpuContext;
-/// use prism_q::{run_with_gpu, Circuit};
-///
-/// let ctx = GpuContext::new(0).expect("no usable GPU");
-/// let circuit = Circuit::new(16, 0);
-/// let _result = run_with_gpu(&circuit, 42, ctx).unwrap();
-/// # }
-/// ```
-#[cfg(feature = "gpu")]
-pub fn run_with_gpu(
-    circuit: &Circuit,
-    seed: u64,
-    context: std::sync::Arc<crate::gpu::GpuContext>,
-) -> Result<SimulationResult> {
-    run_with(BackendKind::StatevectorGpu { context }, circuit, seed)
-}
-
-/// Execute a Clifford-only circuit on the CUDA GPU stabilizer dispatch.
-///
-/// Wraps [`run_with`] with `BackendKind::StabilizerGpu { context }`. The
-/// dispatch applies independent-subsystem decomposition and the qubit-count
-/// crossover ([`crate::gpu::stabilizer_min_qubits`]); sub-circuits below
-/// threshold automatically run on the CPU stabilizer. Non-Clifford circuits
-/// are rejected at dispatch time with the same error shape as
-/// [`BackendKind::Stabilizer`].
-///
-/// ```no_run
-/// # #[cfg(feature = "gpu")] {
-/// use prism_q::gpu::GpuContext;
-/// use prism_q::{run_with_stabilizer_gpu, Circuit};
-///
-/// let ctx = GpuContext::new(0).expect("no usable GPU");
-/// let circuit = Circuit::new(1024, 0);
-/// let _result = run_with_stabilizer_gpu(&circuit, 42, ctx).unwrap();
-/// # }
-/// ```
-#[cfg(feature = "gpu")]
-pub fn run_with_stabilizer_gpu(
-    circuit: &Circuit,
-    seed: u64,
-    context: std::sync::Arc<crate::gpu::GpuContext>,
-) -> Result<SimulationResult> {
-    run_with(BackendKind::StabilizerGpu { context }, circuit, seed)
 }
 
 fn run_with_internal(
@@ -187,7 +274,7 @@ fn run_with_internal(
     circuit: &Circuit,
     seed: u64,
     opts: SimOptions,
-) -> Result<SimulationResult> {
+) -> Result<RunOutcome> {
     if !matches!(kind, BackendKind::Auto) {
         validate_explicit_backend(&kind, circuit)?;
     }
@@ -245,12 +332,22 @@ fn run_with_internal(
             Ok(probs_only_result(sr.probabilities))
         }
         DispatchAction::StochasticPauli { num_samples } => {
-            let spp = unified_pauli::run_spp(circuit, num_samples, seed)?;
-            Ok(probs_only_result(unified_pauli::spp_to_probabilities(&spp)))
+            Err(crate::error::PrismError::IncompatibleBackend {
+                backend: format!(
+                    "{:?}",
+                    BackendKind::StochasticPauli { num_samples }
+                ),
+                reason: "StochasticPauli produces marginal estimates only; use `simulate(...).marginals()`".into(),
+            })
         }
         DispatchAction::DeterministicPauli { epsilon, max_terms } => {
-            let spd = unified_pauli::run_spd(circuit, epsilon, max_terms)?;
-            Ok(probs_only_result(unified_pauli::spd_to_probabilities(&spd)))
+            Err(crate::error::PrismError::IncompatibleBackend {
+                backend: format!(
+                    "{:?}",
+                    BackendKind::DeterministicPauli { epsilon, max_terms }
+                ),
+                reason: "DeterministicPauli produces marginals only; use `simulate(...).marginals()`".into(),
+            })
         }
     }
 }
@@ -259,18 +356,19 @@ fn run_with_internal(
 ///
 /// Use this when you need direct control over the backend instance
 /// (e.g., testing a specific backend). For automatic dispatch, use [`run`].
-pub fn run_on(backend: &mut dyn Backend, circuit: &Circuit) -> Result<SimulationResult> {
+pub fn run_on(backend: &mut dyn Backend, circuit: &Circuit) -> Result<RunOutcome> {
     execute(backend, circuit, &SimOptions::default())
 }
 
 /// Parse an OpenQASM string and execute with automatic backend selection.
-pub fn run_qasm(qasm: &str, seed: u64) -> Result<SimulationResult> {
+pub fn run_qasm(qasm: &str, seed: u64) -> Result<RunOutcome> {
     let circuit = crate::circuit::openqasm::parse(qasm)?;
-    run(&circuit, seed)
+    simulate(&circuit).seed(seed).run()
 }
 
 /// Execute a circuit multiple times, collecting measurement outcomes.
-pub fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
+#[cfg(test)]
+fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     run_shots_with(BackendKind::Auto, circuit, num_shots, seed)
 }
 
@@ -344,7 +442,86 @@ fn compile_measurements_for_kind(
     Ok(sampler)
 }
 
-/// Execute a circuit multiple times and return outcome counts directly.
+fn auto_terminal_statevector_candidate(circuit: &Circuit) -> bool {
+    let mut has_partial_independence = false;
+    if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
+        let components = circuit.independent_subsystems();
+        if components.len() > 1 {
+            if should_decompose(&components, circuit.num_qubits) {
+                return false;
+            }
+            has_partial_independence = true;
+        }
+    }
+
+    if !auto_selects_cpu_statevector(circuit, has_partial_independence) {
+        return false;
+    }
+
+    if circuit.is_clifford_plus_t()
+        && circuit.has_t_gates()
+        && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
+    {
+        let t = circuit.t_count();
+        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
+        if t <= MAX_AUTO_T_COUNT_APPROX && t <= sr_budget {
+            return false;
+        }
+    }
+
+    !has_temporal_clifford_opportunity(&BackendKind::Auto, circuit)
+}
+
+fn terminal_statevector_candidate(kind: &BackendKind, circuit: &Circuit) -> bool {
+    match kind {
+        BackendKind::Statevector => true,
+        BackendKind::Auto => auto_terminal_statevector_candidate(circuit),
+        _ => false,
+    }
+}
+
+fn try_terminal_statevector_backend(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> Result<Option<TerminalStatevector>> {
+    if !circuit.has_terminal_measurements_only() {
+        return Ok(None);
+    }
+
+    let meas_map = circuit.measurement_map();
+    if meas_map.is_empty() {
+        return Ok(None);
+    }
+
+    let stripped = circuit.without_measurements();
+    if !terminal_statevector_candidate(kind, &stripped) {
+        return Ok(None);
+    }
+
+    let mut backend = StatevectorBackend::new(seed);
+    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
+        std::borrow::Cow::Borrowed(&stripped)
+    } else {
+        crate::circuit::expand_qft_blocks(&stripped)
+    };
+    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    backend.apply_instructions(&fused.instructions)?;
+
+    Ok(Some((backend, meas_map)))
+}
+
+/// Execute a circuit multiple times with automatic backend selection and return counts.
+///
+/// Use this when only a frequency histogram is needed. Optimized paths can
+/// avoid materializing per-shot bit vectors.
+#[cfg(test)]
+fn run_counts(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<HashMap<Vec<u64>, u64>> {
+    run_counts_with(BackendKind::Auto, circuit, num_shots, seed)
+}
+
+/// Execute a circuit multiple times with explicit backend selection and return counts.
 ///
 /// For Clifford circuits with terminal measurements and no resets, Auto,
 /// Stabilizer, FactoredStabilizer, and explicit `StabilizerGpu` route through
@@ -352,7 +529,11 @@ fn compile_measurements_for_kind(
 /// carries its GPU context into the compiled sampler so large shot runs avoid
 /// the raw tableau measurement round-trips. Other circuits fall back to
 /// per-shot simulation with counting.
-pub fn run_counts(
+///
+/// Optimized terminal statevector paths sample counts directly from the output
+/// distribution. The distribution is equivalent to materializing shots first,
+/// but finite seeded counts may differ from `run_shots_with(...).counts()`.
+pub(crate) fn run_counts_with(
     kind: BackendKind,
     circuit: &Circuit,
     num_shots: usize,
@@ -361,6 +542,17 @@ pub fn run_counts(
     if should_use_compiled_clifford_sampling(&kind, circuit, num_shots) {
         let mut sampler = compile_measurements_for_kind(&kind, circuit, seed)?;
         return sampler.try_sample_counts(num_shots);
+    }
+
+    if let Some((backend, meas_map)) = try_terminal_statevector_backend(&kind, circuit, seed)? {
+        return Ok(sample_counts_from_state(
+            backend.state_vector(),
+            backend.probability_scale(),
+            &meas_map,
+            circuit.num_classical_bits,
+            num_shots,
+            seed,
+        ));
     }
 
     let result = run_shots_with(kind, circuit, num_shots, seed)?;
@@ -382,48 +574,75 @@ pub fn run_counts(
 ///
 /// For other circuits, falls back to statevector probabilities and extracts
 /// marginals.
-pub fn run_marginals(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
+#[cfg(test)]
+fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
+    run_marginals_result_with(BackendKind::Auto, circuit, seed).map(MarginalsResult::into_vec)
+}
+
+/// Compute per-qubit marginal probabilities with explicit backend selection.
+#[cfg(test)]
+fn run_marginals_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
+    run_marginals_result_with(kind, circuit, seed).map(MarginalsResult::into_vec)
+}
+
+fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)> {
+    expectations
+        .iter()
+        .map(|ez| {
+            let p0 = ((1.0 + ez) / 2.0).clamp(0.0, 1.0);
+            (p0, 1.0 - p0)
+        })
+        .collect()
+}
+
+fn run_marginals_result_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> Result<MarginalsResult> {
     let n = circuit.num_qubits;
 
-    if (matches!(
-        kind,
-        BackendKind::Auto | BackendKind::DeterministicPauli { .. }
-    )) && circuit.is_clifford_plus_t()
+    match kind {
+        BackendKind::StochasticPauli { num_samples } => {
+            let spp = unified_pauli::run_spp(circuit, num_samples, seed)?;
+            return Ok(MarginalsResult {
+                marginals: expectations_to_marginals(&spp.expectations),
+            });
+        }
+        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+            let spd = unified_pauli::run_spd(circuit, epsilon, max_terms)?;
+            return Ok(MarginalsResult {
+                marginals: expectations_to_marginals(&spd.expectations),
+            });
+        }
+        _ => {}
+    }
+
+    if matches!(kind, BackendKind::Auto)
+        && circuit.is_clifford_plus_t()
         && circuit.has_t_gates()
         && n >= MIN_QUBITS_FOR_SPD_AUTO
     {
         let spd = unified_pauli::run_spd(circuit, 0.0, AUTO_SPD_MAX_TERMS)?;
-        return Ok(spd
-            .expectations
-            .iter()
-            .map(|ez| {
-                let p0 = ((1.0 + ez) / 2.0).clamp(0.0, 1.0);
-                (p0, 1.0 - p0)
-            })
-            .collect());
+        return Ok(MarginalsResult {
+            marginals: expectations_to_marginals(&spd.expectations),
+        });
     }
 
     let result = run_with(kind, circuit, seed)?;
     if let Some(probs) = &result.probabilities {
-        let mut marginals = vec![(0.0f64, 0.0f64); n];
-        let dense = probs.to_vec();
-        for (idx, &p) in dense.iter().enumerate() {
-            for (q, m) in marginals.iter_mut().enumerate() {
-                if (idx >> q) & 1 == 0 {
-                    m.0 += p;
-                } else {
-                    m.1 += p;
-                }
-            }
-        }
-        Ok(marginals)
+        Ok(MarginalsResult {
+            marginals: probs.marginals(),
+        })
     } else {
-        Ok(vec![(0.5, 0.5); n])
+        Ok(MarginalsResult {
+            marginals: vec![(0.5, 0.5); n],
+        })
     }
 }
 
 /// Execute a circuit multiple times with explicit backend selection.
-pub fn run_shots_with(
+pub(crate) fn run_shots_with(
     kind: BackendKind,
     circuit: &Circuit,
     num_shots: usize,
@@ -459,6 +678,21 @@ pub fn run_shots_with(
                 num_classical_bits: circuit.num_classical_bits,
             });
         }
+    }
+
+    if let Some((backend, meas_map)) = try_terminal_statevector_backend(&kind, circuit, seed)? {
+        let shots = sample_shots_from_state(
+            backend.state_vector(),
+            backend.probability_scale(),
+            &meas_map,
+            circuit.num_classical_bits,
+            num_shots,
+            seed,
+        );
+        return Ok(ShotsResult {
+            shots,
+            num_classical_bits: circuit.num_classical_bits,
+        });
     }
 
     if circuit.has_terminal_measurements_only() {
@@ -593,7 +827,7 @@ fn auto_general_noise_backend(circuit: &Circuit) -> BackendKind {
     }
 }
 
-pub fn run_shots_with_noise(
+pub(crate) fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
     noise_model: &noise::NoiseModel,
@@ -1296,7 +1530,7 @@ mod tests {
     #[test]
     fn test_run_counts_factored_stabilizer() {
         let circuit = make_bell_with_measure();
-        let counts = run_counts(BackendKind::FactoredStabilizer, &circuit, 128, 42).unwrap();
+        let counts = run_counts_with(BackendKind::FactoredStabilizer, &circuit, 128, 42).unwrap();
         let total: u64 = counts.values().sum();
         let bell_total = counts.get(&vec![0u64]).copied().unwrap_or(0)
             + counts.get(&vec![3u64]).copied().unwrap_or(0);
@@ -1539,6 +1773,112 @@ mod tests {
         for shot in &result.shots {
             assert_eq!(shot, &vec![false, false, true]);
         }
+    }
+
+    #[test]
+    fn test_terminal_statevector_sampling_matches_probability_path() {
+        let mut c = Circuit::new(5, 5);
+        for q in 0..5 {
+            c.add_gate(Gate::Ry(0.17 + q as f64 * 0.11), &[q]);
+        }
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Cx, &[1, 2]);
+        c.add_gate(Gate::Rz(0.41), &[3]);
+        c.add_gate(Gate::Rx(0.23), &[4]);
+        c.add_measure(3, 1);
+        c.add_measure(0, 4);
+
+        let stripped = c.without_measurements();
+        let reference = run_with_internal(
+            BackendKind::Statevector,
+            &stripped,
+            42,
+            SimOptions::default(),
+        )
+        .unwrap();
+        let probs = reference.probabilities.unwrap();
+        let expected =
+            shots::sample_shots(&probs, &c.measurement_map(), c.num_classical_bits, 256, 42);
+
+        let actual = run_shots_with(BackendKind::Statevector, &c, 256, 42).unwrap();
+        assert_eq!(actual.shots, expected);
+    }
+
+    #[test]
+    fn test_terminal_statevector_counts_match_probability_path_all_measured() {
+        let mut c = Circuit::new(4, 4);
+        c.add_gate(Gate::Ry(0.31), &[0]);
+        c.add_gate(Gate::Ry(0.47), &[1]);
+        c.add_gate(Gate::Cx, &[0, 2]);
+        c.add_gate(Gate::Rx(0.19), &[3]);
+        c.add_measure(0, 0);
+        c.add_measure(1, 1);
+        c.add_measure(2, 2);
+        c.add_measure(3, 3);
+
+        let stripped = c.without_measurements();
+        let reference = run_with_internal(
+            BackendKind::Statevector,
+            &stripped,
+            7,
+            SimOptions::default(),
+        )
+        .unwrap();
+        let probs = reference.probabilities.unwrap();
+        let expected_shots =
+            shots::sample_shots(&probs, &c.measurement_map(), c.num_classical_bits, 512, 7);
+        let expected = ShotsResult {
+            shots: expected_shots,
+            num_classical_bits: c.num_classical_bits,
+        }
+        .counts();
+
+        let actual = run_counts_with(BackendKind::Statevector, &c, 512, 7).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_terminal_statevector_duplicate_classical_bit_uses_last_measurement() {
+        let mut c = Circuit::new(2, 1);
+        c.add_gate(Gate::X, &[0]);
+        c.add_measure(0, 0);
+        c.add_measure(1, 0);
+
+        let shots = run_shots_with(BackendKind::Statevector, &c, 16, 42).unwrap();
+        for shot in &shots.shots {
+            assert_eq!(shot, &vec![false]);
+        }
+
+        let counts = run_counts_with(BackendKind::Statevector, &c, 16, 42).unwrap();
+        assert_eq!(counts.get(&vec![0]), Some(&16));
+    }
+
+    #[test]
+    fn test_terminal_statevector_counts_wide_classical_register() {
+        let mut c = Circuit::new(2, 72);
+        c.add_gate(Gate::X, &[0]);
+        c.add_measure(0, 70);
+
+        let counts = run_counts_with(BackendKind::Statevector, &c, 10, 11).unwrap();
+        let mut expected = vec![0u64; 2];
+        expected[1] = 1u64 << 6;
+        assert_eq!(counts.get(&expected), Some(&10));
+    }
+
+    #[test]
+    fn test_terminal_statevector_subset_counts_sum_to_shots() {
+        let mut c = Circuit::new(5, 5);
+        for q in 0..5 {
+            c.add_gate(Gate::Ry(0.21 + q as f64 * 0.07), &[q]);
+        }
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Cx, &[3, 4]);
+        c.add_measure(1, 4);
+        c.add_measure(4, 0);
+
+        let counts = run_counts_with(BackendKind::Statevector, &c, 1024, 42).unwrap();
+        assert_eq!(counts.values().sum::<u64>(), 1024);
+        assert!(counts.keys().all(|key| key[0] & !0b1_0001 == 0));
     }
 
     #[test]
@@ -1841,7 +2181,7 @@ mod tests {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
-        let m = run_marginals(BackendKind::Auto, &c, 42).unwrap();
+        let m = run_marginals(&c, 42).unwrap();
         assert_eq!(m.len(), 2);
         assert!((m[0].0 - 0.5).abs() < 1e-10);
         assert!((m[0].1 - 0.5).abs() < 1e-10);
@@ -1853,7 +2193,7 @@ mod tests {
     fn test_run_marginals_x_gate() {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::X, &[0]);
-        let m = run_marginals(BackendKind::Auto, &c, 42).unwrap();
+        let m = run_marginals(&c, 42).unwrap();
         assert!((m[0].0 - 0.0).abs() < 1e-10);
         assert!((m[0].1 - 1.0).abs() < 1e-10);
         assert!((m[1].0 - 1.0).abs() < 1e-10);
@@ -1863,14 +2203,14 @@ mod tests {
     #[test]
     fn test_run_marginals_clifford_t_spd_path() {
         let c = crate::circuits::clifford_t_circuit(14, 10, 0.1, 42);
-        let m_spd = run_marginals(BackendKind::Auto, &c, 42).unwrap();
+        let m_spd = run_marginals(&c, 42).unwrap();
         assert_eq!(m_spd.len(), 14);
         for (p0, p1) in &m_spd {
             assert!(*p0 >= 0.0 && *p0 <= 1.0);
             assert!((p0 + p1 - 1.0).abs() < 1e-10);
         }
 
-        let m_sv = run_marginals(BackendKind::Statevector, &c, 42).unwrap();
+        let m_sv = run_marginals_with(BackendKind::Statevector, &c, 42).unwrap();
         for i in 0..14 {
             assert!(
                 (m_spd[i].0 - m_sv[i].0).abs() < 1e-6,
@@ -1882,6 +2222,54 @@ mod tests {
     }
 
     // ── Dispatch validation ───────────────────────────────────────────
+
+    #[test]
+    fn test_simulate_builder_run_matches_run() {
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Ry(0.31), &[2]);
+
+        let expected = run(&c, 42).unwrap();
+        let actual = simulate(&c).seed(42).run().unwrap();
+
+        assert_eq!(actual.classical_bits, expected.classical_bits);
+        assert_eq!(
+            actual.probabilities.unwrap().to_vec(),
+            expected.probabilities.unwrap().to_vec()
+        );
+    }
+
+    #[test]
+    fn test_simulate_builder_sample_counts_matches_run_counts() {
+        let mut c = Circuit::new(4, 4);
+        c.add_gate(Gate::Ry(0.25), &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Rx(0.17), &[2]);
+        c.add_measure(0, 0);
+        c.add_measure(1, 1);
+        c.add_measure(2, 2);
+        c.add_measure(3, 3);
+
+        let expected = run_counts(&c, 256, 42).unwrap();
+        let actual = simulate(&c).seed(42).sample_counts(256).unwrap();
+
+        assert_eq!(actual.num_classical_bits, c.num_classical_bits);
+        assert_eq!(actual.counts, expected);
+    }
+
+    #[test]
+    fn test_simulate_builder_marginals_matches_run_marginals() {
+        let c = crate::circuits::clifford_t_circuit(14, 10, 0.1, 42);
+        let expected = run_marginals(&c, 42).unwrap();
+        let actual = simulate(&c).seed(42).marginals().unwrap();
+
+        assert_eq!(actual.marginals.len(), expected.len());
+        for (a, b) in actual.marginals.iter().zip(expected.iter()) {
+            assert!((a.0 - b.0).abs() < 1e-12);
+            assert!((a.1 - b.1).abs() < 1e-12);
+        }
+    }
 
     #[test]
     fn test_validate_factored_stabilizer_rejects_non_clifford() {
@@ -1952,6 +2340,58 @@ mod tests {
     }
 
     // ── Noisy simulation error paths ────────────────────────────────────
+
+    #[test]
+    fn test_pauli_backends_reject_generic_run() {
+        let c = crate::circuits::clifford_t_circuit(4, 2, 0.1, 42);
+
+        assert!(matches!(
+            simulate(&c)
+                .backend(BackendKind::StochasticPauli { num_samples: 100 })
+                .seed(42)
+                .run()
+                .unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+        assert!(matches!(
+            simulate(&c)
+                .backend(BackendKind::DeterministicPauli {
+                    epsilon: 0.0,
+                    max_terms: 0
+                })
+                .seed(42)
+                .run()
+                .unwrap_err(),
+            crate::error::PrismError::IncompatibleBackend { .. }
+        ));
+    }
+
+    #[test]
+    fn test_pauli_backends_return_marginals_through_builder() {
+        let c = crate::circuits::clifford_t_circuit(4, 2, 0.1, 42);
+
+        let spp = simulate(&c)
+            .backend(BackendKind::StochasticPauli { num_samples: 1_000 })
+            .seed(42)
+            .marginals()
+            .unwrap();
+        let spd = simulate(&c)
+            .backend(BackendKind::DeterministicPauli {
+                epsilon: 0.0,
+                max_terms: 0,
+            })
+            .seed(42)
+            .marginals()
+            .unwrap();
+
+        assert_eq!(spp.marginals.len(), c.num_qubits);
+        assert_eq!(spd.marginals.len(), c.num_qubits);
+        assert!(spp
+            .marginals
+            .iter()
+            .chain(spd.marginals.iter())
+            .all(|(p0, p1)| *p0 >= 0.0 && *p0 <= 1.0 && (p0 + p1 - 1.0).abs() < 1e-10));
+    }
 
     #[test]
     fn test_noise_rejects_stabilizer_rank() {

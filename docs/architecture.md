@@ -206,15 +206,17 @@ Orchestration layer in `src/sim/mod.rs`. Entry points:
 
 | Function | Description |
 |----------|-------------|
-| `run(circuit, seed)` | Auto-dispatch, full output |
-| `run_with(kind, circuit, seed)` | Explicit backend selection |
+| `simulate(circuit).seed(seed).run()` | Auto-dispatch, full output |
+| `simulate(circuit).backend(kind).seed(seed).run()` | Explicit backend selection |
+| `simulate(circuit).seed(seed).shots(shots)` | Multi-shot sampling |
+| `simulate(circuit).backend(kind).seed(seed).shots(shots)` | Multi-shot with backend selection |
+| `simulate(circuit).backend(kind).noise(noise).seed(seed).shots(shots)` | Noisy multi-shot |
+| `simulate(circuit).seed(seed).sample_counts(shots)` | Auto-dispatched frequency histogram |
+| `simulate(circuit).backend(kind).seed(seed).sample_counts(shots)` | Frequency histogram with backend selection |
+| `simulate(circuit).seed(seed).marginals()` | Auto-dispatched per-qubit marginal probabilities |
+| `simulate(circuit).backend(kind).seed(seed).marginals()` | Per-qubit marginal probabilities with backend selection |
 | `run_on(backend, circuit)` | Pre-constructed backend |
 | `run_qasm(qasm, seed)` | Parse + simulate |
-| `run_shots(circuit, shots, seed)` | Multi-shot sampling |
-| `run_shots_with(kind, circuit, shots, seed)` | Multi-shot with backend selection |
-| `run_shots_with_noise(kind, circuit, noise, shots, seed)` | Noisy multi-shot |
-| `run_counts(kind, circuit, shots, seed)` | Frequency histogram |
-| `run_marginals(kind, circuit, seed)` | Per-qubit marginal probabilities |
 
 ### Auto-dispatch decision tree
 
@@ -291,7 +293,8 @@ CUDA acceleration covers statevector execution, stabilizer execution, and compil
 BTS sampling. Five entry points are available:
 
 - **`BackendKind::StatevectorGpu { context }`**. Public dispatch path for statevector
-  GPU execution. It routes through `sim::run_with`, keeps fusion and subsystem
+  GPU execution. It routes through `simulate(circuit).backend(kind).seed(seed).run()`,
+  keeps fusion and subsystem
   decomposition, and uses `crate::gpu::min_qubits()` (default 14,
   `PRISM_GPU_MIN_QUBITS` override) to keep small sub-circuits on CPU.
 - **`BackendKind::StabilizerGpu { context }`**. Public dispatch path for stabilizer
@@ -549,7 +552,7 @@ No panics on user input. `debug_assert!` for internal invariants only.
 Top-level re-exports from `src/lib.rs`:
 
 **Simulation:**
-`run`, `run_with`, `run_on`, `run_qasm`, `run_shots`, `run_shots_with`, `run_shots_with_noise`, `run_counts`, `run_marginals`, `bitstring`
+`simulate`, `run_on`, `run_qasm`, `bitstring`
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`, `run_shots_compiled`, `run_shots_noisy`, `run_shots_homological`, `noisy_marginals_analytical`
@@ -558,10 +561,10 @@ Top-level re-exports from `src/lib.rs`:
 `parse_qec_program`, `compile_qec_program_rows`, `run_qec_program`, `run_qec_program_reference`, `QecProgram`, `QecOp`, `QecOptions`, `QecSampleResult`, `QecBasis`, `QecPauli`, `QecRecordRef`, `QecNoise`, `QecMeasurementRow`, `QecCompiledRows`
 
 **Clifford+T:**
-`run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `run_spp`, `run_spd`, `spp_to_probabilities`, `spd_to_probabilities`
+`run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `run_spp`, `run_spd`
 
 **Types:**
-`Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `Gate`, `BackendKind`, `SimulationResult`, `Probabilities`, `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`
+`Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `Gate`, `BackendKind`, `RunOutcome`, `CountsResult`, `MarginalsResult`, `Probabilities`, `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`
 
 **Backends:**
 `StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`, `ProductStateBackend`, `TensorNetworkBackend`, `FactoredBackend`

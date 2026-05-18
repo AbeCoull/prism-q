@@ -90,16 +90,11 @@ pub use sim::noise::{
 pub use sim::stabilizer_rank::{
     run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_overlap_sq, StabRankResult,
 };
-pub use sim::unified_pauli::{
-    run_spd, run_spp, spd_to_probabilities, spp_to_probabilities, SpdResult, SppResult,
-};
+pub use sim::unified_pauli::{run_spd, run_spp, SpdResult, SppResult};
 pub use sim::{
-    bitstring, run, run_counts, run_marginals, run_on, run_qasm, run_shots, run_shots_with,
-    run_shots_with_noise, run_with, BackendKind, FactoredBlock, Probabilities, ShotsResult,
-    SimulationResult,
+    bitstring, run_on, run_qasm, simulate, BackendKind, CountsResult, FactoredBlock,
+    MarginalsResult, Probabilities, RunOutcome, Seeded, ShotsResult, Simulate, Unseeded,
 };
 
 #[cfg(feature = "gpu")]
 pub use sim::compiled::{run_shots_compiled_with_gpu, DevicePackedShots};
-#[cfg(feature = "gpu")]
-pub use sim::{run_with_gpu, run_with_stabilizer_gpu};

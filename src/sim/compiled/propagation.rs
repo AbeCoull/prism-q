@@ -372,8 +372,8 @@ unsafe fn batch_propagate_cz_avx2(
         let xv1 = _mm256_loadu_si256(x1p.add(i));
         let zv1 = _mm256_loadu_si256(z1p.add(i));
         let sv = _mm256_loadu_si256(sp.add(i));
-        let xnor = _mm256_andnot_si256(_mm256_xor_si256(zv0, zv1), _mm256_set1_epi64x(-1));
-        let flip = _mm256_and_si256(_mm256_and_si256(xv0, xv1), xnor);
+        let zxor = _mm256_xor_si256(zv0, zv1);
+        let flip = _mm256_and_si256(_mm256_and_si256(xv0, xv1), zxor);
         _mm256_storeu_si256(sp.add(i), _mm256_xor_si256(sv, flip));
         _mm256_storeu_si256(z0p.add(i), _mm256_xor_si256(zv0, xv1));
         _mm256_storeu_si256(z1p.add(i), _mm256_xor_si256(zv1, xv0));
@@ -384,7 +384,7 @@ unsafe fn batch_propagate_cz_avx2(
         let zv0 = *z0.get_unchecked(w);
         let xv1 = *x1.get_unchecked(w);
         let zv1 = *z1.get_unchecked(w);
-        *sign.get_unchecked_mut(w) ^= xv0 & xv1 & !(zv0 ^ zv1);
+        *sign.get_unchecked_mut(w) ^= xv0 & xv1 & (zv0 ^ zv1);
         *z0.get_unchecked_mut(w) = zv0 ^ xv1;
         *z1.get_unchecked_mut(w) = zv1 ^ xv0;
     }
@@ -644,7 +644,6 @@ unsafe fn batch_propagate_cz_neon(
     let x1p = x1.as_ptr();
     let z1p = z1.as_mut_ptr();
     let sp = sign.as_mut_ptr();
-    let ones = vdupq_n_u64(!0u64);
     for i in 0..chunks {
         let off = i * 2;
         let xv0 = vld1q_u64(x0p.add(off));
@@ -652,8 +651,8 @@ unsafe fn batch_propagate_cz_neon(
         let xv1 = vld1q_u64(x1p.add(off));
         let zv1 = vld1q_u64(z1p.add(off));
         let sv = vld1q_u64(sp.add(off));
-        let xnor = veorq_u64(veorq_u64(zv0, zv1), ones);
-        let flip = vandq_u64(vandq_u64(xv0, xv1), xnor);
+        let zxor = veorq_u64(zv0, zv1);
+        let flip = vandq_u64(vandq_u64(xv0, xv1), zxor);
         vst1q_u64(sp.add(off), veorq_u64(sv, flip));
         vst1q_u64(z0p.add(off), veorq_u64(zv0, xv1));
         vst1q_u64(z1p.add(off), veorq_u64(zv1, xv0));
@@ -664,7 +663,7 @@ unsafe fn batch_propagate_cz_neon(
         let zv0 = *z0.get_unchecked(w);
         let xv1 = *x1.get_unchecked(w);
         let zv1 = *z1.get_unchecked(w);
-        *sign.get_unchecked_mut(w) ^= xv0 & xv1 & !(zv0 ^ zv1);
+        *sign.get_unchecked_mut(w) ^= xv0 & xv1 & (zv0 ^ zv1);
         *z0.get_unchecked_mut(w) = zv0 ^ xv1;
         *z1.get_unchecked_mut(w) = zv1 ^ xv0;
     }
@@ -839,25 +838,6 @@ pub(crate) fn batch_propagate_backward(
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_avx2(&mut x[q], &z[q], sign, m_words, true) };
-                return;
-            }
-            #[cfg(target_arch = "aarch64")]
-            if use_neon {
-                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_neon(&mut x[q], &z[q], sign, m_words, true) };
-                return;
-            }
-            for w in 0..m_words {
-                sign[w] ^= !x[q][w] & z[q][w];
-                x[q][w] ^= z[q][w];
-            }
-        }
-        Gate::SXdg => {
-            let q = targets[0];
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                // SAFETY: AVX2 detected, slices are valid with m_words elements
                 unsafe { batch_propagate_sx_avx2(&mut x[q], &z[q], sign, m_words, false) };
                 return;
             }
@@ -869,6 +849,25 @@ pub(crate) fn batch_propagate_backward(
             }
             for w in 0..m_words {
                 sign[w] ^= x[q][w] & z[q][w];
+                x[q][w] ^= z[q][w];
+            }
+        }
+        Gate::SXdg => {
+            let q = targets[0];
+            #[cfg(target_arch = "x86_64")]
+            if use_avx2 {
+                // SAFETY: AVX2 detected, slices are valid with m_words elements
+                unsafe { batch_propagate_sx_avx2(&mut x[q], &z[q], sign, m_words, true) };
+                return;
+            }
+            #[cfg(target_arch = "aarch64")]
+            if use_neon {
+                // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
+                unsafe { batch_propagate_sx_neon(&mut x[q], &z[q], sign, m_words, true) };
+                return;
+            }
+            for w in 0..m_words {
+                sign[w] ^= !x[q][w] & z[q][w];
                 x[q][w] ^= z[q][w];
             }
         }
@@ -969,7 +968,7 @@ pub(crate) fn batch_propagate_backward(
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q0][w] & x[q1][w] & !(z[q0][w] ^ z[q1][w]);
+                sign[w] ^= x[q0][w] & x[q1][w] & (z[q0][w] ^ z[q1][w]);
                 z[q0][w] ^= x[q1][w];
                 z[q1][w] ^= x[q0][w];
             }
@@ -1725,7 +1724,7 @@ pub(super) fn colmajor_forward_sim(
                         continue;
                     }
                     for w in 0..row_words {
-                        phase[w] ^= x0_sl[w] & x1_sl[w] & !(z0_sl[w] ^ z1_sl[w]);
+                        phase[w] ^= x0_sl[w] & x1_sl[w] & (z0_sl[w] ^ z1_sl[w]);
                         z0_sl[w] ^= x1_sl[w];
                         z1_sl[w] ^= x0_sl[w];
                     }

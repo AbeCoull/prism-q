@@ -173,6 +173,11 @@ fn fusion_qft_state_amplitude_16q() {
 }
 
 #[test]
+fn fusion_qft_state_amplitude_18q() {
+    assert_fusion_preserves_state(&circuits::qft_circuit(18));
+}
+
+#[test]
 fn fusion_qft_state_amplitude_20q() {
     assert_fusion_preserves_state(&circuits::qft_circuit(20));
 }

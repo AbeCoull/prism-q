@@ -435,7 +435,7 @@ fn bench_stabilizer_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("stabilizer/scaling");
     configure_group(&mut group);
 
-    for &n in &[10, 50, 100, 500, 1000] {
+    for &n in &[10, 50, 100, 500, 1000, 5000] {
         let circuit = random_clifford_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -450,7 +450,7 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
     let mut group = c.benchmark_group("stabilizer/measurement");
     configure_group(&mut group);
 
-    for &n in &[10, 50, 100, 500, 1000] {
+    for &n in &[10, 50, 100, 500, 1000, 5000] {
         let mut circuit = Circuit::new(n, n);
         circuit.add_gate(Gate::H, &[0]);
         for i in 0..n - 1 {

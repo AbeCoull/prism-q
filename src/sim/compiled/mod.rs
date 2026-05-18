@@ -4,6 +4,8 @@ pub(crate) mod parity;
 mod propagation;
 pub(crate) mod rng;
 #[cfg(test)]
+mod sign_truth_table_tests;
+#[cfg(test)]
 mod tests;
 
 use std::hash::{Hash, Hasher};

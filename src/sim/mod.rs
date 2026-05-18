@@ -355,7 +355,7 @@ fn run_with_internal(
 /// Execute a circuit on a pre-constructed backend.
 ///
 /// Use this when you need direct control over the backend instance
-/// (e.g., testing a specific backend). For automatic dispatch, use [`run`].
+/// (e.g., testing a specific backend). For automatic dispatch, use [`simulate`].
 pub fn run_on(backend: &mut dyn Backend, circuit: &Circuit) -> Result<RunOutcome> {
     execute(backend, circuit, &SimOptions::default())
 }

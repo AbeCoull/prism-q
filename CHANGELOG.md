@@ -2,11 +2,28 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.14.2] - 2026-05-18
+
+### Bug Fixes
+
+- **sim:** Correct backward sign for SX, SXdg, and CZ in compiled Pauli propagation (#68)([6a2c273](https://github.com/AbeCoull/prism-q/commit/6a2c273ffeb8f901416dd2a2316a0e293862a858))
+
+### Refactor
+
+- **sim:** Consolidate simulator hot path helpers (#65)([5ebb2b8](https://github.com/AbeCoull/prism-q/commit/5ebb2b885035a0ad185a78fbe9d77b318d8cbab9))
+
+### Testing
+
+- Really boring but test coverage is good and this is an attempt to add more (#67)([42cc7e8](https://github.com/AbeCoull/prism-q/commit/42cc7e8ce502483e7f1df65eb08a8d1fed8c2253))
 ## [0.14.1] - 2026-05-13
 
 ### Documentation
 
 - Cleanup safety with docstrings, consolidate code, and general housekeeping (#62)([59dfc93](https://github.com/AbeCoull/prism-q/commit/59dfc93f1ef32588975a6f78261565174ed8a2fd))
+
+### Miscellaneous
+
+- **release:** 0.14.1([6add832](https://github.com/AbeCoull/prism-q/commit/6add8329838d869fc4348bb3d01e4f216db8d18e))
 
 ### Performance
 

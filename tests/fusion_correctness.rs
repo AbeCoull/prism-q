@@ -5,6 +5,10 @@
 //! **unfused** execution (manual backend.apply loop) against **fused** execution
 //! (sim::run_on, which applies the full fusion pipeline internally).
 
+mod common;
+
+use common::assert_probs_close as assert_probs_close_labeled;
+use common::circuits as corpus;
 use num_complex::Complex64;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::Backend;
@@ -59,14 +63,7 @@ fn run_fused_state(circuit: &Circuit) -> Vec<Complex64> {
 }
 
 fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
-    assert_eq!(actual.len(), expected.len(), "length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < eps,
-            "prob[{i}]: expected {e:.12}, got {a:.12} (diff {:.2e})",
-            (a - e).abs()
-        );
-    }
+    assert_probs_close_labeled(actual, expected, eps, "fusion");
 }
 
 fn assert_state_close(actual: &[Complex64], expected: &[Complex64], eps: f64) {
@@ -499,6 +496,24 @@ fn fusion_threshold_15q_before_cphase() {
 #[test]
 fn fusion_threshold_16q_cphase_fusion() {
     assert_fusion_preserves_correctness(&circuits::qft_circuit(16));
+}
+
+circuit_case_tests! {
+    cases: corpus::fusion_threshold_cases(),
+    runner: assert_fusion_preserves_correctness,
+    tests: {
+        fusion_threshold_boundary_9q => "fusion_threshold_9",
+        fusion_threshold_boundary_10q => "fusion_threshold_10",
+        fusion_threshold_boundary_11q => "fusion_threshold_11",
+        fusion_threshold_boundary_12q => "fusion_threshold_12",
+        fusion_threshold_boundary_13q => "fusion_threshold_13",
+        fusion_threshold_boundary_14q => "fusion_threshold_14",
+        fusion_threshold_boundary_15q => "fusion_threshold_15",
+        fusion_threshold_boundary_16q => "fusion_threshold_16",
+        fusion_threshold_boundary_17q => "fusion_threshold_17",
+        fusion_threshold_boundary_18q => "fusion_threshold_18",
+        fusion_threshold_boundary_19q => "fusion_threshold_19",
+    }
 }
 
 // ===== Large circuits (higher qubit counts) =====

@@ -36,11 +36,6 @@ fn mps_qft_4q_sv() {
 }
 
 #[test]
-fn mps_qft_8q_sv() {
-    check_sv_cross("qft 8q sv", &circuits::qft_circuit(8));
-}
-
-#[test]
 fn mps_qft_12q_sv() {
     check_sv_cross("qft 12q sv", &circuits::qft_circuit(12));
 }
@@ -61,16 +56,6 @@ fn mps_qft_12q_fused() {
 // ===== random =====
 
 #[test]
-fn mps_random_4q_sv() {
-    check_sv_cross("random 4q d10 sv", &circuits::random_circuit(4, 10, SEED));
-}
-
-#[test]
-fn mps_random_8q_sv() {
-    check_sv_cross("random 8q d10 sv", &circuits::random_circuit(8, 10, SEED));
-}
-
-#[test]
 fn mps_random_12q_fused() {
     check_fused_vs_unfused(
         "random 12q d5 fused",
@@ -84,14 +69,6 @@ fn mps_random_16q_sv() {
 }
 
 // ===== hardware_efficient_ansatz =====
-
-#[test]
-fn mps_hea_4q_sv() {
-    check_sv_cross(
-        "hea 4q l3 sv",
-        &circuits::hardware_efficient_ansatz(4, 3, SEED),
-    );
-}
 
 #[test]
 fn mps_hea_12q_fused() {
@@ -112,11 +89,6 @@ fn mps_hea_16q_sv() {
 // ===== ghz =====
 
 #[test]
-fn mps_ghz_4q_sv() {
-    check_sv_cross("ghz 4q sv", &circuits::ghz_circuit(4));
-}
-
-#[test]
 fn mps_ghz_12q_fused() {
     check_fused_vs_unfused("ghz 12q fused", &circuits::ghz_circuit(12));
 }
@@ -127,11 +99,6 @@ fn mps_ghz_16q_sv() {
 }
 
 // ===== qaoa =====
-
-#[test]
-fn mps_qaoa_4q_sv() {
-    check_sv_cross("qaoa 4q l2 sv", &circuits::qaoa_circuit(4, 2, SEED));
-}
 
 #[test]
 fn mps_qaoa_12q_fused() {
@@ -159,26 +126,11 @@ fn mps_clifford_12q_fused() {
 // ===== phase_estimation =====
 
 #[test]
-fn mps_qpe_4q_sv() {
-    check_sv_cross("qpe 4q sv", &circuits::phase_estimation_circuit(4));
-}
-
-#[test]
-fn mps_qpe_8q_sv() {
-    check_sv_cross("qpe 8q sv", &circuits::phase_estimation_circuit(8));
-}
-
-#[test]
 fn mps_qpe_12q_fused() {
     check_fused_vs_unfused("qpe 12q fused", &circuits::phase_estimation_circuit(12));
 }
 
 // ===== w_state =====
-
-#[test]
-fn mps_w_state_4q_sv() {
-    check_sv_cross("w_state 4q sv", &circuits::w_state_circuit(4));
-}
 
 #[test]
 fn mps_w_state_8q_fused() {

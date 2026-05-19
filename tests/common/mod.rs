@@ -6,6 +6,10 @@
 
 #![allow(dead_code)]
 
+pub mod circuits;
+pub mod framework;
+pub mod matrix;
+
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::Backend;
 use prism_q::circuit::{Circuit, Instruction};
@@ -54,6 +58,49 @@ pub fn assert_backend_matches_sv<B: Backend>(
     let actual = backend.probabilities().unwrap();
     let expected = sv_reference_probs(circuit);
     assert_probs_close(&actual, &expected, eps, label);
+}
+
+pub fn assert_backend_outcome_matches_sv<B: Backend>(
+    backend: &mut B,
+    circuit: &Circuit,
+    eps: f64,
+    label: &str,
+) {
+    let expected = sim::run_on(&mut StatevectorBackend::new(SEED), circuit).unwrap();
+    let actual = sim::run_on(backend, circuit).unwrap();
+    assert_eq!(
+        actual.classical_bits, expected.classical_bits,
+        "{label}: classical bits mismatch"
+    );
+    assert_probs_close(
+        &actual.probabilities.expect("actual probabilities").to_vec(),
+        &expected
+            .probabilities
+            .expect("expected probabilities")
+            .to_vec(),
+        eps,
+        label,
+    );
+}
+
+pub fn assert_backend_repeatable<B: Backend, F: Fn() -> B>(
+    new_backend: F,
+    circuit: &Circuit,
+    eps: f64,
+    label: &str,
+) {
+    let first = sim::run_on(&mut new_backend(), circuit).unwrap();
+    let second = sim::run_on(&mut new_backend(), circuit).unwrap();
+    assert_eq!(
+        first.classical_bits, second.classical_bits,
+        "{label}: fixed seed produced different classical bits"
+    );
+    assert_probs_close(
+        &first.probabilities.expect("first probabilities").to_vec(),
+        &second.probabilities.expect("second probabilities").to_vec(),
+        eps,
+        label,
+    );
 }
 
 pub fn run_unfused_probs<B: Backend>(backend: &mut B, circuit: &Circuit) -> Vec<f64> {

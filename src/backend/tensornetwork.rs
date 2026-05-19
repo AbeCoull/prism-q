@@ -399,6 +399,31 @@ impl TensorNetworkBackend {
         id
     }
 
+    fn replace_with_statevector(&mut self, state: Vec<Complex64>) {
+        let n = self.num_qubits;
+        self.tensors.clear();
+        self.next_leg = 0;
+        self.output_legs.clear();
+
+        for _ in 0..n {
+            let leg = self.fresh_leg();
+            self.output_legs.push(leg);
+        }
+
+        let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
+        let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
+        for q in (0..n).rev() {
+            shape.push(2);
+            legs.push(self.output_legs[q]);
+        }
+
+        self.tensors.push(Tensor {
+            data: state,
+            shape,
+            legs,
+        });
+    }
+
     fn append_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
         let in_leg = self.output_legs[target];
         let out_leg = self.fresh_leg();
@@ -507,12 +532,11 @@ impl TensorNetworkBackend {
 
     fn apply_reset(&mut self, qubit: usize) -> Result<()> {
         let amplitudes = self.contract_to_statevector()?;
-        let n = self.num_qubits;
 
         let mut collapsed = amplitudes;
         let mut prob_zero = 0.0f64;
         for (idx, amp) in collapsed.iter_mut().enumerate() {
-            let bit = (idx >> (n - 1 - qubit)) & 1 == 1;
+            let bit = (idx >> qubit) & 1 == 1;
             if bit {
                 *amp = Complex64::new(0.0, 0.0);
             } else {
@@ -531,22 +555,7 @@ impl TensorNetworkBackend {
             collapsed[0] = Complex64::new(1.0, 0.0);
         }
 
-        self.tensors.clear();
-        self.next_leg = 0;
-        self.output_legs.clear();
-        let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
-        let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
-        for _ in 0..n {
-            let leg = self.fresh_leg();
-            self.output_legs.push(leg);
-            shape.push(2);
-            legs.push(leg);
-        }
-        self.tensors.push(Tensor {
-            data: collapsed,
-            shape,
-            legs,
-        });
+        self.replace_with_statevector(collapsed);
         Ok(())
     }
 
@@ -690,11 +699,10 @@ impl Backend for TensorNetworkBackend {
                 use rand::Rng;
 
                 let amplitudes = self.contract_to_statevector()?;
-                let n = self.num_qubits;
 
                 let mut prob_one = 0.0f64;
                 for (idx, amp) in amplitudes.iter().enumerate() {
-                    if (idx >> (n - 1 - qubit)) & 1 == 1 {
+                    if (idx >> qubit) & 1 == 1 {
                         prob_one += amp.norm_sqr();
                     }
                 }
@@ -705,7 +713,7 @@ impl Backend for TensorNetworkBackend {
                 let mut collapsed = amplitudes;
                 let mut norm_sq = 0.0f64;
                 for (idx, amp) in collapsed.iter_mut().enumerate() {
-                    let bit = (idx >> (n - 1 - qubit)) & 1 == 1;
+                    let bit = (idx >> qubit) & 1 == 1;
                     if bit != outcome {
                         *amp = Complex64::new(0.0, 0.0);
                     } else {
@@ -717,22 +725,7 @@ impl Backend for TensorNetworkBackend {
                     *amp /= norm;
                 }
 
-                self.tensors.clear();
-                self.next_leg = 0;
-                self.output_legs.clear();
-                let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
-                let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
-                for _ in 0..n {
-                    let leg = self.fresh_leg();
-                    self.output_legs.push(leg);
-                    shape.push(2);
-                    legs.push(leg);
-                }
-                self.tensors.push(Tensor {
-                    data: collapsed,
-                    shape,
-                    legs,
-                });
+                self.replace_with_statevector(collapsed);
             }
             Instruction::Reset { qubit } => {
                 self.apply_reset(*qubit)?;

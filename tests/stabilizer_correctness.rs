@@ -87,11 +87,6 @@ fn stabilizer_clifford_random_pairs_16q() {
 // ===== ghz =====
 
 #[test]
-fn stabilizer_ghz_4q() {
-    check("ghz 4q", &circuits::ghz_circuit(4));
-}
-
-#[test]
 fn stabilizer_ghz_12q() {
     check("ghz 12q", &circuits::ghz_circuit(12));
 }

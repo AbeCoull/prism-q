@@ -27,6 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+      - uses: taiki-e/install-action@cargo-nextest
 
       - name: Formatting
         run: cargo fmt --all -- --check
@@ -35,7 +36,10 @@ jobs:
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       - name: Tests
-        run: cargo test --features "$CI_FEATURES"
+        run: cargo nextest run --features "$CI_FEATURES"
+
+      - name: Doc tests
+        run: cargo test --doc --features "$CI_FEATURES"
 
       - name: Doc build
         run: cargo doc --no-deps --features "$CI_FEATURES"
@@ -203,10 +207,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-bin: false
+      - uses: taiki-e/install-action@cargo-nextest
       - name: Clippy
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
       - name: Tests
-        run: cargo test --features "$CI_FEATURES"
+        run: cargo nextest run --features "$CI_FEATURES"
+      - name: Doc tests
+        run: cargo test --doc --features "$CI_FEATURES"
 
   security:
     name: Security & Licenses

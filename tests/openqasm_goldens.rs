@@ -6,6 +6,9 @@
 //! the statevector backend and checks the resulting probability distribution
 //! against an analytic reference.
 
+mod common;
+
+use common::assert_probs_close;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::openqasm;
 use prism_q::sim;
@@ -15,16 +18,6 @@ fn run_probs(qasm: &str) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(42);
     let result = sim::run_on(&mut backend, &circuit).expect("run");
     result.probabilities.expect("probabilities").to_vec()
-}
-
-fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
-    assert_eq!(actual.len(), expected.len(), "probability length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < eps,
-            "prob[{i}]: expected {e:.6}, got {a:.6}"
-        );
-    }
 }
 
 /// Qiskit-style export: `for` loop, `cp` controlled phase, U/u gates,
@@ -69,7 +62,7 @@ fn qiskit_style_def_with_u_gate() {
         cx q[0], q[1];
     "#;
     let probs = run_probs(qasm);
-    assert_probs_close(&probs, &[0.0, 0.0, 0.0, 1.0], 1e-10);
+    assert_probs_close(&probs, &[0.0, 0.0, 0.0, 1.0], 1e-10, "qiskit_def_u");
 }
 
 /// Qiskit-style conditional reset: `if (c[0] == 1) x q[0]` is the canonical

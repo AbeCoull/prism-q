@@ -7,6 +7,7 @@
 
 mod common;
 
+use common::circuits as corpus;
 use common::{
     assert_backend_matches_sv, assert_fused_matches_unfused, run_unfused_probs, PRODUCT_EPS, SEED,
 };
@@ -40,56 +41,6 @@ fn has_gate<F: Fn(&Gate) -> bool>(circuit: &Circuit, matches_gate: F) -> bool {
             Instruction::Gate { gate, .. } if matches_gate(gate)
         )
     })
-}
-
-// ===== single_qubit_rotation_circuit =====
-
-#[test]
-fn product_single_qubit_rotations_4q_sv() {
-    check_sv_cross(
-        "single_qubit_rotation 4q d5 sv",
-        &circuits::single_qubit_rotation_circuit(4, 5, SEED),
-    );
-}
-
-#[test]
-fn product_single_qubit_rotations_4q_fused() {
-    check_fused_vs_unfused(
-        "single_qubit_rotation 4q d5 fused",
-        &circuits::single_qubit_rotation_circuit(4, 5, SEED),
-    );
-}
-
-#[test]
-fn product_single_qubit_rotations_8q_sv() {
-    check_sv_cross(
-        "single_qubit_rotation 8q d10 sv",
-        &circuits::single_qubit_rotation_circuit(8, 10, SEED),
-    );
-}
-
-#[test]
-fn product_single_qubit_rotations_8q_fused() {
-    check_fused_vs_unfused(
-        "single_qubit_rotation 8q d10 fused",
-        &circuits::single_qubit_rotation_circuit(8, 10, SEED),
-    );
-}
-
-#[test]
-fn product_single_qubit_rotations_12q_sv() {
-    check_sv_cross(
-        "single_qubit_rotation 12q d10 sv",
-        &circuits::single_qubit_rotation_circuit(12, 10, SEED),
-    );
-}
-
-#[test]
-fn product_single_qubit_rotations_16q_sv() {
-    check_sv_cross(
-        "single_qubit_rotation 16q d5 sv",
-        &circuits::single_qubit_rotation_circuit(16, 5, SEED),
-    );
 }
 
 #[test]
@@ -255,7 +206,7 @@ fn product_unfused_apply_is_separable_only() {
 #[test]
 fn product_unfused_runs_separable_circuit() {
     // Sanity: the unfused helper itself must succeed on a separable circuit.
-    let c = circuits::single_qubit_rotation_circuit(6, 5, SEED);
+    let c = corpus::single_qubit_rotations();
     let mut backend = ProductStateBackend::new(SEED);
     let _ = run_unfused_probs(&mut backend, &c);
 }

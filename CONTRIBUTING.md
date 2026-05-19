@@ -15,11 +15,15 @@ PTX is compiled at runtime via NVRTC against the device's compute capability.
 ## Test and lint
 
 ```bash
-cargo test --all-features
+cargo nextest run --all-features
+cargo test --doc --all-features
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
 cargo doc --no-deps --all-features
 ```
+
+Use `cargo test --all-features` when `cargo-nextest` is not installed. Keep doctests on
+`cargo test --doc` until nextest doctest support is no longer experimental.
 
 GPU golden tests run under `cargo test --features "parallel gpu" --test golden_gpu` and
 skip automatically when no CUDA device is present.
@@ -52,8 +56,9 @@ multiple `cargo bench` processes at once. Rayon contention causes noisy results.
 
 ## CI
 
-PRs run formatting, clippy, tests, doc build, coverage, aarch64 cross-compile,
-macOS ARM64 tests, and `cargo-deny` (security advisories plus license audit).
+PRs run formatting, clippy, nextest, doctests, doc build, coverage, aarch64
+cross-compile, macOS ARM64 tests, and `cargo-deny` (security advisories plus license
+audit).
 
 ## Hot-path rules
 

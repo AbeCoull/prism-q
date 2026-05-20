@@ -2,7 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.14.4] - 2026-05-20
+
+### Bug Fixes
+
+- **sim:** Tighten packed shots and dispatch metadata (#71)([64da8fa](https://github.com/AbeCoull/prism-q/commit/64da8faa6f53ce6c81150fb2b6372f27007cd7f5))
+
+### Testing
+
+- Consolidate backend correctness matrix and use nextest (#70)([fcec12a](https://github.com/AbeCoull/prism-q/commit/fcec12ab57049e310a6cfaf2a1a1cc38a6dcf8eb))
 ## [0.14.3] - 2026-05-18
+
+### Miscellaneous
+
+- **release:** 0.14.3([d0df681](https://github.com/AbeCoull/prism-q/commit/d0df6810aff5679df594ab5cb0a06108dffcd513))
 
 ### Performance
 
@@ -19,12 +32,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Refactor
 
-- **sim:** Replace public free-function simulation aliases with the query-aware builder API.
 - **sim:** Consolidate simulator hot path helpers (#65)([5ebb2b8](https://github.com/AbeCoull/prism-q/commit/5ebb2b885035a0ad185a78fbe9d77b318d8cbab9))
-
-### Performance
-
-- **sim:** Add terminal statevector shot and count fast paths with high-shot Criterion coverage.
 
 ### Testing
 
@@ -330,3 +338,4 @@ All notable changes to PRISM-Q will be documented in this file.
 ### `fix
 
 - Fusion pass fixes with temporal blocking (#8)([eb9fc76](https://github.com/AbeCoull/prism-q/commit/eb9fc762a122e66903defb793a1345b3b3e2a5ad))
+

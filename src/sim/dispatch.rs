@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuContext;
 
-use super::{Probabilities, RunOutcome};
+use super::{try_backend_probabilities, RunOutcome};
 
 pub(super) enum DispatchAction {
     Backend(Box<dyn Backend>),
@@ -445,11 +445,14 @@ pub(super) fn try_temporal_clifford(
         }
     }
 
-    let probs = sv.probabilities().ok().map(Probabilities::Dense);
+    let probabilities = match try_backend_probabilities(&sv) {
+        Ok(probs) => probs,
+        Err(e) => return Some(Err(e)),
+    };
 
     Some(Ok(RunOutcome {
         classical_bits: sv.classical_results().to_vec(),
-        probabilities: probs,
+        probabilities,
     }))
 }
 

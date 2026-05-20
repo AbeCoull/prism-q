@@ -675,6 +675,93 @@ fn packed_shots_parity_rows_rejects_bad_index() {
 }
 
 #[test]
+fn packed_shots_try_constructors_reject_invalid_raw_data() {
+    for (name, result) in [
+        (
+            "shot-major shape",
+            PackedShots::try_from_shot_major(vec![0], 2, 65),
+        ),
+        (
+            "measurement-major shape",
+            PackedShots::try_from_meas_major(vec![0], 65, 2),
+        ),
+        (
+            "shot-major tail",
+            PackedShots::try_from_shot_major(vec![0b1000], 1, 3),
+        ),
+        (
+            "measurement-major tail",
+            PackedShots::try_from_meas_major(vec![0b1000], 3, 1),
+        ),
+    ] {
+        assert!(
+            matches!(result.unwrap_err(), PrismError::InvalidParameter { .. }),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn packed_shots_reports_raw_format_version() {
+    let packed = PackedShots::from_shot_major(vec![0], 1, 1);
+    assert_eq!(packed.raw_format_version(), PackedShots::RAW_FORMAT_VERSION);
+    assert_eq!(PackedShots::RAW_FORMAT_VERSION, 1);
+}
+
+#[test]
+fn packed_shots_counts_ignore_shot_major_padding() {
+    let packed = PackedShots {
+        data: vec![0b1000, 0b1001, 0b0000],
+        num_shots: 3,
+        num_measurements: 3,
+        m_words: 1,
+        s_words: 1,
+        layout: ShotLayout::ShotMajor,
+    };
+
+    let counts = packed.counts();
+    assert_eq!(counts.get(&vec![0]), Some(&2));
+    assert_eq!(counts.get(&vec![1]), Some(&1));
+
+    let mut acc = HistogramAccumulator::new();
+    acc.accumulate(&packed);
+    let acc_counts = acc.into_counts();
+    assert_eq!(acc_counts.get(&vec![0]), Some(&2));
+    assert_eq!(acc_counts.get(&vec![1]), Some(&1));
+}
+
+#[test]
+fn packed_shots_marginals_ignore_meas_major_padding() {
+    let packed = PackedShots {
+        data: vec![0b1001],
+        num_shots: 3,
+        num_measurements: 1,
+        m_words: 1,
+        s_words: 1,
+        layout: ShotLayout::MeasMajor,
+    };
+
+    let mut acc = MarginalsAccumulator::new(1);
+    acc.accumulate(&packed);
+    assert!((acc.marginals()[0] - (1.0 / 3.0)).abs() < 1e-12);
+}
+
+#[test]
+fn packed_shots_parity_rows_clear_meas_major_padding() {
+    let packed = PackedShots {
+        data: vec![0b1001, 0b1000],
+        num_shots: 3,
+        num_measurements: 2,
+        m_words: 1,
+        s_words: 1,
+        layout: ShotLayout::MeasMajor,
+    };
+
+    let parity = packed.parity_rows(&[vec![0], vec![0, 1]]).unwrap();
+    assert_eq!(parity.raw_data(), &[0b001, 0b001]);
+}
+
+#[test]
 fn detector_sampler_preserves_bell_measure_reset_correlation() {
     let mut c = Circuit::new(2, 2);
     c.add_gate(Gate::H, &[0]);

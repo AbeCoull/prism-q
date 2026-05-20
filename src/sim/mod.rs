@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{max_statevector_qubits, Backend};
 use crate::circuit::{Circuit, Instruction};
-use crate::error::Result;
+use crate::error::{PrismError, Result};
 use shots::{packed_shots_to_classical_bits, sample_shots};
 use terminal_sampling::{sample_counts_from_state, sample_shots_from_state};
 
@@ -70,7 +70,10 @@ pub struct RunOutcome {
     /// `true` = measured |1⟩.
     pub classical_bits: Vec<bool>,
     /// Probability of each computational basis state (length 2^n).
-    /// `None` if the backend does not support probability extraction.
+    ///
+    /// `None` means the selected backend cannot expose a dense probability
+    /// distribution for this circuit. Other probability extraction failures
+    /// are returned as errors by the query that produced this result.
     pub probabilities: Option<Probabilities>,
 }
 
@@ -220,6 +223,14 @@ fn probs_only_result(probs: Vec<f64>) -> RunOutcome {
     }
 }
 
+fn try_backend_probabilities(backend: &dyn Backend) -> Result<Option<Probabilities>> {
+    match backend.probabilities() {
+        Ok(probs) => Ok(Some(Probabilities::Dense(probs))),
+        Err(PrismError::BackendUnsupported { .. }) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 /// Core execution: fuse, init, apply, extract.
 fn execute(backend: &mut dyn Backend, circuit: &Circuit, opts: &SimOptions) -> Result<RunOutcome> {
     let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
@@ -240,15 +251,15 @@ fn execute_circuit(
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
     backend.apply_instructions(&circuit.instructions)?;
 
-    let probs = if opts.probabilities {
-        backend.probabilities().ok().map(Probabilities::Dense)
+    let probabilities = if opts.probabilities {
+        try_backend_probabilities(backend)?
     } else {
         None
     };
 
     Ok(RunOutcome {
         classical_bits: backend.classical_results().to_vec(),
-        probabilities: probs,
+        probabilities,
     })
 }
 
@@ -595,6 +606,37 @@ fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)> {
         .collect()
 }
 
+fn has_nonunitary_or_classical_ops(circuit: &Circuit) -> bool {
+    circuit.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Measure { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Conditional { .. }
+        )
+    })
+}
+
+fn supports_pauli_marginal_backend(circuit: &Circuit) -> bool {
+    circuit.is_clifford_plus_t() && !has_nonunitary_or_classical_ops(circuit)
+}
+
+fn validate_pauli_marginal_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
+    if !circuit.is_clifford_plus_t() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "Pauli marginal backends require Clifford+T gates".into(),
+        });
+    }
+    if has_nonunitary_or_classical_ops(circuit) {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "Pauli marginal backends require a unitary circuit without measurements, resets, or conditionals".into(),
+        });
+    }
+    Ok(())
+}
+
 fn run_marginals_result_with(
     kind: BackendKind,
     circuit: &Circuit,
@@ -602,15 +644,17 @@ fn run_marginals_result_with(
 ) -> Result<MarginalsResult> {
     let n = circuit.num_qubits;
 
-    match kind {
+    match &kind {
         BackendKind::StochasticPauli { num_samples } => {
-            let spp = unified_pauli::run_spp(circuit, num_samples, seed)?;
+            validate_pauli_marginal_backend(&kind, circuit)?;
+            let spp = unified_pauli::run_spp(circuit, *num_samples, seed)?;
             return Ok(MarginalsResult {
                 marginals: expectations_to_marginals(&spp.expectations),
             });
         }
         BackendKind::DeterministicPauli { epsilon, max_terms } => {
-            let spd = unified_pauli::run_spd(circuit, epsilon, max_terms)?;
+            validate_pauli_marginal_backend(&kind, circuit)?;
+            let spd = unified_pauli::run_spd(circuit, *epsilon, *max_terms)?;
             return Ok(MarginalsResult {
                 marginals: expectations_to_marginals(&spd.expectations),
             });
@@ -619,7 +663,7 @@ fn run_marginals_result_with(
     }
 
     if matches!(kind, BackendKind::Auto)
-        && circuit.is_clifford_plus_t()
+        && supports_pauli_marginal_backend(circuit)
         && circuit.has_t_gates()
         && n >= MIN_QUBITS_FOR_SPD_AUTO
     {
@@ -635,8 +679,12 @@ fn run_marginals_result_with(
             marginals: probs.marginals(),
         })
     } else {
-        Ok(MarginalsResult {
-            marginals: vec![(0.5, 0.5); n],
+        Err(PrismError::BackendUnsupported {
+            backend: "simulate".into(),
+            operation: format!(
+                "marginals for {} qubits without backend probability output",
+                circuit.num_qubits
+            ),
         })
     }
 }
@@ -977,6 +1025,83 @@ mod tests {
         c.add_gate(Gate::T, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
         c
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ProbabilityFailure {
+        Unsupported,
+        Invalid,
+    }
+
+    struct ProbabilityFailureBackend {
+        failure: ProbabilityFailure,
+        classical_bits: Vec<bool>,
+        num_qubits: usize,
+    }
+
+    impl ProbabilityFailureBackend {
+        fn new(failure: ProbabilityFailure) -> Self {
+            Self {
+                failure,
+                classical_bits: Vec::new(),
+                num_qubits: 0,
+            }
+        }
+    }
+
+    impl Backend for ProbabilityFailureBackend {
+        fn name(&self) -> &'static str {
+            "probability_failure"
+        }
+
+        fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+            self.num_qubits = num_qubits;
+            self.classical_bits = vec![false; num_classical_bits];
+            Ok(())
+        }
+
+        fn apply(&mut self, _instruction: &Instruction) -> Result<()> {
+            Ok(())
+        }
+
+        fn classical_results(&self) -> &[bool] {
+            &self.classical_bits
+        }
+
+        fn probabilities(&self) -> Result<Vec<f64>> {
+            match self.failure {
+                ProbabilityFailure::Unsupported => Err(PrismError::BackendUnsupported {
+                    backend: self.name().to_string(),
+                    operation: "probabilities".to_string(),
+                }),
+                ProbabilityFailure::Invalid => Err(PrismError::InvalidParameter {
+                    message: "probability extraction failed".to_string(),
+                }),
+            }
+        }
+
+        fn num_qubits(&self) -> usize {
+            self.num_qubits
+        }
+    }
+
+    fn assert_pauli_marginals_reject(circuit: &Circuit) {
+        for backend in [
+            BackendKind::StochasticPauli { num_samples: 100 },
+            BackendKind::DeterministicPauli {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
+        ] {
+            assert!(matches!(
+                simulate(circuit)
+                    .backend(backend)
+                    .seed(42)
+                    .marginals()
+                    .unwrap_err(),
+                PrismError::IncompatibleBackend { .. }
+            ));
+        }
     }
 
     #[test]
@@ -2201,6 +2326,39 @@ mod tests {
     }
 
     #[test]
+    fn test_run_handles_backend_probability_failures() {
+        let circuit = Circuit::new(1, 0);
+
+        let mut unsupported = ProbabilityFailureBackend::new(ProbabilityFailure::Unsupported);
+        let result = run_on(&mut unsupported, &circuit).unwrap();
+        assert!(result.classical_bits.is_empty());
+        assert!(result.probabilities.is_none());
+
+        let mut invalid = ProbabilityFailureBackend::new(ProbabilityFailure::Invalid);
+        let err = run_on(&mut invalid, &circuit).unwrap_err();
+
+        assert!(matches!(err, PrismError::InvalidParameter { .. }));
+    }
+
+    #[test]
+    fn test_run_marginals_rejects_missing_probability_output() {
+        let circuit = Circuit::new(65, 0);
+        let run_result = simulate(&circuit)
+            .backend(BackendKind::FactoredStabilizer)
+            .seed(42)
+            .run()
+            .unwrap();
+        assert!(run_result.probabilities.is_none());
+
+        let err = simulate(&circuit)
+            .backend(BackendKind::FactoredStabilizer)
+            .seed(42)
+            .marginals()
+            .unwrap_err();
+        assert!(matches!(err, PrismError::BackendUnsupported { .. }));
+    }
+
+    #[test]
     fn test_run_marginals_clifford_t_spd_path() {
         let c = crate::circuits::clifford_t_circuit(14, 10, 0.1, 42);
         let m_spd = run_marginals(&c, 42).unwrap();
@@ -2391,6 +2549,38 @@ mod tests {
             .iter()
             .chain(spd.marginals.iter())
             .all(|(p0, p1)| *p0 >= 0.0 && *p0 <= 1.0 && (p0 + p1 - 1.0).abs() < 1e-10));
+    }
+
+    #[test]
+    fn test_pauli_marginals_reject_non_clifford_t_gates() {
+        let mut c = Circuit::new(1, 0);
+        c.add_gate(Gate::Rx(0.25), &[0]);
+
+        assert_pauli_marginals_reject(&c);
+    }
+
+    #[test]
+    fn test_pauli_marginals_reject_measurements_resets_and_conditionals() {
+        let mut measured = Circuit::new(1, 1);
+        measured.add_gate(Gate::H, &[0]);
+        measured.add_gate(Gate::T, &[0]);
+        measured.add_measure(0, 0);
+
+        let mut reset = Circuit::new(1, 0);
+        reset.add_gate(Gate::T, &[0]);
+        reset.add_reset(0);
+
+        let mut conditional = Circuit::new(2, 1);
+        conditional.add_measure(0, 0);
+        conditional.instructions.push(Instruction::Conditional {
+            condition: crate::circuit::ClassicalCondition::BitIsOne(0),
+            gate: Gate::T,
+            targets: smallvec![1],
+        });
+
+        for circuit in [&measured, &reset, &conditional] {
+            assert_pauli_marginals_reject(circuit);
+        }
     }
 
     #[test]

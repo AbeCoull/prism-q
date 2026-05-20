@@ -108,9 +108,13 @@ Representative CI workloads:
 | `statevector/scalability_d5/22` | Dense statevector scaling at a larger qubit count |
 | `statevector/qft_textbook/22` | Structured controlled phase and swap workload |
 | `statevector/qpe_t_gate/22q` | Phase estimation with non-Clifford gates |
+| `statevector/qaoa_l3/20` | QAOA workload with ZZ rotations and mixer layers |
 | `stabilizer/scaling/1000` | Large Clifford stabilizer backend path |
+| `stabilizer/measurement/ghz_measure_all/1000` | Large GHZ preparation plus terminal measurements |
 | `auto/qft_textbook/22` | Auto dispatch on a structured dense circuit |
+| `auto/qpe_t_gate/22q` | Auto dispatch on a non-Clifford phase estimation circuit |
 | `compiled_sampler/noiseless/noiseless_1000q_10k` | Compiled shot sampling path |
+| `compiled_sampler/noisy/noisy_1000q_10k` | Compiled Pauli-noise shot sampling path |
 
 The script builds the `circuits` benchmark binary once with
 `cargo bench --no-run`, then runs the compiled executable directly with

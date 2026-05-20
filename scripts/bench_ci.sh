@@ -82,11 +82,11 @@ run_bench() {
     echo ""
 }
 
-# Keep CI filters on benchmark IDs that exist on the base branch. All selected
-# circuits are at least 22 qubits.
-CIRCUITS_FILTER="^(statevector/(scalability_d5/22|qft_textbook/22|qpe_t_gate/22q)"
-CIRCUITS_FILTER+="|stabilizer/scaling/1000"
-CIRCUITS_FILTER+="|auto/qft_textbook/22"
-CIRCUITS_FILTER+="|compiled_sampler/noiseless/noiseless_1000q_10k)$"
+# Keep CI filters on benchmark IDs that exist on the base branch. Prefer larger
+# rows while keeping hosted runner cost bounded.
+CIRCUITS_FILTER="^(statevector/(scalability_d5/22|qft_textbook/22|qpe_t_gate/22q|qaoa_l3/20)"
+CIRCUITS_FILTER+="|stabilizer/(scaling/1000|measurement/ghz_measure_all/1000)"
+CIRCUITS_FILTER+="|auto/(qft_textbook/22|qpe_t_gate/22q)"
+CIRCUITS_FILTER+="|compiled_sampler/(noiseless/noiseless_1000q_10k|noisy/noisy_1000q_10k))$"
 
-run_bench "circuits" "$CIRCUITS_FILTER" 6
+run_bench "circuits" "$CIRCUITS_FILTER" 10

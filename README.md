@@ -15,12 +15,11 @@
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 
-PRISM-Q is a Rust quantum circuit simulator focused on practical throughput.
-
-Automatic dispatch selects the simulation strategy that best fits each circuit's
-structure. CPU kernels use SIMD, with optional CUDA paths for statevector and
-experimental stabilizer workloads. Input is OpenQASM 3.0, with backward-compatible 2.0
-syntax.
+PRISM-Q is a Rust quantum circuit simulator built for speed. It dispatches across
+multiple specialized backends, runs a multi pass fusion pipeline, and uses AVX2, FMA,
+and BMI2 SIMD kernels in the inner loop. CPU kernels are the default path, with
+optional CUDA support for statevector and experimental stabilizer workloads. Input is
+OpenQASM 3.0 with backward compatible 2.0 syntax.
 
 ## Installation
 
@@ -36,27 +35,14 @@ Enable Rayon parallelism for larger circuits:
 cargo add prism-q --features parallel
 ```
 
-Use the latest repository version:
-
-```bash
-cargo add prism-q --git https://github.com/AbeCoull/prism-q --features parallel
-```
-
-Build from source:
-
-```bash
-git clone https://github.com/AbeCoull/prism-q.git
-cd prism-q
-cargo build --release --features parallel
-```
-
 For CUDA support, install CUDA Toolkit 12.x or newer, then build with:
 
 ```bash
 cargo build --release --features "parallel gpu"
 ```
 
-The crate exposes library APIs under `prism_q`.
+Building from source or pinning to a git revision is covered in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Quick start
 
@@ -157,12 +143,12 @@ let result = simulate(&c).seed(42).run().unwrap();
 
 | Backend | Best for | Scaling | Key property |
 | --- | --- | --- | --- |
-| **Statevector** | General circuits | O(2^n) | Full SIMD, tiled L2/L3 kernels, optional CUDA path |
-| **Stabilizer** | Clifford-only | O(n^2) | SIMD-optimized, scales to thousands of qubits |
+| **Statevector** | General circuits | O(2ⁿ) | Full SIMD, tiled L2/L3 kernels, optional CUDA path |
+| **Stabilizer** | Clifford only | O(n²) | SIMD optimized, scales to thousands of qubits |
 | **Sparse** | Few live amplitudes | O(k) | HashMap with parallel measurement |
-| **MPS** | Low-entanglement or 1D | O(n chi^2) | Hybrid faer / Jacobi SVD |
-| **Product State** | No entanglement | O(n) | Per-qubit, instant |
-| **Tensor Network** | Low treewidth | Contraction-dependent | Greedy min-size heuristic |
+| **MPS** | Low entanglement or 1D | O(nχ²) | Hybrid faer / Jacobi SVD |
+| **Product State** | No entanglement | O(n) | Per qubit, instant |
+| **Tensor Network** | Low treewidth | Depends on contraction order | Greedy min size heuristic |
 | **Factored** | Partial entanglement | Dynamic | Tracks independent sub-states |
 
 `BackendKind::Auto` selects at dispatch time. Non-entangling circuits go to Product
@@ -204,24 +190,17 @@ Thread count defaults to logical cores. Set `RAYON_NUM_THREADS` to override.
 
 ## GPU backend (optional)
 
-The `gpu` feature enables a CUDA statevector path.
+The `gpu` feature enables CUDA paths for the statevector and (experimentally) the
+stabilizer backend. Requires CUDA Toolkit 12.x or newer and a CUDA capable device.
+PTX is compiled at runtime via NVRTC against the device's compute capability.
 
 ```bash
 cargo build --release --features "parallel gpu"
-cargo test  --features "parallel gpu" --test golden_gpu
 ```
 
-Requires the CUDA toolkit (12.x or newer) and a CUDA-capable device. PTX is compiled at
-runtime via NVRTC against the device's compute capability. Every `Gate` variant is
-covered by a dedicated kernel, including batched kernels for `BatchPhase`, `BatchRzz`,
-`DiagonalBatch`, and both diagonal and non-diagonal `MultiFused`. Golden tests in
-[`tests/golden_gpu.rs`](tests/golden_gpu.rs) verify amplitude equivalence against the
-CPU statevector within 1e-10.
-
-`BackendKind::Auto` does not yet route to GPU. Opt in explicitly with the
-simulation builder so the circuit picks up fusion plus independent-subsystem decomposition and applies
-a size-aware crossover (default: GPU only for `≥ gpu::MIN_QUBITS_DEFAULT` qubit
-sub-circuits, overridable via `PRISM_GPU_MIN_QUBITS`):
+Opt in through the simulation builder. The circuit still goes through fusion and
+independent subsystem decomposition, and a size aware crossover keeps small sub
+circuits on the CPU:
 
 ```rust
 use prism_q::{gpu::GpuContext, simulate};
@@ -230,50 +209,15 @@ let ctx = GpuContext::new(0)?;
 let result = simulate(&circuit).gpu(ctx).seed(42).run()?;
 ```
 
-Introspect whether the default GPU dispatch footprint is likely to fit before
-dispatching a large circuit:
+`BackendKind::StabilizerGpu` runs Clifford circuits on the device, and
+`CompiledSampler::with_gpu(ctx)` accelerates large shot counts for compiled BTS
+sampling. Crossover thresholds are conservative by default and can be tuned through
+`PRISM_GPU_MIN_QUBITS`, `PRISM_STABILIZER_GPU_MIN_QUBITS`, and
+`PRISM_GPU_BTS_MIN_SHOTS`.
 
-```rust
-use prism_q::gpu::{self, GpuContext};
-
-if gpu::is_available() {
-    let ctx = GpuContext::new(0)?;
-    if ctx.fits_statevector(28)? {
-        // the 28-qubit state plus the default probabilities scratch buffer
-        // should fit in current free VRAM
-    }
-}
-```
-
-For kernel experiments where every gate must hit the device, use
-`StatevectorBackend::new(seed).with_gpu(ctx)` directly. That bypasses the dispatch
-crossover by design.
-
-### Stabilizer GPU (experimental)
-
-`BackendKind::StabilizerGpu` routes Clifford circuits through CUDA. Gate application uses one batched kernel
-(`stab_apply_batch`). Measurement and reset stay on the device, including pivot
-search, row operations, phase fixup, and deterministic outcomes. Golden tests
-cover 100 to 5000 qubits.
-
-Compiled BTS sampling can use the GPU through `run_shots_compiled_with_gpu` or
-`CompiledSampler::with_gpu(ctx)`. The GPU path activates only for flat sparse
-parity data and shot counts at or above `gpu::BTS_MIN_SHOTS_DEFAULT`
-(`131_072` by default, override with `PRISM_GPU_BTS_MIN_SHOTS`). The sampler
-caches parity data and reusable scratch on the device across repeated calls.
-`DevicePackedShots::marginals()` and `DevicePackedShots::counts()` reduce on the
-device before falling back to a full shot copy.
-
-The stabilizer GPU dispatch crossover is conservative by default:
-`STABILIZER_MIN_QUBITS_DEFAULT = 100_000`. Set
-`PRISM_STABILIZER_GPU_MIN_QUBITS` for experiments.
-
-Benchmark direct stabilizer backend groups for throughput claims.
-`probabilities()`, `export_tableau()`, and `export_statevector()` are diagnostic
-readback helpers, not the throughput path.
-
-See [`docs/architecture.md`](docs/architecture.md) for the kernel design and crossover
-analysis.
+`BackendKind::Auto` does not yet route to GPU. See
+[`docs/architecture.md`](docs/architecture.md) for kernel design, crossover analysis,
+and the full set of tuning knobs.
 
 ## Coverage
 
@@ -292,38 +236,14 @@ CI generates coverage on every push and PR, and updates the badge automatically.
 cargo bench --bench circuits     --features parallel         # circuit macrobenchmarks
 cargo bench --bench bench_driver --features parallel         # gate microbenchmarks
 cargo bench --bench bench_gpu    --features "parallel gpu"   # GPU dispatch benchmarks
-cargo bench --features "parallel,bench-fast"                 # quick smoke test
 ```
 
-`bench_gpu` includes direct stabilizer backend groups that time
-`StabilizerBackend::apply_instructions` without probability readback. It also
-includes GPU BTS marginal and device count groups for the reduced transfer
-compiled sampler path. Use direct stabilizer groups for GPU crossover and
-throughput claims. Treat `simulate(...).run()` groups as public API timings.
+Always use `--features parallel`; baselines were taken with Rayon enabled. Do not run
+two `cargo bench` invocations concurrently on the same machine — Rayon thread pools
+contend for cores and skew results.
 
-Always use `--features parallel`. Baselines were taken with Rayon enabled. Never run
-two `cargo bench` invocations at the same time on the same machine. Rayon thread pools
-fight for cores and produce large swings in results.
-
-### Regression checks
-
-```bash
-# Save a baseline.
-cargo bench --features parallel
-./scripts/bench_check.sh save --name "before"         # unix
-.\scripts\bench_check.ps1 save -Name "before"         # windows
-
-# Make changes, bench again.
-cargo bench --features parallel
-
-# Compare (exits 1 on regression).
-./scripts/bench_check.sh compare --baseline "before"
-.\scripts\bench_check.ps1 compare -Baseline "before"
-
-# Markdown table for PRs.
-./scripts/bench_check.sh table --baseline "before"
-.\scripts\bench_check.ps1 table -Baseline "before"
-```
+Baseline capture, regression checks, and the markdown table workflow used in PRs live
+in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Profiling
 
@@ -338,12 +258,13 @@ SVGs land in `bench_results/` (gitignored).
 
 ## Roadmap
 
-- Expanded OpenQASM 3.0: `reset` instruction, `for` loop unrolling, `def` subroutines.
-- Expectation values: `<psi|O|psi>` for Pauli strings (VQE and QAOA).
-- Density matrix backend: mixed-state simulation for noise and decoherence modeling.
-- GPU auto-dispatch: thread a GPU context into `BackendKind::Auto` so large circuits
+- Density matrix backend: mixed state simulation for noise and decoherence modeling.
+- GPU auto dispatch: thread a GPU context into `BackendKind::Auto` so large circuits
   route to GPU without an explicit `BackendKind::StatevectorGpu`. Crossover and
   decomposition already work through the explicit variant.
+- Expanded classical control: mid circuit branching beyond the current `if` form, and
+  parameterized circuit reuse for variational workloads.
+- Distributed statevector: multi node sharding for circuits beyond single host memory.
 
 ## Architecture
 

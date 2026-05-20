@@ -2,11 +2,24 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.15.0] - 2026-05-20
+
+### Documentation
+
+- Add quantum computing category and updating README (#72)([f304e39](https://github.com/AbeCoull/prism-q/commit/f304e390d58e07c0d75c2fb9e76ba1e3e8c4c5f7))
+
+### Features
+
+- Expand benchmark regression tests (#73)([c7937e4](https://github.com/AbeCoull/prism-q/commit/c7937e422250e564d1b85ebfac1958e3d59dcc44))
 ## [0.14.4] - 2026-05-20
 
 ### Bug Fixes
 
 - **sim:** Tighten packed shots and dispatch metadata (#71)([64da8fa](https://github.com/AbeCoull/prism-q/commit/64da8faa6f53ce6c81150fb2b6372f27007cd7f5))
+
+### Miscellaneous
+
+- **release:** 0.14.4([8043b43](https://github.com/AbeCoull/prism-q/commit/8043b4367e62856462aded0229b997316c9a0ba6))
 
 ### Testing
 

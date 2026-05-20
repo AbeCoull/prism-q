@@ -218,6 +218,16 @@ Orchestration layer in `src/sim/mod.rs`. Entry points:
 | `run_on(backend, circuit)` | Pre-constructed backend |
 | `run_qasm(qasm, seed)` | Parse + simulate |
 
+`RunOutcome::probabilities` is `None` only when the selected backend cannot
+expose a dense probability distribution for the requested circuit, such as
+factored stabilizer or decomposed runs above the dense output cap. Other
+probability extraction failures propagate as errors. `marginals()` requires
+either a direct Pauli marginal route or backend probability output; it returns
+`BackendUnsupported` instead of fabricating uniform marginals when neither path
+is available. Stochastic and deterministic Pauli marginal backends accept only
+unitary Clifford+T circuits without measurement, reset, or conditional
+instructions.
+
 ### Auto-dispatch decision tree
 
 ```text
@@ -398,6 +408,16 @@ For multi-shot sampling without materializing the full statevector on every shot
 | `PauliExpectationAccumulator` | ⟨P⟩ for Pauli observables | VQE/QAOA |
 | `CorrelatorAccumulator` | ⟨Z_i Z_j⟩ correlations | Entanglement analysis |
 | `NullAccumulator` | Nothing | Benchmarking raw sampling speed |
+
+**PackedShots raw format**: `PackedShots::RAW_FORMAT_VERSION` is the replay
+contract for `raw_data()` and `into_data()`. Version 1 stores little-endian bit
+order within each `u64`. `ShotMajor` stores one row per shot with
+`m_words() = ceil(num_measurements / 64)`. `MeasMajor` stores one row per
+measurement with `s_words() = ceil(num_shots / 64)`. The checked
+`try_from_shot_major` and `try_from_meas_major` constructors reject shape
+mismatches and non-zero semantic padding. Histograms, marginals, parity rows,
+and accumulators mask only semantic padding: measurement-tail bits in
+shot-major data and shot-tail bits in measurement-major data.
 
 **Detector sampler** (`compile_detector_sampler`): Compiles Clifford circuits
 with measurement and reset reuse into the same packed measurement sampler, then

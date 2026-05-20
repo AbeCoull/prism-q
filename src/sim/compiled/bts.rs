@@ -4,6 +4,7 @@ use super::rng::Xoshiro256PlusPlus;
 use super::rng::Xoshiro256PlusPlusX2;
 #[cfg(target_arch = "x86_64")]
 use super::rng::Xoshiro256PlusPlusX4;
+use super::shot_tail_mask;
 
 pub(super) const BTS_BATCH_SHOTS: usize = 65536;
 
@@ -240,9 +241,8 @@ pub(super) fn sample_bts_meas_major(
             *r = rng.next_u64();
         }
         if batch == s_words - 1 {
-            let rem = num_shots % 64;
-            if rem != 0 {
-                let mask = (1u64 << rem) - 1;
+            let mask = shot_tail_mask(num_shots);
+            if mask != u64::MAX {
                 for r in random_bits.iter_mut().take(rank) {
                     *r &= mask;
                 }
@@ -257,7 +257,7 @@ pub(super) fn sample_bts_meas_major(
         }
     }
 
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
     meas_major
 }
 
@@ -266,6 +266,7 @@ pub(super) fn apply_ref_bits_meas_major(
     ref_bits: &[u64],
     num_meas: usize,
     s_words: usize,
+    num_shots: usize,
 ) {
     for m in 0..num_meas {
         let ref_bit = (ref_bits[m / 64] >> (m % 64)) & 1;
@@ -276,6 +277,7 @@ pub(super) fn apply_ref_bits_meas_major(
             }
         }
     }
+    super::clear_meas_major_shot_padding(meas_major, num_shots, num_meas, s_words);
 }
 
 fn sample_bts_meas_major_dag(
@@ -307,9 +309,8 @@ fn sample_bts_meas_major_dag(
             *r = rng.next_u64();
         }
         if batch == s_words - 1 {
-            let rem = num_shots % 64;
-            if rem != 0 {
-                let mask = (1u64 << rem) - 1;
+            let mask = shot_tail_mask(num_shots);
+            if mask != u64::MAX {
                 for r in random_bits.iter_mut().take(rank) {
                     *r &= mask;
                 }
@@ -332,7 +333,7 @@ fn sample_bts_meas_major_dag(
         }
     }
 
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
     meas_major
 }
 
@@ -474,7 +475,7 @@ unsafe fn sample_bts_meas_major_avx2(
         );
     }
 
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
     meas_major
 }
 
@@ -783,7 +784,7 @@ unsafe fn sample_bts_meas_major_dag_avx2(
         }
     }
 
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
     meas_major
 }
 
@@ -931,7 +932,7 @@ unsafe fn sample_bts_meas_major_neon(
         );
     }
 
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words);
+    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
     meas_major
 }
 
@@ -1177,7 +1178,7 @@ mod tests {
         m[1] = 0x0F;
         m[2] = 0x0F;
         let ref_bits = vec![0b101u64];
-        apply_ref_bits_meas_major(&mut m, &ref_bits, num_meas, s_words);
+        apply_ref_bits_meas_major(&mut m, &ref_bits, num_meas, s_words, 64);
         assert_eq!(m[0], !0x0Fu64);
         assert_eq!(m[1], 0x0F);
         assert_eq!(m[2], !0x0Fu64);

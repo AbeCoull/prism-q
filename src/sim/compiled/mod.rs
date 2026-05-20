@@ -1530,6 +1530,171 @@ pub enum ShotLayout {
     MeasMajor,
 }
 
+#[inline]
+pub(crate) fn measurement_tail_mask(num_measurements: usize) -> u64 {
+    let tail = num_measurements % 64;
+    if tail == 0 {
+        u64::MAX
+    } else {
+        (1u64 << tail) - 1
+    }
+}
+
+#[inline]
+pub(crate) fn shot_tail_mask(num_shots: usize) -> u64 {
+    let tail = num_shots % 64;
+    if tail == 0 {
+        u64::MAX
+    } else {
+        (1u64 << tail) - 1
+    }
+}
+
+fn checked_packed_len(label: &str, rows: usize, words_per_row: usize) -> Result<usize> {
+    rows.checked_mul(words_per_row)
+        .ok_or_else(|| PrismError::InvalidParameter {
+            message: format!("{label} packed raw shape overflows usize"),
+        })
+}
+
+fn validate_packed_len(
+    label: &str,
+    actual: usize,
+    rows: usize,
+    words_per_row: usize,
+) -> Result<usize> {
+    let expected = checked_packed_len(label, rows, words_per_row)?;
+    if actual != expected {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "{label} packed raw length {actual} does not match expected length {expected}"
+            ),
+        });
+    }
+    Ok(expected)
+}
+
+fn validate_shot_major_padding(
+    data: &[u64],
+    num_shots: usize,
+    num_measurements: usize,
+    m_words: usize,
+) -> Result<()> {
+    let valid_mask = measurement_tail_mask(num_measurements);
+    if let Some(shot) = first_shot_major_padding_violation(data, num_shots, m_words, valid_mask) {
+        return Err(PrismError::InvalidParameter {
+            message: format!("shot-major raw padding bits are set in shot {shot}"),
+        });
+    }
+    Ok(())
+}
+
+fn first_shot_major_padding_violation(
+    data: &[u64],
+    num_shots: usize,
+    m_words: usize,
+    tail_mask: u64,
+) -> Option<usize> {
+    if m_words == 0 || tail_mask == u64::MAX {
+        return None;
+    }
+    let invalid_mask = !tail_mask;
+    (0..num_shots).find(|&shot| data[shot * m_words + m_words - 1] & invalid_mask != 0)
+}
+
+pub(crate) fn shot_major_padding_bits_set(
+    data: &[u64],
+    num_shots: usize,
+    m_words: usize,
+    tail_mask: u64,
+) -> bool {
+    first_shot_major_padding_violation(data, num_shots, m_words, tail_mask).is_some()
+}
+
+fn validate_meas_major_padding(
+    data: &[u64],
+    num_shots: usize,
+    num_measurements: usize,
+    s_words: usize,
+) -> Result<()> {
+    if s_words == 0 {
+        return Ok(());
+    }
+    let valid_mask = shot_tail_mask(num_shots);
+    if valid_mask == u64::MAX {
+        return Ok(());
+    }
+    let invalid_mask = !valid_mask;
+    for measurement in 0..num_measurements {
+        let idx = measurement * s_words + s_words - 1;
+        if data[idx] & invalid_mask != 0 {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "measurement-major raw padding bits are set in measurement {measurement}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn clear_meas_major_shot_padding(
+    data: &mut [u64],
+    num_shots: usize,
+    num_measurements: usize,
+    s_words: usize,
+) {
+    if s_words == 0 {
+        return;
+    }
+    let valid_mask = shot_tail_mask(num_shots);
+    if valid_mask == u64::MAX {
+        return;
+    }
+    for measurement in 0..num_measurements {
+        data[measurement * s_words + s_words - 1] &= valid_mask;
+    }
+}
+
+#[inline]
+pub(crate) fn count_vec_key<S>(
+    counts: &mut std::collections::HashMap<Vec<u64>, u64, S>,
+    key: &[u64],
+) where
+    S: std::hash::BuildHasher,
+{
+    if let Some(count) = counts.get_mut(key) {
+        *count += 1;
+    } else {
+        counts.insert(key.to_vec(), 1);
+    }
+}
+
+#[inline]
+pub(crate) fn count_vec_key_masked<S>(
+    counts: &mut std::collections::HashMap<Vec<u64>, u64, S>,
+    key: &[u64],
+    tail_mask: u64,
+    scratch: &mut Vec<u64>,
+) where
+    S: std::hash::BuildHasher,
+{
+    if key.is_empty() || tail_mask == u64::MAX || (key[key.len() - 1] & !tail_mask) == 0 {
+        count_vec_key(counts, key);
+        return;
+    }
+
+    scratch.clear();
+    scratch.extend_from_slice(key);
+    let last = scratch.len() - 1;
+    scratch[last] &= tail_mask;
+    if let Some(count) = counts.get_mut(scratch.as_slice()) {
+        *count += 1;
+    } else {
+        counts.insert(scratch.clone(), 1);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PackedShots {
     data: Vec<u64>,
@@ -1541,6 +1706,12 @@ pub struct PackedShots {
 }
 
 impl PackedShots {
+    pub const RAW_FORMAT_VERSION: u32 = 1;
+
+    pub fn raw_format_version(&self) -> u32 {
+        Self::RAW_FORMAT_VERSION
+    }
+
     pub fn num_shots(&self) -> usize {
         self.num_shots
     }
@@ -1577,6 +1748,10 @@ impl PackedShots {
         self.m_words
     }
 
+    pub(crate) fn measurement_tail_mask(&self) -> u64 {
+        measurement_tail_mask(self.num_measurements)
+    }
+
     pub fn shot_words(&self, shot: usize) -> &[u64] {
         assert!(
             self.layout == ShotLayout::ShotMajor,
@@ -1595,32 +1770,61 @@ impl PackedShots {
         &self.data[base..base + self.s_words]
     }
 
-    pub fn from_shot_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
+    pub fn try_from_shot_major(
+        data: Vec<u64>,
+        num_shots: usize,
+        num_measurements: usize,
+    ) -> Result<Self> {
         let m_words = num_measurements.div_ceil(64);
         let s_words = num_shots.div_ceil(64);
-        Self {
+        validate_packed_len("shot-major", data.len(), num_shots, m_words)?;
+        validate_shot_major_padding(&data, num_shots, num_measurements, m_words)?;
+        Ok(Self {
             data,
             num_shots,
             num_measurements,
             m_words,
             s_words,
             layout: ShotLayout::ShotMajor,
-        }
+        })
     }
 
-    pub fn from_meas_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
+    pub fn from_shot_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
+        Self::try_from_shot_major(data, num_shots, num_measurements)
+            .unwrap_or_else(|e| panic!("invalid shot-major PackedShots raw data: {e}"))
+    }
+
+    pub fn try_from_meas_major(
+        data: Vec<u64>,
+        num_shots: usize,
+        num_measurements: usize,
+    ) -> Result<Self> {
         let m_words = num_measurements.div_ceil(64);
         let s_words = num_shots.div_ceil(64);
-        Self {
+        validate_packed_len("measurement-major", data.len(), num_measurements, s_words)?;
+        validate_meas_major_padding(&data, num_shots, num_measurements, s_words)?;
+        Ok(Self {
             data,
             num_shots,
             num_measurements,
             m_words,
             s_words,
             layout: ShotLayout::MeasMajor,
-        }
+        })
     }
 
+    pub fn from_meas_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
+        Self::try_from_meas_major(data, num_shots, num_measurements)
+            .unwrap_or_else(|e| panic!("invalid measurement-major PackedShots raw data: {e}"))
+    }
+
+    /// Return the raw words for [`PackedShots::RAW_FORMAT_VERSION`].
+    ///
+    /// Version 1 stores little-endian bit order within each `u64`. Shot-major
+    /// layout stores `num_shots` rows of `m_words()` words. Measurement-major
+    /// layout stores `num_measurements` rows of `s_words()` words. Semantic
+    /// padding bits are outside `num_measurements` for shot-major data and
+    /// outside `num_shots` for measurement-major data.
     pub fn raw_data(&self) -> &[u64] {
         &self.data
     }
@@ -1672,12 +1876,7 @@ impl PackedShots {
         let mut shots = vec![vec![false; self.num_measurements]; self.num_shots];
         match self.layout {
             ShotLayout::ShotMajor => {
-                let tail = self.num_measurements % 64;
-                let last_mask = if tail == 0 {
-                    u64::MAX
-                } else {
-                    (1u64 << tail) - 1
-                };
+                let last_mask = self.measurement_tail_mask();
                 for (s, shot) in shots.iter_mut().enumerate() {
                     let row = &self.data[s * self.m_words..(s + 1) * self.m_words];
                     for (mw, mut bits) in row.iter().copied().enumerate() {
@@ -1694,12 +1893,7 @@ impl PackedShots {
                 }
             }
             ShotLayout::MeasMajor => {
-                let tail = self.num_shots % 64;
-                let last_mask = if tail == 0 {
-                    u64::MAX
-                } else {
-                    (1u64 << tail) - 1
-                };
+                let last_mask = shot_tail_mask(self.num_shots);
                 let mut measurement = 0;
                 while measurement < self.num_measurements {
                     let row =
@@ -1742,6 +1936,12 @@ impl PackedShots {
                                 xor_words(dst, &self.data[src_start..src_start + self.s_words]);
                             }
                         });
+                    clear_meas_major_shot_padding(
+                        &mut data,
+                        self.num_shots,
+                        rows.len(),
+                        self.s_words,
+                    );
                     return Ok(PackedShots::from_meas_major(
                         data,
                         self.num_shots,
@@ -1756,6 +1956,7 @@ impl PackedShots {
                         xor_words(dst, &self.data[src_start..src_start + self.s_words]);
                     }
                 }
+                clear_meas_major_shot_padding(&mut data, self.num_shots, rows.len(), self.s_words);
                 Ok(PackedShots::from_meas_major(
                     data,
                     self.num_shots,
@@ -1801,12 +2002,26 @@ impl PackedShots {
 
         let mut map = HashMap::new();
         let mw = self.m_words;
+        let tail_mask = self.measurement_tail_mask();
+        let mut scratch = Vec::new();
 
         match self.layout {
             ShotLayout::ShotMajor => {
-                for s in 0..self.num_shots {
-                    let base = s * mw;
-                    *map.entry(self.data[base..base + mw].to_vec()).or_insert(0) += 1;
+                if shot_major_padding_bits_set(&self.data, self.num_shots, mw, tail_mask) {
+                    for s in 0..self.num_shots {
+                        let base = s * mw;
+                        count_vec_key_masked(
+                            &mut map,
+                            &self.data[base..base + mw],
+                            tail_mask,
+                            &mut scratch,
+                        );
+                    }
+                } else {
+                    for s in 0..self.num_shots {
+                        let base = s * mw;
+                        count_vec_key(&mut map, &self.data[base..base + mw]);
+                    }
                 }
             }
             ShotLayout::MeasMajor => {
@@ -1835,7 +2050,7 @@ impl PackedShots {
 
                     for s in 0..batch_len {
                         let base = s * mw;
-                        *map.entry(shot_buf[base..base + mw].to_vec()).or_insert(0) += 1;
+                        count_vec_key(&mut map, &shot_buf[base..base + mw]);
                     }
                 }
             }
@@ -1849,6 +2064,7 @@ impl PackedShots {
         let mut map = HashMap::new();
         let mw = self.m_words;
         debug_assert!(mw <= 8);
+        let tail_mask = self.measurement_tail_mask();
 
         match self.layout {
             ShotLayout::ShotMajor => {
@@ -1856,6 +2072,9 @@ impl PackedShots {
                     let base = s * mw;
                     let mut key = [0u64; 8];
                     key[..mw].copy_from_slice(&self.data[base..base + mw]);
+                    if mw > 0 {
+                        key[mw - 1] &= tail_mask;
+                    }
                     *map.entry(key).or_insert(0) += 1;
                 }
             }

@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 
-use super::{PackedShots, ShotLayout};
+use super::{
+    count_vec_key, count_vec_key_masked, shot_major_padding_bits_set, shot_tail_mask, PackedShots,
+    ShotLayout,
+};
 
 const DEFAULT_TARGET_BYTES: usize = 256 * 1024 * 1024;
 
@@ -156,11 +159,9 @@ fn count_shot_typed<const M: usize>(counts: &mut FxHashMap<[u64; M], u64>, key: 
 }
 
 #[inline]
-fn count_shot_wide(counts: &mut FxHashMap<Vec<u64>, u64>, key: &[u64]) {
-    if let Some(count) = counts.get_mut(key) {
-        *count += 1;
-    } else {
-        counts.insert(key.to_vec(), 1);
+fn mask_typed_tail<const M: usize>(key: &mut [u64; M], tail_mask: u64) {
+    if M > 0 {
+        key[M - 1] &= tail_mask;
     }
 }
 
@@ -400,7 +401,7 @@ fn accumulate_meas_major_wide(
         for s in 0..batch_len {
             let base = s * m_words;
             let key = &batch_buf[base..base + m_words];
-            count_shot_wide(counts, key);
+            count_vec_key(counts, key);
         }
     }
 }
@@ -441,6 +442,7 @@ fn count_shard_shot_major_typed<const M: usize>(
     data: &[u64],
     shard_start: usize,
     shard_end: usize,
+    tail_mask: u64,
 ) -> FxHashMap<[u64; M], u64> {
     let shard_len = shard_end - shard_start;
     let mut local: FxHashMap<[u64; M], u64> = FxHashMap::default();
@@ -450,6 +452,7 @@ fn count_shard_shot_major_typed<const M: usize>(
         let base = s * M;
         let mut key = [0u64; M];
         key.copy_from_slice(&data[base..base + M]);
+        mask_typed_tail(&mut key, tail_mask);
         count_shot_typed(&mut local, key);
     }
 
@@ -462,15 +465,24 @@ fn count_shard_shot_major_wide(
     shard_start: usize,
     shard_end: usize,
     m_words: usize,
+    tail_mask: u64,
 ) -> FxHashMap<Vec<u64>, u64> {
     let shard_len = shard_end - shard_start;
     let mut local = FxHashMap::default();
     local.reserve(shard_len.min(65536));
+    let mut scratch = Vec::new();
 
-    for s in shard_start..shard_end {
-        let base = s * m_words;
-        let key = &data[base..base + m_words];
-        count_shot_wide(&mut local, key);
+    if tail_mask == u64::MAX {
+        for s in shard_start..shard_end {
+            let base = s * m_words;
+            count_vec_key(&mut local, &data[base..base + m_words]);
+        }
+    } else {
+        for s in shard_start..shard_end {
+            let base = s * m_words;
+            let key = &data[base..base + m_words];
+            count_vec_key_masked(&mut local, key, tail_mask, &mut scratch);
+        }
     }
 
     local
@@ -500,7 +512,7 @@ fn count_shard_wide(
         for s in 0..batch_len {
             let base = s * m_words;
             let key = &buf[base..base + m_words];
-            count_shot_wide(&mut local, key);
+            count_vec_key(&mut local, key);
         }
     }
 
@@ -638,6 +650,12 @@ impl ShotAccumulator for HistogramAccumulator {
             }
             ShotLayout::ShotMajor => {
                 let data = chunk.raw_data();
+                let raw_tail_mask = chunk.measurement_tail_mask();
+                let tail_mask = if shot_major_padding_bits_set(data, n, m_words, raw_tail_mask) {
+                    raw_tail_mask
+                } else {
+                    u64::MAX
+                };
 
                 macro_rules! shot_major_dispatch {
                     ($($variant:ident, $M:expr);+ $(;)?) => {
@@ -657,7 +675,7 @@ impl ShotAccumulator for HistogramAccumulator {
                                                 if start >= n { return None; }
                                                 let end = (start + shots_per_thread).min(n);
                                                 Some(count_shard_shot_major_typed::<$M>(
-                                                    data, start, end,
+                                                    data, start, end, tail_mask,
                                                 ))
                                             })
                                             .collect();
@@ -670,6 +688,7 @@ impl ShotAccumulator for HistogramAccumulator {
                                         let base = s * $M;
                                         let mut key = [0u64; $M];
                                         key.copy_from_slice(&data[base..base + $M]);
+                                        mask_typed_tail(&mut key, tail_mask);
                                         count_shot_typed(counts, key);
                                     }
                                 }
@@ -679,6 +698,7 @@ impl ShotAccumulator for HistogramAccumulator {
                                     let base = s * $M;
                                     let mut key = [0u64; $M];
                                     key.copy_from_slice(&data[base..base + $M]);
+                                    mask_typed_tail(&mut key, tail_mask);
                                     count_shot_typed(counts, key);
                                 }
                             })+
@@ -697,7 +717,7 @@ impl ShotAccumulator for HistogramAccumulator {
                                                 if start >= n { return None; }
                                                 let end = (start + shots_per_thread).min(n);
                                                 Some(count_shard_shot_major_wide(
-                                                    data, start, end, m_words,
+                                                    data, start, end, m_words, tail_mask,
                                                 ))
                                             })
                                             .collect();
@@ -706,16 +726,40 @@ impl ShotAccumulator for HistogramAccumulator {
                                         merge_shard_wide(counts, shard);
                                     }
                                 } else {
-                                    for s in 0..n {
-                                        let key = chunk.shot_words(s);
-                                        count_shot_wide(counts, key);
+                                    if tail_mask == u64::MAX {
+                                        for s in 0..n {
+                                            let key = chunk.shot_words(s);
+                                            count_vec_key(counts, key);
+                                        }
+                                    } else {
+                                        for s in 0..n {
+                                            let key = chunk.shot_words(s);
+                                            count_vec_key_masked(
+                                                counts,
+                                                key,
+                                                tail_mask,
+                                                &mut self.batch_buf,
+                                            );
+                                        }
                                     }
                                 }
 
                                 #[cfg(not(feature = "parallel"))]
-                                for s in 0..n {
-                                    let key = chunk.shot_words(s);
-                                    count_shot_wide(counts, key);
+                                if tail_mask == u64::MAX {
+                                    for s in 0..n {
+                                        let key = chunk.shot_words(s);
+                                        count_vec_key(counts, key);
+                                    }
+                                } else {
+                                    for s in 0..n {
+                                        let key = chunk.shot_words(s);
+                                        count_vec_key_masked(
+                                            counts,
+                                            key,
+                                            tail_mask,
+                                            &mut self.batch_buf,
+                                        );
+                                    }
                                 }
                             }
                             InlineCounts::Uninit => unreachable!(),
@@ -768,12 +812,7 @@ impl ShotAccumulator for MarginalsAccumulator {
         match chunk.layout() {
             ShotLayout::MeasMajor => {
                 let s_words = chunk.s_words();
-                let tail_bits = n % 64;
-                let tail_mask = if tail_bits == 0 {
-                    !0u64
-                } else {
-                    (1u64 << tail_bits) - 1
-                };
+                let tail_mask = shot_tail_mask(n);
                 for mi in 0..m {
                     let row = chunk.meas_words(mi);
                     let mut count = 0u64;
@@ -856,12 +895,7 @@ impl ShotAccumulator for PauliExpectationAccumulator {
         match chunk.layout() {
             ShotLayout::MeasMajor => {
                 let s_words = chunk.s_words();
-                let tail_bits = n % 64;
-                let tail_mask = if tail_bits == 0 {
-                    !0u64
-                } else {
-                    (1u64 << tail_bits) - 1
-                };
+                let tail_mask = shot_tail_mask(n);
                 self.parity_buf.resize(s_words, 0);
                 for (k, obs) in self.observables.iter().enumerate() {
                     self.parity_buf.fill(0);
@@ -967,12 +1001,7 @@ impl ShotAccumulator for CorrelatorAccumulator {
         match chunk.layout() {
             ShotLayout::MeasMajor => {
                 let s_words = chunk.s_words();
-                let tail_bits = n % 64;
-                let tail_mask = if tail_bits == 0 {
-                    !0u64
-                } else {
-                    (1u64 << tail_bits) - 1
-                };
+                let tail_mask = shot_tail_mask(n);
                 for (k, &(i, j)) in self.pairs.iter().enumerate() {
                     let row_i = chunk.meas_words(i);
                     let row_j = chunk.meas_words(j);
@@ -1116,11 +1145,11 @@ mod tests {
     }
 
     #[test]
-    fn count_shot_wide_insert_and_update() {
+    fn count_vec_key_insert_and_update() {
         let mut m: FxHashMap<Vec<u64>, u64> = FxHashMap::default();
-        count_shot_wide(&mut m, &[1, 2, 3]);
-        count_shot_wide(&mut m, &[1, 2, 3]);
-        count_shot_wide(&mut m, &[4, 5, 6]);
+        count_vec_key(&mut m, &[1, 2, 3]);
+        count_vec_key(&mut m, &[1, 2, 3]);
+        count_vec_key(&mut m, &[4, 5, 6]);
         assert_eq!(m.get(&vec![1u64, 2, 3]), Some(&2));
         assert_eq!(m.get(&vec![4u64, 5, 6]), Some(&1));
     }

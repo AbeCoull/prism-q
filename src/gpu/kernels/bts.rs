@@ -17,6 +17,7 @@ use crate::error::Result;
 use crate::gpu::GpuBuffer;
 use crate::sim::compiled::parity::SparseParity;
 use crate::sim::compiled::rng::Xoshiro256PlusPlus;
+use crate::sim::compiled::shot_tail_mask;
 
 use super::super::GpuContext;
 use super::{div_ceil_grid, launch_err, require_i32, require_u32};
@@ -91,6 +92,7 @@ extern "C" __global__ void bts_sample_meas_major(
     int rank,
     int out_stride_words,
     int out_word_offset,
+    unsigned long long tail_mask,
     unsigned long long *meas_major
 ) {
     int m = blockIdx.x;
@@ -108,6 +110,7 @@ extern "C" __global__ void bts_sample_meas_major(
     unsigned long long ref_word = ref_bits[m >> 6];
     unsigned long long ref_bit = (ref_word >> (m & 63)) & 1ULL;
     if (ref_bit != 0ULL) acc = ~acc;
+    if (batch == s_words - 1) acc &= tail_mask;
 
     meas_major[
         (unsigned long long)m * (unsigned long long)out_stride_words +
@@ -693,14 +696,7 @@ impl GpuBtsCache {
                             ]
                         })
                         .collect();
-                    let tail_mask: Option<u64> = {
-                        let rem = chunk_shots % 64;
-                        if rem == 0 {
-                            None
-                        } else {
-                            Some((1u64 << rem) - 1)
-                        }
-                    };
+                    let tail_mask = shot_tail_mask(chunk_shots);
                     let last_batch = chunk_s_words - 1;
                     use rayon::prelude::*;
                     self.random_bits_host[..required]
@@ -717,11 +713,9 @@ impl GpuBtsCache {
                                     *word = trng.next_u64();
                                 }
                                 let absolute_batch = first_batch + b;
-                                if absolute_batch == last_batch {
-                                    if let Some(mask) = tail_mask {
-                                        for word in &mut slab[start..end] {
-                                            *word &= mask;
-                                        }
+                                if absolute_batch == last_batch && tail_mask != u64::MAX {
+                                    for word in &mut slab[start..end] {
+                                        *word &= tail_mask;
                                     }
                                 }
                             }
@@ -739,24 +733,14 @@ impl GpuBtsCache {
                 *word = rng.next_u64();
             }
             if batch == chunk_s_words - 1 {
-                let rem = chunk_shots % 64;
-                if rem != 0 {
-                    let mask = (1u64 << rem) - 1;
+                let mask = shot_tail_mask(chunk_shots);
+                if mask != u64::MAX {
                     for word in &mut self.random_bits_host[start..end] {
                         *word &= mask;
                     }
                 }
             }
         }
-    }
-}
-
-fn tail_mask(num_shots: usize) -> u64 {
-    let rem = num_shots % 64;
-    if rem == 0 {
-        !0u64
-    } else {
-        (1u64 << rem) - 1
     }
 }
 
@@ -893,6 +877,7 @@ pub(crate) fn launch_bts_sample(
         let out_stride_words_i =
             require_i32("bts_sample_meas_major", "out_stride_words", chunk_s_words)?;
         let out_word_offset_i = 0i32;
+        let tail_mask_u64 = shot_tail_mask(chunk_shots);
         let batch_blocks = div_ceil_grid(
             "bts_sample_meas_major",
             "chunk_s_words",
@@ -925,6 +910,7 @@ pub(crate) fn launch_bts_sample(
             .arg(&rank_i)
             .arg(&out_stride_words_i)
             .arg(&out_word_offset_i)
+            .arg(&tail_mask_u64)
             .arg(&mut chunk_output_dev);
         // SAFETY: kernel signature matches the call shape. Each thread writes
         // one unique output word (indexed by m and batch), so there is no
@@ -1003,6 +989,7 @@ pub(crate) fn launch_bts_sample_device(
         let out_stride_words_i = require_i32("bts_sample_meas_major", "out_stride_words", s_words)?;
         let out_word_offset_i =
             require_i32("bts_sample_meas_major", "out_word_offset", shots_done / 64)?;
+        let tail_mask_u64 = shot_tail_mask(chunk_shots);
         let batch_blocks = div_ceil_grid(
             "bts_sample_meas_major",
             "chunk_s_words",
@@ -1032,6 +1019,7 @@ pub(crate) fn launch_bts_sample_device(
             .arg(&rank_i)
             .arg(&out_stride_words_i)
             .arg(&out_word_offset_i)
+            .arg(&tail_mask_u64)
             .arg(&mut output_view);
         // SAFETY: kernel signature matches the call shape. Each thread writes
         // one unique output word addressed by measurement row and chunk-local
@@ -1350,7 +1338,7 @@ pub(crate) fn count_meas_major_marginals(
     let num_meas_i = require_i32("bts_popcount_rows", "num_meas", num_meas)?;
     let s_words_i = require_i32("bts_popcount_rows", "s_words", s_words)?;
     let num_meas_grid = require_u32("bts_popcount_rows", "num_meas", num_meas)?;
-    let tail_mask_u64 = tail_mask(num_shots);
+    let tail_mask_u64 = shot_tail_mask(num_shots);
     let cfg = LaunchConfig {
         grid_dim: (num_meas_grid, 1, 1),
         block_dim: (POPCOUNT_BLOCK_SIZE, 1, 1),

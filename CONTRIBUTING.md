@@ -9,8 +9,22 @@ cargo build --features "parallel gpu" # add the optional CUDA statevector backen
 cargo build --all-features            # everything
 ```
 
-The `gpu` feature requires the CUDA toolkit (12.x or newer) and a CUDA-capable device.
+The `gpu` feature requires the CUDA toolkit (12.x or newer) and a CUDA capable device.
 PTX is compiled at runtime via NVRTC against the device's compute capability.
+
+### From source
+
+```bash
+git clone https://github.com/AbeCoull/prism-q.git
+cd prism-q
+cargo build --release --features parallel
+```
+
+To pin a downstream crate to a specific revision:
+
+```bash
+cargo add prism-q --git https://github.com/AbeCoull/prism-q --features parallel
+```
 
 ## Test and lint
 
@@ -45,6 +59,25 @@ cargo bench --bench bench_driver --features parallel    # gate microbenchmarks
 
 Always use `--features parallel`. Baselines were taken with Rayon enabled. Do not run
 multiple `cargo bench` processes at once. Rayon contention causes noisy results.
+
+### Regression checks
+
+```bash
+cargo bench --features parallel
+./scripts/bench_check.sh save --name "before"
+.\scripts\bench_check.ps1 save -Name "before"
+
+cargo bench --features parallel
+
+./scripts/bench_check.sh compare --baseline "before"
+.\scripts\bench_check.ps1 compare -Baseline "before"
+
+./scripts/bench_check.sh table --baseline "before"
+.\scripts\bench_check.ps1 table -Baseline "before"
+```
+
+`compare` exits non zero on regression. `table` emits a markdown summary for the PR
+description.
 
 ## PR guidelines
 

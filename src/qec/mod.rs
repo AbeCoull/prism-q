@@ -16,6 +16,9 @@
 //! - [`run_qec_program_reference`] is the correctness oracle. One state-vector
 //!   simulation per shot. Use it for small semantic cross-checks, not bulk
 //!   sampling.
+//! - [`run_qec_program_with_strategy`] dispatches non-Clifford observable
+//!   programs through exact light-cone SPD, CAMPS, then a private exact
+//!   tensor-network scalar fallback.
 //! - [`compile_qec_program_rows`] lowers basis measurements and `MPP` records
 //!   into the packed X/Z Pauli row representation used by sampler internals.
 //!   It does not execute gates, resets, or active noise.
@@ -24,16 +27,30 @@
 //! shots, plus accepted and discarded shot counts after postselection and
 //! per-observable logical-error counts.
 
+mod camps_prefix;
+/// Treewidth-aware cut-selection heuristics for the QEC T-strategy ladder.
+///
+/// Not yet wired into the production dispatcher (which follows a fixed
+/// SPD -> CAMPS -> tensor-network ladder); exposed only under the
+/// `bench-internal` feature so the heuristics can be benchmarked without
+/// committing them to the stable public API.
+#[cfg(feature = "bench-internal")]
+pub mod cut_selection;
 mod noise;
+pub mod observable_reroute;
 mod parse;
 mod result;
 mod runner;
+mod t_sampler;
 
 pub use parse::parse_qec_program;
-pub use result::QecSampleResult;
+pub use result::{QecObservableEstimate, QecSampleResult};
 #[cfg(feature = "bench-internal")]
 pub use runner::{compile_qec_profiled_sampler, QecProfiledCounts, QecProfiledSampler};
 pub use runner::{run_qec_program, run_qec_program_reference};
+pub use t_sampler::{
+    run_qec_program_spd_rerouted, run_qec_program_with_strategy, QecObservableReroute, QecTStrategy,
+};
 
 use crate::circuit::Circuit;
 use crate::error::{PrismError, Result};

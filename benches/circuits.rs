@@ -5,11 +5,11 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use prism_q::backend::Backend;
-use prism_q::circuit::Circuit;
+use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
-use prism_q::{BackendKind, MpsBackend};
+use prism_q::{BackendKind, ClassicalCondition, Instruction, MpsBackend};
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -23,6 +23,18 @@ fn run_with(
     seed: u64,
 ) -> prism_q::Result<prism_q::RunOutcome> {
     sim::simulate(circuit).backend(kind).seed(seed).run()
+}
+
+fn run_shots_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<prism_q::ShotsResult> {
+    sim::simulate(circuit)
+        .backend(kind)
+        .seed(seed)
+        .shots(num_shots)
 }
 
 fn run_shots_with_noise(
@@ -1107,6 +1119,65 @@ fn clifford_t_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
     circuit
 }
 
+fn stabilizer_rank_terminal_shot_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut circuit = clifford_t_circuit(n_qubits, t_count, seed);
+    let measured = n_qubits.min(4);
+    circuit.num_classical_bits = measured;
+    for q in 0..measured {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+fn stabilizer_rank_mid_circuit_shot_circuit(n_qubits: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut circuit = clifford_t_circuit(n_qubits, t_count, seed);
+    circuit.num_classical_bits = 2;
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_reset(0);
+    circuit.add_measure(1, 1);
+    circuit
+}
+
+fn bench_stabilizer_rank_shot_case(
+    group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
+    n_qubits: usize,
+    t_count: usize,
+    shot_count: usize,
+) {
+    let branch_count = 1usize << t_count;
+    let terminal = stabilizer_rank_terminal_shot_circuit(n_qubits, t_count, SEED);
+    let id = format!("{n_qubits}q_chi{branch_count}_{shot_count}shots");
+    group.bench_function(BenchmarkId::new("shots_terminal", &id), |b| {
+        b.iter(|| {
+            run_shots_with(
+                BackendKind::StabilizerRank,
+                black_box(&terminal),
+                black_box(shot_count),
+                SEED,
+            )
+            .unwrap();
+        });
+    });
+
+    let mid = stabilizer_rank_mid_circuit_shot_circuit(n_qubits, t_count, SEED);
+    group.bench_function(BenchmarkId::new("shots_mid_circuit", &id), |b| {
+        b.iter(|| {
+            run_shots_with(
+                BackendKind::StabilizerRank,
+                black_box(&mid),
+                black_box(shot_count),
+                SEED,
+            )
+            .unwrap();
+        });
+    });
+}
+
 fn bench_clifford_t(c: &mut Criterion) {
     let mut group = c.benchmark_group("clifford_t");
     configure_group(&mut group);
@@ -1193,6 +1264,14 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
             });
         });
     }
+
+    let shot_count = 64;
+    for &n in &[32, 64, 128] {
+        for &t in &[1, 2, 3, 4] {
+            bench_stabilizer_rank_shot_case(&mut group, n, t, shot_count);
+        }
+    }
+    bench_stabilizer_rank_shot_case(&mut group, 1000, 1, shot_count);
 
     group.finish();
 }

@@ -8,7 +8,16 @@ use crate::sim::compiled::PackedShots;
 /// [`super::QecOptions::keep_measurements`] is `false`, [`Self::measurements`]
 /// is returned with zero shots; detector and observable shots are always
 /// populated.
+///
+/// This type is `#[non_exhaustive]`: construct it through [`Self::new`],
+/// [`Self::new_with_total_shots`], or [`Self::empty`] (not a struct
+/// literal), and match its fields with a trailing `..`. New fields may be
+/// added in minor releases without a major version bump; `0.15.0` added
+/// [`Self::observable_expectations`] and the `#[non_exhaustive]` marker
+/// itself, which is a breaking change for crates that previously built or
+/// exhaustively destructured this struct.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct QecSampleResult {
     /// Number of shots requested from the sampler.
     pub total_shots: usize,
@@ -18,6 +27,15 @@ pub struct QecSampleResult {
     /// Detector records: one bit per detector per shot.
     pub detectors: PackedShots,
     /// Logical observable records: one bit per observable per shot.
+    ///
+    /// For sampled strategies each bit is a real per-shot observable
+    /// parity. Analytical T strategies (SPD / CAMPS / tensor network) have
+    /// no per-shot stream, so they synthesize these records to match the
+    /// `logical_errors` popcount: the one-bits occupy positions
+    /// `[0, accepted_shots)` and the remainder up to `total_shots` is inert
+    /// padding. Derive rates with [`Self::logical_error_rates`]
+    /// (denominator `accepted_shots`); do not align these rows
+    /// shot-for-shot with detector rows on the analytical path.
     pub observables: PackedShots,
     /// Number of shots accepted after postselection (or `total_shots` when no
     /// postselection predicate is present).
@@ -27,6 +45,29 @@ pub struct QecSampleResult {
     /// For each observable, count of accepted shots where the observable
     /// parity equals 1. Length equals the number of observables.
     pub logical_errors: Vec<u64>,
+    /// Optional weighted-estimator expectation per observable. When
+    /// `Some`, this is the unbiased estimator's output for
+    /// `⟨1 - 2·parity⟩ ∈ [-γ^t, +γ^t]` (raw signed-importance mean);
+    /// `None` when the strategy emits raw bit counts only. Used by
+    /// analytical or weighted T strategies where the observable expectation
+    /// is not a simple ratio of bit counts.
+    pub observable_expectations: Option<Vec<QecObservableEstimate>>,
+}
+
+/// Unbiased expectation estimate for one observable under a weighted
+/// shot strategy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QecObservableEstimate {
+    /// Empirical mean of `Re(weight · (1 - 2·parity))` over the shot
+    /// stream. For Z-basis Pauli observables on a true probability
+    /// distribution this lies in `[-1, +1]`; quasi-probability variance
+    /// can push raw shot estimates outside that range.
+    pub mean: f64,
+    /// Empirical variance of the weighted per-shot contribution.
+    pub variance: f64,
+    /// Number of shots that contributed to the estimate (excluding
+    /// postselection rejections).
+    pub num_shots: usize,
 }
 
 impl QecSampleResult {
@@ -40,6 +81,7 @@ impl QecSampleResult {
             accepted_shots: 0,
             discarded_shots: 0,
             logical_errors: vec![0; num_observables],
+            observable_expectations: None,
         }
     }
 
@@ -122,7 +164,28 @@ impl QecSampleResult {
             accepted_shots,
             discarded_shots,
             logical_errors,
+            observable_expectations: None,
         })
+    }
+
+    /// Attach unbiased-estimator outputs alongside the raw bit counts.
+    /// Used by quasi-probability QEC T strategies. Validates that the
+    /// estimate length matches the number of observables.
+    pub fn with_observable_expectations(
+        mut self,
+        estimates: Vec<QecObservableEstimate>,
+    ) -> Result<Self> {
+        if estimates.len() != self.observables.num_measurements() {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "observable expectation length {} does not match {} observables",
+                    estimates.len(),
+                    self.observables.num_measurements()
+                ),
+            });
+        }
+        self.observable_expectations = Some(estimates);
+        Ok(self)
     }
 
     /// Fraction of requested shots accepted after postselection.

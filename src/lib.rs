@@ -71,8 +71,9 @@ pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
 pub use qec::{compile_qec_profiled_sampler, QecProfiledCounts, QecProfiledSampler};
 pub use qec::{
     compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
-    QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise, QecOp, QecOptions, QecPauli,
-    QecProgram, QecRecordRef, QecSampleResult,
+    run_qec_program_spd_rerouted, run_qec_program_with_strategy, QecBasis, QecCompiledRows,
+    QecMeasurementRow, QecNoise, QecObservableEstimate, QecObservableReroute, QecOp, QecOptions,
+    QecPauli, QecProgram, QecRecordRef, QecSampleResult, QecTStrategy,
 };
 pub use sim::compiled::{
     compile_detector_sampler, compile_forward, compile_measurements, run_shots_compiled,
@@ -88,9 +89,14 @@ pub use sim::noise::{
     ReadoutError,
 };
 pub use sim::stabilizer_rank::{
-    run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_overlap_sq, StabRankResult,
+    run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,
+    stabilizer_overlap_sq, StabRankResult,
 };
-pub use sim::unified_pauli::{run_spd, run_spp, SpdResult, SppResult};
+pub use sim::unified_pauli::{
+    inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_light_cone, run_spp,
+    run_spp_observable, PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SppObservableResult,
+    SppResult,
+};
 pub use sim::{
     bitstring, run_on, run_qasm, simulate, BackendKind, CountsResult, FactoredBlock,
     MarginalsResult, Probabilities, RunOutcome, Seeded, ShotsResult, Simulate, Unseeded,

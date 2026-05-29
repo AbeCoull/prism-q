@@ -319,6 +319,7 @@ fn run_with_internal(
     if matches!(kind, BackendKind::Auto)
         && circuit.is_clifford_plus_t()
         && circuit.has_t_gates()
+        && !has_nonunitary_or_classical_ops(circuit)
         && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
     {
         let t = circuit.t_count();
@@ -741,6 +742,22 @@ pub(crate) fn run_shots_with(
             shots,
             num_classical_bits: circuit.num_classical_bits,
         });
+    }
+
+    if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates() {
+        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+    }
+    if matches!(kind, BackendKind::Auto)
+        && circuit.has_terminal_measurements_only()
+        && circuit.is_clifford_plus_t()
+        && circuit.has_t_gates()
+        && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
+    {
+        let t = circuit.t_count();
+        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
+        if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
+            return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+        }
     }
 
     if circuit.has_terminal_measurements_only() {

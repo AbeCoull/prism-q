@@ -445,11 +445,23 @@ Three strategies for circuits mixing Clifford and T gates:
 
 ### Stabilizer rank (`src/sim/stabilizer_rank.rs`)
 
-Maintains a weighted sum of stabilizer states. Each T gate doubles the term count via T = α·I + β·Z decomposition. Clifford gates are O(n²) per term. Accumulates weighted amplitudes for exact probabilities.
+Exact probability output remains capped because it returns a dense vector with
+2^n entries. Shot sampling uses coherent weighted MPS branches instead of a
+dense statevector fallback. Clifford gates mutate each branch state, `T` and
+`Tdg` split branches, and measurement computes outcome probabilities from the
+weighted branch ensemble before projecting every branch to the sampled outcome.
+This removes the hard qubit-count cap from `run_stabilizer_rank_shots`;
+practical scaling is governed by branch count, MPS bond growth, and measurement
+count.
 
-- `run_stabilizer_rank`: Exact probabilities (t ≤ 20, n ≤ 25)
+The dense probability path maintains a weighted sum of stabilizer states. Each T
+gate doubles the term count via the `T = alpha*I + beta*Z` decomposition.
+Clifford gates are O(n^2) per term and weighted amplitudes are accumulated for
+exact probabilities.
+
+- `run_stabilizer_rank`: Exact probabilities (t <= 20, n <= 25)
 - `run_stabilizer_rank_approx`: Approximate with Monte Carlo (higher t counts)
-- `run_stabilizer_rank_shots`: Shot-based sampling
+- `run_stabilizer_rank_shots`: Shot-based sampling with no fixed qubit cap
 - `stabilizer_overlap_sq`: Inner product between stabilizer states
 
 ### Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
@@ -463,6 +475,32 @@ Backward-propagates measurement observables as Pauli strings. Clifford gates con
 Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T gates deterministically branch X/Y terms. Identical strings auto-merge. Optional ε-truncation for approximate mode. Exact for small T-counts, approximate with bounded error for larger ones.
 
 `run_spd(circuit, epsilon, max_terms) → SpdResult`
+
+## Performance decision log
+
+### 2026-05-28 Remove dense fallback from stabilizer-rank shots
+- **Context**: T-containing stabilizer-rank shot sampling rejected circuits
+  above 25 qubits because it reused the dense probability-vector path. Large
+  low-T circuits should be sampleable when branch count and MPS bond growth
+  remain within budget.
+- **Options considered**: Keep the statevector fallback and document the limit,
+  use dense probability extraction only for terminal measurements, or sample
+  online from coherent weighted branches. The first two options kept the
+  25-qubit cap for user-facing sampling.
+- **Decision**: Use coherent weighted MPS branches for
+  `run_stabilizer_rank_shots`. Keep the 25-qubit limit only on APIs that
+  explicitly return dense probability vectors.
+- **Measurement**: `cargo bench --bench circuits --features bench-fast --
+  "stabilizer_rank/shots_(terminal|mid_circuit)"` on Windows, rustc 1.93.0,
+  8 logical processors. Criterion mean estimates for 64 shots: 32q chi2
+  terminal 21.380 ms, mid-circuit 28.531 ms; 128q chi16 terminal 4.0263 s,
+  mid-circuit 3.2277 s; 1000q chi2 terminal 838.02 ms, mid-circuit 1.1196 s.
+  Old implementation was unsupported above 25 qubits for T-containing shot
+  circuits.
+- **Revisit trigger**: Optimize branch overlap and projection if 1000q chi2
+  exceeds 2 seconds for 64 shots on the release benchmark runner, or if chi16
+  terminal sampling regresses by more than 5 percent against the saved Criterion
+  baseline.
 
 ## Memory layout
 
@@ -581,7 +619,7 @@ Top-level re-exports from `src/lib.rs`:
 `parse_qec_program`, `compile_qec_program_rows`, `run_qec_program`, `run_qec_program_reference`, `QecProgram`, `QecOp`, `QecOptions`, `QecSampleResult`, `QecBasis`, `QecPauli`, `QecRecordRef`, `QecNoise`, `QecMeasurementRow`, `QecCompiledRows`
 
 **Clifford+T:**
-`run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `run_spp`, `run_spd`
+`run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`, `stabilizer_inner_product`, `run_spp`, `run_spp_observable`, `run_spd`, `run_spd_observable`, `run_spd_observable_light_cone`
 
 **Types:**
 `Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `Gate`, `BackendKind`, `RunOutcome`, `CountsResult`, `MarginalsResult`, `Probabilities`, `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`

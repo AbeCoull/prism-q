@@ -16,6 +16,6 @@ OpenQASM 3.0 with backward compatible 2.0 syntax.
 ## Install
 
 ```bash
-cargo add prism-q                     # core
-cargo add prism-q --features parallel # Rayon parallelism for larger circuits
+cargo add prism-q                         # Rayon parallelism + faer SVD (default)
+cargo add prism-q --no-default-features    # single-threaded, minimal dependencies
 ```

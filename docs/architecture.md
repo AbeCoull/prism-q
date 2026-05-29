@@ -476,31 +476,6 @@ Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T ga
 
 `run_spd(circuit, epsilon, max_terms) → SpdResult`
 
-## Performance decision log
-
-### 2026-05-28 Remove dense fallback from stabilizer-rank shots
-- **Context**: T-containing stabilizer-rank shot sampling rejected circuits
-  above 25 qubits because it reused the dense probability-vector path. Large
-  low-T circuits should be sampleable when branch count and MPS bond growth
-  remain within budget.
-- **Options considered**: Keep the statevector fallback and document the limit,
-  use dense probability extraction only for terminal measurements, or sample
-  online from coherent weighted branches. The first two options kept the
-  25-qubit cap for user-facing sampling.
-- **Decision**: Use coherent weighted MPS branches for
-  `run_stabilizer_rank_shots`. Keep the 25-qubit limit only on APIs that
-  explicitly return dense probability vectors.
-- **Measurement**: `cargo bench --bench circuits --features bench-fast --
-  "stabilizer_rank/shots_(terminal|mid_circuit)"` on Windows, rustc 1.93.0,
-  8 logical processors. Criterion mean estimates for 64 shots: 32q chi2
-  terminal 21.380 ms, mid-circuit 28.531 ms; 128q chi16 terminal 4.0263 s,
-  mid-circuit 3.2277 s; 1000q chi2 terminal 838.02 ms, mid-circuit 1.1196 s.
-  Old implementation was unsupported above 25 qubits for T-containing shot
-  circuits.
-- **Revisit trigger**: Optimize branch overlap and projection if 1000q chi2
-  exceeds 2 seconds for 64 shots on the release benchmark runner, or if chi16
-  terminal sampling regresses by more than 5 percent against the saved Criterion
-  baseline.
 
 ## Memory layout
 

@@ -4,185 +4,58 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::circuit::{Circuit, Instruction, SmallVec};
-use crate::error::Result;
+use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::{flip_bit, propagate_backward, PauliVec};
 
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
-const MIN_CLIFF_GATES_FOR_COALESCE: usize = 16;
 
-// ---------------------------------------------------------------------------
-// Clifford Map: pre-compiled symplectic transformation over GF(2)
-// ---------------------------------------------------------------------------
+/// Absolute ceiling on the weighted-Pauli term count, enforced even in exact
+/// mode (`max_terms == 0`). Without a per-step truncation budget the term set
+/// grows as `2^(in-cone T count)`; this caps transient memory the same way the
+/// stabilizer-rank backend does. Exceeding it is an error, not a silent
+/// truncation: callers wanting bounded approximate evaluation pass a nonzero
+/// `max_terms` instead.
+const SPD_MAX_TERMS_CEILING: usize = 1 << 20;
 
-struct CliffordMap {
-    num_words: usize,
-    col_xx: Vec<u64>,
-    col_xz: Vec<u64>,
-    col_zx: Vec<u64>,
-    col_zz: Vec<u64>,
+#[inline]
+fn check_spd_term_ceiling(len: usize) -> Result<()> {
+    if len > SPD_MAX_TERMS_CEILING {
+        return Err(PrismError::BackendUnsupported {
+            backend: "SPD".into(),
+            operation: format!(
+                "weighted-Pauli sum exceeded {SPD_MAX_TERMS_CEILING} terms; pass a nonzero \
+                 max_terms for bounded approximate truncation"
+            ),
+        });
+    }
+    Ok(())
 }
 
-impl CliffordMap {
-    fn identity(n: usize) -> Self {
-        let num_words = n.div_ceil(64);
-        let mut col_xx = vec![0u64; n * num_words];
-        let mut col_zz = vec![0u64; n * num_words];
-        for q in 0..n {
-            col_xx[q * num_words + q / 64] = 1u64 << (q % 64);
-            col_zz[q * num_words + q / 64] = 1u64 << (q % 64);
-        }
-        Self {
-            num_words,
-            col_xx,
-            col_xz: vec![0u64; n * num_words],
-            col_zx: vec![0u64; n * num_words],
-            col_zz,
-        }
-    }
-
-    #[inline(always)]
-    fn col_range(&self, q: usize) -> std::ops::Range<usize> {
-        q * self.num_words..(q + 1) * self.num_words
-    }
-
-    fn apply_h(&mut self, q: usize) {
-        let r = self.col_range(q);
-        for i in r {
-            std::mem::swap(&mut self.col_xx[i], &mut self.col_xz[i]);
-            std::mem::swap(&mut self.col_zx[i], &mut self.col_zz[i]);
-        }
-    }
-
-    fn apply_s(&mut self, q: usize) {
-        let r = self.col_range(q);
-        for i in r {
-            self.col_xz[i] ^= self.col_xx[i];
-            self.col_zz[i] ^= self.col_zx[i];
-        }
-    }
-
-    fn apply_sx(&mut self, q: usize) {
-        let r = self.col_range(q);
-        for i in r {
-            self.col_xx[i] ^= self.col_xz[i];
-            self.col_zx[i] ^= self.col_zz[i];
-        }
-    }
-
-    fn apply_cx(&mut self, ctrl: usize, tgt: usize) {
-        let nw = self.num_words;
-        for w in 0..nw {
-            self.col_xx[tgt * nw + w] ^= self.col_xx[ctrl * nw + w];
-            self.col_xz[tgt * nw + w] ^= self.col_xz[ctrl * nw + w];
-            self.col_zx[ctrl * nw + w] ^= self.col_zx[tgt * nw + w];
-            self.col_zz[ctrl * nw + w] ^= self.col_zz[tgt * nw + w];
-        }
-    }
-
-    fn apply_cz(&mut self, q0: usize, q1: usize) {
-        let nw = self.num_words;
-        for w in 0..nw {
-            self.col_xz[q0 * nw + w] ^= self.col_xx[q1 * nw + w];
-            self.col_xz[q1 * nw + w] ^= self.col_xx[q0 * nw + w];
-            self.col_zz[q0 * nw + w] ^= self.col_zx[q1 * nw + w];
-            self.col_zz[q1 * nw + w] ^= self.col_zx[q0 * nw + w];
-        }
-    }
-
-    fn apply_swap(&mut self, q0: usize, q1: usize) {
-        let nw = self.num_words;
-        for w in 0..nw {
-            let r0 = q0 * nw + w;
-            let r1 = q1 * nw + w;
-            self.col_xx.swap(r0, r1);
-            self.col_xz.swap(r0, r1);
-            self.col_zx.swap(r0, r1);
-            self.col_zz.swap(r0, r1);
-        }
-    }
-
-    fn apply_gate(&mut self, gate: &Gate, targets: &[usize]) {
-        match gate {
-            Gate::H => self.apply_h(targets[0]),
-            Gate::S | Gate::Sdg => self.apply_s(targets[0]),
-            Gate::SX | Gate::SXdg => self.apply_sx(targets[0]),
-            Gate::X | Gate::Y | Gate::Z | Gate::Id => {}
-            Gate::Cx => self.apply_cx(targets[0], targets[1]),
-            Gate::Cz => self.apply_cz(targets[0], targets[1]),
-            Gate::Swap => self.apply_swap(targets[0], targets[1]),
-            _ => {}
-        }
-    }
-
-    fn apply(&self, pauli: &mut PauliVec) {
-        let nw = self.num_words;
-
-        let mut scratch = [0u64; 32];
-        if nw <= 16 {
-            scratch[..nw].copy_from_slice(&pauli.x);
-            scratch[16..16 + nw].copy_from_slice(&pauli.z);
-            pauli.x.fill(0);
-            pauli.z.fill(0);
-
-            for word in 0..nw {
-                let mut xw = scratch[word];
-                while xw != 0 {
-                    let bit = xw.trailing_zeros() as usize;
-                    let q = word * 64 + bit;
-                    let base = q * nw;
-                    for w in 0..nw {
-                        pauli.x[w] ^= self.col_xx[base + w];
-                        pauli.z[w] ^= self.col_xz[base + w];
-                    }
-                    xw &= xw - 1;
-                }
-
-                let mut zw = scratch[16 + word];
-                while zw != 0 {
-                    let bit = zw.trailing_zeros() as usize;
-                    let q = word * 64 + bit;
-                    let base = q * nw;
-                    for w in 0..nw {
-                        pauli.x[w] ^= self.col_zx[base + w];
-                        pauli.z[w] ^= self.col_zz[base + w];
-                    }
-                    zw &= zw - 1;
+fn validate_clifford_t_unitary(circuit: &Circuit, backend: &'static str) -> Result<()> {
+    for inst in &circuit.instructions {
+        match inst {
+            Instruction::Gate { gate, .. } => {
+                if !(gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg)) {
+                    return Err(PrismError::BackendUnsupported {
+                        backend: backend.to_string(),
+                        operation: format!("non-Clifford+T gate `{}`", gate.name()),
+                    });
                 }
             }
-        } else {
-            let old_x = pauli.x.clone();
-            let old_z = pauli.z.clone();
-            pauli.x.fill(0);
-            pauli.z.fill(0);
-
-            for word in 0..nw {
-                let mut xw = old_x[word];
-                while xw != 0 {
-                    let bit = xw.trailing_zeros() as usize;
-                    let q = word * 64 + bit;
-                    let base = q * nw;
-                    for w in 0..nw {
-                        pauli.x[w] ^= self.col_xx[base + w];
-                        pauli.z[w] ^= self.col_xz[base + w];
-                    }
-                    xw &= xw - 1;
-                }
-
-                let mut zw = old_z[word];
-                while zw != 0 {
-                    let bit = zw.trailing_zeros() as usize;
-                    let q = word * 64 + bit;
-                    let base = q * nw;
-                    for w in 0..nw {
-                        pauli.x[w] ^= self.col_zx[base + w];
-                        pauli.z[w] ^= self.col_zz[base + w];
-                    }
-                    zw &= zw - 1;
-                }
+            Instruction::Barrier { .. } => {}
+            Instruction::Measure { .. }
+            | Instruction::Reset { .. }
+            | Instruction::Conditional { .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: backend.to_string(),
+                    reason: "Pauli propagation requires a unitary Clifford+T circuit without measurements, resets, or conditionals"
+                        .to_string(),
+                });
             }
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -190,13 +63,11 @@ impl CliffordMap {
 // ---------------------------------------------------------------------------
 
 enum CoalescedOp {
-    Map(CliffordMap),
     SmallCliff(Vec<(Gate, SmallVec<[usize; 4]>)>),
     T { qubit: usize, is_dagger: bool },
 }
 
 fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
-    let n = circuit.num_qubits;
     let mut ops = Vec::new();
     let mut cliff_buf: Vec<(Gate, SmallVec<[usize; 4]>)> = Vec::new();
 
@@ -204,14 +75,14 @@ fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
         if let Instruction::Gate { gate, targets } = inst {
             match gate {
                 Gate::T => {
-                    flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+                    flush_cliff_buf(&mut cliff_buf, &mut ops);
                     ops.push(CoalescedOp::T {
                         qubit: targets[0],
                         is_dagger: false,
                     });
                 }
                 Gate::Tdg => {
-                    flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+                    flush_cliff_buf(&mut cliff_buf, &mut ops);
                     ops.push(CoalescedOp::T {
                         qubit: targets[0],
                         is_dagger: true,
@@ -222,30 +93,18 @@ fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
                 }
             }
         } else {
-            flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+            flush_cliff_buf(&mut cliff_buf, &mut ops);
         }
     }
-    flush_cliff_buf(n, &mut cliff_buf, &mut ops);
+    flush_cliff_buf(&mut cliff_buf, &mut ops);
     ops
 }
 
-fn flush_cliff_buf(
-    n: usize,
-    buf: &mut Vec<(Gate, SmallVec<[usize; 4]>)>,
-    ops: &mut Vec<CoalescedOp>,
-) {
+fn flush_cliff_buf(buf: &mut Vec<(Gate, SmallVec<[usize; 4]>)>, ops: &mut Vec<CoalescedOp>) {
     if buf.is_empty() {
         return;
     }
-    if buf.len() < MIN_CLIFF_GATES_FOR_COALESCE {
-        ops.push(CoalescedOp::SmallCliff(std::mem::take(buf)));
-    } else {
-        let mut map = CliffordMap::identity(n);
-        for (gate, targets) in buf.drain(..) {
-            map.apply_gate(&gate, &targets);
-        }
-        ops.push(CoalescedOp::Map(map));
-    }
+    ops.push(CoalescedOp::SmallCliff(std::mem::take(buf)));
 }
 
 // ---------------------------------------------------------------------------
@@ -259,28 +118,26 @@ fn branch_t_gate(
     is_dagger: bool,
     rng: &mut impl Rng,
 ) -> Complex64 {
+    // PauliVec stores the Y letter as the ordered product XZ. Since
+    // actual Y = i XZ, the T flip branch is imaginary in this basis:
+    // T contributes -i/sqrt(2), and Tdg contributes +i/sqrt(2).
+    // SPP samples one branch with probability 1/2, so the per-shot
+    // flip weight is +/-i*sqrt(2).
     if !pauli.has_x_or_y(qubit) {
         return Complex64::new(1.0, 0.0);
     }
 
-    let has_z = (pauli.z[qubit / 64] >> (qubit % 64)) & 1 != 0;
-    let is_y = has_z;
-
     let keep = rng.random_bool(0.5);
-    if !keep {
-        flip_bit(&mut pauli.z, qubit);
+    if keep {
+        return Complex64::new(SQRT_2, 0.0);
     }
 
-    let sign = match (is_y, keep, is_dagger) {
-        (false, _, false) => 1.0,
-        (false, true, true) => 1.0,
-        (false, false, true) => -1.0,
-        (true, true, false) => 1.0,
-        (true, false, false) => -1.0,
-        (true, _, true) => 1.0,
-    };
-
-    Complex64::new(sign * SQRT_2, 0.0)
+    flip_bit(&mut pauli.z, qubit);
+    if is_dagger {
+        Complex64::new(0.0, SQRT_2)
+    } else {
+        Complex64::new(0.0, -SQRT_2)
+    }
 }
 
 fn backward_propagate_coalesced(
@@ -296,11 +153,13 @@ fn backward_propagate_coalesced(
 
     for op in ops.iter().rev() {
         match op {
-            CoalescedOp::Map(map) => {
-                map.apply(&mut pauli);
-            }
             CoalescedOp::SmallCliff(gates) => {
                 for (gate, targets) in gates.iter().rev() {
+                    // Phase track Clifford conjugation, mirroring the
+                    // SPD path (`conjugate_all_backward_phased`); the
+                    // bare `propagate_backward` is Pauli-frame only
+                    // and drops the `-1` from e.g. `HYH = -Y`.
+                    weight *= clifford_conjugation_phase(gate, targets, &pauli);
                     propagate_backward(&mut pauli, gate, targets);
                 }
             }
@@ -375,7 +234,160 @@ fn estimate_qubit_expectation(
     (mean, std_error, nonzero)
 }
 
+/// Pauli axis for a joint-observable term. Identity factors are omitted
+/// from the term list and contribute trivially.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PauliAxis {
+    X,
+    Y,
+    Z,
+}
+
+/// One non-identity factor of a joint Pauli observable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PauliTerm {
+    pub qubit: usize,
+    pub axis: PauliAxis,
+}
+
+impl PauliTerm {
+    pub fn new(qubit: usize, axis: PauliAxis) -> Self {
+        Self { qubit, axis }
+    }
+
+    pub fn x(qubit: usize) -> Self {
+        Self::new(qubit, PauliAxis::X)
+    }
+
+    pub fn y(qubit: usize) -> Self {
+        Self::new(qubit, PauliAxis::Y)
+    }
+
+    pub fn z(qubit: usize) -> Self {
+        Self::new(qubit, PauliAxis::Z)
+    }
+}
+
+/// Result of running SPP on a joint Pauli observable.
+#[derive(Debug, Clone)]
+pub struct SppObservableResult {
+    pub mean: f64,
+    pub std_error: f64,
+    pub variance: f64,
+    pub num_samples: usize,
+    pub nonzero_fraction: f64,
+    pub t_count: usize,
+}
+
+/// Result of running SPD on a joint Pauli observable.
+#[derive(Debug, Clone)]
+pub struct SpdObservableResult {
+    pub mean: f64,
+    pub t_count: usize,
+    pub peak_terms: usize,
+    pub total_discarded: f64,
+}
+
+fn pauli_vec_from_terms(
+    num_qubits: usize,
+    terms: &[PauliTerm],
+) -> std::result::Result<(PauliVec, Complex64), crate::error::PrismError> {
+    let num_words = num_qubits.div_ceil(64);
+    let mut pv = PauliVec::new(num_words);
+    let mut coeff = Complex64::new(1.0, 0.0);
+    let mut seen = vec![false; num_qubits];
+    for term in terms {
+        if term.qubit >= num_qubits {
+            return Err(crate::error::PrismError::InvalidQubit {
+                index: term.qubit,
+                register_size: num_qubits,
+            });
+        }
+        if seen[term.qubit] {
+            return Err(crate::error::PrismError::InvalidParameter {
+                message: format!(
+                    "joint Pauli observable has duplicate factor on qubit {}",
+                    term.qubit
+                ),
+            });
+        }
+        seen[term.qubit] = true;
+        match term.axis {
+            PauliAxis::X => {
+                pv.x[term.qubit / 64] |= 1u64 << (term.qubit % 64);
+            }
+            PauliAxis::Z => {
+                pv.z[term.qubit / 64] |= 1u64 << (term.qubit % 64);
+            }
+            PauliAxis::Y => {
+                pv.x[term.qubit / 64] |= 1u64 << (term.qubit % 64);
+                pv.z[term.qubit / 64] |= 1u64 << (term.qubit % 64);
+                coeff *= Complex64::new(0.0, 1.0);
+            }
+        }
+    }
+    Ok((pv, coeff))
+}
+
+/// Estimate `⟨0^n| U† P U |0^n⟩` for joint Pauli observable `P` on a
+/// Clifford+T circuit `U` via stochastic Pauli propagation.
+///
+/// Each sample backward-propagates the observable through the circuit
+/// (Clifford segments as coalesced gate runs, T gates via a stochastic
+/// Pauli branch that records a complex weight). The
+/// contribution is `Re(weight)` when the final Pauli is diagonal in
+/// `{I, Z}` (i.e. evaluates trivially on `|0^n⟩`), else zero.
+pub fn run_spp_observable(
+    circuit: &Circuit,
+    observable: &[PauliTerm],
+    num_samples: usize,
+    seed: u64,
+) -> Result<SppObservableResult> {
+    validate_clifford_t_unitary(circuit, "SPP observable")?;
+    let n = circuit.num_qubits;
+    let t_count = count_t_gates(circuit);
+    let ops = coalesce_cliffords(circuit);
+    let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
+
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut mean = 0.0f64;
+    let mut m2 = 0.0f64;
+    let mut nonzero = 0usize;
+
+    for i in 0..num_samples {
+        let (pauli, weight) = backward_propagate_coalesced(&ops, &obs, &mut rng);
+        let val = if pauli.is_diagonal() {
+            nonzero += 1;
+            (obs_coeff * weight).re
+        } else {
+            0.0
+        };
+        let delta = val - mean;
+        mean += delta / (i + 1) as f64;
+        let delta2 = val - mean;
+        m2 += delta * delta2;
+    }
+
+    let variance = if num_samples > 1 {
+        m2 / (num_samples - 1) as f64
+    } else {
+        0.0
+    };
+    let std_error = (variance / num_samples.max(1) as f64).sqrt();
+    let nonzero_fraction = nonzero as f64 / num_samples.max(1) as f64;
+
+    Ok(SppObservableResult {
+        mean,
+        std_error,
+        variance,
+        num_samples,
+        nonzero_fraction,
+        t_count,
+    })
+}
+
 pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppResult> {
+    validate_clifford_t_unitary(circuit, "SPP")?;
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_t_gates(circuit);
@@ -533,12 +545,14 @@ fn clifford_conjugation_phase(gate: &Gate, targets: &[usize], pauli: &PauliVec) 
 
 struct WeightedPauliSum {
     terms: HashMap<PauliVec, Complex64>,
+    scratch: Vec<(PauliVec, Complex64)>,
 }
 
 impl WeightedPauliSum {
     fn new() -> Self {
         Self {
             terms: HashMap::new(),
+            scratch: Vec::new(),
         }
     }
 
@@ -548,11 +562,18 @@ impl WeightedPauliSum {
     }
 
     fn conjugate_all_backward_phased(&mut self, gate: &Gate, targets: &[usize]) {
-        let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
-        for (mut pauli, coeff) in old_terms {
+        // Clifford conjugation is a bijection on Pauli strings: the symplectic
+        // action on the (x, z) bits is invertible, so distinct keys map to
+        // distinct keys and no coefficient merging occurs. Reuse `scratch` to
+        // avoid a per-gate heap allocation, drain into it (which keeps the
+        // map's bucket capacity), then re-insert directly without the
+        // accumulate path.
+        self.scratch.clear();
+        self.scratch.extend(self.terms.drain());
+        for (mut pauli, coeff) in self.scratch.drain(..) {
             let phase = clifford_conjugation_phase(gate, targets, &pauli);
             propagate_backward(&mut pauli, gate, targets);
-            self.insert(pauli, coeff * phase);
+            self.terms.insert(pauli, coeff * phase);
         }
     }
 
@@ -612,7 +633,61 @@ pub struct SpdResult {
     pub total_discarded: f64,
 }
 
+/// Deterministic SPD on a joint Pauli observable.
+///
+/// Starts with the single weighted term `(observable, 1.0)`, backward-
+/// propagates through every gate, branches each T into two terms with
+/// `α / β` coefficients, and truncates terms whose magnitude falls below
+/// `epsilon` whenever the sum exceeds `max_terms`. Returns
+/// `⟨0^n| U† P U |0^n⟩` as the sum of remaining diagonal-term
+/// coefficients.
+pub fn run_spd_observable(
+    circuit: &Circuit,
+    observable: &[PauliTerm],
+    epsilon: f64,
+    max_terms: usize,
+) -> Result<SpdObservableResult> {
+    validate_clifford_t_unitary(circuit, "SPD observable")?;
+    let n = circuit.num_qubits;
+    let t_count = count_t_gates(circuit);
+    let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
+
+    let mut sum = WeightedPauliSum::new();
+    sum.insert(obs, obs_coeff);
+    let mut peak_terms = sum.terms.len();
+    let mut total_discarded = 0.0;
+
+    for inst in circuit.instructions.iter().rev() {
+        if let Instruction::Gate { gate, targets } = inst {
+            match gate {
+                Gate::T => sum.branch_t_deterministic(targets[0], false),
+                Gate::Tdg => sum.branch_t_deterministic(targets[0], true),
+                _ => sum.conjugate_all_backward_phased(gate, targets),
+            }
+        }
+        if max_terms > 0 && sum.terms.len() > max_terms {
+            total_discarded += sum.truncate(epsilon);
+        }
+        check_spd_term_ceiling(sum.terms.len())?;
+        if sum.terms.len() > peak_terms {
+            peak_terms = sum.terms.len();
+        }
+    }
+
+    if epsilon > 0.0 {
+        total_discarded += sum.truncate(epsilon);
+    }
+
+    Ok(SpdObservableResult {
+        mean: sum.diagonal_expectation(),
+        t_count,
+        peak_terms,
+        total_discarded,
+    })
+}
+
 pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdResult> {
+    validate_clifford_t_unitary(circuit, "SPD")?;
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_t_gates(circuit);
@@ -637,6 +712,7 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
             if max_terms > 0 && sum.terms.len() > max_terms {
                 total_discarded += sum.truncate(epsilon);
             }
+            check_spd_term_ceiling(sum.terms.len())?;
 
             if sum.terms.len() > peak_terms {
                 peak_terms = sum.terms.len();
@@ -654,6 +730,96 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
         expectations,
         t_count,
         max_terms: peak_terms,
+        total_discarded,
+    })
+}
+
+/// Inverse light cone of a Pauli observable under a circuit, computed
+/// conservatively by gate-graph reachability.
+///
+/// Returns, for each instruction index in `circuit.instructions`, whether the
+/// gate at that index can affect the backward-propagated observable. A gate is
+/// in the cone if its support intersects the current cone-qubit set when the
+/// circuit is traversed in reverse from the observable.
+///
+/// Exactness: a gate whose target set is disjoint from the cone-qubit set at
+/// its backward-traversal depth conjugates the propagated observable trivially
+/// (`U_k^dag P_k U_k = P_k` because the support of `P_k` is contained in the
+/// cone set at depth `k`, and `U_k` acts as identity outside its targets).
+/// Removing those gates from the backward pass is therefore exact.
+pub fn inverse_light_cone(circuit: &Circuit, observable: &[PauliTerm]) -> Vec<bool> {
+    let mut cone: std::collections::HashSet<usize> = observable.iter().map(|t| t.qubit).collect();
+    let n_inst = circuit.instructions.len();
+    let mut keep = vec![false; n_inst];
+
+    for (idx, inst) in circuit.instructions.iter().enumerate().rev() {
+        let targets: &[usize] = match inst {
+            Instruction::Gate { targets, .. } => targets,
+            _ => continue,
+        };
+        let touches = targets.iter().any(|q| cone.contains(q));
+        if touches {
+            keep[idx] = true;
+            for &q in targets {
+                cone.insert(q);
+            }
+        }
+    }
+    keep
+}
+
+/// SPD on a joint Pauli observable, restricted to the inverse light cone.
+///
+/// Identical in result to `run_spd_observable` for any Clifford+T circuit, but
+/// skips gates whose support is disjoint from the propagated observable's
+/// causal cone. For QEC syndrome and detector observables with bounded
+/// spatial support, this turns the SPD cliff from a function of total T-count
+/// into a function of in-cone T-count.
+pub fn run_spd_observable_light_cone(
+    circuit: &Circuit,
+    observable: &[PauliTerm],
+    epsilon: f64,
+    max_terms: usize,
+) -> Result<SpdObservableResult> {
+    validate_clifford_t_unitary(circuit, "light-cone SPD observable")?;
+    let n = circuit.num_qubits;
+    let t_count = count_t_gates(circuit);
+    let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
+    let keep = inverse_light_cone(circuit, observable);
+
+    let mut sum = WeightedPauliSum::new();
+    sum.insert(obs, obs_coeff);
+    let mut peak_terms = sum.terms.len();
+    let mut total_discarded = 0.0;
+
+    for (idx, inst) in circuit.instructions.iter().enumerate().rev() {
+        if !keep[idx] {
+            continue;
+        }
+        if let Instruction::Gate { gate, targets } = inst {
+            match gate {
+                Gate::T => sum.branch_t_deterministic(targets[0], false),
+                Gate::Tdg => sum.branch_t_deterministic(targets[0], true),
+                _ => sum.conjugate_all_backward_phased(gate, targets),
+            }
+        }
+        if max_terms > 0 && sum.terms.len() > max_terms {
+            total_discarded += sum.truncate(epsilon);
+        }
+        check_spd_term_ceiling(sum.terms.len())?;
+        if sum.terms.len() > peak_terms {
+            peak_terms = sum.terms.len();
+        }
+    }
+
+    if epsilon > 0.0 {
+        total_discarded += sum.truncate(epsilon);
+    }
+
+    Ok(SpdObservableResult {
+        mean: sum.diagonal_expectation(),
+        t_count,
+        peak_terms,
         total_discarded,
     })
 }
@@ -1060,19 +1226,12 @@ mod tests {
     }
 
     #[test]
-    fn clifford_map_identity_and_apply_all() {
-        let mut m = CliffordMap::identity(5);
-        m.apply_h(0);
-        m.apply_s(1);
-        m.apply_sx(2);
-        m.apply_cx(0, 1);
-        m.apply_cz(2, 3);
-        assert_eq!(m.num_words, 1);
-        assert_eq!(m.col_xx.len(), 5);
-    }
-
-    #[test]
-    fn coalesce_cliffords_triggers_map_path() {
+    fn coalesce_cliffords_long_clifford_run_stays_phase_correct() {
+        // Regression: the SmallCliff path threads
+        // `clifford_conjugation_phase` through every gate so global
+        // signs from `HYH = -Y`, `SYS† = -X`, etc. are preserved.
+        // Confirm SPP matches the analytical SPD on a long Clifford
+        // run.
         let mut circuit = Circuit::new(4, 0);
         for _ in 0..20 {
             for q in 0..4 {
@@ -1082,12 +1241,16 @@ mod tests {
             circuit.add_gate(Gate::Cx, &[0, 1]);
             circuit.add_gate(Gate::Cz, &[2, 3]);
         }
-        let ops = coalesce_cliffords(&circuit);
-        assert!(!ops.is_empty());
-        let result = run_spp(&circuit, 32, 42).unwrap();
-        assert_eq!(result.expectations.len(), 4);
-        let probs = spp_to_probabilities(&result);
-        assert_eq!(probs.len(), 8);
+        let spp = run_spp(&circuit, 4_000, 42).unwrap();
+        let spd = run_spd(&circuit, 1e-10, 16_384).unwrap();
+        for q in 0..4 {
+            assert!(
+                (spp.expectations[q] - spd.expectations[q]).abs() < 0.08,
+                "qubit {q}: spp={}, spd={}",
+                spp.expectations[q],
+                spd.expectations[q]
+            );
+        }
     }
 
     #[test]
@@ -1110,5 +1273,103 @@ mod tests {
         assert_eq!(probs.len(), 4);
         let sum: f64 = probs.iter().sum();
         assert!((sum - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn light_cone_excludes_disjoint_gates() {
+        let mut circuit = Circuit::new(4, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::H, &[3]);
+        circuit.add_gate(Gate::T, &[3]);
+        circuit.add_gate(Gate::H, &[3]);
+
+        let obs = [PauliTerm::z(0)];
+        let keep = inverse_light_cone(&circuit, &obs);
+        assert_eq!(keep, vec![true, true, true, false, false, false]);
+    }
+
+    #[test]
+    fn light_cone_follows_entangling_gates() {
+        let mut circuit = Circuit::new(3, 0);
+        circuit.add_gate(Gate::T, &[1]);
+        circuit.add_gate(Gate::Cx, &[1, 2]);
+        circuit.add_gate(Gate::H, &[2]);
+        circuit.add_gate(Gate::H, &[0]);
+
+        let obs = [PauliTerm::z(2)];
+        let keep = inverse_light_cone(&circuit, &obs);
+        assert_eq!(keep, vec![true, true, true, false]);
+    }
+
+    #[test]
+    fn light_cone_spd_matches_unrestricted_spd() {
+        let mut circuit = Circuit::new(5, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::H, &[4]);
+        circuit.add_gate(Gate::T, &[4]);
+        circuit.add_gate(Gate::Cx, &[3, 4]);
+        circuit.add_gate(Gate::T, &[3]);
+
+        let obs = [PauliTerm::z(0)];
+        let full = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap();
+        let cone = run_spd_observable_light_cone(&circuit, &obs, 0.0, 0).unwrap();
+        assert!(
+            (full.mean - cone.mean).abs() < 1e-12,
+            "full={} cone={}",
+            full.mean,
+            cone.mean
+        );
+        assert!(cone.peak_terms <= full.peak_terms);
+    }
+
+    #[test]
+    fn light_cone_skips_most_gates_on_disjoint_t_block() {
+        let mut circuit = Circuit::new(6, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::T, &[0]);
+        circuit.add_gate(Gate::H, &[0]);
+        for _ in 0..6 {
+            circuit.add_gate(Gate::H, &[3]);
+            circuit.add_gate(Gate::T, &[3]);
+            circuit.add_gate(Gate::Cx, &[3, 4]);
+            circuit.add_gate(Gate::T, &[4]);
+            circuit.add_gate(Gate::Cx, &[4, 5]);
+            circuit.add_gate(Gate::T, &[5]);
+        }
+
+        let obs = [PauliTerm::z(0)];
+        let keep = inverse_light_cone(&circuit, &obs);
+        let kept = keep.iter().filter(|b| **b).count();
+        assert_eq!(kept, 3, "only the H-T-H block on q0 should be kept");
+
+        let full = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap();
+        let cone = run_spd_observable_light_cone(&circuit, &obs, 0.0, 0).unwrap();
+        assert!((full.mean - cone.mean).abs() < 1e-12);
+    }
+
+    #[test]
+    fn light_cone_spd_matches_on_entangled_observable() {
+        let mut circuit = Circuit::new(4, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::T, &[1]);
+        circuit.add_gate(Gate::Cx, &[1, 2]);
+        circuit.add_gate(Gate::T, &[2]);
+        circuit.add_gate(Gate::H, &[3]);
+        circuit.add_gate(Gate::T, &[3]);
+
+        let obs = [PauliTerm::z(0), PauliTerm::z(2)];
+        let full = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap();
+        let cone = run_spd_observable_light_cone(&circuit, &obs, 0.0, 0).unwrap();
+        assert!(
+            (full.mean - cone.mean).abs() < 1e-12,
+            "full={} cone={}",
+            full.mean,
+            cone.mean
+        );
     }
 }

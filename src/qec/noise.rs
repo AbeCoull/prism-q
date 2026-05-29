@@ -18,10 +18,10 @@ struct QecDeferredNoiseEvent {
     position: usize,
 }
 
-struct QecDeferredProgram {
-    circuit: Circuit,
+pub(super) struct QecDeferredProgram {
+    pub(super) circuit: Circuit,
     noise_events: Vec<QecDeferredNoiseEvent>,
-    measurement_qubits: Vec<usize>,
+    pub(super) measurement_qubits: Vec<usize>,
 }
 
 pub(super) struct QecCompiledNoiseSampler {
@@ -225,6 +225,23 @@ fn qec_noise_rng(seed: u64) -> Xoshiro256PlusPlus {
 }
 
 fn lower_qec_program_to_deferred_circuit(program: &QecProgram) -> Result<QecDeferredProgram> {
+    lower_qec_program_to_deferred_circuit_inner(program, false)
+}
+
+/// Variant of [`lower_qec_program_to_deferred_circuit`] that admits T /
+/// Tdg gates. Used by the SPD and CAMPS T-strategy adapters that
+/// evaluate observables analytically over the unitary circuit and so
+/// do not need the Clifford-only restriction.
+pub(super) fn lower_qec_program_to_deferred_circuit_allowing_non_clifford(
+    program: &QecProgram,
+) -> Result<QecDeferredProgram> {
+    lower_qec_program_to_deferred_circuit_inner(program, true)
+}
+
+fn lower_qec_program_to_deferred_circuit_inner(
+    program: &QecProgram,
+    allow_non_clifford: bool,
+) -> Result<QecDeferredProgram> {
     let has_mpp = program
         .ops()
         .iter()
@@ -242,7 +259,7 @@ fn lower_qec_program_to_deferred_circuit(program: &QecProgram) -> Result<QecDefe
     for op in program.ops() {
         match op {
             QecOp::Gate { gate, targets } => {
-                if !gate.is_clifford() {
+                if !allow_non_clifford && !gate.is_clifford() {
                     return Err(PrismError::IncompatibleBackend {
                         backend: "QEC compiled runner".to_string(),
                         reason: format!(

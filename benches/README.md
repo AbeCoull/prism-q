@@ -28,6 +28,8 @@ Criterion.rs with HTML reports. Two benchmark binaries:
 | `qubit_sweep/clifford_d10` | Clifford-heavy circuits, depth 10, 4–20 qubits |
 | `depth_sweep/12q_random` | 12-qubit random circuits, depth 5–100 |
 | `entanglement_structure` | Sparse vs dense entanglement, 16 qubits |
+| `stabilizer_rank/shots_terminal` | Clifford+T shot sampling with terminal measurements, including 1000q chi2 |
+| `stabilizer_rank/shots_mid_circuit` | Clifford+T shot sampling with measurement, reset, and conditional gates |
 
 ### Shot and QEC benchmarks (bench_shots_perf)
 

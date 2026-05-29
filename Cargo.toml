@@ -80,3 +80,7 @@ harness = false
 name = "bench_gpu"
 harness = false
 required-features = ["gpu"]
+
+[[bench]]
+name = "qec_t_strategies"
+harness = false

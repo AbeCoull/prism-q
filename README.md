@@ -34,10 +34,11 @@ Add PRISM-Q to a Rust project:
 cargo add prism-q
 ```
 
-Enable Rayon parallelism for larger circuits:
+Rayon parallelism and the faer SVD path are on by default. For a single-threaded,
+minimal-dependency build, opt out:
 
 ```bash
-cargo add prism-q --features parallel
+cargo add prism-q --no-default-features
 ```
 
 For CUDA support, install CUDA Toolkit 12.x or newer, then build with:

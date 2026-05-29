@@ -46,6 +46,28 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  check-no-default-features:
+    name: Lint & Test (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: taiki-e/install-action@cargo-nextest
+
+      - name: Clippy
+        run: cargo clippy --all-targets --no-default-features -- -D warnings -D clippy::undocumented_unsafe_blocks
+
+      - name: Tests
+        run: cargo nextest run --no-default-features
+
+      - name: Doc tests
+        run: cargo test --doc --no-default-features
+
   benchmark-regression:
     name: Benchmark Regression
     runs-on: ubuntu-latest
@@ -187,8 +209,8 @@ jobs:
           cache-bin: false
       - name: Install cross-compilation toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-      - name: Check (no features)
-        run: cargo check --target aarch64-unknown-linux-gnu
+      - name: Check (no default features)
+        run: cargo check --target aarch64-unknown-linux-gnu --no-default-features
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
       - name: Check (CI features)

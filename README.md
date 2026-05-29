@@ -21,6 +21,11 @@ and BMI2 SIMD kernels in the inner loop. CPU kernels are the default path, with
 optional CUDA support for statevector and experimental stabilizer workloads. Input is
 OpenQASM 3.0 with backward compatible 2.0 syntax.
 
+## Documentation
+
+Full documentation is published at <https://abecoull.github.io/prism-q/>. The generated
+API reference is on [docs.rs](https://docs.rs/prism-q).
+
 ## Installation
 
 Add PRISM-Q to a Rust project:

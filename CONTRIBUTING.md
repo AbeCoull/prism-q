@@ -50,6 +50,20 @@ cargo llvm-cov --all-features                     # terminal summary
 cargo llvm-cov --all-features --html --open       # browseable HTML report
 ```
 
+## Documentation site
+
+The architecture guide and glossary in `docs/` publish as an mdBook site to GitHub Pages
+via `.github/workflows/docs.yml`. Preview locally:
+
+```bash
+cargo install mdbook   # once
+mdbook serve docs      # serves at http://localhost:3000
+```
+
+The book is rooted at `docs/` (`docs/book.toml`); `docs/SUMMARY.md` lists the pages and
+rendered output lands in `docs/book/` (gitignored). Publishing requires the repository
+Pages source set to "GitHub Actions" once under Settings > Pages.
+
 ## Benchmarks
 
 ```bash

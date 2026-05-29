@@ -5,12 +5,10 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
-      - 'llms.txt'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/**'
-      - 'llms.txt'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -33,8 +31,6 @@ jobs:
           tool: mdbook
       - name: Build book
         run: mdbook build docs
-      - name: Copy llms.txt to site root
-        run: cp llms.txt docs/book/llms.txt
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/book

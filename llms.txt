@@ -1,0 +1,18 @@
+# PRISM-Q
+
+> PRISM-Q is a Rust quantum circuit simulator built for speed. It dispatches across
+> multiple specialized backends, runs a multi pass fusion pipeline, and uses AVX2, FMA,
+> and BMI2 SIMD kernels in the inner loop. CPU kernels are the default path, with
+> optional CUDA support for statevector and experimental stabilizer workloads. Input is
+> OpenQASM 3.0 with backward compatible 2.0 syntax.
+
+## Documentation
+
+- [Architecture](https://abecoull.github.io/prism-q/architecture.html): backends, dispatch tree, fusion pipeline, SIMD strategy
+- [Glossary](https://abecoull.github.io/prism-q/glossary.html): terminology
+- [API reference](https://docs.rs/prism-q): generated Rust API documentation
+
+## Install
+
+- crates.io: https://crates.io/crates/prism-q
+- `cargo add prism-q`

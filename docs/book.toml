@@ -1,0 +1,10 @@
+[book]
+title = "PRISM-Q"
+description = "A Rust quantum circuit simulator built for speed."
+authors = ["A. Coull"]
+language = "en"
+src = "."
+
+[output.html]
+git-repository-url = "https://github.com/AbeCoull/prism-q"
+default-theme = "rust"

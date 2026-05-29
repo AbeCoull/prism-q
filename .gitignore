@@ -1,6 +1,9 @@
 # Build
 /target/
 
+# Rendered documentation site (built in CI)
+docs/book/
+
 # Profiling & benchmarks
 bench_results/
 benchmark_internal/

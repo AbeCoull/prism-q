@@ -2,6 +2,11 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.16.0] - 2026-05-29
+
+### Features
+
+- **qec:** Add T strategy ladder for stabilizer simulator (#74)([d6503aa](https://github.com/AbeCoull/prism-q/commit/d6503aaec9486fdfe800d2ffd5318a8065f43548))
 ## [0.15.0] - 2026-05-20
 
 ### Documentation
@@ -11,6 +16,10 @@ All notable changes to PRISM-Q will be documented in this file.
 ### Features
 
 - Expand benchmark regression tests (#73)([c7937e4](https://github.com/AbeCoull/prism-q/commit/c7937e422250e564d1b85ebfac1958e3d59dcc44))
+
+### Miscellaneous
+
+- **release:** 0.15.0([a2239ec](https://github.com/AbeCoull/prism-q/commit/a2239ecc7e57d8427feb38e1023ad9bb599647f5))
 ## [0.14.4] - 2026-05-20
 
 ### Bug Fixes

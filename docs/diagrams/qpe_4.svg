@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 502.0 160.1" role="img" aria-label="Quantum circuit: 4 qubits, 10 moments">
+<defs><linearGradient id="g-std" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--std-top)"/><stop offset="100%" stop-color="var(--std-fill)"/></linearGradient><linearGradient id="g-par" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--par-top)"/><stop offset="100%" stop-color="var(--par-fill)"/></linearGradient><linearGradient id="g-pha" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--pha-top)"/><stop offset="100%" stop-color="var(--pha-fill)"/></linearGradient><linearGradient id="g-ctrl" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--ctrl-top)"/><stop offset="100%" stop-color="var(--ctrl-fill)"/></linearGradient><linearGradient id="g-meas" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--meas-top)"/><stop offset="100%" stop-color="var(--meas-fill)"/></linearGradient><linearGradient id="g-mfus" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--mfus-top)"/><stop offset="100%" stop-color="var(--mfus-fill)"/></linearGradient><marker id="arrow-meas" viewBox="0 0 6 6" refX="3" refY="3" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 6 3 L 0 6 z" fill="var(--meas-str)"/></marker></defs>
+<style>:root{--bg:#ffffff;--wire:#c4c8cc;--text:#2b2f33;--stripe:#f6f7f8;--ctrl-dot:#2b2f33;--ctrl-bdr:#ffffff;--swap:#6b7075;--barrier:#dcdfe2;--shadow-filter:drop-shadow(0 0.5px 0.5px rgba(0,0,0,0.05));--hover-filter:drop-shadow(0 0 3px #5a5e6350);--std-top:#dce8f6;--std-fill:#c8daf0;--std-str:#3872a8;--std-txt:#1e4d7a;--par-top:#e6d8f4;--par-fill:#d8c8ee;--par-str:#6840a0;--par-txt:#42267a;--pha-top:#d4eedf;--pha-fill:#c0e4d0;--pha-str:#2d7a52;--pha-txt:#1a5438;--ctrl-top:#f2e4cc;--ctrl-fill:#ecd8b8;--ctrl-str:#98682e;--ctrl-txt:#6a4418;--meas-top:#f2d8da;--meas-fill:#eac8ca;--meas-str:#a03840;--meas-txt:#701820;--mfus-top:#ddd4f0;--mfus-fill:#d0c4e8;--mfus-str:#5c40a0;--mfus-txt:#3a2070;}@media(prefers-color-scheme:dark){:root{--bg:#000000;--wire:#2a2d31;--text:#b0b4ba;--stripe:#07080a;--ctrl-dot:#d0d3d8;--ctrl-bdr:#000000;--swap:#6b7075;--barrier:#2a2d31;--shadow-filter:drop-shadow(0 0.5px 0.5px rgba(0,0,0,0.30));--hover-filter:drop-shadow(0 0 3px #7a7e8450);--std-top:#1a3858;--std-fill:#122844;--std-str:#5a9ed6;--std-txt:#90c4ec;--par-top:#2e1e50;--par-fill:#20123a;--par-str:#9868d0;--par-txt:#c4a0ec;--pha-top:#183c28;--pha-fill:#0e2818;--pha-str:#40b878;--pha-txt:#80e0b0;--ctrl-top:#382c14;--ctrl-fill:#281c08;--ctrl-str:#d09848;--ctrl-txt:#ecc888;--meas-top:#381c22;--meas-fill:#281014;--meas-str:#c85060;--meas-txt:#ec9098;--mfus-top:#261c44;--mfus-fill:#1a1030;--mfus-str:#8860c8;--mfus-txt:#b898e8;}}text{font-family:Inter,-apple-system,system-ui,sans-serif;font-size:11px;text-rendering:optimizeLegibility;font-variant-numeric:tabular-nums;}.gate text{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-weight:600;letter-spacing:-0.01em;}.gate{filter:var(--shadow-filter);cursor:pointer;transition:filter 0.15s ease,opacity 0.1s ease;}.gate:hover{filter:var(--hover-filter);opacity:0.92;}.ctrl{cursor:pointer;transition:r 0.1s ease;}.ctrl:hover circle{r:4.5;}.gate-std rect,.gate-std circle{fill:url(#g-std);stroke:var(--std-str);}.gate-std text{fill:var(--std-txt);}.gate-par rect,.gate-par circle{fill:url(#g-par);stroke:var(--par-str);}.gate-par text{fill:var(--par-txt);}.gate-pha rect,.gate-pha circle{fill:url(#g-pha);stroke:var(--pha-str);}.gate-pha text{fill:var(--pha-txt);}.gate-ctrl rect,.gate-ctrl circle{fill:url(#g-ctrl);stroke:var(--ctrl-str);}.gate-ctrl text{fill:var(--ctrl-txt);}.gate-meas rect,.gate-meas circle{fill:url(#g-meas);stroke:var(--meas-str);}.gate-meas text{fill:var(--meas-txt);}.gate-mfus rect,.gate-mfus circle{fill:url(#g-mfus);stroke:var(--mfus-str);}.gate-mfus text{fill:var(--mfus-txt);}.gate-ctrl line{stroke:var(--ctrl-str);}.gate-meas path,.gate-meas line{stroke:var(--meas-txt);}.qlabel{font-family:'JetBrains Mono','Fira Code',Consolas,monospace;font-weight:500;font-size:10.1px;letter-spacing:0.02em;fill:var(--text);}</style>
+<text x="48.0" y="24.0" class="qlabel" dominant-baseline="central">4 qubits · 14 gates · depth 10</text>
+<g id="layer-bg" role="presentation">
+<rect width="100%" height="100%" fill="var(--bg)"/>
+<rect x="0" y="48.0" width="100%" height="28.0" fill="var(--stripe)" shape-rendering="crispEdges"/>
+<rect x="0" y="104.0" width="100%" height="28.0" fill="var(--stripe)" shape-rendering="crispEdges"/>
+</g>
+<g id="layer-wires">
+<text x="40.0" y="34.0" text-anchor="end" dominant-baseline="central" class="qlabel">q[0]</text>
+<text x="40.0" y="62.0" text-anchor="end" dominant-baseline="central" class="qlabel">q[1]</text>
+<text x="40.0" y="90.0" text-anchor="end" dominant-baseline="central" class="qlabel">q[2]</text>
+<text x="40.0" y="118.0" text-anchor="end" dominant-baseline="central" class="qlabel">q[3]</text>
+<line x1="48.0" y1="34.0" x2="488.0" y2="34.0" stroke="var(--wire)" stroke-width="1" stroke-linecap="round" shape-rendering="crispEdges"/>
+<line x1="48.0" y1="62.0" x2="488.0" y2="62.0" stroke="var(--wire)" stroke-width="1" stroke-linecap="round" shape-rendering="crispEdges"/>
+<line x1="48.0" y1="90.0" x2="488.0" y2="90.0" stroke="var(--wire)" stroke-width="1" stroke-linecap="round" shape-rendering="crispEdges"/>
+<line x1="48.0" y1="118.0" x2="488.0" y2="118.0" stroke="var(--wire)" stroke-width="1" stroke-linecap="round" shape-rendering="crispEdges"/>
+</g>
+<g id="layer-gates">
+<g class="gate gate-std"><title>X on q[3]</title><rect x="56.0" y="107.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="70.0" y="118.0" text-anchor="middle" dominant-baseline="central">X</text></g>
+<g class="gate gate-std"><title>H on q[0]</title><rect x="56.0" y="23.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="70.0" y="34.0" text-anchor="middle" dominant-baseline="central">H</text></g>
+<g class="gate gate-std"><title>H on q[1]</title><rect x="56.0" y="51.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="70.0" y="62.0" text-anchor="middle" dominant-baseline="central">H</text></g>
+<g class="gate gate-std"><title>H on q[2]</title><rect x="56.0" y="79.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="70.0" y="90.0" text-anchor="middle" dominant-baseline="central">H</text></g>
+<line x1="114.0" y1="34.0" x2="114.0" y2="118.0" stroke="var(--ctrl-str)" stroke-width="1" shape-rendering="crispEdges"/>
+<circle cx="114.0" cy="62.0" r="1.5" fill="var(--wire)"/>
+<circle cx="114.0" cy="90.0" r="1.5" fill="var(--wire)"/>
+<g class="ctrl"><title>CU: ctrl q[0] → target q[3]</title><circle cx="114.0" cy="34.0" r="3.0" fill="var(--ctrl-dot)" stroke="var(--ctrl-bdr)" stroke-width="1"/></g>
+<g class="gate gate-ctrl"><title>CU: ctrl q[0] → target q[3]</title><rect x="100.0" y="107.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="114.0" y="118.0" text-anchor="middle" dominant-baseline="central">U</text></g>
+<line x1="158.0" y1="62.0" x2="158.0" y2="118.0" stroke="var(--ctrl-str)" stroke-width="1" shape-rendering="crispEdges"/>
+<circle cx="158.0" cy="90.0" r="1.5" fill="var(--wire)"/>
+<g class="ctrl"><title>CU: ctrl q[1] → target q[3]</title><circle cx="158.0" cy="62.0" r="3.0" fill="var(--ctrl-dot)" stroke="var(--ctrl-bdr)" stroke-width="1"/></g>
+<g class="gate gate-ctrl"><title>CU: ctrl q[1] → target q[3]</title><rect x="144.0" y="107.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="158.0" y="118.0" text-anchor="middle" dominant-baseline="central">U</text></g>
+<line x1="202.0" y1="90.0" x2="202.0" y2="118.0" stroke="var(--ctrl-str)" stroke-width="1" shape-rendering="crispEdges"/>
+<g class="ctrl"><title>CU: ctrl q[2] → target q[3]</title><circle cx="202.0" cy="90.0" r="3.0" fill="var(--ctrl-dot)" stroke="var(--ctrl-bdr)" stroke-width="1"/></g>
+<g class="gate gate-ctrl"><title>CU: ctrl q[2] → target q[3]</title><rect x="188.0" y="107.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="202.0" y="118.0" text-anchor="middle" dominant-baseline="central">U</text></g>
+<line x1="246.0" y1="34.0" x2="246.0" y2="90.0" stroke="var(--swap)" stroke-width="1" shape-rendering="crispEdges"/>
+<circle cx="246.0" cy="62.0" r="1.5" fill="var(--wire)"/>
+<g class="gate"><title>SWAP q[0] ↔ q[2]</title><line x1="239.0" y1="27.0" x2="253.0" y2="41.0" stroke="var(--swap)" stroke-width="1.5" stroke-linecap="round"/><line x1="239.0" y1="41.0" x2="253.0" y2="27.0" stroke="var(--swap)" stroke-width="1.5" stroke-linecap="round"/></g>
+<g class="gate"><title>SWAP q[0] ↔ q[2]</title><line x1="239.0" y1="83.0" x2="253.0" y2="97.0" stroke="var(--swap)" stroke-width="1.5" stroke-linecap="round"/><line x1="239.0" y1="97.0" x2="253.0" y2="83.0" stroke="var(--swap)" stroke-width="1.5" stroke-linecap="round"/></g>
+<g class="gate gate-std"><title>H on q[2]</title><rect x="276.0" y="79.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="290.0" y="90.0" text-anchor="middle" dominant-baseline="central">H</text></g>
+<line x1="334.0" y1="62.0" x2="334.0" y2="90.0" stroke="var(--ctrl-str)" stroke-width="1" shape-rendering="crispEdges"/>
+<g class="ctrl"><title>CU: ctrl q[1] → target q[2]</title><circle cx="334.0" cy="62.0" r="3.0" fill="var(--ctrl-dot)" stroke="var(--ctrl-bdr)" stroke-width="1"/></g>
+<g class="gate gate-ctrl"><title>CU: ctrl q[1] → target q[2]</title><rect x="320.0" y="79.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="334.0" y="90.0" text-anchor="middle" dominant-baseline="central">U</text></g>
+<g class="gate gate-std"><title>H on q[1]</title><rect x="364.0" y="51.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="378.0" y="62.0" text-anchor="middle" dominant-baseline="central">H</text></g>
+<line x1="378.0" y1="34.0" x2="378.0" y2="90.0" stroke="var(--ctrl-str)" stroke-width="1" shape-rendering="crispEdges"/>
+<circle cx="378.0" cy="62.0" r="1.5" fill="var(--wire)"/>
+<g class="ctrl"><title>CU: ctrl q[0] → target q[2]</title><circle cx="378.0" cy="34.0" r="3.0" fill="var(--ctrl-dot)" stroke="var(--ctrl-bdr)" stroke-width="1"/></g>
+<g class="gate gate-ctrl"><title>CU: ctrl q[0] → target q[2]</title><rect x="364.0" y="79.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="378.0" y="90.0" text-anchor="middle" dominant-baseline="central">U</text></g>
+<line x1="422.0" y1="34.0" x2="422.0" y2="62.0" stroke="var(--ctrl-str)" stroke-width="1" shape-rendering="crispEdges"/>
+<g class="ctrl"><title>CU: ctrl q[0] → target q[1]</title><circle cx="422.0" cy="34.0" r="3.0" fill="var(--ctrl-dot)" stroke="var(--ctrl-bdr)" stroke-width="1"/></g>
+<g class="gate gate-ctrl"><title>CU: ctrl q[0] → target q[1]</title><rect x="408.0" y="51.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="422.0" y="62.0" text-anchor="middle" dominant-baseline="central">U</text></g>
+<g class="gate gate-std"><title>H on q[0]</title><rect x="452.0" y="23.0" width="28.0" height="22.0" rx="1" stroke-width="1"/><text x="466.0" y="34.0" text-anchor="middle" dominant-baseline="central">H</text></g>
+</g>
+<g id="layer-legend">
+<rect x="177.4" y="132.0" width="147.3" height="17.1" rx="8.6" fill="var(--bg)" fill-opacity="0.92" stroke="var(--wire)" stroke-width="0.5" stroke-opacity="0.4"/>
+<rect x="185.4" y="136.0" width="9.1" height="9.1" rx="1.8" fill="url(#g-std)" stroke="var(--std-str)" stroke-width="0.75"/>
+<text x="197.8" y="140.6" class="qlabel" font-size="10.1px" dominant-baseline="central">Standard</text>
+<rect x="251.6" y="136.0" width="9.1" height="9.1" rx="1.8" fill="url(#g-ctrl)" stroke="var(--ctrl-str)" stroke-width="0.75"/>
+<text x="264.0" y="140.6" class="qlabel" font-size="10.1px" dominant-baseline="central">Controlled</text>
+</g>
+</svg>

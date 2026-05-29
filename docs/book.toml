@@ -6,5 +6,31 @@ language = "en"
 src = "."
 
 [output.html]
-git-repository-url = "https://github.com/AbeCoull/prism-q"
 default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/AbeCoull/prism-q"
+git-repository-icon = "fa-github"
+edit-url-template = "https://github.com/AbeCoull/prism-q/edit/main/docs/{path}"
+additional-css = ["theme/custom.css", "mdbook-admonish.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+mathjax-support = false
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 20
+use-boolean-and = true
+boost-title = 2
+
+[preprocessor.katex]
+after = ["links"]
+
+[preprocessor.admonish]
+command = "mdbook-admonish"
+assets_version = "3.1.0" # do not edit: managed by `mdbook-admonish install`
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

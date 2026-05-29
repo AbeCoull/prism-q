@@ -19,7 +19,7 @@
 //!
 //! # Adding a new backend
 //!
-//! See `docs/architecture.md` § "Add a new backend" for the full playbook.
+//! See `AGENTS.md` § "Backend extension contract" for the full playbook.
 
 pub mod factored;
 pub mod factored_stabilizer;

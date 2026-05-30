@@ -2,11 +2,29 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.16.1] - 2026-05-30
+
+### Bug Fixes
+
+- **kernel:** Add kernel checks across CPU arch and GPU (#79)([b5cc9a4](https://github.com/AbeCoull/prism-q/commit/b5cc9a478fa3415f1d80a892ce59c701d208a960))
+
+### Documentation
+
+- Update docs to properly include architecture breakdown and bett… (#78)([e5266d8](https://github.com/AbeCoull/prism-q/commit/e5266d87cf37c9c05a49c57c22e6e7a19c63c159))
+- Add github pages (#75)([7474e5d](https://github.com/AbeCoull/prism-q/commit/7474e5db947c687a9e55a3c56b289c02759a9b7c))
+
+### Miscellaneous
+
+- Make parallel feature opt-out instead of opt-in (#76)([22d0a25](https://github.com/AbeCoull/prism-q/commit/22d0a259136f8625a0dcac18ad67a6bc551e45bc))
 ## [0.16.0] - 2026-05-29
 
 ### Features
 
 - **qec:** Add T strategy ladder for stabilizer simulator (#74)([d6503aa](https://github.com/AbeCoull/prism-q/commit/d6503aaec9486fdfe800d2ffd5318a8065f43548))
+
+### Miscellaneous
+
+- **release:** 0.16.0([cb5fb54](https://github.com/AbeCoull/prism-q/commit/cb5fb548fc3e2d6ab36ac7d3927b066ef929e925))
 ## [0.15.0] - 2026-05-20
 
 ### Documentation

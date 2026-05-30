@@ -103,3 +103,33 @@ pub(crate) fn has_avx2() -> bool {
 pub(crate) fn has_avx2() -> bool {
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Dispatcher and the AVX2 kernel must both equal a plain scalar XOR. The
+    /// length is not a multiple of the SIMD stride, so the remainder loop runs too.
+    #[test]
+    fn xor_words_matches_scalar_reference() {
+        let src: Vec<u64> = (0..37)
+            .map(|i| 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(i + 1))
+            .collect();
+        let dst0: Vec<u64> = (0..37)
+            .map(|i| 0xD1B5_4A32_D192_ED03u64.wrapping_add(i))
+            .collect();
+        let expected: Vec<u64> = dst0.iter().zip(&src).map(|(d, s)| d ^ s).collect();
+
+        let mut dst = dst0.clone();
+        xor_words(&mut dst, &src);
+        assert_eq!(dst, expected, "xor_words dispatcher");
+
+        #[cfg(target_arch = "x86_64")]
+        if has_avx2() {
+            let mut dst = dst0.clone();
+            // SAFETY: equal lengths; avx2 verified above.
+            unsafe { xor_words_avx2(dst.as_mut_ptr(), src.as_ptr(), src.len()) };
+            assert_eq!(dst, expected, "xor_words_avx2 kernel");
+        }
+    }
+}

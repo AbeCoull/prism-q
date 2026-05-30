@@ -299,7 +299,22 @@ impl StatevectorBackend {
                 }
                 Ok(())
             }
-            _ => {
+            Gate::Id
+            | Gate::X
+            | Gate::Y
+            | Gate::Z
+            | Gate::H
+            | Gate::S
+            | Gate::Sdg
+            | Gate::T
+            | Gate::Tdg
+            | Gate::SX
+            | Gate::SXdg
+            | Gate::Rx(_)
+            | Gate::Ry(_)
+            | Gate::Rz(_)
+            | Gate::P(_)
+            | Gate::Fused(_) => {
                 let mat = gate.matrix_2x2();
                 if gate.is_diagonal_1q() {
                     k::launch_apply_diagonal_1q(&ctx, gpu, targets[0], mat[0][0], mat[1][1])
@@ -473,7 +488,22 @@ impl StatevectorBackend {
             Gate::Multi2q(data) => {
                 self.apply_multi_2q(&data.gates);
             }
-            _ => {
+            Gate::Id
+            | Gate::X
+            | Gate::Y
+            | Gate::Z
+            | Gate::H
+            | Gate::S
+            | Gate::Sdg
+            | Gate::T
+            | Gate::Tdg
+            | Gate::SX
+            | Gate::SXdg
+            | Gate::Rx(_)
+            | Gate::Ry(_)
+            | Gate::Rz(_)
+            | Gate::P(_)
+            | Gate::Fused(_) => {
                 let mat = gate.matrix_2x2();
                 if gate.is_diagonal_1q() {
                     self.apply_diagonal_gate(targets[0], mat[0][0], mat[1][1]);

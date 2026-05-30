@@ -12,7 +12,10 @@ use num_complex::Complex64;
 
 use prism_q::backend::Backend;
 use prism_q::circuit::{smallvec, Instruction, SmallVec};
-use prism_q::gates::{DiagEntry, DiagonalBatchData, Gate, McuData, MultiFusedData};
+use prism_q::gates::{
+    BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Gate, McuData, Multi2qData,
+    MultiFusedData,
+};
 use prism_q::gpu::GpuContext;
 use prism_q::StatevectorBackend;
 
@@ -59,6 +62,141 @@ fn g(gate: Gate, targets: &[usize]) -> Instruction {
     let mut tv: SmallVec<[usize; 4]> = smallvec![];
     tv.extend_from_slice(targets);
     Instruction::Gate { gate, targets: tv }
+}
+
+// One constructed instance per `Gate` variant, fed through the exhaustive
+// `representative` match so a new variant cannot be added without a GPU
+// differential case.
+
+fn sample_2x2() -> [[Complex64; 2]; 2] {
+    [
+        [Complex64::new(0.6, -0.1), Complex64::new(-0.3, 0.2)],
+        [Complex64::new(0.2, 0.4), Complex64::new(0.7, -0.2)],
+    ]
+}
+
+fn sample_4x4() -> [[Complex64; 4]; 4] {
+    let mut mat = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in mat.iter_mut().enumerate() {
+        for (c, entry) in row.iter_mut().enumerate() {
+            *entry = Complex64::new(0.1 * (r as f64 + 1.0), 0.07 * (c as f64 + 1.0));
+        }
+    }
+    mat
+}
+
+fn gate_samples() -> Vec<Gate> {
+    let m2 = sample_2x2();
+    let m4 = sample_4x4();
+    vec![
+        Gate::Id,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::T,
+        Gate::Tdg,
+        Gate::SX,
+        Gate::SXdg,
+        Gate::Rx(0.37),
+        Gate::Ry(1.11),
+        Gate::Rz(-0.62),
+        Gate::P(0.44),
+        Gate::Fused(Box::new(m2)),
+        Gate::Rzz(0.3),
+        Gate::Cx,
+        Gate::Cz,
+        Gate::Swap,
+        Gate::Cu(Box::new(m2)),
+        Gate::Mcu(Box::new(McuData {
+            mat: m2,
+            num_controls: 2,
+        })),
+        Gate::BatchPhase(Box::new(BatchPhaseData {
+            phases: smallvec![(1usize, Complex64::from_polar(1.0, 0.5))],
+        })),
+        Gate::BatchRzz(Box::new(BatchRzzData {
+            edges: vec![(0, 1, 0.3), (1, 2, 0.5)],
+        })),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+            entries: vec![
+                DiagEntry::Phase1q {
+                    qubit: 0,
+                    d0: Complex64::from_polar(1.0, 0.2),
+                    d1: Complex64::from_polar(1.0, -0.3),
+                },
+                DiagEntry::Phase2q {
+                    q0: 1,
+                    q1: 2,
+                    phase: Complex64::from_polar(1.0, 0.5),
+                },
+                DiagEntry::Parity2q {
+                    q0: 0,
+                    q1: 3,
+                    same: Complex64::from_polar(1.0, 0.1),
+                    diff: Complex64::from_polar(1.0, -0.4),
+                },
+            ],
+        })),
+        Gate::MultiFused(Box::new(MultiFusedData {
+            gates: vec![(0, m2), (1, m2)],
+            all_diagonal: false,
+        })),
+        Gate::Fused2q(Box::new(m4)),
+        Gate::Multi2q(Box::new(Multi2qData {
+            gates: vec![(0, 1, m4)],
+        })),
+        Gate::QftBlock { start: 0, num: 4 },
+    ]
+}
+
+/// Maps each `Gate` variant to a target layout. Exhaustive by design.
+fn representative(gate: &Gate) -> (usize, Vec<Instruction>) {
+    const N: usize = 5;
+    let targets: Vec<usize> = match gate {
+        Gate::Id
+        | Gate::X
+        | Gate::Y
+        | Gate::Z
+        | Gate::H
+        | Gate::S
+        | Gate::Sdg
+        | Gate::T
+        | Gate::Tdg
+        | Gate::SX
+        | Gate::SXdg
+        | Gate::Rx(_)
+        | Gate::Ry(_)
+        | Gate::Rz(_)
+        | Gate::P(_)
+        | Gate::Fused(_) => vec![0],
+        Gate::Cx | Gate::Cz | Gate::Swap | Gate::Rzz(_) => vec![0, 1],
+        Gate::Cu(_) => vec![0, 2],
+        Gate::Mcu(data) => (0..=data.num_controls as usize).collect(),
+        Gate::BatchPhase(_) => vec![0],
+        Gate::BatchRzz(_) => vec![0, 1, 2],
+        Gate::DiagonalBatch(_) => vec![0, 1, 2, 3],
+        Gate::MultiFused(_) => (0..N).collect(),
+        Gate::Fused2q(_) => vec![0, 1],
+        Gate::Multi2q(_) => vec![0, 1],
+        Gate::QftBlock { start, num } => {
+            (*start as usize..*start as usize + *num as usize).collect()
+        }
+    };
+    let mut insts: Vec<Instruction> = (0..N).map(|q| g(Gate::H, &[q])).collect();
+    insts.push(g(gate.clone(), &targets));
+    (N, insts)
+}
+
+#[test]
+fn every_gate_variant_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    for sample in gate_samples() {
+        let (n, insts) = representative(&sample);
+        f.compare(n, &insts);
+    }
 }
 
 // ============================================================================

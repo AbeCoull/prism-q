@@ -245,15 +245,16 @@ jobs:
       - name: Cross-backend correctness matrix
         run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --test backend_matrix
 
-  # Compile-check the GPU paths without a device: cudarc dynamic-linking builds with
-  # the toolkit but needs no GPU at runtime. Enforces the exhaustive GPU dispatch
-  # matches and golden_gpu registry, and runs the device-free KERNEL_NAMES test.
+  # Compile-check the GPU paths with the CUDA toolkit but no device. The job only
+  # compiles and runs the device-free KERNEL_NAMES test (nothing opens a device),
+  # enforcing the exhaustive GPU dispatch matches and the golden_gpu registry at
+  # compile time. Pinned to ubuntu-22.04: CUDA 12.4 (matching cudarc's cuda-12040
+  # bindings) has no package for the ubuntu2404 repo on ubuntu-latest.
   gpu-check:
     name: GPU compile-check (no device)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      # Provides nvrtc/driver headers for the build. No GPU is present or needed.
       - uses: Jimver/cuda-toolkit@v0.2.18
         with:
           cuda: '12.4.0'

@@ -667,7 +667,23 @@ impl StabilizerBackend {
             Gate::Cx => self.sgi_apply_cx(targets[0], targets[1]),
             Gate::Cz => self.sgi_apply_cz(targets[0], targets[1]),
             Gate::Swap => self.sgi_apply_swap(targets[0], targets[1]),
-            _ => {
+            Gate::T
+            | Gate::Tdg
+            | Gate::Rx(_)
+            | Gate::Ry(_)
+            | Gate::Rz(_)
+            | Gate::P(_)
+            | Gate::Rzz(_)
+            | Gate::Cu(_)
+            | Gate::Mcu(_)
+            | Gate::Fused(_)
+            | Gate::BatchPhase(_)
+            | Gate::BatchRzz(_)
+            | Gate::DiagonalBatch(_)
+            | Gate::MultiFused(_)
+            | Gate::Fused2q(_)
+            | Gate::Multi2q(_)
+            | Gate::QftBlock { .. } => {
                 return Err(PrismError::BackendUnsupported {
                     backend: self.name().to_string(),
                     operation: format!(
@@ -1002,7 +1018,23 @@ impl StabilizerBackend {
             Gate::Cx => self.apply_cx(targets[0], targets[1]),
             Gate::Cz => self.apply_cz(targets[0], targets[1]),
             Gate::Swap => self.apply_swap(targets[0], targets[1]),
-            _ => {
+            Gate::T
+            | Gate::Tdg
+            | Gate::Rx(_)
+            | Gate::Ry(_)
+            | Gate::Rz(_)
+            | Gate::P(_)
+            | Gate::Rzz(_)
+            | Gate::Cu(_)
+            | Gate::Mcu(_)
+            | Gate::Fused(_)
+            | Gate::BatchPhase(_)
+            | Gate::BatchRzz(_)
+            | Gate::DiagonalBatch(_)
+            | Gate::MultiFused(_)
+            | Gate::Fused2q(_)
+            | Gate::Multi2q(_)
+            | Gate::QftBlock { .. } => {
                 return Err(PrismError::BackendUnsupported {
                     backend: self.name().to_string(),
                     operation: format!(

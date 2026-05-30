@@ -218,6 +218,60 @@ jobs:
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
+  # Execute the NEON fallbacks under emulation. check-aarch64 above only compiles,
+  # so without this the NEON kernels are never run against their scalar reference on
+  # Linux. Scoped to the SIMD-relevant tests to bound QEMU wall-clock.
+  test-aarch64-qemu:
+    name: Test aarch64 (QEMU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: SIMD kernel unit tests (NEON vs scalar)
+        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::simd::tests
+      - name: word_ops unit tests (NEON vs scalar)
+        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::word_ops::tests
+      - name: Batched diagonal phase reference (NEON path)
+        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::statevector::tests::batch_phase_matches_independent_reference
+      - name: Cross-backend correctness matrix
+        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --test backend_matrix
+
+  # Compile-check the GPU paths without a device: cudarc dynamic-linking builds with
+  # the toolkit but needs no GPU at runtime. Enforces the exhaustive GPU dispatch
+  # matches and golden_gpu registry, and runs the device-free KERNEL_NAMES test.
+  gpu-check:
+    name: GPU compile-check (no device)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Provides nvrtc/driver headers for the build. No GPU is present or needed.
+      - uses: Jimver/cuda-toolkit@v0.2.18
+        with:
+          cuda: '12.4.0'
+          method: network
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: taiki-e/install-action@cargo-nextest
+      - name: Compile-check GPU dispatch + golden_gpu coverage
+        run: cargo check --all-targets --features "parallel gpu"
+      - name: Clippy GPU paths
+        run: cargo clippy --all-targets --features "parallel gpu" -- -D warnings -D clippy::undocumented_unsafe_blocks
+      - name: KERNEL_NAMES consistency (device-free)
+        run: cargo nextest run --features "parallel gpu" -E 'test(kernel_names_match_source_entry_points)'
+
   test-macos-arm:
     name: Test macOS ARM64
     runs-on: macos-14

@@ -2473,4 +2473,163 @@ mod tests {
             );
         }
     }
+
+    // Drive every SIMD tier the host supports against the scalar reference. The
+    // dispatcher runs only the best tier, so SSE2/FMA never execute on an AVX2 host
+    // without forcing them here.
+
+    #[cfg(target_arch = "x86_64")]
+    fn available_tiers() -> Vec<SimdTier> {
+        let mut tiers = vec![SimdTier::Sse2];
+        if has_fma() {
+            tiers.push(SimdTier::Fma);
+        }
+        if has_avx2_fma() {
+            tiers.push(SimdTier::Avx2Fma);
+        }
+        tiers
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn tier_name(tier: &SimdTier) -> &'static str {
+        match tier {
+            SimdTier::Avx2Fma => "avx2fma",
+            SimdTier::Fma => "fma",
+            SimdTier::Sse2 => "sse2",
+        }
+    }
+
+    /// All four entries distinct, so an indexing or sign bug cannot cancel out.
+    #[cfg(target_arch = "x86_64")]
+    fn asymmetric_gate() -> [[Complex64; 2]; 2] {
+        [[c(0.3, 0.1), c(-0.2, 0.4)], [c(0.5, -0.3), c(0.1, 0.2)]]
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn apply_slices_every_tier_matches_scalar() {
+        let mat = asymmetric_gate();
+        // Length deliberately not a multiple of the widest tier's stride so the
+        // scalar remainder loop is exercised too.
+        let lo0: Vec<Complex64> = (0..37)
+            .map(|i| c(0.11 * i as f64, -0.07 * i as f64))
+            .collect();
+        let hi0: Vec<Complex64> = (0..37)
+            .map(|i| c(-0.05 * i as f64, 0.09 * i as f64))
+            .collect();
+
+        let mut lo_ref = lo0.clone();
+        let mut hi_ref = hi0.clone();
+        apply_slices_scalar(&mut lo_ref, &mut hi_ref, &mat);
+
+        for tier in available_tiers() {
+            let mut prepared = PreparedGate1q::new(&mat);
+            let name = tier_name(&tier);
+            prepared.tier = tier;
+            let mut lo = lo0.clone();
+            let mut hi = hi0.clone();
+            prepared.apply(&mut lo, &mut hi);
+            for i in 0..lo.len() {
+                assert!(
+                    (lo[i] - lo_ref[i]).norm() < EPS && (hi[i] - hi_ref[i]).norm() < EPS,
+                    "tier {name} diverged from scalar at index {i}"
+                );
+            }
+        }
+    }
+
+    /// Scalar reference for a full-state single-qubit apply.
+    #[cfg(target_arch = "x86_64")]
+    fn scalar_full_apply(state: &mut [Complex64], target: usize, mat: &[[Complex64; 2]; 2]) {
+        let half = 1usize << target;
+        let mut base = 0usize;
+        while base < state.len() {
+            for k in base..base + half {
+                let v0 = state[k];
+                let v1 = state[k + half];
+                state[k] = mat[0][0] * v0 + mat[0][1] * v1;
+                state[k + half] = mat[1][0] * v0 + mat[1][1] * v1;
+            }
+            base += half * 2;
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn apply_full_sequential_every_tier_matches_scalar() {
+        let mat = asymmetric_gate();
+        // Cover the AVX2 size/target guard boundary (target >= 2 and small state
+        // takes the 256-bit path; otherwise the 128-bit fallback).
+        for nq in [3usize, 5, 8] {
+            let dim = 1usize << nq;
+            let state0: Vec<Complex64> = (0..dim)
+                .map(|i| c(0.013 * i as f64 + 0.1, -0.017 * i as f64))
+                .collect();
+            for target in 0..nq {
+                let mut reference = state0.clone();
+                scalar_full_apply(&mut reference, target, &mat);
+
+                for tier in available_tiers() {
+                    let mut prepared = PreparedGate1q::new(&mat);
+                    let name = tier_name(&tier);
+                    prepared.tier = tier;
+                    let mut state = state0.clone();
+                    prepared.apply_full_sequential(&mut state, target);
+                    for i in 0..dim {
+                        assert!(
+                            (state[i] - reference[i]).norm() < EPS,
+                            "tier {name} nq={nq} target={target} diverged at index {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn norm_sqr_sum_avx2fma_matches_scalar() {
+        if !has_avx2_fma() {
+            return;
+        }
+        let slice: Vec<Complex64> = (0..101)
+            .map(|i| c(0.07 * i as f64 - 1.0, 0.03 * i as f64 + 0.2))
+            .collect();
+        let scalar: f64 = slice.iter().map(|z| z.norm_sqr()).sum();
+        // SAFETY: guarded by has_avx2_fma() above.
+        let simd = unsafe { norm_sqr_sum_avx2fma(&slice) };
+        assert!(
+            (simd - scalar).abs() < 1e-9,
+            "avx2fma norm_sqr_sum={simd} vs scalar={scalar}"
+        );
+    }
+
+    // Completeness tripwire: pin the count of `#[target_feature]` kernels so adding
+    // one without a paired per-tier test fails here. Reads source text only, so it
+    // runs on every arch.
+    #[test]
+    fn target_feature_kernel_count_is_pinned() {
+        // Split the needle so this test's own source does not self-count.
+        let needle = concat!("target_feature", "(enable");
+        let root = env!("CARGO_MANIFEST_DIR");
+        // Per-file expected counts; the breakdown makes a drift easy to localise.
+        let expected: [(&str, usize); 4] = [
+            ("src/backend/simd.rs", 27),
+            ("src/backend/word_ops.rs", 2),
+            ("src/backend/stabilizer/kernels/simd.rs", 3),
+            ("src/backend/statevector/kernels.rs", 10),
+        ];
+        for (file, want) in expected {
+            let path = format!("{root}/{file}");
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+            let got = text.matches(needle).count();
+            assert_eq!(
+                got, want,
+                "{file} has {got} `#[target_feature]` kernels, pinned at {want}. \
+                 If you added or removed a tiered kernel, add/adjust its per-tier \
+                 equivalence test and update this pin."
+            );
+        }
+    }
 }

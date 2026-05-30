@@ -459,7 +459,23 @@ impl StabilizerBackend {
                 self.queue_2q_gpu(op::SWAP, targets[0], targets[1]);
                 Ok(())
             }
-            _ => Err(PrismError::BackendUnsupported {
+            Gate::T
+            | Gate::Tdg
+            | Gate::Rx(_)
+            | Gate::Ry(_)
+            | Gate::Rz(_)
+            | Gate::P(_)
+            | Gate::Rzz(_)
+            | Gate::Cu(_)
+            | Gate::Mcu(_)
+            | Gate::Fused(_)
+            | Gate::BatchPhase(_)
+            | Gate::BatchRzz(_)
+            | Gate::DiagonalBatch(_)
+            | Gate::MultiFused(_)
+            | Gate::Fused2q(_)
+            | Gate::Multi2q(_)
+            | Gate::QftBlock { .. } => Err(PrismError::BackendUnsupported {
                 backend: self.name().to_string(),
                 operation: format!(
                     "non-Clifford gate `{}` (stabilizer backend supports Clifford gates only)",

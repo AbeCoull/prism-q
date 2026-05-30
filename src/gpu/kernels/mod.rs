@@ -170,3 +170,50 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "bts_apply_noise_masks_meas_major",
     "bts_generate_and_apply_noise_meas_major_by_row",
 ];
+
+#[cfg(test)]
+mod sync_tests {
+    use super::{kernel_source, KERNEL_NAMES};
+    use std::collections::BTreeSet;
+
+    /// Names following each `__global__ void` marker in the PTX source.
+    fn source_entry_points(src: &str) -> BTreeSet<String> {
+        const MARKER: &str = "__global__ void ";
+        let mut names = BTreeSet::new();
+        let mut rest = src;
+        while let Some(pos) = rest.find(MARKER) {
+            rest = &rest[pos + MARKER.len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                names.insert(name);
+            }
+        }
+        names
+    }
+
+    /// `KERNEL_NAMES` must match the kernels in the CUDA source exactly: a missing
+    /// name is never pre-resolved by `GpuDevice::new`, an orphan name is dead drift.
+    /// Inspects the source string only, so it needs no GPU device.
+    #[test]
+    fn kernel_names_match_source_entry_points() {
+        let src = kernel_source();
+        let in_source = source_entry_points(&src);
+        let declared: BTreeSet<String> = KERNEL_NAMES.iter().map(|s| s.to_string()).collect();
+
+        let missing: Vec<&String> = in_source.difference(&declared).collect();
+        let orphan: Vec<&String> = declared.difference(&in_source).collect();
+
+        assert!(
+            missing.is_empty(),
+            "kernels defined in source but absent from KERNEL_NAMES \
+             (GpuDevice::new would not pre-resolve them): {missing:?}"
+        );
+        assert!(
+            orphan.is_empty(),
+            "KERNEL_NAMES entries with no matching kernel in source: {orphan:?}"
+        );
+    }
+}

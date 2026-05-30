@@ -1348,6 +1348,61 @@ fn test_deferred_norm_export_statevector() {
     );
 }
 
+/// `apply_batch_phase` vs an independent reference. At 6 qubits the sequential path
+/// runs, so a BMI2+FMA host exercises `apply_batch_phase_bmi2` and others the scalar
+/// fallback.
+#[test]
+fn batch_phase_matches_independent_reference() {
+    use crate::circuit::{smallvec, Instruction, SmallVec};
+    use crate::gates::{BatchPhaseData, Gate};
+
+    let n = 6usize;
+    let control = 1usize;
+    let entries: [(usize, Complex64); 3] = [
+        (0, Complex64::from_polar(1.0, 0.37)),
+        (2, Complex64::from_polar(1.0, -0.91)),
+        (4, Complex64::from_polar(1.0, 1.25)),
+    ];
+
+    let mut backend = StatevectorBackend::new(42);
+    backend.init(n, 0).unwrap();
+    for q in 0..n {
+        let targets: SmallVec<[usize; 4]> = smallvec![q];
+        backend
+            .apply(&Instruction::Gate {
+                gate: Gate::H,
+                targets,
+            })
+            .unwrap();
+    }
+    let mut phases: SmallVec<[(usize, Complex64); 8]> = smallvec![];
+    for &(tq, ph) in &entries {
+        phases.push((tq, ph));
+    }
+    let ctrl_targets: SmallVec<[usize; 4]> = smallvec![control];
+    backend
+        .apply(&Instruction::Gate {
+            gate: Gate::BatchPhase(Box::new(BatchPhaseData { phases })),
+            targets: ctrl_targets,
+        })
+        .unwrap();
+    let got = backend.export_statevector().unwrap();
+
+    let amp0 = Complex64::new((1.0 / (1u64 << n) as f64).sqrt(), 0.0);
+    let dim = 1usize << n;
+    let mut expected = vec![amp0; dim];
+    for (i, e) in expected.iter_mut().enumerate() {
+        if (i >> control) & 1 == 1 {
+            for &(tq, ph) in &entries {
+                if (i >> tq) & 1 == 1 {
+                    *e *= ph;
+                }
+            }
+        }
+    }
+    assert_state_close(&got, &expected, 1e-12);
+}
+
 #[cfg(feature = "gpu")]
 mod gpu_scaffold {
     use super::*;

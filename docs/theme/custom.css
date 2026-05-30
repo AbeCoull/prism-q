@@ -1,0 +1,79 @@
+/* PRISM-Q docs theme layer. Layered on top of the stock mdBook themes via
+   `additional-css` in book.toml. Do not fork the base theme files. */
+
+:root {
+    --prism-accent: #6d4bd6;
+    --prism-accent-soft: rgba(109, 75, 214, 0.12);
+}
+
+/* Accent links and active sidebar entry, scoped per built-in theme so the color
+   reads against each background. */
+.light,
+.rust {
+    --links: var(--prism-accent);
+    --sidebar-active: var(--prism-accent);
+}
+
+.navy,
+.coal,
+.ayu {
+    --links: #b49cf2;
+    --sidebar-active: #b49cf2;
+}
+
+/* Landing hero */
+.prism-hero {
+    text-align: center;
+    margin: 1.5rem 0 2rem;
+}
+
+.prism-hero h1 {
+    margin-bottom: 0.25rem;
+}
+
+/* Feature card grid on the landing page */
+.prism-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin: 1.75rem 0;
+}
+
+.prism-card {
+    display: block;
+    padding: 1rem 1.15rem;
+    border: 1px solid var(--prism-accent-soft);
+    border-left: 3px solid var(--prism-accent);
+    border-radius: 6px;
+    background: var(--prism-accent-soft);
+    text-decoration: none !important;
+    color: inherit;
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.prism-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+
+.prism-card-title {
+    display: block;
+    margin-bottom: 0.35rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--prism-accent);
+}
+
+.prism-card-body {
+    display: block;
+    font-size: 0.9rem;
+    opacity: 0.85;
+}
+
+/* Keep embedded circuit SVGs within the content column and centered. */
+.content img[src$=".svg"] {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    margin: 1rem auto;
+}

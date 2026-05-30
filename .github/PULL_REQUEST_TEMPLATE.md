@@ -48,7 +48,7 @@ flamegraph output showing where time went. If no hot paths were touched, write "
 
 ## Architecture or design changes
 
-- [ ] `docs/architecture.md` updated if the change is structural
+- [ ] `docs/architecture/` updated if the change is structural
 - [ ] Design or research notes added where required for new subsystems
 
 ## Breaking changes

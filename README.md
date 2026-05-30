@@ -222,7 +222,7 @@ sampling. Crossover thresholds are conservative by default and can be tuned thro
 `PRISM_GPU_BTS_MIN_SHOTS`.
 
 `BackendKind::Auto` does not yet route to GPU. See
-[`docs/architecture.md`](docs/architecture.md) for kernel design, crossover analysis,
+[`docs/guides/gpu.md`](docs/guides/gpu.md) for kernel design, crossover analysis,
 and the full set of tuning knobs.
 
 ## Coverage
@@ -274,9 +274,9 @@ SVGs land in `bench_results/` (gitignored).
 
 ## Architecture
 
-See [`docs/architecture.md`](docs/architecture.md) for the full picture: layered design,
-backend trait contract, SIMD strategy, fusion pipeline, compiled samplers, and how to
-add a new backend.
+See the [architecture reference](docs/architecture/overview.md) for the full picture:
+layered design, backend trait contract, SIMD strategy, fusion pipeline, and compiled
+samplers. The published docs site is at <https://abecoull.github.io/prism-q/>.
 
 ## Contributing
 

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="PRISM-Q">
+  <rect width="32" height="32" rx="6" fill="#6d4bd6"/>
+  <path d="M7 24 L16 8 L25 24 Z" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linejoin="round"/>
+  <line x1="18" y1="16" x2="27" y2="13" stroke="#bfe0ff" stroke-width="2" stroke-linecap="round"/>
+  <line x1="18" y1="19" x2="27" y2="22" stroke="#bff0d0" stroke-width="2" stroke-linecap="round"/>
+</svg>

@@ -121,7 +121,8 @@ audit).
 3. Write unit tests (single-qubit, two-qubit, measurement at minimum) and golden tests
    against the statevector backend.
 4. Add benchmark entries in `benches/circuits.rs`.
-5. Update `docs/architecture.md` with the backend's position in the dispatch tree.
+5. Update `docs/architecture/engine.md` with the backend's position in the dispatch tree,
+   and `docs/architecture/backends.md` with its description.
 
 ## Questions
 

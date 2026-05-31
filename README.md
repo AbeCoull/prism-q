@@ -21,6 +21,9 @@ and BMI2 SIMD kernels in the inner loop. CPU kernels are the default path, with
 optional CUDA support for statevector and experimental stabilizer workloads. Input is
 OpenQASM 3.0 with backward compatible 2.0 syntax.
 
+For which CPU and GPU architectures each backend supports, see the
+[capability and support matrix](https://abecoull.github.io/prism-q/guides/capabilities.html).
+
 ## Documentation
 
 Full documentation is published at <https://abecoull.github.io/prism-q/>. The generated

@@ -1,5 +1,8 @@
 # Threading, SIMD, and Memory Layout
 
+For which SIMD tiers and architectures each backend supports, see the
+[Capability and Support Matrix](../guides/capabilities.md).
+
 ## Memory layout
 
 | Backend | State representation | Memory | Access pattern |

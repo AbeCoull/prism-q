@@ -12,6 +12,7 @@
 # Guides
 
 - [Backends Deep Dive](./guides/backends.md)
+- [Capability and Support Matrix](./guides/capabilities.md)
 - [Performance and SIMD](./guides/performance.md)
 - [OpenQASM Support](./guides/openqasm.md)
 - [Clifford+T Simulation](./guides/clifford-t.md)

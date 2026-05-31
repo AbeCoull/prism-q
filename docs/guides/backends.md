@@ -4,7 +4,9 @@ PRISM-Q does not have one simulation algorithm. It has eight, each optimal for a
 different class of circuit. This guide is the task-oriented companion to the
 [architecture reference](../architecture/backends.md): it focuses on scaling and when to
 reach for each one. To select a backend in code, see
-[Choosing a Backend](../getting-started/choosing-a-backend.md).
+[Choosing a Backend](../getting-started/choosing-a-backend.md). For which CPU and
+GPU architectures each backend supports, see the
+[Capability and Support Matrix](./capabilities.md).
 
 ## Scaling at a glance
 

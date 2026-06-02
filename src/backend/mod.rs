@@ -21,6 +21,8 @@
 //!
 //! See `docs/architecture.md` § "Add a new backend" for the full playbook.
 
+#[cfg(feature = "distributed")]
+pub mod distributed_statevector;
 pub mod factored;
 pub mod factored_stabilizer;
 pub(crate) mod memory;

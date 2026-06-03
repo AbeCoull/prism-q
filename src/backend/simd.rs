@@ -2399,6 +2399,41 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn combine_global_half_x86_tiers_match_scalar() {
+        let c_self = c(0.3, -0.4);
+        let c_remote = c(-0.2, 0.7);
+        for len in [1usize, 2, 3, 4, 5, 7, 16, 17, 33] {
+            let dst0: Vec<Complex64> = (0..len)
+                .map(|i| c((i as f64) * 0.13 - 0.4, 0.2 - (i as f64) * 0.07))
+                .collect();
+            let remote: Vec<Complex64> = (0..len)
+                .map(|i| c(0.5 - (i as f64) * 0.11, (i as f64) * 0.03 + 0.1))
+                .collect();
+            let mut expected = dst0.clone();
+            combine_global_half_scalar(&mut expected, &remote, c_self, c_remote);
+
+            if has_fma() {
+                let mut actual = dst0.clone();
+                // SAFETY: FMA support is checked above, and the slices have equal length.
+                unsafe { combine_global_half_fma(&mut actual, &remote, c_self, c_remote) };
+                assert_state_close(&actual, &expected, &format!("fma len={len}"));
+            }
+
+            if has_avx2_fma() {
+                let mut actual = dst0.clone();
+                // SAFETY: AVX2 and FMA support are checked above, and the slices have equal length.
+                unsafe { combine_global_half_avx2fma(&mut actual, &remote, c_self, c_remote) };
+                assert_state_close(&actual, &expected, &format!("avx2fma len={len}"));
+            }
+
+            let mut actual = dst0.clone();
+            combine_global_half(&mut actual, &remote, c_self, c_remote);
+            assert_state_close(&actual, &expected, &format!("dispatch len={len}"));
+        }
+    }
+
     fn identity_4x4() -> [[Complex64; 4]; 4] {
         let z = c(0.0, 0.0);
         let o = c(1.0, 0.0);
@@ -2740,7 +2775,7 @@ mod tests {
         let root = env!("CARGO_MANIFEST_DIR");
         // Per-file expected counts; the breakdown makes a drift easy to localise.
         let expected: [(&str, usize); 4] = [
-            ("src/backend/simd.rs", 27),
+            ("src/backend/simd.rs", 29),
             ("src/backend/word_ops.rs", 2),
             ("src/backend/stabilizer/kernels/simd.rs", 3),
             ("src/backend/statevector/kernels.rs", 10),

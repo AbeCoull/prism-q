@@ -8,11 +8,16 @@ use crate::backend::{max_statevector_qubits, Backend};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
-#[cfg(feature = "gpu")]
+#[cfg(any(feature = "gpu", feature = "distributed"))]
 use std::sync::Arc;
 
 #[cfg(feature = "gpu")]
 use crate::gpu::GpuContext;
+
+#[cfg(feature = "distributed")]
+use crate::backend::distributed_statevector::DistributedStatevectorBackend;
+#[cfg(feature = "distributed")]
+use crate::distributed::DistributedContext;
 
 use super::{try_backend_probabilities, RunOutcome};
 
@@ -123,6 +128,16 @@ pub enum BackendKind {
     StabilizerGpu {
         context: Arc<GpuContext>,
     },
+    /// Exact state vector distributed across `2^p` ranks via a
+    /// [`DistributedContext`]. The low `n - p` qubits are simulated locally with
+    /// the standard SIMD kernels; the top `p` qubits select the rank.
+    ///
+    /// Results are independent of the rank count. With a single rank the path is
+    /// identical to [`BackendKind::Statevector`].
+    #[cfg(feature = "distributed")]
+    StatevectorDistributed {
+        context: Arc<DistributedContext>,
+    },
 }
 
 impl BackendKind {
@@ -211,6 +226,8 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
         | BackendKind::DeterministicPauli { .. } => false,
         #[cfg(feature = "gpu")]
         BackendKind::StabilizerGpu { .. } => false,
+        #[cfg(feature = "distributed")]
+        BackendKind::StatevectorDistributed { context } => context.size() == 1,
         BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
         _ => true,
     }
@@ -354,6 +371,10 @@ pub(super) fn select_dispatch(
         #[cfg(feature = "gpu")]
         BackendKind::StabilizerGpu { context } => DispatchAction::Backend(Box::new(
             stabilizer_gpu_with_crossover(context, circuit, seed),
+        )),
+        #[cfg(feature = "distributed")]
+        BackendKind::StatevectorDistributed { context } => DispatchAction::Backend(Box::new(
+            DistributedStatevectorBackend::new(context.clone(), seed),
         )),
     }
 }

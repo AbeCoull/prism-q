@@ -48,6 +48,8 @@
 pub mod backend;
 pub mod circuit;
 pub mod circuits;
+#[cfg(feature = "distributed")]
+pub mod distributed;
 pub mod error;
 pub mod gates;
 #[cfg(feature = "gpu")]
@@ -55,6 +57,8 @@ pub mod gpu;
 pub mod qec;
 pub mod sim;
 
+#[cfg(feature = "distributed")]
+pub use backend::distributed_statevector::DistributedStatevectorBackend;
 pub use backend::factored::FactoredBackend;
 pub use backend::factored_stabilizer::FactoredStabilizerBackend;
 pub use backend::mps::MpsBackend;
@@ -65,6 +69,10 @@ pub use backend::statevector::StatevectorBackend;
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;
 pub use circuit::{Circuit, ClassicalCondition, Instruction, SvgOptions, TextOptions};
+#[cfg(feature = "distributed-mpi")]
+pub use distributed::MpiComm;
+#[cfg(feature = "distributed")]
+pub use distributed::{DistributedContext, RankComm, SerialComm};
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
 #[cfg(feature = "bench-internal")]

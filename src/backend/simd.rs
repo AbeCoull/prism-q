@@ -1344,6 +1344,133 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     }
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "distributed"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn combine_global_half_avx2fma(
+    dst: &mut [Complex64],
+    remote: &[Complex64],
+    c_self: Complex64,
+    c_remote: Complex64,
+) {
+    let s_rr = _mm256_set1_pd(c_self.re);
+    let s_ii = _mm256_set1_pd(c_self.im);
+    let r_rr = _mm256_set1_pd(c_remote.re);
+    let r_ii = _mm256_set1_pd(c_remote.im);
+    let dp = dst.as_mut_ptr() as *mut f64;
+    let rp = remote.as_ptr() as *const f64;
+    let pairs = dst.len() / 2;
+    for i in 0..pairs {
+        let off = i * 4;
+        let d = _mm256_loadu_pd(dp.add(off));
+        let r = _mm256_loadu_pd(rp.add(off));
+        let acc = _mm256_add_pd(
+            complex_mul_avx2fma(s_rr, s_ii, d),
+            complex_mul_avx2fma(r_rr, r_ii, r),
+        );
+        _mm256_storeu_pd(dp.add(off), acc);
+    }
+    if dst.len() % 2 != 0 {
+        let last = dst.len() - 1;
+        dst[last] = c_self * dst[last] + c_remote * remote[last];
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", feature = "distributed"))]
+#[target_feature(enable = "fma")]
+unsafe fn combine_global_half_fma(
+    dst: &mut [Complex64],
+    remote: &[Complex64],
+    c_self: Complex64,
+    c_remote: Complex64,
+) {
+    let s_rr = _mm_set1_pd(c_self.re);
+    let s_ii = _mm_set1_pd(c_self.im);
+    let r_rr = _mm_set1_pd(c_remote.re);
+    let r_ii = _mm_set1_pd(c_remote.im);
+    let dp = dst.as_mut_ptr() as *mut f64;
+    let rp = remote.as_ptr() as *const f64;
+    for i in 0..dst.len() {
+        let d = _mm_loadu_pd(dp.add(i * 2));
+        let r = _mm_loadu_pd(rp.add(i * 2));
+        let acc = _mm_add_pd(
+            complex_mul_fma(s_rr, s_ii, d),
+            complex_mul_fma(r_rr, r_ii, r),
+        );
+        _mm_storeu_pd(dp.add(i * 2), acc);
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", feature = "distributed"))]
+unsafe fn combine_global_half_neon(
+    dst: &mut [Complex64],
+    remote: &[Complex64],
+    c_self: Complex64,
+    c_remote: Complex64,
+) {
+    let s_rr = vdupq_n_f64(c_self.re);
+    let s_ii_as = vcombine_f64(vdup_n_f64(-c_self.im), vdup_n_f64(c_self.im));
+    let r_rr = vdupq_n_f64(c_remote.re);
+    let r_ii_as = vcombine_f64(vdup_n_f64(-c_remote.im), vdup_n_f64(c_remote.im));
+    let dp = dst.as_mut_ptr() as *mut f64;
+    let rp = remote.as_ptr() as *const f64;
+    for i in 0..dst.len() {
+        let d = vld1q_f64(dp.add(i * 2));
+        let r = vld1q_f64(rp.add(i * 2));
+        let acc = vaddq_f64(
+            complex_mul_neon(s_rr, s_ii_as, d),
+            complex_mul_neon(r_rr, r_ii_as, r),
+        );
+        vst1q_f64(dp.add(i * 2), acc);
+    }
+}
+
+#[cfg(feature = "distributed")]
+#[inline(always)]
+fn combine_global_half_scalar(
+    dst: &mut [Complex64],
+    remote: &[Complex64],
+    c_self: Complex64,
+    c_remote: Complex64,
+) {
+    for (d, &r) in dst.iter_mut().zip(remote.iter()) {
+        *d = c_self * *d + c_remote * r;
+    }
+}
+
+/// Combine two equal-length amplitude slices in place:
+/// `dst[i] = c_self * dst[i] + c_remote * remote[i]`.
+///
+/// Used after a distributed rank exchange for a global one qubit gate.
+#[cfg(feature = "distributed")]
+pub(crate) fn combine_global_half(
+    dst: &mut [Complex64],
+    remote: &[Complex64],
+    c_self: Complex64,
+    c_remote: Complex64,
+) {
+    debug_assert_eq!(dst.len(), remote.len());
+    #[cfg(target_arch = "x86_64")]
+    {
+        if dst.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
+            // SAFETY: AVX2 and FMA are available; slices have equal length.
+            unsafe { combine_global_half_avx2fma(dst, remote, c_self, c_remote) };
+            return;
+        }
+        if dst.len() >= 2 && has_fma() {
+            // SAFETY: FMA is available; slices have equal length.
+            unsafe { combine_global_half_fma(dst, remote, c_self, c_remote) };
+            return;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if dst.len() >= MIN_SIMD_SLICE {
+        // SAFETY: NEON is available; slices have equal length.
+        unsafe { combine_global_half_neon(dst, remote, c_self, c_remote) };
+        return;
+    }
+    combine_global_half_scalar(dst, remote, c_self, c_remote);
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn scale_complex_to_slice_avx2fma(
@@ -2273,6 +2400,41 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_arch = "x86_64", feature = "distributed"))]
+    #[test]
+    fn combine_global_half_x86_tiers_match_scalar() {
+        let c_self = c(0.3, -0.4);
+        let c_remote = c(-0.2, 0.7);
+        for len in [1usize, 2, 3, 4, 5, 7, 16, 17, 33] {
+            let dst0: Vec<Complex64> = (0..len)
+                .map(|i| c((i as f64) * 0.13 - 0.4, 0.2 - (i as f64) * 0.07))
+                .collect();
+            let remote: Vec<Complex64> = (0..len)
+                .map(|i| c(0.5 - (i as f64) * 0.11, (i as f64) * 0.03 + 0.1))
+                .collect();
+            let mut expected = dst0.clone();
+            combine_global_half_scalar(&mut expected, &remote, c_self, c_remote);
+
+            if has_fma() {
+                let mut actual = dst0.clone();
+                // SAFETY: FMA support is checked above, and the slices have equal length.
+                unsafe { combine_global_half_fma(&mut actual, &remote, c_self, c_remote) };
+                assert_state_close(&actual, &expected, &format!("fma len={len}"));
+            }
+
+            if has_avx2_fma() {
+                let mut actual = dst0.clone();
+                // SAFETY: AVX2 and FMA support are checked above, and the slices have equal length.
+                unsafe { combine_global_half_avx2fma(&mut actual, &remote, c_self, c_remote) };
+                assert_state_close(&actual, &expected, &format!("avx2fma len={len}"));
+            }
+
+            let mut actual = dst0.clone();
+            combine_global_half(&mut actual, &remote, c_self, c_remote);
+            assert_state_close(&actual, &expected, &format!("dispatch len={len}"));
+        }
+    }
+
     fn identity_4x4() -> [[Complex64; 4]; 4] {
         let z = c(0.0, 0.0);
         let o = c(1.0, 0.0);
@@ -2614,7 +2776,7 @@ mod tests {
         let root = env!("CARGO_MANIFEST_DIR");
         // Per-file expected counts; the breakdown makes a drift easy to localise.
         let expected: [(&str, usize); 4] = [
-            ("src/backend/simd.rs", 27),
+            ("src/backend/simd.rs", 29),
             ("src/backend/word_ops.rs", 2),
             ("src/backend/stabilizer/kernels/simd.rs", 3),
             ("src/backend/statevector/kernels.rs", 10),

@@ -136,6 +136,18 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     pub fn gpu(self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
         self.backend(BackendKind::StatevectorGpu { context })
     }
+
+    /// Distribute the exact state vector across the ranks of `context`.
+    ///
+    /// With a single rank this behaves like [`Simulate::backend`] with
+    /// [`BackendKind::Statevector`].
+    #[cfg(feature = "distributed")]
+    pub fn distributed(
+        self,
+        context: std::sync::Arc<crate::distributed::DistributedContext>,
+    ) -> Self {
+        self.backend(BackendKind::StatevectorDistributed { context })
+    }
 }
 
 impl<'c> Simulate<'c, Unseeded> {
@@ -288,6 +300,17 @@ fn run_with_internal(
 ) -> Result<RunOutcome> {
     if !matches!(kind, BackendKind::Auto) {
         validate_explicit_backend(&kind, circuit)?;
+    }
+    // The distributed backend runs the whole circuit across ranks in lockstep.
+    // Subsystem decomposition, Clifford+T, and temporal-Clifford shortcuts all
+    // reshape execution per sub-block, which would desynchronize the collective
+    // calls every rank must issue in the same order. Dispatch directly.
+    #[cfg(feature = "distributed")]
+    if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
+        return match select_dispatch(&kind, circuit, seed, false) {
+            DispatchAction::Backend(mut backend) => execute(&mut *backend, circuit, &opts),
+            _ => unreachable!("StatevectorDistributed always dispatches to a backend"),
+        };
     }
     let mut has_partial_independence = false;
     if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {

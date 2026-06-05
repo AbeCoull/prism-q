@@ -5,6 +5,8 @@ all-features = true
 ignore = [
     # paste: unmaintained, transitive dep from faer/gemm. Revisit when upstream moves to pastey.
     { id = "RUSTSEC-2024-0436", reason = "transitive dep from faer, revisit when deps migrate to pastey" },
+    # custom_derive: unmaintained, transitive dep from optional mpi via conv.
+    { id = "RUSTSEC-2025-0058", reason = "transitive dep from optional mpi, revisit when mpi removes conv/custom_derive" },
 ]
 
 [licenses]
@@ -13,6 +15,7 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
+    "BSD-3-Clause",
     "ISC",
     "Zlib",
     "Unicode-3.0",

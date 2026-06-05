@@ -1344,7 +1344,7 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "distributed", test)))]
+#[cfg(all(target_arch = "x86_64", feature = "distributed"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn combine_global_half_avx2fma(
     dst: &mut [Complex64],
@@ -1375,7 +1375,7 @@ unsafe fn combine_global_half_avx2fma(
     }
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "distributed", test)))]
+#[cfg(all(target_arch = "x86_64", feature = "distributed"))]
 #[target_feature(enable = "fma")]
 unsafe fn combine_global_half_fma(
     dst: &mut [Complex64],
@@ -1400,7 +1400,7 @@ unsafe fn combine_global_half_fma(
     }
 }
 
-#[cfg(all(target_arch = "aarch64", any(feature = "distributed", test)))]
+#[cfg(all(target_arch = "aarch64", feature = "distributed"))]
 unsafe fn combine_global_half_neon(
     dst: &mut [Complex64],
     remote: &[Complex64],
@@ -1424,8 +1424,7 @@ unsafe fn combine_global_half_neon(
     }
 }
 
-#[allow(dead_code)]
-#[cfg(any(feature = "distributed", test))]
+#[cfg(feature = "distributed")]
 #[inline(always)]
 fn combine_global_half_scalar(
     dst: &mut [Complex64],
@@ -1442,7 +1441,7 @@ fn combine_global_half_scalar(
 /// `dst[i] = c_self * dst[i] + c_remote * remote[i]`.
 ///
 /// Used after a distributed rank exchange for a global one qubit gate.
-#[cfg(any(feature = "distributed", test))]
+#[cfg(feature = "distributed")]
 pub(crate) fn combine_global_half(
     dst: &mut [Complex64],
     remote: &[Complex64],
@@ -2401,7 +2400,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "distributed"))]
     #[test]
     fn combine_global_half_x86_tiers_match_scalar() {
         let c_self = c(0.3, -0.4);

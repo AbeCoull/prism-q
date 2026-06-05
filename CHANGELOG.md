@@ -2,6 +2,15 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.17.0] - 2026-06-05
+
+### Documentation
+
+- Add supported status for cpu/gpu architectures (#80)([ddb2005](https://github.com/AbeCoull/prism-q/commit/ddb2005cb0fc6ab04d3e1742501b40085af6e56e))
+
+### Features
+
+- **dist:** Add MPI base for the state vector backend (#81)([550a717](https://github.com/AbeCoull/prism-q/commit/550a717fd0dc2623aaaac2ca8020a5a9e1440545))
 ## [0.16.1] - 2026-05-30
 
 ### Bug Fixes
@@ -15,6 +24,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- **release:** 0.16.1([3967113](https://github.com/AbeCoull/prism-q/commit/3967113cf30bc8c63e9ccc27a9989445437dff34))
 - Make parallel feature opt-out instead of opt-in (#76)([22d0a25](https://github.com/AbeCoull/prism-q/commit/22d0a259136f8625a0dcac18ad67a6bc551e45bc))
 ## [0.16.0] - 2026-05-29
 

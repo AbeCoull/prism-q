@@ -6,6 +6,7 @@ use crate::circuit::Circuit;
 use crate::distributed::{DistributedContext, RankComm};
 use crate::sim::run_on;
 use num_complex::Complex64;
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 
 const SEED: u64 = 42;
@@ -26,6 +27,11 @@ struct LoopbackState {
     arrived: usize,
     cslots: Vec<Vec<Complex64>>,
     fslots: Vec<f64>,
+    // Pairwise mailboxes indexed by `sender * size + receiver`. Each holds a
+    // FIFO queue of messages so repeated exchanges between the same pair stay
+    // ordered. This models MPI point-to-point, which is independent of the
+    // global barrier used by the collectives.
+    mailbox: Vec<VecDeque<Vec<Complex64>>>,
 }
 
 impl LoopbackShared {
@@ -37,6 +43,7 @@ impl LoopbackShared {
                 arrived: 0,
                 cslots: vec![Vec::new(); size],
                 fslots: vec![0.0; size],
+                mailbox: (0..size * size).map(|_| VecDeque::new()).collect(),
             }),
             cv: Condvar::new(),
         })
@@ -117,16 +124,21 @@ impl RankComm for LoopbackComm {
 
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
         debug_assert_eq!(send.len(), recv.len());
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            st.cslots[self.rank] = send.to_vec();
+        let size = self.shared.size;
+        let mut st = self.shared.state.lock().unwrap();
+        // Deposit into self -> partner, then wait for partner -> self. Pairwise
+        // and barrier-independent, so ranks that skip an exchange (a 0 control)
+        // never block a partner: their partner skips the same exchange.
+        st.mailbox[self.rank * size + partner].push_back(send.to_vec());
+        self.shared.cv.notify_all();
+        let inbox = partner * size + self.rank;
+        loop {
+            if let Some(msg) = st.mailbox[inbox].pop_front() {
+                recv.copy_from_slice(&msg);
+                return;
+            }
+            st = self.shared.cv.wait(st).unwrap();
         }
-        self.shared.barrier();
-        {
-            let st = self.shared.state.lock().unwrap();
-            recv.copy_from_slice(&st.cslots[partner]);
-        }
-        self.shared.barrier();
     }
 
     fn barrier(&self) {
@@ -311,6 +323,119 @@ fn loopback_local_only_matches_across_ranks() {
     // Entangling chain confined to local qubits.
     let mut b = CircuitBuilder::new(5);
     b.h(0).cx(0, 1).cx(1, 2);
+    assert_loopback_matches(&b.build(), &[1, 2, 4]);
+}
+
+// --- P2: two-qubit / controlled gates spanning global qubits ---
+//
+// With 4 qubits across 4 ranks, qubits 0,1 are local and 2,3 are global, so a
+// two-qubit gate can place its operands in every local/global combination. A
+// leading Hadamard wall spreads amplitude so every branch carries weight.
+
+fn spread_4q() -> CircuitBuilder {
+    let mut b = CircuitBuilder::new(4);
+    b.h(0).h(1).h(2).h(3);
+    b
+}
+
+#[test]
+fn loopback_cx_all_qubit_splits() {
+    relax_min_local_qubits();
+    // (local,local), (local,global), (global,local), (global,global).
+    for &(c, t) in &[(0usize, 1usize), (1, 2), (2, 0), (2, 3)] {
+        let mut b = spread_4q();
+        b.cx(c, t);
+        assert_loopback_matches(&b.build(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+fn loopback_cz_all_qubit_splits() {
+    relax_min_local_qubits();
+    for &(a, t) in &[(0usize, 1usize), (1, 3), (3, 0), (2, 3)] {
+        let mut b = spread_4q();
+        b.cz(a, t);
+        assert_loopback_matches(&b.build(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+fn loopback_swap_all_qubit_splits() {
+    relax_min_local_qubits();
+    for &(a, t) in &[(0usize, 1usize), (1, 2), (3, 0), (2, 3)] {
+        let mut b = spread_4q();
+        b.swap(a, t);
+        assert_loopback_matches(&b.build(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+fn loopback_rzz_all_qubit_splits() {
+    relax_min_local_qubits();
+    for &(a, t) in &[(0usize, 1usize), (1, 2), (2, 0), (2, 3)] {
+        let mut b = spread_4q();
+        b.rzz(0.85, a, t);
+        assert_loopback_matches(&b.build(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+fn loopback_cphase_all_qubit_splits() {
+    relax_min_local_qubits();
+    for &(c, t) in &[(0usize, 1usize), (1, 2), (2, 0), (2, 3)] {
+        let mut b = spread_4q();
+        b.cphase(0.6, c, t);
+        assert_loopback_matches(&b.build(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+fn loopback_controlled_unitary_global_target() {
+    relax_min_local_qubits();
+    // A non-phase controlled unitary (Ry(0.9) on the target) with control and
+    // target in mixed local/global positions.
+    let ry = |theta: f64| {
+        let (s, c) = (theta / 2.0).sin_cos();
+        [
+            [Complex64::new(c, 0.0), Complex64::new(-s, 0.0)],
+            [Complex64::new(s, 0.0), Complex64::new(c, 0.0)],
+        ]
+    };
+    for &(c, t) in &[(1usize, 2usize), (2, 0), (2, 3)] {
+        let mut b = spread_4q();
+        b.cu(ry(0.9), c, t);
+        assert_loopback_matches(&b.build(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+fn loopback_toffoli_mixed_splits() {
+    relax_min_local_qubits();
+    let x = [
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+    // Two controls + target across local/global boundaries.
+    for &(c0, c1, t) in &[(0usize, 1usize, 2usize), (0, 2, 3), (2, 3, 0), (1, 2, 3)] {
+        let mut b = spread_4q();
+        b.mcu(x, &[c0, c1], t);
+        assert_loopback_matches(&b.build(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+fn loopback_mixed_circuit_qft_like() {
+    relax_min_local_qubits();
+    // H walls interleaved with controlled phases spanning all splits, plus an
+    // entangling tail. Exercises the full P2 path end to end.
+    let mut b = CircuitBuilder::new(4);
+    b.h(0).h(1).h(2).h(3);
+    b.cphase(0.5, 0, 2)
+        .cphase(0.25, 1, 3)
+        .cx(2, 1)
+        .rzz(0.4, 0, 3)
+        .swap(1, 2)
+        .cz(0, 3);
     assert_loopback_matches(&b.build(), &[1, 2, 4]);
 }
 

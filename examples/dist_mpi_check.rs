@@ -42,18 +42,27 @@ fn run() {
     const SEED: u64 = 42;
     const TOL: f64 = 1e-10;
 
-    // Cover local entanglement and global one qubit gates.
+    // Cover local entanglement, global one qubit gates, and two-qubit and
+    // controlled gates whose operands span local and global qubits.
     fn build_circuit(num_qubits: usize, _local_qubits: usize) -> Circuit {
-        let mut b = CircuitBuilder::new(num_qubits);
+        let n = num_qubits;
+        let hi = n - 1; // global on multi-rank runs
+        let mid = n - 2; // global on 4+ ranks
+        let mut b = CircuitBuilder::new(n);
         // Local entanglement on the bottom qubits.
         b.h(0).cx(0, 1).cx(1, 2);
-        // Include global targets.
-        for q in 0..num_qubits {
+        // One qubit gates on every qubit, including global targets.
+        for q in 0..n {
             b.h(q);
         }
-        b.rx(0.37, num_qubits - 1)
-            .t(num_qubits - 1)
-            .rz(-0.6, num_qubits - 2);
+        b.rx(0.37, hi).t(hi).rz(-0.6, mid);
+        // Two-qubit and controlled gates spanning the local/global boundary.
+        b.cx(0, hi) // control local, target global
+            .cx(hi, 0) // control global, target local
+            .cz(1, mid) // diagonal across the boundary
+            .rzz(0.4, 2, hi) // parity diagonal across the boundary
+            .swap(0, hi) // swap across the boundary
+            .cphase(0.5, mid, hi); // controlled phase, both global on 4 ranks
         b.build()
     }
 

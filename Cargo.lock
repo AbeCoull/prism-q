@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "prism-q"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "criterion",
  "cudarc",

@@ -2,6 +2,11 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.18.0] - 2026-06-08
+
+### Features
+
+- **dist:** Support global multi-qubit gates (#82)([1c65673](https://github.com/AbeCoull/prism-q/commit/1c656731471cbad9e32775545ac7eb40027f0608))
 ## [0.17.0] - 2026-06-05
 
 ### Documentation
@@ -11,6 +16,10 @@ All notable changes to PRISM-Q will be documented in this file.
 ### Features
 
 - **dist:** Add MPI base for the state vector backend (#81)([550a717](https://github.com/AbeCoull/prism-q/commit/550a717fd0dc2623aaaac2ca8020a5a9e1440545))
+
+### Miscellaneous
+
+- **release:** 0.17.0([7258bdd](https://github.com/AbeCoull/prism-q/commit/7258bdd6380a2dbcc99f4bcf57086481b2964361))
 ## [0.16.1] - 2026-05-30
 
 ### Bug Fixes

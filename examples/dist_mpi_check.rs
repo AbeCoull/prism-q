@@ -63,6 +63,18 @@ fn run() {
             .rzz(0.4, 2, hi) // parity diagonal across the boundary
             .swap(0, hi) // swap across the boundary
             .cphase(0.5, mid, hi); // controlled phase, both global on 4 ranks
+                                   // Fusion-triggering tail: rotation layers + a CX ladder fuse into
+                                   // MultiFused / Fused2q, and the cphase ladder into BatchPhase, all
+                                   // reaching the global qubits at the top of the register.
+        for q in 0..n {
+            b.ry(0.2 + 0.01 * q as f64, q).rz(0.1, q);
+        }
+        for q in 0..n - 1 {
+            b.cx(q, q + 1);
+        }
+        for q in 0..n - 1 {
+            b.cphase(0.3, q, n - 1);
+        }
         b.build()
     }
 
@@ -72,7 +84,9 @@ fn run() {
     assert!(size.is_power_of_two(), "rank count must be a power of two");
     let p = size.trailing_zeros() as usize;
 
-    let num_qubits = 6;
+    // 16 qubits crosses every fusion threshold (1q/2q/multi/diagonal-batch), so
+    // the run exercises fused and batched gates spanning the global qubits.
+    let num_qubits = 16;
     let local_qubits = num_qubits - p;
     let circuit = build_circuit(num_qubits, local_qubits);
 

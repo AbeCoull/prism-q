@@ -23,9 +23,14 @@
 //! communicate. Plus gathers for `probabilities` and `export_statevector`. With
 //! a single rank ([`SerialComm`]), every qubit is local.
 //!
-//! Not implemented yet: measurement, reset, conditionals, and sampling. Fused
-//! and batched gates are not applied across rank bits (fusion is disabled on
-//! multi-rank runs).
+//! Fusion runs in every mode: fully local fused gates dispatch to the inner
+//! backend's tiled SIMD kernels, while fused or batched gates that span a rank
+//! bit (MultiFused, Fused2q, Multi2q, BatchPhase, BatchRzz, DiagonalBatch) are
+//! decomposed into the primitive paths above. A general two-qubit gate over one
+//! global qubit needs a single pairwise exchange; over two global qubits it
+//! gathers the four-rank group.
+//!
+//! Not implemented yet: measurement, reset, conditionals, and sampling.
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +48,12 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
 const BACKEND_NAME: &str = "distributed_statevector";
+
+/// Whether a 2x2 matrix is diagonal (off-diagonal entries effectively zero).
+#[inline]
+fn is_diagonal_2x2(mat: &[[Complex64; 2]; 2]) -> bool {
+    mat[0][1].norm() < 1e-12 && mat[1][0].norm() < 1e-12
+}
 
 /// Distributed state vector backend over an [`Arc<DistributedContext>`].
 pub struct DistributedStatevectorBackend {
@@ -258,9 +269,22 @@ impl DistributedStatevectorBackend {
     /// `exp(i theta/2)` when they differ, so no communication is needed: a
     /// global qubit contributes a constant rank bit to the parity.
     fn apply_rzz_dist(&mut self, q0: usize, q1: usize, theta: f64) {
-        let local = self.local_qubits();
         let phase_same = Complex64::from_polar(1.0, -theta / 2.0);
         let phase_diff = Complex64::from_polar(1.0, theta / 2.0);
+        self.apply_rzz_phases_dist(q0, q1, phase_same, phase_diff);
+    }
+
+    /// Apply a parity-diagonal two-qubit phase: `phase_same` when the two qubit
+    /// bits agree, `phase_diff` when they differ. Shared by `Rzz` and the
+    /// `Parity2q` diagonal-batch entry. Communication-free.
+    fn apply_rzz_phases_dist(
+        &mut self,
+        q0: usize,
+        q1: usize,
+        phase_same: Complex64,
+        phase_diff: Complex64,
+    ) {
+        let local = self.local_qubits();
         let phases = [phase_same, phase_diff];
 
         match (q0 < local, q1 < local) {
@@ -348,6 +372,113 @@ impl DistributedStatevectorBackend {
         }
     }
 
+    /// Apply a general 4x4 two-qubit unitary across any local/global split.
+    ///
+    /// `mat` follows the backend convention where row/column index `2*b0 + b1`
+    /// orders the `(q0, q1)` bits with `q0` most significant. Local-local
+    /// delegates to the inner tiled kernel. One global qubit needs a single
+    /// pairwise exchange; two global qubits need a four-way gather across the
+    /// rank group that shares the two rank bits.
+    fn apply_2q_dist(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        let local = self.local_qubits();
+        match (q0 < local, q1 < local) {
+            (true, true) => self.apply_local_fused_2q(q0, q1, mat),
+            (true, false) | (false, true) => self.apply_2q_one_global(q0, q1, mat),
+            (false, false) => self.apply_2q_two_global(q0, q1, mat),
+        }
+    }
+
+    /// Apply a fully local 4x4 gate through the inner backend's tiled kernel.
+    fn apply_local_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        self.inner
+            .apply(&Instruction::Gate {
+                gate: Gate::Fused2q(Box::new(*mat)),
+                targets: smallvec![q0, q1],
+            })
+            .expect("local fused 2q");
+    }
+
+    /// One qubit local, one global. Exchange with the partner that differs in
+    /// the global bit, then recompute each amplitude from the four inputs of the
+    /// 2x2 block: the two local-bit values on this rank (global bit `g`) and the
+    /// two on the partner (global bit `1 - g`).
+    fn apply_2q_one_global(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        let local = self.local_qubits();
+        let (local_q, global_q, global_is_q0) = if q0 < local {
+            (q0, q1, false)
+        } else {
+            (q1, q0, true)
+        };
+        let partner = self.context.rank() ^ (1usize << self.global_bit(global_q));
+        let len = self.inner.state.len();
+        if self.recv.len() != len {
+            self.recv.resize(len, Complex64::new(0.0, 0.0));
+        }
+        self.context
+            .comm()
+            .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
+
+        let g = self.rank_bit_set(global_q) as usize;
+        let half = 1usize << local_q;
+        // Basis index in `mat` is `2*b_q0 + b_q1`.
+        let basis = |gbit: usize, lbit: usize| -> usize {
+            if global_is_q0 {
+                (gbit << 1) | lbit
+            } else {
+                (lbit << 1) | gbit
+            }
+        };
+        // Output depends on both local-bit siblings, so snapshot first.
+        let local_snapshot = self.inner.state.clone();
+        for i in 0..len {
+            let l = (i >> local_q) & 1;
+            let row = basis(g, l);
+            let sib0 = i & !half; // local bit 0 sibling index
+            let sib1 = i | half; // local bit 1 sibling index
+            let mut acc = mat[row][basis(g, 0)] * local_snapshot[sib0];
+            acc += mat[row][basis(g, 1)] * local_snapshot[sib1];
+            acc += mat[row][basis(1 - g, 0)] * self.recv[sib0];
+            acc += mat[row][basis(1 - g, 1)] * self.recv[sib1];
+            self.inner.state[i] = acc;
+        }
+    }
+
+    /// Both qubits global. The four `(q0, q1)` combinations live on four ranks
+    /// that share every other rank bit. Gather the other three slices, then each
+    /// rank computes its output row of `mat` from the four gathered slices.
+    fn apply_2q_two_global(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+        let b0 = self.global_bit(q0);
+        let b1 = self.global_bit(q1);
+        let rank = self.context.rank();
+        let g0 = (rank >> b0) & 1;
+        let g1 = (rank >> b1) & 1;
+        let my_basis = (g0 << 1) | g1;
+
+        let len = self.inner.state.len();
+        let mut slices: [Vec<Complex64>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for (c, slot) in slices.iter_mut().enumerate() {
+            if c == my_basis {
+                *slot = self.inner.state.clone();
+                continue;
+            }
+            let c0 = (c >> 1) & 1;
+            let c1 = c & 1;
+            let partner = (rank & !(1 << b0) & !(1 << b1)) | (c0 << b0) | (c1 << b1);
+            let mut buf = vec![Complex64::new(0.0, 0.0); len];
+            self.context
+                .comm()
+                .sendrecv_c64(partner, &self.inner.state, &mut buf);
+            *slot = buf;
+        }
+        for i in 0..len {
+            let mut acc = Complex64::new(0.0, 0.0);
+            for (c, slice) in slices.iter().enumerate() {
+                acc += mat[my_basis][c] * slice[i];
+            }
+            self.inner.state[i] = acc;
+        }
+    }
+
     /// Dispatch a multi-qubit gate whose qubit set spans at least one global
     /// qubit. Fusion is disabled in multi-rank mode, so gates arrive as raw
     /// primitives (Cx, Cz, Swap, Cu, Mcu, Rzz).
@@ -393,7 +524,81 @@ impl DistributedStatevectorBackend {
                 }
                 Ok(())
             }
-            _ => Err(self.unsupported("fused or batched gate spanning a global qubit")),
+            Gate::Fused2q(mat) => {
+                self.apply_2q_dist(targets[0], targets[1], mat);
+                Ok(())
+            }
+            Gate::Multi2q(data) => {
+                for &(q0, q1, ref mat) in &data.gates {
+                    self.apply_2q_dist(q0, q1, mat);
+                }
+                Ok(())
+            }
+            Gate::MultiFused(data) => {
+                for &(q, ref mat) in &data.gates {
+                    if q < self.local_qubits() {
+                        self.inner.apply_1q_matrix(q, mat).expect("local 1q matrix");
+                    } else if is_diagonal_2x2(mat) {
+                        self.apply_global_diagonal_1q(q, mat[0][0], mat[1][1]);
+                    } else {
+                        self.apply_global_1q(q, *mat);
+                    }
+                }
+                Ok(())
+            }
+            Gate::BatchPhase(data) => {
+                let control = targets[0];
+                for &(target, phase) in &data.phases {
+                    self.apply_controlled_phase_dist(&[control, target], phase);
+                }
+                Ok(())
+            }
+            Gate::BatchRzz(data) => {
+                for &(q0, q1, theta) in &data.edges {
+                    self.apply_rzz_dist(q0, q1, theta);
+                }
+                Ok(())
+            }
+            Gate::DiagonalBatch(data) => {
+                for entry in &data.entries {
+                    self.apply_diag_entry_dist(entry);
+                }
+                Ok(())
+            }
+            _ => Err(self.unsupported("gate spanning a global qubit")),
+        }
+    }
+
+    /// Apply a single [`DiagEntry`] across any local/global split. All diagonal
+    /// entries are communication-free.
+    fn apply_diag_entry_dist(&mut self, entry: &crate::gates::DiagEntry) {
+        use crate::gates::DiagEntry;
+        match *entry {
+            DiagEntry::Phase1q { qubit, d0, d1 } => {
+                if qubit < self.local_qubits() {
+                    self.inner
+                        .apply_1q_matrix(
+                            qubit,
+                            &[
+                                [d0, Complex64::new(0.0, 0.0)],
+                                [Complex64::new(0.0, 0.0), d1],
+                            ],
+                        )
+                        .expect("local diagonal 1q");
+                } else {
+                    self.apply_global_diagonal_1q(qubit, d0, d1);
+                }
+            }
+            DiagEntry::Phase2q { q0, q1, phase } => {
+                self.apply_controlled_phase_dist(&[q0, q1], phase);
+            }
+            DiagEntry::Parity2q {
+                q0, q1, same, diff, ..
+            } => {
+                // same = exp(-i theta/2), diff = exp(i theta/2) for Rzz(theta).
+                // Recover the parity phases directly without the angle.
+                self.apply_rzz_phases_dist(q0, q1, same, diff);
+            }
         }
     }
 
@@ -411,8 +616,10 @@ impl Backend for DistributedStatevectorBackend {
     }
 
     fn supports_fused_gates(&self) -> bool {
-        // Fusion assumes every target indexes the local slice.
-        self.is_single_rank()
+        // Fusion runs in every mode. Fully local fused gates dispatch to the
+        // inner backend's tiled SIMD kernels; fused or batched gates that span a
+        // rank bit are decomposed into primitives at apply time.
+        true
     }
 
     fn supports_qft_block(&self) -> bool {

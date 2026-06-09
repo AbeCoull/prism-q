@@ -439,6 +439,114 @@ fn loopback_mixed_circuit_qft_like() {
     assert_loopback_matches(&b.build(), &[1, 2, 4]);
 }
 
+// --- P3: distributed fusion (fused/batched gates spanning global qubits) ---
+//
+// These circuits are large enough to trigger the fusion pipeline (>= 10 qubits
+// for 1q fusion, >= 12 for 2q, >= 14 for multi-1q, >= 16 for diagonal batch).
+// The reference statevector fuses identically, so a match confirms the
+// distributed backend decomposes each fused/batched variant correctly when its
+// qubit set spans a rank bit. Run at 2 and 4 ranks to put fused gates on the
+// global qubits (the top 1 or 2 of the register).
+
+#[test]
+fn loopback_fused_multifused_and_2q() {
+    relax_min_local_qubits();
+    // HEA-style: layers of 1q rotations (fuse into MultiFused) and CX ladders
+    // (fuse into Fused2q / Multi2q), reaching the global qubits at the top.
+    let n = 14;
+    let mut b = CircuitBuilder::new(n);
+    for layer in 0..3 {
+        for q in 0..n {
+            b.ry(0.3 + 0.01 * (layer * n + q) as f64, q);
+            b.rz(-0.2 + 0.02 * q as f64, q);
+        }
+        for q in 0..n - 1 {
+            b.cx(q, q + 1);
+        }
+    }
+    assert_loopback_matches(&b.build(), &[1, 2, 4]);
+}
+
+#[test]
+fn loopback_fused_batchphase_qft() {
+    relax_min_local_qubits();
+    // Textbook QFT produces H walls plus controlled-phase batches (BatchPhase)
+    // and trailing swaps, spanning the full register including global qubits.
+    let n = 12;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+        for (j, target) in (q + 1..n).enumerate() {
+            let angle = std::f64::consts::PI / (1u64 << (j + 1)) as f64;
+            b.cphase(angle, target, q);
+        }
+    }
+    for q in 0..n / 2 {
+        b.swap(q, n - 1 - q);
+    }
+    assert_loopback_matches(&b.build(), &[1, 2, 4]);
+}
+
+#[test]
+fn loopback_fused_batchrzz_qaoa() {
+    relax_min_local_qubits();
+    // QAOA-style: Rzz on every edge (fuse into BatchRzz at >= 16q) plus Rx
+    // mixers (MultiFused), spanning global qubits.
+    let n = 16;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+    }
+    for round in 0..2 {
+        for q in 0..n - 1 {
+            b.rzz(0.7 + 0.01 * round as f64, q, q + 1);
+        }
+        for q in 0..n {
+            b.rx(0.4, q);
+        }
+    }
+    assert_loopback_matches(&b.build(), &[1, 2, 4]);
+}
+
+#[test]
+fn loopback_fused_diagonal_batch() {
+    relax_min_local_qubits();
+    // Mixed diagonal run (cphase + rzz + diagonal 1q) at >= 16 qubits triggers
+    // DiagonalBatch fusion; ensure the entries decompose across the boundary.
+    let n = 16;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+    }
+    for q in 0..n - 1 {
+        b.cphase(0.3, q, q + 1);
+        b.rzz(0.5, q, q + 1);
+    }
+    for q in 0..n {
+        b.t(q);
+        b.rz(0.15, q);
+    }
+    assert_loopback_matches(&b.build(), &[1, 2, 4]);
+}
+
+#[test]
+fn loopback_fused_2q_both_global() {
+    relax_min_local_qubits();
+    // Force a fused 2q gate onto the two global qubits at 4 ranks (top two of a
+    // 12q register), exercising the four-way gather path.
+    let n = 12;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+    }
+    // Adjacent 1q + CX on the top pair fuse into a Fused2q spanning both globals.
+    b.ry(0.6, n - 2)
+        .rz(0.3, n - 1)
+        .cx(n - 2, n - 1)
+        .ry(-0.4, n - 1);
+    assert_loopback_matches(&b.build(), &[1, 2, 4]);
+}
+
 #[test]
 fn reports_global_qubit_count_for_single_rank() {
     let ctx = DistributedContext::serial();

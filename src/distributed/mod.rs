@@ -4,7 +4,7 @@
 //! define their own state partitioning and use this module for rank access.
 //!
 //! Available contexts:
-//! - [`DistributedContext::serial`]: a single rank for tests and non-MPI runs.
+//! - [`DistributedContext::serial`]: one rank for tests and runs without MPI.
 //! - [`DistributedContext::world`]: the MPI world communicator (requires the
 //!   `distributed-mpi` feature and an MPI launcher).
 //!
@@ -29,6 +29,20 @@ pub fn min_local_qubits() -> usize {
     use std::sync::OnceLock;
     static CACHED: OnceLock<usize> = OnceLock::new();
     *CACHED.get_or_init(|| env_usize_or("PRISM_DIST_MIN_LOCAL_QUBITS", MIN_LOCAL_QUBITS_DEFAULT, 1))
+}
+
+/// Maximum number of amplitudes exchanged per message for a global one qubit
+/// gate. Chunking bounds the receive buffer to this value.
+///
+/// Tunable via `PRISM_DIST_EXCHANGE_CHUNK`. The default (`usize::MAX`) keeps the
+/// original one message behavior, so there is no change unless set.
+pub const EXCHANGE_CHUNK_DEFAULT: usize = usize::MAX;
+
+/// Chunk size in amplitudes for tiled global one qubit exchange.
+pub fn exchange_chunk() -> usize {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| env_usize_or("PRISM_DIST_EXCHANGE_CHUNK", EXCHANGE_CHUNK_DEFAULT, 1))
 }
 
 #[inline]
@@ -60,7 +74,7 @@ impl DistributedContext {
         Arc::new(Self { comm })
     }
 
-    /// Single rank. Used by tests and by non-MPI runs.
+    /// Single rank. Used by tests and runs without MPI.
     pub fn serial() -> Arc<Self> {
         Self::from_comm(Arc::new(SerialComm))
     }

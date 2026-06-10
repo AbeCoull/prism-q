@@ -5,7 +5,7 @@
 //!
 //! Available contexts:
 //! - [`DistributedContext::serial`]: one rank for tests and runs without MPI.
-//! - [`DistributedContext::world`]: the MPI world communicator (requires the
+//! - `DistributedContext::world`: the MPI world communicator (requires the
 //!   `distributed-mpi` feature and an MPI launcher).
 //!
 //! Tuning thresholds are cached after the first environment variable read.
@@ -43,6 +43,22 @@ pub fn exchange_chunk() -> usize {
     use std::sync::OnceLock;
     static CACHED: OnceLock<usize> = OnceLock::new();
     *CACHED.get_or_init(|| env_usize_or("PRISM_DIST_EXCHANGE_CHUNK", EXCHANGE_CHUNK_DEFAULT, 1))
+}
+
+/// Whether the distributed backend relabels qubits to keep busy qubits local.
+///
+/// On by default. Relabeling turns SWAP gates into zero-communication map
+/// updates and moves global qubits into local positions with a half-slice
+/// exchange before non-diagonal gates touch them. Set `PRISM_DIST_RELABEL=0`
+/// to disable and force direct per-gate exchange.
+pub fn relabel_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("PRISM_DIST_RELABEL")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+    })
 }
 
 #[inline]

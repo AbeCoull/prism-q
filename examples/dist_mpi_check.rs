@@ -150,8 +150,17 @@ fn measurement_check(
 
     let rank = ctx.rank();
     let size = ctx.size();
-    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+    let mut backend = DistributedStatevectorBackend::new(ctx.clone(), SEED);
     let out = run_on(&mut backend, &circuit).expect("distributed measurement run");
+
+    // Same circuit with qubit relabeling disabled, for the cost comparison.
+    let mut direct = DistributedStatevectorBackend::new(ctx, SEED);
+    direct.set_relabel(false);
+    let direct_out = run_on(&mut direct, &circuit).expect("direct measurement run");
+    assert_eq!(
+        out.classical_bits, direct_out.classical_bits,
+        "relabel and direct runs must measure identical outcomes"
+    );
 
     if rank == 0 {
         // Pack the outcome bits into a signature for rank count comparison.
@@ -162,11 +171,17 @@ fn measurement_check(
             }
         }
         println!("MEAS: {size} ranks, outcome_sig=0x{sig:016x}");
-        // Communication cost proxy: messages and amplitudes exchanged by rank 0.
+        // Communication cost proxy: messages and amplitudes exchanged by rank 0,
+        // with qubit relabeling (default) and with direct per-gate exchange.
         println!(
             "COMM: {size} ranks, messages={}, amplitudes={}",
             backend.exchange_messages(),
             backend.exchange_amplitudes()
+        );
+        println!(
+            "COMM-DIRECT: {size} ranks, messages={}, amplitudes={}",
+            direct.exchange_messages(),
+            direct.exchange_amplitudes()
         );
     }
 }

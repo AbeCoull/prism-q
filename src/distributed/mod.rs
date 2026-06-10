@@ -4,8 +4,8 @@
 //! define their own state partitioning and use this module for rank access.
 //!
 //! Available contexts:
-//! - [`DistributedContext::serial`]: a single rank for tests and non-MPI runs.
-//! - [`DistributedContext::world`]: the MPI world communicator (requires the
+//! - [`DistributedContext::serial`]: one rank for tests and runs without MPI.
+//! - `DistributedContext::world`: the MPI world communicator (requires the
 //!   `distributed-mpi` feature and an MPI launcher).
 //!
 //! Tuning thresholds are cached after the first environment variable read.
@@ -29,6 +29,36 @@ pub fn min_local_qubits() -> usize {
     use std::sync::OnceLock;
     static CACHED: OnceLock<usize> = OnceLock::new();
     *CACHED.get_or_init(|| env_usize_or("PRISM_DIST_MIN_LOCAL_QUBITS", MIN_LOCAL_QUBITS_DEFAULT, 1))
+}
+
+/// Maximum number of amplitudes exchanged per message for a global one qubit
+/// gate. Chunking bounds the receive buffer to this value.
+///
+/// Tunable via `PRISM_DIST_EXCHANGE_CHUNK`. The default (`usize::MAX`) keeps the
+/// original one message behavior, so there is no change unless set.
+pub const EXCHANGE_CHUNK_DEFAULT: usize = usize::MAX;
+
+/// Chunk size in amplitudes for tiled global one qubit exchange.
+pub fn exchange_chunk() -> usize {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| env_usize_or("PRISM_DIST_EXCHANGE_CHUNK", EXCHANGE_CHUNK_DEFAULT, 1))
+}
+
+/// Whether the distributed backend relabels qubits to keep busy qubits local.
+///
+/// On by default. Relabeling turns SWAP gates into zero-communication map
+/// updates and moves global qubits into local positions with a half-slice
+/// exchange before non-diagonal gates touch them. Set `PRISM_DIST_RELABEL=0`
+/// to disable and force direct per-gate exchange.
+pub fn relabel_enabled() -> bool {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("PRISM_DIST_RELABEL")
+            .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+    })
 }
 
 #[inline]
@@ -60,7 +90,7 @@ impl DistributedContext {
         Arc::new(Self { comm })
     }
 
-    /// Single rank. Used by tests and by non-MPI runs.
+    /// Single rank. Used by tests and runs without MPI.
     pub fn serial() -> Arc<Self> {
         Self::from_comm(Arc::new(SerialComm))
     }

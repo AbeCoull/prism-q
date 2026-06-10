@@ -1,10 +1,10 @@
-# Build and run the distributed backend's multi-rank correctness check.
+# Build and run the distributed backend rank correctness check.
 #
 # Usage:   powershell -ExecutionPolicy Bypass -File scripts\test-mpi.ps1 [-Ranks 4]
 #
 # Sets up the MPI build environment, builds the lib tests and the mpiexec check
 # binary, then launches it across N ranks. Rank 0 asserts the gathered result
-# matches the single-node statevector reference and exits non-zero on mismatch.
+# matches the one process statevector reference and exits nonzero on mismatch.
 
 param(
     [int[]] $RankCounts = @(1, 2, 4)
@@ -31,12 +31,26 @@ $exe = Join-Path $scriptDir '..\target\debug\examples\dist_mpi_check.exe'
 $mpiexec = "C:\Program Files\Microsoft MPI\Bin\mpiexec.exe"
 if (-not (Test-Path $mpiexec)) { $mpiexec = "mpiexec" }
 
-# The check circuit is small, so relax the local-qubit floor to let it
+# The check circuit is small, so relax the local qubit floor to let it
 # distribute across ranks on a single host.
+$measSigs = @{}
 foreach ($n in $RankCounts) {
     Write-Host "`n== mpiexec -n $n dist_mpi_check =="
-    & $mpiexec -n $n -env PRISM_DIST_MIN_LOCAL_QUBITS 1 $exe
-    if ($LASTEXITCODE -ne 0) { throw "multi-rank check failed at -n $n" }
+    $out = & $mpiexec -n $n -env PRISM_DIST_MIN_LOCAL_QUBITS 1 $exe
+    if ($LASTEXITCODE -ne 0) { throw "rank check failed at -n $n" }
+    $out | ForEach-Object { Write-Host $_ }
+    # Capture the measurement signature to confirm it matches across rank counts.
+    $match = $out | Select-String -Pattern 'outcome_sig=(\S+)' | Select-Object -First 1
+    if (-not $match) {
+        throw "measurement signature missing at -n $n"
+    }
+    $measSigs[$n] = $match.Matches[0].Groups[1].Value
 }
+
+$unique = $measSigs.Values | Select-Object -Unique
+if ($unique.Count -gt 1) {
+    throw "measurement outcomes differ across rank counts: $($measSigs | Out-String)"
+}
+Write-Host "`nMeasurement determinism: signature $($unique) identical across ranks."
 
 Write-Host "`nAll distributed MPI checks passed."

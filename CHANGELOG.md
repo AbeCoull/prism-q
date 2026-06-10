@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.19.0] - 2026-06-10
+
+### Features
+
+- **dist:** Add fusion, measurement, and tiled exchange to the distributed backend (#83)([c4f3749](https://github.com/AbeCoull/prism-q/commit/c4f374976d1f1d14ff8068dae9485ab4ea6a0149))
 ## [0.18.0] - 2026-06-08
 
 ### Features
 
 - **dist:** Support global multi-qubit gates (#82)([1c65673](https://github.com/AbeCoull/prism-q/commit/1c656731471cbad9e32775545ac7eb40027f0608))
+
+### Miscellaneous
+
+- **release:** 0.18.0([0d1f7c1](https://github.com/AbeCoull/prism-q/commit/0d1f7c12e179ea4e55f8f7af894e8b62150c5b91))
 ## [0.17.0] - 2026-06-05
 
 ### Documentation

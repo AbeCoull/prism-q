@@ -27,6 +27,10 @@ struct LoopbackState {
     arrived: usize,
     cslots: Vec<Vec<Complex64>>,
     fslots: Vec<f64>,
+    reduce: Vec<f64>,
+    // Largest block sent by a rank to allgather. Shot sampling tests
+    // assert this stays at one element, proving no dense gather happened.
+    max_gather_block: usize,
     // Mailboxes indexed by `sender * size + receiver`. FIFO order matches MPI
     // sendrecv order and stays separate from collective barriers.
     mailbox: Vec<VecDeque<Vec<Complex64>>>,
@@ -41,6 +45,8 @@ impl LoopbackShared {
                 arrived: 0,
                 cslots: vec![Vec::new(); size],
                 fslots: vec![0.0; size],
+                reduce: Vec::new(),
+                max_gather_block: 0,
                 mailbox: (0..size * size).map(|_| VecDeque::new()).collect(),
             }),
             cv: Condvar::new(),
@@ -90,6 +96,7 @@ impl RankComm for LoopbackComm {
     fn allgather_c64(&self, local: &[Complex64]) -> Vec<Complex64> {
         {
             let mut st = self.shared.state.lock().unwrap();
+            st.max_gather_block = st.max_gather_block.max(local.len());
             st.cslots[self.rank] = local.to_vec();
         }
         self.shared.barrier();
@@ -118,6 +125,29 @@ impl RankComm for LoopbackComm {
         };
         self.shared.barrier();
         sum
+    }
+
+    fn allreduce_sum_f64_slice(&self, values: &mut [f64]) {
+        {
+            let mut st = self.shared.state.lock().unwrap();
+            if st.reduce.len() != values.len() {
+                st.reduce = vec![0.0; values.len()];
+            }
+            for (acc, &v) in st.reduce.iter_mut().zip(values.iter()) {
+                *acc += v;
+            }
+        }
+        self.shared.barrier();
+        {
+            let st = self.shared.state.lock().unwrap();
+            values.copy_from_slice(&st.reduce);
+        }
+        self.shared.barrier();
+        if self.rank == 0 {
+            let mut st = self.shared.state.lock().unwrap();
+            st.reduce.clear();
+        }
+        self.shared.barrier();
     }
 
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
@@ -1040,4 +1070,212 @@ fn reports_global_qubit_count_for_single_rank() {
     dist.init(5, 0).unwrap();
     assert_eq!(dist.num_qubits(), 5);
     assert!(dist.supports_fused_gates());
+}
+
+/// Run distributed multi-shot sampling across simulated ranks. Returns the
+/// shots for every rank and the largest allgather block sent by any rank.
+fn loopback_shots(
+    circuit: &Circuit,
+    size: usize,
+    num_shots: usize,
+) -> (Vec<Vec<Vec<bool>>>, usize) {
+    let shared = LoopbackShared::new(size);
+    let handles: Vec<_> = (0..size)
+        .map(|rank| {
+            let comm = LoopbackComm {
+                shared: shared.clone(),
+                rank,
+            };
+            let circuit = circuit.clone();
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn(move || {
+                    let ctx = DistributedContext::from_comm(Arc::new(comm));
+                    let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
+                    crate::sim::run_shots_with(kind, &circuit, num_shots, SEED)
+                        .expect("distributed shots")
+                        .shots
+                })
+                .expect("spawn rank thread")
+        })
+        .collect();
+    let results: Vec<Vec<Vec<bool>>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let max_gather = shared.state.lock().unwrap().max_gather_block;
+    (results, max_gather)
+}
+
+/// Sample shots through the production dense sampler, so the comparison
+/// tests prove distributed sampling reproduces the real dense path.
+fn dense_reference_shots(circuit: &Circuit, num_shots: usize) -> Vec<Vec<bool>> {
+    let stripped = circuit.without_measurements();
+    crate::sim::shots::sample_shots(
+        &crate::sim::Probabilities::Dense(reference_probs(&stripped)),
+        &circuit.measurement_map(),
+        circuit.num_classical_bits,
+        num_shots,
+        SEED,
+    )
+}
+
+#[test]
+fn shots_terminal_uniform_match_dense_across_rank_counts() {
+    relax_min_local_qubits();
+    let mut circuit = Circuit::new(4, 4);
+    for q in 0..4 {
+        circuit.add_gate(crate::gates::Gate::H, &[q]);
+    }
+    for q in 0..4 {
+        circuit.add_measure(q, q);
+    }
+    let expected = dense_reference_shots(&circuit, 64);
+    for size in [1usize, 2, 4] {
+        let (per_rank, _) = loopback_shots(&circuit, size, 64);
+        for shots in &per_rank {
+            assert_eq!(shots, &expected, "size {size}");
+        }
+    }
+}
+
+#[test]
+fn shots_terminal_ghz_match_dense_across_rank_counts() {
+    relax_min_local_qubits();
+    let mut circuit = Circuit::new(4, 4);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    for q in 0..3 {
+        circuit.add_gate(crate::gates::Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..4 {
+        circuit.add_measure(q, q);
+    }
+    let expected = dense_reference_shots(&circuit, 100);
+    let mut saw = [false, false];
+    for shot in &expected {
+        assert!(
+            shot.iter().all(|&b| b == shot[0]),
+            "GHZ shot must be uniform"
+        );
+        saw[shot[0] as usize] = true;
+    }
+    assert!(saw[0] && saw[1], "100 GHZ shots should hit both outcomes");
+    for size in [1usize, 2, 4] {
+        let (per_rank, _) = loopback_shots(&circuit, size, 100);
+        for shots in &per_rank {
+            assert_eq!(shots, &expected, "size {size}");
+        }
+    }
+}
+
+#[test]
+fn shots_restore_relabeled_qubits_before_sampling() {
+    relax_min_local_qubits();
+    // The swap leaves q3 = 1. At 2 and 4 ranks, q3 is a rank bit, so relabeling
+    // turns the swap into a map update and sampling must first restore the
+    // relabeled qubits to their circuit positions.
+    let mut circuit = Circuit::new(4, 4);
+    circuit.add_gate(crate::gates::Gate::X, &[0]);
+    circuit.add_gate(crate::gates::Gate::Swap, &[0, 3]);
+    for q in 0..4 {
+        circuit.add_measure(q, q);
+    }
+    for size in [1usize, 2, 4] {
+        let (per_rank, _) = loopback_shots(&circuit, size, 8);
+        for shots in &per_rank {
+            for shot in shots {
+                assert_eq!(shot, &vec![false, false, false, true], "size {size}");
+            }
+        }
+    }
+}
+
+#[test]
+fn shots_sample_without_dense_gather() {
+    relax_min_local_qubits();
+    let mut circuit = Circuit::new(6, 6);
+    for q in 0..6 {
+        circuit.add_gate(crate::gates::Gate::H, &[q]);
+    }
+    for q in 0..6 {
+        circuit.add_measure(q, q);
+    }
+    let (per_rank, max_gather) = loopback_shots(&circuit, 4, 32);
+    for shots in &per_rank {
+        assert_eq!(shots, &per_rank[0], "shots must be identical on every rank");
+    }
+    assert_eq!(
+        max_gather, 1,
+        "terminal sampling must only gather one mass value per rank"
+    );
+}
+
+#[test]
+fn shots_mid_circuit_match_across_rank_counts() {
+    relax_min_local_qubits();
+    let mut circuit = Circuit::new(4, 2);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(crate::gates::Gate::Cx, &[0, 1]);
+    circuit.add_measure(1, 1);
+    let (reference, _) = loopback_shots(&circuit, 1, 20);
+    let expected = &reference[0];
+    let mut saw = [false, false];
+    for shot in expected {
+        assert_eq!(shot[0], shot[1], "copied bit must match the measured bit");
+        saw[shot[0] as usize] = true;
+    }
+    assert!(
+        saw[0] && saw[1],
+        "20 fair coin shots should hit both outcomes"
+    );
+    for size in [2usize, 4] {
+        let (per_rank, _) = loopback_shots(&circuit, size, 20);
+        for shots in &per_rank {
+            assert_eq!(shots, expected, "size {size}");
+        }
+    }
+}
+
+#[test]
+fn noisy_shots_rejected_on_distributed_kind() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(crate::gates::Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let noise = crate::sim::noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let kind = crate::sim::BackendKind::StatevectorDistributed {
+        context: DistributedContext::serial(),
+    };
+    let err = crate::sim::run_shots_with_noise(kind, &circuit, &noise, 10, SEED).unwrap_err();
+    assert!(matches!(
+        err,
+        crate::error::PrismError::IncompatibleBackend { .. }
+    ));
+}
+
+#[test]
+fn shots_without_measurements_still_validate_configuration() {
+    relax_min_local_qubits();
+    // Three ranks is not a power of two; the error must surface even though a
+    // circuit without measurements needs no execution to produce all false shots.
+    // The init failure happens before any collective, so ranks do not block.
+    let circuit = Circuit::new(4, 0);
+    let shared = LoopbackShared::new(3);
+    let handles: Vec<_> = (0..3)
+        .map(|rank| {
+            let comm = LoopbackComm {
+                shared: shared.clone(),
+                rank,
+            };
+            let circuit = circuit.clone();
+            std::thread::spawn(move || {
+                let ctx = DistributedContext::from_comm(Arc::new(comm));
+                let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
+                crate::sim::run_shots_with(kind, &circuit, 8, SEED).is_err()
+            })
+        })
+        .collect();
+    for handle in handles {
+        assert!(
+            handle.join().unwrap(),
+            "non power of two rank count must error"
+        );
+    }
 }

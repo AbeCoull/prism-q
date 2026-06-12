@@ -88,14 +88,14 @@ pub(super) fn build_cdf(probs: &[f64]) -> Vec<f64> {
     cdf
 }
 
-pub(super) fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
+pub(crate) fn sample_from_cdf(cdf: &[f64], r: f64) -> usize {
     match cdf.binary_search_by(|p| p.partial_cmp(&r).unwrap_or(std::cmp::Ordering::Equal)) {
         Ok(i) => i,
         Err(i) => i.min(cdf.len() - 1),
     }
 }
 
-pub(super) fn sample_shots(
+pub(crate) fn sample_shots(
     probs: &Probabilities,
     meas_map: &[(usize, usize)],
     num_classical_bits: usize,

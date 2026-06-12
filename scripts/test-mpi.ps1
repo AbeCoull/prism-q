@@ -34,6 +34,7 @@ if (-not (Test-Path $mpiexec)) { $mpiexec = "mpiexec" }
 # The check circuit is small, so relax the local qubit floor to let it
 # distribute across ranks on a single host.
 $measSigs = @{}
+$shotSigs = @{}
 foreach ($n in $RankCounts) {
     Write-Host "`n== mpiexec -n $n dist_mpi_check =="
     $out = & $mpiexec -n $n -env PRISM_DIST_MIN_LOCAL_QUBITS 1 $exe
@@ -45,6 +46,11 @@ foreach ($n in $RankCounts) {
         throw "measurement signature missing at -n $n"
     }
     $measSigs[$n] = $match.Matches[0].Groups[1].Value
+    $match = $out | Select-String -Pattern 'shots_sig=(\S+)' | Select-Object -First 1
+    if (-not $match) {
+        throw "shots signature missing at -n $n"
+    }
+    $shotSigs[$n] = $match.Matches[0].Groups[1].Value
 }
 
 $unique = $measSigs.Values | Select-Object -Unique
@@ -52,5 +58,11 @@ if ($unique.Count -gt 1) {
     throw "measurement outcomes differ across rank counts: $($measSigs | Out-String)"
 }
 Write-Host "`nMeasurement determinism: signature $($unique) identical across ranks."
+
+$uniqueShots = $shotSigs.Values | Select-Object -Unique
+if ($uniqueShots.Count -gt 1) {
+    throw "shot outcomes differ across rank counts: $($shotSigs | Out-String)"
+}
+Write-Host "Shot sampling determinism: signature $($uniqueShots) identical across ranks."
 
 Write-Host "`nAll distributed MPI checks passed."

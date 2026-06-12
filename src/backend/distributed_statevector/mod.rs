@@ -78,8 +78,17 @@
 //! communication volume. Use these counters to evaluate qubit reordering and
 //! routing, since one host cannot measure real network latency.
 //!
-//! Not implemented yet: distributed shot sampling, and lookahead epoch planning
-//! that batches several relabels into one exchange.
+//! # Shot sampling
+//!
+//! Circuits whose measurements are terminal sample shots without gathering the
+//! dense state or probability vector on any rank; communication scales with
+//! the rank count and shot count, never with the state size. See
+//! [`DistributedStatevectorBackend::sample_state_indices`] for the algorithm.
+//! Circuits with mid-circuit measurements fall back to one lockstep run per
+//! shot.
+//!
+//! Not implemented yet: lookahead epoch planning that batches several relabels
+//! into one exchange.
 
 #[cfg(test)]
 mod tests;
@@ -430,6 +439,73 @@ impl DistributedStatevectorBackend {
         self.qubit_map[global_q] = local_pos;
         self.phys_map.swap(local_pos, global_pos);
         self.refresh_map_identity();
+    }
+
+    /// Physically swap the qubits at positions `a < b` and update the map.
+    /// When both positions are local, this runs the inner SWAP kernel. When one
+    /// position is local and one is global, this reuses the half-slice relabel
+    /// exchange. When both positions are global, this exchanges full slices
+    /// between rank pairs whose two bits differ.
+    fn swap_physical_positions(&mut self, a: usize, b: usize) {
+        debug_assert!(
+            a < b,
+            "positions must be ordered: branch selection assumes a < b"
+        );
+        let local = self.local_qubits();
+        if b < local {
+            self.inner
+                .apply(&Instruction::Gate {
+                    gate: Gate::Swap,
+                    targets: smallvec![a, b],
+                })
+                .expect("local SWAP cannot fail");
+        } else if a < local {
+            self.relabel_swap(a, b);
+            return;
+        } else {
+            let ga = self.global_bit(a);
+            let gb = self.global_bit(b);
+            let rank = self.context.rank();
+            if ((rank >> ga) ^ (rank >> gb)) & 1 == 1 {
+                let partner = rank ^ ((1usize << ga) | (1usize << gb));
+                let len = self.inner.state.len();
+                let chunk = self.exchange_chunk.min(len).max(1);
+                if self.recv.len() != chunk {
+                    self.recv.resize(chunk, Complex64::new(0.0, 0.0));
+                }
+                let mut off = 0;
+                while off < len {
+                    let end = (off + chunk).min(len);
+                    self.count_exchange(end - off);
+                    let recv = &mut self.recv[..end - off];
+                    self.context
+                        .comm()
+                        .sendrecv_c64(partner, &self.inner.state[off..end], recv);
+                    self.inner.state[off..end].copy_from_slice(recv);
+                    off = end;
+                }
+            }
+        }
+        let qa = self.phys_map[a];
+        let qb = self.phys_map[b];
+        self.qubit_map[qa] = b;
+        self.qubit_map[qb] = a;
+        self.phys_map.swap(a, b);
+        self.refresh_map_identity();
+    }
+
+    /// Physically reorder the state until every circuit qubit occupies its own
+    /// position. Runs in lockstep on every rank because the maps are identical.
+    /// Each misplaced qubit costs at most one exchange. The identity map
+    /// returns without work.
+    fn restore_identity_map(&mut self) {
+        while !self.map_identity {
+            let Some(pos) = (0..self.num_qubits).find(|&p| self.phys_map[p] != p) else {
+                break;
+            };
+            let src = self.qubit_map[pos];
+            self.swap_physical_positions(pos, src);
+        }
     }
 
     /// Translate an instruction into physical positions: map the targets and
@@ -1097,6 +1173,82 @@ impl DistributedStatevectorBackend {
         } else {
             self.qubit_map[qubit]
         }
+    }
+
+    /// Sample `num_shots` computational basis indices in circuit qubit order
+    /// without gathering the dense state or probability vector on any rank.
+    ///
+    /// Relabeled qubits are first restored to their circuit positions with
+    /// bounded exchanges, so each rank owns a contiguous slice in circuit
+    /// order. Each rank then builds a cumulative distribution for its local
+    /// slice. One gather shares a single mass value from each rank. Every rank
+    /// assigns each shot to an owning rank from the same seeded draw stream,
+    /// the owner samples its local distribution, and a tiled sum reduction
+    /// distributes the sampled indices. Buffers scale with the rank count and
+    /// shot count, not the global state size.
+    ///
+    /// Collective: every rank must call this with identical `num_shots` and
+    /// `seed`. The result is identical on every rank and reproduces the dense
+    /// sampling path draw for draw, independent of the rank count, except
+    /// when accumulated rounding differences move a draw across an interval
+    /// edge in the cumulative distribution.
+    pub fn sample_state_indices(&mut self, num_shots: usize, seed: u64) -> Result<Vec<u64>> {
+        if self.num_qubits > 53 {
+            return Err(self.unsupported(
+                "shot sampling above 53 qubits: index transport is exact only below 2^53",
+            ));
+        }
+        if num_shots == 0 {
+            return Ok(Vec::new());
+        }
+        self.restore_identity_map();
+        debug_assert!(self.map_identity);
+
+        let mut local_cdf = self.inner.probabilities()?;
+        let mut acc = 0.0f64;
+        for p in local_cdf.iter_mut() {
+            acc += *p;
+            *p = acc;
+        }
+
+        let masses = self.context.comm().allgather_f64(&[acc]);
+        let mut rank_cdf = Vec::with_capacity(masses.len());
+        let mut total = 0.0f64;
+        for &m in &masses {
+            total += m;
+            rank_cdf.push(total);
+        }
+        if let Some(last) = rank_cdf.last_mut() {
+            *last = 1.0;
+        }
+
+        let rank = self.context.rank();
+        let local_qubits = self.local_qubits();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut indices = vec![0.0f64; num_shots];
+        for slot in indices.iter_mut() {
+            let r: f64 = rng.random();
+            // First rank whose cumulative mass reaches r. The strict
+            // comparison matches the dense binary search at exact boundary
+            // hits and never selects an empty interval.
+            let owner = rank_cdf.partition_point(|&c| c < r);
+            if owner != rank {
+                continue;
+            }
+            let residual = if owner == 0 {
+                r
+            } else {
+                r - rank_cdf[owner - 1]
+            };
+            let local_idx = crate::sim::shots::sample_from_cdf(&local_cdf, residual);
+            *slot = (((rank as u64) << local_qubits) | local_idx as u64) as f64;
+        }
+
+        const REDUCE_CHUNK: usize = 1 << 20;
+        for chunk in indices.chunks_mut(REDUCE_CHUNK) {
+            self.context.comm().allreduce_sum_f64_slice(chunk);
+        }
+        Ok(indices.into_iter().map(|v| v as u64).collect())
     }
 
     /// Zero the amplitudes inconsistent with `qubit == outcome`.

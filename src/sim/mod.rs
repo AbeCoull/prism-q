@@ -9,7 +9,7 @@ mod dispatch;
 pub mod homological;
 pub mod noise;
 mod probability;
-mod shots;
+pub(crate) mod shots;
 pub mod stabilizer_rank;
 mod terminal_sampling;
 mod trajectory;
@@ -713,6 +713,76 @@ fn run_marginals_result_with(
     }
 }
 
+/// Multi-shot execution for the distributed statevector backend.
+///
+/// Every rank runs this function in lockstep. Circuits with only terminal
+/// measurements run once and sample basis indices without gathering the dense
+/// state on any rank. Circuits with mid-circuit measurements run once per shot,
+/// prefused, with per-shot seeds matching the generic slow path.
+#[cfg(feature = "distributed")]
+fn run_shots_distributed(
+    context: std::sync::Arc<crate::distributed::DistributedContext>,
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    use crate::backend::distributed_statevector::DistributedStatevectorBackend;
+
+    let meas_map = circuit.measurement_map();
+    if meas_map.is_empty() {
+        // No measurements means every shot is all false, but init must still
+        // run so invalid rank counts and local qubit floor violations surface as
+        // errors instead of fabricated output.
+        let mut backend = DistributedStatevectorBackend::new(context, seed);
+        backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+        return Ok(ShotsResult {
+            shots: vec![vec![false; circuit.num_classical_bits]; num_shots],
+            num_classical_bits: circuit.num_classical_bits,
+        });
+    }
+
+    if circuit.has_terminal_measurements_only() {
+        let stripped = circuit.without_measurements();
+        let mut backend = DistributedStatevectorBackend::new(context, seed);
+        execute(&mut backend, &stripped, &SimOptions::classical_only())?;
+        let indices = backend.sample_state_indices(num_shots, seed)?;
+        let shots = indices
+            .iter()
+            .map(|&idx| {
+                let mut shot = vec![false; circuit.num_classical_bits];
+                for &(qubit, cbit) in &meas_map {
+                    shot[cbit] = (idx >> qubit) & 1 == 1;
+                }
+                shot
+            })
+            .collect();
+        return Ok(ShotsResult {
+            shots,
+            num_classical_bits: circuit.num_classical_bits,
+        });
+    }
+
+    let probe = DistributedStatevectorBackend::new(context.clone(), seed);
+    let expanded: std::borrow::Cow<'_, Circuit> = if probe.supports_qft_block() {
+        std::borrow::Cow::Borrowed(circuit)
+    } else {
+        crate::circuit::expand_qft_blocks(circuit)
+    };
+    let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
+    let opts = SimOptions::classical_only();
+    let mut shots = Vec::with_capacity(num_shots);
+    for i in 0..num_shots {
+        let shot_seed = seed.wrapping_add(i as u64);
+        let mut backend = DistributedStatevectorBackend::new(context.clone(), shot_seed);
+        let result = execute_circuit(&mut backend, &fused, &opts)?;
+        shots.push(result.classical_bits);
+    }
+    Ok(ShotsResult {
+        shots,
+        num_classical_bits: circuit.num_classical_bits,
+    })
+}
+
 /// Execute a circuit multiple times with explicit backend selection.
 pub(crate) fn run_shots_with(
     kind: BackendKind,
@@ -720,6 +790,14 @@ pub(crate) fn run_shots_with(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    // The distributed backend runs every rank in lockstep, so shot execution
+    // must not route through shortcuts that reshape the collective call
+    // sequence. Dispatch directly.
+    #[cfg(feature = "distributed")]
+    if let BackendKind::StatevectorDistributed { context } = &kind {
+        return run_shots_distributed(context.clone(), circuit, num_shots, seed);
+    }
+
     // Compiled sampler: O(n²·m) compile + O(r·m/64) per shot with LUT.
     // Always polynomial, avoids the O(2^k) probability computation path.
     // Explicit `StabilizerGpu` attaches its CUDA context here so repeated shot
@@ -922,6 +1000,20 @@ pub(crate) fn run_shots_with_noise(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    // Trajectory execution runs shots on Rayon worker threads, whose
+    // scheduling order differs per rank. Per-shot distributed backends would
+    // issue collectives out of lockstep and deadlock or corrupt exchanges.
+    // Reject until a lockstep noisy path exists.
+    #[cfg(feature = "distributed")]
+    if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "noisy shot sampling is not supported on the distributed backend; \
+                     trajectory execution cannot keep rank collectives in lockstep"
+                .into(),
+        });
+    }
+
     if !kind.supports_noisy_per_shot() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),

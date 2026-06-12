@@ -120,7 +120,11 @@ fn run() {
     // Measurement determinism: with a fixed seed every rank count must produce
     // the same classical outcomes. The script compares the printed signature
     // across `-n 1/2/4`. Reuse the existing context (MPI initializes only once).
-    measurement_check(ctx, num_qubits);
+    measurement_check(ctx.clone(), num_qubits);
+
+    // Shot sampling: terminal measurements sample basis indices without
+    // gathering the dense state on any rank.
+    shots_check(ctx, num_qubits);
 }
 
 #[cfg(feature = "distributed-mpi")]
@@ -183,5 +187,51 @@ fn measurement_check(
             direct.exchange_messages(),
             direct.exchange_amplitudes()
         );
+    }
+}
+
+#[cfg(feature = "distributed-mpi")]
+fn shots_check(ctx: std::sync::Arc<prism_q::distributed::DistributedContext>, num_qubits: usize) {
+    use prism_q::circuit::builder::CircuitBuilder;
+
+    const SEED: u64 = 42;
+    const NUM_SHOTS: usize = 200;
+
+    let n = num_qubits;
+    let mut b = CircuitBuilder::new_with_classical(n, n);
+    b.h(0);
+    for q in 0..n - 1 {
+        b.cx(q, q + 1);
+    }
+    for q in 0..n {
+        b.measure(q, q);
+    }
+    let circuit = b.build();
+
+    let rank = ctx.rank();
+    let size = ctx.size();
+    let result = prism_q::simulate(&circuit)
+        .distributed(ctx)
+        .seed(SEED)
+        .shots(NUM_SHOTS)
+        .expect("distributed shots");
+
+    let mut ones = 0usize;
+    let mut sig: u64 = 0xcbf2_9ce4_8422_2325;
+    for shot in &result.shots {
+        assert!(
+            shot.iter().all(|&bit| bit == shot[0]),
+            "GHZ shot must be all zeros or all ones"
+        );
+        ones += shot[0] as usize;
+        sig = (sig ^ shot[0] as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    assert!(
+        ones > 0 && ones < NUM_SHOTS,
+        "200 GHZ shots should produce both outcomes"
+    );
+
+    if rank == 0 {
+        println!("SHOTS: {size} ranks, ones={ones}/{NUM_SHOTS}, shots_sig=0x{sig:016x}");
     }
 }

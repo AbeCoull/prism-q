@@ -226,8 +226,6 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
         | BackendKind::DeterministicPauli { .. } => false,
         #[cfg(feature = "gpu")]
         BackendKind::StabilizerGpu { .. } => false,
-        #[cfg(feature = "distributed")]
-        BackendKind::StatevectorDistributed { context } => context.size() == 1,
         BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
         _ => true,
     }

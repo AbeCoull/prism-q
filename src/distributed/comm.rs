@@ -31,6 +31,24 @@ pub trait RankComm: std::fmt::Debug + Send + Sync {
     /// Sum a scalar across all ranks; every rank receives the total.
     fn allreduce_sum_f64(&self, value: f64) -> f64;
 
+    /// Elementwise sum of `values` across all ranks, in place. Every rank
+    /// receives the same per-element totals.
+    ///
+    /// The default gathers every rank's block and sums elementwise, which
+    /// costs `size * len` transfer. Override with a native reduction when the
+    /// transport has one.
+    fn allreduce_sum_f64_slice(&self, values: &mut [f64]) {
+        let n = values.len();
+        if n == 0 {
+            return;
+        }
+        let gathered = self.allgather_f64(values);
+        values.fill(0.0);
+        for (i, &v) in gathered.iter().enumerate() {
+            values[i % n] += v;
+        }
+    }
+
     /// Exchange equal length amplitude blocks with `partner`.
     ///
     /// On return, `recv` holds `partner`'s `send` block. `send` and `recv` must
@@ -70,6 +88,9 @@ impl RankComm for SerialComm {
     fn allreduce_sum_f64(&self, value: f64) -> f64 {
         value
     }
+
+    #[inline]
+    fn allreduce_sum_f64_slice(&self, _values: &mut [f64]) {}
 
     #[inline]
     fn sendrecv_c64(&self, _partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
@@ -173,6 +194,13 @@ impl RankComm for MpiComm {
         self.world
             .all_reduce_into(&value, &mut out, mpi::collective::SystemOperation::sum());
         out
+    }
+
+    fn allreduce_sum_f64_slice(&self, values: &mut [f64]) {
+        use mpi::traits::CommunicatorCollectives;
+        let send = values.to_vec();
+        self.world
+            .all_reduce_into(&send[..], values, mpi::collective::SystemOperation::sum());
     }
 
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {

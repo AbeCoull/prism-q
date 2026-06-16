@@ -20,7 +20,7 @@ scalar path is used.
 
 | Backend | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Statevector | Yes | SIMD | Yes | SIMD | Yes | Planned | Planned |
+| Statevector | Yes | SIMD | Yes | SIMD | Yes | Planned | Yes |
 | Stabilizer | Yes | SIMD | Yes | SIMD | Yes | Planned | Planned |
 | Factored Stabilizer | Yes | SIMD | Yes | SIMD | No | Planned | Planned |
 | Sparse | Yes | Scalar | Yes | Scalar | No | Planned | Planned |
@@ -42,15 +42,19 @@ Notes:
 - **CUDA** covers the optional `gpu` feature. Only the statevector and stabilizer
   paths have device kernels; every other backend runs on CPU. See the
   [GPU Backend](./gpu.md) guide.
+- **Distributed** covers the optional `distributed` and `distributed-mpi` features.
+  The statevector backend splits the state across MPI ranks with exact results,
+  including gates, measurement, reset, and multi-shot sampling without gathering
+  the dense state. Use `simulate(&circuit).distributed(context)`.
 
 ## Not yet supported
 
 | Target | Status | Notes |
 | --- | --- | --- |
 | ROCm (AMD GPU) | Planned | No AMD device kernels; the GPU path is CUDA-only |
-| Distributed CPU | Planned | No multi-node execution |
 | Distributed GPU | Planned | No multi-node GPU execution |
 | Multi-GPU | Planned | A GPU context binds a single device |
+| Distributed noisy shots | Planned | Noise models are rejected on the distributed backend; trajectory execution is not lockstep across ranks |
 
 These targets are listed so the matrix reflects the roadmap rather than hiding
-the gaps. Distributed execution is not a code path PRISM-Q exposes today.
+the gaps.

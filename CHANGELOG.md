@@ -2,11 +2,20 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.20.0] - 2026-06-16
+
+### Features
+
+- **distributed:** Add statevector shot sampling (#84)([b483dae](https://github.com/AbeCoull/prism-q/commit/b483dae300a234349f250b61a9ad8bd15e919966))
 ## [0.19.0] - 2026-06-10
 
 ### Features
 
 - **dist:** Add fusion, measurement, and tiled exchange to the distributed backend (#83)([c4f3749](https://github.com/AbeCoull/prism-q/commit/c4f374976d1f1d14ff8068dae9485ab4ea6a0149))
+
+### Miscellaneous
+
+- **release:** 0.19.0([ad630b1](https://github.com/AbeCoull/prism-q/commit/ad630b17e0fceea4bfd7ce9e7c6b066ae4537d08))
 ## [0.18.0] - 2026-06-08
 
 ### Features

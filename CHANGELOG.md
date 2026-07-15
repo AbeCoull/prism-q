@@ -2,11 +2,24 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.21.0] - 2026-07-15
+
+### Features
+
+- **deps:** Modernize rust and dependencies (#86)([fb92606](https://github.com/AbeCoull/prism-q/commit/fb9260630abeb24dbd8c8a7d4a4d7c43c3c98638))
+
+### Miscellaneous
+
+- **python:** Add PyO3/maturin Python bindings (#85)([0594079](https://github.com/AbeCoull/prism-q/commit/059407938a26dac94651af05eefe64c768c054f9))
 ## [0.20.0] - 2026-06-16
 
 ### Features
 
 - **distributed:** Add statevector shot sampling (#84)([b483dae](https://github.com/AbeCoull/prism-q/commit/b483dae300a234349f250b61a9ad8bd15e919966))
+
+### Miscellaneous
+
+- **release:** 0.20.0([9aef078](https://github.com/AbeCoull/prism-q/commit/9aef078175cb0e7c9e5d5acbbe96a67c4e5b0184))
 ## [0.19.0] - 2026-06-10
 
 ### Features

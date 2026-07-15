@@ -20,7 +20,7 @@ jobs:
     name: Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -50,7 +50,7 @@ jobs:
     name: Lint & Test (no default features)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -78,14 +78,14 @@ jobs:
       contents: read
     steps:
       - name: Checkout base
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           path: base
           fetch-depth: 1
 
       - name: Checkout head
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.sha }}
@@ -149,7 +149,7 @@ jobs:
 
       - name: Upload benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-regression
           if-no-files-found: ignore
@@ -165,7 +165,7 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -185,7 +185,7 @@ jobs:
           echo "### Coverage: ${COVERAGE}%" >> "$GITHUB_STEP_SUMMARY"
       - name: Update coverage badge
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
+        uses: schneegans/dynamic-badges-action@v1.9.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
@@ -200,7 +200,7 @@ jobs:
     name: Cross-compile aarch64
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
@@ -226,7 +226,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-gnu
@@ -254,8 +254,8 @@ jobs:
     name: GPU compile-check (no device)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: Jimver/cuda-toolkit@v0.2.18
+      - uses: actions/checkout@v7
+      - uses: Jimver/cuda-toolkit@v0.2.35
         with:
           cuda: '12.4.0'
           method: network
@@ -277,7 +277,7 @@ jobs:
     name: Test macOS ARM64
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -296,7 +296,7 @@ jobs:
     name: Security & Licenses
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

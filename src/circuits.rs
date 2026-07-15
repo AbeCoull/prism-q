@@ -358,16 +358,19 @@ pub fn cz_chain_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
 }
 
 /// Append an inverse QFT on `n` qubits starting at index `start`.
+///
+/// Exact inverse of the forward decomposition in `qft_textbook_steps`: reverse
+/// the gate order and negate every controlled-phase angle.
 pub(crate) fn apply_inverse_qft(c: &mut Circuit, start: usize, n: usize) {
     for i in 0..n / 2 {
         c.add_gate(Gate::Swap, &[start + i, start + n - 1 - i]);
     }
-    for i in (0..n).rev() {
-        for j in ((i + 1)..n).rev() {
-            let theta = std::f64::consts::TAU / (1u64 << (j - i)) as f64;
-            c.add_gate(Gate::cphase(-theta), &[start + i, start + j]);
+    for q in 0..n {
+        for k in (0..q).rev() {
+            let theta = std::f64::consts::TAU / (1u64 << (q - k + 1)) as f64;
+            c.add_gate(Gate::cphase(-theta), &[start + k, start + q]);
         }
-        c.add_gate(Gate::H, &[start + i]);
+        c.add_gate(Gate::H, &[start + q]);
     }
 }
 

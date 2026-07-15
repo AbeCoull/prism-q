@@ -1,0 +1,24 @@
+[package]
+name = "prism-q-py"
+version = "0.20.0"
+edition = "2021"
+rust-version = "1.75.0"
+authors = ["A. Coull"]
+description = "Python bindings for PRISM-Q, a performance-first quantum circuit simulator"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AbeCoull/prism-q"
+publish = false
+
+[package.metadata.release]
+release = false
+
+[lib]
+name = "_prism_q"
+crate-type = ["cdylib"]
+
+[dependencies]
+prism-q = { path = "../..", default-features = false, features = ["parallel"] }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py311", "num-complex"] }
+numpy = "0.25"
+num-complex = "0.4"
+smallvec = "1"

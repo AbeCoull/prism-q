@@ -53,6 +53,23 @@ cargo build --release --features "parallel gpu"
 Building from source or pinning to a git revision is covered in
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
+### Python
+
+Python bindings (PyO3 + maturin) live in [`bindings/python`](bindings/python) and
+expose core simulation, noise, and QEC with NumPy output:
+
+```python
+import prism_q
+
+circuit = prism_q.CircuitBuilder(2).h(0).cx(0, 1).build()
+print(prism_q.simulate(circuit).seed(42).run().probabilities)  # [0.5, 0, 0, 0.5]
+```
+
+Count keys and measurement bits are LSB-first (`q[0]` is the least-significant
+qubit), reversed relative to Qiskit. Invalid indices (for example a qubit index
+outside the register) raise an exception. See
+[`bindings/python/README.md`](bindings/python/README.md).
+
 ## Quick start
 
 ```rust

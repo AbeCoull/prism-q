@@ -108,3 +108,15 @@ jobs:
           name: ${{ steps.tag.outputs.tag }}
           body_path: ${{ steps.changelog.outputs.body_path }}
           generate_release_notes: false
+
+      - name: Publish Python bindings in lockstep
+        if: steps.bump.outputs.level != 'none'
+        run: |
+          VERSION="${{ steps.tag.outputs.version }}"
+          sed -i -E "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" bindings/python/Cargo.toml
+          cargo update -p prism-q-py 2>/dev/null || true
+          git add bindings/python/Cargo.toml Cargo.lock
+          git commit -m "chore(python): release $VERSION"
+          git tag "py-v$VERSION"
+          git push origin HEAD:main
+          git push origin "py-v$VERSION"

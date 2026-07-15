@@ -1,12 +1,12 @@
 use super::{
-    append_basis_to_z_rotation, append_z_to_basis_rotation, QecNoise, QecOp, QecPauli, QecProgram,
+    QecNoise, QecOp, QecPauli, QecProgram, append_basis_to_z_rotation, append_z_to_basis_rotation,
 };
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::{
-    batch_propagate_backward, compile_measurements, rng::Xoshiro256PlusPlus, xor_words,
-    CompiledSampler, PackedShots,
+    CompiledSampler, PackedShots, batch_propagate_backward, compile_measurements,
+    rng::Xoshiro256PlusPlus, xor_words,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;

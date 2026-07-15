@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{assert_backend_matches_sv, assert_fused_matches_unfused, SEED, SPARSE_EPS};
+use common::{SEED, SPARSE_EPS, assert_backend_matches_sv, assert_fused_matches_unfused};
 use prism_q::backend::sparse::SparseBackend;
 use prism_q::circuit::Circuit;
 use prism_q::circuits;

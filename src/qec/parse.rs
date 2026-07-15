@@ -455,7 +455,7 @@ fn split_instruction(line: &str, line_num: usize) -> Result<(String, Option<Stri
     let line = line.trim();
     let (head, rest) = if let Some(open) = line.find('(') {
         let first_ws = line.find(char::is_whitespace);
-        if first_ws.map_or(true, |ws| open < ws) {
+        if first_ws.is_none_or(|ws| open < ws) {
             let close = line[open..]
                 .find(')')
                 .map(|offset| open + offset)
@@ -627,7 +627,7 @@ fn parse_pauli_term(term: &str, line_num: usize) -> Result<QecPauli> {
             return Err(qec_parse_error(
                 line_num,
                 format!("expected Pauli target, got `{term}`"),
-            ))
+            ));
         }
     };
     let qubit_text = chars.as_str();

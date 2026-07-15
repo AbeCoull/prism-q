@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use super::draw::{assign_moments, OpKind, PlacedOp};
 use super::Circuit;
+use super::draw::{OpKind, PlacedOp, assign_moments};
 use crate::gates::Gate;
 
 const GATE_CORNER_RADIUS: f64 = 1.0;
@@ -240,8 +240,14 @@ impl Theme {
         let _ = write!(
             svg,
             "--bg:{};--wire:{};--text:{};--stripe:{};--ctrl-dot:{};--ctrl-bdr:{};--swap:{};--barrier:{};",
-            self.bg, self.wire, self.text, self.stripe,
-            self.control_dot, self.control_border, self.swap_stroke, self.barrier,
+            self.bg,
+            self.wire,
+            self.text,
+            self.stripe,
+            self.control_dot,
+            self.control_border,
+            self.swap_stroke,
+            self.barrier,
         );
         let _ = write!(
             svg,

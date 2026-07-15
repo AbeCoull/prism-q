@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 

@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{assert_backend_matches_sv, is_clifford, STAB_EPS};
+use common::{STAB_EPS, assert_backend_matches_sv, is_clifford};
 use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::circuits;
 

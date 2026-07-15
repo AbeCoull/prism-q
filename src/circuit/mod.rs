@@ -22,7 +22,7 @@ mod fusion_rzz;
 pub mod openqasm;
 
 use crate::gates::Gate;
-pub use smallvec::{smallvec, SmallVec};
+pub use smallvec::{SmallVec, smallvec};
 
 /// A quantum circuit in PRISM-Q's internal representation.
 #[derive(Debug, Clone)]

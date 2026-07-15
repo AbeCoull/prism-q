@@ -2,8 +2,8 @@
 
 use numpy::PyArray2;
 use prism_q::{
-    run_qec_program, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult,
+    PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef,
+    QecSampleResult, run_qec_program,
 };
 use pyo3::prelude::*;
 
@@ -12,7 +12,7 @@ use crate::gate::PyGate;
 use crate::numpy_util::bool_matrix;
 
 /// Pauli basis for QEC measurements and resets.
-#[pyclass(name = "QecBasis", module = "prism_q", eq, eq_int)]
+#[pyclass(name = "QecBasis", module = "prism_q", eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum PyQecBasis {
     X,
@@ -31,7 +31,7 @@ impl PyQecBasis {
 }
 
 /// Reference to a prior measurement record (absolute index or lookback).
-#[pyclass(name = "RecordRef", module = "prism_q", frozen)]
+#[pyclass(name = "RecordRef", module = "prism_q", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyRecordRef(QecRecordRef);
 
@@ -55,7 +55,7 @@ impl PyRecordRef {
 }
 
 /// Pauli-noise annotation for a QEC program.
-#[pyclass(name = "QecNoise", module = "prism_q", frozen)]
+#[pyclass(name = "QecNoise", module = "prism_q", frozen, from_py_object)]
 #[derive(Clone, Copy)]
 pub struct PyQecNoise(QecNoise);
 
@@ -225,7 +225,7 @@ impl PyQecProgram {
     /// Sample the program through the compiled Clifford path.
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyQecResult> {
         let program = &self.inner;
-        let result = py.allow_threads(|| run_qec_program(program))?;
+        let result = py.detach(|| run_qec_program(program))?;
         Ok(PyQecResult { inner: result })
     }
 

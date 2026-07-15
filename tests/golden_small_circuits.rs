@@ -4,17 +4,17 @@
 //! the resulting state vector or probabilities against hand-computed values.
 
 use num_complex::Complex64;
+use prism_q::Instruction;
+use prism_q::backend::Backend;
 use prism_q::backend::mps::MpsBackend;
 use prism_q::backend::product::ProductStateBackend;
 use prism_q::backend::sparse::SparseBackend;
 use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
-use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::{Gate, McuData};
 use prism_q::sim;
-use prism_q::Instruction;
 
 const EPS: f64 = 1e-12;
 

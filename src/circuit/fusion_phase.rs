@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use num_complex::Complex64;
 
-use super::{smallvec, Circuit, Instruction, SmallVec};
+use super::{Circuit, Instruction, SmallVec, smallvec};
 use crate::gates::{BatchPhaseData, Gate, MultiFusedData};
 
 use super::fusion::IDENTITY_EPS;

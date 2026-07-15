@@ -34,8 +34,8 @@ fn main() {
 fn run() {
     use prism_q::backend::distributed_statevector::DistributedStatevectorBackend;
     use prism_q::backend::statevector::StatevectorBackend;
-    use prism_q::circuit::builder::CircuitBuilder;
     use prism_q::circuit::Circuit;
+    use prism_q::circuit::builder::CircuitBuilder;
     use prism_q::distributed::DistributedContext;
     use prism_q::sim::run_on;
 
@@ -63,8 +63,8 @@ fn run() {
             .rzz(0.4, 2, hi) // parity diagonal across the boundary
             .swap(0, hi) // swap across the boundary
             .cphase(0.5, mid, hi); // controlled phase, both global on 4 ranks
-                                   // Fusion tail: rotations and CX form MultiFused
-                                   // and Fused2q; cphase forms BatchPhase.
+        // Fusion tail: rotations and CX form MultiFused
+        // and Fused2q; cphase forms BatchPhase.
         for q in 0..n {
             b.ry(0.2 + 0.01 * q as f64, q).rz(0.1, q);
         }

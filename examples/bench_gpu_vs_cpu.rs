@@ -13,9 +13,9 @@
 
 use std::time::Instant;
 
+use prism_q::StatevectorBackend;
 use prism_q::backend::Backend;
 use prism_q::circuits::random_circuit;
-use prism_q::StatevectorBackend;
 
 #[cfg(feature = "gpu")]
 use prism_q::gpu::GpuContext;

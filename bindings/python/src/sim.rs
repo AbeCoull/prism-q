@@ -3,7 +3,7 @@
 //! `PySimulation` mirrors the core `Simulate` typestate builder but stores
 //! owned data and rebuilds the chain inside each terminal call, so none of the
 //! Rust lifetimes or `Seeded`/`Unseeded` type parameters leak into Python.
-//! Heavy terminals release the GIL via `py.allow_threads`.
+//! Heavy terminals release the GIL via `py.detach`.
 
 use std::collections::HashMap;
 
@@ -11,15 +11,15 @@ use num_complex::Complex64;
 use numpy::PyArray1;
 use prism_q::backend::Backend;
 use prism_q::{
-    bitstring, simulate as core_simulate, BackendKind, Circuit, CountsResult, MarginalsResult,
-    NoiseModel, RunOutcome, ShotsResult, StatevectorBackend,
+    BackendKind, Circuit, CountsResult, MarginalsResult, NoiseModel, RunOutcome, ShotsResult,
+    StatevectorBackend, bitstring, simulate as core_simulate,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
-use crate::error::{invalid, PyPrismResult};
+use crate::error::{PyPrismResult, invalid};
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{complex_array, f64_array};
 
@@ -66,7 +66,7 @@ impl PySimulation {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;
-        let outcome: RunOutcome = py.allow_threads(|| {
+        let outcome: RunOutcome = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
@@ -82,7 +82,7 @@ impl PySimulation {
         let kind = self.kind.clone();
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let result: ShotsResult = py.allow_threads(|| {
+        let result: ShotsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
@@ -101,7 +101,7 @@ impl PySimulation {
         let kind = self.kind.clone();
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
-        let result: CountsResult = py.allow_threads(|| {
+        let result: CountsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
@@ -125,7 +125,7 @@ impl PySimulation {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;
-        let result: MarginalsResult = py.allow_threads(|| {
+        let result: MarginalsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
@@ -145,7 +145,7 @@ impl PySimulation {
         }
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let circuit = &self.circuit;
-        let amps: Vec<Complex64> = py.allow_threads(|| {
+        let amps: Vec<Complex64> = py.detach(|| {
             let mut backend = StatevectorBackend::new(seed);
             prism_q::run_on(&mut backend, circuit)?;
             backend.export_statevector()

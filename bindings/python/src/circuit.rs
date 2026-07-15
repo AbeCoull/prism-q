@@ -1,16 +1,16 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
 use prism_q::circuit::openqasm;
-use prism_q::{circuits, Circuit, CircuitBuilder, Gate};
+use prism_q::{Circuit, CircuitBuilder, Gate, circuits};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
-use crate::error::{invalid, PyPrismResult};
+use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
 
 /// A quantum circuit. Construct via [`CircuitBuilder`], [`parse_qasm`], or one
 /// of the reusable circuit generators under `prism_q.circuits`.
-#[pyclass(name = "Circuit", module = "prism_q")]
+#[pyclass(name = "Circuit", module = "prism_q", from_py_object)]
 #[derive(Clone)]
 pub struct PyCircuit(pub Circuit);
 

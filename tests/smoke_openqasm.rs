@@ -1,7 +1,7 @@
 //! Smoke tests: OpenQASM 3.0 parsing → statevector simulation round-trips.
 
-use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::Backend;
+use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::openqasm;
 use prism_q::sim;
 

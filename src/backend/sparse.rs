@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -29,7 +29,7 @@ use rayon::prelude::*;
 const MIN_STATES_FOR_PAR: usize = 4096;
 
 use crate::backend::{
-    dense_probability_len, dense_statevector_len, is_phase_one, reserve_dense_output, Backend,
+    Backend, dense_probability_len, dense_statevector_len, is_phase_one, reserve_dense_output,
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
@@ -264,13 +264,13 @@ impl SparseBackend {
         let prob_zero: f64 = if self.state.len() >= MIN_STATES_FOR_PAR {
             self.state
                 .par_iter()
-                .filter(|(&idx, _)| idx & mask == 0)
+                .filter(|&(&idx, _)| idx & mask == 0)
                 .map(|(_, amp)| amp.norm_sqr())
                 .sum()
         } else {
             self.state
                 .iter()
-                .filter(|(&idx, _)| idx & mask == 0)
+                .filter(|&(&idx, _)| idx & mask == 0)
                 .map(|(_, amp)| amp.norm_sqr())
                 .sum()
         };
@@ -279,7 +279,7 @@ impl SparseBackend {
         let prob_zero: f64 = self
             .state
             .iter()
-            .filter(|(&idx, _)| idx & mask == 0)
+            .filter(|&(&idx, _)| idx & mask == 0)
             .map(|(_, amp)| amp.norm_sqr())
             .sum();
 
@@ -306,13 +306,13 @@ impl SparseBackend {
         let prob_one: f64 = if self.state.len() >= MIN_STATES_FOR_PAR {
             self.state
                 .par_iter()
-                .filter(|(&idx, _)| idx & mask != 0)
+                .filter(|&(&idx, _)| idx & mask != 0)
                 .map(|(_, amp)| amp.norm_sqr())
                 .sum()
         } else {
             self.state
                 .iter()
-                .filter(|(&idx, _)| idx & mask != 0)
+                .filter(|&(&idx, _)| idx & mask != 0)
                 .map(|(_, amp)| amp.norm_sqr())
                 .sum()
         };
@@ -321,7 +321,7 @@ impl SparseBackend {
         let prob_one: f64 = self
             .state
             .iter()
-            .filter(|(&idx, _)| idx & mask != 0)
+            .filter(|&(&idx, _)| idx & mask != 0)
             .map(|(_, amp)| amp.norm_sqr())
             .sum();
 

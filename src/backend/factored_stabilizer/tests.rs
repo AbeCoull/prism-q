@@ -1,6 +1,6 @@
+use crate::backend::Backend;
 use crate::backend::factored_stabilizer::FactoredStabilizerBackend;
 use crate::backend::stabilizer::StabilizerBackend;
-use crate::backend::Backend;
 use crate::circuit::Circuit;
 use crate::gates::Gate;
 

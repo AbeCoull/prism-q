@@ -8,12 +8,12 @@
 //! cargo run --release --example bench_stabilizer -- --qubits 50,100,500,1000 --iters 3
 //! ```
 
-use prism_q::backend::stabilizer::StabilizerBackend;
+use prism_q::Circuit;
 use prism_q::backend::Backend;
+use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::circuit::Instruction;
 use prism_q::circuits;
 use prism_q::gates::Gate;
-use prism_q::Circuit;
 use std::time::Instant;
 
 const SEED: u64 = 0xDEAD_BEEF;
@@ -221,7 +221,9 @@ fn main() {
             }
             "--help" | "-h" => {
                 eprintln!("Usage: bench_stabilizer [OPTIONS]");
-                eprintln!("  --qubits, -q  Comma-separated qubit counts (default: 10,20,50,100,200,500,1000)");
+                eprintln!(
+                    "  --qubits, -q  Comma-separated qubit counts (default: 10,20,50,100,200,500,1000)"
+                );
                 eprintln!("  --iters,  -i  Iterations per benchmark (default: 5)");
                 eprintln!("  --depth,  -d  Circuit depth for random Clifford (default: 10)");
                 std::process::exit(0);

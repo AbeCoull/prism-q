@@ -14,18 +14,20 @@
 //! `--features parallel,bench-internal`.
 
 #[cfg(feature = "bench-internal")]
-use criterion::{black_box, measurement::WallTime, BenchmarkGroup};
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkGroup, measurement::WallTime};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[cfg(feature = "bench-internal")]
-use prism_q::qec::cut_selection::{cut_score, min_fill_treewidth_proxy, InteractionGraph};
+use prism_q::qec::cut_selection::{InteractionGraph, cut_score, min_fill_treewidth_proxy};
 #[cfg(feature = "bench-internal")]
 use prism_q::qec::observable_reroute::{cone_telemetry, min_cone_z_representative, xor_z_support};
 use prism_q::{
-    run_qec_program_with_strategy, run_spd_observable, run_spd_observable_light_cone, Circuit,
-    Gate, PauliTerm, QecOptions, QecProgram, QecRecordRef, QecTStrategy,
+    Circuit, Gate, PauliTerm, QecOptions, QecProgram, QecRecordRef, QecTStrategy,
+    run_qec_program_with_strategy, run_spd_observable, run_spd_observable_light_cone,
 };
 #[cfg(feature = "bench-internal")]
 use std::collections::HashSet;
+#[cfg(feature = "bench-internal")]
+use std::hint::black_box;
 use std::time::Duration;
 
 const SEED: u64 = 0xDEAD_BEEF;

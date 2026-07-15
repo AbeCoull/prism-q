@@ -1,7 +1,7 @@
 use prism_q::qec::observable_reroute::{
-    min_cone_z_representative, xor_z_support, ObservableRerouteResult,
+    ObservableRerouteResult, min_cone_z_representative, xor_z_support,
 };
-use prism_q::{run_spd_observable, run_spd_observable_light_cone, Circuit, Gate, PauliTerm};
+use prism_q::{Circuit, Gate, PauliTerm, run_spd_observable, run_spd_observable_light_cone};
 use std::collections::HashSet;
 
 fn z_terms(support: &[usize]) -> Vec<PauliTerm> {

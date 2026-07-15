@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use prism_q::circuit::Circuit;
-use prism_q::{circuits, simulate, BackendKind, Result};
+use prism_q::{BackendKind, Result, circuits, simulate};
 
 const SEED: u64 = 0xDEAD_BEEF;
 const HEA_LAYERS: usize = 5;

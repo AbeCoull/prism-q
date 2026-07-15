@@ -30,13 +30,13 @@
 //! - Small qubit counts where statevector is faster and exact.
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::{
-    dense_probability_len, dense_statevector_len, reserve_dense_output, simd, Backend,
-    NORM_CLAMP_MIN,
+    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, reserve_dense_output,
+    simd,
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
@@ -395,35 +395,33 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
 #[cfg(feature = "parallel")]
 #[doc(hidden)]
 pub fn svd_faer(a: &[Complex64], m: usize, n: usize) -> SvdResult {
-    use faer::Mat;
+    use faer::MatRef;
 
-    let mat = Mat::<faer::complex_native::c64>::from_fn(m, n, |i, j| {
-        let v = a[j * m + i];
-        faer::complex_native::c64::new(v.re, v.im)
-    });
+    let mat = MatRef::from_column_major_slice(a, m, n);
 
-    let result = mat.thin_svd();
+    let result = match mat.thin_svd() {
+        Ok(svd) => svd,
+        Err(_) => return svd_jacobi(a, m, n),
+    };
     let k = m.min(n);
 
-    let u_mat = result.u();
-    let s_vec = result.s_diagonal();
-    let v_mat = result.v();
+    let u_mat = result.U();
+    let s_col = result.S().column_vector();
+    let v_mat = result.V();
 
     let mut u = vec![ZERO; m * k];
     for j in 0..k {
         for i in 0..m {
-            let v = u_mat.read(i, j);
-            u[j * m + i] = Complex64::new(v.re, v.im);
+            u[j * m + i] = u_mat[(i, j)];
         }
     }
 
-    let s: Vec<f64> = (0..k).map(|i| s_vec.read(i).re).collect();
+    let s: Vec<f64> = (0..k).map(|i| s_col[i].re).collect();
 
     let mut vt = vec![ZERO; k * n];
     for i in 0..k {
         for j in 0..n {
-            let v = v_mat.read(j, i);
-            vt[i * n + j] = Complex64::new(v.re, -v.im);
+            vt[i * n + j] = v_mat[(j, i)].conj();
         }
     }
 
@@ -2350,7 +2348,7 @@ mod tests {
         assert!((gate[7 * 8 + 6] - ONE).norm() < 1e-12); // 6→7
         assert!((gate[6 * 8 + 7] - ONE).norm() < 1e-12); // 7→6
         assert!((gate[7 * 8 + 7] - ZERO).norm() < 1e-12); // 7→7 should be 0
-                                                          // Diagonal entries for 0..5 should be 1
+        // Diagonal entries for 0..5 should be 1
         for s in 0..6 {
             assert!((gate[s * 8 + s] - ONE).norm() < 1e-12, "state {s}");
         }

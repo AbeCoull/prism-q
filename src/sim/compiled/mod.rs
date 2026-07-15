@@ -15,19 +15,19 @@ use crate::error::{PrismError, Result};
 #[cfg(feature = "gpu")]
 use crate::gpu::kernels::bts::GpuBtsCache;
 use crate::sim::ShotsResult;
-use rand::{RngCore, SeedableRng};
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use bts::{bts_batched, bts_single_pass, sample_bts_meas_major, BTS_BATCH_SHOTS};
-use rng::{binomial_sample, Xoshiro256PlusPlus};
+use bts::{BTS_BATCH_SHOTS, bts_batched, bts_single_pass, sample_bts_meas_major};
+use rng::{Xoshiro256PlusPlus, binomial_sample};
 
 pub use accumulator::{
-    default_chunk_size, optimal_chunk_size, CorrelatorAccumulator, HistogramAccumulator,
-    MarginalsAccumulator, NullAccumulator, PauliExpectationAccumulator, ShotAccumulator,
+    CorrelatorAccumulator, HistogramAccumulator, MarginalsAccumulator, NullAccumulator,
+    PauliExpectationAccumulator, ShotAccumulator, default_chunk_size, optimal_chunk_size,
 };
 pub use parity::ParityStats;
-use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
 pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity, XorDag};
+use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
 
 pub(crate) use crate::backend::word_ops::xor_words;
 pub(crate) use propagation::batch_propagate_backward;
@@ -253,7 +253,10 @@ unsafe impl Sync for SendPtrU64 {}
 impl SendPtrU64 {
     #[inline(always)]
     unsafe fn copy_from_slice(self, dst_offset: usize, src: &[u64]) {
-        std::ptr::copy_nonoverlapping(src.as_ptr(), self.0.add(dst_offset), src.len());
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), self.0.add(dst_offset), src.len());
+        }
     }
 }
 
@@ -2983,8 +2986,8 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
             .map(|(&outcome, &sign)| outcome ^ sign)
             .collect()
     } else {
-        use crate::backend::stabilizer::StabilizerBackend;
         use crate::backend::Backend;
+        use crate::backend::stabilizer::StabilizerBackend;
         let mut stab = StabilizerBackend::new(seed);
         stab.init(circuit.num_qubits, circuit.num_classical_bits)?;
         stab.apply_instructions(&circuit.instructions)?;

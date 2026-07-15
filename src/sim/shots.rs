@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
-use super::compiled;
 use super::Probabilities;
+use super::compiled;
 
 /// Result of a multi-shot simulation run.
 #[derive(Debug, Clone)]

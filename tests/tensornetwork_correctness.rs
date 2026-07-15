@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{assert_backend_matches_sv, SEED, TN_EPS};
+use common::{SEED, TN_EPS, assert_backend_matches_sv};
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
 use prism_q::circuits;

@@ -1,9 +1,9 @@
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
-use crate::sim::compiled::batch_propagate_backward;
-use crate::sim::compiled::{default_chunk_size, xor_words, PackedShots, ShotAccumulator};
-use crate::sim::noise::NoiseModel;
 use crate::sim::ShotsResult;
+use crate::sim::compiled::batch_propagate_backward;
+use crate::sim::compiled::{PackedShots, ShotAccumulator, default_chunk_size, xor_words};
+use crate::sim::noise::NoiseModel;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -658,7 +658,7 @@ impl HomologicalSampler {
     pub fn sample(&mut self) -> Vec<bool> {
         let mut outcome = self.compiled.sample();
 
-        let u: f64 = rand::Rng::random(&mut self.rng);
+        let u: f64 = rand::RngExt::random(&mut self.rng);
         let class = match self
             .class_cdf
             .binary_search_by(|p| p.partial_cmp(&u).unwrap_or(std::cmp::Ordering::Equal))
@@ -699,7 +699,7 @@ impl HomologicalSampler {
         }
 
         for s in 0..num_shots {
-            let u: f64 = rand::Rng::random(&mut self.rng);
+            let u: f64 = rand::RngExt::random(&mut self.rng);
             let class = match self
                 .class_cdf
                 .binary_search_by(|p| p.partial_cmp(&u).unwrap_or(std::cmp::Ordering::Equal))

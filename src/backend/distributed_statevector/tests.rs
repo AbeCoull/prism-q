@@ -1,8 +1,8 @@
 use super::DistributedStatevectorBackend;
-use crate::backend::statevector::StatevectorBackend;
 use crate::backend::Backend;
-use crate::circuit::builder::CircuitBuilder;
+use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::Circuit;
+use crate::circuit::builder::CircuitBuilder;
 use crate::distributed::{DistributedContext, RankComm};
 use crate::sim::run_on;
 use num_complex::Complex64;
@@ -55,14 +55,14 @@ impl LoopbackShared {
 
     fn barrier(&self) {
         let mut st = self.state.lock().unwrap();
-        let gen = st.generation;
+        let arrival_generation = st.generation;
         st.arrived += 1;
         if st.arrived == self.size {
             st.arrived = 0;
             st.generation = st.generation.wrapping_add(1);
             self.cv.notify_all();
         } else {
-            while st.generation == gen {
+            while st.generation == arrival_generation {
                 st = self.cv.wait(st).unwrap();
             }
         }
@@ -379,7 +379,13 @@ fn serial_export_statevector_matches() {
 
 /// Relax the local qubit floor before constructing any distributed backend.
 fn relax_min_local_qubits() {
-    std::env::set_var("PRISM_DIST_MIN_LOCAL_QUBITS", "1");
+    // SAFETY: set_var is unsafe because it can race concurrent getenv calls.
+    // The supported runner (cargo nextest) executes each test in its own
+    // process, so no other thread exists when this runs. Under plain
+    // `cargo test` the call still precedes any distributed backend
+    // construction in the same test, and the pre-existing getenv race with
+    // unrelated tests is unchanged from the pre-edition-2024 code.
+    unsafe { std::env::set_var("PRISM_DIST_MIN_LOCAL_QUBITS", "1") };
     assert_eq!(crate::distributed::min_local_qubits(), 1);
 }
 

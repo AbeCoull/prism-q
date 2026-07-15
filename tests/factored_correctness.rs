@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{assert_backend_matches_sv, assert_fused_matches_unfused, FACTORED_EPS, SEED};
+use common::{FACTORED_EPS, SEED, assert_backend_matches_sv, assert_fused_matches_unfused};
 use prism_q::backend::factored::FactoredBackend;
 use prism_q::circuit::{Circuit, Instruction};
 use prism_q::circuits;

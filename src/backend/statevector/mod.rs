@@ -51,10 +51,10 @@ use rand_chacha::ChaCha8Rng;
 use std::sync::Arc;
 
 use crate::backend::simd;
-use crate::backend::{dense_probability_len, dense_statevector_len, Backend};
+use crate::backend::{Backend, dense_probability_len, dense_statevector_len};
 use crate::circuit::Instruction;
 #[cfg(feature = "gpu")]
-use crate::circuit::{qft_textbook_steps, QftTextbookStep};
+use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::error::Result;
 use crate::gates::Gate;
 
@@ -126,12 +126,16 @@ unsafe impl Sync for SendPtr {}
 impl SendPtr {
     #[inline(always)]
     pub(crate) unsafe fn load(self, idx: usize) -> Complex64 {
-        *self.0.add(idx)
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe { *self.0.add(idx) }
     }
 
     #[inline(always)]
     pub(crate) unsafe fn store(self, idx: usize, val: Complex64) {
-        *self.0.add(idx) = val;
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            *self.0.add(idx) = val;
+        }
     }
 
     #[inline(always)]
@@ -328,7 +332,7 @@ impl StatevectorBackend {
     #[cfg(feature = "gpu")]
     fn apply_measure_gpu(&mut self, qubit: usize, classical_bit: usize) -> Result<()> {
         use crate::gpu::kernels::dense as k;
-        use rand::Rng;
+        use rand::RngExt;
 
         let gpu = self
             .gpu_state

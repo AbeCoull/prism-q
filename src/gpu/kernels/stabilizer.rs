@@ -901,7 +901,7 @@ fn launch_word_grouped_kernel(
     let ensure_u32_buffer =
         |slot: &mut Option<CudaSlice<u32>>, len: usize, op: &str| -> Result<()> {
             let needed = len.max(1);
-            if slot.as_ref().map_or(true, |buf| buf.len() < needed) {
+            if slot.as_ref().is_none_or(|buf| buf.len() < needed) {
                 *slot = Some(
                     stream
                         .alloc_zeros::<u32>(needed)

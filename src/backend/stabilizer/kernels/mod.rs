@@ -10,7 +10,7 @@ use crate::backend::Backend;
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use rand::Rng;
+use rand::RngExt;
 
 use super::StabilizerBackend;
 

@@ -3,9 +3,9 @@ use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::Gate;
 
-use super::StabilizerBackend;
 #[cfg(feature = "parallel")]
 use super::MIN_QUBITS_FOR_PAR_GATES;
+use super::StabilizerBackend;
 
 /// Minimum number of u64 words for word-group gate batching to be profitable.
 ///
@@ -14,6 +14,13 @@ use super::MIN_QUBITS_FOR_PAR_GATES;
 /// benefit. At nw=4 (n=193+), each row is 64 bytes (one cache line) and
 /// word-group batching avoids repeated full-row iteration per gate.
 pub(crate) const MIN_WORDS_FOR_BATCH: usize = 4;
+
+/// Minimum run of consecutive measurements to route through
+/// `batch_measure_ref_info`. Individual measurements pay two full-tableau
+/// scans each (O(m * n) row touches, cache-hostile at large n); the batch
+/// path builds its index in one pass. Below this length the index pass
+/// costs more than the scans it replaces.
+pub(crate) const MIN_MEASURES_FOR_BATCH: usize = 8;
 
 /// Compact gate representation for batched word-group execution.
 ///
@@ -694,6 +701,38 @@ impl StabilizerBackend {
         }
     }
 
+    /// Length of the leading run of measurements safe to batch as one unit.
+    /// Batching matches sequential semantics only while every qubit and
+    /// classical bit in the run is distinct, so the run stops at the first
+    /// repeat or non-measure instruction.
+    fn measure_run_len(&self, instructions: &[Instruction]) -> usize {
+        let qubit_words = self.num_words;
+        let cbit_words = self.classical_bits.len().div_ceil(64).max(1);
+        let mut seen_qubits = vec![0u64; qubit_words];
+        let mut seen_cbits = vec![0u64; cbit_words];
+        let mut len = 0;
+
+        for instruction in instructions {
+            let Instruction::Measure {
+                qubit,
+                classical_bit,
+            } = instruction
+            else {
+                break;
+            };
+            let q_mask = 1u64 << (qubit % 64);
+            let c_mask = 1u64 << (classical_bit % 64);
+            if seen_qubits[qubit / 64] & q_mask != 0 || seen_cbits[classical_bit / 64] & c_mask != 0
+            {
+                break;
+            }
+            seen_qubits[qubit / 64] |= q_mask;
+            seen_cbits[classical_bit / 64] |= c_mask;
+            len += 1;
+        }
+        len
+    }
+
     pub(in crate::backend::stabilizer) fn apply_instructions_word_batch(
         &mut self,
         instructions: &[Instruction],
@@ -703,7 +742,9 @@ impl StabilizerBackend {
         let mut cross_word: Vec<CrossWordGate> = Vec::new();
         let mut cross_word_qubits: Vec<u64> = vec![0u64; nw];
 
-        for instruction in instructions {
+        let mut idx = 0;
+        while idx < instructions.len() {
+            let instruction = &instructions[idx];
             match instruction {
                 Instruction::Gate { gate, targets } => {
                     if let Some((w, bg)) = Self::classify_gate(gate, targets) {
@@ -749,12 +790,42 @@ impl StabilizerBackend {
                         self.dispatch_gate(gate, targets)?;
                     }
                 }
+                Instruction::Measure { .. } => {
+                    self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                    cross_word_qubits.fill(0);
+                    let run_possible = matches!(
+                        instructions.get(idx + MIN_MEASURES_FOR_BATCH - 1),
+                        Some(Instruction::Measure { .. })
+                    );
+                    let run = if run_possible {
+                        self.measure_run_len(&instructions[idx..])
+                    } else {
+                        1
+                    };
+                    if run >= MIN_MEASURES_FOR_BATCH {
+                        let measurements: Vec<(usize, usize)> = instructions[idx..idx + run]
+                            .iter()
+                            .map(|inst| match inst {
+                                Instruction::Measure {
+                                    qubit,
+                                    classical_bit,
+                                } => (*qubit, *classical_bit),
+                                _ => unreachable!("measure_run_len returns only measure runs"),
+                            })
+                            .collect();
+                        self.batch_measure_ref_info(&measurements);
+                        idx += run;
+                        continue;
+                    }
+                    self.apply(instruction)?;
+                }
                 _ => {
                     self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
                     cross_word_qubits.fill(0);
                     self.apply(instruction)?;
                 }
             }
+            idx += 1;
         }
 
         self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
@@ -830,8 +901,8 @@ impl StabilizerBackend {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::stabilizer::StabilizerBackend;
     use crate::backend::Backend;
+    use crate::backend::stabilizer::StabilizerBackend;
     use crate::circuit::Circuit;
     use crate::gates::Gate;
     use crate::sim;
@@ -923,5 +994,108 @@ mod tests {
         }
         let zeros = run_and_count_zero(&c);
         assert_eq!(zeros, n);
+    }
+
+    fn add_measure_all(c: &mut Circuit) {
+        let n = c.num_qubits;
+        for q in 0..n {
+            c.instructions.push(crate::circuit::Instruction::Measure {
+                qubit: q,
+                classical_bit: q,
+            });
+        }
+    }
+
+    fn sequential_reference_bits(circuit: &Circuit, seed: u64) -> Vec<bool> {
+        let mut b = StabilizerBackend::new(seed);
+        b.init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        for instr in &circuit.instructions {
+            b.apply(instr).unwrap();
+        }
+        b.classical_results().to_vec()
+    }
+
+    fn batched_bits(circuit: &Circuit, seed: u64) -> Vec<bool> {
+        let mut b = StabilizerBackend::new(seed);
+        b.init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        b.apply_instructions(&circuit.instructions).unwrap();
+        b.classical_results().to_vec()
+    }
+
+    #[test]
+    fn measure_batch_matches_sequential_ghz_997q() {
+        let n = 997;
+        let mut c = Circuit::new(n, n);
+        c.add_gate(Gate::H, &[0]);
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        add_measure_all(&mut c);
+        assert_eq!(batched_bits(&c, 42), sequential_reference_bits(&c, 42));
+    }
+
+    #[test]
+    fn measure_batch_matches_sequential_random_clifford_300q() {
+        let n = 300;
+        let mut c = crate::circuits::clifford_heavy_circuit(n, 8, 42);
+        c.num_classical_bits = n;
+        add_measure_all(&mut c);
+        assert_eq!(batched_bits(&c, 42), sequential_reference_bits(&c, 42));
+    }
+
+    #[test]
+    fn measure_batch_matches_sequential_interleaved_measures() {
+        let n = 300;
+        let mut c = Circuit::new(n, n);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        for q in 0..64 {
+            c.instructions.push(crate::circuit::Instruction::Measure {
+                qubit: q,
+                classical_bit: q,
+            });
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        add_measure_all(&mut c);
+        assert_eq!(batched_bits(&c, 42), sequential_reference_bits(&c, 42));
+    }
+
+    #[test]
+    fn measure_batch_splits_on_repeated_qubit() {
+        let n = 300;
+        let mut c = Circuit::new(n, n);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        add_measure_all(&mut c);
+        for q in 0..32 {
+            c.instructions.push(crate::circuit::Instruction::Measure {
+                qubit: q,
+                classical_bit: q,
+            });
+        }
+        assert_eq!(batched_bits(&c, 42), sequential_reference_bits(&c, 42));
+    }
+
+    #[test]
+    fn measure_batch_splits_on_shared_classical_bit() {
+        let n = 300;
+        let mut c = Circuit::new(n, n);
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        for q in 0..32 {
+            c.instructions.push(crate::circuit::Instruction::Measure {
+                qubit: q,
+                classical_bit: 0,
+            });
+        }
+        add_measure_all(&mut c);
+        assert_eq!(batched_bits(&c, 42), sequential_reference_bits(&c, 42));
     }
 }

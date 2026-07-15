@@ -3,16 +3,17 @@
 //! Use `--features bench-fast` for a quick run that reduces warmup and
 //! measurement time. Omit for the full suite with default Criterion timing.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use prism_q::backend::Backend;
 use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{BackendKind, ClassicalCondition, Instruction, MpsBackend};
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use std::hint::black_box;
 use std::time::Duration;
 
 const SEED: u64 = 0xDEAD_BEEF;

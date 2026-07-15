@@ -614,7 +614,7 @@ pub(crate) fn build_ofd_disentangler(
             continue;
         }
         let cost = anchor_routing_cost(mps, n, &support);
-        if best.map_or(true, |(_, c)| cost < c) {
+        if best.is_none_or(|(_, c)| cost < c) {
             best = Some((n, cost));
         }
     }
@@ -787,10 +787,13 @@ pub(crate) fn apply_t_via_camps(
 
     if support.len() == 1 {
         mps.reset_truncation_tracking();
-        if let Some((n, cascade)) = build_ofd_disentangler(mps, &z_bar, n_qubits, tol)? {
-            apply_cascade_and_rotate(prefix, mps, &cascade, n, target, is_dagger)?;
-        } else {
-            apply_single_qubit_rotation_to_mps(mps, &z_bar, support[0], is_dagger)?;
+        match build_ofd_disentangler(mps, &z_bar, n_qubits, tol)? {
+            Some((n, cascade)) => {
+                apply_cascade_and_rotate(prefix, mps, &cascade, n, target, is_dagger)?;
+            }
+            _ => {
+                apply_single_qubit_rotation_to_mps(mps, &z_bar, support[0], is_dagger)?;
+            }
         }
         return check_camps_truncation(mps, target);
     }
@@ -936,8 +939,8 @@ fn apply_single_qubit_rotation_to_mps(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::statevector::StatevectorBackend;
     use crate::backend::Backend;
+    use crate::backend::statevector::StatevectorBackend;
     use crate::circuit::{Instruction, SmallVec};
     use num_complex::Complex64;
 
@@ -997,7 +1000,7 @@ mod tests {
     }
 
     fn randomizing_prefix(n: usize, seed: u64) -> Vec<(Gate, Vec<usize>)> {
-        use rand::Rng;
+        use rand::RngExt;
         use rand::SeedableRng;
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         let mut g = vec![(Gate::H, vec![0])];
@@ -1173,9 +1176,11 @@ mod tests {
     fn ofd_no_xy_returns_none() {
         let mps = empty_mps(3);
         let p = make_pauli(3, &[(0, PauliKind::Z), (1, PauliKind::Z)]);
-        assert!(build_ofd_disentangler(&mps, &p, 3, 1e-10)
-            .unwrap()
-            .is_none());
+        assert!(
+            build_ofd_disentangler(&mps, &p, 3, 1e-10)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1736,9 +1741,11 @@ mod tests {
         })
         .unwrap();
         let p = make_pauli(2, &[(0, PauliKind::X), (1, PauliKind::Z)]);
-        assert!(build_ofd_disentangler(&mps, &p, 2, 1e-10)
-            .unwrap()
-            .is_none());
+        assert!(
+            build_ofd_disentangler(&mps, &p, 2, 1e-10)
+                .unwrap()
+                .is_none()
+        );
         let (n, d) = build_ofds_disentangler(&mps, &p, 2).unwrap();
         assert_eq!(n, 0);
         assert_eq!(d.len(), 1);

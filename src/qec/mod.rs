@@ -46,16 +46,16 @@ mod t_sampler;
 pub use parse::parse_qec_program;
 pub use result::{QecObservableEstimate, QecSampleResult};
 #[cfg(feature = "bench-internal")]
-pub use runner::{compile_qec_profiled_sampler, QecProfiledCounts, QecProfiledSampler};
+pub use runner::{QecProfiledCounts, QecProfiledSampler, compile_qec_profiled_sampler};
 pub use runner::{run_qec_program, run_qec_program_reference};
 pub use t_sampler::{
-    run_qec_program_spd_rerouted, run_qec_program_with_strategy, QecObservableReroute, QecTStrategy,
+    QecObservableReroute, QecTStrategy, run_qec_program_spd_rerouted, run_qec_program_with_strategy,
 };
 
 use crate::circuit::Circuit;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use crate::sim::compiled::{get_bit, set_bit, PackedShots, PauliVec};
+use crate::sim::compiled::{PackedShots, PauliVec, get_bit, set_bit};
 
 /// Pauli basis used by QEC measurements and Pauli products.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

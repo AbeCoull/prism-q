@@ -1,7 +1,7 @@
 use num_complex::Complex64;
+use prism_q::CircuitBuilder;
 use prism_q::circuit::Circuit;
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
-use prism_q::CircuitBuilder;
 use smallvec::smallvec;
 
 fn one_gate_circuit() -> Circuit {
@@ -31,56 +31,72 @@ fn pauli_channel_negative_probability_rejected() {
 #[test]
 fn depolarizing_out_of_range_rejected() {
     assert!(NoiseChannel::Depolarizing { p: 1.5 }.validate().is_err());
-    assert!(NoiseChannel::TwoQubitDepolarizing { p: f64::NAN }
-        .validate()
-        .is_err());
+    assert!(
+        NoiseChannel::TwoQubitDepolarizing { p: f64::NAN }
+            .validate()
+            .is_err()
+    );
 }
 
 #[test]
 fn amplitude_and_phase_damping_validation() {
-    assert!(NoiseChannel::AmplitudeDamping { gamma: 0.5 }
+    assert!(
+        NoiseChannel::AmplitudeDamping { gamma: 0.5 }
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        NoiseChannel::AmplitudeDamping { gamma: -0.1 }
+            .validate()
+            .is_err()
+    );
+    assert!(
+        NoiseChannel::PhaseDamping {
+            gamma: f64::INFINITY
+        }
         .validate()
-        .is_ok());
-    assert!(NoiseChannel::AmplitudeDamping { gamma: -0.1 }
-        .validate()
-        .is_err());
-    assert!(NoiseChannel::PhaseDamping {
-        gamma: f64::INFINITY
-    }
-    .validate()
-    .is_err());
+        .is_err()
+    );
 }
 
 #[test]
 fn thermal_relaxation_validation() {
-    assert!(NoiseChannel::ThermalRelaxation {
-        t1: 100.0,
-        t2: 50.0,
-        gate_time: 1.0,
-    }
-    .validate()
-    .is_ok());
-    assert!(NoiseChannel::ThermalRelaxation {
-        t1: 0.0,
-        t2: 1.0,
-        gate_time: 1.0,
-    }
-    .validate()
-    .is_err());
-    assert!(NoiseChannel::ThermalRelaxation {
-        t1: 1.0,
-        t2: -1.0,
-        gate_time: 1.0,
-    }
-    .validate()
-    .is_err());
-    assert!(NoiseChannel::ThermalRelaxation {
-        t1: 1.0,
-        t2: 1.0,
-        gate_time: -1.0,
-    }
-    .validate()
-    .is_err());
+    assert!(
+        NoiseChannel::ThermalRelaxation {
+            t1: 100.0,
+            t2: 50.0,
+            gate_time: 1.0,
+        }
+        .validate()
+        .is_ok()
+    );
+    assert!(
+        NoiseChannel::ThermalRelaxation {
+            t1: 0.0,
+            t2: 1.0,
+            gate_time: 1.0,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        NoiseChannel::ThermalRelaxation {
+            t1: 1.0,
+            t2: -1.0,
+            gate_time: 1.0,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        NoiseChannel::ThermalRelaxation {
+            t1: 1.0,
+            t2: 1.0,
+            gate_time: -1.0,
+        }
+        .validate()
+        .is_err()
+    );
 }
 
 #[test]

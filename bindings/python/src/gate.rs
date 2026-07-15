@@ -9,11 +9,11 @@ use prism_q::Gate;
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use crate::error::{invalid, PyPrismResult};
+use crate::error::{PyPrismResult, invalid};
 
 /// A quantum gate. Construct via the named static methods (`Gate.h()`,
 /// `Gate.rx(theta)`, `Gate.cu(matrix)`, ...).
-#[pyclass(name = "Gate", module = "prism_q", frozen)]
+#[pyclass(name = "Gate", module = "prism_q", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyGate(pub Gate);
 

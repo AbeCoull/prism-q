@@ -1,5 +1,5 @@
-use super::propagation::{batch_propagate_backward, propagate_backward};
 use super::PauliVec;
+use super::propagation::{batch_propagate_backward, propagate_backward};
 use crate::gates::Gate;
 use num_complex::Complex64;
 

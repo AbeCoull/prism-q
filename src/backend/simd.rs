@@ -126,9 +126,12 @@ pub(crate) unsafe fn complex_mul_neon(
     c_ii_as: float64x2_t,
     z: float64x2_t,
 ) -> float64x2_t {
-    let z_swap = vextq_f64(z, z, 1);
-    let prod = vmulq_f64(c_rr, z);
-    vfmaq_f64(prod, c_ii_as, z_swap)
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let z_swap = vextq_f64(z, z, 1);
+        let prod = vmulq_f64(c_rr, z);
+        vfmaq_f64(prod, c_ii_as, z_swap)
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -139,39 +142,45 @@ unsafe fn complex_mul_sse2(
     z: __m128d,
     sign_mask: __m128d,
 ) -> __m128d {
-    let z_swap = _mm_shuffle_pd(z, z, 0b01);
-    let t1 = _mm_mul_pd(c_rr, z);
-    let t2 = _mm_mul_pd(c_ii, z_swap);
-    let t2_neg = _mm_xor_pd(t2, sign_mask);
-    _mm_add_pd(t1, t2_neg)
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let z_swap = _mm_shuffle_pd(z, z, 0b01);
+        let t1 = _mm_mul_pd(c_rr, z);
+        let t2 = _mm_mul_pd(c_ii, z_swap);
+        let t2_neg = _mm_xor_pd(t2, sign_mask);
+        _mm_add_pd(t1, t2_neg)
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
 #[target_feature(enable = "sse2")]
 unsafe fn apply_slices_sse2(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast) {
-    debug_assert_eq!(lo.len(), hi.len());
-    let n = lo.len();
-    let lo_ptr = lo.as_mut_ptr() as *mut f64;
-    let hi_ptr = hi.as_mut_ptr() as *mut f64;
-    let sign_mask = _mm_set_pd(0.0, -0.0_f64);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert_eq!(lo.len(), hi.len());
+        let n = lo.len();
+        let lo_ptr = lo.as_mut_ptr() as *mut f64;
+        let hi_ptr = hi.as_mut_ptr() as *mut f64;
+        let sign_mask = _mm_set_pd(0.0, -0.0_f64);
 
-    for i in 0..n {
-        let a_ptr = lo_ptr.add(i * 2);
-        let b_ptr = hi_ptr.add(i * 2);
+        for i in 0..n {
+            let a_ptr = lo_ptr.add(i * 2);
+            let b_ptr = hi_ptr.add(i * 2);
 
-        let a = _mm_loadu_pd(a_ptr);
-        let b = _mm_loadu_pd(b_ptr);
+            let a = _mm_loadu_pd(a_ptr);
+            let b = _mm_loadu_pd(b_ptr);
 
-        let m00_a = complex_mul_sse2(mat.m00_rr, mat.m00_ii, a, sign_mask);
-        let m01_b = complex_mul_sse2(mat.m01_rr, mat.m01_ii, b, sign_mask);
-        let new_a = _mm_add_pd(m00_a, m01_b);
+            let m00_a = complex_mul_sse2(mat.m00_rr, mat.m00_ii, a, sign_mask);
+            let m01_b = complex_mul_sse2(mat.m01_rr, mat.m01_ii, b, sign_mask);
+            let new_a = _mm_add_pd(m00_a, m01_b);
 
-        let m10_a = complex_mul_sse2(mat.m10_rr, mat.m10_ii, a, sign_mask);
-        let m11_b = complex_mul_sse2(mat.m11_rr, mat.m11_ii, b, sign_mask);
-        let new_b = _mm_add_pd(m10_a, m11_b);
+            let m10_a = complex_mul_sse2(mat.m10_rr, mat.m10_ii, a, sign_mask);
+            let m11_b = complex_mul_sse2(mat.m11_rr, mat.m11_ii, b, sign_mask);
+            let new_b = _mm_add_pd(m10_a, m11_b);
 
-        _mm_storeu_pd(a_ptr, new_a);
-        _mm_storeu_pd(b_ptr, new_b);
+            _mm_storeu_pd(a_ptr, new_a);
+            _mm_storeu_pd(b_ptr, new_b);
+        }
     }
 }
 
@@ -187,56 +196,62 @@ pub(crate) unsafe fn complex_mul_fma(c_rr: __m128d, c_ii: __m128d, z: __m128d) -
 #[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
 #[target_feature(enable = "fma")]
 unsafe fn apply_slices_fma(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast) {
-    debug_assert_eq!(lo.len(), hi.len());
-    let n = lo.len();
-    let lo_ptr = lo.as_mut_ptr() as *mut f64;
-    let hi_ptr = hi.as_mut_ptr() as *mut f64;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert_eq!(lo.len(), hi.len());
+        let n = lo.len();
+        let lo_ptr = lo.as_mut_ptr() as *mut f64;
+        let hi_ptr = hi.as_mut_ptr() as *mut f64;
 
-    for i in 0..n {
-        let a_ptr = lo_ptr.add(i * 2);
-        let b_ptr = hi_ptr.add(i * 2);
+        for i in 0..n {
+            let a_ptr = lo_ptr.add(i * 2);
+            let b_ptr = hi_ptr.add(i * 2);
 
-        let a = _mm_loadu_pd(a_ptr);
-        let b = _mm_loadu_pd(b_ptr);
+            let a = _mm_loadu_pd(a_ptr);
+            let b = _mm_loadu_pd(b_ptr);
 
-        let m00_a = complex_mul_fma(mat.m00_rr, mat.m00_ii, a);
-        let m01_b = complex_mul_fma(mat.m01_rr, mat.m01_ii, b);
-        let new_a = _mm_add_pd(m00_a, m01_b);
+            let m00_a = complex_mul_fma(mat.m00_rr, mat.m00_ii, a);
+            let m01_b = complex_mul_fma(mat.m01_rr, mat.m01_ii, b);
+            let new_a = _mm_add_pd(m00_a, m01_b);
 
-        let m10_a = complex_mul_fma(mat.m10_rr, mat.m10_ii, a);
-        let m11_b = complex_mul_fma(mat.m11_rr, mat.m11_ii, b);
-        let new_b = _mm_add_pd(m10_a, m11_b);
+            let m10_a = complex_mul_fma(mat.m10_rr, mat.m10_ii, a);
+            let m11_b = complex_mul_fma(mat.m11_rr, mat.m11_ii, b);
+            let new_b = _mm_add_pd(m10_a, m11_b);
 
-        _mm_storeu_pd(a_ptr, new_a);
-        _mm_storeu_pd(b_ptr, new_b);
+            _mm_storeu_pd(a_ptr, new_a);
+            _mm_storeu_pd(b_ptr, new_b);
+        }
     }
 }
 
 #[cfg(all(target_arch = "aarch64", any(feature = "parallel", test)))]
 unsafe fn apply_slices_neon(lo: &mut [Complex64], hi: &mut [Complex64], mat: &MatBroadcast) {
-    debug_assert_eq!(lo.len(), hi.len());
-    let n = lo.len();
-    let lo_ptr = lo.as_mut_ptr() as *mut f64;
-    let hi_ptr = hi.as_mut_ptr() as *mut f64;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert_eq!(lo.len(), hi.len());
+        let n = lo.len();
+        let lo_ptr = lo.as_mut_ptr() as *mut f64;
+        let hi_ptr = hi.as_mut_ptr() as *mut f64;
 
-    for i in 0..n {
-        let a_ptr = lo_ptr.add(i * 2);
-        let b_ptr = hi_ptr.add(i * 2);
+        for i in 0..n {
+            let a_ptr = lo_ptr.add(i * 2);
+            let b_ptr = hi_ptr.add(i * 2);
 
-        let a = vld1q_f64(a_ptr);
-        let b = vld1q_f64(b_ptr);
+            let a = vld1q_f64(a_ptr);
+            let b = vld1q_f64(b_ptr);
 
-        let new_a = vaddq_f64(
-            complex_mul_neon(mat.m00_rr, mat.m00_ii_as, a),
-            complex_mul_neon(mat.m01_rr, mat.m01_ii_as, b),
-        );
-        let new_b = vaddq_f64(
-            complex_mul_neon(mat.m10_rr, mat.m10_ii_as, a),
-            complex_mul_neon(mat.m11_rr, mat.m11_ii_as, b),
-        );
+            let new_a = vaddq_f64(
+                complex_mul_neon(mat.m00_rr, mat.m00_ii_as, a),
+                complex_mul_neon(mat.m01_rr, mat.m01_ii_as, b),
+            );
+            let new_b = vaddq_f64(
+                complex_mul_neon(mat.m10_rr, mat.m10_ii_as, a),
+                complex_mul_neon(mat.m11_rr, mat.m11_ii_as, b),
+            );
 
-        vst1q_f64(a_ptr, new_a);
-        vst1q_f64(b_ptr, new_b);
+            vst1q_f64(a_ptr, new_a);
+            vst1q_f64(b_ptr, new_b);
+        }
     }
 }
 
@@ -258,94 +273,103 @@ unsafe fn apply_slices_avx2fma(
     mat: &MatBroadcast256,
     mat128: &MatBroadcast,
 ) {
-    debug_assert_eq!(lo.len(), hi.len());
-    let n = lo.len();
-    let lo_ptr = lo.as_mut_ptr() as *mut f64;
-    let hi_ptr = hi.as_mut_ptr() as *mut f64;
-    let pairs = n / 2;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert_eq!(lo.len(), hi.len());
+        let n = lo.len();
+        let lo_ptr = lo.as_mut_ptr() as *mut f64;
+        let hi_ptr = hi.as_mut_ptr() as *mut f64;
+        let pairs = n / 2;
 
-    for i in 0..pairs {
-        let off = i * 4;
-        let a = _mm256_loadu_pd(lo_ptr.add(off));
-        let b = _mm256_loadu_pd(hi_ptr.add(off));
+        for i in 0..pairs {
+            let off = i * 4;
+            let a = _mm256_loadu_pd(lo_ptr.add(off));
+            let b = _mm256_loadu_pd(hi_ptr.add(off));
 
-        let new_a = _mm256_add_pd(
-            complex_mul_avx2fma(mat.m00_rr, mat.m00_ii, a),
-            complex_mul_avx2fma(mat.m01_rr, mat.m01_ii, b),
-        );
-        let new_b = _mm256_add_pd(
-            complex_mul_avx2fma(mat.m10_rr, mat.m10_ii, a),
-            complex_mul_avx2fma(mat.m11_rr, mat.m11_ii, b),
-        );
+            let new_a = _mm256_add_pd(
+                complex_mul_avx2fma(mat.m00_rr, mat.m00_ii, a),
+                complex_mul_avx2fma(mat.m01_rr, mat.m01_ii, b),
+            );
+            let new_b = _mm256_add_pd(
+                complex_mul_avx2fma(mat.m10_rr, mat.m10_ii, a),
+                complex_mul_avx2fma(mat.m11_rr, mat.m11_ii, b),
+            );
 
-        _mm256_storeu_pd(lo_ptr.add(off), new_a);
-        _mm256_storeu_pd(hi_ptr.add(off), new_b);
-    }
+            _mm256_storeu_pd(lo_ptr.add(off), new_a);
+            _mm256_storeu_pd(hi_ptr.add(off), new_b);
+        }
 
-    if n % 2 != 0 {
-        let off = pairs * 4;
-        apply_pair_fma(lo_ptr.add(off), hi_ptr.add(off), mat128);
+        if n % 2 != 0 {
+            let off = pairs * 4;
+            apply_pair_fma(lo_ptr.add(off), hi_ptr.add(off), mat128);
+        }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 unsafe fn apply_full_loop_sse2(state: &mut [Complex64], target: usize, mat: &MatBroadcast) {
-    let half = 1usize << target;
-    let mask = half - 1;
-    let num_pairs = state.len() >> 1;
-    let base = state.as_mut_ptr() as *mut f64;
-    let sign_mask = _mm_set_pd(0.0, -0.0_f64);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let half = 1usize << target;
+        let mask = half - 1;
+        let num_pairs = state.len() >> 1;
+        let base = state.as_mut_ptr() as *mut f64;
+        let sign_mask = _mm_set_pd(0.0, -0.0_f64);
 
-    for k in 0..num_pairs {
-        let i0 = (k & !mask) << 1 | (k & mask);
-        let i1 = i0 | half;
-        let a_ptr = base.add(i0 * 2);
-        let b_ptr = base.add(i1 * 2);
+        for k in 0..num_pairs {
+            let i0 = (k & !mask) << 1 | (k & mask);
+            let i1 = i0 | half;
+            let a_ptr = base.add(i0 * 2);
+            let b_ptr = base.add(i1 * 2);
 
-        let a = _mm_loadu_pd(a_ptr);
-        let b = _mm_loadu_pd(b_ptr);
+            let a = _mm_loadu_pd(a_ptr);
+            let b = _mm_loadu_pd(b_ptr);
 
-        let m00_a = complex_mul_sse2(mat.m00_rr, mat.m00_ii, a, sign_mask);
-        let m01_b = complex_mul_sse2(mat.m01_rr, mat.m01_ii, b, sign_mask);
-        let new_a = _mm_add_pd(m00_a, m01_b);
+            let m00_a = complex_mul_sse2(mat.m00_rr, mat.m00_ii, a, sign_mask);
+            let m01_b = complex_mul_sse2(mat.m01_rr, mat.m01_ii, b, sign_mask);
+            let new_a = _mm_add_pd(m00_a, m01_b);
 
-        let m10_a = complex_mul_sse2(mat.m10_rr, mat.m10_ii, a, sign_mask);
-        let m11_b = complex_mul_sse2(mat.m11_rr, mat.m11_ii, b, sign_mask);
-        let new_b = _mm_add_pd(m10_a, m11_b);
+            let m10_a = complex_mul_sse2(mat.m10_rr, mat.m10_ii, a, sign_mask);
+            let m11_b = complex_mul_sse2(mat.m11_rr, mat.m11_ii, b, sign_mask);
+            let new_b = _mm_add_pd(m10_a, m11_b);
 
-        _mm_storeu_pd(a_ptr, new_a);
-        _mm_storeu_pd(b_ptr, new_b);
+            _mm_storeu_pd(a_ptr, new_a);
+            _mm_storeu_pd(b_ptr, new_b);
+        }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
 unsafe fn apply_full_loop_fma(state: &mut [Complex64], target: usize, mat: &MatBroadcast) {
-    let half = 1usize << target;
-    let mask = half - 1;
-    let num_pairs = state.len() >> 1;
-    let base = state.as_mut_ptr() as *mut f64;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let half = 1usize << target;
+        let mask = half - 1;
+        let num_pairs = state.len() >> 1;
+        let base = state.as_mut_ptr() as *mut f64;
 
-    for k in 0..num_pairs {
-        let i0 = (k & !mask) << 1 | (k & mask);
-        let i1 = i0 | half;
-        let a_ptr = base.add(i0 * 2);
-        let b_ptr = base.add(i1 * 2);
+        for k in 0..num_pairs {
+            let i0 = (k & !mask) << 1 | (k & mask);
+            let i1 = i0 | half;
+            let a_ptr = base.add(i0 * 2);
+            let b_ptr = base.add(i1 * 2);
 
-        let a = _mm_loadu_pd(a_ptr);
-        let b = _mm_loadu_pd(b_ptr);
+            let a = _mm_loadu_pd(a_ptr);
+            let b = _mm_loadu_pd(b_ptr);
 
-        let m00_a = complex_mul_fma(mat.m00_rr, mat.m00_ii, a);
-        let m01_b = complex_mul_fma(mat.m01_rr, mat.m01_ii, b);
-        let new_a = _mm_add_pd(m00_a, m01_b);
+            let m00_a = complex_mul_fma(mat.m00_rr, mat.m00_ii, a);
+            let m01_b = complex_mul_fma(mat.m01_rr, mat.m01_ii, b);
+            let new_a = _mm_add_pd(m00_a, m01_b);
 
-        let m10_a = complex_mul_fma(mat.m10_rr, mat.m10_ii, a);
-        let m11_b = complex_mul_fma(mat.m11_rr, mat.m11_ii, b);
-        let new_b = _mm_add_pd(m10_a, m11_b);
+            let m10_a = complex_mul_fma(mat.m10_rr, mat.m10_ii, a);
+            let m11_b = complex_mul_fma(mat.m11_rr, mat.m11_ii, b);
+            let new_b = _mm_add_pd(m10_a, m11_b);
 
-        _mm_storeu_pd(a_ptr, new_a);
-        _mm_storeu_pd(b_ptr, new_b);
+            _mm_storeu_pd(a_ptr, new_a);
+            _mm_storeu_pd(b_ptr, new_b);
+        }
     }
 }
 
@@ -356,48 +380,75 @@ unsafe fn apply_full_loop_avx2fma_inline(
     target: usize,
     mat: &MatBroadcast256,
 ) {
-    // SAFETY: caller guarantees target >= 2 (half >= 4, avx_pairs >= 2).
-    let half = 1usize << target;
-    let block_size = half << 1;
-    let avx_pairs = half / 2;
-    let base = state.as_mut_ptr() as *mut f64;
-    let n = state.len();
-    let mut offset = 0;
-    while offset < n {
-        let lo_ptr = base.add(offset * 2);
-        let hi_ptr = base.add((offset + half) * 2);
-        for i in 0..avx_pairs {
-            let off = i * 4;
-            let a = _mm256_loadu_pd(lo_ptr.add(off));
-            let b = _mm256_loadu_pd(hi_ptr.add(off));
-            let new_a = _mm256_add_pd(
-                complex_mul_avx2fma(mat.m00_rr, mat.m00_ii, a),
-                complex_mul_avx2fma(mat.m01_rr, mat.m01_ii, b),
-            );
-            let new_b = _mm256_add_pd(
-                complex_mul_avx2fma(mat.m10_rr, mat.m10_ii, a),
-                complex_mul_avx2fma(mat.m11_rr, mat.m11_ii, b),
-            );
-            _mm256_storeu_pd(lo_ptr.add(off), new_a);
-            _mm256_storeu_pd(hi_ptr.add(off), new_b);
+    unsafe {
+        // SAFETY: caller guarantees target >= 2 (half >= 4, avx_pairs >= 2).
+        let half = 1usize << target;
+        let block_size = half << 1;
+        let avx_pairs = half / 2;
+        let base = state.as_mut_ptr() as *mut f64;
+        let n = state.len();
+        let mut offset = 0;
+        while offset < n {
+            let lo_ptr = base.add(offset * 2);
+            let hi_ptr = base.add((offset + half) * 2);
+            for i in 0..avx_pairs {
+                let off = i * 4;
+                let a = _mm256_loadu_pd(lo_ptr.add(off));
+                let b = _mm256_loadu_pd(hi_ptr.add(off));
+                let new_a = _mm256_add_pd(
+                    complex_mul_avx2fma(mat.m00_rr, mat.m00_ii, a),
+                    complex_mul_avx2fma(mat.m01_rr, mat.m01_ii, b),
+                );
+                let new_b = _mm256_add_pd(
+                    complex_mul_avx2fma(mat.m10_rr, mat.m10_ii, a),
+                    complex_mul_avx2fma(mat.m11_rr, mat.m11_ii, b),
+                );
+                _mm256_storeu_pd(lo_ptr.add(off), new_a);
+                _mm256_storeu_pd(hi_ptr.add(off), new_b);
+            }
+            offset += block_size;
         }
-        offset += block_size;
     }
 }
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn apply_full_loop_neon(state: &mut [Complex64], target: usize, mat: &MatBroadcast) {
-    let half = 1usize << target;
-    let mask = half - 1;
-    let num_pairs = state.len() >> 1;
-    let base = state.as_mut_ptr() as *mut f64;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let half = 1usize << target;
+        let mask = half - 1;
+        let num_pairs = state.len() >> 1;
+        let base = state.as_mut_ptr() as *mut f64;
 
-    for k in 0..num_pairs {
-        let i0 = (k & !mask) << 1 | (k & mask);
-        let i1 = i0 | half;
-        let a_ptr = base.add(i0 * 2);
-        let b_ptr = base.add(i1 * 2);
+        for k in 0..num_pairs {
+            let i0 = (k & !mask) << 1 | (k & mask);
+            let i1 = i0 | half;
+            let a_ptr = base.add(i0 * 2);
+            let b_ptr = base.add(i1 * 2);
 
+            let a = vld1q_f64(a_ptr);
+            let b = vld1q_f64(b_ptr);
+
+            let new_a = vaddq_f64(
+                complex_mul_neon(mat.m00_rr, mat.m00_ii_as, a),
+                complex_mul_neon(mat.m01_rr, mat.m01_ii_as, b),
+            );
+            let new_b = vaddq_f64(
+                complex_mul_neon(mat.m10_rr, mat.m10_ii_as, a),
+                complex_mul_neon(mat.m11_rr, mat.m11_ii_as, b),
+            );
+
+            vst1q_f64(a_ptr, new_a);
+            vst1q_f64(b_ptr, new_b);
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn apply_pair_neon(a_ptr: *mut f64, b_ptr: *mut f64, mat: &MatBroadcast) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
         let a = vld1q_f64(a_ptr);
         let b = vld1q_f64(b_ptr);
 
@@ -415,61 +466,48 @@ unsafe fn apply_full_loop_neon(state: &mut [Complex64], target: usize, mat: &Mat
     }
 }
 
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
-unsafe fn apply_pair_neon(a_ptr: *mut f64, b_ptr: *mut f64, mat: &MatBroadcast) {
-    let a = vld1q_f64(a_ptr);
-    let b = vld1q_f64(b_ptr);
-
-    let new_a = vaddq_f64(
-        complex_mul_neon(mat.m00_rr, mat.m00_ii_as, a),
-        complex_mul_neon(mat.m01_rr, mat.m01_ii_as, b),
-    );
-    let new_b = vaddq_f64(
-        complex_mul_neon(mat.m10_rr, mat.m10_ii_as, a),
-        complex_mul_neon(mat.m11_rr, mat.m11_ii_as, b),
-    );
-
-    vst1q_f64(a_ptr, new_a);
-    vst1q_f64(b_ptr, new_b);
-}
-
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn apply_pair_sse2(a_ptr: *mut f64, b_ptr: *mut f64, mat: &MatBroadcast) {
-    let sign_mask = _mm_set_pd(0.0, -0.0_f64);
-    let a = _mm_loadu_pd(a_ptr);
-    let b = _mm_loadu_pd(b_ptr);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let sign_mask = _mm_set_pd(0.0, -0.0_f64);
+        let a = _mm_loadu_pd(a_ptr);
+        let b = _mm_loadu_pd(b_ptr);
 
-    let m00_a = complex_mul_sse2(mat.m00_rr, mat.m00_ii, a, sign_mask);
-    let m01_b = complex_mul_sse2(mat.m01_rr, mat.m01_ii, b, sign_mask);
-    let new_a = _mm_add_pd(m00_a, m01_b);
+        let m00_a = complex_mul_sse2(mat.m00_rr, mat.m00_ii, a, sign_mask);
+        let m01_b = complex_mul_sse2(mat.m01_rr, mat.m01_ii, b, sign_mask);
+        let new_a = _mm_add_pd(m00_a, m01_b);
 
-    let m10_a = complex_mul_sse2(mat.m10_rr, mat.m10_ii, a, sign_mask);
-    let m11_b = complex_mul_sse2(mat.m11_rr, mat.m11_ii, b, sign_mask);
-    let new_b = _mm_add_pd(m10_a, m11_b);
+        let m10_a = complex_mul_sse2(mat.m10_rr, mat.m10_ii, a, sign_mask);
+        let m11_b = complex_mul_sse2(mat.m11_rr, mat.m11_ii, b, sign_mask);
+        let new_b = _mm_add_pd(m10_a, m11_b);
 
-    _mm_storeu_pd(a_ptr, new_a);
-    _mm_storeu_pd(b_ptr, new_b);
+        _mm_storeu_pd(a_ptr, new_a);
+        _mm_storeu_pd(b_ptr, new_b);
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "fma")]
 unsafe fn apply_pair_fma(a_ptr: *mut f64, b_ptr: *mut f64, mat: &MatBroadcast) {
-    let a = _mm_loadu_pd(a_ptr);
-    let b = _mm_loadu_pd(b_ptr);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let a = _mm_loadu_pd(a_ptr);
+        let b = _mm_loadu_pd(b_ptr);
 
-    let m00_a = complex_mul_fma(mat.m00_rr, mat.m00_ii, a);
-    let m01_b = complex_mul_fma(mat.m01_rr, mat.m01_ii, b);
-    let new_a = _mm_add_pd(m00_a, m01_b);
+        let m00_a = complex_mul_fma(mat.m00_rr, mat.m00_ii, a);
+        let m01_b = complex_mul_fma(mat.m01_rr, mat.m01_ii, b);
+        let new_a = _mm_add_pd(m00_a, m01_b);
 
-    let m10_a = complex_mul_fma(mat.m10_rr, mat.m10_ii, a);
-    let m11_b = complex_mul_fma(mat.m11_rr, mat.m11_ii, b);
-    let new_b = _mm_add_pd(m10_a, m11_b);
+        let m10_a = complex_mul_fma(mat.m10_rr, mat.m10_ii, a);
+        let m11_b = complex_mul_fma(mat.m11_rr, mat.m11_ii, b);
+        let new_b = _mm_add_pd(m10_a, m11_b);
 
-    _mm_storeu_pd(a_ptr, new_a);
-    _mm_storeu_pd(b_ptr, new_b);
+        _mm_storeu_pd(a_ptr, new_a);
+        _mm_storeu_pd(b_ptr, new_b);
+    }
 }
 
 #[inline(always)]
@@ -693,27 +731,32 @@ impl PreparedGate1q {
     /// - No other reference may alias either pointee for the duration of this call.
     #[inline(always)]
     pub(crate) unsafe fn apply_pair_ptr(&self, a_ptr: *mut f64, b_ptr: *mut f64) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            match self.tier {
-                SimdTier::Avx2Fma | SimdTier::Fma => apply_pair_fma(a_ptr, b_ptr, &self.broadcast),
-                SimdTier::Sse2 => apply_pair_sse2(a_ptr, b_ptr, &self.broadcast),
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            #[cfg(target_arch = "x86_64")]
+            {
+                match self.tier {
+                    SimdTier::Avx2Fma | SimdTier::Fma => {
+                        apply_pair_fma(a_ptr, b_ptr, &self.broadcast)
+                    }
+                    SimdTier::Sse2 => apply_pair_sse2(a_ptr, b_ptr, &self.broadcast),
+                }
             }
-        }
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            apply_pair_neon(a_ptr, b_ptr, &self.broadcast);
-        }
+            #[cfg(target_arch = "aarch64")]
+            {
+                apply_pair_neon(a_ptr, b_ptr, &self.broadcast);
+            }
 
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            let a = &mut *(a_ptr as *mut Complex64);
-            let b = &mut *(b_ptr as *mut Complex64);
-            let v0 = *a;
-            let v1 = *b;
-            *a = self.mat[0][0] * v0 + self.mat[0][1] * v1;
-            *b = self.mat[1][0] * v0 + self.mat[1][1] * v1;
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            {
+                let a = &mut *(a_ptr as *mut Complex64);
+                let b = &mut *(b_ptr as *mut Complex64);
+                let v0 = *a;
+                let v1 = *b;
+                *a = self.mat[0][0] * v0 + self.mat[0][1] * v1;
+                *b = self.mat[1][0] * v0 + self.mat[1][1] * v1;
+            }
         }
     }
 
@@ -743,33 +786,36 @@ unsafe fn apply_diagonal_loop_fma(
     d1_ii: __m128d,
     skip_lo: bool,
 ) {
-    let half = 1usize << target;
-    let mask = half - 1;
-    let num_pairs = state.len() >> 1;
-    let base = state.as_mut_ptr() as *mut f64;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let half = 1usize << target;
+        let mask = half - 1;
+        let num_pairs = state.len() >> 1;
+        let base = state.as_mut_ptr() as *mut f64;
 
-    if skip_lo {
-        for k in 0..num_pairs {
-            let i1 = ((k & !mask) << 1 | (k & mask)) | half;
-            let p = base.add(i1 * 2);
-            let s = _mm_loadu_pd(p);
-            let r = complex_mul_fma(d1_rr, d1_ii, s);
-            _mm_storeu_pd(p, r);
-        }
-    } else {
-        for k in 0..num_pairs {
-            let i0 = (k & !mask) << 1 | (k & mask);
-            let i1 = i0 | half;
+        if skip_lo {
+            for k in 0..num_pairs {
+                let i1 = ((k & !mask) << 1 | (k & mask)) | half;
+                let p = base.add(i1 * 2);
+                let s = _mm_loadu_pd(p);
+                let r = complex_mul_fma(d1_rr, d1_ii, s);
+                _mm_storeu_pd(p, r);
+            }
+        } else {
+            for k in 0..num_pairs {
+                let i0 = (k & !mask) << 1 | (k & mask);
+                let i1 = i0 | half;
 
-            let p0 = base.add(i0 * 2);
-            let s0 = _mm_loadu_pd(p0);
-            let r0 = complex_mul_fma(d0_rr, d0_ii, s0);
-            _mm_storeu_pd(p0, r0);
+                let p0 = base.add(i0 * 2);
+                let s0 = _mm_loadu_pd(p0);
+                let r0 = complex_mul_fma(d0_rr, d0_ii, s0);
+                _mm_storeu_pd(p0, r0);
 
-            let p1 = base.add(i1 * 2);
-            let s1 = _mm_loadu_pd(p1);
-            let r1 = complex_mul_fma(d1_rr, d1_ii, s1);
-            _mm_storeu_pd(p1, r1);
+                let p1 = base.add(i1 * 2);
+                let s1 = _mm_loadu_pd(p1);
+                let r1 = complex_mul_fma(d1_rr, d1_ii, s1);
+                _mm_storeu_pd(p1, r1);
+            }
         }
     }
 }
@@ -784,33 +830,36 @@ unsafe fn apply_diagonal_loop_neon(
     d1_ii_as: float64x2_t,
     skip_lo: bool,
 ) {
-    let half = 1usize << target;
-    let mask = half - 1;
-    let num_pairs = state.len() >> 1;
-    let base = state.as_mut_ptr() as *mut f64;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let half = 1usize << target;
+        let mask = half - 1;
+        let num_pairs = state.len() >> 1;
+        let base = state.as_mut_ptr() as *mut f64;
 
-    if skip_lo {
-        for k in 0..num_pairs {
-            let i1 = ((k & !mask) << 1 | (k & mask)) | half;
-            let p = base.add(i1 * 2);
-            let s = vld1q_f64(p);
-            let r = complex_mul_neon(d1_rr, d1_ii_as, s);
-            vst1q_f64(p, r);
-        }
-    } else {
-        for k in 0..num_pairs {
-            let i0 = (k & !mask) << 1 | (k & mask);
-            let i1 = i0 | half;
+        if skip_lo {
+            for k in 0..num_pairs {
+                let i1 = ((k & !mask) << 1 | (k & mask)) | half;
+                let p = base.add(i1 * 2);
+                let s = vld1q_f64(p);
+                let r = complex_mul_neon(d1_rr, d1_ii_as, s);
+                vst1q_f64(p, r);
+            }
+        } else {
+            for k in 0..num_pairs {
+                let i0 = (k & !mask) << 1 | (k & mask);
+                let i1 = i0 | half;
 
-            let p0 = base.add(i0 * 2);
-            let s0 = vld1q_f64(p0);
-            let r0 = complex_mul_neon(d0_rr, d0_ii_as, s0);
-            vst1q_f64(p0, r0);
+                let p0 = base.add(i0 * 2);
+                let s0 = vld1q_f64(p0);
+                let r0 = complex_mul_neon(d0_rr, d0_ii_as, s0);
+                vst1q_f64(p0, r0);
 
-            let p1 = base.add(i1 * 2);
-            let s1 = vld1q_f64(p1);
-            let r1 = complex_mul_neon(d1_rr, d1_ii_as, s1);
-            vst1q_f64(p1, r1);
+                let p1 = base.add(i1 * 2);
+                let s1 = vld1q_f64(p1);
+                let r1 = complex_mul_neon(d1_rr, d1_ii_as, s1);
+                vst1q_f64(p1, r1);
+            }
         }
     }
 }
@@ -907,17 +956,20 @@ pub(crate) fn has_bmi2() -> bool {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn negate_slice_avx2(slice: &mut [Complex64]) {
-    let sign = _mm256_set1_pd(-0.0_f64);
-    let ptr = slice.as_mut_ptr() as *mut f64;
-    let pairs = slice.len() / 2;
-    for i in 0..pairs {
-        let off = i * 4;
-        let v = _mm256_loadu_pd(ptr.add(off));
-        _mm256_storeu_pd(ptr.add(off), _mm256_xor_pd(v, sign));
-    }
-    if slice.len() % 2 != 0 {
-        let last = &mut slice[slice.len() - 1];
-        *last = -*last;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let sign = _mm256_set1_pd(-0.0_f64);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        let pairs = slice.len() / 2;
+        for i in 0..pairs {
+            let off = i * 4;
+            let v = _mm256_loadu_pd(ptr.add(off));
+            _mm256_storeu_pd(ptr.add(off), _mm256_xor_pd(v, sign));
+        }
+        if slice.len() % 2 != 0 {
+            let last = &mut slice[slice.len() - 1];
+            *last = -*last;
+        }
     }
 }
 
@@ -954,21 +1006,24 @@ pub(crate) fn negate_slice(slice: &mut [Complex64]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn swap_slices_avx2(a: &mut [Complex64], b: &mut [Complex64]) {
-    debug_assert_eq!(a.len(), b.len());
-    let n = a.len();
-    let ap = a.as_mut_ptr() as *mut f64;
-    let bp = b.as_mut_ptr() as *mut f64;
-    let pairs = n / 2;
-    for i in 0..pairs {
-        let off = i * 4;
-        let va = _mm256_loadu_pd(ap.add(off));
-        let vb = _mm256_loadu_pd(bp.add(off));
-        _mm256_storeu_pd(ap.add(off), vb);
-        _mm256_storeu_pd(bp.add(off), va);
-    }
-    if n % 2 != 0 {
-        let last = n - 1;
-        std::mem::swap(&mut a[last], &mut b[last]);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert_eq!(a.len(), b.len());
+        let n = a.len();
+        let ap = a.as_mut_ptr() as *mut f64;
+        let bp = b.as_mut_ptr() as *mut f64;
+        let pairs = n / 2;
+        for i in 0..pairs {
+            let off = i * 4;
+            let va = _mm256_loadu_pd(ap.add(off));
+            let vb = _mm256_loadu_pd(bp.add(off));
+            _mm256_storeu_pd(ap.add(off), vb);
+            _mm256_storeu_pd(bp.add(off), va);
+        }
+        if n % 2 != 0 {
+            let last = n - 1;
+            std::mem::swap(&mut a[last], &mut b[last]);
+        }
     }
 }
 
@@ -1007,45 +1062,48 @@ pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn norm_sqr_sum_avx2fma(slice: &[Complex64]) -> f64 {
-    let ptr = slice.as_ptr() as *const f64;
-    let pairs = slice.len() / 2;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ptr = slice.as_ptr() as *const f64;
+        let pairs = slice.len() / 2;
 
-    // 4 independent accumulators hide FMA latency (4 cycles on Skylake).
-    let mut a0 = _mm256_setzero_pd();
-    let mut a1 = _mm256_setzero_pd();
-    let mut a2 = _mm256_setzero_pd();
-    let mut a3 = _mm256_setzero_pd();
-    let unrolled = pairs / 4;
-    let remainder = pairs % 4;
+        // 4 independent accumulators hide FMA latency (4 cycles on Skylake).
+        let mut a0 = _mm256_setzero_pd();
+        let mut a1 = _mm256_setzero_pd();
+        let mut a2 = _mm256_setzero_pd();
+        let mut a3 = _mm256_setzero_pd();
+        let unrolled = pairs / 4;
+        let remainder = pairs % 4;
 
-    for i in 0..unrolled {
-        let base = i * 16;
-        let v0 = _mm256_loadu_pd(ptr.add(base));
-        let v1 = _mm256_loadu_pd(ptr.add(base + 4));
-        let v2 = _mm256_loadu_pd(ptr.add(base + 8));
-        let v3 = _mm256_loadu_pd(ptr.add(base + 12));
-        a0 = _mm256_fmadd_pd(v0, v0, a0);
-        a1 = _mm256_fmadd_pd(v1, v1, a1);
-        a2 = _mm256_fmadd_pd(v2, v2, a2);
-        a3 = _mm256_fmadd_pd(v3, v3, a3);
+        for i in 0..unrolled {
+            let base = i * 16;
+            let v0 = _mm256_loadu_pd(ptr.add(base));
+            let v1 = _mm256_loadu_pd(ptr.add(base + 4));
+            let v2 = _mm256_loadu_pd(ptr.add(base + 8));
+            let v3 = _mm256_loadu_pd(ptr.add(base + 12));
+            a0 = _mm256_fmadd_pd(v0, v0, a0);
+            a1 = _mm256_fmadd_pd(v1, v1, a1);
+            a2 = _mm256_fmadd_pd(v2, v2, a2);
+            a3 = _mm256_fmadd_pd(v3, v3, a3);
+        }
+
+        let mut acc = _mm256_add_pd(_mm256_add_pd(a0, a1), _mm256_add_pd(a2, a3));
+        let tail_base = unrolled * 16;
+        for i in 0..remainder {
+            let v = _mm256_loadu_pd(ptr.add(tail_base + i * 4));
+            acc = _mm256_fmadd_pd(v, v, acc);
+        }
+
+        let hi128 = _mm256_extractf128_pd(acc, 1);
+        let sum128 = _mm_add_pd(_mm256_castpd256_pd128(acc), hi128);
+        let hi64 = _mm_unpackhi_pd(sum128, sum128);
+        let total = _mm_add_sd(sum128, hi64);
+        let mut result = _mm_cvtsd_f64(total);
+        if slice.len() % 2 != 0 {
+            result += slice[slice.len() - 1].norm_sqr();
+        }
+        result
     }
-
-    let mut acc = _mm256_add_pd(_mm256_add_pd(a0, a1), _mm256_add_pd(a2, a3));
-    let tail_base = unrolled * 16;
-    for i in 0..remainder {
-        let v = _mm256_loadu_pd(ptr.add(tail_base + i * 4));
-        acc = _mm256_fmadd_pd(v, v, acc);
-    }
-
-    let hi128 = _mm256_extractf128_pd(acc, 1);
-    let sum128 = _mm_add_pd(_mm256_castpd256_pd128(acc), hi128);
-    let hi64 = _mm_unpackhi_pd(sum128, sum128);
-    let total = _mm_add_sd(sum128, hi64);
-    let mut result = _mm_cvtsd_f64(total);
-    if slice.len() % 2 != 0 {
-        result += slice[slice.len() - 1].norm_sqr();
-    }
-    result
 }
 
 pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
@@ -1066,59 +1124,65 @@ pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
 
 #[cfg(target_arch = "aarch64")]
 unsafe fn norm_sqr_sum_neon(slice: &[Complex64]) -> f64 {
-    let ptr = slice.as_ptr() as *const f64;
-    let mut a0 = vdupq_n_f64(0.0);
-    let mut a1 = vdupq_n_f64(0.0);
-    let mut a2 = vdupq_n_f64(0.0);
-    let mut a3 = vdupq_n_f64(0.0);
-    let unrolled = slice.len() / 4;
-    let remainder = slice.len() % 4;
-    for i in 0..unrolled {
-        let base = i * 8;
-        let v0 = vld1q_f64(ptr.add(base));
-        let v1 = vld1q_f64(ptr.add(base + 2));
-        let v2 = vld1q_f64(ptr.add(base + 4));
-        let v3 = vld1q_f64(ptr.add(base + 6));
-        a0 = vfmaq_f64(a0, v0, v0);
-        a1 = vfmaq_f64(a1, v1, v1);
-        a2 = vfmaq_f64(a2, v2, v2);
-        a3 = vfmaq_f64(a3, v3, v3);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let ptr = slice.as_ptr() as *const f64;
+        let mut a0 = vdupq_n_f64(0.0);
+        let mut a1 = vdupq_n_f64(0.0);
+        let mut a2 = vdupq_n_f64(0.0);
+        let mut a3 = vdupq_n_f64(0.0);
+        let unrolled = slice.len() / 4;
+        let remainder = slice.len() % 4;
+        for i in 0..unrolled {
+            let base = i * 8;
+            let v0 = vld1q_f64(ptr.add(base));
+            let v1 = vld1q_f64(ptr.add(base + 2));
+            let v2 = vld1q_f64(ptr.add(base + 4));
+            let v3 = vld1q_f64(ptr.add(base + 6));
+            a0 = vfmaq_f64(a0, v0, v0);
+            a1 = vfmaq_f64(a1, v1, v1);
+            a2 = vfmaq_f64(a2, v2, v2);
+            a3 = vfmaq_f64(a3, v3, v3);
+        }
+        let mut acc = vaddq_f64(vaddq_f64(a0, a1), vaddq_f64(a2, a3));
+        let tail = unrolled * 4;
+        for i in 0..remainder {
+            let v = vld1q_f64(ptr.add((tail + i) * 2));
+            acc = vfmaq_f64(acc, v, v);
+        }
+        vaddvq_f64(acc)
     }
-    let mut acc = vaddq_f64(vaddq_f64(a0, a1), vaddq_f64(a2, a3));
-    let tail = unrolled * 4;
-    for i in 0..remainder {
-        let v = vld1q_f64(ptr.add((tail + i) * 2));
-        acc = vfmaq_f64(acc, v, v);
-    }
-    vaddvq_f64(acc)
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn norm_sqr_to_slice_avx2(src: &[Complex64], dst: &mut [f64]) {
-    debug_assert!(dst.len() >= src.len());
-    let inp = src.as_ptr() as *const f64;
-    let out = dst.as_mut_ptr();
-    let quads = src.len() / 4;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(dst.len() >= src.len());
+        let inp = src.as_ptr() as *const f64;
+        let out = dst.as_mut_ptr();
+        let quads = src.len() / 4;
 
-    for i in 0..quads {
-        let base_in = i * 8;
-        let base_out = i * 4;
-        let v0 = _mm256_loadu_pd(inp.add(base_in));
-        let v1 = _mm256_loadu_pd(inp.add(base_in + 4));
-        let sq0 = _mm256_mul_pd(v0, v0);
-        let sq1 = _mm256_mul_pd(v1, v1);
-        // hadd: lane0=[sq0[0]+sq0[1], sq1[0]+sq1[1]], lane1=[sq0[2]+sq0[3], sq1[2]+sq1[3]]
-        //      = [norm0, norm2, norm1, norm3]
-        let h = _mm256_hadd_pd(sq0, sq1);
-        // permute to [norm0, norm1, norm2, norm3]
-        let ordered = _mm256_permute4x64_pd(h, 0b11_01_10_00);
-        _mm256_storeu_pd(out.add(base_out), ordered);
-    }
+        for i in 0..quads {
+            let base_in = i * 8;
+            let base_out = i * 4;
+            let v0 = _mm256_loadu_pd(inp.add(base_in));
+            let v1 = _mm256_loadu_pd(inp.add(base_in + 4));
+            let sq0 = _mm256_mul_pd(v0, v0);
+            let sq1 = _mm256_mul_pd(v1, v1);
+            // hadd: lane0=[sq0[0]+sq0[1], sq1[0]+sq1[1]], lane1=[sq0[2]+sq0[3], sq1[2]+sq1[3]]
+            //      = [norm0, norm2, norm1, norm3]
+            let h = _mm256_hadd_pd(sq0, sq1);
+            // permute to [norm0, norm1, norm2, norm3]
+            let ordered = _mm256_permute4x64_pd(h, 0b11_01_10_00);
+            _mm256_storeu_pd(out.add(base_out), ordered);
+        }
 
-    let tail = quads * 4;
-    for (j, c) in src[tail..].iter().enumerate() {
-        *out.add(tail + j) = c.norm_sqr();
+        let tail = quads * 4;
+        for (j, c) in src[tail..].iter().enumerate() {
+            *out.add(tail + j) = c.norm_sqr();
+        }
     }
 }
 
@@ -1163,27 +1227,30 @@ pub(crate) fn norm_sqr_to_slice(src: &[Complex64], dst: &mut [f64]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn norm_sqr_to_slice_scaled_avx2(src: &[Complex64], dst: &mut [f64], scale: f64) {
-    debug_assert!(dst.len() >= src.len());
-    let inp = src.as_ptr() as *const f64;
-    let out = dst.as_mut_ptr();
-    let s = _mm256_set1_pd(scale);
-    let quads = src.len() / 4;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(dst.len() >= src.len());
+        let inp = src.as_ptr() as *const f64;
+        let out = dst.as_mut_ptr();
+        let s = _mm256_set1_pd(scale);
+        let quads = src.len() / 4;
 
-    for i in 0..quads {
-        let base_in = i * 8;
-        let base_out = i * 4;
-        let v0 = _mm256_loadu_pd(inp.add(base_in));
-        let v1 = _mm256_loadu_pd(inp.add(base_in + 4));
-        let sq0 = _mm256_mul_pd(v0, v0);
-        let sq1 = _mm256_mul_pd(v1, v1);
-        let h = _mm256_hadd_pd(sq0, sq1);
-        let ordered = _mm256_permute4x64_pd(h, 0b11_01_10_00);
-        _mm256_storeu_pd(out.add(base_out), _mm256_mul_pd(ordered, s));
-    }
+        for i in 0..quads {
+            let base_in = i * 8;
+            let base_out = i * 4;
+            let v0 = _mm256_loadu_pd(inp.add(base_in));
+            let v1 = _mm256_loadu_pd(inp.add(base_in + 4));
+            let sq0 = _mm256_mul_pd(v0, v0);
+            let sq1 = _mm256_mul_pd(v1, v1);
+            let h = _mm256_hadd_pd(sq0, sq1);
+            let ordered = _mm256_permute4x64_pd(h, 0b11_01_10_00);
+            _mm256_storeu_pd(out.add(base_out), _mm256_mul_pd(ordered, s));
+        }
 
-    let tail = quads * 4;
-    for (j, c) in src[tail..].iter().enumerate() {
-        *out.add(tail + j) = c.norm_sqr() * scale;
+        let tail = quads * 4;
+        for (j, c) in src[tail..].iter().enumerate() {
+            *out.add(tail + j) = c.norm_sqr() * scale;
+        }
     }
 }
 
@@ -1226,21 +1293,27 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
     }
 }
 
-#[cfg(all(target_arch = "x86_64", any(feature = "parallel", test)))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "parallel", feature = "distributed", test)
+))]
 #[target_feature(enable = "avx2")]
 unsafe fn zero_slice_avx2(slice: &mut [Complex64]) {
-    let z = _mm256_setzero_pd();
-    let ptr = slice.as_mut_ptr() as *mut f64;
-    let pairs = slice.len() / 2;
-    for i in 0..pairs {
-        _mm256_storeu_pd(ptr.add(i * 4), z);
-    }
-    if slice.len() % 2 != 0 {
-        slice[slice.len() - 1] = Complex64::new(0.0, 0.0);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let z = _mm256_setzero_pd();
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        let pairs = slice.len() / 2;
+        for i in 0..pairs {
+            _mm256_storeu_pd(ptr.add(i * 4), z);
+        }
+        if slice.len() % 2 != 0 {
+            slice[slice.len() - 1] = Complex64::new(0.0, 0.0);
+        }
     }
 }
 
-#[cfg(any(feature = "parallel", test))]
+#[cfg(any(feature = "parallel", feature = "distributed", test))]
 pub(crate) fn zero_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
@@ -1258,52 +1331,61 @@ pub(crate) fn zero_slice(slice: &mut [Complex64]) {
 #[cfg(all(target_arch = "x86_64", test))]
 #[target_feature(enable = "avx2")]
 unsafe fn scale_slice_avx2(slice: &mut [Complex64], factor: f64) {
-    let f = _mm256_set1_pd(factor);
-    let ptr = slice.as_mut_ptr() as *mut f64;
-    let pairs = slice.len() / 2;
-    for i in 0..pairs {
-        let off = i * 4;
-        let v = _mm256_loadu_pd(ptr.add(off));
-        _mm256_storeu_pd(ptr.add(off), _mm256_mul_pd(v, f));
-    }
-    if slice.len() % 2 != 0 {
-        slice[slice.len() - 1] *= factor;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let f = _mm256_set1_pd(factor);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        let pairs = slice.len() / 2;
+        for i in 0..pairs {
+            let off = i * 4;
+            let v = _mm256_loadu_pd(ptr.add(off));
+            _mm256_storeu_pd(ptr.add(off), _mm256_mul_pd(v, f));
+        }
+        if slice.len() % 2 != 0 {
+            slice[slice.len() - 1] *= factor;
+        }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn scale_complex_slice_avx2fma(slice: &mut [Complex64], factor: Complex64) {
-    let rr = _mm256_set1_pd(factor.re);
-    let ii = _mm256_set1_pd(factor.im);
-    let ptr = slice.as_mut_ptr() as *mut f64;
-    let pairs = slice.len() / 2;
-    for i in 0..pairs {
-        let off = i * 4;
-        let v = _mm256_loadu_pd(ptr.add(off));
-        let v_swap = _mm256_permute_pd(v, 0b0101);
-        let t = _mm256_mul_pd(ii, v_swap);
-        let result = _mm256_fmaddsub_pd(rr, v, t);
-        _mm256_storeu_pd(ptr.add(off), result);
-    }
-    if slice.len() % 2 != 0 {
-        slice[slice.len() - 1] *= factor;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let rr = _mm256_set1_pd(factor.re);
+        let ii = _mm256_set1_pd(factor.im);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        let pairs = slice.len() / 2;
+        for i in 0..pairs {
+            let off = i * 4;
+            let v = _mm256_loadu_pd(ptr.add(off));
+            let v_swap = _mm256_permute_pd(v, 0b0101);
+            let t = _mm256_mul_pd(ii, v_swap);
+            let result = _mm256_fmaddsub_pd(rr, v, t);
+            _mm256_storeu_pd(ptr.add(off), result);
+        }
+        if slice.len() % 2 != 0 {
+            slice[slice.len() - 1] *= factor;
+        }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
 unsafe fn scale_complex_slice_fma(slice: &mut [Complex64], factor: Complex64) {
-    let rr = _mm_set1_pd(factor.re);
-    let ii = _mm_set1_pd(factor.im);
-    let ptr = slice.as_mut_ptr() as *mut f64;
-    for i in 0..slice.len() {
-        let p = ptr.add(i * 2);
-        let v = _mm_loadu_pd(p);
-        let v_swap = _mm_shuffle_pd(v, v, 0b01);
-        let t = _mm_mul_pd(ii, v_swap);
-        let result = _mm_fmaddsub_pd(rr, v, t);
-        _mm_storeu_pd(p, result);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let rr = _mm_set1_pd(factor.re);
+        let ii = _mm_set1_pd(factor.im);
+        let ptr = slice.as_mut_ptr() as *mut f64;
+        for i in 0..slice.len() {
+            let p = ptr.add(i * 2);
+            let v = _mm_loadu_pd(p);
+            let v_swap = _mm_shuffle_pd(v, v, 0b01);
+            let t = _mm_mul_pd(ii, v_swap);
+            let result = _mm_fmaddsub_pd(rr, v, t);
+            _mm_storeu_pd(p, result);
+        }
     }
 }
 
@@ -1352,26 +1434,29 @@ unsafe fn combine_global_half_avx2fma(
     c_self: Complex64,
     c_remote: Complex64,
 ) {
-    let s_rr = _mm256_set1_pd(c_self.re);
-    let s_ii = _mm256_set1_pd(c_self.im);
-    let r_rr = _mm256_set1_pd(c_remote.re);
-    let r_ii = _mm256_set1_pd(c_remote.im);
-    let dp = dst.as_mut_ptr() as *mut f64;
-    let rp = remote.as_ptr() as *const f64;
-    let pairs = dst.len() / 2;
-    for i in 0..pairs {
-        let off = i * 4;
-        let d = _mm256_loadu_pd(dp.add(off));
-        let r = _mm256_loadu_pd(rp.add(off));
-        let acc = _mm256_add_pd(
-            complex_mul_avx2fma(s_rr, s_ii, d),
-            complex_mul_avx2fma(r_rr, r_ii, r),
-        );
-        _mm256_storeu_pd(dp.add(off), acc);
-    }
-    if dst.len() % 2 != 0 {
-        let last = dst.len() - 1;
-        dst[last] = c_self * dst[last] + c_remote * remote[last];
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let s_rr = _mm256_set1_pd(c_self.re);
+        let s_ii = _mm256_set1_pd(c_self.im);
+        let r_rr = _mm256_set1_pd(c_remote.re);
+        let r_ii = _mm256_set1_pd(c_remote.im);
+        let dp = dst.as_mut_ptr() as *mut f64;
+        let rp = remote.as_ptr() as *const f64;
+        let pairs = dst.len() / 2;
+        for i in 0..pairs {
+            let off = i * 4;
+            let d = _mm256_loadu_pd(dp.add(off));
+            let r = _mm256_loadu_pd(rp.add(off));
+            let acc = _mm256_add_pd(
+                complex_mul_avx2fma(s_rr, s_ii, d),
+                complex_mul_avx2fma(r_rr, r_ii, r),
+            );
+            _mm256_storeu_pd(dp.add(off), acc);
+        }
+        if dst.len() % 2 != 0 {
+            let last = dst.len() - 1;
+            dst[last] = c_self * dst[last] + c_remote * remote[last];
+        }
     }
 }
 
@@ -1383,20 +1468,23 @@ unsafe fn combine_global_half_fma(
     c_self: Complex64,
     c_remote: Complex64,
 ) {
-    let s_rr = _mm_set1_pd(c_self.re);
-    let s_ii = _mm_set1_pd(c_self.im);
-    let r_rr = _mm_set1_pd(c_remote.re);
-    let r_ii = _mm_set1_pd(c_remote.im);
-    let dp = dst.as_mut_ptr() as *mut f64;
-    let rp = remote.as_ptr() as *const f64;
-    for i in 0..dst.len() {
-        let d = _mm_loadu_pd(dp.add(i * 2));
-        let r = _mm_loadu_pd(rp.add(i * 2));
-        let acc = _mm_add_pd(
-            complex_mul_fma(s_rr, s_ii, d),
-            complex_mul_fma(r_rr, r_ii, r),
-        );
-        _mm_storeu_pd(dp.add(i * 2), acc);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let s_rr = _mm_set1_pd(c_self.re);
+        let s_ii = _mm_set1_pd(c_self.im);
+        let r_rr = _mm_set1_pd(c_remote.re);
+        let r_ii = _mm_set1_pd(c_remote.im);
+        let dp = dst.as_mut_ptr() as *mut f64;
+        let rp = remote.as_ptr() as *const f64;
+        for i in 0..dst.len() {
+            let d = _mm_loadu_pd(dp.add(i * 2));
+            let r = _mm_loadu_pd(rp.add(i * 2));
+            let acc = _mm_add_pd(
+                complex_mul_fma(s_rr, s_ii, d),
+                complex_mul_fma(r_rr, r_ii, r),
+            );
+            _mm_storeu_pd(dp.add(i * 2), acc);
+        }
     }
 }
 
@@ -1407,20 +1495,23 @@ unsafe fn combine_global_half_neon(
     c_self: Complex64,
     c_remote: Complex64,
 ) {
-    let s_rr = vdupq_n_f64(c_self.re);
-    let s_ii_as = vcombine_f64(vdup_n_f64(-c_self.im), vdup_n_f64(c_self.im));
-    let r_rr = vdupq_n_f64(c_remote.re);
-    let r_ii_as = vcombine_f64(vdup_n_f64(-c_remote.im), vdup_n_f64(c_remote.im));
-    let dp = dst.as_mut_ptr() as *mut f64;
-    let rp = remote.as_ptr() as *const f64;
-    for i in 0..dst.len() {
-        let d = vld1q_f64(dp.add(i * 2));
-        let r = vld1q_f64(rp.add(i * 2));
-        let acc = vaddq_f64(
-            complex_mul_neon(s_rr, s_ii_as, d),
-            complex_mul_neon(r_rr, r_ii_as, r),
-        );
-        vst1q_f64(dp.add(i * 2), acc);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let s_rr = vdupq_n_f64(c_self.re);
+        let s_ii_as = vcombine_f64(vdup_n_f64(-c_self.im), vdup_n_f64(c_self.im));
+        let r_rr = vdupq_n_f64(c_remote.re);
+        let r_ii_as = vcombine_f64(vdup_n_f64(-c_remote.im), vdup_n_f64(c_remote.im));
+        let dp = dst.as_mut_ptr() as *mut f64;
+        let rp = remote.as_ptr() as *const f64;
+        for i in 0..dst.len() {
+            let d = vld1q_f64(dp.add(i * 2));
+            let r = vld1q_f64(rp.add(i * 2));
+            let acc = vaddq_f64(
+                complex_mul_neon(s_rr, s_ii_as, d),
+                complex_mul_neon(r_rr, r_ii_as, r),
+            );
+            vst1q_f64(dp.add(i * 2), acc);
+        }
     }
 }
 
@@ -1478,40 +1569,46 @@ unsafe fn scale_complex_to_slice_avx2fma(
     src: &[Complex64],
     factor: Complex64,
 ) {
-    debug_assert!(dst.len() >= src.len());
-    let rr = _mm256_set1_pd(factor.re);
-    let ii = _mm256_set1_pd(factor.im);
-    let dp = dst.as_mut_ptr() as *mut f64;
-    let sp = src.as_ptr() as *const f64;
-    let pairs = src.len() / 2;
-    for i in 0..pairs {
-        let off = i * 4;
-        let v = _mm256_loadu_pd(sp.add(off));
-        let v_swap = _mm256_permute_pd(v, 0b0101);
-        let t = _mm256_mul_pd(ii, v_swap);
-        let result = _mm256_fmaddsub_pd(rr, v, t);
-        _mm256_storeu_pd(dp.add(off), result);
-    }
-    if src.len() % 2 != 0 {
-        let last = src.len() - 1;
-        dst[last] = src[last] * factor;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(dst.len() >= src.len());
+        let rr = _mm256_set1_pd(factor.re);
+        let ii = _mm256_set1_pd(factor.im);
+        let dp = dst.as_mut_ptr() as *mut f64;
+        let sp = src.as_ptr() as *const f64;
+        let pairs = src.len() / 2;
+        for i in 0..pairs {
+            let off = i * 4;
+            let v = _mm256_loadu_pd(sp.add(off));
+            let v_swap = _mm256_permute_pd(v, 0b0101);
+            let t = _mm256_mul_pd(ii, v_swap);
+            let result = _mm256_fmaddsub_pd(rr, v, t);
+            _mm256_storeu_pd(dp.add(off), result);
+        }
+        if src.len() % 2 != 0 {
+            let last = src.len() - 1;
+            dst[last] = src[last] * factor;
+        }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
 unsafe fn scale_complex_to_slice_fma(dst: &mut [Complex64], src: &[Complex64], factor: Complex64) {
-    debug_assert!(dst.len() >= src.len());
-    let rr = _mm_set1_pd(factor.re);
-    let ii = _mm_set1_pd(factor.im);
-    let dp = dst.as_mut_ptr() as *mut f64;
-    let sp = src.as_ptr() as *const f64;
-    for i in 0..src.len() {
-        let v = _mm_loadu_pd(sp.add(i * 2));
-        let v_swap = _mm_shuffle_pd(v, v, 0b01);
-        let t = _mm_mul_pd(ii, v_swap);
-        let result = _mm_fmaddsub_pd(rr, v, t);
-        _mm_storeu_pd(dp.add(i * 2), result);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        debug_assert!(dst.len() >= src.len());
+        let rr = _mm_set1_pd(factor.re);
+        let ii = _mm_set1_pd(factor.im);
+        let dp = dst.as_mut_ptr() as *mut f64;
+        let sp = src.as_ptr() as *const f64;
+        for i in 0..src.len() {
+            let v = _mm_loadu_pd(sp.add(i * 2));
+            let v_swap = _mm_shuffle_pd(v, v, 0b01);
+            let t = _mm_mul_pd(ii, v_swap);
+            let result = _mm_fmaddsub_pd(rr, v, t);
+            _mm_storeu_pd(dp.add(i * 2), result);
+        }
     }
 }
 
@@ -1619,16 +1716,19 @@ struct Mat4x4Broadcast256 {
 impl Mat4x4Broadcast256 {
     #[inline(always)]
     unsafe fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
-        let mut rr = [_mm256_setzero_pd(); 16];
-        let mut ii = [_mm256_setzero_pd(); 16];
-        for (r, row) in mat.iter().enumerate() {
-            for (c, elem) in row.iter().enumerate() {
-                let idx = r * 4 + c;
-                rr[idx] = _mm256_set1_pd(elem.re);
-                ii[idx] = _mm256_set1_pd(elem.im);
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            let mut rr = [_mm256_setzero_pd(); 16];
+            let mut ii = [_mm256_setzero_pd(); 16];
+            for (r, row) in mat.iter().enumerate() {
+                for (c, elem) in row.iter().enumerate() {
+                    let idx = r * 4 + c;
+                    rr[idx] = _mm256_set1_pd(elem.re);
+                    ii[idx] = _mm256_set1_pd(elem.im);
+                }
             }
+            Self { rr, ii }
         }
-        Self { rr, ii }
     }
 }
 
@@ -1659,34 +1759,37 @@ impl Mat4x4Broadcast {
 #[inline]
 #[target_feature(enable = "fma")]
 unsafe fn apply_fused_2q_group_fma_inner(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
-    let s0 = _mm_loadu_pd(state.add(i[0] * 2));
-    let s1 = _mm_loadu_pd(state.add(i[1] * 2));
-    let s2 = _mm_loadu_pd(state.add(i[2] * 2));
-    let s3 = _mm_loadu_pd(state.add(i[3] * 2));
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let s0 = _mm_loadu_pd(state.add(i[0] * 2));
+        let s1 = _mm_loadu_pd(state.add(i[1] * 2));
+        let s2 = _mm_loadu_pd(state.add(i[2] * 2));
+        let s3 = _mm_loadu_pd(state.add(i[3] * 2));
 
-    let sf0 = _mm_shuffle_pd(s0, s0, 0b01);
-    let sf1 = _mm_shuffle_pd(s1, s1, 0b01);
-    let sf2 = _mm_shuffle_pd(s2, s2, 0b01);
-    let sf3 = _mm_shuffle_pd(s3, s3, 0b01);
+        let sf0 = _mm_shuffle_pd(s0, s0, 0b01);
+        let sf1 = _mm_shuffle_pd(s1, s1, 0b01);
+        let sf2 = _mm_shuffle_pd(s2, s2, 0b01);
+        let sf3 = _mm_shuffle_pd(s3, s3, 0b01);
 
-    macro_rules! row {
-        ($r:expr) => {{
-            let off = $r * 4;
-            let t = _mm_mul_pd(mat.ii[off], sf0);
-            let mut acc = _mm_fmaddsub_pd(mat.rr[off], s0, t);
-            let t = _mm_mul_pd(mat.ii[off + 1], sf1);
-            acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 1], s1, t));
-            let t = _mm_mul_pd(mat.ii[off + 2], sf2);
-            acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 2], s2, t));
-            let t = _mm_mul_pd(mat.ii[off + 3], sf3);
-            acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 3], s3, t));
-            _mm_storeu_pd(state.add(i[$r] * 2), acc);
-        }};
+        macro_rules! row {
+            ($r:expr) => {{
+                let off = $r * 4;
+                let t = _mm_mul_pd(mat.ii[off], sf0);
+                let mut acc = _mm_fmaddsub_pd(mat.rr[off], s0, t);
+                let t = _mm_mul_pd(mat.ii[off + 1], sf1);
+                acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 1], s1, t));
+                let t = _mm_mul_pd(mat.ii[off + 2], sf2);
+                acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 2], s2, t));
+                let t = _mm_mul_pd(mat.ii[off + 3], sf3);
+                acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 3], s3, t));
+                _mm_storeu_pd(state.add(i[$r] * 2), acc);
+            }};
+        }
+        row!(0);
+        row!(1);
+        row!(2);
+        row!(3);
     }
-    row!(0);
-    row!(1);
-    row!(2);
-    row!(3);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1700,12 +1803,15 @@ unsafe fn apply_fused_2q_loop_fma(
     mask1: usize,
     mat: &Mat4x4Broadcast,
 ) {
-    use crate::backend::statevector::insert_zero_bit;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use crate::backend::statevector::insert_zero_bit;
 
-    for k in 0..n_iter {
-        let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-        let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
-        apply_fused_2q_group_fma_inner(state, i, mat);
+        for k in 0..n_iter {
+            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+            apply_fused_2q_group_fma_inner(state, i, mat);
+        }
     }
 }
 
@@ -1713,7 +1819,10 @@ unsafe fn apply_fused_2q_loop_fma(
 #[inline]
 #[target_feature(enable = "fma")]
 unsafe fn apply_fused_2q_group_fma(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
-    apply_fused_2q_group_fma_inner(state, i, mat);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        apply_fused_2q_group_fma_inner(state, i, mat);
+    }
 }
 
 /// Apply two consecutive 4-element groups (k and k+1) of a 2q gate using AVX2.
@@ -1726,34 +1835,37 @@ unsafe fn apply_fused_2q_group_fma(state: *mut f64, i: [usize; 4], mat: &Mat4x4B
 #[inline]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn apply_fused_2q_pair_avx2_inner(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast256) {
-    let s0 = _mm256_loadu_pd(state.add(i[0] * 2));
-    let s1 = _mm256_loadu_pd(state.add(i[1] * 2));
-    let s2 = _mm256_loadu_pd(state.add(i[2] * 2));
-    let s3 = _mm256_loadu_pd(state.add(i[3] * 2));
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let s0 = _mm256_loadu_pd(state.add(i[0] * 2));
+        let s1 = _mm256_loadu_pd(state.add(i[1] * 2));
+        let s2 = _mm256_loadu_pd(state.add(i[2] * 2));
+        let s3 = _mm256_loadu_pd(state.add(i[3] * 2));
 
-    let sf0 = _mm256_shuffle_pd(s0, s0, 0b0101);
-    let sf1 = _mm256_shuffle_pd(s1, s1, 0b0101);
-    let sf2 = _mm256_shuffle_pd(s2, s2, 0b0101);
-    let sf3 = _mm256_shuffle_pd(s3, s3, 0b0101);
+        let sf0 = _mm256_shuffle_pd(s0, s0, 0b0101);
+        let sf1 = _mm256_shuffle_pd(s1, s1, 0b0101);
+        let sf2 = _mm256_shuffle_pd(s2, s2, 0b0101);
+        let sf3 = _mm256_shuffle_pd(s3, s3, 0b0101);
 
-    macro_rules! row {
-        ($r:expr) => {{
-            let off = $r * 4;
-            let t = _mm256_mul_pd(mat.ii[off], sf0);
-            let mut acc = _mm256_fmaddsub_pd(mat.rr[off], s0, t);
-            let t = _mm256_mul_pd(mat.ii[off + 1], sf1);
-            acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 1], s1, t));
-            let t = _mm256_mul_pd(mat.ii[off + 2], sf2);
-            acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 2], s2, t));
-            let t = _mm256_mul_pd(mat.ii[off + 3], sf3);
-            acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 3], s3, t));
-            _mm256_storeu_pd(state.add(i[$r] * 2), acc);
-        }};
+        macro_rules! row {
+            ($r:expr) => {{
+                let off = $r * 4;
+                let t = _mm256_mul_pd(mat.ii[off], sf0);
+                let mut acc = _mm256_fmaddsub_pd(mat.rr[off], s0, t);
+                let t = _mm256_mul_pd(mat.ii[off + 1], sf1);
+                acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 1], s1, t));
+                let t = _mm256_mul_pd(mat.ii[off + 2], sf2);
+                acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 2], s2, t));
+                let t = _mm256_mul_pd(mat.ii[off + 3], sf3);
+                acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 3], s3, t));
+                _mm256_storeu_pd(state.add(i[$r] * 2), acc);
+            }};
+        }
+        row!(0);
+        row!(1);
+        row!(2);
+        row!(3);
     }
-    row!(0);
-    row!(1);
-    row!(2);
-    row!(3);
 }
 
 /// Pair-batched 2q kernel main loop. Requires `lo > 0` so that paired k/k+1
@@ -1772,29 +1884,32 @@ unsafe fn apply_fused_2q_loop_avx2(
     mat256: &Mat4x4Broadcast256,
     mat128: &Mat4x4Broadcast,
 ) {
-    use crate::backend::statevector::insert_zero_bit;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use crate::backend::statevector::insert_zero_bit;
 
-    if lo == 0 {
-        for k in 0..n_iter {
+        if lo == 0 {
+            for k in 0..n_iter {
+                let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+                let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+                apply_fused_2q_group_fma_inner(state, i, mat128);
+            }
+            return;
+        }
+
+        let pairs = n_iter / 2;
+        for pk in 0..pairs {
+            let k = pk * 2;
+            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+            apply_fused_2q_pair_avx2_inner(state, i, mat256);
+        }
+        if n_iter & 1 == 1 {
+            let k = n_iter - 1;
             let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
             let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
             apply_fused_2q_group_fma_inner(state, i, mat128);
         }
-        return;
-    }
-
-    let pairs = n_iter / 2;
-    for pk in 0..pairs {
-        let k = pk * 2;
-        let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-        let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
-        apply_fused_2q_pair_avx2_inner(state, i, mat256);
-    }
-    if n_iter & 1 == 1 {
-        let k = n_iter - 1;
-        let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-        let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
-        apply_fused_2q_group_fma_inner(state, i, mat128);
     }
 }
 
@@ -1806,36 +1921,39 @@ unsafe fn apply_fused_2q_loop_avx2(
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn apply_fused_2q_group_sse2(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
-    let sign_mask = _mm_set_pd(0.0, -0.0_f64);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let sign_mask = _mm_set_pd(0.0, -0.0_f64);
 
-    let s0 = _mm_loadu_pd(state.add(i[0] * 2));
-    let s1 = _mm_loadu_pd(state.add(i[1] * 2));
-    let s2 = _mm_loadu_pd(state.add(i[2] * 2));
-    let s3 = _mm_loadu_pd(state.add(i[3] * 2));
+        let s0 = _mm_loadu_pd(state.add(i[0] * 2));
+        let s1 = _mm_loadu_pd(state.add(i[1] * 2));
+        let s2 = _mm_loadu_pd(state.add(i[2] * 2));
+        let s3 = _mm_loadu_pd(state.add(i[3] * 2));
 
-    macro_rules! row {
-        ($r:expr) => {{
-            let off = $r * 4;
-            let mut acc = complex_mul_sse2(mat.rr[off], mat.ii[off], s0, sign_mask);
-            acc = _mm_add_pd(
-                acc,
-                complex_mul_sse2(mat.rr[off + 1], mat.ii[off + 1], s1, sign_mask),
-            );
-            acc = _mm_add_pd(
-                acc,
-                complex_mul_sse2(mat.rr[off + 2], mat.ii[off + 2], s2, sign_mask),
-            );
-            acc = _mm_add_pd(
-                acc,
-                complex_mul_sse2(mat.rr[off + 3], mat.ii[off + 3], s3, sign_mask),
-            );
-            _mm_storeu_pd(state.add(i[$r] * 2), acc);
-        }};
+        macro_rules! row {
+            ($r:expr) => {{
+                let off = $r * 4;
+                let mut acc = complex_mul_sse2(mat.rr[off], mat.ii[off], s0, sign_mask);
+                acc = _mm_add_pd(
+                    acc,
+                    complex_mul_sse2(mat.rr[off + 1], mat.ii[off + 1], s1, sign_mask),
+                );
+                acc = _mm_add_pd(
+                    acc,
+                    complex_mul_sse2(mat.rr[off + 2], mat.ii[off + 2], s2, sign_mask),
+                );
+                acc = _mm_add_pd(
+                    acc,
+                    complex_mul_sse2(mat.rr[off + 3], mat.ii[off + 3], s3, sign_mask),
+                );
+                _mm_storeu_pd(state.add(i[$r] * 2), acc);
+            }};
+        }
+        row!(0);
+        row!(1);
+        row!(2);
+        row!(3);
     }
-    row!(0);
-    row!(1);
-    row!(2);
-    row!(3);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1873,46 +1991,52 @@ unsafe fn complex_mul_neon_preswapped(
     z: float64x2_t,
     z_swap: float64x2_t,
 ) -> float64x2_t {
-    let prod = vmulq_f64(c_rr, z);
-    vfmaq_f64(prod, c_ii_as, z_swap)
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let prod = vmulq_f64(c_rr, z);
+        vfmaq_f64(prod, c_ii_as, z_swap)
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn apply_fused_2q_group_neon(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
-    let s0 = vld1q_f64(state.add(i[0] * 2));
-    let s1 = vld1q_f64(state.add(i[1] * 2));
-    let s2 = vld1q_f64(state.add(i[2] * 2));
-    let s3 = vld1q_f64(state.add(i[3] * 2));
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let s0 = vld1q_f64(state.add(i[0] * 2));
+        let s1 = vld1q_f64(state.add(i[1] * 2));
+        let s2 = vld1q_f64(state.add(i[2] * 2));
+        let s3 = vld1q_f64(state.add(i[3] * 2));
 
-    let sf0 = vextq_f64(s0, s0, 1);
-    let sf1 = vextq_f64(s1, s1, 1);
-    let sf2 = vextq_f64(s2, s2, 1);
-    let sf3 = vextq_f64(s3, s3, 1);
+        let sf0 = vextq_f64(s0, s0, 1);
+        let sf1 = vextq_f64(s1, s1, 1);
+        let sf2 = vextq_f64(s2, s2, 1);
+        let sf3 = vextq_f64(s3, s3, 1);
 
-    macro_rules! row {
-        ($r:expr) => {{
-            let off = $r * 4;
-            let mut acc = complex_mul_neon_preswapped(mat.rr[off], mat.ii_as[off], s0, sf0);
-            acc = vaddq_f64(
-                acc,
-                complex_mul_neon_preswapped(mat.rr[off + 1], mat.ii_as[off + 1], s1, sf1),
-            );
-            acc = vaddq_f64(
-                acc,
-                complex_mul_neon_preswapped(mat.rr[off + 2], mat.ii_as[off + 2], s2, sf2),
-            );
-            acc = vaddq_f64(
-                acc,
-                complex_mul_neon_preswapped(mat.rr[off + 3], mat.ii_as[off + 3], s3, sf3),
-            );
-            vst1q_f64(state.add(i[$r] * 2), acc);
-        }};
+        macro_rules! row {
+            ($r:expr) => {{
+                let off = $r * 4;
+                let mut acc = complex_mul_neon_preswapped(mat.rr[off], mat.ii_as[off], s0, sf0);
+                acc = vaddq_f64(
+                    acc,
+                    complex_mul_neon_preswapped(mat.rr[off + 1], mat.ii_as[off + 1], s1, sf1),
+                );
+                acc = vaddq_f64(
+                    acc,
+                    complex_mul_neon_preswapped(mat.rr[off + 2], mat.ii_as[off + 2], s2, sf2),
+                );
+                acc = vaddq_f64(
+                    acc,
+                    complex_mul_neon_preswapped(mat.rr[off + 3], mat.ii_as[off + 3], s3, sf3),
+                );
+                vst1q_f64(state.add(i[$r] * 2), acc);
+            }};
+        }
+        row!(0);
+        row!(1);
+        row!(2);
+        row!(3);
     }
-    row!(0);
-    row!(1);
-    row!(2);
-    row!(3);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1925,12 +2049,15 @@ unsafe fn apply_fused_2q_loop_neon(
     mask1: usize,
     mat: &Mat4x4Broadcast,
 ) {
-    use crate::backend::statevector::insert_zero_bit;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use crate::backend::statevector::insert_zero_bit;
 
-    for k in 0..n_iter {
-        let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-        let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
-        apply_fused_2q_group_neon(state, i, mat);
+        for k in 0..n_iter {
+            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
+            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+            apply_fused_2q_group_neon(state, i, mat);
+        }
     }
 }
 
@@ -2132,32 +2259,35 @@ impl PreparedGate2q {
     /// and that no other thread is accessing the same indices.
     #[inline(always)]
     pub(crate) unsafe fn apply_group_ptr(&self, state: *mut f64, i: [usize; 4]) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if !matches!(self.tier, SimdTier::Sse2) {
-                apply_fused_2q_group_fma(state, i, &self.broadcast);
-            } else {
-                apply_fused_2q_group_sse2(state, i, &self.broadcast);
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if !matches!(self.tier, SimdTier::Sse2) {
+                    apply_fused_2q_group_fma(state, i, &self.broadcast);
+                } else {
+                    apply_fused_2q_group_sse2(state, i, &self.broadcast);
+                }
             }
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            apply_fused_2q_group_neon(state, i, &self.broadcast);
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            let a: [Complex64; 4] = [
-                *(state.add(i[0] * 2) as *const Complex64),
-                *(state.add(i[1] * 2) as *const Complex64),
-                *(state.add(i[2] * 2) as *const Complex64),
-                *(state.add(i[3] * 2) as *const Complex64),
-            ];
-            for (r, &idx) in i.iter().enumerate() {
-                let result = self.mat[r][0] * a[0]
-                    + self.mat[r][1] * a[1]
-                    + self.mat[r][2] * a[2]
-                    + self.mat[r][3] * a[3];
-                *(state.add(idx * 2) as *mut Complex64) = result;
+            #[cfg(target_arch = "aarch64")]
+            {
+                apply_fused_2q_group_neon(state, i, &self.broadcast);
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            {
+                let a: [Complex64; 4] = [
+                    *(state.add(i[0] * 2) as *const Complex64),
+                    *(state.add(i[1] * 2) as *const Complex64),
+                    *(state.add(i[2] * 2) as *const Complex64),
+                    *(state.add(i[3] * 2) as *const Complex64),
+                ];
+                for (r, &idx) in i.iter().enumerate() {
+                    let result = self.mat[r][0] * a[0]
+                        + self.mat[r][1] * a[1]
+                        + self.mat[r][2] * a[2]
+                        + self.mat[r][3] * a[3];
+                    *(state.add(idx * 2) as *mut Complex64) = result;
+                }
             }
         }
     }
@@ -2564,7 +2694,7 @@ mod tests {
     }
 
     fn random_state(num_qubits: usize, seed: u64) -> Vec<Complex64> {
-        use rand::Rng;
+        use rand::RngExt;
         use rand::SeedableRng;
         use rand_chacha::ChaCha8Rng;
         let mut rng = ChaCha8Rng::seed_from_u64(seed);

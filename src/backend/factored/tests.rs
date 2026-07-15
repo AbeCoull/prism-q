@@ -1,7 +1,7 @@
+use crate::backend::Backend;
 use crate::backend::factored::FactoredBackend;
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::Backend;
-use crate::circuit::{smallvec, Circuit, ClassicalCondition, Instruction};
+use crate::circuit::{Circuit, ClassicalCondition, Instruction, smallvec};
 use crate::gates::Gate;
 use crate::sim;
 

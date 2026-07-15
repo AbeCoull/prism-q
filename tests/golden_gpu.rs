@@ -10,14 +10,14 @@
 
 use num_complex::Complex64;
 
+use prism_q::StatevectorBackend;
 use prism_q::backend::Backend;
-use prism_q::circuit::{smallvec, Instruction, SmallVec};
+use prism_q::circuit::{Instruction, SmallVec, smallvec};
 use prism_q::gates::{
     BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Gate, McuData, Multi2qData,
     MultiFusedData,
 };
 use prism_q::gpu::GpuContext;
-use prism_q::StatevectorBackend;
 
 const EPS: f64 = 1e-12;
 
@@ -817,8 +817,8 @@ fn stabilizer_gpu_init_allocates_tableau_and_accepts_gate() {
 /// gate. Both instructions need no device work.
 #[test]
 fn stabilizer_gpu_accepts_barrier_and_false_conditional() {
-    use prism_q::circuit::ClassicalCondition;
     use prism_q::StabilizerBackend;
+    use prism_q::circuit::ClassicalCondition;
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1079,8 +1079,8 @@ fn stabilizer_gpu_bell_and_ghz() {
 
 #[test]
 fn stabilizer_gpu_rejects_non_clifford_via_gpu_path() {
-    use prism_q::error::PrismError;
     use prism_q::StabilizerBackend;
+    use prism_q::error::PrismError;
 
     let Some(f) = Fixture::try_new() else { return };
     let mut backend = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
@@ -1481,7 +1481,7 @@ fn stabilizer_gpu_export_statevector_matches_cpu() {
 /// `BackendKind::Stabilizer` run.
 #[test]
 fn stabilizer_gpu_builder_matches_cpu_below_threshold() {
-    use prism_q::{simulate, BackendKind, Circuit};
+    use prism_q::{BackendKind, Circuit, simulate};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1516,7 +1516,7 @@ fn stabilizer_gpu_builder_matches_cpu_below_threshold() {
 /// still holds.
 #[test]
 fn stabilizer_gpu_builder_matches_cpu_at_scale() {
-    use prism_q::{simulate, BackendKind};
+    use prism_q::{BackendKind, simulate};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1558,7 +1558,7 @@ fn stabilizer_gpu_builder_matches_cpu_at_scale() {
 /// bit error in the GPU path surfaces.
 #[test]
 fn run_shots_compiled_with_gpu_bell_pairs_are_correlated() {
-    use prism_q::{run_shots_compiled_with_gpu, Circuit};
+    use prism_q::{Circuit, run_shots_compiled_with_gpu};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1596,7 +1596,7 @@ fn run_shots_compiled_with_gpu_bell_pairs_are_correlated() {
 /// rates should agree to within a few sigma over 10_000 shots.
 #[test]
 fn run_shots_compiled_with_gpu_distribution_matches_cpu() {
-    use prism_q::{run_shots_compiled, run_shots_compiled_with_gpu, Circuit};
+    use prism_q::{Circuit, run_shots_compiled, run_shots_compiled_with_gpu};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1643,7 +1643,7 @@ fn run_shots_compiled_with_gpu_distribution_matches_cpu() {
 /// `run_shots_compiled_with_gpu`, not the raw tableau measurement loop.
 #[test]
 fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
-    use prism_q::{run_shots_compiled_with_gpu, simulate, BackendKind, Circuit};
+    use prism_q::{BackendKind, Circuit, run_shots_compiled_with_gpu, simulate};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1675,7 +1675,7 @@ fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
 /// reuses its GPU BTS cache across calls.
 #[test]
 fn run_shots_compiled_with_gpu_repeated_batches_match_fresh_sampler() {
-    use prism_q::{compile_measurements, Circuit};
+    use prism_q::{Circuit, compile_measurements};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1713,7 +1713,7 @@ fn run_shots_compiled_with_gpu_repeated_batches_match_fresh_sampler() {
 
 #[test]
 fn sample_bulk_packed_device_to_host_is_reproducible() {
-    use prism_q::{compile_measurements, Circuit};
+    use prism_q::{Circuit, compile_measurements};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1760,7 +1760,7 @@ fn sample_bulk_packed_device_to_host_is_reproducible() {
 
 #[test]
 fn sample_bulk_packed_device_marginals_match_host_reduction() {
-    use prism_q::{compile_measurements, Circuit};
+    use prism_q::{Circuit, compile_measurements};
 
     let Some(f) = Fixture::try_new() else { return };
 
@@ -1808,7 +1808,7 @@ fn sample_bulk_packed_device_marginals_match_host_reduction() {
 
 #[test]
 fn sample_bulk_packed_device_counts_match_host_counts() {
-    use prism_q::{compile_measurements, Circuit};
+    use prism_q::{Circuit, compile_measurements};
 
     let Some(f) = Fixture::try_new() else { return };
 

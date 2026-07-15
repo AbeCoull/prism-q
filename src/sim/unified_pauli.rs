@@ -1,12 +1,12 @@
 use num_complex::Complex64;
-use rand::Rng;
 use rand::SeedableRng;
+use rand::{Rng, RngExt};
 use rand_chacha::ChaCha8Rng;
 
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use crate::sim::compiled::{flip_bit, propagate_backward, PauliVec};
+use crate::sim::compiled::{PauliVec, flip_bit, propagate_backward};
 
 const SQRT_2: f64 = std::f64::consts::SQRT_2;
 

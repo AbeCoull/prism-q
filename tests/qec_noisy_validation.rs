@@ -1,8 +1,8 @@
 #[cfg(feature = "bench-internal")]
 use prism_q::compile_qec_profiled_sampler;
 use prism_q::{
-    parse_qec_program, run_qec_program, run_qec_program_reference, Gate, PackedShots, QecNoise,
-    QecOptions, QecProgram, QecRecordRef,
+    Gate, PackedShots, QecNoise, QecOptions, QecProgram, QecRecordRef, parse_qec_program,
+    run_qec_program, run_qec_program_reference,
 };
 
 const SEED: u64 = 0xDEAD_BEEF;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::circuit::{smallvec, ClassicalCondition, Instruction};
+use crate::circuit::{ClassicalCondition, Instruction, smallvec};
 use crate::circuits;
 use crate::gates::Gate;
 use crate::sim::BackendKind;
@@ -1575,7 +1575,7 @@ fn optimal_chunk_size_basic() {
 
 #[test]
 fn noisy_chunked_histogram_matches_direct() {
-    use crate::sim::noise::{compile_noisy, NoiseModel};
+    use crate::sim::noise::{NoiseModel, compile_noisy};
 
     let mut c = circuits::ghz_circuit(10);
     c.num_classical_bits = 10;

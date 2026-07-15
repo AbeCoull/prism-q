@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "prism-q-py"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "num-complex",
  "numpy",

@@ -13,6 +13,11 @@ homepage = "https://github.com/AbeCoull/prism-q"
 keywords = ["quantum", "quantum-computing", "simulator", "stabilizer", "qec"]
 categories = ["science", "science::quantum-computing", "simulation", "mathematics"]
 
+[workspace]
+members = [".", "bindings/python"]
+default-members = ["."]
+resolver = "2"
+
 [dependencies]
 num-complex = "0.4"
 rand = "0.9.3"
@@ -51,6 +56,16 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = "none"
+
+# Dedicated profile for the Python bindings (bindings/python). PyO3 converts a
+# Rust panic into a Python exception at the FFI boundary via stack unwinding,
+# which `[profile.release] panic = "abort"` would defeat (a panic would abort
+# the interpreter instead of raising). Cargo profiles are workspace-global, so
+# maturin targets this profile to build the cdylib with unwinding while the main
+# crate's own release builds and benchmarks keep `panic = "abort"`.
+[profile.python-release]
+inherits = "release"
+panic = "unwind"
 
 [package.metadata.release]
 pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "v{{version}}"]

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "prism-q"
+description = "PRISM-Q: performance-first quantum circuit simulator (Python bindings)"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.21"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Physics",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/AbeCoull/prism-q"
+Documentation = "https://docs.rs/prism-q"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "prism_q._prism_q"
+python-source = "python"
+profile = "python-release"
+strip = true

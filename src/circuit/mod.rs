@@ -761,15 +761,16 @@ pub enum QftTextbookStep {
 }
 
 /// Yield the textbook QFT decomposition for `num` qubits starting at `start`.
-/// Order: for each `i in 0..num`, `H q[start+i]` followed by
-/// `cphase(TAU / 2^(j-i))` for `j in i+1..num`, then bit-reversal swaps.
+/// Order: for each qubit `q` from `num - 1` down to `0`, `H q[start+q]` followed
+/// by `cphase(TAU / 2^(q-k+1))` controlled by `q[start+k]` for `k in 0..q`, then
+/// bit-reversal swaps. Matches the native FFT (`apply_qft_block`).
 pub fn qft_textbook_steps(start: usize, num: usize) -> impl Iterator<Item = QftTextbookStep> {
-    let outer = (0..num).flat_map(move |i| {
-        let head = std::iter::once(QftTextbookStep::Hadamard(start + i));
-        let phases = ((i + 1)..num).map(move |j| QftTextbookStep::CPhase {
-            control: start + i,
-            target: start + j,
-            theta: std::f64::consts::TAU / (1u64 << (j - i)) as f64,
+    let outer = (0..num).rev().flat_map(move |q| {
+        let head = std::iter::once(QftTextbookStep::Hadamard(start + q));
+        let phases = (0..q).map(move |k| QftTextbookStep::CPhase {
+            control: start + k,
+            target: start + q,
+            theta: std::f64::consts::TAU / (1u64 << (q - k + 1)) as f64,
         });
         head.chain(phases)
     });

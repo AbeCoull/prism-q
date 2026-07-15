@@ -15,7 +15,7 @@ jobs:
     name: Determine & Publish Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.RELEASE_PAT }}
@@ -102,7 +102,7 @@ jobs:
 
       - name: Create GitHub Release
         if: steps.bump.outputs.level != 'none'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}

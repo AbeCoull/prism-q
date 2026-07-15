@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use crate::sim::unified_pauli::{inverse_light_cone, PauliTerm};
+use crate::sim::unified_pauli::{PauliTerm, inverse_light_cone};
 
 /// Upper bound on the number of supplied stabilizers the reroute search will
 /// enumerate. The search is a brute-force scan over the `2^k` subset sums of

@@ -20,7 +20,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
-use crate::backend::{dense_statevector_len, tensor_probability_len, Backend, NORM_CLAMP_MIN};
+use crate::backend::{Backend, NORM_CLAMP_MIN, dense_statevector_len, tensor_probability_len};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -1055,7 +1055,7 @@ impl Backend for TensorNetworkBackend {
                 qubit,
                 classical_bit,
             } => {
-                use rand::Rng;
+                use rand::RngExt;
 
                 let amplitudes = self.contract_to_statevector()?;
 
@@ -1142,8 +1142,8 @@ impl Backend for TensorNetworkBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::statevector::StatevectorBackend;
     use crate::backend::Backend;
+    use crate::backend::statevector::StatevectorBackend;
     use crate::circuit::Circuit;
     use crate::gates::{Gate, MultiFusedData};
 

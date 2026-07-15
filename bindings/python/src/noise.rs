@@ -11,11 +11,11 @@ use pyo3::types::PyAny;
 use smallvec::SmallVec;
 
 use crate::circuit::PyCircuit;
-use crate::error::{invalid, PyPrismResult};
+use crate::error::{PyPrismResult, invalid};
 use crate::gate::extract_2x2;
 
 /// A single-qubit (or two-qubit) noise channel. Construct via the static methods.
-#[pyclass(name = "NoiseChannel", module = "prism_q", frozen)]
+#[pyclass(name = "NoiseChannel", module = "prism_q", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyNoiseChannel(pub NoiseChannel);
 

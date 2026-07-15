@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 
 use super::{
-    count_vec_key, count_vec_key_masked, shot_major_padding_bits_set, shot_tail_mask, PackedShots,
-    ShotLayout,
+    PackedShots, ShotLayout, count_vec_key, count_vec_key_masked, shot_major_padding_bits_set,
+    shot_tail_mask,
 };
 
 const DEFAULT_TARGET_BYTES: usize = 256 * 1024 * 1024;
@@ -194,47 +194,51 @@ fn transpose_64x64(matrix: &mut [u64; 64]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn transpose_64x64_avx2(matrix: &mut [u64; 64]) {
-    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
 
-    for (&delta, &mask_val) in TRANSPOSE_DELTAS.iter().zip(TRANSPOSE_MASKS.iter()) {
-        let vmask = _mm256_set1_epi64x(mask_val as i64);
-        let vnmask = _mm256_set1_epi64x(!mask_val as i64);
-        let shift = _mm_set_epi64x(0, delta as i64);
+        for (&delta, &mask_val) in TRANSPOSE_DELTAS.iter().zip(TRANSPOSE_MASKS.iter()) {
+            let vmask = _mm256_set1_epi64x(mask_val as i64);
+            let vnmask = _mm256_set1_epi64x(!mask_val as i64);
+            let shift = _mm_set_epi64x(0, delta as i64);
 
-        let mut i = 0;
-        while i < 64 {
-            let mut j = 0;
-            while j + 4 <= delta {
-                let a = _mm256_loadu_si256(matrix.as_ptr().add(i + j) as *const __m256i);
-                let b = _mm256_loadu_si256(matrix.as_ptr().add(i + j + delta) as *const __m256i);
+            let mut i = 0;
+            while i < 64 {
+                let mut j = 0;
+                while j + 4 <= delta {
+                    let a = _mm256_loadu_si256(matrix.as_ptr().add(i + j) as *const __m256i);
+                    let b =
+                        _mm256_loadu_si256(matrix.as_ptr().add(i + j + delta) as *const __m256i);
 
-                let a_low = _mm256_and_si256(a, vmask);
-                let b_low = _mm256_and_si256(b, vmask);
-                let b_shifted = _mm256_sll_epi64(b_low, shift);
-                let new_a = _mm256_or_si256(a_low, b_shifted);
+                    let a_low = _mm256_and_si256(a, vmask);
+                    let b_low = _mm256_and_si256(b, vmask);
+                    let b_shifted = _mm256_sll_epi64(b_low, shift);
+                    let new_a = _mm256_or_si256(a_low, b_shifted);
 
-                let a_shifted = _mm256_srl_epi64(a, shift);
-                let a_high = _mm256_and_si256(a_shifted, vmask);
-                let b_high = _mm256_and_si256(b, vnmask);
-                let new_b = _mm256_or_si256(a_high, b_high);
+                    let a_shifted = _mm256_srl_epi64(a, shift);
+                    let a_high = _mm256_and_si256(a_shifted, vmask);
+                    let b_high = _mm256_and_si256(b, vnmask);
+                    let new_b = _mm256_or_si256(a_high, b_high);
 
-                _mm256_storeu_si256(matrix.as_mut_ptr().add(i + j) as *mut __m256i, new_a);
-                _mm256_storeu_si256(
-                    matrix.as_mut_ptr().add(i + j + delta) as *mut __m256i,
-                    new_b,
-                );
+                    _mm256_storeu_si256(matrix.as_mut_ptr().add(i + j) as *mut __m256i, new_a);
+                    _mm256_storeu_si256(
+                        matrix.as_mut_ptr().add(i + j + delta) as *mut __m256i,
+                        new_b,
+                    );
 
-                j += 4;
+                    j += 4;
+                }
+                while j < delta {
+                    let a = *matrix.get_unchecked(i + j);
+                    let b = *matrix.get_unchecked(i + j + delta);
+                    *matrix.get_unchecked_mut(i + j) = (a & mask_val) | ((b & mask_val) << delta);
+                    *matrix.get_unchecked_mut(i + j + delta) =
+                        ((a >> delta) & mask_val) | (b & !mask_val);
+                    j += 1;
+                }
+                i += 2 * delta;
             }
-            while j < delta {
-                let a = *matrix.get_unchecked(i + j);
-                let b = *matrix.get_unchecked(i + j + delta);
-                *matrix.get_unchecked_mut(i + j) = (a & mask_val) | ((b & mask_val) << delta);
-                *matrix.get_unchecked_mut(i + j + delta) =
-                    ((a >> delta) & mask_val) | (b & !mask_val);
-                j += 1;
-            }
-            i += 2 * delta;
         }
     }
 }
@@ -248,45 +252,48 @@ unsafe fn transpose_64x64_avx2(_matrix: &mut [u64; 64]) {
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 unsafe fn transpose_64x64_neon(matrix: &mut [u64; 64]) {
-    use std::arch::aarch64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::*;
 
-    for (&delta, &mask_val) in TRANSPOSE_DELTAS.iter().zip(TRANSPOSE_MASKS.iter()) {
-        let vmask = vdupq_n_u64(mask_val);
-        let vnmask = vdupq_n_u64(!mask_val);
-        let vshift_left = vdupq_n_s64(delta as i64);
-        let vshift_right = vdupq_n_s64(-(delta as i64));
+        for (&delta, &mask_val) in TRANSPOSE_DELTAS.iter().zip(TRANSPOSE_MASKS.iter()) {
+            let vmask = vdupq_n_u64(mask_val);
+            let vnmask = vdupq_n_u64(!mask_val);
+            let vshift_left = vdupq_n_s64(delta as i64);
+            let vshift_right = vdupq_n_s64(-(delta as i64));
 
-        let mut i = 0;
-        while i < 64 {
-            let mut j = 0;
-            while j + 2 <= delta {
-                let a = vld1q_u64(matrix.as_ptr().add(i + j));
-                let b = vld1q_u64(matrix.as_ptr().add(i + j + delta));
+            let mut i = 0;
+            while i < 64 {
+                let mut j = 0;
+                while j + 2 <= delta {
+                    let a = vld1q_u64(matrix.as_ptr().add(i + j));
+                    let b = vld1q_u64(matrix.as_ptr().add(i + j + delta));
 
-                let a_low = vandq_u64(a, vmask);
-                let b_low = vandq_u64(b, vmask);
-                let b_shifted = vshlq_u64(b_low, vshift_left);
-                let new_a = vorrq_u64(a_low, b_shifted);
+                    let a_low = vandq_u64(a, vmask);
+                    let b_low = vandq_u64(b, vmask);
+                    let b_shifted = vshlq_u64(b_low, vshift_left);
+                    let new_a = vorrq_u64(a_low, b_shifted);
 
-                let a_shifted = vshlq_u64(a, vshift_right);
-                let a_high = vandq_u64(a_shifted, vmask);
-                let b_high = vandq_u64(b, vnmask);
-                let new_b = vorrq_u64(a_high, b_high);
+                    let a_shifted = vshlq_u64(a, vshift_right);
+                    let a_high = vandq_u64(a_shifted, vmask);
+                    let b_high = vandq_u64(b, vnmask);
+                    let new_b = vorrq_u64(a_high, b_high);
 
-                vst1q_u64(matrix.as_mut_ptr().add(i + j), new_a);
-                vst1q_u64(matrix.as_mut_ptr().add(i + j + delta), new_b);
+                    vst1q_u64(matrix.as_mut_ptr().add(i + j), new_a);
+                    vst1q_u64(matrix.as_mut_ptr().add(i + j + delta), new_b);
 
-                j += 2;
+                    j += 2;
+                }
+                while j < delta {
+                    let a = *matrix.get_unchecked(i + j);
+                    let b = *matrix.get_unchecked(i + j + delta);
+                    *matrix.get_unchecked_mut(i + j) = (a & mask_val) | ((b & mask_val) << delta);
+                    *matrix.get_unchecked_mut(i + j + delta) =
+                        ((a >> delta) & mask_val) | (b & !mask_val);
+                    j += 1;
+                }
+                i += 2 * delta;
             }
-            while j < delta {
-                let a = *matrix.get_unchecked(i + j);
-                let b = *matrix.get_unchecked(i + j + delta);
-                *matrix.get_unchecked_mut(i + j) = (a & mask_val) | ((b & mask_val) << delta);
-                *matrix.get_unchecked_mut(i + j + delta) =
-                    ((a >> delta) & mask_val) | (b & !mask_val);
-                j += 1;
-            }
-            i += 2 * delta;
         }
     }
 }

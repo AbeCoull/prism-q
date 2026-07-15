@@ -17,24 +17,24 @@ pub mod unified_pauli;
 
 pub(crate) use decomposed::merge_probabilities;
 use decomposed::{
-    run_decomposed, run_decomposed_prefused, should_decompose, MIN_DECOMPOSITION_QUBITS,
+    MIN_DECOMPOSITION_QUBITS, run_decomposed, run_decomposed_prefused, should_decompose,
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    auto_selects_cpu_statevector, has_temporal_clifford_opportunity, select_backend,
-    select_dispatch, stabilizer_rank_budget, supports_fused_for_kind, try_temporal_clifford,
-    validate_explicit_backend, DispatchAction, AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM,
-    AUTO_SPD_MAX_TERMS, MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
+    AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM, AUTO_SPD_MAX_TERMS, DispatchAction,
+    MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
     MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO,
+    MIN_QUBITS_FOR_SPD_AUTO, auto_selects_cpu_statevector, has_temporal_clifford_opportunity,
+    select_backend, select_dispatch, stabilizer_rank_budget, supports_fused_for_kind,
+    try_temporal_clifford, validate_explicit_backend,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
-pub use shots::{bitstring, ShotsResult};
+pub use shots::{ShotsResult, bitstring};
 
 use std::collections::HashMap;
 
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::{max_statevector_qubits, Backend};
+use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use shots::{packed_shots_to_classical_bits, sample_shots};
@@ -2581,12 +2581,14 @@ mod tests {
 
     #[test]
     fn test_validate_factored_stabilizer_accepts_clifford() {
-        assert!(run_with(
-            BackendKind::FactoredStabilizer,
-            &make_clifford_circuit(),
-            42
-        )
-        .is_ok());
+        assert!(
+            run_with(
+                BackendKind::FactoredStabilizer,
+                &make_clifford_circuit(),
+                42
+            )
+            .is_ok()
+        );
     }
 
     // ── Pauli backend error paths ───────────────────────────────────────
@@ -2676,11 +2678,12 @@ mod tests {
 
         assert_eq!(spp.marginals.len(), c.num_qubits);
         assert_eq!(spd.marginals.len(), c.num_qubits);
-        assert!(spp
-            .marginals
-            .iter()
-            .chain(spd.marginals.iter())
-            .all(|(p0, p1)| *p0 >= 0.0 && *p0 <= 1.0 && (p0 + p1 - 1.0).abs() < 1e-10));
+        assert!(
+            spp.marginals
+                .iter()
+                .chain(spd.marginals.iter())
+                .all(|(p0, p1)| *p0 >= 0.0 && *p0 <= 1.0 && (p0 + p1 - 1.0).abs() < 1e-10)
+        );
     }
 
     #[test]

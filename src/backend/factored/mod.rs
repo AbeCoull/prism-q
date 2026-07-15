@@ -9,14 +9,14 @@
 mod tests;
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 
 use crate::backend::simd;
 use crate::backend::statevector::insert_zero_bit;
-use crate::backend::{is_phase_one, measurement_inv_norm, sorted_mcu_qubits, Backend};
+use crate::backend::{Backend, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate};

@@ -1205,7 +1205,7 @@ fn test_parallel_self_inverse_cancel_20q() {
 #[cfg(feature = "parallel")]
 #[test]
 fn test_parallel_conditional_gate_16q() {
-    use crate::circuit::{smallvec, ClassicalCondition};
+    use crate::circuit::{ClassicalCondition, smallvec};
     let mut c = Circuit::new(16, 1);
     c.add_gate(Gate::X, &[0]);
     c.add_measure(0, 0);
@@ -1353,7 +1353,7 @@ fn test_deferred_norm_export_statevector() {
 /// fallback.
 #[test]
 fn batch_phase_matches_independent_reference() {
-    use crate::circuit::{smallvec, Instruction, SmallVec};
+    use crate::circuit::{Instruction, SmallVec, smallvec};
     use crate::gates::{BatchPhaseData, Gate};
 
     let n = 6usize;

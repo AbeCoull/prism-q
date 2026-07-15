@@ -9,11 +9,11 @@ mod common;
 
 use common::circuits as corpus;
 use common::{
-    assert_backend_matches_sv, assert_fused_matches_unfused, run_unfused_probs, PRODUCT_EPS, SEED,
+    PRODUCT_EPS, SEED, assert_backend_matches_sv, assert_fused_matches_unfused, run_unfused_probs,
 };
 use num_complex::Complex64;
-use prism_q::backend::product::ProductStateBackend;
 use prism_q::backend::Backend;
+use prism_q::backend::product::ProductStateBackend;
 use prism_q::circuit::{Circuit, Instruction};
 use prism_q::circuits;
 use prism_q::gates::{DiagEntry, DiagonalBatchData, Gate};

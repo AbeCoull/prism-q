@@ -1,5 +1,5 @@
 use prism_q::circuits::clifford_heavy_circuit;
-use prism_q::{simulate, BackendKind};
+use prism_q::{BackendKind, simulate};
 
 fn main() {
     // A Clifford-only 4-qubit circuit with entangling gates.
@@ -27,7 +27,7 @@ fn main() {
         let nonzero: Vec<(usize, f64)> = probs
             .iter()
             .enumerate()
-            .filter(|(_, &p)| p > 1e-10)
+            .filter(|&(_, &p)| p > 1e-10)
             .map(|(i, &p)| (i, p))
             .collect();
 

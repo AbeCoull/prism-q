@@ -4,7 +4,7 @@ use crate::backend::sparse::SparseBackend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
-use crate::backend::{max_statevector_qubits, Backend};
+use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
@@ -19,7 +19,7 @@ use crate::backend::distributed_statevector::DistributedStatevectorBackend;
 #[cfg(feature = "distributed")]
 use crate::distributed::DistributedContext;
 
-use super::{try_backend_probabilities, RunOutcome};
+use super::{RunOutcome, try_backend_probabilities};
 
 pub(super) enum DispatchAction {
     Backend(Box<dyn Backend>),

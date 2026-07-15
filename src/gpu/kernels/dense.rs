@@ -718,10 +718,7 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
 
     // Reuse the cached scratch buffer when large enough; grow if num_qubits increased.
     let mut scratch_slot = state.probs_scratch();
-    if scratch_slot
-        .as_ref()
-        .map_or(true, |b| b.len() < dim as usize)
-    {
+    if scratch_slot.as_ref().is_none_or(|b| b.len() < dim as usize) {
         *scratch_slot = Some(GpuBuffer::<f64>::alloc_zeros(device, dim as usize)?);
     }
     let scratch = scratch_slot.as_mut().unwrap();

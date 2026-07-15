@@ -6,13 +6,13 @@
 //! product structure. O((a+b)²/64) polynomial merge cost.
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::stabilizer::kernels::rowmul_words;
-use crate::backend::{dense_probability_len, dense_statevector_len, reserve_dense_output, Backend};
+use crate::backend::{Backend, dense_probability_len, dense_statevector_len, reserve_dense_output};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;

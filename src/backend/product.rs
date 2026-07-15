@@ -21,12 +21,12 @@
 //! - Scales to arbitrarily many qubits with constant per-qubit cost.
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::{
-    dense_probability_len, dense_statevector_len, reserve_dense_output, Backend, NORM_CLAMP_MIN,
+    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, reserve_dense_output,
 };
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};

@@ -8,16 +8,16 @@
 //! [`QecTStrategy::Camps`] are direct analytical paths.
 
 use super::observable_reroute::{min_cone_z_representative, xor_z_support};
-use super::{run_qec_program_reference, QecObservableEstimate, QecOp, QecProgram, QecSampleResult};
 #[cfg(test)]
 use super::{QecBasis, QecOptions, QecRecordRef};
-use crate::backend::mps::MpsBackend;
+use super::{QecObservableEstimate, QecOp, QecProgram, QecSampleResult, run_qec_program_reference};
 use crate::backend::Backend;
+use crate::backend::mps::MpsBackend;
 use crate::circuit::{Circuit, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::PackedShots;
-use crate::sim::unified_pauli::{run_spd_observable_light_cone, PauliTerm};
+use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
 
 /// Strategy used to sample a QEC program that may contain T gates.
 ///
@@ -553,7 +553,7 @@ const QEC_CAMPS_MAX_BOND_DIM: usize = 256;
 /// Z-only observable scope.
 fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
     use super::camps_prefix::{
-        apply_t_via_camps, evaluate_z_observable_camps, SignedCliffordPrefix,
+        SignedCliffordPrefix, apply_t_via_camps, evaluate_z_observable_camps,
     };
     use crate::circuit::Instruction;
 

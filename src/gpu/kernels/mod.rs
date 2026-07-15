@@ -173,7 +173,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
 
 #[cfg(test)]
 mod sync_tests {
-    use super::{kernel_source, KERNEL_NAMES};
+    use super::{KERNEL_NAMES, kernel_source};
     use std::collections::BTreeSet;
 
     /// Names following each `__global__ void` marker in the PTX source.

@@ -182,7 +182,10 @@ fn detect_physical_memory_bytes() -> Option<u64> {
         ull_avail_extended_virtual: u64,
     }
 
-    extern "system" {
+    // SAFETY: signature matches the documented kernel32 GlobalMemoryStatusEx
+    // ABI: one pointer argument to a struct whose dw_length field is set
+    // before the call, returning BOOL as i32.
+    unsafe extern "system" {
         fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
     }
 

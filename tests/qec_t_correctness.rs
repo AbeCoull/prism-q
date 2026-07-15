@@ -5,8 +5,8 @@
 //! Clifford+T fixture.
 
 use prism_q::{
-    run_qec_program_reference, run_qec_program_spd_rerouted, run_qec_program_with_strategy, Gate,
-    QecObservableReroute, QecOptions, QecProgram, QecRecordRef, QecTStrategy,
+    Gate, QecObservableReroute, QecOptions, QecProgram, QecRecordRef, QecTStrategy,
+    run_qec_program_reference, run_qec_program_spd_rerouted, run_qec_program_with_strategy,
 };
 
 const SEED: u64 = 0xDEAD_BEEF;

@@ -5,7 +5,7 @@ use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 
-use crate::error::{invalid, PyPrismResult};
+use crate::error::{PyPrismResult, invalid};
 
 /// Move a `Vec<f64>` into a 1-D `float64` NumPy array.
 pub fn f64_array(py: Python<'_>, values: Vec<f64>) -> Bound<'_, PyArray1<f64>> {

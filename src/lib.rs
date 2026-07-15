@@ -75,40 +75,40 @@ pub use distributed::MpiComm;
 pub use distributed::{DistributedContext, RankComm, SerialComm};
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
-#[cfg(feature = "bench-internal")]
-pub use qec::{compile_qec_profiled_sampler, QecProfiledCounts, QecProfiledSampler};
 pub use qec::{
-    compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference,
-    run_qec_program_spd_rerouted, run_qec_program_with_strategy, QecBasis, QecCompiledRows,
-    QecMeasurementRow, QecNoise, QecObservableEstimate, QecObservableReroute, QecOp, QecOptions,
-    QecPauli, QecProgram, QecRecordRef, QecSampleResult, QecTStrategy,
+    QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise, QecObservableEstimate,
+    QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, QecSampleResult,
+    QecTStrategy, compile_qec_program_rows, parse_qec_program, run_qec_program,
+    run_qec_program_reference, run_qec_program_spd_rerouted, run_qec_program_with_strategy,
 };
+#[cfg(feature = "bench-internal")]
+pub use qec::{QecProfiledCounts, QecProfiledSampler, compile_qec_profiled_sampler};
 pub use sim::compiled::{
-    compile_detector_sampler, compile_forward, compile_measurements, run_shots_compiled,
     CompiledDetectorSampler, CompiledSampler, CorrelatorAccumulator, DetectorSampleBatch,
     HistogramAccumulator, MarginalsAccumulator, NullAccumulator, PackedShots, ParityStats,
-    PauliExpectationAccumulator, ShotAccumulator, ShotLayout,
+    PauliExpectationAccumulator, ShotAccumulator, ShotLayout, compile_detector_sampler,
+    compile_forward, compile_measurements, run_shots_compiled,
 };
 pub use sim::homological::{
-    noisy_marginals_analytical, run_shots_homological, ErrorChainComplex, HomologicalSampler,
+    ErrorChainComplex, HomologicalSampler, noisy_marginals_analytical, run_shots_homological,
 };
 pub use sim::noise::{
-    compile_noisy, run_shots_noisy, NoiseChannel, NoiseEvent, NoiseModel, NoisyCompiledSampler,
-    ReadoutError,
+    NoiseChannel, NoiseEvent, NoiseModel, NoisyCompiledSampler, ReadoutError, compile_noisy,
+    run_shots_noisy,
 };
 pub use sim::stabilizer_rank::{
-    run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,
-    stabilizer_overlap_sq, StabRankResult,
+    StabRankResult, run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,
+    stabilizer_overlap_sq,
 };
 pub use sim::unified_pauli::{
+    PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SppObservableResult, SppResult,
     inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_light_cone, run_spp,
-    run_spp_observable, PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SppObservableResult,
-    SppResult,
+    run_spp_observable,
 };
 pub use sim::{
-    bitstring, run_on, run_qasm, simulate, BackendKind, CountsResult, FactoredBlock,
-    MarginalsResult, Probabilities, RunOutcome, Seeded, ShotsResult, Simulate, Unseeded,
+    BackendKind, CountsResult, FactoredBlock, MarginalsResult, Probabilities, RunOutcome, Seeded,
+    ShotsResult, Simulate, Unseeded, bitstring, run_on, run_qasm, simulate,
 };
 
 #[cfg(feature = "gpu")]
-pub use sim::compiled::{run_shots_compiled_with_gpu, DevicePackedShots};
+pub use sim::compiled::{DevicePackedShots, run_shots_compiled_with_gpu};

@@ -35,7 +35,7 @@ use num_complex::Complex64;
 use smallvec::SmallVec;
 
 use crate::backend::{
-    dense_probability_len, dense_statevector_len, reserve_dense_output, Backend, NORM_CLAMP_MIN,
+    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, reserve_dense_output,
 };
 use crate::circuit::Instruction;
 #[cfg(feature = "gpu")]
@@ -52,7 +52,7 @@ pub(crate) mod kernels;
 #[cfg(test)]
 mod tests;
 
-use kernels::{rowmul_words, xor_words, MIN_WORDS_FOR_BATCH};
+use kernels::{MIN_WORDS_FOR_BATCH, rowmul_words, xor_words};
 
 #[cfg(feature = "gpu")]
 use crate::gpu::kernels::stabilizer::CliffordBatchScratch;
@@ -223,7 +223,7 @@ impl StabilizerBackend {
     #[cfg(feature = "gpu")]
     fn apply_measure_gpu(&mut self, qubit: usize, classical_bit: usize) -> Result<()> {
         use crate::gpu::kernels::stabilizer as k;
-        use rand::Rng;
+        use rand::RngExt;
         self.flush_gpu_ops()?;
         let ctx = self
             .gpu_context
@@ -284,7 +284,7 @@ impl StabilizerBackend {
     /// copied buffers are returned unchanged.
     #[cfg(feature = "gpu")]
     fn copy_device_tableau_with_pending(&self) -> Result<(Vec<u64>, Vec<bool>)> {
-        use crate::gpu::kernels::stabilizer::{op, CLIFOP_STRIDE};
+        use crate::gpu::kernels::stabilizer::{CLIFOP_STRIDE, op};
         let tableau = self
             .gpu_tableau
             .as_ref()

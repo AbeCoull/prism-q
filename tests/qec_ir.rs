@@ -1,8 +1,8 @@
 use prism_q::circuit::openqasm;
 use prism_q::{
-    compile_qec_program_rows, parse_qec_program, run_qec_program, run_qec_program_reference, Gate,
-    PackedShots, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef,
-    QecSampleResult,
+    Gate, PackedShots, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef,
+    QecSampleResult, compile_qec_program_rows, parse_qec_program, run_qec_program,
+    run_qec_program_reference,
 };
 
 fn assert_f64_close(actual: f64, expected: f64, tolerance: f64) {
@@ -82,14 +82,18 @@ fn qec_program_from_ops_validates_records_and_qubits() {
 
     let mut program = QecProgram::new(1);
     assert!(program.measure_z(1).is_err());
-    assert!(program
-        .measure_pauli_product(&[QecPauli::x(0), QecPauli::z(0)])
-        .is_err());
+    assert!(
+        program
+            .measure_pauli_product(&[QecPauli::x(0), QecPauli::z(0)])
+            .is_err()
+    );
     assert!(program.noise(QecNoise::XError(1.5), &[0]).is_err());
     assert!(program.noise(QecNoise::Depolarize2(0.001), &[0]).is_err());
-    assert!(program
-        .noise(QecNoise::Depolarize2(0.001), &[0, 0])
-        .is_err());
+    assert!(
+        program
+            .noise(QecNoise::Depolarize2(0.001), &[0, 0])
+            .is_err()
+    );
 }
 
 #[test]
@@ -813,10 +817,12 @@ fn qec_text_parser_skips_zero_probability_noise_annotations() {
         "#,
     )
     .unwrap();
-    assert!(!program
-        .ops()
-        .iter()
-        .any(|op| matches!(op, QecOp::Noise { .. })));
+    assert!(
+        !program
+            .ops()
+            .iter()
+            .any(|op| matches!(op, QecOp::Noise { .. }))
+    );
 }
 
 #[test]

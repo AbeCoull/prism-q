@@ -3,15 +3,15 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::smallvec;
 
-use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::Backend;
+use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
-use crate::sim::compiled::{
-    batch_propagate_backward, compile_measurements, xor_words, PackedShots,
-};
 use crate::sim::ShotsResult;
+use crate::sim::compiled::{
+    PackedShots, batch_propagate_backward, compile_measurements, xor_words,
+};
 
 /// A single-qubit (or two-qubit, for `TwoQubitDepolarizing`) noise channel.
 ///
@@ -369,7 +369,7 @@ impl FlatNoiseSensitivity {
 
 #[inline(always)]
 fn geometric_sample(rng: &mut ChaCha8Rng, ln_1mp: f64) -> usize {
-    let u: f64 = 1.0 - rand::Rng::random::<f64>(rng);
+    let u: f64 = 1.0 - rand::RngExt::random::<f64>(rng);
     (u.ln() / ln_1mp) as usize
 }
 
@@ -396,7 +396,7 @@ trait EventRng {
 impl EventRng for ChaCha8Rng {
     #[inline]
     fn uniform(&mut self) -> f64 {
-        rand::Rng::random::<f64>(self)
+        rand::RngExt::random::<f64>(self)
     }
     #[inline]
     fn geom(&mut self, ln_1mp: f64) -> usize {
@@ -1029,7 +1029,7 @@ impl NoisyCompiledSampler {
         // reference statistically.
         #[cfg(feature = "parallel")]
         {
-            use rand::RngCore;
+            use rand::Rng;
             use rayon::prelude::*;
             // Rayon split + per-event seed draw has to be dominated by real
             // work; below this threshold the serial master-rng loop wins.
@@ -1104,7 +1104,7 @@ impl NoisyCompiledSampler {
         // probabilities fail the `u64` threshold check.
         let use_fused = cache.event_thresholds_valid;
         let master_seed: u64 = if use_fused {
-            rand::RngCore::next_u64(&mut self.rng)
+            rand::Rng::next_u64(&mut self.rng)
         } else {
             0
         };
@@ -1434,7 +1434,7 @@ impl NoisyCompiledSampler {
         let shots_per_thread = (num_shots.div_ceil(num_threads) + 63) & !63;
 
         let seeds: Vec<u64> = (0..num_threads)
-            .map(|_| rand::Rng::random(&mut self.rng))
+            .map(|_| rand::RngExt::random(&mut self.rng))
             .collect();
 
         let events = &self.events;
@@ -1472,7 +1472,7 @@ impl NoisyCompiledSampler {
 
             if p_event >= 0.5 || num_shots < 32 {
                 for s in start..end {
-                    let r: f64 = rand::Rng::random(rng);
+                    let r: f64 = rand::RngExt::random(rng);
                     if r < px {
                         let b = s * m_words;
                         xor_words(&mut accum[b..b + m_words], events.z_flip(i));
@@ -1492,7 +1492,7 @@ impl NoisyCompiledSampler {
 
                 let mut pos = start + geometric_sample(rng, ln_1mp);
                 while pos < end {
-                    let r: f64 = rand::Rng::random(rng);
+                    let r: f64 = rand::RngExt::random(rng);
                     let b = pos * m_words;
                     if r < px_frac {
                         xor_words(&mut accum[b..b + m_words], events.z_flip(i));
@@ -1531,7 +1531,7 @@ impl NoisyCompiledSampler {
 
                 if p_event >= 0.5 || tile_n < 32 {
                     for s in 0..tile_n {
-                        let r: f64 = rand::Rng::random(&mut self.rng);
+                        let r: f64 = rand::RngExt::random(&mut self.rng);
                         if r < px {
                             z_mask[s * e_words + ew] |= eb;
                         } else if r < px + py {
@@ -1548,7 +1548,7 @@ impl NoisyCompiledSampler {
 
                     let mut pos = geometric_sample(&mut self.rng, ln_1mp);
                     while pos < tile_n {
-                        let r: f64 = rand::Rng::random(&mut self.rng);
+                        let r: f64 = rand::RngExt::random(&mut self.rng);
                         if r < px_frac {
                             z_mask[pos * e_words + ew] |= eb;
                         } else if r < pxy_frac {
@@ -2047,7 +2047,7 @@ fn run_shots_noisy_frame(
                             let ln_1mp = (1.0 - p_event).ln();
                             let mut pos = geometric_sample(&mut rng, ln_1mp);
                             while pos < batch_n {
-                                let r: f64 = rand::Rng::random(&mut rng);
+                                let r: f64 = rand::RngExt::random(&mut rng);
                                 let bit = 1u64 << (pos % 64);
                                 let w = pos / 64;
                                 if r < px_frac {
@@ -2062,7 +2062,7 @@ fn run_shots_noisy_frame(
                             }
                         } else {
                             for s in 0..batch_n {
-                                let r: f64 = rand::Rng::random(&mut rng);
+                                let r: f64 = rand::RngExt::random(&mut rng);
                                 if r < px {
                                     x_frame[q][s / 64] ^= 1u64 << (s % 64);
                                 } else if r < px + py {
@@ -2083,7 +2083,7 @@ fn run_shots_noisy_frame(
                         let support = &ref_info.random_x_support[meas_idx];
                         #[allow(clippy::needless_range_loop)]
                         for w in 0..bw {
-                            let random_word: u64 = rand::Rng::random(&mut rng);
+                            let random_word: u64 = rand::RngExt::random(&mut rng);
                             let mask = if w == bw - 1 && batch_n % 64 != 0 {
                                 random_word & ((1u64 << (batch_n % 64)) - 1)
                             } else {
@@ -2319,7 +2319,7 @@ pub(crate) fn run_shots_noisy_brute_with(
             for event in noise_events {
                 let (px, py, pz) = event.pauli_probs();
                 let q = event.qubit();
-                let r: f64 = rand::Rng::random(&mut rng);
+                let r: f64 = rand::RngExt::random(&mut rng);
                 if r < px {
                     backend.apply(&Instruction::Gate {
                         gate: Gate::X,

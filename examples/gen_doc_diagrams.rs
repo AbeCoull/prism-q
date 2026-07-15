@@ -10,11 +10,11 @@
 //!
 //! `auto_theme` emits self-contained SVGs that adapt to the reader's color scheme.
 
+use prism_q::SvgOptions;
 use prism_q::circuits::{
     ghz_circuit, hardware_efficient_ansatz, phase_estimation_circuit, qaoa_circuit, qft_circuit,
     w_state_circuit,
 };
-use prism_q::SvgOptions;
 use std::fs;
 use std::path::Path;
 

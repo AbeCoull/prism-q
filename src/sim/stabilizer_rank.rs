@@ -20,14 +20,14 @@
 //!   overlaps without materializing a dense statevector.
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::f64::consts::FRAC_PI_4;
 
+use crate::backend::Backend;
 use crate::backend::mps::MpsBackend;
 use crate::backend::stabilizer::StabilizerBackend;
-use crate::backend::Backend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;

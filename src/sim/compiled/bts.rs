@@ -23,7 +23,10 @@ unsafe impl Sync for SendPtrU64 {}
 impl SendPtrU64 {
     #[inline(always)]
     unsafe fn write_slice(self, offset: usize, src: *const u64, len: usize) {
-        std::ptr::copy_nonoverlapping(src, self.0.add(offset), len);
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, self.0.add(offset), len);
+        }
     }
 }
 
@@ -349,134 +352,137 @@ unsafe fn sample_bts_meas_major_avx2(
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
-    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
 
-    let num_meas = sparse.num_rows;
-    let s_words = num_shots.div_ceil(64);
-    let s_quads = num_shots.div_ceil(256);
+        let num_meas = sparse.num_rows;
+        let s_words = num_shots.div_ceil(64);
+        let s_quads = num_shots.div_ceil(256);
 
-    let mut meas_major = vec![0u64; num_meas * s_words];
-    let mut vrng = Xoshiro256PlusPlusX4::from_scalar(rng);
+        let mut meas_major = vec![0u64; num_meas * s_words];
+        let mut vrng = Xoshiro256PlusPlusX4::from_scalar(rng);
 
-    let tile = if rank == 0 {
-        s_quads
-    } else {
-        (16384 / (rank * 32)).clamp(1, BTS_QUAD_TILE).min(s_quads)
-    };
+        let tile = if rank == 0 {
+            s_quads
+        } else {
+            (16384 / (rank * 32)).clamp(1, BTS_QUAD_TILE).min(s_quads)
+        };
 
-    let rem = num_shots % 256;
-    let full_quads = if rem == 0 { s_quads } else { s_quads - 1 };
+        let rem = num_shots % 256;
+        let full_quads = if rem == 0 { s_quads } else { s_quads - 1 };
 
-    if tile >= 2 && full_quads >= tile {
-        let mut random_tile: Vec<__m256i> = vec![_mm256_setzero_si256(); rank * tile];
+        if tile >= 2 && full_quads >= tile {
+            let mut random_tile: Vec<__m256i> = vec![_mm256_setzero_si256(); rank * tile];
 
-        let mut quad_start = 0;
-        while quad_start + tile <= full_quads {
-            for t in 0..tile {
-                for r in 0..rank {
-                    random_tile[r * tile + t] = vrng.next_m256i();
-                }
-            }
-
-            for &m in &sparse.non_det_rows {
-                let m = m as usize;
-                let cols = sparse.row_cols(m);
-                let out_base = m * s_words + quad_start * 4;
-
-                match cols.len() {
-                    0 => unreachable!(),
-                    1 => {
-                        let c0 = cols[0] as usize * tile;
-                        for t in 0..tile {
-                            _mm256_storeu_si256(
-                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
-                                random_tile[c0 + t],
-                            );
-                        }
-                    }
-                    2 => {
-                        let c0 = cols[0] as usize * tile;
-                        let c1 = cols[1] as usize * tile;
-                        for t in 0..tile {
-                            _mm256_storeu_si256(
-                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
-                                _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
-                            );
-                        }
-                    }
-                    3 => {
-                        let c0 = cols[0] as usize * tile;
-                        let c1 = cols[1] as usize * tile;
-                        let c2 = cols[2] as usize * tile;
-                        for t in 0..tile {
-                            _mm256_storeu_si256(
-                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
-                                _mm256_xor_si256(
-                                    _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
-                                    random_tile[c2 + t],
-                                ),
-                            );
-                        }
-                    }
-                    4 => {
-                        let c0 = cols[0] as usize * tile;
-                        let c1 = cols[1] as usize * tile;
-                        let c2 = cols[2] as usize * tile;
-                        let c3 = cols[3] as usize * tile;
-                        for t in 0..tile {
-                            _mm256_storeu_si256(
-                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
-                                _mm256_xor_si256(
-                                    _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
-                                    _mm256_xor_si256(random_tile[c2 + t], random_tile[c3 + t]),
-                                ),
-                            );
-                        }
-                    }
-                    _ => {
-                        for t in 0..tile {
-                            let a = xor_reduce_avx2_tiled(cols, &random_tile, tile, t);
-                            _mm256_storeu_si256(
-                                meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
-                                a,
-                            );
-                        }
+            let mut quad_start = 0;
+            while quad_start + tile <= full_quads {
+                for t in 0..tile {
+                    for r in 0..rank {
+                        random_tile[r * tile + t] = vrng.next_m256i();
                     }
                 }
+
+                for &m in &sparse.non_det_rows {
+                    let m = m as usize;
+                    let cols = sparse.row_cols(m);
+                    let out_base = m * s_words + quad_start * 4;
+
+                    match cols.len() {
+                        0 => unreachable!(),
+                        1 => {
+                            let c0 = cols[0] as usize * tile;
+                            for t in 0..tile {
+                                _mm256_storeu_si256(
+                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    random_tile[c0 + t],
+                                );
+                            }
+                        }
+                        2 => {
+                            let c0 = cols[0] as usize * tile;
+                            let c1 = cols[1] as usize * tile;
+                            for t in 0..tile {
+                                _mm256_storeu_si256(
+                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
+                                );
+                            }
+                        }
+                        3 => {
+                            let c0 = cols[0] as usize * tile;
+                            let c1 = cols[1] as usize * tile;
+                            let c2 = cols[2] as usize * tile;
+                            for t in 0..tile {
+                                _mm256_storeu_si256(
+                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    _mm256_xor_si256(
+                                        _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
+                                        random_tile[c2 + t],
+                                    ),
+                                );
+                            }
+                        }
+                        4 => {
+                            let c0 = cols[0] as usize * tile;
+                            let c1 = cols[1] as usize * tile;
+                            let c2 = cols[2] as usize * tile;
+                            let c3 = cols[3] as usize * tile;
+                            for t in 0..tile {
+                                _mm256_storeu_si256(
+                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    _mm256_xor_si256(
+                                        _mm256_xor_si256(random_tile[c0 + t], random_tile[c1 + t]),
+                                        _mm256_xor_si256(random_tile[c2 + t], random_tile[c3 + t]),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            for t in 0..tile {
+                                let a = xor_reduce_avx2_tiled(cols, &random_tile, tile, t);
+                                _mm256_storeu_si256(
+                                    meas_major[out_base + t * 4..].as_mut_ptr() as *mut __m256i,
+                                    a,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                quad_start += tile;
             }
 
-            quad_start += tile;
+            bts_avx2_remainder(
+                sparse,
+                &mut meas_major,
+                &mut vrng,
+                &mut random_tile,
+                rank,
+                s_words,
+                s_quads,
+                quad_start,
+                tile,
+                rem,
+            );
+        } else {
+            let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
+            bts_avx2_per_quad(
+                sparse,
+                &mut meas_major,
+                &mut vrng,
+                &mut random_avx,
+                rank,
+                s_words,
+                s_quads,
+                0,
+                rem,
+            );
         }
 
-        bts_avx2_remainder(
-            sparse,
-            &mut meas_major,
-            &mut vrng,
-            &mut random_tile,
-            rank,
-            s_words,
-            s_quads,
-            quad_start,
-            tile,
-            rem,
-        );
-    } else {
-        let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
-        bts_avx2_per_quad(
-            sparse,
-            &mut meas_major,
-            &mut vrng,
-            &mut random_avx,
-            rank,
-            s_words,
-            s_quads,
-            0,
-            rem,
-        );
+        apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
+        meas_major
     }
-
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-    meas_major
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -494,63 +500,66 @@ unsafe fn bts_avx2_remainder(
     tile: usize,
     rem: usize,
 ) {
-    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
 
-    for quad in quad_start..s_quads {
-        let base_sw = quad * 4;
-        let words_this_quad = (s_words - base_sw).min(4);
+        for quad in quad_start..s_quads {
+            let base_sw = quad * 4;
+            let words_this_quad = (s_words - base_sw).min(4);
 
-        for r in 0..rank {
-            random_tile[r * tile] = vrng.next_m256i();
-        }
-
-        if quad == s_quads - 1 && rem != 0 {
-            let full_words = rem / 64;
-            let tail_bits = rem % 64;
-            let mut mask_buf = [!0u64; 4];
-            for val in mask_buf
-                .iter_mut()
-                .skip(full_words + usize::from(tail_bits > 0))
-            {
-                *val = 0;
-            }
-            if tail_bits > 0 {
-                mask_buf[full_words] = (1u64 << tail_bits) - 1;
-            }
-            let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
             for r in 0..rank {
-                random_tile[r * tile] = _mm256_and_si256(random_tile[r * tile], mask_vec);
+                random_tile[r * tile] = vrng.next_m256i();
             }
-        }
 
-        for &m in &sparse.non_det_rows {
-            let m = m as usize;
-            let cols = sparse.row_cols(m);
-            let acc = match cols.len() {
-                0 => unreachable!(),
-                1 => random_tile[cols[0] as usize * tile],
-                2 => _mm256_xor_si256(
-                    random_tile[cols[0] as usize * tile],
-                    random_tile[cols[1] as usize * tile],
-                ),
-                3 => _mm256_xor_si256(
-                    _mm256_xor_si256(
+            if quad == s_quads - 1 && rem != 0 {
+                let full_words = rem / 64;
+                let tail_bits = rem % 64;
+                let mut mask_buf = [!0u64; 4];
+                for val in mask_buf
+                    .iter_mut()
+                    .skip(full_words + usize::from(tail_bits > 0))
+                {
+                    *val = 0;
+                }
+                if tail_bits > 0 {
+                    mask_buf[full_words] = (1u64 << tail_bits) - 1;
+                }
+                let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
+                for r in 0..rank {
+                    random_tile[r * tile] = _mm256_and_si256(random_tile[r * tile], mask_vec);
+                }
+            }
+
+            for &m in &sparse.non_det_rows {
+                let m = m as usize;
+                let cols = sparse.row_cols(m);
+                let acc = match cols.len() {
+                    0 => unreachable!(),
+                    1 => random_tile[cols[0] as usize * tile],
+                    2 => _mm256_xor_si256(
                         random_tile[cols[0] as usize * tile],
                         random_tile[cols[1] as usize * tile],
                     ),
-                    random_tile[cols[2] as usize * tile],
-                ),
-                _ => xor_reduce_avx2_tiled(cols, random_tile, tile, 0),
-            };
+                    3 => _mm256_xor_si256(
+                        _mm256_xor_si256(
+                            random_tile[cols[0] as usize * tile],
+                            random_tile[cols[1] as usize * tile],
+                        ),
+                        random_tile[cols[2] as usize * tile],
+                    ),
+                    _ => xor_reduce_avx2_tiled(cols, random_tile, tile, 0),
+                };
 
-            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
-            if words_this_quad == 4 {
-                _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
-            } else {
-                let mut tmp = [0u64; 4];
-                _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
-                for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
-                    *out_ptr.add(w) = val;
+                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+                if words_this_quad == 4 {
+                    _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
+                } else {
+                    let mut tmp = [0u64; 4];
+                    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
+                    for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
+                        *out_ptr.add(w) = val;
+                    }
                 }
             }
         }
@@ -571,61 +580,75 @@ unsafe fn bts_avx2_per_quad(
     start_quad: usize,
     rem: usize,
 ) {
-    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
 
-    for quad in start_quad..s_quads {
-        let base_sw = quad * 4;
-        let words_this_quad = (s_words - base_sw).min(4);
+        for quad in start_quad..s_quads {
+            let base_sw = quad * 4;
+            let words_this_quad = (s_words - base_sw).min(4);
 
-        for avx in random_avx.iter_mut().take(rank) {
-            *avx = vrng.next_m256i();
-        }
-
-        if quad == s_quads - 1 && rem != 0 {
-            let full_words = rem / 64;
-            let tail_bits = rem % 64;
-            let mut mask_buf = [!0u64; 4];
-            for val in mask_buf
-                .iter_mut()
-                .skip(full_words + usize::from(tail_bits > 0))
-            {
-                *val = 0;
-            }
-            if tail_bits > 0 {
-                mask_buf[full_words] = (1u64 << tail_bits) - 1;
-            }
-            let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
             for avx in random_avx.iter_mut().take(rank) {
-                *avx = _mm256_and_si256(*avx, mask_vec);
+                *avx = vrng.next_m256i();
             }
-        }
 
-        for &m in &sparse.non_det_rows {
-            let m = m as usize;
-            let cols = sparse.row_cols(m);
-            let acc = match cols.len() {
-                0 => unreachable!(),
-                1 => random_avx[cols[0] as usize],
-                2 => _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize]),
-                3 => _mm256_xor_si256(
-                    _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize]),
-                    random_avx[cols[2] as usize],
-                ),
-                4 => _mm256_xor_si256(
-                    _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize]),
-                    _mm256_xor_si256(random_avx[cols[2] as usize], random_avx[cols[3] as usize]),
-                ),
-                _ => xor_reduce_avx2(cols, random_avx),
-            };
+            if quad == s_quads - 1 && rem != 0 {
+                let full_words = rem / 64;
+                let tail_bits = rem % 64;
+                let mut mask_buf = [!0u64; 4];
+                for val in mask_buf
+                    .iter_mut()
+                    .skip(full_words + usize::from(tail_bits > 0))
+                {
+                    *val = 0;
+                }
+                if tail_bits > 0 {
+                    mask_buf[full_words] = (1u64 << tail_bits) - 1;
+                }
+                let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
+                for avx in random_avx.iter_mut().take(rank) {
+                    *avx = _mm256_and_si256(*avx, mask_vec);
+                }
+            }
 
-            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
-            if words_this_quad == 4 {
-                _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
-            } else {
-                let mut tmp = [0u64; 4];
-                _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
-                for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
-                    *out_ptr.add(w) = val;
+            for &m in &sparse.non_det_rows {
+                let m = m as usize;
+                let cols = sparse.row_cols(m);
+                let acc = match cols.len() {
+                    0 => unreachable!(),
+                    1 => random_avx[cols[0] as usize],
+                    2 => {
+                        _mm256_xor_si256(random_avx[cols[0] as usize], random_avx[cols[1] as usize])
+                    }
+                    3 => _mm256_xor_si256(
+                        _mm256_xor_si256(
+                            random_avx[cols[0] as usize],
+                            random_avx[cols[1] as usize],
+                        ),
+                        random_avx[cols[2] as usize],
+                    ),
+                    4 => _mm256_xor_si256(
+                        _mm256_xor_si256(
+                            random_avx[cols[0] as usize],
+                            random_avx[cols[1] as usize],
+                        ),
+                        _mm256_xor_si256(
+                            random_avx[cols[2] as usize],
+                            random_avx[cols[3] as usize],
+                        ),
+                    ),
+                    _ => xor_reduce_avx2(cols, random_avx),
+                };
+
+                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+                if words_this_quad == 4 {
+                    _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
+                } else {
+                    let mut tmp = [0u64; 4];
+                    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
+                    for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
+                        *out_ptr.add(w) = val;
+                    }
                 }
             }
         }
@@ -640,28 +663,31 @@ unsafe fn xor_reduce_avx2_tiled(
     tile: usize,
     t: usize,
 ) -> std::arch::x86_64::__m256i {
-    use std::arch::x86_64::*;
-    let mut chunks = cols.chunks_exact(4);
-    let mut acc = _mm256_setzero_si256();
-    for chunk in &mut chunks {
-        acc = _mm256_xor_si256(
-            acc,
-            _mm256_xor_si256(
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let mut chunks = cols.chunks_exact(4);
+        let mut acc = _mm256_setzero_si256();
+        for chunk in &mut chunks {
+            acc = _mm256_xor_si256(
+                acc,
                 _mm256_xor_si256(
-                    random_tile[chunk[0] as usize * tile + t],
-                    random_tile[chunk[1] as usize * tile + t],
+                    _mm256_xor_si256(
+                        random_tile[chunk[0] as usize * tile + t],
+                        random_tile[chunk[1] as usize * tile + t],
+                    ),
+                    _mm256_xor_si256(
+                        random_tile[chunk[2] as usize * tile + t],
+                        random_tile[chunk[3] as usize * tile + t],
+                    ),
                 ),
-                _mm256_xor_si256(
-                    random_tile[chunk[2] as usize * tile + t],
-                    random_tile[chunk[3] as usize * tile + t],
-                ),
-            ),
-        );
+            );
+        }
+        for &c in chunks.remainder() {
+            acc = _mm256_xor_si256(acc, random_tile[c as usize * tile + t]);
+        }
+        acc
     }
-    for &c in chunks.remainder() {
-        acc = _mm256_xor_si256(acc, random_tile[c as usize * tile + t]);
-    }
-    acc
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -670,22 +696,25 @@ unsafe fn xor_reduce_avx2(
     cols: &[u32],
     random: &[std::arch::x86_64::__m256i],
 ) -> std::arch::x86_64::__m256i {
-    use std::arch::x86_64::*;
-    let mut chunks = cols.chunks_exact(4);
-    let mut acc = _mm256_setzero_si256();
-    for chunk in &mut chunks {
-        acc = _mm256_xor_si256(
-            acc,
-            _mm256_xor_si256(
-                _mm256_xor_si256(random[chunk[0] as usize], random[chunk[1] as usize]),
-                _mm256_xor_si256(random[chunk[2] as usize], random[chunk[3] as usize]),
-            ),
-        );
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
+        let mut chunks = cols.chunks_exact(4);
+        let mut acc = _mm256_setzero_si256();
+        for chunk in &mut chunks {
+            acc = _mm256_xor_si256(
+                acc,
+                _mm256_xor_si256(
+                    _mm256_xor_si256(random[chunk[0] as usize], random[chunk[1] as usize]),
+                    _mm256_xor_si256(random[chunk[2] as usize], random[chunk[3] as usize]),
+                ),
+            );
+        }
+        for &c in chunks.remainder() {
+            acc = _mm256_xor_si256(acc, random[c as usize]);
+        }
+        acc
     }
-    for &c in chunks.remainder() {
-        acc = _mm256_xor_si256(acc, random[c as usize]);
-    }
-    acc
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -710,82 +739,85 @@ unsafe fn sample_bts_meas_major_dag_avx2(
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
-    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
 
-    let num_meas = sparse.num_rows;
-    let s_words = num_shots.div_ceil(64);
-    let s_quads = num_shots.div_ceil(256);
-    let rem = num_shots % 256;
+        let num_meas = sparse.num_rows;
+        let s_words = num_shots.div_ceil(64);
+        let s_quads = num_shots.div_ceil(256);
+        let rem = num_shots % 256;
 
-    let mut meas_major = vec![0u64; num_meas * s_words];
-    let mut vrng = Xoshiro256PlusPlusX4::from_scalar(rng);
-    let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
+        let mut meas_major = vec![0u64; num_meas * s_words];
+        let mut vrng = Xoshiro256PlusPlusX4::from_scalar(rng);
+        let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
 
-    for quad in 0..s_quads {
-        let base_sw = quad * 4;
-        let words_this_quad = (s_words - base_sw).min(4);
+        for quad in 0..s_quads {
+            let base_sw = quad * 4;
+            let words_this_quad = (s_words - base_sw).min(4);
 
-        for avx in random_avx.iter_mut().take(rank) {
-            *avx = vrng.next_m256i();
-        }
-
-        if quad == s_quads - 1 && rem != 0 {
-            let full_words = rem / 64;
-            let tail_bits = rem % 64;
-            let mut mask_buf = [!0u64; 4];
-            for val in mask_buf
-                .iter_mut()
-                .skip(full_words + usize::from(tail_bits > 0))
-            {
-                *val = 0;
-            }
-            if tail_bits > 0 {
-                mask_buf[full_words] = (1u64 << tail_bits) - 1;
-            }
-            let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
             for avx in random_avx.iter_mut().take(rank) {
-                *avx = _mm256_and_si256(*avx, mask_vec);
+                *avx = vrng.next_m256i();
             }
-        }
 
-        for (m, entry) in dag.entries.iter().enumerate() {
-            if entry.parent.is_none() && entry.residual_cols.is_empty() {
-                continue;
+            if quad == s_quads - 1 && rem != 0 {
+                let full_words = rem / 64;
+                let tail_bits = rem % 64;
+                let mut mask_buf = [!0u64; 4];
+                for val in mask_buf
+                    .iter_mut()
+                    .skip(full_words + usize::from(tail_bits > 0))
+                {
+                    *val = 0;
+                }
+                if tail_bits > 0 {
+                    mask_buf[full_words] = (1u64 << tail_bits) - 1;
+                }
+                let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
+                for avx in random_avx.iter_mut().take(rank) {
+                    *avx = _mm256_and_si256(*avx, mask_vec);
+                }
             }
-            let mut acc = if let Some(p) = entry.parent {
-                let parent_ptr = meas_major[p * s_words + base_sw..].as_ptr();
+
+            for (m, entry) in dag.entries.iter().enumerate() {
+                if entry.parent.is_none() && entry.residual_cols.is_empty() {
+                    continue;
+                }
+                let mut acc = if let Some(p) = entry.parent {
+                    let parent_ptr = meas_major[p * s_words + base_sw..].as_ptr();
+                    if words_this_quad == 4 {
+                        _mm256_loadu_si256(parent_ptr as *const __m256i)
+                    } else {
+                        let mut tmp = [0u64; 4];
+                        for (w, slot) in tmp.iter_mut().enumerate().take(words_this_quad) {
+                            *slot = *parent_ptr.add(w);
+                        }
+                        _mm256_loadu_si256(tmp.as_ptr() as *const __m256i)
+                    }
+                } else {
+                    _mm256_setzero_si256()
+                };
+
+                for &c in &entry.residual_cols {
+                    acc = _mm256_xor_si256(acc, random_avx[c as usize]);
+                }
+
+                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
                 if words_this_quad == 4 {
-                    _mm256_loadu_si256(parent_ptr as *const __m256i)
+                    _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
                 } else {
                     let mut tmp = [0u64; 4];
-                    for (w, slot) in tmp.iter_mut().enumerate().take(words_this_quad) {
-                        *slot = *parent_ptr.add(w);
+                    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
+                    for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
+                        *out_ptr.add(w) = val;
                     }
-                    _mm256_loadu_si256(tmp.as_ptr() as *const __m256i)
-                }
-            } else {
-                _mm256_setzero_si256()
-            };
-
-            for &c in &entry.residual_cols {
-                acc = _mm256_xor_si256(acc, random_avx[c as usize]);
-            }
-
-            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
-            if words_this_quad == 4 {
-                _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
-            } else {
-                let mut tmp = [0u64; 4];
-                _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
-                for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
-                    *out_ptr.add(w) = val;
                 }
             }
         }
-    }
 
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-    meas_major
+        apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
+        meas_major
+    }
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -813,127 +845,130 @@ unsafe fn sample_bts_meas_major_neon(
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
-    use std::arch::aarch64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::*;
 
-    let num_meas = sparse.num_rows;
-    let s_words = num_shots.div_ceil(64);
-    let s_pairs = num_shots.div_ceil(128);
+        let num_meas = sparse.num_rows;
+        let s_words = num_shots.div_ceil(64);
+        let s_pairs = num_shots.div_ceil(128);
 
-    let mut meas_major = vec![0u64; num_meas * s_words];
-    let mut vrng = Xoshiro256PlusPlusX2::from_scalar(rng);
+        let mut meas_major = vec![0u64; num_meas * s_words];
+        let mut vrng = Xoshiro256PlusPlusX2::from_scalar(rng);
 
-    let tile = if rank == 0 {
-        s_pairs
-    } else {
-        (16384 / (rank * 16)).clamp(1, BTS_PAIR_TILE).min(s_pairs)
-    };
+        let tile = if rank == 0 {
+            s_pairs
+        } else {
+            (16384 / (rank * 16)).clamp(1, BTS_PAIR_TILE).min(s_pairs)
+        };
 
-    let rem = num_shots % 128;
-    let full_pairs = if rem == 0 { s_pairs } else { s_pairs - 1 };
+        let rem = num_shots % 128;
+        let full_pairs = if rem == 0 { s_pairs } else { s_pairs - 1 };
 
-    if tile >= 2 && full_pairs >= tile {
-        let mut random_tile: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank * tile];
+        if tile >= 2 && full_pairs >= tile {
+            let mut random_tile: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank * tile];
 
-        let mut pair_start = 0;
-        while pair_start + tile <= full_pairs {
-            for t in 0..tile {
-                for r in 0..rank {
-                    random_tile[r * tile + t] = vrng.next_uint64x2();
-                }
-            }
-
-            for &m in &sparse.non_det_rows {
-                let m = m as usize;
-                let cols = sparse.row_cols(m);
-                let out_base = m * s_words + pair_start * 2;
-
-                match cols.len() {
-                    0 => unreachable!(),
-                    1 => {
-                        let c0 = cols[0] as usize * tile;
-                        for t in 0..tile {
-                            vst1q_u64(
-                                meas_major[out_base + t * 2..].as_mut_ptr(),
-                                random_tile[c0 + t],
-                            );
-                        }
-                    }
-                    2 => {
-                        let c0 = cols[0] as usize * tile;
-                        let c1 = cols[1] as usize * tile;
-                        for t in 0..tile {
-                            vst1q_u64(
-                                meas_major[out_base + t * 2..].as_mut_ptr(),
-                                veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
-                            );
-                        }
-                    }
-                    3 => {
-                        let c0 = cols[0] as usize * tile;
-                        let c1 = cols[1] as usize * tile;
-                        let c2 = cols[2] as usize * tile;
-                        for t in 0..tile {
-                            vst1q_u64(
-                                meas_major[out_base + t * 2..].as_mut_ptr(),
-                                veorq_u64(
-                                    veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
-                                    random_tile[c2 + t],
-                                ),
-                            );
-                        }
-                    }
-                    4 => {
-                        let c0 = cols[0] as usize * tile;
-                        let c1 = cols[1] as usize * tile;
-                        let c2 = cols[2] as usize * tile;
-                        let c3 = cols[3] as usize * tile;
-                        for t in 0..tile {
-                            vst1q_u64(
-                                meas_major[out_base + t * 2..].as_mut_ptr(),
-                                veorq_u64(
-                                    veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
-                                    veorq_u64(random_tile[c2 + t], random_tile[c3 + t]),
-                                ),
-                            );
-                        }
-                    }
-                    _ => {
-                        for t in 0..tile {
-                            let a = xor_reduce_neon_tiled(cols, &random_tile, tile, t);
-                            vst1q_u64(meas_major[out_base + t * 2..].as_mut_ptr(), a);
-                        }
+            let mut pair_start = 0;
+            while pair_start + tile <= full_pairs {
+                for t in 0..tile {
+                    for r in 0..rank {
+                        random_tile[r * tile + t] = vrng.next_uint64x2();
                     }
                 }
+
+                for &m in &sparse.non_det_rows {
+                    let m = m as usize;
+                    let cols = sparse.row_cols(m);
+                    let out_base = m * s_words + pair_start * 2;
+
+                    match cols.len() {
+                        0 => unreachable!(),
+                        1 => {
+                            let c0 = cols[0] as usize * tile;
+                            for t in 0..tile {
+                                vst1q_u64(
+                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    random_tile[c0 + t],
+                                );
+                            }
+                        }
+                        2 => {
+                            let c0 = cols[0] as usize * tile;
+                            let c1 = cols[1] as usize * tile;
+                            for t in 0..tile {
+                                vst1q_u64(
+                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
+                                );
+                            }
+                        }
+                        3 => {
+                            let c0 = cols[0] as usize * tile;
+                            let c1 = cols[1] as usize * tile;
+                            let c2 = cols[2] as usize * tile;
+                            for t in 0..tile {
+                                vst1q_u64(
+                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    veorq_u64(
+                                        veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
+                                        random_tile[c2 + t],
+                                    ),
+                                );
+                            }
+                        }
+                        4 => {
+                            let c0 = cols[0] as usize * tile;
+                            let c1 = cols[1] as usize * tile;
+                            let c2 = cols[2] as usize * tile;
+                            let c3 = cols[3] as usize * tile;
+                            for t in 0..tile {
+                                vst1q_u64(
+                                    meas_major[out_base + t * 2..].as_mut_ptr(),
+                                    veorq_u64(
+                                        veorq_u64(random_tile[c0 + t], random_tile[c1 + t]),
+                                        veorq_u64(random_tile[c2 + t], random_tile[c3 + t]),
+                                    ),
+                                );
+                            }
+                        }
+                        _ => {
+                            for t in 0..tile {
+                                let a = xor_reduce_neon_tiled(cols, &random_tile, tile, t);
+                                vst1q_u64(meas_major[out_base + t * 2..].as_mut_ptr(), a);
+                            }
+                        }
+                    }
+                }
+
+                pair_start += tile;
             }
 
-            pair_start += tile;
+            bts_neon_remainder(
+                sparse,
+                &mut meas_major,
+                &mut vrng,
+                rank,
+                s_words,
+                s_pairs,
+                pair_start,
+                rem,
+            );
+        } else {
+            bts_neon_per_pair(
+                sparse,
+                &mut meas_major,
+                &mut vrng,
+                rank,
+                s_words,
+                s_pairs,
+                0,
+                rem,
+            );
         }
 
-        bts_neon_remainder(
-            sparse,
-            &mut meas_major,
-            &mut vrng,
-            rank,
-            s_words,
-            s_pairs,
-            pair_start,
-            rem,
-        );
-    } else {
-        bts_neon_per_pair(
-            sparse,
-            &mut meas_major,
-            &mut vrng,
-            rank,
-            s_words,
-            s_pairs,
-            0,
-            rem,
-        );
+        apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
+        meas_major
     }
-
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-    meas_major
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -948,60 +983,63 @@ unsafe fn bts_neon_remainder(
     pair_start: usize,
     rem: usize,
 ) {
-    use std::arch::aarch64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::*;
 
-    let mut random_neon: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank];
+        let mut random_neon: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank];
 
-    for pair in pair_start..s_pairs {
-        let base_sw = pair * 2;
-        let words_this_pair = (s_words - base_sw).min(2);
+        for pair in pair_start..s_pairs {
+            let base_sw = pair * 2;
+            let words_this_pair = (s_words - base_sw).min(2);
 
-        for nval in random_neon.iter_mut().take(rank) {
-            *nval = vrng.next_uint64x2();
-        }
-
-        if pair == s_pairs - 1 && rem != 0 {
-            let full_words = rem / 64;
-            let tail_bits = rem % 64;
-            let mut mask_buf = [!0u64; 2];
-            for val in mask_buf
-                .iter_mut()
-                .skip(full_words + usize::from(tail_bits > 0))
-            {
-                *val = 0;
-            }
-            if tail_bits > 0 {
-                mask_buf[full_words] = (1u64 << tail_bits) - 1;
-            }
-            let mask_vec = vld1q_u64(mask_buf.as_ptr());
             for nval in random_neon.iter_mut().take(rank) {
-                *nval = vandq_u64(*nval, mask_vec);
+                *nval = vrng.next_uint64x2();
             }
-        }
 
-        for &m in &sparse.non_det_rows {
-            let m = m as usize;
-            let cols = sparse.row_cols(m);
-            let acc = match cols.len() {
-                0 => unreachable!(),
-                1 => random_neon[cols[0] as usize],
-                2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                3 => veorq_u64(
-                    veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                    random_neon[cols[2] as usize],
-                ),
-                4 => veorq_u64(
-                    veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                    veorq_u64(random_neon[cols[2] as usize], random_neon[cols[3] as usize]),
-                ),
-                _ => xor_reduce_neon(cols, &random_neon),
-            };
+            if pair == s_pairs - 1 && rem != 0 {
+                let full_words = rem / 64;
+                let tail_bits = rem % 64;
+                let mut mask_buf = [!0u64; 2];
+                for val in mask_buf
+                    .iter_mut()
+                    .skip(full_words + usize::from(tail_bits > 0))
+                {
+                    *val = 0;
+                }
+                if tail_bits > 0 {
+                    mask_buf[full_words] = (1u64 << tail_bits) - 1;
+                }
+                let mask_vec = vld1q_u64(mask_buf.as_ptr());
+                for nval in random_neon.iter_mut().take(rank) {
+                    *nval = vandq_u64(*nval, mask_vec);
+                }
+            }
 
-            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
-            if words_this_pair == 2 {
-                vst1q_u64(out_ptr, acc);
-            } else {
-                *out_ptr = vgetq_lane_u64(acc, 0);
+            for &m in &sparse.non_det_rows {
+                let m = m as usize;
+                let cols = sparse.row_cols(m);
+                let acc = match cols.len() {
+                    0 => unreachable!(),
+                    1 => random_neon[cols[0] as usize],
+                    2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
+                    3 => veorq_u64(
+                        veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
+                        random_neon[cols[2] as usize],
+                    ),
+                    4 => veorq_u64(
+                        veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
+                        veorq_u64(random_neon[cols[2] as usize], random_neon[cols[3] as usize]),
+                    ),
+                    _ => xor_reduce_neon(cols, &random_neon),
+                };
+
+                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+                if words_this_pair == 2 {
+                    vst1q_u64(out_ptr, acc);
+                } else {
+                    *out_ptr = vgetq_lane_u64(acc, 0);
+                }
             }
         }
     }
@@ -1019,60 +1057,63 @@ unsafe fn bts_neon_per_pair(
     start_pair: usize,
     rem: usize,
 ) {
-    use std::arch::aarch64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::*;
 
-    let mut random_neon: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank];
+        let mut random_neon: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank];
 
-    for pair in start_pair..s_pairs {
-        let base_sw = pair * 2;
-        let words_this_pair = (s_words - base_sw).min(2);
+        for pair in start_pair..s_pairs {
+            let base_sw = pair * 2;
+            let words_this_pair = (s_words - base_sw).min(2);
 
-        for nval in random_neon.iter_mut().take(rank) {
-            *nval = vrng.next_uint64x2();
-        }
-
-        if pair == s_pairs - 1 && rem != 0 {
-            let full_words = rem / 64;
-            let tail_bits = rem % 64;
-            let mut mask_buf = [!0u64; 2];
-            for val in mask_buf
-                .iter_mut()
-                .skip(full_words + usize::from(tail_bits > 0))
-            {
-                *val = 0;
-            }
-            if tail_bits > 0 {
-                mask_buf[full_words] = (1u64 << tail_bits) - 1;
-            }
-            let mask_vec = vld1q_u64(mask_buf.as_ptr());
             for nval in random_neon.iter_mut().take(rank) {
-                *nval = vandq_u64(*nval, mask_vec);
+                *nval = vrng.next_uint64x2();
             }
-        }
 
-        for &m in &sparse.non_det_rows {
-            let m = m as usize;
-            let cols = sparse.row_cols(m);
-            let acc = match cols.len() {
-                0 => unreachable!(),
-                1 => random_neon[cols[0] as usize],
-                2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                3 => veorq_u64(
-                    veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                    random_neon[cols[2] as usize],
-                ),
-                4 => veorq_u64(
-                    veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                    veorq_u64(random_neon[cols[2] as usize], random_neon[cols[3] as usize]),
-                ),
-                _ => xor_reduce_neon(cols, &random_neon),
-            };
+            if pair == s_pairs - 1 && rem != 0 {
+                let full_words = rem / 64;
+                let tail_bits = rem % 64;
+                let mut mask_buf = [!0u64; 2];
+                for val in mask_buf
+                    .iter_mut()
+                    .skip(full_words + usize::from(tail_bits > 0))
+                {
+                    *val = 0;
+                }
+                if tail_bits > 0 {
+                    mask_buf[full_words] = (1u64 << tail_bits) - 1;
+                }
+                let mask_vec = vld1q_u64(mask_buf.as_ptr());
+                for nval in random_neon.iter_mut().take(rank) {
+                    *nval = vandq_u64(*nval, mask_vec);
+                }
+            }
 
-            let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
-            if words_this_pair == 2 {
-                vst1q_u64(out_ptr, acc);
-            } else {
-                *out_ptr = vgetq_lane_u64(acc, 0);
+            for &m in &sparse.non_det_rows {
+                let m = m as usize;
+                let cols = sparse.row_cols(m);
+                let acc = match cols.len() {
+                    0 => unreachable!(),
+                    1 => random_neon[cols[0] as usize],
+                    2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
+                    3 => veorq_u64(
+                        veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
+                        random_neon[cols[2] as usize],
+                    ),
+                    4 => veorq_u64(
+                        veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
+                        veorq_u64(random_neon[cols[2] as usize], random_neon[cols[3] as usize]),
+                    ),
+                    _ => xor_reduce_neon(cols, &random_neon),
+                };
+
+                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
+                if words_this_pair == 2 {
+                    vst1q_u64(out_ptr, acc);
+                } else {
+                    *out_ptr = vgetq_lane_u64(acc, 0);
+                }
             }
         }
     }
@@ -1086,28 +1127,31 @@ unsafe fn xor_reduce_neon_tiled(
     tile: usize,
     t: usize,
 ) -> std::arch::aarch64::uint64x2_t {
-    use std::arch::aarch64::*;
-    let mut chunks = cols.chunks_exact(4);
-    let mut acc = vdupq_n_u64(0);
-    for chunk in &mut chunks {
-        acc = veorq_u64(
-            acc,
-            veorq_u64(
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut chunks = cols.chunks_exact(4);
+        let mut acc = vdupq_n_u64(0);
+        for chunk in &mut chunks {
+            acc = veorq_u64(
+                acc,
                 veorq_u64(
-                    random_tile[chunk[0] as usize * tile + t],
-                    random_tile[chunk[1] as usize * tile + t],
+                    veorq_u64(
+                        random_tile[chunk[0] as usize * tile + t],
+                        random_tile[chunk[1] as usize * tile + t],
+                    ),
+                    veorq_u64(
+                        random_tile[chunk[2] as usize * tile + t],
+                        random_tile[chunk[3] as usize * tile + t],
+                    ),
                 ),
-                veorq_u64(
-                    random_tile[chunk[2] as usize * tile + t],
-                    random_tile[chunk[3] as usize * tile + t],
-                ),
-            ),
-        );
+            );
+        }
+        for &c in chunks.remainder() {
+            acc = veorq_u64(acc, random_tile[c as usize * tile + t]);
+        }
+        acc
     }
-    for &c in chunks.remainder() {
-        acc = veorq_u64(acc, random_tile[c as usize * tile + t]);
-    }
-    acc
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1116,22 +1160,25 @@ unsafe fn xor_reduce_neon(
     cols: &[u32],
     random: &[std::arch::aarch64::uint64x2_t],
 ) -> std::arch::aarch64::uint64x2_t {
-    use std::arch::aarch64::*;
-    let mut chunks = cols.chunks_exact(4);
-    let mut acc = vdupq_n_u64(0);
-    for chunk in &mut chunks {
-        acc = veorq_u64(
-            acc,
-            veorq_u64(
-                veorq_u64(random[chunk[0] as usize], random[chunk[1] as usize]),
-                veorq_u64(random[chunk[2] as usize], random[chunk[3] as usize]),
-            ),
-        );
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut chunks = cols.chunks_exact(4);
+        let mut acc = vdupq_n_u64(0);
+        for chunk in &mut chunks {
+            acc = veorq_u64(
+                acc,
+                veorq_u64(
+                    veorq_u64(random[chunk[0] as usize], random[chunk[1] as usize]),
+                    veorq_u64(random[chunk[2] as usize], random[chunk[3] as usize]),
+                ),
+            );
+        }
+        for &c in chunks.remainder() {
+            acc = veorq_u64(acc, random[c as usize]);
+        }
+        acc
     }
-    for &c in chunks.remainder() {
-        acc = veorq_u64(acc, random[c as usize]);
-    }
-    acc
 }
 
 #[cfg(not(target_arch = "aarch64"))]

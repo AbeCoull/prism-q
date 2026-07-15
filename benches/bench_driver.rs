@@ -3,12 +3,13 @@
 //! Use `--features bench-fast` for a quick run that reduces warmup and
 //! measurement time. Omit for the full suite with default Criterion timing.
 
-use criterion::{black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{BackendKind, StatevectorBackend};
+use std::hint::black_box;
 use std::time::Duration;
 
 fn run_with(

@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream};
-use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
+use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 
 use crate::error::{PrismError, Result};
 
-use super::kernels::{kernel_source, KERNEL_NAMES};
+use super::kernels::{KERNEL_NAMES, kernel_source};
 
 /// Handle to a CUDA-capable device.
 ///

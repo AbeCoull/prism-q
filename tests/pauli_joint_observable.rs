@@ -2,7 +2,7 @@
 
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
-use prism_q::{run_spd_observable, run_spp_observable, PauliAxis, PauliTerm};
+use prism_q::{PauliAxis, PauliTerm, run_spd_observable, run_spp_observable};
 
 const SEED: u64 = 0xDEAD_BEEF;
 

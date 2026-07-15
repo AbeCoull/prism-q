@@ -10,8 +10,8 @@ pub mod circuits;
 pub mod framework;
 pub mod matrix;
 
-use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::Backend;
+use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::{Circuit, Instruction};
 use prism_q::sim;
 

@@ -272,7 +272,7 @@ impl<'e> ExprParser<'e> {
                 return Err(PrismError::Parse {
                     line: self.line,
                     message: format!("unknown function `{name}` in expression"),
-                })
+                });
             }
         };
         if !val.is_finite() {

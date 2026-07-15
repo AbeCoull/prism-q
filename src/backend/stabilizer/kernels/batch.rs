@@ -3,9 +3,9 @@ use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::Gate;
 
-use super::StabilizerBackend;
 #[cfg(feature = "parallel")]
 use super::MIN_QUBITS_FOR_PAR_GATES;
+use super::StabilizerBackend;
 
 /// Minimum number of u64 words for word-group gate batching to be profitable.
 ///
@@ -830,8 +830,8 @@ impl StabilizerBackend {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::stabilizer::StabilizerBackend;
     use crate::backend::Backend;
+    use crate::backend::stabilizer::StabilizerBackend;
     use crate::circuit::Circuit;
     use crate::gates::Gate;
     use crate::sim;

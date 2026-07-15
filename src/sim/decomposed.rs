@@ -2,8 +2,8 @@ use crate::circuit::Circuit;
 use crate::error::Result;
 
 use super::{
-    execute_circuit, select_backend, validate_explicit_backend, BackendKind, FactoredBlock,
-    Probabilities, RunOutcome, SimOptions,
+    BackendKind, FactoredBlock, Probabilities, RunOutcome, SimOptions, execute_circuit,
+    select_backend, validate_explicit_backend,
 };
 
 pub(super) const MIN_DECOMPOSITION_QUBITS: usize = 8;

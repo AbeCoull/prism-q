@@ -9,8 +9,8 @@
 //! cargo run --release --features parallel --example profile_circuit -- hea 20 10
 //! ```
 
-use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::Backend;
+use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::fusion::fuse_circuit;
 use prism_q::circuit::{Circuit, Instruction};
 use prism_q::circuits;

@@ -4,7 +4,7 @@
 //! comparison runner. All randomized builders use `ChaCha8Rng` for
 //! deterministic output given the same seed.
 
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 

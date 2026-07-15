@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::circuits::{measurement_cases, random_measurement_cases, BackendKind};
+use common::circuits::{BackendKind, measurement_cases, random_measurement_cases};
 use common::{FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, STAB_EPS, TN_EPS};
 use prism_q::backend::factored::FactoredBackend;
 use prism_q::backend::mps::MpsBackend;

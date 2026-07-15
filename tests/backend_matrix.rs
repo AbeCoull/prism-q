@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::circuits::{exact_small_cases, product_separable_cases, BackendKind};
+use common::circuits::{BackendKind, exact_small_cases, product_separable_cases};
 use common::{FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, STAB_EPS, TN_EPS};
 use prism_q::backend::factored::FactoredBackend;
 use prism_q::backend::mps::MpsBackend;

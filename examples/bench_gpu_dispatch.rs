@@ -15,7 +15,7 @@ use prism_q::backend::Backend;
 #[cfg(feature = "gpu")]
 use prism_q::circuits::{independent_bell_pairs, random_circuit};
 #[cfg(feature = "gpu")]
-use prism_q::{sim, BackendKind, Circuit, StatevectorBackend};
+use prism_q::{BackendKind, Circuit, StatevectorBackend, sim};
 
 #[cfg(feature = "gpu")]
 use prism_q::gpu::GpuContext;

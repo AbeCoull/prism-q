@@ -8,17 +8,17 @@
 
 #[cfg(feature = "bench-internal")]
 use criterion::BatchSize;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use prism_q::BackendKind;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::sim::noise::NoiseModel;
-use prism_q::BackendKind;
+use prism_q::{
+    HomologicalSampler, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef, run_qec_program,
+};
 #[cfg(feature = "bench-internal")]
 use prism_q::{compile_qec_profiled_sampler, parse_qec_program};
-use prism_q::{
-    run_qec_program, HomologicalSampler, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef,
-};
 use std::collections::HashMap;
 #[cfg(feature = "bench-internal")]
 use std::hint::black_box;

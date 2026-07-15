@@ -592,7 +592,7 @@ fn render_connectivity(lines: &mut Vec<String>, circuit: &Circuit) {
     let max_degree_q = degree
         .iter()
         .enumerate()
-        .max_by_key(|(_, &d)| d)
+        .max_by_key(|&(_, &d)| d)
         .map(|(q, _)| q)
         .unwrap_or(0);
     let max_degree = degree[max_degree_q];

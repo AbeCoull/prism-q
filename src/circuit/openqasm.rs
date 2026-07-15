@@ -49,7 +49,7 @@
 
 use num_complex::Complex64;
 
-use crate::circuit::{smallvec, Circuit, ClassicalCondition, Instruction, SmallVec};
+use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use std::collections::HashMap;

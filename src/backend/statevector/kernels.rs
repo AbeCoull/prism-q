@@ -5,17 +5,17 @@
 //! `PARALLEL_THRESHOLD_QUBITS`.
 
 use num_complex::Complex64;
-use rand::Rng;
+use rand::RngExt;
 use smallvec::SmallVec;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::insert_zero_bit;
 use super::StatevectorBackend;
+use super::insert_zero_bit;
 #[cfg(feature = "parallel")]
-use super::{SendPtr, MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
+use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS, SendPtr};
 use crate::backend::simd;
 use crate::backend::{is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
-use crate::circuit::{qft_textbook_steps, QftTextbookStep};
+use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{DiagEntry, Gate};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -619,18 +619,21 @@ unsafe fn apply_batch_phase_bmi2(
     groups: &[BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS],
     num_groups: usize,
 ) {
-    use std::arch::x86_64::_pext_u64;
-    let ctrl_mask = 1usize << ctrl_bit;
-    let half = state.len() >> 1;
-    for k in 0..half {
-        let i = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
-        let mut combined = Complex64::new(1.0, 0.0);
-        for group in groups.iter().take(num_groups) {
-            let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-            combined *= group.table[bits];
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::_pext_u64;
+        let ctrl_mask = 1usize << ctrl_bit;
+        let half = state.len() >> 1;
+        for k in 0..half {
+            let i = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
+            let mut combined = Complex64::new(1.0, 0.0);
+            for group in groups.iter().take(num_groups) {
+                let bits = _pext_u64(i as u64, group.pext_mask) as usize;
+                combined *= group.table[bits];
+            }
+            // SAFETY: insert_zero_bit(k, ctrl_bit) | ctrl_mask < state.len() for k < half
+            *state.get_unchecked_mut(i) *= combined;
         }
-        // SAFETY: insert_zero_bit(k, ctrl_bit) | ctrl_mask < state.len() for k < half
-        *state.get_unchecked_mut(i) *= combined;
     }
 }
 
@@ -643,35 +646,38 @@ unsafe fn batch_phase_tile_bmi2(
     groups: &[BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS],
     num_groups: usize,
 ) {
-    use std::arch::x86_64::_pext_u64;
-    let ctrl_mask = 1usize << ctrl_bit;
-    let tile_bits = tile.len().trailing_zeros() as usize;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::_pext_u64;
+        let ctrl_mask = 1usize << ctrl_bit;
+        let tile_bits = tile.len().trailing_zeros() as usize;
 
-    if ctrl_bit >= tile_bits {
-        if (base_idx & ctrl_mask) == 0 {
-            return;
-        }
-        for (j, amp) in tile.iter_mut().enumerate() {
-            let i = base_idx + j;
-            let mut combined = Complex64::new(1.0, 0.0);
-            for group in groups.iter().take(num_groups) {
-                let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-                combined *= group.table[bits];
+        if ctrl_bit >= tile_bits {
+            if (base_idx & ctrl_mask) == 0 {
+                return;
             }
-            *amp *= combined;
-        }
-    } else {
-        let half = tile.len() >> 1;
-        for k in 0..half {
-            let j = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
-            let i = base_idx + j;
-            let mut combined = Complex64::new(1.0, 0.0);
-            for group in groups.iter().take(num_groups) {
-                let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-                combined *= group.table[bits];
+            for (j, amp) in tile.iter_mut().enumerate() {
+                let i = base_idx + j;
+                let mut combined = Complex64::new(1.0, 0.0);
+                for group in groups.iter().take(num_groups) {
+                    let bits = _pext_u64(i as u64, group.pext_mask) as usize;
+                    combined *= group.table[bits];
+                }
+                *amp *= combined;
             }
-            // SAFETY: j < tile.len() guaranteed by insert_zero_bit mapping
-            *tile.get_unchecked_mut(j) *= combined;
+        } else {
+            let half = tile.len() >> 1;
+            for k in 0..half {
+                let j = insert_zero_bit(k, ctrl_bit) | ctrl_mask;
+                let i = base_idx + j;
+                let mut combined = Complex64::new(1.0, 0.0);
+                for group in groups.iter().take(num_groups) {
+                    let bits = _pext_u64(i as u64, group.pext_mask) as usize;
+                    combined *= group.table[bits];
+                }
+                // SAFETY: j < tile.len() guaranteed by insert_zero_bit mapping
+                *tile.get_unchecked_mut(j) *= combined;
+            }
         }
     }
 }
@@ -879,50 +885,53 @@ unsafe fn radix4_butterfly_fma(
     w_2s_kps: Complex64,
     w_s_k: Complex64,
 ) {
-    use std::arch::x86_64::{
-        _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_storeu_pd, _mm_sub_pd,
-    };
-    let s = inner_stride;
-    let inv_sqrt2_v = _mm_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm_add_pd, _mm_loadu_pd, _mm_mul_pd, _mm_set1_pd, _mm_storeu_pd, _mm_sub_pd,
+        };
+        let s = inner_stride;
+        let inv_sqrt2_v = _mm_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
 
-    let a_ptr = base_ptr;
-    let b_ptr = base_ptr.add(s * 2);
-    let c_ptr = base_ptr.add(2 * s * 2);
-    let d_ptr = base_ptr.add(3 * s * 2);
+        let a_ptr = base_ptr;
+        let b_ptr = base_ptr.add(s * 2);
+        let c_ptr = base_ptr.add(2 * s * 2);
+        let d_ptr = base_ptr.add(3 * s * 2);
 
-    let a = _mm_loadu_pd(a_ptr);
-    let b = _mm_loadu_pd(b_ptr);
-    let c = _mm_loadu_pd(c_ptr);
-    let d = _mm_loadu_pd(d_ptr);
+        let a = _mm_loadu_pd(a_ptr);
+        let b = _mm_loadu_pd(b_ptr);
+        let c = _mm_loadu_pd(c_ptr);
+        let d = _mm_loadu_pd(d_ptr);
 
-    let w_2s_k_rr = _mm_set1_pd(w_2s_k.re);
-    let w_2s_k_ii = _mm_set1_pd(w_2s_k.im);
-    let w_2s_kps_rr = _mm_set1_pd(w_2s_kps.re);
-    let w_2s_kps_ii = _mm_set1_pd(w_2s_kps.im);
-    let w_s_k_rr = _mm_set1_pd(w_s_k.re);
-    let w_s_k_ii = _mm_set1_pd(w_s_k.im);
+        let w_2s_k_rr = _mm_set1_pd(w_2s_k.re);
+        let w_2s_k_ii = _mm_set1_pd(w_2s_k.im);
+        let w_2s_kps_rr = _mm_set1_pd(w_2s_kps.re);
+        let w_2s_kps_ii = _mm_set1_pd(w_2s_kps.im);
+        let w_s_k_rr = _mm_set1_pd(w_s_k.re);
+        let w_s_k_ii = _mm_set1_pd(w_s_k.im);
 
-    let t_ac_sum = _mm_mul_pd(_mm_add_pd(a, c), inv_sqrt2_v);
-    let t_ac_diff = simd::complex_mul_fma(w_2s_k_rr, w_2s_k_ii, _mm_sub_pd(a, c));
-    let t_bd_sum = _mm_mul_pd(_mm_add_pd(b, d), inv_sqrt2_v);
-    let t_bd_diff = simd::complex_mul_fma(w_2s_kps_rr, w_2s_kps_ii, _mm_sub_pd(b, d));
+        let t_ac_sum = _mm_mul_pd(_mm_add_pd(a, c), inv_sqrt2_v);
+        let t_ac_diff = simd::complex_mul_fma(w_2s_k_rr, w_2s_k_ii, _mm_sub_pd(a, c));
+        let t_bd_sum = _mm_mul_pd(_mm_add_pd(b, d), inv_sqrt2_v);
+        let t_bd_diff = simd::complex_mul_fma(w_2s_kps_rr, w_2s_kps_ii, _mm_sub_pd(b, d));
 
-    _mm_storeu_pd(
-        a_ptr,
-        _mm_mul_pd(_mm_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
-    );
-    _mm_storeu_pd(
-        b_ptr,
-        simd::complex_mul_fma(w_s_k_rr, w_s_k_ii, _mm_sub_pd(t_ac_sum, t_bd_sum)),
-    );
-    _mm_storeu_pd(
-        c_ptr,
-        _mm_mul_pd(_mm_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
-    );
-    _mm_storeu_pd(
-        d_ptr,
-        simd::complex_mul_fma(w_s_k_rr, w_s_k_ii, _mm_sub_pd(t_ac_diff, t_bd_diff)),
-    );
+        _mm_storeu_pd(
+            a_ptr,
+            _mm_mul_pd(_mm_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
+        );
+        _mm_storeu_pd(
+            b_ptr,
+            simd::complex_mul_fma(w_s_k_rr, w_s_k_ii, _mm_sub_pd(t_ac_sum, t_bd_sum)),
+        );
+        _mm_storeu_pd(
+            c_ptr,
+            _mm_mul_pd(_mm_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+        );
+        _mm_storeu_pd(
+            d_ptr,
+            simd::complex_mul_fma(w_s_k_rr, w_s_k_ii, _mm_sub_pd(t_ac_diff, t_bd_diff)),
+        );
+    }
 }
 
 /// AVX2-256 SIMD variant: processes TWO radix-4 butterflies per call (at
@@ -944,53 +953,56 @@ unsafe fn radix4_butterfly_pair_avx2fma(
     w_s_k0: Complex64,
     w_s_k1: Complex64,
 ) {
-    use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_set_pd,
-        _mm256_storeu_pd, _mm256_sub_pd,
-    };
-    let s = inner_stride;
-    let inv_sqrt2_v = _mm256_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set_pd, _mm256_set1_pd,
+            _mm256_storeu_pd, _mm256_sub_pd,
+        };
+        let s = inner_stride;
+        let inv_sqrt2_v = _mm256_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
 
-    let a_ptr = base_ptr;
-    let b_ptr = base_ptr.add(s * 2);
-    let c_ptr = base_ptr.add(2 * s * 2);
-    let d_ptr = base_ptr.add(3 * s * 2);
+        let a_ptr = base_ptr;
+        let b_ptr = base_ptr.add(s * 2);
+        let c_ptr = base_ptr.add(2 * s * 2);
+        let d_ptr = base_ptr.add(3 * s * 2);
 
-    let a = _mm256_loadu_pd(a_ptr);
-    let b = _mm256_loadu_pd(b_ptr);
-    let c = _mm256_loadu_pd(c_ptr);
-    let d = _mm256_loadu_pd(d_ptr);
+        let a = _mm256_loadu_pd(a_ptr);
+        let b = _mm256_loadu_pd(b_ptr);
+        let c = _mm256_loadu_pd(c_ptr);
+        let d = _mm256_loadu_pd(d_ptr);
 
-    // c_rr layout: [w0.re, w0.re, w1.re, w1.re], broadcasts each twiddle's
-    // real part to the two lanes corresponding to that butterfly's complex.
-    let w_2s_k_rr = _mm256_set_pd(w_2s_k1.re, w_2s_k1.re, w_2s_k0.re, w_2s_k0.re);
-    let w_2s_k_ii = _mm256_set_pd(w_2s_k1.im, w_2s_k1.im, w_2s_k0.im, w_2s_k0.im);
-    let w_2s_kps_rr = _mm256_set_pd(w_2s_kps1.re, w_2s_kps1.re, w_2s_kps0.re, w_2s_kps0.re);
-    let w_2s_kps_ii = _mm256_set_pd(w_2s_kps1.im, w_2s_kps1.im, w_2s_kps0.im, w_2s_kps0.im);
-    let w_s_k_rr = _mm256_set_pd(w_s_k1.re, w_s_k1.re, w_s_k0.re, w_s_k0.re);
-    let w_s_k_ii = _mm256_set_pd(w_s_k1.im, w_s_k1.im, w_s_k0.im, w_s_k0.im);
+        // c_rr layout: [w0.re, w0.re, w1.re, w1.re], broadcasts each twiddle's
+        // real part to the two lanes corresponding to that butterfly's complex.
+        let w_2s_k_rr = _mm256_set_pd(w_2s_k1.re, w_2s_k1.re, w_2s_k0.re, w_2s_k0.re);
+        let w_2s_k_ii = _mm256_set_pd(w_2s_k1.im, w_2s_k1.im, w_2s_k0.im, w_2s_k0.im);
+        let w_2s_kps_rr = _mm256_set_pd(w_2s_kps1.re, w_2s_kps1.re, w_2s_kps0.re, w_2s_kps0.re);
+        let w_2s_kps_ii = _mm256_set_pd(w_2s_kps1.im, w_2s_kps1.im, w_2s_kps0.im, w_2s_kps0.im);
+        let w_s_k_rr = _mm256_set_pd(w_s_k1.re, w_s_k1.re, w_s_k0.re, w_s_k0.re);
+        let w_s_k_ii = _mm256_set_pd(w_s_k1.im, w_s_k1.im, w_s_k0.im, w_s_k0.im);
 
-    let t_ac_sum = _mm256_mul_pd(_mm256_add_pd(a, c), inv_sqrt2_v);
-    let t_ac_diff = simd::complex_mul_avx2fma(w_2s_k_rr, w_2s_k_ii, _mm256_sub_pd(a, c));
-    let t_bd_sum = _mm256_mul_pd(_mm256_add_pd(b, d), inv_sqrt2_v);
-    let t_bd_diff = simd::complex_mul_avx2fma(w_2s_kps_rr, w_2s_kps_ii, _mm256_sub_pd(b, d));
+        let t_ac_sum = _mm256_mul_pd(_mm256_add_pd(a, c), inv_sqrt2_v);
+        let t_ac_diff = simd::complex_mul_avx2fma(w_2s_k_rr, w_2s_k_ii, _mm256_sub_pd(a, c));
+        let t_bd_sum = _mm256_mul_pd(_mm256_add_pd(b, d), inv_sqrt2_v);
+        let t_bd_diff = simd::complex_mul_avx2fma(w_2s_kps_rr, w_2s_kps_ii, _mm256_sub_pd(b, d));
 
-    _mm256_storeu_pd(
-        a_ptr,
-        _mm256_mul_pd(_mm256_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
-    );
-    _mm256_storeu_pd(
-        b_ptr,
-        simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_sum, t_bd_sum)),
-    );
-    _mm256_storeu_pd(
-        c_ptr,
-        _mm256_mul_pd(_mm256_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
-    );
-    _mm256_storeu_pd(
-        d_ptr,
-        simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_diff, t_bd_diff)),
-    );
+        _mm256_storeu_pd(
+            a_ptr,
+            _mm256_mul_pd(_mm256_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
+        );
+        _mm256_storeu_pd(
+            b_ptr,
+            simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_sum, t_bd_sum)),
+        );
+        _mm256_storeu_pd(
+            c_ptr,
+            _mm256_mul_pd(_mm256_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+        );
+        _mm256_storeu_pd(
+            d_ptr,
+            simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_diff, t_bd_diff)),
+        );
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1009,45 +1021,48 @@ unsafe fn radix4_butterfly_pair_slices_avx2fma(
     w_s_k0: Complex64,
     w_s_k1: Complex64,
 ) {
-    use std::arch::x86_64::{
-        _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set1_pd, _mm256_set_pd,
-        _mm256_storeu_pd, _mm256_sub_pd,
-    };
-    let inv_sqrt2_v = _mm256_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::{
+            _mm256_add_pd, _mm256_loadu_pd, _mm256_mul_pd, _mm256_set_pd, _mm256_set1_pd,
+            _mm256_storeu_pd, _mm256_sub_pd,
+        };
+        let inv_sqrt2_v = _mm256_set1_pd(std::f64::consts::FRAC_1_SQRT_2);
 
-    let a = _mm256_loadu_pd(a_ptr);
-    let b = _mm256_loadu_pd(b_ptr);
-    let c = _mm256_loadu_pd(c_ptr);
-    let d = _mm256_loadu_pd(d_ptr);
+        let a = _mm256_loadu_pd(a_ptr);
+        let b = _mm256_loadu_pd(b_ptr);
+        let c = _mm256_loadu_pd(c_ptr);
+        let d = _mm256_loadu_pd(d_ptr);
 
-    let w_2s_k_rr = _mm256_set_pd(w_2s_k1.re, w_2s_k1.re, w_2s_k0.re, w_2s_k0.re);
-    let w_2s_k_ii = _mm256_set_pd(w_2s_k1.im, w_2s_k1.im, w_2s_k0.im, w_2s_k0.im);
-    let w_2s_kps_rr = _mm256_set_pd(w_2s_kps1.re, w_2s_kps1.re, w_2s_kps0.re, w_2s_kps0.re);
-    let w_2s_kps_ii = _mm256_set_pd(w_2s_kps1.im, w_2s_kps1.im, w_2s_kps0.im, w_2s_kps0.im);
-    let w_s_k_rr = _mm256_set_pd(w_s_k1.re, w_s_k1.re, w_s_k0.re, w_s_k0.re);
-    let w_s_k_ii = _mm256_set_pd(w_s_k1.im, w_s_k1.im, w_s_k0.im, w_s_k0.im);
+        let w_2s_k_rr = _mm256_set_pd(w_2s_k1.re, w_2s_k1.re, w_2s_k0.re, w_2s_k0.re);
+        let w_2s_k_ii = _mm256_set_pd(w_2s_k1.im, w_2s_k1.im, w_2s_k0.im, w_2s_k0.im);
+        let w_2s_kps_rr = _mm256_set_pd(w_2s_kps1.re, w_2s_kps1.re, w_2s_kps0.re, w_2s_kps0.re);
+        let w_2s_kps_ii = _mm256_set_pd(w_2s_kps1.im, w_2s_kps1.im, w_2s_kps0.im, w_2s_kps0.im);
+        let w_s_k_rr = _mm256_set_pd(w_s_k1.re, w_s_k1.re, w_s_k0.re, w_s_k0.re);
+        let w_s_k_ii = _mm256_set_pd(w_s_k1.im, w_s_k1.im, w_s_k0.im, w_s_k0.im);
 
-    let t_ac_sum = _mm256_mul_pd(_mm256_add_pd(a, c), inv_sqrt2_v);
-    let t_ac_diff = simd::complex_mul_avx2fma(w_2s_k_rr, w_2s_k_ii, _mm256_sub_pd(a, c));
-    let t_bd_sum = _mm256_mul_pd(_mm256_add_pd(b, d), inv_sqrt2_v);
-    let t_bd_diff = simd::complex_mul_avx2fma(w_2s_kps_rr, w_2s_kps_ii, _mm256_sub_pd(b, d));
+        let t_ac_sum = _mm256_mul_pd(_mm256_add_pd(a, c), inv_sqrt2_v);
+        let t_ac_diff = simd::complex_mul_avx2fma(w_2s_k_rr, w_2s_k_ii, _mm256_sub_pd(a, c));
+        let t_bd_sum = _mm256_mul_pd(_mm256_add_pd(b, d), inv_sqrt2_v);
+        let t_bd_diff = simd::complex_mul_avx2fma(w_2s_kps_rr, w_2s_kps_ii, _mm256_sub_pd(b, d));
 
-    _mm256_storeu_pd(
-        a_ptr,
-        _mm256_mul_pd(_mm256_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
-    );
-    _mm256_storeu_pd(
-        b_ptr,
-        simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_sum, t_bd_sum)),
-    );
-    _mm256_storeu_pd(
-        c_ptr,
-        _mm256_mul_pd(_mm256_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
-    );
-    _mm256_storeu_pd(
-        d_ptr,
-        simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_diff, t_bd_diff)),
-    );
+        _mm256_storeu_pd(
+            a_ptr,
+            _mm256_mul_pd(_mm256_add_pd(t_ac_sum, t_bd_sum), inv_sqrt2_v),
+        );
+        _mm256_storeu_pd(
+            b_ptr,
+            simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_sum, t_bd_sum)),
+        );
+        _mm256_storeu_pd(
+            c_ptr,
+            _mm256_mul_pd(_mm256_add_pd(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+        );
+        _mm256_storeu_pd(
+            d_ptr,
+            simd::complex_mul_avx2fma(w_s_k_rr, w_s_k_ii, _mm256_sub_pd(t_ac_diff, t_bd_diff)),
+        );
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1058,11 +1073,14 @@ unsafe fn neon_twiddle_parts(
     std::arch::aarch64::float64x2_t,
     std::arch::aarch64::float64x2_t,
 ) {
-    use std::arch::aarch64::{vcombine_f64, vdup_n_f64, vdupq_n_f64};
-    (
-        vdupq_n_f64(w.re),
-        vcombine_f64(vdup_n_f64(-w.im), vdup_n_f64(w.im)),
-    )
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::{vcombine_f64, vdup_n_f64, vdupq_n_f64};
+        (
+            vdupq_n_f64(w.re),
+            vcombine_f64(vdup_n_f64(-w.im), vdup_n_f64(w.im)),
+        )
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1075,42 +1093,47 @@ unsafe fn radix4_butterfly_neon(
     w_2s_kps: Complex64,
     w_s_k: Complex64,
 ) {
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64, vsubq_f64};
-    let s = inner_stride;
-    let inv_sqrt2_v = vdupq_n_f64(std::f64::consts::FRAC_1_SQRT_2);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::{
+            vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64, vsubq_f64,
+        };
+        let s = inner_stride;
+        let inv_sqrt2_v = vdupq_n_f64(std::f64::consts::FRAC_1_SQRT_2);
 
-    let a_ptr = base_ptr;
-    let b_ptr = base_ptr.add(s * 2);
-    let c_ptr = base_ptr.add(2 * s * 2);
-    let d_ptr = base_ptr.add(3 * s * 2);
+        let a_ptr = base_ptr;
+        let b_ptr = base_ptr.add(s * 2);
+        let c_ptr = base_ptr.add(2 * s * 2);
+        let d_ptr = base_ptr.add(3 * s * 2);
 
-    let a = vld1q_f64(a_ptr);
-    let b = vld1q_f64(b_ptr);
-    let c = vld1q_f64(c_ptr);
-    let d = vld1q_f64(d_ptr);
+        let a = vld1q_f64(a_ptr);
+        let b = vld1q_f64(b_ptr);
+        let c = vld1q_f64(c_ptr);
+        let d = vld1q_f64(d_ptr);
 
-    let (w_2s_k_rr, w_2s_k_ii_as) = neon_twiddle_parts(w_2s_k);
-    let (w_2s_kps_rr, w_2s_kps_ii_as) = neon_twiddle_parts(w_2s_kps);
-    let (w_s_k_rr, w_s_k_ii_as) = neon_twiddle_parts(w_s_k);
+        let (w_2s_k_rr, w_2s_k_ii_as) = neon_twiddle_parts(w_2s_k);
+        let (w_2s_kps_rr, w_2s_kps_ii_as) = neon_twiddle_parts(w_2s_kps);
+        let (w_s_k_rr, w_s_k_ii_as) = neon_twiddle_parts(w_s_k);
 
-    let t_ac_sum = vmulq_f64(vaddq_f64(a, c), inv_sqrt2_v);
-    let t_ac_diff = simd::complex_mul_neon(w_2s_k_rr, w_2s_k_ii_as, vsubq_f64(a, c));
-    let t_bd_sum = vmulq_f64(vaddq_f64(b, d), inv_sqrt2_v);
-    let t_bd_diff = simd::complex_mul_neon(w_2s_kps_rr, w_2s_kps_ii_as, vsubq_f64(b, d));
+        let t_ac_sum = vmulq_f64(vaddq_f64(a, c), inv_sqrt2_v);
+        let t_ac_diff = simd::complex_mul_neon(w_2s_k_rr, w_2s_k_ii_as, vsubq_f64(a, c));
+        let t_bd_sum = vmulq_f64(vaddq_f64(b, d), inv_sqrt2_v);
+        let t_bd_diff = simd::complex_mul_neon(w_2s_kps_rr, w_2s_kps_ii_as, vsubq_f64(b, d));
 
-    vst1q_f64(a_ptr, vmulq_f64(vaddq_f64(t_ac_sum, t_bd_sum), inv_sqrt2_v));
-    vst1q_f64(
-        b_ptr,
-        simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_sum, t_bd_sum)),
-    );
-    vst1q_f64(
-        c_ptr,
-        vmulq_f64(vaddq_f64(t_ac_diff, t_bd_diff), inv_sqrt2_v),
-    );
-    vst1q_f64(
-        d_ptr,
-        simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_diff, t_bd_diff)),
-    );
+        vst1q_f64(a_ptr, vmulq_f64(vaddq_f64(t_ac_sum, t_bd_sum), inv_sqrt2_v));
+        vst1q_f64(
+            b_ptr,
+            simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_sum, t_bd_sum)),
+        );
+        vst1q_f64(
+            c_ptr,
+            vmulq_f64(vaddq_f64(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+        );
+        vst1q_f64(
+            d_ptr,
+            simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_diff, t_bd_diff)),
+        );
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -1125,36 +1148,41 @@ unsafe fn radix4_butterfly_slices_neon(
     w_2s_kps: Complex64,
     w_s_k: Complex64,
 ) {
-    use std::arch::aarch64::{vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64, vsubq_f64};
-    let inv_sqrt2_v = vdupq_n_f64(std::f64::consts::FRAC_1_SQRT_2);
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::{
+            vaddq_f64, vdupq_n_f64, vld1q_f64, vmulq_f64, vst1q_f64, vsubq_f64,
+        };
+        let inv_sqrt2_v = vdupq_n_f64(std::f64::consts::FRAC_1_SQRT_2);
 
-    let a = vld1q_f64(a_ptr);
-    let b = vld1q_f64(b_ptr);
-    let c = vld1q_f64(c_ptr);
-    let d = vld1q_f64(d_ptr);
+        let a = vld1q_f64(a_ptr);
+        let b = vld1q_f64(b_ptr);
+        let c = vld1q_f64(c_ptr);
+        let d = vld1q_f64(d_ptr);
 
-    let (w_2s_k_rr, w_2s_k_ii_as) = neon_twiddle_parts(w_2s_k);
-    let (w_2s_kps_rr, w_2s_kps_ii_as) = neon_twiddle_parts(w_2s_kps);
-    let (w_s_k_rr, w_s_k_ii_as) = neon_twiddle_parts(w_s_k);
+        let (w_2s_k_rr, w_2s_k_ii_as) = neon_twiddle_parts(w_2s_k);
+        let (w_2s_kps_rr, w_2s_kps_ii_as) = neon_twiddle_parts(w_2s_kps);
+        let (w_s_k_rr, w_s_k_ii_as) = neon_twiddle_parts(w_s_k);
 
-    let t_ac_sum = vmulq_f64(vaddq_f64(a, c), inv_sqrt2_v);
-    let t_ac_diff = simd::complex_mul_neon(w_2s_k_rr, w_2s_k_ii_as, vsubq_f64(a, c));
-    let t_bd_sum = vmulq_f64(vaddq_f64(b, d), inv_sqrt2_v);
-    let t_bd_diff = simd::complex_mul_neon(w_2s_kps_rr, w_2s_kps_ii_as, vsubq_f64(b, d));
+        let t_ac_sum = vmulq_f64(vaddq_f64(a, c), inv_sqrt2_v);
+        let t_ac_diff = simd::complex_mul_neon(w_2s_k_rr, w_2s_k_ii_as, vsubq_f64(a, c));
+        let t_bd_sum = vmulq_f64(vaddq_f64(b, d), inv_sqrt2_v);
+        let t_bd_diff = simd::complex_mul_neon(w_2s_kps_rr, w_2s_kps_ii_as, vsubq_f64(b, d));
 
-    vst1q_f64(a_ptr, vmulq_f64(vaddq_f64(t_ac_sum, t_bd_sum), inv_sqrt2_v));
-    vst1q_f64(
-        b_ptr,
-        simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_sum, t_bd_sum)),
-    );
-    vst1q_f64(
-        c_ptr,
-        vmulq_f64(vaddq_f64(t_ac_diff, t_bd_diff), inv_sqrt2_v),
-    );
-    vst1q_f64(
-        d_ptr,
-        simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_diff, t_bd_diff)),
-    );
+        vst1q_f64(a_ptr, vmulq_f64(vaddq_f64(t_ac_sum, t_bd_sum), inv_sqrt2_v));
+        vst1q_f64(
+            b_ptr,
+            simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_sum, t_bd_sum)),
+        );
+        vst1q_f64(
+            c_ptr,
+            vmulq_f64(vaddq_f64(t_ac_diff, t_bd_diff), inv_sqrt2_v),
+        );
+        vst1q_f64(
+            d_ptr,
+            simd::complex_mul_neon(w_s_k_rr, w_s_k_ii_as, vsubq_f64(t_ac_diff, t_bd_diff)),
+        );
+    }
 }
 
 #[inline]

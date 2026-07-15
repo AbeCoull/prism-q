@@ -97,13 +97,13 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use num_complex::Complex64;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::simd;
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::{dense_probability_len, dense_statevector_len, measurement_inv_norm, Backend};
-use crate::circuit::{smallvec, Instruction, SmallVec};
+use crate::backend::{Backend, dense_probability_len, dense_statevector_len, measurement_inv_norm};
+use crate::circuit::{Instruction, SmallVec, smallvec};
 use crate::distributed::DistributedContext;
 use crate::error::{PrismError, Result};
 use crate::gates::{DiagEntry, Gate};
@@ -204,10 +204,8 @@ fn required_local_qubits(gate: &Gate, targets: &[usize]) -> SmallVec<[usize; 8]>
                 }
             }
         }
-        g if g.num_qubits() == 1 => {
-            if !g.is_diagonal_1q() {
-                push(&mut req, targets[0]);
-            }
+        g if g.num_qubits() == 1 && !g.is_diagonal_1q() => {
+            push(&mut req, targets[0]);
         }
         _ => {}
     }

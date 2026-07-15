@@ -11,7 +11,7 @@
 
 [![CI](https://github.com/AbeCoull/prism-q/actions/workflows/ci.yml/badge.svg)](https://github.com/AbeCoull/prism-q/actions/workflows/ci.yml)
 ![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/AbeCoull/4ea63a3791840048749e67b2484098a3/raw/coverage.json)
-![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)
+![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust)
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 

@@ -23,10 +23,10 @@ use std::borrow::Cow;
 
 use num_complex::Complex64;
 
-use super::{smallvec, Circuit, Instruction, SmallVec};
+use super::{Circuit, Instruction, SmallVec, smallvec};
 use crate::gates::{
-    kron_2x2, mat_mul_2x2, mat_mul_4x4, DiagEntry, DiagonalBatchData, Gate, Multi2qData,
-    MultiFusedData,
+    DiagEntry, DiagonalBatchData, Gate, Multi2qData, MultiFusedData, kron_2x2, mat_mul_2x2,
+    mat_mul_4x4,
 };
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
@@ -1669,8 +1669,8 @@ mod tests {
 
     #[test]
     fn test_fused_probabilities_match_unfused() {
-        use crate::backend::statevector::StatevectorBackend;
         use crate::backend::Backend;
+        use crate::backend::statevector::StatevectorBackend;
 
         let mut c = Circuit::new(3, 0);
         c.add_gate(Gate::H, &[0]);
@@ -1804,8 +1804,8 @@ mod tests {
 
     #[test]
     fn test_identity_elision_preserves_probabilities() {
-        use crate::backend::statevector::StatevectorBackend;
         use crate::backend::Backend;
+        use crate::backend::statevector::StatevectorBackend;
 
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::H, &[0]);
@@ -1861,8 +1861,8 @@ mod tests {
 
     #[test]
     fn test_cphase_fused_probabilities_match() {
-        use crate::backend::statevector::StatevectorBackend;
         use crate::backend::Backend;
+        use crate::backend::statevector::StatevectorBackend;
         use crate::sim;
 
         let n = 4;
@@ -1977,8 +1977,8 @@ mod tests {
 
     #[test]
     fn test_cancel_preserves_probabilities() {
-        use crate::backend::statevector::StatevectorBackend;
         use crate::backend::Backend;
+        use crate::backend::statevector::StatevectorBackend;
 
         let mut c = Circuit::new(3, 0);
         c.add_gate(Gate::H, &[0]);
@@ -2091,8 +2091,8 @@ mod tests {
 
     #[test]
     fn test_reorder_preserves_probabilities() {
-        use crate::backend::statevector::StatevectorBackend;
         use crate::backend::Backend;
+        use crate::backend::statevector::StatevectorBackend;
 
         let mut c = Circuit::new(4, 0);
         c.add_gate(Gate::H, &[0]);
@@ -2197,9 +2197,11 @@ mod tests {
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(result.instructions.len(), 3);
         // Both diagonal gates should precede CZ
-        assert!(result.instructions[0..2]
-            .iter()
-            .all(|i| matches!(i, Instruction::Gate { gate, .. } if gate.num_qubits() == 1)));
+        assert!(
+            result.instructions[0..2]
+                .iter()
+                .all(|i| matches!(i, Instruction::Gate { gate, .. } if gate.num_qubits() == 1))
+        );
         assert!(matches!(
             &result.instructions[2],
             Instruction::Gate { gate: Gate::Cz, .. }
@@ -2208,8 +2210,8 @@ mod tests {
 
     #[test]
     fn test_reorder_commutation_preserves_probabilities() {
-        use crate::backend::statevector::StatevectorBackend;
         use crate::backend::Backend;
+        use crate::backend::statevector::StatevectorBackend;
 
         let mut c = Circuit::new(3, 0);
         c.add_gate(Gate::H, &[0]);

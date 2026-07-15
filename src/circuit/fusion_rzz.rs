@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use super::{smallvec, Circuit, Instruction, SmallVec};
+use super::{Circuit, Instruction, SmallVec, smallvec};
 use crate::gates::{BatchRzzData, Gate};
 
 pub(super) fn fuse_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {

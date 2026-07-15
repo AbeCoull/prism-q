@@ -1,18 +1,18 @@
-use super::noise::compile_qec_noisy_sampler;
 #[cfg(feature = "bench-internal")]
 use super::noise::QecCompiledNoiseSampler;
+use super::noise::compile_qec_noisy_sampler;
 use super::{
-    append_basis_to_z_rotation, append_z_to_basis_rotation, QecBasis, QecNoise, QecOp, QecOptions,
-    QecPauli, QecProgram, QecSampleResult,
+    QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecSampleResult,
+    append_basis_to_z_rotation, append_z_to_basis_rotation,
 };
-use crate::backend::{statevector::StatevectorBackend, Backend};
+use crate::backend::{Backend, statevector::StatevectorBackend};
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 #[cfg(feature = "bench-internal")]
 use crate::sim::compiled::CompiledDetectorSampler;
-use crate::sim::compiled::{compile_detector_sampler, PackedShots, ShotLayout};
-use rand::{Rng, SeedableRng};
+use crate::sim::compiled::{PackedShots, ShotLayout, compile_detector_sampler};
+use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 /// Run a native QEC program through the scalable compiled Clifford path.

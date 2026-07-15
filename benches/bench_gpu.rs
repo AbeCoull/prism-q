@@ -22,13 +22,13 @@ use std::hint::black_box;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::gpu::GpuContext;
-use prism_q::{sim, BackendKind, StabilizerBackend, StatevectorBackend};
+use prism_q::{BackendKind, StabilizerBackend, StatevectorBackend, sim};
 
 const SEED: u64 = 0xDEAD_BEEF;
 

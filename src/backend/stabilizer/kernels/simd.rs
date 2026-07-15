@@ -83,105 +83,108 @@ unsafe fn rowmul_words_avx2(
     src_z: &[u64],
     initial_sum: u64,
 ) -> u64 {
-    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
 
-    let nw = dst_x.len();
-    let chunks = nw / 4;
+        let nw = dst_x.len();
+        let chunks = nw / 4;
 
-    let lookup = _mm256_setr_epi8(
-        0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3,
-        3, 4,
-    );
-    let low_mask = _mm256_set1_epi8(0x0f);
-    let vzero = _mm256_setzero_si256();
+        let lookup = _mm256_setr_epi8(
+            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2,
+            3, 3, 4,
+        );
+        let low_mask = _mm256_set1_epi8(0x0f);
+        let vzero = _mm256_setzero_si256();
 
-    let mut vsum_pos = _mm256_setzero_si256();
-    let mut vsum_nz = _mm256_setzero_si256();
+        let mut vsum_pos = _mm256_setzero_si256();
+        let mut vsum_nz = _mm256_setzero_si256();
 
-    for i in 0..chunks {
-        let off = i * 4;
-        let vx1 = _mm256_loadu_si256(src_x.as_ptr().add(off) as *const __m256i);
-        let vz1 = _mm256_loadu_si256(src_z.as_ptr().add(off) as *const __m256i);
-        let vx2 = _mm256_loadu_si256(dst_x.as_ptr().add(off) as *const __m256i);
-        let vz2 = _mm256_loadu_si256(dst_z.as_ptr().add(off) as *const __m256i);
+        for i in 0..chunks {
+            let off = i * 4;
+            let vx1 = _mm256_loadu_si256(src_x.as_ptr().add(off) as *const __m256i);
+            let vz1 = _mm256_loadu_si256(src_z.as_ptr().add(off) as *const __m256i);
+            let vx2 = _mm256_loadu_si256(dst_x.as_ptr().add(off) as *const __m256i);
+            let vz2 = _mm256_loadu_si256(dst_z.as_ptr().add(off) as *const __m256i);
 
-        let vnew_x = _mm256_xor_si256(vx1, vx2);
-        let vnew_z = _mm256_xor_si256(vz1, vz2);
-        _mm256_storeu_si256(dst_x.as_mut_ptr().add(off) as *mut __m256i, vnew_x);
-        _mm256_storeu_si256(dst_z.as_mut_ptr().add(off) as *mut __m256i, vnew_z);
+            let vnew_x = _mm256_xor_si256(vx1, vx2);
+            let vnew_z = _mm256_xor_si256(vz1, vz2);
+            _mm256_storeu_si256(dst_x.as_mut_ptr().add(off) as *mut __m256i, vnew_x);
+            _mm256_storeu_si256(dst_z.as_mut_ptr().add(off) as *mut __m256i, vnew_z);
 
-        let vor = _mm256_or_si256(_mm256_or_si256(vx1, vz1), _mm256_or_si256(vx2, vz2));
-        if _mm256_testz_si256(vor, vor) != 0 {
-            continue;
+            let vor = _mm256_or_si256(_mm256_or_si256(vx1, vz1), _mm256_or_si256(vx2, vz2));
+            if _mm256_testz_si256(vor, vor) != 0 {
+                continue;
+            }
+
+            let vnonzero = _mm256_and_si256(
+                _mm256_and_si256(_mm256_or_si256(vnew_x, vnew_z), _mm256_or_si256(vx1, vz1)),
+                _mm256_or_si256(vx2, vz2),
+            );
+
+            // _mm256_andnot_si256(a, b) = ~a & b
+            let vpos = _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_and_si256(_mm256_and_si256(vx1, vz1), _mm256_andnot_si256(vx2, vz2)),
+                    _mm256_and_si256(_mm256_andnot_si256(vz1, vx1), _mm256_and_si256(vx2, vz2)),
+                ),
+                _mm256_and_si256(_mm256_andnot_si256(vx1, vz1), _mm256_andnot_si256(vz2, vx2)),
+            );
+
+            let lo_p = _mm256_and_si256(vpos, low_mask);
+            let hi_p = _mm256_and_si256(_mm256_srli_epi16(vpos, 4), low_mask);
+            let cnt_p = _mm256_add_epi8(
+                _mm256_shuffle_epi8(lookup, lo_p),
+                _mm256_shuffle_epi8(lookup, hi_p),
+            );
+            vsum_pos = _mm256_add_epi64(vsum_pos, _mm256_sad_epu8(cnt_p, vzero));
+
+            let lo_n = _mm256_and_si256(vnonzero, low_mask);
+            let hi_n = _mm256_and_si256(_mm256_srli_epi16(vnonzero, 4), low_mask);
+            let cnt_n = _mm256_add_epi8(
+                _mm256_shuffle_epi8(lookup, lo_n),
+                _mm256_shuffle_epi8(lookup, hi_n),
+            );
+            vsum_nz = _mm256_add_epi64(vsum_nz, _mm256_sad_epu8(cnt_n, vzero));
         }
 
-        let vnonzero = _mm256_and_si256(
-            _mm256_and_si256(_mm256_or_si256(vnew_x, vnew_z), _mm256_or_si256(vx1, vz1)),
-            _mm256_or_si256(vx2, vz2),
-        );
+        let pos_lo = _mm256_castsi256_si128(vsum_pos);
+        let pos_hi = _mm256_extracti128_si256(vsum_pos, 1);
+        let pos_sum = _mm_add_epi64(pos_lo, pos_hi);
+        let total_pos =
+            (_mm_cvtsi128_si64(pos_sum) as u64).wrapping_add(_mm_extract_epi64(pos_sum, 1) as u64);
 
-        // _mm256_andnot_si256(a, b) = ~a & b
-        let vpos = _mm256_or_si256(
-            _mm256_or_si256(
-                _mm256_and_si256(_mm256_and_si256(vx1, vz1), _mm256_andnot_si256(vx2, vz2)),
-                _mm256_and_si256(_mm256_andnot_si256(vz1, vx1), _mm256_and_si256(vx2, vz2)),
-            ),
-            _mm256_and_si256(_mm256_andnot_si256(vx1, vz1), _mm256_andnot_si256(vz2, vx2)),
-        );
+        let nz_lo = _mm256_castsi256_si128(vsum_nz);
+        let nz_hi = _mm256_extracti128_si256(vsum_nz, 1);
+        let nz_sum = _mm_add_epi64(nz_lo, nz_hi);
+        let total_nz =
+            (_mm_cvtsi128_si64(nz_sum) as u64).wrapping_add(_mm_extract_epi64(nz_sum, 1) as u64);
 
-        let lo_p = _mm256_and_si256(vpos, low_mask);
-        let hi_p = _mm256_and_si256(_mm256_srli_epi16(vpos, 4), low_mask);
-        let cnt_p = _mm256_add_epi8(
-            _mm256_shuffle_epi8(lookup, lo_p),
-            _mm256_shuffle_epi8(lookup, hi_p),
-        );
-        vsum_pos = _mm256_add_epi64(vsum_pos, _mm256_sad_epu8(cnt_p, vzero));
+        let mut sum = initial_sum
+            .wrapping_add(2u64.wrapping_mul(total_pos))
+            .wrapping_sub(total_nz);
 
-        let lo_n = _mm256_and_si256(vnonzero, low_mask);
-        let hi_n = _mm256_and_si256(_mm256_srli_epi16(vnonzero, 4), low_mask);
-        let cnt_n = _mm256_add_epi8(
-            _mm256_shuffle_epi8(lookup, lo_n),
-            _mm256_shuffle_epi8(lookup, hi_n),
-        );
-        vsum_nz = _mm256_add_epi64(vsum_nz, _mm256_sad_epu8(cnt_n, vzero));
-    }
-
-    let pos_lo = _mm256_castsi256_si128(vsum_pos);
-    let pos_hi = _mm256_extracti128_si256(vsum_pos, 1);
-    let pos_sum = _mm_add_epi64(pos_lo, pos_hi);
-    let total_pos =
-        (_mm_cvtsi128_si64(pos_sum) as u64).wrapping_add(_mm_extract_epi64(pos_sum, 1) as u64);
-
-    let nz_lo = _mm256_castsi256_si128(vsum_nz);
-    let nz_hi = _mm256_extracti128_si256(vsum_nz, 1);
-    let nz_sum = _mm_add_epi64(nz_lo, nz_hi);
-    let total_nz =
-        (_mm_cvtsi128_si64(nz_sum) as u64).wrapping_add(_mm_extract_epi64(nz_sum, 1) as u64);
-
-    let mut sum = initial_sum
-        .wrapping_add(2u64.wrapping_mul(total_pos))
-        .wrapping_sub(total_nz);
-
-    let tail = chunks * 4;
-    for w in tail..nw {
-        let x1 = src_x[w];
-        let z1 = src_z[w];
-        let x2 = dst_x[w];
-        let z2 = dst_z[w];
-        let new_x = x1 ^ x2;
-        let new_z = z1 ^ z2;
-        dst_x[w] = new_x;
-        dst_z[w] = new_z;
-        if (x1 | z1 | x2 | z2) == 0 {
-            continue;
+        let tail = chunks * 4;
+        for w in tail..nw {
+            let x1 = src_x[w];
+            let z1 = src_z[w];
+            let x2 = dst_x[w];
+            let z2 = dst_z[w];
+            let new_x = x1 ^ x2;
+            let new_z = z1 ^ z2;
+            dst_x[w] = new_x;
+            dst_z[w] = new_z;
+            if (x1 | z1 | x2 | z2) == 0 {
+                continue;
+            }
+            let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
+            let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
         }
-        let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
-        let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-        sum = sum.wrapping_add(2 * pos.count_ones() as u64);
-        sum = sum.wrapping_sub(nonzero.count_ones() as u64);
-    }
 
-    sum
+        sum
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -193,112 +196,115 @@ unsafe fn rowmul_words_avx2_nt(
     src_z: &[u64],
     initial_sum: u64,
 ) -> u64 {
-    use std::arch::x86_64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::x86_64::*;
 
-    if (dst_x.as_ptr() as usize) & 31 != 0 || (dst_z.as_ptr() as usize) & 31 != 0 {
-        return rowmul_words_avx2(dst_x, dst_z, src_x, src_z, initial_sum);
-    }
-
-    let nw = dst_x.len();
-    let chunks = nw / 4;
-
-    let lookup = _mm256_setr_epi8(
-        0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3,
-        3, 4,
-    );
-    let low_mask = _mm256_set1_epi8(0x0f);
-    let vzero = _mm256_setzero_si256();
-
-    let mut vsum_pos = _mm256_setzero_si256();
-    let mut vsum_nz = _mm256_setzero_si256();
-
-    for i in 0..chunks {
-        let off = i * 4;
-        let vx1 = _mm256_loadu_si256(src_x.as_ptr().add(off) as *const __m256i);
-        let vz1 = _mm256_loadu_si256(src_z.as_ptr().add(off) as *const __m256i);
-        let vx2 = _mm256_loadu_si256(dst_x.as_ptr().add(off) as *const __m256i);
-        let vz2 = _mm256_loadu_si256(dst_z.as_ptr().add(off) as *const __m256i);
-
-        let vnew_x = _mm256_xor_si256(vx1, vx2);
-        let vnew_z = _mm256_xor_si256(vz1, vz2);
-        // SAFETY: dst_x and dst_z verified 32-byte aligned at function entry;
-        // chunk offsets advance by 32 bytes, preserving alignment.
-        _mm256_stream_si256(dst_x.as_mut_ptr().add(off) as *mut __m256i, vnew_x);
-        _mm256_stream_si256(dst_z.as_mut_ptr().add(off) as *mut __m256i, vnew_z);
-
-        let vor = _mm256_or_si256(_mm256_or_si256(vx1, vz1), _mm256_or_si256(vx2, vz2));
-        if _mm256_testz_si256(vor, vor) != 0 {
-            continue;
+        if (dst_x.as_ptr() as usize) & 31 != 0 || (dst_z.as_ptr() as usize) & 31 != 0 {
+            return rowmul_words_avx2(dst_x, dst_z, src_x, src_z, initial_sum);
         }
 
-        let vnonzero = _mm256_and_si256(
-            _mm256_and_si256(_mm256_or_si256(vnew_x, vnew_z), _mm256_or_si256(vx1, vz1)),
-            _mm256_or_si256(vx2, vz2),
+        let nw = dst_x.len();
+        let chunks = nw / 4;
+
+        let lookup = _mm256_setr_epi8(
+            0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2,
+            3, 3, 4,
         );
+        let low_mask = _mm256_set1_epi8(0x0f);
+        let vzero = _mm256_setzero_si256();
 
-        let vpos = _mm256_or_si256(
-            _mm256_or_si256(
-                _mm256_and_si256(_mm256_and_si256(vx1, vz1), _mm256_andnot_si256(vx2, vz2)),
-                _mm256_and_si256(_mm256_andnot_si256(vz1, vx1), _mm256_and_si256(vx2, vz2)),
-            ),
-            _mm256_and_si256(_mm256_andnot_si256(vx1, vz1), _mm256_andnot_si256(vz2, vx2)),
-        );
+        let mut vsum_pos = _mm256_setzero_si256();
+        let mut vsum_nz = _mm256_setzero_si256();
 
-        let lo_p = _mm256_and_si256(vpos, low_mask);
-        let hi_p = _mm256_and_si256(_mm256_srli_epi16(vpos, 4), low_mask);
-        let cnt_p = _mm256_add_epi8(
-            _mm256_shuffle_epi8(lookup, lo_p),
-            _mm256_shuffle_epi8(lookup, hi_p),
-        );
-        vsum_pos = _mm256_add_epi64(vsum_pos, _mm256_sad_epu8(cnt_p, vzero));
+        for i in 0..chunks {
+            let off = i * 4;
+            let vx1 = _mm256_loadu_si256(src_x.as_ptr().add(off) as *const __m256i);
+            let vz1 = _mm256_loadu_si256(src_z.as_ptr().add(off) as *const __m256i);
+            let vx2 = _mm256_loadu_si256(dst_x.as_ptr().add(off) as *const __m256i);
+            let vz2 = _mm256_loadu_si256(dst_z.as_ptr().add(off) as *const __m256i);
 
-        let lo_n = _mm256_and_si256(vnonzero, low_mask);
-        let hi_n = _mm256_and_si256(_mm256_srli_epi16(vnonzero, 4), low_mask);
-        let cnt_n = _mm256_add_epi8(
-            _mm256_shuffle_epi8(lookup, lo_n),
-            _mm256_shuffle_epi8(lookup, hi_n),
-        );
-        vsum_nz = _mm256_add_epi64(vsum_nz, _mm256_sad_epu8(cnt_n, vzero));
-    }
+            let vnew_x = _mm256_xor_si256(vx1, vx2);
+            let vnew_z = _mm256_xor_si256(vz1, vz2);
+            // SAFETY: dst_x and dst_z verified 32-byte aligned at function entry;
+            // chunk offsets advance by 32 bytes, preserving alignment.
+            _mm256_stream_si256(dst_x.as_mut_ptr().add(off) as *mut __m256i, vnew_x);
+            _mm256_stream_si256(dst_z.as_mut_ptr().add(off) as *mut __m256i, vnew_z);
 
-    _mm_sfence();
+            let vor = _mm256_or_si256(_mm256_or_si256(vx1, vz1), _mm256_or_si256(vx2, vz2));
+            if _mm256_testz_si256(vor, vor) != 0 {
+                continue;
+            }
 
-    let pos_lo = _mm256_castsi256_si128(vsum_pos);
-    let pos_hi = _mm256_extracti128_si256(vsum_pos, 1);
-    let pos_sum = _mm_add_epi64(pos_lo, pos_hi);
-    let total_pos =
-        (_mm_cvtsi128_si64(pos_sum) as u64).wrapping_add(_mm_extract_epi64(pos_sum, 1) as u64);
+            let vnonzero = _mm256_and_si256(
+                _mm256_and_si256(_mm256_or_si256(vnew_x, vnew_z), _mm256_or_si256(vx1, vz1)),
+                _mm256_or_si256(vx2, vz2),
+            );
 
-    let nz_lo = _mm256_castsi256_si128(vsum_nz);
-    let nz_hi = _mm256_extracti128_si256(vsum_nz, 1);
-    let nz_sum = _mm_add_epi64(nz_lo, nz_hi);
-    let total_nz =
-        (_mm_cvtsi128_si64(nz_sum) as u64).wrapping_add(_mm_extract_epi64(nz_sum, 1) as u64);
+            let vpos = _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_and_si256(_mm256_and_si256(vx1, vz1), _mm256_andnot_si256(vx2, vz2)),
+                    _mm256_and_si256(_mm256_andnot_si256(vz1, vx1), _mm256_and_si256(vx2, vz2)),
+                ),
+                _mm256_and_si256(_mm256_andnot_si256(vx1, vz1), _mm256_andnot_si256(vz2, vx2)),
+            );
 
-    let mut sum = initial_sum
-        .wrapping_add(2u64.wrapping_mul(total_pos))
-        .wrapping_sub(total_nz);
+            let lo_p = _mm256_and_si256(vpos, low_mask);
+            let hi_p = _mm256_and_si256(_mm256_srli_epi16(vpos, 4), low_mask);
+            let cnt_p = _mm256_add_epi8(
+                _mm256_shuffle_epi8(lookup, lo_p),
+                _mm256_shuffle_epi8(lookup, hi_p),
+            );
+            vsum_pos = _mm256_add_epi64(vsum_pos, _mm256_sad_epu8(cnt_p, vzero));
 
-    let tail = chunks * 4;
-    for w in tail..nw {
-        let x1 = src_x[w];
-        let z1 = src_z[w];
-        let x2 = dst_x[w];
-        let z2 = dst_z[w];
-        let new_x = x1 ^ x2;
-        let new_z = z1 ^ z2;
-        dst_x[w] = new_x;
-        dst_z[w] = new_z;
-        if (x1 | z1 | x2 | z2) == 0 {
-            continue;
+            let lo_n = _mm256_and_si256(vnonzero, low_mask);
+            let hi_n = _mm256_and_si256(_mm256_srli_epi16(vnonzero, 4), low_mask);
+            let cnt_n = _mm256_add_epi8(
+                _mm256_shuffle_epi8(lookup, lo_n),
+                _mm256_shuffle_epi8(lookup, hi_n),
+            );
+            vsum_nz = _mm256_add_epi64(vsum_nz, _mm256_sad_epu8(cnt_n, vzero));
         }
-        let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
-        let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-        sum = sum.wrapping_add(2 * pos.count_ones() as u64);
-        sum = sum.wrapping_sub(nonzero.count_ones() as u64);
-    }
 
-    sum
+        _mm_sfence();
+
+        let pos_lo = _mm256_castsi256_si128(vsum_pos);
+        let pos_hi = _mm256_extracti128_si256(vsum_pos, 1);
+        let pos_sum = _mm_add_epi64(pos_lo, pos_hi);
+        let total_pos =
+            (_mm_cvtsi128_si64(pos_sum) as u64).wrapping_add(_mm_extract_epi64(pos_sum, 1) as u64);
+
+        let nz_lo = _mm256_castsi256_si128(vsum_nz);
+        let nz_hi = _mm256_extracti128_si256(vsum_nz, 1);
+        let nz_sum = _mm_add_epi64(nz_lo, nz_hi);
+        let total_nz =
+            (_mm_cvtsi128_si64(nz_sum) as u64).wrapping_add(_mm_extract_epi64(nz_sum, 1) as u64);
+
+        let mut sum = initial_sum
+            .wrapping_add(2u64.wrapping_mul(total_pos))
+            .wrapping_sub(total_nz);
+
+        let tail = chunks * 4;
+        for w in tail..nw {
+            let x1 = src_x[w];
+            let z1 = src_z[w];
+            let x2 = dst_x[w];
+            let z2 = dst_z[w];
+            let new_x = x1 ^ x2;
+            let new_z = z1 ^ z2;
+            dst_x[w] = new_x;
+            dst_z[w] = new_z;
+            if (x1 | z1 | x2 | z2) == 0 {
+                continue;
+            }
+            let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
+            let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
+        }
+
+        sum
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -311,77 +317,80 @@ unsafe fn rowmul_words_neon(
     src_z: &[u64],
     initial_sum: u64,
 ) -> u64 {
-    use std::arch::aarch64::*;
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        use std::arch::aarch64::*;
 
-    let nw = dst_x.len();
-    let chunks = nw / 2;
+        let nw = dst_x.len();
+        let chunks = nw / 2;
 
-    let mut vsum_pos = vdupq_n_u64(0);
-    let mut vsum_nz = vdupq_n_u64(0);
+        let mut vsum_pos = vdupq_n_u64(0);
+        let mut vsum_nz = vdupq_n_u64(0);
 
-    for i in 0..chunks {
-        let off = i * 2;
-        let vx1 = vld1q_u64(src_x.as_ptr().add(off));
-        let vz1 = vld1q_u64(src_z.as_ptr().add(off));
-        let vx2 = vld1q_u64(dst_x.as_ptr().add(off));
-        let vz2 = vld1q_u64(dst_z.as_ptr().add(off));
+        for i in 0..chunks {
+            let off = i * 2;
+            let vx1 = vld1q_u64(src_x.as_ptr().add(off));
+            let vz1 = vld1q_u64(src_z.as_ptr().add(off));
+            let vx2 = vld1q_u64(dst_x.as_ptr().add(off));
+            let vz2 = vld1q_u64(dst_z.as_ptr().add(off));
 
-        let vnew_x = veorq_u64(vx1, vx2);
-        let vnew_z = veorq_u64(vz1, vz2);
-        vst1q_u64(dst_x.as_mut_ptr().add(off), vnew_x);
-        vst1q_u64(dst_z.as_mut_ptr().add(off), vnew_z);
+            let vnew_x = veorq_u64(vx1, vx2);
+            let vnew_z = veorq_u64(vz1, vz2);
+            vst1q_u64(dst_x.as_mut_ptr().add(off), vnew_x);
+            vst1q_u64(dst_z.as_mut_ptr().add(off), vnew_z);
 
-        let vor = vorrq_u64(vorrq_u64(vx1, vz1), vorrq_u64(vx2, vz2));
-        if vgetq_lane_u64(vor, 0) | vgetq_lane_u64(vor, 1) == 0 {
-            continue;
+            let vor = vorrq_u64(vorrq_u64(vx1, vz1), vorrq_u64(vx2, vz2));
+            if vgetq_lane_u64(vor, 0) | vgetq_lane_u64(vor, 1) == 0 {
+                continue;
+            }
+
+            let vnonzero = vandq_u64(
+                vandq_u64(vorrq_u64(vnew_x, vnew_z), vorrq_u64(vx1, vz1)),
+                vorrq_u64(vx2, vz2),
+            );
+
+            // vbicq_u64(a, b) = a & ~b
+            let term1 = vandq_u64(vandq_u64(vx1, vz1), vbicq_u64(vz2, vx2));
+            let term2 = vandq_u64(vbicq_u64(vx1, vz1), vandq_u64(vx2, vz2));
+            let term3 = vandq_u64(vbicq_u64(vz1, vx1), vbicq_u64(vx2, vz2));
+            let vpos = vorrq_u64(vorrq_u64(term1, term2), term3);
+
+            let pos_cnt = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_u64(
+                vpos,
+            )))));
+            let nz_cnt = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_u64(
+                vnonzero,
+            )))));
+
+            vsum_pos = vaddq_u64(vsum_pos, pos_cnt);
+            vsum_nz = vaddq_u64(vsum_nz, nz_cnt);
         }
 
-        let vnonzero = vandq_u64(
-            vandq_u64(vorrq_u64(vnew_x, vnew_z), vorrq_u64(vx1, vz1)),
-            vorrq_u64(vx2, vz2),
-        );
+        let total_pos = vgetq_lane_u64(vsum_pos, 0).wrapping_add(vgetq_lane_u64(vsum_pos, 1));
+        let total_nz = vgetq_lane_u64(vsum_nz, 0).wrapping_add(vgetq_lane_u64(vsum_nz, 1));
 
-        // vbicq_u64(a, b) = a & ~b
-        let term1 = vandq_u64(vandq_u64(vx1, vz1), vbicq_u64(vz2, vx2));
-        let term2 = vandq_u64(vbicq_u64(vx1, vz1), vandq_u64(vx2, vz2));
-        let term3 = vandq_u64(vbicq_u64(vz1, vx1), vbicq_u64(vx2, vz2));
-        let vpos = vorrq_u64(vorrq_u64(term1, term2), term3);
+        let mut sum = initial_sum
+            .wrapping_add(2u64.wrapping_mul(total_pos))
+            .wrapping_sub(total_nz);
 
-        let pos_cnt = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_u64(
-            vpos,
-        )))));
-        let nz_cnt = vpaddlq_u32(vpaddlq_u16(vpaddlq_u8(vcntq_u8(vreinterpretq_u8_u64(
-            vnonzero,
-        )))));
-
-        vsum_pos = vaddq_u64(vsum_pos, pos_cnt);
-        vsum_nz = vaddq_u64(vsum_nz, nz_cnt);
-    }
-
-    let total_pos = vgetq_lane_u64(vsum_pos, 0).wrapping_add(vgetq_lane_u64(vsum_pos, 1));
-    let total_nz = vgetq_lane_u64(vsum_nz, 0).wrapping_add(vgetq_lane_u64(vsum_nz, 1));
-
-    let mut sum = initial_sum
-        .wrapping_add(2u64.wrapping_mul(total_pos))
-        .wrapping_sub(total_nz);
-
-    if nw & 1 != 0 {
-        let w = nw - 1;
-        let x1 = src_x[w];
-        let z1 = src_z[w];
-        let x2 = dst_x[w];
-        let z2 = dst_z[w];
-        let new_x = x1 ^ x2;
-        let new_z = z1 ^ z2;
-        dst_x[w] = new_x;
-        dst_z[w] = new_z;
-        if (x1 | z1 | x2 | z2) != 0 {
-            let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
-            let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-            sum = sum.wrapping_add(2 * pos.count_ones() as u64);
-            sum = sum.wrapping_sub(nonzero.count_ones() as u64);
+        if nw & 1 != 0 {
+            let w = nw - 1;
+            let x1 = src_x[w];
+            let z1 = src_z[w];
+            let x2 = dst_x[w];
+            let z2 = dst_z[w];
+            let new_x = x1 ^ x2;
+            let new_z = z1 ^ z2;
+            dst_x[w] = new_x;
+            dst_z[w] = new_z;
+            if (x1 | z1 | x2 | z2) != 0 {
+                let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
+                let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
+                sum = sum.wrapping_add(2 * pos.count_ones() as u64);
+                sum = sum.wrapping_sub(nonzero.count_ones() as u64);
+            }
         }
-    }
 
-    sum
+        sum
+    }
 }

@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 
 /// Backend selection for a simulation. Construct via the static methods, e.g.
 /// `BackendKind.auto()`, `BackendKind.mps(max_bond_dim=64)`.
-#[pyclass(name = "BackendKind", module = "prism_q")]
+#[pyclass(name = "BackendKind", module = "prism_q", from_py_object)]
 #[derive(Clone)]
 pub struct PyBackendKind(pub BackendKind);
 

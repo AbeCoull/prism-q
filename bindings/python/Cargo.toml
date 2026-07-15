@@ -18,7 +18,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 prism-q = { path = "../..", default-features = false, features = ["parallel"] }
-pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39", "num-complex"] }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py311", "num-complex"] }
 numpy = "0.25"
 num-complex = "0.4"
 smallvec = "1"

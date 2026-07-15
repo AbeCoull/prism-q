@@ -17,7 +17,6 @@ def test_uniform_depolarizing_introduces_errors():
     circuit = parse_qasm(BELL_QASM)
     model = NoiseModel.uniform_depolarizing(circuit, 0.1)
     counts = simulate(circuit).seed(2).noise(model).shots(4000).counts()
-    # Without noise only 00/11 appear; depolarizing should leak into 01/10.
     assert set(counts) == {"00", "01", "10", "11"}
     leaked = counts.get("01", 0) + counts.get("10", 0)
     assert leaked > 0
@@ -67,7 +66,6 @@ def test_custom_kraus_channel_runs():
     model.validate()
     assert not model.is_pauli_only()
     counts = simulate(circuit).seed(1).noise(model).shots(1000).counts()
-    # Identity Kraus is a no-op: no leakage into 01/10.
     assert set(counts) <= {"00", "11"}
     assert sum(counts.values()) == 1000
 

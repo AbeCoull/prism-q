@@ -45,10 +45,8 @@ def test_build_is_non_destructive():
     builder = CircuitBuilder(2).h(0).cx(0, 1)
     c1 = builder.build()
     c2 = builder.build()
-    # Repeated build() must not empty the builder.
     assert c1.num_qubits == 2 and c1.gate_count() == 2
     assert c2.num_qubits == 2 and c2.gate_count() == 2
-    # The builder is still usable afterward.
     c3 = builder.t(0).build()
     assert c3.gate_count() == 3
 
@@ -72,8 +70,6 @@ def test_sample_counts():
 
 
 def test_run_qasm_helper():
-    # No measurement: probabilities reflect the superposition (measuring would
-    # collapse the state).
     qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncx q[0], q[1];"
     out = run_qasm(qasm, 42)
     probs = out.probabilities
@@ -106,7 +102,6 @@ def test_cu_accepts_nested_list_and_numpy():
     p1 = simulate(c1).seed(1).run().probabilities
     p2 = simulate(c2).seed(1).run().probabilities
     np.testing.assert_allclose(p1, p2, atol=1e-12)
-    # Behaves like a CNOT: equal weight on |00> and |11>.
     assert math.isclose(p1[0], 0.5, abs_tol=1e-9)
     assert math.isclose(p1[3], 0.5, abs_tol=1e-9)
 
@@ -114,8 +109,8 @@ def test_cu_accepts_nested_list_and_numpy():
 @pytest.mark.parametrize(
     "prep, expected_index",
     [
-        ([0, 1], 0b111),  # both controls set -> target flips to |111>
-        ([0], 0b001),  # only one control set -> no flip, stays |001>
+        ([0, 1], 0b111),
+        ([0], 0b001),
     ],
 )
 def test_mcu_toffoli(prep, expected_index):

@@ -9,12 +9,11 @@ def _repetition_round():
     qp.set_options(shots=128, seed=42)
     for q in range(3):
         qp.reset(QecBasis.Z, q)
-    # Deterministic X on qubit 0 flips the ZZ(0,1) stabilizer.
     qp.push_gate(prism_q.Gate.x(), [0])
     r0 = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
     r1 = qp.measure_pauli_product([(QecBasis.Z, 1), (QecBasis.Z, 2)])
     qp.detector([RecordRef.absolute(r0)])
-    qp.detector_lookback([1])  # most recent record = r1
+    qp.detector_lookback([1])
     m0 = qp.measure_z(0)
     qp.observable_include(0, [RecordRef.absolute(m0)])
     return qp
@@ -36,7 +35,6 @@ def test_detectors_and_observables_are_bool_arrays():
     assert det.dtype == np.bool_
     assert det.shape == (128, 2)
     assert obs.shape == (128, 1)
-    # Detector 0 = ZZ(0,1) reads 1 (q0 flipped); detector 1 = ZZ(1,2) reads 0.
     assert det[:, 0].all()
     assert not det[:, 1].any()
     assert obs[:, 0].all()
@@ -63,12 +61,12 @@ def test_postselect_rejects_shots():
     qp = QecProgram(1)
     qp.set_options(shots=512, seed=1)
     qp.reset(QecBasis.Z, 0)
-    qp.push_gate(prism_q.Gate.h(), [0])  # random Z outcome
+    qp.push_gate(prism_q.Gate.h(), [0])
     r = qp.measure_z(0)
-    qp.postselect([RecordRef.absolute(r)], False)  # accept only outcome 0
+    qp.postselect([RecordRef.absolute(r)], False)
     res = qp.run()
     assert res.accepted_shots + res.discarded_shots == res.total_shots == 512
-    assert 0 < res.accepted_shots < 512  # roughly half survive
+    assert 0 < res.accepted_shots < 512
 
 
 def test_from_text_parses():

@@ -20,7 +20,6 @@ def test_explicit_statevector_backend_matches_auto():
 def test_stabilizer_backend_on_clifford():
     ghz = circuits.ghz(4)
     probs = simulate(ghz).backend(BackendKind.stabilizer()).seed(1).run().probabilities
-    # GHZ: only |0000> and |1111> populated.
     assert math.isclose(probs[0], 0.5, abs_tol=1e-9)
     assert math.isclose(probs[-1], 0.5, abs_tol=1e-9)
 
@@ -51,7 +50,6 @@ def test_sparse_backend_runs():
     ],
 )
 def test_pauli_backends_return_valid_marginals(backend):
-    # Pauli-propagation backends require a Clifford+T circuit with no measurements.
     circuit = CircuitBuilder(2).h(0).t(0).cx(0, 1).build()
     marginals = simulate(circuit).backend(backend).seed(1).marginals()
     assert len(marginals) == 2

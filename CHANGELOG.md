@@ -2,6 +2,24 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.21.1] - 2026-07-15
+
+### Bug Fixes
+
+- **qft:** Correct textbook QFT decomposition to match native FFT (#89)([5f64e2b](https://github.com/AbeCoull/prism-q/commit/5f64e2b791d80c83a2ee150282f85f0d76b6f58a))
+
+### Miscellaneous
+
+- Only use latest macos runners (#87)([701d215](https://github.com/AbeCoull/prism-q/commit/701d215d8f9ab9d303490fb15cfb3b8c3676a58e))
+
+### Infra
+
+- **deps:** Bump CI workflow versions (#88)([d8dfc35](https://github.com/AbeCoull/prism-q/commit/d8dfc354b8e7e3612c41885f90d4b33e5c7334b9))
+## [py-v0.21.0] - 2026-07-15
+
+### Miscellaneous
+
+- **python:** Release 0.21.0([7553292](https://github.com/AbeCoull/prism-q/commit/7553292d12fa61606e41f61a89f12df0eef6cc28))
 ## [0.21.0] - 2026-07-15
 
 ### Features
@@ -10,6 +28,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([171fd5b](https://github.com/AbeCoull/prism-q/commit/171fd5b3b28cb5fabec1cbbd02bd068b93a280a5))
 - **python:** Add PyO3/maturin Python bindings (#85)([0594079](https://github.com/AbeCoull/prism-q/commit/059407938a26dac94651af05eefe64c768c054f9))
 ## [0.20.0] - 2026-06-16
 

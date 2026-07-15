@@ -275,7 +275,7 @@ jobs:
 
   test-macos-arm:
     name: Test macOS ARM64
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

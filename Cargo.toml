@@ -24,7 +24,11 @@ rand = "0.10"
 rand_chacha = "0.10"
 smallvec = "1"
 thiserror = "2"
-rayon = { version = "1.10", optional = true }
+# rayon 1.12.0 regresses the word-batched stabilizer measurement kernels ~5x
+# (ghz_measure_all/1000: 17.6ms -> 92ms locally, +2965% in CI) and the
+# decomposition merge path. Hold below 1.12 until the par_chunks kernels are
+# retuned against it.
+rayon = { version = ">=1.10, <1.12", optional = true }
 num_cpus = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }

@@ -33,12 +33,15 @@ pub use shots::{ShotsResult, bitstring};
 
 use std::collections::HashMap;
 
+use num_complex::Complex64;
+
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use shots::{packed_shots_to_classical_bits, sample_shots};
 use terminal_sampling::{sample_counts_from_state, sample_shots_from_state};
+use unified_pauli::{PauliAxis, PauliTerm};
 
 type TerminalStatevector = (StatevectorBackend, Vec<(usize, usize)>);
 
@@ -214,6 +217,24 @@ impl<'c> Simulate<'c, Seeded> {
             });
         }
         run_marginals_result_with(self.kind, self.circuit, seed)
+    }
+
+    /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on the circuit's
+    /// output state, honoring the selected backend.
+    ///
+    /// Each observable is a product of single-qubit Paulis (identity factors
+    /// omitted). The circuit must be unitary. Clifford circuits propagate each
+    /// observable exactly; non-Clifford circuits use the state vector.
+    #[inline]
+    pub fn expectation_values(self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let seed = self.seed_value();
+        if self.noise_model.is_some() {
+            return Err(PrismError::BackendUnsupported {
+                backend: format!("{:?}", self.kind),
+                operation: "expectation values with an inline noise model".into(),
+            });
+        }
+        run_expectation_values_with(self.kind, self.circuit, observables, seed)
     }
 }
 
@@ -711,6 +732,188 @@ fn run_marginals_result_with(
             ),
         })
     }
+}
+
+/// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on a unitary circuit's
+/// output state, using automatic backend selection. See
+/// [`Simulate::expectation_values`] for explicit backend control.
+pub fn run_expectation_values(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    seed: u64,
+) -> Result<Vec<f64>> {
+    run_expectation_values_with(BackendKind::Auto, circuit, observables, seed)
+}
+
+fn run_expectation_values_with(
+    kind: BackendKind,
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    seed: u64,
+) -> Result<Vec<f64>> {
+    if has_nonunitary_or_classical_ops(circuit) {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "expectation values require a unitary circuit without measurements, resets, or conditionals".into(),
+        });
+    }
+
+    match &kind {
+        BackendKind::StochasticPauli { num_samples } => observables
+            .iter()
+            .enumerate()
+            .map(|(i, obs)| {
+                unified_pauli::run_spp_observable(
+                    circuit,
+                    obs,
+                    *num_samples,
+                    seed.wrapping_add(i as u64),
+                )
+                .map(|r| r.mean)
+            })
+            .collect(),
+        BackendKind::DeterministicPauli { epsilon, max_terms } => observables
+            .iter()
+            .map(|obs| {
+                unified_pauli::run_spd_observable(circuit, obs, *epsilon, *max_terms)
+                    .map(|r| r.mean)
+            })
+            .collect(),
+        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FactoredStabilizer => {
+            if circuit.is_clifford_only() {
+                observables
+                    .iter()
+                    .map(|obs| {
+                        unified_pauli::run_spd_observable(circuit, obs, 0.0, 0).map(|r| r.mean)
+                    })
+                    .collect()
+            } else if matches!(kind, BackendKind::Auto) {
+                if circuit.num_qubits > max_statevector_qubits() {
+                    return Err(PrismError::IncompatibleBackend {
+                        backend: format!("{kind:?}"),
+                        reason: format!(
+                            "expectation values for a {}-qubit non-Clifford circuit exceed the statevector cap ({} qubits); no exact accelerated path exists for arbitrary Pauli observables here",
+                            circuit.num_qubits,
+                            max_statevector_qubits()
+                        ),
+                    });
+                }
+                expectation_values_statevector(circuit, observables, seed)
+            } else {
+                Err(PrismError::IncompatibleBackend {
+                    backend: format!("{kind:?}"),
+                    reason: "stabilizer backends require a Clifford-only circuit".into(),
+                })
+            }
+        }
+        BackendKind::Statevector => expectation_values_statevector(circuit, observables, seed),
+        other => Err(PrismError::IncompatibleBackend {
+            backend: format!("{other:?}"),
+            reason: "expectation values support Auto, Statevector, Stabilizer, FactoredStabilizer, StochasticPauli, and DeterministicPauli".into(),
+        }),
+    }
+}
+
+fn expectation_values_statevector(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    seed: u64,
+) -> Result<Vec<f64>> {
+    // Validate before the 2^n simulation so bad observables fail cheaply.
+    let masks = observables
+        .iter()
+        .map(|obs| pauli_masks(obs, circuit.num_qubits))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut backend = StatevectorBackend::new(seed);
+    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
+        std::borrow::Cow::Borrowed(circuit)
+    } else {
+        crate::circuit::expand_qft_blocks(circuit)
+    };
+    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    backend.apply_instructions(&fused.instructions)?;
+
+    let state = backend.state_vector();
+    let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
+    Ok(masks
+        .iter()
+        .map(|&(xmask, zmask, num_y)| {
+            pauli_expectation_from_masks(state, xmask, zmask, num_y, norm)
+        })
+        .collect())
+}
+
+/// Validate a joint Pauli observable and reduce it to `(Xmask, Zmask, #Y)`,
+/// where `Xmask` covers X and Y factors and `Zmask` covers Z and Y factors.
+fn pauli_masks(observable: &[PauliTerm], num_qubits: usize) -> Result<(usize, usize, u32)> {
+    let mut xmask = 0usize;
+    let mut zmask = 0usize;
+    let mut num_y = 0u32;
+    let mut seen = vec![false; num_qubits];
+    for term in observable {
+        if term.qubit >= num_qubits {
+            return Err(PrismError::InvalidQubit {
+                index: term.qubit,
+                register_size: num_qubits,
+            });
+        }
+        if seen[term.qubit] {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "joint Pauli observable has duplicate factor on qubit {}",
+                    term.qubit
+                ),
+            });
+        }
+        seen[term.qubit] = true;
+        let bit = 1usize << term.qubit;
+        match term.axis {
+            PauliAxis::X => xmask |= bit,
+            PauliAxis::Z => zmask |= bit,
+            PauliAxis::Y => {
+                xmask |= bit;
+                zmask |= bit;
+                num_y += 1;
+            }
+        }
+    }
+    Ok((xmask, zmask, num_y))
+}
+
+/// Exact `⟨ψ|P|ψ⟩` from the reduced observable masks, where `P` acts as
+/// `P|j⟩ = i^{#Y}·(-1)^{popcount(j & Zmask)}·|j ⊕ Xmask⟩`. Normalization
+/// independent, so raw backend amplitudes are fine.
+fn pauli_expectation_from_masks(
+    state: &[Complex64],
+    xmask: usize,
+    zmask: usize,
+    num_y: u32,
+    norm: f64,
+) -> f64 {
+    if norm == 0.0 {
+        return 0.0;
+    }
+
+    let mut acc = Complex64::new(0.0, 0.0);
+    for (j, &amp) in state.iter().enumerate() {
+        let partner = state[j ^ xmask];
+        let sign = if (j & zmask).count_ones() & 1 == 1 {
+            -1.0
+        } else {
+            1.0
+        };
+        acc += partner.conj() * amp * sign;
+    }
+
+    let i_pow = match num_y % 4 {
+        0 => Complex64::new(1.0, 0.0),
+        1 => Complex64::new(0.0, 1.0),
+        2 => Complex64::new(-1.0, 0.0),
+        _ => Complex64::new(0.0, -1.0),
+    };
+    (acc * i_pow).re / norm
 }
 
 /// Multi-shot execution for the distributed statevector backend.

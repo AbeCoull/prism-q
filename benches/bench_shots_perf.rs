@@ -27,6 +27,21 @@ use std::time::Duration;
 const SEED: u64 = 0xDEAD_BEEF;
 const API_QUERY_SHOTS: usize = 100_000;
 
+// Base high-shot counts always run; 100M/1B are added only when
+// PRISM_BENCH_HIGH_SHOTS=<max> is set, capped by <max>, so a bare `cargo bench`
+// stays fast. A 1B row exercises the streaming chunked path, which sibling bulk
+// rows cannot reach without materializing every shot.
+fn high_shot_counts() -> Vec<usize> {
+    let cap: usize = std::env::var("PRISM_BENCH_HIGH_SHOTS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    [100_000_000, 1_000_000_000]
+        .into_iter()
+        .filter(|&n| n <= cap)
+        .collect()
+}
+
 fn run_shots_with(
     kind: BackendKind,
     circuit: &Circuit,
@@ -792,6 +807,65 @@ fn bench_analytical_marginals(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_chunked_high_shots(c: &mut Criterion) {
+    use prism_q::{HistogramAccumulator, MarginalsAccumulator, PauliExpectationAccumulator};
+
+    let mut group = c.benchmark_group("chunked_high_shots");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(3));
+
+    let mut shot_counts = vec![1_000_000, 10_000_000];
+    shot_counts.extend(high_shot_counts());
+
+    let clifford = clifford_circuit_with_measurements(100, 10);
+    let ghz = ghz_circuit_with_measurements(100);
+
+    for &shots in &shot_counts {
+        group.bench_with_input(
+            BenchmarkId::new("marginals/clifford_d10_100q", shots),
+            &shots,
+            |b, &shots| {
+                let mut sampler = prism_q::compile_measurements(&clifford, SEED).unwrap();
+                b.iter(|| {
+                    let mut acc = MarginalsAccumulator::new(100);
+                    sampler.sample_chunked(shots, &mut acc);
+                    acc.marginals()
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("expectation/clifford_d10_100q", shots),
+            &shots,
+            |b, &shots| {
+                let mut sampler = prism_q::compile_measurements(&clifford, SEED).unwrap();
+                let observables = vec![vec![0, 1], vec![10, 20], vec![50, 99]];
+                b.iter(|| {
+                    let mut acc = PauliExpectationAccumulator::new(observables.clone());
+                    sampler.sample_chunked(shots, &mut acc);
+                    acc.expectations()
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("histogram/ghz_100q", shots),
+            &shots,
+            |b, &shots| {
+                let mut sampler = prism_q::compile_measurements(&ghz, SEED).unwrap();
+                b.iter(|| {
+                    let mut acc = HistogramAccumulator::new();
+                    sampler.sample_chunked(shots, &mut acc);
+                    acc.into_counts()
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_api_queries,
@@ -808,5 +882,6 @@ criterion_group!(
     bench_homological_compile,
     bench_homological_sample,
     bench_analytical_marginals,
+    bench_chunked_high_shots,
 );
 criterion_main!(benches);

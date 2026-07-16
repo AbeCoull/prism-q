@@ -2,6 +2,16 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.22.0] - 2026-07-16
+
+### Features
+
+- **sim:** Add Pauli expectation value (#90)([f24ee68](https://github.com/AbeCoull/prism-q/commit/f24ee680215560aec27456206481f36b04f85f34))
+## [py-v0.21.1] - 2026-07-15
+
+### Miscellaneous
+
+- **python:** Release 0.21.1([a2e94e3](https://github.com/AbeCoull/prism-q/commit/a2e94e3fd641fc24892dc0272d937be822e81dd7))
 ## [0.21.1] - 2026-07-15
 
 ### Bug Fixes
@@ -10,6 +20,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([249571a](https://github.com/AbeCoull/prism-q/commit/249571ac639fba94d293d32948b9690a42af910a))
 - Only use latest macos runners (#87)([701d215](https://github.com/AbeCoull/prism-q/commit/701d215d8f9ab9d303490fb15cfb3b8c3676a58e))
 
 ### Infra

@@ -66,6 +66,19 @@ fn configure_group(group: &mut criterion::BenchmarkGroup<criterion::measurement:
     }
 }
 
+/// Statevector rows above 26q, opted in via `PRISM_BENCH_HIGH_QUBITS=<max>`.
+///
+/// Off by default: a dense `.run()` holds the statevector and its readback
+/// probability vector at once, so 28q peaks near 6 GiB and 30q near 24 GiB.
+/// `<max>` bounds the largest row a host admits.
+fn high_qubit_sizes() -> Vec<usize> {
+    let cap: usize = std::env::var("PRISM_BENCH_HIGH_QUBITS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0);
+    [28, 30].into_iter().filter(|&n| n <= cap).collect()
+}
+
 // ---- Bench-specific circuit builders (not shared) ----
 
 fn qft_like_circuit(n_qubits: usize) -> Circuit {
@@ -259,7 +272,9 @@ fn bench_statevector_random(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/random_d10");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 12, 16, 20] {
+    let mut sizes = vec![4, 8, 12, 16, 20];
+    sizes.extend(high_qubit_sizes());
+    for &n in &sizes {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -323,7 +338,9 @@ fn bench_statevector_qft_textbook(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qft_textbook");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 12, 16, 20, 22, 24, 26] {
+    let mut sizes = vec![4, 8, 12, 16, 20, 22, 24, 26];
+    sizes.extend(high_qubit_sizes());
+    for &n in &sizes {
         let circuit = circuits::qft_circuit(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {

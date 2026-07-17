@@ -33,6 +33,28 @@ jobs:
         run: cargo install --locked mdbook-admonish@1.20.0 mdbook-mermaid@0.14.0 mdbook-katex@0.9.4
       - name: Build book
         run: mdbook build docs
+      - name: Generate sitemap.xml
+        run: |
+          base="https://abecoull.github.io/prism-q"
+          tmp="$(mktemp)"
+          {
+            echo '<?xml version="1.0" encoding="UTF-8"?>'
+            echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+            find docs/book -name '*.html' \
+              ! -name '404.html' ! -name 'print.html' ! -name 'toc.html' \
+              -printf '%P\n' | sort | while read -r f; do
+                if [ "$f" = "index.html" ]; then
+                  loc="$base/"
+                elif cmp -s "docs/book/$f" docs/book/index.html; then
+                  continue
+                else
+                  loc="$base/$f"
+                fi
+                printf '  <url><loc>%s</loc></url>\n' "$loc"
+              done
+            echo '</urlset>'
+          } > "$tmp"
+          mv "$tmp" docs/book/sitemap.xml
       - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/book

@@ -2,11 +2,25 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.23.0] - 2026-07-17
+
+### Features
+
+- **sim:** Route Auto dispatch to GPU via opt-in AutoGpu context (#95)([6f78da3](https://github.com/AbeCoull/prism-q/commit/6f78da320879de56e1be7324537d55b6459d5eed))
+## [py-v0.22.1] - 2026-07-17
+
+### Miscellaneous
+
+- **python:** Release 0.22.1([4fe7246](https://github.com/AbeCoull/prism-q/commit/4fe72462410111ddf39ebd73b916db17004b9091))
 ## [0.22.1] - 2026-07-17
 
 ### Bug Fixes
 
 - **parser:** Return Parse error for nameless gate definition (#94)([a562449](https://github.com/AbeCoull/prism-q/commit/a562449652a3d279fabcefbcac9b8e38d1e60b29))
+
+### Miscellaneous
+
+- Release([69a8fa8](https://github.com/AbeCoull/prism-q/commit/69a8fa8800e514f6f87752603078a48fafcb6aa1))
 
 ### Testing
 

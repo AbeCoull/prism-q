@@ -409,7 +409,7 @@ impl SubTableau {
     }
 
     fn rowmul(&mut self, h: usize, i: usize) {
-        debug_assert!(h != i);
+        debug_assert_ne!(h, i);
         let stride = self.stride();
         let nw = self.num_words;
         let base_h = h * stride;
@@ -715,7 +715,7 @@ impl SubTableau {
             }
         }
 
-        let norm_sq: f64 = sv.iter().map(|c| c.norm_sqr()).sum();
+        let norm_sq: f64 = sv.iter().map(Complex64::norm_sqr).sum();
         if norm_sq > 1e-30 {
             let inv_norm = 1.0 / norm_sq.sqrt();
             for amp in &mut sv {
@@ -927,8 +927,6 @@ impl FactoredStabilizerBackend {
             comp_qubits[qubit_component[q]].push(q);
         }
 
-        let mut new_sub_indices = Vec::with_capacity(num_components);
-
         #[allow(clippy::needless_range_loop)]
         for c in 0..num_components {
             let local_qs = &comp_qubits[c];
@@ -1042,7 +1040,6 @@ impl FactoredStabilizerBackend {
             };
 
             let slot = self.find_free_slot();
-            new_sub_indices.push(slot);
             let global_qs: SmallVec<[usize; 8]> = new_sub.qubits.clone();
             self.subs[slot] = Some(new_sub);
             for &gq in &global_qs {
@@ -1261,9 +1258,8 @@ fn gauss_eliminate_x(
             }
         }
 
-        let row = match pivot {
-            Some(r) => r,
-            None => continue,
+        let Some(row) = pivot else {
+            continue;
         };
 
         if row != k {

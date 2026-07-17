@@ -441,7 +441,7 @@ impl Backend for SparseBackend {
         self.num_qubits = num_qubits;
         self.state.clear();
         self.state.insert(0, Complex64::new(1.0, 0.0));
-        self.classical_bits = vec![false; num_classical_bits];
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         Ok(())
     }
 

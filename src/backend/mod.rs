@@ -19,7 +19,8 @@
 //!
 //! # Adding a new backend
 //!
-//! See `docs/architecture.md` § "Add a new backend" for the full playbook.
+//! Implement the [`Backend`] trait below, following the contract and
+//! performance requirements above.
 
 #[cfg(feature = "distributed")]
 pub mod distributed_statevector;

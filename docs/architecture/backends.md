@@ -1,6 +1,6 @@
 # Backends
 
-PRISM-Q ships seven CPU backends plus an optional CUDA path. The
+PRISM-Q ships eight CPU backends plus an optional CUDA path. The
 [simulation engine](./engine.md) picks one automatically, or you can select explicitly.
 For a task-oriented version of this material, see the
 [Backends Deep Dive guide](../guides/backends.md).

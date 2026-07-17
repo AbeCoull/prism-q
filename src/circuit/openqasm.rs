@@ -655,7 +655,7 @@ impl<'a> Parser<'a> {
         let kind_name = kind.name();
 
         if rest.trim_start().starts_with('[') {
-            let bracket_content = Self::extract_bracket(rest).ok_or(PrismError::Parse {
+            let bracket_content = Self::extract_bracket(rest).ok_or_else(|| PrismError::Parse {
                 line: line_num,
                 message: format!("missing `]` in {kind_name} declaration"),
             })?;
@@ -931,7 +931,13 @@ impl<'a> Parser<'a> {
             (name, params, qubit_names)
         } else {
             let parts: Vec<&str> = header.split_whitespace().collect();
-            let name = parts[0].to_string();
+            let Some(name_tok) = parts.first() else {
+                return Err(PrismError::Parse {
+                    line: line_num,
+                    message: "gate definition is missing a name".to_string(),
+                });
+            };
+            let name = name_tok.to_string();
             let qubit_names: Vec<String> = parts[1..]
                 .iter()
                 .flat_map(|s| s.split(','))
@@ -1519,6 +1525,56 @@ impl<'a> Parser<'a> {
             var_map.insert(param_name.clone(), call_params[i]);
         }
 
+        let max_qubit = call_qubits.iter().max().copied().unwrap_or(0) + 1;
+        let mut sub_parser = Parser {
+            input: "",
+            qregs: HashMap::new(),
+            cregs: HashMap::new(),
+            gate_defs: HashMap::new(),
+            def_defs: HashMap::new(),
+            total_qubits: max_qubit,
+            total_cbits: self.total_cbits,
+            gate_expansion_depth: self.gate_expansion_depth + 1,
+            param_vars: Some(var_map),
+            int_vars: self.int_vars.clone(),
+        };
+        sub_parser.qregs.insert(
+            "__q__".to_string(),
+            Register {
+                offset: 0,
+                size: max_qubit,
+            },
+        );
+        for (k, v) in &self.qregs {
+            sub_parser.qregs.insert(
+                k.clone(),
+                Register {
+                    offset: v.offset,
+                    size: v.size,
+                },
+            );
+        }
+        for (k, v) in &self.cregs {
+            sub_parser.cregs.insert(
+                k.clone(),
+                Register {
+                    offset: v.offset,
+                    size: v.size,
+                },
+            );
+        }
+        for (k, v) in &self.gate_defs {
+            sub_parser.gate_defs.insert(
+                k.clone(),
+                GateDefinition {
+                    params: v.params.clone(),
+                    qubits: v.qubits.clone(),
+                    body: v.body.clone(),
+                },
+            );
+        }
+        self.copy_def_defs_into(&mut sub_parser);
+
         let mut all_instrs = Vec::new();
         for stmt in &def.body {
             let mut expanded = stmt.clone();
@@ -1526,57 +1582,6 @@ impl<'a> Parser<'a> {
                 expanded =
                     replace_word(&expanded, qubit_name, &format!("__q__[{}]", call_qubits[i]));
             }
-
-            let saved_qregs = &self.qregs;
-            let max_qubit = call_qubits.iter().max().copied().unwrap_or(0) + 1;
-            let mut sub_parser = Parser {
-                input: "",
-                qregs: HashMap::new(),
-                cregs: HashMap::new(),
-                gate_defs: HashMap::new(),
-                def_defs: HashMap::new(),
-                total_qubits: max_qubit,
-                total_cbits: self.total_cbits,
-                gate_expansion_depth: self.gate_expansion_depth + 1,
-                param_vars: Some(var_map.clone()),
-                int_vars: self.int_vars.clone(),
-            };
-            sub_parser.qregs.insert(
-                "__q__".to_string(),
-                Register {
-                    offset: 0,
-                    size: max_qubit,
-                },
-            );
-            for (k, v) in saved_qregs {
-                sub_parser.qregs.insert(
-                    k.clone(),
-                    Register {
-                        offset: v.offset,
-                        size: v.size,
-                    },
-                );
-            }
-            for (k, v) in &self.cregs {
-                sub_parser.cregs.insert(
-                    k.clone(),
-                    Register {
-                        offset: v.offset,
-                        size: v.size,
-                    },
-                );
-            }
-            for (k, v) in &self.gate_defs {
-                sub_parser.gate_defs.insert(
-                    k.clone(),
-                    GateDefinition {
-                        params: v.params.clone(),
-                        qubits: v.qubits.clone(),
-                        body: v.body.clone(),
-                    },
-                );
-            }
-            self.copy_def_defs_into(&mut sub_parser);
 
             let instrs = sub_parser.parse_gate_application(expanded.trim(), line_num)?;
             all_instrs.extend(instrs);

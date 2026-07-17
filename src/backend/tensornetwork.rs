@@ -1032,7 +1032,7 @@ impl Backend for TensorNetworkBackend {
         self.num_qubits = num_qubits;
         self.tensors = Vec::new();
         self.next_leg = 0;
-        self.classical_bits = vec![false; num_classical_bits];
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
 
         self.output_legs = Vec::with_capacity(num_qubits);
         for _ in 0..num_qubits {

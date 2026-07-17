@@ -253,7 +253,7 @@ impl GridCell {
     fn vert_connector(width: usize) -> Self {
         let pad_left = width.saturating_sub(1) / 2;
         let pad_right = width - pad_left - 1;
-        let content = format!("{}{}{}", " ".repeat(pad_left), VERT, " ".repeat(pad_right),);
+        let content = format!("{}{}{}", " ".repeat(pad_left), VERT, " ".repeat(pad_right));
         Self {
             content,
             is_vert_connector: true,
@@ -381,7 +381,7 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                     if all_rows.len() >= 2 {
                         let min_r = *all_rows.iter().min().unwrap();
                         let max_r = *all_rows.iter().max().unwrap();
-                        for r in (min_r * 2 + 1)..=(max_r * 2 - 1) {
+                        for r in (min_r * 2 + 1)..(max_r * 2) {
                             if r % 2 == 1 {
                                 grid[r][m_idx] = GridCell::vert_connector(w);
                             } else {
@@ -404,7 +404,7 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                         let max_r = *rows.iter().max().unwrap();
                         grid[min_r * 2][m_idx] = GridCell::gate(&op.label, w);
                         grid[max_r * 2][m_idx] = GridCell::gate(&op.label, w);
-                        for r in (min_r * 2 + 1)..=(max_r * 2 - 1) {
+                        for r in (min_r * 2 + 1)..(max_r * 2) {
                             if r % 2 == 1 {
                                 grid[r][m_idx] = GridCell::vert_connector(w);
                             } else {
@@ -428,7 +428,7 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
                         let (min_r, max_r) = (rows[0].min(rows[1]), rows[0].max(rows[1]));
                         grid[min_r * 2][m_idx] = GridCell::swap_marker(w);
                         grid[max_r * 2][m_idx] = GridCell::swap_marker(w);
-                        for r in (min_r * 2 + 1)..=(max_r * 2 - 1) {
+                        for r in (min_r * 2 + 1)..(max_r * 2) {
                             if r % 2 == 1 {
                                 grid[r][m_idx] = GridCell::vert_connector(w);
                             } else {

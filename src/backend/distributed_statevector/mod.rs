@@ -1204,7 +1204,7 @@ impl DistributedStatevectorBackend {
 
         let mut local_cdf = self.inner.probabilities()?;
         let mut acc = 0.0f64;
-        for p in local_cdf.iter_mut() {
+        for p in &mut local_cdf {
             acc += *p;
             *p = acc;
         }

@@ -150,12 +150,8 @@ pub(super) fn run_decomposed_prefused(
         .map(|i| {
             let block_seed = seed.wrapping_add(i as u64);
             let sub = &partitions[i].0;
-            let block_kind = if matches!(kind, BackendKind::Auto) {
-                BackendKind::Auto
-            } else {
-                kind.clone()
-            };
-            if !matches!(block_kind, BackendKind::Auto) {
+            let block_kind = kind.clone();
+            if !block_kind.is_auto() {
                 validate_explicit_backend(&block_kind, sub)?;
             }
             let mut backend = select_backend(&block_kind, sub, block_seed, false);

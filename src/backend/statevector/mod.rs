@@ -155,6 +155,8 @@ pub struct StatevectorBackend {
     gpu_context: Option<Arc<GpuContext>>,
     #[cfg(feature = "gpu")]
     gpu_state: Option<GpuState>,
+    #[cfg(feature = "gpu")]
+    gpu_soft: bool,
 }
 
 /// Kill switch for the native whole-state `QftBlock` FFT path.
@@ -180,16 +182,30 @@ impl StatevectorBackend {
             gpu_context: None,
             #[cfg(feature = "gpu")]
             gpu_state: None,
+            #[cfg(feature = "gpu")]
+            gpu_soft: false,
         }
     }
 
     /// Opt into GPU acceleration using the given shared execution context.
     ///
     /// When set, [`Backend::init`] allocates a device-resident state instead of a host
-    /// `Vec<Complex64>` and gate application routes through GPU kernels.
+    /// `Vec<Complex64>` and gate application routes through GPU kernels. A device
+    /// allocation failure is propagated as an error.
     #[cfg(feature = "gpu")]
     pub fn with_gpu(mut self, context: Arc<GpuContext>) -> Self {
         self.gpu_context = Some(context);
+        self
+    }
+
+    /// Opt into GPU acceleration but fall back to the host state if the device
+    /// allocation fails at [`Backend::init`], instead of erroring. Used by the
+    /// `Auto` GPU dispatch path, where an unfit or racing device must degrade to
+    /// CPU rather than surface a failure.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu_auto(mut self, context: Arc<GpuContext>) -> Self {
+        self.gpu_context = Some(context);
+        self.gpu_soft = true;
         self
     }
 
@@ -548,9 +564,15 @@ impl Backend for StatevectorBackend {
 
         #[cfg(feature = "gpu")]
         if let Some(ctx) = self.gpu_context.clone() {
-            self.state.clear();
-            self.gpu_state = Some(GpuState::new(ctx, num_qubits)?);
-            return Ok(());
+            match GpuState::new(ctx, num_qubits) {
+                Ok(state) => {
+                    self.state.clear();
+                    self.gpu_state = Some(state);
+                    return Ok(());
+                }
+                Err(e) if !self.gpu_soft => return Err(e),
+                Err(_) => self.gpu_context = None,
+            }
         }
 
         let dim = 1usize << num_qubits;

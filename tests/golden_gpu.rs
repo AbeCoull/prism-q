@@ -1547,6 +1547,53 @@ fn stabilizer_gpu_builder_matches_cpu_at_scale() {
     );
 }
 
+/// `simulate(...).gpu_auto(ctx)` must select the GPU statevector for a large
+/// entangled non-Clifford block and produce amplitudes matching the CPU `Auto`
+/// path within 1e-10. The circuit is 16 qubits (clears the 14q crossover), fully
+/// entangled by a CX chain (single component, no decomposition), and non-Clifford
+/// via arbitrary rotations (no Clifford+T shortcut), so `Auto` lands on the dense
+/// statevector and `gpu_auto` routes that block to the device.
+#[test]
+fn auto_gpu_matches_cpu_auto_above_threshold() {
+    use prism_q::{BackendKind, Circuit, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 16;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Rz(0.5), &[q]);
+    }
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .run()
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .run()
+        .unwrap();
+
+    let cp = cpu.probabilities.expect("cpu probs").to_vec();
+    let gp = gpu.probabilities.expect("gpu probs").to_vec();
+    assert_eq!(cp.len(), gp.len());
+    for (i, (c, g)) in cp.iter().zip(gp.iter()).enumerate() {
+        let diff = (c - g).abs();
+        assert!(
+            diff < 1e-10,
+            "prob mismatch at {i}: cpu={c}, gpu={g}, diff={diff}"
+        );
+    }
+}
+
 // ============================================================================
 // GPU BTS sampling
 // ============================================================================

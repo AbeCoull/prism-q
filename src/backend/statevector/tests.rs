@@ -1431,6 +1431,21 @@ mod gpu_scaffold {
         assert_eq!(backend.num_qubits(), 4);
     }
 
+    /// The soft GPU mode used by the Auto path degrades to the host state when
+    /// the device allocation fails, instead of erroring like `with_gpu`. The
+    /// stub context fails `GpuState::new`, so init must succeed on CPU and the
+    /// backend must expose a valid ground state through the host path.
+    #[test]
+    fn with_gpu_auto_falls_back_to_cpu_on_alloc_failure() {
+        let ctx = GpuContext::stub_for_tests();
+        let mut backend = StatevectorBackend::new(42).with_gpu_auto(ctx);
+        backend.init(2, 0).unwrap();
+        let probs = backend.probabilities().unwrap();
+        assert_eq!(probs.len(), 4);
+        assert!((probs[0] - 1.0).abs() < 1e-12);
+        assert!(probs[1..].iter().all(|&p| p < 1e-12));
+    }
+
     /// Real-device smoke test: |0000⟩ state round-trips correctly through the GPU path.
     ///
     /// When CUDA is not available or the driver rejects the PTX, prints a SKIP message and

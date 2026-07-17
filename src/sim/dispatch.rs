@@ -94,6 +94,26 @@ pub enum BackendKind {
         epsilon: f64,
         max_terms: usize,
     },
+    /// Automatic backend selection with GPU acceleration opted in.
+    ///
+    /// Makes the same shape-based routing decisions as [`BackendKind::Auto`],
+    /// but when the selected backend (per sub-block, after subsystem
+    /// decomposition) is the dense statevector or the stabilizer tableau and the
+    /// block clears the qubit-count crossover with VRAM to spare, that block runs
+    /// on the supplied context. Every other choice, and every block that fails
+    /// the crossover or VRAM check, runs on the identical CPU path Auto would
+    /// take. The statevector path also degrades to the host when the device
+    /// allocation itself fails, so a missing, unfit, or racing device stays on
+    /// CPU rather than erroring. Acceleration reaches whichever entry points
+    /// route a selected statevector block through dispatch; some sampling and
+    /// expectation fast paths still build a host statevector directly and stay
+    /// on CPU pending the routing unification noted in `auto_gpu_choice_to_backend`.
+    ///
+    /// The context is user-supplied and is never acquired implicitly.
+    #[cfg(feature = "gpu")]
+    AutoGpu {
+        context: Arc<GpuContext>,
+    },
     /// Statevector backed by a CUDA GPU execution context.
     ///
     /// Circuits (or decomposed sub-blocks) with fewer than
@@ -141,6 +161,21 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
+    /// Whether this kind uses automatic shape-based routing. True for
+    /// [`BackendKind::Auto`] and its GPU-accelerated sibling
+    /// [`BackendKind::AutoGpu`], which make identical routing decisions and
+    /// differ only in whether a cleared statevector or stabilizer block runs on
+    /// the device.
+    #[inline]
+    pub(crate) fn is_auto(&self) -> bool {
+        match self {
+            BackendKind::Auto => true,
+            #[cfg(feature = "gpu")]
+            BackendKind::AutoGpu { .. } => true,
+            _ => false,
+        }
+    }
+
     pub fn supports_noisy_per_shot(&self) -> bool {
         !matches!(
             self,
@@ -159,7 +194,7 @@ impl BackendKind {
             | BackendKind::ProductState
             | BackendKind::Factored => true,
             #[cfg(feature = "gpu")]
-            BackendKind::StatevectorGpu { .. } => true,
+            BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => true,
             _ => false,
         }
     }
@@ -226,7 +261,7 @@ pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> 
         | BackendKind::DeterministicPauli { .. } => false,
         #[cfg(feature = "gpu")]
         BackendKind::StabilizerGpu { .. } => false,
-        BackendKind::Auto => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
+        _ if kind.is_auto() => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
         _ => true,
     }
 }
@@ -305,6 +340,68 @@ fn stabilizer_gpu_with_crossover(
     }
 }
 
+/// Build a `StatevectorBackend` for the `AutoGpu` path. Routes the block to the
+/// device only when it clears the qubit crossover and the current VRAM holds the
+/// amplitude buffer plus scratch headroom. Every failing case, including a stub
+/// or absent device that makes the VRAM query error, falls back to the host
+/// backend rather than surfacing an error.
+///
+/// Headroom: `fits_statevector(n + 1)` requires `2^(n+1) * 16` free bytes, which
+/// covers the `2^n * 16` byte amplitude buffer plus the probabilities and
+/// measurement scratch (up to `2^n * 8` bytes each) with margin.
+#[cfg(feature = "gpu")]
+fn auto_statevector_backend(
+    context: &Arc<GpuContext>,
+    circuit: &Circuit,
+    seed: u64,
+) -> StatevectorBackend {
+    let fits = circuit.num_qubits >= crate::gpu::min_qubits()
+        && context
+            .fits_statevector(circuit.num_qubits + 1)
+            .unwrap_or(false);
+    if fits {
+        StatevectorBackend::new(seed).with_gpu_auto(context.clone())
+    } else {
+        StatevectorBackend::new(seed)
+    }
+}
+
+fn auto_choice_to_backend(choice: AutoBackendChoice, seed: u64) -> Box<dyn Backend> {
+    match choice {
+        AutoBackendChoice::ProductState => Box::new(ProductStateBackend::new(seed)),
+        AutoBackendChoice::Stabilizer => Box::new(StabilizerBackend::new(seed)),
+        AutoBackendChoice::Sparse => Box::new(SparseBackend::new(seed)),
+        AutoBackendChoice::Mps => Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM)),
+        AutoBackendChoice::Factored => {
+            Box::new(crate::backend::factored::FactoredBackend::new(seed))
+        }
+        AutoBackendChoice::Statevector => Box::new(StatevectorBackend::new(seed)),
+    }
+}
+
+/// Map an auto choice to a backend, routing the GPU-eligible leaves
+/// (statevector and stabilizer) onto `context` through their respective
+/// crossovers. Non-eligible choices resolve to the same CPU backend as the
+/// plain `Auto` path.
+// TODO: replace these per-leaf arms with one per-choice mechanism where each backend owns its threshold, VRAM fit, and CPU fallback, so new GPU backends and every sampling/expectation/noise path route uniformly.
+#[cfg(feature = "gpu")]
+fn auto_gpu_choice_to_backend(
+    choice: AutoBackendChoice,
+    context: &Arc<GpuContext>,
+    circuit: &Circuit,
+    seed: u64,
+) -> Box<dyn Backend> {
+    match choice {
+        AutoBackendChoice::Statevector => {
+            Box::new(auto_statevector_backend(context, circuit, seed))
+        }
+        AutoBackendChoice::Stabilizer => {
+            Box::new(stabilizer_gpu_with_crossover(context, circuit, seed))
+        }
+        other => auto_choice_to_backend(other, seed),
+    }
+}
+
 pub(super) fn select_dispatch(
     kind: &BackendKind,
     circuit: &Circuit,
@@ -312,26 +409,15 @@ pub(super) fn select_dispatch(
     has_partial_independence: bool,
 ) -> DispatchAction {
     match kind {
-        BackendKind::Auto => match select_auto_backend_choice(circuit, has_partial_independence) {
-            AutoBackendChoice::ProductState => {
-                DispatchAction::Backend(Box::new(ProductStateBackend::new(seed)))
-            }
-            AutoBackendChoice::Stabilizer => {
-                DispatchAction::Backend(Box::new(StabilizerBackend::new(seed)))
-            }
-            AutoBackendChoice::Sparse => {
-                DispatchAction::Backend(Box::new(SparseBackend::new(seed)))
-            }
-            AutoBackendChoice::Mps => {
-                DispatchAction::Backend(Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM)))
-            }
-            AutoBackendChoice::Factored => DispatchAction::Backend(Box::new(
-                crate::backend::factored::FactoredBackend::new(seed),
-            )),
-            AutoBackendChoice::Statevector => {
-                DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
-            }
-        },
+        BackendKind::Auto => {
+            let choice = select_auto_backend_choice(circuit, has_partial_independence);
+            DispatchAction::Backend(auto_choice_to_backend(choice, seed))
+        }
+        #[cfg(feature = "gpu")]
+        BackendKind::AutoGpu { context } => {
+            let choice = select_auto_backend_choice(circuit, has_partial_independence);
+            DispatchAction::Backend(auto_gpu_choice_to_backend(choice, context, circuit, seed))
+        }
         BackendKind::Statevector => {
             DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
         }
@@ -395,7 +481,7 @@ pub(super) fn min_clifford_prefix_gates(num_qubits: usize) -> usize {
 }
 
 pub(super) fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Circuit) -> bool {
-    if !matches!(kind, BackendKind::Auto) {
+    if !kind.is_auto() {
         return false;
     }
     if circuit.num_qubits > max_statevector_qubits() {
@@ -425,7 +511,7 @@ pub(super) fn try_temporal_clifford(
     circuit: &Circuit,
     seed: u64,
 ) -> Option<Result<RunOutcome>> {
-    if !matches!(kind, BackendKind::Auto) {
+    if !kind.is_auto() {
         return None;
     }
     if circuit.num_qubits > max_statevector_qubits() {
@@ -607,5 +693,81 @@ mod gpu_crossover_tests {
         circuit.add_gate(Gate::T, &[0]);
         let err = run_query(stabilizer_stub_kind(), &circuit, 42).unwrap_err();
         assert!(matches!(err, PrismError::IncompatibleBackend { .. }));
+    }
+
+    fn auto_gpu_stub_kind() -> BackendKind {
+        BackendKind::AutoGpu {
+            context: GpuContext::stub_for_tests(),
+        }
+    }
+
+    fn assert_probs_match(a: &RunOutcome, b: &RunOutcome) {
+        let ap = a.probabilities.as_ref().expect("probs a").to_vec();
+        let bp = b.probabilities.as_ref().expect("probs b").to_vec();
+        assert_eq!(ap.len(), bp.len());
+        for (i, (x, y)) in ap.iter().zip(bp.iter()).enumerate() {
+            assert!((x - y).abs() < 1e-10, "prob[{i}]: {x} vs {y}");
+        }
+    }
+
+    /// A small Clifford circuit selects the stabilizer choice, which sits below
+    /// the stabilizer GPU crossover, so `AutoGpu` builds a CPU stabilizer and
+    /// never touches the stub. Results match the plain `Auto` path.
+    #[test]
+    fn auto_gpu_small_clifford_routes_to_cpu() {
+        let mut circuit = Circuit::new(4, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::Cx, &[1, 2]);
+        circuit.add_gate(Gate::Cx, &[2, 3]);
+
+        let cpu = run_query(BackendKind::Auto, &circuit, 42).expect("cpu auto baseline");
+        let gpu = run_query(auto_gpu_stub_kind(), &circuit, 42)
+            .expect("stub must stay out of the way below the stabilizer crossover");
+        assert_probs_match(&cpu, &gpu);
+    }
+
+    /// `independent_bell_pairs(8)` spans 16 qubits but decomposes into 8
+    /// independent 2q blocks, each below the statevector crossover. Every block
+    /// stays on CPU under `AutoGpu`; if decomposition failed, the monolithic 16q
+    /// path would still hit the VRAM gate and fall back rather than error.
+    #[test]
+    fn auto_gpu_decomposable_16q_runs_per_block_on_cpu() {
+        let circuit = crate::circuits::independent_bell_pairs(8);
+        assert_eq!(circuit.num_qubits, 16);
+
+        let cpu = run_query(BackendKind::Auto, &circuit, 42).expect("cpu auto baseline");
+        let gpu = run_query(auto_gpu_stub_kind(), &circuit, 42).expect("stub stays out of the way");
+        assert_probs_match(&cpu, &gpu);
+    }
+
+    /// A 16q entangled non-Clifford circuit selects the statevector choice and
+    /// clears the 14q crossover, so `AutoGpu` reaches the GPU decision. Because
+    /// the stub cannot report VRAM, the fits check fails closed and the block
+    /// runs on CPU: same results as `Auto`, no error. The explicit
+    /// `StatevectorGpu` path has no VRAM gate, so the same circuit touches the
+    /// stub and surfaces `BackendUnsupported`, isolating the added fallback.
+    #[test]
+    fn auto_gpu_large_block_falls_back_to_cpu_on_stub() {
+        let mut circuit = Circuit::new(16, 0);
+        for q in 0..16 {
+            circuit.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        for q in 0..15 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+
+        let cpu = run_query(BackendKind::Auto, &circuit, 42).expect("cpu auto baseline");
+        let gpu = run_query(auto_gpu_stub_kind(), &circuit, 42)
+            .expect("stub VRAM query fails closed, so AutoGpu must fall back to CPU without error");
+        assert_probs_match(&cpu, &gpu);
+
+        let explicit = BackendKind::StatevectorGpu {
+            context: GpuContext::stub_for_tests(),
+        };
+        assert!(matches!(
+            run_query(explicit, &circuit, 42).unwrap_err(),
+            PrismError::BackendUnsupported { .. }
+        ));
     }
 }

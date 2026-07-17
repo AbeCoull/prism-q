@@ -140,6 +140,17 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
         self.backend(BackendKind::StatevectorGpu { context })
     }
 
+    /// Automatic backend selection with GPU acceleration opted in via `context`.
+    ///
+    /// Routes like [`BackendKind::Auto`], but a selected statevector or
+    /// stabilizer block that clears the qubit crossover with VRAM to spare runs
+    /// on the device. Unsupported cases fall back to the identical CPU path.
+    #[cfg(feature = "gpu")]
+    #[inline]
+    pub fn gpu_auto(self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
+        self.backend(BackendKind::AutoGpu { context })
+    }
+
     /// Distribute the exact state vector across the ranks of `context`.
     ///
     /// With a single rank this behaves like [`Simulate::backend`] with
@@ -319,7 +330,7 @@ fn run_with_internal(
     seed: u64,
     opts: SimOptions,
 ) -> Result<RunOutcome> {
-    if !matches!(kind, BackendKind::Auto) {
+    if !kind.is_auto() {
         validate_explicit_backend(&kind, circuit)?;
     }
     // The distributed backend runs the whole circuit across ranks in lockstep.
@@ -339,7 +350,7 @@ fn run_with_internal(
         if components.len() > 1 {
             if should_decompose(&components, circuit.num_qubits) {
                 let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
-                if matches!(kind, BackendKind::Auto)
+                if kind.is_auto()
                     && circuit.is_clifford_only()
                     && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
                     && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
@@ -360,7 +371,7 @@ fn run_with_internal(
             has_partial_independence = true;
         }
     }
-    if matches!(kind, BackendKind::Auto)
+    if kind.is_auto()
         && circuit.is_clifford_plus_t()
         && circuit.has_t_gates()
         && !has_nonunitary_or_classical_ops(circuit)
@@ -452,8 +463,11 @@ fn supports_deferred_measurement_sampling(circuit: &Circuit) -> bool {
 }
 
 fn is_clifford_sampler_kind(kind: &BackendKind) -> bool {
+    if kind.is_auto() {
+        return true;
+    }
     match kind {
-        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FactoredStabilizer => true,
+        BackendKind::Stabilizer | BackendKind::FactoredStabilizer => true,
         #[cfg(feature = "gpu")]
         BackendKind::StabilizerGpu { .. } => true,
         _ => false,
@@ -529,11 +543,10 @@ fn auto_terminal_statevector_candidate(circuit: &Circuit) -> bool {
 }
 
 fn terminal_statevector_candidate(kind: &BackendKind, circuit: &Circuit) -> bool {
-    match kind {
-        BackendKind::Statevector => true,
-        BackendKind::Auto => auto_terminal_statevector_candidate(circuit),
-        _ => false,
+    if kind.is_auto() {
+        return auto_terminal_statevector_candidate(circuit);
     }
+    matches!(kind, BackendKind::Statevector)
 }
 
 fn try_terminal_statevector_backend(
@@ -707,7 +720,7 @@ fn run_marginals_result_with(
         _ => {}
     }
 
-    if matches!(kind, BackendKind::Auto)
+    if kind.is_auto()
         && supports_pauli_marginal_backend(circuit)
         && circuit.has_t_gates()
         && n >= MIN_QUBITS_FOR_SPD_AUTO
@@ -779,7 +792,12 @@ fn run_expectation_values_with(
                     .map(|r| r.mean)
             })
             .collect(),
-        BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FactoredStabilizer => {
+        _ if kind.is_auto()
+            || matches!(
+                kind,
+                BackendKind::Stabilizer | BackendKind::FactoredStabilizer
+            ) =>
+        {
             if circuit.is_clifford_only() {
                 observables
                     .iter()
@@ -787,7 +805,7 @@ fn run_expectation_values_with(
                         unified_pauli::run_spd_observable(circuit, obs, 0.0, 0).map(|r| r.mean)
                     })
                     .collect()
-            } else if matches!(kind, BackendKind::Auto) {
+            } else if kind.is_auto() {
                 if circuit.num_qubits > max_statevector_qubits() {
                     return Err(PrismError::IncompatibleBackend {
                         backend: format!("{kind:?}"),
@@ -1051,7 +1069,7 @@ pub(crate) fn run_shots_with(
     if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates() {
         return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
-    if matches!(kind, BackendKind::Auto)
+    if kind.is_auto()
         && circuit.has_terminal_measurements_only()
         && circuit.is_clifford_plus_t()
         && circuit.has_t_gates()
@@ -1085,7 +1103,7 @@ pub(crate) fn run_shots_with(
 
     // Slow path: mid-circuit measurements require per-shot simulation.
     // Pre-compute seed-independent analysis to avoid redundant work.
-    if !matches!(kind, BackendKind::Auto) {
+    if !kind.is_auto() {
         validate_explicit_backend(&kind, circuit)?;
     }
 
@@ -1118,7 +1136,7 @@ pub(crate) fn run_shots_with(
             reason: "Pauli propagation backends do not support mid-circuit measurements".into(),
         });
     }
-    if matches!(kind, BackendKind::Auto) && circuit.is_clifford_plus_t() && circuit.has_t_gates() {
+    if kind.is_auto() && circuit.is_clifford_plus_t() && circuit.has_t_gates() {
         let t = circuit.t_count();
         let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
         if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
@@ -1253,15 +1271,17 @@ pub(crate) fn run_shots_with_noise(
         });
     }
 
-    if !matches!(kind, BackendKind::Auto) {
+    if !kind.is_auto() {
         validate_explicit_backend(&kind, circuit)?;
     }
 
     if noise_model.is_pauli_only() {
-        let use_compiled = matches!(
-            kind,
-            BackendKind::Auto | BackendKind::Stabilizer | BackendKind::FactoredStabilizer
-        ) && supports_compiled_measurement_sampling(circuit)
+        let use_compiled = (kind.is_auto()
+            || matches!(
+                kind,
+                BackendKind::Stabilizer | BackendKind::FactoredStabilizer
+            ))
+            && supports_compiled_measurement_sampling(circuit)
             || {
                 #[cfg(feature = "gpu")]
                 {
@@ -1289,7 +1309,7 @@ pub(crate) fn run_shots_with_noise(
         }
     }
 
-    let trajectory_kind = if matches!(kind, BackendKind::Auto) && !noise_model.is_pauli_only() {
+    let trajectory_kind = if kind.is_auto() && !noise_model.is_pauli_only() {
         auto_general_noise_backend(circuit)
     } else {
         kind

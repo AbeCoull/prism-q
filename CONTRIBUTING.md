@@ -64,6 +64,9 @@ The book is rooted at `docs/` (`docs/book.toml`); `docs/SUMMARY.md` lists the pa
 rendered output lands in `docs/book/` (gitignored). Publishing requires the repository
 Pages source set to "GitHub Actions" once under Settings > Pages.
 
+The workflow generates `sitemap.xml` from the built HTML, so pages in `SUMMARY.md` are
+indexed automatically.
+
 ## Benchmarks
 
 ```bash

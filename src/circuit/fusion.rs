@@ -143,7 +143,7 @@ fn is_cancelling_pair(a: &Instruction, b: &Instruction) -> bool {
 /// Tracks pending self-inverse 2q gates per-qubit. When a matching gate appears
 /// with no intervening instruction on the same qubits, both are removed.
 /// Returns `Cow::Borrowed` when no cancellation opportunities exist.
-pub fn cancel_self_inverse_pairs(circuit: &Circuit) -> Cow<'_, Circuit> {
+pub(crate) fn cancel_self_inverse_pairs(circuit: &Circuit) -> Cow<'_, Circuit> {
     let has_candidates = circuit.instructions.iter().any(|inst| {
         matches!(
             inst,
@@ -315,7 +315,7 @@ fn has_fusable_gates(circuit: &Circuit) -> bool {
 /// Returns a `Cow::Borrowed` reference to the original circuit when no fusion
 /// opportunities exist (zero overhead), or a `Cow::Owned` new circuit with
 /// fused instructions. The fused circuit produces identical simulation results.
-pub fn fuse_single_qubit_gates(circuit: &Circuit) -> Cow<'_, Circuit> {
+pub(crate) fn fuse_single_qubit_gates(circuit: &Circuit) -> Cow<'_, Circuit> {
     if !has_fusable_gates(circuit) {
         return Cow::Borrowed(circuit);
     }
@@ -467,7 +467,7 @@ fn has_reorder_opportunity(circuit: &Circuit) -> bool {
 /// subsequent `fuse_multi_1q_gates()` pass.
 ///
 /// Returns `Cow::Borrowed` when no reordering is possible.
-pub fn reorder_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+pub(crate) fn reorder_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     if !has_reorder_opportunity(&circuit) {
         return circuit;
     }
@@ -572,7 +572,7 @@ pub fn reorder_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
 ///
 /// Correctness: a 1q gate on qubit q commutes with any multi-qubit gate not
 /// involving q (independent subspaces), so deferring its application is safe.
-pub fn fuse_multi_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+pub(crate) fn fuse_multi_1q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     if !has_multi_1q_run(&circuit) {
         return circuit;
     }
@@ -692,7 +692,7 @@ fn has_multi_1q_run(circuit: &Circuit) -> bool {
 /// 2q gate become pre-gates of the next, so most HEA-style patterns are captured.
 ///
 /// Returns `Cow::Borrowed` when no fusion opportunities exist.
-pub fn fuse_2q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+pub(crate) fn fuse_2q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     if !has_2q_fusion_opportunity(&circuit) {
         return circuit;
     }
@@ -1016,7 +1016,7 @@ fn fuse_same_pair_2q_blocks(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
 /// the run after every one or two gates.
 ///
 /// Returns `Cow::Borrowed` when no reorder happens.
-pub fn reorder_disjoint_fused2q(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+pub(crate) fn reorder_disjoint_fused2q(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     let circuit = input.as_ref();
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
     let mut window: Vec<(Tier2q, Instruction)> = Vec::new();
@@ -1091,7 +1091,7 @@ fn flush_disjoint_window(
 /// gates (max qubit > 16) are left as-is.
 ///
 /// Returns `Cow::Borrowed` when no batching opportunities exist.
-pub fn fuse_multi_2q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+pub(crate) fn fuse_multi_2q_gates(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     if !has_multi_2q_opportunity(&circuit) {
         return circuit;
     }

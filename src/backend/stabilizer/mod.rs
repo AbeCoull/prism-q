@@ -818,8 +818,8 @@ impl StabilizerBackend {
                            nw: usize,
                            stride: usize,
                            num_meas: usize| {
-            first_destab.iter_mut().for_each(|v| *v = usize::MAX);
-            match_count.iter_mut().for_each(|v| *v = 0);
+            first_destab.fill(usize::MAX);
+            match_count.fill(0);
             for r in 0..2 * n {
                 let r_base = r * stride;
                 for w in 0..nw {

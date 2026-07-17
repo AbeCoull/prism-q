@@ -1589,11 +1589,7 @@ impl MpsBackend {
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
         let prob = self.site_outcome_probabilities(qubit);
 
-        let measured = if self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0) {
-            1usize
-        } else {
-            0usize
-        };
+        let measured = usize::from(self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0));
         self.classical_bits[classical_bit] = measured == 1;
         self.project_site_outcome(qubit, measured);
     }
@@ -1842,7 +1838,7 @@ impl Backend for MpsBackend {
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
-        self.classical_bits = vec![false; num_classical_bits];
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         self.sites = (0..num_qubits)
             .map(|_| SiteTensor::new_zero_state())
             .collect();

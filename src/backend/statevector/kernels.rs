@@ -143,8 +143,9 @@ fn qft_twiddle_cache_limit_bytes() -> usize {
         std::env::var("PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .map(|mb| mb.saturating_mul(1024 * 1024))
-            .unwrap_or(QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES)
+            .map_or(QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES, |mb| {
+                mb.saturating_mul(1024 * 1024)
+            })
     })
 }
 

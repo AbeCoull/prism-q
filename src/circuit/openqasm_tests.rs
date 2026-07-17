@@ -104,6 +104,13 @@ fn test_undefined_register() {
 }
 
 #[test]
+fn test_gate_def_missing_name_is_error() {
+    let qasm = "OPENQASM 3.0;\ngate {}";
+    let err = parse(qasm).unwrap_err();
+    assert!(matches!(err, PrismError::Parse { .. }));
+}
+
+#[test]
 fn test_qubit_out_of_bounds() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[5];";
     let err = parse(qasm).unwrap_err();

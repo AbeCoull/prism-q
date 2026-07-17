@@ -190,7 +190,7 @@ pub fn min_fill_treewidth_proxy(graph: &InteractionGraph, excluded: &HashSet<usi
                 }
             }
             let key = (fill, deg, v);
-            if best.map_or(true, |b| key < b) {
+            if best.is_none_or(|b| key < b) {
                 best = Some(key);
             }
         }
@@ -256,7 +256,7 @@ pub fn best_single_cut(graph: &InteractionGraph, c: f64) -> Option<(usize, f64)>
         let mut s = HashSet::new();
         s.insert(v);
         let score = cut_score(graph, &s, c);
-        if score < uncut && best.map_or(true, |(_, sb)| score < sb) {
+        if score < uncut && best.is_none_or(|(_, sb)| score < sb) {
             best = Some((v, score));
         }
     }
@@ -292,7 +292,7 @@ pub fn nested_dissection_cuts(graph: &InteractionGraph, max_component: usize) ->
             }
             let max_part = sub_comps.iter().map(|c| c.len()).max().unwrap();
             let balance = -(max_part as isize);
-            if best.map_or(true, |(_, b)| balance > b) {
+            if best.is_none_or(|(_, b)| balance > b) {
                 best = Some((v, balance));
             }
         }

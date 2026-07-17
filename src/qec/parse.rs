@@ -620,9 +620,9 @@ fn parse_pauli_term(term: &str, line_num: usize) -> Result<QecPauli> {
     reject_inverted_target(term, line_num)?;
     let mut chars = term.chars();
     let basis = match chars.next() {
-        Some('X') | Some('x') => QecBasis::X,
-        Some('Y') | Some('y') => QecBasis::Y,
-        Some('Z') | Some('z') => QecBasis::Z,
+        Some('X' | 'x') => QecBasis::X,
+        Some('Y' | 'y') => QecBasis::Y,
+        Some('Z' | 'z') => QecBasis::Z,
         _ => {
             return Err(qec_parse_error(
                 line_num,

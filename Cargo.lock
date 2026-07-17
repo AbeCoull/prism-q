@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "prism-q"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "criterion",
  "cudarc",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "prism-q-py"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "num-complex",
  "numpy",

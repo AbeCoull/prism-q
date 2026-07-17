@@ -2,11 +2,30 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.22.1] - 2026-07-17
+
+### Bug Fixes
+
+- **parser:** Return Parse error for nameless gate definition (#94)([a562449](https://github.com/AbeCoull/prism-q/commit/a562449652a3d279fabcefbcac9b8e38d1e60b29))
+
+### Testing
+
+- **bench:** Add high-shot chunked sampling bench and memory profiler (#92)([2672a0b](https://github.com/AbeCoull/prism-q/commit/2672a0b6bb371dd1c3d9b1e39c7c606bab924315))
+- **bench:** Add opt-in 28q/30q statevector Criterion rows (#91)([ab9f329](https://github.com/AbeCoull/prism-q/commit/ab9f3293eb69d271afcd09963d6d876b54275561))
+## [py-v0.22.0] - 2026-07-16
+
+### Miscellaneous
+
+- **python:** Release 0.22.0([997d11a](https://github.com/AbeCoull/prism-q/commit/997d11aa7c4ecd11f71d0d02a0b1997620e64e2d))
 ## [0.22.0] - 2026-07-16
 
 ### Features
 
 - **sim:** Add Pauli expectation value (#90)([f24ee68](https://github.com/AbeCoull/prism-q/commit/f24ee680215560aec27456206481f36b04f85f34))
+
+### Miscellaneous
+
+- Release([f551276](https://github.com/AbeCoull/prism-q/commit/f55127672af4a8dbda015292911d2587f535fff4))
 ## [py-v0.21.1] - 2026-07-15
 
 ### Miscellaneous

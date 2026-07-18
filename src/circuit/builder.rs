@@ -128,6 +128,15 @@ impl CircuitBuilder {
         self
     }
 
+    /// Reset `qubit` to |0⟩.
+    ///
+    /// # Panics
+    /// Panics if `qubit` is out of bounds.
+    pub fn reset(&mut self, qubit: usize) -> &mut Self {
+        self.circuit.add_reset(qubit);
+        self
+    }
+
     /// Measure all qubits into classical bits with matching indices.
     ///
     /// Expands `num_classical_bits` if needed to accommodate all qubits.
@@ -237,6 +246,26 @@ mod tests {
             .filter(|i| matches!(i, Instruction::Measure { .. }))
             .collect();
         assert_eq!(measures.len(), 3);
+    }
+
+    #[test]
+    fn builder_reset_emits_instruction_and_chains() {
+        let c = CircuitBuilder::new(2).x(0).reset(0).h(1).build();
+        assert_eq!(c.instructions.len(), 3);
+        assert!(matches!(
+            c.instructions.as_slice(),
+            [
+                Instruction::Gate {
+                    gate: Gate::X,
+                    targets: x_targets,
+                },
+                Instruction::Reset { qubit: 0 },
+                Instruction::Gate {
+                    gate: Gate::H,
+                    targets: h_targets,
+                },
+            ] if x_targets.as_slice() == [0] && h_targets.as_slice() == [1]
+        ));
     }
 
     #[test]

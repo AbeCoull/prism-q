@@ -93,6 +93,8 @@ pub struct StabilizerBackend {
     pub(super) pending_gpu_ops: Vec<u32>,
     #[cfg(feature = "gpu")]
     pub(super) gpu_batch_scratch: CliffordBatchScratch,
+    #[cfg(feature = "gpu")]
+    pub(super) gpu_soft: bool,
 }
 
 impl Clone for StabilizerBackend {
@@ -132,6 +134,8 @@ impl Clone for StabilizerBackend {
             pending_gpu_ops: Vec::new(),
             #[cfg(feature = "gpu")]
             gpu_batch_scratch: CliffordBatchScratch::default(),
+            #[cfg(feature = "gpu")]
+            gpu_soft: self.gpu_soft,
         }
     }
 }
@@ -162,7 +166,48 @@ impl StabilizerBackend {
             pending_gpu_ops: Vec::new(),
             #[cfg(feature = "gpu")]
             gpu_batch_scratch: CliffordBatchScratch::default(),
+            #[cfg(feature = "gpu")]
+            gpu_soft: false,
         }
+    }
+
+    /// Initialise the host-resident identity tableau. Shared by the CPU init
+    /// path and the soft GPU fallback in [`Backend::init`].
+    fn init_host(&mut self, n: usize, nw: usize, num_classical_bits: usize) -> Result<()> {
+        self.n = n;
+        self.num_words = nw;
+
+        let total_rows = 2 * n + 1;
+        let stride = 2 * nw;
+
+        self.xz = vec![0u64; total_rows * stride];
+        self.phase = vec![false; total_rows];
+
+        for i in 0..n {
+            let word = i / 64;
+            let bit = i % 64;
+            self.xz[i * stride + word] |= 1u64 << bit;
+            self.xz[(i + n) * stride + nw + word] |= 1u64 << bit;
+        }
+
+        self.qubit_active = (0..n).map(|q| vec![q as u32, (n + q) as u32]).collect();
+        self.total_weight = 2 * n;
+        self.sgi_max_active = 2;
+
+        let want_lazy = self.lazy_destab;
+        self.lazy_destab = false;
+        self.gate_row_start = 0;
+        #[cfg(feature = "gpu")]
+        {
+            self.pending_gpu_ops.clear();
+            self.gpu_batch_scratch.clear();
+        }
+
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+        if want_lazy {
+            self.enable_lazy_destab();
+        }
+        Ok(())
     }
 
     /// Opt into GPU acceleration using the given shared execution context.
@@ -172,6 +217,18 @@ impl StabilizerBackend {
     #[cfg(feature = "gpu")]
     pub fn with_gpu(mut self, context: Arc<GpuContext>) -> Self {
         self.gpu_context = Some(context);
+        self
+    }
+
+    /// Opt into GPU acceleration but fall back to the host tableau if the device
+    /// allocation fails at [`Backend::init`], instead of erroring. Mirrors
+    /// [`StatevectorBackend::with_gpu_auto`](crate::backend::statevector::StatevectorBackend::with_gpu_auto);
+    /// used by the `Auto` GPU dispatch path, where an unfit or racing device must
+    /// degrade to CPU rather than surface a failure.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu_auto(mut self, context: Arc<GpuContext>) -> Self {
+        self.gpu_context = Some(context);
+        self.gpu_soft = true;
         self
     }
 
@@ -1332,9 +1389,17 @@ impl Backend for StabilizerBackend {
         #[cfg(feature = "gpu")]
         if let Some(ctx) = self.gpu_context.clone() {
             // Allocate the device tableau first so an allocation failure returns
-            // cleanly without touching any existing state. Only once the tableau
-            // Commit the transition to GPU mode only after the device state is available.
-            let tableau = GpuTableau::new(ctx, n)?;
+            // cleanly without touching any existing state. The transition to GPU
+            // mode commits only once the tableau is live.
+            let tableau = match GpuTableau::new(ctx, n) {
+                Ok(tableau) => tableau,
+                Err(_) if self.gpu_soft => {
+                    self.gpu_context = None;
+                    self.gpu_tableau = None;
+                    return self.init_host(n, nw, num_classical_bits);
+                }
+                Err(e) => return Err(e),
+            };
             self.n = n;
             self.num_words = nw;
             self.xz.clear();
@@ -1351,40 +1416,7 @@ impl Backend for StabilizerBackend {
             return Ok(());
         }
 
-        self.n = n;
-        self.num_words = nw;
-
-        let total_rows = 2 * n + 1;
-        let stride = 2 * nw;
-
-        self.xz = vec![0u64; total_rows * stride];
-        self.phase = vec![false; total_rows];
-
-        for i in 0..n {
-            let word = i / 64;
-            let bit = i % 64;
-            self.xz[i * stride + word] |= 1u64 << bit;
-            self.xz[(i + n) * stride + nw + word] |= 1u64 << bit;
-        }
-
-        self.qubit_active = (0..n).map(|q| vec![q as u32, (n + q) as u32]).collect();
-        self.total_weight = 2 * n;
-        self.sgi_max_active = 2;
-
-        let want_lazy = self.lazy_destab;
-        self.lazy_destab = false;
-        self.gate_row_start = 0;
-        #[cfg(feature = "gpu")]
-        {
-            self.pending_gpu_ops.clear();
-            self.gpu_batch_scratch.clear();
-        }
-
-        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
-        if want_lazy {
-            self.enable_lazy_destab();
-        }
-        Ok(())
+        self.init_host(n, nw, num_classical_bits)
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {

@@ -218,6 +218,47 @@ impl GpuContext {
         Ok(amplitude_bytes <= available)
     }
 
+    /// Whether the currently-available VRAM holds a dense statevector for
+    /// `num_qubits` plus the reduction scratch `GpuState` keeps live.
+    ///
+    /// Budgets the `2 * 2^n` f64 amplitude buffer (16 bytes/amplitude), one
+    /// `2^n` f64 probabilities scratch buffer (8 bytes/amplitude), and one
+    /// byte per amplitude of margin for the measurement partials
+    /// (`ceil(2^n / 512)` f64) and launcher metadata, so `2^n * 25` bytes
+    /// total. This is the fail-fast gate for the `Auto` GPU statevector
+    /// leaf; the backend's soft mode ([`StatevectorBackend::with_gpu_auto`](crate::backend::statevector::StatevectorBackend::with_gpu_auto))
+    /// is the backstop for any residual transient allocation that slips past it.
+    pub fn fits_statevector_with_scratch(&self, num_qubits: usize) -> Result<bool> {
+        if num_qubits >= usize::BITS as usize - 5 {
+            return Ok(false);
+        }
+        let bytes = (1usize << num_qubits).checked_mul(25).ok_or_else(|| {
+            crate::error::PrismError::InvalidParameter {
+                message: format!("num_qubits={num_qubits} overflows usize"),
+            }
+        })?;
+        Ok(bytes <= self.vram_available()?)
+    }
+
+    /// Whether the currently-available VRAM holds a stabilizer tableau for
+    /// `num_qubits`, matching the device layout in [`GpuTableau`].
+    ///
+    /// The tableau stores `(2n+1)` rows of `2 * ceil(n/64)` u64 words plus one
+    /// phase byte per row; the fixed measurement scratch is negligible. Used as
+    /// the fail-closed gate for the `Auto` GPU stabilizer leaf.
+    pub fn fits_tableau(&self, num_qubits: usize) -> Result<bool> {
+        let total_rows = num_qubits.checked_mul(2).and_then(|r| r.checked_add(1));
+        let num_words = num_qubits.div_ceil(64).max(1);
+        let xz_words = total_rows.and_then(|rows| rows.checked_mul(2 * num_words));
+        let bytes = xz_words
+            .and_then(|w| w.checked_mul(8))
+            .and_then(|b| b.checked_add(total_rows.unwrap_or(usize::MAX)));
+        match bytes {
+            Some(bytes) => Ok(bytes <= self.vram_available()?),
+            None => Ok(false),
+        }
+    }
+
     pub(crate) fn device(&self) -> &GpuDevice {
         &self.device
     }
@@ -272,6 +313,27 @@ impl GpuState {
         };
         kernels::dense::launch_set_initial_state(&context, &mut state)?;
         Ok(state)
+    }
+
+    /// Allocate a device state initialized from host amplitudes. The slice
+    /// length must be a power of two of at least 2; callers validate before
+    /// converting.
+    pub fn from_host_amplitudes(context: Arc<GpuContext>, amps: &[Complex64]) -> Result<Self> {
+        debug_assert!(amps.len().is_power_of_two() && amps.len() >= 2);
+        let num_qubits = amps.len().trailing_zeros() as usize;
+        let mut host = Vec::with_capacity(amps.len() * 2);
+        for a in amps {
+            host.push(a.re);
+            host.push(a.im);
+        }
+        let buffer = GpuBuffer::<f64>::from_host(context.device(), &host)?;
+        Ok(Self {
+            context,
+            buffer,
+            num_qubits,
+            pending_norm: 1.0,
+            probs_scratch: std::cell::RefCell::new(None),
+        })
     }
 
     /// Number of qubits the buffer is sized for.
@@ -520,5 +582,39 @@ mod tests {
         // which no GPU has. The function clamps these to `Ok(false)` before
         // touching the device, so even the stub context returns cleanly.
         assert!(!ctx.fits_statevector(128).unwrap());
+    }
+
+    #[test]
+    fn fits_statevector_with_scratch_rejects_cleanly_on_stub() {
+        let ctx = GpuContext::stub_for_tests();
+        assert!(matches!(
+            ctx.fits_statevector_with_scratch(4).unwrap_err(),
+            PrismError::BackendUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn fits_statevector_with_scratch_clamps_overflow_before_device() {
+        let ctx = GpuContext::stub_for_tests();
+        // Past the overflow boundary the scratch budget clamps to `Ok(false)`
+        // without touching the (stub) device.
+        assert!(!ctx.fits_statevector_with_scratch(128).unwrap());
+    }
+
+    #[test]
+    fn fits_tableau_rejects_cleanly_on_stub() {
+        let ctx = GpuContext::stub_for_tests();
+        assert!(matches!(
+            ctx.fits_tableau(64).unwrap_err(),
+            PrismError::BackendUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn fits_tableau_clamps_overflow_before_device() {
+        let ctx = GpuContext::stub_for_tests();
+        // A qubit count whose tableau byte budget overflows usize must clamp to
+        // `Ok(false)` rather than reaching the device or panicking.
+        assert!(!ctx.fits_tableau(usize::MAX / 2).unwrap());
     }
 }

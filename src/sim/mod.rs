@@ -21,12 +21,12 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    AUTO_APPROX_MAX_TERMS, AUTO_MPS_BOND_DIM, AUTO_SPD_MAX_TERMS, DispatchAction,
+    AUTO_APPROX_MAX_TERMS, AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family,
     MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
     MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO, auto_selects_cpu_statevector, has_temporal_clifford_opportunity,
-    select_backend, select_dispatch, stabilizer_rank_budget, supports_fused_for_kind,
-    try_temporal_clifford, validate_explicit_backend,
+    MIN_QUBITS_FOR_SPD_AUTO, accel_for, auto_selects_cpu_statevector, build_statevector,
+    has_temporal_clifford_opportunity, plan_for_family, plan_temporal_clifford, resolve,
+    resolve_backend, run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{ShotsResult, bitstring};
@@ -40,7 +40,10 @@ use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use shots::{packed_shots_to_classical_bits, sample_shots};
-use terminal_sampling::{sample_counts_from_state, sample_shots_from_state};
+use terminal_sampling::{
+    sample_counts_from_probs, sample_counts_from_state, sample_shots_from_probs,
+    sample_shots_from_state,
+};
 use unified_pauli::{PauliAxis, PauliTerm};
 
 type TerminalStatevector = (StatevectorBackend, Vec<(usize, usize)>);
@@ -339,66 +342,62 @@ fn run_with_internal(
     // calls every rank must issue in the same order. Dispatch directly.
     #[cfg(feature = "distributed")]
     if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
-        return match select_dispatch(&kind, circuit, seed, false) {
-            DispatchAction::Backend(mut backend) => execute(&mut *backend, circuit, &opts),
-            _ => unreachable!("StatevectorDistributed always dispatches to a backend"),
-        };
+        let mut backend = resolve_backend(&kind, circuit, false).build(seed);
+        return execute(&mut *backend, circuit, &opts);
     }
-    let mut has_partial_independence = false;
-    if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
-        let components = circuit.independent_subsystems();
-        if components.len() > 1 {
-            if should_decompose(&components, circuit.num_qubits) {
-                let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
-                if kind.is_auto()
-                    && circuit.is_clifford_only()
-                    && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
-                    && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
-                {
-                    let mut backend =
-                        crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed);
-                    let fs_opts = if circuit.num_qubits > 64 {
-                        SimOptions {
-                            probabilities: false,
-                        }
-                    } else {
-                        opts
-                    };
-                    return execute(&mut backend, circuit, &fs_opts);
+    let (decompose, has_partial_independence) = analyze_independence(circuit);
+    if let Some(components) = decompose {
+        let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
+        if kind.is_auto()
+            && circuit.is_clifford_only()
+            && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
+            && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
+        {
+            let mut backend =
+                crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed);
+            let fs_opts = if circuit.num_qubits > 64 {
+                SimOptions {
+                    probabilities: false,
                 }
-                return run_decomposed(&kind, &components, circuit, seed, &opts);
+            } else {
+                opts
+            };
+            return execute(&mut backend, circuit, &fs_opts);
+        }
+        return run_decomposed(&kind, &components, circuit, seed, &opts);
+    }
+    if kind.is_auto() && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS {
+        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
+            if t <= MAX_AUTO_T_COUNT_APPROX
+                && t <= sr_budget
+                && !has_nonunitary_or_classical_ops(circuit)
+            {
+                let sr = if t <= MAX_AUTO_T_COUNT_EXACT {
+                    stabilizer_rank::run_stabilizer_rank(circuit, seed)?
+                } else {
+                    stabilizer_rank::run_stabilizer_rank_approx(
+                        circuit,
+                        AUTO_APPROX_MAX_TERMS,
+                        seed,
+                    )?
+                };
+                return Ok(probs_only_result(sr.probabilities));
             }
-            has_partial_independence = true;
         }
     }
-    if kind.is_auto()
-        && circuit.is_clifford_plus_t()
-        && circuit.has_t_gates()
-        && !has_nonunitary_or_classical_ops(circuit)
-        && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
-    {
-        let t = circuit.t_count();
-        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
-        if t <= MAX_AUTO_T_COUNT_EXACT && t <= sr_budget {
-            let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
-            return Ok(probs_only_result(sr.probabilities));
-        }
-        if t <= MAX_AUTO_T_COUNT_APPROX && t <= sr_budget {
-            let sr =
-                stabilizer_rank::run_stabilizer_rank_approx(circuit, AUTO_APPROX_MAX_TERMS, seed)?;
-            return Ok(probs_only_result(sr.probabilities));
-        }
+    if let Some(tc) = plan_temporal_clifford(&kind, circuit) {
+        return run_temporal_clifford(&tc, seed, opts.probabilities);
     }
-    if let Some(result) = try_temporal_clifford(&kind, circuit, seed) {
-        return result;
-    }
-    match select_dispatch(&kind, circuit, seed, has_partial_independence) {
-        DispatchAction::Backend(mut backend) => execute(&mut *backend, circuit, &opts),
-        DispatchAction::StabilizerRank => {
+    match resolve(&kind, circuit, has_partial_independence) {
+        ExecutionPlan::Backend(plan) => {
+            let mut backend = plan.build(seed);
+            execute(&mut *backend, circuit, &opts)
+        }
+        ExecutionPlan::StabilizerRank => {
             let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
             Ok(probs_only_result(sr.probabilities))
         }
-        DispatchAction::StochasticPauli { num_samples } => {
+        ExecutionPlan::StochasticPauli { num_samples } => {
             Err(crate::error::PrismError::IncompatibleBackend {
                 backend: format!(
                     "{:?}",
@@ -407,7 +406,7 @@ fn run_with_internal(
                 reason: "StochasticPauli produces marginal estimates only; use `simulate(...).marginals()`".into(),
             })
         }
-        DispatchAction::DeterministicPauli { epsilon, max_terms } => {
+        ExecutionPlan::DeterministicPauli { epsilon, max_terms } => {
             Err(crate::error::PrismError::IncompatibleBackend {
                 backend: format!(
                     "{:?}",
@@ -512,30 +511,53 @@ fn compile_measurements_for_kind(
     Ok(sampler)
 }
 
-fn auto_terminal_statevector_candidate(circuit: &Circuit) -> bool {
-    let mut has_partial_independence = false;
+/// Independence analysis shared by the routing prelude in
+/// `run_with_internal`, the shots slow path, and the terminal fast-path
+/// candidacy. Returns the components to decompose with when full
+/// decomposition should fire, plus the partial-independence flag otherwise.
+fn analyze_independence(circuit: &Circuit) -> (Option<Vec<Vec<usize>>>, bool) {
     if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
         let components = circuit.independent_subsystems();
         if components.len() > 1 {
             if should_decompose(&components, circuit.num_qubits) {
-                return false;
+                return (Some(components), false);
             }
-            has_partial_independence = true;
+            return (None, true);
         }
+    }
+    (None, false)
+}
+
+/// `(t_count, stabilizer_rank_budget)` when the auto Clifford+T family gate
+/// passes. Callers apply their own per-entry-point T-count ceilings.
+fn auto_clifford_t_budget(circuit: &Circuit) -> Option<(usize, usize)> {
+    (circuit.is_clifford_plus_t() && circuit.has_t_gates()).then(|| {
+        (
+            circuit.t_count(),
+            stabilizer_rank_budget(circuit.num_qubits),
+        )
+    })
+}
+
+/// Mirrors the routing precedence of `run_with_internal` (decomposition, then
+/// Clifford+T stabilizer rank, then temporal Clifford, then family choice)
+/// through the shared predicates. Keep the check order aligned when either
+/// side changes.
+fn auto_terminal_statevector_candidate(circuit: &Circuit) -> bool {
+    let (decompose, has_partial_independence) = analyze_independence(circuit);
+    if decompose.is_some() {
+        return false;
     }
 
     if !auto_selects_cpu_statevector(circuit, has_partial_independence) {
         return false;
     }
 
-    if circuit.is_clifford_plus_t()
-        && circuit.has_t_gates()
-        && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
-    {
-        let t = circuit.t_count();
-        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
-        if t <= MAX_AUTO_T_COUNT_APPROX && t <= sr_budget {
-            return false;
+    if circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS {
+        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
+            if t <= MAX_AUTO_T_COUNT_APPROX && t <= sr_budget {
+                return false;
+            }
         }
     }
 
@@ -546,7 +568,12 @@ fn terminal_statevector_candidate(kind: &BackendKind, circuit: &Circuit) -> bool
     if kind.is_auto() {
         return auto_terminal_statevector_candidate(circuit);
     }
-    matches!(kind, BackendKind::Statevector)
+    match kind {
+        BackendKind::Statevector => true,
+        #[cfg(feature = "gpu")]
+        BackendKind::StatevectorGpu { .. } => true,
+        _ => false,
+    }
 }
 
 fn try_terminal_statevector_backend(
@@ -568,7 +595,8 @@ fn try_terminal_statevector_backend(
         return Ok(None);
     }
 
-    let mut backend = StatevectorBackend::new(seed);
+    let accel = accel_for(kind, Family::Statevector, stripped.num_qubits);
+    let mut backend = build_statevector(&accel, seed);
     let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
         std::borrow::Cow::Borrowed(&stripped)
     } else {
@@ -614,6 +642,16 @@ pub(crate) fn run_counts_with(
     }
 
     if let Some((backend, meas_map)) = try_terminal_statevector_backend(&kind, circuit, seed)? {
+        if backend.is_gpu_resident() {
+            let probs = backend.probabilities()?;
+            return Ok(sample_counts_from_probs(
+                &probs,
+                &meas_map,
+                circuit.num_classical_bits,
+                num_shots,
+                seed,
+            ));
+        }
         return Ok(sample_counts_from_state(
             backend.state_vector(),
             backend.probability_scale(),
@@ -816,7 +854,7 @@ fn run_expectation_values_with(
                         ),
                     });
                 }
-                expectation_values_statevector(circuit, observables, seed)
+                expectation_values_statevector(&kind, circuit, observables, seed)
             } else {
                 Err(PrismError::IncompatibleBackend {
                     backend: format!("{kind:?}"),
@@ -824,15 +862,28 @@ fn run_expectation_values_with(
                 })
             }
         }
-        BackendKind::Statevector => expectation_values_statevector(circuit, observables, seed),
-        other => Err(PrismError::IncompatibleBackend {
-            backend: format!("{other:?}"),
-            reason: "expectation values support Auto, Statevector, Stabilizer, FactoredStabilizer, StochasticPauli, and DeterministicPauli".into(),
-        }),
+        BackendKind::Statevector => {
+            expectation_values_statevector(&kind, circuit, observables, seed)
+        }
+        #[cfg(feature = "gpu")]
+        BackendKind::StatevectorGpu { .. } => {
+            expectation_values_statevector(&kind, circuit, observables, seed)
+        }
+        other => {
+            #[cfg(feature = "gpu")]
+            let supported = "expectation values support Auto, AutoGpu, Statevector, StatevectorGpu, Stabilizer, FactoredStabilizer, StochasticPauli, and DeterministicPauli";
+            #[cfg(not(feature = "gpu"))]
+            let supported = "expectation values support Auto, Statevector, Stabilizer, FactoredStabilizer, StochasticPauli, and DeterministicPauli";
+            Err(PrismError::IncompatibleBackend {
+                backend: format!("{other:?}"),
+                reason: supported.into(),
+            })
+        }
     }
 }
 
 fn expectation_values_statevector(
+    kind: &BackendKind,
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     seed: u64,
@@ -843,7 +894,8 @@ fn expectation_values_statevector(
         .map(|obs| pauli_masks(obs, circuit.num_qubits))
         .collect::<Result<Vec<_>>>()?;
 
-    let mut backend = StatevectorBackend::new(seed);
+    let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
+    let mut backend = build_statevector(&accel, seed);
     let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
         std::borrow::Cow::Borrowed(circuit)
     } else {
@@ -853,7 +905,13 @@ fn expectation_values_statevector(
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
 
-    let state = backend.state_vector();
+    let exported;
+    let state: &[Complex64] = if backend.is_gpu_resident() {
+        exported = backend.export_statevector()?;
+        &exported
+    } else {
+        backend.state_vector()
+    };
     let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
     Ok(masks
         .iter()
@@ -1052,14 +1110,25 @@ pub(crate) fn run_shots_with(
     }
 
     if let Some((backend, meas_map)) = try_terminal_statevector_backend(&kind, circuit, seed)? {
-        let shots = sample_shots_from_state(
-            backend.state_vector(),
-            backend.probability_scale(),
-            &meas_map,
-            circuit.num_classical_bits,
-            num_shots,
-            seed,
-        );
+        let shots = if backend.is_gpu_resident() {
+            let probs = backend.probabilities()?;
+            sample_shots_from_probs(
+                &probs,
+                &meas_map,
+                circuit.num_classical_bits,
+                num_shots,
+                seed,
+            )
+        } else {
+            sample_shots_from_state(
+                backend.state_vector(),
+                backend.probability_scale(),
+                &meas_map,
+                circuit.num_classical_bits,
+                num_shots,
+                seed,
+            )
+        };
         return Ok(ShotsResult {
             shots,
             num_classical_bits: circuit.num_classical_bits,
@@ -1071,14 +1140,12 @@ pub(crate) fn run_shots_with(
     }
     if kind.is_auto()
         && circuit.has_terminal_measurements_only()
-        && circuit.is_clifford_plus_t()
-        && circuit.has_t_gates()
         && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
     {
-        let t = circuit.t_count();
-        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
-        if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
-            return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
+            if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
+                return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+            }
         }
     }
 
@@ -1107,22 +1174,7 @@ pub(crate) fn run_shots_with(
         validate_explicit_backend(&kind, circuit)?;
     }
 
-    let mut has_partial_independence = false;
-    let decompose = if circuit.num_qubits >= MIN_DECOMPOSITION_QUBITS {
-        let comps = circuit.independent_subsystems();
-        if comps.len() > 1 {
-            if should_decompose(&comps, circuit.num_qubits) {
-                Some(comps)
-            } else {
-                has_partial_independence = true;
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let (decompose, has_partial_independence) = analyze_independence(circuit);
 
     if matches!(kind, BackendKind::StabilizerRank) {
         return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
@@ -1136,35 +1188,55 @@ pub(crate) fn run_shots_with(
             reason: "Pauli propagation backends do not support mid-circuit measurements".into(),
         });
     }
-    if kind.is_auto() && circuit.is_clifford_plus_t() && circuit.has_t_gates() {
-        let t = circuit.t_count();
-        let sr_budget = stabilizer_rank_budget(circuit.num_qubits);
-        if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
-            return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+    if kind.is_auto() {
+        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
+            if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
+                return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
+            }
         }
     }
 
     if has_temporal_clifford_opportunity(&kind, circuit) {
-        return run_shots_fallback(&kind, circuit, num_shots, seed);
+        if decompose.is_none() {
+            if let Some(tc) = plan_temporal_clifford(&kind, circuit) {
+                return collect_shots(circuit, num_shots, seed, |shot_seed| {
+                    Ok(run_temporal_clifford(&tc, shot_seed, false)?.classical_bits)
+                });
+            }
+        }
+        // Decomposable circuits with a temporal prefix keep the per-shot
+        // full-pipeline route; the prefix spans blocks that decomposition
+        // would otherwise split.
+        let opts = SimOptions::classical_only();
+        return collect_shots(circuit, num_shots, seed, |shot_seed| {
+            Ok(run_with_internal(kind.clone(), circuit, shot_seed, opts)?.classical_bits)
+        });
     }
 
-    let supports_fused = supports_fused_for_kind(&kind, circuit);
-    let mut shots = Vec::with_capacity(num_shots);
     let opts = SimOptions::classical_only();
 
     if let Some(ref comps) = decompose {
         let partitions = circuit.partition_subcircuits(comps);
-        let fused_blocks: Vec<_> = partitions
+        let block_plans: Vec<BackendPlan> = partitions
             .iter()
             .map(|(sub, _, _)| {
-                crate::circuit::fusion::fuse_circuit(sub, supports_fused_for_kind(&kind, sub))
+                if !kind.is_auto() {
+                    validate_explicit_backend(&kind, sub)?;
+                }
+                Ok(resolve_backend(&kind, sub, false))
+            })
+            .collect::<Result<_>>()?;
+        let fused_blocks: Vec<_> = partitions
+            .iter()
+            .zip(&block_plans)
+            .map(|((sub, _, _), plan)| {
+                crate::circuit::fusion::fuse_circuit(sub, plan.supports_fused())
             })
             .collect();
 
-        for i in 0..num_shots {
-            let shot_seed = seed.wrapping_add(i as u64);
+        collect_shots(circuit, num_shots, seed, |shot_seed| {
             let result = run_decomposed_prefused(
-                &kind,
+                &block_plans,
                 comps,
                 &partitions,
                 &fused_blocks,
@@ -1172,23 +1244,52 @@ pub(crate) fn run_shots_with(
                 &opts,
                 circuit,
             )?;
-            shots.push(result.classical_bits);
-        }
+            Ok(result.classical_bits)
+        })
     } else {
-        let fused = crate::circuit::fusion::fuse_circuit(circuit, supports_fused);
+        let plan = resolve_backend(&kind, circuit, has_partial_independence);
+        let fused = crate::circuit::fusion::fuse_circuit(circuit, plan.supports_fused());
 
-        for i in 0..num_shots {
-            let shot_seed = seed.wrapping_add(i as u64);
-            let mut backend = select_backend(&kind, circuit, shot_seed, has_partial_independence);
-            let result = execute_circuit(&mut *backend, &fused, &opts)?;
-            shots.push(result.classical_bits);
-        }
+        collect_shots(circuit, num_shots, seed, |shot_seed| {
+            let mut backend = plan.build(shot_seed);
+            Ok(execute_circuit(&mut *backend, &fused, &opts)?.classical_bits)
+        })
     }
+}
 
+fn collect_shots(
+    circuit: &Circuit,
+    num_shots: usize,
+    seed: u64,
+    mut shot: impl FnMut(u64) -> Result<Vec<bool>>,
+) -> Result<ShotsResult> {
+    let mut shots = Vec::with_capacity(num_shots);
+    for i in 0..num_shots {
+        shots.push(shot(seed.wrapping_add(i as u64))?);
+    }
     Ok(ShotsResult {
         shots,
         num_classical_bits: circuit.num_classical_bits,
     })
+}
+
+/// Family choice for auto-routed non-Pauli noise trajectories. Restricted to
+/// families whose trajectory operations (1q Kraus, qubit probability, reduced
+/// density matrix, reset) are supported; the statevector leaf carries the
+/// kind's acceleration.
+fn general_noise_plan(kind: &BackendKind, circuit: &Circuit) -> BackendPlan {
+    let family = if !circuit.has_entangling_gates() {
+        Family::ProductState
+    } else if circuit.num_qubits > max_statevector_qubits() {
+        if circuit.is_sparse_friendly() {
+            Family::Sparse
+        } else {
+            Family::Mps
+        }
+    } else {
+        Family::Statevector
+    };
+    plan_for_family(kind, family, circuit.num_qubits)
 }
 
 /// Execute a noisy circuit for multiple shots with explicit backend selection.
@@ -1198,22 +1299,6 @@ pub(crate) fn run_shots_with(
 /// For all other cases, falls back to per-shot simulation with noise injection.
 /// The compiled noisy path is limited to terminal measurements with no resets
 /// or classical conditionals.
-fn auto_general_noise_backend(circuit: &Circuit) -> BackendKind {
-    if !circuit.has_entangling_gates() {
-        BackendKind::ProductState
-    } else if circuit.num_qubits > max_statevector_qubits() {
-        if circuit.is_sparse_friendly() {
-            BackendKind::Sparse
-        } else {
-            BackendKind::Mps {
-                max_bond_dim: AUTO_MPS_BOND_DIM,
-            }
-        }
-    } else {
-        BackendKind::Statevector
-    }
-}
-
 pub(crate) fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
@@ -1309,38 +1394,19 @@ pub(crate) fn run_shots_with_noise(
         }
     }
 
-    let trajectory_kind = if kind.is_auto() && !noise_model.is_pauli_only() {
-        auto_general_noise_backend(circuit)
+    let plan = if kind.is_auto() && !noise_model.is_pauli_only() {
+        general_noise_plan(&kind, circuit)
     } else {
-        kind
+        resolve_backend(&kind, circuit, false)
     };
-
     trajectory::run_trajectories(
-        |s| select_backend(&trajectory_kind, circuit, s, false),
+        |s| plan.build(s),
         circuit,
         noise_model,
         num_shots,
         seed,
+        plan.is_gpu(),
     )
-}
-
-fn run_shots_fallback(
-    kind: &BackendKind,
-    circuit: &Circuit,
-    num_shots: usize,
-    seed: u64,
-) -> Result<ShotsResult> {
-    let mut shots = Vec::with_capacity(num_shots);
-    let opts = SimOptions::classical_only();
-    for i in 0..num_shots {
-        let shot_seed = seed.wrapping_add(i as u64);
-        let result = run_with_internal(kind.clone(), circuit, shot_seed, opts)?;
-        shots.push(result.classical_bits);
-    }
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
 }
 
 #[cfg(test)]
@@ -1476,21 +1542,21 @@ mod tests {
     #[test]
     fn test_auto_selects_product() {
         let circuit = make_product_circuit();
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, false);
+        let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
         assert_eq!(backend.name(), "productstate");
     }
 
     #[test]
     fn test_auto_selects_stabilizer() {
         let circuit = make_clifford_circuit();
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, false);
+        let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
         assert_eq!(backend.name(), "stabilizer");
     }
 
     #[test]
     fn test_auto_selects_statevector() {
         let circuit = make_general_circuit();
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, false);
+        let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
         assert_eq!(backend.name(), "statevector");
     }
 
@@ -1583,7 +1649,7 @@ mod tests {
         circuit.add_gate(Gate::H, &[0]);
         circuit.add_gate(Gate::T, &[0]);
         circuit.add_gate(Gate::Cx, &[0, 1]);
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, false);
+        let backend = resolve_backend(&BackendKind::Auto, &circuit, false).build(42);
         assert_eq!(backend.name(), "statevector");
     }
 
@@ -1593,14 +1659,14 @@ mod tests {
         circuit.add_gate(Gate::H, &[0]);
         circuit.add_gate(Gate::T, &[0]);
         circuit.add_gate(Gate::Cx, &[0, 1]);
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, true);
+        let backend = resolve_backend(&BackendKind::Auto, &circuit, true).build(42);
         assert_eq!(backend.name(), "factored");
     }
 
     #[test]
     fn test_auto_ignores_partial_independence_when_no_entangling() {
         let circuit = make_product_circuit();
-        let backend = select_backend(&BackendKind::Auto, &circuit, 42, true);
+        let backend = resolve_backend(&BackendKind::Auto, &circuit, true).build(42);
         assert_eq!(backend.name(), "productstate");
     }
 
@@ -1787,12 +1853,12 @@ mod tests {
 
         let (sub_a, _, _) = c.extract_subcircuit(&components[0]);
         assert!(sub_a.is_clifford_only());
-        let backend_a = select_backend(&BackendKind::Auto, &sub_a, 42, false);
+        let backend_a = resolve_backend(&BackendKind::Auto, &sub_a, false).build(42);
         assert_eq!(backend_a.name(), "stabilizer");
 
         let (sub_b, _, _) = c.extract_subcircuit(&components[1]);
         assert!(!sub_b.is_clifford_only());
-        let backend_b = select_backend(&BackendKind::Auto, &sub_b, 43, false);
+        let backend_b = resolve_backend(&BackendKind::Auto, &sub_b, false).build(43);
         assert_eq!(backend_b.name(), "statevector");
 
         // End-to-end: auto (decomposed) must match monolithic statevector
@@ -2101,7 +2167,7 @@ mod tests {
             BackendKind::Mps { max_bond_dim: 64 },
         ] {
             let label = format!("{backend_kind:?}/post-measure");
-            let mut backend = select_backend(&backend_kind, &circuit, 42, false);
+            let mut backend = resolve_backend(&backend_kind, &circuit, false).build(42);
             run_on(backend.as_mut(), &circuit).unwrap();
             let state = backend.export_statevector().unwrap();
             assert_unit_norm(&state, &label);
@@ -2117,7 +2183,7 @@ mod tests {
             (BackendKind::Mps { max_bond_dim: 128 }, "mps/qft8"),
             (BackendKind::TensorNetwork, "tn/qft8"),
         ] {
-            let mut backend = select_backend(&kind, &circuit, 42, false);
+            let mut backend = resolve_backend(&kind, &circuit, false).build(42);
             run_on(backend.as_mut(), &circuit).unwrap();
             let state = backend.export_statevector().unwrap();
             assert_unit_norm(&state, label);
@@ -3157,5 +3223,321 @@ mod tests {
             .unwrap()
             .to_vec();
         assert_probs_match(BackendKind::StabilizerRank, &circuit, &sv_probs, 1e-6);
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod terminal_gpu_stub_tests {
+    use super::*;
+    use crate::gates::Gate;
+    use crate::gpu::GpuContext;
+
+    fn terminal_circuit(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, n);
+        for q in 0..n {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..n {
+            c.add_measure(q, q);
+        }
+        c
+    }
+
+    fn auto_gpu_stub() -> BackendKind {
+        BackendKind::AutoGpu {
+            context: GpuContext::stub_for_tests(),
+        }
+    }
+
+    /// The terminal fast path resolves the accel through the capability table.
+    /// On the stub the VRAM gate fails closed, so `AutoGpu` must take the
+    /// identical host path as `Auto`: same sampler, same RNG stream, byte-equal
+    /// counts.
+    #[test]
+    fn auto_gpu_terminal_counts_match_auto_on_stub() {
+        let circuit = terminal_circuit(16);
+        let auto_counts = run_counts_with(BackendKind::Auto, &circuit, 500, 42).unwrap();
+        let gpu_counts = run_counts_with(auto_gpu_stub(), &circuit, 500, 42).unwrap();
+        assert_eq!(auto_counts, gpu_counts);
+    }
+
+    #[test]
+    fn auto_gpu_terminal_shots_match_auto_on_stub() {
+        let circuit = terminal_circuit(16);
+        let auto_shots = run_shots_with(BackendKind::Auto, &circuit, 64, 42).unwrap();
+        let gpu_shots = run_shots_with(auto_gpu_stub(), &circuit, 64, 42).unwrap();
+        assert_eq!(auto_shots.shots, gpu_shots.shots);
+    }
+
+    /// Explicit `StatevectorGpu` is a terminal-fast-path candidate. Above the
+    /// crossover it resolves hard, so the stub's failed allocation surfaces
+    /// instead of falling back, proving the device path was reached.
+    #[test]
+    fn statevector_gpu_terminal_counts_hard_above_crossover_on_stub() {
+        let circuit = terminal_circuit(16);
+        let kind = BackendKind::StatevectorGpu {
+            context: GpuContext::stub_for_tests(),
+        };
+        let err = run_counts_with(kind, &circuit, 100, 42).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::PrismError::BackendUnsupported { .. }
+        ));
+    }
+
+    /// Below the crossover the explicit GPU kind resolves to the host and must
+    /// match explicit `Statevector` byte-exact through the terminal path.
+    #[test]
+    fn statevector_gpu_terminal_counts_below_crossover_match_statevector() {
+        let circuit = terminal_circuit(6);
+        let kind = BackendKind::StatevectorGpu {
+            context: GpuContext::stub_for_tests(),
+        };
+        let sv = run_counts_with(BackendKind::Statevector, &circuit, 200, 42).unwrap();
+        let gpu = run_counts_with(kind, &circuit, 200, 42).unwrap();
+        assert_eq!(sv, gpu);
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod expectation_gpu_stub_tests {
+    use super::unified_pauli::{PauliAxis, PauliTerm};
+    use super::*;
+    use crate::gates::Gate;
+    use crate::gpu::GpuContext;
+
+    fn dense_circuit(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        c
+    }
+
+    fn observables() -> Vec<Vec<PauliTerm>> {
+        vec![
+            vec![PauliTerm::new(0, PauliAxis::Z)],
+            vec![
+                PauliTerm::new(1, PauliAxis::X),
+                PauliTerm::new(2, PauliAxis::Y),
+            ],
+        ]
+    }
+
+    #[test]
+    fn auto_gpu_expectation_matches_auto_on_stub() {
+        let circuit = dense_circuit(16);
+        let auto_vals =
+            run_expectation_values_with(BackendKind::Auto, &circuit, &observables(), 42).unwrap();
+        let gpu_vals = run_expectation_values_with(
+            BackendKind::AutoGpu {
+                context: GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            &observables(),
+            42,
+        )
+        .unwrap();
+        assert_eq!(auto_vals, gpu_vals);
+    }
+
+    /// Explicit `StatevectorGpu` expectation values resolve hard above the
+    /// crossover, so the stub's failed allocation surfaces.
+    #[test]
+    fn statevector_gpu_expectation_hard_above_crossover_on_stub() {
+        let circuit = dense_circuit(16);
+        let err = run_expectation_values_with(
+            BackendKind::StatevectorGpu {
+                context: GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            &observables(),
+            42,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::PrismError::BackendUnsupported { .. }
+        ));
+    }
+
+    #[test]
+    fn statevector_gpu_expectation_below_crossover_matches_statevector() {
+        let circuit = dense_circuit(6);
+        let sv =
+            run_expectation_values_with(BackendKind::Statevector, &circuit, &observables(), 42)
+                .unwrap();
+        let gpu = run_expectation_values_with(
+            BackendKind::StatevectorGpu {
+                context: GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            &observables(),
+            42,
+        )
+        .unwrap();
+        assert_eq!(sv, gpu);
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod noise_gpu_stub_tests {
+    use super::*;
+    use crate::gates::Gate;
+    use crate::gpu::GpuContext;
+
+    fn noisy_circuit(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, n);
+        for q in 0..n {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..n {
+            c.add_measure(q, q);
+        }
+        c
+    }
+
+    /// AutoGpu + non-Pauli noise resolves the trajectory plan through the
+    /// capability table. On the stub the VRAM gate fails closed, so the run
+    /// must be byte-identical to `Auto`.
+    #[test]
+    fn auto_gpu_general_noise_matches_auto_on_stub() {
+        let circuit = noisy_circuit(14);
+        let noise = noise::NoiseModel::with_amplitude_damping(&circuit, 0.05);
+        let auto_shots = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 16, 42).unwrap();
+        let gpu_shots = run_shots_with_noise(
+            BackendKind::AutoGpu {
+                context: GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            &noise,
+            16,
+            42,
+        )
+        .unwrap();
+        assert_eq!(auto_shots.shots, gpu_shots.shots);
+    }
+
+    /// A non-entangling circuit resolves to the product-state family for
+    /// general noise under AutoGpu, per the capability table (no GPU row).
+    #[test]
+    fn auto_gpu_general_noise_product_circuit_matches_auto() {
+        let mut circuit = Circuit::new(6, 6);
+        for q in 0..6 {
+            circuit.add_gate(Gate::Rx(0.4), &[q]);
+        }
+        for q in 0..6 {
+            circuit.add_measure(q, q);
+        }
+        let noise = noise::NoiseModel::with_amplitude_damping(&circuit, 0.05);
+        let auto_shots = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 64, 42).unwrap();
+        let gpu_shots = run_shots_with_noise(
+            BackendKind::AutoGpu {
+                context: GpuContext::stub_for_tests(),
+            },
+            &circuit,
+            &noise,
+            64,
+            42,
+        )
+        .unwrap();
+        assert_eq!(auto_shots.shots, gpu_shots.shots);
+    }
+}
+
+#[cfg(test)]
+mod terminal_candidate_matrix_tests {
+    use super::*;
+    use crate::gates::Gate;
+
+    fn rx_cx_chain(circuit: &mut Circuit, qubits: std::ops::Range<usize>) {
+        for q in qubits.clone() {
+            circuit.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        for q in qubits.start..qubits.end - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+
+    #[test]
+    fn dense_entangled_circuit_is_candidate() {
+        let mut circuit = Circuit::new(8, 0);
+        rx_cx_chain(&mut circuit, 0..8);
+        assert!(auto_terminal_statevector_candidate(&circuit));
+    }
+
+    #[test]
+    fn decomposable_circuit_is_not_candidate() {
+        let mut circuit = Circuit::new(12, 0);
+        rx_cx_chain(&mut circuit, 0..6);
+        rx_cx_chain(&mut circuit, 6..12);
+        assert!(!auto_terminal_statevector_candidate(&circuit));
+    }
+
+    #[test]
+    fn partial_independent_circuit_is_not_candidate() {
+        let mut circuit = Circuit::new(10, 0);
+        rx_cx_chain(&mut circuit, 0..8);
+        rx_cx_chain(&mut circuit, 8..10);
+        assert!(!auto_terminal_statevector_candidate(&circuit));
+    }
+
+    /// A Clifford+T circuit inside the stabilizer-rank budget routes to the
+    /// rank engine; one T past the budget falls back to the statevector and
+    /// becomes a candidate. Pins the shared budget helper at its boundary.
+    #[test]
+    fn clifford_t_budget_boundary_flips_candidacy() {
+        let n = 10;
+        let budget = stabilizer_rank_budget(n);
+        assert_eq!(budget, 2);
+
+        let mut within = Circuit::new(n, 0);
+        within.add_gate(Gate::H, &[0]);
+        for q in 0..n - 1 {
+            within.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..budget {
+            within.add_gate(Gate::T, &[q]);
+        }
+        assert!(!auto_terminal_statevector_candidate(&within));
+
+        let mut beyond = Circuit::new(n, 0);
+        beyond.add_gate(Gate::H, &[0]);
+        for q in 0..n - 1 {
+            beyond.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..budget + 1 {
+            beyond.add_gate(Gate::T, &[q]);
+        }
+        assert!(auto_terminal_statevector_candidate(&beyond));
+    }
+
+    #[test]
+    fn temporal_prefix_circuit_is_not_candidate() {
+        let n = 8;
+        let mut circuit = Circuit::new(n, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        for _ in 0..3 {
+            for q in 0..n - 1 {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        assert!(has_temporal_clifford_opportunity(
+            &BackendKind::Auto,
+            &circuit
+        ));
+        assert!(!auto_terminal_statevector_candidate(&circuit));
     }
 }

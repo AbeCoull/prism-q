@@ -27,6 +27,16 @@ impl<T: DeviceRepr + ValidAsZeroBits> GpuBuffer<T> {
 }
 
 impl<T: DeviceRepr> GpuBuffer<T> {
+    /// Allocate a device buffer initialized from `host` in one transfer,
+    /// skipping the zero fill of [`alloc_zeros`](Self::alloc_zeros).
+    pub fn from_host(device: &GpuDevice, host: &[T]) -> Result<Self> {
+        let stream = device.stream()?;
+        let slice = stream
+            .clone_htod(host)
+            .map_err(|e| driver_err("from_host", e))?;
+        Ok(Self { slice })
+    }
+
     /// Copy `host.len()` elements from host to device (in-place).
     pub fn copy_from_host(&mut self, device: &GpuDevice, host: &[T]) -> Result<()> {
         let stream = device.stream()?;

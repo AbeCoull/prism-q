@@ -967,6 +967,40 @@ mod gpu_scaffold {
         assert!(matches!(err, PrismError::BackendUnsupported { .. }));
     }
 
+    /// `with_gpu_auto` is the soft (fail-closed) mode. On the stub context,
+    /// `GpuTableau::new` fails at `init`, but instead of surfacing the error the
+    /// backend must degrade to the host tableau and run correctly. A GHZ chain
+    /// then measures deterministically-correlated bits, proving the fallback
+    /// produced a working CPU stabilizer rather than a corrupt half-state.
+    #[test]
+    fn with_gpu_auto_falls_back_to_host_on_stub() {
+        use crate::gates::Gate;
+
+        let ctx = GpuContext::stub_for_tests();
+        let mut backend = StabilizerBackend::new(42).with_gpu_auto(ctx);
+        backend
+            .init(4, 4)
+            .expect("soft mode must fall back to host, not error");
+        assert_eq!(backend.num_qubits(), 4);
+
+        let mut circuit = Circuit::new(4, 4);
+        circuit.add_gate(Gate::H, &[0]);
+        for i in 0..3 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        for i in 0..4 {
+            circuit.add_measure(i, i);
+        }
+        for inst in &circuit.instructions {
+            backend.apply(inst).unwrap();
+        }
+        let bits = backend.classical_results();
+        assert!(
+            bits.iter().all(|&b| b == bits[0]),
+            "GHZ measurement bits must all agree: {bits:?}"
+        );
+    }
+
     /// Constructing with `with_gpu(ctx)` but then not initialising must leave
     /// the backend in a usable (context-only) state.
     #[test]

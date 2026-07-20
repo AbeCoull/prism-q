@@ -50,6 +50,20 @@ pub(crate) fn max_tensor_probability_qubits() -> usize {
     })
 }
 
+/// Measured-bit cap for the dense terminal-sampling path, which materializes
+/// one outcome distribution plus one CDF (two f64 per outcome). Above the cap
+/// the samplers stream with sorted thresholds instead.
+pub(crate) fn max_dense_outcome_bits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        configured_or_detected_dense_qubits(
+            "PRISM_MAX_DENSE_OUTCOME_BITS",
+            2 * size_of::<f64>(),
+            "dense outcome sampling cap",
+        )
+    })
+}
+
 fn configured_or_detected_dense_qubits(
     env_var: &str,
     bytes_per_basis_state: usize,

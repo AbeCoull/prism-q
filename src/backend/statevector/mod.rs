@@ -427,6 +427,20 @@ impl StatevectorBackend {
         self.pending_norm * self.pending_norm
     }
 
+    /// Whether the amplitudes live in device memory. When true, the host
+    /// `state_vector()` slice is empty; read the state through
+    /// [`probabilities`](crate::backend::Backend::probabilities) or
+    /// [`export_statevector`](crate::backend::Backend::export_statevector).
+    #[cfg(feature = "gpu")]
+    pub(crate) fn is_gpu_resident(&self) -> bool {
+        self.gpu_state.is_some()
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    pub(crate) fn is_gpu_resident(&self) -> bool {
+        false
+    }
+
     /// Initialize the backend from a pre-computed state vector.
     ///
     /// Accepts ownership of the amplitude vector, bypassing the default |0...0⟩
@@ -449,9 +463,26 @@ impl StatevectorBackend {
             });
         }
         self.num_qubits = dim.trailing_zeros() as usize;
-        self.state = state;
         self.pending_norm = 1.0;
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+
+        #[cfg(feature = "gpu")]
+        if let Some(ctx) = self.gpu_context.clone() {
+            match GpuState::from_host_amplitudes(ctx, &state) {
+                Ok(gpu) => {
+                    self.state.clear();
+                    self.gpu_state = Some(gpu);
+                    return Ok(());
+                }
+                Err(e) if !self.gpu_soft => return Err(e),
+                Err(_) => {
+                    self.gpu_context = None;
+                    self.gpu_state = None;
+                }
+            }
+        }
+
+        self.state = state;
         Ok(())
     }
 
@@ -571,7 +602,10 @@ impl Backend for StatevectorBackend {
                     return Ok(());
                 }
                 Err(e) if !self.gpu_soft => return Err(e),
-                Err(_) => self.gpu_context = None,
+                Err(_) => {
+                    self.gpu_context = None;
+                    self.gpu_state = None;
+                }
             }
         }
 

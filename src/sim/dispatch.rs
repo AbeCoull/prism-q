@@ -1086,8 +1086,20 @@ mod dispatch_matrix_tests {
         c
     }
 
-    fn oversize_sparse() -> Circuit {
-        let n = max_statevector_qubits() + 1;
+    /// One qubit past the statevector memory cap, or `None` when memory
+    /// detection failed and the cap is disabled (no width is oversize then).
+    fn oversize_qubits() -> Option<usize> {
+        let cap = max_statevector_qubits();
+        if cap >= usize::BITS as usize {
+            eprintln!(
+                "SKIP: statevector qubit cap disabled on this host; skipping oversize checks"
+            );
+            return None;
+        }
+        Some(cap + 1)
+    }
+
+    fn oversize_sparse(n: usize) -> Circuit {
         let mut c = Circuit::new(n, 0);
         for q in 0..n {
             c.add_gate(Gate::T, &[q]);
@@ -1098,8 +1110,7 @@ mod dispatch_matrix_tests {
         c
     }
 
-    fn oversize_dense() -> Circuit {
-        let n = max_statevector_qubits() + 1;
+    fn oversize_dense(n: usize) -> Circuit {
         let mut c = Circuit::new(n, 0);
         for q in 0..n {
             c.add_gate(Gate::Rx(0.3), &[q]);
@@ -1147,6 +1158,7 @@ mod dispatch_matrix_tests {
     /// (small circuits by crossover, large ones by the fail-closed VRAM gate).
     #[test]
     fn auto_family_matrix() {
+        let oversize = oversize_qubits();
         for kind in auto_kinds() {
             assert_cpu_family(&kind, &product(6), false, Family::ProductState);
             assert_cpu_family(&kind, &clifford(6), false, Family::Stabilizer);
@@ -1154,15 +1166,18 @@ mod dispatch_matrix_tests {
             assert_cpu_family(&kind, &dense(8), false, Family::Statevector);
             assert_cpu_family(&kind, &dense(16), false, Family::Statevector);
             assert_cpu_family(&kind, &dense(8), true, Family::Factored);
-            assert_cpu_family(&kind, &oversize_sparse(), false, Family::Sparse);
-            assert_cpu_family(&kind, &oversize_dense(), false, Family::Mps);
+            if let Some(n) = oversize {
+                assert_cpu_family(&kind, &oversize_sparse(n), false, Family::Sparse);
+                assert_cpu_family(&kind, &oversize_dense(n), false, Family::Mps);
+            }
         }
     }
 
     #[test]
     fn auto_oversize_mps_uses_auto_bond_dim() {
+        let Some(n) = oversize_qubits() else { return };
         for kind in auto_kinds() {
-            let plan = resolved(&kind, &oversize_dense(), false);
+            let plan = resolved(&kind, &oversize_dense(n), false);
             assert!(matches!(
                 plan,
                 BackendPlan::Mps {

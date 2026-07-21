@@ -214,7 +214,41 @@ fn detect_physical_memory_bytes() -> Option<u64> {
     Some(status.ull_total_phys)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn detect_physical_memory_bytes() -> Option<u64> {
+    // SAFETY: signature matches the documented libSystem sysctlbyname ABI:
+    // a C-string name, an output buffer with its length passed by pointer,
+    // and an unused input buffer, returning 0 on success.
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *mut std::ffi::c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+
+    let mut memsize: u64 = 0;
+    let mut len = size_of::<u64>();
+    // SAFETY: oldp points to an 8-byte buffer and oldlenp holds its size;
+    // hw.memsize is a u64 sysctl.
+    let ret = unsafe {
+        sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut memsize as *mut u64).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || len != size_of::<u64>() || memsize == 0 {
+        return None;
+    }
+    Some(memsize)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn detect_physical_memory_bytes() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {

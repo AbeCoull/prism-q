@@ -759,10 +759,7 @@ fn test_sgi_500q_clifford_d10_matches_gate_by_gate() {
     use crate::circuits;
     let n = 500;
     let mut circuit = circuits::clifford_heavy_circuit(n, 10, 42);
-    circuit.num_classical_bits = n;
-    for i in 0..n {
-        circuit.add_measure(i, i);
-    }
+    circuit.measure_all();
 
     let mut b1 = StabilizerBackend::new(42);
     b1.init(circuit.num_qubits, circuit.num_classical_bits)
@@ -852,10 +849,7 @@ fn test_pcc_random_pairs_matches_gate_by_gate() {
     use crate::circuits;
     let n = 500;
     let mut circuit = circuits::clifford_random_pairs(n, 10, 42);
-    circuit.num_classical_bits = n;
-    for i in 0..n {
-        circuit.add_measure(i, i);
-    }
+    circuit.measure_all();
 
     let mut b1 = StabilizerBackend::new(42);
     b1.init(circuit.num_qubits, circuit.num_classical_bits)

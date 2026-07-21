@@ -100,6 +100,18 @@ impl Circuit {
         });
     }
 
+    /// Measure every qubit into the classical bit of the same index, growing
+    /// `num_classical_bits` to `num_qubits` if needed.
+    pub fn measure_all(&mut self) {
+        let n = self.num_qubits;
+        if self.num_classical_bits < n {
+            self.num_classical_bits = n;
+        }
+        for q in 0..n {
+            self.add_measure(q, q);
+        }
+    }
+
     /// Append a reset operation, returning the qubit to |0⟩.
     ///
     /// # Panics

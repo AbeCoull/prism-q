@@ -429,29 +429,41 @@ mod tests {
     fn trajectory_pauli_matches_brute_force() {
         let n = 5;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
 
-        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+        let num_shots = 5000;
 
         let factory = |s: u64| -> Box<dyn Backend> {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
+        let trajectory = run_trajectories(factory, &circuit, &noise, num_shots, 42, false).unwrap();
+        let brute = crate::sim::noise::run_shots_noisy_brute_with(
+            |s| Box::new(crate::backend::stabilizer::StabilizerBackend::new(s)),
+            &circuit,
+            &noise,
+            num_shots,
+            42,
+        )
+        .unwrap();
 
-        let result = run_trajectories(factory, &circuit, &noise, 500, 42, false).unwrap();
-        assert_eq!(result.shots.len(), 500);
+        let traj_coh = trajectory.coherent_fraction();
+        let brute_coh = brute.coherent_fraction();
+        // 5 sigma for a pairwise comparison at 5000 shots.
+        assert!(
+            (traj_coh - brute_coh).abs() < 0.05,
+            "coherent fraction: trajectory={traj_coh:.3}, brute={brute_coh:.3}"
+        );
+        assert!(traj_coh < 1.0, "noise should produce non-GHZ outcomes");
 
-        let all_zero: Vec<bool> = vec![false; n];
-        let all_one: Vec<bool> = vec![true; n];
-        let num_00 = result.shots.iter().filter(|s| **s == all_zero).count();
-        let num_11 = result.shots.iter().filter(|s| **s == all_one).count();
-        let num_other = 500 - num_00 - num_11;
-
-        assert!(num_other > 0, "noise should produce non-GHZ outcomes");
-        assert!(num_00 > 50, "should still have many |00...0> outcomes");
-        assert!(num_11 > 50, "should still have many |11...1> outcomes");
+        for bit in 0..n {
+            let t = trajectory.marginal(bit);
+            let b = brute.marginal(bit);
+            assert!(
+                (t - b).abs() < 0.05,
+                "bit {bit}: trajectory marginal {t:.3} vs brute {b:.3}"
+            );
+        }
     }
 
     #[test]
@@ -558,10 +570,7 @@ mod tests {
     fn zero_noise_trajectory_deterministic() {
         let n = 3;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
 
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
         let factory = |s: u64| -> Box<dyn Backend> {

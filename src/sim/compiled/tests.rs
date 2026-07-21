@@ -19,11 +19,7 @@ fn ghz_rank_is_one() {
 fn bell_pairs_rank() {
     let n_pairs = 5;
     let mut c = circuits::independent_bell_pairs(n_pairs);
-    let n = c.num_qubits;
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let sampler = compile_measurements(&c, 42).unwrap();
     assert_eq!(sampler.rank(), n_pairs, "5 Bell pairs should have rank 5");
 }
@@ -32,10 +28,7 @@ fn bell_pairs_rank() {
 fn random_clifford_rank_is_n() {
     let n = 10;
     let mut c = circuits::clifford_heavy_circuit(n, 50, 42);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let sampler = compile_measurements(&c, 42).unwrap();
     assert_eq!(
         sampler.rank(),
@@ -172,10 +165,7 @@ fn single_h_measure() {
 fn ghz_distribution() {
     let n = 10;
     let mut c = circuits::ghz_circuit(n);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let result = run_shots_compiled(&c, 10_000, 42).unwrap();
     let counts = result.counts();
 
@@ -206,11 +196,7 @@ fn ghz_distribution() {
 fn bell_pairs_always_agree() {
     let n_pairs = 5;
     let mut c = circuits::independent_bell_pairs(n_pairs);
-    let n = c.num_qubits;
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let result = run_shots_compiled(&c, 10_000, 42).unwrap();
 
     for shot in &result.shots {
@@ -228,10 +214,7 @@ fn bell_pairs_always_agree() {
 fn random_clifford_marginals() {
     let n = 10;
     let mut c = circuits::clifford_heavy_circuit(n, 10, 42);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let compiled = run_shots_compiled(&c, 50_000, 42).unwrap();
     let reference = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 50_000, 42).unwrap();
 
@@ -251,10 +234,7 @@ fn random_clifford_marginals() {
 fn lut_grouped_sampling_50q() {
     let n = 50;
     let mut c = circuits::clifford_heavy_circuit(n, 10, 42);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let sampler = compile_measurements(&c, 42).unwrap();
     assert!(sampler.rank() >= 40, "50q should have high rank for LUT");
     assert!(sampler.lut.is_some(), "rank >= 8 should build LUT");
@@ -278,10 +258,7 @@ fn lut_grouped_sampling_50q() {
 fn forward_ghz_rank_and_distribution() {
     let n = 10;
     let mut c = circuits::ghz_circuit(n);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let sampler = compile_forward(&c, 42).unwrap();
     assert_eq!(sampler.rank(), 1, "Forward GHZ-10 should have rank 1");
 
@@ -307,11 +284,7 @@ fn forward_ghz_rank_and_distribution() {
 fn forward_bell_pairs_agree() {
     let n_pairs = 5;
     let mut c = circuits::independent_bell_pairs(n_pairs);
-    let n = c.num_qubits;
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let sampler = compile_forward(&c, 42).unwrap();
     assert_eq!(
         sampler.rank(),
@@ -378,10 +351,7 @@ fn forward_x_measure_always_one() {
 fn forward_random_clifford_marginals() {
     let n = 10;
     let mut c = circuits::clifford_heavy_circuit(n, 10, 42);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
 
     let mut forward = compile_forward(&c, 42).unwrap();
     let mut backward = compile_measurements(&c, 42).unwrap();
@@ -407,10 +377,7 @@ fn forward_random_clifford_marginals() {
 fn forward_clifford_50q_marginals() {
     let n = 50;
     let mut c = circuits::clifford_heavy_circuit(n, 10, 42);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
 
     let mut forward = compile_forward(&c, 42).unwrap();
     let reference = crate::sim::run_shots_with(BackendKind::Stabilizer, &c, 5_000, 42).unwrap();
@@ -435,10 +402,7 @@ fn rank_analysis_across_circuit_types() {
 
     for &n in &sizes {
         let mut c = circuits::ghz_circuit(n);
-        c.num_classical_bits = n;
-        for i in 0..n {
-            c.add_measure(i, i);
-        }
+        c.measure_all();
         let sampler = compile_measurements(&c, 42).unwrap();
         assert_eq!(sampler.rank(), 1, "GHZ-{n} should have rank 1");
     }
@@ -461,10 +425,7 @@ fn rank_analysis_across_circuit_types() {
 
     for &n in &sizes {
         let mut c = circuits::clifford_heavy_circuit(n, 50, 42);
-        c.num_classical_bits = n;
-        for i in 0..n {
-            c.add_measure(i, i);
-        }
+        c.measure_all();
         let sampler = compile_measurements(&c, 42).unwrap();
         assert!(
             sampler.rank() >= n.saturating_sub(4),
@@ -493,12 +454,8 @@ fn rank_analysis_across_circuit_types() {
 #[test]
 fn filtered_bell_pairs_matches_monolithic() {
     let n_pairs = 50;
-    let n = 2 * n_pairs;
     let mut c = circuits::independent_bell_pairs(n_pairs);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
 
     let blocks = c.independent_subsystems();
     assert_eq!(
@@ -1626,11 +1583,7 @@ fn multinomial_ghz_correct_outcomes() {
 fn multinomial_bell_pairs_correlation() {
     let n_pairs = 5;
     let mut c = circuits::independent_bell_pairs(n_pairs);
-    let n = c.num_qubits;
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let mut sampler = compile_measurements(&c, 42).unwrap();
     assert_eq!(sampler.rank(), n_pairs);
 
@@ -1710,10 +1663,7 @@ fn multinomial_identity_all_zeros() {
 fn multinomial_high_rank_falls_through() {
     let n = 50;
     let mut c = circuits::clifford_heavy_circuit(n, 10, 42);
-    c.num_classical_bits = n;
-    for i in 0..n {
-        c.add_measure(i, i);
-    }
+    c.measure_all();
     let mut sampler = compile_measurements(&c, 42).unwrap();
     assert!(sampler.rank() > 22, "50q clifford should have rank > 22");
 
@@ -1764,10 +1714,7 @@ fn gpu_bts_low_rank_ghz_stays_on_cpu_above_threshold() {
     let shots = crate::gpu::bts_min_shots().max(1);
     let n = 128;
     let mut c = circuits::ghz_circuit(n);
-    c.num_classical_bits = n;
-    for q in 0..n {
-        c.add_measure(q, q);
-    }
+    c.measure_all();
 
     let gpu = compile_measurements(&c, 42)
         .unwrap()

@@ -2609,10 +2609,7 @@ mod tests {
     fn test_run_shots_with_noise_clifford_uses_compiled() {
         let n = 10;
         let mut circuit = crate::circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
         let result = run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 100, 42).unwrap();
         assert_eq!(result.shots.len(), 100);
@@ -2701,10 +2698,7 @@ mod tests {
     fn test_run_shots_with_noise_stabilizer_gpu_matches_stabilizer() {
         let n = 8;
         let mut circuit = crate::circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = noise::NoiseModel::uniform_depolarizing(&circuit, 0.01);
 
         let cpu = run_shots_with_noise(BackendKind::Stabilizer, &circuit, &noise, 128, 42).unwrap();

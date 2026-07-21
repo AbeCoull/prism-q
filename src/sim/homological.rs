@@ -498,12 +498,15 @@ impl ErrorChainComplex {
     }
 }
 
+const MAX_SYNDROME_RANK: usize = 20;
+
 impl HomologicalSampler {
     /// Build a sampler from a circuit and noise model.
     ///
     /// Computes the E-matrix (error-to-measurement propagation), finds a basis
     /// for im(E), and precomputes 2^r syndrome class probabilities where
-    /// r = rank(E). Also builds a compiled sampler for quantum randomness.
+    /// r = rank(E), rejecting circuits with r above `MAX_SYNDROME_RANK`.
+    /// Also builds a compiled sampler for quantum randomness.
     ///
     /// Total per-shot cost: O(r_quantum + 1) where r_quantum is the stabilizer
     /// rank (number of random measurements), versus O(p) for brute-force
@@ -563,10 +566,10 @@ impl HomologicalSampler {
         }
 
         let r = pivot_cols.len();
-        if r > 20 {
+        if r > MAX_SYNDROME_RANK {
             return Err(crate::error::PrismError::IncompatibleBackend {
                 backend: "HomologicalSampler".to_string(),
-                reason: format!("syndrome rank {} too large (max 20)", r),
+                reason: format!("syndrome rank {r} too large (max {MAX_SYNDROME_RANK})"),
             });
         }
 
@@ -737,8 +740,8 @@ impl HomologicalSampler {
 
 /// Run noisy shot sampling using the homological sampler.
 ///
-/// For Clifford circuits where the homology dimension h is small (≤ 20),
-/// precomputes class probabilities and samples in O(1) per shot.
+/// For Clifford circuits whose syndrome rank is at most `MAX_SYNDROME_RANK`
+/// (20), precomputes class probabilities and samples in O(1) per shot.
 pub fn run_shots_homological(
     circuit: &Circuit,
     noise: &NoiseModel,
@@ -893,10 +896,7 @@ mod tests {
     fn homological_ghz_compiles() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
         let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
         assert!(sampler.syndrome_rank() <= n, "syndrome rank should be ≤ n");
@@ -906,10 +906,7 @@ mod tests {
     fn homological_ghz_samples() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
         let mut sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
         let shots = sampler.sample_bulk(1000);
@@ -921,10 +918,7 @@ mod tests {
     fn homological_bell_pairs() {
         let n = 4;
         let mut circuit = circuits::independent_bell_pairs(n / 2);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
         let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
         // Bell pairs with noise should have non-trivial syndrome rank
@@ -935,10 +929,7 @@ mod tests {
     fn homological_class_probs_sum_to_one() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
         let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
         let sum: f64 = sampler.class_probs.iter().sum();
@@ -952,10 +943,7 @@ mod tests {
     fn homological_matches_brute_force_statistics() {
         let n = 4;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
         let num_shots = 10000;
 
@@ -966,13 +954,9 @@ mod tests {
         let brute_result =
             crate::sim::noise::run_shots_noisy(&circuit, &noise, num_shots, 42).unwrap();
 
-        // Compare per-bit marginal probabilities
-        let m = n;
-        for bit in 0..m {
-            let homo_ones: usize = homo_result.shots.iter().filter(|s| s[bit]).count();
-            let brute_ones: usize = brute_result.shots.iter().filter(|s| s[bit]).count();
-            let homo_p = homo_ones as f64 / num_shots as f64;
-            let brute_p = brute_ones as f64 / num_shots as f64;
+        for bit in 0..n {
+            let homo_p = homo_result.marginal(bit);
+            let brute_p = brute_result.marginal(bit);
             let diff = (homo_p - brute_p).abs();
             assert!(
                 diff < 0.05,
@@ -998,10 +982,7 @@ mod tests {
     fn boundary_ghz_has_one_logical_qubit() {
         for n in [3, 5, 8] {
             let mut circuit = circuits::ghz_circuit(n);
-            circuit.num_classical_bits = n;
-            for i in 0..n {
-                circuit.add_measure(i, i);
-            }
+            circuit.measure_all();
             let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
             let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
             assert_eq!(
@@ -1029,12 +1010,8 @@ mod tests {
     #[test]
     fn boundary_independent_bell_pairs() {
         let n_pairs = 3;
-        let n = n_pairs * 2;
         let mut circuit = circuits::independent_bell_pairs(n_pairs);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
         let ecc = ErrorChainComplex::build(&circuit, &noise, 42).unwrap();
         assert_eq!(
@@ -1048,10 +1025,7 @@ mod tests {
     fn boundary_exposed_via_sampler() {
         let n = 4;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
         let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
         assert_eq!(sampler.homology_dim(), 1);
@@ -1078,10 +1052,7 @@ mod tests {
     fn packed_matches_unpacked() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
 
         let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
@@ -1104,10 +1075,7 @@ mod tests {
     fn marginals_matches_unpacked() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
 
         let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
@@ -1132,10 +1100,7 @@ mod tests {
     fn analytical_marginals_match_sampled_small() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
 
         let analytical = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
@@ -1159,10 +1124,7 @@ mod tests {
     fn analytical_marginals_ghz_50q() {
         let n = 50;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
 
         let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
@@ -1180,10 +1142,7 @@ mod tests {
     fn analytical_marginals_ghz_100q() {
         let n = 100;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
 
         let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
@@ -1198,10 +1157,7 @@ mod tests {
         let n_pairs = 50;
         let n = n_pairs * 2;
         let mut circuit = circuits::independent_bell_pairs(n_pairs);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
 
         let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
@@ -1218,10 +1174,7 @@ mod tests {
     fn analytical_marginals_clifford_1000q() {
         let n = 1000;
         let mut circuit = circuits::clifford_heavy_circuit(n, 2, 42);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
 
         let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
@@ -1258,10 +1211,7 @@ mod tests {
     fn analytical_marginals_no_noise() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
 
         let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
@@ -1277,10 +1227,7 @@ mod tests {
     fn chunked_accumulator_matches_packed() {
         let n = 6;
         let mut circuit = circuits::ghz_circuit(n);
-        circuit.num_classical_bits = n;
-        for i in 0..n {
-            circuit.add_measure(i, i);
-        }
+        circuit.measure_all();
         let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
 
         let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();

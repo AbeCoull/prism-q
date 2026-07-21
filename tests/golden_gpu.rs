@@ -1633,6 +1633,13 @@ fn auto_gpu_matches_cpu_auto_above_threshold() {
 // GPU BTS sampling
 // ============================================================================
 
+fn bts_min_shots_env() -> usize {
+    std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT)
+}
+
 /// `run_shots_compiled_with_gpu` routes BTS sampling through the GPU when the
 /// circuit compiles to a flat sparse parity. Statistical test: 50 Bell pairs
 /// measured per shot. Every shot must have each pair correlated
@@ -1652,9 +1659,7 @@ fn run_shots_compiled_with_gpu_bell_pairs_are_correlated() {
         circuit.add_gate(Gate::H, &[2 * p]);
         circuit.add_gate(Gate::Cx, &[2 * p, 2 * p + 1]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
 
     let result = run_shots_compiled_with_gpu(&circuit, num_shots, 42, f.ctx.clone()).unwrap();
     assert_eq!(result.shots.len(), num_shots);
@@ -1691,9 +1696,7 @@ fn run_shots_compiled_with_gpu_distribution_matches_cpu() {
     for q in 0..n {
         circuit.add_gate(Gate::H, &[q]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
 
     let cpu = run_shots_compiled(&circuit, num_shots, 42).unwrap();
     let gpu = run_shots_compiled_with_gpu(&circuit, num_shots, 42, f.ctx.clone()).unwrap();
@@ -1735,9 +1738,7 @@ fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
     for q in 0..n {
         circuit.add_gate(Gate::H, &[q]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
 
     let compiled = run_shots_compiled_with_gpu(&circuit, num_shots, 42, f.ctx.clone()).unwrap();
     let explicit = simulate(&circuit)
@@ -1762,10 +1763,7 @@ fn run_shots_compiled_with_gpu_repeated_batches_match_fresh_sampler() {
     let Some(f) = Fixture::try_new() else { return };
 
     let n = 128;
-    let batch_shots = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT);
+    let batch_shots = bts_min_shots_env();
     if batch_shots == 0 || batch_shots > 262_144 {
         return;
     }
@@ -1773,9 +1771,7 @@ fn run_shots_compiled_with_gpu_repeated_batches_match_fresh_sampler() {
     for q in 0..n {
         circuit.add_gate(Gate::H, &[q]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
 
     let mut reused = compile_measurements(&circuit, 42)
         .unwrap()
@@ -1799,10 +1795,7 @@ fn sample_bulk_packed_device_to_host_is_reproducible() {
 
     let Some(f) = Fixture::try_new() else { return };
 
-    let shots = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT);
+    let shots = bts_min_shots_env();
     if shots == 0 || shots > 262_144 {
         return;
     }
@@ -1815,9 +1808,7 @@ fn sample_bulk_packed_device_to_host_is_reproducible() {
     for q in 0..n - 1 {
         circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
 
     let mut gpu_a = compile_measurements(&circuit, 42)
         .unwrap()
@@ -1846,10 +1837,7 @@ fn sample_bulk_packed_device_marginals_match_host_reduction() {
 
     let Some(f) = Fixture::try_new() else { return };
 
-    let shots = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT);
+    let shots = bts_min_shots_env();
     if shots == 0 || shots > 262_144 {
         return;
     }
@@ -1862,9 +1850,7 @@ fn sample_bulk_packed_device_marginals_match_host_reduction() {
     for q in 0..n - 1 {
         circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
 
     let mut gpu = compile_measurements(&circuit, 42)
         .unwrap()
@@ -1894,11 +1880,7 @@ fn sample_bulk_packed_device_counts_match_host_counts() {
 
     let Some(f) = Fixture::try_new() else { return };
 
-    let shots = std::env::var("PRISM_GPU_BTS_MIN_SHOTS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT)
-        .max(131_072);
+    let shots = bts_min_shots_env().max(131_072);
     if shots > 262_144 {
         return;
     }
@@ -1909,9 +1891,7 @@ fn sample_bulk_packed_device_counts_match_host_counts() {
     for q in 0..rank {
         circuit.add_gate(Gate::H, &[q]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
 
     let mut gpu = compile_measurements(&circuit, 42)
         .unwrap()
@@ -1921,6 +1901,104 @@ fn sample_bulk_packed_device_counts_match_host_counts() {
     let host_counts = device.to_host().unwrap().counts();
 
     assert_eq!(device_counts, host_counts);
+}
+
+/// Noisy GPU reductions draw from the same distribution as the CPU noisy
+/// sampler. Device noise masks come from a device-seeded RNG stream, so the
+/// comparison is statistical: per-measurement marginals, per-qubit count
+/// frequencies, and parity-violation rates must agree within 5 sigma.
+///
+/// The circuit is 16 H qubits fanned into 16 four-source parity qubits, which
+/// keeps the compiled sampler on the sparse-parity strategy and inside the GPU
+/// BTS routing gates (rank, row weight, single block). The in-crate test
+/// `noisy_gpu_test_circuit_routes_to_gpu_bts` pins that routing; a circuit
+/// change that silently drops this test back to the CPU path fails there.
+#[test]
+fn noisy_compiled_gpu_reductions_match_cpu_statistics() {
+    use prism_q::{Circuit, NoiseModel, compile_noisy};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let shots = bts_min_shots_env().max(131_072);
+    if shots > 262_144 {
+        return;
+    }
+
+    let n = 32;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..16 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 16..32 {
+        for k in 0..4 {
+            circuit.add_gate(Gate::Cx, &[(q - 16 + k) % 16, q]);
+        }
+    }
+    circuit.measure_all();
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+
+    let mut cpu = compile_noisy(&circuit, &noise, 42).unwrap();
+    let mut gpu = compile_noisy(&circuit, &noise, 42)
+        .unwrap()
+        .with_gpu(f.ctx.clone());
+
+    let tol = 5.0 * (0.5 / shots as f64).sqrt();
+
+    let cpu_marginals = cpu.sample_marginals(shots);
+    let gpu_marginals = gpu.sample_marginals(shots);
+    for q in 0..n {
+        assert!(
+            (cpu_marginals[q] - gpu_marginals[q]).abs() < tol,
+            "marginal[{q}]: cpu={} gpu={}",
+            cpu_marginals[q],
+            gpu_marginals[q]
+        );
+    }
+
+    let cpu_counts = cpu.sample_counts(shots);
+    let gpu_counts = gpu.sample_counts(shots);
+    assert_eq!(cpu_counts.values().sum::<u64>(), shots as u64);
+    assert_eq!(gpu_counts.values().sum::<u64>(), shots as u64);
+
+    let cpu_freq = one_frequencies_from_counts(&cpu_counts, n, shots as u64);
+    let gpu_freq = one_frequencies_from_counts(&gpu_counts, n, shots as u64);
+    for q in 0..n {
+        assert!(
+            (cpu_freq[q] - gpu_freq[q]).abs() < tol,
+            "count frequency[{q}]: cpu={} gpu={}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
+
+    // Noiseless, each parity qubit equals the XOR of its four sources, so the
+    // violation rate isolates the applied noise.
+    let parity_violation = |counts: &std::collections::HashMap<Vec<u64>, u64>| -> f64 {
+        let bit = |key: &Vec<u64>, q: usize| (key[q / 64] >> (q % 64)) & 1;
+        let mut violations = 0u64;
+        for (key, count) in counts {
+            for q in 16..32 {
+                let mut parity = bit(key, q);
+                for k in 0..4 {
+                    parity ^= bit(key, (q - 16 + k) % 16);
+                }
+                if parity != 0 {
+                    violations += count;
+                }
+            }
+        }
+        violations as f64 / (shots * 16) as f64
+    };
+    let cpu_violation = parity_violation(&cpu_counts);
+    let gpu_violation = parity_violation(&gpu_counts);
+    assert!(
+        cpu_violation > 0.0 && gpu_violation > 0.0,
+        "noise should violate some parity checks: cpu={cpu_violation} gpu={gpu_violation}"
+    );
+    assert!(
+        (cpu_violation - gpu_violation).abs() < tol,
+        "parity violation rate: cpu={cpu_violation} gpu={gpu_violation}"
+    );
 }
 
 // ============================================================================
@@ -1938,9 +2016,7 @@ fn terminal_rx_cx_circuit(n: usize) -> prism_q::Circuit {
     for q in 0..n {
         circuit.add_gate(Gate::Rz(0.5), &[q]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     circuit
 }
 
@@ -2292,9 +2368,7 @@ fn auto_gpu_noisy_trajectories_match_cpu_auto() {
     for q in 0..n - 1 {
         circuit.add_gate(Gate::Cx, &[q, q + 1]);
     }
-    for q in 0..n {
-        circuit.add_measure(q, q);
-    }
+    circuit.measure_all();
     let noise = NoiseModel::with_amplitude_damping(&circuit, 0.05);
     let cpu = simulate(&circuit)
         .noise(&noise)

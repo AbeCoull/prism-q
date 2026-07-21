@@ -141,13 +141,7 @@ impl CircuitBuilder {
     ///
     /// Expands `num_classical_bits` if needed to accommodate all qubits.
     pub fn measure_all(&mut self) -> &mut Self {
-        let n = self.circuit.num_qubits;
-        if self.circuit.num_classical_bits < n {
-            self.circuit.num_classical_bits = n;
-        }
-        for q in 0..n {
-            self.circuit.add_measure(q, q);
-        }
+        self.circuit.measure_all();
         self
     }
 

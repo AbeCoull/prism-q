@@ -45,6 +45,21 @@ impl ShotsResult {
     }
 }
 
+#[cfg(test)]
+impl ShotsResult {
+    pub(crate) fn marginal(&self, bit: usize) -> f64 {
+        self.shots.iter().filter(|s| s[bit]).count() as f64 / self.shots.len() as f64
+    }
+
+    pub(crate) fn coherent_fraction(&self) -> f64 {
+        self.shots
+            .iter()
+            .filter(|s| s.iter().all(|&b| b == s[0]))
+            .count() as f64
+            / self.shots.len() as f64
+    }
+}
+
 impl std::fmt::Display for ShotsResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let counts = self.counts();

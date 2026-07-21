@@ -2,11 +2,33 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.24.0] - 2026-07-21
+
+### Documentation
+
+- Update pages to have a sitemap and fill in metadata for the python bindings (#96)([cdb3361](https://github.com/AbeCoull/prism-q/commit/cdb3361265c31ddc078f589d3f604620a24c535f))
+
+### Features
+
+- **sim:** Unify backend dispatch behind a per-family resolver (#99)([9beaafc](https://github.com/AbeCoull/prism-q/commit/9beaafc9671ccf702d454add2e117820ffd9bc36))
+
+### Miscellaneous
+
+- **circuit:** Add reset to builder (#97)([7aa78ec](https://github.com/AbeCoull/prism-q/commit/7aa78eccd4cfc620846a1b8e0119dbab29b0f55c))
+## [py-v0.23.0] - 2026-07-17
+
+### Miscellaneous
+
+- **python:** Release 0.23.0([0cf206b](https://github.com/AbeCoull/prism-q/commit/0cf206b532c219b87cd9f969ee67c4f03675d307))
 ## [0.23.0] - 2026-07-17
 
 ### Features
 
 - **sim:** Route Auto dispatch to GPU via opt-in AutoGpu context (#95)([6f78da3](https://github.com/AbeCoull/prism-q/commit/6f78da320879de56e1be7324537d55b6459d5eed))
+
+### Miscellaneous
+
+- Release([9ccbdef](https://github.com/AbeCoull/prism-q/commit/9ccbdef61159b298f1ff1ef954b8a8583dfa370e))
 ## [py-v0.22.1] - 2026-07-17
 
 ### Miscellaneous

@@ -50,6 +50,20 @@ pub(crate) fn max_tensor_probability_qubits() -> usize {
     })
 }
 
+/// Measured-bit cap for the dense terminal-sampling path, which materializes
+/// one outcome distribution plus one CDF (two f64 per outcome). Above the cap
+/// the samplers stream with sorted thresholds instead.
+pub(crate) fn max_dense_outcome_bits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        configured_or_detected_dense_qubits(
+            "PRISM_MAX_DENSE_OUTCOME_BITS",
+            2 * size_of::<f64>(),
+            "dense outcome sampling cap",
+        )
+    })
+}
+
 fn configured_or_detected_dense_qubits(
     env_var: &str,
     bytes_per_basis_state: usize,
@@ -200,7 +214,41 @@ fn detect_physical_memory_bytes() -> Option<u64> {
     Some(status.ull_total_phys)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn detect_physical_memory_bytes() -> Option<u64> {
+    // SAFETY: signature matches the documented libSystem sysctlbyname ABI:
+    // a C-string name, an output buffer with its length passed by pointer,
+    // and an unused input buffer, returning 0 on success.
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *mut std::ffi::c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+
+    let mut memsize: u64 = 0;
+    let mut len = size_of::<u64>();
+    // SAFETY: oldp points to an 8-byte buffer and oldlenp holds its size;
+    // hw.memsize is a u64 sysctl.
+    let ret = unsafe {
+        sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut memsize as *mut u64).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || len != size_of::<u64>() || memsize == 0 {
+        return None;
+    }
+    Some(memsize)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn detect_physical_memory_bytes() -> Option<u64> {
     let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
     for line in meminfo.lines() {

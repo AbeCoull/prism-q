@@ -21,13 +21,6 @@ use crate::distributed::DistributedContext;
 
 use super::{RunOutcome, try_backend_probabilities};
 
-pub(super) enum DispatchAction {
-    Backend(Box<dyn Backend>),
-    StabilizerRank,
-    StochasticPauli { num_samples: usize },
-    DeterministicPauli { epsilon: f64, max_terms: usize },
-}
-
 pub(super) const AUTO_MPS_BOND_DIM: usize = 256;
 
 pub(super) const MAX_AUTO_T_COUNT_EXACT: usize = 18;
@@ -97,17 +90,18 @@ pub enum BackendKind {
     /// Automatic backend selection with GPU acceleration opted in.
     ///
     /// Makes the same shape-based routing decisions as [`BackendKind::Auto`],
-    /// but when the selected backend (per sub-block, after subsystem
-    /// decomposition) is the dense statevector or the stabilizer tableau and the
-    /// block clears the qubit-count crossover with VRAM to spare, that block runs
-    /// on the supplied context. Every other choice, and every block that fails
-    /// the crossover or VRAM check, runs on the identical CPU path Auto would
-    /// take. The statevector path also degrades to the host when the device
-    /// allocation itself fails, so a missing, unfit, or racing device stays on
-    /// CPU rather than erroring. Acceleration reaches whichever entry points
-    /// route a selected statevector block through dispatch; some sampling and
-    /// expectation fast paths still build a host statevector directly and stay
-    /// on CPU pending the routing unification noted in `auto_gpu_choice_to_backend`.
+    /// but when the selected family (per sub-block, after subsystem
+    /// decomposition) has a device capability row and the block clears the
+    /// qubit-count crossover with VRAM to spare, that block runs on the
+    /// supplied context. Every other choice, and every block that fails the
+    /// crossover or VRAM check, runs on the identical CPU path Auto would
+    /// take. Device paths resolve soft: an allocation that fails after the
+    /// VRAM check degrades to the host, so a missing, unfit, or racing device
+    /// stays on CPU rather than erroring.
+    ///
+    /// Acceleration reaches every entry point through one resolution
+    /// mechanism: single runs, terminal shot and counts sampling, expectation
+    /// values, temporal-Clifford tails, and non-Pauli noisy trajectories.
     ///
     /// The context is user-supplied and is never acquired implicitly.
     #[cfg(feature = "gpu")]
@@ -252,48 +246,35 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
     Ok(())
 }
 
-pub(super) fn supports_fused_for_kind(kind: &BackendKind, circuit: &Circuit) -> bool {
-    match kind {
-        BackendKind::Stabilizer
-        | BackendKind::FactoredStabilizer
-        | BackendKind::StabilizerRank
-        | BackendKind::StochasticPauli { .. }
-        | BackendKind::DeterministicPauli { .. } => false,
-        #[cfg(feature = "gpu")]
-        BackendKind::StabilizerGpu { .. } => false,
-        _ if kind.is_auto() => !(circuit.is_clifford_only() && circuit.has_entangling_gates()),
-        _ => true,
-    }
-}
-
+/// Simulator family, independent of how it was selected (auto routing or an
+/// explicit kind) and of where it executes (host or device).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AutoBackendChoice {
+pub(super) enum Family {
     ProductState,
     Stabilizer,
     Sparse,
     Mps,
     Factored,
+    FactoredStabilizer,
+    TensorNetwork,
     Statevector,
 }
 
-fn select_auto_backend_choice(
-    circuit: &Circuit,
-    has_partial_independence: bool,
-) -> AutoBackendChoice {
+fn select_auto_backend_choice(circuit: &Circuit, has_partial_independence: bool) -> Family {
     if !circuit.has_entangling_gates() {
-        AutoBackendChoice::ProductState
+        Family::ProductState
     } else if circuit.is_clifford_only() {
-        AutoBackendChoice::Stabilizer
+        Family::Stabilizer
     } else if circuit.num_qubits > max_statevector_qubits() {
         if circuit.is_sparse_friendly() {
-            AutoBackendChoice::Sparse
+            Family::Sparse
         } else {
-            AutoBackendChoice::Mps
+            Family::Mps
         }
     } else if has_partial_independence {
-        AutoBackendChoice::Factored
+        Family::Factored
     } else {
-        AutoBackendChoice::Statevector
+        Family::Statevector
     }
 }
 
@@ -303,174 +284,335 @@ pub(super) fn auto_selects_cpu_statevector(
 ) -> bool {
     matches!(
         select_auto_backend_choice(circuit, has_partial_independence),
-        AutoBackendChoice::Statevector
+        Family::Statevector
     )
 }
 
-/// Build a `StatevectorBackend` configured for GPU execution if the circuit
-/// is large enough to clear the crossover, otherwise a plain host
-/// backend. Called from `select_dispatch` (which runs per sub-block after
-/// decomposition) so small blocks transparently stay on CPU.
+/// Execution target for a resolved family: host, or a device context with a
+/// resolved failure mode. `soft` builds fall back to the host if device
+/// allocation fails at `init`; hard builds surface the error.
+#[derive(Clone)]
+pub(super) enum Accel {
+    Cpu,
+    #[cfg(feature = "gpu")]
+    Gpu {
+        context: Arc<GpuContext>,
+        soft: bool,
+    },
+}
+
+/// Device eligibility for one family: the qubit crossover and the VRAM-fit
+/// predicate, owned together. Families without device kernels are `None` rows
+/// in [`gpu_capability`]; adding a device path for a family means adding its
+/// row there, not touching dispatch.
 #[cfg(feature = "gpu")]
-fn statevector_gpu_with_crossover(
-    context: &Arc<GpuContext>,
-    circuit: &Circuit,
-    seed: u64,
-) -> StatevectorBackend {
-    if circuit.num_qubits >= crate::gpu::min_qubits() {
-        StatevectorBackend::new(seed).with_gpu(context.clone())
-    } else {
-        StatevectorBackend::new(seed)
+struct GpuCapability {
+    min_qubits: fn() -> usize,
+    fits: fn(&Arc<GpuContext>, usize) -> bool,
+}
+
+/// Families with a `gpu_capability` row. Keep in sync with the match below;
+/// a new device family needs an entry in both.
+#[cfg(feature = "gpu")]
+const GPU_CAPABLE_FAMILIES: [Family; 2] = [Family::Statevector, Family::Stabilizer];
+
+#[cfg(feature = "gpu")]
+fn gpu_capability(family: Family) -> Option<GpuCapability> {
+    match family {
+        Family::Statevector => Some(GpuCapability {
+            min_qubits: crate::gpu::min_qubits,
+            fits: |ctx, n| ctx.fits_statevector_with_scratch(n).unwrap_or(false),
+        }),
+        Family::Stabilizer => Some(GpuCapability {
+            min_qubits: crate::gpu::stabilizer_min_qubits,
+            fits: |ctx, n| ctx.fits_tableau(n).unwrap_or(false),
+        }),
+        Family::ProductState
+        | Family::Sparse
+        | Family::Mps
+        | Family::Factored
+        | Family::FactoredStabilizer
+        | Family::TensorNetwork => None,
     }
 }
 
-/// Build a `StabilizerBackend` configured for GPU execution if the circuit
-/// is large enough to clear the stabilizer crossover, otherwise a plain
-/// host backend.
-#[cfg(feature = "gpu")]
-fn stabilizer_gpu_with_crossover(
-    context: &Arc<GpuContext>,
-    circuit: &Circuit,
-    seed: u64,
-) -> StabilizerBackend {
-    if circuit.num_qubits >= crate::gpu::stabilizer_min_qubits() {
-        StabilizerBackend::new(seed).with_gpu(context.clone())
-    } else {
-        StabilizerBackend::new(seed)
-    }
-}
-
-/// Build a `StatevectorBackend` for the `AutoGpu` path. Routes the block to the
-/// device only when it clears the qubit crossover and the current VRAM holds the
-/// amplitude buffer plus scratch headroom. Every failing case, including a stub
-/// or absent device that makes the VRAM query error, falls back to the host
-/// backend rather than surfacing an error.
+/// The one decision point for CPU vs GPU execution of a family.
 ///
-/// Headroom: `fits_statevector(n + 1)` requires `2^(n+1) * 16` free bytes, which
-/// covers the `2^n * 16` byte amplitude buffer plus the probabilities and
-/// measurement scratch (up to `2^n * 8` bytes each) with margin.
+/// `AutoGpu` requires the family's capability row, the qubit crossover, and the
+/// VRAM-fit gate, and resolves soft so an allocation race still degrades to the
+/// host. An explicit GPU kind applies only the crossover for its own family and
+/// resolves hard: the user asked for the device, so an unfit device errors
+/// loudly. Every other kind, and every family without a capability row,
+/// resolves to the host.
+///
+/// The verdict (including the VRAM query) is intended to be taken once per
+/// user-level call and reused across shots; soft-mode init fallback covers
+/// VRAM shrinking after the fact.
 #[cfg(feature = "gpu")]
-fn auto_statevector_backend(
-    context: &Arc<GpuContext>,
-    circuit: &Circuit,
-    seed: u64,
-) -> StatevectorBackend {
-    let fits = circuit.num_qubits >= crate::gpu::min_qubits()
-        && context
-            .fits_statevector(circuit.num_qubits + 1)
-            .unwrap_or(false);
-    if fits {
-        StatevectorBackend::new(seed).with_gpu_auto(context.clone())
-    } else {
-        StatevectorBackend::new(seed)
+pub(super) fn accel_for(kind: &BackendKind, family: Family, num_qubits: usize) -> Accel {
+    let Some((context, soft)) = gpu_request(kind, family) else {
+        return Accel::Cpu;
+    };
+    let Some(cap) = gpu_capability(family) else {
+        return Accel::Cpu;
+    };
+    if num_qubits < (cap.min_qubits)() {
+        return Accel::Cpu;
+    }
+    if soft && !(cap.fits)(context, num_qubits) {
+        return Accel::Cpu;
+    }
+    Accel::Gpu {
+        context: context.clone(),
+        soft,
     }
 }
 
-fn auto_choice_to_backend(choice: AutoBackendChoice, seed: u64) -> Box<dyn Backend> {
-    match choice {
-        AutoBackendChoice::ProductState => Box::new(ProductStateBackend::new(seed)),
-        AutoBackendChoice::Stabilizer => Box::new(StabilizerBackend::new(seed)),
-        AutoBackendChoice::Sparse => Box::new(SparseBackend::new(seed)),
-        AutoBackendChoice::Mps => Box::new(MpsBackend::new(seed, AUTO_MPS_BOND_DIM)),
-        AutoBackendChoice::Factored => {
-            Box::new(crate::backend::factored::FactoredBackend::new(seed))
-        }
-        AutoBackendChoice::Statevector => Box::new(StatevectorBackend::new(seed)),
-    }
-}
-
-/// Map an auto choice to a backend, routing the GPU-eligible leaves
-/// (statevector and stabilizer) onto `context` through their respective
-/// crossovers. Non-eligible choices resolve to the same CPU backend as the
-/// plain `Auto` path.
-// TODO: replace these per-leaf arms with one per-choice mechanism where each backend owns its threshold, VRAM fit, and CPU fallback, so new GPU backends and every sampling/expectation/noise path route uniformly.
+/// Which (kind, family) pairs request device execution, and whether the
+/// request resolves soft. Shared by [`accel_for`] and [`may_resolve_to_gpu`]
+/// so the kind-to-family matching lives in one place.
 #[cfg(feature = "gpu")]
-fn auto_gpu_choice_to_backend(
-    choice: AutoBackendChoice,
-    context: &Arc<GpuContext>,
-    circuit: &Circuit,
-    seed: u64,
-) -> Box<dyn Backend> {
-    match choice {
-        AutoBackendChoice::Statevector => {
-            Box::new(auto_statevector_backend(context, circuit, seed))
-        }
-        AutoBackendChoice::Stabilizer => {
-            Box::new(stabilizer_gpu_with_crossover(context, circuit, seed))
-        }
-        other => auto_choice_to_backend(other, seed),
+fn gpu_request(kind: &BackendKind, family: Family) -> Option<(&Arc<GpuContext>, bool)> {
+    match (kind, family) {
+        (BackendKind::AutoGpu { context }, _) => Some((context, true)),
+        (BackendKind::StatevectorGpu { context }, Family::Statevector) => Some((context, false)),
+        (BackendKind::StabilizerGpu { context }, Family::Stabilizer) => Some((context, false)),
+        _ => None,
     }
 }
 
-pub(super) fn select_dispatch(
-    kind: &BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-    has_partial_independence: bool,
-) -> DispatchAction {
-    match kind {
-        BackendKind::Auto => {
-            let choice = select_auto_backend_choice(circuit, has_partial_independence);
-            DispatchAction::Backend(auto_choice_to_backend(choice, seed))
-        }
+/// Whether this kind could resolve any family to the device at the given
+/// width. Over-approximates [`accel_for`]: it applies only the qubit
+/// crossover and skips the VRAM-fit gate, so the verdict cannot flip between
+/// a scheduling decision and the later per-block resolution. Multi-block
+/// drivers consult it before spreading work across threads; GPU backends
+/// share one CUDA stream per context and must not execute concurrently.
+#[cfg(feature = "gpu")]
+pub(super) fn may_resolve_to_gpu(kind: &BackendKind, num_qubits: usize) -> bool {
+    GPU_CAPABLE_FAMILIES.into_iter().any(|family| {
+        gpu_request(kind, family).is_some()
+            && gpu_capability(family).is_some_and(|cap| num_qubits >= (cap.min_qubits)())
+    })
+}
+
+#[cfg(not(feature = "gpu"))]
+pub(super) fn accel_for(_kind: &BackendKind, _family: Family, _num_qubits: usize) -> Accel {
+    Accel::Cpu
+}
+
+pub(super) fn build_statevector(accel: &Accel, seed: u64) -> StatevectorBackend {
+    match accel {
+        Accel::Cpu => StatevectorBackend::new(seed),
         #[cfg(feature = "gpu")]
-        BackendKind::AutoGpu { context } => {
-            let choice = select_auto_backend_choice(circuit, has_partial_independence);
-            DispatchAction::Backend(auto_gpu_choice_to_backend(choice, context, circuit, seed))
-        }
-        BackendKind::Statevector => {
-            DispatchAction::Backend(Box::new(StatevectorBackend::new(seed)))
-        }
-        BackendKind::Stabilizer => DispatchAction::Backend(Box::new(StabilizerBackend::new(seed))),
-        BackendKind::Sparse => DispatchAction::Backend(Box::new(SparseBackend::new(seed))),
-        BackendKind::Mps { max_bond_dim } => {
-            DispatchAction::Backend(Box::new(MpsBackend::new(seed, *max_bond_dim)))
-        }
-        BackendKind::ProductState => {
-            DispatchAction::Backend(Box::new(ProductStateBackend::new(seed)))
-        }
-        BackendKind::TensorNetwork => {
-            DispatchAction::Backend(Box::new(TensorNetworkBackend::new(seed)))
-        }
-        BackendKind::Factored => DispatchAction::Backend(Box::new(
-            crate::backend::factored::FactoredBackend::new(seed),
-        )),
-        BackendKind::FactoredStabilizer => DispatchAction::Backend(Box::new(
-            crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed),
-        )),
-        BackendKind::StabilizerRank => DispatchAction::StabilizerRank,
-        BackendKind::StochasticPauli { num_samples } => DispatchAction::StochasticPauli {
-            num_samples: *num_samples,
-        },
-        BackendKind::DeterministicPauli { epsilon, max_terms } => {
-            DispatchAction::DeterministicPauli {
-                epsilon: *epsilon,
-                max_terms: *max_terms,
+        Accel::Gpu {
+            context,
+            soft: true,
+        } => StatevectorBackend::new(seed).with_gpu_auto(context.clone()),
+        #[cfg(feature = "gpu")]
+        Accel::Gpu {
+            context,
+            soft: false,
+        } => StatevectorBackend::new(seed).with_gpu(context.clone()),
+    }
+}
+
+fn build_stabilizer(accel: &Accel, seed: u64) -> StabilizerBackend {
+    match accel {
+        Accel::Cpu => StabilizerBackend::new(seed),
+        #[cfg(feature = "gpu")]
+        Accel::Gpu {
+            context,
+            soft: true,
+        } => StabilizerBackend::new(seed).with_gpu_auto(context.clone()),
+        #[cfg(feature = "gpu")]
+        Accel::Gpu {
+            context,
+            soft: false,
+        } => StabilizerBackend::new(seed).with_gpu(context.clone()),
+    }
+}
+
+/// Resolved family plus acceleration for one user-level call. `build` is
+/// cheap enough to call once per shot or per trajectory: a constructor, a
+/// `Box::new`, and at most one `Arc` clone. All circuit analysis and every
+/// driver VRAM query happen earlier, in [`resolve`].
+#[derive(Clone)]
+pub(super) enum BackendPlan {
+    ProductState,
+    Sparse,
+    TensorNetwork,
+    Factored,
+    FactoredStabilizer,
+    Mps {
+        max_bond_dim: usize,
+    },
+    Stabilizer {
+        accel: Accel,
+    },
+    Statevector {
+        accel: Accel,
+    },
+    #[cfg(feature = "distributed")]
+    Distributed(Arc<DistributedContext>),
+}
+
+impl BackendPlan {
+    pub(super) fn build(&self, seed: u64) -> Box<dyn Backend> {
+        match self {
+            BackendPlan::ProductState => Box::new(ProductStateBackend::new(seed)),
+            BackendPlan::Sparse => Box::new(SparseBackend::new(seed)),
+            BackendPlan::TensorNetwork => Box::new(TensorNetworkBackend::new(seed)),
+            BackendPlan::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
+            BackendPlan::FactoredStabilizer => {
+                Box::new(crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed))
+            }
+            BackendPlan::Mps { max_bond_dim } => Box::new(MpsBackend::new(seed, *max_bond_dim)),
+            BackendPlan::Stabilizer { accel } => Box::new(build_stabilizer(accel, seed)),
+            BackendPlan::Statevector { accel } => Box::new(build_statevector(accel, seed)),
+            #[cfg(feature = "distributed")]
+            BackendPlan::Distributed(context) => {
+                Box::new(DistributedStatevectorBackend::new(context.clone(), seed))
             }
         }
-        #[cfg(feature = "gpu")]
-        BackendKind::StatevectorGpu { context } => DispatchAction::Backend(Box::new(
-            statevector_gpu_with_crossover(context, circuit, seed),
-        )),
-        #[cfg(feature = "gpu")]
-        BackendKind::StabilizerGpu { context } => DispatchAction::Backend(Box::new(
-            stabilizer_gpu_with_crossover(context, circuit, seed),
-        )),
-        #[cfg(feature = "distributed")]
-        BackendKind::StatevectorDistributed { context } => DispatchAction::Backend(Box::new(
-            DistributedStatevectorBackend::new(context.clone(), seed),
-        )),
+    }
+
+    pub(super) fn is_gpu(&self) -> bool {
+        match self {
+            BackendPlan::Stabilizer { accel } | BackendPlan::Statevector { accel } => {
+                !matches!(accel, Accel::Cpu)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the fusion pipeline should synthesize fused-matrix gates for
+    /// this plan. Tableau-based families reject non-Clifford fused matrices;
+    /// every dense or factored representation accepts them.
+    pub(super) fn supports_fused(&self) -> bool {
+        !matches!(
+            self,
+            BackendPlan::Stabilizer { .. } | BackendPlan::FactoredStabilizer
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn family(&self) -> Family {
+        match self {
+            BackendPlan::ProductState => Family::ProductState,
+            BackendPlan::Sparse => Family::Sparse,
+            BackendPlan::TensorNetwork => Family::TensorNetwork,
+            BackendPlan::Factored => Family::Factored,
+            BackendPlan::FactoredStabilizer => Family::FactoredStabilizer,
+            BackendPlan::Mps { .. } => Family::Mps,
+            BackendPlan::Stabilizer { .. } => Family::Stabilizer,
+            BackendPlan::Statevector { .. } => Family::Statevector,
+            #[cfg(feature = "distributed")]
+            BackendPlan::Distributed(_) => Family::Statevector,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn accel(&self) -> &Accel {
+        match self {
+            BackendPlan::Stabilizer { accel } | BackendPlan::Statevector { accel } => accel,
+            _ => &Accel::Cpu,
+        }
     }
 }
 
-pub(super) fn select_backend(
+/// Whole-call routing decision produced by [`resolve`]. Backend execution is
+/// described by a buildable [`BackendPlan`]; the remaining variants are the
+/// non-backend engines (stabilizer rank, Pauli propagation) that callers
+/// handle outside the `Backend` world.
+pub(super) enum ExecutionPlan {
+    Backend(BackendPlan),
+    StabilizerRank,
+    StochasticPauli { num_samples: usize },
+    DeterministicPauli { epsilon: f64, max_terms: usize },
+}
+
+pub(super) fn plan_for_family(
+    kind: &BackendKind,
+    family: Family,
+    num_qubits: usize,
+) -> BackendPlan {
+    match family {
+        Family::ProductState => BackendPlan::ProductState,
+        Family::Sparse => BackendPlan::Sparse,
+        Family::TensorNetwork => BackendPlan::TensorNetwork,
+        Family::Factored => BackendPlan::Factored,
+        Family::FactoredStabilizer => BackendPlan::FactoredStabilizer,
+        Family::Mps => BackendPlan::Mps {
+            max_bond_dim: AUTO_MPS_BOND_DIM,
+        },
+        Family::Stabilizer => BackendPlan::Stabilizer {
+            accel: accel_for(kind, Family::Stabilizer, num_qubits),
+        },
+        Family::Statevector => BackendPlan::Statevector {
+            accel: accel_for(kind, Family::Statevector, num_qubits),
+        },
+    }
+}
+
+/// Resolve `kind` against `circuit` into an [`ExecutionPlan`], exactly once
+/// per user-level call. Auto kinds run the shape-based decision tree; explicit
+/// kinds map 1:1 onto their family. The CPU-vs-GPU verdict, including the
+/// VRAM-fit query, is taken here through [`accel_for`] and reused across
+/// shots; soft-mode init fallback covers VRAM shrinking after resolution.
+pub(super) fn resolve(
     kind: &BackendKind,
     circuit: &Circuit,
-    seed: u64,
     has_partial_independence: bool,
-) -> Box<dyn Backend> {
-    match select_dispatch(kind, circuit, seed, has_partial_independence) {
-        DispatchAction::Backend(b) => b,
+) -> ExecutionPlan {
+    let family = match kind {
+        BackendKind::Auto => select_auto_backend_choice(circuit, has_partial_independence),
+        #[cfg(feature = "gpu")]
+        BackendKind::AutoGpu { .. } => {
+            select_auto_backend_choice(circuit, has_partial_independence)
+        }
+        BackendKind::Statevector => Family::Statevector,
+        BackendKind::Stabilizer => Family::Stabilizer,
+        BackendKind::Sparse => Family::Sparse,
+        BackendKind::Mps { max_bond_dim } => {
+            return ExecutionPlan::Backend(BackendPlan::Mps {
+                max_bond_dim: *max_bond_dim,
+            });
+        }
+        BackendKind::ProductState => Family::ProductState,
+        BackendKind::TensorNetwork => Family::TensorNetwork,
+        BackendKind::Factored => Family::Factored,
+        BackendKind::FactoredStabilizer => Family::FactoredStabilizer,
+        BackendKind::StabilizerRank => return ExecutionPlan::StabilizerRank,
+        BackendKind::StochasticPauli { num_samples } => {
+            return ExecutionPlan::StochasticPauli {
+                num_samples: *num_samples,
+            };
+        }
+        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+            return ExecutionPlan::DeterministicPauli {
+                epsilon: *epsilon,
+                max_terms: *max_terms,
+            };
+        }
+        #[cfg(feature = "gpu")]
+        BackendKind::StatevectorGpu { .. } => Family::Statevector,
+        #[cfg(feature = "gpu")]
+        BackendKind::StabilizerGpu { .. } => Family::Stabilizer,
+        #[cfg(feature = "distributed")]
+        BackendKind::StatevectorDistributed { context } => {
+            return ExecutionPlan::Backend(BackendPlan::Distributed(context.clone()));
+        }
+    };
+    ExecutionPlan::Backend(plan_for_family(kind, family, circuit.num_qubits))
+}
+
+pub(super) fn resolve_backend(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    has_partial_independence: bool,
+) -> BackendPlan {
+    match resolve(kind, circuit, has_partial_independence) {
+        ExecutionPlan::Backend(plan) => plan,
         _ => unreachable!("non-backend dispatch should be handled by caller"),
     }
 }
@@ -506,11 +648,23 @@ pub(super) fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Ci
     prefix_gates >= min_gates && prefix_gates < circuit.instructions.len()
 }
 
-pub(super) fn try_temporal_clifford(
+/// Temporal-Clifford execution split into a seed-independent plan and a
+/// per-seed run, so shot loops split and fuse the circuit once instead of
+/// once per shot. The stabilizer prefix runs on the host tableau; the
+/// crossover data in [`gpu_capability`] makes a device prefix unreachable
+/// here (temporal-Clifford requires fitting the dense statevector, far below
+/// the stabilizer crossover).
+pub(super) struct TemporalCliffordPlan {
+    prefix: Circuit,
+    fused_tail: Circuit,
+    tail_num_classical_bits: usize,
+    tail_accel: Accel,
+}
+
+pub(super) fn plan_temporal_clifford(
     kind: &BackendKind,
     circuit: &Circuit,
-    seed: u64,
-) -> Option<Result<RunOutcome>> {
+) -> Option<TemporalCliffordPlan> {
     if !kind.is_auto() {
         return None;
     }
@@ -521,44 +675,54 @@ pub(super) fn try_temporal_clifford(
     if prefix.gate_count() < min_clifford_prefix_gates(circuit.num_qubits) {
         return None;
     }
+    let tail_accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
+    let tail_num_classical_bits = tail.num_classical_bits;
+    let fused_tail = match &tail_accel {
+        Accel::Cpu => crate::circuit::fusion::fuse_circuit(&tail, true).into_owned(),
+        #[cfg(feature = "gpu")]
+        Accel::Gpu { .. } => {
+            let expanded = crate::circuit::expand_qft_blocks(&tail);
+            crate::circuit::fusion::fuse_circuit(&expanded, true).into_owned()
+        }
+    };
+    Some(TemporalCliffordPlan {
+        prefix,
+        fused_tail,
+        tail_num_classical_bits,
+        tail_accel,
+    })
+}
 
+pub(super) fn run_temporal_clifford(
+    plan: &TemporalCliffordPlan,
+    seed: u64,
+    want_probabilities: bool,
+) -> Result<RunOutcome> {
     let mut stab = StabilizerBackend::new(seed);
-    if let Err(e) = stab.init(prefix.num_qubits, prefix.num_classical_bits) {
-        return Some(Err(e));
-    }
+    stab.init(plan.prefix.num_qubits, plan.prefix.num_classical_bits)?;
     stab.enable_lazy_destab();
-    for inst in &prefix.instructions {
-        if let Err(e) = stab.apply(inst) {
-            return Some(Err(e));
-        }
+    for inst in &plan.prefix.instructions {
+        stab.apply(inst)?;
     }
 
-    let state = match stab.export_statevector() {
-        Ok(s) => s,
-        Err(e) => return Some(Err(e)),
+    let state = stab.export_statevector()?;
+
+    let mut sv = build_statevector(&plan.tail_accel, seed);
+    sv.init_from_state(state, plan.tail_num_classical_bits)?;
+    for inst in &plan.fused_tail.instructions {
+        sv.apply(inst)?;
+    }
+
+    let probabilities = if want_probabilities {
+        try_backend_probabilities(&sv)?
+    } else {
+        None
     };
 
-    let mut sv = StatevectorBackend::new(seed);
-    if let Err(e) = sv.init_from_state(state, tail.num_classical_bits) {
-        return Some(Err(e));
-    }
-
-    let fused_tail = crate::circuit::fusion::fuse_circuit(&tail, sv.supports_fused_gates());
-    for inst in &fused_tail.instructions {
-        if let Err(e) = sv.apply(inst) {
-            return Some(Err(e));
-        }
-    }
-
-    let probabilities = match try_backend_probabilities(&sv) {
-        Ok(probs) => probs,
-        Err(e) => return Some(Err(e)),
-    };
-
-    Some(Ok(RunOutcome {
+    Ok(RunOutcome {
         classical_bits: sv.classical_results().to_vec(),
         probabilities,
-    }))
+    })
 }
 
 #[cfg(all(test, feature = "gpu"))]
@@ -769,5 +933,340 @@ mod gpu_crossover_tests {
             run_query(explicit, &circuit, 42).unwrap_err(),
             PrismError::BackendUnsupported { .. }
         ));
+    }
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod accel_tests {
+    use super::*;
+
+    fn stub() -> Arc<GpuContext> {
+        GpuContext::stub_for_tests()
+    }
+
+    fn is_cpu(accel: &Accel) -> bool {
+        matches!(accel, Accel::Cpu)
+    }
+
+    #[test]
+    fn auto_gpu_statevector_below_crossover_is_cpu() {
+        let kind = BackendKind::AutoGpu { context: stub() };
+        let n = crate::gpu::min_qubits() - 1;
+        assert!(is_cpu(&accel_for(&kind, Family::Statevector, n)));
+    }
+
+    /// Above the crossover the stub cannot report VRAM, so the fit gate fails
+    /// closed and the soft path resolves to the host.
+    #[test]
+    fn auto_gpu_statevector_fits_fails_closed_on_stub() {
+        let kind = BackendKind::AutoGpu { context: stub() };
+        let n = crate::gpu::min_qubits() + 2;
+        assert!(is_cpu(&accel_for(&kind, Family::Statevector, n)));
+    }
+
+    #[test]
+    fn auto_gpu_cpu_only_families_stay_cpu() {
+        let kind = BackendKind::AutoGpu { context: stub() };
+        for family in [
+            Family::ProductState,
+            Family::Sparse,
+            Family::Mps,
+            Family::Factored,
+            Family::FactoredStabilizer,
+            Family::TensorNetwork,
+        ] {
+            assert!(is_cpu(&accel_for(&kind, family, 1 << 10)), "{family:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_statevector_gpu_is_hard_at_crossover_and_cpu_below() {
+        let kind = BackendKind::StatevectorGpu { context: stub() };
+        let n = crate::gpu::min_qubits();
+        assert!(matches!(
+            accel_for(&kind, Family::Statevector, n),
+            Accel::Gpu { soft: false, .. }
+        ));
+        assert!(is_cpu(&accel_for(&kind, Family::Statevector, n - 1)));
+    }
+
+    #[test]
+    fn explicit_stabilizer_gpu_is_hard_at_crossover_and_cpu_below() {
+        let kind = BackendKind::StabilizerGpu { context: stub() };
+        let n = crate::gpu::stabilizer_min_qubits();
+        assert!(matches!(
+            accel_for(&kind, Family::Stabilizer, n),
+            Accel::Gpu { soft: false, .. }
+        ));
+        assert!(is_cpu(&accel_for(&kind, Family::Stabilizer, n - 1)));
+    }
+
+    /// An explicit GPU kind accelerates only its own family; any other family
+    /// resolves to the host regardless of size.
+    #[test]
+    fn explicit_kind_other_family_is_cpu() {
+        let sv = BackendKind::StatevectorGpu { context: stub() };
+        assert!(is_cpu(&accel_for(&sv, Family::Stabilizer, 1 << 20)));
+        let stab = BackendKind::StabilizerGpu { context: stub() };
+        assert!(is_cpu(&accel_for(&stab, Family::Statevector, 1 << 20)));
+    }
+
+    #[test]
+    fn cpu_kinds_are_cpu_everywhere() {
+        for family in [Family::Statevector, Family::Stabilizer] {
+            assert!(is_cpu(&accel_for(&BackendKind::Auto, family, 1 << 20)));
+            assert!(is_cpu(&accel_for(
+                &BackendKind::Statevector,
+                family,
+                1 << 20
+            )));
+        }
+    }
+
+    /// `init_from_state` on a soft GPU backend degrades to the host when the
+    /// device upload fails, preserving the supplied amplitudes.
+    #[test]
+    fn init_from_state_soft_falls_back_to_host_on_stub() {
+        use num_complex::Complex64;
+        let mut sv = StatevectorBackend::new(42).with_gpu_auto(stub());
+        let amp = Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+        let state = vec![amp, Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0), amp];
+        sv.init_from_state(state.clone(), 0).unwrap();
+        let exported = sv.export_statevector().unwrap();
+        for (e, s) in exported.iter().zip(&state) {
+            assert!((e - s).norm() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn init_from_state_hard_errors_on_stub() {
+        use num_complex::Complex64;
+        let mut sv = StatevectorBackend::new(42).with_gpu(stub());
+        let err = sv
+            .init_from_state(vec![Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)], 0)
+            .unwrap_err();
+        assert!(matches!(err, PrismError::BackendUnsupported { .. }));
+    }
+}
+
+/// Table-driven coverage of [`resolve`]: every backend kind against every
+/// circuit shape class, asserting the resolved family and execution target.
+/// This is the contract that all simulator families dispatch uniformly on
+/// both targets; extend it when a family gains a capability row.
+#[cfg(test)]
+mod dispatch_matrix_tests {
+    use super::*;
+    use crate::gates::Gate;
+
+    fn product(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        c
+    }
+
+    fn clifford(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, 0);
+        c.add_gate(Gate::H, &[0]);
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        c
+    }
+
+    fn dense(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        c
+    }
+
+    /// One qubit past the statevector memory cap, or `None` when memory
+    /// detection failed and the cap is disabled (no width is oversize then).
+    fn oversize_qubits() -> Option<usize> {
+        let cap = max_statevector_qubits();
+        if cap >= usize::BITS as usize {
+            eprintln!(
+                "SKIP: statevector qubit cap disabled on this host; skipping oversize checks"
+            );
+            return None;
+        }
+        Some(cap + 1)
+    }
+
+    fn oversize_sparse(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::T, &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        c
+    }
+
+    fn oversize_dense(n: usize) -> Circuit {
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n {
+            c.add_gate(Gate::Rx(0.3), &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        c
+    }
+
+    fn resolved(kind: &BackendKind, circuit: &Circuit, hpi: bool) -> BackendPlan {
+        match resolve(kind, circuit, hpi) {
+            ExecutionPlan::Backend(plan) => plan,
+            _ => panic!("expected a backend plan"),
+        }
+    }
+
+    fn assert_cpu_family(kind: &BackendKind, circuit: &Circuit, hpi: bool, family: Family) {
+        let plan = resolved(kind, circuit, hpi);
+        assert_eq!(plan.family(), family, "kind {kind:?}");
+        assert!(
+            matches!(plan.accel(), Accel::Cpu),
+            "kind {kind:?} family {family:?} must resolve to the host"
+        );
+    }
+
+    fn auto_kinds() -> Vec<BackendKind> {
+        #[cfg(feature = "gpu")]
+        {
+            vec![
+                BackendKind::Auto,
+                BackendKind::AutoGpu {
+                    context: GpuContext::stub_for_tests(),
+                },
+            ]
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            vec![BackendKind::Auto]
+        }
+    }
+
+    /// Auto and AutoGpu make identical family choices across every circuit
+    /// shape class; on the stub context every choice resolves to the host
+    /// (small circuits by crossover, large ones by the fail-closed VRAM gate).
+    #[test]
+    fn auto_family_matrix() {
+        let oversize = oversize_qubits();
+        for kind in auto_kinds() {
+            assert_cpu_family(&kind, &product(6), false, Family::ProductState);
+            assert_cpu_family(&kind, &clifford(6), false, Family::Stabilizer);
+            assert_cpu_family(&kind, &clifford(16), false, Family::Stabilizer);
+            assert_cpu_family(&kind, &dense(8), false, Family::Statevector);
+            assert_cpu_family(&kind, &dense(16), false, Family::Statevector);
+            assert_cpu_family(&kind, &dense(8), true, Family::Factored);
+            if let Some(n) = oversize {
+                assert_cpu_family(&kind, &oversize_sparse(n), false, Family::Sparse);
+                assert_cpu_family(&kind, &oversize_dense(n), false, Family::Mps);
+            }
+        }
+    }
+
+    #[test]
+    fn auto_oversize_mps_uses_auto_bond_dim() {
+        let Some(n) = oversize_qubits() else { return };
+        for kind in auto_kinds() {
+            let plan = resolved(&kind, &oversize_dense(n), false);
+            assert!(matches!(
+                plan,
+                BackendPlan::Mps {
+                    max_bond_dim: AUTO_MPS_BOND_DIM
+                }
+            ));
+        }
+    }
+
+    /// Explicit CPU kinds map 1:1 onto their family regardless of circuit
+    /// shape, always on the host.
+    #[test]
+    fn explicit_cpu_kind_matrix() {
+        let circuit = dense(6);
+        let cases = [
+            (BackendKind::Statevector, Family::Statevector),
+            (BackendKind::Stabilizer, Family::Stabilizer),
+            (BackendKind::Sparse, Family::Sparse),
+            (BackendKind::ProductState, Family::ProductState),
+            (BackendKind::TensorNetwork, Family::TensorNetwork),
+            (BackendKind::Factored, Family::Factored),
+            (BackendKind::FactoredStabilizer, Family::FactoredStabilizer),
+        ];
+        for (kind, family) in cases {
+            assert_cpu_family(&kind, &circuit, false, family);
+        }
+
+        let plan = resolved(&BackendKind::Mps { max_bond_dim: 77 }, &circuit, false);
+        assert!(matches!(plan, BackendPlan::Mps { max_bond_dim: 77 }));
+    }
+
+    #[test]
+    fn non_backend_kinds_resolve_to_their_engines() {
+        let circuit = dense(6);
+        assert!(matches!(
+            resolve(&BackendKind::StabilizerRank, &circuit, false),
+            ExecutionPlan::StabilizerRank
+        ));
+        assert!(matches!(
+            resolve(
+                &BackendKind::StochasticPauli { num_samples: 9 },
+                &circuit,
+                false
+            ),
+            ExecutionPlan::StochasticPauli { num_samples: 9 }
+        ));
+        assert!(matches!(
+            resolve(
+                &BackendKind::DeterministicPauli {
+                    epsilon: 0.5,
+                    max_terms: 3
+                },
+                &circuit,
+                false
+            ),
+            ExecutionPlan::DeterministicPauli {
+                epsilon: e,
+                max_terms: 3
+            } if e == 0.5
+        ));
+    }
+
+    /// Explicit GPU kinds resolve hard device execution at their crossover
+    /// (no VRAM gate) and host execution below it; the family choice never
+    /// changes with the target.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn explicit_gpu_kind_matrix() {
+        let sv_kind = BackendKind::StatevectorGpu {
+            context: GpuContext::stub_for_tests(),
+        };
+        let large = dense(crate::gpu::min_qubits());
+        let plan = resolved(&sv_kind, &large, false);
+        assert_eq!(plan.family(), Family::Statevector);
+        assert!(matches!(plan.accel(), Accel::Gpu { soft: false, .. }));
+        assert_cpu_family(
+            &sv_kind,
+            &dense(crate::gpu::min_qubits() - 1),
+            false,
+            Family::Statevector,
+        );
+
+        let stab_kind = BackendKind::StabilizerGpu {
+            context: GpuContext::stub_for_tests(),
+        };
+        let huge = Circuit::new(crate::gpu::stabilizer_min_qubits(), 0);
+        let plan = resolved(&stab_kind, &huge, false);
+        assert_eq!(plan.family(), Family::Stabilizer);
+        assert!(matches!(plan.accel(), Accel::Gpu { soft: false, .. }));
+        assert_cpu_family(&stab_kind, &clifford(8), false, Family::Stabilizer);
     }
 }

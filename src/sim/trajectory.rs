@@ -352,16 +352,31 @@ pub(crate) fn run_trajectory_shot(
     Ok(results)
 }
 
+/// Shot-level parallelism stops where kernel-level parallelism starts. At and
+/// above the backend parallel threshold the statevector kernels already
+/// saturate the pool, and nesting shot tasks inside kernel joins piles stolen
+/// shot frames onto one worker stack until it overflows. Same guard as
+/// `MAX_BLOCK_QUBITS_FOR_PAR` in the decomposed path.
+#[cfg(feature = "parallel")]
+const MAX_QUBITS_FOR_PAR_SHOTS: usize = 14;
+
+/// `force_serial` keeps every trajectory on one thread. Device-resident
+/// backends set it: parallel trajectories would allocate one device state per
+/// Rayon thread against a single-state VRAM verdict, and concurrent launches
+/// on one device serialize anyway.
 pub(crate) fn run_trajectories(
     backend_factory: impl Fn(u64) -> Box<dyn Backend> + Sync,
     circuit: &Circuit,
     noise: &NoiseModel,
     num_shots: usize,
     seed: u64,
+    force_serial: bool,
 ) -> Result<ShotsResult> {
+    #[cfg(not(feature = "parallel"))]
+    let _ = force_serial;
     #[cfg(feature = "parallel")]
     {
-        if circuit.num_qubits <= 20 && num_shots >= 4 {
+        if !force_serial && circuit.num_qubits < MAX_QUBITS_FOR_PAR_SHOTS && num_shots >= 4 {
             return run_trajectories_par(&backend_factory, circuit, noise, num_shots, seed);
         }
     }
@@ -425,7 +440,7 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &noise, 500, 42).unwrap();
+        let result = run_trajectories(factory, &circuit, &noise, 500, 42, false).unwrap();
         assert_eq!(result.shots.len(), 500);
 
         let all_zero: Vec<bool> = vec![false; n];
@@ -451,7 +466,7 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &noise, 1000, 42).unwrap();
+        let result = run_trajectories(factory, &circuit, &noise, 1000, 42, false).unwrap();
         let num_zero = result.shots.iter().filter(|s| !s[0]).count();
         // With gamma=0.9 on |1⟩, P(decay) ≈ 0.9
         assert!(
@@ -483,7 +498,7 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &pd_noise, 1000, 42).unwrap();
+        let result = run_trajectories(factory, &circuit, &pd_noise, 1000, 42, false).unwrap();
         let num_one = result.shots.iter().filter(|s| s[0]).count();
         // Phase damping on |1⟩ should keep it as |1⟩ (only dephases superpositions)
         assert_eq!(num_one, 1000, "PD should not change |1⟩ population");
@@ -501,7 +516,7 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &noise, 1000, 42).unwrap();
+        let result = run_trajectories(factory, &circuit, &noise, 1000, 42, false).unwrap();
         let num_one = result.shots.iter().filter(|s| s[0]).count();
         // Should see ~30% readout flips
         assert!(
@@ -529,7 +544,7 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &noise, 1000, 42).unwrap();
+        let result = run_trajectories(factory, &circuit, &noise, 1000, 42, false).unwrap();
         // With 50% 2q depolarizing, varied outcomes should appear.
         let num_00 = result.shots.iter().filter(|s| !s[0] && !s[1]).count();
         assert!(
@@ -553,8 +568,8 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let r1 = run_trajectories(factory, &circuit, &noise, 100, 42).unwrap();
-        let r2 = run_trajectories(factory, &circuit, &noise, 100, 42).unwrap();
+        let r1 = run_trajectories(factory, &circuit, &noise, 100, 42, false).unwrap();
+        let r2 = run_trajectories(factory, &circuit, &noise, 100, 42, false).unwrap();
         assert_eq!(r1.shots, r2.shots, "same seed must produce same results");
     }
 }

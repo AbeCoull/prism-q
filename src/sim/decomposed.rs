@@ -2,8 +2,8 @@ use crate::circuit::Circuit;
 use crate::error::Result;
 
 use super::{
-    BackendKind, FactoredBlock, Probabilities, RunOutcome, SimOptions, execute_circuit,
-    select_backend, validate_explicit_backend,
+    BackendKind, FactoredBlock, Probabilities, RunOutcome, SimOptions, dispatch::BackendPlan,
+    execute_circuit,
 };
 
 pub(super) const MIN_DECOMPOSITION_QUBITS: usize = 8;
@@ -29,6 +29,11 @@ fn run_blocks_maybe_par(
         let all_small = _components
             .iter()
             .all(|c| c.len() < MAX_BLOCK_QUBITS_FOR_PAR);
+        #[cfg(feature = "gpu")]
+        let all_small = all_small
+            && _components
+                .iter()
+                .all(|c| !super::dispatch::may_resolve_to_gpu(kind, c.len()));
         if all_small && k >= 2 {
             use rayon::prelude::*;
             crate::backend::init_thread_pool();
@@ -132,7 +137,7 @@ fn merge_decomposed_results(
 }
 
 pub(super) fn run_decomposed_prefused(
-    kind: &BackendKind,
+    block_plans: &[BackendPlan],
     components: &[Vec<usize>],
     partitions: &[(Circuit, Vec<usize>, Vec<usize>)],
     fused_blocks: &[std::borrow::Cow<'_, Circuit>],
@@ -149,12 +154,7 @@ pub(super) fn run_decomposed_prefused(
     let results: Vec<Result<RunOutcome>> = (0..k)
         .map(|i| {
             let block_seed = seed.wrapping_add(i as u64);
-            let sub = &partitions[i].0;
-            let block_kind = kind.clone();
-            if !block_kind.is_auto() {
-                validate_explicit_backend(&block_kind, sub)?;
-            }
-            let mut backend = select_backend(&block_kind, sub, block_seed, false);
+            let mut backend = block_plans[i].build(block_seed);
             execute_circuit(&mut *backend, &fused_blocks[i], &block_opts)
         })
         .collect();

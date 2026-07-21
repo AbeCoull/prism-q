@@ -778,6 +778,41 @@ fn statevector_gpu_builder_matches_cpu_random() {
     }
 }
 
+/// A mid-circuit measurement forces the per-shot slow path. With
+/// `BackendKind::StatevectorGpu` at 14q each per-shot backend routes to the
+/// device, and outcomes must match the host statevector shot-for-shot: both
+/// backends draw the same RNG stream for the same shot seed.
+#[test]
+fn statevector_gpu_mid_measure_shots_match_cpu() {
+    use prism_q::{BackendKind, Circuit};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let mut circuit = Circuit::new(14, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 0..13 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_measure(1, 1);
+
+    let cpu = prism_q::simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .shots(16)
+        .expect("cpu shots failed");
+    let gpu = prism_q::simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .seed(42)
+        .shots(16)
+        .expect("gpu shots failed");
+
+    assert_eq!(cpu.shots, gpu.shots);
+}
+
 // ============================================================================
 // Stabilizer GPU scaffold
 // ============================================================================
@@ -1886,4 +1921,427 @@ fn sample_bulk_packed_device_counts_match_host_counts() {
     let host_counts = device.to_host().unwrap().counts();
 
     assert_eq!(device_counts, host_counts);
+}
+
+// ============================================================================
+// AutoGpu terminal sampling
+// ============================================================================
+
+fn terminal_rx_cx_circuit(n: usize) -> prism_q::Circuit {
+    let mut circuit = prism_q::Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Rz(0.5), &[q]);
+    }
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+fn one_frequencies_from_counts(
+    counts: &std::collections::HashMap<Vec<u64>, u64>,
+    num_qubits: usize,
+    num_shots: u64,
+) -> Vec<f64> {
+    let mut ones = vec![0u64; num_qubits];
+    for (key, count) in counts {
+        for (q, one_count) in ones.iter_mut().enumerate() {
+            if (key[q / 64] >> (q % 64)) & 1 == 1 {
+                *one_count += count;
+            }
+        }
+    }
+    ones.into_iter()
+        .map(|c| c as f64 / num_shots as f64)
+        .collect()
+}
+
+/// Terminal counts under `gpu_auto` simulate on device and sample from the
+/// device-reduced probabilities. Same seed twice must reproduce identical
+/// counts, and per-qubit frequencies must agree with the CPU `Auto` sampler
+/// within statistical tolerance (different samplers, same distribution).
+#[test]
+fn auto_gpu_terminal_counts_match_cpu_auto() {
+    use prism_q::{BackendKind, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 16;
+    let num_shots = 50_000;
+    let circuit = terminal_rx_cx_circuit(n);
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .sample_counts(num_shots)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .sample_counts(num_shots)
+        .unwrap();
+    let gpu_again = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .sample_counts(num_shots)
+        .unwrap();
+
+    assert_eq!(
+        gpu.counts, gpu_again.counts,
+        "same seed must reproduce identical GPU counts"
+    );
+
+    let total: u64 = gpu.counts.values().sum();
+    assert_eq!(total, num_shots as u64);
+
+    let cpu_freq = one_frequencies_from_counts(&cpu.counts, n, num_shots as u64);
+    let gpu_freq = one_frequencies_from_counts(&gpu.counts, n, num_shots as u64);
+    for q in 0..n {
+        let diff = (cpu_freq[q] - gpu_freq[q]).abs();
+        assert!(
+            diff < 0.02,
+            "qubit {q}: cpu freq={}, gpu freq={}, diff={diff}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
+}
+
+/// Terminal shots under `gpu_auto`: deterministic per seed, per-qubit
+/// frequencies statistically matching the CPU `Auto` path.
+#[test]
+fn auto_gpu_terminal_shots_match_cpu_auto() {
+    use prism_q::{BackendKind, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 16;
+    let num_shots = 4000;
+    let circuit = terminal_rx_cx_circuit(n);
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+    let gpu_again = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+
+    assert_eq!(
+        gpu.shots, gpu_again.shots,
+        "same seed must reproduce identical GPU shots"
+    );
+    assert_eq!(gpu.shots.len(), num_shots);
+
+    let freq = |shots: &[Vec<bool>]| -> Vec<f64> {
+        let mut ones = vec![0usize; n];
+        for shot in shots {
+            for (q, one_count) in ones.iter_mut().enumerate() {
+                if shot[q] {
+                    *one_count += 1;
+                }
+            }
+        }
+        ones.into_iter()
+            .map(|c| c as f64 / shots.len() as f64)
+            .collect()
+    };
+
+    let cpu_freq = freq(&cpu.shots);
+    let gpu_freq = freq(&gpu.shots);
+    for q in 0..n {
+        let diff = (cpu_freq[q] - gpu_freq[q]).abs();
+        assert!(
+            diff < 0.05,
+            "qubit {q}: cpu freq={}, gpu freq={}, diff={diff}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
+}
+
+/// Explicit `StatevectorGpu` terminal counts route through the same terminal
+/// fast path as `AutoGpu`: device simulation, device-reduced probabilities,
+/// and the same host sampler, so identical seeds produce identical counts.
+#[test]
+fn statevector_gpu_terminal_counts_match_auto_gpu() {
+    use prism_q::simulate;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let circuit = terminal_rx_cx_circuit(16);
+    let num_shots = 20_000;
+    let auto_gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .sample_counts(num_shots)
+        .unwrap();
+    let explicit = simulate(&circuit)
+        .gpu(f.ctx.clone())
+        .seed(42)
+        .sample_counts(num_shots)
+        .unwrap();
+    assert_eq!(auto_gpu.counts, explicit.counts);
+}
+
+/// Expectation values under `gpu_auto` and explicit `.gpu(...)` simulate on
+/// device and export amplitudes for the Pauli mask reduction. GPU kernel
+/// float ordering differs from the host, so agreement is 1e-8, not 1e-12.
+#[test]
+fn gpu_expectation_values_match_cpu() {
+    use prism_q::{BackendKind, PauliAxis, PauliTerm, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 16;
+    let mut circuit = prism_q::Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Rz(0.5), &[q]);
+    }
+
+    let obs = vec![
+        vec![PauliTerm::new(0, PauliAxis::Z)],
+        vec![PauliTerm::new(3, PauliAxis::X)],
+        vec![
+            PauliTerm::new(5, PauliAxis::Y),
+            PauliTerm::new(7, PauliAxis::Z),
+        ],
+        vec![
+            PauliTerm::new(1, PauliAxis::X),
+            PauliTerm::new(2, PauliAxis::Y),
+            PauliTerm::new(4, PauliAxis::Z),
+        ],
+    ];
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .expectation_values(&obs)
+        .unwrap();
+    let auto_gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .seed(42)
+        .expectation_values(&obs)
+        .unwrap();
+    let explicit = simulate(&circuit)
+        .gpu(f.ctx.clone())
+        .seed(42)
+        .expectation_values(&obs)
+        .unwrap();
+
+    for (i, ((c, a), e)) in cpu.iter().zip(&auto_gpu).zip(&explicit).enumerate() {
+        assert!(
+            (c - a).abs() < 1e-8,
+            "obs {i}: cpu={c}, auto_gpu={a}, diff={}",
+            (c - a).abs()
+        );
+        assert!(
+            (c - e).abs() < 1e-8,
+            "obs {i}: cpu={c}, explicit gpu={e}, diff={}",
+            (c - e).abs()
+        );
+    }
+}
+
+// ============================================================================
+// Temporal-Clifford GPU tail
+// ============================================================================
+
+fn temporal_prefix(n: usize) -> prism_q::Circuit {
+    let mut circuit = prism_q::Circuit::new(n, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    for _ in 0..3 {
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    circuit
+}
+
+fn assert_run_probs_match(circuit: &prism_q::Circuit, ctx: &std::sync::Arc<GpuContext>) {
+    use prism_q::{BackendKind, simulate};
+
+    let cpu = simulate(circuit)
+        .backend(BackendKind::Auto)
+        .seed(42)
+        .run()
+        .unwrap();
+    let gpu = simulate(circuit)
+        .gpu_auto(ctx.clone())
+        .seed(42)
+        .run()
+        .unwrap();
+
+    let cp = cpu.probabilities.expect("cpu probs").to_vec();
+    let gp = gpu.probabilities.expect("gpu probs").to_vec();
+    assert_eq!(cp.len(), gp.len());
+    for (i, (c, g)) in cp.iter().zip(gp.iter()).enumerate() {
+        let diff = (c - g).abs();
+        assert!(
+            diff < 1e-10,
+            "prob mismatch at {i}: cpu={c}, gpu={g}, diff={diff}"
+        );
+    }
+}
+
+/// Long Clifford prefix + non-Clifford tail under `gpu_auto`: the prefix runs
+/// on the host tableau, the exported state uploads to the device, and the tail
+/// runs there. Probabilities must match the CPU `Auto` temporal path.
+#[test]
+fn auto_gpu_temporal_clifford_matches_cpu_auto() {
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 15;
+    let mut circuit = temporal_prefix(n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3), &[q]);
+    }
+    assert_run_probs_match(&circuit, &f.ctx);
+}
+
+/// Same shape with a `QftBlock` tail: the device tail cannot run the native
+/// host FFT path, so the block is expanded at plan time. Catches any route
+/// that hands an unexpanded block to the device kernels.
+#[test]
+fn auto_gpu_temporal_clifford_qft_tail_matches_cpu_auto() {
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 15;
+    let mut circuit = temporal_prefix(n);
+    let targets: Vec<usize> = (0..n).collect();
+    circuit.add_gate(
+        Gate::QftBlock {
+            start: 0,
+            num: n as u8,
+        },
+        &targets,
+    );
+    for q in 0..n {
+        circuit.add_gate(Gate::Rz(0.5), &[q]);
+    }
+    assert_run_probs_match(&circuit, &f.ctx);
+}
+
+/// Device round-trip for `init_from_state`: uploaded amplitudes must export
+/// back unchanged.
+#[test]
+fn init_from_state_gpu_round_trip() {
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 4;
+    let dim = 1usize << n;
+    let mut state: Vec<Complex64> = (0..dim)
+        .map(|i| Complex64::new(0.3 + i as f64, 0.1 * i as f64))
+        .collect();
+    let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+    for a in &mut state {
+        *a /= norm;
+    }
+
+    let mut sv = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    sv.init_from_state(state.clone(), 0).unwrap();
+    let exported = sv.export_statevector().unwrap();
+    assert_eq!(exported.len(), state.len());
+    for (i, (e, s)) in exported.iter().zip(&state).enumerate() {
+        let diff = (e - s).norm();
+        assert!(diff < 1e-12, "amp {i}: uploaded={s:?}, exported={e:?}");
+    }
+}
+
+// ============================================================================
+// AutoGpu noisy trajectories
+// ============================================================================
+
+/// Non-Pauli (amplitude damping) noise under `gpu_auto`: trajectories build
+/// soft device statevectors per shot and run serially. Per-qubit frequencies
+/// must agree statistically with the CPU `Auto` trajectory engine, and the
+/// run must be reproducible per seed.
+#[test]
+fn auto_gpu_noisy_trajectories_match_cpu_auto() {
+    use prism_q::NoiseModel;
+    use prism_q::simulate;
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 14;
+    let num_shots = 400;
+    let mut circuit = prism_q::Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    let noise = NoiseModel::with_amplitude_damping(&circuit, 0.05);
+    let cpu = simulate(&circuit)
+        .noise(&noise)
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .noise(&noise)
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+    let gpu_again = simulate(&circuit)
+        .gpu_auto(f.ctx.clone())
+        .noise(&noise)
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+
+    assert_eq!(
+        gpu.shots, gpu_again.shots,
+        "same seed must reproduce identical noisy GPU shots"
+    );
+
+    let freq = |shots: &[Vec<bool>]| -> Vec<f64> {
+        let mut ones = vec![0usize; n];
+        for shot in shots {
+            for (q, one_count) in ones.iter_mut().enumerate() {
+                if shot[q] {
+                    *one_count += 1;
+                }
+            }
+        }
+        ones.into_iter()
+            .map(|c| c as f64 / shots.len() as f64)
+            .collect()
+    };
+
+    let cpu_freq = freq(&cpu.shots);
+    let gpu_freq = freq(&gpu.shots);
+    for q in 0..n {
+        let diff = (cpu_freq[q] - gpu_freq[q]).abs();
+        assert!(
+            diff < 0.15,
+            "qubit {q}: cpu freq={}, gpu freq={}, diff={diff}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
 }

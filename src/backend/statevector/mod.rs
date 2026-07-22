@@ -67,6 +67,24 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 pub(crate) use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
 
+/// Per-block partial sums for a 1q reduced density matrix: `(p0, p1, r)` over
+/// one `2 * 2^qubit` block whose low half holds the qubit-0 amplitudes.
+#[inline(always)]
+pub(super) fn rdm_block_sums(block: &[Complex64], half: usize) -> (f64, f64, Complex64) {
+    let (lo, hi) = block.split_at(half);
+    let mut p0 = 0.0f64;
+    let mut p1 = 0.0f64;
+    let mut r = Complex64::new(0.0, 0.0);
+    for i in 0..half {
+        let a0 = lo[i];
+        let a1 = hi[i];
+        p0 += a0.norm_sqr();
+        p1 += a1.norm_sqr();
+        r += a1 * a0.conj();
+    }
+    (p0, p1, r)
+}
+
 #[cfg(feature = "gpu")]
 fn reduced_density_matrix_from_state(state: &[Complex64], qubit: usize) -> [[Complex64; 2]; 2] {
     let half = 1usize << qubit;
@@ -76,14 +94,10 @@ fn reduced_density_matrix_from_state(state: &[Complex64], qubit: usize) -> [[Com
     let mut r = Complex64::new(0.0, 0.0);
 
     for block in state.chunks(block_size) {
-        let (lo, hi) = block.split_at(half);
-        for i in 0..half {
-            let a0 = lo[i];
-            let a1 = hi[i];
-            p0 += a0.norm_sqr();
-            p1 += a1.norm_sqr();
-            r += a1 * a0.conj();
-        }
+        let (b0, b1, br) = rdm_block_sums(block, half);
+        p0 += b0;
+        p1 += b1;
+        r += br;
     }
 
     [

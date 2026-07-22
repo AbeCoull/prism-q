@@ -8,6 +8,9 @@
 
 #![cfg(feature = "gpu")]
 
+mod common;
+
+use common::assert_probs_close;
 use num_complex::Complex64;
 
 use prism_q::StatevectorBackend;
@@ -37,21 +40,40 @@ impl Fixture {
     }
 
     fn compare(&self, num_qubits: usize, instructions: &[Instruction]) {
+        self.compare_eps(num_qubits, instructions, EPS);
+    }
+
+    fn compare_eps(&self, num_qubits: usize, instructions: &[Instruction], eps: f64) {
+        self.compare_with_classical(num_qubits, 0, instructions, eps);
+    }
+
+    fn compare_with_classical(
+        &self,
+        num_qubits: usize,
+        num_classical: usize,
+        instructions: &[Instruction],
+        eps: f64,
+    ) {
         let mut cpu = StatevectorBackend::new(42);
-        cpu.init(num_qubits, 0).unwrap();
+        cpu.init(num_qubits, num_classical).unwrap();
         let mut gpu = StatevectorBackend::new(42).with_gpu(self.ctx.clone());
-        gpu.init(num_qubits, 0).unwrap();
+        gpu.init(num_qubits, num_classical).unwrap();
         for inst in instructions {
             cpu.apply(inst).unwrap();
             gpu.apply(inst).unwrap();
         }
+        assert_eq!(
+            cpu.classical_results(),
+            gpu.classical_results(),
+            "classical bits mismatch"
+        );
         let cpu_sv = cpu.export_statevector().unwrap();
         let gpu_sv = gpu.export_statevector().unwrap();
         assert_eq!(cpu_sv.len(), gpu_sv.len());
         for (i, (c, g)) in cpu_sv.iter().zip(gpu_sv.iter()).enumerate() {
             let diff = (c - g).norm();
             assert!(
-                diff < EPS,
+                diff < eps,
                 "amplitude mismatch at index {i}: cpu={c:?}, gpu={g:?}, |diff|={diff}"
             );
         }
@@ -469,70 +491,28 @@ fn diagonal_batch_all_entry_kinds() {
 fn measurement_deterministic_with_fixed_seed() {
     let Some(f) = Fixture::try_new() else { return };
     let n = 3;
-    let mut cpu = StatevectorBackend::new(42);
-    cpu.init(n, n).unwrap();
-    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
-    gpu.init(n, n).unwrap();
-
-    let prep = [g(Gate::H, &[0]), g(Gate::Cx, &[0, 1]), g(Gate::H, &[2])];
-    for inst in &prep {
-        cpu.apply(inst).unwrap();
-        gpu.apply(inst).unwrap();
-    }
+    let mut insts = vec![g(Gate::H, &[0]), g(Gate::Cx, &[0, 1]), g(Gate::H, &[2])];
     for q in 0..n {
-        cpu.apply(&Instruction::Measure {
+        insts.push(Instruction::Measure {
             qubit: q,
             classical_bit: q,
-        })
-        .unwrap();
-        gpu.apply(&Instruction::Measure {
-            qubit: q,
-            classical_bit: q,
-        })
-        .unwrap();
+        });
     }
-    assert_eq!(cpu.classical_results(), gpu.classical_results());
-    // Export statevectors and verify residual state matches (post-collapse).
-    let cpu_sv = cpu.export_statevector().unwrap();
-    let gpu_sv = gpu.export_statevector().unwrap();
-    for (i, (c, g_)) in cpu_sv.iter().zip(gpu_sv.iter()).enumerate() {
-        let diff = (c - g_).norm();
-        assert!(
-            diff < EPS,
-            "post-measurement amplitude mismatch at {i}: {c:?} vs {g_:?}"
-        );
-    }
+    f.compare_with_classical(n, n, &insts, EPS);
 }
 
 #[test]
 fn reset_to_zero() {
     let Some(f) = Fixture::try_new() else { return };
-    let n = 3;
-    let mut cpu = StatevectorBackend::new(42);
-    cpu.init(n, 0).unwrap();
-    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
-    gpu.init(n, 0).unwrap();
-
     // Put the register into |1⟩|+⟩|1⟩, then reset q0 and q2.
-    let prep = [g(Gate::X, &[0]), g(Gate::H, &[1]), g(Gate::X, &[2])];
-    for inst in &prep {
-        cpu.apply(inst).unwrap();
-        gpu.apply(inst).unwrap();
-    }
-    cpu.apply(&Instruction::Reset { qubit: 0 }).unwrap();
-    gpu.apply(&Instruction::Reset { qubit: 0 }).unwrap();
-    cpu.apply(&Instruction::Reset { qubit: 2 }).unwrap();
-    gpu.apply(&Instruction::Reset { qubit: 2 }).unwrap();
-
-    let cpu_sv = cpu.export_statevector().unwrap();
-    let gpu_sv = gpu.export_statevector().unwrap();
-    for (i, (c, g_)) in cpu_sv.iter().zip(gpu_sv.iter()).enumerate() {
-        let diff = (c - g_).norm();
-        assert!(
-            diff < EPS,
-            "reset amplitude mismatch at {i}: {c:?} vs {g_:?}"
-        );
-    }
+    let insts = [
+        g(Gate::X, &[0]),
+        g(Gate::H, &[1]),
+        g(Gate::X, &[2]),
+        Instruction::Reset { qubit: 0 },
+        Instruction::Reset { qubit: 2 },
+    ];
+    f.compare(3, &insts);
 }
 
 // ============================================================================
@@ -586,55 +566,45 @@ fn batch_rzz_14q_qaoa_matches_cpu() {
     // CPU LUT kernel.
     let Some(f) = Fixture::try_new() else { return };
     let circuit = prism_q::circuits::qaoa_circuit(14, 2, 42);
-
-    let mut cpu = StatevectorBackend::new(42);
-    cpu.init(14, 0).unwrap();
-    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
-    gpu.init(14, 0).unwrap();
-    for inst in &circuit.instructions {
-        cpu.apply(inst).unwrap();
-        gpu.apply(inst).unwrap();
-    }
-    let cpu_sv = cpu.export_statevector().unwrap();
-    let gpu_sv = gpu.export_statevector().unwrap();
-    let eps = 1e-10;
-    for (i, (c, g)) in cpu_sv.iter().zip(gpu_sv.iter()).enumerate() {
-        let diff = (c - g).norm();
-        assert!(
-            diff < eps,
-            "qaoa_14q mismatch at {i}: cpu={c:?} gpu={g:?} |diff|={diff}"
-        );
-    }
+    f.compare_eps(14, &circuit.instructions, 1e-10);
 }
 
 #[test]
 fn batch_phase_16q_matches_cpu() {
-    // QFT at 16q exercises the `fuse_controlled_phases` pass which emits
-    // `Gate::BatchPhase`. The batched GPU kernel must match the CPU tiled kernel
-    // within tolerance. The test drives through `simulate(...).run()` so fusion fires
-    // normally, then compares probabilities between plain statevector and GPU statevector.
+    // `qft_circuit` emits a single `Gate::QftBlock`, so exercising the batched
+    // phase kernel requires expanding to textbook gates first and running the
+    // fusion pipeline, which re-batches the controlled phases into
+    // `Gate::BatchPhase` at 16q. The batched GPU kernel must match the CPU
+    // tiled kernel within tolerance.
     let Some(f) = Fixture::try_new() else { return };
 
     let circuit = prism_q::circuits::qft_circuit(16);
+    let expanded = prism_q::circuit::expand_qft_blocks(&circuit);
+    let fused = prism_q::circuit::fusion::fuse_circuit(&expanded, true);
+    assert!(
+        fused.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::BatchPhase(_),
+                ..
+            }
+        )),
+        "expanded 16q QFT must fuse to at least one BatchPhase"
+    );
+    // Looser than the default 1e-12: 16q with ~130 gates accumulates rounding.
+    f.compare_eps(16, &fused.instructions, 1e-10);
+}
 
-    let mut cpu = StatevectorBackend::new(42);
-    cpu.init(16, 0).unwrap();
-    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
-    gpu.init(16, 0).unwrap();
-    for inst in &circuit.instructions {
-        cpu.apply(inst).unwrap();
-        gpu.apply(inst).unwrap();
-    }
-    let cpu_sv = cpu.export_statevector().unwrap();
-    let gpu_sv = gpu.export_statevector().unwrap();
-    let eps = 1e-10; // looser than default 1e-12 for 16q × ~130 gates
-    for (i, (c, g)) in cpu_sv.iter().zip(gpu_sv.iter()).enumerate() {
-        let diff = (c - g).norm();
-        assert!(
-            diff < eps,
-            "qft_16q mismatch at {i}: cpu={c:?} gpu={g:?} |diff|={diff}"
-        );
-    }
+#[test]
+fn qft_block_native_and_expanded_match_cpu() {
+    // Native: the raw `Gate::QftBlock` instruction, CPU FFT path vs the GPU
+    // textbook-step decomposition. Expanded: both backends run the textbook
+    // gate list produced by `expand_qft_blocks`.
+    let Some(f) = Fixture::try_new() else { return };
+    let circuit = prism_q::circuits::qft_circuit(16);
+    f.compare_eps(16, &circuit.instructions, 1e-10);
+    let expanded = prism_q::circuit::expand_qft_blocks(&circuit);
+    f.compare_eps(16, &expanded.instructions, 1e-10);
 }
 
 #[test]
@@ -729,13 +699,7 @@ fn probabilities_match_cpu_on_random_circuit() {
     }
     let cpu_p = cpu.probabilities().unwrap();
     let gpu_p = gpu.probabilities().unwrap();
-    assert_eq!(cpu_p.len(), gpu_p.len());
-    for (i, (c, g_)) in cpu_p.iter().zip(gpu_p.iter()).enumerate() {
-        assert!(
-            (c - g_).abs() < EPS,
-            "prob[{i}] mismatch: cpu={c}, gpu={g_}"
-        );
-    }
+    assert_probs_close(&gpu_p, &cpu_p, EPS, "gpu/random_6q");
 }
 
 // ============================================================================
@@ -768,14 +732,7 @@ fn statevector_gpu_builder_matches_cpu_random() {
 
     let cpu_p = cpu.probabilities.expect("cpu probs missing").to_vec();
     let gpu_p = gpu.probabilities.expect("gpu probs missing").to_vec();
-    assert_eq!(cpu_p.len(), gpu_p.len());
-    for (i, (c, g_)) in cpu_p.iter().zip(gpu_p.iter()).enumerate() {
-        assert!(
-            (c - g_).abs() < 1e-10,
-            "prob[{i}] cpu={c}, gpu={g_}, diff={}",
-            (c - g_).abs()
-        );
-    }
+    assert_probs_close(&gpu_p, &cpu_p, 1e-10, "gpu/dispatch_random_14q");
 }
 
 /// A mid-circuit measurement forces the per-shot slow path. With

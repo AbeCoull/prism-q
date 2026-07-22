@@ -4,21 +4,18 @@
 //! [`QecTStrategy::Reference`] within statistical tolerance on a small
 //! Clifford+T fixture.
 
+mod qec_common;
+
 use prism_q::{
     Gate, QecObservableReroute, QecOptions, QecProgram, QecRecordRef, QecTStrategy,
     run_qec_program_reference, run_qec_program_spd_rerouted, run_qec_program_with_strategy,
 };
+use qec_common::ANALYTICAL_STRATEGIES;
 
-const SEED: u64 = 0xDEAD_BEEF;
 const STAT_SHOTS: usize = 4_000;
 
 fn options(shots: usize) -> QecOptions {
-    QecOptions {
-        shots,
-        seed: SEED,
-        chunk_size: Some(2048),
-        keep_measurements: false,
-    }
+    qec_common::qec_options(shots, 2048, false)
 }
 
 fn small_clifford_t_program() -> QecProgram {
@@ -239,7 +236,7 @@ fn t_chain_program(shots: usize, t_count: usize) -> QecProgram {
 #[test]
 fn analytical_t_count_scaling_correctness() {
     let t_counts: &[usize] = &[1, 2, 4, 8, 12];
-    let strategies = [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps];
+    let strategies = ANALYTICAL_STRATEGIES;
     run_strategy_sweep(
         "T-count scaling sweep",
         t_counts,
@@ -296,7 +293,7 @@ fn entangled_t_xor_program(shots: usize, n: usize) -> QecProgram {
 #[test]
 fn camps_matches_reference_on_entangled_multi_qubit_t() {
     let qubit_counts: &[usize] = &[2, 3, 4, 5, 6];
-    let strategies = [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps];
+    let strategies = ANALYTICAL_STRATEGIES;
     run_strategy_sweep(
         "multi-qubit GHZ-chain correctness sweep",
         qubit_counts,
@@ -344,7 +341,7 @@ fn entangled_two_t_xor_program(shots: usize, n: usize) -> QecProgram {
 #[test]
 fn camps_matches_reference_on_two_t_multi_qubit() {
     let qubit_counts: &[usize] = &[2, 3, 4, 5, 6];
-    let strategies = [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps];
+    let strategies = ANALYTICAL_STRATEGIES;
     run_strategy_sweep(
         "two-T multi-qubit correctness sweep",
         qubit_counts,
@@ -487,7 +484,7 @@ fn analytical_strategies_handle_reset() {
 
     let reference = run_qec_program_reference(&program).unwrap();
     let ref_rate = reference.logical_errors[0] as f64 / reference.accepted_shots as f64;
-    for strategy in [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps] {
+    for strategy in ANALYTICAL_STRATEGIES {
         let result = run_qec_program_with_strategy(&program, strategy).unwrap();
         let denom = result.accepted_shots.max(1) as f64;
         let rate = result.logical_errors[0] as f64 / denom;
@@ -516,7 +513,7 @@ fn analytical_strategies_handle_x_basis_measurement() {
 
     let reference = run_qec_program_reference(&program).unwrap();
     let ref_rate = reference.logical_errors[0] as f64 / reference.accepted_shots as f64;
-    for strategy in [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps] {
+    for strategy in ANALYTICAL_STRATEGIES {
         let result = run_qec_program_with_strategy(&program, strategy).unwrap();
         let denom = result.accepted_shots.max(1) as f64;
         let rate = result.logical_errors[0] as f64 / denom;
@@ -550,7 +547,7 @@ fn analytical_strategies_handle_postselection() {
 
     let reference = run_qec_program_reference(&program).unwrap();
     let ref_rate = reference.logical_errors[0] as f64 / reference.accepted_shots as f64;
-    for strategy in [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps] {
+    for strategy in ANALYTICAL_STRATEGIES {
         let result = run_qec_program_with_strategy(&program, strategy).unwrap();
         let denom = result.accepted_shots.max(1) as f64;
         let rate = result.logical_errors[0] as f64 / denom;
@@ -629,7 +626,7 @@ fn analytical_strategies_reject_active_noise_route_to_reference() {
         .observable_include(0, &[QecRecordRef::absolute(m0)])
         .unwrap();
 
-    for strategy in [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps] {
+    for strategy in ANALYTICAL_STRATEGIES {
         let err = run_qec_program_with_strategy(&program, strategy)
             .expect_err("analytical strategies must reject active noise channels");
         let msg = format!("{err:?}");
@@ -654,7 +651,7 @@ fn analytical_strategies_reject_detectors() {
         .observable_include(0, &[QecRecordRef::absolute(m0)])
         .unwrap();
 
-    for strategy in [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps] {
+    for strategy in ANALYTICAL_STRATEGIES {
         let err = run_qec_program_with_strategy(&program, strategy)
             .expect_err("analytical strategy must reject detector records");
         let msg = format!("{err:?}");

@@ -3,9 +3,9 @@ use std::borrow::Cow;
 use num_complex::Complex64;
 
 use super::{Circuit, Instruction, SmallVec, smallvec};
-use crate::gates::{BatchPhaseData, Gate, MultiFusedData};
+use crate::gates::{BatchPhaseData, Gate, MultiFusedData, is_diagonal_2x2};
 
-use super::fusion::IDENTITY_EPS;
+use super::fusion::push_unique;
 
 const MIN_BATCH_PHASES: usize = 2;
 
@@ -25,12 +25,18 @@ fn remove_target_user(target_users: &mut [TargetUserVec], target: usize, control
     target_users[target].retain(|c| *c != control);
 }
 
-fn emit_phase_chain(control: usize, phases: PhaseVec, output: &mut Vec<Instruction>) {
+fn emit_phase_chain(
+    control: usize,
+    phases: PhaseVec,
+    output: &mut Vec<Instruction>,
+    changed: &mut bool,
+) {
     if phases.len() >= MIN_BATCH_PHASES {
         output.push(Instruction::Gate {
             gate: Gate::BatchPhase(Box::new(BatchPhaseData { phases })),
             targets: smallvec![control],
         });
+        *changed = true;
         return;
     }
 
@@ -49,6 +55,7 @@ fn flush_phase_control(
     pending: &mut [Option<PhaseVec>],
     target_users: &mut [TargetUserVec],
     output: &mut Vec<Instruction>,
+    changed: &mut bool,
 ) {
     let Some(phases) = pending[control].take() else {
         return;
@@ -56,7 +63,7 @@ fn flush_phase_control(
     for &(target, _) in &phases {
         remove_target_user(target_users, target, control);
     }
-    emit_phase_chain(control, phases, output);
+    emit_phase_chain(control, phases, output, changed);
 }
 
 fn push_pending_phase(
@@ -84,6 +91,7 @@ fn flush_phase_target_conflicts(
     pending: &mut [Option<PhaseVec>],
     target_users: &mut [TargetUserVec],
     output: &mut Vec<Instruction>,
+    changed: &mut bool,
 ) {
     let controls = std::mem::take(&mut target_users[target]);
     if controls.is_empty() {
@@ -109,7 +117,7 @@ fn flush_phase_target_conflicts(
     }
 
     if !re_rooted.is_empty() {
-        emit_phase_chain(target, re_rooted, output);
+        emit_phase_chain(target, re_rooted, output, changed);
     }
 }
 
@@ -119,20 +127,22 @@ fn flush_phase_qubits_in_use(
     pending: &mut [Option<PhaseVec>],
     target_users: &mut [TargetUserVec],
     output: &mut Vec<Instruction>,
+    changed: &mut bool,
 ) {
     for &q in qs {
-        flush_phase_control(q, pending, target_users, output);
+        flush_phase_control(q, pending, target_users, output, changed);
     }
     if diagonal_only {
         return;
     }
     for &q in qs {
-        flush_phase_target_conflicts(q, pending, target_users, output);
+        flush_phase_target_conflicts(q, pending, target_users, output, changed);
     }
 }
 
+/// Returns the input unchanged unless at least one `BatchPhase` is emitted.
 pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
-    if !has_batchable_phases(&circuit) {
+    if !circuit.instructions.iter().any(is_controlled_phase_2q) {
         return circuit;
     }
 
@@ -140,6 +150,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     let n = circuit.num_qubits;
     let mut pending: PendingPhaseVec = (0..n).map(|_| None).collect();
     let mut target_users: Vec<TargetUserVec> = (0..n).map(|_| SmallVec::new()).collect();
+    let mut changed = false;
 
     for inst in &circuit.instructions {
         match inst {
@@ -157,6 +168,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                             &mut pending,
                             &mut target_users,
                             &mut output,
+                            &mut changed,
                         );
                         push_pending_phase(control, target, phase, &mut pending, &mut target_users);
                         continue;
@@ -169,6 +181,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                     &mut pending,
                     &mut target_users,
                     &mut output,
+                    &mut changed,
                 );
                 output.push(inst.clone());
             }
@@ -179,6 +192,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                     &mut pending,
                     &mut target_users,
                     &mut output,
+                    &mut changed,
                 );
                 output.push(inst.clone());
             }
@@ -189,6 +203,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                     &mut pending,
                     &mut target_users,
                     &mut output,
+                    &mut changed,
                 );
                 output.push(inst.clone());
             }
@@ -199,6 +214,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
                     &mut pending,
                     &mut target_users,
                     &mut output,
+                    &mut changed,
                 );
                 output.push(inst.clone());
             }
@@ -206,148 +222,20 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     }
 
     for q in 0..n {
-        flush_phase_control(q, &mut pending, &mut target_users, &mut output);
+        flush_phase_control(
+            q,
+            &mut pending,
+            &mut target_users,
+            &mut output,
+            &mut changed,
+        );
     }
 
-    Cow::Owned(Circuit {
-        num_qubits: circuit.num_qubits,
-        num_classical_bits: circuit.num_classical_bits,
-        instructions: output,
-    })
-}
-
-fn has_batchable_phases(circuit: &Circuit) -> bool {
-    type PendingTargets = SmallVec<[usize; 8]>;
-
-    if !circuit.instructions.iter().any(is_controlled_phase_2q) {
-        return false;
+    if changed {
+        Cow::Owned(circuit.with_instructions(output))
+    } else {
+        circuit
     }
-
-    fn push_pending_target(
-        control: usize,
-        target: usize,
-        pending: &mut [PendingTargets],
-        target_users: &mut [TargetUserVec],
-    ) {
-        if !pending[control].contains(&target) {
-            target_users[target].push(control);
-        }
-        pending[control].push(target);
-    }
-
-    fn flush_control(
-        q: usize,
-        pending: &mut [PendingTargets],
-        target_users: &mut [TargetUserVec],
-    ) -> bool {
-        let len = pending[q].len();
-        for target in pending[q].drain(..) {
-            remove_target_user(target_users, target, q);
-        }
-        len >= MIN_BATCH_PHASES
-    }
-
-    fn flush_target_conflicts(
-        target: usize,
-        pending: &mut [PendingTargets],
-        target_users: &mut [TargetUserVec],
-    ) -> bool {
-        let controls = std::mem::take(&mut target_users[target]);
-        let mut re_rooted = 0usize;
-        for control in controls {
-            let mut kept: PendingTargets = SmallVec::new();
-            for pending_target in pending[control].drain(..) {
-                if pending_target == target {
-                    re_rooted += 1;
-                } else {
-                    kept.push(pending_target);
-                }
-            }
-            pending[control] = kept;
-        }
-        re_rooted >= MIN_BATCH_PHASES
-    }
-
-    fn flush_qubits_in_use(
-        qs: &[usize],
-        diagonal_only: bool,
-        pending: &mut [PendingTargets],
-        target_users: &mut [TargetUserVec],
-    ) -> bool {
-        for &q in qs {
-            if flush_control(q, pending, target_users) {
-                return true;
-            }
-        }
-        if diagonal_only {
-            return false;
-        }
-        for &q in qs {
-            if flush_target_conflicts(q, pending, target_users) {
-                return true;
-            }
-        }
-        false
-    }
-
-    let mut pending: Vec<PendingTargets> =
-        (0..circuit.num_qubits).map(|_| SmallVec::new()).collect();
-    let mut target_users: Vec<TargetUserVec> =
-        (0..circuit.num_qubits).map(|_| SmallVec::new()).collect();
-    for inst in &circuit.instructions {
-        match inst {
-            Instruction::Gate { gate, targets } => {
-                if gate.controlled_phase().is_some() && gate.num_qubits() == 2 {
-                    let control = targets[0];
-                    let target = targets[1];
-                    if flush_qubits_in_use(
-                        std::slice::from_ref(&target),
-                        true,
-                        &mut pending,
-                        &mut target_users,
-                    ) {
-                        return true;
-                    }
-                    if pending[control].len() + 1 >= MIN_BATCH_PHASES {
-                        return true;
-                    }
-                    push_pending_target(control, target, &mut pending, &mut target_users);
-                } else {
-                    let diagonal_only = gate.num_qubits() == 1 && gate.is_diagonal_1q();
-                    if flush_qubits_in_use(targets, diagonal_only, &mut pending, &mut target_users)
-                    {
-                        return true;
-                    }
-                }
-            }
-            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
-                if flush_qubits_in_use(
-                    std::slice::from_ref(qubit),
-                    false,
-                    &mut pending,
-                    &mut target_users,
-                ) {
-                    return true;
-                }
-            }
-            Instruction::Barrier { qubits } => {
-                if flush_qubits_in_use(qubits, false, &mut pending, &mut target_users) {
-                    return true;
-                }
-            }
-            Instruction::Conditional { targets, .. } => {
-                if flush_qubits_in_use(targets, false, &mut pending, &mut target_users) {
-                    return true;
-                }
-            }
-        }
-    }
-    for q in 0..circuit.num_qubits {
-        if flush_control(q, &mut pending, &mut target_users) {
-            return true;
-        }
-    }
-    false
 }
 
 fn is_batchable_1q(inst: &Instruction) -> bool {
@@ -381,14 +269,10 @@ pub(super) fn batch_post_phase_1q(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit>
         if pending.len() >= 2 {
             let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
             for &(q, _) in pending.iter() {
-                if !targets.contains(&q) {
-                    targets.push(q);
-                }
+                push_unique(&mut targets, q);
             }
             targets.sort_unstable();
-            let all_diagonal = pending
-                .iter()
-                .all(|(_, m)| m[0][1].norm() < IDENTITY_EPS && m[1][0].norm() < IDENTITY_EPS);
+            let all_diagonal = pending.iter().all(|(_, m)| is_diagonal_2x2(m));
             output.push(Instruction::Gate {
                 gate: Gate::MultiFused(Box::new(MultiFusedData {
                     gates: std::mem::take(pending),
@@ -419,9 +303,5 @@ pub(super) fn batch_post_phase_1q(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit>
 
     flush(&mut pending, &mut output);
 
-    Cow::Owned(Circuit {
-        num_qubits: circuit.num_qubits,
-        num_classical_bits: circuit.num_classical_bits,
-        instructions: output,
-    })
+    Cow::Owned(circuit.with_instructions(output))
 }

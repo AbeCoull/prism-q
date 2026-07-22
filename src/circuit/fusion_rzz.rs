@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use super::fusion::push_unique;
 use super::{Circuit, Instruction, SmallVec, smallvec};
 use crate::gates::{BatchRzzData, Gate};
 
@@ -47,11 +48,7 @@ pub(super) fn fuse_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
     }
 
     match out {
-        Some(new_insts) => {
-            let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
-            c.instructions = new_insts;
-            Cow::Owned(c)
-        }
+        Some(new_insts) => Cow::Owned(circuit.with_instructions(new_insts)),
         None => Cow::Borrowed(circuit),
     }
 }
@@ -115,9 +112,7 @@ pub(super) fn fuse_batch_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
 
     flush_rzz_run(&mut output, &mut rzz_run, &mut deferred, &mut rzz_qubits);
 
-    let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);
-    c.instructions = output;
-    Cow::Owned(c)
+    Cow::Owned(circuit.with_instructions(output))
 }
 
 fn flush_rzz_run(
@@ -129,12 +124,8 @@ fn flush_rzz_run(
     if rzz_run.len() >= 2 {
         let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
         for &(q0, q1, _) in rzz_run.iter() {
-            if !tgts.contains(&q0) {
-                tgts.push(q0);
-            }
-            if !tgts.contains(&q1) {
-                tgts.push(q1);
-            }
+            push_unique(&mut tgts, q0);
+            push_unique(&mut tgts, q1);
         }
         output.push(Instruction::Gate {
             gate: Gate::BatchRzz(Box::new(BatchRzzData {

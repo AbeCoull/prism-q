@@ -25,6 +25,7 @@ pub use accumulator::{
     CorrelatorAccumulator, HistogramAccumulator, MarginalsAccumulator, NullAccumulator,
     PauliExpectationAccumulator, ShotAccumulator, default_chunk_size, optimal_chunk_size,
 };
+pub(crate) use accumulator::{counts_from_chunks, for_each_chunk, marginals_from_chunks};
 pub use parity::ParityStats;
 pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity, XorDag};
 use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
@@ -1073,13 +1074,10 @@ impl CompiledSampler {
         chunk_size: usize,
         acc: &mut A,
     ) {
-        let mut remaining = total_shots;
-        while remaining > 0 {
-            let this_batch = remaining.min(chunk_size);
-            let packed = self.sample_bulk_packed(this_batch);
+        for_each_chunk(total_shots, chunk_size, |batch| {
+            let packed = self.sample_bulk_packed(batch);
             acc.accumulate(&packed);
-            remaining -= this_batch;
-        }
+        });
     }
 
     pub fn sample_counts(
@@ -1123,9 +1121,7 @@ impl CompiledSampler {
                 return self.sample_counts_rank_space(total_shots);
             }
         }
-        let mut acc = HistogramAccumulator::new();
-        self.sample_chunked(total_shots, &mut acc);
-        acc.into_counts()
+        counts_from_chunks(|acc| self.sample_chunked(total_shots, acc))
     }
 
     fn sample_counts_multinomial(
@@ -1311,9 +1307,9 @@ impl CompiledSampler {
     }
 
     fn sample_marginals_cpu(&mut self, total_shots: usize) -> Vec<f64> {
-        let mut acc = MarginalsAccumulator::new(self.num_measurements);
-        self.sample_chunked(total_shots, &mut acc);
-        acc.marginals()
+        marginals_from_chunks(self.num_measurements, |acc| {
+            self.sample_chunked(total_shots, acc)
+        })
     }
 
     pub fn sample_detection_events(
@@ -1473,64 +1469,33 @@ impl CompiledSampler {
         }
         report
     }
-
-    pub fn detection_event_report(&self, pairs: &[(usize, usize)]) -> String {
-        let sparse = match &self.sparse {
-            Some(s) => s,
-            None => return "No sparse parity matrix available\n".to_string(),
-        };
-        let det_sparse = sparse.compile_detection_events(pairs);
-        let meas_stats = sparse.stats();
-        let det_stats = det_sparse.stats();
-
-        let mut report = format!(
-            "Detection events: {} pairs\n\
-             Measurement parity: total_weight={}, mean={:.2}\n\
-             Detection parity:   total_weight={}, mean={:.2}\n",
-            pairs.len(),
-            meas_stats.total_weight,
-            meas_stats.mean_weight,
-            det_stats.total_weight,
-            det_stats.mean_weight,
-        );
-
-        if meas_stats.total_weight > 0 {
-            let reduction = 1.0 - det_stats.total_weight as f64 / meas_stats.total_weight as f64;
-            report.push_str(&format!(
-                "Weight reduction: {:.1}% ({:.1}x less work)\n",
-                reduction * 100.0,
-                if det_stats.total_weight > 0 {
-                    meas_stats.total_weight as f64 / det_stats.total_weight as f64
-                } else {
-                    f64::INFINITY
-                },
-            ));
-        }
-
-        let mut histogram = [0usize; 8];
-        for m in 0..det_sparse.num_rows {
-            let w = det_sparse.row_weight(m);
-            histogram[w.min(7)] += 1;
-        }
-        report.push_str("Detection weight histogram: ");
-        for (i, &count) in histogram.iter().enumerate() {
-            if count > 0 {
-                if i < 7 {
-                    report.push_str(&format!("w{}={} ", i, count));
-                } else {
-                    report.push_str(&format!("w7+={} ", count));
-                }
-            }
-        }
-        report.push('\n');
-        report
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShotLayout {
     ShotMajor,
     MeasMajor,
+}
+
+/// XOR `mask` into every shot of a shot-major packed buffer.
+pub(crate) fn xor_mask_shot_major(
+    accum: &mut [u64],
+    num_shots: usize,
+    m_words: usize,
+    mask: &[u64],
+) {
+    #[cfg(feature = "parallel")]
+    if num_shots >= 256 {
+        use rayon::prelude::*;
+        accum[..num_shots * m_words]
+            .par_chunks_mut(m_words)
+            .for_each(|shot| xor_words(shot, mask));
+        return;
+    }
+    for s in 0..num_shots {
+        let base = s * m_words;
+        xor_words(&mut accum[base..base + m_words], mask);
+    }
 }
 
 #[inline]
@@ -3057,10 +3022,10 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
     let packed = sampler.sample_bulk_packed(num_shots);
-    Ok(ShotsResult {
-        shots: packed.to_shots(),
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(
+        packed.to_shots(),
+        circuit.num_classical_bits,
+    ))
 }
 
 /// Like [`run_shots_compiled`] but routes BTS sampling through the GPU when the
@@ -3078,8 +3043,8 @@ pub fn run_shots_compiled_with_gpu(
 ) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?.with_gpu(context);
     let packed = sampler.sample_bulk_packed(num_shots);
-    Ok(ShotsResult {
-        shots: packed.to_shots(),
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(
+        packed.to_shots(),
+        circuit.num_classical_bits,
+    ))
 }

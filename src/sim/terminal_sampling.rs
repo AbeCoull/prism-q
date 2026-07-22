@@ -153,9 +153,9 @@ fn extract_masked_bits(index: usize, mask: u64) -> usize {
     result
 }
 
-fn build_state_outcome_distribution(
-    state: &[Complex64],
-    norm_sq: f64,
+fn build_outcome_distribution<T: Sync>(
+    items: &[T],
+    weight: impl Fn(&T) -> f64 + Send + Sync,
     map: &CompactMeasurementMap,
     max_dense_bits: usize,
 ) -> Option<Vec<f64>> {
@@ -167,27 +167,27 @@ fn build_state_outcome_distribution(
 
     #[cfg(feature = "parallel")]
     {
-        if map.direct_state_key(state.len()) {
+        if map.direct_state_key(items.len()) {
             let mut probs = vec![0.0f64; outcomes];
             probs
                 .par_iter_mut()
-                .zip(state.par_iter())
-                .for_each(|(p, amp)| {
-                    *p = amp.norm_sqr() * norm_sq;
+                .zip(items.par_iter())
+                .for_each(|(p, item)| {
+                    *p = weight(item);
                 });
             return Some(probs);
         }
 
-        if state.len() >= crate::backend::MIN_PAR_ELEMS && outcomes <= (1usize << 16) {
-            let probs = state
+        if items.len() >= crate::backend::MIN_PAR_ELEMS && outcomes <= (1usize << 16) {
+            let probs = items
                 .par_chunks(crate::backend::MIN_PAR_ELEMS)
                 .enumerate()
                 .map(|(chunk_idx, chunk)| {
                     let mut local = vec![0.0f64; outcomes];
                     let base = chunk_idx * crate::backend::MIN_PAR_ELEMS;
-                    for (offset, amp) in chunk.iter().enumerate() {
+                    for (offset, item) in chunk.iter().enumerate() {
                         let key = map.compact_key(base + offset);
-                        local[key] += amp.norm_sqr() * norm_sq;
+                        local[key] += weight(item);
                     }
                     local
                 })
@@ -205,14 +205,14 @@ fn build_state_outcome_distribution(
     }
 
     let mut probs = vec![0.0f64; outcomes];
-    if map.direct_state_key(state.len()) {
-        for (idx, amp) in state.iter().enumerate() {
-            probs[idx] = amp.norm_sqr() * norm_sq;
+    if map.direct_state_key(items.len()) {
+        for (idx, item) in items.iter().enumerate() {
+            probs[idx] = weight(item);
         }
     } else {
-        for (idx, amp) in state.iter().enumerate() {
+        for (idx, item) in items.iter().enumerate() {
             let key = map.compact_key(idx);
-            probs[key] += amp.norm_sqr() * norm_sq;
+            probs[key] += weight(item);
         }
     }
     Some(probs)
@@ -284,9 +284,9 @@ fn sorted_thresholds(num_shots: usize, seed: u64) -> Vec<(f64, usize)> {
     thresholds
 }
 
-fn sample_shots_streaming_from_state(
-    state: &[Complex64],
-    norm_sq: f64,
+fn streaming_shots<T>(
+    items: &[T],
+    weight: impl Fn(&T) -> f64,
     map: &CompactMeasurementMap,
     num_classical_bits: usize,
     num_shots: usize,
@@ -297,8 +297,8 @@ fn sample_shots_streaming_from_state(
     let mut cumulative = 0.0f64;
     let mut next = 0usize;
 
-    for (state_idx, amp) in state.iter().enumerate() {
-        cumulative += amp.norm_sqr() * norm_sq;
+    for (state_idx, item) in items.iter().enumerate() {
+        cumulative += weight(item);
         while next < thresholds.len() && thresholds[next].0 <= cumulative {
             let shot_idx = thresholds[next].1;
             map.fill_shot_from_state_index(state_idx, &mut shots[shot_idx]);
@@ -306,7 +306,7 @@ fn sample_shots_streaming_from_state(
         }
     }
 
-    let fallback_idx = state.len().saturating_sub(1);
+    let fallback_idx = items.len().saturating_sub(1);
     while next < thresholds.len() {
         let shot_idx = thresholds[next].1;
         map.fill_shot_from_state_index(fallback_idx, &mut shots[shot_idx]);
@@ -316,9 +316,9 @@ fn sample_shots_streaming_from_state(
     shots
 }
 
-fn sample_counts_streaming_from_state(
-    state: &[Complex64],
-    norm_sq: f64,
+fn streaming_counts<T>(
+    items: &[T],
+    weight: impl Fn(&T) -> f64,
     map: &CompactMeasurementMap,
     num_classical_bits: usize,
     num_shots: usize,
@@ -326,12 +326,12 @@ fn sample_counts_streaming_from_state(
 ) -> HashMap<Vec<u64>, u64> {
     let thresholds = sorted_thresholds(num_shots, seed);
     let m_words = num_classical_bits.div_ceil(64).max(1);
-    let mut counts = HashMap::with_capacity(num_shots.min(state.len()));
+    let mut counts = HashMap::with_capacity(num_shots.min(items.len()));
     let mut cumulative = 0.0f64;
     let mut next = 0usize;
 
-    for (state_idx, amp) in state.iter().enumerate() {
-        cumulative += amp.norm_sqr() * norm_sq;
+    for (state_idx, item) in items.iter().enumerate() {
+        cumulative += weight(item);
         let start = next;
         while next < thresholds.len() && thresholds[next].0 <= cumulative {
             next += 1;
@@ -343,118 +343,7 @@ fn sample_counts_streaming_from_state(
         }
     }
 
-    let fallback_idx = state.len().saturating_sub(1);
-    let fallback_hits = thresholds.len() - next;
-    if fallback_hits != 0 {
-        let packed = map.packed_key_from_state_index(fallback_idx, m_words);
-        *counts.entry(packed).or_insert(0) += fallback_hits as u64;
-    }
-
-    counts
-}
-
-fn build_probs_outcome_distribution(
-    probs: &[f64],
-    map: &CompactMeasurementMap,
-    max_dense_bits: usize,
-) -> Option<Vec<f64>> {
-    if map.num_bits() > max_dense_bits {
-        return None;
-    }
-
-    let outcomes = 1usize << map.num_bits();
-
-    #[cfg(feature = "parallel")]
-    if probs.len() >= crate::backend::MIN_PAR_ELEMS && outcomes <= (1usize << 16) {
-        let out = probs
-            .par_chunks(crate::backend::MIN_PAR_ELEMS)
-            .enumerate()
-            .map(|(chunk_idx, chunk)| {
-                let mut local = vec![0.0f64; outcomes];
-                let base = chunk_idx * crate::backend::MIN_PAR_ELEMS;
-                for (offset, &p) in chunk.iter().enumerate() {
-                    let key = map.compact_key(base + offset);
-                    local[key] += p;
-                }
-                local
-            })
-            .reduce(
-                || vec![0.0f64; outcomes],
-                |mut a, b| {
-                    for (dst, src) in a.iter_mut().zip(b) {
-                        *dst += src;
-                    }
-                    a
-                },
-            );
-        return Some(out);
-    }
-
-    let mut out = vec![0.0f64; outcomes];
-    for (idx, &p) in probs.iter().enumerate() {
-        out[map.compact_key(idx)] += p;
-    }
-    Some(out)
-}
-
-fn sample_shots_streaming_from_probs(
-    probs: &[f64],
-    map: &CompactMeasurementMap,
-    num_classical_bits: usize,
-    num_shots: usize,
-    seed: u64,
-) -> Vec<Vec<bool>> {
-    let thresholds = sorted_thresholds(num_shots, seed);
-    let mut shots = vec![vec![false; num_classical_bits]; num_shots];
-    let mut cumulative = 0.0f64;
-    let mut next = 0usize;
-
-    for (state_idx, &p) in probs.iter().enumerate() {
-        cumulative += p;
-        while next < thresholds.len() && thresholds[next].0 <= cumulative {
-            let shot_idx = thresholds[next].1;
-            map.fill_shot_from_state_index(state_idx, &mut shots[shot_idx]);
-            next += 1;
-        }
-    }
-
-    let fallback_idx = probs.len().saturating_sub(1);
-    while next < thresholds.len() {
-        let shot_idx = thresholds[next].1;
-        map.fill_shot_from_state_index(fallback_idx, &mut shots[shot_idx]);
-        next += 1;
-    }
-
-    shots
-}
-
-fn sample_counts_streaming_from_probs(
-    probs: &[f64],
-    map: &CompactMeasurementMap,
-    num_classical_bits: usize,
-    num_shots: usize,
-    seed: u64,
-) -> HashMap<Vec<u64>, u64> {
-    let thresholds = sorted_thresholds(num_shots, seed);
-    let m_words = num_classical_bits.div_ceil(64).max(1);
-    let mut counts = HashMap::with_capacity(num_shots.min(probs.len()));
-    let mut cumulative = 0.0f64;
-    let mut next = 0usize;
-
-    for (state_idx, &p) in probs.iter().enumerate() {
-        cumulative += p;
-        let start = next;
-        while next < thresholds.len() && thresholds[next].0 <= cumulative {
-            next += 1;
-        }
-        let hits = next - start;
-        if hits != 0 {
-            let packed = map.packed_key_from_state_index(state_idx, m_words);
-            *counts.entry(packed).or_insert(0) += hits as u64;
-        }
-    }
-
-    let fallback_idx = probs.len().saturating_sub(1);
+    let fallback_idx = items.len().saturating_sub(1);
     let fallback_hits = thresholds.len() - next;
     if fallback_hits != 0 {
         let packed = map.packed_key_from_state_index(fallback_idx, m_words);
@@ -480,7 +369,7 @@ pub(super) fn sample_shots_from_probs(
         return vec![vec![false; num_classical_bits]; num_shots];
     }
 
-    sample_shots_streaming_from_probs(probs, &map, num_classical_bits, num_shots, seed)
+    streaming_shots(probs, |&p| p, &map, num_classical_bits, num_shots, seed)
 }
 
 pub(super) fn sample_counts_from_probs(
@@ -536,10 +425,10 @@ fn sample_counts_from_probs_capped(
         );
     }
 
-    if let Some(outcome) = build_probs_outcome_distribution(probs, &map, max_dense_bits) {
+    if let Some(outcome) = build_outcome_distribution(probs, |&p| p, &map, max_dense_bits) {
         sample_counts_from_outcome_distribution(&outcome, &map, num_classical_bits, num_shots, seed)
     } else {
-        sample_counts_streaming_from_probs(probs, &map, num_classical_bits, num_shots, seed)
+        streaming_counts(probs, |&p| p, &map, num_classical_bits, num_shots, seed)
     }
 }
 
@@ -560,7 +449,14 @@ pub(super) fn sample_shots_from_state(
         return vec![vec![false; num_classical_bits]; num_shots];
     }
 
-    sample_shots_streaming_from_state(state, norm_sq, &map, num_classical_bits, num_shots, seed)
+    streaming_shots(
+        state,
+        |amp| amp.norm_sqr() * norm_sq,
+        &map,
+        num_classical_bits,
+        num_shots,
+        seed,
+    )
 }
 
 pub(super) fn sample_counts_from_state(
@@ -589,17 +485,17 @@ pub(super) fn sample_counts_from_state(
         return counts;
     }
 
-    if let Some(probs) = build_state_outcome_distribution(
+    if let Some(probs) = build_outcome_distribution(
         state,
-        norm_sq,
+        |amp| amp.norm_sqr() * norm_sq,
         &map,
         crate::backend::max_dense_outcome_bits(),
     ) {
         sample_counts_from_outcome_distribution(&probs, &map, num_classical_bits, num_shots, seed)
     } else {
-        sample_counts_streaming_from_state(
+        streaming_counts(
             state,
-            norm_sq,
+            |amp| amp.norm_sqr() * norm_sq,
             &map,
             num_classical_bits,
             num_shots,
@@ -631,7 +527,7 @@ mod tests {
         assert!(map.direct_state_key(len));
 
         let above_cap = sample_counts_from_probs_capped(&probs, &meas_map, bits, 300, 42, bits - 1);
-        let via_streaming = sample_counts_streaming_from_probs(&probs, &map, bits, 300, 42);
+        let via_streaming = streaming_counts(&probs, |&p| p, &map, bits, 300, 42);
         assert_eq!(above_cap, via_streaming);
 
         let below_cap = sample_counts_from_probs_capped(&probs, &meas_map, bits, 300, 42, bits);

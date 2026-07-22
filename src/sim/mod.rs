@@ -24,9 +24,10 @@ use dispatch::{
     AUTO_APPROX_MAX_TERMS, AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family,
     MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
     MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO, accel_for, auto_selects_cpu_statevector, build_statevector,
-    has_temporal_clifford_opportunity, plan_for_family, plan_temporal_clifford, resolve,
-    resolve_backend, run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
+    MIN_QUBITS_FOR_SPD_AUTO, TemporalCliffordPlan, accel_for, auto_selects_cpu_statevector,
+    build_statevector, has_temporal_clifford_opportunity, plan_for_family, plan_temporal_clifford,
+    resolve, resolve_backend, run_temporal_clifford, stabilizer_rank_budget,
+    validate_explicit_backend,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{ShotsResult, bitstring};
@@ -345,14 +346,8 @@ fn run_with_internal(
         let mut backend = resolve_backend(&kind, circuit, false).build(seed);
         return execute(&mut *backend, circuit, &opts);
     }
-    let (decompose, has_partial_independence) = analyze_independence(circuit);
-    if let Some(components) = decompose {
-        let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
-        if kind.is_auto()
-            && circuit.is_clifford_only()
-            && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
-            && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
-        {
+    match plan_probability_route(&kind, circuit) {
+        ProbabilityRoute::FactoredStabilizer => {
             let mut backend =
                 crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed);
             let fs_opts = if circuit.num_qubits > 64 {
@@ -362,59 +357,52 @@ fn run_with_internal(
             } else {
                 opts
             };
-            return execute(&mut backend, circuit, &fs_opts);
+            execute(&mut backend, circuit, &fs_opts)
         }
-        return run_decomposed(&kind, &components, circuit, seed, &opts);
-    }
-    if kind.is_auto() && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS {
-        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
-            if t <= MAX_AUTO_T_COUNT_APPROX
-                && t <= sr_budget
-                && !has_nonunitary_or_classical_ops(circuit)
-            {
-                let sr = if t <= MAX_AUTO_T_COUNT_EXACT {
-                    stabilizer_rank::run_stabilizer_rank(circuit, seed)?
-                } else {
-                    stabilizer_rank::run_stabilizer_rank_approx(
-                        circuit,
-                        AUTO_APPROX_MAX_TERMS,
-                        seed,
-                    )?
-                };
-                return Ok(probs_only_result(sr.probabilities));
-            }
+        ProbabilityRoute::Decomposed(components) => {
+            run_decomposed(&kind, &components, circuit, seed, &opts)
         }
-    }
-    if let Some(tc) = plan_temporal_clifford(&kind, circuit) {
-        return run_temporal_clifford(&tc, seed, opts.probabilities);
-    }
-    match resolve(&kind, circuit, has_partial_independence) {
-        ExecutionPlan::Backend(plan) => {
-            let mut backend = plan.build(seed);
-            execute(&mut *backend, circuit, &opts)
-        }
-        ExecutionPlan::StabilizerRank => {
-            let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
+        ProbabilityRoute::StabilizerRank { t_count } => {
+            let sr = if t_count <= MAX_AUTO_T_COUNT_EXACT {
+                stabilizer_rank::run_stabilizer_rank(circuit, seed)?
+            } else {
+                stabilizer_rank::run_stabilizer_rank_approx(circuit, AUTO_APPROX_MAX_TERMS, seed)?
+            };
             Ok(probs_only_result(sr.probabilities))
         }
-        ExecutionPlan::StochasticPauli { num_samples } => {
-            Err(crate::error::PrismError::IncompatibleBackend {
-                backend: format!(
-                    "{:?}",
-                    BackendKind::StochasticPauli { num_samples }
-                ),
-                reason: "StochasticPauli produces marginal estimates only; use `simulate(...).marginals()`".into(),
-            })
+        ProbabilityRoute::TemporalClifford(tc) => {
+            run_temporal_clifford(&tc, seed, opts.probabilities)
         }
-        ExecutionPlan::DeterministicPauli { epsilon, max_terms } => {
-            Err(crate::error::PrismError::IncompatibleBackend {
-                backend: format!(
-                    "{:?}",
-                    BackendKind::DeterministicPauli { epsilon, max_terms }
-                ),
-                reason: "DeterministicPauli produces marginals only; use `simulate(...).marginals()`".into(),
-            })
-        }
+        ProbabilityRoute::Direct {
+            has_partial_independence,
+        } => match resolve(&kind, circuit, has_partial_independence) {
+            ExecutionPlan::Backend(plan) => {
+                let mut backend = plan.build(seed);
+                execute(&mut *backend, circuit, &opts)
+            }
+            ExecutionPlan::StabilizerRank => {
+                let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
+                Ok(probs_only_result(sr.probabilities))
+            }
+            ExecutionPlan::StochasticPauli { num_samples } => {
+                Err(crate::error::PrismError::IncompatibleBackend {
+                    backend: format!(
+                        "{:?}",
+                        BackendKind::StochasticPauli { num_samples }
+                    ),
+                    reason: "StochasticPauli produces marginal estimates only; use `simulate(...).marginals()`".into(),
+                })
+            }
+            ExecutionPlan::DeterministicPauli { epsilon, max_terms } => {
+                Err(crate::error::PrismError::IncompatibleBackend {
+                    backend: format!(
+                        "{:?}",
+                        BackendKind::DeterministicPauli { epsilon, max_terms }
+                    ),
+                    reason: "DeterministicPauli produces marginals only; use `simulate(...).marginals()`".into(),
+                })
+            }
+        },
     }
 }
 
@@ -539,29 +527,66 @@ fn auto_clifford_t_budget(circuit: &Circuit) -> Option<(usize, usize)> {
     })
 }
 
-/// Mirrors the routing precedence of `run_with_internal` (decomposition, then
-/// Clifford+T stabilizer rank, then temporal Clifford, then family choice)
-/// through the shared predicates. Keep the check order aligned when either
-/// side changes.
-fn auto_terminal_statevector_candidate(circuit: &Circuit) -> bool {
+/// Auto-dispatch gate for the Clifford+T stabilizer-rank shortcut: the T
+/// count must fit both the caller's ceiling and the size-derived
+/// stabilizer-rank budget. Returns the T count when the shortcut applies.
+fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> Option<usize> {
+    let (t, sr_budget) = auto_clifford_t_budget(circuit)?;
+    (t <= max_t && t <= sr_budget).then_some(t)
+}
+
+/// Routing precedence for the probability path: decomposition (with the
+/// large sparse-Clifford factored-stabilizer override), then the Clifford+T
+/// stabilizer-rank shortcut, then temporal Clifford, then direct family
+/// resolution. `run_with_internal` executes this plan and
+/// `auto_terminal_statevector_candidate` consults it, so the two cannot
+/// drift apart.
+enum ProbabilityRoute {
+    FactoredStabilizer,
+    Decomposed(Vec<Vec<usize>>),
+    StabilizerRank { t_count: usize },
+    TemporalClifford(TemporalCliffordPlan),
+    Direct { has_partial_independence: bool },
+}
+
+fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityRoute {
     let (decompose, has_partial_independence) = analyze_independence(circuit);
-    if decompose.is_some() {
-        return false;
+    if let Some(components) = decompose {
+        let max_block = components.iter().map(|c| c.len()).max().unwrap_or(0);
+        if kind.is_auto()
+            && circuit.is_clifford_only()
+            && circuit.num_qubits >= MIN_FACTORED_STABILIZER_QUBITS
+            && max_block >= MIN_BLOCK_FOR_FACTORED_STAB
+        {
+            return ProbabilityRoute::FactoredStabilizer;
+        }
+        return ProbabilityRoute::Decomposed(components);
     }
-
-    if !auto_selects_cpu_statevector(circuit, has_partial_independence) {
-        return false;
-    }
-
-    if circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS {
-        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
-            if t <= MAX_AUTO_T_COUNT_APPROX && t <= sr_budget {
-                return false;
-            }
+    if kind.is_auto()
+        && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
+        && !has_nonunitary_or_classical_ops(circuit)
+    {
+        if let Some(t_count) = auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_APPROX) {
+            return ProbabilityRoute::StabilizerRank { t_count };
         }
     }
+    if let Some(tc) = plan_temporal_clifford(kind, circuit) {
+        return ProbabilityRoute::TemporalClifford(tc);
+    }
+    ProbabilityRoute::Direct {
+        has_partial_independence,
+    }
+}
 
-    !has_temporal_clifford_opportunity(&BackendKind::Auto, circuit)
+/// True when the auto probability route falls through to direct family
+/// resolution and that resolver picks the CPU statevector.
+fn auto_terminal_statevector_candidate(circuit: &Circuit) -> bool {
+    match plan_probability_route(&BackendKind::Auto, circuit) {
+        ProbabilityRoute::Direct {
+            has_partial_independence,
+        } => auto_selects_cpu_statevector(circuit, has_partial_independence),
+        _ => false,
+    }
 }
 
 fn terminal_statevector_candidate(kind: &BackendKind, circuit: &Circuit) -> bool {
@@ -692,7 +717,7 @@ fn run_marginals_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result
     run_marginals_result_with(kind, circuit, seed).map(MarginalsResult::into_vec)
 }
 
-fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)> {
+pub(crate) fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)> {
     expectations
         .iter()
         .map(|ez| {
@@ -1014,10 +1039,10 @@ fn run_shots_distributed(
         // errors instead of fabricated output.
         let mut backend = DistributedStatevectorBackend::new(context, seed);
         backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-        return Ok(ShotsResult {
-            shots: vec![vec![false; circuit.num_classical_bits]; num_shots],
-            num_classical_bits: circuit.num_classical_bits,
-        });
+        return Ok(ShotsResult::from_shots(
+            vec![vec![false; circuit.num_classical_bits]; num_shots],
+            circuit.num_classical_bits,
+        ));
     }
 
     if circuit.has_terminal_measurements_only() {
@@ -1035,10 +1060,7 @@ fn run_shots_distributed(
                 shot
             })
             .collect();
-        return Ok(ShotsResult {
-            shots,
-            num_classical_bits: circuit.num_classical_bits,
-        });
+        return Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits));
     }
 
     let probe = DistributedStatevectorBackend::new(context.clone(), seed);
@@ -1056,10 +1078,7 @@ fn run_shots_distributed(
         let result = execute_circuit(&mut backend, &fused, &opts)?;
         shots.push(result.classical_bits);
     }
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
 /// Execute a circuit multiple times with explicit backend selection.
@@ -1087,10 +1106,10 @@ pub(crate) fn run_shots_with(
         let mut sampler = compile_measurements_for_kind(&kind, circuit, seed)?;
         let packed = sampler.try_sample_bulk_packed(num_shots)?;
         let meas_map = circuit.measurement_map();
-        return Ok(ShotsResult {
-            shots: packed_shots_to_classical_bits(&packed, &meas_map, circuit.num_classical_bits),
-            num_classical_bits: circuit.num_classical_bits,
-        });
+        return Ok(ShotsResult::from_shots(
+            packed_shots_to_classical_bits(&packed, &meas_map, circuit.num_classical_bits),
+            circuit.num_classical_bits,
+        ));
     }
 
     if should_use_deferred_clifford_sampling(&kind, circuit, num_shots) {
@@ -1098,14 +1117,10 @@ pub(crate) fn run_shots_with(
             let mut sampler = compile_measurements_for_kind(&kind, &deferred, seed)?;
             let packed = sampler.try_sample_bulk_packed(num_shots)?;
             let meas_map = deferred.measurement_map();
-            return Ok(ShotsResult {
-                shots: packed_shots_to_classical_bits(
-                    &packed,
-                    &meas_map,
-                    circuit.num_classical_bits,
-                ),
-                num_classical_bits: circuit.num_classical_bits,
-            });
+            return Ok(ShotsResult::from_shots(
+                packed_shots_to_classical_bits(&packed, &meas_map, circuit.num_classical_bits),
+                circuit.num_classical_bits,
+            ));
         }
     }
 
@@ -1129,10 +1144,7 @@ pub(crate) fn run_shots_with(
                 seed,
             )
         };
-        return Ok(ShotsResult {
-            shots,
-            num_classical_bits: circuit.num_classical_bits,
-        });
+        return Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits));
     }
 
     if matches!(kind, BackendKind::StabilizerRank) && circuit.has_t_gates() {
@@ -1141,12 +1153,9 @@ pub(crate) fn run_shots_with(
     if kind.is_auto()
         && circuit.has_terminal_measurements_only()
         && circuit.num_qubits > MAX_STABILIZER_RANK_QUBITS
+        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some()
     {
-        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
-            if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
-                return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
-            }
-        }
+        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
 
     if circuit.has_terminal_measurements_only() {
@@ -1161,10 +1170,7 @@ pub(crate) fn run_shots_with(
                 num_shots,
                 seed,
             );
-            return Ok(ShotsResult {
-                shots,
-                num_classical_bits: circuit.num_classical_bits,
-            });
+            return Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits));
         }
     }
 
@@ -1188,12 +1194,8 @@ pub(crate) fn run_shots_with(
             reason: "Pauli propagation backends do not support mid-circuit measurements".into(),
         });
     }
-    if kind.is_auto() {
-        if let Some((t, sr_budget)) = auto_clifford_t_budget(circuit) {
-            if t <= MAX_AUTO_T_COUNT_SHOTS && t <= sr_budget {
-                return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
-            }
-        }
+    if kind.is_auto() && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_SHOTS).is_some() {
+        return stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed);
     }
 
     if has_temporal_clifford_opportunity(&kind, circuit) {
@@ -1267,10 +1269,7 @@ fn collect_shots(
     for i in 0..num_shots {
         shots.push(shot(seed.wrapping_add(i as u64))?);
     }
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
 /// Family choice for auto-routed non-Pauli noise trajectories. Restricted to
@@ -1429,6 +1428,51 @@ mod tests {
         c.add_gate(Gate::Cx, &[1, 2]);
         c.add_gate(Gate::S, &[0]);
         c
+    }
+
+    /// The probability-route planner is the single source of the auto routing
+    /// precedence; every entry point (run, shots, counts via the terminal
+    /// candidate) consults it. Pin the route for representative circuits so a
+    /// precedence change is a deliberate edit here, not silent drift.
+    #[test]
+    fn probability_route_precedence_is_pinned() {
+        let ghz = make_clifford_circuit();
+        assert!(matches!(
+            plan_probability_route(&BackendKind::Auto, &ghz),
+            ProbabilityRoute::Direct { .. }
+        ));
+
+        let mut clifford_t = Circuit::new(16, 0);
+        clifford_t.add_gate(Gate::H, &[0]);
+        for i in 0..15 {
+            clifford_t.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        clifford_t.add_gate(Gate::T, &[1]);
+        assert!(matches!(
+            plan_probability_route(&BackendKind::Auto, &clifford_t),
+            ProbabilityRoute::StabilizerRank { t_count: 1 }
+        ));
+
+        let mut general = Circuit::new(4, 0);
+        general.add_gate(Gate::H, &[0]);
+        general.add_gate(Gate::Rx(0.3), &[1]);
+        general.add_gate(Gate::Cx, &[0, 1]);
+        assert!(matches!(
+            plan_probability_route(&BackendKind::Auto, &general),
+            ProbabilityRoute::Direct { .. }
+        ));
+
+        let candidate_is_direct = |c: &Circuit| {
+            matches!(
+                plan_probability_route(&BackendKind::Auto, c),
+                ProbabilityRoute::Direct { .. }
+            )
+        };
+        for circuit in [&ghz, &clifford_t, &general] {
+            if auto_terminal_statevector_candidate(circuit) {
+                assert!(candidate_is_direct(circuit));
+            }
+        }
     }
 
     fn make_product_circuit() -> Circuit {
@@ -2373,11 +2417,7 @@ mod tests {
         let probs = reference.probabilities.unwrap();
         let expected_shots =
             shots::sample_shots(&probs, &c.measurement_map(), c.num_classical_bits, 512, 7);
-        let expected = ShotsResult {
-            shots: expected_shots,
-            num_classical_bits: c.num_classical_bits,
-        }
-        .counts();
+        let expected = ShotsResult::from_shots(expected_shots, c.num_classical_bits).counts();
 
         let actual = run_counts_with(BackendKind::Statevector, &c, 512, 7).unwrap();
         assert_eq!(actual, expected);

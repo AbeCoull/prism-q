@@ -257,31 +257,26 @@ impl SparseBackend {
         self.prune();
     }
 
+    fn masked_prob(&self, mask: usize, bit_set: bool) -> f64 {
+        #[cfg(feature = "parallel")]
+        if self.state.len() >= MIN_STATES_FOR_PAR {
+            return self
+                .state
+                .par_iter()
+                .filter(|&(&idx, _)| (idx & mask != 0) == bit_set)
+                .map(|(_, amp)| amp.norm_sqr())
+                .sum();
+        }
+        self.state
+            .iter()
+            .filter(|&(&idx, _)| (idx & mask != 0) == bit_set)
+            .map(|(_, amp)| amp.norm_sqr())
+            .sum()
+    }
+
     fn apply_reset(&mut self, qubit: usize) {
         let mask = 1usize << qubit;
-
-        #[cfg(feature = "parallel")]
-        let prob_zero: f64 = if self.state.len() >= MIN_STATES_FOR_PAR {
-            self.state
-                .par_iter()
-                .filter(|&(&idx, _)| idx & mask == 0)
-                .map(|(_, amp)| amp.norm_sqr())
-                .sum()
-        } else {
-            self.state
-                .iter()
-                .filter(|&(&idx, _)| idx & mask == 0)
-                .map(|(_, amp)| amp.norm_sqr())
-                .sum()
-        };
-
-        #[cfg(not(feature = "parallel"))]
-        let prob_zero: f64 = self
-            .state
-            .iter()
-            .filter(|&(&idx, _)| idx & mask == 0)
-            .map(|(_, amp)| amp.norm_sqr())
-            .sum();
+        let prob_zero = self.masked_prob(mask, false);
 
         if prob_zero > 0.0 {
             let inv_norm = 1.0 / prob_zero.sqrt();
@@ -301,29 +296,7 @@ impl SparseBackend {
 
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
         let mask = 1usize << qubit;
-
-        #[cfg(feature = "parallel")]
-        let prob_one: f64 = if self.state.len() >= MIN_STATES_FOR_PAR {
-            self.state
-                .par_iter()
-                .filter(|&(&idx, _)| idx & mask != 0)
-                .map(|(_, amp)| amp.norm_sqr())
-                .sum()
-        } else {
-            self.state
-                .iter()
-                .filter(|&(&idx, _)| idx & mask != 0)
-                .map(|(_, amp)| amp.norm_sqr())
-                .sum()
-        };
-
-        #[cfg(not(feature = "parallel"))]
-        let prob_one: f64 = self
-            .state
-            .iter()
-            .filter(|&(&idx, _)| idx & mask != 0)
-            .map(|(_, amp)| amp.norm_sqr())
-            .sum();
+        let prob_one = self.masked_prob(mask, true);
 
         let outcome = self.rng.random::<f64>() < prob_one;
         self.classical_bits[classical_bit] = outcome;

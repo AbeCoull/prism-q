@@ -1,5 +1,7 @@
 //! Smoke tests: OpenQASM 3.0 parsing → statevector simulation round-trips.
 
+mod common;
+
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::openqasm;
@@ -18,13 +20,7 @@ fn run_shots(
 }
 
 fn assert_probs(probs: &[f64], expected: &[f64], eps: f64) {
-    assert_eq!(probs.len(), expected.len());
-    for (i, (a, e)) in probs.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < eps,
-            "prob[{i}]: expected {e:.6}, got {a:.6}"
-        );
-    }
+    common::assert_probs_close(probs, expected, eps, "openqasm");
 }
 
 #[test]

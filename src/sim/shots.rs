@@ -17,6 +17,13 @@ pub struct ShotsResult {
 }
 
 impl ShotsResult {
+    pub(crate) fn from_shots(shots: Vec<Vec<bool>>, num_classical_bits: usize) -> Self {
+        Self {
+            shots,
+            num_classical_bits,
+        }
+    }
+
     /// Build a frequency histogram of measurement outcomes.
     ///
     /// Keys are packed `Vec<u64>` where bit `i` of word `i/64` corresponds

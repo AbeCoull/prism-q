@@ -24,17 +24,13 @@ use crate::gates::{DiagEntry, Gate};
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::SendPtr;
 #[cfg(feature = "parallel")]
-use crate::backend::{MIN_PAR_ELEMS, MIN_PAR_ITERS, PARALLEL_THRESHOLD_QUBITS};
+use crate::backend::{
+    MIN_PAR_ELEMS, MIN_PAR_ITERS, PARALLEL_THRESHOLD_QUBITS, chunk_min_len as par_chunk_min_len,
+};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 type GateList = SmallVec<[(usize, [[Complex64; 2]; 2]); 4]>;
-
-#[cfg(feature = "parallel")]
-#[inline(always)]
-fn par_chunk_min_len(chunk_size: usize) -> usize {
-    (MIN_PAR_ELEMS / chunk_size).max(1)
-}
 
 struct SubState {
     state: Vec<Complex64>,
@@ -150,7 +146,8 @@ impl FactoredBackend {
     }
 
     /// Central gate dispatch. Translates global qubit indices to local and
-    /// calls sequential SIMD kernels on the sub-state slice.
+    /// applies the sequential or Rayon kernel on the sub-state slice; the
+    /// parallel path engages at `PARALLEL_THRESHOLD_QUBITS`.
     #[inline(always)]
     fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         if let Gate::MultiFused(data) = gate {
@@ -186,11 +183,22 @@ impl FactoredBackend {
         };
 
         #[cfg(feature = "parallel")]
-        {
+        let par = {
             let sub = self.substates[ss_idx].as_ref().unwrap();
-            if sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS {
-                return self.dispatch_gate_par(ss_idx, gate, targets);
-            }
+            sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS
+        };
+
+        macro_rules! seq_or_par {
+            ($seq:expr, $par:expr) => {{
+                #[cfg(feature = "parallel")]
+                if par {
+                    $par
+                } else {
+                    $seq
+                }
+                #[cfg(not(feature = "parallel"))]
+                $seq
+            }};
         }
 
         match gate {
@@ -198,68 +206,95 @@ impl FactoredBackend {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
-                apply_rzz_seq(&mut sub.state, q0, q1, *theta);
+                seq_or_par!(
+                    apply_rzz_seq(&mut sub.state, q0, q1, *theta),
+                    par_apply_rzz(&mut sub.state, q0, q1, *theta)
+                );
             }
             Gate::Cx => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let ctrl = Self::local_qubit(sub, targets[0]);
                 let tgt = Self::local_qubit(sub, targets[1]);
-                apply_cx_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt);
+                seq_or_par!(
+                    apply_cx_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt),
+                    par_apply_cx(&mut sub.state, ctrl, tgt)
+                );
             }
             Gate::Cz => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
-                apply_cz_seq(&mut sub.state, sub.qubits.len(), q0, q1);
+                seq_or_par!(
+                    apply_cz_seq(&mut sub.state, sub.qubits.len(), q0, q1),
+                    par_apply_cz(&mut sub.state, q0, q1)
+                );
             }
             Gate::Swap => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
-                apply_swap_seq(&mut sub.state, sub.qubits.len(), q0, q1);
+                seq_or_par!(
+                    apply_swap_seq(&mut sub.state, sub.qubits.len(), q0, q1),
+                    par_apply_swap(&mut sub.state, q0, q1)
+                );
             }
             Gate::Cu(mat) => {
+                let sub = self.substates[ss_idx].as_mut().unwrap();
+                let ctrl = Self::local_qubit(sub, targets[0]);
+                let tgt = Self::local_qubit(sub, targets[1]);
                 if let Some(phase) = gate.controlled_phase() {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let ctrl = Self::local_qubit(sub, targets[0]);
-                    let tgt = Self::local_qubit(sub, targets[1]);
-                    apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt, phase);
+                    seq_or_par!(
+                        apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt, phase),
+                        par_apply_cu_phase(&mut sub.state, sub.qubits.len(), ctrl, tgt, phase)
+                    );
                 } else {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let ctrl = Self::local_qubit(sub, targets[0]);
-                    let tgt = Self::local_qubit(sub, targets[1]);
-                    apply_cu_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt, **mat);
+                    seq_or_par!(
+                        apply_cu_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt, **mat),
+                        par_apply_cu(&mut sub.state, sub.qubits.len(), ctrl, tgt, **mat)
+                    );
                 }
             }
             Gate::Mcu(data) => {
                 let nc = data.num_controls as usize;
+                let sub = self.substates[ss_idx].as_mut().unwrap();
+                let local_ctrls: SmallVec<[usize; 4]> = targets[..nc]
+                    .iter()
+                    .map(|&q| Self::local_qubit(sub, q))
+                    .collect();
+                let local_tgt = Self::local_qubit(sub, targets[nc]);
                 if let Some(phase) = gate.controlled_phase() {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let local_ctrls: SmallVec<[usize; 4]> = targets[..nc]
-                        .iter()
-                        .map(|&q| Self::local_qubit(sub, q))
-                        .collect();
-                    let local_tgt = Self::local_qubit(sub, targets[nc]);
-                    apply_mcu_phase_seq(
-                        &mut sub.state,
-                        sub.qubits.len(),
-                        &local_ctrls,
-                        local_tgt,
-                        phase,
+                    seq_or_par!(
+                        apply_mcu_phase_seq(
+                            &mut sub.state,
+                            sub.qubits.len(),
+                            &local_ctrls,
+                            local_tgt,
+                            phase,
+                        ),
+                        par_apply_mcu_phase(
+                            &mut sub.state,
+                            sub.qubits.len(),
+                            &local_ctrls,
+                            local_tgt,
+                            phase,
+                        )
                     );
                 } else {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let local_ctrls: SmallVec<[usize; 4]> = targets[..nc]
-                        .iter()
-                        .map(|&q| Self::local_qubit(sub, q))
-                        .collect();
-                    let local_tgt = Self::local_qubit(sub, targets[nc]);
-                    apply_mcu_seq(
-                        &mut sub.state,
-                        sub.qubits.len(),
-                        &local_ctrls,
-                        local_tgt,
-                        data.mat,
+                    seq_or_par!(
+                        apply_mcu_seq(
+                            &mut sub.state,
+                            sub.qubits.len(),
+                            &local_ctrls,
+                            local_tgt,
+                            data.mat,
+                        ),
+                        par_apply_mcu(
+                            &mut sub.state,
+                            sub.qubits.len(),
+                            &local_ctrls,
+                            local_tgt,
+                            data.mat,
+                        )
                     );
                 }
             }
@@ -271,14 +306,25 @@ impl FactoredBackend {
                     .iter()
                     .map(|&(gq, ph)| (Self::local_qubit(sub, gq), ph))
                     .collect();
-                apply_batch_phase_seq(&mut sub.state, sub.qubits.len(), local_ctrl, &local_phases);
+                seq_or_par!(
+                    apply_batch_phase_seq(
+                        &mut sub.state,
+                        sub.qubits.len(),
+                        local_ctrl,
+                        &local_phases,
+                    ),
+                    par_apply_batch_phase(&mut sub.state, local_ctrl, &local_phases)
+                );
             }
             Gate::BatchRzz(data) => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 for &(q0, q1, theta) in &data.edges {
                     let lq0 = Self::local_qubit(sub, q0);
                     let lq1 = Self::local_qubit(sub, q1);
-                    apply_rzz_seq(&mut sub.state, lq0, lq1, theta);
+                    seq_or_par!(
+                        apply_rzz_seq(&mut sub.state, lq0, lq1, theta),
+                        par_apply_rzz(&mut sub.state, lq0, lq1, theta)
+                    );
                 }
             }
             Gate::DiagonalBatch(data) => {
@@ -288,21 +334,44 @@ impl FactoredBackend {
                         DiagEntry::Phase1q { qubit, d0, d1 } => {
                             let lq = Self::local_qubit(sub, *qubit);
                             let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
-                            simd::apply_diagonal_sequential(&mut sub.state, lq, *d0, *d1, skip_lo);
+                            seq_or_par!(
+                                simd::apply_diagonal_sequential(
+                                    &mut sub.state,
+                                    lq,
+                                    *d0,
+                                    *d1,
+                                    skip_lo,
+                                ),
+                                par_apply_diagonal(&mut sub.state, lq, *d0, *d1, skip_lo)
+                            );
                         }
                         DiagEntry::Phase2q { q0, q1, phase } => {
                             let lq0 = Self::local_qubit(sub, *q0);
                             let lq1 = Self::local_qubit(sub, *q1);
-                            apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase);
+                            seq_or_par!(
+                                apply_cu_phase_seq(
+                                    &mut sub.state,
+                                    sub.qubits.len(),
+                                    lq0,
+                                    lq1,
+                                    *phase,
+                                ),
+                                par_apply_cu_phase(
+                                    &mut sub.state,
+                                    sub.qubits.len(),
+                                    lq0,
+                                    lq1,
+                                    *phase,
+                                )
+                            );
                         }
                         DiagEntry::Parity2q { q0, q1, same, diff } => {
                             let lq0 = Self::local_qubit(sub, *q0);
                             let lq1 = Self::local_qubit(sub, *q1);
-                            let n = sub.state.len();
-                            for i in 0..n {
-                                let parity = ((i >> lq0) ^ (i >> lq1)) & 1;
-                                sub.state[i] *= if parity == 0 { *same } else { *diff };
-                            }
+                            seq_or_par!(
+                                apply_parity2q_seq(&mut sub.state, lq0, lq1, *same, *diff),
+                                par_apply_parity2q(&mut sub.state, lq0, lq1, *same, *diff)
+                            );
                         }
                     }
                 }
@@ -311,8 +380,15 @@ impl FactoredBackend {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
-                let prepared = simd::PreparedGate2q::new(mat);
-                prepared.apply_full(&mut sub.state, sub.qubits.len(), q0, q1);
+                seq_or_par!(
+                    simd::PreparedGate2q::new(mat).apply_full(
+                        &mut sub.state,
+                        sub.qubits.len(),
+                        q0,
+                        q1,
+                    ),
+                    par_apply_fused2q(&mut sub.state, sub.qubits.len(), q0, q1, mat)
+                );
             }
             Gate::MultiFused(_) | Gate::Multi2q(_) => unreachable!(),
             _ => {
@@ -321,16 +397,22 @@ impl FactoredBackend {
                 let local = Self::local_qubit(sub, targets[0]);
                 if gate.is_diagonal_1q() {
                     let skip_lo = is_phase_one(mat[0][0]);
-                    simd::apply_diagonal_sequential(
-                        &mut sub.state,
-                        local,
-                        mat[0][0],
-                        mat[1][1],
-                        skip_lo,
+                    seq_or_par!(
+                        simd::apply_diagonal_sequential(
+                            &mut sub.state,
+                            local,
+                            mat[0][0],
+                            mat[1][1],
+                            skip_lo,
+                        ),
+                        par_apply_diagonal(&mut sub.state, local, mat[0][0], mat[1][1], skip_lo)
                     );
                 } else {
-                    let prepared = simd::PreparedGate1q::new(&mat);
-                    prepared.apply_full_sequential(&mut sub.state, local);
+                    seq_or_par!(
+                        simd::PreparedGate1q::new(&mat)
+                            .apply_full_sequential(&mut sub.state, local),
+                        par_apply_1q(&mut sub.state, local, &mat)
+                    );
                 }
             }
         }
@@ -367,151 +449,6 @@ impl FactoredBackend {
                 prepared.apply_full_sequential(&mut sub.state, local_tgt);
             }
         }
-    }
-
-    #[cfg(feature = "parallel")]
-    fn dispatch_gate_par(&mut self, ss_idx: usize, gate: &Gate, targets: &[usize]) -> Result<()> {
-        match gate {
-            Gate::Rzz(theta) => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                let q0 = Self::local_qubit(sub, targets[0]);
-                let q1 = Self::local_qubit(sub, targets[1]);
-                par_apply_rzz(&mut sub.state, q0, q1, *theta);
-            }
-            Gate::Cx => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                let ctrl = Self::local_qubit(sub, targets[0]);
-                let tgt = Self::local_qubit(sub, targets[1]);
-                par_apply_cx(&mut sub.state, ctrl, tgt);
-            }
-            Gate::Cz => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                let q0 = Self::local_qubit(sub, targets[0]);
-                let q1 = Self::local_qubit(sub, targets[1]);
-                par_apply_cz(&mut sub.state, q0, q1);
-            }
-            Gate::Swap => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                let q0 = Self::local_qubit(sub, targets[0]);
-                let q1 = Self::local_qubit(sub, targets[1]);
-                par_apply_swap(&mut sub.state, q0, q1);
-            }
-            Gate::Cu(mat) => {
-                if let Some(phase) = gate.controlled_phase() {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let ctrl = Self::local_qubit(sub, targets[0]);
-                    let tgt = Self::local_qubit(sub, targets[1]);
-                    par_apply_cu_phase(&mut sub.state, sub.qubits.len(), ctrl, tgt, phase);
-                } else {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let ctrl = Self::local_qubit(sub, targets[0]);
-                    let tgt = Self::local_qubit(sub, targets[1]);
-                    par_apply_cu(&mut sub.state, sub.qubits.len(), ctrl, tgt, **mat);
-                }
-            }
-            Gate::Mcu(data) => {
-                let nc = data.num_controls as usize;
-                if let Some(phase) = gate.controlled_phase() {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let local_ctrls: SmallVec<[usize; 4]> = targets[..nc]
-                        .iter()
-                        .map(|&q| Self::local_qubit(sub, q))
-                        .collect();
-                    let local_tgt = Self::local_qubit(sub, targets[nc]);
-                    par_apply_mcu_phase(
-                        &mut sub.state,
-                        sub.qubits.len(),
-                        &local_ctrls,
-                        local_tgt,
-                        phase,
-                    );
-                } else {
-                    let sub = self.substates[ss_idx].as_mut().unwrap();
-                    let local_ctrls: SmallVec<[usize; 4]> = targets[..nc]
-                        .iter()
-                        .map(|&q| Self::local_qubit(sub, q))
-                        .collect();
-                    let local_tgt = Self::local_qubit(sub, targets[nc]);
-                    par_apply_mcu(
-                        &mut sub.state,
-                        sub.qubits.len(),
-                        &local_ctrls,
-                        local_tgt,
-                        data.mat,
-                    );
-                }
-            }
-            Gate::BatchPhase(data) => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                let local_ctrl = Self::local_qubit(sub, targets[0]);
-                let local_phases: SmallVec<[(usize, Complex64); 8]> = data
-                    .phases
-                    .iter()
-                    .map(|&(gq, ph)| (Self::local_qubit(sub, gq), ph))
-                    .collect();
-                par_apply_batch_phase(&mut sub.state, local_ctrl, &local_phases);
-            }
-            Gate::BatchRzz(data) => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                for &(q0, q1, theta) in &data.edges {
-                    let lq0 = Self::local_qubit(sub, q0);
-                    let lq1 = Self::local_qubit(sub, q1);
-                    par_apply_rzz(&mut sub.state, lq0, lq1, theta);
-                }
-            }
-            Gate::DiagonalBatch(data) => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                for entry in &data.entries {
-                    match entry {
-                        DiagEntry::Phase1q { qubit, d0, d1 } => {
-                            let lq = Self::local_qubit(sub, *qubit);
-                            let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
-                            par_apply_diagonal(&mut sub.state, lq, *d0, *d1, skip_lo);
-                        }
-                        DiagEntry::Phase2q { q0, q1, phase } => {
-                            let lq0 = Self::local_qubit(sub, *q0);
-                            let lq1 = Self::local_qubit(sub, *q1);
-                            par_apply_cu_phase(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase);
-                        }
-                        DiagEntry::Parity2q { q0, q1, same, diff } => {
-                            let lq0 = Self::local_qubit(sub, *q0);
-                            let lq1 = Self::local_qubit(sub, *q1);
-                            let phases = [*same, *diff];
-                            sub.state
-                                .par_chunks_mut(MIN_PAR_ELEMS)
-                                .enumerate()
-                                .for_each(|(chunk_idx, chunk)| {
-                                    let base = chunk_idx * MIN_PAR_ELEMS;
-                                    for (j, amp) in chunk.iter_mut().enumerate() {
-                                        let i = base + j;
-                                        let parity = ((i >> lq0) ^ (i >> lq1)) & 1;
-                                        *amp *= phases[parity];
-                                    }
-                                });
-                        }
-                    }
-                }
-            }
-            Gate::Fused2q(mat) => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                let q0 = Self::local_qubit(sub, targets[0]);
-                let q1 = Self::local_qubit(sub, targets[1]);
-                par_apply_fused2q(&mut sub.state, sub.qubits.len(), q0, q1, mat);
-            }
-            Gate::MultiFused(_) | Gate::Multi2q(_) => unreachable!(),
-            _ => {
-                let mat = gate.matrix_2x2();
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                let local = Self::local_qubit(sub, targets[0]);
-                if gate.is_diagonal_1q() {
-                    let skip_lo = is_phase_one(mat[0][0]);
-                    par_apply_diagonal(&mut sub.state, local, mat[0][0], mat[1][1], skip_lo);
-                } else {
-                    par_apply_1q(&mut sub.state, local, &mat);
-                }
-            }
-        }
-        Ok(())
     }
 
     fn apply_reset(&mut self, qubit: usize) {
@@ -792,6 +729,43 @@ fn apply_rzz_seq(state: &mut [Complex64], q0: usize, q1: usize, theta: f64) {
         let parity = ((i >> q0) ^ (i >> q1)) & 1;
         *amp *= phases[parity];
     }
+}
+
+#[inline(always)]
+fn apply_parity2q_seq(
+    state: &mut [Complex64],
+    q0: usize,
+    q1: usize,
+    same: Complex64,
+    diff: Complex64,
+) {
+    let phases = [same, diff];
+    for (i, amp) in state.iter_mut().enumerate() {
+        let parity = ((i >> q0) ^ (i >> q1)) & 1;
+        *amp *= phases[parity];
+    }
+}
+
+#[cfg(feature = "parallel")]
+fn par_apply_parity2q(
+    state: &mut [Complex64],
+    q0: usize,
+    q1: usize,
+    same: Complex64,
+    diff: Complex64,
+) {
+    let phases = [same, diff];
+    state
+        .par_chunks_mut(MIN_PAR_ELEMS)
+        .enumerate()
+        .for_each(|(chunk_idx, chunk)| {
+            let base = chunk_idx * MIN_PAR_ELEMS;
+            for (j, amp) in chunk.iter_mut().enumerate() {
+                let i = base + j;
+                let parity = ((i >> q0) ^ (i >> q1)) & 1;
+                *amp *= phases[parity];
+            }
+        });
 }
 
 fn apply_cz_seq(state: &mut [Complex64], num_qubits: usize, q0: usize, q1: usize) {

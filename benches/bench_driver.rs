@@ -7,32 +7,11 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
-use prism_q::sim;
 use prism_q::{BackendKind, StatevectorBackend};
 use std::hint::black_box;
-use std::time::Duration;
 
-fn run_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-) -> prism_q::Result<prism_q::RunOutcome> {
-    sim::simulate(circuit).backend(kind).seed(seed).run()
-}
-
-fn is_fast() -> bool {
-    cfg!(feature = "bench-fast")
-}
-
-fn configure_group(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    if is_fast() {
-        group.sample_size(10);
-        group.warm_up_time(Duration::from_millis(200));
-        group.measurement_time(Duration::from_secs(1));
-    } else {
-        group.sample_size(10);
-    }
-}
+mod common;
+use common::{configure_group, run_with};
 
 const QUBIT_COUNTS: [usize; 5] = [4, 8, 12, 16, 20];
 

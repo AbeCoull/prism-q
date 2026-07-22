@@ -3,7 +3,8 @@ use super::noise::QecCompiledNoiseSampler;
 use super::noise::compile_qec_noisy_sampler;
 use super::{
     QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecSampleResult,
-    append_basis_to_z_rotation, append_z_to_basis_rotation,
+    append_basis_to_z_rotation, append_mpp_parity_rotations, append_z_to_basis_rotation,
+    ensure_lowered_record_count, qec_non_clifford_error,
 };
 use crate::backend::{Backend, statevector::StatevectorBackend};
 use crate::circuit::{Circuit, Instruction, SmallVec};
@@ -850,13 +851,7 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
         match op {
             QecOp::Gate { gate, targets } => {
                 if !gate.is_clifford() {
-                    return Err(PrismError::IncompatibleBackend {
-                        backend: "QEC compiled runner".to_string(),
-                        reason: format!(
-                            "compiled QEC runner requires Clifford gates, got `{}`",
-                            gate.name()
-                        ),
-                    });
+                    return Err(qec_non_clifford_error(gate));
                 }
                 circuit.add_gate(gate.clone(), targets);
             }
@@ -874,15 +869,7 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
                 if scratch_needs_reset {
                     circuit.add_reset(scratch_qubit);
                 }
-                for term in terms {
-                    append_basis_to_z_rotation(&mut circuit, term.basis, term.qubit);
-                }
-                for term in terms {
-                    circuit.add_gate(Gate::Cx, &[term.qubit, scratch_qubit]);
-                }
-                for term in terms.iter().rev() {
-                    append_z_to_basis_rotation(&mut circuit, term.basis, term.qubit);
-                }
+                append_mpp_parity_rotations(&mut circuit, terms, scratch_qubit);
                 circuit.add_measure(scratch_qubit, next_record);
                 next_record += 1;
                 scratch_needs_reset = true;
@@ -917,14 +904,7 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
         }
     }
 
-    if next_record != program.num_measurements() {
-        return Err(PrismError::InvalidParameter {
-            message: format!(
-                "QEC compiled lowering produced {next_record} records, expected {}",
-                program.num_measurements()
-            ),
-        });
-    }
+    ensure_lowered_record_count(program, next_record, "compiled")?;
     Ok(circuit)
 }
 

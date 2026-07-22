@@ -390,10 +390,7 @@ pub(crate) fn run_trajectories(
         shots.push(result);
     }
 
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
 #[cfg(feature = "parallel")]
@@ -414,10 +411,7 @@ fn run_trajectories_par(
         })
         .collect();
 
-    Ok(ShotsResult {
-        shots: shots?,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots?, circuit.num_classical_bits))
 }
 
 #[cfg(test)]

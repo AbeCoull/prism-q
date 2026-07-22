@@ -707,8 +707,61 @@ impl Gate {
             | Gate::Tdg
             | Gate::Rz(_)
             | Gate::P(_) => true,
-            Gate::Fused(m) => m[0][1].norm() < IDENTITY_EPS && m[1][0].norm() < IDENTITY_EPS,
+            Gate::Fused(m) => is_diagonal_2x2(m),
             _ => false,
+        }
+    }
+
+    /// True if this gate can be absorbed into a `DiagonalBatch`.
+    #[inline]
+    pub(crate) fn is_diag_batchable(&self) -> bool {
+        match self {
+            Gate::Cz | Gate::Rzz(_) => true,
+            _ if self.is_diagonal_1q() => true,
+            _ if self.controlled_phase().is_some() => true,
+            _ => false,
+        }
+    }
+
+    /// The `DiagEntry` values equivalent to this gate applied on `targets`.
+    ///
+    /// Only valid for gates where `is_diag_batchable()` returns true.
+    pub(crate) fn diag_entries(&self, targets: &[usize]) -> SmallVec<[DiagEntry; 2]> {
+        match self {
+            Gate::Cz => {
+                smallvec::smallvec![DiagEntry::Phase2q {
+                    q0: targets[0],
+                    q1: targets[1],
+                    phase: Complex64::new(-1.0, 0.0),
+                }]
+            }
+            Gate::Rzz(theta) => {
+                let half = theta / 2.0;
+                let same = Complex64::new((-half).cos(), (-half).sin()); // e^{-iθ/2}
+                let diff = Complex64::new(half.cos(), half.sin()); // e^{iθ/2}
+                smallvec::smallvec![DiagEntry::Parity2q {
+                    q0: targets[0],
+                    q1: targets[1],
+                    same,
+                    diff,
+                }]
+            }
+            _ if self.controlled_phase().is_some() => {
+                let phase = self.controlled_phase().unwrap();
+                smallvec::smallvec![DiagEntry::Phase2q {
+                    q0: targets[0],
+                    q1: targets[1],
+                    phase,
+                }]
+            }
+            _ => {
+                let mat = self.matrix_2x2();
+                smallvec::smallvec![DiagEntry::Phase1q {
+                    qubit: targets[0],
+                    d0: mat[0][0],
+                    d1: mat[1][1],
+                }]
+            }
         }
     }
 
@@ -813,6 +866,25 @@ impl Gate {
                 | Gate::Swap
         )
     }
+}
+
+/// Whether a 2x2 matrix is diagonal (both off-diagonal norms below `IDENTITY_EPS`).
+#[inline]
+pub(crate) fn is_diagonal_2x2(mat: &[[Complex64; 2]; 2]) -> bool {
+    mat[0][1].norm() < IDENTITY_EPS && mat[1][0].norm() < IDENTITY_EPS
+}
+
+/// Whether a 4x4 matrix is diagonal (all off-diagonal norms below `IDENTITY_EPS`).
+#[inline]
+pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
+    for (r, row) in mat.iter().enumerate() {
+        for (c, value) in row.iter().enumerate() {
+            if r != c && value.norm() >= IDENTITY_EPS {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Check if two 2x2 unitary matrices are equal up to a global phase factor.

@@ -1282,16 +1282,13 @@ impl NoisyCompiledSampler {
                 .noiseless
                 .should_use_gpu_bts(total_shots.min(chunk_size.max(1)))
         {
-            let mut remaining = total_shots;
-            while remaining > 0 {
-                let this_batch = remaining.min(chunk_size);
+            crate::sim::compiled::for_each_chunk(total_shots, chunk_size, |this_batch| {
                 let packed = match self.try_sample_bulk_packed_with_gpu_context(this_batch) {
                     Ok(packed) => packed,
                     Err(_) => self.sample_bulk_packed_cpu(this_batch),
                 };
                 acc.accumulate(&packed);
-                remaining -= this_batch;
-            }
+            });
             return;
         }
 
@@ -1299,9 +1296,7 @@ impl NoisyCompiledSampler {
         let mut accum_buf: Vec<u64> = Vec::new();
         let mut rand_buf: Vec<u8> = Vec::new();
         let ref_bits_packed = self.noiseless.ref_bits_packed().to_vec();
-        let mut remaining = total_shots;
-        while remaining > 0 {
-            let this_batch = remaining.min(chunk_size);
+        crate::sim::compiled::for_each_chunk(total_shots, chunk_size, |this_batch| {
             self.noiseless.sample_bulk_words_shot_major_reuse(
                 &mut accum_buf,
                 &mut rand_buf,
@@ -1310,37 +1305,18 @@ impl NoisyCompiledSampler {
 
             self.apply_noise_bulk(&mut accum_buf, this_batch, m_words);
 
-            #[cfg(feature = "parallel")]
-            if this_batch >= 256 {
-                use rayon::prelude::*;
-                accum_buf[..this_batch * m_words]
-                    .par_chunks_mut(m_words)
-                    .for_each(|shot| xor_words(shot, &ref_bits_packed));
-            } else {
-                for s in 0..this_batch {
-                    let shot_base = s * m_words;
-                    xor_words(
-                        &mut accum_buf[shot_base..shot_base + m_words],
-                        &ref_bits_packed,
-                    );
-                }
-            }
-
-            #[cfg(not(feature = "parallel"))]
-            for s in 0..this_batch {
-                let shot_base = s * m_words;
-                xor_words(
-                    &mut accum_buf[shot_base..shot_base + m_words],
-                    &ref_bits_packed,
-                );
-            }
+            crate::sim::compiled::xor_mask_shot_major(
+                &mut accum_buf,
+                this_batch,
+                m_words,
+                &ref_bits_packed,
+            );
 
             let data = std::mem::take(&mut accum_buf);
             let packed = PackedShots::from_shot_major(data, this_batch, self.num_measurements);
             acc.accumulate(&packed);
             accum_buf = packed.into_data();
-            remaining -= this_batch;
-        }
+        });
     }
 
     /// Sample noisy outcomes and return exact packed counts.
@@ -1370,9 +1346,7 @@ impl NoisyCompiledSampler {
         &mut self,
         total_shots: usize,
     ) -> std::collections::HashMap<Vec<u64>, u64> {
-        let mut acc = crate::sim::compiled::HistogramAccumulator::new();
-        self.sample_chunked(total_shots, &mut acc);
-        acc.into_counts()
+        crate::sim::compiled::counts_from_chunks(|acc| self.sample_chunked(total_shots, acc))
     }
 
     /// Sample noisy outcomes and return per-measurement `P(bit = 1)`.
@@ -1393,9 +1367,9 @@ impl NoisyCompiledSampler {
     }
 
     fn sample_marginals_cpu(&mut self, total_shots: usize) -> Vec<f64> {
-        let mut acc = crate::sim::compiled::MarginalsAccumulator::new(self.num_measurements);
-        self.sample_chunked(total_shots, &mut acc);
-        acc.marginals()
+        crate::sim::compiled::marginals_from_chunks(self.num_measurements, |acc| {
+            self.sample_chunked(total_shots, acc)
+        })
     }
 
     #[cfg(test)]
@@ -2141,10 +2115,7 @@ fn run_shots_noisy_frame(
         num_classical,
     );
 
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
 /// Sample a Pauli-noisy Clifford circuit through the compiled noisy sampler,
@@ -2229,10 +2200,7 @@ fn finish_noisy_compiled_run(
     let packed = sampler.try_sample_bulk_packed(num_shots)?;
     let shots = unpack_and_remap_packed(&packed, num_shots, &classical_bit_order, num_classical);
 
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
 fn run_shots_noisy_compiled(
@@ -2347,10 +2315,7 @@ pub(crate) fn run_shots_noisy_brute_with(
         shots.push(backend.classical_results().to_vec());
     }
 
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
 #[cfg(test)]

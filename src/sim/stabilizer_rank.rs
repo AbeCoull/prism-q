@@ -337,26 +337,7 @@ const MIN_TERMS_FOR_PAR: usize = 16;
 /// via T = α·I + β·Z decomposition. n ≤ 25, total terms ≤ 2²⁰.
 pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResult> {
     let n = circuit.num_qubits;
-    let nc = circuit.num_classical_bits;
-
-    if n > MAX_STATEVECTOR_QUBITS {
-        return Err(PrismError::BackendUnsupported {
-            backend: "stabilizer_rank".into(),
-            operation: format!(
-                "exact probabilities for {} qubits (max {})",
-                n, MAX_STATEVECTOR_QUBITS
-            ),
-        });
-    }
-    validate_stabilizer_rank_circuit(circuit)?;
-
-    let mut backend = StabilizerBackend::new(seed);
-    backend.init(n, nc)?;
-
-    let mut branches: Vec<WeightedBranch> = vec![WeightedBranch {
-        weight: Complex64::new(1.0, 0.0),
-        offset: SignedPauli::identity(n),
-    }];
+    let (mut backend, mut branches) = stabilizer_rank_setup(circuit, seed)?;
 
     let mut t_count = 0usize;
 
@@ -388,6 +369,33 @@ pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResul
         t_count,
         pruned_count: 0,
     })
+}
+
+/// Shared entry validation and initial state for the exact and approximate runners.
+fn stabilizer_rank_setup(
+    circuit: &Circuit,
+    seed: u64,
+) -> Result<(StabilizerBackend, Vec<WeightedBranch>)> {
+    let n = circuit.num_qubits;
+    if n > MAX_STATEVECTOR_QUBITS {
+        return Err(PrismError::BackendUnsupported {
+            backend: "stabilizer_rank".into(),
+            operation: format!(
+                "exact probabilities for {} qubits (max {})",
+                n, MAX_STATEVECTOR_QUBITS
+            ),
+        });
+    }
+    validate_stabilizer_rank_circuit(circuit)?;
+
+    let mut backend = StabilizerBackend::new(seed);
+    backend.init(n, circuit.num_classical_bits)?;
+
+    let branches = vec![WeightedBranch {
+        weight: Complex64::new(1.0, 0.0),
+        offset: SignedPauli::identity(n),
+    }];
+    Ok((backend, branches))
 }
 
 fn conjugate_all(branches: &mut [WeightedBranch], gate: &Gate, targets: &[usize]) -> Result<()> {
@@ -471,26 +479,7 @@ fn expand_t(branches: &mut Vec<WeightedBranch>, qubit: usize, is_dagger: bool) -
         });
     }
 
-    let (alpha, beta) = if is_dagger {
-        tdg_coefficients()
-    } else {
-        t_coefficients()
-    };
-
-    let orig_len = branches.len();
-    let mut new_branches = Vec::with_capacity(orig_len);
-
-    for b in branches.iter_mut() {
-        let mut z_offset = b.offset.clone();
-        z_offset.mul_z_on_left(qubit);
-        new_branches.push(WeightedBranch {
-            weight: b.weight * beta,
-            offset: z_offset,
-        });
-        b.weight *= alpha;
-    }
-
-    branches.extend(new_branches);
+    expand_t_unbounded(branches, qubit, is_dagger);
     Ok(())
 }
 
@@ -505,29 +494,10 @@ pub fn run_stabilizer_rank_approx(
     seed: u64,
 ) -> Result<StabRankResult> {
     let n = circuit.num_qubits;
-    let nc = circuit.num_classical_bits;
-
-    if n > MAX_STATEVECTOR_QUBITS {
-        return Err(PrismError::BackendUnsupported {
-            backend: "stabilizer_rank".into(),
-            operation: format!(
-                "exact probabilities for {} qubits (max {})",
-                n, MAX_STATEVECTOR_QUBITS
-            ),
-        });
-    }
-    validate_stabilizer_rank_circuit(circuit)?;
+    let (mut backend, mut branches) = stabilizer_rank_setup(circuit, seed)?;
 
     let max_terms = max_terms.max(2);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-
-    let mut backend = StabilizerBackend::new(seed);
-    backend.init(n, nc)?;
-
-    let mut branches: Vec<WeightedBranch> = vec![WeightedBranch {
-        weight: Complex64::new(1.0, 0.0),
-        offset: SignedPauli::identity(n),
-    }];
 
     let mut t_count = 0usize;
     let mut pruned_total = 0usize;
@@ -1032,10 +1002,10 @@ fn sample_terminal_mps_branches(
         }
         shots.push(classical_bits);
     }
-    Ok(super::ShotsResult {
+    Ok(super::ShotsResult::from_shots(
         shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+        circuit.num_classical_bits,
+    ))
 }
 
 fn sample_mps_branches_online(
@@ -1054,10 +1024,10 @@ fn sample_mps_branches_online(
         }
         shots.push(classical_bits);
     }
-    Ok(super::ShotsResult {
+    Ok(super::ShotsResult::from_shots(
         shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+        circuit.num_classical_bits,
+    ))
 }
 
 /// Shot sampling on a Clifford+T circuit.

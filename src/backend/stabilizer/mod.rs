@@ -733,49 +733,16 @@ impl StabilizerBackend {
         self.apply_gates_only_word_batch(instructions)
     }
 
-    /// Multiply row `h` by row `i` (replace `h` with the Pauli product).
-    ///
-    /// Fused phase+XOR: AG g-function with wordwise popcount, row XOR in the
-    /// same loop to avoid a separate memory pass.
     pub(super) fn rowmul(&mut self, h: usize, i: usize) {
-        let stride = self.stride();
-        let nw = self.num_words;
-        let base_h = h * stride;
-        let base_i = i * stride;
-
-        let initial_sum =
-            if self.phase[i] { 2u64 } else { 0 } + if self.phase[h] { 2u64 } else { 0 };
-
-        // SAFETY: h != i in all callers, so row regions [base_h..base_h+stride]
-        // and [base_i..base_i+stride] are non-overlapping.
-        let (dst_x, dst_z, src_x, src_z) = unsafe {
-            let ptr = self.xz.as_mut_ptr();
-            (
-                std::slice::from_raw_parts_mut(ptr.add(base_h), nw),
-                std::slice::from_raw_parts_mut(ptr.add(base_h + nw), nw),
-                std::slice::from_raw_parts(ptr.add(base_i) as *const u64, nw),
-                std::slice::from_raw_parts(ptr.add(base_i + nw) as *const u64, nw),
-            )
-        };
-
-        let sum = rowmul_words(dst_x, dst_z, src_x, src_z, initial_sum);
-        self.phase[h] = (sum & 3) >= 2;
+        kernels::rowops::rowmul(&mut self.xz, &mut self.phase, self.num_words, h, i);
     }
 
     pub(super) fn copy_row(&mut self, dst: usize, src: usize) {
-        let stride = self.stride();
-        let src_start = src * stride;
-        let dst_start = dst * stride;
-        self.xz
-            .copy_within(src_start..src_start + stride, dst_start);
-        self.phase[dst] = self.phase[src];
+        kernels::rowops::copy_row(&mut self.xz, &mut self.phase, self.num_words, dst, src);
     }
 
     pub(super) fn zero_row(&mut self, r: usize) {
-        let stride = self.stride();
-        let start = r * stride;
-        self.xz[start..start + stride].fill(0);
-        self.phase[r] = false;
+        kernels::rowops::zero_row(&mut self.xz, &mut self.phase, self.num_words, r);
     }
 
     pub(super) fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {

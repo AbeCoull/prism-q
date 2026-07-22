@@ -84,85 +84,55 @@ fn classify_op(gate: &Gate, targets: &[usize]) -> (String, OpKind) {
     (label, kind)
 }
 
+fn place_op(moments: &mut Vec<Vec<PlacedOp>>, moment: usize, op: PlacedOp) {
+    if moment >= moments.len() {
+        moments.resize_with(moment + 1, Vec::new);
+    }
+    moments[moment].push(op);
+}
+
 pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
-    let n = circuit.num_qubits;
-    let mut qubit_depth = vec![0usize; n];
     let mut moments: Vec<Vec<PlacedOp>> = Vec::new();
 
-    for inst in &circuit.instructions {
-        match inst {
+    super::for_each_placement(&circuit.instructions, circuit.num_qubits, |inst, d| {
+        let op = match inst {
             Instruction::Gate { gate, targets } => {
-                let max_d = targets.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
                 let (label, kind) = classify_op(gate, targets);
-                let op = PlacedOp {
+                PlacedOp {
                     label,
                     qubits: SmallVec::from_slice(targets),
                     kind,
                     gate: Some(gate.clone()),
-                };
-                if max_d >= moments.len() {
-                    moments.resize_with(max_d + 1, Vec::new);
-                }
-                moments[max_d].push(op);
-                for &q in targets.iter() {
-                    qubit_depth[q] = max_d + 1;
                 }
             }
             Instruction::Measure {
                 qubit,
                 classical_bit,
-            } => {
-                let d = qubit_depth[*qubit];
-                let op = PlacedOp {
-                    label: "M".into(),
-                    qubits: smallvec::smallvec![*qubit],
-                    kind: OpKind::Measure {
-                        cbit: *classical_bit,
-                    },
-                    gate: None,
-                };
-                if d >= moments.len() {
-                    moments.resize_with(d + 1, Vec::new);
-                }
-                moments[d].push(op);
-                qubit_depth[*qubit] = d + 1;
-            }
-            Instruction::Reset { qubit } => {
-                let d = qubit_depth[*qubit];
-                let op = PlacedOp {
-                    label: "|0⟩".into(),
-                    qubits: smallvec::smallvec![*qubit],
-                    kind: OpKind::Reset,
-                    gate: None,
-                };
-                if d >= moments.len() {
-                    moments.resize_with(d + 1, Vec::new);
-                }
-                moments[d].push(op);
-                qubit_depth[*qubit] = d + 1;
-            }
-            Instruction::Barrier { qubits } => {
-                let max_d = qubits.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
-                let op = PlacedOp {
-                    label: String::new(),
-                    qubits: SmallVec::from_slice(qubits),
-                    kind: OpKind::Barrier,
-                    gate: None,
-                };
-                if max_d >= moments.len() {
-                    moments.resize_with(max_d + 1, Vec::new);
-                }
-                moments[max_d].push(op);
-                for &q in qubits.iter() {
-                    qubit_depth[q] = max_d;
-                }
-            }
+            } => PlacedOp {
+                label: "M".into(),
+                qubits: smallvec::smallvec![*qubit],
+                kind: OpKind::Measure {
+                    cbit: *classical_bit,
+                },
+                gate: None,
+            },
+            Instruction::Reset { qubit } => PlacedOp {
+                label: "|0⟩".into(),
+                qubits: smallvec::smallvec![*qubit],
+                kind: OpKind::Reset,
+                gate: None,
+            },
+            Instruction::Barrier { qubits } => PlacedOp {
+                label: String::new(),
+                qubits: SmallVec::from_slice(qubits),
+                kind: OpKind::Barrier,
+                gate: None,
+            },
             Instruction::Conditional {
                 condition,
                 gate,
                 targets,
             } => {
-                let max_d = targets.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
                 let cbit_label = match condition {
                     ClassicalCondition::BitIsOne(b) => format!("c[{}]", b),
                     ClassicalCondition::BitIsZero(b) => format!("!c[{}]", b),
@@ -181,22 +151,16 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                         format!("c[{}..{}]!={}", offset, offset + size, value)
                     }
                 };
-                let op = PlacedOp {
+                PlacedOp {
                     label: gate.to_string(),
                     qubits: SmallVec::from_slice(targets),
                     kind: OpKind::Conditional { cbit_label },
                     gate: Some(gate.clone()),
-                };
-                if max_d >= moments.len() {
-                    moments.resize_with(max_d + 1, Vec::new);
-                }
-                moments[max_d].push(op);
-                for &q in targets.iter() {
-                    qubit_depth[q] = max_d + 1;
                 }
             }
-        }
-    }
+        };
+        place_op(&mut moments, d, op);
+    });
     moments
 }
 

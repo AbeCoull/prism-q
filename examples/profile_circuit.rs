@@ -29,9 +29,10 @@ fn build_circuit(name: &str, n: usize) -> Circuit {
         "ghz" => circuits::ghz_circuit(n),
         "deep" => circuits::random_circuit(n, 50, SEED),
         "qaoa" => circuits::qaoa_circuit(n, 3, SEED),
+        "qv" => circuits::quantum_volume_circuit(n, n, SEED),
         other => {
             eprintln!("Unknown circuit: {other}");
-            eprintln!("Available: qft, random, hea, qpe, clifford, ghz, deep, qaoa");
+            eprintln!("Available: qft, random, hea, qpe, clifford, ghz, deep, qaoa, qv");
             std::process::exit(1);
         }
     }
@@ -110,7 +111,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
         eprintln!("Usage: profile_circuit <circuit> <n_qubits> [iterations]");
-        eprintln!("  circuit: qft | random | hea | qpe | clifford | ghz | deep | qaoa");
+        eprintln!("  circuit: qft | random | hea | qpe | clifford | ghz | deep | qaoa | qv");
         eprintln!("  iterations: default 5");
         std::process::exit(1);
     }

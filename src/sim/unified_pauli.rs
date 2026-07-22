@@ -440,13 +440,9 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
 
 #[cfg(test)]
 fn spp_to_probabilities(result: &SppResult) -> Vec<f64> {
-    result
-        .expectations
-        .iter()
-        .flat_map(|ez| {
-            let p0 = (1.0 + ez) / 2.0;
-            [p0.clamp(0.0, 1.0), (1.0 - ez).clamp(0.0, 2.0) / 2.0]
-        })
+    super::expectations_to_marginals(&result.expectations)
+        .into_iter()
+        .flat_map(|(p0, p1)| [p0, p1])
         .collect()
 }
 
@@ -826,13 +822,9 @@ pub fn run_spd_observable_light_cone(
 
 #[cfg(test)]
 fn spd_to_probabilities(result: &SpdResult) -> Vec<f64> {
-    result
-        .expectations
-        .iter()
-        .flat_map(|ez| {
-            let p0 = (1.0 + ez) / 2.0;
-            [p0.clamp(0.0, 1.0), (1.0 - p0).clamp(0.0, 1.0)]
-        })
+    super::expectations_to_marginals(&result.expectations)
+        .into_iter()
+        .flat_map(|(p0, p1)| [p0, p1])
         .collect()
 }
 

@@ -721,20 +721,16 @@ impl HomologicalSampler {
 
     pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
         let chunk_size = default_chunk_size(self.compiled.num_measurements());
-        let mut remaining = total_shots;
-        while remaining > 0 {
-            let batch = remaining.min(chunk_size);
+        crate::sim::compiled::for_each_chunk(total_shots, chunk_size, |batch| {
             let packed = self.sample_packed(batch);
             acc.accumulate(&packed);
-            remaining -= batch;
-        }
+        });
     }
 
     pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
-        let mut acc =
-            crate::sim::compiled::MarginalsAccumulator::new(self.compiled.num_measurements());
-        self.sample_chunked(total_shots, &mut acc);
-        acc.marginals()
+        crate::sim::compiled::marginals_from_chunks(self.compiled.num_measurements(), |acc| {
+            self.sample_chunked(total_shots, acc)
+        })
     }
 }
 
@@ -780,10 +776,7 @@ pub(crate) fn run_shots_homological_inner(
         shots.push(out);
     }
 
-    Ok(ShotsResult {
-        shots,
-        num_classical_bits: circuit.num_classical_bits,
-    })
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
 /// Compute exact noisy marginals analytically. No sampling, no rank limit.

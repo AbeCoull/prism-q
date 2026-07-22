@@ -1,9 +1,9 @@
 use super::{
-    QecNoise, QecOp, QecPauli, QecProgram, append_basis_to_z_rotation, append_z_to_basis_rotation,
+    QecNoise, QecOp, QecPauli, QecProgram, append_basis_to_z_rotation, append_mpp_parity_rotations,
+    append_z_to_basis_rotation, ensure_lowered_record_count, qec_non_clifford_error,
 };
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
 use crate::sim::compiled::{
     CompiledSampler, PackedShots, batch_propagate_backward, compile_measurements,
     rng::Xoshiro256PlusPlus, xor_words,
@@ -260,13 +260,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
         match op {
             QecOp::Gate { gate, targets } => {
                 if !allow_non_clifford && !gate.is_clifford() {
-                    return Err(PrismError::IncompatibleBackend {
-                        backend: "QEC compiled runner".to_string(),
-                        reason: format!(
-                            "compiled QEC runner requires Clifford gates, got `{}`",
-                            gate.name()
-                        ),
-                    });
+                    return Err(qec_non_clifford_error(gate));
                 }
                 let mapped = map_qec_deferred_targets(targets, &aliases, &measured_aliases)?;
                 circuit.add_gate(gate.clone(), mapped.as_slice());
@@ -302,15 +296,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     mapped_terms.push(QecPauli::new(term.basis, alias));
                 }
 
-                for term in &mapped_terms {
-                    append_basis_to_z_rotation(&mut circuit, term.basis, term.qubit);
-                }
-                for term in &mapped_terms {
-                    circuit.add_gate(Gate::Cx, &[term.qubit, scratch_alias]);
-                }
-                for term in mapped_terms.iter().rev() {
-                    append_z_to_basis_rotation(&mut circuit, term.basis, term.qubit);
-                }
+                append_mpp_parity_rotations(&mut circuit, &mapped_terms, scratch_alias);
 
                 deferred_measurements.push((scratch_alias, next_record));
                 measured_aliases[scratch_alias] = true;
@@ -351,14 +337,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
         }
     }
 
-    if next_record != program.num_measurements() {
-        return Err(PrismError::InvalidParameter {
-            message: format!(
-                "QEC deferred lowering produced {next_record} records, expected {}",
-                program.num_measurements()
-            ),
-        });
-    }
+    ensure_lowered_record_count(program, next_record, "deferred")?;
 
     let mut measurement_qubits = Vec::with_capacity(deferred_measurements.len());
     for (qubit, classical_bit) in deferred_measurements {

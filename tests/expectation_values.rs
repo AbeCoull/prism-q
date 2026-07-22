@@ -1,6 +1,8 @@
 //! Public API coverage for `run_expectation_values` and
 //! `Simulate::expectation_values`.
 
+mod common;
+
 use prism_q::gates::Gate;
 use prism_q::{BackendKind, Circuit, PauliAxis, PauliTerm, run_expectation_values, simulate};
 
@@ -14,10 +16,7 @@ fn bell() -> Circuit {
 }
 
 fn assert_close(got: &[f64], want: &[f64], tol: f64) {
-    assert_eq!(got.len(), want.len());
-    for (g, w) in got.iter().zip(want) {
-        assert!((g - w).abs() < tol, "got {g}, want {w}");
-    }
+    common::assert_probs_close(got, want, tol, "expectation");
 }
 
 #[test]

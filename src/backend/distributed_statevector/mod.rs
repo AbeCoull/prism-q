@@ -106,15 +106,9 @@ use crate::backend::{Backend, dense_probability_len, dense_statevector_len, meas
 use crate::circuit::{Instruction, SmallVec, smallvec};
 use crate::distributed::DistributedContext;
 use crate::error::{PrismError, Result};
-use crate::gates::{DiagEntry, Gate};
+use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
 
 const BACKEND_NAME: &str = "distributed_statevector";
-
-/// Whether a 2x2 matrix is diagonal.
-#[inline]
-fn is_diagonal_2x2(mat: &[[Complex64; 2]; 2]) -> bool {
-    mat[0][1].norm() < 1e-12 && mat[1][0].norm() < 1e-12
-}
 
 /// Visit every circuit qubit an instruction touches: the instruction targets
 /// plus qubit indices stored inside batched gate data. Indices may repeat.

@@ -2591,3 +2591,42 @@ fn if_bit_compare_against_two_rejected() {
     let err = parse(qasm).unwrap_err();
     assert!(matches!(err, PrismError::Parse { .. }));
 }
+
+#[test]
+fn gate_names_round_trip_through_resolve_gate() {
+    let named = [
+        Gate::Id,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::T,
+        Gate::Tdg,
+        Gate::SX,
+        Gate::SXdg,
+        Gate::Rx(0.3),
+        Gate::Ry(0.4),
+        Gate::Rz(0.5),
+        Gate::P(0.6),
+        Gate::Rzz(0.7),
+        Gate::Cx,
+        Gate::Cz,
+        Gate::Swap,
+    ];
+    for gate in named {
+        let params: Vec<f64> = match &gate {
+            Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::P(t) | Gate::Rzz(t) => vec![*t],
+            _ => vec![],
+        };
+        let resolved = Parser::resolve_gate(gate.name(), &params, 0)
+            .unwrap_or_else(|e| panic!("`{}` did not resolve: {e}", gate.name()));
+        assert_eq!(
+            resolved,
+            gate,
+            "`{}` resolved to a different variant",
+            gate.name()
+        );
+    }
+}

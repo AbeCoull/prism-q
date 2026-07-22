@@ -28,43 +28,10 @@ use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::gpu::GpuContext;
-use prism_q::{BackendKind, StabilizerBackend, StatevectorBackend, sim};
+use prism_q::{BackendKind, StabilizerBackend, StatevectorBackend};
 
-const SEED: u64 = 0xDEAD_BEEF;
-
-fn run_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-) -> prism_q::Result<prism_q::RunOutcome> {
-    sim::simulate(circuit).backend(kind).seed(seed).run()
-}
-
-fn run_shots_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    num_shots: usize,
-    seed: u64,
-) -> prism_q::Result<prism_q::ShotsResult> {
-    sim::simulate(circuit)
-        .backend(kind)
-        .seed(seed)
-        .shots(num_shots)
-}
-
-fn is_fast() -> bool {
-    cfg!(feature = "bench-fast")
-}
-
-fn configure_group(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    if is_fast() {
-        group.sample_size(10);
-        group.warm_up_time(Duration::from_millis(200));
-        group.measurement_time(Duration::from_secs(1));
-    } else {
-        group.sample_size(10);
-    }
-}
+mod common;
+use common::{SEED, configure_group, is_fast, run_shots_with, run_with};
 
 fn shared_ctx() -> Option<Arc<GpuContext>> {
     static CTX: OnceLock<Option<Arc<GpuContext>>> = OnceLock::new();

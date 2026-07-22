@@ -3,6 +3,9 @@
 //! Each test constructs a circuit programmatically (not via QASM) and checks
 //! the resulting state vector or probabilities against hand-computed values.
 
+mod common;
+
+use common::assert_probs_close;
 use num_complex::Complex64;
 use prism_q::Instruction;
 use prism_q::backend::Backend;
@@ -39,10 +42,7 @@ fn run_and_state(circuit: &Circuit) -> Vec<Complex64> {
 }
 
 fn assert_probs(actual: &[f64], expected: &[f64]) {
-    assert_eq!(actual.len(), expected.len(), "length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!((a - e).abs() < EPS, "prob[{i}]: expected {e}, got {a}");
-    }
+    assert_probs_close(actual, expected, EPS, "golden");
 }
 
 fn assert_amplitude(actual: Complex64, expected: Complex64, label: &str) {
@@ -473,10 +473,7 @@ fn run_mps_probs(circuit: &Circuit) -> Vec<f64> {
 }
 
 fn assert_probs_mps(actual: &[f64], expected: &[f64]) {
-    assert_eq!(actual.len(), expected.len(), "length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!((a - e).abs() < MPS_EPS, "prob[{i}]: expected {e}, got {a}");
-    }
+    assert_probs_close(actual, expected, MPS_EPS, "mps");
 }
 
 #[test]
@@ -814,10 +811,7 @@ fn run_tn_probs(circuit: &Circuit) -> Vec<f64> {
 }
 
 fn assert_probs_tn(actual: &[f64], expected: &[f64]) {
-    assert_eq!(actual.len(), expected.len(), "length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!((a - e).abs() < TN_EPS, "prob[{i}]: expected {e}, got {a}");
-    }
+    assert_probs_close(actual, expected, TN_EPS, "tn");
 }
 
 #[test]
@@ -884,13 +878,7 @@ fn tn_complex_circuit_matches_statevector() {
 const PAR_EPS: f64 = 1e-10;
 
 fn assert_probs_par(actual: &[f64], expected: &[f64], label: &str) {
-    assert_eq!(actual.len(), expected.len(), "{label}: length mismatch");
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < PAR_EPS,
-            "{label} prob[{i}]: expected {e}, got {a}"
-        );
-    }
+    assert_probs_close(actual, expected, PAR_EPS, label);
 }
 
 #[test]

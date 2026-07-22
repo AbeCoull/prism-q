@@ -20,7 +20,7 @@ use crate::sim::compiled::rng::Xoshiro256PlusPlus;
 use crate::sim::compiled::shot_tail_mask;
 
 use super::super::GpuContext;
-use super::{div_ceil_grid, launch_err, require_i32, require_u32};
+use super::{div_ceil_grid, launch_err, linear_cfg, require_i32, require_u32, stream_and_fn};
 
 const SAMPLE_BLOCK_SIZE: u32 = 128;
 const NOISE_BLOCK_SIZE: u32 = 128;
@@ -156,6 +156,58 @@ extern "C" __global__ void bts_popcount_rows(
     }
 }
 
+
+// Open-addressing insert-or-increment for a 3-state (empty / claiming / ready)
+// hash table. Spins on slots mid-claim, linear-probes on collision, and sets
+// `overflow` when a full sweep finds no usable slot.
+__device__ __forceinline__ void hash_insert_count(
+    const unsigned long long *key,
+    int m_words,
+    unsigned long long *slot_keys,
+    unsigned long long *slot_counts,
+    unsigned int *slot_states,
+    unsigned int table_mask,
+    unsigned int *overflow
+) {
+    unsigned long long hash = hash_words(key, m_words);
+    unsigned int slot = (unsigned int)hash & table_mask;
+
+    for (unsigned int probe = 0; probe <= table_mask; ++probe) {
+        unsigned int state = load_state(slot_states + slot);
+        unsigned long long *slot_key =
+            slot_keys + (unsigned long long)slot * (unsigned long long)m_words;
+
+        if (state == 2U) {
+            if (keys_equal(slot_key, key, m_words)) {
+                atomicAdd(slot_counts + slot, 1ULL);
+                return;
+            }
+        } else if (state == 0U) {
+            if (atomicCAS(slot_states + slot, 0U, 1U) == 0U) {
+                for (int mw = 0; mw < m_words; ++mw) {
+                    slot_key[mw] = key[mw];
+                }
+                slot_counts[slot] = 1ULL;
+                __threadfence();
+                atomicExch(slot_states + slot, 2U);
+                return;
+            }
+            continue;
+        } else {
+            while ((state = load_state(slot_states + slot)) == 1U) {
+            }
+            if (state == 2U && keys_equal(slot_key, key, m_words)) {
+                atomicAdd(slot_counts + slot, 1ULL);
+                return;
+            }
+        }
+
+        slot = (slot + 1U) & table_mask;
+    }
+
+    atomicExch(overflow, 1U);
+}
+
 extern "C" __global__ void bts_count_meas_major_upto8(
     const unsigned long long *meas_major,
     int num_meas,
@@ -215,42 +267,7 @@ extern "C" __global__ void bts_count_meas_major_upto8(
         key[mw] = shot_words[lane][mw];
     }
 
-    unsigned long long hash = hash_words(key, m_words);
-    unsigned int slot = (unsigned int)hash & table_mask;
-
-    for (unsigned int probe = 0; probe <= table_mask; ++probe) {
-        unsigned int state = load_state(slot_states + slot);
-        unsigned long long *slot_key = slot_keys + (unsigned long long)slot * (unsigned long long)m_words;
-
-        if (state == 2U) {
-            if (keys_equal(slot_key, key, m_words)) {
-                atomicAdd(slot_counts + slot, 1ULL);
-                return;
-            }
-        } else if (state == 0U) {
-            if (atomicCAS(slot_states + slot, 0U, 1U) == 0U) {
-                for (int mw = 0; mw < m_words; ++mw) {
-                    slot_key[mw] = key[mw];
-                }
-                slot_counts[slot] = 1ULL;
-                __threadfence();
-                atomicExch(slot_states + slot, 2U);
-                return;
-            }
-            continue;
-        } else {
-            while ((state = load_state(slot_states + slot)) == 1U) {
-            }
-            if (state == 2U && keys_equal(slot_key, key, m_words)) {
-                atomicAdd(slot_counts + slot, 1ULL);
-                return;
-            }
-        }
-
-        slot = (slot + 1U) & table_mask;
-    }
-
-    atomicExch(overflow, 1U);
+    hash_insert_count(key, m_words, slot_keys, slot_counts, slot_states, table_mask, overflow);
 }
 
 extern "C" __global__ void bts_count_shot_major_upto8(
@@ -281,43 +298,7 @@ extern "C" __global__ void bts_count_shot_major_upto8(
         }
     }
 
-    unsigned long long hash = hash_words(key, m_words);
-    unsigned int slot = (unsigned int)hash & table_mask;
-
-    for (unsigned int probe = 0; probe <= table_mask; ++probe) {
-        unsigned int state = load_state(slot_states + slot);
-        unsigned long long *slot_key =
-            slot_keys + (unsigned long long)slot * (unsigned long long)m_words;
-
-        if (state == 2U) {
-            if (keys_equal(slot_key, key, m_words)) {
-                atomicAdd(slot_counts + slot, 1ULL);
-                return;
-            }
-        } else if (state == 0U) {
-            if (atomicCAS(slot_states + slot, 0U, 1U) == 0U) {
-                for (int mw = 0; mw < m_words; ++mw) {
-                    slot_key[mw] = key[mw];
-                }
-                slot_counts[slot] = 1ULL;
-                __threadfence();
-                atomicExch(slot_states + slot, 2U);
-                return;
-            }
-            continue;
-        } else {
-            while ((state = load_state(slot_states + slot)) == 1U) {
-            }
-            if (state == 2U && keys_equal(slot_key, key, m_words)) {
-                atomicAdd(slot_counts + slot, 1ULL);
-                return;
-            }
-        }
-
-        slot = (slot + 1U) & table_mask;
-    }
-
-    atomicExch(overflow, 1U);
+    hash_insert_count(key, m_words, slot_keys, slot_counts, slot_states, table_mask, overflow);
 }
 
 extern "C" __global__ void bts_count_used_slots(
@@ -844,9 +825,7 @@ pub(crate) fn launch_bts_sample(
         return Ok(vec![0u64; num_meas * s_words]);
     }
 
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("bts_sample_meas_major")?;
+    let (stream, func) = stream_and_fn(ctx, "bts_sample_meas_major")?;
 
     let mut output = vec![0u64; num_meas * s_words];
     let mut shots_done = 0usize;
@@ -958,8 +937,7 @@ pub(crate) fn launch_bts_sample_device(
     }
 
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("bts_sample_meas_major")?;
+    let (stream, func) = stream_and_fn(ctx, "bts_sample_meas_major")?;
     let mut output_dev = GpuBuffer::<u64>::alloc_zeros(device, output_len.max(1))?;
 
     let mut shots_done = 0usize;
@@ -1147,9 +1125,7 @@ pub(crate) fn generate_and_apply_noise_masks_meas_major_by_row(
         return Ok(());
     }
 
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("bts_generate_and_apply_noise_meas_major_by_row")?;
+    let (stream, func) = stream_and_fn(ctx, "bts_generate_and_apply_noise_meas_major_by_row")?;
     let num_meas_i = require_i32(
         "bts_generate_and_apply_noise_meas_major_by_row",
         "num_meas",
@@ -1235,9 +1211,7 @@ pub(crate) fn apply_noise_masks_meas_major(
         return Ok(());
     }
 
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("bts_apply_noise_masks_meas_major")?;
+    let (stream, func) = stream_and_fn(ctx, "bts_apply_noise_masks_meas_major")?;
     let num_meas_i = require_i32("bts_apply_noise_masks_meas_major", "num_meas", num_meas)?;
     let s_words_i = require_i32("bts_apply_noise_masks_meas_major", "s_words", s_words)?;
     let word_offset_i = require_i32(
@@ -1330,8 +1304,7 @@ pub(crate) fn count_meas_major_marginals(
     }
 
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("bts_popcount_rows")?;
+    let (stream, func) = stream_and_fn(ctx, "bts_popcount_rows")?;
     let mut row_counts = GpuBuffer::<u64>::alloc_zeros(device, num_meas.max(1))?;
     let mut host_counts = vec![0u64; num_meas];
 
@@ -1339,11 +1312,7 @@ pub(crate) fn count_meas_major_marginals(
     let s_words_i = require_i32("bts_popcount_rows", "s_words", s_words)?;
     let num_meas_grid = require_u32("bts_popcount_rows", "num_meas", num_meas)?;
     let tail_mask_u64 = shot_tail_mask(num_shots);
-    let cfg = LaunchConfig {
-        grid_dim: (num_meas_grid, 1, 1),
-        block_dim: (POPCOUNT_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(POPCOUNT_BLOCK_SIZE, num_meas_grid);
 
     let mut builder = stream.launch_builder(&func);
     builder
@@ -1373,8 +1342,7 @@ fn count_used_slots(
     }
 
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("bts_count_used_slots")?;
+    let (stream, func) = stream_and_fn(ctx, "bts_count_used_slots")?;
     let mut used_out = GpuBuffer::<u32>::alloc_zeros(device, 1)?;
     let table_capacity_i = require_i32("bts_count_used_slots", "table_slots", table_slots)?;
     let blocks = div_ceil_grid(
@@ -1383,11 +1351,7 @@ fn count_used_slots(
         table_slots,
         COUNT_HASH_BLOCK_SIZE,
     )?;
-    let cfg = LaunchConfig {
-        grid_dim: (blocks, 1, 1),
-        block_dim: (COUNT_HASH_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(COUNT_HASH_BLOCK_SIZE, blocks);
 
     let mut builder = stream.launch_builder(&func);
     builder
@@ -1442,11 +1406,7 @@ fn compact_count_table(
         table_slots,
         COUNT_COMPACT_BLOCK_SIZE,
     )?;
-    let compact_cfg = LaunchConfig {
-        grid_dim: (compact_blocks, 1, 1),
-        block_dim: (COUNT_COMPACT_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let compact_cfg = linear_cfg(COUNT_COMPACT_BLOCK_SIZE, compact_blocks);
 
     let mut compact_builder = stream.launch_builder(&compact_func);
     compact_builder
@@ -1523,11 +1483,7 @@ pub(crate) fn try_count_shot_major(
         num_shots,
         COUNT_HASH_BLOCK_SIZE,
     )?;
-    let cfg = LaunchConfig {
-        grid_dim: (blocks, 1, 1),
-        block_dim: (COUNT_HASH_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(COUNT_HASH_BLOCK_SIZE, blocks);
 
     let mut builder = stream.launch_builder(&func);
     builder
@@ -1605,11 +1561,7 @@ fn try_count_meas_major_direct(
         num_shots,
         COUNT_MEAS_BATCH_SIZE,
     )?;
-    let cfg = LaunchConfig {
-        grid_dim: (batches.max(1), 1, 1),
-        block_dim: (COUNT_MEAS_BATCH_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(COUNT_MEAS_BATCH_SIZE, batches.max(1));
 
     let mut builder = stream.launch_builder(&func);
     builder

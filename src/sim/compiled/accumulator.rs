@@ -23,6 +23,36 @@ pub fn default_chunk_size(num_meas: usize) -> usize {
     optimal_chunk_size(num_meas, DEFAULT_TARGET_BYTES)
 }
 
+pub(crate) fn for_each_chunk(
+    total_shots: usize,
+    chunk_size: usize,
+    mut sample_chunk: impl FnMut(usize),
+) {
+    let mut remaining = total_shots;
+    while remaining > 0 {
+        let batch = remaining.min(chunk_size);
+        sample_chunk(batch);
+        remaining -= batch;
+    }
+}
+
+pub(crate) fn counts_from_chunks(
+    sample_chunked: impl FnOnce(&mut HistogramAccumulator),
+) -> HashMap<Vec<u64>, u64> {
+    let mut acc = HistogramAccumulator::new();
+    sample_chunked(&mut acc);
+    acc.into_counts()
+}
+
+pub(crate) fn marginals_from_chunks(
+    num_measurements: usize,
+    sample_chunked: impl FnOnce(&mut MarginalsAccumulator),
+) -> Vec<f64> {
+    let mut acc = MarginalsAccumulator::new(num_measurements);
+    sample_chunked(&mut acc);
+    acc.marginals()
+}
+
 struct FxHasher {
     hash: u64,
 }

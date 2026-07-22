@@ -24,7 +24,7 @@ use num_complex::Complex64;
 use crate::error::{PrismError, Result};
 
 use super::super::{GpuContext, GpuState};
-use super::launch_err;
+use super::{launch_err, linear_cfg, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -42,6 +42,30 @@ const KERNEL_SOURCE_TEMPLATE: &str = r#"
 #define BR_GROUP_SIZE   {{BR_GROUP_SIZE}}
 #define DB_TABLE_SIZE   {{DB_TABLE_SIZE}}
 #define DB_MAX_QUBITS   {{DB_MAX_QUBITS}}
+
+// ============================================================================
+// Shared device helpers
+// ============================================================================
+
+__device__ __forceinline__ void apply2x2(double2 *state,
+    unsigned long long i0, unsigned long long i1,
+    double m00r, double m00i, double m01r, double m01i,
+    double m10r, double m10i, double m11r, double m11i)
+{
+    double2 a = state[i0];
+    double2 b = state[i1];
+    state[i0].x = m00r*a.x - m00i*a.y + m01r*b.x - m01i*b.y;
+    state[i0].y = m00r*a.y + m00i*a.x + m01r*b.y + m01i*b.x;
+    state[i1].x = m10r*a.x - m10i*a.y + m11r*b.x - m11i*b.y;
+    state[i1].y = m10r*a.y + m10i*a.x + m11r*b.y + m11i*b.x;
+}
+
+__device__ __forceinline__ void apply_phase(double2 *state, unsigned long long i, double pr, double pi)
+{
+    double2 a = state[i];
+    state[i].x = pr*a.x - pi*a.y;
+    state[i].y = pr*a.y + pi*a.x;
+}
 
 // ============================================================================
 // Initialisation
@@ -71,12 +95,7 @@ extern "C" __global__ void apply_gate_1q(
     unsigned long long i0 = ((k & ~mask) << 1) | (k & mask);
     unsigned long long i1 = i0 | (1ULL << target);
 
-    double2 a = state[i0];
-    double2 b = state[i1];
-    state[i0].x = m00r*a.x - m00i*a.y + m01r*b.x - m01i*b.y;
-    state[i0].y = m00r*a.y + m00i*a.x + m01r*b.y + m01i*b.x;
-    state[i1].x = m10r*a.x - m10i*a.y + m11r*b.x - m11i*b.y;
-    state[i1].y = m10r*a.y + m10i*a.x + m11r*b.y + m11i*b.x;
+    apply2x2(state, i0, i1, m00r, m00i, m01r, m01i, m10r, m10i, m11r, m11i);
 }
 
 // Diagonal 2x2 specialisation.
@@ -93,12 +112,8 @@ extern "C" __global__ void apply_diagonal_1q(
     unsigned long long i0 = ((k & ~mask) << 1) | (k & mask);
     unsigned long long i1 = i0 | (1ULL << target);
 
-    double2 a = state[i0];
-    double2 b = state[i1];
-    state[i0].x = d0r*a.x - d0i*a.y;
-    state[i0].y = d0r*a.y + d0i*a.x;
-    state[i1].x = d1r*b.x - d1i*b.y;
-    state[i1].y = d1r*b.y + d1i*b.x;
+    apply_phase(state, i0, d0r, d0i);
+    apply_phase(state, i1, d1r, d1i);
 }
 
 // ============================================================================
@@ -177,9 +192,7 @@ extern "C" __global__ void apply_parity_phase(
     unsigned long long parity = ((i >> q0) ^ (i >> q1)) & 1ULL;
     double pr = parity ? diff_r : same_r;
     double pi = parity ? diff_i : same_i;
-    double2 a = state[i];
-    state[i].x = pr*a.x - pi*a.y;
-    state[i].y = pr*a.y + pi*a.x;
+    apply_phase(state, i, pr, pi);
 }
 
 // ============================================================================
@@ -199,12 +212,7 @@ extern "C" __global__ void apply_cu(
     unsigned long long i0 = idx | (1ULL << control);
     unsigned long long i1 = i0 | (1ULL << target);
 
-    double2 a = state[i0];
-    double2 b = state[i1];
-    state[i0].x = m00r*a.x - m00i*a.y + m01r*b.x - m01i*b.y;
-    state[i0].y = m00r*a.y + m00i*a.x + m01r*b.y + m01i*b.x;
-    state[i1].x = m10r*a.x - m10i*a.y + m11r*b.x - m11i*b.y;
-    state[i1].y = m10r*a.y + m10i*a.x + m11r*b.y + m11i*b.x;
+    apply2x2(state, i0, i1, m00r, m00i, m01r, m01i, m10r, m10i, m11r, m11i);
 }
 
 // Controlled-phase optimisation: state[both_set] *= phase.
@@ -220,9 +228,7 @@ extern "C" __global__ void apply_cu_phase(
     int hi_q = control < target ? target : control;
     unsigned long long idx = expand_2q(k, lo_q, hi_q);
     unsigned long long i = idx | (1ULL << control) | (1ULL << target);
-    double2 a = state[i];
-    state[i].x = pr*a.x - pi*a.y;
-    state[i].y = pr*a.y + pi*a.x;
+    apply_phase(state, i, pr, pi);
 }
 
 // Multi-controlled unitary. `sorted` contains all controls + target, sorted ascending.
@@ -250,12 +256,7 @@ extern "C" __global__ void apply_mcu(
     unsigned long long i0 = idx | ctrl_mask;
     unsigned long long i1 = i0 | tgt_mask;
 
-    double2 a = state[i0];
-    double2 b = state[i1];
-    state[i0].x = m00r*a.x - m00i*a.y + m01r*b.x - m01i*b.y;
-    state[i0].y = m00r*a.y + m00i*a.x + m01r*b.y + m01i*b.x;
-    state[i1].x = m10r*a.x - m10i*a.y + m11r*b.x - m11i*b.y;
-    state[i1].y = m10r*a.y + m10i*a.x + m11r*b.y + m11i*b.x;
+    apply2x2(state, i0, i1, m00r, m00i, m01r, m01i, m10r, m10i, m11r, m11i);
 }
 
 extern "C" __global__ void apply_mcu_phase(
@@ -275,9 +276,7 @@ extern "C" __global__ void apply_mcu_phase(
         idx = (hi << (bit + 1)) | lo;
     }
     unsigned long long i = idx | all_mask;
-    double2 a = state[i];
-    state[i].x = pr*a.x - pi*a.y;
-    state[i].y = pr*a.y + pi*a.x;
+    apply_phase(state, i, pr, pi);
 }
 
 // ============================================================================
@@ -403,18 +402,6 @@ extern "C" __global__ void compute_probabilities(
     out[i] = (a.x * a.x + a.y * a.y) * norm_sq;
 }
 
-// scale_state: state[i] *= s. Used to fold deferred pending_norm into the device buffer before
-// export. Launched over 2^n threads.
-
-extern "C" __global__ void scale_state(
-    double2 *state, unsigned long long dim, double s)
-{
-    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= dim) return;
-    state[i].x *= s;
-    state[i].y *= s;
-}
-
 // apply_multi_fused_tiled: batched non-diagonal MultiFused via shared-memory tiles.
 //
 // Each block loads a TILE_SIZE slice of amplitudes into shared memory, then applies every
@@ -458,9 +445,6 @@ extern "C" __global__ void apply_multi_fused_tiled(
         int i0 = ((k & ~mask) << 1) | (k & mask);
         int i1 = i0 | (1 << t);
 
-        double2 a = tile[i0];
-        double2 b = tile[i1];
-
         double2 m00 = matrices[g * 4 + 0];
         double2 m01 = matrices[g * 4 + 1];
         double2 m10 = matrices[g * 4 + 2];
@@ -471,10 +455,7 @@ extern "C" __global__ void apply_multi_fused_tiled(
         // index mapping partitions [0, TILE_SIZE)). The trailing sync below
         // serialises writes across gate boundaries, which is the only hazard.
 
-        tile[i0].x = m00.x * a.x - m00.y * a.y + m01.x * b.x - m01.y * b.y;
-        tile[i0].y = m00.x * a.y + m00.y * a.x + m01.x * b.y + m01.y * b.x;
-        tile[i1].x = m10.x * a.x - m10.y * a.y + m11.x * b.x - m11.y * b.y;
-        tile[i1].y = m10.x * a.y + m10.y * a.x + m11.x * b.y + m11.y * b.x;
+        apply2x2(tile, i0, i1, m00.x, m00.y, m01.x, m01.y, m10.x, m10.y, m11.x, m11.y);
         __syncthreads();
     }
 
@@ -516,9 +497,7 @@ extern "C" __global__ void apply_diagonal_batch(
         ci = ni;
     }
 
-    double2 a = state[i];
-    state[i].x = cr * a.x - ci * a.y;
-    state[i].y = cr * a.y + ci * a.x;
+    apply_phase(state, i, cr, ci);
 }
 
 // apply_batch_rzz: applies a batch of Rzz gates via precomputed parity-phase LUTs (built
@@ -558,9 +537,7 @@ extern "C" __global__ void apply_batch_rzz(
         ci = ni;
     }
 
-    double2 a = state[i];
-    state[i].x = cr * a.x - ci * a.y;
-    state[i].y = cr * a.y + ci * a.x;
+    apply_phase(state, i, cr, ci);
 }
 
 // apply_batch_phase: applies a batch of controlled-phase gates sharing a control qubit via
@@ -600,9 +577,7 @@ extern "C" __global__ void apply_batch_phase(
         ci = ni;
     }
 
-    double2 a = state[idx];
-    state[idx].x = cr * a.x - ci * a.y;
-    state[idx].y = cr * a.y + ci * a.x;
+    apply_phase(state, idx, cr, ci);
 }
 
 // apply_multi_fused_diagonal: batch of diagonal 1q gates in a single pass. Replaces the
@@ -683,14 +658,8 @@ fn grid_for(count: u64) -> u32 {
 }
 
 pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -> Result<()> {
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("set_initial_state")?;
-    let cfg = LaunchConfig {
-        grid_dim: (1, 1, 1),
-        block_dim: (1, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "set_initial_state")?;
+    let cfg = linear_cfg(1, 1);
     let mut builder = stream.launch_builder(&func);
     let buffer = state.buffer_mut().raw_mut();
     builder.arg(buffer);
@@ -708,13 +677,8 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
     let n = state.num_qubits();
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("compute_probabilities")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(dim), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "compute_probabilities")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
 
     // Reuse the cached scratch buffer when large enough; grow if num_qubits increased.
     let mut scratch_slot = state.probs_scratch();
@@ -739,30 +703,6 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
     Ok(host)
 }
 
-#[allow(dead_code)]
-pub(crate) fn launch_scale_state(ctx: &GpuContext, state: &mut GpuState, s: f64) -> Result<()> {
-    let n = state.num_qubits();
-    let dim: u64 = 1u64 << n;
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("scale_state")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(dim), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
-    let mut builder = stream.launch_builder(&func);
-    let buffer = state.buffer_mut().raw_mut();
-    builder.arg(buffer).arg(&dim).arg(&s);
-    // SAFETY: signature matches; grid covers dim.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| launch_err("scale_state", e))?;
-    }
-    Ok(())
-}
-
 pub(crate) fn launch_apply_gate_1q(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -777,14 +717,8 @@ pub(crate) fn launch_apply_gate_1q(
         });
     }
     let pair_count: u64 = 1u64 << (n - 1);
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_gate_1q")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(pair_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_gate_1q")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
     let m00r = matrix[0][0].re;
     let m00i = matrix[0][0].im;
     let m01r = matrix[0][1].re;
@@ -832,14 +766,8 @@ pub(crate) fn launch_apply_diagonal_1q(
         });
     }
     let pair_count: u64 = 1u64 << (n - 1);
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_diagonal_1q")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(pair_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_diagonal_1q")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
     let target_i = target as i32;
     let d0r = d0.re;
     let d0i = d0.im;
@@ -882,11 +810,7 @@ fn launch_2q(
     let device = ctx.device();
     let stream = device.stream()?;
     let func = device.function(kernel)?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(pair_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
     let q0_i = q0 as i32;
     let q1_i = q1 as i32;
     let mut builder = stream.launch_builder(&func);
@@ -942,14 +866,8 @@ pub(crate) fn launch_apply_parity_phase(
         });
     }
     let dim: u64 = 1u64 << n;
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_parity_phase")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(dim), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_parity_phase")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
     let q0_i = q0 as i32;
     let q1_i = q1 as i32;
     let sr = same.re;
@@ -1007,14 +925,8 @@ pub(crate) fn launch_apply_cu(
         });
     }
     let pair_count: u64 = 1u64 << (n - 2);
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_cu")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(pair_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_cu")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
     let ctrl_i = control as i32;
     let tgt_i = target as i32;
     let m00r = matrix[0][0].re;
@@ -1062,14 +974,8 @@ pub(crate) fn launch_apply_cu_phase(
         });
     }
     let pair_count: u64 = 1u64 << (n - 2);
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_cu_phase")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(pair_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_cu_phase")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
     let ctrl_i = control as i32;
     let tgt_i = target as i32;
     let pr = phase.re;
@@ -1136,13 +1042,8 @@ pub(crate) fn launch_apply_mcu(
     let tgt_mask: u64 = 1u64 << target;
 
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_mcu")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(iter_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_mcu")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count));
     let mut scratch = ctx.launcher_scratch();
     let sorted_buf = super::ensure_scratch(&mut scratch.u32_a, device, &sorted)?;
     let m00r = matrix[0][0].re;
@@ -1197,13 +1098,8 @@ pub(crate) fn launch_apply_mcu_phase(
     }
 
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_mcu_phase")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(iter_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_mcu_phase")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count));
     let mut scratch = ctx.launcher_scratch();
     let sorted_buf = super::ensure_scratch(&mut scratch.u32_a, device, &sorted)?;
     let pr = phase.re;
@@ -1243,13 +1139,8 @@ pub(crate) fn launch_apply_fused_2q(
     }
     let pair_count: u64 = 1u64 << (n - 2);
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_fused_2q")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(pair_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_fused_2q")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
     let mut flat = [0.0_f64; 32];
     for row in 0..4 {
         for col in 0..4 {
@@ -1370,14 +1261,8 @@ pub(crate) fn measure_collapse(
         });
     }
     let dim: u64 = 1u64 << n;
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("measure_collapse")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(dim), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "measure_collapse")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
     let qubit_i = qubit as i32;
     let outcome_i: i32 = if outcome { 1 } else { 0 };
     let mut builder = stream.launch_builder(&func);
@@ -1426,13 +1311,8 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
 
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_multi_fused_diagonal")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(dim), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_multi_fused_diagonal")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1521,13 +1401,8 @@ pub(crate) fn launch_apply_batch_phase(
 
     let half_count: u64 = 1u64 << (n - 1);
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_batch_phase")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(half_count), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_batch_phase")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(half_count));
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1609,13 +1484,8 @@ pub(crate) fn launch_apply_batch_rzz(
 
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_batch_rzz")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(dim), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_batch_rzz")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1715,13 +1585,8 @@ pub(crate) fn launch_apply_diagonal_batch(
     let n = state.num_qubits();
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_diagonal_batch")?;
-    let cfg = LaunchConfig {
-        grid_dim: (grid_for(dim), 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_diagonal_batch")?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
@@ -1833,13 +1698,8 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
     let dim: u64 = 1u64 << n;
     let num_tiles = dim / MULTI_FUSED_TILE_SIZE;
     let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("apply_multi_fused_tiled")?;
-    let cfg = LaunchConfig {
-        grid_dim: (num_tiles as u32, 1, 1),
-        block_dim: (MULTI_FUSED_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let (stream, func) = stream_and_fn(ctx, "apply_multi_fused_tiled")?;
+    let cfg = linear_cfg(MULTI_FUSED_BLOCK_SIZE, num_tiles as u32);
 
     let num_gates_i = tile_targets.len() as i32;
     {

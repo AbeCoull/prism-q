@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use std::hint::black_box;
 use std::time::Duration;
 
-const SEED: u64 = 0xDEAD_BEEF;
+mod common;
+use common::{SEED, run_shots_with};
+
 const API_QUERY_SHOTS: usize = 100_000;
 
 // Base high-shot counts always run; 100M/1B are added only when
@@ -40,18 +42,6 @@ fn high_shot_counts() -> Vec<usize> {
         .into_iter()
         .filter(|&n| n <= cap)
         .collect()
-}
-
-fn run_shots_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    num_shots: usize,
-    seed: u64,
-) -> prism_q::Result<prism_q::ShotsResult> {
-    sim::simulate(circuit)
-        .backend(kind)
-        .seed(seed)
-        .shots(num_shots)
 }
 
 fn run_counts_with(

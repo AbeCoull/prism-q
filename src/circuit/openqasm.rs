@@ -2040,6 +2040,14 @@ impl<'a> Parser<'a> {
     /// Returns `Ok(None)` if the gate name is not a decomposed gate (caller
     /// should fall through to `resolve_gate`). Returns `Ok(Some(instrs))` for
     /// gates that expand to multiple instructions.
+    /// Decomposition-body shorthand for a gate instruction.
+    fn ig(gate: Gate, targets: &[usize]) -> Instruction {
+        Instruction::Gate {
+            gate,
+            targets: SmallVec::from_slice(targets),
+        }
+    }
+
     fn resolve_decomposed_gate(
         name: &str,
         params: &[f64],
@@ -2064,10 +2072,10 @@ impl<'a> Parser<'a> {
                         ),
                     });
                 }
-                Ok(Some(vec![Instruction::Gate {
-                    gate: Gate::mcu(Gate::X.matrix_2x2(), controls as u8),
-                    targets: SmallVec::from_slice(qubits),
-                }]))
+                Ok(Some(vec![Self::ig(
+                    Gate::mcu(Gate::X.matrix_2x2(), controls as u8),
+                    qubits,
+                )]))
             }
             "rccx" => {
                 Self::check_arity(name, qubits, 3)?;
@@ -2075,42 +2083,15 @@ impl<'a> Parser<'a> {
                 let c1 = qubits[1];
                 let target = qubits[2];
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::T,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c1, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Tdg,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c0, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::T,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c1, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Tdg,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![target],
-                    },
+                    Self::ig(Gate::H, &[target]),
+                    Self::ig(Gate::T, &[target]),
+                    Self::ig(Gate::Cx, &[c1, target]),
+                    Self::ig(Gate::Tdg, &[target]),
+                    Self::ig(Gate::Cx, &[c0, target]),
+                    Self::ig(Gate::T, &[target]),
+                    Self::ig(Gate::Cx, &[c1, target]),
+                    Self::ig(Gate::Tdg, &[target]),
+                    Self::ig(Gate::H, &[target]),
                 ]))
             }
             "rc3x" | "rcccx" => {
@@ -2120,78 +2101,24 @@ impl<'a> Parser<'a> {
                 let c2 = qubits[2];
                 let target = qubits[3];
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::T,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c2, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Tdg,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c0, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::T,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c1, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Tdg,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c0, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::T,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c1, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Tdg,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::T,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![c2, target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Tdg,
-                        targets: smallvec![target],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![target],
-                    },
+                    Self::ig(Gate::H, &[target]),
+                    Self::ig(Gate::T, &[target]),
+                    Self::ig(Gate::Cx, &[c2, target]),
+                    Self::ig(Gate::Tdg, &[target]),
+                    Self::ig(Gate::H, &[target]),
+                    Self::ig(Gate::Cx, &[c0, target]),
+                    Self::ig(Gate::T, &[target]),
+                    Self::ig(Gate::Cx, &[c1, target]),
+                    Self::ig(Gate::Tdg, &[target]),
+                    Self::ig(Gate::Cx, &[c0, target]),
+                    Self::ig(Gate::T, &[target]),
+                    Self::ig(Gate::Cx, &[c1, target]),
+                    Self::ig(Gate::Tdg, &[target]),
+                    Self::ig(Gate::H, &[target]),
+                    Self::ig(Gate::T, &[target]),
+                    Self::ig(Gate::Cx, &[c2, target]),
+                    Self::ig(Gate::Tdg, &[target]),
+                    Self::ig(Gate::H, &[target]),
                 ]))
             }
             "cswap" | "fredkin" => {
@@ -2200,18 +2127,9 @@ impl<'a> Parser<'a> {
                 let t1 = qubits[1];
                 let t2 = qubits[2];
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![t2, t1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::mcu(Gate::X.matrix_2x2(), 2),
-                        targets: smallvec![ctrl, t1, t2],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![t2, t1],
-                    },
+                    Self::ig(Gate::Cx, &[t2, t1]),
+                    Self::ig(Gate::mcu(Gate::X.matrix_2x2(), 2), &[ctrl, t1, t2]),
+                    Self::ig(Gate::Cx, &[t2, t1]),
                 ]))
             }
             "rxx" => {
@@ -2220,34 +2138,13 @@ impl<'a> Parser<'a> {
                 let q0 = qubits[0];
                 let q1 = qubits[1];
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q0, q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Rz(params[0]),
-                        targets: smallvec![q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q0, q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![q1],
-                    },
+                    Self::ig(Gate::H, &[q0]),
+                    Self::ig(Gate::H, &[q1]),
+                    Self::ig(Gate::Cx, &[q0, q1]),
+                    Self::ig(Gate::Rz(params[0]), &[q1]),
+                    Self::ig(Gate::Cx, &[q0, q1]),
+                    Self::ig(Gate::H, &[q0]),
+                    Self::ig(Gate::H, &[q1]),
                 ]))
             }
             "ryy" => {
@@ -2257,34 +2154,13 @@ impl<'a> Parser<'a> {
                 let q1 = qubits[1];
                 let half_pi = std::f64::consts::FRAC_PI_2;
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::Rx(half_pi),
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Rx(half_pi),
-                        targets: smallvec![q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q0, q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Rz(params[0]),
-                        targets: smallvec![q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q0, q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Rx(-half_pi),
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Rx(-half_pi),
-                        targets: smallvec![q1],
-                    },
+                    Self::ig(Gate::Rx(half_pi), &[q0]),
+                    Self::ig(Gate::Rx(half_pi), &[q1]),
+                    Self::ig(Gate::Cx, &[q0, q1]),
+                    Self::ig(Gate::Rz(params[0]), &[q1]),
+                    Self::ig(Gate::Cx, &[q0, q1]),
+                    Self::ig(Gate::Rx(-half_pi), &[q0]),
+                    Self::ig(Gate::Rx(-half_pi), &[q1]),
                 ]))
             }
             "ecr" => {
@@ -2292,22 +2168,10 @@ impl<'a> Parser<'a> {
                 let q0 = qubits[0];
                 let q1 = qubits[1];
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::Rz(std::f64::consts::FRAC_PI_4),
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Rx(std::f64::consts::FRAC_PI_2),
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q0, q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::X,
-                        targets: smallvec![q0],
-                    },
+                    Self::ig(Gate::Rz(std::f64::consts::FRAC_PI_4), &[q0]),
+                    Self::ig(Gate::Rx(std::f64::consts::FRAC_PI_2), &[q0]),
+                    Self::ig(Gate::Cx, &[q0, q1]),
+                    Self::ig(Gate::X, &[q0]),
                 ]))
             }
             "iswap" => {
@@ -2315,30 +2179,12 @@ impl<'a> Parser<'a> {
                 let q0 = qubits[0];
                 let q1 = qubits[1];
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::S,
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::S,
-                        targets: smallvec![q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q0, q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q1, q0],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::H,
-                        targets: smallvec![q1],
-                    },
+                    Self::ig(Gate::S, &[q0]),
+                    Self::ig(Gate::S, &[q1]),
+                    Self::ig(Gate::H, &[q0]),
+                    Self::ig(Gate::Cx, &[q0, q1]),
+                    Self::ig(Gate::Cx, &[q1, q0]),
+                    Self::ig(Gate::H, &[q1]),
                 ]))
             }
             "dcx" => {
@@ -2346,23 +2192,14 @@ impl<'a> Parser<'a> {
                 let q0 = qubits[0];
                 let q1 = qubits[1];
                 Ok(Some(vec![
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q0, q1],
-                    },
-                    Instruction::Gate {
-                        gate: Gate::Cx,
-                        targets: smallvec![q1, q0],
-                    },
+                    Self::ig(Gate::Cx, &[q0, q1]),
+                    Self::ig(Gate::Cx, &[q1, q0]),
                 ]))
             }
             "u1" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Self::check_arity(name, qubits, 1)?;
-                Ok(Some(vec![Instruction::Gate {
-                    gate: Gate::P(params[0]),
-                    targets: smallvec![qubits[0]],
-                }]))
+                Ok(Some(vec![Self::ig(Gate::P(params[0]), &[qubits[0]])]))
             }
             "u2" => {
                 Self::expect_param_count(name, params, 2, line_num)?;
@@ -2378,10 +2215,10 @@ impl<'a> Parser<'a> {
                         Complex64::from_polar(isqrt2, phi + lam),
                     ],
                 ];
-                Ok(Some(vec![Instruction::Gate {
-                    gate: Gate::Fused(Box::new(mat)),
-                    targets: smallvec![qubits[0]],
-                }]))
+                Ok(Some(vec![Self::ig(
+                    Gate::Fused(Box::new(mat)),
+                    &[qubits[0]],
+                )]))
             }
             "u3" | "u" | "U" => {
                 Self::expect_param_count(name, params, 3, line_num)?;
@@ -2390,10 +2227,10 @@ impl<'a> Parser<'a> {
                 let phi = params[1];
                 let lam = params[2];
                 let mat = Self::u_matrix(theta, phi, lam);
-                Ok(Some(vec![Instruction::Gate {
-                    gate: Gate::Fused(Box::new(mat)),
-                    targets: smallvec![qubits[0]],
-                }]))
+                Ok(Some(vec![Self::ig(
+                    Gate::Fused(Box::new(mat)),
+                    &[qubits[0]],
+                )]))
             }
             _ => Ok(None),
         }

@@ -11,7 +11,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
-use crate::backend::stabilizer::kernels::rowmul_words;
+use crate::backend::stabilizer::kernels::{rowmul_words, rowops};
 use crate::backend::{Backend, dense_probability_len, dense_statevector_len, reserve_dense_output};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
@@ -59,329 +59,78 @@ impl SubTableau {
         self.qubits.iter().position(|&q| q == global).unwrap()
     }
 
+    #[cfg(feature = "parallel")]
+    #[inline(always)]
+    fn par_rows(&self) -> bool {
+        self.n >= MIN_QUBITS_FOR_PAR_GATES
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    #[inline(always)]
+    fn par_rows(&self) -> bool {
+        false
+    }
+
     fn apply_h(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            let xw = row[word];
-            let zw = row[nw + word];
-            let x = xw & bit_mask;
-            let z = zw & bit_mask;
-            *phase ^= (x != 0) && (z != 0);
-            row[word] = (xw & !bit_mask) | z;
-            row[nw + word] = (zw & !bit_mask) | x;
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::h_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_s(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            let x = row[word] & bit_mask;
-            let z = row[nw + word] & bit_mask;
-            *phase ^= (x != 0) && (z != 0);
-            row[nw + word] ^= x;
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::s_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_sdg(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            let x = row[word] & bit_mask;
-            row[nw + word] ^= x;
-            let z_new = row[nw + word] & bit_mask;
-            *phase ^= (x != 0) && (z_new != 0);
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::sdg_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_x(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            *phase ^= (row[nw + word] & bit_mask) != 0;
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::x_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_y(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            *phase ^= ((row[word] ^ row[nw + word]) & bit_mask) != 0;
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::y_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_z(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            *phase ^= (row[word] & bit_mask) != 0;
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::z_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_sx(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            let x = row[word] & bit_mask;
-            let z = row[nw + word] & bit_mask;
-            *phase ^= (z != 0) && (x == 0);
-            row[word] ^= z;
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::sx_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_sxdg(&mut self, a: usize) {
-        let word = a / 64;
-        let bit_mask = 1u64 << (a % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            let x = row[word] & bit_mask;
-            let z = row[nw + word] & bit_mask;
-            *phase ^= (x != 0) && (z != 0);
-            row[word] ^= z;
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::sxdg_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     fn apply_cx(&mut self, ctrl: usize, tgt: usize) {
-        let cw = ctrl / 64;
-        let cb = 1u64 << (ctrl % 64);
-        let tw = tgt / 64;
-        let tb = 1u64 << (tgt % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            let xc = (row[cw] & cb) != 0;
-            let zc = (row[nw + cw] & cb) != 0;
-            let xt = (row[tw] & tb) != 0;
-            let zt = (row[nw + tw] & tb) != 0;
-            *phase ^= xc && zt && (xt == zc);
-            if xc {
-                row[tw] ^= tb;
-            }
-            if zt {
-                row[nw + cw] ^= cb;
-            }
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::cx_all(
+            &mut self.xz,
+            &mut self.phase,
+            self.num_words,
+            par,
+            ctrl,
+            tgt,
+        );
     }
 
     fn apply_cz(&mut self, a: usize, b: usize) {
-        let aw = a / 64;
-        let ab = 1u64 << (a % 64);
-        let bw = b / 64;
-        let bb = 1u64 << (b % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], phase: &mut bool| {
-            let xa = (row[aw] & ab) != 0;
-            let za = (row[nw + aw] & ab) != 0;
-            let xb = (row[bw] & bb) != 0;
-            let zb = (row[nw + bw] & bb) != 0;
-            *phase ^= xa && xb && (za != zb);
-            if xa {
-                row[nw + bw] ^= bb;
-            }
-            if xb {
-                row[nw + aw] ^= ab;
-            }
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::cz_all(&mut self.xz, &mut self.phase, self.num_words, par, a, b);
     }
 
     fn apply_swap(&mut self, a: usize, b: usize) {
-        let aw = a / 64;
-        let ab = 1u64 << (a % 64);
-        let bw = b / 64;
-        let bb = 1u64 << (b % 64);
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let row_op = |row: &mut [u64], _phase: &mut bool| {
-            let xa = (row[aw] & ab) != 0;
-            let za = (row[nw + aw] & ab) != 0;
-            let xb = (row[bw] & bb) != 0;
-            let zb = (row[nw + bw] & bb) != 0;
-            row[aw] = (row[aw] & !ab) | if xb { ab } else { 0 };
-            row[bw] = (row[bw] & !bb) | if xa { bb } else { 0 };
-            row[nw + aw] = (row[nw + aw] & !ab) | if zb { ab } else { 0 };
-            row[nw + bw] = (row[nw + bw] & !bb) | if za { bb } else { 0 };
-        };
-
-        #[cfg(feature = "parallel")]
-        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
-            use rayon::prelude::*;
-            self.xz
-                .par_chunks_mut(stride)
-                .zip(self.phase.par_iter_mut())
-                .for_each(|(row, phase)| row_op(row, phase));
-            return;
-        }
-
-        for (row, phase) in self.xz.chunks_mut(stride).zip(self.phase.iter_mut()) {
-            row_op(row, phase);
-        }
+        let par = self.par_rows();
+        rowops::swap_all(&mut self.xz, &mut self.phase, self.num_words, par, a, b);
     }
 
     fn dispatch_gate(&mut self, gate: &Gate, local_targets: &[usize]) -> Result<()> {
@@ -409,40 +158,15 @@ impl SubTableau {
     }
 
     fn rowmul(&mut self, h: usize, i: usize) {
-        debug_assert_ne!(h, i);
-        let stride = self.stride();
-        let nw = self.num_words;
-        let base_h = h * stride;
-        let base_i = i * stride;
-        let initial = if self.phase[i] { 2u64 } else { 0 } + if self.phase[h] { 2u64 } else { 0 };
-        // SAFETY: h != i so row regions are non-overlapping.
-        let (dst_x, dst_z, src_x, src_z) = unsafe {
-            let ptr = self.xz.as_mut_ptr();
-            (
-                std::slice::from_raw_parts_mut(ptr.add(base_h), nw),
-                std::slice::from_raw_parts_mut(ptr.add(base_h + nw), nw),
-                std::slice::from_raw_parts(ptr.add(base_i) as *const u64, nw),
-                std::slice::from_raw_parts(ptr.add(base_i + nw) as *const u64, nw),
-            )
-        };
-        let sum = rowmul_words(dst_x, dst_z, src_x, src_z, initial);
-        self.phase[h] = (sum & 3) >= 2;
+        rowops::rowmul(&mut self.xz, &mut self.phase, self.num_words, h, i);
     }
 
     fn copy_row(&mut self, dst: usize, src: usize) {
-        let stride = self.stride();
-        let src_start = src * stride;
-        let dst_start = dst * stride;
-        self.xz
-            .copy_within(src_start..src_start + stride, dst_start);
-        self.phase[dst] = self.phase[src];
+        rowops::copy_row(&mut self.xz, &mut self.phase, self.num_words, dst, src);
     }
 
     fn zero_row(&mut self, r: usize) {
-        let stride = self.stride();
-        let start = r * stride;
-        self.xz[start..start + stride].fill(0);
-        self.phase[r] = false;
+        rowops::zero_row(&mut self.xz, &mut self.phase, self.num_words, r);
     }
 
     fn measure(&mut self, local_q: usize, rng: &mut ChaCha8Rng) -> bool {

@@ -48,6 +48,12 @@ pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
 pub(crate) const MIN_PAR_ELEMS: usize = 4096;
 
 #[cfg(feature = "parallel")]
+#[inline(always)]
+pub(crate) fn chunk_min_len(chunk_size: usize) -> usize {
+    (MIN_PAR_ELEMS / chunk_size).max(1)
+}
+
+#[cfg(feature = "parallel")]
 pub(crate) const MIN_PAR_ITERS: usize = 2048;
 
 #[cfg(feature = "parallel")]

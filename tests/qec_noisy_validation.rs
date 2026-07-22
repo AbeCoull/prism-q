@@ -5,16 +5,12 @@ use prism_q::{
     run_qec_program, run_qec_program_reference,
 };
 
-const SEED: u64 = 0xDEAD_BEEF;
+mod qec_common;
+
 const STAT_SHOTS: usize = 20_000;
 
 fn qec_options(shots: usize, keep_measurements: bool) -> QecOptions {
-    QecOptions {
-        shots,
-        seed: SEED,
-        chunk_size: Some(4096),
-        keep_measurements,
-    }
+    qec_common::qec_options(shots, 4096, keep_measurements)
 }
 
 fn bit_rate(shots: &PackedShots, column: usize) -> f64 {

@@ -10,11 +10,30 @@ pub(crate) mod bts;
 pub(crate) mod dense;
 pub(crate) mod stabilizer;
 
-use cudarc::driver::{DeviceRepr, ValidAsZeroBits};
+use std::sync::Arc;
+
+use cudarc::driver::{CudaFunction, CudaStream, DeviceRepr, LaunchConfig, ValidAsZeroBits};
 
 use crate::error::{PrismError, Result};
+use crate::gpu::GpuContext;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::memory::GpuBuffer;
+
+pub(super) fn stream_and_fn<'a>(
+    ctx: &'a GpuContext,
+    name: &'static str,
+) -> Result<(&'a Arc<CudaStream>, CudaFunction)> {
+    let device = ctx.device();
+    Ok((device.stream()?, device.function(name)?))
+}
+
+pub(super) fn linear_cfg(block_size: u32, grid_blocks: u32) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (grid_blocks, 1, 1),
+        block_dim: (block_size, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
 
 pub(super) fn launch_err(op: &str, err: impl std::fmt::Display) -> PrismError {
     PrismError::BackendUnsupported {
@@ -145,7 +164,6 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "measure_prob_one_finalize",
     "measure_collapse",
     "compute_probabilities",
-    "scale_state",
     "apply_multi_fused_diagonal",
     "apply_batch_phase",
     "apply_batch_rzz",

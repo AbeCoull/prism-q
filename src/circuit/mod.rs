@@ -725,36 +725,67 @@ impl Circuit {
         Some((prefix, tail))
     }
 
+    /// Same register shape as `self` with a replacement instruction list.
+    ///
+    /// The rebuild form every fusion pass uses to emit its rewritten circuit.
+    pub(crate) fn with_instructions(&self, instructions: Vec<Instruction>) -> Circuit {
+        Circuit {
+            num_qubits: self.num_qubits,
+            num_classical_bits: self.num_classical_bits,
+            instructions,
+        }
+    }
+
     /// Circuit depth via greedy layer assignment.
     ///
     /// Each gate occupies the earliest layer where all its qubits are free.
     /// Measurements count as depth-1 operations. Barriers synchronize qubits
     /// to the same layer without adding depth.
     pub fn depth(&self) -> usize {
-        if self.instructions.is_empty() {
-            return 0;
-        }
-        let mut qubit_depth = vec![0usize; self.num_qubits];
-        for inst in &self.instructions {
-            match inst {
-                Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
-                    let max_d = targets.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
-                    for &q in targets {
-                        qubit_depth[q] = max_d + 1;
-                    }
+        let mut depth = 0usize;
+        for_each_placement(&self.instructions, self.num_qubits, |inst, layer| {
+            if !matches!(inst, Instruction::Barrier { .. }) {
+                depth = depth.max(layer + 1);
+            }
+        });
+        depth
+    }
+}
+
+/// Walk instructions in greedy layer order, calling `visit(inst, layer)` with
+/// the earliest layer where every touched qubit is free. Gates and
+/// conditionals advance their qubits past the layer, measurements and resets
+/// advance one step, and barriers synchronize their qubits to the layer
+/// without occupying it. Shared by [`Circuit::depth`] and the drawing
+/// moment assignment.
+fn for_each_placement(
+    instructions: &[Instruction],
+    num_qubits: usize,
+    mut visit: impl FnMut(&Instruction, usize),
+) {
+    let mut qubit_depth = vec![0usize; num_qubits];
+    for inst in instructions {
+        match inst {
+            Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => {
+                let d = targets.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
+                visit(inst, d);
+                for &q in targets.iter() {
+                    qubit_depth[q] = d + 1;
                 }
-                Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
-                    qubit_depth[*qubit] += 1;
-                }
-                Instruction::Barrier { qubits } => {
-                    let max_d = qubits.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
-                    for &q in qubits {
-                        qubit_depth[q] = max_d;
-                    }
+            }
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
+                let d = qubit_depth[*qubit];
+                visit(inst, d);
+                qubit_depth[*qubit] = d + 1;
+            }
+            Instruction::Barrier { qubits } => {
+                let d = qubits.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
+                visit(inst, d);
+                for &q in qubits.iter() {
+                    qubit_depth[q] = d;
                 }
             }
         }
-        qubit_depth.into_iter().max().unwrap_or(0)
     }
 }
 
@@ -840,11 +871,7 @@ pub fn expand_qft_blocks(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
         }
     }
 
-    std::borrow::Cow::Owned(Circuit {
-        num_qubits: circuit.num_qubits,
-        num_classical_bits: circuit.num_classical_bits,
-        instructions: out,
-    })
+    std::borrow::Cow::Owned(circuit.with_instructions(out))
 }
 
 /// Condition for classically-controlled gate execution.

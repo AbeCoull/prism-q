@@ -21,13 +21,7 @@ use crate::gates::{DiagEntry, Gate};
 use rayon::prelude::*;
 
 #[cfg(feature = "parallel")]
-use crate::backend::MIN_PAR_ITERS;
-
-#[cfg(feature = "parallel")]
-#[inline(always)]
-fn chunk_min_len(chunk_size: usize) -> usize {
-    (MIN_PAR_ELEMS / chunk_size).max(1)
-}
+use crate::backend::{MIN_PAR_ITERS, chunk_min_len};
 
 /// Largest qubit target whose full period (2^(t+1) elements) fits within `tile_size`.
 #[inline(always)]
@@ -2677,14 +2671,10 @@ impl StatevectorBackend {
         let mut p1 = 0.0f64;
         let mut r = Complex64::new(0.0, 0.0);
         for block in self.state.chunks(block_size) {
-            let (lo, hi) = block.split_at(half);
-            for i in 0..half {
-                let a0 = lo[i];
-                let a1 = hi[i];
-                p0 += a0.norm_sqr();
-                p1 += a1.norm_sqr();
-                r += a1 * a0.conj();
-            }
+            let (b0, b1, br) = super::rdm_block_sums(block, half);
+            p0 += b0;
+            p1 += b1;
+            r += br;
         }
 
         let scale = Complex64::new(norm_sq, 0.0);
@@ -2705,20 +2695,7 @@ impl StatevectorBackend {
             .state
             .par_chunks(block_size)
             .with_min_len(chunk_min_len(block_size))
-            .map(|block| {
-                let (lo, hi) = block.split_at(half);
-                let mut p0 = 0.0f64;
-                let mut p1 = 0.0f64;
-                let mut r = Complex64::new(0.0, 0.0);
-                for i in 0..half {
-                    let a0 = lo[i];
-                    let a1 = hi[i];
-                    p0 += a0.norm_sqr();
-                    p1 += a1.norm_sqr();
-                    r += a1 * a0.conj();
-                }
-                (p0, p1, r)
-            })
+            .map(|block| super::rdm_block_sums(block, half))
             .reduce(
                 || (0.0, 0.0, Complex64::new(0.0, 0.0)),
                 |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),

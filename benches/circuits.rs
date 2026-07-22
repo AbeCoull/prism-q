@@ -16,27 +16,8 @@ use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 use std::time::Duration;
 
-const SEED: u64 = 0xDEAD_BEEF;
-
-fn run_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-) -> prism_q::Result<prism_q::RunOutcome> {
-    sim::simulate(circuit).backend(kind).seed(seed).run()
-}
-
-fn run_shots_with(
-    kind: BackendKind,
-    circuit: &Circuit,
-    num_shots: usize,
-    seed: u64,
-) -> prism_q::Result<prism_q::ShotsResult> {
-    sim::simulate(circuit)
-        .backend(kind)
-        .seed(seed)
-        .shots(num_shots)
-}
+mod common;
+use common::{SEED, configure_group, run_shots_with, run_with};
 
 fn run_shots_with_noise(
     kind: BackendKind,
@@ -50,20 +31,6 @@ fn run_shots_with_noise(
         .noise(noise)
         .seed(seed)
         .shots(num_shots)
-}
-
-fn is_fast() -> bool {
-    cfg!(feature = "bench-fast")
-}
-
-fn configure_group(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    if is_fast() {
-        group.sample_size(10);
-        group.warm_up_time(Duration::from_millis(200));
-        group.measurement_time(Duration::from_secs(1));
-    } else {
-        group.sample_size(10);
-    }
 }
 
 /// Statevector rows above 26q, opted in via `PRISM_BENCH_HIGH_QUBITS=<max>`.

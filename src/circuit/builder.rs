@@ -45,6 +45,15 @@ macro_rules! gate_1q_param {
     };
 }
 
+macro_rules! gate_2q {
+    ($name:ident, $variant:ident, $a:ident, $b:ident) => {
+        pub fn $name(&mut self, $a: usize, $b: usize) -> &mut Self {
+            self.circuit.add_gate(Gate::$variant, &[$a, $b]);
+            self
+        }
+    };
+}
+
 impl CircuitBuilder {
     /// Create a builder for a circuit with `num_qubits` qubits and no classical bits.
     pub fn new(num_qubits: usize) -> Self {
@@ -82,20 +91,9 @@ impl CircuitBuilder {
         self
     }
 
-    pub fn cx(&mut self, control: usize, target: usize) -> &mut Self {
-        self.circuit.add_gate(Gate::Cx, &[control, target]);
-        self
-    }
-
-    pub fn cz(&mut self, q0: usize, q1: usize) -> &mut Self {
-        self.circuit.add_gate(Gate::Cz, &[q0, q1]);
-        self
-    }
-
-    pub fn swap(&mut self, q0: usize, q1: usize) -> &mut Self {
-        self.circuit.add_gate(Gate::Swap, &[q0, q1]);
-        self
-    }
+    gate_2q!(cx, Cx, control, target);
+    gate_2q!(cz, Cz, q0, q1);
+    gate_2q!(swap, Swap, q0, q1);
 
     pub fn cu(&mut self, mat: [[Complex64; 2]; 2], control: usize, target: usize) -> &mut Self {
         self.circuit.add_gate(Gate::cu(mat), &[control, target]);

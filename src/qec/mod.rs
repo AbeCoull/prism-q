@@ -668,63 +668,67 @@ impl QecProgram {
         })
     }
 
+    /// Walk the ops with a running count of measurement records emitted so
+    /// far. Record-referencing ops resolve relative offsets against that
+    /// count; the row-resolver methods below share this walk.
+    fn visit_ops_with_measurement_count(
+        &self,
+        mut visit: impl FnMut(&QecOp, usize) -> Result<()>,
+    ) -> Result<()> {
+        let mut next_measurement = 0;
+        for op in &self.ops {
+            if matches!(
+                op,
+                QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. }
+            ) {
+                next_measurement += 1;
+                continue;
+            }
+            visit(op, next_measurement)?;
+        }
+        Ok(())
+    }
+
     /// Resolve detector rows to absolute measurement record indices.
     pub fn detector_rows(&self) -> Result<Vec<Vec<usize>>> {
         let mut rows = Vec::new();
-        let mut next_measurement = 0;
-        for op in &self.ops {
-            match op {
-                QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
-                    next_measurement += 1;
-                }
-                QecOp::Detector { records, .. } => {
-                    rows.push(resolve_records(records, next_measurement)?);
-                }
-                _ => {}
+        self.visit_ops_with_measurement_count(|op, next_measurement| {
+            if let QecOp::Detector { records, .. } = op {
+                rows.push(resolve_records(records, next_measurement)?);
             }
-        }
+            Ok(())
+        })?;
         Ok(rows)
     }
 
     /// Resolve observable rows to absolute measurement record indices.
     pub fn observable_rows(&self) -> Result<Vec<Vec<usize>>> {
-        let mut rows = Vec::new();
-        let mut next_measurement = 0;
-        for op in &self.ops {
-            match op {
-                QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
-                    next_measurement += 1;
+        let mut rows: Vec<Vec<usize>> = Vec::new();
+        self.visit_ops_with_measurement_count(|op, next_measurement| {
+            if let QecOp::ObservableInclude {
+                observable,
+                records,
+            } = op
+            {
+                if rows.len() <= *observable {
+                    rows.resize_with(*observable + 1, Vec::new);
                 }
-                QecOp::ObservableInclude {
-                    observable,
-                    records,
-                } => {
-                    if rows.len() <= *observable {
-                        rows.resize_with(*observable + 1, Vec::new);
-                    }
-                    rows[*observable].extend(resolve_records(records, next_measurement)?);
-                }
-                _ => {}
+                rows[*observable].extend(resolve_records(records, next_measurement)?);
             }
-        }
+            Ok(())
+        })?;
         Ok(rows)
     }
 
     /// Resolve postselection rows to absolute measurement record indices.
     pub fn postselection_rows(&self) -> Result<Vec<(Vec<usize>, bool)>> {
         let mut rows = Vec::new();
-        let mut next_measurement = 0;
-        for op in &self.ops {
-            match op {
-                QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
-                    next_measurement += 1;
-                }
-                QecOp::Postselect { records, expected } => {
-                    rows.push((resolve_records(records, next_measurement)?, *expected));
-                }
-                _ => {}
+        self.visit_ops_with_measurement_count(|op, next_measurement| {
+            if let QecOp::Postselect { records, expected } = op {
+                rows.push((resolve_records(records, next_measurement)?, *expected));
             }
-        }
+            Ok(())
+        })?;
         Ok(rows)
     }
 
@@ -890,6 +894,51 @@ pub(super) fn append_z_to_basis_rotation(circuit: &mut Circuit, basis: QecBasis,
         }
         QecBasis::Z => {}
     }
+}
+
+/// Lower a Pauli-product measurement onto a scratch qubit: rotate each term
+/// into the Z basis, accumulate parity on the scratch via CX, then undo the
+/// rotations in reverse order. The caller measures the scratch afterward.
+pub(super) fn append_mpp_parity_rotations(
+    circuit: &mut Circuit,
+    terms: &[QecPauli],
+    scratch: usize,
+) {
+    for term in terms {
+        append_basis_to_z_rotation(circuit, term.basis, term.qubit);
+    }
+    for term in terms {
+        circuit.add_gate(Gate::Cx, &[term.qubit, scratch]);
+    }
+    for term in terms.iter().rev() {
+        append_z_to_basis_rotation(circuit, term.basis, term.qubit);
+    }
+}
+
+pub(super) fn qec_non_clifford_error(gate: &Gate) -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: "QEC compiled runner".to_string(),
+        reason: format!(
+            "compiled QEC runner requires Clifford gates, got `{}`",
+            gate.name()
+        ),
+    }
+}
+
+pub(super) fn ensure_lowered_record_count(
+    program: &QecProgram,
+    produced: usize,
+    stage: &str,
+) -> Result<()> {
+    if produced != program.num_measurements() {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "QEC {stage} lowering produced {produced} records, expected {}",
+                program.num_measurements()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn resolve_records(records: &[QecRecordRef], next_measurement: usize) -> Result<Vec<usize>> {

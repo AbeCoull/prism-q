@@ -45,12 +45,12 @@
 //! serialises rowmul's of stabilisers whose paired destabilisers anticommute
 //! with Z_q into the scratch row and reads its phase.
 
-use cudarc::driver::{CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaSlice, PushKernelArg};
 
 use crate::error::Result;
 
 use super::super::{GpuContext, GpuTableau};
-use super::{div_ceil_grid, launch_err, require_i32, require_u32};
+use super::{div_ceil_grid, launch_err, linear_cfg, require_i32, require_u32, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 128;
 
@@ -618,9 +618,7 @@ pub(crate) fn kernel_source() -> String {
 /// Assumes `xz` and `phase` were allocated via `GpuBuffer::alloc_zeros` (so everything
 /// else is already zero); this kernel only writes the identity bits.
 pub(crate) fn launch_set_initial_tableau(ctx: &GpuContext, tableau: &mut GpuTableau) -> Result<()> {
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("stab_set_initial_tableau")?;
+    let (stream, func) = stream_and_fn(ctx, "stab_set_initial_tableau")?;
 
     let n_usize = tableau.num_qubits();
     if n_usize == 0 {
@@ -634,11 +632,7 @@ pub(crate) fn launch_set_initial_tableau(ctx: &GpuContext, tableau: &mut GpuTabl
         n_usize,
         BLOCK_SIZE,
     )?;
-    let cfg = LaunchConfig {
-        grid_dim: (blocks, 1, 1),
-        block_dim: (BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(BLOCK_SIZE, blocks);
 
     let mut builder = stream.launch_builder(&func);
     let xz = tableau.xz_mut().raw_mut();
@@ -873,9 +867,7 @@ fn launch_word_grouped_kernel(
     let num_rows = require_i32("stab_apply_word_grouped", "num_rows", num_rows_usize)?;
     let num_words_i = require_i32("stab_apply_word_grouped", "num_words", tableau.num_words())?;
 
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("stab_apply_word_grouped")?;
+    let (stream, func) = stream_and_fn(ctx, "stab_apply_word_grouped")?;
 
     let group_words_src: &[u32] = if scratch.group_words.is_empty() {
         &ZERO_U32
@@ -968,11 +960,7 @@ fn launch_word_grouped_kernel(
         .next_power_of_two()
         .clamp(32, BLOCK_SIZE as usize) as u32;
     let num_rows_grid = require_u32("stab_apply_word_grouped", "num_rows", num_rows_usize)?;
-    let cfg = LaunchConfig {
-        grid_dim: (num_rows_grid, 1, 1),
-        block_dim: (block_threads, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(block_threads, num_rows_grid);
 
     let group_words_dev = scratch
         .group_words_dev
@@ -1034,9 +1022,7 @@ pub(crate) fn launch_rowmul_words(
     src_row: usize,
     dst_row: usize,
 ) -> Result<()> {
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("stab_rowmul_words")?;
+    let (stream, func) = stream_and_fn(ctx, "stab_rowmul_words")?;
 
     let nw_usize = tableau.num_words();
     if nw_usize == 0 {
@@ -1045,11 +1031,7 @@ pub(crate) fn launch_rowmul_words(
     let nw = require_i32("stab_rowmul_words", "num_words", nw_usize)?;
     let src_i = require_i32("stab_rowmul_words", "src_row", src_row)?;
     let dst_i = require_i32("stab_rowmul_words", "dst_row", dst_row)?;
-    let cfg = LaunchConfig {
-        grid_dim: (1, 1, 1),
-        block_dim: (ROWMUL_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(ROWMUL_BLOCK_SIZE, 1);
 
     let mut builder = stream.launch_builder(&func);
     let (xz_buf, phase_buf) = tableau.xz_phase_mut();
@@ -1087,9 +1069,7 @@ pub(crate) fn launch_measure_find_pivot(
     if n == 0 {
         return Ok(None);
     }
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("stab_measure_find_pivot")?;
+    let (stream, func) = stream_and_fn(ctx, "stab_measure_find_pivot")?;
 
     let sentinel = require_i32(
         "stab_measure_find_pivot",
@@ -1105,11 +1085,7 @@ pub(crate) fn launch_measure_find_pivot(
         n,
         MEASURE_BLOCK_SIZE,
     )?;
-    let cfg = LaunchConfig {
-        grid_dim: (blocks, 1, 1),
-        block_dim: (MEASURE_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(MEASURE_BLOCK_SIZE, blocks);
 
     let mut host_pivot = [0_i32; 1];
     {
@@ -1158,20 +1134,14 @@ pub(crate) fn launch_measure_cascade(
     if n == 0 {
         return Ok(());
     }
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("stab_measure_cascade")?;
+    let (stream, func) = stream_and_fn(ctx, "stab_measure_cascade")?;
 
     let num_qubits_i = require_i32("stab_measure_cascade", "num_qubits", n)?;
     let nw = require_i32("stab_measure_cascade", "num_words", tableau.num_words())?;
     let target_i = require_i32("stab_measure_cascade", "target", target)?;
     let pivot_i = require_i32("stab_measure_cascade", "pivot_row", pivot_row)?;
     let blocks = require_u32("stab_measure_cascade", "num_rows", 2usize.saturating_mul(n))?;
-    let cfg = LaunchConfig {
-        grid_dim: (blocks, 1, 1),
-        block_dim: (MEASURE_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(MEASURE_BLOCK_SIZE, blocks);
 
     let mut builder = stream.launch_builder(&func);
     let (xz_buf, phase_buf) = tableau.xz_phase_mut();
@@ -1209,20 +1179,14 @@ pub(crate) fn launch_measure_fixup(
     if n == 0 {
         return Ok(());
     }
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("stab_measure_fixup")?;
+    let (stream, func) = stream_and_fn(ctx, "stab_measure_fixup")?;
 
     let num_qubits_i = require_i32("stab_measure_fixup", "num_qubits", n)?;
     let nw = require_i32("stab_measure_fixup", "num_words", tableau.num_words())?;
     let target_i = require_i32("stab_measure_fixup", "target", target)?;
     let pivot_i = require_i32("stab_measure_fixup", "pivot_row", pivot_row)?;
     let outcome_u8: u8 = outcome as u8;
-    let cfg = LaunchConfig {
-        grid_dim: (1, 1, 1),
-        block_dim: (MEASURE_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(MEASURE_BLOCK_SIZE, 1);
 
     let mut builder = stream.launch_builder(&func);
     let (xz_buf, phase_buf) = tableau.xz_phase_mut();
@@ -1259,9 +1223,7 @@ pub(crate) fn launch_measure_deterministic(
     if n == 0 {
         return Ok(false);
     }
-    let device = ctx.device();
-    let stream = device.stream()?;
-    let func = device.function("stab_measure_deterministic")?;
+    let (stream, func) = stream_and_fn(ctx, "stab_measure_deterministic")?;
 
     let num_qubits_i = require_i32("stab_measure_deterministic", "num_qubits", n)?;
     let nw = require_i32(
@@ -1270,11 +1232,7 @@ pub(crate) fn launch_measure_deterministic(
         tableau.num_words(),
     )?;
     let target_i = require_i32("stab_measure_deterministic", "target", target)?;
-    let cfg = LaunchConfig {
-        grid_dim: (1, 1, 1),
-        block_dim: (MEASURE_BLOCK_SIZE, 1, 1),
-        shared_mem_bytes: 0,
-    };
+    let cfg = linear_cfg(MEASURE_BLOCK_SIZE, 1);
 
     let mut host_out = [0u8; 1];
     {

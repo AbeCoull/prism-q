@@ -35,6 +35,8 @@ Orchestration layer in `src/sim/mod.rs`.
 | `simulate(circuit).backend(kind).seed(seed).sample_counts(shots)` | Frequency histogram with backend selection |
 | `simulate(circuit).seed(seed).marginals()` | Auto-dispatched per-qubit marginal probabilities |
 | `simulate(circuit).backend(kind).seed(seed).marginals()` | Per-qubit marginal probabilities with backend selection |
+| `simulate(circuit).seed(seed).expectation_values(observables)` | `⟨P_k⟩` per Pauli string |
+| `simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` | `⟨H⟩` and adjoint gradient |
 | `run_on(backend, circuit)` | Pre-constructed backend |
 | `run_qasm(qasm, seed)` | Parse + simulate |
 
@@ -77,6 +79,42 @@ Block-level Rayon parallelism when all blocks are <14 qubits (avoids oversubscri
 ## Temporal Clifford decomposition
 
 For Clifford+T circuits: Clifford prefix runs on the Stabilizer backend, state is exported to Statevector for the non-Clifford tail. Saves exponential memory for circuits with a long Clifford preamble.
+
+## Expectation-value gradients (adjoint method)
+
+`run_expectation_gradient(circuit, hamiltonian, params, seed)` and
+`simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` compute
+`⟨H⟩` and the exact gradient `d⟨H⟩/dθ` for a weighted Pauli-sum Hamiltonian
+`H = Σ c_k P_k`, at a cost independent of the parameter count. Implementation in
+`src/sim/gradient.rs`.
+
+The method back-propagates two statevectors. With `U = U_L…U_1` and `|φ⟩ = U|0⟩`:
+
+1. Forward pass (unfused) keeps `|φ⟩`. Build `|λ⟩ = H|φ⟩`; the value is
+   `Re⟨φ|λ⟩`.
+2. Sweep `i = L…1`. For a trainable gate with generator `G_i`, accumulate
+   `Im⟨λ|G_i|φ⟩` (projector form for `P`), then step both states back through
+   `U_i†` (`Gate::inverse()`).
+
+The `⟨λ|G|φ⟩` sandwich generalizes the forward `pauli_expectation_from_masks`
+kernel to two vectors (`pauli_sandwich`, Rayon-parallel at 16+ qubits).
+
+Differentiable gates are `Rx`, `Ry`, `Rz`, `Rzz`, and `P` (identified by
+`Gate::pauli_generator`, a method, so `Gate` stays 16 bytes). Trainable links on
+other gates, non-unitary instructions, and `QftBlock` are rejected. Parameter
+identity is an index-based side table (`ParameterMap` of instruction→slot links,
+recorded by the `*_param` `CircuitBuilder` methods); many gates may share a slot.
+
+Differentiation runs on the unfused instruction stream so each gate keeps a 1:1
+correspondence with its generator (fusion would erase both the stored angle and
+that correspondence). Two prunings cut work without changing results: the sweep
+stops at the earliest in-cone trainable gate (a non-trainable prefix costs no
+inverse applications), and a trainable gate outside the Hamiltonian's inverse
+light cone has a provably zero gradient, so its sandwich is skipped.
+
+Memory is two statevectors, so the qubit ceiling is about one below a single
+run. Only the statevector backend is supported; stabilizer/MPS/factored/GPU
+gradients are not implemented.
 
 ## Backend dispatch variants
 

@@ -16,6 +16,7 @@ use num_complex::Complex64;
 
 use super::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use crate::gates::Gate;
+use crate::sim::gradient::ParameterMap;
 
 /// Fluent builder for quantum circuits.
 ///
@@ -23,8 +24,15 @@ use crate::gates::Gate;
 /// method returns `&mut Self`, allowing compact one-liner circuits.
 /// Call [`build`](Self::build) to extract the finished [`Circuit`], or
 /// use [`run`](Self::run) / [`run_with`](Self::run_with) for direct execution.
+///
+/// The `*_param` methods (e.g. [`rx_param`](Self::rx_param)) additionally record
+/// which instruction feeds which slot of a parameter vector, for use with the
+/// adjoint gradient. Retrieve the recorded map with
+/// [`parameter_map`](Self::parameter_map) or
+/// [`build_parametric`](Self::build_parametric).
 pub struct CircuitBuilder {
     circuit: Circuit,
+    params: ParameterMap,
 }
 
 macro_rules! gate_1q {
@@ -54,11 +62,24 @@ macro_rules! gate_2q {
     };
 }
 
+macro_rules! gate_1q_param_tracked {
+    ($name:ident, $variant:ident) => {
+        /// Append this single-qubit rotation on `q` with initial angle `theta0`,
+        /// recording it as trainable parameter `slot` for the adjoint gradient.
+        pub fn $name(&mut self, slot: usize, theta0: f64, q: usize) -> &mut Self {
+            self.params.push(self.circuit.instructions.len(), slot);
+            self.circuit.add_gate(Gate::$variant(theta0), &[q]);
+            self
+        }
+    };
+}
+
 impl CircuitBuilder {
     /// Create a builder for a circuit with `num_qubits` qubits and no classical bits.
     pub fn new(num_qubits: usize) -> Self {
         Self {
             circuit: Circuit::new(num_qubits, 0),
+            params: ParameterMap::new(),
         }
     }
 
@@ -66,6 +87,7 @@ impl CircuitBuilder {
     pub fn new_with_classical(num_qubits: usize, num_classical_bits: usize) -> Self {
         Self {
             circuit: Circuit::new(num_qubits, num_classical_bits),
+            params: ParameterMap::new(),
         }
     }
 
@@ -88,6 +110,18 @@ impl CircuitBuilder {
 
     pub fn rzz(&mut self, theta: f64, q0: usize, q1: usize) -> &mut Self {
         self.circuit.add_gate(Gate::Rzz(theta), &[q0, q1]);
+        self
+    }
+
+    gate_1q_param_tracked!(rx_param, Rx);
+    gate_1q_param_tracked!(ry_param, Ry);
+    gate_1q_param_tracked!(rz_param, Rz);
+    gate_1q_param_tracked!(p_param, P);
+
+    /// Append `Rzz(theta0)` on `q0, q1`, recording it as trainable parameter `slot`.
+    pub fn rzz_param(&mut self, slot: usize, theta0: f64, q0: usize, q1: usize) -> &mut Self {
+        self.params.push(self.circuit.instructions.len(), slot);
+        self.circuit.add_gate(Gate::Rzz(theta0), &[q0, q1]);
         self
     }
 
@@ -169,12 +203,26 @@ impl CircuitBuilder {
 
     /// Extract the finished circuit, replacing the builder's internal circuit with an empty one.
     pub fn build(&mut self) -> Circuit {
+        self.params = ParameterMap::new();
         std::mem::replace(&mut self.circuit, Circuit::new(0, 0))
+    }
+
+    /// Extract the finished circuit together with the recorded parameter map,
+    /// resetting the builder.
+    pub fn build_parametric(&mut self) -> (Circuit, ParameterMap) {
+        let circuit = std::mem::replace(&mut self.circuit, Circuit::new(0, 0));
+        let params = std::mem::take(&mut self.params);
+        (circuit, params)
     }
 
     /// Borrow the circuit without consuming the builder.
     pub fn circuit(&self) -> &Circuit {
         &self.circuit
+    }
+
+    /// Borrow the parameter map recorded by the `*_param` methods.
+    pub fn parameter_map(&self) -> &ParameterMap {
+        &self.params
     }
 
     /// Execute with automatic backend selection.

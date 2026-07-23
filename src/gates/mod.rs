@@ -132,6 +132,28 @@ pub enum Gate {
     QftBlock { start: u8, num: u8 },
 }
 
+/// Analytic differentiation generator for a parametric gate.
+///
+/// Returned by [`Gate::pauli_generator`] and consumed by the adjoint gradient
+/// engine. `Gate` stays 16 bytes: this is produced on demand, never stored in
+/// the enum. Each rotation variant is `exp(-i θ/2 G)` with the named Pauli
+/// generator `G` acting on the gate's `targets` (in order); `Phase` is the
+/// non-Pauli phase gate `diag(1, e^{iθ})` whose generator is the projector
+/// `|1⟩⟨1|` on `targets[0]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratorKind {
+    /// `Rx(θ)`: generator `X` on `targets[0]`.
+    RotX,
+    /// `Ry(θ)`: generator `Y` on `targets[0]`.
+    RotY,
+    /// `Rz(θ)`: generator `Z` on `targets[0]`.
+    RotZ,
+    /// `Rzz(θ)`: generator `Z⊗Z` on `targets[0]` and `targets[1]`.
+    RotZz,
+    /// `P(θ)`: generator is the projector `|1⟩⟨1|` on `targets[0]`.
+    Phase,
+}
+
 /// Data for a multi-controlled unitary gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McuData {
@@ -616,6 +638,23 @@ impl Gate {
                     .map(|&(q0, q1, ref mat)| (q0, q1, adjoint_4x4(mat)))
                     .collect(),
             })),
+        }
+    }
+
+    /// Return the analytic differentiation generator for a parametric gate,
+    /// or `None` if the gate has no defined generator (all non-parametric
+    /// gates, and parametric gates whose angle is not stored inline as `f64`,
+    /// e.g. controlled unitaries built from a boxed matrix). Used by the
+    /// adjoint gradient engine to decide which instructions are differentiable.
+    #[inline]
+    pub fn pauli_generator(&self) -> Option<GeneratorKind> {
+        match self {
+            Gate::Rx(_) => Some(GeneratorKind::RotX),
+            Gate::Ry(_) => Some(GeneratorKind::RotY),
+            Gate::Rz(_) => Some(GeneratorKind::RotZ),
+            Gate::Rzz(_) => Some(GeneratorKind::RotZz),
+            Gate::P(_) => Some(GeneratorKind::Phase),
+            _ => None,
         }
     }
 

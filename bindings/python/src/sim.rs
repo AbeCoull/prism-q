@@ -11,8 +11,9 @@ use num_complex::Complex64;
 use numpy::PyArray1;
 use prism_q::backend::Backend;
 use prism_q::{
-    BackendKind, Circuit, CountsResult, MarginalsResult, NoiseModel, RunOutcome, ShotsResult,
-    StatevectorBackend, bitstring, simulate as core_simulate,
+    BackendKind, Circuit, CountsResult, MarginalsResult, NoiseModel, ParamLink, ParameterMap,
+    PauliAxis, PauliTerm, RunOutcome, ShotsResult, StatevectorBackend, bitstring,
+    simulate as core_simulate,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -151,6 +152,63 @@ impl PySimulation {
             backend.export_statevector()
         })?;
         Ok(complex_array(py, amps))
+    }
+
+    /// Compute `⟨H⟩` and its exact gradient with respect to the trainable
+    /// parameters via the adjoint method, returning `(value, gradient)` with
+    /// the gradient as a `float64` array.
+    ///
+    /// `hamiltonian` is a list of `(coefficient, [(qubit, axis), ...])` terms,
+    /// where `axis` is one of `"X"`, `"Y"`, `"Z"` (identity factors omitted).
+    /// `parameters` is a list of `(instruction_index, parameter_slot)` links,
+    /// as returned by `CircuitBuilder.parameter_links()`. Runs on the
+    /// statevector backend; the circuit must be unitary.
+    #[pyo3(signature = (hamiltonian, parameters))]
+    fn expectation_gradient<'py>(
+        &self,
+        py: Python<'py>,
+        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        parameters: Vec<(usize, usize)>,
+    ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
+        if self.noise.is_some() {
+            return Err(invalid("expectation_gradient() does not support noise"));
+        }
+        let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
+        for (coeff, factors) in hamiltonian {
+            let mut string = Vec::with_capacity(factors.len());
+            for (qubit, axis) in factors {
+                string.push(PauliTerm::new(qubit, parse_axis(&axis)?));
+            }
+            terms.push((coeff, string));
+        }
+        let params = ParameterMap::from_links(
+            parameters
+                .into_iter()
+                .map(|(instruction, param)| ParamLink { instruction, param })
+                .collect(),
+        );
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let circuit = &self.circuit;
+        let result = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            sim.seed(seed).expectation_gradient(&terms, &params)
+        })?;
+        Ok((result.value, f64_array(py, result.gradient)))
+    }
+}
+
+fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {
+    match axis.to_ascii_uppercase().as_str() {
+        "X" => Ok(PauliAxis::X),
+        "Y" => Ok(PauliAxis::Y),
+        "Z" => Ok(PauliAxis::Z),
+        other => Err(invalid(format!(
+            "Pauli axis must be one of \"X\", \"Y\", \"Z\"; got {other:?}"
+        ))),
     }
 }
 

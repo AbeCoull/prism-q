@@ -9,7 +9,10 @@ use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
-use prism_q::{BackendKind, ClassicalCondition, Instruction, MpsBackend};
+use prism_q::{
+    BackendKind, ClassicalCondition, Instruction, MpsBackend, ParameterMap, PauliTerm,
+    run_expectation_gradient, run_expectation_values,
+};
 use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -953,6 +956,166 @@ fn bench_decomposition(c: &mut Criterion) {
     group.finish();
 }
 
+// ---- Adjoint gradient benchmarks ----
+
+/// Mark every analytically differentiable gate as its own trainable slot.
+fn all_rotations_trainable(circuit: &Circuit) -> ParameterMap {
+    let mut params = ParameterMap::new();
+    let mut slot = 0;
+    for (i, inst) in circuit.instructions.iter().enumerate() {
+        if let Instruction::Gate { gate, .. } = inst {
+            if gate.pauli_generator().is_some() {
+                params.push(i, slot);
+                slot += 1;
+            }
+        }
+    }
+    params
+}
+
+/// A small weighted Z-chain Hamiltonian over the first few qubits.
+fn z_chain_hamiltonian(n: usize) -> Vec<(f64, Vec<PauliTerm>)> {
+    (0..n - 1)
+        .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
+        .collect()
+}
+
+/// Add `delta` to the angle of every gate bound to parameter `slot`.
+fn shift_slot(circuit: &Circuit, params: &ParameterMap, slot: usize, delta: f64) -> Circuit {
+    let mut out = circuit.clone();
+    for link in params.links().iter().filter(|l| l.param == slot) {
+        if let Instruction::Gate {
+            gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
+            ..
+        } = &mut out.instructions[link.instruction]
+        {
+            *t += delta;
+        }
+    }
+    out
+}
+
+/// Central finite-difference gradient over all parameters, the current user
+/// alternative to the adjoint method (two forward expectation runs per slot).
+fn finite_diff_gradient(
+    circuit: &Circuit,
+    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    params: &ParameterMap,
+) -> Vec<f64> {
+    let observables: Vec<Vec<PauliTerm>> = hamiltonian.iter().map(|(_, p)| p.clone()).collect();
+    let eps = 1e-5;
+    let expval = |c: &Circuit| -> f64 {
+        let per_term = run_expectation_values(c, &observables, 42).unwrap();
+        hamiltonian
+            .iter()
+            .zip(per_term)
+            .map(|((coeff, _), v)| coeff * v)
+            .sum()
+    };
+    (0..params.num_params())
+        .map(|slot| {
+            let plus = expval(&shift_slot(circuit, params, slot, eps));
+            let minus = expval(&shift_slot(circuit, params, slot, -eps));
+            (plus - minus) / (2.0 * eps)
+        })
+        .collect()
+}
+
+fn bench_gradient(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gradient/hea_l2");
+    configure_group(&mut group);
+
+    for &n in &[14, 18, 20, 22] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let params = all_rotations_trainable(&circuit);
+        let ham = z_chain_hamiltonian(n);
+
+        group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
+            b.iter(|| black_box(run_expectation_gradient(circ, &ham, &params, 42).unwrap()));
+        });
+        group.bench_with_input(BenchmarkId::new("finitediff", n), &circuit, |b, circ| {
+            b.iter(|| black_box(finite_diff_gradient(circ, &ham, &params)));
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_gradient_qaoa(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gradient/qaoa_l1");
+    configure_group(&mut group);
+
+    for &n in &[14, 18, 20] {
+        let circuit = circuits::qaoa_circuit(n, 1, SEED);
+        let params = all_rotations_trainable(&circuit);
+        let ham = z_chain_hamiltonian(n);
+
+        group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
+            b.iter(|| black_box(run_expectation_gradient(circ, &ham, &params, 42).unwrap()));
+        });
+        group.bench_with_input(BenchmarkId::new("finitediff", n), &circuit, |b, circ| {
+            b.iter(|| black_box(finite_diff_gradient(circ, &ham, &params)));
+        });
+    }
+
+    group.finish();
+}
+
+/// A fixed entangling prefix (non-trainable) followed by a trainable
+/// single-qubit-rotation layer, with a local single-qubit observable. Exercises
+/// the backward-sweep early termination (prefix skipped) and light-cone
+/// sandwich pruning (only the in-cone trainable gate contributes).
+fn prefix_local_circuit(n: usize, prefix_layers: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for layer in 0..prefix_layers {
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+        }
+        for q in (layer % 2..n - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.1 + 0.01 * q as f64), &[q]);
+    }
+    c
+}
+
+fn bench_gradient_prefix(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gradient/prefix_local");
+    configure_group(&mut group);
+
+    for &n in &[16, 18, 20] {
+        let circuit = prefix_local_circuit(n, 6);
+        let params = all_rotations_trainable(&circuit);
+        let ham = vec![(1.0, vec![PauliTerm::z(0)])];
+
+        group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
+            b.iter(|| black_box(run_expectation_gradient(circ, &ham, &params, 42).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("expectation/pauli_sum");
+    configure_group(&mut group);
+
+    for &n in &[14, 16, 18, 20] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let observables: Vec<Vec<PauliTerm>> = (0..n - 1)
+            .map(|q| vec![PauliTerm::z(q), PauliTerm::z(q + 1)])
+            .collect();
+
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| black_box(run_expectation_values(circ, &observables, 42).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
 // ---- Factored backend benchmarks ----
 
 fn bench_factored_random(c: &mut Criterion) {
@@ -1517,6 +1680,12 @@ criterion_group!(
     bench_compare_general,
     // Decomposition
     bench_decomposition,
+    // Adjoint gradient (adjoint vs finite-difference per parameter)
+    bench_gradient,
+    bench_gradient_qaoa,
+    bench_gradient_prefix,
+    // Forward Pauli-sum expectation (parallel-sandwich neutrality)
+    bench_expectation,
     // Factored backend
     bench_factored_random,
     bench_factored_independent,

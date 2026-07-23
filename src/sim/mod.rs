@@ -6,6 +6,7 @@
 pub mod compiled;
 mod decomposed;
 mod dispatch;
+pub mod gradient;
 pub mod homological;
 pub mod noise;
 mod probability;
@@ -250,6 +251,38 @@ impl<'c> Simulate<'c, Seeded> {
             });
         }
         run_expectation_values_with(self.kind, self.circuit, observables, seed)
+    }
+
+    /// Compute `⟨H⟩` and its exact gradient with respect to the trainable
+    /// parameters using the adjoint method.
+    ///
+    /// `hamiltonian` is a weighted Pauli sum `Σ c_k P_k` with real
+    /// coefficients. `params` declares which gate instructions are trainable.
+    /// Runs on the statevector backend; the selected backend must be `Auto` or
+    /// `Statevector`. The circuit must be unitary. See
+    /// [`gradient::run_expectation_gradient`].
+    #[inline]
+    pub fn expectation_gradient(
+        self,
+        hamiltonian: &[(f64, Vec<PauliTerm>)],
+        params: &gradient::ParameterMap,
+    ) -> Result<gradient::ExpectationGradient> {
+        let seed = self.seed_value();
+        if self.noise_model.is_some() {
+            return Err(PrismError::BackendUnsupported {
+                backend: format!("{:?}", self.kind),
+                operation: "expectation gradients with an inline noise model".into(),
+            });
+        }
+        if !(self.kind.is_auto() || matches!(self.kind, BackendKind::Statevector)) {
+            return Err(PrismError::IncompatibleBackend {
+                backend: format!("{:?}", self.kind),
+                reason:
+                    "adjoint gradients run on the statevector backend; select Auto or Statevector"
+                        .into(),
+            });
+        }
+        gradient::run_expectation_gradient(self.circuit, hamiltonian, params, seed)
     }
 }
 
@@ -948,7 +981,10 @@ fn expectation_values_statevector(
 
 /// Validate a joint Pauli observable and reduce it to `(Xmask, Zmask, #Y)`,
 /// where `Xmask` covers X and Y factors and `Zmask` covers Z and Y factors.
-fn pauli_masks(observable: &[PauliTerm], num_qubits: usize) -> Result<(usize, usize, u32)> {
+pub(crate) fn pauli_masks(
+    observable: &[PauliTerm],
+    num_qubits: usize,
+) -> Result<(usize, usize, u32)> {
     let mut xmask = 0usize;
     let mut zmask = 0usize;
     let mut num_y = 0u32;
@@ -983,8 +1019,61 @@ fn pauli_masks(observable: &[PauliTerm], num_qubits: usize) -> Result<(usize, us
     Ok((xmask, zmask, num_y))
 }
 
-/// Exact `⟨ψ|P|ψ⟩` from the reduced observable masks, where `P` acts as
-/// `P|j⟩ = i^{#Y}·(-1)^{popcount(j & Zmask)}·|j ⊕ Xmask⟩`. Normalization
+/// Complex Pauli sandwich `⟨λ|P|φ⟩`, where `P` acts as
+/// `P|j⟩ = i^{#Y}·(-1)^{popcount(j & Zmask)}·|j ⊕ Xmask⟩`. Returns the raw
+/// (unnormalized) complex value. The adjoint gradient engine uses this with
+/// distinct `λ` and `φ`; `pauli_expectation_from_masks` is the `λ = φ` case.
+pub(crate) fn pauli_sandwich(
+    lambda: &[Complex64],
+    phi: &[Complex64],
+    xmask: usize,
+    zmask: usize,
+    num_y: u32,
+) -> Complex64 {
+    let term = |j: usize, amp: Complex64| {
+        let partner = lambda[j ^ xmask];
+        let sign = if (j & zmask).count_ones() & 1 == 1 {
+            -1.0
+        } else {
+            1.0
+        };
+        partner.conj() * amp * sign
+    };
+
+    // Higher threshold than gate kernels: the sandwich is a single lightweight
+    // O(N) reduction, so Rayon fan-out only pays off past 2^16 elements. Below
+    // that (and for a multi-term Hamiltonian's many small reductions) the
+    // sequential path is faster.
+    #[cfg(feature = "parallel")]
+    const SANDWICH_MIN_PAR_QUBITS: usize = 16;
+    #[cfg(feature = "parallel")]
+    let acc: Complex64 = if phi.len() >= (1 << SANDWICH_MIN_PAR_QUBITS) {
+        use rayon::prelude::*;
+        phi.par_iter()
+            .enumerate()
+            .map(|(j, &amp)| term(j, amp))
+            .sum()
+    } else {
+        phi.iter().enumerate().map(|(j, &amp)| term(j, amp)).sum()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let acc: Complex64 = phi.iter().enumerate().map(|(j, &amp)| term(j, amp)).sum();
+
+    acc * i_pow(num_y)
+}
+
+/// `i^{num_y}`, the phase a joint Pauli picks up from its Y factors.
+#[inline]
+pub(crate) fn i_pow(num_y: u32) -> Complex64 {
+    match num_y % 4 {
+        0 => Complex64::new(1.0, 0.0),
+        1 => Complex64::new(0.0, 1.0),
+        2 => Complex64::new(-1.0, 0.0),
+        _ => Complex64::new(0.0, -1.0),
+    }
+}
+
+/// Exact `⟨ψ|P|ψ⟩` from the reduced observable masks. Normalization
 /// independent, so raw backend amplitudes are fine.
 fn pauli_expectation_from_masks(
     state: &[Complex64],
@@ -996,25 +1085,7 @@ fn pauli_expectation_from_masks(
     if norm == 0.0 {
         return 0.0;
     }
-
-    let mut acc = Complex64::new(0.0, 0.0);
-    for (j, &amp) in state.iter().enumerate() {
-        let partner = state[j ^ xmask];
-        let sign = if (j & zmask).count_ones() & 1 == 1 {
-            -1.0
-        } else {
-            1.0
-        };
-        acc += partner.conj() * amp * sign;
-    }
-
-    let i_pow = match num_y % 4 {
-        0 => Complex64::new(1.0, 0.0),
-        1 => Complex64::new(0.0, 1.0),
-        2 => Complex64::new(-1.0, 0.0),
-        _ => Complex64::new(0.0, -1.0),
-    };
-    (acc * i_pow).re / norm
+    pauli_sandwich(state, state, xmask, zmask, num_y).re / norm
 }
 
 /// Multi-shot execution for the distributed statevector backend.

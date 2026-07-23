@@ -74,7 +74,7 @@ pub use distributed::MpiComm;
 #[cfg(feature = "distributed")]
 pub use distributed::{DistributedContext, RankComm, SerialComm};
 pub use error::{PrismError, Result};
-pub use gates::{BatchPhaseData, Gate, McuData, Multi2qData, MultiFusedData};
+pub use gates::{BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData};
 pub use qec::{
     QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise, QecObservableEstimate,
     QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, QecSampleResult,
@@ -89,6 +89,7 @@ pub use sim::compiled::{
     PauliExpectationAccumulator, ShotAccumulator, ShotLayout, compile_detector_sampler,
     compile_forward, compile_measurements, run_shots_compiled,
 };
+pub use sim::gradient::{ExpectationGradient, ParamLink, ParameterMap, run_expectation_gradient};
 pub use sim::homological::{
     ErrorChainComplex, HomologicalSampler, noisy_marginals_analytical, run_shots_homological,
 };

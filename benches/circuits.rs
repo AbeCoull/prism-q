@@ -958,21 +958,6 @@ fn bench_decomposition(c: &mut Criterion) {
 
 // ---- Adjoint gradient benchmarks ----
 
-/// Mark every analytically differentiable gate as its own trainable slot.
-fn all_rotations_trainable(circuit: &Circuit) -> ParameterMap {
-    let mut params = ParameterMap::new();
-    let mut slot = 0;
-    for (i, inst) in circuit.instructions.iter().enumerate() {
-        if let Instruction::Gate { gate, .. } = inst {
-            if gate.pauli_generator().is_some() {
-                params.push(i, slot);
-                slot += 1;
-            }
-        }
-    }
-    params
-}
-
 /// A small weighted Z-chain Hamiltonian over the first few qubits.
 fn z_chain_hamiltonian(n: usize) -> Vec<(f64, Vec<PauliTerm>)> {
     (0..n - 1)
@@ -1027,7 +1012,7 @@ fn bench_gradient(c: &mut Criterion) {
 
     for &n in &[14, 18, 20, 22] {
         let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
-        let params = all_rotations_trainable(&circuit);
+        let params = ParameterMap::all_rotations(&circuit);
         let ham = z_chain_hamiltonian(n);
 
         group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
@@ -1047,7 +1032,7 @@ fn bench_gradient_qaoa(c: &mut Criterion) {
 
     for &n in &[14, 18, 20] {
         let circuit = circuits::qaoa_circuit(n, 1, SEED);
-        let params = all_rotations_trainable(&circuit);
+        let params = ParameterMap::all_rotations(&circuit);
         let ham = z_chain_hamiltonian(n);
 
         group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
@@ -1087,7 +1072,7 @@ fn bench_gradient_prefix(c: &mut Criterion) {
 
     for &n in &[16, 18, 20] {
         let circuit = prefix_local_circuit(n, 6);
-        let params = all_rotations_trainable(&circuit);
+        let params = ParameterMap::all_rotations(&circuit);
         let ham = vec![(1.0, vec![PauliTerm::z(0)])];
 
         group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {

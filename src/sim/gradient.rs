@@ -56,6 +56,24 @@ impl ParameterMap {
         Self { links }
     }
 
+    /// Mark every analytically differentiable gate (`Rx`, `Ry`, `Rz`, `Rzz`,
+    /// `P`) as its own parameter, in circuit order. The common "every rotation
+    /// is trainable" case for a variational ansatz.
+    pub fn all_rotations(circuit: &Circuit) -> Self {
+        let mut links = Vec::new();
+        for (i, inst) in circuit.instructions.iter().enumerate() {
+            if let Instruction::Gate { gate, .. } = inst {
+                if gate.pauli_generator().is_some() {
+                    links.push(ParamLink {
+                        instruction: i,
+                        param: links.len(),
+                    });
+                }
+            }
+        }
+        Self { links }
+    }
+
     /// Record that `instruction` feeds parameter slot `param`.
     pub fn push(&mut self, instruction: usize, param: usize) {
         self.links.push(ParamLink { instruction, param });
@@ -196,16 +214,21 @@ pub fn run_expectation_gradient(
     // observable), so its sandwich is skipped.
     let in_cone = observable_light_cone(circuit, hamiltonian);
 
-    let mut slots_of: Vec<Vec<usize>> = vec![Vec::new(); circuit.instructions.len()];
-    for link in params.links() {
-        slots_of[link.instruction].push(link.param);
-    }
+    // Links sorted by descending instruction index, matching the reverse sweep.
+    // A cursor walks this list so the per-instruction lookup stays O(params),
+    // not O(instructions).
+    let mut links = params.links().to_vec();
+    links.sort_unstable_by_key(|l| std::cmp::Reverse(l.instruction));
 
     // Stop the backward sweep at the earliest in-cone trainable gate: nothing
     // before it contributes, so a non-trainable (or out-of-cone) prefix costs
     // no inverse applications. If no trainable gate reaches the observable, the
     // gradient is zero everywhere.
-    let earliest = (0..circuit.instructions.len()).find(|&i| in_cone[i] && !slots_of[i].is_empty());
+    let earliest = links
+        .iter()
+        .filter(|l| in_cone[l.instruction])
+        .map(|l| l.instruction)
+        .min();
     let Some(earliest) = earliest else {
         return Ok(ExpectationGradient { value, gradient });
     };
@@ -213,6 +236,7 @@ pub fn run_expectation_gradient(
     let mut lambda = StatevectorBackend::new(seed);
     lambda.init_from_state(lambda_state, circuit.num_classical_bits)?;
 
+    let mut cursor = 0;
     for i in (earliest..circuit.instructions.len()).rev() {
         let (gate, targets) = match &circuit.instructions[i] {
             Instruction::Gate { gate, targets } => (gate, targets),
@@ -220,14 +244,23 @@ pub fn run_expectation_gradient(
             _ => unreachable!("non-unitary instructions rejected above"),
         };
 
-        if in_cone[i] && !slots_of[i].is_empty() {
-            let kind = gate
-                .pauli_generator()
-                .expect("trainable instruction validated as differentiable");
-            let contrib =
-                gradient_contribution(kind, targets, lambda.state_vector(), phi.state_vector());
-            for &slot in &slots_of[i] {
-                gradient[slot] += contrib;
+        if cursor < links.len() && links[cursor].instruction == i {
+            if in_cone[i] {
+                let kind = gate
+                    .pauli_generator()
+                    .expect("trainable instruction validated as differentiable");
+                let contrib =
+                    gradient_contribution(kind, targets, lambda.state_vector(), phi.state_vector());
+                while cursor < links.len() && links[cursor].instruction == i {
+                    gradient[links[cursor].param] += contrib;
+                    cursor += 1;
+                }
+            } else {
+                // Out of the light cone: contribution is zero, but the cursor
+                // still advances past this instruction's links.
+                while cursor < links.len() && links[cursor].instruction == i {
+                    cursor += 1;
+                }
             }
         }
 

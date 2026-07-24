@@ -1,7 +1,7 @@
 //! Stabilizer (Clifford) simulation backend.
 //!
-//! Uses the Gottesman-Knill theorem: Clifford circuits can be simulated in
-//! O(n²) time per gate using a stabilizer tableau of 2n Pauli strings.
+//! Uses the Gottesman-Knill theorem: Clifford circuits are simulated on a
+//! stabilizer tableau of 2n Pauli strings in O(n) time per gate.
 //!
 //! # Memory layout
 //!
@@ -15,7 +15,7 @@
 //!
 //! # Gate support
 //!
-//! Clifford gates only: H, S, Sdg, X, Y, Z, CX, CZ, SWAP, Id.
+//! Clifford gates only: H, S, Sdg, SX, SXdg, X, Y, Z, Id, CX, CZ, SWAP.
 //! Non-Clifford gates (T, Rx, Ry, Rz, Fused) return `BackendUnsupported`.
 //!
 //! # When to prefer this backend
@@ -59,7 +59,8 @@ use crate::gpu::kernels::stabilizer::CliffordBatchScratch;
 #[cfg(feature = "gpu")]
 use crate::gpu::{GpuContext, GpuTableau};
 
-/// Clifford-only O(n^2) stabilizer simulation (Aaronson-Gottesman tableau).
+/// Clifford-only stabilizer simulation on an Aaronson-Gottesman tableau,
+/// O(n²) space.
 ///
 /// Manually implements `Clone`: the CPU tableau fields (`xz`, `phase`, SGI
 /// buffers, etc.) clone element-for-element just like the old derived impl.
@@ -542,12 +543,20 @@ impl StabilizerBackend {
         }
     }
 
+    /// Create a backend that starts in lazy destabilizer mode (see
+    /// [`Self::enable_lazy_destab`]).
     pub fn new_lazy(seed: u64) -> Self {
         let mut s = Self::new(seed);
         s.lazy_destab = true;
         s
     }
 
+    /// Defer destabilizer rows: gates update only the n stabilizer rows until
+    /// a measurement or reset materializes the destabilizers via Gaussian
+    /// elimination. Halves gate cost for long Clifford prefixes with few
+    /// measurements. The per-instruction [`Backend::apply`] path switches back
+    /// to an eager tableau before the first gate; only the bulk apply paths
+    /// preserve laziness.
     pub fn enable_lazy_destab(&mut self) {
         if self.lazy_destab || self.n == 0 {
             return;
@@ -707,6 +716,10 @@ impl StabilizerBackend {
         (self.xz, self.phase, self.n, self.num_words)
     }
 
+    /// Apply gate and satisfied-conditional instructions, skipping
+    /// measurements, resets, and barriers. Routes through the SGI or
+    /// word-batch bulk paths at the same thresholds as
+    /// [`Backend::apply_instructions`].
     pub fn apply_gates_only(&mut self, instructions: &[Instruction]) -> Result<()> {
         let nw = self.num_words;
         if nw < MIN_WORDS_FOR_BATCH {
@@ -808,6 +821,14 @@ impl StabilizerBackend {
         }
     }
 
+    /// Measure a run of distinct qubits into distinct classical bits using one
+    /// tableau index pass instead of two strided full-tableau scans per
+    /// measurement.
+    ///
+    /// Bit-identical to applying the measurements sequentially: a random
+    /// outcome invalidates the index, which is rebuilt before continuing.
+    /// Returns, per measurement, whether the outcome was random, the X-support
+    /// of the pivot row for random outcomes, and the outcome bit.
     pub(crate) fn batch_measure_ref_info(
         &mut self,
         measurements: &[(usize, usize)],
@@ -978,11 +999,10 @@ impl StabilizerBackend {
         (is_random, random_x_support, outcomes)
     }
 
-    /// Export the stabilizer state as a dense statevector.
-    ///
-    /// Host-readable snapshot of the raw tableau: bit-packed `xz` and per-row
-    /// `phase`. When a GPU tableau is attached the data is copied back via
-    /// `GpuTableau::copy_to_host`; otherwise the host vectors are cloned.
+    /// Export a host-readable snapshot of the raw tableau: bit-packed `xz`
+    /// and per-row `phase`. When a GPU tableau is attached the data is copied
+    /// back via `GpuTableau::copy_to_host` with queued ops replayed; otherwise
+    /// the host vectors are cloned.
     ///
     /// Used by golden tests to compare GPU kernel output against the CPU
     /// reference byte for byte. Also gives user-facing diagnostics access to

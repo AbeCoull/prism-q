@@ -22,6 +22,10 @@ pub(super) struct QecDeferredProgram {
     pub(super) circuit: Circuit,
     noise_events: Vec<QecDeferredNoiseEvent>,
     pub(super) measurement_qubits: Vec<usize>,
+    /// Final lowered-circuit alias of each program qubit. Resets reassign a
+    /// program qubit to a fresh alias, so ops that reference program qubits
+    /// at the end of the stream (`EXP_VAL`) must translate through this map.
+    pub(super) final_qubit_aliases: Vec<usize>,
 }
 
 pub(super) struct QecCompiledNoiseSampler {
@@ -324,13 +328,8 @@ fn lower_qec_program_to_deferred_circuit_inner(
                     )?;
                 }
             }
-            QecOp::ExpectationValue { .. } => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "QEC compiled runner".to_string(),
-                    reason: "compiled QEC runner does not evaluate EXP_VAL yet".to_string(),
-                });
-            }
-            QecOp::Detector { .. }
+            QecOp::ExpectationValue { .. }
+            | QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }
             | QecOp::Tick => {}
@@ -345,10 +344,12 @@ fn lower_qec_program_to_deferred_circuit_inner(
         circuit.add_measure(qubit, classical_bit);
     }
 
+    let final_qubit_aliases = aliases[..program.num_qubits()].to_vec();
     Ok(QecDeferredProgram {
         circuit,
         noise_events,
         measurement_qubits,
+        final_qubit_aliases,
     })
 }
 

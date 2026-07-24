@@ -2,9 +2,9 @@
 use super::noise::QecCompiledNoiseSampler;
 use super::noise::compile_qec_noisy_sampler;
 use super::{
-    QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecSampleResult,
-    append_basis_to_z_rotation, append_mpp_parity_rotations, append_z_to_basis_rotation,
-    ensure_lowered_record_count, qec_non_clifford_error,
+    QecBasis, QecNoise, QecObservableEstimate, QecOp, QecOptions, QecPauli, QecProgram,
+    QecSampleResult, append_basis_to_z_rotation, append_mpp_parity_rotations,
+    append_z_to_basis_rotation, ensure_lowered_record_count, qec_non_clifford_error,
 };
 use crate::backend::{Backend, statevector::StatevectorBackend};
 use crate::circuit::{Circuit, Instruction, SmallVec};
@@ -26,8 +26,18 @@ use rand_chacha::ChaCha8Rng;
 /// `DEPOLARIZE2`) are compiled into packed sensitivity rows that are XORed
 /// into the noiseless measurement records.
 ///
+/// Programs containing `EXP_VAL` ops are routed instead of packed-sampled:
+/// with active noise they run through [`run_qec_program_reference`].
+/// Noiseless programs with detectors split into a packed sampling run for
+/// the measurement, detector, and observable records plus an analytical
+/// estimator run, falling back to the reference runner when either half
+/// cannot lower (for example non-Clifford gates on the packed half).
+/// Otherwise the analytical Auto T-strategy ladder evaluates the program.
+/// Estimates land in [`QecSampleResult::expectation_values`].
+///
 /// V1 limitations:
-/// - Non-Clifford gates and `EXP_VAL` are rejected.
+/// - Non-Clifford gates are rejected on the packed path (the `EXP_VAL`
+///   route accepts them via the analytical strategies).
 /// - A measured qubit must be `Reset` before any later gate reuses it; the
 ///   compiled lowering defers measurements to the terminal records of an
 ///   internal circuit.
@@ -35,6 +45,23 @@ use rand_chacha::ChaCha8Rng;
 ///   `chunk_size` together with `keep_measurements: false` keeps peak memory
 ///   at one chunk worth of measurement records.
 pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
+    if program.num_expectation_values() > 0 {
+        super::validate_qec_exp_val_placement(program)?;
+        let has_active_noise = program
+            .ops()
+            .iter()
+            .any(|op| matches!(op, QecOp::Noise { channel, .. } if channel.probability() > 0.0));
+        if has_active_noise {
+            return run_qec_program_reference(program);
+        }
+        if program.num_detectors() > 0 {
+            return run_qec_program_detectors_and_exp_val(program);
+        }
+        return super::t_sampler::run_qec_program_with_strategy(
+            program,
+            super::t_sampler::QecTStrategy::Auto,
+        );
+    }
     let has_noise = validate_qec_compiled_program(program)?;
     let chunk_size = qec_runner_chunk_size(program.options())?;
     if program.num_measurements() == 0 {
@@ -69,6 +96,47 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         return qec_result_from_measurements(program, measurements);
     }
     qec_result_from_measurement_chunks(program, |chunk| sampler.sample_measurements_packed(chunk))
+}
+
+/// Split execution for noiseless `EXP_VAL` programs with detectors.
+///
+/// Detectors are record metadata and do not affect the state, so the two
+/// halves compose: the packed compiled sampler runs the program without its
+/// `EXP_VAL` ops (real sampled measurement, detector, and observable
+/// records), and the analytical ladder runs the program without its
+/// detectors (exact estimates). When either half cannot run, for example
+/// non-Clifford gates on the packed half, the whole program falls back to
+/// [`run_qec_program_reference`].
+fn run_qec_program_detectors_and_exp_val(program: &QecProgram) -> Result<QecSampleResult> {
+    let sampling_ops = program
+        .ops()
+        .iter()
+        .filter(|op| !matches!(op, QecOp::ExpectationValue { .. }))
+        .cloned()
+        .collect();
+    let estimator_ops = program
+        .ops()
+        .iter()
+        .filter(|op| !matches!(op, QecOp::Detector { .. }))
+        .cloned()
+        .collect();
+    let sampling_program =
+        QecProgram::from_ops(program.num_qubits(), program.options(), sampling_ops)?;
+    let estimator_program =
+        QecProgram::from_ops(program.num_qubits(), program.options(), estimator_ops)?;
+    let Ok(sampled) = run_qec_program(&sampling_program) else {
+        return run_qec_program_reference(program);
+    };
+    let Ok(estimated) = super::t_sampler::run_qec_program_with_strategy(
+        &estimator_program,
+        super::t_sampler::QecTStrategy::Auto,
+    ) else {
+        return run_qec_program_reference(program);
+    };
+    let estimates = estimated
+        .expectation_values
+        .expect("analytical ladder attaches estimates for EXP_VAL programs");
+    Ok(sampled.with_expectation_values(estimates))
 }
 
 /// Internal staged QEC sampler used by benchmark harnesses.
@@ -284,10 +352,18 @@ impl QecProfiledSampler {
 /// for small programs or to cross-check the compiled runner; cost is
 /// `O(shots * 2^n)`, so it is not the production performance path.
 ///
-/// `EXP_VAL` is rejected pending estimator semantics. [`QecOptions::chunk_size`]
-/// is validated for shape but not used to bound execution batches.
+/// `EXP_VAL` ops are evaluated exactly on each shot's final statevector and
+/// reported in [`QecSampleResult::expectation_values`] as the sample mean and
+/// unbiased sample variance over accepted shots. With noise annotations the
+/// per-shot trajectories average to the mixed-state expectation `Tr(rho P)`
+/// and the variance captures the noise-induced spread. The Pauli-mask
+/// reduction limits `EXP_VAL` here to programs of at most 64 qubits (larger
+/// programs are rejected up front); statevector memory binds far earlier.
+/// [`QecOptions::chunk_size`] is validated for shape but not used to bound
+/// execution batches.
 pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult> {
     qec_runner_chunk_size(program.options())?;
+    super::validate_qec_exp_val_placement(program)?;
     let shots = program.options().shots;
     let num_measurements = program.num_measurements();
     let has_mpp = program
@@ -300,6 +376,29 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
     let mut noise_rng = ChaCha8Rng::seed_from_u64(program.options().seed ^ 0xD1B5_4A32_D192_ED03);
     let m_words = num_measurements.div_ceil(64);
     let mut measurement_data = vec![0u64; shots.saturating_mul(m_words)];
+
+    if program.num_expectation_values() > 0 && backend_qubits > usize::BITS as usize {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "QEC reference runner".to_string(),
+            reason: format!(
+                "`EXP_VAL` mask reduction supports at most {} qubits, program needs {}",
+                usize::BITS,
+                backend_qubits
+            ),
+        });
+    }
+    let exp_val_masks = program
+        .expectation_value_ops()
+        .into_iter()
+        .map(|(terms, coefficient)| {
+            let terms = super::qec_terms_to_pauli(terms);
+            crate::sim::pauli_masks(&terms, backend_qubits).map(|masks| (masks, coefficient))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let postselection_rows = program.postselection_rows()?;
+    let mut exp_val_sums = vec![0.0f64; exp_val_masks.len()];
+    let mut exp_val_sq_sums = vec![0.0f64; exp_val_masks.len()];
+    let mut exp_val_accepted = 0usize;
 
     for shot in 0..shots {
         backend.init(backend_qubits, num_measurements)?;
@@ -332,13 +431,8 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                 QecOp::Noise { channel, targets } => {
                     apply_reference_noise(&mut backend, &mut noise_rng, *channel, targets)?;
                 }
-                QecOp::ExpectationValue { .. } => {
-                    return Err(PrismError::IncompatibleBackend {
-                        backend: "QEC reference runner".to_string(),
-                        reason: "QEC reference runner does not evaluate EXP_VAL yet".to_string(),
-                    });
-                }
-                QecOp::Detector { .. }
+                QecOp::ExpectationValue { .. }
+                | QecOp::Detector { .. }
                 | QecOp::ObservableInclude { .. }
                 | QecOp::Postselect { .. }
                 | QecOp::Tick => {}
@@ -352,10 +446,65 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                 ),
             });
         }
+
+        if !exp_val_masks.is_empty() {
+            let accepted = postselection_rows.iter().all(|(row, expected)| {
+                let parity = row.iter().fold(false, |acc, &record| {
+                    let bit =
+                        (measurement_data[shot * m_words + record / 64] >> (record % 64)) & 1 == 1;
+                    acc ^ bit
+                });
+                parity == *expected
+            });
+            if accepted {
+                exp_val_accepted += 1;
+                let state = backend.state_vector();
+                let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
+                for (slot, &((xmask, zmask, num_y), coefficient)) in
+                    exp_val_masks.iter().enumerate()
+                {
+                    let value = coefficient
+                        * crate::sim::pauli_expectation_from_masks(
+                            state, xmask, zmask, num_y, norm,
+                        );
+                    exp_val_sums[slot] += value;
+                    exp_val_sq_sums[slot] += value * value;
+                }
+            }
+        }
     }
 
     let measurements = PackedShots::from_shot_major(measurement_data, shots, num_measurements);
-    qec_result_from_measurements(program, measurements)
+    let result = qec_result_from_measurements(program, measurements)?;
+    if exp_val_masks.is_empty() {
+        return Ok(result);
+    }
+    let n = exp_val_accepted;
+    let estimates = exp_val_sums
+        .iter()
+        .zip(&exp_val_sq_sums)
+        .map(|(&sum, &sum_sq)| {
+            if n == 0 {
+                return QecObservableEstimate {
+                    mean: 0.0,
+                    variance: 0.0,
+                    num_shots: 0,
+                };
+            }
+            let mean = sum / n as f64;
+            let variance = if n >= 2 {
+                ((sum_sq - n as f64 * mean * mean) / (n as f64 - 1.0)).max(0.0)
+            } else {
+                0.0
+            };
+            QecObservableEstimate {
+                mean,
+                variance,
+                num_shots: n,
+            }
+        })
+        .collect();
+    Ok(result.with_expectation_values(estimates))
 }
 
 fn qec_result_from_measurements(
@@ -822,7 +971,10 @@ fn validate_qec_compiled_program(program: &QecProgram) -> Result<bool> {
             QecOp::ExpectationValue { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC compiled runner".to_string(),
-                    reason: "compiled QEC runner does not evaluate EXP_VAL yet".to_string(),
+                    reason: "compiled QEC sampler has no estimator stage for `EXP_VAL`; \
+                             `run_qec_program` routes such programs to the analytical or \
+                             reference runners"
+                        .to_string(),
                 });
             }
             QecOp::Noise { channel, .. } => {
@@ -894,7 +1046,10 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
             QecOp::ExpectationValue { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC compiled runner".to_string(),
-                    reason: "compiled QEC runner does not evaluate EXP_VAL yet".to_string(),
+                    reason: "compiled QEC sampler has no estimator stage for `EXP_VAL`; \
+                             `run_qec_program` routes such programs to the analytical or \
+                             reference runners"
+                        .to_string(),
                 });
             }
             QecOp::Detector { .. }

@@ -29,7 +29,7 @@ state fits in RAM. The memory cap is derived from system RAM (overridable with
 
 ## Stabilizer
 
-If your circuit uses only Clifford gates (H, S, Sdg, SX, SXdg, CX, CZ, SWAP, measurement),
+If your circuit uses only Clifford gates (H, S, Sdg, SX, SXdg, X, Y, Z, Id, CX, CZ, SWAP, measurement),
 the stabilizer tableau simulates it in $O(n^2)$ and scales to thousands of qubits.
 Auto-dispatch selects it whenever the circuit is Clifford-only.
 

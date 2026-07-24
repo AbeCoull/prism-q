@@ -218,8 +218,13 @@ pub enum QecOp {
         observable: usize,
         records: Vec<QecRecordRef>,
     },
-    /// Expectation-value metadata. Both runners reject programs containing
-    /// this op until estimator semantics land.
+    /// Final-state expectation-value estimator: `coefficient * <P>` where
+    /// `P` is the Pauli product over `terms`, evaluated in the program's
+    /// final state. Must be terminal (no gate, measurement, reset, or
+    /// active noise may follow) and may only reference live qubits (not
+    /// single-qubit-measured since their last reset). Estimates are
+    /// returned in [`QecSampleResult::expectation_values`], one per op in
+    /// op order.
     ExpectationValue {
         terms: Vec<QecPauli>,
         coefficient: f64,
@@ -567,6 +572,27 @@ impl QecProgram {
             .map_or(0, |max_idx| max_idx + 1)
     }
 
+    /// Number of `EXP_VAL` ops.
+    pub fn num_expectation_values(&self) -> usize {
+        self.ops
+            .iter()
+            .filter(|op| matches!(op, QecOp::ExpectationValue { .. }))
+            .count()
+    }
+
+    /// The `EXP_VAL` ops in op order as `(terms, coefficient)`.
+    pub fn expectation_value_ops(&self) -> Vec<(&[QecPauli], f64)> {
+        self.ops
+            .iter()
+            .filter_map(|op| match op {
+                QecOp::ExpectationValue { terms, coefficient } => {
+                    Some((terms.as_slice(), *coefficient))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Append a validated operation.
     pub fn push_op(&mut self, op: QecOp) -> Result<()> {
         self.validate_op(&op, self.num_measurements())?;
@@ -838,7 +864,9 @@ pub fn compile_qec_program_rows(program: &QecProgram) -> Result<QecCompiledRows>
             QecOp::ExpectationValue { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "QEC row compiler".to_string(),
-                    reason: "QEC row compilation does not evaluate EXP_VAL yet".to_string(),
+                    reason: "QEC row compilation has no row representation for `EXP_VAL`; \
+                             use `run_qec_program`"
+                        .to_string(),
                 });
             }
             QecOp::Detector { .. }
@@ -872,6 +900,89 @@ pub fn compile_qec_program_rows(program: &QecProgram) -> Result<QecCompiledRows>
         postselection_rows,
         postselection_expected,
     })
+}
+
+pub(crate) fn qec_terms_to_pauli(terms: &[QecPauli]) -> Vec<crate::sim::unified_pauli::PauliTerm> {
+    use crate::sim::unified_pauli::PauliTerm;
+    terms
+        .iter()
+        .map(|t| match t.basis {
+            QecBasis::X => PauliTerm::x(t.qubit),
+            QecBasis::Y => PauliTerm::y(t.qubit),
+            QecBasis::Z => PauliTerm::z(t.qubit),
+        })
+        .collect()
+}
+
+/// Validate `EXP_VAL` placement for execution.
+///
+/// Terminality: no gate, measurement, reset, or active noise may follow an
+/// `EXP_VAL` op, so "final state" is well defined on every path.
+/// Liveness: an `EXP_VAL` term may not reference a qubit that was
+/// single-qubit-measured after its last reset. Liveness keeps the sampled
+/// post-measurement expectation equal to the measurement-stripped
+/// pure-state expectation the analytical strategies evaluate (the Pauli
+/// commutes with every measurement projector when their supports are
+/// disjoint). Pauli-product measurements do not affect liveness: the
+/// deferred lowering measures a scratch alias and the cross terms of the
+/// projected state cancel exactly.
+///
+/// No-op for programs without `EXP_VAL` ops.
+pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()> {
+    let terminal_violation = |op_name: &str| PrismError::InvalidParameter {
+        message: format!("`EXP_VAL` must be terminal: `{op_name}` appears after an `EXP_VAL` op"),
+    };
+    let mut seen_exp_val = false;
+    let mut measured_since_reset = vec![false; program.num_qubits()];
+    for op in program.ops() {
+        match op {
+            QecOp::ExpectationValue { terms, .. } => {
+                seen_exp_val = true;
+                if let Some(term) = terms.iter().find(|t| measured_since_reset[t.qubit]) {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!(
+                            "`EXP_VAL` term on qubit {}: qubit was measured after its last \
+                             reset; expectation values are defined only on live qubits",
+                            term.qubit
+                        ),
+                    });
+                }
+            }
+            QecOp::Gate { gate, .. } => {
+                if seen_exp_val {
+                    return Err(terminal_violation(gate.name()));
+                }
+            }
+            QecOp::Measure { qubit, .. } => {
+                if seen_exp_val {
+                    return Err(terminal_violation("M"));
+                }
+                measured_since_reset[*qubit] = true;
+            }
+            QecOp::MeasurePauliProduct { .. } => {
+                if seen_exp_val {
+                    return Err(terminal_violation("MPP"));
+                }
+            }
+            QecOp::Reset { qubit, .. } => {
+                if seen_exp_val {
+                    return Err(terminal_violation("R"));
+                }
+                measured_since_reset[*qubit] = false;
+            }
+            QecOp::Noise { channel, .. } if channel.probability() > 0.0 => {
+                if seen_exp_val {
+                    return Err(terminal_violation(channel.name()));
+                }
+            }
+            QecOp::Detector { .. }
+            | QecOp::ObservableInclude { .. }
+            | QecOp::Postselect { .. }
+            | QecOp::Noise { .. }
+            | QecOp::Tick => {}
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn append_basis_to_z_rotation(circuit: &mut Circuit, basis: QecBasis, qubit: usize) {
@@ -973,10 +1084,7 @@ fn validate_pauli_terms(terms: &[QecPauli], num_qubits: usize) -> Result<()> {
         validate_qubit(term.qubit, num_qubits)?;
         if terms[..idx].iter().any(|prior| prior.qubit == term.qubit) {
             return Err(PrismError::InvalidParameter {
-                message: format!(
-                    "Pauli-product measurement contains duplicate qubit {}",
-                    term.qubit
-                ),
+                message: format!("Pauli product contains duplicate qubit {}", term.qubit),
             });
         }
     }

@@ -1075,7 +1075,7 @@ pub(crate) fn i_pow(num_y: u32) -> Complex64 {
 
 /// Exact `⟨ψ|P|ψ⟩` from the reduced observable masks. Normalization
 /// independent, so raw backend amplitudes are fine.
-fn pauli_expectation_from_masks(
+pub(crate) fn pauli_expectation_from_masks(
     state: &[Complex64],
     xmask: usize,
     zmask: usize,

@@ -11,8 +11,9 @@
 //! # Gate support
 //!
 //! All single-qubit gates are applied as a 2×2 matrix-vector multiply on the
-//! per-qubit state. Two-qubit and multi-qubit gates return `BackendUnsupported`
-//! since product states cannot represent entanglement.
+//! per-qubit state; `MultiFused` batches and single-qubit `DiagonalBatch`
+//! entries apply the same way per target. Entangling gates return
+//! `BackendUnsupported` since product states cannot represent entanglement.
 //!
 //! # When to prefer this backend
 //!
@@ -260,8 +261,8 @@ impl Backend for ProductStateBackend {
         reserve_dense_output(&mut sv, dim, self.name(), "statevector export")?;
         sv.push(Complex64::new(1.0, 0.0));
         for q in 0..self.num_qubits {
-            let a = self.qubits[q][0]; // α = ⟨0|ψ_q⟩
-            let b = self.qubits[q][1]; // β = ⟨1|ψ_q⟩
+            let a = self.qubits[q][0];
+            let b = self.qubits[q][1];
             let len = sv.len();
             for i in 0..len {
                 sv.push(sv[i] * b);

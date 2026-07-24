@@ -530,13 +530,16 @@ fn qec_compiled_runner_ignores_single_qubit_noise_after_measurement() {
 }
 
 #[test]
-fn qec_compiled_runner_rejects_exp_val_without_reference_fallback() {
+fn qec_compiled_runner_evaluates_noiseless_exp_val_via_analytic_route() {
     let mut exp_val_program = QecProgram::new(1);
     exp_val_program
         .expectation_value(&[QecPauli::z(0)], 1.0)
         .unwrap();
-    let err = run_qec_program(&exp_val_program).unwrap_err();
-    assert!(format!("{err}").contains("EXP_VAL"));
+    let result = run_qec_program(&exp_val_program).unwrap();
+    let estimates = result.expectation_values.expect("EXP_VAL estimates");
+    assert_eq!(estimates.len(), 1);
+    assert!((estimates[0].mean - 1.0).abs() < 1e-12);
+    assert!(estimates[0].variance <= 1e-12);
 }
 
 #[test]
@@ -616,12 +619,16 @@ fn qec_reference_runner_applies_pauli_noise() {
 }
 
 #[test]
-fn qec_reference_runner_rejects_exp_val_until_result_schema_lands() {
+fn qec_reference_runner_evaluates_exp_val_on_final_state() {
     let mut program = QecProgram::new(1);
     program.expectation_value(&[QecPauli::z(0)], 1.0).unwrap();
 
-    let err = run_qec_program_reference(&program).unwrap_err();
-    assert!(format!("{err}").contains("does not evaluate EXP_VAL yet"));
+    let result = run_qec_program_reference(&program).unwrap();
+    let estimates = result.expectation_values.expect("EXP_VAL estimates");
+    assert_eq!(estimates.len(), 1);
+    assert!((estimates[0].mean - 1.0).abs() < 1e-12);
+    assert_eq!(estimates[0].variance, 0.0);
+    assert_eq!(estimates[0].num_shots, program.options().shots);
 }
 
 #[test]

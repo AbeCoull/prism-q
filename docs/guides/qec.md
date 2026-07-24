@@ -51,10 +51,13 @@ programs.
 
 ```admonish info title="What QEC programs support"
 Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,
-detectors, observables, postselection, and `X_ERROR` / `Z_ERROR` / `DEPOLARIZE1` /
-`DEPOLARIZE2` noise. Non-Clifford gates and `EXP_VAL` are rejected until their production
-strategies land. See the [QEC IR reference](../architecture/qec-ir.md) for the full
-grammar and the V1 reset requirement.
+detectors, observables, postselection, `X_ERROR` / `Z_ERROR` / `DEPOLARIZE1` /
+`DEPOLARIZE2` noise, and terminal `EXP_VAL` final-state expectation estimates
+(noiseless programs use the analytical T strategies, with any detector records
+still sampled by the packed runner; noisy programs use the per-shot reference
+runner). Non-Clifford gates are rejected on the packed sampling path.
+See the [QEC IR reference](../architecture/qec-ir.md) for the full
+grammar, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
 
 ## Homological sampling

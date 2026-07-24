@@ -52,10 +52,19 @@ pub struct QecSampleResult {
     /// analytical or weighted T strategies where the observable expectation
     /// is not a simple ratio of bit counts.
     pub observable_expectations: Option<Vec<QecObservableEstimate>>,
+    /// Estimates for the program's `EXP_VAL` ops, one per op in op order,
+    /// each scaled by the op's coefficient. `None` when the program has no
+    /// `EXP_VAL` ops. The reference runner reports the per-shot sample mean
+    /// and unbiased sample variance over accepted shots; analytical
+    /// strategies report the exact expectation with `variance` carrying
+    /// squared truncation weight (0.0 when exact). Zero accepted shots
+    /// yield `{mean: 0.0, variance: 0.0, num_shots: 0}`.
+    pub expectation_values: Option<Vec<QecObservableEstimate>>,
 }
 
 /// Unbiased expectation estimate for one observable under a weighted
-/// shot strategy.
+/// shot strategy, or for one `EXP_VAL` op (see
+/// [`QecSampleResult::expectation_values`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct QecObservableEstimate {
     /// Empirical mean of `Re(weight · (1 - 2·parity))` over the shot
@@ -82,6 +91,7 @@ impl QecSampleResult {
             discarded_shots: 0,
             logical_errors: vec![0; num_observables],
             observable_expectations: None,
+            expectation_values: None,
         }
     }
 
@@ -165,6 +175,7 @@ impl QecSampleResult {
             discarded_shots,
             logical_errors,
             observable_expectations: None,
+            expectation_values: None,
         })
     }
 
@@ -186,6 +197,14 @@ impl QecSampleResult {
         }
         self.observable_expectations = Some(estimates);
         Ok(self)
+    }
+
+    /// Attach `EXP_VAL` estimates, one per `EXP_VAL` op in op order. There
+    /// is no packed row to validate against; callers supply one estimate
+    /// per op.
+    pub fn with_expectation_values(mut self, estimates: Vec<QecObservableEstimate>) -> Self {
+        self.expectation_values = Some(estimates);
+        self
     }
 
     /// Fraction of requested shots accepted after postselection.

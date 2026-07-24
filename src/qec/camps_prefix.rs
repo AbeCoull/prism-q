@@ -201,7 +201,6 @@ impl SignedCliffordPrefix {
         self.inv_z[q].clone()
     }
 
-    #[cfg(test)]
     pub fn conjugate_x(&self, q: usize) -> SignedPauli {
         self.inv_x[q].clone()
     }
@@ -686,12 +685,16 @@ pub(crate) fn build_ofds_disentangler(
     Some((anchor, cascade))
 }
 
-/// Evaluate `⟨ψ|Π_q Z_q|ψ⟩` for a CAMPS state `|ψ⟩ = C|ϕ⟩` where the
-/// Clifford prefix `C` is tracked by `prefix` and the MPS holds `|ϕ⟩`.
+/// Evaluate `⟨ψ|Π_k P_k|ψ⟩` for a general Pauli product over X/Y/Z terms
+/// on a CAMPS state `|ψ⟩ = C|ϕ⟩` where the Clifford prefix `C` is tracked
+/// by `prefix` and the MPS holds `|ϕ⟩`.
 ///
-/// Rewrites the observable as `⟨ϕ| C† (Π Z_q) C |ϕ⟩` by composing
-/// `Π_q (C† Z_q C)` via signed-Pauli multiplication, then evaluates
-/// the resulting Pauli string on the MPS via [`crate::backend::mps::MpsBackend::pauli_expectation`].
+/// Rewrites the observable as `⟨ϕ| C† (Π P_k) C |ϕ⟩` by composing the
+/// conjugated rows via signed-Pauli multiplication: `C† Z_q C` and
+/// `C† X_q C` come straight from the inverse tableau, and a Y term is
+/// `C† Y_q C = i · (C† X_q C)(C† Z_q C)`, with the `i` supplied as
+/// `extra_phase4 = 1` on that product. The result is evaluated on the MPS
+/// via [`crate::backend::mps::MpsBackend::pauli_expectation`].
 ///
 /// The composed string is canonicalized for the MPS evaluator: each
 /// qubit's `(x, z)` bit pattern is mapped to letter `I`/`X`/`Y`/`Z`,
@@ -699,16 +702,25 @@ pub(crate) fn build_ofds_disentangler(
 /// absorbed into the overall coefficient alongside the stored `i^phase4`.
 /// For a Hermitian observable (which `C† O C` is whenever `O` is
 /// Hermitian and `C` unitary) the coefficient lands at `±1`.
-pub(crate) fn evaluate_z_observable_camps(
+pub(crate) fn evaluate_pauli_observable_camps(
     prefix: &SignedCliffordPrefix,
     mps: &crate::backend::mps::MpsBackend,
-    z_qubits: &[usize],
+    terms: &[crate::sim::unified_pauli::PauliTerm],
 ) -> crate::error::Result<f64> {
+    use crate::sim::unified_pauli::PauliAxis;
     let n = prefix.num_qubits();
     let num_words = n.div_ceil(64).max(1);
     let mut combined = SignedPauli::zero(num_words);
-    for &q in z_qubits {
-        let row = prefix.conjugate_z(q);
+    for term in terms {
+        let row = match term.axis {
+            PauliAxis::Z => prefix.conjugate_z(term.qubit),
+            PauliAxis::X => prefix.conjugate_x(term.qubit),
+            PauliAxis::Y => {
+                let mut row = prefix.conjugate_x(term.qubit);
+                rowmul_into(&mut row, &prefix.inv_z[term.qubit], n, 1);
+                row
+            }
+        };
         rowmul_into(&mut combined, &row, n, 0);
     }
     let factors = combined.mps_factors(n);
@@ -943,6 +955,19 @@ mod tests {
     use crate::backend::statevector::StatevectorBackend;
     use crate::circuit::{Instruction, SmallVec};
     use num_complex::Complex64;
+
+    fn eval_z(
+        prefix: &SignedCliffordPrefix,
+        mps: &crate::backend::mps::MpsBackend,
+        qubits: &[usize],
+    ) -> f64 {
+        let terms: Vec<_> = qubits
+            .iter()
+            .copied()
+            .map(crate::sim::unified_pauli::PauliTerm::z)
+            .collect();
+        evaluate_pauli_observable_camps(prefix, mps, &terms).unwrap()
+    }
 
     fn pauli_action_on_basis(p: &SignedPauli, i: usize, n: usize) -> (Complex64, usize) {
         let mut j = i;
@@ -1430,7 +1455,7 @@ mod tests {
         apply_t_via_camps(&mut prefix, &mut mps, 0, false, 1e-10).unwrap();
         prefix.apply_state_gate(&Gate::H, &[0]).unwrap();
 
-        let z_camps = evaluate_z_observable_camps(&prefix, &mps, &[0]).unwrap();
+        let z_camps = eval_z(&prefix, &mps, &[0]);
         let direct = direct_state(
             n,
             &[(Gate::SX, vec![0]), (Gate::T, vec![0]), (Gate::H, vec![0])],
@@ -1448,6 +1473,60 @@ mod tests {
             (z_camps - z_direct).abs() < 1e-9,
             "single-Y twisted Pauli: camps={z_camps} direct={z_direct}"
         );
+    }
+
+    #[test]
+    fn general_pauli_observable_matches_statevector() {
+        use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+        let n = 3;
+        let prep = [
+            (Gate::H, vec![0]),
+            (Gate::SX, vec![1]),
+            (Gate::Cx, vec![0, 1]),
+            (Gate::S, vec![1]),
+            (Gate::Cz, vec![1, 2]),
+            (Gate::SXdg, vec![2]),
+        ];
+        let mut prefix = SignedCliffordPrefix::identity(n);
+        for (g, t) in &prep {
+            prefix.apply_state_gate(g, t).unwrap();
+        }
+        let mut mps = crate::backend::mps::MpsBackend::new(42, 64);
+        mps.init(n, 0).unwrap();
+        apply_t_via_camps(&mut prefix, &mut mps, 0, false, 1e-10).unwrap();
+
+        let mut full_gates = prep.to_vec();
+        full_gates.push((Gate::T, vec![0]));
+        let direct = direct_state(n, &full_gates);
+
+        let cases: Vec<Vec<PauliTerm>> = vec![
+            vec![PauliTerm::x(0)],
+            vec![PauliTerm::y(1)],
+            vec![PauliTerm::z(2), PauliTerm::x(0)],
+            vec![PauliTerm::y(0), PauliTerm::y(2)],
+            vec![PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)],
+            vec![PauliTerm::y(0), PauliTerm::y(1), PauliTerm::y(2)],
+        ];
+        let num_words = n.div_ceil(64).max(1);
+        for terms in &cases {
+            let camps = evaluate_pauli_observable_camps(&prefix, &mps, terms).unwrap();
+            let mut p = SignedPauli::zero(num_words);
+            for t in terms {
+                match t.axis {
+                    PauliAxis::X => p.set_x(t.qubit, true),
+                    PauliAxis::Z => p.set_z(t.qubit, true),
+                    PauliAxis::Y => {
+                        p.set_x(t.qubit, true);
+                        p.set_z(t.qubit, true);
+                    }
+                }
+            }
+            let direct_val = pauli_string_expectation(&direct, n, &p).re;
+            assert!(
+                (camps - direct_val).abs() < 1e-9,
+                "general Pauli {terms:?}: camps={camps} direct={direct_val}"
+            );
+        }
     }
 
     #[test]
@@ -1964,7 +2043,7 @@ mod tests {
         for (g, t) in post_cliffords {
             prefix.apply_state_gate(g, t).unwrap();
         }
-        let zz_camps = evaluate_z_observable_camps(&prefix, &mps, &[0, 1]).unwrap();
+        let zz_camps = eval_z(&prefix, &mps, &[0, 1]);
         let mut gates: Vec<(Gate, Vec<usize>)> = vec![
             (Gate::H, vec![0]),
             (Gate::Cx, vec![0, 1]),
@@ -2031,7 +2110,7 @@ mod tests {
         prefix.apply_state_gate(&Gate::H, &[0]).unwrap();
         prefix.apply_state_gate(&Gate::H, &[1]).unwrap();
 
-        let zz_camps = evaluate_z_observable_camps(&prefix, &mps, &[0, 1]).unwrap();
+        let zz_camps = eval_z(&prefix, &mps, &[0, 1]);
 
         let direct = direct_state(
             n,
@@ -2249,7 +2328,7 @@ mod tests {
 
         let probs = sv.probabilities().unwrap();
         for q in 0..n {
-            let camps = evaluate_z_observable_camps(&prefix, &mps, &[q]).unwrap();
+            let camps = eval_z(&prefix, &mps, &[q]);
             let mask = 1usize << q;
             let direct: f64 = probs
                 .iter()

@@ -102,7 +102,13 @@ mod auto_test_hooks {
 fn run_qec_program_spd_for_auto(program: &QecProgram) -> Result<QecSampleResult> {
     let mut result = run_qec_program_spd(program)?;
     if auto_test_hooks::force_spd_nonexact() {
-        if let Some(estimates) = result.observable_expectations.as_mut() {
+        for estimates in [
+            result.observable_expectations.as_mut(),
+            result.expectation_values.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             for estimate in estimates {
                 estimate.variance = estimate.variance.max(1.0);
             }
@@ -175,15 +181,16 @@ fn run_qec_program_auto_after_camps(
 const QEC_SPD_NEGLIGIBLE_VARIANCE: f64 = 1e-12;
 
 fn analytical_result_has_no_truncation(result: &QecSampleResult) -> bool {
-    result
-        .observable_expectations
-        .as_ref()
-        .map(|estimates| {
-            estimates
-                .iter()
-                .all(|estimate| estimate.variance <= QEC_SPD_NEGLIGIBLE_VARIANCE)
-        })
-        .unwrap_or(true)
+    let exact = |estimates: Option<&Vec<QecObservableEstimate>>| {
+        estimates
+            .map(|estimates| {
+                estimates
+                    .iter()
+                    .all(|estimate| estimate.variance <= QEC_SPD_NEGLIGIBLE_VARIANCE)
+            })
+            .unwrap_or(true)
+    };
+    exact(result.observable_expectations.as_ref()) && exact(result.expectation_values.as_ref())
 }
 
 /// Default truncation tolerance for SPD on QEC programs.
@@ -208,9 +215,16 @@ const QEC_SPD_MAX_TERMS: usize = 16_384;
 /// **Still rejected:**
 /// - Active `Noise` channels: SPD / CAMPS do not have an
 ///   `apply_noise_to_measurements`-style hook.
-/// - `ExpectationValue`: unmodified rejection.
 /// - `Detector`: analytical strategies do not emit detector rows yet.
-fn lower_qec_program_for_pauli_observable(program: &QecProgram) -> Result<(Circuit, Vec<usize>)> {
+///
+/// `ExpectationValue` ops are accepted: placement is validated (terminal,
+/// live qubits only) and their program-qubit terms are translated through
+/// the returned final-alias map, since resets reassign qubits to fresh
+/// aliases in the lowered circuit.
+fn lower_qec_program_for_pauli_observable(
+    program: &QecProgram,
+) -> Result<(Circuit, Vec<usize>, Vec<usize>)> {
+    super::validate_qec_exp_val_placement(program)?;
     for op in program.ops() {
         match op {
             QecOp::Noise { channel, .. } if channel.probability() > 0.0 => {
@@ -223,14 +237,6 @@ fn lower_qec_program_for_pauli_observable(program: &QecProgram) -> Result<(Circu
                          (statevector per shot with stochastic noise) or extend \
                          CAMPS to an `MPDO` density-matrix path"
                     ),
-                });
-            }
-            QecOp::ExpectationValue { .. } => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "QEC SPD / CAMPS".to_string(),
-                    reason: "EXP_VAL op is reserved for the dedicated \
-                             expectation runner"
-                        .to_string(),
                 });
             }
             QecOp::Detector { .. } => {
@@ -254,7 +260,11 @@ fn lower_qec_program_for_pauli_observable(program: &QecProgram) -> Result<(Circu
             circuit.instructions.push(inst.clone());
         }
     }
-    Ok((circuit, deferred.measurement_qubits))
+    Ok((
+        circuit,
+        deferred.measurement_qubits,
+        deferred.final_qubit_aliases,
+    ))
 }
 
 /// Convert an observable-row record list into a joint Pauli observable.
@@ -335,6 +345,31 @@ fn lower_postselection_rows(
     Ok(out)
 }
 
+/// Merge a projector Z-string with an observable's Pauli terms. A Z
+/// observable term on a projector qubit cancels it (Z·Z = I), preserving
+/// the parity semantics of the legacy record-based observables. X/Y
+/// observable terms cannot share a projector qubit: projector strings live
+/// on measured aliases while `EXP_VAL` terms are restricted to live
+/// qubits, so the supports are disjoint by construction.
+fn merge_projector_with_observable(pi: &[PauliTerm], obs: &[PauliTerm]) -> Vec<PauliTerm> {
+    use crate::sim::unified_pauli::PauliAxis;
+    let mut out: Vec<PauliTerm> = obs.to_vec();
+    for pt in pi {
+        if let Some(pos) = out.iter().position(|t| t.qubit == pt.qubit) {
+            debug_assert!(
+                matches!(out[pos].axis, PauliAxis::Z),
+                "projector qubit {} overlaps a non-Z observable term",
+                pt.qubit
+            );
+            out.remove(pos);
+        } else {
+            out.push(*pt);
+        }
+    }
+    out.sort_by_key(|t| t.qubit);
+    out
+}
+
 /// XOR-merge a sequence of qubit lists into a sorted, deduplicated
 /// `Vec<PauliTerm>` of `Z` factors (each qubit appears with parity 1).
 fn merge_qubit_groups_into_z_terms<'a, I>(groups: I) -> Vec<PauliTerm>
@@ -402,14 +437,9 @@ where
     let mut obs_pi_sums = vec![0.0; observable_terms_list.len()];
     let mut obs_discarded = vec![0.0; observable_terms_list.len()];
 
-    let obs_qubits: Vec<Vec<usize>> = observable_terms_list
-        .iter()
-        .map(|terms| terms.iter().map(|t| t.qubit).collect())
-        .collect();
-
     for mask in 0..subset_count {
         let mut sign = 1.0;
-        let mut qubit_groups: Vec<&[usize]> = Vec::with_capacity(j + 1);
+        let mut qubit_groups: Vec<&[usize]> = Vec::with_capacity(j);
         for (j_idx, (qubits, eps)) in postsel.iter().enumerate() {
             if (mask >> j_idx) & 1 == 1 {
                 sign *= *eps;
@@ -420,10 +450,8 @@ where
         let pi_value = eval(&pi_pauli)?;
         pi_sum += sign * pi_value.mean;
 
-        for (obs_idx, obs_q) in obs_qubits.iter().enumerate() {
-            qubit_groups.push(obs_q.as_slice());
-            let combined_pauli = merge_qubit_groups_into_z_terms(qubit_groups.iter().copied());
-            qubit_groups.pop();
+        for (obs_idx, obs_terms) in observable_terms_list.iter().enumerate() {
+            let combined_pauli = merge_projector_with_observable(&pi_pauli, obs_terms);
             let outcome = eval(&combined_pauli)?;
             obs_pi_sums[obs_idx] += sign * outcome.mean;
             obs_discarded[obs_idx] += outcome.discarded_sq;
@@ -540,37 +568,61 @@ fn packed_observable_records_from_logical_errors(
     PackedShots::from_meas_major(data, total_shots, num_observables)
 }
 
+struct QecExpVal {
+    terms: Vec<PauliTerm>,
+    coefficient: f64,
+}
+
 struct LoweredPauliObservables {
     circuit: Circuit,
     record_to_qubit: Vec<usize>,
     observable_terms_list: Vec<Vec<PauliTerm>>,
     postsel_rows: Vec<(Vec<usize>, bool)>,
+    exp_vals: Vec<QecExpVal>,
 }
 
 /// Shared lowering prelude for the analytical strategies: the restricted
 /// Clifford+T circuit, the record-to-qubit map, per-observable Pauli terms,
-/// and the unresolved postselection rows.
+/// the unresolved postselection rows, and the `EXP_VAL` ops with their
+/// program-qubit terms translated to final lowered-circuit aliases.
 fn lower_pauli_observables(program: &QecProgram) -> Result<LoweredPauliObservables> {
-    let (circuit, record_to_qubit) = lower_qec_program_for_pauli_observable(program)?;
+    let (circuit, record_to_qubit, final_qubit_aliases) =
+        lower_qec_program_for_pauli_observable(program)?;
     let observable_rows = program.observable_rows()?;
     let postsel_rows = program.postselection_rows()?;
     let mut observable_terms_list = Vec::with_capacity(observable_rows.len());
     for row in observable_rows.iter() {
         observable_terms_list.push(observable_row_to_pauli_terms(row, &record_to_qubit)?);
     }
+    let exp_vals = program
+        .expectation_value_ops()
+        .into_iter()
+        .map(|(terms, coefficient)| {
+            let terms = super::qec_terms_to_pauli(terms)
+                .into_iter()
+                .map(|mut t| {
+                    t.qubit = final_qubit_aliases[t.qubit];
+                    t
+                })
+                .collect();
+            QecExpVal { terms, coefficient }
+        })
+        .collect();
     Ok(LoweredPauliObservables {
         circuit,
         record_to_qubit,
         observable_terms_list,
         postsel_rows,
+        exp_vals,
     })
 }
 
 /// Shared result assembly for the analytical strategies. Evaluates each
-/// observable through `eval`, reporting unconditional means directly or
-/// routing through the conditional-expectation combiner when postselection
-/// rows exist. `discarded_sq` from `eval` lands in
-/// `QecObservableEstimate::variance` on both paths.
+/// observable and `EXP_VAL` op through `eval`, reporting unconditional
+/// means directly or routing through the conditional-expectation combiner
+/// when postselection rows exist. `discarded_sq` from `eval` lands in
+/// `QecObservableEstimate::variance` on both paths; `EXP_VAL` estimates
+/// are scaled by the op coefficient (mean by `c`, variance by `c²`).
 fn evaluate_observable_program<F>(
     program: &QecProgram,
     lowered: &LoweredPauliObservables,
@@ -591,23 +643,57 @@ where
                 num_shots: program.options().shots,
             });
         }
-        return build_qec_result_from_observable_means(program, means, estimates);
+        let mut exp_estimates = Vec::with_capacity(lowered.exp_vals.len());
+        for ev in &lowered.exp_vals {
+            let eval_result = eval(&ev.terms)?;
+            exp_estimates.push(QecObservableEstimate {
+                mean: ev.coefficient * eval_result.mean,
+                variance: ev.coefficient * ev.coefficient * eval_result.discarded_sq,
+                num_shots: program.options().shots,
+            });
+        }
+        let result = build_qec_result_from_observable_means(program, means, estimates)?;
+        return Ok(if exp_estimates.is_empty() {
+            result
+        } else {
+            result.with_expectation_values(exp_estimates)
+        });
     }
 
     let postsel = lower_postselection_rows(&lowered.postsel_rows, &lowered.record_to_qubit)?;
-    let (means, obs_discarded, accept_rate) =
-        evaluate_conditional_expectations(&lowered.observable_terms_list, &postsel, eval)?;
+    let num_observables = lowered.observable_terms_list.len();
+    let mut all_terms: Vec<Vec<PauliTerm>> = lowered.observable_terms_list.clone();
+    all_terms.extend(lowered.exp_vals.iter().map(|ev| ev.terms.clone()));
+    let (mut means, mut discarded, accept_rate) =
+        evaluate_conditional_expectations(&all_terms, &postsel, eval)?;
+    let exp_means = means.split_off(num_observables);
+    let exp_discarded = discarded.split_off(num_observables);
     let estimate_shots = accepted_shots_for_rate(program.options().shots, accept_rate);
     let estimates: Vec<_> = means
         .iter()
-        .zip(obs_discarded.iter())
+        .zip(discarded.iter())
         .map(|(&mean, &discarded_sq)| QecObservableEstimate {
             mean,
             variance: discarded_sq,
             num_shots: estimate_shots,
         })
         .collect();
-    build_qec_result_with_acceptance(program, means, estimates, accept_rate)
+    let exp_estimates: Vec<_> = lowered
+        .exp_vals
+        .iter()
+        .zip(exp_means.iter().zip(exp_discarded.iter()))
+        .map(|(ev, (&mean, &discarded_sq))| QecObservableEstimate {
+            mean: ev.coefficient * mean,
+            variance: ev.coefficient * ev.coefficient * discarded_sq,
+            num_shots: estimate_shots,
+        })
+        .collect();
+    let result = build_qec_result_with_acceptance(program, means, estimates, accept_rate)?;
+    Ok(if exp_estimates.is_empty() {
+        result
+    } else {
+        result.with_expectation_values(exp_estimates)
+    })
 }
 
 /// Default MPS bond-dimension cap for CAMPS. Matches the
@@ -618,12 +704,13 @@ const QEC_CAMPS_MAX_BOND_DIM: usize = 256;
 /// CAMPS analytical path for QEC observables.
 ///
 /// Tracks the Clifford prefix separately from the MPS, applies T/Tdg through
-/// the CAMPS disentangler update, and evaluates Z-string observables directly
-/// from the MPS plus prefix. The path shares SPD's restricted lowering and
-/// Z-only observable scope.
+/// the CAMPS disentangler update, and evaluates Pauli-string observables
+/// directly from the MPS plus prefix: record-based observables lower to
+/// Z-strings, and `EXP_VAL` terms may carry any X/Y/Z letters. The path
+/// shares SPD's restricted lowering.
 fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
     use super::camps_prefix::{
-        SignedCliffordPrefix, apply_t_via_camps, evaluate_z_observable_camps,
+        SignedCliffordPrefix, apply_t_via_camps, evaluate_pauli_observable_camps,
     };
     use crate::circuit::Instruction;
 
@@ -661,13 +748,12 @@ fn run_qec_program_camps(program: &QecProgram) -> Result<QecSampleResult> {
 
     // Clifford gates are absorbed into a [`SignedCliffordPrefix`]; T/Tdg
     // gates dispatch through [`apply_t_via_camps`] (Liu & Clark
-    // Algorithm 1 OFD). The observable `⟨ψ|Π Z_q|ψ⟩` is evaluated as
-    // `⟨ϕ| C†(Π Z_q) C |ϕ⟩` by composing twisted Pauli rows and calling
+    // Algorithm 1 OFD). The observable `⟨ψ|Π P_k|ψ⟩` is evaluated as
+    // `⟨ϕ| C†(Π P_k) C |ϕ⟩` by composing twisted Pauli rows and calling
     // [`crate::backend::mps::MpsBackend::pauli_expectation`].
     evaluate_observable_program(program, &lowered, |terms| {
-        let qubits: Vec<usize> = terms.iter().map(|t| t.qubit).collect();
         Ok(ConditionalEval {
-            mean: evaluate_z_observable_camps(&prefix, &backend, &qubits)?,
+            mean: evaluate_pauli_observable_camps(&prefix, &backend, terms)?,
             discarded_sq: 0.0,
         })
     })
@@ -726,6 +812,14 @@ pub fn run_qec_program_spd_rerouted(
     program: &QecProgram,
     reroutes: &[QecObservableReroute],
 ) -> Result<QecSampleResult> {
+    if program.num_expectation_values() > 0 {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "QEC SPD rerouted".to_string(),
+            reason: "stabilizer rerouting applies to record-based Z observables; `EXP_VAL` \
+                     is not supported on the rerouted path"
+                .to_string(),
+        });
+    }
     let LoweredPauliObservables {
         circuit,
         observable_terms_list,

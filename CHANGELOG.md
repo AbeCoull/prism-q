@@ -2,11 +2,29 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.26.0] - 2026-07-24
+
+### Features
+
+- **qec:** Evaluate EXP_VAL end to end with final-state estimator semantics (#104)([e4d387a](https://github.com/AbeCoull/prism-q/commit/e4d387a28c2119536f40bd23f6cbd48fc5000137))
+
+### Refactor
+
+- **sim:** Mark trainable gates with a fluent builder marker (#103)([678e7c4](https://github.com/AbeCoull/prism-q/commit/678e7c456c65a3c26b1ac0354b17d8cc841307a5))
+## [py-v0.25.0] - 2026-07-23
+
+### Miscellaneous
+
+- **python:** Release 0.25.0([158194e](https://github.com/AbeCoull/prism-q/commit/158194e4dfaa6618209f1064a5b5afc74e075acd))
 ## [0.25.0] - 2026-07-23
 
 ### Features
 
 - **sim:** Adjoint-method expectation-value gradients (#102)([39070e3](https://github.com/AbeCoull/prism-q/commit/39070e3a3f340c27af2fe32d023b7dbae441e0f9))
+
+### Miscellaneous
+
+- Release([862c90d](https://github.com/AbeCoull/prism-q/commit/862c90d881e316ff7c5495df7c45ae2d1a7b6ce7))
 
 ### Refactor
 

@@ -2,11 +2,25 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.27.0] - 2026-07-24
+
+### Features
+
+- **backend:** Add exact density-matrix simulator backend (#105)([6787816](https://github.com/AbeCoull/prism-q/commit/678781677337dec2afdd662b3ee1a55450276dde))
+## [py-v0.26.0] - 2026-07-24
+
+### Miscellaneous
+
+- **python:** Release 0.26.0([1ed472a](https://github.com/AbeCoull/prism-q/commit/1ed472a781c2fb12e8423bd9d58398123b254ab2))
 ## [0.26.0] - 2026-07-24
 
 ### Features
 
 - **qec:** Evaluate EXP_VAL end to end with final-state estimator semantics (#104)([e4d387a](https://github.com/AbeCoull/prism-q/commit/e4d387a28c2119536f40bd23f6cbd48fc5000137))
+
+### Miscellaneous
+
+- Release([d1c76d0](https://github.com/AbeCoull/prism-q/commit/d1c76d0c0f2cc5be745347ad956bc533cb40da84))
 
 ### Refactor
 

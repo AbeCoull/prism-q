@@ -61,6 +61,18 @@ macro_rules! gate_2q {
     };
 }
 
+macro_rules! gate_1q_param_tracked {
+    ($name:ident, $variant:ident) => {
+        /// Append this single-qubit rotation on `q` with initial angle `theta0`,
+        /// recording it as trainable parameter `slot` for the adjoint gradient.
+        pub fn $name(&mut self, slot: usize, theta0: f64, q: usize) -> &mut Self {
+            self.params.push(self.circuit.instructions.len(), slot);
+            self.circuit.add_gate(Gate::$variant(theta0), &[q]);
+            self
+        }
+    };
+}
+
 impl CircuitBuilder {
     /// Create a builder for a circuit with `num_qubits` qubits and no classical bits.
     pub fn new(num_qubits: usize) -> Self {

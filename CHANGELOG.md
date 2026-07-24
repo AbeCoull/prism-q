@@ -2,6 +2,24 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.25.0] - 2026-07-23
+
+### Features
+
+- **sim:** Adjoint-method expectation-value gradients (#102)([39070e3](https://github.com/AbeCoull/prism-q/commit/39070e3a3f340c27af2fe32d023b7dbae441e0f9))
+
+### Refactor
+
+- Consolidate shared scaffolding across sim, fusion, GPU, and backends (#101)([e4b0723](https://github.com/AbeCoull/prism-q/commit/e4b07236e16ae90561774226f27cc7af7755a426))
+
+### Testing
+
+- **sim:** Pin noisy sampling engines to one observable-result contract (#100)([8772dd7](https://github.com/AbeCoull/prism-q/commit/8772dd71396cae03bede270e7e71269449f60fcf))
+## [py-v0.24.0] - 2026-07-21
+
+### Miscellaneous
+
+- **python:** Release 0.24.0([40ae7a2](https://github.com/AbeCoull/prism-q/commit/40ae7a233556719b3a61a39bdacf6271ab599462))
 ## [0.24.0] - 2026-07-21
 
 ### Documentation
@@ -14,6 +32,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([492c374](https://github.com/AbeCoull/prism-q/commit/492c37450b2bb6031b1dcfa983ca9d9d7b3b3896))
 - **circuit:** Add reset to builder (#97)([7aa78ec](https://github.com/AbeCoull/prism-q/commit/7aa78eccd4cfc620846a1b8e0119dbab29b0f55c))
 ## [py-v0.23.0] - 2026-07-17
 

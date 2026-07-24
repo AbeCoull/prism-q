@@ -1,7 +1,7 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
 use prism_q::circuit::openqasm;
-use prism_q::{Circuit, CircuitBuilder, Gate, circuits};
+use prism_q::{Circuit, CircuitBuilder, Gate, Instruction, circuits};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -253,72 +253,25 @@ impl PyCircuitBuilder {
         Ok(slf)
     }
 
-    /// Append `Rx(theta0)` on `q`, recording it as trainable parameter `slot`
-    /// for `Simulation.expectation_gradient`.
-    fn rx_param(
-        mut slf: PyRefMut<'_, Self>,
-        slot: usize,
-        theta0: f64,
-        q: usize,
-    ) -> PyPrismResult<PyRefMut<'_, Self>> {
-        check_qubit(slf.inner.circuit().num_qubits, q, "qubit")?;
-        slf.inner.rx_param(slot, theta0, q);
+    /// Mark the most recently appended gate as trainable parameter `slot` for
+    /// `Simulation.expectation_gradient`. Several gates may share a slot (their
+    /// gradients accumulate). Example: `builder.rz(theta, q).trainable(0)`.
+    fn trainable(mut slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let differentiable = matches!(
+            slf.inner.circuit().instructions.last(),
+            Some(Instruction::Gate { gate, .. }) if gate.pauli_generator().is_some()
+        );
+        if !differentiable {
+            return Err(invalid(
+                "trainable() requires the last appended instruction to be a differentiable gate (rx, ry, rz, rzz, p)",
+            ));
+        }
+        slf.inner.trainable(slot);
         Ok(slf)
     }
 
-    /// Append `Ry(theta0)` on `q`, recording it as trainable parameter `slot`.
-    fn ry_param(
-        mut slf: PyRefMut<'_, Self>,
-        slot: usize,
-        theta0: f64,
-        q: usize,
-    ) -> PyPrismResult<PyRefMut<'_, Self>> {
-        check_qubit(slf.inner.circuit().num_qubits, q, "qubit")?;
-        slf.inner.ry_param(slot, theta0, q);
-        Ok(slf)
-    }
-
-    /// Append `Rz(theta0)` on `q`, recording it as trainable parameter `slot`.
-    fn rz_param(
-        mut slf: PyRefMut<'_, Self>,
-        slot: usize,
-        theta0: f64,
-        q: usize,
-    ) -> PyPrismResult<PyRefMut<'_, Self>> {
-        check_qubit(slf.inner.circuit().num_qubits, q, "qubit")?;
-        slf.inner.rz_param(slot, theta0, q);
-        Ok(slf)
-    }
-
-    /// Append `P(theta0)` on `q`, recording it as trainable parameter `slot`.
-    fn p_param(
-        mut slf: PyRefMut<'_, Self>,
-        slot: usize,
-        theta0: f64,
-        q: usize,
-    ) -> PyPrismResult<PyRefMut<'_, Self>> {
-        check_qubit(slf.inner.circuit().num_qubits, q, "qubit")?;
-        slf.inner.p_param(slot, theta0, q);
-        Ok(slf)
-    }
-
-    /// Append `Rzz(theta0)` on `q0, q1`, recording it as trainable parameter `slot`.
-    fn rzz_param(
-        mut slf: PyRefMut<'_, Self>,
-        slot: usize,
-        theta0: f64,
-        q0: usize,
-        q1: usize,
-    ) -> PyPrismResult<PyRefMut<'_, Self>> {
-        let num_qubits = slf.inner.circuit().num_qubits;
-        check_qubit(num_qubits, q0, "q0")?;
-        check_qubit(num_qubits, q1, "q1")?;
-        slf.inner.rzz_param(slot, theta0, q0, q1);
-        Ok(slf)
-    }
-
-    /// The `(instruction_index, parameter_slot)` links recorded by the
-    /// `*_param` methods, for passing to `Simulation.expectation_gradient`.
+    /// The `(instruction_index, parameter_slot)` links recorded by
+    /// `trainable`, for passing to `Simulation.expectation_gradient`.
     fn parameter_links(&self) -> Vec<(usize, usize)> {
         self.inner
             .parameter_map()

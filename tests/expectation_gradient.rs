@@ -73,21 +73,6 @@ fn param_shift(
     (plus - minus) / 2.0
 }
 
-/// Mark every analytically differentiable gate as its own trainable slot.
-fn all_rotations_trainable(circuit: &Circuit) -> ParameterMap {
-    let mut params = ParameterMap::new();
-    let mut slot = 0;
-    for (i, inst) in circuit.instructions.iter().enumerate() {
-        if let Instruction::Gate { gate, .. } = inst {
-            if gate.pauli_generator().is_some() {
-                params.push(i, slot);
-                slot += 1;
-            }
-        }
-    }
-    params
-}
-
 #[test]
 fn single_rx_matches_analytic() {
     let theta = 0.6;
@@ -107,7 +92,7 @@ fn single_rx_matches_analytic() {
 #[test]
 fn hea_multiterm_hamiltonian_all_params() {
     let c = circuits::hardware_efficient_ansatz(4, 2, SEED);
-    let params = all_rotations_trainable(&c);
+    let params = ParameterMap::all_rotations(&c);
     let obs: Hamiltonian = vec![
         (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (0.7, vec![PauliTerm::x(0)]),
@@ -141,7 +126,7 @@ fn hea_multiterm_hamiltonian_all_params() {
 #[test]
 fn qaoa_layer_rzz_and_rx() {
     let c = circuits::qaoa_circuit(6, 1, SEED);
-    let params = all_rotations_trainable(&c);
+    let params = ParameterMap::all_rotations(&c);
     let obs: Hamiltonian = vec![
         (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (1.0, vec![PauliTerm::z(2), PauliTerm::z(3)]),
@@ -163,7 +148,7 @@ fn qaoa_layer_rzz_and_rx() {
 #[test]
 fn value_matches_forward_expectation() {
     let c = circuits::hardware_efficient_ansatz(5, 3, SEED);
-    let params = all_rotations_trainable(&c);
+    let params = ParameterMap::all_rotations(&c);
     let obs: Hamiltonian = vec![
         (1.2, vec![PauliTerm::z(0)]),
         (-0.5, vec![PauliTerm::x(1), PauliTerm::x(2)]),
@@ -177,7 +162,12 @@ fn builder_records_and_differentiates() {
     use prism_q::CircuitBuilder;
     let theta = 0.9;
     let mut b = CircuitBuilder::new(2);
-    b.h(0).rz_param(0, theta, 0).cx(0, 1).ry_param(1, 0.4, 1);
+    b.h(0)
+        .rz(theta, 0)
+        .trainable(0)
+        .cx(0, 1)
+        .ry(0.4, 1)
+        .trainable(1);
     let (circuit, params) = b.build_parametric();
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0), PauliTerm::z(1)])];
@@ -187,6 +177,29 @@ fn builder_records_and_differentiates() {
         let fd = finite_diff(&circuit, &obs, &params, slot);
         assert!((g.gradient[slot] - fd).abs() < 1e-6);
     }
+}
+
+#[test]
+fn builder_shared_slot_accumulates() {
+    use prism_q::CircuitBuilder;
+    // Two Rx gates on separate qubits sharing slot 0 via the builder marker.
+    let theta = 0.4;
+    let mut b = CircuitBuilder::new(2);
+    b.rx(theta, 0).trainable(0).rx(theta, 1).trainable(0);
+    let (circuit, params) = b.build_parametric();
+    assert_eq!(params.num_params(), 1);
+
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)]), (1.0, vec![PauliTerm::z(1)])];
+    let g = run_expectation_gradient(&circuit, &obs, &params, SEED).unwrap();
+    assert!((g.gradient[0] - (-2.0 * theta.sin())).abs() < 1e-9);
+    assert!((g.gradient[0] - finite_diff(&circuit, &obs, &params, 0)).abs() < 1e-6);
+}
+
+#[test]
+#[should_panic(expected = "differentiable gate")]
+fn trainable_on_nondifferentiable_gate_panics() {
+    use prism_q::CircuitBuilder;
+    CircuitBuilder::new(1).h(0).trainable(0);
 }
 
 #[test]

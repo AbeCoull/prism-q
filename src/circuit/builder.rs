@@ -25,9 +25,8 @@ use crate::sim::gradient::ParameterMap;
 /// Call [`build`](Self::build) to extract the finished [`Circuit`], or
 /// use [`run`](Self::run) / [`run_with`](Self::run_with) for direct execution.
 ///
-/// The `*_param` methods (e.g. [`rx_param`](Self::rx_param)) additionally record
-/// which instruction feeds which slot of a parameter vector, for use with the
-/// adjoint gradient. Retrieve the recorded map with
+/// [`trainable`](Self::trainable) marks the most recently appended gate as a
+/// trainable parameter for the adjoint gradient. Retrieve the recorded map with
 /// [`parameter_map`](Self::parameter_map) or
 /// [`build_parametric`](Self::build_parametric).
 pub struct CircuitBuilder {
@@ -57,18 +56,6 @@ macro_rules! gate_2q {
     ($name:ident, $variant:ident, $a:ident, $b:ident) => {
         pub fn $name(&mut self, $a: usize, $b: usize) -> &mut Self {
             self.circuit.add_gate(Gate::$variant, &[$a, $b]);
-            self
-        }
-    };
-}
-
-macro_rules! gate_1q_param_tracked {
-    ($name:ident, $variant:ident) => {
-        /// Append this single-qubit rotation on `q` with initial angle `theta0`,
-        /// recording it as trainable parameter `slot` for the adjoint gradient.
-        pub fn $name(&mut self, slot: usize, theta0: f64, q: usize) -> &mut Self {
-            self.params.push(self.circuit.instructions.len(), slot);
-            self.circuit.add_gate(Gate::$variant(theta0), &[q]);
             self
         }
     };
@@ -113,15 +100,28 @@ impl CircuitBuilder {
         self
     }
 
-    gate_1q_param_tracked!(rx_param, Rx);
-    gate_1q_param_tracked!(ry_param, Ry);
-    gate_1q_param_tracked!(rz_param, Rz);
-    gate_1q_param_tracked!(p_param, P);
-
-    /// Append `Rzz(theta0)` on `q0, q1`, recording it as trainable parameter `slot`.
-    pub fn rzz_param(&mut self, slot: usize, theta0: f64, q0: usize, q1: usize) -> &mut Self {
-        self.params.push(self.circuit.instructions.len(), slot);
-        self.circuit.add_gate(Gate::Rzz(theta0), &[q0, q1]);
+    /// Mark the most recently appended gate as trainable parameter `slot` for
+    /// the adjoint gradient. Several gates may share a slot (their gradients
+    /// accumulate). Example: `builder.rz(theta, q).trainable(0)`.
+    ///
+    /// # Panics
+    /// Panics if no gate has been appended yet, or if the last instruction is
+    /// not an analytically differentiable gate (`Rx`, `Ry`, `Rz`, `Rzz`, `P`).
+    pub fn trainable(&mut self, slot: usize) -> &mut Self {
+        let last = self
+            .circuit
+            .instructions
+            .len()
+            .checked_sub(1)
+            .expect("trainable() called before any gate was appended");
+        match &self.circuit.instructions[last] {
+            Instruction::Gate { gate, .. } if gate.pauli_generator().is_some() => {}
+            other => panic!(
+                "trainable() requires the last instruction to be a differentiable gate \
+                 (rx, ry, rz, rzz, p), got {other:?}"
+            ),
+        }
+        self.params.push(last, slot);
         self
     }
 
@@ -220,7 +220,7 @@ impl CircuitBuilder {
         &self.circuit
     }
 
-    /// Borrow the parameter map recorded by the `*_param` methods.
+    /// Borrow the parameter map recorded by [`trainable`](Self::trainable).
     pub fn parameter_map(&self) -> &ParameterMap {
         &self.params
     }

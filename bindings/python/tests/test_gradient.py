@@ -9,7 +9,7 @@ def test_single_rx_gradient_matches_analytic():
     # Rx(theta)|0>, <Z> = cos theta, d/dtheta = -sin theta.
     theta = 0.6
     builder = CircuitBuilder(1)
-    builder.rx_param(0, theta, 0)
+    builder.rx(theta, 0).trainable(0)
     circuit = builder.build()
     links = builder.parameter_links()
 
@@ -25,7 +25,7 @@ def test_single_rx_gradient_matches_analytic():
 
 def test_two_parameter_circuit_matches_finite_difference():
     builder = CircuitBuilder(2)
-    builder.h(0).rz_param(0, 0.9, 0).cx(0, 1).ry_param(1, 0.4, 1)
+    builder.h(0).rz(0.9, 0).trainable(0).cx(0, 1).ry(0.4, 1).trainable(1)
     circuit = builder.build()
     links = builder.parameter_links()
     assert len(links) == 2
@@ -63,7 +63,7 @@ def _build(rz_theta, ry_theta):
 
 def test_invalid_axis_is_rejected():
     builder = CircuitBuilder(1)
-    builder.rx_param(0, 0.3, 0)
+    builder.rx(0.3, 0).trainable(0)
     circuit = builder.build()
     links = builder.parameter_links()
     try:

@@ -22,6 +22,7 @@
 //! Implement the [`Backend`] trait below, following the contract and
 //! performance requirements above.
 
+pub mod density_matrix;
 #[cfg(feature = "distributed")]
 pub mod distributed_statevector;
 pub mod factored;

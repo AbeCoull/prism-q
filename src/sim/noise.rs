@@ -4,6 +4,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::smallvec;
 
 use crate::backend::Backend;
+use crate::backend::density_matrix::DensityMatrixBackend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
@@ -106,6 +107,11 @@ impl NoiseChannel {
                     return Err(crate::error::PrismError::InvalidParameter {
                         message: "thermal relaxation gate_time must be finite and non-negative"
                             .into(),
+                    });
+                }
+                if *t2 > 2.0 * *t1 * (1.0 + 1e-9) {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: "thermal relaxation requires t2 <= 2*t1".into(),
                     });
                 }
             }
@@ -2318,6 +2324,203 @@ pub(crate) fn run_shots_noisy_brute_with(
     Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
 }
 
+fn amplitude_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {
+    let s = (1.0 - gamma).max(0.0).sqrt();
+    let g = gamma.max(0.0).sqrt();
+    [
+        [
+            [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+            [Complex64::new(0.0, 0.0), Complex64::new(s, 0.0)],
+        ],
+        [
+            [Complex64::new(0.0, 0.0), Complex64::new(g, 0.0)],
+            [Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)],
+        ],
+    ]
+}
+
+fn phase_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {
+    let s = (1.0 - gamma).max(0.0).sqrt();
+    let g = gamma.max(0.0).sqrt();
+    [
+        [
+            [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+            [Complex64::new(0.0, 0.0), Complex64::new(s, 0.0)],
+        ],
+        [
+            [Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)],
+            [Complex64::new(0.0, 0.0), Complex64::new(g, 0.0)],
+        ],
+    ]
+}
+
+/// Lower a single-qubit noise channel to its Kraus operators for exact
+/// density-matrix evolution. Thermal relaxation (`t2 <= 2*t1`, zero
+/// temperature) is the amplitude-damping channel composed with a pure-dephasing
+/// channel chosen so populations decay as `exp(-t/t1)` and coherences as
+/// `exp(-t/t2)`.
+pub(crate) fn kraus_1q(channel: &NoiseChannel) -> Vec<[[Complex64; 2]; 2]> {
+    let id = [
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+    ];
+    let x = [
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+    let y = [
+        [Complex64::new(0.0, 0.0), Complex64::new(0.0, -1.0)],
+        [Complex64::new(0.0, 1.0), Complex64::new(0.0, 0.0)],
+    ];
+    let z = [
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::new(-1.0, 0.0)],
+    ];
+    let scale = |m: [[Complex64; 2]; 2], s: f64| {
+        let s = Complex64::new(s, 0.0);
+        [[m[0][0] * s, m[0][1] * s], [m[1][0] * s, m[1][1] * s]]
+    };
+    let pauli = |px: f64, py: f64, pz: f64| {
+        let pi = (1.0 - px - py - pz).max(0.0);
+        vec![
+            scale(id, pi.sqrt()),
+            scale(x, px.sqrt()),
+            scale(y, py.sqrt()),
+            scale(z, pz.sqrt()),
+        ]
+    };
+    match channel {
+        NoiseChannel::Pauli { px, py, pz } => pauli(*px, *py, *pz),
+        NoiseChannel::Depolarizing { p } => pauli(p / 3.0, p / 3.0, p / 3.0),
+        NoiseChannel::AmplitudeDamping { gamma } => amplitude_damping_kraus(*gamma).to_vec(),
+        NoiseChannel::PhaseDamping { gamma } => phase_damping_kraus(*gamma).to_vec(),
+        NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
+            let gad = 1.0 - (-gate_time / t1).exp();
+            let gpd = (1.0 - (gate_time / t1 - 2.0 * gate_time / t2).exp()).clamp(0.0, 1.0);
+            let ad = amplitude_damping_kraus(gad);
+            let pd = phase_damping_kraus(gpd);
+            let mut out = Vec::with_capacity(4);
+            for a in &ad {
+                for p in &pd {
+                    out.push(crate::gates::mat_mul_2x2(a, p));
+                }
+            }
+            out
+        }
+        NoiseChannel::Custom { kraus } => kraus.clone(),
+        NoiseChannel::TwoQubitDepolarizing { .. } => {
+            unreachable!("two-qubit depolarizing has no single-qubit Kraus lowering")
+        }
+    }
+}
+
+/// Apply one noise event to a density-matrix backend exactly.
+pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseEvent) {
+    match &event.channel {
+        NoiseChannel::TwoQubitDepolarizing { p } => {
+            dm.apply_2q_depolarizing(event.qubits[0], event.qubits[1], *p);
+        }
+        other => {
+            let kraus = kraus_1q(other);
+            dm.apply_1q_kraus(event.qubits[0], &kraus);
+        }
+    }
+}
+
+/// Evolve a density-matrix backend through `circuit` and optional `noise`.
+///
+/// Measurements are not collapsed; observables and marginals are read off the
+/// final mixed state, so this assumes terminal (non-feedback) measurement. The
+/// circuit is checked against the density-matrix qubit cap and the noise model
+/// is validated before any allocation.
+fn evolve_density_matrix(
+    circuit: &Circuit,
+    noise: Option<&NoiseModel>,
+    seed: u64,
+) -> Result<DensityMatrixBackend> {
+    let cap = crate::backend::max_density_matrix_qubits();
+    if circuit.num_qubits > cap {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: "density_matrix".into(),
+            reason: format!(
+                "circuit has {} qubits, exceeding the density-matrix cap of {cap} on this machine (set PRISM_MAX_DM_QUBITS to override)",
+                circuit.num_qubits
+            ),
+        });
+    }
+    if let Some(noise) = noise {
+        if noise.after_gate.len() != circuit.instructions.len() {
+            return Err(crate::error::PrismError::InvalidParameter {
+                message: "noise model length does not match circuit instruction count".into(),
+            });
+        }
+        noise.validate()?;
+    }
+
+    let mut dm = DensityMatrixBackend::new(seed);
+    dm.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    for (i, inst) in circuit.instructions.iter().enumerate() {
+        match inst {
+            Instruction::Measure { .. } => {}
+            other => dm.apply(other)?,
+        }
+        if let Some(noise) = noise {
+            for event in &noise.after_gate[i] {
+                apply_noise_event_dm(&mut dm, event);
+            }
+        }
+    }
+    Ok(dm)
+}
+
+/// Exact per-classical-bit measurement marginals under a noise model, evolved
+/// on the density-matrix backend. Measurements are read as `Tr(P_1 rho)` on the
+/// final state without collapse, so this assumes terminal (non-feedback)
+/// measurement, matching the domain of `noisy_marginals_analytical`.
+#[cfg(test)]
+pub(crate) fn dm_noisy_marginals(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+) -> Result<Vec<f64>> {
+    let dm = evolve_density_matrix(circuit, Some(noise), seed)?;
+    let mut result = vec![0.5f64; circuit.num_classical_bits];
+    for inst in &circuit.instructions {
+        if let Instruction::Measure {
+            qubit,
+            classical_bit,
+        } = inst
+        {
+            if *classical_bit < result.len() {
+                result[*classical_bit] = dm.qubit_probability(*qubit)?;
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Exact `Tr(rho P_k)` for each joint Pauli `P_k`, evolving the density-matrix
+/// backend through `circuit` and (optionally) `noise`. Measurements are read off
+/// the final mixed state without collapse, so this is the exact (zero-variance)
+/// analogue of trajectory-averaged expectation values. The circuit must fit the
+/// density-matrix qubit cap; observables reuse the same Pauli-mask reduction as
+/// [`run_expectation_values`](crate::sim::run_expectation_values).
+pub fn density_matrix_expectation_values(
+    circuit: &Circuit,
+    observables: &[Vec<crate::PauliTerm>],
+    noise: Option<&NoiseModel>,
+    seed: u64,
+) -> Result<Vec<f64>> {
+    let dm = evolve_density_matrix(circuit, noise, seed)?;
+    observables
+        .iter()
+        .map(|obs| {
+            let (xmask, zmask, num_y) = crate::sim::pauli_masks(obs, circuit.num_qubits)?;
+            Ok(dm.expectation_pauli(xmask, zmask, num_y))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2501,6 +2704,23 @@ mod tests {
             }
         }
 
+        // The density-matrix backend carries no sampling noise, so it sits far
+        // tighter to the analytic marginals than the sampled engines. The
+        // residual is a model gap, not statistics: the analytic reference is the
+        // Pauli-frame independent-error model (X and Y flips are independent
+        // Bernoulli events), while the density matrix evolves the exact
+        // depolarizing channel (mutually exclusive Paulis). The two agree to
+        // first order in p and differ at O(p^2); at p = 0.02 that gap is < 3e-4.
+        let dm_marginals = dm_noisy_marginals(&circuit, &noise, seed).unwrap();
+        let dm_tol = 3e-4;
+        for (bit, &expected) in analytic.iter().enumerate() {
+            assert!(
+                (dm_marginals[bit] - expected).abs() < dm_tol,
+                "density_matrix bit {bit}: marginal {:.12} vs analytic {expected:.12}",
+                dm_marginals[bit]
+            );
+        }
+
         let ghz_coherent = |result: &ShotsResult| -> f64 {
             result
                 .shots
@@ -2518,6 +2738,270 @@ mod tests {
                 "{name} GHZ coherence {value:.4} vs compiled {reference:.4}"
             );
         }
+    }
+
+    #[test]
+    fn dm_expectation_matches_run_expectation_values() {
+        use crate::{PauliAxis, PauliTerm};
+        let mut circuit = Circuit::new(3, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Ry(0.7), &[1]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.add_gate(Gate::Rx(1.1), &[2]);
+        circuit.add_gate(Gate::Cz, &[1, 2]);
+        circuit.add_gate(Gate::T, &[0]);
+
+        let observables = vec![
+            vec![PauliTerm::new(0, PauliAxis::Z)],
+            vec![PauliTerm::new(2, PauliAxis::X)],
+            vec![
+                PauliTerm::new(0, PauliAxis::Z),
+                PauliTerm::new(1, PauliAxis::Z),
+            ],
+            vec![
+                PauliTerm::new(0, PauliAxis::Y),
+                PauliTerm::new(2, PauliAxis::X),
+            ],
+        ];
+
+        let reference = crate::sim::run_expectation_values(&circuit, &observables, 42).unwrap();
+        let dm = density_matrix_expectation_values(&circuit, &observables, None, 42).unwrap();
+        for (i, (a, b)) in dm.iter().zip(&reference).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "observable {i}: dm {a:.15} vs statevector {b:.15}"
+            );
+        }
+    }
+
+    #[test]
+    fn trajectory_expectations_converge_to_density_matrix_within_5_sigma() {
+        use crate::backend::statevector::StatevectorBackend;
+        use crate::sim::trajectory::run_trajectory_shot;
+        use crate::{PauliAxis, PauliTerm};
+
+        // Six-qubit seeded layered circuit with two noise layers.
+        let mut circuit = Circuit::new(6, 0);
+        for q in 0..6 {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for q in 0..5 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(0xDEAD_BEEF);
+        for q in 0..6 {
+            let theta: f64 = rand::RngExt::random::<f64>(&mut rng) * std::f64::consts::TAU;
+            circuit.add_gate(
+                if q % 2 == 0 {
+                    Gate::Rz(theta)
+                } else {
+                    Gate::Rx(theta)
+                },
+                &[q],
+            );
+        }
+
+        // Noise after layer 1 (the first H) and layer 2 (first CX).
+        let mut noise = NoiseModel {
+            after_gate: vec![Vec::new(); circuit.instructions.len()],
+            readout: vec![None; circuit.num_classical_bits],
+        };
+        for q in 0..6 {
+            noise.after_gate[q].push(NoiseEvent {
+                channel: NoiseChannel::Depolarizing { p: 0.02 },
+                qubits: smallvec![q],
+            });
+        }
+        for q in 0..6 {
+            noise.after_gate[6 + q.min(4)].push(NoiseEvent {
+                channel: NoiseChannel::AmplitudeDamping { gamma: 0.03 },
+                qubits: smallvec![q],
+            });
+        }
+
+        let observables = vec![
+            vec![
+                PauliTerm::new(0, PauliAxis::Z),
+                PauliTerm::new(1, PauliAxis::Z),
+            ],
+            vec![
+                PauliTerm::new(2, PauliAxis::X),
+                PauliTerm::new(3, PauliAxis::X),
+            ],
+            vec![
+                PauliTerm::new(4, PauliAxis::Z),
+                PauliTerm::new(5, PauliAxis::Z),
+            ],
+        ];
+        let weights = [0.5f64, 0.3, 0.2];
+
+        let mu_dm =
+            density_matrix_expectation_values(&circuit, &observables, Some(&noise), 42).unwrap();
+
+        // Trajectory estimates: each shot is a pure state; the observable value
+        // on that state is a sample whose mean converges to Tr(rho P).
+        let masks: Vec<_> = observables
+            .iter()
+            .map(|obs| crate::sim::pauli_masks(obs, circuit.num_qubits).unwrap())
+            .collect();
+        let shots = 20_000usize;
+        let mut sums = vec![0.0f64; observables.len()];
+        let mut sq_sums = vec![0.0f64; observables.len()];
+        let mut backend = StatevectorBackend::new(42);
+        for i in 0..shots {
+            let mut shot_rng = ChaCha8Rng::seed_from_u64(42u64.wrapping_add(i as u64));
+            run_trajectory_shot(&mut backend, &circuit, &noise, &mut shot_rng).unwrap();
+            let state = backend.state_vector();
+            let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
+            for (k, &(x, z, y)) in masks.iter().enumerate() {
+                let v = crate::sim::pauli_expectation_from_masks(state, x, z, y, norm);
+                sums[k] += v;
+                sq_sums[k] += v * v;
+            }
+        }
+
+        for (k, &w) in weights.iter().enumerate() {
+            let mean = sums[k] / shots as f64;
+            let var = (sq_sums[k] / shots as f64 - mean * mean).max(0.0);
+            let sigma = (var / shots as f64).sqrt();
+            let diff = (mean - mu_dm[k]).abs();
+            if sigma < 1e-12 {
+                assert!(
+                    diff < 1e-10,
+                    "term {k} (w={w}): degenerate trajectory, mean {mean} vs dm {}",
+                    mu_dm[k]
+                );
+            } else {
+                let z_score = diff / sigma;
+                assert!(
+                    z_score < 5.0,
+                    "term {k} (w={w}): z={z_score:.2}, traj {mean:.6} vs dm {:.6}",
+                    mu_dm[k]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dm_named_channel_lowering_preserves_trace_and_decay() {
+        use crate::backend::density_matrix::DensityMatrixBackend;
+
+        let trace = |dm: &DensityMatrixBackend| -> f64 { dm.probabilities().unwrap().iter().sum() };
+        let identity = [
+            [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+            [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        ];
+        let channels = [
+            NoiseChannel::Pauli {
+                px: 0.1,
+                py: 0.05,
+                pz: 0.2,
+            },
+            NoiseChannel::Depolarizing { p: 0.3 },
+            NoiseChannel::AmplitudeDamping { gamma: 0.4 },
+            NoiseChannel::PhaseDamping { gamma: 0.35 },
+            NoiseChannel::ThermalRelaxation {
+                t1: 50.0,
+                t2: 40.0,
+                gate_time: 10.0,
+            },
+            NoiseChannel::Custom {
+                kraus: vec![identity],
+            },
+        ];
+        for ch in &channels {
+            let mut dm = DensityMatrixBackend::new(42);
+            dm.init(1, 0).unwrap();
+            dm.apply(&Instruction::Gate {
+                gate: Gate::H,
+                targets: smallvec![0],
+            })
+            .unwrap();
+            dm.apply_1q_kraus(0, &kraus_1q(ch));
+            assert!(
+                (trace(&dm) - 1.0).abs() < 1e-12,
+                "trace after {ch:?}: {}",
+                trace(&dm)
+            );
+        }
+
+        let (t1, t2, gt) = (50.0, 40.0, 10.0);
+        let thermal = NoiseChannel::ThermalRelaxation {
+            t1,
+            t2,
+            gate_time: gt,
+        };
+        let mut dm = DensityMatrixBackend::new(42);
+        dm.init(1, 0).unwrap();
+        dm.apply(&Instruction::Gate {
+            gate: Gate::X,
+            targets: smallvec![0],
+        })
+        .unwrap();
+        dm.apply_1q_kraus(0, &kraus_1q(&thermal));
+        let rho = dm.reduced_density_matrix_1q(0).unwrap();
+        assert!(
+            (rho[1][1].re - (-gt / t1).exp()).abs() < 1e-12,
+            "T1 population decay: {rho:?}"
+        );
+
+        let mut dm = DensityMatrixBackend::new(42);
+        dm.init(1, 0).unwrap();
+        dm.apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec![0],
+        })
+        .unwrap();
+        dm.apply_1q_kraus(0, &kraus_1q(&thermal));
+        let rho = dm.reduced_density_matrix_1q(0).unwrap();
+        assert!(
+            (rho[0][1].norm() - 0.5 * (-gt / t2).exp()).abs() < 1e-12,
+            "T2 coherence decay: {rho:?}"
+        );
+
+        // Amplitude and phase damping lowerings drive the exact analytic channel
+        // through kraus_1q, not just trace preservation, on |+>.
+        let prep_plus = |ch: &NoiseChannel| -> [[Complex64; 2]; 2] {
+            let mut dm = DensityMatrixBackend::new(42);
+            dm.init(1, 0).unwrap();
+            dm.apply(&Instruction::Gate {
+                gate: Gate::H,
+                targets: smallvec![0],
+            })
+            .unwrap();
+            dm.apply_1q_kraus(0, &kraus_1q(ch));
+            dm.reduced_density_matrix_1q(0).unwrap()
+        };
+
+        let gamma = 0.4;
+        let rho = prep_plus(&NoiseChannel::AmplitudeDamping { gamma });
+        assert!(
+            (rho[0][0].re - (0.5 + 0.5 * gamma)).abs() < 1e-12,
+            "AD pop0: {rho:?}"
+        );
+        assert!(
+            (rho[1][1].re - 0.5 * (1.0 - gamma)).abs() < 1e-12,
+            "AD pop1: {rho:?}"
+        );
+        assert!(
+            (rho[0][1].norm() - 0.5 * (1.0 - gamma).sqrt()).abs() < 1e-12,
+            "AD coherence: {rho:?}"
+        );
+
+        let gamma = 0.35;
+        let rho = prep_plus(&NoiseChannel::PhaseDamping { gamma });
+        assert!(
+            (rho[0][0].re - 0.5).abs() < 1e-12,
+            "PD pop0 preserved: {rho:?}"
+        );
+        assert!(
+            (rho[1][1].re - 0.5).abs() < 1e-12,
+            "PD pop1 preserved: {rho:?}"
+        );
+        assert!(
+            (rho[0][1].norm() - 0.5 * (1.0 - gamma).sqrt()).abs() < 1e-12,
+            "PD coherence: {rho:?}"
+        );
     }
 
     #[test]

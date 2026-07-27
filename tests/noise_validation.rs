@@ -97,6 +97,26 @@ fn thermal_relaxation_validation() {
         .validate()
         .is_err()
     );
+    // t2 must not exceed 2*t1 (outside the amplitude-damping-then-dephasing
+    // decomposition's validity).
+    assert!(
+        NoiseChannel::ThermalRelaxation {
+            t1: 50.0,
+            t2: 150.0,
+            gate_time: 10.0,
+        }
+        .validate()
+        .is_err()
+    );
+    assert!(
+        NoiseChannel::ThermalRelaxation {
+            t1: 50.0,
+            t2: 100.0,
+            gate_time: 10.0,
+        }
+        .validate()
+        .is_ok()
+    );
 }
 
 #[test]

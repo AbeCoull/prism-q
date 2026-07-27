@@ -95,7 +95,7 @@ pub use sim::homological::{
 };
 pub use sim::noise::{
     NoiseChannel, NoiseEvent, NoiseModel, NoisyCompiledSampler, ReadoutError, compile_noisy,
-    run_shots_noisy,
+    density_matrix_expectation_values, run_shots_noisy,
 };
 pub use sim::stabilizer_rank::{
     StabRankResult, run_stabilizer_rank, run_stabilizer_rank_approx, stabilizer_inner_product,

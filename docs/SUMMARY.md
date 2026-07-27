@@ -28,6 +28,7 @@
 - [Backends](./architecture/backends.md)
 - [Compiled Samplers](./architecture/samplers.md)
 - [Native QEC Program IR](./architecture/qec-ir.md)
+- [QEC Program Execution](./architecture/qec-programs.md)
 - [Threading, SIMD, and Memory Layout](./architecture/threading-simd.md)
 - [Error Model and Public API](./architecture/api-surface.md)
 

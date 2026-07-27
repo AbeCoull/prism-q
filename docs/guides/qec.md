@@ -57,7 +57,8 @@ detectors, observables, postselection, `X_ERROR` / `Z_ERROR` / `DEPOLARIZE1` /
 still sampled by the packed runner; noisy programs use the per-shot reference
 runner). Non-Clifford gates are rejected on the packed sampling path.
 See the [QEC IR reference](../architecture/qec-ir.md) for the full
-grammar, the V1 reset requirement, and the `EXP_VAL` placement rules.
+grammar, and [QEC program execution](../architecture/qec-programs.md) for the
+runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
 
 ## Homological sampling

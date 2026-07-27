@@ -26,8 +26,12 @@ use rand_chacha::ChaCha8Rng;
 /// `DEPOLARIZE2`) are compiled into packed sensitivity rows that are XORed
 /// into the noiseless measurement records.
 ///
-/// Programs containing `EXP_VAL` ops are routed instead of packed-sampled:
-/// with active noise they run through [`run_qec_program_reference`].
+/// Programs containing `EXP_VAL` ops are routed instead of packed-sampled.
+/// With active noise, programs that produce no measurement records, carry no
+/// postselection predicate, and fit the density-matrix qubit cap are estimated
+/// exactly as `Tr(rho P)` on the density-matrix backend, reported with
+/// `variance` `0.0`; every other noisy program runs through
+/// [`run_qec_program_reference`].
 /// Noiseless programs with detectors split into a packed sampling run for
 /// the measurement, detector, and observable records plus an analytical
 /// estimator run, falling back to the reference runner when either half
@@ -52,7 +56,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
             .iter()
             .any(|op| matches!(op, QecOp::Noise { channel, .. } if channel.probability() > 0.0));
         if has_active_noise {
-            return run_qec_program_reference(program);
+            return run_qec_program_noisy_exp_val(program);
         }
         if program.num_detectors() > 0 {
             return run_qec_program_detectors_and_exp_val(program);
@@ -96,6 +100,73 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         return qec_result_from_measurements(program, measurements);
     }
     qec_result_from_measurement_chunks(program, |chunk| sampler.sample_measurements_packed(chunk))
+}
+
+/// Execution for `EXP_VAL` programs carrying active noise.
+///
+/// Eligible programs are estimated exactly on the density-matrix backend:
+/// `rho` carries the whole noisy ensemble, so `Tr(rho P)` is the value the
+/// reference runner approximates by averaging per-shot statevector
+/// expectations, and it comes out with variance `0.0` instead of a sampling
+/// spread. Everything else keeps [`run_qec_program_reference`] unchanged.
+///
+/// A program is eligible when all of the following hold:
+///
+/// - It produces no measurement records. `M` and `MPP` collapse the state per
+///   shot and feed the measurement, detector, and observable rows of the
+///   result; the mixed state holds no record stream, so those programs need
+///   real sampling.
+/// - It has no postselection predicate. Postselection conditions the estimate
+///   on an accepted subensemble, and `Tr(rho P)` is unconditioned.
+/// - Its width is within the density-matrix cap. The backend stores `4^n`
+///   amplitudes (see `PRISM_MAX_DM_QUBITS`).
+///
+/// Resets are eligible. Both paths implement the reset channel
+/// `rho -> |0><0| (x) tr_q rho` per the [`Backend::reset`](crate::backend::Backend::reset)
+/// contract: the density matrix applies it directly, and the reference runner
+/// samples one trajectory of it per shot, so the shot mean still converges to
+/// `Tr(rho P)`.
+///
+/// Gates or channels the density-matrix path rejects surface as an error from
+/// the lowering or the oracle, which also falls back to the reference runner.
+fn run_qec_program_noisy_exp_val(program: &QecProgram) -> Result<QecSampleResult> {
+    qec_runner_chunk_size(program.options())?;
+    if program.num_measurements() > 0
+        || !program.postselection_rows()?.is_empty()
+        || program.num_qubits() > crate::backend::max_density_matrix_qubits()
+    {
+        return run_qec_program_reference(program);
+    }
+    let Ok((circuit, noise)) = super::noise::lower_qec_program_to_density_matrix(program) else {
+        return run_qec_program_reference(program);
+    };
+    let exp_val_ops = program.expectation_value_ops();
+    let observables: Vec<_> = exp_val_ops
+        .iter()
+        .map(|(terms, _)| super::qec_terms_to_pauli(terms))
+        .collect();
+    let Ok(values) = crate::sim::noise::density_matrix_expectation_values(
+        &circuit,
+        &observables,
+        Some(&noise),
+        program.options().seed,
+    ) else {
+        return run_qec_program_reference(program);
+    };
+
+    let shots = program.options().shots;
+    let measurements = PackedShots::from_shot_major(Vec::new(), shots, 0);
+    let result = qec_result_from_measurements(program, measurements)?;
+    let estimates = exp_val_ops
+        .iter()
+        .zip(&values)
+        .map(|(&(_, coefficient), value)| QecObservableEstimate {
+            mean: coefficient * value,
+            variance: 0.0,
+            num_shots: shots,
+        })
+        .collect();
+    Ok(result.with_expectation_values(estimates))
 }
 
 /// Split execution for noiseless `EXP_VAL` programs with detectors.

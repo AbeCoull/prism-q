@@ -49,14 +49,17 @@ absolute indices while parsing.
 
 ## Runner routing
 
-`run_qec_program` picks one of five paths:
+`run_qec_program` picks one of six paths:
 
 ```mermaid
 flowchart TD
     A[run_qec_program] --> B{EXP_VAL ops present?}
     B -- yes --> C[validate placement rules]
     C --> D{active noise?}
-    D -- yes --> R[reference runner]
+    D -- yes --> M{density-matrix eligible?}
+    M -- yes --> X[density-matrix estimator]
+    M -- no --> R[reference runner]
+    X -- lowering or oracle rejects --> R
     D -- no --> E{detectors present?}
     E -- yes --> S[two-run split]
     E -- no --> L[analytical Auto ladder]
@@ -68,9 +71,9 @@ flowchart TD
 
 Programs containing `EXP_VAL` ops are routed instead of packed-sampled. The
 placement rules are validated first, then active noise sends the program to
-`run_qec_program_reference`, detectors send it to the two-run split, and the
-remaining noiseless case runs the analytical Auto ladder described under
-Expectation values.
+the density-matrix estimator or `run_qec_program_reference`, detectors send it
+to the two-run split, and the remaining noiseless case runs the analytical
+Auto ladder described under Expectation values.
 
 Programs without `EXP_VAL` ops take the packed compiled path. Validation
 rejects non-Clifford gates and reports whether active noise is present.
@@ -90,6 +93,32 @@ analytical ladder runs the program without its detectors (exact estimates
 attached to the sampled result). When either half cannot run, for example
 non-Clifford gates on the packed half, the whole program falls back to the
 reference runner.
+
+The density-matrix estimator serves noisy `EXP_VAL` programs whose noisy
+ensemble the mixed state can carry in full, where `Tr(rho P)` is the exact
+value the reference runner approximates by averaging per-shot statevector
+expectations. Eligibility:
+
+- No measurement records. `M` and `MPP` collapse the state per shot and feed
+  the measurement, detector, and observable rows of the result; the mixed
+  state holds no record stream, so those programs need real sampling.
+- No postselection predicate, which would condition the estimate on an
+  accepted subensemble that `Tr(rho P)` does not express.
+- Width within the density-matrix cap (`PRISM_MAX_DM_QUBITS`, default half
+  the statevector cap), since the backend stores `4^n` amplitudes.
+
+`R` is eligible. Both paths implement the reset channel
+`rho -> |0><0| (x) tr_q rho` per the reset contract on the
+[backends](./backends.md) page: the density matrix applies it directly, and
+the reference runner samples one trajectory of it per shot, so the shot mean
+still converges to `Tr(rho P)`.
+
+Gates and channels the density-matrix path rejects surface as an error from
+the lowering or the oracle, which also falls back to the reference runner. The
+lowering maps gates one to one, expands a basis reset into `Reset` plus its
+Z-to-basis rotation, and turns each Pauli-noise annotation into `NoiseModel`
+events on the instruction it follows, applied through the backend's exact
+one-qubit Kraus and two-qubit depolarizing channels.
 
 `run_qec_program_reference` is the correctness oracle: one statevector
 simulation per shot, `O(shots * 2^n)`. It executes ops in order, samples
@@ -174,9 +203,12 @@ Supported channels are `X_ERROR`, `Z_ERROR`, `DEPOLARIZE1`, and
 longer affect any record), and a `DEPOLARIZE2` pair with one measured target
 degrades to `DEPOLARIZE1` at `p * 0.8` on the survivor, preserving the
 marginal error rate. The reference runner instead applies the same channels
-stochastically to the per-shot state. How the QEC noise path relates to the
-circuit-level noisy engines is covered by the noisy engine routing section of
-the [compiled samplers](./samplers.md) page.
+stochastically to the per-shot state, and the density-matrix estimator
+applies them exactly: `X_ERROR` and `Z_ERROR` become one-axis Pauli channels,
+`DEPOLARIZE1` a symmetric one-qubit depolarizing channel, and `DEPOLARIZE2` a
+two-qubit depolarizing channel on each target pair. How the QEC noise path
+relates to the circuit-level noisy engines is covered by the noisy engine
+routing section of the [compiled samplers](./samplers.md) page.
 
 ## Expectation values
 
@@ -200,7 +232,8 @@ Estimator paths:
 
 | Path | Selection | `mean` | `variance` |
 | --- | --- | --- | --- |
-| Reference runner | `run_qec_program` with active noise, or as the detector-split fallback; `run_qec_program_reference` directly | per-shot exact `c * <P>` averaged over accepted shots | unbiased sample variance |
+| Density-matrix estimator | `run_qec_program` with active noise on an eligible program | exact `c * Tr(rho P)` | `0.0` |
+| Reference runner | `run_qec_program` with active noise on an ineligible program, or as the detector-split fallback; `run_qec_program_reference` directly | per-shot exact `c * <P>` averaged over accepted shots | unbiased sample variance |
 | Analytical ladder (SPD, CAMPS, tensor network) | `run_qec_program` noiseless; `run_qec_program_with_strategy` | exact `c * <P>` on the lowered unitary | `c^2 *` squared SPD truncation weight; `0.0` for CAMPS and tensor network |
 
 The reference runner precomputes Pauli masks per observable and evaluates

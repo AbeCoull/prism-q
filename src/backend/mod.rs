@@ -238,6 +238,21 @@ pub trait Backend {
     /// Destructive, non-unitary. Used by OpenQASM `reset` and as a primitive
     /// for thermal relaxation trajectory simulation. The default returns
     /// `BackendUnsupported`; backends override for their native representation.
+    ///
+    /// The contract is the reset channel `rho -> |0><0| (x) tr_q rho`: the
+    /// qubit is traced out and replaced by |0⟩, leaving the rest of the
+    /// register in the mixture the trace produces. Projecting onto |0⟩ and
+    /// renormalizing is **not** equivalent. The two agree only when the qubit
+    /// is unentangled; when it is entangled, projection also collapses its
+    /// partners into the branch correlated with the |0⟩ outcome. On a Bell
+    /// pair, resetting qubit 1 leaves ⟨Z0⟩ = 0 under the channel and
+    /// ⟨Z0⟩ = 1 under projection.
+    ///
+    /// A backend holding a single pure state cannot represent the mixture, so
+    /// it implements one trajectory of the channel: sample the measurement
+    /// outcome, collapse onto it, and apply X when the outcome is 1. Averaged
+    /// over shots that reproduces the channel. Backends holding a mixed state
+    /// (density matrix) apply the channel directly.
     fn reset(&mut self, _qubit: usize) -> Result<()> {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),

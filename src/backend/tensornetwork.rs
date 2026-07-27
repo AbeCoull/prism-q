@@ -948,28 +948,25 @@ impl TensorNetworkBackend {
     }
 
     fn apply_reset(&mut self, qubit: usize) -> Result<()> {
-        let amplitudes = self.contract_to_statevector()?;
+        use rand::RngExt;
 
-        let mut collapsed = amplitudes;
-        let mut prob_zero = 0.0f64;
-        for (idx, amp) in collapsed.iter_mut().enumerate() {
-            let bit = (idx >> qubit) & 1 == 1;
-            if bit {
-                *amp = Complex64::new(0.0, 0.0);
-            } else {
-                prob_zero += amp.norm_sqr();
+        let amplitudes = self.contract_to_statevector()?;
+        let mask = 1usize << qubit;
+
+        let mut prob_one = 0.0f64;
+        for (idx, amp) in amplitudes.iter().enumerate() {
+            if idx & mask != 0 {
+                prob_one += amp.norm_sqr();
             }
         }
-        if prob_zero > NORM_CLAMP_MIN {
-            let norm = prob_zero.sqrt();
-            for amp in &mut collapsed {
-                *amp /= norm;
+        let outcome = self.rng.random::<f64>() < prob_one;
+        let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
+
+        let mut collapsed = vec![Complex64::new(0.0, 0.0); amplitudes.len()];
+        for (idx, amp) in amplitudes.iter().enumerate() {
+            if (idx & mask != 0) == outcome {
+                collapsed[idx & !mask] = amp * inv_norm;
             }
-        } else {
-            for amp in collapsed.iter_mut() {
-                *amp = Complex64::new(0.0, 0.0);
-            }
-            collapsed[0] = Complex64::new(1.0, 0.0);
         }
 
         self.replace_with_statevector(collapsed);

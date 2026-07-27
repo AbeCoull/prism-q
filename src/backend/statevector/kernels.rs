@@ -2710,41 +2710,35 @@ impl StatevectorBackend {
     }
 
     #[inline(always)]
+    /// Reset `qubit` to `|0>` as one trajectory of the reset channel: sample
+    /// the measurement outcome, collapse onto it, then fold the `|1>` branch
+    /// down to `|0>`. See the [`Backend::reset`](crate::backend::Backend::reset)
+    /// contract for why a projection onto `|0>` is not equivalent.
     pub(super) fn apply_reset(&mut self, qubit: usize) {
+        let prob_one = self.qubit_probability_one(qubit);
+        let outcome = self.rng.random::<f64>() < prob_one;
+        let inv_norm = measurement_inv_norm(outcome, prob_one);
+
         #[cfg(feature = "parallel")]
         if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
-            self.apply_reset_par(qubit);
+            self.fold_reset_par(qubit, outcome);
+            self.pending_norm *= inv_norm;
             return;
         }
 
         let half = 1usize << qubit;
         let block_size = half << 1;
-        let norm_sq = self.pending_norm * self.pending_norm;
         let zero = Complex64::new(0.0, 0.0);
-
-        let mut prob_zero = 0.0f64;
-        for block in self.state.chunks(block_size) {
-            for amp in &block[..half] {
-                prob_zero += amp.norm_sqr();
+        for block in self.state.chunks_mut(block_size) {
+            let (lo, hi) = block.split_at_mut(half);
+            if outcome {
+                lo.copy_from_slice(hi);
             }
-        }
-        prob_zero *= norm_sq;
-
-        if prob_zero > 0.0 {
-            for block in self.state.chunks_mut(block_size) {
-                for amp in &mut block[half..] {
-                    *amp = zero;
-                }
-            }
-            let inv_norm = 1.0 / prob_zero.sqrt();
-            self.pending_norm *= inv_norm;
-        } else {
-            for amp in self.state.iter_mut() {
+            for amp in hi.iter_mut() {
                 *amp = zero;
             }
-            self.state[0] = Complex64::new(1.0, 0.0);
-            self.pending_norm = 1.0;
         }
+        self.pending_norm *= inv_norm;
     }
 
     /// Apply multiple single-qubit gates in a multi-tier tiled pass.
@@ -3123,36 +3117,19 @@ impl StatevectorBackend {
     }
 
     #[cfg(feature = "parallel")]
-    fn apply_reset_par(&mut self, qubit: usize) {
+    fn fold_reset_par(&mut self, qubit: usize, outcome: bool) {
         let half = 1usize << qubit;
         let block_size = half << 1;
-        let norm_sq = self.pending_norm * self.pending_norm;
-
-        let prob_zero: f64 = self
-            .state
-            .par_chunks(block_size)
+        self.state
+            .par_chunks_mut(block_size)
             .with_min_len(chunk_min_len(block_size))
-            .map(|chunk| simd::norm_sqr_sum(&chunk[..half]))
-            .sum::<f64>()
-            * norm_sq;
-
-        if prob_zero > 0.0 {
-            self.state
-                .par_chunks_mut(block_size)
-                .with_min_len(chunk_min_len(block_size))
-                .for_each(|chunk| {
-                    let (_, hi) = chunk.split_at_mut(half);
-                    simd::zero_slice(hi);
-                });
-            let inv_norm = 1.0 / prob_zero.sqrt();
-            self.pending_norm *= inv_norm;
-        } else {
-            self.state
-                .par_chunks_mut(crate::backend::MIN_PAR_ELEMS)
-                .for_each(simd::zero_slice);
-            self.state[0] = Complex64::new(1.0, 0.0);
-            self.pending_norm = 1.0;
-        }
+            .for_each(|chunk| {
+                let (lo, hi) = chunk.split_at_mut(half);
+                if outcome {
+                    lo.copy_from_slice(hi);
+                }
+                simd::zero_slice(hi);
+            });
     }
 
     pub(super) fn apply_diagonal_batch(&mut self, entries: &[DiagEntry]) {

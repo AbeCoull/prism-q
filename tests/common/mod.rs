@@ -25,6 +25,16 @@ pub const FACTORED_EPS: f64 = 1e-10;
 
 pub const SEED: u64 = 42;
 
+/// Statevector probabilities used as the reference for the backend matrices.
+///
+/// The statevector is a participant, not an independent authority: a helper
+/// built on it can only report that two implementations disagree, and it will
+/// name the other backend as the failure. Anything this reference is expected
+/// to get right therefore needs a closed-form anchor in
+/// `tests/golden_small_circuits.rs` that names the statevector directly. The
+/// `reset` contract went unanchored there for a long time, and a
+/// projection-onto-|0> implementation survived a green matrix as a result:
+/// four correct backends were the ones reported as failing.
 pub fn sv_reference_probs(circuit: &Circuit) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(SEED);
     sim::run_on(&mut backend, circuit).unwrap();

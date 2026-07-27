@@ -8,6 +8,7 @@ use crate::sim::compiled::{
     CompiledSampler, PackedShots, batch_propagate_backward, compile_measurements,
     rng::Xoshiro256PlusPlus, xor_words,
 };
+use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -226,6 +227,90 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
 fn qec_noise_rng(seed: u64) -> Xoshiro256PlusPlus {
     let mut seed_rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(0x51A7_EC01));
     Xoshiro256PlusPlus::from_chacha(&mut seed_rng)
+}
+
+/// Lower a measurement-free QEC program into a circuit plus the matching
+/// density-matrix noise model.
+///
+/// Gates map one to one; a basis reset becomes `Reset` followed by the
+/// Z-to-basis rotation. Pauli-noise annotations become [`NoiseEvent`]s on the
+/// instruction they follow, which the density-matrix backend applies through
+/// its exact one-qubit Kraus and two-qubit depolarizing channels. Noise that
+/// precedes every instruction anchors on a barrier so each event has a host.
+///
+/// Measurements are rejected: they carry a per-shot record stream the mixed
+/// state does not hold. Callers route those programs to the reference runner.
+pub(super) fn lower_qec_program_to_density_matrix(
+    program: &QecProgram,
+) -> Result<(Circuit, NoiseModel)> {
+    let mut circuit = Circuit::new(program.num_qubits(), 0);
+    let mut after_gate: Vec<Vec<NoiseEvent>> = Vec::new();
+
+    for op in program.ops() {
+        match op {
+            QecOp::Gate { gate, targets } => circuit.add_gate(gate.clone(), targets),
+            QecOp::Reset { basis, qubit } => {
+                circuit.add_reset(*qubit);
+                append_z_to_basis_rotation(&mut circuit, *basis, *qubit);
+            }
+            QecOp::Noise { channel, targets } if channel.probability() > 0.0 => {
+                if circuit.instructions.is_empty() {
+                    circuit.add_barrier(&[]);
+                }
+                let anchor = circuit.instructions.len() - 1;
+                after_gate.resize_with(circuit.instructions.len(), Vec::new);
+                push_density_matrix_noise_events(&mut after_gate[anchor], *channel, targets);
+            }
+            QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC density-matrix estimator".to_string(),
+                    reason: "the density matrix holds no measurement records; \
+                             `run_qec_program` routes measuring programs to the reference runner"
+                        .to_string(),
+                });
+            }
+            QecOp::Noise { .. }
+            | QecOp::ExpectationValue { .. }
+            | QecOp::Detector { .. }
+            | QecOp::ObservableInclude { .. }
+            | QecOp::Postselect { .. }
+            | QecOp::Tick => {}
+        }
+    }
+
+    after_gate.resize_with(circuit.instructions.len(), Vec::new);
+    let noise = NoiseModel {
+        after_gate,
+        readout: Vec::new(),
+    };
+    Ok((circuit, noise))
+}
+
+fn push_density_matrix_noise_events(
+    events: &mut Vec<NoiseEvent>,
+    channel: QecNoise,
+    targets: &[usize],
+) {
+    match channel {
+        QecNoise::XError(p) => {
+            events.extend(targets.iter().map(|&q| NoiseEvent::pauli(q, p, 0.0, 0.0)));
+        }
+        QecNoise::ZError(p) => {
+            events.extend(targets.iter().map(|&q| NoiseEvent::pauli(q, 0.0, 0.0, p)));
+        }
+        QecNoise::Depolarize1(p) => {
+            events.extend(targets.iter().map(|&q| NoiseEvent {
+                channel: NoiseChannel::Depolarizing { p },
+                qubits: SmallVec::from_slice(&[q]),
+            }));
+        }
+        QecNoise::Depolarize2(p) => {
+            events.extend(targets.chunks_exact(2).map(|pair| NoiseEvent {
+                channel: NoiseChannel::TwoQubitDepolarizing { p },
+                qubits: SmallVec::from_slice(pair),
+            }));
+        }
+    }
 }
 
 fn lower_qec_program_to_deferred_circuit(program: &QecProgram) -> Result<QecDeferredProgram> {

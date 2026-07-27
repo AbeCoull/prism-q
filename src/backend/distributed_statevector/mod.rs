@@ -1265,23 +1265,20 @@ impl DistributedStatevectorBackend {
         }
     }
 
-    /// Reset `qubit` to `|0>` using the statevector backend's projection
-    /// convention.
-    fn reset_dist(&mut self, qubit: usize) {
-        let qubit = self.physical_qubit(qubit);
-        let prob_zero = self.prob_outcome_global(qubit, false);
-        if prob_zero > 0.0 {
-            self.collapse(qubit, false);
-            self.inner.pending_norm *= 1.0 / prob_zero.sqrt();
-        } else {
-            simd::zero_slice(&mut self.inner.state);
-            if self.context.rank() == 0 {
-                if let Some(amp) = self.inner.state.get_mut(0) {
-                    *amp = Complex64::new(1.0, 0.0);
-                }
-            }
-            self.inner.pending_norm = 1.0;
+    /// Reset `qubit` to `|0>` as one trajectory of the reset channel: sample
+    /// the outcome, collapse onto it, then apply X when it is 1. The draw
+    /// comes from the rank-replicated measurement stream, so every rank
+    /// selects the same branch.
+    fn reset_dist(&mut self, qubit: usize) -> Result<()> {
+        let physical = self.physical_qubit(qubit);
+        let prob_one = self.prob_one_global(physical);
+        let outcome = self.meas_rng.random::<f64>() < prob_one;
+        self.collapse(physical, outcome);
+        self.inner.pending_norm *= measurement_inv_norm(outcome, prob_one);
+        if outcome {
+            self.apply_gate(&Gate::X, &[qubit])?;
         }
+        Ok(())
     }
 
     /// Route a gate to the local fast path or the distributed paths.
@@ -1410,10 +1407,7 @@ impl Backend for DistributedStatevectorBackend {
                 self.measure_dist(*qubit, *classical_bit);
                 Ok(())
             }
-            Instruction::Reset { qubit } => {
-                self.reset_dist(*qubit);
-                Ok(())
-            }
+            Instruction::Reset { qubit } => self.reset_dist(*qubit),
             Instruction::Barrier { .. } => Ok(()),
             Instruction::Conditional {
                 condition,
@@ -1463,7 +1457,6 @@ impl Backend for DistributedStatevectorBackend {
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {
-        self.reset_dist(qubit);
-        Ok(())
+        self.reset_dist(qubit)
     }
 }

@@ -19,6 +19,7 @@ backend_matrix_outcome_tests! {
     tests: {
         measurement_sparse_deterministic_matches_statevector => "deterministic_measurement",
         measurement_sparse_reset_from_one_matches_statevector => "reset_from_one",
+        measurement_sparse_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_sparse_reset_conditional_matches_statevector => "measurement_reset_conditional",
     }
 }
@@ -41,6 +42,7 @@ backend_matrix_outcome_tests! {
     tests: {
         measurement_mps_deterministic_matches_statevector => "deterministic_measurement",
         measurement_mps_reset_from_one_matches_statevector => "reset_from_one",
+        measurement_mps_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_mps_reset_conditional_matches_statevector => "measurement_reset_conditional",
     }
 }
@@ -63,6 +65,7 @@ backend_matrix_outcome_tests! {
     tests: {
         measurement_tensor_network_deterministic_matches_statevector => "deterministic_measurement",
         measurement_tensor_network_reset_from_one_matches_statevector => "reset_from_one",
+        measurement_tensor_network_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_tensor_network_reset_conditional_matches_statevector => "measurement_reset_conditional",
     }
 }
@@ -85,6 +88,7 @@ backend_matrix_outcome_tests! {
     tests: {
         measurement_factored_deterministic_matches_statevector => "deterministic_measurement",
         measurement_factored_reset_from_one_matches_statevector => "reset_from_one",
+        measurement_factored_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_factored_reset_conditional_matches_statevector => "measurement_reset_conditional",
     }
 }
@@ -107,6 +111,7 @@ backend_matrix_outcome_tests! {
     tests: {
         measurement_stabilizer_deterministic_matches_statevector => "deterministic_measurement",
         measurement_stabilizer_reset_from_one_matches_statevector => "reset_from_one",
+        measurement_stabilizer_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_stabilizer_reset_conditional_matches_statevector => "measurement_reset_conditional",
     }
 }
@@ -129,6 +134,7 @@ backend_matrix_outcome_tests! {
     tests: {
         measurement_product_deterministic_matches_statevector => "deterministic_measurement",
         measurement_product_reset_from_one_matches_statevector => "reset_from_one",
+        measurement_product_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_product_reset_conditional_matches_statevector => "measurement_reset_conditional",
     }
 }

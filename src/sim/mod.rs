@@ -3435,6 +3435,19 @@ mod expectation_gpu_stub_tests {
         ]
     }
 
+    /// The two routes run the same CPU kernels but as separate invocations, so
+    /// a parallel reduction can pair its partial sums differently and land a
+    /// ulp apart. Agreement is what the test is about, not bit equality.
+    fn assert_expectations_close(left: &[f64], right: &[f64]) {
+        assert_eq!(left.len(), right.len());
+        for (slot, (a, b)) in left.iter().zip(right).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-12,
+                "observable {slot}: {a:.17} vs {b:.17}"
+            );
+        }
+    }
+
     #[test]
     fn auto_gpu_expectation_matches_auto_on_stub() {
         let circuit = dense_circuit(16);
@@ -3449,7 +3462,7 @@ mod expectation_gpu_stub_tests {
             42,
         )
         .unwrap();
-        assert_eq!(auto_vals, gpu_vals);
+        assert_expectations_close(&auto_vals, &gpu_vals);
     }
 
     /// Explicit `StatevectorGpu` expectation values resolve hard above the
@@ -3487,7 +3500,7 @@ mod expectation_gpu_stub_tests {
             42,
         )
         .unwrap();
-        assert_eq!(sv, gpu);
+        assert_expectations_close(&sv, &gpu);
     }
 }
 

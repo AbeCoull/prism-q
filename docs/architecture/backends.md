@@ -10,6 +10,22 @@ The diagrams below are rendered directly from PRISM-Q's own SVG circuit renderer
 
 ![GHZ state preparation circuit](../diagrams/ghz_5.svg)
 
+## Reset semantics
+
+`reset` is the channel `rho -> |0⟩⟨0| ⊗ tr_q rho` on every backend: the qubit is traced
+out and replaced by `|0⟩`, leaving the rest of the register in the mixture the trace
+produces. Projecting onto `|0⟩` and renormalizing is not equivalent. The two agree only
+when the reset qubit is unentangled; when it is entangled, projection also collapses its
+partners into the branch correlated with the `|0⟩` outcome. Resetting qubit 1 of a Bell
+pair leaves `⟨Z0⟩ = 0` under the channel and `⟨Z0⟩ = 1` under projection.
+
+A backend holding a single pure state cannot represent the resulting mixture, so it runs
+one trajectory of the channel: sample the measurement outcome, collapse onto it, and
+apply X when the outcome is 1. Averaged over shots that reproduces the channel, and a
+reset consumes one draw from the backend's RNG stream. The density-matrix backend holds
+the mixture and applies the channel directly, with no draw. `tests/reset_channel.rs`
+pins the contract across backends against the density-matrix oracle.
+
 ## Statevector
 
 Full-state simulation in a flat `Vec<Complex64>` of 2^n amplitudes. The primary backend for circuits up to ~28 qubits.

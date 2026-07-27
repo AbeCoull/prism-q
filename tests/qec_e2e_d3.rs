@@ -10,6 +10,10 @@
 //! `e2e-d3-s`: Clifford-only encoding under X noise with detectors,
 //! sampled through the compiled runner's reference route, compared against
 //! closed-form means within a 5-sigma band.
+//!
+//! `e2e-d3-d`: the same encoding plus transversal T under depolarizing noise
+//! and without syndrome measurement, routed to the exact density-matrix
+//! estimator and compared against closed-form means at 1e-10.
 
 mod qec_common;
 
@@ -71,44 +75,78 @@ fn e2e_d3_t() {
 
     for &strategy in &ANALYTICAL_STRATEGIES {
         let result = run_qec_program_with_strategy(&program, strategy).unwrap();
-        let estimates = result.expectation_values.expect("e2e-d3-t estimates");
-        assert_eq!(estimates.len(), 3, "e2e-d3-t: three EXP_VAL ops in order");
-        for (slot, (estimate, reference)) in estimates.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (estimate.mean - reference).abs() < 1e-6,
-                "e2e-d3-t strategy {strategy:?} slot {slot}: {:.8} vs closed form {reference:.8}",
-                estimate.mean
-            );
-        }
+        qec_common::assert_exact_estimates(
+            qec_common::estimates(&result),
+            &expected,
+            1e-6,
+            &format!("e2e-d3-t strategy {strategy:?}"),
+        );
     }
 
     let routed = run_qec_program(&program).unwrap();
     let auto = run_qec_program_with_strategy(&program, QecTStrategy::Auto).unwrap();
-    let routed_estimates = routed.expectation_values.expect("estimates");
-    let auto_estimates = auto.expectation_values.expect("estimates");
-    for (slot, (a, b)) in routed_estimates
-        .iter()
-        .zip(auto_estimates.iter())
-        .enumerate()
-    {
-        assert!(
-            (a.mean - b.mean).abs() < 1e-12,
-            "e2e-d3-t slot {slot}: compiled entry point must match the Auto ladder"
-        );
-    }
+    qec_common::assert_exact_estimates(
+        qec_common::estimates(&routed),
+        &qec_common::means(&auto),
+        1e-12,
+        "e2e-d3-t compiled entry point vs Auto ladder",
+    );
 
     // The syndrome round is deterministic on the logical |+> state, so the
     // sampled reference is exact shot for shot.
     let reference = run_qec_program_reference(&program).unwrap();
     assert_eq!(reference.accepted_shots, STAT_SHOTS);
-    let estimates = reference.expectation_values.expect("estimates");
-    for (slot, (estimate, expected)) in estimates.iter().zip(expected.iter()).enumerate() {
-        assert!(
-            (estimate.mean - expected).abs() < 1e-9,
-            "e2e-d3-t reference slot {slot}: {:.10} vs closed form {expected:.10}",
-            estimate.mean
-        );
-    }
+    qec_common::assert_exact_estimates(
+        qec_common::estimates(&reference),
+        &expected,
+        1e-9,
+        "e2e-d3-t reference",
+    );
+}
+
+#[test]
+fn e2e_d3_d() {
+    // Logical |+> plus transversal T, then DEPOLARIZE1(p) on every data
+    // qubit. No syndrome round, so the program carries no measurement
+    // records and routes to the density-matrix estimator. Depolarizing keeps
+    // (1-4p/3) of a term per data qubit it touches, so the weight-3 logical
+    // terms pick up the cube and Z0*Z1 the square.
+    let p = 0.06;
+    let mut program = QecProgram::with_options(3, qec_common::qec_options(STAT_SHOTS, 2048, false));
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.push_gate(Gate::Cx, &[0, 1]).unwrap();
+    program.push_gate(Gate::Cx, &[0, 2]).unwrap();
+    program.push_gate(Gate::T, &[0]).unwrap();
+    program.push_gate(Gate::T, &[1]).unwrap();
+    program.push_gate(Gate::T, &[2]).unwrap();
+    program.noise(QecNoise::Depolarize1(p), &[0, 1, 2]).unwrap();
+    program
+        .expectation_value(&[QecPauli::x(0), QecPauli::x(1), QecPauli::x(2)], 1.0)
+        .unwrap();
+    program
+        .expectation_value(&[QecPauli::y(0), QecPauli::x(1), QecPauli::x(2)], -0.5)
+        .unwrap();
+    program
+        .expectation_value(&[QecPauli::z(0), QecPauli::z(1)], 1.0)
+        .unwrap();
+
+    let [x_l, y_l, zz] = e2e_d3_t_expected();
+    let decay = 1.0 - 4.0 * p / 3.0;
+    let expected = [x_l * decay.powi(3), y_l * decay.powi(3), zz * decay.powi(2)];
+
+    let result = run_qec_program(&program).unwrap();
+    let estimates = qec_common::estimates(&result);
+    qec_common::assert_exact_estimates(estimates, &expected, 1e-10, "e2e-d3-d");
+    qec_common::assert_zero_variance(estimates, "e2e-d3-d");
+    assert!(estimates.iter().all(|e| e.num_shots == STAT_SHOTS));
+
+    let reference = run_qec_program_reference(&program).unwrap();
+    qec_common::assert_within_sampling_error(
+        qec_common::estimates(&reference),
+        &expected,
+        0.01,
+        "e2e-d3-d reference",
+    );
 }
 
 #[test]
@@ -130,20 +168,14 @@ fn e2e_d3_s() {
 
     let result = run_qec_program(&program).unwrap();
     assert_eq!(result.total_shots, STAT_SHOTS);
-    let estimates = result.expectation_values.expect("e2e-d3-s estimates");
-    assert_eq!(estimates.len(), 2, "e2e-d3-s: two EXP_VAL ops in order");
-    for (slot, (estimate, reference)) in estimates.iter().zip(expected.iter()).enumerate() {
+    let estimates = qec_common::estimates(&result);
+    qec_common::assert_within_sampling_error(estimates, &expected, 0.02, "e2e-d3-s");
+    for (slot, estimate) in estimates.iter().enumerate() {
         assert!(
             estimate.variance > 0.0,
-            "e2e-d3-s slot {slot}: sampled path must report nonzero variance"
+            "e2e-d3-s slot {slot}: measurement records keep this program on the sampled path"
         );
         assert_eq!(estimate.num_shots, STAT_SHOTS);
-        let tol = 5.0 * (estimate.variance / estimate.num_shots as f64).sqrt() + 0.02;
-        assert!(
-            (estimate.mean - reference).abs() < tol,
-            "e2e-d3-s slot {slot}: {:.4} vs closed form {reference:.4} (tol {tol:.4})",
-            estimate.mean
-        );
     }
 
     // Each detector fires when an odd number of its two data qubits flipped:

@@ -82,6 +82,8 @@ fn exp_val_reference_rejects_programs_beyond_mask_width() {
 
 #[test]
 fn exp_val_coefficient_scales_mean_and_variance() {
+    // Sampled path, called directly: `run_qec_program` sends this program to
+    // the exact density-matrix estimator, which reports no spread to scale.
     let build = |coefficient: f64| {
         let mut program = program_with_shots(1, 512);
         program.noise(QecNoise::XError(0.3), &[0]).unwrap();
@@ -90,8 +92,8 @@ fn exp_val_coefficient_scales_mean_and_variance() {
             .unwrap();
         program
     };
-    let unit = run_qec_program(&build(1.0)).unwrap();
-    let scaled = run_qec_program(&build(-0.5)).unwrap();
+    let unit = run_qec_program_reference(&build(1.0)).unwrap();
+    let scaled = run_qec_program_reference(&build(-0.5)).unwrap();
     let unit = &unit.expectation_values.expect("estimates")[0];
     let scaled = &scaled.expectation_values.expect("estimates")[0];
     assert!((scaled.mean - (-0.5) * unit.mean).abs() < 1e-12);
@@ -122,20 +124,14 @@ fn exp_val_reference_matches_analytic_on_live_qubits_after_measurement() {
         .unwrap();
 
     let reference = run_qec_program_reference(&program).unwrap();
-    let ref_estimates = reference.expectation_values.expect("estimates");
     for &strategy in &ANALYTICAL_STRATEGIES {
         let result = run_qec_program_with_strategy(&program, strategy).unwrap();
-        let estimates = result.expectation_values.expect("estimates");
-        assert_eq!(estimates.len(), 3);
-        for (slot, (analytic, sampled)) in estimates.iter().zip(ref_estimates.iter()).enumerate() {
-            let tol = 5.0 * (sampled.variance / sampled.num_shots.max(1) as f64).sqrt() + 0.01;
-            assert!(
-                (analytic.mean - sampled.mean).abs() < tol,
-                "strategy {strategy:?} slot {slot}: analytic {:.4} vs reference {:.4} (tol {tol:.4})",
-                analytic.mean,
-                sampled.mean
-            );
-        }
+        qec_common::assert_within_sampling_error(
+            qec_common::estimates(&reference),
+            &qec_common::means(&result),
+            0.01,
+            &format!("strategy {strategy:?} vs reference"),
+        );
     }
 }
 
@@ -212,25 +208,68 @@ fn exp_val_routing_pinned() {
     noiseless.expectation_value(&[QecPauli::x(0)], 1.0).unwrap();
     let routed = run_qec_program(&noiseless).unwrap();
     let auto = run_qec_program_with_strategy(&noiseless, QecTStrategy::Auto).unwrap();
-    let routed_estimates = routed.expectation_values.expect("estimates");
-    let auto_estimates = auto.expectation_values.expect("estimates");
-    for (a, b) in routed_estimates.iter().zip(auto_estimates.iter()) {
-        assert!(
-            (a.mean - b.mean).abs() < 1e-12 && a.num_shots == b.num_shots,
-            "noiseless EXP_VAL programs must route to the analytical Auto ladder"
-        );
-    }
-
-    let mut noisy = base(1);
-    noisy.noise(QecNoise::XError(0.1), &[0]).unwrap();
-    noisy.expectation_value(&[QecPauli::x(0)], 1.0).unwrap();
-    let routed = run_qec_program(&noisy).unwrap();
-    let reference = run_qec_program_reference(&noisy).unwrap();
-    assert_eq!(
-        routed.expectation_values.expect("estimates"),
-        reference.expectation_values.expect("estimates"),
-        "noisy EXP_VAL programs must route to the reference runner"
+    qec_common::assert_exact_estimates(
+        qec_common::estimates(&routed),
+        &qec_common::means(&auto),
+        1e-12,
+        "noiseless EXP_VAL programs route to the analytical Auto ladder",
     );
+
+    // No measurement records and no postselection, so this is eligible for the
+    // exact route. DEPOLARIZE1 gives the sampled path genuine per-shot spread
+    // (the Y and Z branches flip the X observable), so a zero variance here
+    // can only come from the exact route. <X0> = cos(pi/4) * (1 - 4p/3).
+    let p = 0.3;
+    let mut noisy = base(1);
+    noisy.noise(QecNoise::Depolarize1(p), &[0]).unwrap();
+    noisy.expectation_value(&[QecPauli::x(0)], 1.0).unwrap();
+    let expected = [std::f64::consts::FRAC_1_SQRT_2 * (1.0 - 4.0 * p / 3.0)];
+    let routed = run_qec_program(&noisy).unwrap();
+    let estimates = qec_common::estimates(&routed);
+    qec_common::assert_exact_estimates(
+        estimates,
+        &expected,
+        1e-10,
+        "eligible noisy EXP_VAL programs route to the density-matrix estimator",
+    );
+    qec_common::assert_zero_variance(estimates, "density-matrix route");
+    let sampled = run_qec_program_reference(&noisy).unwrap();
+    assert!(
+        qec_common::estimates(&sampled)[0].variance > 0.0,
+        "fixture must separate the routes: the sampled path has to report spread"
+    );
+
+    // Measurement records force per-shot sampling: Z0 collapses to +1 or -1
+    // with the measured partner, so the reference runner keeps this program.
+    let mut noisy_measured = program_with_shots(2, 256);
+    noisy_measured.push_gate(Gate::H, &[0]).unwrap();
+    noisy_measured.push_gate(Gate::Cx, &[0, 1]).unwrap();
+    noisy_measured.noise(QecNoise::XError(0.1), &[0]).unwrap();
+    noisy_measured.measure_z(1).unwrap();
+    noisy_measured
+        .expectation_value(&[QecPauli::z(0)], 1.0)
+        .unwrap();
+    let routed =
+        qec_common::assert_matches_reference_runner(&noisy_measured, "measurement records");
+    assert!(
+        qec_common::estimates(&routed)[0].variance > 0.0,
+        "sampled path must report spread"
+    );
+    assert_eq!(routed.measurements.num_measurements(), 1);
+
+    // Postselection conditions the estimate on an accepted subensemble, which
+    // Tr(rho O) cannot express. The empty-record predicate never matches, so
+    // the reference runner reports an estimate over zero accepted shots.
+    let mut noisy_postselected = program_with_shots(1, 256);
+    noisy_postselected
+        .noise(QecNoise::XError(0.3), &[0])
+        .unwrap();
+    noisy_postselected.postselect(&[], true).unwrap();
+    noisy_postselected
+        .expectation_value(&[QecPauli::z(0)], 1.0)
+        .unwrap();
+    let routed = qec_common::assert_matches_reference_runner(&noisy_postselected, "postselection");
+    assert_eq!(routed.accepted_shots, 0);
 
     let mut with_detector = base(2);
     with_detector.push_gate(Gate::Cx, &[0, 1]).unwrap();
@@ -241,15 +280,98 @@ fn exp_val_routing_pinned() {
     with_detector
         .expectation_value(&[QecPauli::z(0)], 1.0)
         .unwrap();
-    let routed = run_qec_program(&with_detector).unwrap();
-    let reference = run_qec_program_reference(&with_detector).unwrap();
-    assert_eq!(
-        routed.expectation_values.expect("estimates"),
-        reference.expectation_values.expect("estimates"),
-        "non-Clifford EXP_VAL programs with detectors must fall back to the reference runner"
+    let routed = qec_common::assert_matches_reference_runner(
+        &with_detector,
+        "non-Clifford program with detectors",
     );
     assert_eq!(routed.detectors.num_measurements(), 1);
     assert_eq!(routed.detectors.num_shots(), 256);
+}
+
+#[test]
+fn exp_val_noisy_density_matrix_matches_closed_form() {
+    // Bell pair under all four QEC Pauli channels. Each channel rescales a
+    // Pauli expectation by a fixed factor: X_ERROR(a) and Z_ERROR(b) give
+    // (1-2a) and (1-2b) on terms that anticommute with them, DEPOLARIZE1(c)
+    // gives (1-4c/3) on a term touching its target (two of the three Paulis
+    // anticommute), and DEPOLARIZE2(d) gives (1-16d/15) on a two-qubit term
+    // (7 of the 15 non-identity two-qubit Paulis commute with it). On the
+    // Bell state <Z0*Z1> = <X0*X1> = 1 and <Y0*Y1> = -1.
+    let (a, b, c, d) = (0.1, 0.2, 0.15, 0.05);
+    let mut program = program_with_shots(2, STAT_SHOTS);
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.push_gate(Gate::Cx, &[0, 1]).unwrap();
+    program.noise(QecNoise::XError(a), &[0]).unwrap();
+    program.noise(QecNoise::ZError(b), &[1]).unwrap();
+    program.noise(QecNoise::Depolarize1(c), &[0]).unwrap();
+    program.noise(QecNoise::Depolarize2(d), &[0, 1]).unwrap();
+    program
+        .expectation_value(&[QecPauli::z(0), QecPauli::z(1)], 1.0)
+        .unwrap();
+    program
+        .expectation_value(&[QecPauli::x(0), QecPauli::x(1)], 2.0)
+        .unwrap();
+    program
+        .expectation_value(&[QecPauli::y(0), QecPauli::y(1)], -0.5)
+        .unwrap();
+
+    let shared = (1.0 - 4.0 * c / 3.0) * (1.0 - 16.0 * d / 15.0);
+    let expected = [
+        (1.0 - 2.0 * a) * shared,
+        2.0 * (1.0 - 2.0 * b) * shared,
+        0.5 * (1.0 - 2.0 * a) * (1.0 - 2.0 * b) * shared,
+    ];
+
+    let result = run_qec_program(&program).unwrap();
+    let estimates = qec_common::estimates(&result);
+    qec_common::assert_exact_estimates(estimates, &expected, 1e-10, "density-matrix estimate");
+    qec_common::assert_zero_variance(estimates, "density-matrix estimate");
+    assert!(estimates.iter().all(|e| e.num_shots == STAT_SHOTS));
+    assert_eq!(result.total_shots, STAT_SHOTS);
+    assert_eq!(result.accepted_shots, STAT_SHOTS);
+    assert_eq!(result.measurements.num_measurements(), 0);
+
+    // The per-shot reference runner estimates the same quantity by sampling,
+    // which cross-checks the channel lowering against the trajectory path.
+    let reference = run_qec_program_reference(&program).unwrap();
+    qec_common::assert_within_sampling_error(
+        qec_common::estimates(&reference),
+        &expected,
+        0.01,
+        "reference runner",
+    );
+}
+
+#[test]
+fn exp_val_noisy_density_matrix_absorbs_resets() {
+    // Both paths implement the reset channel, so resets stay on the exact
+    // route. Resetting qubit 1 of a Bell pair traces it out, leaving qubit 0
+    // maximally mixed (<Z0> = 0) and qubit 1 in |+>, whose <X1> decays to
+    // 1-2p under Z_ERROR(p). The reference runner samples one branch of the
+    // reset per shot, so its mean converges to the same values.
+    let p = 0.25;
+    let mut program = program_with_shots(2, STAT_SHOTS);
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.push_gate(Gate::Cx, &[0, 1]).unwrap();
+    program.reset(QecBasis::X, 1).unwrap();
+    program.noise(QecNoise::ZError(p), &[1]).unwrap();
+    program.expectation_value(&[QecPauli::x(1)], 1.0).unwrap();
+    program.expectation_value(&[QecPauli::z(0)], 1.0).unwrap();
+
+    let expected = [1.0 - 2.0 * p, 0.0];
+
+    let result = run_qec_program(&program).unwrap();
+    let estimates = qec_common::estimates(&result);
+    qec_common::assert_exact_estimates(estimates, &expected, 1e-10, "reset under noise");
+    qec_common::assert_zero_variance(estimates, "reset under noise");
+
+    let reference = run_qec_program_reference(&program).unwrap();
+    qec_common::assert_within_sampling_error(
+        qec_common::estimates(&reference),
+        &expected,
+        0.01,
+        "reset under noise reference",
+    );
 }
 
 #[test]

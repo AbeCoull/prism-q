@@ -385,6 +385,7 @@ impl StatevectorBackend {
     #[cfg(feature = "gpu")]
     fn apply_reset_gpu(&mut self, qubit: usize) -> Result<()> {
         use crate::gpu::kernels::dense as k;
+        use rand::RngExt;
 
         let gpu = self
             .gpu_state
@@ -392,20 +393,20 @@ impl StatevectorBackend {
             .expect("apply_reset_gpu called without gpu_state");
         let ctx = gpu.context().clone();
 
-        // Match CPU semantics (src/backend/statevector/kernels.rs::apply_reset):
-        // deterministic projection onto |0⟩ irrespective of the current amplitude on |1⟩.
         let prob_one = k::measure_prob_one(&ctx, gpu, qubit)?;
-        let prob_zero = (1.0 - prob_one).clamp(0.0, 1.0);
+        let u: f64 = self.rng.random();
+        let outcome = u < prob_one;
 
-        k::measure_collapse(&ctx, gpu, qubit, false)?;
+        let gpu = self
+            .gpu_state
+            .as_mut()
+            .expect("apply_reset_gpu called without gpu_state");
+        k::measure_collapse(&ctx, gpu, qubit, outcome)?;
+        let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
+        gpu.set_pending_norm(gpu.pending_norm() * inv_norm);
 
-        if prob_zero > crate::backend::NORM_CLAMP_MIN {
-            let inv_norm = 1.0 / prob_zero.sqrt();
-            gpu.set_pending_norm(gpu.pending_norm() * inv_norm);
-        } else {
-            // |0> half was empty, reinitialize to |0...0> (CPU does the same).
-            k::launch_set_initial_state(&ctx, gpu)?;
-            gpu.set_pending_norm(1.0);
+        if outcome {
+            self.dispatch_gate_gpu(&Gate::X, &[qubit])?;
         }
         Ok(())
     }

@@ -276,10 +276,11 @@ impl SparseBackend {
 
     fn apply_reset(&mut self, qubit: usize) {
         let mask = 1usize << qubit;
-        let prob_zero = self.masked_prob(mask, false);
+        let prob_one = self.masked_prob(mask, true);
+        let outcome = self.rng.random::<f64>() < prob_one;
+        let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
 
-        if prob_zero > 0.0 {
-            let inv_norm = 1.0 / prob_zero.sqrt();
+        if !outcome {
             self.state.retain(|&idx, amp| {
                 if idx & mask == 0 {
                     *amp *= inv_norm;
@@ -288,10 +289,16 @@ impl SparseBackend {
                     false
                 }
             });
-        } else {
-            self.state.clear();
-            self.state.insert(0, Complex64::new(1.0, 0.0));
+            return;
         }
+
+        let folded: Vec<(usize, Complex64)> = self
+            .state
+            .drain()
+            .filter(|(idx, _)| idx & mask != 0)
+            .map(|(idx, amp)| (idx ^ mask, amp * inv_norm))
+            .collect();
+        self.state.extend(folded);
     }
 
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {

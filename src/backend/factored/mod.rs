@@ -460,27 +460,23 @@ impl FactoredBackend {
         let n = sub.state.len();
         let zero = Complex64::new(0.0, 0.0);
 
-        let mut prob_zero = 0.0f64;
+        let mut prob_one = 0.0f64;
         for i in 0..n {
-            if (i & mask) == 0 {
-                prob_zero += sub.state[i].norm_sqr();
+            if (i & mask) != 0 {
+                prob_one += sub.state[i].norm_sqr();
             }
         }
 
-        if prob_zero > 0.0 {
-            let inv_norm = 1.0 / prob_zero.sqrt();
-            for i in 0..n {
-                if (i & mask) == 0 {
-                    sub.state[i] *= inv_norm;
-                } else {
-                    sub.state[i] = zero;
-                }
+        let outcome = self.rng.random::<f64>() < prob_one;
+        let inv_norm = measurement_inv_norm(outcome, prob_one);
+
+        for i in 0..n {
+            if (i & mask) != 0 {
+                continue;
             }
-        } else {
-            for amp in sub.state.iter_mut() {
-                *amp = zero;
-            }
-            sub.state[0] = Complex64::new(1.0, 0.0);
+            let source = if outcome { i | mask } else { i };
+            sub.state[i] = sub.state[source] * inv_norm;
+            sub.state[i | mask] = zero;
         }
     }
 

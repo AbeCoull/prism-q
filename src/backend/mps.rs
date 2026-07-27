@@ -1540,50 +1540,9 @@ impl MpsBackend {
     }
 
     fn apply_reset(&mut self, qubit: usize) {
-        let l_env = self.compute_left_env(qubit);
-        let r_env = self.compute_right_env(qubit);
-        let t = &self.sites[qubit];
-        let bl = t.bond_left;
-        let br = t.bond_right;
-
-        let mut prob_zero = 0.0f64;
-        for alpha in 0..bl {
-            for alpha_p in 0..bl {
-                let l_val = l_env[alpha * bl + alpha_p];
-                if l_val == ZERO {
-                    continue;
-                }
-                for beta in 0..br {
-                    for beta_p in 0..br {
-                        let r_val = r_env[beta * br + beta_p];
-                        if r_val == ZERO {
-                            continue;
-                        }
-                        prob_zero += (l_val
-                            * t.data[t.idx(alpha, 0, beta)]
-                            * t.data[t.idx(alpha_p, 0, beta_p)].conj()
-                            * r_val)
-                            .re;
-                    }
-                }
-            }
-        }
-
-        if prob_zero > NORM_CLAMP_MIN {
-            let inv_sqrt = 1.0 / prob_zero.sqrt();
-            let scale = Complex64::new(inv_sqrt, 0.0);
-            let t = &mut self.sites[qubit];
-            for alpha in 0..bl {
-                for beta in 0..br {
-                    let idx_0 = alpha * (2 * br) + beta;
-                    let idx_1 = alpha * (2 * br) + br + beta;
-                    t.data[idx_0] *= scale;
-                    t.data[idx_1] = ZERO;
-                }
-            }
-        } else {
-            self.apply_single_qubit_gate(qubit, &[[ZERO, ONE], [ONE, ZERO]]);
-        }
+        let prob = self.site_outcome_probabilities(qubit);
+        let outcome = usize::from(self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0));
+        self.collapse_site_to_zero(qubit, outcome, prob[outcome].clamp(0.0, 1.0));
     }
 
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
@@ -1681,6 +1640,29 @@ impl MpsBackend {
             }
         }
         prob
+    }
+
+    /// Collapse a site onto `outcome` and return it to the zero state.
+    ///
+    /// Writing the surviving component straight into the zero slot folds in the
+    /// X that a trajectory reset would otherwise apply after projecting onto
+    /// outcome 1, and takes the Born probability from the caller so the site
+    /// environments are contracted once per reset rather than twice.
+    fn collapse_site_to_zero(&mut self, site: usize, outcome: usize, prob: f64) {
+        if prob <= NORM_CLAMP_MIN {
+            return;
+        }
+        let scale = Complex64::new(1.0 / prob.sqrt(), 0.0);
+        let t = &mut self.sites[site];
+        let br = t.bond_right;
+        for alpha in 0..t.bond_left {
+            let base = alpha * (2 * br);
+            for beta in 0..br {
+                let zero_idx = base + beta;
+                t.data[zero_idx] = t.data[base + outcome * br + beta] * scale;
+                t.data[zero_idx + br] = ZERO;
+            }
+        }
     }
 
     /// Project a logical qubit onto a requested computational-basis outcome.

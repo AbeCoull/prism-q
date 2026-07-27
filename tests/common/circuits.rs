@@ -390,6 +390,20 @@ pub fn reset_from_one() -> Circuit {
     circuit
 }
 
+/// Reset a qubit holding |1> while another qubit is in superposition. The
+/// reset outcome is forced, so the case stays deterministic, but the spectator
+/// is what makes it discriminating: an implementation that reinitializes the
+/// whole register instead of the reset qubit collapses qubit 0 as well.
+/// One-qubit `reset_from_one` cannot see that.
+pub fn reset_from_one_with_spectator() -> Circuit {
+    let mut circuit = Circuit::new(2, 1);
+    circuit.add_gate(Gate::X, &[1]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_reset(1);
+    circuit.add_measure(1, 0);
+    circuit
+}
+
 pub fn superposition_measurement() -> Circuit {
     let mut circuit = Circuit::new(1, 1);
     circuit.add_gate(Gate::H, &[0]);
@@ -528,7 +542,7 @@ pub fn exact_small_cases() -> [CircuitCase; 18] {
     ]
 }
 
-pub fn measurement_cases() -> [CircuitCase; 3] {
+pub fn measurement_cases() -> [CircuitCase; 4] {
     [
         CircuitCase::new(
             "deterministic_measurement",
@@ -541,6 +555,15 @@ pub fn measurement_cases() -> [CircuitCase; 3] {
         CircuitCase::new(
             "reset_from_one",
             reset_from_one,
+            CircuitCapabilities::new()
+                .clifford_only()
+                .requires_measurement()
+                .requires_reset()
+                .product_separable(),
+        ),
+        CircuitCase::new(
+            "reset_from_one_with_spectator",
+            reset_from_one_with_spectator,
             CircuitCapabilities::new()
                 .clifford_only()
                 .requires_measurement()

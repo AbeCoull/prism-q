@@ -44,6 +44,7 @@ flowchart TD
 The remaining pages in this section follow that flow: the
 [parser and circuit IR](./ir.md), the [fusion pipeline](./fusion.md), the
 [simulation engine and dispatch](./engine.md), the individual [backends](./backends.md),
-the [compiled samplers](./samplers.md), the [native QEC program IR](./qec-ir.md), the
+the [compiled samplers](./samplers.md), the [native QEC program IR](./qec-ir.md) and its
+[execution path](./qec-programs.md), the
 [threading, SIMD, and memory layout](./threading-simd.md), and the
 [error model and public API surface](./api-surface.md).

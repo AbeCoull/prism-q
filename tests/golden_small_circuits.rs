@@ -291,6 +291,70 @@ fn measure_collapsed_state_is_consistent() {
     }
 }
 
+// ---- Reset ----
+//
+// These anchor the statevector's own `reset` against hand-computed values.
+// The cross-backend matrices in `tests/measurement_matrix.rs` compare every
+// other backend against the statevector, so nothing there can tell which side
+// of a disagreement is wrong. `reset` went unanchored here for a long time,
+// and a projection-onto-|0> implementation survived as a result.
+
+#[test]
+fn reset_returns_qubit_to_zero() {
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(Gate::X, &[0]);
+    c.add_reset(0);
+    assert_probs(&run_and_probs(&c), &[1.0, 0.0]);
+}
+
+#[test]
+fn reset_from_one_preserves_a_spectator_superposition() {
+    // Resetting a qubit that holds |1> must clear that qubit and nothing else.
+    // q0 stays in |+>, so the two |q1 = 0> outcomes keep weight 1/2 each.
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::X, &[1]);
+    c.add_gate(Gate::H, &[0]);
+    c.add_reset(1);
+    assert_probs(&run_and_probs(&c), &[0.5, 0.5, 0.0, 0.0]);
+}
+
+#[test]
+fn reset_of_an_entangled_partner_samples_both_branches() {
+    // Reset is the channel `rho -> |0><0| (x) tr_q rho`. A statevector carries
+    // one trajectory of it, so each run lands wholly on |00> or wholly on |01>
+    // (q0 set, q1 cleared), and over seeds both branches must occur. A
+    // projection onto |0> yields |00> every time, keeping the partner
+    // correlated with the |0> outcome. Sixty-four seeds make a one-sided
+    // result conclusive; `tests/reset_channel.rs` pins the 1/2 weights against
+    // the density-matrix oracle.
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_reset(1);
+
+    let mut branches = [false; 2];
+    for seed in 0..64u64 {
+        let mut backend = StatevectorBackend::new(seed);
+        sim::run_on(&mut backend, &c).unwrap();
+        let probs = backend.probabilities().unwrap();
+        assert!(
+            probs[2].abs() < EPS && probs[3].abs() < EPS,
+            "seed {seed}: q1 must be cleared, got {probs:?}"
+        );
+        let branch = usize::from(probs[1] > 0.5);
+        assert!(
+            (probs[branch] - 1.0).abs() < EPS,
+            "seed {seed}: one trajectory is a single basis state, got {probs:?}"
+        );
+        branches[branch] = true;
+    }
+    assert!(
+        branches[0] && branches[1],
+        "reset must sample both branches of the partner, saw only {}",
+        if branches[0] { "|00>" } else { "|01>" }
+    );
+}
+
 // ---- Circuit depth ----
 
 #[test]

@@ -837,11 +837,34 @@ fn loopback_reset_clears_global_qubit() {
 }
 
 #[test]
+fn loopback_reset_of_entangled_partner_matches_statevector() {
+    relax_min_local_qubits();
+    // Reset samples a branch, so every rank has to draw the same outcome from
+    // the replicated measurement stream. A disagreement leaves ranks holding
+    // halves of different branches, which the statevector comparison catches.
+    let n = 5;
+    let mut b = CircuitBuilder::new(n);
+    b.h(0);
+    for q in 1..n {
+        b.cx(0, q);
+    }
+    let mut circuit = b.build();
+    circuit.add_reset(n - 1);
+
+    let expected = reference_probs(&circuit);
+    assert!(
+        (expected[0] + expected[(1 << (n - 1)) - 1] - 1.0).abs() < TOL,
+        "reset of a GHZ partner must land wholly on one branch, got {expected:?}"
+    );
+    assert_loopback_matches(&circuit, &[1, 2, 4]);
+}
+
+#[test]
 fn loopback_reset_empty_zero_branch_matches_statevector() {
     relax_min_local_qubits();
-    // Statevector reset projects onto the |0> branch. If that branch is empty,
-    // it reinitializes to |0...0>; distributed reset must not preserve other
-    // qubits by flipping the |1> branch.
+    // Resetting a qubit that holds |1> has no |0> branch to sample: the
+    // outcome is forced to 1, so the reset collapses there and flips it,
+    // leaving every other qubit untouched.
     let n = 5;
     let mut b = CircuitBuilder::new(n);
     b.x(0).x(n - 1);
@@ -850,8 +873,8 @@ fn loopback_reset_empty_zero_branch_matches_statevector() {
 
     let expected = reference_probs(&circuit);
     assert!(
-        (expected[0] - 1.0).abs() < TOL,
-        "statevector reset should reinitialize empty zero branch"
+        (expected[1] - 1.0).abs() < TOL,
+        "reset from |1> must clear only the reset qubit and leave qubit 0 set"
     );
     assert_loopback_matches(&circuit, &[1, 2, 4]);
 }

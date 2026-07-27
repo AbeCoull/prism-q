@@ -1,10 +1,11 @@
 //! Direct-circuit tests for the joint-observable SPP/SPD API.
 
+mod common;
+
+use common::SEED;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::{PauliAxis, PauliTerm, run_spd_observable, run_spp_observable};
-
-const SEED: u64 = 0xDEAD_BEEF;
 
 #[test]
 fn spp_recovers_single_qubit_z_expectation_on_h_t_h_circuit() {

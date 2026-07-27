@@ -8,11 +8,9 @@
 
 mod common;
 
-use common::{STAB_EPS, assert_backend_matches_sv, is_clifford};
+use common::{SEED, STAB_EPS, assert_backend_matches_sv, is_clifford};
 use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::circuits;
-
-const SEED: u64 = 42;
 
 fn check(label: &str, circuit: &prism_q::circuit::Circuit) {
     assert!(

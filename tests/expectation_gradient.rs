@@ -1,14 +1,15 @@
 //! Adjoint-gradient correctness: `run_expectation_gradient` and
 //! `Simulate::expectation_gradient` validated against central finite
-//! differences and the parameter-shift rule, at fixed seed 42.
+//! differences and the parameter-shift rule, at the fixed test seed.
 
+mod common;
+
+use common::SEED;
 use prism_q::circuits;
 use prism_q::{
     Circuit, Gate, Instruction, ParameterMap, PauliTerm, run_expectation_gradient,
     run_expectation_values, simulate,
 };
-
-const SEED: u64 = 42;
 
 type Hamiltonian = Vec<(f64, Vec<PauliTerm>)>;
 

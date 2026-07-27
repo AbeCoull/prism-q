@@ -7,7 +7,8 @@ use prism_q::{
     run_qec_program_reference,
 };
 
-pub const SEED: u64 = 0xDEAD_BEEF;
+/// Fixed test seed. `0xDEAD_BEEF` is reserved for bench circuits.
+pub const SEED: u64 = 42;
 
 pub const ANALYTICAL_STRATEGIES: [QecTStrategy; 3] =
     [QecTStrategy::Auto, QecTStrategy::Spd, QecTStrategy::Camps];

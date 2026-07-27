@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 pub mod circuits;
+pub mod conformance;
 pub mod framework;
 pub mod matrix;
 

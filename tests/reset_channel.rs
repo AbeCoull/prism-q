@@ -9,11 +9,15 @@
 //!
 //! The oracle is the density-matrix backend, which holds the mixture and
 //! applies the channel directly. It is deliberately not the statevector
-//! backend: the sv-reference matrix in `tests/backend_matrix.rs` cannot pin
-//! this contract, because the statevector is one of the implementations under
-//! test. Pure-state backends carry one trajectory per run, so a case whose
-//! branches differ is compared as an average over seeds.
+//! backend: the sv-reference matrices in `tests/backend_matrix.rs` and
+//! `tests/measurement_matrix.rs` cannot pin this contract, because the
+//! statevector is one of the implementations under test. Pure-state backends
+//! carry one trajectory per run, so a case whose branches differ is compared as
+//! an average over seeds.
 
+mod common;
+
+use common::{SEED, assert_probs_close};
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::backend::factored::FactoredBackend;
@@ -27,7 +31,6 @@ use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
 
-const SEED: u64 = 42;
 const TRIALS: usize = 2_000;
 /// Band on a seed-averaged probability at `TRIALS` samples. The tightest
 /// entry is a fair coin, whose standard error here is 0.011.
@@ -174,15 +177,6 @@ fn averaged_probabilities(entry: &BackendEntry, circuit: &Circuit) -> Vec<f64> {
         }
     }
     totals.iter().map(|t| t / TRIALS as f64).collect()
-}
-
-fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64, label: &str) {
-    for (slot, (got, want)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (got - want).abs() < eps,
-            "{label} slot {slot}: {got:.6} vs channel {want:.6}"
-        );
-    }
 }
 
 fn find_case(name: &str) -> &'static ResetCase {

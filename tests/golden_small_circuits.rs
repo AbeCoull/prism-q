@@ -1,44 +1,45 @@
-//! Golden tests: known circuits with analytically verified outputs.
+//! Closed-form goldens: circuits whose output was computed by hand.
 //!
-//! Each test constructs a circuit programmatically (not via QASM) and checks
-//! the resulting state vector or probabilities against hand-computed values.
+//! The expected value is either a literal derived from the algebra in the
+//! comment above it, or a textbook decomposition of the same gate applied on
+//! the same backend. Nothing here is checked against a second simulator, which
+//! is the point: `tests/backend_equivalence.rs` compares backends against each
+//! other, and a comparison can only report that two implementations disagree,
+//! never which one is right. `tests/common/mod.rs` records what that cost once,
+//! when a projection-onto-|0> `reset` survived a green matrix because the
+//! statevector it was compared against had the same bug.
+//!
+//! Add a test here when a behavior needs an authority. Add it to
+//! `tests/backend_equivalence.rs` when two implementations need to agree.
 
 mod common;
 
-use common::assert_probs_close;
+use common::{assert_probs_close, run_fused_probs};
 use num_complex::Complex64;
 use prism_q::Instruction;
 use prism_q::backend::Backend;
-use prism_q::backend::mps::MpsBackend;
+use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::backend::product::ProductStateBackend;
-use prism_q::backend::sparse::SparseBackend;
 use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
-use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::{Gate, McuData};
 use prism_q::sim;
 
 const EPS: f64 = 1e-12;
 
-fn run_with(
-    kind: prism_q::BackendKind,
-    circuit: &Circuit,
-    seed: u64,
-) -> prism_q::Result<prism_q::RunOutcome> {
-    sim::simulate(circuit).backend(kind).seed(seed).run()
-}
-
 fn run_and_probs(circuit: &Circuit) -> Vec<f64> {
-    let mut backend = StatevectorBackend::new(42);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.probabilities().unwrap()
+    run_fused_probs(&mut StatevectorBackend::new(common::SEED), circuit)
 }
 
 fn run_and_state(circuit: &Circuit) -> Vec<Complex64> {
-    let mut backend = StatevectorBackend::new(42);
+    let mut backend = StatevectorBackend::new(common::SEED);
     sim::run_on(&mut backend, circuit).unwrap();
     backend.state_vector().to_vec()
+}
+
+fn run_stabilizer_probs(circuit: &Circuit) -> Vec<f64> {
+    run_fused_probs(&mut StabilizerBackend::new(common::SEED), circuit)
 }
 
 fn assert_probs(actual: &[f64], expected: &[f64]) {
@@ -277,7 +278,7 @@ fn measure_collapsed_state_is_consistent() {
     c.add_gate(Gate::H, &[0]);
     c.add_measure(0, 0);
 
-    let mut backend = StatevectorBackend::new(42);
+    let mut backend = StatevectorBackend::new(common::SEED);
     sim::run_on(&mut backend, &c).unwrap();
     let outcome = backend.classical_results()[0];
     let probs = backend.probabilities().unwrap();
@@ -371,274 +372,6 @@ fn depth_calculation() {
     assert_eq!(c.depth(), 3);
 }
 
-// ---- Stabilizer vs Statevector golden tests ----
-
-fn run_stabilizer_probs(circuit: &Circuit) -> Vec<f64> {
-    let mut backend = StabilizerBackend::new(42);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.probabilities().unwrap()
-}
-
-#[test]
-fn stabilizer_bell_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn stabilizer_ghz4_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    for i in 0..3 {
-        c.add_gate(Gate::Cx, &[i, i + 1]);
-    }
-    assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn stabilizer_all_cliffords_match_statevector() {
-    let gates = [
-        Gate::Id,
-        Gate::X,
-        Gate::Y,
-        Gate::Z,
-        Gate::H,
-        Gate::S,
-        Gate::Sdg,
-    ];
-    for gate in &gates {
-        let mut c = Circuit::new(1, 0);
-        c.add_gate(gate.clone(), &[0]);
-        assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-    }
-}
-
-#[test]
-fn stabilizer_swap_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(Gate::Swap, &[0, 1]);
-    assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn stabilizer_cz_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::Cz, &[0, 1]);
-    assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn stabilizer_complex_clifford_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::S, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::Cz, &[1, 2]);
-    c.add_gate(Gate::Swap, &[2, 3]);
-    c.add_gate(Gate::X, &[3]);
-    c.add_gate(Gate::Sdg, &[1]);
-    assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-}
-
-// ---- Sparse vs Statevector golden tests ----
-
-fn run_sparse_probs(circuit: &Circuit) -> Vec<f64> {
-    let mut backend = SparseBackend::new(42);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.probabilities().unwrap()
-}
-
-#[test]
-fn sparse_bell_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn sparse_ghz4_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    for i in 0..3 {
-        c.add_gate(Gate::Cx, &[i, i + 1]);
-    }
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn sparse_all_single_gates_match_statevector() {
-    let gates = [
-        Gate::Id,
-        Gate::X,
-        Gate::Y,
-        Gate::Z,
-        Gate::H,
-        Gate::S,
-        Gate::Sdg,
-        Gate::T,
-        Gate::Tdg,
-        Gate::Rx(1.234),
-        Gate::Ry(2.345),
-        Gate::Rz(3.456),
-    ];
-    for gate in &gates {
-        let mut c = Circuit::new(1, 0);
-        c.add_gate(gate.clone(), &[0]);
-        assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-    }
-}
-
-#[test]
-fn sparse_swap_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(Gate::Swap, &[0, 1]);
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn sparse_cz_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::Cz, &[0, 1]);
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn sparse_complex_circuit_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Rx(0.5), &[1]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::Ry(1.0), &[2]);
-    c.add_gate(Gate::Cz, &[1, 2]);
-    c.add_gate(Gate::Swap, &[2, 3]);
-    c.add_gate(Gate::T, &[3]);
-    c.add_gate(Gate::Rz(0.7), &[0]);
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-// ---- MPS vs Statevector golden tests ----
-
-const MPS_EPS: f64 = 1e-10;
-
-fn run_mps_probs(circuit: &Circuit) -> Vec<f64> {
-    let mut backend = MpsBackend::new(42, 64);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.probabilities().unwrap()
-}
-
-fn assert_probs_mps(actual: &[f64], expected: &[f64]) {
-    assert_probs_close(actual, expected, MPS_EPS, "mps");
-}
-
-#[test]
-fn mps_bell_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_ghz4_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    for i in 0..3 {
-        c.add_gate(Gate::Cx, &[i, i + 1]);
-    }
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_all_single_gates_match_statevector() {
-    let gates = [
-        Gate::Id,
-        Gate::X,
-        Gate::Y,
-        Gate::Z,
-        Gate::H,
-        Gate::S,
-        Gate::Sdg,
-        Gate::T,
-        Gate::Tdg,
-        Gate::Rx(1.234),
-        Gate::Ry(2.345),
-        Gate::Rz(3.456),
-    ];
-    for gate in &gates {
-        let mut c = Circuit::new(1, 0);
-        c.add_gate(gate.clone(), &[0]);
-        assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-    }
-}
-
-#[test]
-fn mps_swap_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(Gate::Swap, &[0, 1]);
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_cz_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::Cz, &[0, 1]);
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_complex_circuit_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Rx(0.5), &[1]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::Ry(1.0), &[2]);
-    c.add_gate(Gate::Cz, &[1, 2]);
-    c.add_gate(Gate::Swap, &[2, 3]);
-    c.add_gate(Gate::T, &[3]);
-    c.add_gate(Gate::Rz(0.7), &[0]);
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_non_adjacent_cx_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 3]);
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_measurement_matches_statevector() {
-    let mut c = Circuit::new(2, 2);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_measure(0, 0);
-    c.add_measure(1, 1);
-
-    let mut sv_backend = StatevectorBackend::new(42);
-    sim::run_on(&mut sv_backend, &c).unwrap();
-    let sv_bits = sv_backend.classical_results().to_vec();
-
-    let mut mps_backend = MpsBackend::new(42, 64);
-    sim::run_on(&mut mps_backend, &c).unwrap();
-    let mps_bits = mps_backend.classical_results().to_vec();
-
-    assert_eq!(sv_bits, mps_bits);
-}
-
 // ---- Multi-controlled gate (MCU) golden tests ----
 
 #[test]
@@ -701,35 +434,6 @@ fn mcu_ccz_phase_flip() {
 }
 
 #[test]
-fn mcu_sparse_toffoli_matches_statevector() {
-    let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(toffoli, &[0, 1, 2]);
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mcu_sparse_ccz_matches_statevector() {
-    let z_mat = Gate::Z.matrix_2x2();
-    let ccz = Gate::Mcu(Box::new(McuData {
-        mat: z_mat,
-        num_controls: 2,
-    }));
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::X, &[2]);
-    c.add_gate(ccz, &[0, 1, 3]);
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
 fn mcu_3ctrl_x() {
     // CCCX: 3 controls, flip target only when all active
     let x_mat = Gate::X.matrix_2x2();
@@ -778,265 +482,29 @@ fn mcu_inv_ctrl_ctrl_rz() {
     assert_amplitude(sv[0b111], Complex64::new(amp, 0.0), "|111⟩");
 }
 
-// ---- CPhase cross-backend tests ----
-
-#[test]
-fn cphase_mps_matches_statevector() {
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(Gate::cphase(std::f64::consts::FRAC_PI_3), &[0, 1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::cphase(0.7), &[1, 2]);
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn cphase_sparse_matches_statevector() {
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(Gate::cphase(std::f64::consts::FRAC_PI_3), &[0, 1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::cphase(0.7), &[1, 2]);
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_matches_statevector_mcu() {
-    let x_mat = Gate::X.matrix_2x2();
-    let mcu = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::X, &[0]);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(mcu, &[0, 1, 3]); // non-adjacent target
-    assert_probs(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
 // ---- Product state backend ----
-
-fn run_product_probs(circuit: &Circuit) -> Vec<f64> {
-    let mut backend = ProductStateBackend::new(42);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.probabilities().unwrap()
-}
-
-#[test]
-fn product_h_all_qubits() {
-    let mut c = Circuit::new(4, 0);
-    for q in 0..4 {
-        c.add_gate(Gate::H, &[q]);
-    }
-    assert_probs(&run_product_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn product_rotation_circuit() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::Rx(0.7), &[0]);
-    c.add_gate(Gate::Ry(1.3), &[1]);
-    c.add_gate(Gate::Rz(2.1), &[2]);
-    c.add_gate(Gate::Rx(0.4), &[3]);
-    assert_probs(&run_product_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn product_mixed_single_gates() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::S, &[0]);
-    c.add_gate(Gate::T, &[1]);
-    c.add_gate(Gate::X, &[2]);
-    c.add_gate(Gate::Y, &[3]);
-    c.add_gate(Gate::Rz(0.5), &[0]);
-    assert_probs(&run_product_probs(&c), &run_and_probs(&c));
-}
 
 #[test]
 fn product_rejects_entangling() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::Cx, &[0, 1]);
-    let mut b = ProductStateBackend::new(42);
+    let mut b = ProductStateBackend::new(common::SEED);
     let result = sim::run_on(&mut b, &c);
     assert!(result.is_err());
 }
 
-// ---- Tensor Network vs Statevector golden tests ----
-
-const TN_EPS: f64 = 1e-10;
-
-fn run_tn_probs(circuit: &Circuit) -> Vec<f64> {
-    let mut backend = TensorNetworkBackend::new(42);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.probabilities().unwrap()
-}
-
-fn assert_probs_tn(actual: &[f64], expected: &[f64]) {
-    assert_probs_close(actual, expected, TN_EPS, "tn");
-}
-
-#[test]
-fn tn_bell_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn tn_ghz4_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    for i in 0..3 {
-        c.add_gate(Gate::Cx, &[i, i + 1]);
-    }
-    assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn tn_all_single_gates_match_statevector() {
-    let gates = [
-        Gate::Id,
-        Gate::X,
-        Gate::Y,
-        Gate::Z,
-        Gate::H,
-        Gate::S,
-        Gate::Sdg,
-        Gate::T,
-        Gate::Tdg,
-        Gate::Rx(1.234),
-        Gate::Ry(2.345),
-        Gate::Rz(3.456),
-    ];
-    for gate in &gates {
-        let mut c = Circuit::new(1, 0);
-        c.add_gate(gate.clone(), &[0]);
-        assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-    }
-}
-
-#[test]
-fn tn_complex_circuit_matches_statevector() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Rx(0.5), &[1]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::Ry(1.0), &[2]);
-    c.add_gate(Gate::Cz, &[1, 2]);
-    c.add_gate(Gate::Swap, &[2, 3]);
-    c.add_gate(Gate::T, &[3]);
-    c.add_gate(Gate::Rz(0.7), &[0]);
-    assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-}
-
-// ---- Parallel threshold correctness (16q = PARALLEL_THRESHOLD_QUBITS + 2) ----
+// ---- Compound gates against their textbook decomposition ----
 //
-// Statevector switches to Rayon parallel kernels at >= 14 qubits.
-// These tests run at 16q to validate parallel paths produce identical
-// results to sequential backends.
-
-const PAR_EPS: f64 = 1e-10;
-
-fn assert_probs_par(actual: &[f64], expected: &[f64], label: &str) {
-    assert_probs_close(actual, expected, PAR_EPS, label);
-}
-
-#[test]
-fn par_16q_random_sparse_matches_statevector() {
-    let circuit = prism_q::circuits::random_circuit(16, 10, 42);
-    let sv = run_and_probs(&circuit);
-    let sp = run_sparse_probs(&circuit);
-    assert_probs_par(&sp, &sv, "sparse/random_16q");
-}
-
-#[test]
-fn par_16q_random_mps_matches_statevector() {
-    let circuit = prism_q::circuits::random_circuit(16, 10, 42);
-    let sv = run_and_probs(&circuit);
-    let mut mps = MpsBackend::new(42, 256);
-    sim::run_on(&mut mps, &circuit).unwrap();
-    let mp = mps.probabilities().unwrap();
-    assert_probs_par(&mp, &sv, "mps/random_16q");
-}
-
-#[test]
-fn par_16q_clifford_stabilizer_matches_statevector() {
-    let circuit = prism_q::circuits::clifford_heavy_circuit(16, 10, 42);
-    let sv = run_and_probs(&circuit);
-    let stab = run_stabilizer_probs(&circuit);
-    assert_probs_par(&stab, &sv, "stabilizer/clifford_16q");
-}
-
-#[test]
-fn par_16q_qft_sparse_matches_statevector() {
-    let circuit = prism_q::circuits::qft_circuit(16);
-    let sv = run_and_probs(&circuit);
-    let sp = run_sparse_probs(&circuit);
-    assert_probs_par(&sp, &sv, "sparse/qft_16q");
-}
-
-#[test]
-fn par_16q_hea_mps_matches_statevector() {
-    let circuit = prism_q::circuits::hardware_efficient_ansatz(16, 3, 42);
-    let sv = run_and_probs(&circuit);
-    let mut mps = MpsBackend::new(42, 256);
-    sim::run_on(&mut mps, &circuit).unwrap();
-    let mp = mps.probabilities().unwrap();
-    assert_probs_par(&mp, &sv, "mps/hea_16q");
-}
-
-#[test]
-fn par_16q_product_matches_statevector() {
-    let mut c = Circuit::new(16, 0);
-    for q in 0..16 {
-        c.add_gate(Gate::H, &[q]);
-        c.add_gate(Gate::Rz(0.1 * (q + 1) as f64), &[q]);
-    }
-    let sv = run_and_probs(&c);
-    let pp = run_product_probs(&c);
-    assert_probs_par(&pp, &sv, "product/16q");
-}
-
-// ---- New gate golden tests ----
-
-#[test]
-fn stabilizer_sx_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::SX, &[0]);
-    c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn stabilizer_sxdg_matches_statevector() {
-    let mut c = Circuit::new(2, 0);
-    c.add_gate(Gate::SXdg, &[0]);
-    c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    assert_probs(&run_stabilizer_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn stabilizer_sx_sxdg_cancel() {
-    let mut c = Circuit::new(1, 0);
-    c.add_gate(Gate::SX, &[0]);
-    c.add_gate(Gate::SXdg, &[0]);
-    let probs = run_stabilizer_probs(&c);
-    assert!((probs[0] - 1.0).abs() < EPS);
-    assert!(probs[1].abs() < EPS);
-}
+// The reference here is a decomposition written out by hand, applied on the
+// same backend. That makes these gate identities, not a second opinion from a
+// second simulator.
 
 #[test]
 fn crx_matches_ctrl_rx() {
     let qasm_crx = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncrx(pi/3) q[0], q[1];";
     let qasm_ctrl = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nctrl @ rx(pi/3) q[0], q[1];";
-    let mut b1 = StatevectorBackend::new(42);
-    let mut b2 = StatevectorBackend::new(42);
+    let mut b1 = StatevectorBackend::new(common::SEED);
+    let mut b2 = StatevectorBackend::new(common::SEED);
     let c1 = prism_q::circuit::openqasm::parse(qasm_crx).unwrap();
     let c2 = prism_q::circuit::openqasm::parse(qasm_ctrl).unwrap();
     sim::run_on(&mut b1, &c1).unwrap();
@@ -1049,8 +517,8 @@ fn ccx_matches_ctrl_ctrl_x() {
     let qasm_ccx = "OPENQASM 3.0;\nqubit[3] q;\nh q[0];\nh q[1];\nccx q[0], q[1], q[2];";
     let qasm_ctrl =
         "OPENQASM 3.0;\nqubit[3] q;\nh q[0];\nh q[1];\nctrl @ ctrl @ x q[0], q[1], q[2];";
-    let mut b1 = StatevectorBackend::new(42);
-    let mut b2 = StatevectorBackend::new(42);
+    let mut b1 = StatevectorBackend::new(common::SEED);
+    let mut b2 = StatevectorBackend::new(common::SEED);
     let c1 = prism_q::circuit::openqasm::parse(qasm_ccx).unwrap();
     let c2 = prism_q::circuit::openqasm::parse(qasm_ctrl).unwrap();
     sim::run_on(&mut b1, &c1).unwrap();
@@ -1061,7 +529,7 @@ fn ccx_matches_ctrl_ctrl_x() {
 #[test]
 fn rzz_decomposition_correct() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nh q[1];\nrzz(pi/4) q[0], q[1];";
-    let mut b = StatevectorBackend::new(42);
+    let mut b = StatevectorBackend::new(common::SEED);
     let c = prism_q::circuit::openqasm::parse(qasm).unwrap();
     sim::run_on(&mut b, &c).unwrap();
     let probs = b.probabilities().unwrap();
@@ -1079,7 +547,7 @@ fn rzz_decomposition_correct() {
 #[test]
 fn u3_matches_manual() {
     let qasm = "OPENQASM 3.0;\nqubit[1] q;\nu3(pi/2, 0, pi) q[0];";
-    let mut b = StatevectorBackend::new(42);
+    let mut b = StatevectorBackend::new(common::SEED);
     let c = prism_q::circuit::openqasm::parse(qasm).unwrap();
     sim::run_on(&mut b, &c).unwrap();
     // u3(pi/2, 0, pi) = H up to global phase
@@ -1095,7 +563,7 @@ fn u3_matches_manual() {
 #[test]
 fn cswap_correct() {
     let qasm = "OPENQASM 3.0;\nqubit[3] q;\nx q[2];\ncswap q[0], q[1], q[2];";
-    let mut b = StatevectorBackend::new(42);
+    let mut b = StatevectorBackend::new(common::SEED);
     let c = prism_q::circuit::openqasm::parse(qasm).unwrap();
     sim::run_on(&mut b, &c).unwrap();
     let probs = b.probabilities().unwrap();
@@ -1104,7 +572,7 @@ fn cswap_correct() {
 
     // With ctrl=|1>: should swap q[1] and q[2]
     let qasm2 = "OPENQASM 3.0;\nqubit[3] q;\nx q[0];\nx q[2];\ncswap q[0], q[1], q[2];";
-    let mut b2 = StatevectorBackend::new(42);
+    let mut b2 = StatevectorBackend::new(common::SEED);
     let c2 = prism_q::circuit::openqasm::parse(qasm2).unwrap();
     sim::run_on(&mut b2, &c2).unwrap();
     let probs2 = b2.probabilities().unwrap();
@@ -1112,436 +580,77 @@ fn cswap_correct() {
     assert!((probs2[3] - 1.0).abs() < EPS);
 }
 
-// ---- Subsystem decomposition ----
-
-#[test]
-fn decomposed_two_independent_bell_pairs() {
-    let mut c = Circuit::new(4, 0);
-    // Bell pair on (0,1)
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    // Bell pair on (2,3)
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::Cx, &[2, 3]);
-
-    let subs = c.independent_subsystems();
-    assert_eq!(subs.len(), 2);
-
-    // Decomposed via run_with (triggers decomposition)
-    let decomposed = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
-    // Monolithic via run_on (skips decomposition)
-    let mut sv = StatevectorBackend::new(42);
-    let monolithic = sim::run_on(&mut sv, &c).unwrap();
-
-    let dp = decomposed.probabilities.unwrap().to_vec();
-    let mp = monolithic.probabilities.unwrap().to_vec();
-    assert_eq!(dp.len(), mp.len());
-    for (i, (d, m)) in dp.iter().zip(mp.iter()).enumerate() {
-        assert!(
-            (d - m).abs() < EPS,
-            "prob[{i}]: decomposed={d}, monolithic={m}"
-        );
-    }
-}
-
-#[test]
-fn decomposed_three_independent_blocks() {
-    let mut c = Circuit::new(6, 0);
-    // Block 0: qubits 0,1
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    // Block 1: qubits 2,3
-    c.add_gate(Gate::X, &[2]);
-    c.add_gate(Gate::Cx, &[2, 3]);
-    // Block 2: qubits 4,5
-    c.add_gate(Gate::H, &[4]);
-    c.add_gate(Gate::Cx, &[4, 5]);
-
-    let subs = c.independent_subsystems();
-    assert_eq!(subs.len(), 3);
-
-    let decomposed = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
-    let mut sv = StatevectorBackend::new(42);
-    let monolithic = sim::run_on(&mut sv, &c).unwrap();
-
-    let dp = decomposed.probabilities.unwrap().to_vec();
-    let mp = monolithic.probabilities.unwrap().to_vec();
-    for (i, (d, m)) in dp.iter().zip(mp.iter()).enumerate() {
-        assert!(
-            (d - m).abs() < EPS,
-            "prob[{i}]: decomposed={d}, monolithic={m}"
-        );
-    }
-}
-
-#[test]
-fn decomposed_with_measurements() {
-    let mut c = Circuit::new(4, 2);
-    // Block (0,1): Bell + measure
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_measure(0, 0);
-    // Block (2,3): X + measure
-    c.add_gate(Gate::X, &[2]);
-    c.add_gate(Gate::Cx, &[2, 3]);
-    c.add_measure(2, 1);
-
-    let result = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
-    assert_eq!(result.classical_bits.len(), 2);
-}
-
-#[test]
-fn decomposed_fully_entangled_same_as_monolithic() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::Cx, &[1, 2]);
-    c.add_gate(Gate::Cx, &[2, 3]);
-
-    let subs = c.independent_subsystems();
-    assert_eq!(subs.len(), 1); // no decomposition
-
-    let via_run_with = run_with(prism_q::BackendKind::Statevector, &c, 42).unwrap();
-    let mut sv = StatevectorBackend::new(42);
-    let via_run_on = sim::run_on(&mut sv, &c).unwrap();
-
-    let rw = via_run_with.probabilities.unwrap().to_vec();
-    let ro = via_run_on.probabilities.unwrap().to_vec();
-    for (i, (a, b)) in rw.iter().zip(ro.iter()).enumerate() {
-        assert!((a - b).abs() < EPS, "prob[{i}]: {a} vs {b}");
-    }
-}
-
-#[test]
-fn decomposed_auto_mixed_backends() {
-    let mut c = Circuit::new(6, 0);
-    // Block (0,1,2): Clifford only, Auto should pick Stabilizer
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::Cx, &[1, 2]);
-    c.add_gate(Gate::S, &[0]);
-    // Block (3,4,5): Non-Clifford, Auto should pick Statevector
-    c.add_gate(Gate::H, &[3]);
-    c.add_gate(Gate::T, &[3]);
-    c.add_gate(Gate::Cx, &[3, 4]);
-    c.add_gate(Gate::Cx, &[4, 5]);
-
-    let result = run_with(prism_q::BackendKind::Auto, &c, 42).unwrap();
-    let mut sv = StatevectorBackend::new(42);
-    let monolithic = sim::run_on(&mut sv, &c).unwrap();
-
-    let ap = result.probabilities.unwrap().to_vec();
-    let mp = monolithic.probabilities.unwrap().to_vec();
-    for (i, (a, m)) in ap.iter().zip(mp.iter()).enumerate() {
-        assert!(
-            (a - m).abs() < EPS,
-            "prob[{i}]: auto_decomposed={a}, monolithic={m}"
-        );
-    }
-}
-
-// ---- Cross-backend correctness at 20q ----
+// ---- Closed-form anchors for the conformance harness ----
 //
-// At 20q, all fusion passes are active (cancel, fuse_1q, reorder, fuse_2q,
-// multi_1q, multi_2q, cphase, batch_post_phase) and all parallel kernels fire.
-// These tests cross-validate parallel statevector against independent backends.
+// `tests/conformance_matrix.rs` decides disagreements by consensus, then by the
+// stabilizer tableau and the density-matrix channel. Those two are the harness's
+// independent authorities, so each needs values that were computed by hand
+// rather than read off another backend. `Family::golden_anchor` in
+// `tests/common/conformance.rs` names the test that covers each motif.
 
 #[test]
-fn par_20q_qft_sparse_matches_statevector() {
-    let circuit = prism_q::circuits::qft_circuit(20);
-    let sv = run_and_probs(&circuit);
-    let sp = run_sparse_probs(&circuit);
-    assert_probs_par(&sp, &sv, "sparse/qft_20q");
-}
-
-#[test]
-fn par_20q_random_mps_matches_statevector() {
-    let circuit = prism_q::circuits::random_circuit(20, 5, 42);
-    let sv = run_and_probs(&circuit);
-    let mut mps = MpsBackend::new(42, 256);
-    sim::run_on(&mut mps, &circuit).unwrap();
-    let mp = mps.probabilities().unwrap();
-    assert_probs_par(&mp, &sv, "mps/random_20q");
-}
-
-#[test]
-fn par_20q_clifford_stabilizer_matches_statevector() {
-    let circuit = prism_q::circuits::clifford_heavy_circuit(20, 10, 42);
-    let sv = run_and_probs(&circuit);
-    let stab = run_stabilizer_probs(&circuit);
-    assert_probs_par(&stab, &sv, "stabilizer/clifford_20q");
-}
-
-#[test]
-fn par_20q_hea_factored_matches_statevector() {
-    let circuit = prism_q::circuits::hardware_efficient_ansatz(20, 3, 42);
-    let sv = run_and_probs(&circuit);
-    let mut fac = prism_q::backend::factored::FactoredBackend::new(42);
-    sim::run_on(&mut fac, &circuit).unwrap();
-    let fp = fac.probabilities().unwrap();
-    assert_probs_par(&fp, &sv, "factored/hea_20q");
-}
-
-// ---- Cross-backend SX/SXdg tests ----
-
-fn sx_sxdg_test_circuit() -> Circuit {
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::SX, &[0]);
-    c.add_gate(Gate::SXdg, &[1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::Cx, &[1, 2]);
-    c.add_gate(Gate::SX, &[2]);
-    c
-}
-
-#[test]
-fn sparse_sx_sxdg_matches_statevector() {
-    let c = sx_sxdg_test_circuit();
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_sx_sxdg_matches_statevector() {
-    let c = sx_sxdg_test_circuit();
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn tn_sx_sxdg_matches_statevector() {
-    let c = sx_sxdg_test_circuit();
-    assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-}
-
-// ---- Cross-backend P(theta) tests ----
-
-fn p_theta_test_circuit() -> Circuit {
-    let mut c = Circuit::new(3, 0);
+fn stabilizer_bell_between_hadamard_layers_matches_closed_form() {
+    // H q0, CX q0 q1 gives (|00> + |11>)/sqrt(2). Then H on both qubits sends
+    // |00> to (|00> + |01> + |10> + |11>)/2 and |11> to
+    // (|00> - |01> - |10> + |11>)/2; the cross terms cancel and the state is
+    // (|00> + |11>)/sqrt(2) again.
+    let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::P(std::f64::consts::FRAC_PI_4), &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::P(1.23), &[1]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::P(std::f64::consts::FRAC_PI_3), &[2]);
-    c
+    assert_probs(&run_stabilizer_probs(&c), &[0.5, 0.0, 0.0, 0.5]);
 }
 
 #[test]
-fn sparse_p_theta_matches_statevector() {
-    let c = p_theta_test_circuit();
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_p_theta_matches_statevector() {
-    let c = p_theta_test_circuit();
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn tn_p_theta_matches_statevector() {
-    let c = p_theta_test_circuit();
-    assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-}
-
-// ---- Cross-backend Cu tests ----
-
-fn cu_test_circuit() -> Circuit {
-    let h_mat = Gate::H.matrix_2x2();
-    let rz_mat = Gate::Rz(0.7).matrix_2x2();
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(Gate::Cu(Box::new(h_mat)), &[0, 1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::Cu(Box::new(rz_mat)), &[1, 2]);
-    c
-}
-
-#[test]
-fn sparse_cu_matches_statevector() {
-    let c = cu_test_circuit();
-    assert_probs(&run_sparse_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn mps_cu_matches_statevector() {
-    let c = cu_test_circuit();
-    assert_probs_mps(&run_mps_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn tn_cu_matches_statevector() {
-    let c = cu_test_circuit();
-    assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-}
-
-// ---- export_statevector cross-backend tests ----
-
-#[test]
-fn sparse_export_statevector_matches() {
-    let mut c = Circuit::new(3, 0);
+fn density_matrix_reset_of_an_entangled_partner_is_the_channel() {
+    // Reset is `rho -> |0><0| (x) tr_q rho`. Tracing qubit 1 out of a Bell pair
+    // leaves qubit 0 maximally mixed, so the weight splits evenly between |00>
+    // and |01> (q0 set, q1 clear). A projection onto |0> would leave all the
+    // weight on |00>.
+    let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::T, &[2]);
+    c.add_reset(1);
 
-    let sv_ref = run_and_state(&c);
-
-    let mut sparse = SparseBackend::new(42);
-    sim::run_on(&mut sparse, &c).unwrap();
-    let sv = sparse.export_statevector().unwrap();
-    for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
-        assert!(
-            (a - e).norm() < EPS,
-            "sparse export[{i}]: expected {e}, got {a}"
-        );
-    }
+    let mut backend = DensityMatrixBackend::new(common::SEED);
+    sim::run_on(&mut backend, &c).unwrap();
+    assert_probs(&backend.probabilities().unwrap(), &[0.5, 0.5, 0.0, 0.0]);
 }
 
 #[test]
-fn mps_export_statevector_matches() {
-    let mut c = Circuit::new(3, 0);
+fn density_matrix_dephasing_removes_coherence() {
+    // The conformance harness lowers `measure` to the Kraus pair
+    // {|0><0|, |1><1|} to build the exact unconditional mixture. That pair must
+    // behave as the measurement channel, not as the identity: applying it
+    // between two Hadamards has to leave |+> maximally mixed, so the second
+    // Hadamard returns 1/2 on each outcome instead of returning to |0>.
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+    let dephasing = [[[one, zero], [zero, zero]], [[zero, zero], [zero, one]]];
+    let hadamard = Instruction::Gate {
+        gate: Gate::H,
+        targets: prism_q::circuit::smallvec![0],
+    };
+
+    let mut backend = DensityMatrixBackend::new(common::SEED);
+    backend.init(1, 0).unwrap();
+    backend.apply(&hadamard).unwrap();
+    backend.apply_1q_kraus(0, &dephasing);
+    backend.apply(&hadamard).unwrap();
+    assert_probs(&backend.probabilities().unwrap(), &[0.5, 0.5]);
+
+    // On half of a Bell pair the same channel kills the coherence between |00>
+    // and |11> while leaving both populations at 1/2, and a Hadamard on the
+    // dephased qubit then spreads the mixture evenly over all four outcomes.
+    let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::T, &[2]);
 
-    let sv_ref = run_and_state(&c);
-
-    let mut mps = MpsBackend::new(42, 64);
-    sim::run_on(&mut mps, &c).unwrap();
-    let sv = mps.export_statevector().unwrap();
-    for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
-        assert!(
-            (a - e).norm() < MPS_EPS,
-            "mps export[{i}]: expected {e}, got {a}"
-        );
-    }
-}
-
-#[test]
-fn tn_export_statevector_matches() {
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::T, &[2]);
-
-    let sv_ref = run_and_state(&c);
-
-    let mut tn = TensorNetworkBackend::new(42);
-    sim::run_on(&mut tn, &c).unwrap();
-    let sv = tn.export_statevector().unwrap();
-    for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
-        assert!(
-            (a - e).norm() < TN_EPS,
-            "tn export[{i}]: expected {e}, got {a}"
-        );
-    }
-}
-
-#[test]
-fn product_export_statevector_matches() {
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Rx(0.5), &[1]);
-    c.add_gate(Gate::T, &[2]);
-
-    let sv_ref = run_and_state(&c);
-
-    let mut prod = ProductStateBackend::new(42);
-    sim::run_on(&mut prod, &c).unwrap();
-    let sv = prod.export_statevector().unwrap();
-    for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
-        assert!(
-            (a - e).norm() < EPS,
-            "product export[{i}]: expected {e}, got {a}"
-        );
-    }
-}
-
-// ---- MCU cross-backend tests ----
-
-#[test]
-fn tn_mcu_toffoli_matches_statevector() {
-    let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(toffoli, &[0, 1, 2]);
-    assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
-}
-
-#[test]
-fn factored_mcu_toffoli_matches_statevector() {
-    let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
-    let mut c = Circuit::new(3, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::X, &[1]);
-    c.add_gate(toffoli, &[0, 1, 2]);
-
-    let sv = run_and_probs(&c);
-    let mut fac = prism_q::backend::factored::FactoredBackend::new(42);
-    sim::run_on(&mut fac, &c).unwrap();
-    let fp = fac.probabilities().unwrap();
-    assert_probs(&fp, &sv);
-}
-
-// ---- Conditional gate cross-backend tests ----
-
-#[test]
-fn sparse_conditional_gate() {
-    let mut c = Circuit::new(2, 1);
-    c.add_gate(Gate::X, &[0]);
-    c.add_measure(0, 0);
-    c.instructions.push(Instruction::Conditional {
-        condition: prism_q::ClassicalCondition::BitIsOne(0),
-        gate: Gate::X,
-        targets: prism_q::circuit::smallvec![1],
-    });
-
-    let sv = run_and_probs(&c);
-    let sp = run_sparse_probs(&c);
-    assert_probs(&sp, &sv);
-}
-
-#[test]
-fn mps_conditional_gate() {
-    let mut c = Circuit::new(2, 1);
-    c.add_gate(Gate::X, &[0]);
-    c.add_measure(0, 0);
-    c.instructions.push(Instruction::Conditional {
-        condition: prism_q::ClassicalCondition::BitIsOne(0),
-        gate: Gate::X,
-        targets: prism_q::circuit::smallvec![1],
-    });
-
-    let sv = run_and_probs(&c);
-    let mp = run_mps_probs(&c);
-    assert_probs_mps(&mp, &sv);
-}
-
-#[test]
-fn factored_conditional_gate() {
-    let mut c = Circuit::new(2, 1);
-    c.add_gate(Gate::X, &[0]);
-    c.add_measure(0, 0);
-    c.instructions.push(Instruction::Conditional {
-        condition: prism_q::ClassicalCondition::BitIsOne(0),
-        gate: Gate::X,
-        targets: prism_q::circuit::smallvec![1],
-    });
-
-    let sv = run_and_probs(&c);
-    let mut fac = prism_q::backend::factored::FactoredBackend::new(42);
-    sim::run_on(&mut fac, &c).unwrap();
-    let fp = fac.probabilities().unwrap();
-    assert_probs(&fp, &sv);
+    let mut backend = DensityMatrixBackend::new(common::SEED);
+    sim::run_on(&mut backend, &c).unwrap();
+    backend.apply_1q_kraus(0, &dephasing);
+    assert_probs(&backend.probabilities().unwrap(), &[0.5, 0.0, 0.0, 0.5]);
+    backend.apply(&hadamard).unwrap();
+    assert_probs(&backend.probabilities().unwrap(), &[0.25, 0.25, 0.25, 0.25]);
 }

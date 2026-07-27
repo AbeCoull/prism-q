@@ -3,8 +3,10 @@
 //! Runs each gate-dispatch path on both backends starting from |0…0⟩ (or a deliberately
 //! chosen non-trivial initial state) and compares the resulting amplitudes within 1e-12.
 //!
-//! Skips with a printed message when no usable GPU is available. This keeps the suite green
-//! on CPU-only machines and catches real kernel regressions on CUDA-capable runners.
+//! Without a usable GPU every test here returns before asserting anything, so a green run on
+//! a CPU-only machine means "not tested", not "passed". Set `PRISM_REQUIRE_GPU=1` to turn that
+//! into a hard failure. Any machine that has a GPU should run the suite with it set; leaving it
+//! unset is only for CPU-only hosts, where the alternative is a build that cannot run at all.
 
 #![cfg(feature = "gpu")]
 
@@ -33,6 +35,11 @@ impl Fixture {
         match GpuContext::new(0) {
             Ok(ctx) => Some(Self { ctx }),
             Err(e) => {
+                assert!(
+                    std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                    "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e}). \
+                     Unset it to allow this suite to skip."
+                );
                 eprintln!("SKIP: no usable GPU ({e})");
                 None
             }
@@ -715,7 +722,7 @@ fn statevector_gpu_builder_matches_cpu_random() {
 
     let Some(f) = Fixture::try_new() else { return };
 
-    let circuit = prism_q::circuits::random_circuit(14, 10, 0xDEAD_BEEF);
+    let circuit = prism_q::circuits::random_circuit(14, 10, common::SEED);
 
     let cpu = prism_q::simulate(&circuit)
         .backend(BackendKind::Statevector)

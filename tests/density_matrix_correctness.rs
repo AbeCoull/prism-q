@@ -4,6 +4,10 @@
 //! statevector backend's basis-state probabilities exactly, and a pure state must
 //! stay pure (`Tr(rho^2) == 1`).
 
+mod common;
+
+use common::{SEED, assert_probs_close};
+use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::backend::statevector::StatevectorBackend;
@@ -17,8 +21,6 @@ fn dm_backend(circuit: &Circuit, seed: u64) -> DensityMatrixBackend {
     backend
 }
 
-use num_complex::Complex64;
-
 fn c(re: f64, im: f64) -> Complex64 {
     Complex64::new(re, im)
 }
@@ -29,7 +31,7 @@ fn dm_after_channel(
     prep: &[(Gate, usize)],
     kraus: &[[[Complex64; 2]; 2]],
 ) -> ([[Complex64; 2]; 2], f64) {
-    let mut backend = DensityMatrixBackend::new(42);
+    let mut backend = DensityMatrixBackend::new(SEED);
     backend.init(1, 0).unwrap();
     for (gate, q) in prep {
         backend
@@ -66,13 +68,13 @@ fn phase_damping(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
 const DM_EPS: f64 = 1e-12;
 
 fn statevector_probs(circuit: &Circuit) -> Vec<f64> {
-    let mut backend = StatevectorBackend::new(42);
+    let mut backend = StatevectorBackend::new(SEED);
     sim::run_on(&mut backend, circuit).unwrap();
     backend.probabilities().unwrap()
 }
 
 fn run_dm(circuit: &Circuit) -> DensityMatrixBackend {
-    let mut backend = DensityMatrixBackend::new(42);
+    let mut backend = DensityMatrixBackend::new(SEED);
     sim::run_on(&mut backend, circuit).unwrap();
     backend
 }
@@ -81,22 +83,13 @@ fn dm_probs(circuit: &Circuit) -> Vec<f64> {
     run_dm(circuit).probabilities().unwrap()
 }
 
-fn assert_probs_close(actual: &[f64], expected: &[f64], label: &str) {
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "{label}: probability vector length mismatch"
-    );
-    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            (a - e).abs() < DM_EPS,
-            "{label}: probability[{i}] mismatch: dm={a}, statevector={e}"
-        );
-    }
-}
-
 fn assert_matches_statevector(circuit: &Circuit, label: &str) {
-    assert_probs_close(&dm_probs(circuit), &statevector_probs(circuit), label);
+    assert_probs_close(
+        &dm_probs(circuit),
+        &statevector_probs(circuit),
+        DM_EPS,
+        label,
+    );
 }
 
 #[test]
@@ -179,13 +172,13 @@ fn dm_qft_matches_statevector() {
 
 #[test]
 fn dm_random_layers_match_statevector() {
-    let c = circuits::random_circuit(6, 10, 0xDEAD_BEEF);
+    let c = circuits::random_circuit(6, 10, SEED);
     assert_matches_statevector(&c, "random6");
 }
 
 #[test]
 fn dm_pure_state_stays_pure() {
-    let c = circuits::random_circuit(5, 8, 0xDEAD_BEEF);
+    let c = circuits::random_circuit(5, 8, SEED);
     let backend = run_dm(&c);
     assert!(
         (backend.purity() - 1.0).abs() < 1e-12,
@@ -196,7 +189,7 @@ fn dm_pure_state_stays_pure() {
 
 #[test]
 fn dm_probabilities_sum_to_one() {
-    let c = circuits::random_circuit(5, 8, 0xDEAD_BEEF);
+    let c = circuits::random_circuit(5, 8, SEED);
     let total: f64 = dm_probs(&c).iter().sum();
     assert!(
         (total - 1.0).abs() < 1e-12,
@@ -218,14 +211,14 @@ fn depolarizing(p: f64) -> Vec<[[Complex64; 2]; 2]> {
 #[test]
 fn dm_explicit_dispatch_matches_statevector() {
     use prism_q::BackendKind;
-    let c = circuits::random_circuit(4, 8, 0xDEAD_BEEF);
+    let c = circuits::random_circuit(4, 8, SEED);
     let outcome = sim::simulate(&c)
         .backend(BackendKind::DensityMatrix)
-        .seed(42)
+        .seed(SEED)
         .run()
         .unwrap();
     let probs = outcome.probabilities.unwrap().to_vec();
-    assert_probs_close(&probs, &statevector_probs(&c), "explicit dispatch");
+    assert_probs_close(&probs, &statevector_probs(&c), DM_EPS, "explicit dispatch");
 }
 
 #[test]
@@ -242,7 +235,7 @@ fn dm_noisy_shot_sampling_is_rejected() {
     let result = sim::simulate(&c)
         .backend(BackendKind::DensityMatrix)
         .noise(&noise)
-        .seed(42)
+        .seed(SEED)
         .shots(100);
     assert!(result.is_err(), "noisy DM shot sampling should be rejected");
 }
@@ -328,7 +321,7 @@ fn dm_two_qubit_depolarizing_bell_analytic() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    let mut backend = DensityMatrixBackend::new(42);
+    let mut backend = DensityMatrixBackend::new(SEED);
     sim::run_on(&mut backend, &c).unwrap();
     backend.apply_2q_depolarizing(0, 1, p);
 
@@ -441,9 +434,9 @@ fn dm_measurement_marginals_match_statevector() {
 
 #[test]
 fn dm_reduced_density_matrix_matches_statevector() {
-    let c = circuits::random_circuit(4, 8, 0xDEAD_BEEF);
+    let c = circuits::random_circuit(4, 8, SEED);
     let dm = run_dm(&c);
-    let mut sv = StatevectorBackend::new(42);
+    let mut sv = StatevectorBackend::new(SEED);
     sim::run_on(&mut sv, &c).unwrap();
     for q in 0..4 {
         let a = dm.reduced_density_matrix_1q(q).unwrap();

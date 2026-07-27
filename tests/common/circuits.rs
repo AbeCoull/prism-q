@@ -35,61 +35,20 @@ pub enum BackendSupport {
     Rejected,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BackendExpectation {
-    pub support: BackendSupport,
-    pub max_qubits: Option<usize>,
-    pub tolerance_override: Option<f64>,
-    pub export_required: bool,
-}
-
-impl BackendExpectation {
-    pub const fn supported() -> Self {
-        Self {
-            support: BackendSupport::Supported,
-            max_qubits: None,
-            tolerance_override: None,
-            export_required: false,
-        }
-    }
-
-    pub const fn rejected() -> Self {
-        Self {
-            support: BackendSupport::Rejected,
-            max_qubits: None,
-            tolerance_override: None,
-            export_required: false,
-        }
-    }
-
+impl BackendSupport {
     pub const fn is_supported(self) -> bool {
-        matches!(self.support, BackendSupport::Supported)
-    }
-
-    pub const fn with_max_qubits(mut self, max_qubits: usize) -> Self {
-        self.max_qubits = Some(max_qubits);
-        self
-    }
-
-    pub const fn with_tolerance(mut self, tolerance: f64) -> Self {
-        self.tolerance_override = Some(tolerance);
-        self
-    }
-
-    pub const fn requiring_export(mut self) -> Self {
-        self.export_required = true;
-        self
+        matches!(self, BackendSupport::Supported)
     }
 }
 
+/// The circuit properties that decide which backends a case may run on.
+///
+/// Every field here has a reader in [`CircuitCase::support`]. A property that
+/// only documents the case belongs in the case name or a comment, not in this
+/// struct, where an unread field reads as a rule that is being enforced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CircuitCapabilities {
-    pub exact_probabilities: bool,
-    pub clifford_only: bool,
-    pub requires_measurement: bool,
-    pub requires_reset: bool,
     pub requires_non_clifford: bool,
-    pub requires_qft_block_expansion: bool,
     pub safe_for_mps: bool,
     pub safe_for_tensor_network: bool,
     pub product_separable: bool,
@@ -98,40 +57,15 @@ pub struct CircuitCapabilities {
 impl CircuitCapabilities {
     pub const fn new() -> Self {
         Self {
-            exact_probabilities: true,
-            clifford_only: false,
-            requires_measurement: false,
-            requires_reset: false,
             requires_non_clifford: false,
-            requires_qft_block_expansion: false,
             safe_for_mps: true,
             safe_for_tensor_network: true,
             product_separable: false,
         }
     }
 
-    pub const fn clifford_only(mut self) -> Self {
-        self.clifford_only = true;
-        self
-    }
-
-    pub const fn requires_measurement(mut self) -> Self {
-        self.requires_measurement = true;
-        self
-    }
-
-    pub const fn requires_reset(mut self) -> Self {
-        self.requires_reset = true;
-        self
-    }
-
     pub const fn requires_non_clifford(mut self) -> Self {
         self.requires_non_clifford = true;
-        self
-    }
-
-    pub const fn requires_qft_block_expansion(mut self) -> Self {
-        self.requires_qft_block_expansion = true;
         self
     }
 
@@ -151,94 +85,11 @@ impl CircuitCapabilities {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BackendExpectations {
-    pub sparse: BackendExpectation,
-    pub mps: BackendExpectation,
-    pub tensor_network: BackendExpectation,
-    pub factored: BackendExpectation,
-    pub stabilizer: BackendExpectation,
-    pub product: BackendExpectation,
-}
-
-impl BackendExpectations {
-    pub const fn from_capabilities(capabilities: CircuitCapabilities) -> Self {
-        let supported = BackendExpectation::supported();
-        let rejected = BackendExpectation::rejected();
-        Self {
-            sparse: supported,
-            mps: if capabilities.safe_for_mps {
-                supported
-            } else {
-                rejected
-            },
-            tensor_network: if capabilities.safe_for_tensor_network {
-                supported
-            } else {
-                rejected
-            },
-            factored: supported,
-            stabilizer: if capabilities.requires_non_clifford {
-                rejected
-            } else {
-                supported
-            },
-            product: if capabilities.product_separable {
-                supported
-            } else {
-                rejected
-            },
-        }
-    }
-
-    pub const fn for_backend(self, backend: BackendKind) -> BackendExpectation {
-        match backend {
-            BackendKind::Sparse => self.sparse,
-            BackendKind::Mps => self.mps,
-            BackendKind::TensorNetwork => self.tensor_network,
-            BackendKind::Factored => self.factored,
-            BackendKind::Stabilizer => self.stabilizer,
-            BackendKind::Product => self.product,
-        }
-    }
-
-    pub const fn with_sparse(mut self, expectation: BackendExpectation) -> Self {
-        self.sparse = expectation;
-        self
-    }
-
-    pub const fn with_mps(mut self, expectation: BackendExpectation) -> Self {
-        self.mps = expectation;
-        self
-    }
-
-    pub const fn with_tensor_network(mut self, expectation: BackendExpectation) -> Self {
-        self.tensor_network = expectation;
-        self
-    }
-
-    pub const fn with_factored(mut self, expectation: BackendExpectation) -> Self {
-        self.factored = expectation;
-        self
-    }
-
-    pub const fn with_stabilizer(mut self, expectation: BackendExpectation) -> Self {
-        self.stabilizer = expectation;
-        self
-    }
-
-    pub const fn with_product(mut self, expectation: BackendExpectation) -> Self {
-        self.product = expectation;
-        self
-    }
-}
-
 #[derive(Clone, Copy)]
 pub struct CircuitCase {
     pub name: &'static str,
     pub build: fn() -> Circuit,
     pub capabilities: CircuitCapabilities,
-    pub expectations: BackendExpectations,
 }
 
 impl CircuitCase {
@@ -251,21 +102,24 @@ impl CircuitCase {
             name,
             build,
             capabilities,
-            expectations: BackendExpectations::from_capabilities(capabilities),
         }
-    }
-
-    pub const fn with_expectations(mut self, expectations: BackendExpectations) -> Self {
-        self.expectations = expectations;
-        self
     }
 
     pub fn circuit(self) -> Circuit {
         (self.build)()
     }
 
-    pub const fn expectation(self, backend: BackendKind) -> BackendExpectation {
-        self.expectations.for_backend(backend)
+    pub const fn support(self, backend: BackendKind) -> BackendSupport {
+        let supported = BackendSupport::Supported;
+        let rejected = BackendSupport::Rejected;
+        match backend {
+            BackendKind::Sparse | BackendKind::Factored => supported,
+            BackendKind::Mps if self.capabilities.safe_for_mps => supported,
+            BackendKind::TensorNetwork if self.capabilities.safe_for_tensor_network => supported,
+            BackendKind::Stabilizer if !self.capabilities.requires_non_clifford => supported,
+            BackendKind::Product if self.capabilities.product_separable => supported,
+            _ => rejected,
+        }
     }
 }
 
@@ -459,23 +313,19 @@ pub fn product_separable_cases() -> [CircuitCase; 4] {
 
 pub fn exact_small_cases() -> [CircuitCase; 18] {
     [
-        CircuitCase::new("bell", bell, CircuitCapabilities::new().clifford_only()),
-        CircuitCase::new("ghz_3", ghz_3, CircuitCapabilities::new().clifford_only()),
-        CircuitCase::new("ghz_4", ghz_4, CircuitCapabilities::new().clifford_only()),
-        CircuitCase::new("ghz_5", ghz_5, CircuitCapabilities::new().clifford_only()),
+        CircuitCase::new("bell", bell, CircuitCapabilities::new()),
+        CircuitCase::new("ghz_3", ghz_3, CircuitCapabilities::new()),
+        CircuitCase::new("ghz_4", ghz_4, CircuitCapabilities::new()),
+        CircuitCase::new("ghz_5", ghz_5, CircuitCapabilities::new()),
         CircuitCase::new(
             "qft_4",
             qft_4,
-            CircuitCapabilities::new()
-                .requires_non_clifford()
-                .requires_qft_block_expansion(),
+            CircuitCapabilities::new().requires_non_clifford(),
         ),
         CircuitCase::new(
             "qft_8",
             qft_8,
-            CircuitCapabilities::new()
-                .requires_non_clifford()
-                .requires_qft_block_expansion(),
+            CircuitCapabilities::new().requires_non_clifford(),
         ),
         CircuitCase::new(
             "random_4",
@@ -532,12 +382,12 @@ pub fn exact_small_cases() -> [CircuitCase; 18] {
         CircuitCase::new(
             "clifford_random_small",
             clifford_random_small,
-            CircuitCapabilities::new().clifford_only(),
+            CircuitCapabilities::new(),
         ),
         CircuitCase::new(
             "sparse_basis_permutation",
             sparse_basis_permutation,
-            CircuitCapabilities::new().clifford_only(),
+            CircuitCapabilities::new(),
         ),
     ]
 }
@@ -547,37 +397,22 @@ pub fn measurement_cases() -> [CircuitCase; 4] {
         CircuitCase::new(
             "deterministic_measurement",
             deterministic_measurement,
-            CircuitCapabilities::new()
-                .clifford_only()
-                .requires_measurement()
-                .product_separable(),
+            CircuitCapabilities::new().product_separable(),
         ),
         CircuitCase::new(
             "reset_from_one",
             reset_from_one,
-            CircuitCapabilities::new()
-                .clifford_only()
-                .requires_measurement()
-                .requires_reset()
-                .product_separable(),
+            CircuitCapabilities::new().product_separable(),
         ),
         CircuitCase::new(
             "reset_from_one_with_spectator",
             reset_from_one_with_spectator,
-            CircuitCapabilities::new()
-                .clifford_only()
-                .requires_measurement()
-                .requires_reset()
-                .product_separable(),
+            CircuitCapabilities::new().product_separable(),
         ),
         CircuitCase::new(
             "measurement_reset_conditional",
             measurement_reset_conditional,
-            CircuitCapabilities::new()
-                .clifford_only()
-                .requires_measurement()
-                .requires_reset()
-                .product_separable(),
+            CircuitCapabilities::new().product_separable(),
         ),
     ]
 }
@@ -586,97 +421,46 @@ pub fn random_measurement_cases() -> [CircuitCase; 1] {
     [CircuitCase::new(
         "superposition_measurement",
         superposition_measurement,
-        CircuitCapabilities::new()
-            .clifford_only()
-            .requires_measurement()
-            .product_separable(),
+        CircuitCapabilities::new().product_separable(),
     )]
 }
 
-pub fn fusion_threshold_cases() -> Vec<CircuitCase> {
-    [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-        .into_iter()
-        .map(|n| {
-            let name = match n {
-                9 => "fusion_threshold_9",
-                10 => "fusion_threshold_10",
-                11 => "fusion_threshold_11",
-                12 => "fusion_threshold_12",
-                13 => "fusion_threshold_13",
-                14 => "fusion_threshold_14",
-                15 => "fusion_threshold_15",
-                16 => "fusion_threshold_16",
-                17 => "fusion_threshold_17",
-                18 => "fusion_threshold_18",
-                19 => "fusion_threshold_19",
-                _ => unreachable!(),
-            };
-            let build = match n {
-                9 => fusion_threshold_9,
-                10 => fusion_threshold_10,
-                11 => fusion_threshold_11,
-                12 => fusion_threshold_12,
-                13 => fusion_threshold_13,
-                14 => fusion_threshold_14,
-                15 => fusion_threshold_15,
-                16 => fusion_threshold_16,
-                17 => fusion_threshold_17,
-                18 => fusion_threshold_18,
-                19 => fusion_threshold_19,
-                _ => unreachable!(),
-            };
-            let capabilities = if n >= 15 {
-                CircuitCapabilities::new()
-                    .requires_non_clifford()
-                    .requires_qft_block_expansion()
-            } else {
-                CircuitCapabilities::new().requires_non_clifford()
-            };
-            CircuitCase::new(name, build, capabilities)
-        })
-        .collect()
-}
-
-fn fusion_threshold_9() -> Circuit {
-    builtins::random_circuit(9, 10, SEED)
-}
-
-fn fusion_threshold_10() -> Circuit {
-    builtins::random_circuit(10, 10, SEED)
-}
-
-fn fusion_threshold_11() -> Circuit {
-    builtins::hardware_efficient_ansatz(11, 3, SEED)
-}
-
-fn fusion_threshold_12() -> Circuit {
-    builtins::hardware_efficient_ansatz(12, 3, SEED)
-}
-
-fn fusion_threshold_13() -> Circuit {
-    builtins::random_circuit(13, 10, SEED)
-}
-
-fn fusion_threshold_14() -> Circuit {
-    builtins::random_circuit(14, 10, SEED)
-}
-
-fn fusion_threshold_15() -> Circuit {
-    builtins::qft_circuit(15)
-}
-
-fn fusion_threshold_16() -> Circuit {
-    builtins::qft_circuit(16)
-}
-
-fn fusion_threshold_17() -> Circuit {
-    builtins::qft_circuit(17)
-}
-
-fn fusion_threshold_18() -> Circuit {
-    builtins::qft_circuit(18)
-}
-
-fn fusion_threshold_19() -> Circuit {
-    builtins::qft_circuit(19)
+/// One case per qubit count from 9 to 19, straddling every fusion threshold.
+/// The shape changes with size because the passes that switch on at each
+/// threshold need a circuit that exercises them: random and ansatz circuits
+/// below the diagonal-batch thresholds, QFT above them.
+pub fn fusion_threshold_cases() -> [CircuitCase; 11] {
+    type NamedBuilder = (&'static str, fn() -> Circuit);
+    const BUILDERS: [NamedBuilder; 11] = [
+        ("fusion_threshold_9", || {
+            builtins::random_circuit(9, 10, SEED)
+        }),
+        ("fusion_threshold_10", || {
+            builtins::random_circuit(10, 10, SEED)
+        }),
+        ("fusion_threshold_11", || {
+            builtins::hardware_efficient_ansatz(11, 3, SEED)
+        }),
+        ("fusion_threshold_12", || {
+            builtins::hardware_efficient_ansatz(12, 3, SEED)
+        }),
+        ("fusion_threshold_13", || {
+            builtins::random_circuit(13, 10, SEED)
+        }),
+        ("fusion_threshold_14", || {
+            builtins::random_circuit(14, 10, SEED)
+        }),
+        ("fusion_threshold_15", || builtins::qft_circuit(15)),
+        ("fusion_threshold_16", || builtins::qft_circuit(16)),
+        ("fusion_threshold_17", || builtins::qft_circuit(17)),
+        ("fusion_threshold_18", || builtins::qft_circuit(18)),
+        ("fusion_threshold_19", || builtins::qft_circuit(19)),
+    ];
+    BUILDERS.map(|(name, build)| {
+        CircuitCase::new(
+            name,
+            build,
+            CircuitCapabilities::new().requires_non_clifford(),
+        )
+    })
 }

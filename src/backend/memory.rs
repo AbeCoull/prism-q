@@ -17,6 +17,23 @@ pub(crate) fn max_statevector_qubits() -> usize {
     })
 }
 
+/// Qubit cap for the exact density-matrix backend. Its state is `4^n`
+/// `Complex64` entries, the element count of a `2n`-qubit statevector, so the
+/// cap is `floor(cap_sv / 2)`: 14 on a 16 GiB host, 15 on 32 GiB.
+/// `PRISM_MAX_DM_QUBITS` overrides unconditionally.
+pub(crate) fn max_density_matrix_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        env_qubit_override("PRISM_MAX_DM_QUBITS").unwrap_or(max_statevector_qubits() / 2)
+    })
+}
+
+/// Read a qubit-cap override from `env_var`, returning `None` when unset or
+/// unparseable.
+fn env_qubit_override(env_var: &str) -> Option<usize> {
+    std::env::var(env_var).ok().and_then(|val| val.parse().ok())
+}
+
 pub(crate) fn max_dense_probability_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -69,10 +86,8 @@ fn configured_or_detected_dense_qubits(
     bytes_per_basis_state: usize,
     warning_label: &str,
 ) -> usize {
-    if let Ok(val) = std::env::var(env_var) {
-        if let Ok(n) = val.parse::<usize>() {
-            return n;
-        }
+    if let Some(n) = env_qubit_override(env_var) {
+        return n;
     }
     match detect_physical_memory_bytes().and_then(|bytes| {
         max_dense_qubits_for_budget(bytes / MEMORY_BUDGET_DIVISOR, bytes_per_basis_state)

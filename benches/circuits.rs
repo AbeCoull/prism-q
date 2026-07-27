@@ -5,6 +5,7 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use prism_q::backend::Backend;
+use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
@@ -1617,6 +1618,50 @@ fn bench_coalesce_baseline(c: &mut Criterion) {
     group.finish();
 }
 
+// ---- Density matrix (explicit backend, constructed directly) ----
+
+fn run_dm_apply_only(circuit: &Circuit) {
+    let mut backend = DensityMatrixBackend::new(42);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    black_box(backend.probabilities().unwrap());
+}
+
+fn bench_density_matrix_unitary_layers(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/unitary_layers");
+    configure_group(&mut group);
+
+    for &n in &[4, 8, 10, 12] {
+        let circuit = circuits::random_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_dm_apply_only(circ);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Neutrality row: an untouched statevector row re-run under a density-matrix
+/// group name. The density-matrix backend shares no kernels with the
+/// statevector path, so this must stay within the 5% regression gate.
+fn bench_density_matrix_neutrality(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/neutrality");
+    configure_group(&mut group);
+
+    let circuit = circuits::qft_circuit(22);
+    group.bench_with_input(BenchmarkId::from_parameter(22), &circuit, |b, circ| {
+        b.iter(|| {
+            run_with(BackendKind::Statevector, circ, 42).unwrap();
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     // Statevector sweeps
@@ -1693,5 +1738,8 @@ criterion_group!(
     bench_spp,
     // Coalescing baseline (interleaved Clifford+T)
     bench_coalesce_baseline,
+    // Density matrix (explicit backend)
+    bench_density_matrix_unitary_layers,
+    bench_density_matrix_neutrality,
 );
 criterion_main!(benches);

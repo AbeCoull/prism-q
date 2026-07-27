@@ -1,8 +1,9 @@
 # Backends
 
-PRISM-Q ships eight CPU backends plus an optional CUDA path. The
-[simulation engine](./engine.md) picks one automatically, or you can select explicitly.
-For a task-oriented version of this material, see the
+PRISM-Q ships eight CPU backends plus an optional CUDA path, and an explicit-only
+density-matrix backend for exact mixed-state evolution. The
+[simulation engine](./engine.md) picks one of the eight automatically, or you can select
+explicitly. For a task-oriented version of this material, see the
 [Backends Deep Dive guide](../guides/backends.md).
 
 The diagrams below are rendered directly from PRISM-Q's own SVG circuit renderer.
@@ -55,5 +56,19 @@ Deferred contraction with a greedy min-size heuristic. Gates append tensors; con
 ## Factored
 
 Dynamic split-state simulation. Starts with n independent 1-qubit states, merges via tensor product only when 2q gates bridge groups. Parallel kernels match statevector patterns for sub-states ≥14 qubits. Selected when subsystem decomposition detects partial independence.
+
+## Density Matrix
+
+Exact mixed-state evolution. Stores the full density operator `rho` for `n` qubits as a
+`4^n` `Complex64` buffer laid out row-major: index `(r << n) | c` holds `⟨r|rho|c⟩`. That
+layout is isomorphic to a `2n`-qubit statevector whose high `n` qubits index the ket (row)
+and low `n` qubits index the bra (column), so gate application reuses the statevector
+kernels with no new gate math. A unitary `U` on the ket register gives the left product
+`U rho`; the same `U` on the bra register of a conjugated buffer gives the right product
+`rho U^dagger`, so `U rho U^dagger` costs two statevector passes and two conjugations.
+
+Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host and 15 on
+32 GiB (`PRISM_MAX_DM_QUBITS` overrides). This backend is CPU-only and explicit-dispatch
+only; `Auto` never selects it.
 
 The [GPU backend](../guides/gpu.md) is documented as a user guide.

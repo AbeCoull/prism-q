@@ -1,10 +1,11 @@
+use crate::backend::density_matrix::DensityMatrixBackend;
 use crate::backend::mps::MpsBackend;
 use crate::backend::product::ProductStateBackend;
 use crate::backend::sparse::SparseBackend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
-use crate::backend::{Backend, max_statevector_qubits};
+use crate::backend::{Backend, max_density_matrix_qubits, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
@@ -80,6 +81,15 @@ pub enum BackendKind {
     Factored,
     StabilizerRank,
     FactoredStabilizer,
+    /// Exact density-matrix backend for mixed-state evolution.
+    ///
+    /// Explicit-dispatch only: [`BackendKind::Auto`] never selects it. Stores
+    /// `4^n` `Complex64` amplitudes, so the qubit ceiling is roughly half the
+    /// statevector cap (14 on a 16 GiB host); `PRISM_MAX_DM_QUBITS` overrides.
+    /// Fusion is skipped for this backend because batched and fused gate
+    /// variants carry qubit indices in their payload that the ket-register
+    /// offset cannot relocate.
+    DensityMatrix,
     StochasticPauli {
         num_samples: usize,
     },
@@ -176,6 +186,7 @@ impl BackendKind {
             BackendKind::StabilizerRank
                 | BackendKind::StochasticPauli { .. }
                 | BackendKind::DeterministicPauli { .. }
+                | BackendKind::DensityMatrix
         )
     }
 
@@ -241,6 +252,16 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
                 reason: "circuit has no T gates; use Stabilizer instead".into(),
             });
         }
+        BackendKind::DensityMatrix if circuit.num_qubits > max_density_matrix_qubits() => {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "density_matrix".into(),
+                reason: format!(
+                    "circuit has {} qubits, exceeding the density-matrix cap of {} on this machine (set PRISM_MAX_DM_QUBITS to override)",
+                    circuit.num_qubits,
+                    max_density_matrix_qubits()
+                ),
+            });
+        }
         _ => {}
     }
     Ok(())
@@ -258,6 +279,7 @@ pub(super) enum Family {
     FactoredStabilizer,
     TensorNetwork,
     Statevector,
+    DensityMatrix,
 }
 
 fn select_auto_backend_choice(circuit: &Circuit, has_partial_independence: bool) -> Family {
@@ -332,7 +354,8 @@ fn gpu_capability(family: Family) -> Option<GpuCapability> {
         | Family::Mps
         | Family::Factored
         | Family::FactoredStabilizer
-        | Family::TensorNetwork => None,
+        | Family::TensorNetwork
+        | Family::DensityMatrix => None,
     }
 }
 
@@ -452,6 +475,7 @@ pub(super) enum BackendPlan {
     Statevector {
         accel: Accel,
     },
+    DensityMatrix,
     #[cfg(feature = "distributed")]
     Distributed(Arc<DistributedContext>),
 }
@@ -469,6 +493,7 @@ impl BackendPlan {
             BackendPlan::Mps { max_bond_dim } => Box::new(MpsBackend::new(seed, *max_bond_dim)),
             BackendPlan::Stabilizer { accel } => Box::new(build_stabilizer(accel, seed)),
             BackendPlan::Statevector { accel } => Box::new(build_statevector(accel, seed)),
+            BackendPlan::DensityMatrix => Box::new(DensityMatrixBackend::new(seed)),
             #[cfg(feature = "distributed")]
             BackendPlan::Distributed(context) => {
                 Box::new(DistributedStatevectorBackend::new(context.clone(), seed))
@@ -491,7 +516,9 @@ impl BackendPlan {
     pub(super) fn supports_fused(&self) -> bool {
         !matches!(
             self,
-            BackendPlan::Stabilizer { .. } | BackendPlan::FactoredStabilizer
+            BackendPlan::Stabilizer { .. }
+                | BackendPlan::FactoredStabilizer
+                | BackendPlan::DensityMatrix
         )
     }
 
@@ -506,6 +533,7 @@ impl BackendPlan {
             BackendPlan::Mps { .. } => Family::Mps,
             BackendPlan::Stabilizer { .. } => Family::Stabilizer,
             BackendPlan::Statevector { .. } => Family::Statevector,
+            BackendPlan::DensityMatrix => Family::DensityMatrix,
             #[cfg(feature = "distributed")]
             BackendPlan::Distributed(_) => Family::Statevector,
         }
@@ -551,6 +579,7 @@ pub(super) fn plan_for_family(
         Family::Statevector => BackendPlan::Statevector {
             accel: accel_for(kind, Family::Statevector, num_qubits),
         },
+        Family::DensityMatrix => BackendPlan::DensityMatrix,
     }
 }
 
@@ -582,6 +611,7 @@ pub(super) fn resolve(
         BackendKind::TensorNetwork => Family::TensorNetwork,
         BackendKind::Factored => Family::Factored,
         BackendKind::FactoredStabilizer => Family::FactoredStabilizer,
+        BackendKind::DensityMatrix => Family::DensityMatrix,
         BackendKind::StabilizerRank => return ExecutionPlan::StabilizerRank,
         BackendKind::StochasticPauli { num_samples } => {
             return ExecutionPlan::StochasticPauli {
@@ -1238,6 +1268,39 @@ mod dispatch_matrix_tests {
                 max_terms: 3
             } if e == 0.5
         ));
+    }
+
+    #[test]
+    fn density_matrix_is_explicit_only() {
+        // Auto never routes to the density-matrix family, whatever the shape.
+        for circuit in [product(6), clifford(6), dense(6)] {
+            for hpi in [false, true] {
+                assert_ne!(
+                    resolved(&BackendKind::Auto, &circuit, hpi).family(),
+                    Family::DensityMatrix
+                );
+            }
+        }
+        // Explicit selection maps 1:1 onto the density-matrix plan, which skips
+        // fusion.
+        let plan = resolved(&BackendKind::DensityMatrix, &dense(6), false);
+        assert_eq!(plan.family(), Family::DensityMatrix);
+        assert!(!plan.supports_fused(), "density matrix must skip fusion");
+        assert!(matches!(plan.accel(), Accel::Cpu));
+    }
+
+    #[test]
+    fn density_matrix_rejects_over_cap() {
+        let cap = max_density_matrix_qubits();
+        if cap >= usize::BITS as usize {
+            eprintln!("SKIP: density-matrix cap disabled on this host");
+            return;
+        }
+        let circuit = dense(cap + 1);
+        let err = validate_explicit_backend(&BackendKind::DensityMatrix, &circuit).unwrap_err();
+        assert!(matches!(err, PrismError::IncompatibleBackend { .. }));
+        // At or below the cap the same shape validates.
+        assert!(validate_explicit_backend(&BackendKind::DensityMatrix, &dense(cap)).is_ok());
     }
 
     /// Explicit GPU kinds resolve hard device execution at their crossover

@@ -23,7 +23,7 @@ codecov.json
 __pycache__/
 *.py[cod]
 .pytest_cache/
-bindings/python/dist/
+dist/
 bindings/python/uv.lock
 bindings/python/python/prism_q/*.pyd
 bindings/python/python/prism_q/*.so

@@ -1,18 +1,22 @@
 # Installation
 
-PRISM-Q is a Rust library. Add it to a project with Cargo:
+PRISM-Q is a Rust library with optional Python bindings. For Python, see
+[Python Bindings](../guides/python.md):
+
+```bash
+pip install prism-q
+```
+
+Add the Rust crate to a project with Cargo:
 
 ```bash
 cargo add prism-q                          # Rayon parallelism + faer SVD (default)
 cargo add prism-q --no-default-features    # single-threaded, minimal dependencies
 ```
 
-Or add it to `Cargo.toml` directly:
-
-```toml
-[dependencies]
-prism-q = "0.16"
-```
+`cargo add` writes the current release into `Cargo.toml` for you. To pin a
+version by hand instead, take it from
+[crates.io](https://crates.io/crates/prism-q).
 
 ## Feature flags
 
@@ -21,6 +25,8 @@ prism-q = "0.16"
 | `parallel` | yes | Rayon parallel kernels (≥14 qubits) and the faer SVD path for MPS |
 | `serialization` | no | `serde` derives for circuits and results |
 | `gpu` | no | Optional CUDA backend (see the [GPU guide](../guides/gpu.md)) |
+| `distributed` | no | Statevector partitioning across ranks (see [Capabilities](../guides/capabilities.md)) |
+| `distributed-mpi` | no | `distributed` plus the MPI transport |
 
 ```admonish tip title="Keep parallel on for performance"
 The published benchmarks were taken with `parallel` enabled. Without it, 16+ qubit runs
@@ -45,5 +51,9 @@ cargo clippy --all-targets --all-features -- -D warnings  # lint
 ```
 
 Use `cargo test --all-features` if `cargo-nextest` is unavailable.
+
+`--all-features` includes `distributed-mpi`, which needs a system MPI
+installation and libclang for its bindgen step. Without those, substitute the
+features you actually want, for example `--features "parallel gpu"`.
 
 Next: build [Your First Circuit](./first-circuit.md).

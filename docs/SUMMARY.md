@@ -11,6 +11,7 @@
 
 # Guides
 
+- [Python Bindings](./guides/python.md)
 - [Backends Deep Dive](./guides/backends.md)
 - [Capability and Support Matrix](./guides/capabilities.md)
 - [Performance and SIMD](./guides/performance.md)

@@ -77,7 +77,7 @@ pub(crate) const NORM_CLAMP_MIN: f64 = 1e-30;
 pub(crate) const PHASE_IS_ONE_EPS: f64 = 1e-15;
 
 pub(crate) use memory::{
-    dense_probability_len, dense_statevector_len, max_dense_outcome_bits,
+    check_state_allocation, dense_probability_len, dense_statevector_len, max_dense_outcome_bits,
     max_density_matrix_qubits, max_statevector_qubits, reserve_dense_output,
     tensor_probability_len,
 };

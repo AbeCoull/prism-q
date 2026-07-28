@@ -116,6 +116,37 @@ fn max_dense_qubits_for_budget(budget_bytes: u64, bytes_per_basis_state: usize) 
     Some(max_qubits.min(usize::BITS as usize - 1))
 }
 
+/// Reject a dense state that would exceed `cap` before the backend reserves it.
+///
+/// Backends call this at the top of `init`, the one point every execution path
+/// passes through before allocating, so a caller that drives a backend directly
+/// through [`run_on`](crate::run_on) cannot bypass the dispatch-level caps and
+/// reach an allocation the machine cannot satisfy. Exceeding a cap is an error,
+/// never a silent fallback to another backend.
+pub(crate) fn check_state_allocation(
+    backend: &str,
+    num_qubits: usize,
+    cap: usize,
+    env_var: &str,
+) -> Result<()> {
+    if num_qubits >= usize::BITS as usize {
+        return Err(PrismError::IncompatibleBackend {
+            backend: backend.to_string(),
+            reason: format!("circuit has {num_qubits} qubits, exceeding addressable memory"),
+        });
+    }
+    if num_qubits > cap {
+        return Err(PrismError::IncompatibleBackend {
+            backend: backend.to_string(),
+            reason: format!(
+                "circuit has {num_qubits} qubits, exceeding the cap of {cap} on this machine \
+                 (set {env_var} to override)"
+            ),
+        });
+    }
+    Ok(())
+}
+
 pub(crate) fn dense_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
     dense_output_len(
         backend,

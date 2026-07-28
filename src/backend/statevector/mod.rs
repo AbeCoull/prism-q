@@ -601,6 +601,13 @@ impl Backend for StatevectorBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+        crate::backend::check_state_allocation(
+            "statevector",
+            num_qubits,
+            crate::backend::max_statevector_qubits(),
+            "PRISM_MAX_SV_QUBITS",
+        )?;
+
         #[cfg(feature = "parallel")]
         crate::backend::init_thread_pool();
 

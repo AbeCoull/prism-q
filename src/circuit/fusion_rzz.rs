@@ -80,6 +80,7 @@ pub(super) fn fuse_batch_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
     let mut rzz_run: Vec<(usize, usize, f64)> = Vec::new();
     let mut deferred: Vec<Instruction> = Vec::new();
     let mut rzz_qubits = vec![false; circuit.num_qubits];
+    let mut deferred_qubits = vec![false; circuit.num_qubits];
 
     for inst in insts {
         if let Instruction::Gate {
@@ -87,6 +88,18 @@ pub(super) fn fuse_batch_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
             targets,
         } = inst
         {
+            // Deferred gates are re-emitted after the whole batch. Admitting an
+            // Rzz on a deferred gate's qubit would sink that gate behind an Rzz
+            // it does not commute with, so close the run first.
+            if deferred_qubits[targets[0]] || deferred_qubits[targets[1]] {
+                flush_rzz_run(
+                    &mut output,
+                    &mut rzz_run,
+                    &mut deferred,
+                    &mut rzz_qubits,
+                    &mut deferred_qubits,
+                );
+            }
             rzz_run.push((targets[0], targets[1], *theta));
             rzz_qubits[targets[0]] = true;
             rzz_qubits[targets[1]] = true;
@@ -94,23 +107,41 @@ pub(super) fn fuse_batch_rzz(circuit: &Circuit) -> Cow<'_, Circuit> {
         }
 
         if !rzz_run.is_empty() {
-            let can_pass = match inst {
-                Instruction::Gate { gate, targets } if gate.num_qubits() == 1 => {
-                    gate.is_diagonal_1q() || !rzz_qubits[targets[0]]
+            match inst {
+                Instruction::Gate { gate, .. }
+                    if gate.num_qubits() == 1 && gate.is_diagonal_1q() =>
+                {
+                    deferred.push(inst.clone());
+                    continue;
                 }
-                _ => false,
-            };
-            if can_pass {
-                deferred.push(inst.clone());
-                continue;
+                Instruction::Gate { gate, targets }
+                    if gate.num_qubits() == 1 && !rzz_qubits[targets[0]] =>
+                {
+                    deferred_qubits[targets[0]] = true;
+                    deferred.push(inst.clone());
+                    continue;
+                }
+                _ => {}
             }
         }
 
-        flush_rzz_run(&mut output, &mut rzz_run, &mut deferred, &mut rzz_qubits);
+        flush_rzz_run(
+            &mut output,
+            &mut rzz_run,
+            &mut deferred,
+            &mut rzz_qubits,
+            &mut deferred_qubits,
+        );
         output.push(inst.clone());
     }
 
-    flush_rzz_run(&mut output, &mut rzz_run, &mut deferred, &mut rzz_qubits);
+    flush_rzz_run(
+        &mut output,
+        &mut rzz_run,
+        &mut deferred,
+        &mut rzz_qubits,
+        &mut deferred_qubits,
+    );
 
     Cow::Owned(circuit.with_instructions(output))
 }
@@ -120,6 +151,7 @@ fn flush_rzz_run(
     rzz_run: &mut Vec<(usize, usize, f64)>,
     deferred: &mut Vec<Instruction>,
     rzz_qubits: &mut [bool],
+    deferred_qubits: &mut [bool],
 ) {
     if rzz_run.len() >= 2 {
         let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
@@ -144,4 +176,5 @@ fn flush_rzz_run(
     output.append(deferred);
     rzz_run.clear();
     rzz_qubits.fill(false);
+    deferred_qubits.fill(false);
 }

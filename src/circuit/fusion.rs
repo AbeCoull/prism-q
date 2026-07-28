@@ -968,12 +968,14 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     let mut run_originals: Vec<Instruction> = Vec::new();
     let mut run_qubits = vec![false; circuit.num_qubits];
     let mut deferred: Vec<Instruction> = Vec::new();
+    let mut deferred_qubits = vec![false; circuit.num_qubits];
 
     let flush_diag_run = |output: &mut Vec<Instruction>,
                           entries: &mut Vec<DiagEntry>,
                           originals: &mut Vec<Instruction>,
                           deferred: &mut Vec<Instruction>,
-                          run_qubits: &mut [bool]| {
+                          run_qubits: &mut [bool],
+                          deferred_qubits: &mut [bool]| {
         if entries.len() >= 2 {
             let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
             for (i, &used) in run_qubits.iter().enumerate() {
@@ -994,11 +996,26 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
         originals.clear();
         output.append(deferred);
         run_qubits.fill(false);
+        deferred_qubits.fill(false);
     };
 
     for inst in insts {
         if let Instruction::Gate { gate, targets } = inst {
             if gate.is_diag_batchable() {
+                // Deferred gates are re-emitted after the whole batch. Admitting
+                // a diagonal gate on a deferred gate's qubit would sink that
+                // gate behind one it does not commute with, so close the run
+                // first and let this gate open a new one.
+                if targets.iter().any(|t| deferred_qubits[*t]) {
+                    flush_diag_run(
+                        &mut output,
+                        &mut run_entries,
+                        &mut run_originals,
+                        &mut deferred,
+                        &mut run_qubits,
+                        &mut deferred_qubits,
+                    );
+                }
                 let new_entries = gate.diag_entries(targets);
                 for t in targets.iter() {
                     run_qubits[*t] = true;
@@ -1009,6 +1026,7 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
             }
 
             if !run_entries.is_empty() && gate.num_qubits() == 1 && !run_qubits[targets[0]] {
+                deferred_qubits[targets[0]] = true;
                 deferred.push(inst.clone());
                 continue;
             }
@@ -1020,6 +1038,7 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
             &mut run_originals,
             &mut deferred,
             &mut run_qubits,
+            &mut deferred_qubits,
         );
         output.push(inst.clone());
     }
@@ -1030,6 +1049,7 @@ fn fuse_diagonal_batch(input: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
         &mut run_originals,
         &mut deferred,
         &mut run_qubits,
+        &mut deferred_qubits,
     );
 
     let mut c = Circuit::new(circuit.num_qubits, circuit.num_classical_bits);

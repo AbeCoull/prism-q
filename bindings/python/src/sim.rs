@@ -175,11 +175,7 @@ impl PySimulation {
         }
         let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
         for (coeff, factors) in hamiltonian {
-            let mut string = Vec::with_capacity(factors.len());
-            for (qubit, axis) in factors {
-                string.push(PauliTerm::new(qubit, parse_axis(&axis)?));
-            }
-            terms.push((coeff, string));
+            terms.push((coeff, parse_pauli_string(factors)?));
         }
         let params = ParameterMap::from_links(
             parameters
@@ -199,6 +195,78 @@ impl PySimulation {
         })?;
         Ok((result.value, f64_array(py, result.gradient)))
     }
+
+    /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on the circuit's
+    /// output state, honoring the selected backend.
+    ///
+    /// Each observable is a list of `(qubit, axis)` factors, where `axis` is one
+    /// of `"X"`, `"Y"`, `"Z"` and identity factors are omitted. The circuit must
+    /// be unitary, and no noise model may be attached.
+    #[pyo3(signature = (observables))]
+    fn expectation_values(
+        &self,
+        py: Python<'_>,
+        observables: Vec<Vec<(usize, String)>>,
+    ) -> PyPrismResult<Vec<f64>> {
+        if self.noise.is_some() {
+            return Err(invalid(
+                "expectation_values() does not support noise; use density_matrix_expectation_values()",
+            ));
+        }
+        let observables = parse_observables(observables)?;
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let circuit = &self.circuit;
+        let values = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            sim.seed(seed).expectation_values(&observables)
+        })?;
+        Ok(values)
+    }
+
+    /// Exact `Tr(rho P)` for each joint Pauli observable, evolving the
+    /// density-matrix backend through the circuit and the attached noise model.
+    ///
+    /// Observables take the same `(qubit, axis)` form as
+    /// [`expectation_values`]. Measurements are read off the final mixed state
+    /// without collapse, so this is the zero-variance analogue of
+    /// trajectory-averaged expectation values. Always uses the density-matrix
+    /// backend regardless of `.backend(...)`, so the circuit must fit that
+    /// backend's qubit cap.
+    #[pyo3(signature = (observables))]
+    fn density_matrix_expectation_values(
+        &self,
+        py: Python<'_>,
+        observables: Vec<Vec<(usize, String)>>,
+    ) -> PyPrismResult<Vec<f64>> {
+        let observables = parse_observables(observables)?;
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
+        let values = py.detach(|| {
+            prism_q::density_matrix_expectation_values(
+                circuit,
+                &observables,
+                owned_noise.as_ref(),
+                seed,
+            )
+        })?;
+        Ok(values)
+    }
+}
+
+fn parse_observables(observables: Vec<Vec<(usize, String)>>) -> PyPrismResult<Vec<Vec<PauliTerm>>> {
+    observables.into_iter().map(parse_pauli_string).collect()
+}
+
+fn parse_pauli_string(factors: Vec<(usize, String)>) -> PyPrismResult<Vec<PauliTerm>> {
+    factors
+        .into_iter()
+        .map(|(qubit, axis)| Ok(PauliTerm::new(qubit, parse_axis(&axis)?)))
+        .collect()
 }
 
 fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {

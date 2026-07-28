@@ -50,6 +50,12 @@ impl PyBackendKind {
     fn stabilizer_rank() -> Self {
         Self(BackendKind::StabilizerRank)
     }
+    /// Exact mixed-state evolution over `4^n` amplitudes. Never selected by
+    /// `auto()`; the qubit ceiling is roughly half the statevector cap.
+    #[staticmethod]
+    fn density_matrix() -> Self {
+        Self(BackendKind::DensityMatrix)
+    }
 
     #[staticmethod]
     #[pyo3(signature = (max_bond_dim = 256))]

@@ -357,6 +357,12 @@ pub(crate) fn run_trajectory_shot(
 /// saturate the pool, and nesting shot tasks inside kernel joins piles stolen
 /// shot frames onto one worker stack until it overflows. Same guard as
 /// `MAX_BLOCK_QUBITS_FOR_PAR` in the decomposed path.
+/// Replica cap for parallel trajectories. Each Rayon thread holds its own
+/// backend, so peak memory is `threads * state(num_qubits)` rather than one
+/// state. Bounding the qubit count bounds the replica set: at 14 qubits a
+/// statevector replica is 256 KiB, so even a large thread pool stays in the
+/// tens of megabytes. Above this the trajectories run serially, one live
+/// backend at a time, and the backend's own `init` cap is the only limit.
 #[cfg(feature = "parallel")]
 const MAX_QUBITS_FOR_PAR_SHOTS: usize = 14;
 
@@ -418,6 +424,27 @@ fn run_trajectories_par(
 mod tests {
     use super::*;
     use crate::circuits;
+
+    /// The replica cap is only a memory bound if it stays at or below the cap
+    /// governing a single state. Raising `MAX_QUBITS_FOR_PAR_SHOTS` past the
+    /// statevector cap would let the parallel path allocate one oversize state
+    /// per thread, which is the failure `run_trajectories` avoids by falling
+    /// back to serial execution.
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_trajectory_replicas_stay_within_a_single_state_cap() {
+        let cap = crate::backend::max_statevector_qubits();
+        assert!(
+            MAX_QUBITS_FOR_PAR_SHOTS <= cap,
+            "parallel replica cap {MAX_QUBITS_FOR_PAR_SHOTS} exceeds the statevector cap {cap}"
+        );
+        let replica_bytes = (1usize << MAX_QUBITS_FOR_PAR_SHOTS) * size_of::<Complex64>();
+        assert_eq!(
+            replica_bytes,
+            256 * 1024,
+            "replica size documented as 256 KiB"
+        );
+    }
 
     #[test]
     fn trajectory_pauli_matches_brute_force() {

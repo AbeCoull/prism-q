@@ -26,6 +26,44 @@ reset consumes one draw from the backend's RNG stream. The density-matrix backen
 the mixture and applies the channel directly, with no draw. `tests/reset_channel.rs`
 pins the contract across backends against the density-matrix oracle.
 
+## Memory budget
+
+A circuit that does not fit in memory is an error, not a fallback. No backend silently
+hands the work to a different one when its state would not fit: it returns
+`PrismError::IncompatibleBackend` naming itself, the qubit count, the cap, and the
+environment variable that overrides it. Choosing a different backend is the caller's
+decision, and `BackendKind::Auto` makes it from circuit structure before any backend is
+constructed.
+
+The check lives in `Backend::init`, which is the one point every execution path passes
+through before reserving its state. Putting it there means a caller that drives a backend
+directly, through `run_on` rather than `simulate`, gets the same guard as one that goes
+through dispatch.
+
+| Cap | Variable | Default |
+|-----|----------|---------|
+| Statevector state | `PRISM_MAX_SV_QUBITS` | Largest `2^n` `Complex64` state fitting half of detected physical memory |
+| Density-matrix state | `PRISM_MAX_DM_QUBITS` | `floor(cap_sv / 2)`, since a density matrix of `n` qubits is a `2n`-qubit statevector |
+| Dense probability output | `PRISM_MAX_PROB_QUBITS` | Same budget over `f64` |
+| Dense statevector export | `PRISM_MAX_EXPORT_QUBITS` | Same budget over `Complex64` |
+| Dense outcome sampling | `PRISM_MAX_DENSE_OUTCOME_BITS` | Same budget over two `f64` per outcome |
+
+The density-matrix backend applies the tighter of its own cap and half the statevector
+cap, so it reports the rejection itself rather than surfacing an error naming the
+statevector it allocates internally. When physical memory cannot be detected the caps are
+disabled and a warning is printed, because guessing a budget is worse than saying the
+budget is unknown.
+
+Parallel noisy trajectories are the one path holding more than one state at a time: each
+Rayon thread runs its own backend, so peak memory is `threads * state(n)`. That path is
+restricted to circuits below 14 qubits, where a statevector replica is 256 KiB and a full
+thread pool stays in the tens of megabytes. Above it trajectories run serially with one
+live backend, bounded by the ordinary state cap.
+
+Three growth paths are not yet bounded and can still exhaust memory on an adversarial
+input: MPS bond dimension when `max_bond_dim` is set very high, sparse-state entry count
+when a circuit densifies, and the transient peak inside a factored sub-state merge.
+
 ## Statevector
 
 Full-state simulation in a flat `Vec<Complex64>` of 2^n amplitudes. The primary backend for circuits up to ~28 qubits.

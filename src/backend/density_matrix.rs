@@ -334,6 +334,17 @@ impl Backend for DensityMatrixBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+        // The state is a 2n-qubit statevector, so the statevector cap binds at
+        // half its value. Taking the tighter of the two here keeps this backend
+        // the one that reports the rejection, whatever the two caps are set to.
+        crate::backend::check_state_allocation(
+            "density_matrix",
+            num_qubits,
+            crate::backend::max_density_matrix_qubits()
+                .min(crate::backend::max_statevector_qubits() / 2),
+            "PRISM_MAX_DM_QUBITS",
+        )?;
+
         self.num_qubits = num_qubits;
         self.classical_bits = vec![false; num_classical_bits];
         self.sv.init(2 * num_qubits, 0)

@@ -784,6 +784,161 @@ fn fusion_same_pair_keeps_diagonal_batch_paths() {
     );
 }
 
+/// A non-diagonal 1q gate may only sink past a BatchRzz when its qubit is
+/// absent from the whole batch. Deferring it on "not seen in the run so far"
+/// let the H below move behind the Rzz gates on q12 that follow it, which
+/// silently dropped the Rz contributions the Rx then acted on.
+fn batch_rzz_barrier_circuit(num_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    for (a, b) in [(1, 5), (4, 6), (0, 9), (8, 9), (3, 11)] {
+        c.add_gate(Gate::Rzz(0.7), &[a, b]);
+    }
+    c.add_gate(Gate::H, &[12]);
+    for a in [1, 2, 6, 7, 8, 10, 11] {
+        c.add_gate(Gate::Rzz(0.7), &[a, 12]);
+    }
+    c.add_gate(Gate::Rx(0.9), &[12]);
+    c.add_gate(Gate::Rzz(0.7), &[0, 13]);
+    c
+}
+
+#[test]
+fn fusion_batch_rzz_respects_non_diagonal_barrier() {
+    for n in 14..=18 {
+        let circuit = batch_rzz_barrier_circuit(n);
+        let unfused = run_unfused_state(&circuit);
+        let fused = run_fused_state(&circuit);
+        assert_eq!(fused.len(), unfused.len(), "{n}q state length mismatch");
+        for (i, (a, e)) in fused.iter().zip(&unfused).enumerate() {
+            assert!(
+                (*a - *e).norm() < EPS,
+                "{n}q amp[{i}]: expected {e}, got {a}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fusion_batch_rzz_still_batches_around_a_barrier() {
+    let circuit = batch_rzz_barrier_circuit(16);
+    let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+    let batches = fused
+        .instructions
+        .iter()
+        .filter(|inst| {
+            matches!(
+                inst,
+                prism_q::circuit::Instruction::Gate {
+                    gate: Gate::BatchRzz(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        batches, 2,
+        "the barrier should split the run into two batches, not disable batching"
+    );
+}
+
+/// `fuse_diagonal_batch` carries the same deferral rule as `fuse_batch_rzz`, over
+/// a much wider gate set (Z, S, T, Rz, P, CZ, Rzz, CPhase). Deferring the first
+/// SX below on "q14 is not in the run yet" put the Rzz on q14 ahead of it.
+fn diagonal_batch_barrier_circuit(num_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    c.add_gate(Gate::Cz, &[9, 0]);
+    c.add_gate(Gate::SX, &[14]);
+    c.add_gate(Gate::Rzz(8.25), &[14, 10]);
+    c.add_gate(Gate::SX, &[14]);
+    c
+}
+
+/// The same shape reached through a controlled phase rather than an Rzz.
+fn controlled_phase_barrier_circuit(num_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    c.add_gate(Gate::H, &[15]);
+    c.add_gate(Gate::Rx(2.81), &[1]);
+    c.add_gate(
+        Gate::cu([
+            [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+            [Complex64::new(0.0, 0.0), Complex64::from_polar(1.0, 2.9)],
+        ]),
+        &[1, 9],
+    );
+    c.add_gate(
+        Gate::cu([
+            [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+            [Complex64::new(0.0, 0.0), Complex64::from_polar(1.0, 1.28)],
+        ]),
+        &[1, 15],
+    );
+    c.add_gate(Gate::H, &[15]);
+    c
+}
+
+#[test]
+fn fusion_diagonal_batch_respects_non_diagonal_barrier() {
+    for n in 16..=18 {
+        assert_fusion_preserves_state(&diagonal_batch_barrier_circuit(n));
+        assert_fusion_preserves_state(&controlled_phase_barrier_circuit(n));
+    }
+}
+
+/// Seeded sweep over the gate mix that exposed both batching reorder bugs. The
+/// deterministic cases above pin the two known shapes; this covers the class,
+/// which stayed hidden because the generated bench circuits never produce it.
+///
+/// Compares probabilities, not amplitudes. Collapsing a run of three 1q gates
+/// such as `S, SX, H` into one matrix drops a global phase, which is a separate
+/// and older gap: it predates the batching fixes, reproduces at
+/// `MIN_QUBITS_FOR_FUSION` with no batching gate present, and is unobservable
+/// in the probabilities. The amplitude-level bar is held by the deterministic
+/// QFT and phase-estimation cases above.
+#[test]
+fn fusion_seeded_sweep_matches_unfused() {
+    let mut state = common::SEED;
+    let mut next = |bound: u64| {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (state >> 33) % bound
+    };
+
+    for _ in 0..150 {
+        let n = 16 + next(2) as usize;
+        let depth = 6 + next(20) as usize;
+        let mut c = Circuit::new(n, 0);
+        for _ in 0..depth {
+            let q0 = next(n as u64) as usize;
+            let q1 = next(n as u64) as usize;
+            let theta = next(1000) as f64 / 100.0;
+            match next(13) {
+                0 => c.add_gate(Gate::H, &[q0]),
+                1 => c.add_gate(Gate::X, &[q0]),
+                2 => c.add_gate(Gate::Rx(theta), &[q0]),
+                3 => c.add_gate(Gate::Ry(theta), &[q0]),
+                4 => c.add_gate(Gate::Rz(theta), &[q0]),
+                5 => c.add_gate(Gate::T, &[q0]),
+                6 => c.add_gate(Gate::S, &[q0]),
+                7 => c.add_gate(Gate::P(theta), &[q0]),
+                8 => c.add_gate(Gate::SX, &[q0]),
+                9 if q0 != q1 => c.add_gate(Gate::Cz, &[q0, q1]),
+                10 if q0 != q1 => c.add_gate(Gate::Rzz(theta), &[q0, q1]),
+                11 if q0 != q1 => c.add_gate(
+                    Gate::cu([
+                        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+                        [Complex64::new(0.0, 0.0), Complex64::from_polar(1.0, theta)],
+                    ]),
+                    &[q0, q1],
+                ),
+                12 if q0 != q1 => c.add_gate(Gate::Cx, &[q0, q1]),
+                _ => c.add_gate(Gate::H, &[q0]),
+            }
+        }
+        assert_fusion_preserves_correctness(&c);
+    }
+}
+
 #[test]
 fn fusion_2q_sparse_backend_12q() {
     // Verify Fused2q works on sparse backend too

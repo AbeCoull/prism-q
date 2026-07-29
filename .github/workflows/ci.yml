@@ -11,7 +11,7 @@ env:
   # Features exercised on runners without CUDA. The `gpu` feature links against CUDA via
   # cudarc's dynamic-linking mode and can't build on hosts that don't have the NVIDIA
   # toolkit installed, so CI enumerates features instead of using --all-features.
-  CI_FEATURES: parallel,serialization
+  CI_FEATURES: parallel
   CI_BENCH_FEATURES: parallel,bench-fast
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
 

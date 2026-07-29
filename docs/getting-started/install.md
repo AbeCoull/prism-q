@@ -23,7 +23,6 @@ version by hand instead, take it from
 | Feature | Default | Enables |
 |---------|---------|---------|
 | `parallel` | yes | Rayon parallel kernels (≥14 qubits) and the faer SVD path for MPS |
-| `serialization` | no | `serde` derives for circuits and results |
 | `gpu` | no | Optional CUDA backend (see the [GPU guide](../guides/gpu.md)) |
 | `distributed` | no | Statevector partitioning across ranks (see [Capabilities](../guides/capabilities.md)) |
 | `distributed-mpi` | no | `distributed` plus the MPI transport |

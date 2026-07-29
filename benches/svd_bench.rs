@@ -6,6 +6,8 @@ use rand_chacha::ChaCha8Rng;
 
 use prism_q::backend::mps::svd_jacobi;
 
+mod common;
+
 #[cfg(feature = "parallel")]
 use prism_q::backend::mps::svd_faer;
 
@@ -71,5 +73,9 @@ fn bench_svd_rectangular(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_svd, bench_svd_rectangular);
+criterion_group! {
+    name = benches;
+    config = common::criterion_config();
+    targets = bench_svd, bench_svd_rectangular
+}
 criterion_main!(benches);

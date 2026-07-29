@@ -2,10 +2,36 @@
 
 ## Framework
 
-Criterion.rs with HTML reports. Two benchmark binaries:
+Criterion.rs. Two benchmark binaries:
 
 - **bench_driver**: Microbenchmarks for individual gate kernels, measurement, and end-to-end QASM.
 - **circuits**: Macrobenchmarks for circuit family sweeps across qubit counts and depths.
+
+### Run configuration
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `PRISM_BENCH_PLOTS` | unset | Set to render the Criterion HTML report. Off by default: on the reference host a five-row group took 335s with plots and 47s without, so roughly 58s per row goes to rendering against 9s of measurement. Gating reads stdout and `target/criterion/**/estimates.json`, which the plots do not feed. |
+| `PRISM_BENCH_SAMPLES` | 100 | Samples per row outside the `bench-fast` tier. Criterion divides `measurement_time` across the sample count rather than multiplying by it, so the same five-row group took 47s at 10 samples and 48s at 100. Lower it only for opt-in rows whose single iteration is slow enough that the sample count, not the time budget, sets the cost. Values below 10 are clamped. |
+
+Sample count controls the precision of one run's mean. It does not remove
+drift between runs: on the reference host, back-to-back runs of identical code
+at 100 samples still moved -9.5% to +7.9%. A comparison that has to hold to the
+5% gate needs a quiet host, and preferably both variants benchmarked as rows in
+the same run so drift cancels.
+
+### Build cost
+
+The relink, not the measurement, dominates the edit-to-number loop. Touching
+`src/lib.rs` rebuilds the `circuits` target in about 202s because
+`[profile.bench]` inherits `lto = "fat"` and `codegen-units = 1`. Filtering to a
+few rows does not avoid it, so batch the rows you need into one run.
+
+Feature sets do not thrash the build cache. Cargo fingerprints them separately,
+so once `--features parallel` and `--features "parallel gpu distributed"` have
+each been built, switching back to the other cost 10s against 190s for the
+first cold build of a set. A separate `--target-dir` per feature set is not
+worth the disk.
 
 ## Benchmark categories
 

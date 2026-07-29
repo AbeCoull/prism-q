@@ -49,9 +49,26 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 
+# Tests run optimized. The suite is dominated by simulation work inside the
+# crate, not by test scaffolding, so an unoptimized build cost 140s of wall time
+# against 40s here, and the worst file (`fusion_correctness`, 101 cases at 16-20
+# qubits) fell from 44.7s to 5.5s. Debug assertions and overflow checks stay on:
+# the `debug_assert_eq!` guards in the backend kernels are load-bearing, and
+# opt-level 2 rather than 3 keeps the incremental rebuild penalty to about 14s.
+[profile.test]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
+# Benchmarks keep full symbols but only line tables. `lto = "fat"` with
+# `codegen-units = 1` makes every bench relink expensive, and dropping type and
+# variable debug info cut the rebuild of the `circuits` target after a
+# `src/lib.rs` touch from 294s to 202s on the reference host. The 24MB PDB still
+# carries function names and line numbers, which is all the flamegraph scripts
+# resolve, so profiling output is unchanged.
 [profile.bench]
 inherits = "release"
-debug = true
+debug = "line-tables-only"
 strip = "none"
 
 # Dedicated profile for the Python bindings (bindings/python). PyO3 converts a

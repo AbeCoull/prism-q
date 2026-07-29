@@ -856,9 +856,11 @@ fn bench_chunked_high_shots(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_api_queries,
+criterion_group! {
+    name = benches;
+    config = common::criterion_config();
+    targets =
+        bench_api_queries,
     bench_run_shots,
     bench_counts,
     bench_run_counts_terminal,
@@ -872,6 +874,6 @@ criterion_group!(
     bench_homological_compile,
     bench_homological_sample,
     bench_analytical_marginals,
-    bench_chunked_high_shots,
-);
+    bench_chunked_high_shots
+}
 criterion_main!(benches);

@@ -13,6 +13,8 @@
 //! Reference and internal sweeps are opt-in benchmarks. Enable them with
 //! `--features parallel,bench-internal`.
 
+mod common;
+
 #[cfg(feature = "bench-internal")]
 use criterion::{BenchmarkGroup, measurement::WallTime};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -779,19 +781,20 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
 }
 
 #[cfg(not(feature = "bench-internal"))]
-criterion_group!(
-    qec_t_strategy_benches,
-    bench_qec_t_strategies,
-    bench_qec_t_scaling,
-    bench_spd_light_cone
-);
+criterion_group! {
+    name = qec_t_strategy_benches;
+    config = common::criterion_config();
+    targets = bench_qec_t_strategies, bench_qec_t_scaling, bench_spd_light_cone
+}
 
 #[cfg(feature = "bench-internal")]
-criterion_group!(
-    qec_t_strategy_benches,
-    bench_qec_t_strategies,
-    bench_qec_t_scaling,
-    bench_spd_light_cone,
-    bench_qec_internal_sweeps
-);
+criterion_group! {
+    name = qec_t_strategy_benches;
+    config = common::criterion_config();
+    targets =
+        bench_qec_t_strategies,
+        bench_qec_t_scaling,
+        bench_spd_light_cone,
+        bench_qec_internal_sweeps
+}
 criterion_main!(qec_t_strategy_benches);

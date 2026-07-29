@@ -718,9 +718,11 @@ fn bench_stab_gpu_shots_explicit(c: &mut Criterion) {
     }
 }
 
-criterion_group!(
-    benches,
-    bench_gpu_random,
+criterion_group! {
+    name = benches;
+    config = common::criterion_config();
+    targets =
+        bench_gpu_random,
     bench_gpu_qft,
     bench_gpu_hea,
     bench_gpu_qaoa,
@@ -736,6 +738,6 @@ criterion_group!(
     bench_stab_bts_packed_cpu_vs_gpu,
     bench_stab_bts_marginals_cpu_vs_gpu,
     bench_stab_bts_device_counts_explicit,
-    bench_stab_gpu_shots_explicit,
-);
+    bench_stab_gpu_shots_explicit
+}
 criterion_main!(benches);

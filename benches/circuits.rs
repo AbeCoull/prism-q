@@ -1719,9 +1719,11 @@ fn bench_density_matrix_neutrality(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    // Statevector sweeps
+criterion_group! {
+    name = benches;
+    config = common::criterion_config();
+    targets =
+        // Statevector sweeps
     bench_statevector_random,
     bench_statevector_qft,
     bench_statevector_qft_textbook,
@@ -1799,6 +1801,6 @@ criterion_group!(
     bench_coalesce_baseline,
     // Density matrix (explicit backend)
     bench_density_matrix_unitary_layers,
-    bench_density_matrix_neutrality,
-);
+    bench_density_matrix_neutrality
+}
 criterion_main!(benches);

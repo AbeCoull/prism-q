@@ -522,9 +522,11 @@ fn bench_classical_only(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_single_qubit_gates,
+criterion_group! {
+    name = benches;
+    config = common::criterion_config();
+    targets =
+        bench_single_qubit_gates,
     bench_two_qubit_gates,
     bench_two_qubit_gate_kernels,
     bench_measurement,
@@ -534,6 +536,6 @@ criterion_group!(
     bench_diagonal_parametric_gates,
     bench_cphase_kernel,
     bench_new_gate_types,
-    bench_classical_only,
-);
+    bench_classical_only
+}
 criterion_main!(benches);

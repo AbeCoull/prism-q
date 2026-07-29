@@ -95,36 +95,6 @@ cargo bench -- --save-baseline my_baseline
 cargo bench -- --baseline my_baseline
 ```
 
-## Choosing rows for a change
-
-A performance sensitive change needs before and after numbers for the rows it
-can move, not for the whole suite. Filters are substring matches on the group
-path, so a trailing `/` selects a whole family:
-`cargo bench --bench circuits --features parallel -- "mps/"`.
-
-| Touched | Target and filters |
-|---------|--------------------|
-| `src/gates/`, `src/backend/statevector/kernels.rs`, `src/backend/simd.rs` | `bench_driver`: `single_qubit_gates`, `two_qubit_gates`, `two_qubit_gate_kernels`, `controlled_gates`, `diagonal_parametric_gates`, `cphase_kernel`, `high_target_qubit` |
-| `src/backend/statevector/mod.rs` | `circuits`: `statevector/` |
-| `src/circuit/fusion.rs`, `fusion_phase.rs`, `fusion_rzz.rs` | `circuits`: `statevector/qft_textbook`, `statevector/hea_l5`, `statevector/qv`, `statevector/random_d10`. Fusion itself costs about 200µs against a 130ms apply, so measure the applied result, not the pass |
-| `src/backend/stabilizer/` | `circuits`: `stabilizer/` |
-| `src/backend/factored_stabilizer/` | `circuits`: `factored_stabilizer/` |
-| `src/backend/factored/` | `circuits`: `factored/` |
-| `src/backend/mps.rs` | `circuits`: `mps/`; `svd_bench`: `svd`, `svd_rect` |
-| `src/backend/sparse.rs` | `circuits`: `sparse/` |
-| `src/backend/product.rs` | `circuits`: `product/` |
-| `src/backend/tensornetwork.rs` | `circuits`: `tn/` |
-| `src/backend/density_matrix.rs` | `circuits`: `density_matrix/` |
-| `src/sim/dispatch.rs` | `circuits`: `auto/`, `compare/` |
-| `src/sim/shots.rs`, `src/sim/terminal_sampling.rs`, `src/sim/compiled/` | `circuits`: `compiled_sampler`, `compiled_sampler_scale`, `compiled_sampler_filtered`; `bench_shots_perf`: `run_shots`, `shots_counts`, `run_counts_terminal`, `compiled_counts`, `histogram_counts`, `chunked_high_shots` |
-| `src/sim/noise.rs`, `src/sim/trajectory.rs` | `circuits`: `noisy_sampling`; `bench_shots_perf`: `qec_noisy_runner` |
-| `src/sim/gradient.rs` | `circuits`: `gradient/` |
-| `src/sim/unified_pauli.rs` | `circuits`: `expectation/pauli_sum`, `spp`, `coalesce_baseline` |
-| `src/sim/stabilizer_rank.rs` | `circuits`: `clifford_t`, `stabilizer_rank`; `qec_t_strategies` |
-| `src/qec/`, `src/sim/homological.rs` | `bench_shots_perf`: `qec_clifford_runner`, `qec_noisy_runner`, `qec_noisy_runner_split`, `homological_compile`, `homological_sample` |
-| `src/gpu/` | `bench_gpu` (needs `--features gpu`) |
-| `src/circuit/mod.rs` gate enum, `src/backend/mod.rs` trait | No subset is safe. A `size_of::<Gate>()` change moves every row through cache behavior, so run `bench_driver` and `circuits` in full |
-
 ## Baseline workflow
 
 ```bash

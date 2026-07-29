@@ -16,10 +16,13 @@ use smallvec::{SmallVec, smallvec};
 
 use crate::backend::simd;
 use crate::backend::statevector::insert_zero_bit;
-use crate::backend::{Backend, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
+use crate::backend::{
+    Backend, BasisSamples, is_phase_one, measurement_inv_norm, sorted_mcu_qubits,
+};
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate};
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::SendPtr;
@@ -510,6 +513,45 @@ impl FactoredBackend {
             }
         }
     }
+
+    /// Reduce a joint Pauli observable to per-sub-state masks in local qubit
+    /// coordinates. Rejects out-of-range qubits and duplicate factors.
+    fn substate_pauli_masks(&self, observable: &[PauliTerm]) -> Result<Vec<(usize, usize, u32)>> {
+        let mut masks = vec![(0usize, 0usize, 0u32); self.substates.len()];
+        let mut seen = vec![false; self.num_qubits];
+        for term in observable {
+            if term.qubit >= self.num_qubits {
+                return Err(crate::error::PrismError::InvalidQubit {
+                    index: term.qubit,
+                    register_size: self.num_qubits,
+                });
+            }
+            if seen[term.qubit] {
+                return Err(crate::error::PrismError::InvalidParameter {
+                    message: format!(
+                        "joint Pauli observable has duplicate factor on qubit {}",
+                        term.qubit
+                    ),
+                });
+            }
+            seen[term.qubit] = true;
+
+            let ss = self.qubit_to_substate[term.qubit];
+            let sub = self.substates[ss].as_ref().unwrap();
+            let bit = 1usize << Self::local_qubit(sub, term.qubit);
+            let entry = &mut masks[ss];
+            match term.axis {
+                PauliAxis::X => entry.0 |= bit,
+                PauliAxis::Z => entry.1 |= bit,
+                PauliAxis::Y => {
+                    entry.0 |= bit;
+                    entry.1 |= bit;
+                    entry.2 += 1;
+                }
+            }
+        }
+        Ok(masks)
+    }
 }
 
 impl Backend for FactoredBackend {
@@ -640,6 +682,72 @@ impl Backend for FactoredBackend {
 
     fn num_qubits(&self) -> usize {
         self.num_qubits
+    }
+
+    fn supports_native_sampling(&self) -> bool {
+        true
+    }
+
+    /// Draws one local index per sub-state and concatenates them, so the cost
+    /// is the sum of the block dimensions rather than their product.
+    ///
+    /// Blocks are visited in slot order and each consumes one draw per shot,
+    /// which is the order and the count the dense factored sampler uses.
+    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let blocks: Vec<(Vec<f64>, &[usize])> = self
+            .substates
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .map(|sub| {
+                let mut probs = vec![0.0_f64; sub.state.len()];
+                simd::norm_sqr_to_slice(&sub.state, &mut probs);
+                (crate::sim::shots::build_cdf(&probs), sub.qubits.as_slice())
+            })
+            .collect();
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut samples = BasisSamples::new(num_shots, self.num_qubits);
+        for shot in 0..num_shots {
+            for (cdf, qubits) in &blocks {
+                let r: f64 = rng.random();
+                let local = crate::sim::shots::sample_from_cdf(cdf, r);
+                for (bit, &qubit) in qubits.iter().enumerate() {
+                    if (local >> bit) & 1 == 1 {
+                        samples.set(shot, qubit);
+                    }
+                }
+            }
+        }
+        Ok(samples)
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// A joint Pauli factorizes across independent sub-states, so the value is
+    /// the product of the per-block expectations. Blocks the observable does
+    /// not touch contribute one and are skipped.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        observables
+            .iter()
+            .map(|observable| {
+                let masks = self.substate_pauli_masks(observable)?;
+                let mut product = 1.0f64;
+                for (ss, slot) in self.substates.iter().enumerate() {
+                    let Some(sub) = slot else { continue };
+                    let (xmask, zmask, num_y) = masks[ss];
+                    if xmask == 0 && zmask == 0 {
+                        continue;
+                    }
+                    let norm: f64 = sub.state.iter().map(|amp| amp.norm_sqr()).sum();
+                    product *= crate::sim::pauli_expectation_from_masks(
+                        &sub.state, xmask, zmask, num_y, norm,
+                    );
+                }
+                Ok(product)
+            })
+            .collect()
     }
 }
 

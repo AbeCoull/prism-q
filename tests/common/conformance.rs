@@ -70,6 +70,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use num_complex::Complex64;
+use prism_q::PauliTerm;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::backend::factored::FactoredBackend;
@@ -885,10 +886,19 @@ pub enum SkipReason {
     FactoredBlocksHaveNoJointState,
     /// Amplitudes are only defined once the trajectory is fixed.
     BranchingTrajectory,
+    /// Outside the query matrices. They cover the backends that gained a path
+    /// from their own state to shots and observables (sparse, MPS, factored)
+    /// plus the statevector they have to agree with. Every other participant is
+    /// a route, or an engine whose query path is unchanged.
+    OutsideQueryMatrix,
+    /// The query matrices append terminal measurements and call the
+    /// unitary-only expectation API, neither of which a circuit that already
+    /// measures, resets, or conditions can carry.
+    QueryNeedsUnitaryCircuit,
 }
 
 impl SkipReason {
-    pub const ALL: [SkipReason; 15] = [
+    pub const ALL: [SkipReason; 17] = [
         SkipReason::NonClifford,
         SkipReason::EntanglingGates,
         SkipReason::StabilizerRankNoTGates,
@@ -904,6 +914,8 @@ impl SkipReason {
         SkipReason::NoAmplitudeExport,
         SkipReason::FactoredBlocksHaveNoJointState,
         SkipReason::BranchingTrajectory,
+        SkipReason::OutsideQueryMatrix,
+        SkipReason::QueryNeedsUnitaryCircuit,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -923,6 +935,8 @@ impl SkipReason {
             SkipReason::NoAmplitudeExport => "no_amplitude_export",
             SkipReason::FactoredBlocksHaveNoJointState => "factored_blocks_have_no_joint_state",
             SkipReason::BranchingTrajectory => "branching_trajectory",
+            SkipReason::OutsideQueryMatrix => "outside_query_matrix",
+            SkipReason::QueryNeedsUnitaryCircuit => "query_needs_unitary_circuit",
         }
     }
 }
@@ -955,12 +969,31 @@ pub struct Participant {
     exec: Executor,
     rules: fn(&CaseProfile) -> Eligibility,
     export_rules: fn(&CaseProfile) -> Eligibility,
+    /// Backend kind the shot and observable queries are driven through, for the
+    /// participants the query matrices cover. `None` keeps the participant out
+    /// of them.
+    query_kind: Option<BackendKind>,
     pub anchor: Option<Anchor>,
 }
 
 impl Participant {
     pub fn eligibility(&self, profile: &CaseProfile) -> Eligibility {
         (self.rules)(profile)
+    }
+
+    /// Query comparison narrows the probability rule: the participant has to be
+    /// in the matrix and the circuit has to be unitary.
+    pub fn query_eligibility(&self, profile: &CaseProfile) -> Eligibility {
+        match self.eligibility(profile) {
+            Eligibility::Skip(reason) => Eligibility::Skip(reason),
+            Eligibility::Compare if self.query_kind.is_none() => {
+                Eligibility::Skip(SkipReason::OutsideQueryMatrix)
+            }
+            Eligibility::Compare if !profile.unitary() => {
+                Eligibility::Skip(SkipReason::QueryNeedsUnitaryCircuit)
+            }
+            Eligibility::Compare => Eligibility::Compare,
+        }
     }
 
     /// Amplitude comparison narrows the probability rule: the trajectory has to
@@ -1080,6 +1113,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(StatevectorBackend::new(s))),
             rules: always,
             export_rules: always,
+            query_kind: Some(BackendKind::Statevector),
             anchor: None,
         },
         Participant {
@@ -1087,6 +1121,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(SparseBackend::new(s))),
             rules: always,
             export_rules: always,
+            query_kind: Some(BackendKind::Sparse),
             anchor: None,
         },
         Participant {
@@ -1094,6 +1129,9 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Mps,
             rules: mps_rules,
             export_rules: always,
+            query_kind: Some(BackendKind::Mps {
+                max_bond_dim: MPS_MAX_BOND,
+            }),
             anchor: None,
         },
         Participant {
@@ -1101,6 +1139,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(TensorNetworkBackend::new(s))),
             rules: tensor_network_rules,
             export_rules: always,
+            query_kind: None,
             anchor: None,
         },
         Participant {
@@ -1108,6 +1147,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(FactoredBackend::new(s))),
             rules: always,
             export_rules: no_state_export,
+            query_kind: Some(BackendKind::Factored),
             anchor: None,
         },
         Participant {
@@ -1115,6 +1155,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(StabilizerBackend::new(s))),
             rules: stabilizer_rules,
             export_rules: always,
+            query_kind: None,
             anchor: Some(Anchor::Tableau),
         },
         Participant {
@@ -1122,6 +1163,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(FactoredStabilizerBackend::new(s))),
             rules: stabilizer_rules,
             export_rules: factored_stabilizer_export,
+            query_kind: None,
             anchor: Some(Anchor::Tableau),
         },
         Participant {
@@ -1129,6 +1171,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(ProductStateBackend::new(s))),
             rules: product_rules,
             export_rules: always,
+            query_kind: None,
             anchor: None,
         },
         Participant {
@@ -1136,6 +1179,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(DensityMatrixBackend::new(s))),
             rules: density_matrix_rules,
             export_rules: no_state_export,
+            query_kind: None,
             anchor: Some(Anchor::Channel),
         },
         Participant {
@@ -1143,6 +1187,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Route(run_auto),
             rules: always,
             export_rules: no_state_export,
+            query_kind: None,
             anchor: None,
         },
         Participant {
@@ -1150,6 +1195,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Route(run_decomposition),
             rules: decomposition_rules,
             export_rules: no_state_export,
+            query_kind: None,
             anchor: None,
         },
         Participant {
@@ -1157,23 +1203,27 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Route(run_stabilizer_rank),
             rules: stabilizer_rank_rules,
             export_rules: no_state_export,
+            query_kind: None,
             anchor: None,
         },
     ]
 }
 
-/// Which skip rules the corpus fires, over both the probability matrix and the
-/// amplitude matrix, with counts.
+/// Which skip rules the corpus fires, over the probability, amplitude, and
+/// query matrices, with counts.
 pub fn skip_ledger() -> BTreeMap<SkipReason, usize> {
     let mut ledger: BTreeMap<SkipReason, usize> = BTreeMap::new();
     let participants = participants();
     for case in generated_cases() {
         for participant in &participants {
-            if let Eligibility::Skip(reason) = participant.eligibility(&case.profile) {
-                *ledger.entry(reason).or_default() += 1;
-            }
-            if let Eligibility::Skip(reason) = participant.amplitude_eligibility(&case.profile) {
-                *ledger.entry(reason).or_default() += 1;
+            for eligibility in [
+                participant.eligibility(&case.profile),
+                participant.amplitude_eligibility(&case.profile),
+                participant.query_eligibility(&case.profile),
+            ] {
+                if let Eligibility::Skip(reason) = eligibility {
+                    *ledger.entry(reason).or_default() += 1;
+                }
             }
         }
     }
@@ -1196,9 +1246,13 @@ pub fn matrix_report() -> String {
                 Eligibility::Compare => "compare".to_string(),
                 Eligibility::Skip(reason) => format!("skip:{}", reason.name()),
             };
+            let query = match participant.query_eligibility(&case.profile) {
+                Eligibility::Compare => "compare".to_string(),
+                Eligibility::Skip(reason) => format!("skip:{}", reason.name()),
+            };
             writeln!(
                 out,
-                "  {:<20} probs {:<34} amps {amps}",
+                "  {:<20} probs {:<34} amps {amps:<34} query {query}",
                 participant.name, probs
             )
             .unwrap();
@@ -1555,6 +1609,171 @@ pub fn assert_amplitudes(case: &GeneratedCase, participants: &[Participant]) {
                         "{}amplitude[{i}]: `{}` gave {got}, `{name}` gave {want} \
                          (diff {diff:.2e}, eps {AMP_EPS:.0e})",
                         case.context(),
+                        participant.name
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---- Query matrices ----
+
+/// Shots drawn per participant in the sampling matrix.
+pub const QUERY_SHOTS: usize = 8_000;
+
+/// Reference probability below which an outcome must never be sampled. Far
+/// above the amplitude noise floor of every participant and far below the
+/// smallest weight any generated case puts on a reachable outcome.
+pub const SAMPLING_SUPPORT_FLOOR: f64 = 1e-12;
+
+/// Band on a sampled frequency: four binomial standard errors at
+/// [`QUERY_SHOTS`] draws, plus a floor so a near-deterministic outcome does not
+/// demand an exact hit.
+fn sampling_band(p: f64) -> f64 {
+    4.0 * (p * (1.0 - p) / QUERY_SHOTS as f64).sqrt() + 0.004
+}
+
+/// Observables the expectation matrix compares, fixed by qubit count so every
+/// participant on a case is asked the same questions. Mixes all three axes and
+/// includes the identity and a full-width string.
+pub fn query_observables(num_qubits: usize) -> Vec<Vec<PauliTerm>> {
+    let mut observables = vec![vec![], vec![PauliTerm::z(0)]];
+    if num_qubits >= 2 {
+        observables.push(vec![PauliTerm::x(0), PauliTerm::z(num_qubits - 1)]);
+        observables.push(vec![PauliTerm::y(0), PauliTerm::y(num_qubits - 1)]);
+    }
+    observables.push(
+        (0..num_qubits)
+            .map(|q| match q % 3 {
+                0 => PauliTerm::x(q),
+                1 => PauliTerm::y(q),
+                _ => PauliTerm::z(q),
+            })
+            .collect(),
+    );
+    observables
+}
+
+fn with_terminal_measurements(circuit: &Circuit) -> Circuit {
+    let mut measured = Circuit::new(circuit.num_qubits, circuit.num_qubits);
+    measured.instructions = circuit.instructions.clone();
+    for q in 0..circuit.num_qubits {
+        measured.add_measure(q, q);
+    }
+    measured
+}
+
+/// Shots from every participant in the query matrix, checked against that
+/// participant's own probability vector.
+///
+/// Support is exact: an outcome the state cannot produce is a failure however
+/// rare. The frequency comparison is the one statistical check in the harness,
+/// and its band is stated rather than tuned until green.
+pub fn assert_native_sampling(case: &GeneratedCase, participants: &[Participant]) {
+    for participant in participants {
+        if !participant.query_eligibility(&case.profile).is_compared() {
+            continue;
+        }
+        let kind = participant.query_kind.clone().unwrap();
+        let reference = run_or_fail(participant, case, CONFORMANCE_SEED, false).probs;
+        let measured = with_terminal_measurements(&case.circuit);
+
+        let result = sim::simulate(&measured)
+            .backend(kind.clone())
+            .seed(CONFORMANCE_SEED)
+            .shots(QUERY_SHOTS)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "{}participant `{}` is in the query matrix but shot sampling failed: {err}",
+                    case.context(),
+                    participant.name
+                )
+            });
+
+        let mut counts = vec![0usize; reference.len()];
+        for shot in &result.shots {
+            let index: usize = shot
+                .iter()
+                .enumerate()
+                .filter(|&(_, &bit)| bit)
+                .map(|(q, _)| 1usize << q)
+                .sum();
+            counts[index] += 1;
+        }
+
+        for (index, &count) in counts.iter().enumerate() {
+            if count == 0 {
+                continue;
+            }
+            assert!(
+                reference[index] > SAMPLING_SUPPORT_FLOOR,
+                "{}`{}` sampled basis state {index} {count} times, but its own probability \
+                 vector puts {:.3e} there",
+                case.context(),
+                participant.name,
+                reference[index]
+            );
+            let frequency = count as f64 / QUERY_SHOTS as f64;
+            let band = sampling_band(reference[index]);
+            assert!(
+                (frequency - reference[index]).abs() < band,
+                "{}`{}` sampled basis state {index} at {frequency:.6} against its own \
+                 probability {:.6} (band {band:.6} at {QUERY_SHOTS} shots)",
+                case.context(),
+                participant.name,
+                reference[index]
+            );
+        }
+
+        let replay = sim::simulate(&measured)
+            .backend(kind)
+            .seed(CONFORMANCE_SEED)
+            .shots(QUERY_SHOTS)
+            .unwrap();
+        assert_eq!(
+            result.shots,
+            replay.shots,
+            "{}`{}` produced different shots from the same seed",
+            case.context(),
+            participant.name
+        );
+    }
+}
+
+/// Expectation values from every participant in the query matrix, compared
+/// against each other at [`PROB_EPS`].
+pub fn assert_expectation_values(case: &GeneratedCase, participants: &[Participant]) {
+    let observables = query_observables(case.circuit.num_qubits);
+    let mut reference: Option<(&'static str, Vec<f64>)> = None;
+
+    for participant in participants {
+        if !participant.query_eligibility(&case.profile).is_compared() {
+            continue;
+        }
+        let values = sim::simulate(&case.circuit)
+            .backend(participant.query_kind.clone().unwrap())
+            .seed(CONFORMANCE_SEED)
+            .expectation_values(&observables)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "{}participant `{}` is in the query matrix but expectation values failed: \
+                     {err}",
+                    case.context(),
+                    participant.name
+                )
+            });
+
+        match &reference {
+            None => reference = Some((participant.name, values)),
+            Some((name, expected)) => {
+                for (i, (got, want)) in values.iter().zip(expected).enumerate() {
+                    assert!(
+                        (got - want).abs() < PROB_EPS,
+                        "{}observable {i} {:?}: `{}` gave {got}, `{name}` gave {want} \
+                         (eps {PROB_EPS:.0e})",
+                        case.context(),
+                        observables[i],
                         participant.name
                     );
                 }

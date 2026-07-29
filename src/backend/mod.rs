@@ -41,6 +41,7 @@ use num_complex::Complex64;
 
 use crate::circuit::Instruction;
 use crate::error::Result;
+use crate::sim::unified_pauli::PauliTerm;
 
 pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
 
@@ -130,6 +131,50 @@ pub(crate) fn sorted_mcu_qubits(controls: &[usize], target: usize, buf: &mut [us
     buf[controls.len()] = target;
     buf[..n].sort_unstable();
     n
+}
+
+/// Packed measurement outcomes produced by [`Backend::sample_basis_states`].
+///
+/// Holds `num_qubits.div_ceil(64)` words per shot; bit `q % 64` of word
+/// `q / 64` carries the outcome for qubit `q`. Packed rather than one index
+/// per shot because MPS and the factored backend run past 64 qubits, which is
+/// the regime the native samplers exist for.
+#[derive(Debug, Clone)]
+pub struct BasisSamples {
+    words: Vec<u64>,
+    words_per_shot: usize,
+}
+
+impl BasisSamples {
+    pub(crate) fn new(num_shots: usize, num_qubits: usize) -> Self {
+        let words_per_shot = num_qubits.div_ceil(64).max(1);
+        Self {
+            words: vec![0u64; num_shots * words_per_shot],
+            words_per_shot,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn set(&mut self, shot: usize, qubit: usize) {
+        self.words[shot * self.words_per_shot + qubit / 64] |= 1u64 << (qubit % 64);
+    }
+
+    /// Record a whole shot from a basis-state index, for backends that key
+    /// their state by one. A `usize` index never spans more than one word.
+    #[inline(always)]
+    pub(crate) fn set_index(&mut self, shot: usize, index: usize) {
+        self.words[shot * self.words_per_shot] = index as u64;
+    }
+
+    pub fn num_shots(&self) -> usize {
+        self.words.len() / self.words_per_shot
+    }
+
+    #[inline(always)]
+    pub fn bit(&self, shot: usize, qubit: usize) -> bool {
+        let word = self.words[shot * self.words_per_shot + qubit / 64];
+        (word >> (qubit % 64)) & 1 == 1
+    }
 }
 
 /// Trait that all simulation backends must implement.
@@ -256,6 +301,48 @@ pub trait Backend {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
             operation: "reset".to_string(),
+        })
+    }
+
+    /// Whether [`Backend::sample_basis_states`] draws from this backend's own
+    /// representation.
+    ///
+    /// `false` routes shot and count queries through the dense probability
+    /// vector, which caps them at the machine's dense-output budget. Backends
+    /// holding a polynomial-size representation override both this and
+    /// [`Backend::sample_basis_states`].
+    fn supports_native_sampling(&self) -> bool {
+        false
+    }
+
+    /// Draw `num_shots` computational-basis outcomes from the current state.
+    ///
+    /// Seeded from `seed` alone rather than from the backend's own RNG, so a
+    /// shot request replays exactly. Does not collapse the state. The default
+    /// reports that the backend has no native sampler.
+    fn sample_basis_states(&self, _num_shots: usize, _seed: u64) -> Result<BasisSamples> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "native basis-state sampling".to_string(),
+        })
+    }
+
+    /// Whether [`Backend::pauli_expectations`] evaluates observables on this
+    /// backend's own representation.
+    fn supports_pauli_expectation(&self) -> bool {
+        false
+    }
+
+    /// Exact `⟨ψ|P_k|ψ⟩` for each joint Pauli observable `P_k`.
+    ///
+    /// Each observable lists one factor per non-identity qubit; omitted qubits
+    /// carry identity. Normalization independent, so implementors divide by
+    /// `⟨ψ|ψ⟩` rather than assuming a unit-norm state. Duplicate factors on one
+    /// qubit are rejected.
+    fn pauli_expectations(&self, _observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "Pauli expectation values".to_string(),
         })
     }
 

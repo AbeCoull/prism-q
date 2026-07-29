@@ -47,6 +47,33 @@ Notes:
   including gates, measurement, reset, and multi-shot sampling without gathering
   the dense state. Use `simulate(&circuit).distributed(context)`.
 
+## Shot and observable queries above the dense cap
+
+`simulate(...).shots(n)`, `.sample_counts(n)`, and `.expectation_values(...)`
+answer from a dense `2^n` vector unless the backend carries its own path. The
+dense route is capped by system memory (roughly 29 qubits on a 16 GiB host; see
+`PRISM_MAX_SV_QUBITS`). Backends marked `Native` below answer without it and are
+bounded only by their own representation.
+
+| Backend | Shots and counts | Expectation values |
+| --- | --- | --- |
+| Sparse | Native, CDF over the stored amplitudes | Native, `O(k)` over the amplitude map |
+| MPS | Native, sequential conditional sampling | Native, one chain contraction per observable |
+| Factored | Native, one draw per sub-state | Native, product over the blocks |
+| Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
+| Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
+| Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
+| Tensor Network, Product State, Density Matrix | Dense | Rejected, naming the backend |
+
+Native sampling is deterministic from the seed alone: the same seed and shot
+count reproduce the same bitstrings. It is not shot-for-shot identical to the
+dense route, which consumes its randomness on a different schedule; the
+distributions agree.
+
+Backends without an observable path return `BackendUnsupported` naming
+themselves, so a rejected request says which engine could not serve it rather
+than blaming the route that selected it.
+
 ## Not yet supported
 
 | Target | Status | Notes |

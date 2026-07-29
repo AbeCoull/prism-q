@@ -1131,8 +1131,6 @@ dependencies = [
  "rand",
  "rand_chacha",
  "rayon",
- "serde",
- "serde_json",
  "smallvec",
  "thiserror 2.0.18",
 ]

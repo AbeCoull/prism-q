@@ -134,6 +134,7 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         stride *= new_shape[i];
     }
 
+    #[cfg(feature = "parallel")]
     let steps: SmallVec<[usize; 6]> = perm.iter().map(|&old_ax| old_strides[old_ax]).collect();
 
     #[cfg(feature = "parallel")]

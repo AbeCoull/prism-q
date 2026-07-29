@@ -42,7 +42,6 @@ use num_complex::Complex64;
 use crate::circuit::Instruction;
 use crate::error::Result;
 
-#[cfg(feature = "parallel")]
 pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
 
 #[cfg(feature = "parallel")]

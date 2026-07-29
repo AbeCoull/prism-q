@@ -30,8 +30,80 @@ use crate::backend::statevector::{StatevectorBackend, insert_zero_bit};
 use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
-use crate::gates::Gate;
+use crate::gates::{Gate, McuData};
 use crate::sim::i_pow;
+
+/// Compile a one-qubit Kraus set into the 4x4 superoperator acting on the
+/// `(row-bit, col-bit)` block of `rho`, where block index `i = 2*a + b` orders
+/// `(row-bit a, col-bit b)`:
+/// `S[2a+b][2a'+b'] = sum_k K_k[a][a'] * conj(K_k[b][b'])`.
+///
+/// A single-element set `[U]` gives the unitary sandwich `U rho U^dagger`.
+fn block_superoperator(kraus: &[[[Complex64; 2]; 2]]) -> [[Complex64; 4]; 4] {
+    let mut s = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for k in kraus {
+        for a in 0..2 {
+            for b in 0..2 {
+                for ap in 0..2 {
+                    for bp in 0..2 {
+                        s[2 * a + b][2 * ap + bp] += k[a][ap] * k[b][bp].conj();
+                    }
+                }
+            }
+        }
+    }
+    s
+}
+
+fn conjugate_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
+    [
+        [m[0][0].conj(), m[0][1].conj()],
+        [m[1][0].conj(), m[1][1].conj()],
+    ]
+}
+
+/// The gate's 2x2 matrix, or `None` for anything else. `Gate::num_qubits` is
+/// not a usable test here: it reports 1 for a `BatchPhase` with no phases, a
+/// single-qubit `DiagonalBatch`, and `QftBlock { num: 1 }`, none of which
+/// `matrix_2x2` accepts.
+fn matrix_1q(gate: &Gate) -> Option<[[Complex64; 2]; 2]> {
+    match gate {
+        Gate::Id
+        | Gate::X
+        | Gate::Y
+        | Gate::Z
+        | Gate::H
+        | Gate::S
+        | Gate::Sdg
+        | Gate::T
+        | Gate::Tdg
+        | Gate::SX
+        | Gate::SXdg
+        | Gate::Rx(_)
+        | Gate::Ry(_)
+        | Gate::Rz(_)
+        | Gate::P(_)
+        | Gate::Fused(_) => Some(gate.matrix_2x2()),
+        _ => None,
+    }
+}
+
+/// `conj(gate)` as a native gate variant, which is what the bra register of
+/// `rho -> U rho U^dagger` needs. `Cx`, `Cz`, and `Swap` are real, so they are
+/// their own conjugate. `None` means the variant has no native conjugate form
+/// and the caller falls back to conjugating the buffer around the gate.
+fn conjugate_gate(gate: &Gate) -> Option<Gate> {
+    match gate {
+        Gate::Cx | Gate::Cz | Gate::Swap => Some(gate.clone()),
+        Gate::Rzz(theta) => Some(Gate::Rzz(-*theta)),
+        Gate::Cu(mat) => Some(Gate::Cu(Box::new(conjugate_2x2(mat)))),
+        Gate::Mcu(data) => Some(Gate::Mcu(Box::new(McuData {
+            mat: conjugate_2x2(&data.mat),
+            num_controls: data.num_controls,
+        }))),
+        _ => None,
+    }
+}
 
 /// Exact density-matrix simulator. See the module docs for the state layout.
 pub struct DensityMatrixBackend {
@@ -79,22 +151,59 @@ impl DensityMatrixBackend {
         }
     }
 
+    /// Apply a compiled one-qubit block superoperator in a single buffer pass.
+    ///
+    /// The `(row-bit, col-bit)` block of `qubit` is the two-qubit subspace
+    /// `(qubit + n, qubit)` of the embedded `2n`-qubit statevector, so the
+    /// statevector two-qubit kernel applies `S` directly. That kernel indexes
+    /// its matrix as `2 * bit(q0) + bit(q1)`, matching the block index `2a + b`
+    /// once the row bit is passed as `q0`.
+    fn apply_block_superoperator(&mut self, qubit: usize, s: &[[Complex64; 4]; 4]) {
+        let n = self.num_qubits;
+        self.sv.apply_fused_2q(qubit + n, qubit, s);
+    }
+
     /// Evolve `rho -> U rho U^dagger` for the unitary `gate` on `targets`.
     ///
-    /// `U` on the ket register (targets offset by `n`) is the left product
-    /// `U rho`; the same `U` on the bra register (original targets) sandwiched
-    /// between two whole-buffer conjugations applies `conj(U)`, giving the right
-    /// product `rho U^dagger`.
+    /// `U` applies to the ket register (targets offset by `n`) for the left
+    /// product `U rho`, and `conj(U)` to the bra register (original targets) for
+    /// the right product `rho U^dagger`. Variants with no native conjugate form
+    /// fall back to conjugating the whole buffer around the gate, which costs
+    /// two extra passes.
+    ///
+    /// A one-qubit gate can instead compile to a block superoperator and sweep
+    /// the buffer once, which wins once the buffer stops fitting in cache. Below
+    /// that the superoperator's dense 4x4 block loses to two cheap passes, so
+    /// the crossover is the point where the embedded `2n`-qubit statevector
+    /// reaches the kernels' own parallel threshold.
     fn apply_unitary(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         let n = self.num_qubits;
+
+        if let Some(mat) = matrix_1q(gate) {
+            if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+                let s = block_superoperator(&[mat]);
+                self.apply_block_superoperator(targets[0], &s);
+                return Ok(());
+            }
+            self.sv.apply_1q_matrix(targets[0] + n, &mat)?;
+            return self.sv.apply_1q_matrix(targets[0], &conjugate_2x2(&mat));
+        }
+
         let ket_targets: SmallVec<[usize; 4]> = targets.iter().map(|&t| t + n).collect();
         self.sv.apply(&Instruction::Gate {
             gate: gate.clone(),
             targets: ket_targets,
         })?;
 
-        self.conjugate_buffer();
         let bra_targets: SmallVec<[usize; 4]> = targets.iter().copied().collect();
+        if let Some(conjugate) = conjugate_gate(gate) {
+            return self.sv.apply(&Instruction::Gate {
+                gate: conjugate,
+                targets: bra_targets,
+            });
+        }
+
+        self.conjugate_buffer();
         self.sv.apply(&Instruction::Gate {
             gate: gate.clone(),
             targets: bra_targets,
@@ -185,45 +294,9 @@ impl DensityMatrixBackend {
     /// on `qubit`. The Kraus set is compiled once into a 4x4 block
     /// superoperator acting on each `(row-bit, col-bit)` block of `rho`, so the
     /// buffer is swept once with no per-element allocation.
-    ///
-    /// Block index `i = 2*a + b` orders `(row-bit a, col-bit b)`; the
-    /// superoperator is `S[2a+b][2a'+b'] = sum_k K_k[a][a'] * conj(K_k[b][b'])`.
     pub fn apply_1q_kraus(&mut self, qubit: usize, kraus: &[[[Complex64; 2]; 2]]) {
-        let n = self.num_qubits;
-        let d = self.dim();
-        let rmask = 1usize << (qubit + n);
-        let cmask = 1usize << qubit;
-
-        let mut s = [[Complex64::new(0.0, 0.0); 4]; 4];
-        for k in kraus {
-            for a in 0..2 {
-                for b in 0..2 {
-                    for ap in 0..2 {
-                        for bp in 0..2 {
-                            s[2 * a + b][2 * ap + bp] += k[a][ap] * k[b][bp].conj();
-                        }
-                    }
-                }
-            }
-        }
-
-        for m in 0..((d * d) >> 2) {
-            let base = insert_zero_bit(insert_zero_bit(m, qubit), qubit + n);
-            let idx = [base, base | cmask, base | rmask, base | rmask | cmask];
-            let v = [
-                self.sv.state[idx[0]],
-                self.sv.state[idx[1]],
-                self.sv.state[idx[2]],
-                self.sv.state[idx[3]],
-            ];
-            for i in 0..4 {
-                let mut acc = Complex64::new(0.0, 0.0);
-                for j in 0..4 {
-                    acc += s[i][j] * v[j];
-                }
-                self.sv.state[idx[i]] = acc;
-            }
-        }
+        let s = block_superoperator(kraus);
+        self.apply_block_superoperator(qubit, &s);
     }
 
     /// Apply symmetric two-qubit depolarizing on `(q0, q1)`:

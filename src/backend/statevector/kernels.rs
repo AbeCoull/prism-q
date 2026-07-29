@@ -2222,7 +2222,7 @@ impl StatevectorBackend {
     }
 
     #[inline(always)]
-    pub(super) fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+    pub(crate) fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
         if q0.max(q1) - q0.min(q1) == 1 {
             #[cfg(feature = "parallel")]
             if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {

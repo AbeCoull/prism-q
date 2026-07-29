@@ -15,6 +15,8 @@
 //! Greedy min-size heuristic: repeatedly contract the pair of tensors whose
 //! result has the smallest total element count. O(T²) where T = tensor count.
 
+use std::borrow::Cow;
+
 use num_complex::Complex64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -54,6 +56,50 @@ impl Tensor {
     }
 }
 
+/// Fill `out` with transposed elements, `out[0]` being output index `start`.
+///
+/// The output index is walked as an odometer over the permuted axes, so the
+/// source offset advances by addition. Only the initial `start` decomposition
+/// divides, which is once per call rather than once per axis per element. The
+/// odometer carries a fixed setup cost, so this is worth calling only for
+/// chunks large enough to amortize it, which is what the parallel path does.
+///
+/// `steps[a]` is the source stride of the axis that output axis `a` came from.
+#[cfg(feature = "parallel")]
+fn transpose_range(
+    out: &mut [Complex64],
+    src: &[Complex64],
+    start: usize,
+    new_shape: &[usize],
+    new_strides: &[usize],
+    steps: &[usize],
+) {
+    let rank = new_shape.len();
+    let mut counter: SmallVec<[usize; 6]> = SmallVec::from_elem(0usize, rank);
+    let mut src_idx = 0usize;
+    if start != 0 {
+        let mut rem = start;
+        for a in 0..rank {
+            counter[a] = rem / new_strides[a];
+            rem %= new_strides[a];
+            src_idx += counter[a] * steps[a];
+        }
+    }
+
+    for slot in out.iter_mut() {
+        *slot = src[src_idx];
+        for a in (0..rank).rev() {
+            counter[a] += 1;
+            src_idx += steps[a];
+            if counter[a] < new_shape[a] {
+                break;
+            }
+            counter[a] = 0;
+            src_idx -= steps[a] * new_shape[a];
+        }
+    }
+}
+
 /// Transpose a tensor by permuting its axes.
 ///
 /// `perm[new_axis] = old_axis`. The output tensor has shape
@@ -88,7 +134,33 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         stride *= new_shape[i];
     }
 
-    // Permuted strides: for each old axis, what stride does it contribute in the new layout?
+    #[cfg(feature = "parallel")]
+    let steps: SmallVec<[usize; 6]> = perm.iter().map(|&old_ax| old_strides[old_ax]).collect();
+
+    #[cfg(feature = "parallel")]
+    if total >= MIN_PAR_ELEMS {
+        let src = &t.data;
+        new_data
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(chunk_idx, out)| {
+                transpose_range(
+                    out,
+                    src,
+                    chunk_idx * MIN_PAR_ELEMS,
+                    &new_shape,
+                    &new_strides,
+                    &steps,
+                );
+            });
+
+        return Tensor {
+            data: new_data,
+            shape: new_shape,
+            legs: new_legs,
+        };
+    }
+
     let perm_strides: SmallVec<[usize; 6]> = (0..rank)
         .map(|old_ax| {
             let new_ax = perm.iter().position(|&p| p == old_ax).unwrap();
@@ -96,41 +168,7 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         })
         .collect();
 
-    #[cfg(feature = "parallel")]
-    if total >= MIN_PAR_ELEMS {
-        let old_strides_ref = &old_strides;
-        let perm_strides_ref = &perm_strides;
-        let src = &t.data;
-        new_data
-            .par_iter_mut()
-            .enumerate()
-            .for_each(|(new_linear, out)| {
-                let mut old_linear = 0usize;
-                let mut rem = new_linear;
-                for a in 0..rank {
-                    let idx = rem / new_strides[a];
-                    rem %= new_strides[a];
-                    let old_ax = perm[a];
-                    old_linear += idx * old_strides_ref[old_ax];
-                }
-                let _ = perm_strides_ref;
-                *out = src[old_linear];
-            });
-    } else {
-        for old_linear in 0..total {
-            let mut new_linear = 0usize;
-            let mut rem = old_linear;
-            for i in 0..rank {
-                let idx = rem / old_strides[i];
-                rem %= old_strides[i];
-                new_linear += idx * perm_strides[i];
-            }
-            new_data[new_linear] = t.data[old_linear];
-        }
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    for old_linear in 0..total {
+    for (old_linear, &amp) in t.data.iter().enumerate() {
         let mut new_linear = 0usize;
         let mut rem = old_linear;
         for i in 0..rank {
@@ -138,7 +176,7 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
             rem %= old_strides[i];
             new_linear += idx * perm_strides[i];
         }
-        new_data[new_linear] = t.data[old_linear];
+        new_data[new_linear] = amp;
     }
 
     Tensor {
@@ -176,15 +214,15 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     b_perm.extend_from_slice(&b_free);
 
     let a_t = if a_perm.iter().enumerate().all(|(i, &p)| i == p) {
-        a.clone()
+        Cow::Borrowed(a)
     } else {
-        transpose(a, &a_perm)
+        Cow::Owned(transpose(a, &a_perm))
     };
 
     let b_t = if b_perm.iter().enumerate().all(|(i, &p)| i == p) {
-        b.clone()
+        Cow::Borrowed(b)
     } else {
-        transpose(b, &b_perm)
+        Cow::Owned(transpose(b, &b_perm))
     };
 
     let m: usize = a_free.iter().map(|&i| a.shape[i]).product::<usize>().max(1);

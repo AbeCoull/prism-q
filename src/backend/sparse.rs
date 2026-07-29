@@ -1,8 +1,11 @@
 //! Sparse state-vector simulation backend.
 //!
-//! Stores only non-zero amplitudes in a `HashMap<usize, Complex64>`, giving O(k) memory
-//! where k is the number of non-zero basis states. Amplitudes below a configurable
-//! epsilon are pruned after each gate to maintain sparsity.
+//! Stores only non-zero amplitudes in a map keyed by basis-state index, giving
+//! O(k) memory where k is the number of non-zero basis states. Amplitudes below
+//! a configurable epsilon are pruned after each gate to maintain sparsity.
+//!
+//! Every gate walks the map, so the map hashes basis-state indices with the
+//! crate's multiply-xor hasher rather than the stdlib default.
 //!
 //! # When to prefer this backend
 //!
@@ -14,8 +17,6 @@
 //!
 //! - After a layer of Hadamard gates (state becomes maximally dense).
 //! - Small qubit counts where dense statevector is faster due to HashMap overhead.
-
-use std::collections::HashMap;
 
 use num_complex::Complex64;
 use rand::RngExt;
@@ -34,14 +35,15 @@ use crate::backend::{
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate};
+use crate::hash::FxHashMap;
 
 const DEFAULT_EPSILON: f64 = 1e-16;
 
 /// Sparse state-vector backend, O(k) where k is the number of non-zero amplitudes.
 pub struct SparseBackend {
     num_qubits: usize,
-    state: HashMap<usize, Complex64>,
-    swap_buf: HashMap<usize, Complex64>,
+    state: FxHashMap<usize, Complex64>,
+    swap_buf: FxHashMap<usize, Complex64>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     epsilon: f64,
@@ -52,8 +54,8 @@ impl SparseBackend {
     pub fn new(seed: u64) -> Self {
         Self {
             num_qubits: 0,
-            state: HashMap::new(),
-            swap_buf: HashMap::new(),
+            state: FxHashMap::default(),
+            swap_buf: FxHashMap::default(),
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             epsilon: DEFAULT_EPSILON,

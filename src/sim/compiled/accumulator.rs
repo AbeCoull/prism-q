@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::hash::{BuildHasher, Hasher};
+
+use crate::hash::FxHashMap;
 
 use super::{
     PackedShots, ShotLayout, count_vec_key, count_vec_key_masked, shot_major_padding_bits_set,
@@ -52,53 +53,6 @@ pub(crate) fn marginals_from_chunks(
     sample_chunked(&mut acc);
     acc.marginals()
 }
-
-struct FxHasher {
-    hash: u64,
-}
-
-impl FxHasher {
-    const SEED: u64 = 0x517cc1b727220a95;
-}
-
-impl Hasher for FxHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        for chunk in bytes.chunks(8) {
-            let mut buf = [0u8; 8];
-            buf[..chunk.len()].copy_from_slice(chunk);
-            let word = u64::from_ne_bytes(buf);
-            self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
-        }
-    }
-
-    #[inline]
-    fn write_u64(&mut self, i: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(Self::SEED);
-    }
-
-    #[inline]
-    fn write_usize(&mut self, i: usize) {
-        self.hash = (self.hash.rotate_left(5) ^ i as u64).wrapping_mul(Self::SEED);
-    }
-}
-
-#[derive(Clone, Default)]
-struct FxBuildHasher;
-
-impl BuildHasher for FxBuildHasher {
-    type Hasher = FxHasher;
-    fn build_hasher(&self) -> FxHasher {
-        FxHasher { hash: 0 }
-    }
-}
-
-type FxHashMap<K, V> = HashMap<K, V, FxBuildHasher>;
 
 #[cfg(feature = "parallel")]
 const MIN_SHOTS_FOR_PAR_HISTOGRAM: usize = 65536;
@@ -1233,20 +1187,5 @@ mod tests {
         transpose_64x64(&mut matrix);
         transpose_64x64(&mut matrix);
         assert_eq!(matrix, original);
-    }
-
-    #[test]
-    fn fx_hasher_finish_changes_with_writes() {
-        use std::hash::Hasher as _;
-        let mut h1 = FxBuildHasher.build_hasher();
-        h1.write(&[1, 2, 3, 4, 5, 6, 7, 8, 9]);
-        let v1 = h1.finish();
-        let mut h2 = FxBuildHasher.build_hasher();
-        h2.write_u64(42);
-        h2.write_usize(7);
-        let v2 = h2.finish();
-        assert_ne!(v1, 0);
-        assert_ne!(v2, 0);
-        assert_ne!(v1, v2);
     }
 }

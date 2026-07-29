@@ -54,6 +54,7 @@ pub mod error;
 pub mod gates;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+mod hash;
 pub mod qec;
 pub mod sim;
 

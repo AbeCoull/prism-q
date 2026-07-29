@@ -13,8 +13,9 @@
 #
 # Output: bench_results/flamegraph-<sanitized-filter>.svg
 #
-# The bench profile (Cargo.toml) already has debug=true and strip="none",
-# so symbol names are preserved in the flamegraph.
+# The bench profile (Cargo.toml) already has debug="line-tables-only" and
+# strip="none", so function names and line numbers are preserved in the
+# flamegraph.
 
 set -euo pipefail
 

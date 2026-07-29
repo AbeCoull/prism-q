@@ -14,6 +14,29 @@
 //!
 //! Greedy min-size heuristic: repeatedly contract the pair of tensors whose
 //! result has the smallest total element count. O(T²) where T = tensor count.
+//!
+//! # Shot and observable queries stay on the dense route
+//!
+//! Unlike the sparse, MPS, and factored backends, this one does not override
+//! `Backend::sample_basis_states` or `Backend::pauli_expectations`. Both report
+//! `BackendUnsupported` naming this backend, and shots continue to route through
+//! `probabilities()`.
+//!
+//! Sampling one bitstring from a deferred network means contracting it once per
+//! qubit to get each conditional, so a shot costs `n` contractions against the
+//! single contraction the dense route pays for the whole distribution. That is
+//! strictly worse whenever the statevector fits, and when it does not fit the
+//! per-qubit contractions do not fit either: the cost is set by treewidth, which
+//! conditioning does not reduce.
+//!
+//! An exact scalar observable path does exist here, `expectation_zero_state`,
+//! which contracts `⟨0|U†PU|0⟩` without a statevector. It takes a circuit rather
+//! than an evolved backend, and this backend swaps its network for a dense
+//! statevector after any measurement, so reaching it from the trait hook would
+//! need a second contraction path carrying its own bra-side leg bookkeeping.
+//! Auto never selects this backend above the statevector cap (it picks sparse or
+//! MPS), so that path would serve explicit `BackendKind::TensorNetwork` requests
+//! only. Revisit if Auto starts routing wide low-treewidth circuits here.
 
 use std::borrow::Cow;
 

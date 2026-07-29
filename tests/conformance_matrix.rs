@@ -12,7 +12,8 @@ use std::collections::BTreeMap;
 use common::conformance::{
     self, Anchor, AnchorPolicy, CONFORMANCE_SEED, Family, MIN_CONSENSUS_PARTICIPANTS, Regime,
     SkipReason, assert_amplitudes, assert_deterministic_case, assert_exact_mixture_case,
-    assert_sampled_mixture_case, cases_in, generated_cases, participants,
+    assert_expectation_values, assert_native_sampling, assert_sampled_mixture_case, cases_in,
+    generated_cases, participants,
 };
 
 /// Skip rules the corpus is expected to fire. A rule that starts or stops
@@ -29,6 +30,8 @@ const EXPECTED_FIRING: &[SkipReason] = &[
     SkipReason::NoAmplitudeExport,
     SkipReason::FactoredBlocksHaveNoJointState,
     SkipReason::BranchingTrajectory,
+    SkipReason::OutsideQueryMatrix,
+    SkipReason::QueryNeedsUnitaryCircuit,
 ];
 
 /// Rules the corpus does not reach, each with why. Encoded so the matrix still
@@ -143,6 +146,56 @@ fn conformance_classical_conditioning_branches_agree_across_backends() {
             case.context()
         );
         assert_sampled_mixture_case(&case, &participants);
+    }
+}
+
+/// Shot sampling on the backends that draw from their own representation, over
+/// the whole unitary corpus. Each participant is checked against its own
+/// probability vector, so a disagreement names the sampler rather than the
+/// evolution.
+#[test]
+fn conformance_native_sampling_matches_each_backend_distribution() {
+    let participants = participants();
+    for case in generated_cases() {
+        assert_native_sampling(&case, &participants);
+    }
+}
+
+/// The query matrices are differential, so a unitary case that reaches fewer
+/// than two participants compares nothing while still reporting pass.
+#[test]
+fn conformance_query_matrix_compares_every_unitary_case() {
+    let participants = participants();
+    let mut unitary_cases = 0;
+    for case in generated_cases() {
+        if !case.profile.unitary() {
+            continue;
+        }
+        unitary_cases += 1;
+        let compared: Vec<&str> = participants
+            .iter()
+            .filter(|participant| participant.query_eligibility(&case.profile).is_compared())
+            .map(|participant| participant.name)
+            .collect();
+        assert!(
+            compared.len() >= 2,
+            "{}only {:?} reached the query matrix; shots and observables need at least two \
+             participants to compare",
+            case.context(),
+            compared
+        );
+    }
+    assert!(
+        unitary_cases > 0,
+        "the corpus produced no unitary case, so the query matrices ran empty"
+    );
+}
+
+#[test]
+fn conformance_expectation_values_agree_where_the_matrix_exposes_them() {
+    let participants = participants();
+    for case in generated_cases() {
+        assert_expectation_values(&case, &participants);
     }
 }
 

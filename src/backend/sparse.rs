@@ -30,12 +30,14 @@ use rayon::prelude::*;
 const MIN_STATES_FOR_PAR: usize = 4096;
 
 use crate::backend::{
-    Backend, dense_probability_len, dense_statevector_len, is_phase_one, reserve_dense_output,
+    Backend, BasisSamples, dense_probability_len, dense_statevector_len, is_phase_one,
+    reserve_dense_output,
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate};
 use crate::hash::FxHashMap;
+use crate::sim::unified_pauli::PauliTerm;
 
 const DEFAULT_EPSILON: f64 = 1e-16;
 
@@ -503,6 +505,63 @@ impl Backend for SparseBackend {
 
     fn num_qubits(&self) -> usize {
         self.num_qubits
+    }
+
+    fn supports_native_sampling(&self) -> bool {
+        true
+    }
+
+    /// Samples from a CDF over the `k` stored amplitudes instead of `2^n`.
+    ///
+    /// Entries are ordered by basis index, which is the order the dense route
+    /// accumulates its CDF in, so the same seed draws the same basis states
+    /// the dense path would have drawn.
+    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let mut indices: Vec<usize> = self.state.keys().copied().collect();
+        indices.sort_unstable();
+        let probs: Vec<f64> = indices
+            .iter()
+            .map(|idx| self.state[idx].norm_sqr())
+            .collect();
+        let cdf = crate::sim::shots::build_cdf(&probs);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut samples = BasisSamples::new(num_shots, self.num_qubits);
+        for shot in 0..num_shots {
+            let r: f64 = rng.random();
+            samples.set_index(shot, indices[crate::sim::shots::sample_from_cdf(&cdf, r)]);
+        }
+        Ok(samples)
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let norm: f64 = self.state.values().map(|amp| amp.norm_sqr()).sum();
+        observables
+            .iter()
+            .map(|observable| {
+                let (xmask, zmask, num_y) = crate::sim::pauli_masks(observable, self.num_qubits)?;
+                if norm == 0.0 {
+                    return Ok(0.0);
+                }
+                let mut acc = Complex64::new(0.0, 0.0);
+                for (&idx, &amp) in &self.state {
+                    let Some(&partner) = self.state.get(&(idx ^ xmask)) else {
+                        continue;
+                    };
+                    let sign = if (idx & zmask).count_ones() & 1 == 1 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    acc += partner.conj() * amp * sign;
+                }
+                Ok((acc * crate::sim::i_pow(num_y)).re / norm)
+            })
+            .collect()
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {

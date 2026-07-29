@@ -41,7 +41,7 @@ use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
-use shots::{packed_shots_to_classical_bits, sample_shots};
+use shots::{packed_shots_to_classical_bits, sample_shots, shots_from_basis_samples};
 use terminal_sampling::{
     sample_counts_from_probs, sample_counts_from_state, sample_shots_from_probs,
     sample_shots_from_state,
@@ -240,7 +240,10 @@ impl<'c> Simulate<'c, Seeded> {
     ///
     /// Each observable is a product of single-qubit Paulis (identity factors
     /// omitted). The circuit must be unitary. Clifford circuits propagate each
-    /// observable exactly; non-Clifford circuits use the state vector.
+    /// observable exactly. Non-Clifford circuits use the state vector while they
+    /// fit it; above that cap the selected backend evaluates the observable on
+    /// its own representation, and a backend without one reports
+    /// `BackendUnsupported` naming itself.
     #[inline]
     pub fn expectation_values(self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         let seed = self.seed_value();
@@ -667,6 +670,38 @@ fn try_terminal_statevector_backend(
     Ok(Some((backend, meas_map)))
 }
 
+/// Build and run the backend for a terminal-measurement circuit when routing
+/// lands on a single backend that samples from its own representation.
+///
+/// Returns `None` when the route is not a direct single backend, or when that
+/// backend has no native sampler, leaving the dense probability path untouched.
+/// The capability is probed before `init`, so a backend without one costs an
+/// allocation and nothing else.
+fn try_native_terminal_backend(
+    kind: &BackendKind,
+    stripped: &Circuit,
+    seed: u64,
+) -> Result<Option<Box<dyn Backend>>> {
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, stripped)?;
+    }
+    let ProbabilityRoute::Direct {
+        has_partial_independence,
+    } = plan_probability_route(kind, stripped)
+    else {
+        return Ok(None);
+    };
+    let ExecutionPlan::Backend(plan) = resolve(kind, stripped, has_partial_independence) else {
+        return Ok(None);
+    };
+    let mut backend = plan.build(seed);
+    if !backend.supports_native_sampling() {
+        return Ok(None);
+    }
+    execute(&mut *backend, stripped, &SimOptions::classical_only())?;
+    Ok(Some(backend))
+}
+
 /// Execute a circuit multiple times with automatic backend selection and return counts.
 ///
 /// Use this when only a frequency histogram is needed. Optimized paths can
@@ -903,14 +938,7 @@ fn run_expectation_values_with(
                     .collect()
             } else if kind.is_auto() {
                 if circuit.num_qubits > max_statevector_qubits() {
-                    return Err(PrismError::IncompatibleBackend {
-                        backend: format!("{kind:?}"),
-                        reason: format!(
-                            "expectation values for a {}-qubit non-Clifford circuit exceed the statevector cap ({} qubits); no exact accelerated path exists for arbitrary Pauli observables here",
-                            circuit.num_qubits,
-                            max_statevector_qubits()
-                        ),
-                    });
+                    return expectation_values_native(&kind, circuit, observables, seed);
                 }
                 expectation_values_statevector(&kind, circuit, observables, seed)
             } else {
@@ -927,17 +955,50 @@ fn run_expectation_values_with(
         BackendKind::StatevectorGpu { .. } => {
             expectation_values_statevector(&kind, circuit, observables, seed)
         }
-        other => {
-            #[cfg(feature = "gpu")]
-            let supported = "expectation values support Auto, AutoGpu, Statevector, StatevectorGpu, Stabilizer, FactoredStabilizer, StochasticPauli, and DeterministicPauli";
-            #[cfg(not(feature = "gpu"))]
-            let supported = "expectation values support Auto, Statevector, Stabilizer, FactoredStabilizer, StochasticPauli, and DeterministicPauli";
-            Err(PrismError::IncompatibleBackend {
-                backend: format!("{other:?}"),
-                reason: supported.into(),
-            })
-        }
+        other => expectation_values_native(other, circuit, observables, seed),
     }
+}
+
+/// Evaluate `observables` on the backend `kind` resolves to, using that
+/// backend's own representation.
+///
+/// Backends without a native Pauli path report `BackendUnsupported` naming
+/// themselves, so a request that cannot be served says which engine could not
+/// serve it rather than blaming the route that picked it.
+fn expectation_values_native(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    seed: u64,
+) -> Result<Vec<f64>> {
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, circuit)?;
+    }
+    // Before the run, matching the statevector path, so a typo in an observable
+    // does not cost a 40-qubit simulation first.
+    for observable in observables {
+        validate_observable(observable, circuit.num_qubits)?;
+    }
+
+    let (_, has_partial_independence) = analyze_independence(circuit);
+    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, has_partial_independence) else {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "expectation values need a backend that holds a state; the stabilizer-rank \
+                     route returns probabilities only"
+                .into(),
+        });
+    };
+
+    let mut backend = plan.build(seed);
+    if !backend.supports_pauli_expectation() {
+        return Err(PrismError::BackendUnsupported {
+            backend: backend.name().to_string(),
+            operation: "Pauli expectation values".to_string(),
+        });
+    }
+    execute(&mut *backend, circuit, &SimOptions::classical_only())?;
+    backend.pauli_expectations(observables)
 }
 
 fn expectation_values_statevector(
@@ -977,6 +1038,33 @@ fn expectation_values_statevector(
             pauli_expectation_from_masks(state, xmask, zmask, num_y, norm)
         })
         .collect())
+}
+
+/// Reject out-of-range qubits and duplicate factors in a joint Pauli
+/// observable.
+///
+/// Same checks [`pauli_masks`] makes, without its `1 << qubit` mask width, so
+/// it also covers the backends that run past 64 qubits.
+pub(crate) fn validate_observable(observable: &[PauliTerm], num_qubits: usize) -> Result<()> {
+    let mut seen = vec![false; num_qubits];
+    for term in observable {
+        if term.qubit >= num_qubits {
+            return Err(PrismError::InvalidQubit {
+                index: term.qubit,
+                register_size: num_qubits,
+            });
+        }
+        if seen[term.qubit] {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "joint Pauli observable has duplicate factor on qubit {}",
+                    term.qubit
+                ),
+            });
+        }
+        seen[term.qubit] = true;
+    }
+    Ok(())
 }
 
 /// Validate a joint Pauli observable and reduce it to `(Xmask, Zmask, #Y)`,
@@ -1231,6 +1319,14 @@ pub(crate) fn run_shots_with(
 
     if circuit.has_terminal_measurements_only() {
         let stripped = circuit.without_measurements();
+        if let Some(backend) = try_native_terminal_backend(&kind, &stripped, seed)? {
+            let samples = backend.sample_basis_states(num_shots, seed)?;
+            let meas_map = circuit.measurement_map();
+            return Ok(ShotsResult::from_shots(
+                shots_from_basis_samples(&samples, &meas_map, circuit.num_classical_bits),
+                circuit.num_classical_bits,
+            ));
+        }
         let result = run_with_internal(kind.clone(), &stripped, seed, SimOptions::default())?;
         if let Some(probs) = result.probabilities {
             let meas_map = circuit.measurement_map();

@@ -656,6 +656,63 @@ fn bench_mps_hotspots(c: &mut Criterion) {
     group.finish();
 }
 
+// ---- Native shot sampling on the polynomial-state backends ----
+
+/// Terminal measurements on every qubit, the shape the native samplers serve.
+fn measure_all(circuit: &Circuit) -> Circuit {
+    let mut measured = Circuit::new(circuit.num_qubits, circuit.num_qubits);
+    measured.instructions = circuit.instructions.clone();
+    for q in 0..circuit.num_qubits {
+        measured.add_measure(q, q);
+    }
+    measured
+}
+
+/// Sizes past the dense probability cap, where the sampler is the only path to
+/// a bitstring. The 24q row stays inside the cap so the polynomial cost can be
+/// read against the dense route on the same circuit family.
+const SAMPLING_QUBITS: [usize; 4] = [24, 32, 48, 64];
+
+const SAMPLING_SHOTS: usize = 1_000;
+
+fn bench_mps_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/sampling");
+    configure_group(&mut group);
+
+    for &n in &SAMPLING_QUBITS {
+        let circuit = measure_all(&dense_entanglement_circuit(n, 4));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    run_shots_with(
+                        BackendKind::Mps { max_bond_dim: 32 },
+                        circ,
+                        SAMPLING_SHOTS,
+                        SEED,
+                    )
+                    .unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_sparse_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse/sampling");
+    configure_group(&mut group);
+
+    for &n in &SAMPLING_QUBITS {
+        let circuit = measure_all(&sparse_entanglement_circuit(n, 2));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(run_shots_with(BackendKind::Sparse, circ, SAMPLING_SHOTS, SEED).unwrap())
+            });
+        });
+    }
+    group.finish();
+}
+
 // ---- Product state backend ----
 
 fn bench_product_scaling(c: &mut Criterion) {
@@ -1687,10 +1744,12 @@ criterion_group!(
     // Sparse
     bench_sparse_scaling,
     bench_sparse_low_entanglement,
+    bench_sparse_sampling,
     // MPS
     bench_mps_scaling,
     bench_mps_linear_chain,
     bench_mps_hotspots,
+    bench_mps_sampling,
     // Product state
     bench_product_scaling,
     // Tensor network

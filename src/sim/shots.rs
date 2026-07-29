@@ -97,7 +97,7 @@ pub fn bitstring(key: &[u64], num_bits: usize) -> String {
     s
 }
 
-pub(super) fn build_cdf(probs: &[f64]) -> Vec<f64> {
+pub(crate) fn build_cdf(probs: &[f64]) -> Vec<f64> {
     let mut cdf = Vec::with_capacity(probs.len());
     let mut acc = 0.0;
     for &p in probs {
@@ -168,6 +168,23 @@ pub(crate) fn sample_shots(
         }
     }
 
+    shots
+}
+
+/// Project packed per-qubit outcomes from a native backend sampler onto
+/// classical bits. Later measurements of the same classical bit win, matching
+/// [`sample_shots`].
+pub(crate) fn shots_from_basis_samples(
+    samples: &crate::backend::BasisSamples,
+    meas_map: &[(usize, usize)],
+    num_classical_bits: usize,
+) -> Vec<Vec<bool>> {
+    let mut shots = vec![vec![false; num_classical_bits]; samples.num_shots()];
+    for (index, shot) in shots.iter_mut().enumerate() {
+        for &(qubit, cbit) in meas_map {
+            shot[cbit] = samples.bit(index, qubit);
+        }
+    }
     shots
 }
 

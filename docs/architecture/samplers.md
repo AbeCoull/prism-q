@@ -45,6 +45,45 @@ syndrome extraction avoids per-shot tableau replay. The sampler can return
 packed measurements, packed detectors, packed observables, detector counts, or
 feed packed detector chunks into any `ShotAccumulator`.
 
+## Native backend sampling (`Backend::sample_basis_states`)
+
+The compiled samplers above cover Clifford circuits. Everything else used to
+funnel through `Backend::probabilities()`, a dense `2^n` allocation, and sample
+from that, which put a hard qubit ceiling on shots for backends whose state is
+polynomial.
+
+Two `Backend` hooks lift it. `supports_native_sampling` declares that a backend
+draws outcomes from its own representation, and `sample_basis_states(num_shots,
+seed)` returns packed per-qubit outcomes as `BasisSamples`
+(`ceil(n / 64)` words per shot). Seeding is from the argument, not the backend's
+RNG, so a shot request replays exactly, and the call does not collapse the
+state. `supports_pauli_expectation` and `pauli_expectations(observables)` are
+the observable-side pair, normalization independent so a truncated MPS is
+divided by `⟨ψ|ψ⟩` rather than assumed unit.
+
+| Backend | Sampling cost | Method |
+|---------|---------------|--------|
+| Sparse | `O(k log k)` once, `O(log k)` per shot | CDF over the `k` stored amplitudes, ordered by basis index |
+| Factored | `O(Σ 2^kᵢ)` once, `O(B log)` per shot | One draw per sub-state, concatenated; `B` blocks |
+| MPS | `O(n·χ³)` once, `O(n·χ²)` per shot | Sequential conditional sampling against precomputed right environments |
+| Everything else | dense | Unchanged: `probabilities()` then CDF |
+
+`run_shots_with` picks the native path through `try_native_terminal_backend`,
+which requires the route to land on a single backend and probes the capability
+before `init`, so a backend without one costs an allocation and nothing else.
+`run_counts_with` needs no separate path: its tail is `run_shots_with(..).counts()`.
+
+MPS records each bit against the logical qubit currently hosted at a site rather
+than the site index, so a layout permuted by SWAP routing needs no
+canonicalization pass. `tests/native_sampling.rs` pins that case; the exact
+check that the conditional decomposition reproduces the dense vector to 1e-12
+lives in `mps_conditional_path_probabilities_match_the_dense_vector`
+(`src/backend/mps.rs`), and the corpus-wide comparison is the query matrix in
+`tests/conformance_matrix.rs`.
+
+The tensor network stays on the dense route by decision, not by omission; its
+module docstring records why.
+
 ## Noisy compiled sampler (`src/sim/noise.rs`)
 
 Backward Pauli propagation through circuit + noise sensitivity analysis. Each noise location gets an X-flip and Z-flip sensitivity row. During sampling, Bernoulli coin flips determine which noise channels fire, then XOR the sensitivity rows into the sample.

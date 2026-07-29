@@ -180,3 +180,167 @@ fn non_unitary_circuit_is_rejected() {
         }
     }
 }
+
+// ===== backends that hold a polynomial-size state =====
+
+/// Observables that mix all three axes over a non-Clifford, entangled state.
+/// Wide enough that a backend confusing qubit order or dropping a factor
+/// cannot land on the statevector value by accident.
+fn mixed_axis_observables() -> [Vec<PauliTerm>; 5] {
+    [
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(1), PauliTerm::y(3)],
+        vec![PauliTerm::z(0), PauliTerm::z(1), PauliTerm::z(2)],
+        vec![
+            PauliTerm::y(0),
+            PauliTerm::x(2),
+            PauliTerm::z(4),
+            PauliTerm::y(5),
+        ],
+        vec![],
+    ]
+}
+
+fn entangled_non_clifford(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.3 + 0.15 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::Cx, &[0, n - 1]);
+    c
+}
+
+fn assert_matches_statevector(label: &str, backend: BackendKind, circuit: &Circuit) {
+    let observables = mixed_axis_observables();
+    let sv = simulate(circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    let got = simulate(circuit)
+        .backend(backend)
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    common::assert_probs_close(&got, &sv, 1e-9, label);
+}
+
+#[test]
+fn mps_expectation_values_match_statevector() {
+    assert_matches_statevector(
+        "mps expectation",
+        BackendKind::Mps {
+            max_bond_dim: 1 << 8,
+        },
+        &entangled_non_clifford(6),
+    );
+}
+
+/// SWAP routing permutes the site layout, so the observable's logical qubits
+/// no longer index the sites they started on.
+#[test]
+fn mps_expectation_values_survive_swap_routing() {
+    let mut c = Circuit::new(6, 0);
+    for q in 0..6 {
+        c.add_gate(Gate::Ry(0.25 * (q + 1) as f64), &[q]);
+    }
+    c.add_gate(Gate::Cx, &[0, 5]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cx, &[1, 4]);
+    assert_matches_statevector(
+        "mps expectation swap routed",
+        BackendKind::Mps {
+            max_bond_dim: 1 << 8,
+        },
+        &c,
+    );
+}
+
+#[test]
+fn sparse_expectation_values_match_statevector() {
+    assert_matches_statevector(
+        "sparse expectation",
+        BackendKind::Sparse,
+        &entangled_non_clifford(6),
+    );
+}
+
+#[test]
+fn factored_expectation_values_match_statevector() {
+    let mut c = Circuit::new(6, 0);
+    for q in 0..6 {
+        c.add_gate(Gate::Ry(0.4 + 0.1 * q as f64), &[q]);
+    }
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::Cx, &[4, 5]);
+    assert_matches_statevector("factored expectation blocks", BackendKind::Factored, &c);
+}
+
+#[test]
+fn factored_expectation_values_match_statevector_when_fully_merged() {
+    assert_matches_statevector(
+        "factored expectation merged",
+        BackendKind::Factored,
+        &entangled_non_clifford(6),
+    );
+}
+
+/// The tensor network contracts to a dense statevector by construction, so it
+/// has no native observable path. The rejection has to name the backend that
+/// cannot serve the request, not the route that selected it.
+#[test]
+fn backends_without_a_native_path_name_themselves() {
+    let c = entangled_non_clifford(5);
+    let observables = [vec![PauliTerm::z(0)]];
+    for (backend, name) in [
+        (BackendKind::TensorNetwork, "tensornetwork"),
+        (BackendKind::DensityMatrix, "density_matrix"),
+    ] {
+        let err = simulate(&c)
+            .backend(backend.clone())
+            .seed(42)
+            .expectation_values(&observables)
+            .unwrap_err();
+        match err {
+            prism_q::PrismError::BackendUnsupported {
+                backend: reported, ..
+            } => assert_eq!(reported, name, "{backend:?} reported the wrong backend"),
+            other => {
+                panic!("{backend:?}: expected a BackendUnsupported naming {name}, got {other:?}")
+            }
+        }
+    }
+}
+
+/// The native path validates observables before it runs, so a bad qubit index
+/// costs nothing on a circuit the statevector could not hold.
+#[test]
+fn invalid_observable_is_rejected_on_the_native_path() {
+    use prism_q::PrismError::{InvalidParameter, InvalidQubit};
+    let c = entangled_non_clifford(5);
+    let mps = BackendKind::Mps {
+        max_bond_dim: 1 << 8,
+    };
+    assert!(matches!(
+        simulate(&c)
+            .backend(mps.clone())
+            .seed(42)
+            .expectation_values(&[vec![PauliTerm::z(9)]])
+            .unwrap_err(),
+        InvalidQubit { .. }
+    ));
+    assert!(matches!(
+        simulate(&c)
+            .backend(mps)
+            .seed(42)
+            .expectation_values(&[vec![PauliTerm::z(0), PauliTerm::x(0)]])
+            .unwrap_err(),
+        InvalidParameter { .. }
+    ));
+}

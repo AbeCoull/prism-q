@@ -35,12 +35,13 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::{
-    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, reserve_dense_output,
-    simd,
+    Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len,
+    reserve_dense_output, simd,
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -1476,6 +1477,66 @@ impl MpsBackend {
         env
     }
 
+    /// Absorb one site into a right environment, in the two passes
+    /// [`Self::inner_product`] uses: `O(χ³)` instead of the four-index sum's
+    /// `O(χ⁴)`. `tmp` carries the intermediate across a sweep so the inner
+    /// buffer is allocated once rather than per site.
+    ///
+    /// [`Self::compute_right_env`] deliberately keeps the four-index form
+    /// instead of calling this. Its callers are measurement and reset, where
+    /// projection has just zeroed half of each site tensor and the environments
+    /// are mostly zero; the `env_val == ZERO` skip there beats dense `O(χ³)`
+    /// arithmetic by 14% on `mps/hotspots/measure_reset_32q_r3` (496 µs against
+    /// 574 µs). The sweep below runs on unprojected chains where the
+    /// environments are dense and the asymptotics decide instead. Measure both
+    /// before unifying them.
+    fn contract_right_env(
+        &self,
+        site: usize,
+        env: &[Complex64],
+        tmp: &mut Vec<Complex64>,
+    ) -> Vec<Complex64> {
+        let t = &self.sites[site];
+        let bl = t.bond_left;
+        let br = t.bond_right;
+
+        // tmp[α, i, β'] = Σ_β A[α, i, β] · env[β, β']
+        tmp.clear();
+        tmp.resize(bl * 2 * br, ZERO);
+        for alpha in 0..bl {
+            for i in 0..2 {
+                for beta in 0..br {
+                    let a = t.data[t.idx(alpha, i, beta)];
+                    if a == ZERO {
+                        continue;
+                    }
+                    let dst = (alpha * 2 + i) * br;
+                    let src = beta * br;
+                    for beta_p in 0..br {
+                        tmp[dst + beta_p] += a * env[src + beta_p];
+                    }
+                }
+            }
+        }
+
+        // new_env[α, α'] = Σ_{i, β'} tmp[α, i, β'] · conj(A[α', i, β'])
+        let mut new_env = vec![ZERO; bl * bl];
+        for alpha_p in 0..bl {
+            for i in 0..2 {
+                for beta_p in 0..br {
+                    let a = t.data[t.idx(alpha_p, i, beta_p)].conj();
+                    if a == ZERO {
+                        continue;
+                    }
+                    for alpha in 0..bl {
+                        new_env[alpha * bl + alpha_p] += tmp[(alpha * 2 + i) * br + beta_p] * a;
+                    }
+                }
+            }
+        }
+        new_env
+    }
+
     fn compute_right_env(&self, site: usize) -> Vec<Complex64> {
         let mut env = vec![ONE];
         let mut env_dim = 1usize;
@@ -1537,6 +1598,24 @@ impl MpsBackend {
             env_dim = bl;
         }
         env
+    }
+
+    /// Right environment of every site, in one backward sweep.
+    ///
+    /// `envs[s]` is what [`Self::compute_right_env`] returns for `s`, but the
+    /// sweep shares each partial contraction with the site to its left, so all
+    /// `n` cost one pass instead of `n`.
+    fn right_environments(&self) -> Vec<Vec<Complex64>> {
+        let n = self.num_qubits;
+        let mut envs: Vec<Vec<Complex64>> = Vec::with_capacity(n);
+        let mut tmp = Vec::new();
+        envs.push(vec![ONE]);
+        for site in (1..n).rev() {
+            let next = self.contract_right_env(site, envs.last().unwrap(), &mut tmp);
+            envs.push(next);
+        }
+        envs.reverse();
+        envs
     }
 
     fn apply_reset(&mut self, qubit: usize) {
@@ -1710,6 +1789,54 @@ impl MpsBackend {
         }
 
         rho
+    }
+
+    /// Conditional outcome weights at `site`, given the boundary vector `left`
+    /// that carries the bits already fixed to its left.
+    ///
+    /// Writes `w[i * bond_right + β] = Σ_α left[α] · A[α, i, β]` into `w` and
+    /// returns the unnormalized weight of each outcome. The conditioned left
+    /// environment is the rank-one `left[α]·conj(left[α'])`, which collapses
+    /// the four-index contraction of [`Self::site_outcome_probabilities`] to
+    /// `O(χ²)`.
+    fn site_conditional_weights(
+        &self,
+        site: usize,
+        left: &[Complex64],
+        right: &[Complex64],
+        w: &mut [Complex64],
+    ) -> [f64; 2] {
+        let t = &self.sites[site];
+        let bl = t.bond_left;
+        let br = t.bond_right;
+
+        let w = &mut w[..2 * br];
+        w.fill(ZERO);
+        for (alpha, &l) in left[..bl].iter().enumerate() {
+            if l == ZERO {
+                continue;
+            }
+            let row = &t.data[alpha * (2 * br)..(alpha + 1) * (2 * br)];
+            for (dst, &src) in w.iter_mut().zip(row) {
+                *dst += l * src;
+            }
+        }
+
+        let mut prob = [0.0f64; 2];
+        for (i, prob_out) in prob.iter_mut().enumerate() {
+            let wi = &w[i * br..(i + 1) * br];
+            let mut acc = ZERO;
+            for (beta, &w_beta) in wi.iter().enumerate() {
+                if w_beta == ZERO {
+                    continue;
+                }
+                let row = &right[beta * br..(beta + 1) * br];
+                let inner: Complex64 = row.iter().zip(wi).map(|(&r, &v)| r * v.conj()).sum();
+                acc += w_beta * inner;
+            }
+            *prob_out = acc.re;
+        }
+        prob
     }
 
     fn chain_amplitude(&self, basis: usize) -> Complex64 {
@@ -1897,6 +2024,92 @@ impl Backend for MpsBackend {
         self.num_qubits
     }
 
+    fn supports_native_sampling(&self) -> bool {
+        true
+    }
+
+    /// Sequential conditional sampling over the chain: `O(n·χ²)` per shot after
+    /// one `O(n·χ³)` sweep for the right environments.
+    ///
+    /// Sites are visited left to right and each bit is recorded against the
+    /// logical qubit currently hosted there, so a layout permuted by SWAP
+    /// routing needs no canonicalization pass.
+    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let n = self.num_qubits;
+        let mut samples = BasisSamples::new(num_shots, n);
+        if n == 0 {
+            return Ok(samples);
+        }
+
+        let right = self.right_environments();
+        let max_bond = self
+            .sites
+            .iter()
+            .map(|site| site.bond_left.max(site.bond_right))
+            .max()
+            .unwrap_or(1);
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut left = vec![ZERO; max_bond];
+        let mut w = vec![ZERO; 2 * max_bond];
+
+        for shot in 0..num_shots {
+            left[0] = ONE;
+            left[1..].fill(ZERO);
+            for (site, right_env) in right.iter().enumerate() {
+                let br = self.sites[site].bond_right;
+                let prob = self.site_conditional_weights(site, &left, right_env, &mut w);
+
+                let total = prob[0] + prob[1];
+                let prob_one = if total > 0.0 {
+                    (prob[1] / total).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let outcome = usize::from(rng.random::<f64>() < prob_one);
+                if outcome == 1 {
+                    samples.set(shot, self.logical_for_site(site));
+                }
+
+                let scale = 1.0 / prob[outcome].max(NORM_CLAMP_MIN).sqrt();
+                left[..br].copy_from_slice(&w[outcome * br..(outcome + 1) * br]);
+                for value in &mut left[..br] {
+                    *value *= scale;
+                }
+            }
+        }
+        Ok(samples)
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// Routes each observable through [`MpsBackend::pauli_expectation`], which
+    /// contracts the chain once per observable. Divided by `⟨ψ|ψ⟩` because a
+    /// truncated chain is not exactly normalized.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let norm = self.pauli_expectation(&[])?.re;
+        observables
+            .iter()
+            .map(|observable| {
+                let factors: Vec<(usize, MpsPauliAxis)> = observable
+                    .iter()
+                    .map(|term| {
+                        let axis = match term.axis {
+                            PauliAxis::X => MpsPauliAxis::X,
+                            PauliAxis::Y => MpsPauliAxis::Y,
+                            PauliAxis::Z => MpsPauliAxis::Z,
+                        };
+                        (term.qubit, axis)
+                    })
+                    .collect();
+                let value = self.pauli_expectation(&factors)?;
+                Ok(if norm == 0.0 { 0.0 } else { value.re / norm })
+            })
+            .collect()
+    }
+
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
         let mut state = Vec::new();
@@ -1990,6 +2203,63 @@ mod tests {
             sum += amps[x].conj() * (Complex64::new(sign, 0.0) * i_factor) * amps[y];
         }
         sum
+    }
+
+    /// The sampler picks each site from `site_conditional_weights`, so the
+    /// product of the conditionals along a path is the probability it draws
+    /// that path with. Comparing it to the dense vector pins the sampled
+    /// distribution exactly rather than statistically, and covers the
+    /// site-to-logical mapping the SWAP-routed layout leaves behind.
+    #[test]
+    fn mps_conditional_path_probabilities_match_the_dense_vector() {
+        let mut c = Circuit::new(5, 0);
+        for q in 0..5 {
+            c.add_gate(Gate::Ry(0.4 + 0.2 * q as f64), &[q]);
+        }
+        c.add_gate(Gate::Cx, &[0, 3]);
+        c.add_gate(Gate::Cx, &[4, 1]);
+        c.add_gate(Gate::T, &[2]);
+        c.add_gate(Gate::Cx, &[2, 0]);
+        let b = run_mps(&c);
+
+        let dense = b.probabilities().unwrap();
+        let right = b.right_environments();
+        let max_bond = b
+            .sites
+            .iter()
+            .map(|site| site.bond_left.max(site.bond_right))
+            .max()
+            .unwrap();
+
+        for (basis, &expected) in dense.iter().enumerate() {
+            assert!(
+                expected > 1e-6,
+                "basis {basis} carries probability {expected:.3e}; the case is meant to have \
+                 full support so every conditional is exercised"
+            );
+
+            let mut left = vec![ZERO; max_bond];
+            let mut w = vec![ZERO; 2 * max_bond];
+            left[0] = ONE;
+            let mut joint = 1.0f64;
+            for (site, right_env) in right.iter().enumerate() {
+                let br = b.sites[site].bond_right;
+                let prob = b.site_conditional_weights(site, &left, right_env, &mut w);
+                let bit = (basis >> b.logical_for_site(site)) & 1;
+                joint *= prob[bit] / (prob[0] + prob[1]);
+
+                let scale = 1.0 / prob[bit].sqrt();
+                left[..br].copy_from_slice(&w[bit * br..(bit + 1) * br]);
+                for value in &mut left[..br] {
+                    *value *= scale;
+                }
+                left[br..].fill(ZERO);
+            }
+            assert!(
+                (joint - expected).abs() < 1e-12,
+                "basis {basis}: conditional path gives {joint}, dense vector gives {expected}"
+            );
+        }
     }
 
     #[test]

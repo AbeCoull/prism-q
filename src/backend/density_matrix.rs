@@ -495,4 +495,20 @@ impl Backend for DensityMatrixBackend {
         }
         Ok([[r00, r01], [r10, r11]])
     }
+
+    /// Evolve `rho -> K rho K^dagger` for an arbitrary `K`, on the same kernel
+    /// selection as the one-qubit branch of `apply_unitary`. Trajectories never
+    /// route here, since `supports_noisy_per_shot` excludes the density matrix in
+    /// favour of `apply_1q_kraus` on the mixture; this keeps the trait method
+    /// allocation-free on every backend that holds a state.
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        let n = self.num_qubits;
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            let s = block_superoperator(&[*matrix]);
+            self.apply_block_superoperator(qubit, &s);
+            return Ok(());
+        }
+        self.sv.apply_1q_matrix(qubit + n, matrix)?;
+        self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
+    }
 }

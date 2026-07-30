@@ -17,6 +17,25 @@
 //! - Use `#[inline]` and `#[inline(always)]` on gate kernels.
 //! - Document all `unsafe` blocks with safety invariants.
 //!
+//! # Optional methods and what declines them
+//!
+//! Several trait methods carry a default that reports the operation unsupported.
+//! Which representations decline, and why they cannot answer:
+//!
+//! | Method | Declined by | Reason |
+//! | --- | --- | --- |
+//! | `apply_1q_matrix` | Stabilizer, FactoredStabilizer | A tableau stores a state by its stabilizer group, closed under Clifford conjugation. A general 2x2 has no image in that group, and a Kraus branch is not even unitary. |
+//! | `reduced_density_matrix_1q` | Stabilizer, FactoredStabilizer | Derivable from a tableau, but the operator it feeds cannot be applied (row above), so the branch would be sampled and never used. |
+//! | `reduced_density_matrix_1q` | TensorNetwork | A local reduced state needs the network contracted with two indices left open, which the contraction planner does not express. Its only route is the full dense contraction behind `export_statevector`. |
+//! | `reduced_density_matrix_1q` | DistributedStatevector | Trajectories run shots on Rayon workers whose order differs per rank, so per-shot noise would issue rank collectives out of lockstep. `run_shots_with_noise` rejects the backend for that reason, which closes the only path here. |
+//! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
+//! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
+//!
+//! [`Backend::reduced_density_matrix_1q`] and [`Backend::apply_1q_matrix`] are
+//! two halves of one capability, sampling a non-Pauli branch and applying the
+//! operator it selects, so their coverage is one set by construction. That set is
+//! `BackendKind::supports_general_noise`.
+//!
 //! # Adding a new backend
 //!
 //! Implement the [`Backend`] trait below, following the contract and
@@ -243,8 +262,9 @@ pub trait Backend {
     /// vector. Enables backend transitions (e.g., Stabilizer → Statevector
     /// for temporal Clifford decomposition).
     ///
-    /// Not all backends support this efficiently. The default implementation
-    /// returns `Err(BackendUnsupported)`.
+    /// Implemented by every backend that holds a pure state, including the
+    /// factored one, whose blocks tensor back into a joint vector. See the module
+    /// docs for what declines it.
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
@@ -266,10 +286,9 @@ pub trait Backend {
     ///
     /// Returned as `[[p0, r*], [r, p1]]`, where `r = <1|rho|0>`.
     /// Used by the trajectory engine for dense custom Kraus channels whose
-    /// branch probabilities depend on coherence, not just populations. The
-    /// default returns `BackendUnsupported`; backends override when their
-    /// representation can expose this quantity efficiently enough for noise
-    /// sampling.
+    /// branch probabilities depend on coherence, not just populations. Backends
+    /// override when their representation can expose this efficiently enough for
+    /// noise sampling; see the module docs for what declines it and why.
     fn reduced_density_matrix_1q(&self, _qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
@@ -349,10 +368,14 @@ pub trait Backend {
     /// Apply a 2×2 matrix to a single qubit without allocating.
     ///
     /// Used by the trajectory engine to apply Kraus operators (amplitude
-    /// damping, phase damping, thermal relaxation) without boxing into a
-    /// `Gate::Fused` on every call. The default falls back to building a
-    /// `Gate::Fused` and dispatching via `apply`; backends may override for a
-    /// zero-allocation fast path.
+    /// damping, phase damping, thermal relaxation, generic normalized Kraus).
+    /// The matrix need not be unitary: a jump branch is a projector scaled by
+    /// `1/sqrt(p_jump)`, and the no-jump branch renormalizes.
+    ///
+    /// The default builds a `Gate::Fused` and dispatches via `apply`, which
+    /// heap-allocates once per call inside a gate-application path, so every
+    /// backend that can reach this method overrides it. See the module docs for
+    /// what declines it.
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
         use crate::circuit::smallvec;
         self.apply(&crate::circuit::Instruction::Gate {

@@ -13,6 +13,19 @@ use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// Noise sampler for one shot, on a ChaCha stream of its own.
+///
+/// The backend is seeded from the same shot seed and is also `ChaCha8Rng`, so on
+/// the default stream the two emit the same sequence and a branch draw lands on
+/// the same value as the measurement draw after it. Amplitude damping at
+/// `gamma = 0.15` on `H|0>` read `P(1) = 0.384` over 200k shots against an exact
+/// 0.425. A second stream keeps one seed reproducible and the draws independent.
+pub(crate) fn noise_rng(shot_seed: u64) -> ChaCha8Rng {
+    let mut rng = ChaCha8Rng::seed_from_u64(shot_seed);
+    rng.set_stream(1);
+    rng
+}
+
 fn apply_pauli(
     backend: &mut dyn Backend,
     qubit: usize,
@@ -390,7 +403,7 @@ pub(crate) fn run_trajectories(
     let mut shots = Vec::with_capacity(num_shots);
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
-        let mut rng = ChaCha8Rng::seed_from_u64(shot_seed);
+        let mut rng = noise_rng(shot_seed);
         let mut backend = backend_factory(shot_seed);
         let result = run_trajectory_shot(backend.as_mut(), circuit, noise, &mut rng)?;
         shots.push(result);
@@ -411,7 +424,7 @@ fn run_trajectories_par(
         .into_par_iter()
         .map(|i| {
             let shot_seed = seed.wrapping_add(i as u64);
-            let mut rng = ChaCha8Rng::seed_from_u64(shot_seed);
+            let mut rng = noise_rng(shot_seed);
             let mut backend = backend_factory(shot_seed);
             run_trajectory_shot(backend.as_mut(), circuit, noise, &mut rng)
         })

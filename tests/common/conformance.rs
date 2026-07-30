@@ -1146,7 +1146,9 @@ pub fn participants() -> Vec<Participant> {
             name: "factored",
             exec: Executor::Direct(|s| Box::new(FactoredBackend::new(s))),
             rules: always,
-            export_rules: no_state_export,
+            // Blocks tensor back into a joint vector, so the export is exact at
+            // any block count.
+            export_rules: always,
             query_kind: Some(BackendKind::Factored),
             anchor: None,
         },

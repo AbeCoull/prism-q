@@ -68,6 +68,18 @@ jobs:
       - name: Doc tests
         run: cargo test --doc --no-default-features
 
+  # The release workflow publishes to crates.io with --no-confirm --execute and no
+  # manual gate, so the version arithmetic in front of it is verified here rather
+  # than at dispatch time. Seconds of runtime against a version number that can
+  # be yanked but never unpublished.
+  release-bump-level:
+    name: Release bump level
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify the conventional-commit mapping and the pre-1.0 clamp
+        run: bash scripts/release_bump_level_test.sh
+
   benchmark-regression:
     name: Benchmark Regression
     runs-on: ubuntu-latest

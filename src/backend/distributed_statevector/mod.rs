@@ -1459,4 +1459,37 @@ impl Backend for DistributedStatevectorBackend {
     fn reset(&mut self, qubit: usize) -> Result<()> {
         self.reset_dist(qubit)
     }
+
+    /// Apply a 2x2 matrix to one circuit qubit across the rank split, on the same
+    /// route `apply_gate` takes for a one-qubit gate: relabel a non-diagonal
+    /// target into a local position when a victim exists, apply locally when the
+    /// physical position is local, otherwise exchange with the partner rank.
+    ///
+    /// Collective when the target is global, so every rank must call it with the
+    /// same qubit.
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        if self.global_qubits == 0 {
+            return self.inner.apply_1q_matrix(qubit, matrix);
+        }
+
+        let diagonal = is_diagonal_2x2(matrix);
+        if self.relabel {
+            self.tick += 1;
+            self.last_used[qubit] = self.tick;
+            if !diagonal {
+                self.make_local(&[qubit]);
+            }
+        }
+
+        let target = self.physical_qubit(qubit);
+        if target < self.local_qubits() {
+            return self.inner.apply_1q_matrix(target, matrix);
+        }
+        if diagonal {
+            self.apply_global_diagonal_1q(target, matrix[0][0], matrix[1][1]);
+        } else {
+            self.apply_global_1q(target, *matrix);
+        }
+        Ok(())
+    }
 }

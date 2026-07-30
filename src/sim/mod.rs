@@ -2401,12 +2401,26 @@ mod tests {
         }
     }
 
+    /// `make_general_circuit` entangles `{0, 1}` and leaves qubit 2 alone, so the
+    /// export runs with two live sub-states rather than one.
     #[test]
-    fn test_export_factored_unsupported() {
+    fn test_export_factored_tensors_multiple_blocks() {
         let circuit = make_general_circuit();
         let mut backend = crate::backend::factored::FactoredBackend::new(42);
         run_on(&mut backend, &circuit).unwrap();
-        assert!(backend.export_statevector().is_err());
+        let state = backend.export_statevector().unwrap();
+        assert_unit_norm(&state, "factored multi-block export");
+
+        let mut sv = StatevectorBackend::new(42);
+        run_on(&mut sv, &circuit).unwrap();
+        let expected = sv.export_statevector().unwrap();
+        assert_eq!(state.len(), expected.len());
+        for (i, (a, e)) in state.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (a - e).norm() < 1e-12,
+                "factored export[{i}]: expected {e}, got {a}"
+            );
+        }
     }
 
     #[test]

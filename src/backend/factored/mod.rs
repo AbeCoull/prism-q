@@ -14,6 +14,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::{SmallVec, smallvec};
 
+use crate::backend::memory::dense_statevector_len;
 use crate::backend::simd;
 use crate::backend::statevector::insert_zero_bit;
 use crate::backend::{
@@ -21,7 +22,7 @@ use crate::backend::{
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
-use crate::gates::{DiagEntry, Gate};
+use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
@@ -638,6 +639,80 @@ impl Backend for FactoredBackend {
             [Complex64::new(p0, 0.0), r.conj()],
             [r, Complex64::new(p1, 0.0)],
         ])
+    }
+
+    /// Apply a Kraus branch to one qubit without boxing a `Gate::Fused`.
+    ///
+    /// The default routes through `apply`, which allocates per call, and this is
+    /// the one override a live path depends on: a non-Pauli channel on a factored
+    /// run reaches here once per damping event. A single target never merges
+    /// sub-states, so kernel selection matches the `Gate::Fused` arm of
+    /// `dispatch_gate` exactly.
+    fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        let ss_idx = self.qubit_to_substate[qubit];
+        let sub = self.substates[ss_idx].as_mut().unwrap();
+        let local = Self::local_qubit(sub, qubit);
+
+        #[cfg(feature = "parallel")]
+        let par = sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS;
+
+        if is_diagonal_2x2(matrix) {
+            let skip_lo = is_phase_one(matrix[0][0]);
+            #[cfg(feature = "parallel")]
+            if par {
+                par_apply_diagonal(&mut sub.state, local, matrix[0][0], matrix[1][1], skip_lo);
+                return Ok(());
+            }
+            simd::apply_diagonal_sequential(
+                &mut sub.state,
+                local,
+                matrix[0][0],
+                matrix[1][1],
+                skip_lo,
+            );
+        } else {
+            #[cfg(feature = "parallel")]
+            if par {
+                par_apply_1q(&mut sub.state, local, matrix);
+                return Ok(());
+            }
+            simd::PreparedGate1q::new(matrix).apply_full_sequential(&mut sub.state, local);
+        }
+        Ok(())
+    }
+
+    /// Tensor the live sub-states back into a joint amplitude vector.
+    ///
+    /// The state is a product over blocks, so the joint amplitude at a global
+    /// index is the product of each block's amplitude at the index restricted to
+    /// that block's qubits. Sub-states stay normalized through measurement, so no
+    /// pending norm is carried.
+    fn export_statevector(&self) -> Result<Vec<Complex64>> {
+        let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
+
+        let active: SmallVec<[&SubState; 16]> = self
+            .substates
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .collect();
+
+        if active.len() == 1 && active[0].qubits.len() == self.num_qubits {
+            return Ok(active[0].state.clone());
+        }
+
+        let mut joint = vec![Complex64::new(0.0, 0.0); dim];
+        for (index, amp) in joint.iter_mut().enumerate() {
+            let mut product = Complex64::new(1.0, 0.0);
+            for sub in &active {
+                let mut local = 0usize;
+                for (bit, &q) in sub.qubits.iter().enumerate() {
+                    local |= ((index >> q) & 1) << bit;
+                }
+                product *= sub.state[local];
+            }
+            *amp = product;
+        }
+        Ok(joint)
     }
 
     fn classical_results(&self) -> &[bool] {

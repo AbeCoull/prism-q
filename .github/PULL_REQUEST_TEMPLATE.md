@@ -19,13 +19,20 @@ diff. Link any related issue or discussion.
 
 ## Benchmarks (required for any change that touches a hot path)
 
-Run from a quiet machine with `--features parallel` and paste the numbers below. If this
-PR only changes documentation or non-performance code, write "N/A, no hot-path changes"
-and skip the table.
+Run `./scripts/bench_ab.sh --filter <rows> --ref <base>` and paste its table below. It
+builds both bench binaries first and runs them adjacent, which is the only method that
+reads correctly on a development host: separate `cargo bench` invocations minutes apart
+have moved a byte-identical control group by as much as +98%. See `benches/README.md`.
 
-| Benchmark | Before | After | Change | Within 5% threshold? |
-| --- | --- | --- | --- | --- |
-|  |  |  |  |  |
+If this PR only changes documentation or non-performance code, write "N/A, no hot-path
+changes" and skip the table.
+
+| Benchmark | Before | After | Change | Control (same code) | Within 5% threshold? |
+| --- | --- | --- | --- | --- | --- |
+|  |  |  |  |  |  |
+
+Keep the control column. A change no larger than its row's same-code control spread is
+noise, not a result; say so rather than rounding it into a win.
 
 Regression verdict: PASS / FAIL / WAIVER
 

@@ -453,3 +453,55 @@ fn dm_reduced_density_matrix_matches_statevector() {
         }
     }
 }
+
+/// The override against the boxed `Gate::Fused` route it replaces, at both sides
+/// of the crossover the one-qubit path selects on: below the parallel threshold
+/// the embedded `2n`-qubit statevector takes two passes, at or above it one block
+/// superoperator pass. The second matrix is a non-unitary jump branch, so this is
+/// not restricted to `rho -> U rho U^dagger`.
+#[test]
+fn dm_apply_1q_matrix_matches_fused_gate_route() {
+    let dense = [[c(0.6, 0.0), c(0.8, 0.0)], [c(0.8, 0.0), c(-0.6, 0.0)]];
+    let jump = [[c(0.0, 0.0), c(1.3, 0.0)], [c(0.0, 0.0), c(0.0, 0.0)]];
+
+    // 4 qubits embeds an 8-qubit statevector (two-pass path); 7 embeds a
+    // 14-qubit one, which is the block-superoperator path.
+    for n in [4usize, 7] {
+        for (label, matrix) in [("dense", dense), ("jump", jump)] {
+            for target in [0usize, n - 1] {
+                let circuit = circuits::random_circuit(n, 6, SEED);
+
+                let mut direct = dm_backend(&circuit, SEED);
+                direct.apply_1q_matrix(target, &matrix).unwrap();
+
+                let mut boxed = dm_backend(&circuit, SEED);
+                boxed
+                    .apply(&prism_q::circuit::Instruction::Gate {
+                        gate: prism_q::gates::Gate::Fused(Box::new(matrix)),
+                        targets: [target].into_iter().collect(),
+                    })
+                    .unwrap();
+
+                let a = direct.probabilities().unwrap();
+                let b = boxed.probabilities().unwrap();
+                assert_probs_close(&a, &b, 1e-12, &format!("{label} on q{target} of {n}"));
+
+                for q in 0..n {
+                    let ra = direct.reduced_density_matrix_1q(q).unwrap();
+                    let rb = boxed.reduced_density_matrix_1q(q).unwrap();
+                    for i in 0..2 {
+                        for j in 0..2 {
+                            assert!(
+                                (ra[i][j] - rb[i][j]).norm() < 1e-12,
+                                "{label} on q{target} of {n}: rdm[{q}][{i}][{j}] \
+                                 direct={} boxed={}",
+                                ra[i][j],
+                                rb[i][j]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

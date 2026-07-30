@@ -28,39 +28,32 @@ jobs:
       - name: Install tools
         run: cargo install git-cliff cargo-release
 
+      - name: Verify the bump level mapping
+        run: bash scripts/release_bump_level_test.sh
+
       - name: Determine bump level from conventional commits
         id: bump
         run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            RANGE="HEAD"
-          else
-            RANGE="${LAST_TAG}..HEAD"
+          # Outside the worktree: cargo-release refuses to run on a dirty tree.
+          bash scripts/release_bump_level.sh > "$RUNNER_TEMP/bump.env"
+          cat "$RUNNER_TEMP/bump.env"
+          cat "$RUNNER_TEMP/bump.env" >> "$GITHUB_OUTPUT"
+
+      - name: Report bump level
+        env:
+          LEVEL: ${{ steps.bump.outputs.level }}
+          RAW_LEVEL: ${{ steps.bump.outputs.raw_level }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          echo "### Bump level: \`$LEVEL\` (from \`$VERSION\`)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$LEVEL" != "$RAW_LEVEL" ]; then
+            {
+              echo ""
+              echo "Conventional commits asked for \`$RAW_LEVEL\`, clamped to \`$LEVEL\`:"
+              echo "the crate is pre-1.0, where the minor is the compatibility boundary."
+              echo "Cut 1.0.0 deliberately rather than letting a breaking commit spend it."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
-
-          COMMITS=$(git log --format="%s" $RANGE 2>/dev/null || true)
-          if [ -z "$COMMITS" ]; then
-            echo "level=none" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          LEVEL="none"
-
-          # Check for breaking changes
-          if echo "$COMMITS" | grep -qiE '^[a-z]+(\(.+\))?!:'; then
-            LEVEL="major"
-          elif git log --format="%b" $RANGE 2>/dev/null | grep -q "^BREAKING CHANGE:"; then
-            LEVEL="major"
-          # Check for features
-          elif echo "$COMMITS" | grep -qE '^feat(\(.+\))?:'; then
-            LEVEL="minor"
-          # Check for fixes or perf
-          elif echo "$COMMITS" | grep -qE '^(fix|perf)(\(.+\))?:'; then
-            LEVEL="patch"
-          fi
-
-          echo "level=$LEVEL" >> "$GITHUB_OUTPUT"
-          echo "### Bump level: \`$LEVEL\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Skip if no release needed
         if: steps.bump.outputs.level == 'none'

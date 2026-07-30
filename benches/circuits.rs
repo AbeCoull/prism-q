@@ -213,6 +213,28 @@ fn with_terminal_measurements(mut circuit: Circuit) -> Circuit {
     circuit
 }
 
+/// Thermal relaxation on every gate target. `t2 < 2 * t1` keeps the dephasing
+/// branch live, so the event costs a reset draw plus a possible Z.
+fn thermal_noise_model(circuit: &Circuit) -> prism_q::NoiseModel {
+    let mut model = prism_q::NoiseModel::uniform_depolarizing(circuit, 0.0);
+    for (index, instruction) in circuit.instructions.iter().enumerate() {
+        if let prism_q::Instruction::Gate { targets, .. } = instruction {
+            model.after_gate[index] = targets
+                .iter()
+                .map(|&q| prism_q::NoiseEvent {
+                    channel: prism_q::NoiseChannel::ThermalRelaxation {
+                        t1: 100.0,
+                        t2: 80.0,
+                        gate_time: 1.0,
+                    },
+                    qubits: prism_q::circuit::SmallVec::from_slice(&[q]),
+                })
+                .collect();
+        }
+    }
+    model
+}
+
 fn non_clifford_noise_circuit(n_qubits: usize, depth: usize) -> Circuit {
     let mut circuit = Circuit::new(n_qubits, 0);
     for layer in 0..depth {
@@ -1256,6 +1278,52 @@ fn bench_factored_dynamic(c: &mut Criterion) {
     group.finish();
 }
 
+/// Non-Pauli trajectory noise on the factored backend, the only path that reaches
+/// `Backend::apply_1q_matrix`. Pauli noise routes to gate application instead, so
+/// `noisy_sampling` does not cover this at all.
+///
+/// Four-qubit blocks keep each sub-state at 16 amplitudes, so per-call cost in
+/// that method is a visible fraction of the kernel. Deep and shot-light because a
+/// shot allocates a fresh backend per block: at depth 5 with 256 shots that
+/// construction read a 36% spread on identical code.
+///
+/// The thermal rows are the control. Thermal relaxation samples a reset branch and
+/// a `Z` branch, never a Kraus matrix, so it shares the shape and the allocator
+/// behavior without touching the method under test.
+fn bench_factored_noise_kraus(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored/noise_kraus");
+    configure_group(&mut group);
+
+    for &total_q in &[16, 24] {
+        let circuit = with_terminal_measurements(circuits::independent_random_blocks(
+            total_q / 4,
+            4,
+            60,
+            SEED,
+        ));
+
+        let damping = prism_q::NoiseModel::with_amplitude_damping(&circuit, 0.01);
+        group.bench_with_input(
+            BenchmarkId::new("amplitude_damping", total_q),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_shots_with_noise(BackendKind::Factored, circ, &damping, 32, SEED).unwrap();
+                });
+            },
+        );
+
+        let thermal = thermal_noise_model(&circuit);
+        group.bench_with_input(BenchmarkId::new("thermal", total_q), &circuit, |b, circ| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::Factored, circ, &thermal, 32, SEED).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_factored_dense(c: &mut Criterion) {
     let mut group = c.benchmark_group("factored/dense");
     configure_group(&mut group);
@@ -1783,6 +1851,7 @@ criterion_group! {
     bench_factored_sim_only,
     bench_factored_dynamic,
     bench_factored_dense,
+    bench_factored_noise_kraus,
     // Clifford+T (SPD/SPP)
     bench_clifford_t,
     // Stabilizer rank

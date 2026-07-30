@@ -1308,3 +1308,78 @@ fn shots_without_measurements_still_validate_configuration() {
         );
     }
 }
+
+/// The override has to reproduce the route `apply_gate` takes for a one-qubit gate
+/// at every position of the local/global split, including the diagonal shortcut.
+/// The third matrix is a non-unitary jump branch, which is what the trajectory
+/// engine actually hands this method.
+#[test]
+fn loopback_apply_1q_matrix_all_qubit_splits() {
+    relax_min_local_qubits();
+    let n = 4;
+
+    let dense = [
+        [Complex64::new(0.6, 0.0), Complex64::new(0.8, 0.0)],
+        [Complex64::new(0.8, 0.0), Complex64::new(-0.6, 0.0)],
+    ];
+    let diagonal = [
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::from_polar(1.0, 0.7)],
+    ];
+    let jump = [
+        [Complex64::new(0.0, 0.0), Complex64::new(1.3, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+
+    let mut b = CircuitBuilder::new(n);
+    b.rx(0.3, 0).ry(0.8, 1).rx(1.2, 2).t(3).h(3).cx(0, 2);
+    let prep = b.build();
+
+    for (label, matrix) in [("dense", dense), ("diagonal", diagonal), ("jump", jump)] {
+        for target in 0..n {
+            let mut sv = StatevectorBackend::new(SEED);
+            sv.init(n, 0).unwrap();
+            sv.apply_instructions(&prep.instructions).unwrap();
+            sv.apply_1q_matrix(target, &matrix).unwrap();
+            let expected = sv.export_statevector().unwrap();
+
+            for &relabel in &[true, false] {
+                for &size in &[1usize, 2, 4] {
+                    let shared = LoopbackShared::new(size);
+                    let handles: Vec<_> = (0..size)
+                        .map(|rank| {
+                            let comm = LoopbackComm {
+                                shared: shared.clone(),
+                                rank,
+                            };
+                            let prep = prep.clone();
+                            std::thread::Builder::new()
+                                .stack_size(64 * 1024 * 1024)
+                                .spawn(move || {
+                                    let ctx = DistributedContext::from_comm(Arc::new(comm));
+                                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                                    backend.set_relabel(relabel);
+                                    backend.init(n, 0).unwrap();
+                                    backend.apply_instructions(&prep.instructions).unwrap();
+                                    backend.apply_1q_matrix(target, &matrix).unwrap();
+                                    backend.export_statevector().unwrap()
+                                })
+                                .expect("spawn rank thread")
+                        })
+                        .collect();
+
+                    for actual in handles.into_iter().map(|h| h.join().unwrap()) {
+                        assert_eq!(expected.len(), actual.len());
+                        for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+                            assert!(
+                                (e - a).norm() < TOL,
+                                "{label} on q{target}, size {size}, relabel {relabel}: \
+                                 amp[{i}] expected {e}, got {a}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

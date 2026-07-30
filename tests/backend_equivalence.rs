@@ -910,6 +910,89 @@ fn product_export_statevector_matches() {
     }
 }
 
+/// One entangled block spanning every qubit, which the factored backend holds as
+/// a single dense sub-state, so the export is the identity case.
+#[test]
+fn factored_export_statevector_single_block_matches() {
+    let mut c = Circuit::new(3, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+
+    let sv_ref = run_and_state(&c);
+
+    let mut fac = prism_q::backend::factored::FactoredBackend::new(SEED);
+    sim::run_on(&mut fac, &c).unwrap();
+    let sv = fac.export_statevector().unwrap();
+    for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
+        assert!(
+            (a - e).norm() < EPS,
+            "factored export[{i}]: expected {e}, got {a}"
+        );
+    }
+}
+
+/// Three live sub-states, one of them interleaved with another in global qubit
+/// order (`{0, 3}` and `{1, 2}`), so the export cannot assume a block owns a
+/// contiguous bit range. Amplitudes, not probabilities: a tensor product of
+/// blocks carries each block's phase, and only the amplitude check sees them.
+#[test]
+fn factored_export_statevector_interleaved_blocks_matches() {
+    let mut c = Circuit::new(5, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::Cx, &[0, 3]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::S, &[2]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::Ry(0.9), &[4]);
+
+    let sv_ref = run_and_state(&c);
+
+    let mut fac = prism_q::backend::factored::FactoredBackend::new(SEED);
+    sim::run_on(&mut fac, &c).unwrap();
+    let sv = fac.export_statevector().unwrap();
+    assert_eq!(sv.len(), sv_ref.len());
+    for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
+        assert!(
+            (a - e).norm() < EPS,
+            "factored export[{i}]: expected {e}, got {a}"
+        );
+    }
+}
+
+/// After a measurement collapses one block, the surviving amplitudes must still
+/// come out normalized, since the export carries no pending norm of its own.
+#[test]
+fn factored_export_statevector_after_measurement_is_normalized() {
+    let mut c = Circuit::new(4, 1);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_measure(0, 0);
+
+    let mut fac = prism_q::backend::factored::FactoredBackend::new(SEED);
+    sim::run_on(&mut fac, &c).unwrap();
+    let sv = fac.export_statevector().unwrap();
+
+    let norm: f64 = sv.iter().map(|a| a.norm_sqr()).sum();
+    assert!(
+        (norm - 1.0).abs() < EPS,
+        "export norm after measure: {norm}"
+    );
+
+    let probs = fac.probabilities().unwrap();
+    for (i, (amp, p)) in sv.iter().zip(probs.iter()).enumerate() {
+        assert!(
+            (amp.norm_sqr() - p).abs() < EPS,
+            "factored export[{i}] disagrees with probabilities: {} vs {p}",
+            amp.norm_sqr()
+        );
+    }
+}
+
 // ---- MCU cross-backend tests ----
 
 #[test]

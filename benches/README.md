@@ -16,9 +16,10 @@ Criterion.rs. Two benchmark binaries:
 
 Sample count controls the precision of one run's mean. It does not remove
 drift between runs: on the reference host, back-to-back runs of identical code
-at 100 samples still moved -9.5% to +7.9%. A comparison that has to hold to the
-5% gate needs a quiet host, and preferably both variants benchmarked as rows in
-the same run so drift cancels.
+at 100 samples still moved -9.5% to +7.9%. Any comparison that has to hold to
+the 5% gate goes through the adjacent-binary A/B below, which removes the build
+and the source edit from between the two measurements and reports each row
+against its own same-code control.
 
 ### Build cost
 
@@ -95,7 +96,71 @@ cargo bench -- --save-baseline my_baseline
 cargo bench -- --baseline my_baseline
 ```
 
-## Baseline workflow
+## Gating comparisons: adjacent-binary A/B
+
+**This is the required method for any before/after claim that has to hold to the
+5% gate.** It supersedes save-a-baseline-then-compare-later for that purpose.
+
+```bash
+./scripts/bench_ab.sh --filter '^factored/noise_kraus/'
+./scripts/bench_ab.sh -f '^density_matrix/' -r main -b circuits
+./scripts/bench_ab.sh -f '^sparse/' --ref-dir /tmp/prism-q-ref   # cache the reference build
+```
+
+The script builds the bench binary from the working tree, builds the same target
+from a reference git ref in a separate worktree, verifies the working tree did
+not change between the two builds, then runs the two executables adjacent with no
+build and no source edit in between. One discarded warmup pass per binary, then
+four measured passes in the order ref, new, new, ref: both means are centred on
+the same point in time so linear drift cancels, and each binary is measured twice
+so every row reports a same-code control alongside its change.
+
+The warmup passes are load bearing. Without them the first measured pass absorbs
+the cold start after two builds, and whichever binary owns it looks slow: three
+rows read -15% to -18% on identical code, all against the binary in pass 1.
+
+```text
+| Benchmark                      | Ref      | New      | Change | Control (ref) | Control (new) | Verdict |
+| single_qubit_gates/h_gate/12   | 29.11 us | 27.64 us | -5.0%  | +11.5%        | -0.4%         | noise   |
+```
+
+That row is from a run where both binaries carried identical code. The -5.0%
+"improvement" is drift, and the +11.5% control is what says so. **Do not report a
+change without its control column.** A change no larger than the row's control
+spread is noise, not a result, and rows whose control spread exceeds the threshold
+are listed separately as unresolvable on this host.
+
+### Why separate invocations do not work
+
+Baseline and after runs minutes apart drift 8-20% on microsecond rows and up to
++98% on a byte-identical control group, because the rebuild and the editor's
+re-index land between them. Every measured optimization in the archive was taken
+with the adjacent-binary method instead: density matrix -29% to -72%, sparse -15%
+to -66%, tensor network -15% to -22%.
+
+The method removes the drift the rebuild causes. It does not make a busy host
+quiet. `density_matrix/neutrality/22` has read a control spread of -15.9% to
++37.0% under this method with the editor consuming about half the CPU, so read the
+control column on every run rather than assuming any row is stable. When the
+controls are wide, the answer is "not measurable right now", not a number.
+
+The two binaries are never byte identical even from identical sources, because
+`[profile.bench] debug = "line-tables-only"` records the package path and the two
+worktrees differ. The script decides "same code" from git, not from `cmp`.
+
+Reference-build cost: the first `--ref-dir` build is a cold build of the crate in
+a second package path (about 2m30s here); later runs against the same ref reuse
+it. Dependencies are shared, since the worktree builds into the same target
+directory.
+
+`bench_ab.sh` needs only git, awk, and cargo. It deliberately avoids `jq` and
+`bc`, neither of which is present on the reference host.
+
+## Stored baselines
+
+Point-in-time snapshots for tracking a number across weeks, and the mechanism the
+CI gate uses (where both sides run in one job on one runner, so the drift the
+method above defends against does not apply). Not a substitute for it locally.
 
 ```bash
 # Save (Unix)
@@ -113,6 +178,10 @@ cargo bench -- --baseline my_baseline
 # Custom threshold
 REGRESSION_THRESHOLD=10 ./scripts/bench_compare.sh
 ```
+
+`scripts/bench_check.sh` (`save`, `compare`, `table`, `list`) reads
+`target/criterion/` and writes to `bench_results/baselines/`. It requires `jq`
+and `bc`, so it runs in CI but not on the Windows reference host.
 
 ## CI regression gate
 
@@ -164,19 +233,46 @@ CI_BENCH_FEATURES=parallel,bench-fast ./scripts/bench_ci.sh
 
 Default threshold: **5%** per benchmark (configurable via `REGRESSION_THRESHOLD`).
 
-`bench_check.*` reads Criterion JSON from `target/criterion/`, compares matching
-benchmark means, and exits with code 1 when any benchmark exceeds the threshold.
-The older `bench_compare.*` wrappers still parse Criterion console output for
-quick baseline checks.
+`bench_ab.sh` applies the threshold per row and only calls a row a regression when
+it exceeds both the threshold and that row's own control spread. `bench_check.*`
+reads Criterion JSON from `target/criterion/`, compares matching benchmark means,
+and exits with code 1 when any benchmark exceeds the threshold. The older
+`bench_compare.*` wrappers still parse Criterion console output for quick baseline
+checks.
+
+### Rows this host cannot resolve
+
+Some rows carry a same-code control spread above the 5% gate. Do not gate a change
+on them; `bench_ab.sh` lists them under the table on every run.
+
+| Row family | Same-code spread observed |
+| --- | --- |
+| `sparse/low_entanglement/{8,12,16,20}` | -4.4% to +15.5%, no consistent sign |
+| `stabilizer/scaling/10`, `factored_stabilizer/scaling/10` | +9% to +13% (L1 resident) |
+| `stabilizer_rank/shots_mid_circuit` | -17.8% to +88% |
+| `gpu_stab_direct/clifford_d10/{2000,5000}` | +118% to +124% (bimodal clock state) |
+| `qec_t_strategies` | about 50% at 10 samples |
+| `factored/independent/*` | -45.5% to +49.7% (tens of microseconds) |
+| `factored/noise_kraus/*` | 12% to 16%, dominated by per-shot backend construction |
+| `noisy_sampling/*` | +9.8% to +48.3% |
+
+Those last three were measured on a host at roughly 50% background load, so treat
+them as an upper bound rather than an intrinsic property of the row.
+
+Gate sparse work on `sparse/random_d10` and `compare/*/sparse/*`, and the
+stabilizer families on their 50q+ rows, which reproduced consistent signs across
+independent pairs.
 
 ## Reproducibility checklist
 
 - [ ] Fixed RNG seed (`0xDEAD_BEEF` for circuit generation, `42` for simulation)
 - [ ] Criterion defaults: 5s warm-up, 5s measurement, 100 samples
-- [ ] Document CPU model, OS, Rust version, RUSTFLAGS
+- [ ] Gating comparisons run through `scripts/bench_ab.sh`, with the control column reported
+- [ ] Document CPU model, OS, Rust version, RUSTFLAGS (`bench_ab.sh` records these in its table)
 - [ ] Disable CPU frequency scaling if possible (`performance` governor on Linux)
 - [ ] Close background applications
 - [ ] Consider CPU pinning (`taskset` on Linux) for reduced variance
+- [ ] One `cargo bench` process at a time. Rayon pools contend and swing the numbers
 
 ## Output
 

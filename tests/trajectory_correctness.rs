@@ -427,6 +427,199 @@ fn custom_kraus_dense_channel_uses_coherence() {
     }
 }
 
+/// `H|0>` damped at `gamma` has exact `P(1) = (1 - gamma) / 2`. With the noise
+/// sampler and the backend sharing a ChaCha stream, the jump fired on exactly the
+/// shots that would have measured `|0>` anyway and this read 0.384 against 0.425,
+/// 37 standard errors out. The tight bound is what holds the two streams apart.
+#[test]
+fn noise_and_measurement_draws_are_independent() {
+    let gamma = 0.15;
+    let num_shots = 100_000;
+    let exact = (1.0 - gamma) / 2.0;
+
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let noise = NoiseModel::with_amplitude_damping(&circuit, gamma);
+
+    for kind in [BackendKind::Statevector, BackendKind::Factored] {
+        let result = run_shots_with_noise(kind.clone(), &circuit, &noise, num_shots, 42).unwrap();
+        let ones = result.shots.iter().filter(|shot| shot[0]).count();
+        let p_one = ones as f64 / num_shots as f64;
+        let sigma = (exact * (1.0 - exact) / num_shots as f64).sqrt();
+
+        assert!(
+            (p_one - exact).abs() <= 5.0 * sigma,
+            "{kind:?}: P(1) = {p_one}, exact = {exact}, off by {} standard errors",
+            (p_one - exact).abs() / sigma
+        );
+    }
+}
+
+/// Two independent two-qubit blocks with no gate bridging them, so the factored
+/// backend holds a product of sub-states rather than one dense block.
+fn damped_two_block_circuit(num_classical: usize) -> Circuit {
+    let mut circuit = Circuit::new(4, num_classical);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::H, &[2]);
+    circuit.add_gate(Gate::Cx, &[2, 3]);
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(Gate::Ry(0.7), &[3]);
+    circuit
+}
+
+/// The non-Pauli trajectory path on the factored backend: the engine reads
+/// `qubit_probability`, samples a branch, and applies that branch's Kraus operator
+/// through `Backend::apply_1q_matrix`. The density matrix evolves the same channel
+/// exactly with no sampling, so it is the reference here, not a second opinion.
+#[test]
+fn factored_amplitude_damping_matches_density_matrix() {
+    let gamma = 0.15;
+    let num_shots = 8000;
+
+    let unitary = damped_two_block_circuit(0);
+    let mut measured = damped_two_block_circuit(4);
+    for q in 0..4 {
+        measured.add_measure(q, q);
+    }
+
+    // `with_amplitude_damping` attaches events only after gate instructions, so
+    // the two models agree on every index the gates occupy.
+    let reference_noise = NoiseModel::with_amplitude_damping(&unitary, gamma);
+    let observables: Vec<Vec<PauliTerm>> = (0..4).map(|q| vec![PauliTerm::z(q)]).collect();
+    let exact =
+        density_matrix_expectation_values(&unitary, &observables, Some(&reference_noise), 42)
+            .unwrap();
+
+    let noise = NoiseModel::with_amplitude_damping(&measured, gamma);
+    let result =
+        run_shots_with_noise(BackendKind::Factored, &measured, &noise, num_shots, 42).unwrap();
+
+    for q in 0..4 {
+        let ones = result.shots.iter().filter(|shot| shot[q]).count();
+        let p_one = ones as f64 / num_shots as f64;
+        let measured_z = 1.0 - 2.0 * p_one;
+
+        let p_exact = (1.0 - exact[q]) / 2.0;
+        // Standard error of <Z> from `num_shots` Bernoulli draws, floored so a
+        // near-deterministic qubit still admits the last few bits of rounding.
+        let sigma = (2.0 * (p_exact * (1.0 - p_exact) / num_shots as f64).sqrt()).max(1e-9);
+
+        assert!(
+            (measured_z - exact[q]).abs() <= 5.0 * sigma,
+            "factored trajectory <Z_{q}> = {measured_z}, density matrix = {}, \
+             difference {} exceeds 5 sigma ({})",
+            exact[q],
+            (measured_z - exact[q]).abs(),
+            5.0 * sigma
+        );
+    }
+}
+
+/// The same channel through the density matrix and the statevector, so a
+/// disagreement above names the factored backend rather than the reference.
+#[test]
+fn statevector_amplitude_damping_matches_density_matrix() {
+    let gamma = 0.15;
+    let num_shots = 8000;
+
+    let unitary = damped_two_block_circuit(0);
+    let mut measured = damped_two_block_circuit(4);
+    for q in 0..4 {
+        measured.add_measure(q, q);
+    }
+
+    let reference_noise = NoiseModel::with_amplitude_damping(&unitary, gamma);
+    let observables: Vec<Vec<PauliTerm>> = (0..4).map(|q| vec![PauliTerm::z(q)]).collect();
+    let exact =
+        density_matrix_expectation_values(&unitary, &observables, Some(&reference_noise), 42)
+            .unwrap();
+
+    let noise = NoiseModel::with_amplitude_damping(&measured, gamma);
+    let result =
+        run_shots_with_noise(BackendKind::Statevector, &measured, &noise, num_shots, 42).unwrap();
+
+    for q in 0..4 {
+        let ones = result.shots.iter().filter(|shot| shot[q]).count();
+        let measured_z = 1.0 - 2.0 * (ones as f64 / num_shots as f64);
+        let p_exact = (1.0 - exact[q]) / 2.0;
+        let sigma = (2.0 * (p_exact * (1.0 - p_exact) / num_shots as f64).sqrt()).max(1e-9);
+
+        assert!(
+            (measured_z - exact[q]).abs() <= 5.0 * sigma,
+            "statevector trajectory <Z_{q}> = {measured_z}, density matrix = {}",
+            exact[q]
+        );
+    }
+}
+
+/// Thermal relaxation on the factored backend routes through `reset` and the
+/// dephasing branch rather than a Kraus matrix, so it exercises the other half
+/// of the non-Pauli path on the same two-block state.
+#[test]
+fn factored_thermal_relaxation_matches_density_matrix() {
+    let num_shots = 8000;
+    let channel = NoiseChannel::ThermalRelaxation {
+        t1: 100.0,
+        t2: 80.0,
+        gate_time: 20.0,
+    };
+
+    let unitary = damped_two_block_circuit(0);
+    let mut measured = damped_two_block_circuit(4);
+    for q in 0..4 {
+        measured.add_measure(q, q);
+    }
+
+    let thermal_model = |circuit: &Circuit| {
+        let mut model = NoiseModel::uniform_depolarizing(circuit, 0.0);
+        for (index, instruction) in circuit.instructions.iter().enumerate() {
+            if let Instruction::Gate { targets, .. } = instruction {
+                model.after_gate[index] = targets
+                    .iter()
+                    .map(|&q| NoiseEvent {
+                        channel: channel.clone(),
+                        qubits: SmallVec::from_slice(&[q]),
+                    })
+                    .collect();
+            }
+        }
+        model
+    };
+
+    let observables: Vec<Vec<PauliTerm>> = (0..4).map(|q| vec![PauliTerm::z(q)]).collect();
+    let exact = density_matrix_expectation_values(
+        &unitary,
+        &observables,
+        Some(&thermal_model(&unitary)),
+        42,
+    )
+    .unwrap();
+
+    let result = run_shots_with_noise(
+        BackendKind::Factored,
+        &measured,
+        &thermal_model(&measured),
+        num_shots,
+        42,
+    )
+    .unwrap();
+
+    for q in 0..4 {
+        let ones = result.shots.iter().filter(|shot| shot[q]).count();
+        let measured_z = 1.0 - 2.0 * (ones as f64 / num_shots as f64);
+        let p_exact = (1.0 - exact[q]) / 2.0;
+        let sigma = (2.0 * (p_exact * (1.0 - p_exact) / num_shots as f64).sqrt()).max(1e-9);
+
+        assert!(
+            (measured_z - exact[q]).abs() <= 5.0 * sigma,
+            "factored thermal <Z_{q}> = {measured_z}, density matrix = {}",
+            exact[q]
+        );
+    }
+}
+
 #[test]
 fn noise_model_validate_catches_invalid_custom_channel() {
     use num_complex::Complex64;

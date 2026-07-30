@@ -1,3 +1,6 @@
+//! Result types for native QEC sampling: packed measurement, detector, and
+//! observable records plus postselection counts and observable estimates.
+
 use crate::error::{PrismError, Result};
 use crate::sim::compiled::PackedShots;
 

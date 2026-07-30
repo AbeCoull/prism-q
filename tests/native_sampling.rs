@@ -1,23 +1,9 @@
-//! Native shot sampling on the backends that hold a polynomial-size state.
-//!
-//! Sparse, Factored, and MPS draw measurement outcomes from their own
-//! representation instead of a dense `2^n` probability vector.
-//!
-//! Most cases run below the dense cap, where the statevector distribution is
-//! available as the reference. The oversize section at the bottom runs at 40
-//! qubits, where it is not: those cases use GHZ and Bell-pair states, whose
-//! support is known in closed form, and they open by pinning that the dense
-//! route rejects the same circuit. No environment override is involved; a `2^40`
-//! amplitude vector is eight terabytes.
-//!
-//! Three properties are checked per backend, and only the second is
-//! statistical:
-//!
-//! 1. Support. Every sampled bitstring has non-zero reference probability. A
-//!    sampler that walks the wrong conditional, or reads the wrong site for a
-//!    permuted MPS layout, emits impossible outcomes and fails here exactly.
-//! 2. Frequency. Per-outcome frequencies sit inside a four-sigma binomial band.
-//! 3. Determinism. One seed replays bit for bit, across separate runs.
+//! Native shot sampling on Sparse, Factored, and MPS, which draw outcomes
+//! from their own representation instead of a dense `2^n` probability vector.
+//! Below the dense cap the statevector distribution is the reference; the
+//! 40-qubit oversize cases use GHZ and Bell-pair states, whose support is
+//! known in closed form, and open by pinning that the dense route rejects the
+//! same circuit.
 
 mod common;
 
@@ -121,9 +107,8 @@ fn check_sampling(label: &str, kind: BackendKind, circuit: &Circuit) {
     );
 }
 
-/// Counts must agree with the shot histogram drawn from the same seed. The
-/// counts entry point has no shortcut for these backends, so it routes through
-/// the same native sampler.
+/// Counts must agree with the shot histogram at the same seed; the counts
+/// entry point routes through the same native sampler.
 fn check_counts_match_shots(label: &str, kind: BackendKind, circuit: &Circuit) {
     let measured = measure_all(circuit);
     let shots = simulate(&measured)
@@ -235,9 +220,9 @@ fn mps_samples_rotation_chain_distribution() {
     check_sampling("mps rotation chain 8q", MPS, &c);
 }
 
-/// Long-range gates route through SWAP chains, so the site holding a logical
-/// qubit is no longer its index. A sampler that reads the site index straight
-/// through returns permuted bitstrings, which the support check rejects.
+// Long-range gates route through SWAP chains, so the site holding a logical
+// qubit is no longer its index. A sampler that reads the site index straight
+// through returns permuted bitstrings, which the support check rejects.
 #[test]
 fn mps_samples_swap_routed_layout() {
     let mut c = Circuit::new(8, 0);
@@ -266,8 +251,8 @@ fn oversize_ghz() -> Circuit {
     measure_all(&ghz(OVERSIZE_QUBITS))
 }
 
-/// Pins the premise the oversize cases rest on: the dense route cannot serve
-/// this circuit, so anything that does is not going through it.
+// Pins the premise the oversize cases rest on: the dense route cannot serve
+// this circuit, so anything that does is not going through it.
 #[test]
 fn oversize_dense_route_is_unavailable() {
     let err = simulate(&oversize_ghz())
@@ -381,9 +366,8 @@ fn factored_samples_above_the_dense_cap() {
     }
 }
 
-/// The headline of the expectation-value half: exact observables on a state the
-/// dense route cannot hold. GHZ gives `<Z_0 Z_k> = 1` for every `k` and
-/// `<Z_0> = 0`.
+// Exact observables on a state the dense route cannot hold: GHZ gives
+// `<Z_0 Z_k> = 1` for every `k` and `<Z_0> = 0`.
 #[test]
 fn mps_expectation_values_above_the_dense_cap() {
     let unitary = ghz(OVERSIZE_QUBITS);

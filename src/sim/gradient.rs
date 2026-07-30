@@ -147,6 +147,24 @@ pub struct ExpectationGradient {
 /// each `P_k` is a joint Pauli string (identity factors omitted). `params`
 /// declares which gate instructions are trainable and how they map to the
 /// gradient vector. The returned gradient has length `params.num_params()`.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{Circuit, Gate, ParameterMap, PauliTerm, run_expectation_gradient};
+///
+/// let theta = 0.5_f64;
+/// let mut circuit = Circuit::new(2, 0);
+/// circuit.add_gate(Gate::Rx(theta), &[0]);
+///
+/// let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+/// let params = ParameterMap::all_rotations(&circuit);
+/// let g = run_expectation_gradient(&circuit, &hamiltonian, &params, 42)?;
+/// // <Z0> = cos(theta), d<Z0>/dtheta = -sin(theta).
+/// assert!((g.value - theta.cos()).abs() < 1e-12);
+/// assert!((g.gradient[0] + theta.sin()).abs() < 1e-9);
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
 pub fn run_expectation_gradient(
     circuit: &Circuit,
     hamiltonian: &[(f64, Vec<PauliTerm>)],

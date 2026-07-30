@@ -1,3 +1,7 @@
+//! Pauli propagation engines for Clifford+T circuits: SPP samples backward
+//! Heisenberg propagation stochastically, SPD carries the full weighted Pauli
+//! sum with optional truncation. Neither materializes a state vector.
+
 use num_complex::Complex64;
 use rand::SeedableRng;
 use rand::{Rng, RngExt};
@@ -58,9 +62,7 @@ fn validate_clifford_t_unitary(circuit: &Circuit, backend: &'static str) -> Resu
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Coalesced circuit representation
-// ---------------------------------------------------------------------------
+// ---- Coalesced circuit representation ----
 
 enum CoalescedOp {
     SmallCliff(Vec<(Gate, SmallVec<[usize; 4]>)>),
@@ -107,9 +109,7 @@ fn flush_cliff_buf(buf: &mut Vec<(Gate, SmallVec<[usize; 4]>)>, ops: &mut Vec<Co
     ops.push(CoalescedOp::SmallCliff(std::mem::take(buf)));
 }
 
-// ---------------------------------------------------------------------------
-// SPP (Stochastic Pauli Propagation)
-// ---------------------------------------------------------------------------
+// ---- SPP (Stochastic Pauli Propagation) ----
 
 #[inline(always)]
 fn branch_t_gate(
@@ -188,11 +188,16 @@ fn count_t_gates(circuit: &Circuit) -> usize {
         .count()
 }
 
+/// Per-qubit `⟨Z_q⟩` estimates from a stochastic Pauli propagation run.
 pub struct SppResult {
     pub expectations: Vec<f64>,
     pub std_errors: Vec<f64>,
+    /// Samples drawn per qubit, not in total.
     pub num_samples: usize,
+    /// T plus Tdg gates in the circuit.
     pub t_count: usize,
+    /// Fraction of samples whose propagated Pauli was diagonal (contributed a
+    /// nonzero value).
     pub nonzero_fraction: f64,
 }
 
@@ -273,8 +278,10 @@ impl PauliTerm {
 pub struct SppObservableResult {
     pub mean: f64,
     pub std_error: f64,
+    /// Sample variance of the per-sample contributions, not of the mean.
     pub variance: f64,
     pub num_samples: usize,
+    /// Fraction of samples whose propagated Pauli was diagonal.
     pub nonzero_fraction: f64,
     pub t_count: usize,
 }
@@ -282,9 +289,12 @@ pub struct SppObservableResult {
 /// Result of running SPD on a joint Pauli observable.
 #[derive(Debug, Clone)]
 pub struct SpdObservableResult {
+    /// `⟨P⟩`; exact when nothing was truncated.
     pub mean: f64,
     pub t_count: usize,
+    /// Peak size of the weighted Pauli sum during propagation.
     pub peak_terms: usize,
+    /// Total coefficient magnitude discarded by truncation (0 for exact runs).
     pub total_discarded: f64,
 }
 
@@ -386,6 +396,30 @@ pub fn run_spp_observable(
     })
 }
 
+/// Estimate `⟨Z_q⟩` for every qubit of a unitary Clifford+T circuit via
+/// stochastic Pauli propagation.
+///
+/// Draws `num_samples` backward propagations per qubit; the cost scales with
+/// samples and gate count, not `2^n`. See [`run_spp_observable`] for a single
+/// joint observable.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{Circuit, Gate, run_spp};
+///
+/// let mut circuit = Circuit::new(2, 0);
+/// circuit.add_gate(Gate::H, &[0]);
+/// circuit.add_gate(Gate::T, &[0]);
+/// circuit.add_gate(Gate::H, &[0]);
+///
+/// let result = run_spp(&circuit, 20_000, 42)?;
+/// assert_eq!(result.t_count, 1);
+/// // <Z0> = cos(pi/4); qubit 1 is untouched, so <Z1> = 1 exactly.
+/// assert!((result.expectations[0] - std::f64::consts::FRAC_1_SQRT_2).abs() < 0.05);
+/// assert!((result.expectations[1] - 1.0).abs() < 1e-12);
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
 pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppResult> {
     validate_clifford_t_unitary(circuit, "SPP")?;
     let n = circuit.num_qubits;
@@ -446,9 +480,7 @@ fn spp_to_probabilities(result: &SppResult) -> Vec<f64> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Deterministic Sparse Pauli Dynamics (SPD)
-// ---------------------------------------------------------------------------
+// ---- Deterministic Sparse Pauli Dynamics (SPD) ----
 
 use std::collections::HashMap;
 
@@ -622,10 +654,16 @@ impl WeightedPauliSum {
     }
 }
 
+/// Per-qubit `⟨Z_q⟩` values from a deterministic sparse Pauli dynamics run.
 pub struct SpdResult {
+    /// `⟨Z_q⟩` per qubit; exact when nothing was truncated.
     pub expectations: Vec<f64>,
+    /// T plus Tdg gates in the circuit.
     pub t_count: usize,
+    /// Peak size of the weighted Pauli sum across all per-qubit runs, not the
+    /// truncation budget passed in.
     pub max_terms: usize,
+    /// Total coefficient magnitude discarded by truncation (0 for exact runs).
     pub total_discarded: f64,
 }
 
@@ -682,6 +720,14 @@ pub fn run_spd_observable(
     })
 }
 
+/// Compute `⟨Z_q⟩` for every qubit of a unitary Clifford+T circuit via
+/// deterministic sparse Pauli dynamics.
+///
+/// Each qubit's `Z_q` propagates backward as a weighted Pauli sum; T gates
+/// double the in-support terms. When the sum exceeds `max_terms`, terms with
+/// coefficient magnitude below `epsilon` are dropped. `max_terms == 0`
+/// disables truncation: exact, but the sum must stay under a hard term
+/// ceiling. See [`run_spd_observable`] for a single joint observable.
 pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdResult> {
     validate_clifford_t_unitary(circuit, "SPD")?;
     let n = circuit.num_qubits;

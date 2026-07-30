@@ -1,18 +1,17 @@
-/// A single block in a factored probability distribution.
-///
+//! Probability distributions over computational basis states.
+//!
+//! [`Probabilities`] serves dense vectors and lazily factored per-block
+//! marginals through one interface.
+
 /// Each block represents the marginal probabilities for one independent
 /// subsystem. The `mask` indicates which global qubit positions belong
 /// to this block, and `probs` holds the 2^k marginal distribution.
 #[derive(Debug, Clone)]
 pub struct FactoredBlock {
-    /// Marginal probability vector for this block (length 2^k).
     pub probs: Vec<f64>,
-    /// Bitmask of global qubit positions belonging to this block.
     pub mask: u64,
 }
 
-/// Probability distribution over computational basis states.
-///
 /// For monolithic simulations this wraps a dense `Vec<f64>` of length 2^n.
 /// For decomposed simulations with independent subsystems, this stores
 /// per-block marginal distributions that are multiplied on demand,
@@ -23,9 +22,7 @@ pub enum Probabilities {
     Dense(Vec<f64>),
     /// Lazy Kronecker product of independent block distributions.
     Factored {
-        /// Per-block marginal probability vectors and bitmasks.
         blocks: Vec<FactoredBlock>,
-        /// Total qubit count across all blocks.
         total_qubits: usize,
     },
 }

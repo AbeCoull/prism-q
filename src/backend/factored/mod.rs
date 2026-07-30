@@ -4,6 +4,31 @@
 //! multi-qubit gate bridges two groups, they merge via tensor product. Groups
 //! never split. For sparse-entanglement circuits this is exponentially cheaper
 //! than a monolithic 2^n statevector.
+//!
+//! # Memory layout
+//!
+//! - One dense `Vec<Complex64>` per group, length 2^k for k group qubits;
+//!   total cost is the sum over groups, dominated by the largest.
+//! - Each group lists its global qubits sorted ascending; position = local
+//!   qubit index. A global map resolves qubit to group.
+//!
+//! # Gate support
+//!
+//! The full gate set, applied with the statevector kernels inside each group.
+//! Rayon and SIMD paths engage per group at `PARALLEL_THRESHOLD_QUBITS`.
+//! Shot sampling and Pauli expectations run natively per group, so both work
+//! past 64 qubits.
+//!
+//! # When to prefer this backend
+//!
+//! - Entanglement confined to small qubit groups (parallel subcircuits,
+//!   ancilla blocks, sparse couplings). Auto dispatch selects it on partial
+//!   independence.
+//!
+//! # When NOT to use this backend
+//!
+//! - Circuits that entangle most qubits into one group; the largest group
+//!   degenerates to a full statevector plus merge cost.
 
 #[cfg(test)]
 mod tests;

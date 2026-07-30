@@ -1,3 +1,7 @@
+//! Bulk randomness for compiled sampling: samplers seed from `ChaCha8Rng` for
+//! per-seed determinism, then draw bulk words from xoshiro256++, which is far
+//! cheaper at one u64 per random bit per 64-shot batch.
+
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 
@@ -45,6 +49,7 @@ impl Xoshiro256PlusPlus {
     }
 }
 
+/// Sample Binomial(n, p): inversion for small `n * p`, BTPE otherwise.
 #[inline(never)]
 pub(super) fn binomial_sample(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64) -> usize {
     if n == 0 || p <= 0.0 {
@@ -91,6 +96,7 @@ fn binomial_inversion(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, _nf: f64) 
     }
 }
 
+/// BTPE rejection sampler (Kachitvichyanukul and Schmeiser, 1988).
 fn binomial_btpe(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, nf: f64, np: f64) -> usize {
     let q = 1.0 - p;
     let r = p / q;

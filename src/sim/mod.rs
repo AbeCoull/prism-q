@@ -1,7 +1,8 @@
 //! Simulation orchestration.
 //!
 //! Connects the circuit IR to a backend. This module is deliberately thin,
-//! the complexity lives in the backends and the parser.
+//! the complexity lives in the backends and the parser. Entry points:
+//! [`simulate`], [`run_qasm`], [`run_on`].
 
 pub mod compiled;
 mod decomposed;
@@ -88,6 +89,8 @@ pub struct RunOutcome {
 /// Frequency histogram returned by query-aware count sampling.
 #[derive(Debug, Clone)]
 pub struct CountsResult {
+    /// Histogram keyed by packed classical bits; same key layout as
+    /// [`ShotsResult::counts`], formattable with [`bitstring`].
     pub counts: HashMap<Vec<u64>, u64>,
     pub num_classical_bits: usize,
 }
@@ -101,6 +104,7 @@ impl CountsResult {
 /// Per-qubit marginal probabilities returned by query-aware marginal sampling.
 #[derive(Debug, Clone)]
 pub struct MarginalsResult {
+    /// `(P(0), P(1))` per qubit, indexed by qubit number.
     pub marginals: Vec<(f64, f64)>,
 }
 
@@ -110,9 +114,11 @@ impl MarginalsResult {
     }
 }
 
+/// Typestate marker: [`Simulate`] builder with no seed chosen yet.
 #[derive(Debug, Clone, Copy)]
 pub struct Unseeded;
 
+/// Typestate marker: [`Simulate`] builder with its RNG seed fixed.
 #[derive(Debug, Clone, Copy)]
 pub struct Seeded {
     seed: u64,
@@ -127,18 +133,22 @@ pub struct Simulate<'c, SeedState> {
 }
 
 impl<'c, SeedState> Simulate<'c, SeedState> {
+    /// Select an explicit backend kind instead of [`BackendKind::Auto`] routing.
     #[inline]
     pub fn backend(mut self, kind: BackendKind) -> Self {
         self.kind = kind;
         self
     }
 
+    /// Attach a noise model. Only [`Simulate::shots`] and
+    /// [`Simulate::sample_counts`] accept one; other queries reject it.
     #[inline]
     pub fn noise(mut self, model: &'c noise::NoiseModel) -> Self {
         self.noise_model = Some(model);
         self
     }
 
+    /// Shortcut for [`Simulate::backend`] with [`BackendKind::StatevectorGpu`].
     #[cfg(feature = "gpu")]
     #[inline]
     pub fn gpu(self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
@@ -170,6 +180,7 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
 }
 
 impl<'c> Simulate<'c, Unseeded> {
+    /// Query methods exist only on the seeded builder.
     #[inline]
     pub fn seed(self, seed: u64) -> Simulate<'c, Seeded> {
         Simulate {
@@ -187,6 +198,8 @@ impl<'c> Simulate<'c, Seeded> {
         self.seed.seed
     }
 
+    /// Execute the circuit once. Rejects an attached noise model; noisy
+    /// simulation runs through [`Simulate::shots`].
     #[inline]
     pub fn run(self) -> Result<RunOutcome> {
         let seed = self.seed_value();
@@ -199,6 +212,8 @@ impl<'c> Simulate<'c, Seeded> {
         run_with_internal(self.kind, self.circuit, seed, SimOptions::default())
     }
 
+    /// Execute `num_shots` times, collecting per-shot classical bits. Accepts
+    /// an attached noise model.
     #[inline]
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         let seed = self.seed_value();
@@ -209,6 +224,12 @@ impl<'c> Simulate<'c, Seeded> {
         }
     }
 
+    /// Sample a frequency histogram over `num_shots` executions. Accepts an
+    /// attached noise model.
+    ///
+    /// Counts may be sampled directly from the output distribution, so seeded
+    /// counts can differ from [`Simulate::shots`] plus [`ShotsResult::counts`]
+    /// while drawing from the identical distribution.
     #[inline]
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
         let seed = self.seed_value();
@@ -223,6 +244,8 @@ impl<'c> Simulate<'c, Seeded> {
         })
     }
 
+    /// Per-qubit marginal probabilities as `(P(0), P(1))` pairs. Rejects an
+    /// attached noise model and backends without probability output.
     #[inline]
     pub fn marginals(self) -> Result<MarginalsResult> {
         let seed = self.seed_value();
@@ -289,6 +312,27 @@ impl<'c> Simulate<'c, Seeded> {
     }
 }
 
+/// Start a query-aware simulation request for `circuit`.
+///
+/// The returned builder defaults to automatic backend selection; chain
+/// [`Simulate::seed`] to unlock the query methods.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{Circuit, Gate, simulate};
+///
+/// let mut circuit = Circuit::new(2, 0);
+/// circuit.add_gate(Gate::H, &[0]);
+/// circuit.add_gate(Gate::Cx, &[0, 1]);
+///
+/// let result = simulate(&circuit).seed(42).run()?;
+/// let probs = result.probabilities.expect("no probabilities").to_vec();
+/// // Bell state: ~50% |00>, ~50% |11>
+/// assert!((probs[0] - 0.5).abs() < 1e-10);
+/// assert!((probs[3] - 0.5).abs() < 1e-10);
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
 #[inline]
 pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
     Simulate {
@@ -347,17 +391,11 @@ fn execute_circuit(
     })
 }
 
-/// Execute a circuit with automatic backend selection.
-///
-/// The simplest entry point. Uses [`BackendKind::Auto`] to select the
-/// optimal backend based on circuit properties, then runs the circuit.
 #[cfg(test)]
 fn run(circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
     run_with(BackendKind::Auto, circuit, seed)
 }
 
-/// Execute a circuit with explicit backend selection.
-///
 /// Constructs the backend internally based on [`BackendKind`], then runs
 /// the circuit. For a pre-constructed backend instance, use [`run_on`].
 pub(crate) fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
@@ -442,10 +480,8 @@ fn run_with_internal(
     }
 }
 
-/// Execute a circuit on a pre-constructed backend.
-///
-/// Use this when you need direct control over the backend instance
-/// (e.g., testing a specific backend). For automatic dispatch, use [`simulate`].
+/// Execute a circuit on a pre-constructed backend. For automatic dispatch,
+/// use [`simulate`].
 pub fn run_on(backend: &mut dyn Backend, circuit: &Circuit) -> Result<RunOutcome> {
     execute(backend, circuit, &SimOptions::default())
 }
@@ -456,7 +492,6 @@ pub fn run_qasm(qasm: &str, seed: u64) -> Result<RunOutcome> {
     simulate(&circuit).seed(seed).run()
 }
 
-/// Execute a circuit multiple times, collecting measurement outcomes.
 #[cfg(test)]
 fn run_shots(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     run_shots_with(BackendKind::Auto, circuit, num_shots, seed)
@@ -702,10 +737,6 @@ fn try_native_terminal_backend(
     Ok(Some(backend))
 }
 
-/// Execute a circuit multiple times with automatic backend selection and return counts.
-///
-/// Use this when only a frequency histogram is needed. Optimized paths can
-/// avoid materializing per-shot bit vectors.
 #[cfg(test)]
 fn run_counts(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<HashMap<Vec<u64>, u64>> {
     run_counts_with(BackendKind::Auto, circuit, num_shots, seed)
@@ -759,27 +790,11 @@ pub(crate) fn run_counts_with(
     Ok(result.counts())
 }
 
-/// Compute per-qubit marginal probabilities: P(q_i = 0) and P(q_i = 1) for each qubit.
-///
-/// Returns a `Vec<(f64, f64)>` of length `num_qubits`, where each element is `(p0, p1)`.
-///
-/// For Clifford+T circuits, uses Sparse Pauli Dynamics (SPD), Heisenberg-picture
-/// backward propagation that scales with Pauli complexity, not 2^n. This is orders
-/// of magnitude faster than statevector for structured Clifford+T circuits (25-400x
-/// at 14-22 qubits).
-///
-/// For pure Clifford circuits, exact marginals still come from backend
-/// probabilities. Sampled parity-matrix marginals remain available through
-/// `compile_measurements(...).sample_marginals(...)`.
-///
-/// For other circuits, falls back to statevector probabilities and extracts
-/// marginals.
 #[cfg(test)]
 fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
     run_marginals_result_with(BackendKind::Auto, circuit, seed).map(MarginalsResult::into_vec)
 }
 
-/// Compute per-qubit marginal probabilities with explicit backend selection.
 #[cfg(test)]
 fn run_marginals_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
     run_marginals_result_with(kind, circuit, seed).map(MarginalsResult::into_vec)
@@ -881,6 +896,25 @@ fn run_marginals_result_with(
 /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on a unitary circuit's
 /// output state, using automatic backend selection. See
 /// [`Simulate::expectation_values`] for explicit backend control.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{Circuit, Gate, PauliTerm, run_expectation_values};
+///
+/// let mut bell = Circuit::new(2, 0);
+/// bell.add_gate(Gate::H, &[0]);
+/// bell.add_gate(Gate::Cx, &[0, 1]);
+///
+/// let observables = vec![
+///     vec![PauliTerm::z(0)],
+///     vec![PauliTerm::z(0), PauliTerm::z(1)],
+/// ];
+/// let values = run_expectation_values(&bell, &observables, 42)?;
+/// assert!(values[0].abs() < 1e-10); // <Z0> = 0
+/// assert!((values[1] - 1.0).abs() < 1e-10); // <Z0 Z1> = 1
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
 pub fn run_expectation_values(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
@@ -1597,10 +1631,10 @@ mod tests {
         c
     }
 
-    /// The probability-route planner is the single source of the auto routing
-    /// precedence; every entry point (run, shots, counts via the terminal
-    /// candidate) consults it. Pin the route for representative circuits so a
-    /// precedence change is a deliberate edit here, not silent drift.
+    // The probability-route planner is the single source of the auto routing
+    // precedence; every entry point (run, shots, counts via the terminal
+    // candidate) consults it. Pin the route for representative circuits so a
+    // precedence change is a deliberate edit here, not silent drift.
     #[test]
     fn probability_route_precedence_is_pinned() {
         let ghz = make_clifford_circuit();
@@ -1923,8 +1957,6 @@ mod tests {
 
     #[test]
     fn test_temporal_clifford_matches_statevector() {
-        // Circuit with a long Clifford prefix followed by non-Clifford gates.
-        // At 10q with 20+ prefix gates, temporal decomposition should trigger.
         let mut c = Circuit::new(10, 0);
 
         // Clifford prefix: 22 gates (above min_clifford_prefix_gates(10)=20)
@@ -2002,8 +2034,6 @@ mod tests {
 
     #[test]
     fn test_temporal_clifford_skipped_when_prefix_too_short() {
-        // Short Clifford prefix, should NOT use temporal decomposition,
-        // but result must still be correct.
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
@@ -2039,11 +2069,6 @@ mod tests {
 
     #[test]
     fn test_per_block_clifford_dispatch() {
-        // 6-qubit circuit: qubits 0-2 = Clifford block, qubits 3-5 = non-Clifford block.
-        // The two blocks are independent (no gates bridge them).
-        // Under Auto dispatch with decomposition, block 0-2 should use Stabilizer
-        // and block 3-5 should use Statevector. Correctness is checked by comparing
-        // against a monolithic statevector run.
         let mut c = Circuit::new(6, 0);
 
         // Block A (Clifford): GHZ state on qubits 0,1,2
@@ -2401,8 +2426,8 @@ mod tests {
         }
     }
 
-    /// `make_general_circuit` entangles `{0, 1}` and leaves qubit 2 alone, so the
-    /// export runs with two live sub-states rather than one.
+    // `make_general_circuit` entangles `{0, 1}` and leaves qubit 2 alone, so the
+    // export runs with two live sub-states rather than one.
     #[test]
     fn test_export_factored_tensors_multiple_blocks() {
         let circuit = make_general_circuit();
@@ -3015,7 +3040,7 @@ mod tests {
         }
     }
 
-    // ── Dispatch validation ───────────────────────────────────────────
+    // ---- Dispatch validation ----
 
     #[test]
     fn test_simulate_builder_run_matches_run() {
@@ -3095,7 +3120,7 @@ mod tests {
         );
     }
 
-    // ── Pauli backend error paths ───────────────────────────────────────
+    // ---- Pauli backend error paths ----
 
     #[test]
     fn test_pauli_backends_reject_mid_circuit_measurements() {
@@ -3135,7 +3160,7 @@ mod tests {
         ));
     }
 
-    // ── Noisy simulation error paths ────────────────────────────────────
+    // ---- Noisy simulation error paths ----
 
     #[test]
     fn test_pauli_backends_reject_generic_run() {
@@ -3357,7 +3382,7 @@ mod tests {
         ));
     }
 
-    // ── Backend smoke tests ─────────────────────────────────────────────
+    // ---- Backend smoke tests ----
 
     fn assert_probs_match(kind: BackendKind, circuit: &Circuit, expected: &[f64], tol: f64) {
         let label = format!("{kind:?}");
@@ -3467,10 +3492,10 @@ mod terminal_gpu_stub_tests {
         }
     }
 
-    /// The terminal fast path resolves the accel through the capability table.
-    /// On the stub the VRAM gate fails closed, so `AutoGpu` must take the
-    /// identical host path as `Auto`: same sampler, same RNG stream, byte-equal
-    /// counts.
+    // The terminal fast path resolves the accel through the capability table.
+    // On the stub the VRAM gate fails closed, so `AutoGpu` must take the
+    // identical host path as `Auto`: same sampler, same RNG stream, byte-equal
+    // counts.
     #[test]
     fn auto_gpu_terminal_counts_match_auto_on_stub() {
         let circuit = terminal_circuit(16);
@@ -3487,9 +3512,9 @@ mod terminal_gpu_stub_tests {
         assert_eq!(auto_shots.shots, gpu_shots.shots);
     }
 
-    /// Explicit `StatevectorGpu` is a terminal-fast-path candidate. Above the
-    /// crossover it resolves hard, so the stub's failed allocation surfaces
-    /// instead of falling back, proving the device path was reached.
+    // Explicit `StatevectorGpu` is a terminal-fast-path candidate. Above the
+    // crossover it resolves hard, so the stub's failed allocation surfaces
+    // instead of falling back, proving the device path was reached.
     #[test]
     fn statevector_gpu_terminal_counts_hard_above_crossover_on_stub() {
         let circuit = terminal_circuit(16);
@@ -3503,8 +3528,8 @@ mod terminal_gpu_stub_tests {
         ));
     }
 
-    /// Below the crossover the explicit GPU kind resolves to the host and must
-    /// match explicit `Statevector` byte-exact through the terminal path.
+    // Below the crossover the explicit GPU kind resolves to the host and must
+    // match explicit `Statevector` byte-exact through the terminal path.
     #[test]
     fn statevector_gpu_terminal_counts_below_crossover_match_statevector() {
         let circuit = terminal_circuit(6);
@@ -3575,8 +3600,8 @@ mod expectation_gpu_stub_tests {
         assert_expectations_close(&auto_vals, &gpu_vals);
     }
 
-    /// Explicit `StatevectorGpu` expectation values resolve hard above the
-    /// crossover, so the stub's failed allocation surfaces.
+    // Explicit `StatevectorGpu` expectation values resolve hard above the
+    // crossover, so the stub's failed allocation surfaces.
     #[test]
     fn statevector_gpu_expectation_hard_above_crossover_on_stub() {
         let circuit = dense_circuit(16);
@@ -3634,9 +3659,9 @@ mod noise_gpu_stub_tests {
         c
     }
 
-    /// AutoGpu + non-Pauli noise resolves the trajectory plan through the
-    /// capability table. On the stub the VRAM gate fails closed, so the run
-    /// must be byte-identical to `Auto`.
+    // AutoGpu + non-Pauli noise resolves the trajectory plan through the
+    // capability table. On the stub the VRAM gate fails closed, so the run
+    // must be byte-identical to `Auto`.
     #[test]
     fn auto_gpu_general_noise_matches_auto_on_stub() {
         let circuit = noisy_circuit(14);
@@ -3655,8 +3680,8 @@ mod noise_gpu_stub_tests {
         assert_eq!(auto_shots.shots, gpu_shots.shots);
     }
 
-    /// A non-entangling circuit resolves to the product-state family for
-    /// general noise under AutoGpu, per the capability table (no GPU row).
+    // A non-entangling circuit resolves to the product-state family for
+    // general noise under AutoGpu, per the capability table (no GPU row).
     #[test]
     fn auto_gpu_general_noise_product_circuit_matches_auto() {
         let mut circuit = Circuit::new(6, 6);
@@ -3719,9 +3744,9 @@ mod terminal_candidate_matrix_tests {
         assert!(!auto_terminal_statevector_candidate(&circuit));
     }
 
-    /// A Clifford+T circuit inside the stabilizer-rank budget routes to the
-    /// rank engine; one T past the budget falls back to the statevector and
-    /// becomes a candidate. Pins the shared budget helper at its boundary.
+    // A Clifford+T circuit inside the stabilizer-rank budget routes to the
+    // rank engine; one T past the budget falls back to the statevector and
+    // becomes a candidate. Pins the shared budget helper at its boundary.
     #[test]
     fn clifford_t_budget_boundary_flips_candidacy() {
         let n = 10;

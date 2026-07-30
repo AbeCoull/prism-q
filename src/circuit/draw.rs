@@ -1,3 +1,6 @@
+//! Unicode text rendering for circuits: [`Circuit::draw`], [`Circuit::summary`],
+//! and [`Circuit::heatmap`], configured through [`TextOptions`].
+
 use std::fmt;
 
 use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
@@ -7,11 +10,17 @@ const SUMMARY_QUBIT_THRESHOLD: usize = 64;
 const SUMMARY_MOMENT_THRESHOLD: usize = 500;
 const DEFAULT_FOLD_WIDTH: usize = 120;
 
+/// Layout options for text rendering of a [`Circuit`].
+///
+/// `Default` gives a 120-column fold width with all wires and barriers shown.
 pub struct TextOptions {
+    /// Maximum output line width before the diagram folds into stacked sections.
     pub fold_width: usize,
     pub show_idle_wires: bool,
     pub show_barriers: bool,
+    /// Draw at most this many wires, noting how many were elided.
     pub max_qubits: Option<usize>,
+    /// Draw at most this many moments, noting the truncation.
     pub max_moments: Option<usize>,
 }
 
@@ -939,6 +948,8 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
 }
 
 impl Circuit {
+    /// Render the circuit as a Unicode wire diagram; circuits over 64 qubits
+    /// or 500 moments fall back to [`summary`](Self::summary) output.
     pub fn draw(&self, opts: &TextOptions) -> String {
         let moments = assign_moments(self);
         let use_summary =
@@ -955,10 +966,14 @@ impl Circuit {
         lines.join("\n")
     }
 
+    /// Render a statistics report: gate counts, connectivity, depth profile,
+    /// qubit activity, gate-density heatmap, and circuit classification.
     pub fn summary(&self) -> String {
         render_summary(self).join("\n")
     }
 
+    /// Render the gate-density heatmap (qubits by moments) as text, bucketing
+    /// rows and columns to fit within `opts.fold_width`.
     pub fn heatmap(&self, opts: &TextOptions) -> String {
         render_heatmap(self, opts).join("\n")
     }
@@ -1067,7 +1082,6 @@ mod tests {
     #[test]
     fn measurement_shown() {
         let circuit = CircuitBuilder::new(1).h(0).measure_all().build();
-        // Circuit already has a measurement from measure_all()
         let text = circuit.draw(&TextOptions::default());
         assert!(text.contains("M"));
     }
@@ -1140,9 +1154,7 @@ mod tests {
 
     #[test]
     fn qft_4q_diagram() {
-        // `qft_circuit` emits a single `Gate::QftBlock`.
-        // The block renders as a labelled box; users wanting the unrolled
-        // H + cphase diagram can call `expand_qft_blocks` first.
+        // `qft_circuit` emits one `Gate::QftBlock`; `expand_qft_blocks` unrolls it.
         let circuit = crate::circuits::qft_circuit(4);
         let text = circuit.draw(&TextOptions::default());
         assert!(text.contains("q[0]"));

@@ -1579,46 +1579,12 @@ mod tests {
 
     #[test]
     fn t_via_camps_ofd_3q_mixed_cascade_matches_direct() {
-        // Build a prefix that produces a 3-qubit twisted Pauli with
-        // mixed X/Y/Z letters anchored on a |0⟩ qubit. The fresh-init
-        // MPS has every qubit in |0⟩, so OFD's anchor selection picks
-        // the first X/Y letter and emits a non-trivial cascade spanning
-        // all remaining qubits (CX + CZ + Sdg/CX/S triplet for Y).
-        //
-        // Prefix construction: H_1, CX(1,0), CX(1,2), S_2.
-        //   prefix C = S_2 · CX(1,2) · CX(1,0) · H_1
-        // Twisted Z_0:
-        //   C† Z_0 C = H_1 · CX(1,0)† · CX(1,2)† · S_2† · Z_0 · S_2 · CX(1,2) · CX(1,0) · H_1
-        // S_2 commutes with Z_0 (different qubit), so reduces to
-        //   H_1 · CX(1,0) · CX(1,2) · Z_0 · CX(1,2) · CX(1,0) · H_1
-        // CX(1,2) commutes with Z_0 (different qubits), so
-        //   H_1 · CX(1,0) · Z_0 · CX(1,0) · H_1 = H_1 · Z_0 Z_1 · H_1 = Z_0 X_1
-        // That setup only gives 2-qubit support, so use a richer prefix.
-        //
-        // Use: H_0, CX(0,1), CX(0,2), S_1. Then for T_target=0:
-        //   C = S_1 · CX(0,2) · CX(0,1) · H_0
-        //   C† Z_0 C = H_0 · CX(0,1) · CX(0,2) · S_1† · Z_0 · S_1 · CX(0,2) · CX(0,1) · H_0
-        //   S_1 commutes with Z_0
-        //   CX(0,2)† Z_0 CX(0,2) = Z_0 (control Z unchanged)
-        //   Still 1-qubit Z, then H_0 gives X_0, a single-qubit Pauli.
-        //
-        // Need to use CX on the *target*-qubit position. T on qubit 2:
-        //   C† Z_2 C, with C above:
-        //   S_1† CX(0,2)† Z_2 CX(0,2) S_1 = S_1† (Z_0 Z_2) S_1 = Z_0 Z_2 (S commutes with Z)
-        //   CX(0,1)† (Z_0 Z_2) CX(0,1) = Z_0 Z_2 (Z_0 unchanged by CX(0,1) control)
-        //   H_0 (Z_0 Z_2) H_0 = X_0 Z_2, still 2-qubit.
-        //
-        // To get 3-qubit, need to fan through both Hadamard and CX
-        // structure. Use: H_0, H_2, CX(0,1), CX(2,1), S_1; T on 1.
+        // Prefix: H_0, H_2, CX(0,1), CX(2,1), S_1; T on qubit 1.
         //   C = S_1 · CX(2,1) · CX(0,1) · H_2 · H_0
-        //   C† Z_1 C = (left-to-right inverse) H_0 H_2 CX(0,1) CX(2,1) S_1† Z_1 S_1 CX(2,1) CX(0,1) H_2 H_0
-        //   S_1† Z_1 S_1 = Z_1
-        //   CX(2,1)† Z_1 CX(2,1) = Z_1 Z_2
-        //   CX(0,1)† (Z_1 Z_2) CX(0,1) = Z_0 Z_1 Z_2 (CX flips Z on target → Z_c Z_t)
-        //   H_2 (Z_0 Z_1 Z_2) H_2 = Z_0 Z_1 X_2
-        //   H_0 (Z_0 Z_1 X_2) H_0 = X_0 Z_1 X_2, 3-qubit mixed letters.
-        // OFD on this: first X/Y letter is q=0 (X). mps[0] is a valid |0> anchor.
-        // Cascade emits CZ(0,1) and CX(0,2). Non-trivial 3-qubit OFD.
+        //   C† Z_1 C: S_1† Z_1 S_1 = Z_1; CX(2,1) → Z_1 Z_2;
+        //   CX(0,1) → Z_0 Z_1 Z_2; H_2 → Z_0 Z_1 X_2; H_0 → X_0 Z_1 X_2.
+        // Mixed 3-qubit letters. OFD anchors on the first X/Y letter (q=0,
+        // a valid |0⟩ anchor on the fresh MPS) and emits CZ(0,1), CX(0,2).
         let n = 3;
         let mut prefix = SignedCliffordPrefix::identity(n);
         for (g, t) in [
@@ -1691,47 +1657,12 @@ mod tests {
         // Force a Y letter to land in the twisted Pauli so OFD emits
         // the (Sdg, CX, S) Y-decomposition triplet.
         //
-        // Prefix: S_1, H_0, CX(0,1). For T on qubit 0:
-        //   C = CX(0,1) · H_0 · S_1
-        //   C† Z_0 C = S_1† H_0 CX(0,1)† Z_0 CX(0,1) H_0 S_1
-        //   CX(0,1)† Z_0 CX(0,1) = Z_0
-        //   H_0 Z_0 H_0 = X_0
-        //   S_1† X_0 S_1 = X_0, still single-qubit. Won't trigger Y.
-        //
-        // Different angle: prefix S_1, CX(0,1), H_1. T on qubit 1.
-        //   C = H_1 · CX(0,1) · S_1
-        //   C† Z_1 C = S_1† CX(0,1)† H_1 Z_1 H_1 CX(0,1) S_1
-        //   H_1 Z_1 H_1 = X_1
-        //   CX(0,1)† X_1 CX(0,1) = X_1 (target X unchanged by CX with target = X_1's qubit? no, X_target → X_target stays, control unchanged for X_t)
-        //   Actually CX(c,t) X_t CX(c,t) = X_t. So X_1 stays.
-        //   S_1† X_1 S_1 = -Y_1. So Z̄ = -Y_1, a single-qubit Y that would use single-qubit fallback, not OFD.
-        //
-        // For multi-qubit with Y letter, need a more layered prefix.
-        // Use: H_0, CX(0,1), S_1, CX(0,2), H_2. T on 2.
-        //   C = H_2 · CX(0,2) · S_1 · CX(0,1) · H_0
-        //   C† Z_2 C = H_0 CX(0,1) S_1† CX(0,2)† H_2 Z_2 H_2 CX(0,2) S_1 CX(0,1) H_0
-        //   H_2 Z_2 H_2 = X_2
-        //   CX(0,2)† X_2 CX(0,2) = X_2 (target X unchanged by CX, but CX(c,t) X_t = X_t. So X_2 stays)
-        //   S_1† X_2 S_1 = X_2 (different qubit)
-        //   CX(0,1)† X_2 CX(0,1) = X_2 (different qubits)
-        //   H_0 X_2 H_0 = X_2, single-qubit Z̄ = X_2. Trivial.
-        //
-        // The issue: CX(0,2)·X_2 doesn't grow because target X is invariant.
-        // To get growth on the target side, the inner gate at the target
-        // must be Z (or Y), not X. Re-pick: H_2 → not at end.
-        //
-        // Try: CX(0,1), H_1, CX(1,2), S_2, H_2. T on 2.
+        // Prefix: CX(0,1), H_1, CX(1,2), S_2, H_2; T on qubit 2.
         //   C = H_2 · S_2 · CX(1,2) · H_1 · CX(0,1)
-        //   C† Z_2 C = CX(0,1) H_1 CX(1,2)† S_2† H_2 Z_2 H_2 S_2 CX(1,2) H_1 CX(0,1)
-        //   H_2 Z_2 H_2 = X_2
-        //   Sdg_2 X_2 S_2 = -Y_2 by direct multiplication.
-        //   So -Y_2 after S†.
-        //   CX(1,2)† (-Y_2) CX(1,2) = -CX(1,2)† Y_2 CX(1,2). Y_2 = i X_2 Z_2. CX(1,2) maps X_2 → X_2, Z_2 → Z_1 Z_2. So Y_2 → i X_2 Z_1 Z_2 = Z_1 · i X_2 Z_2 = Z_1 Y_2.
-        //   So get -Z_1 Y_2.
-        //   H_1 (-Z_1 Y_2) H_1 = -X_1 Y_2.
-        //   CX(0,1)† (-X_1 Y_2) CX(0,1) = -CX(0,1)† X_1 CX(0,1) · Y_2 = -X_1 · Y_2 (X_t unchanged) = -X_1 Y_2.
-        //   So Zbar = -X_1 Y_2, phase4=2. Letters at (0,1,2): I, X, Y.
-        // OFD: first X/Y is q=1 (X). mps[1] is a valid |0> anchor. Cascade emits triplet for Y at q=2.
+        //   C† Z_2 C: H_2 Z_2 H_2 = X_2; S_2† X_2 S_2 = -Y_2;
+        //   CX(1,2) → -Z_1 Y_2; H_1 → -X_1 Y_2; CX(0,1) → -X_1 Y_2.
+        // Z̄ = -X_1 Y_2, phase4 = 2, letters (I, X, Y). OFD anchors at q=1
+        // (X, valid |0⟩ anchor); the Y at q=2 emits the (Sdg, CX, S) triplet.
         let n = 3;
         let mut prefix = SignedCliffordPrefix::identity(n);
         for (g, t) in [

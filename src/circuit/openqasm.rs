@@ -2035,11 +2035,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Handle gates that decompose into multiple instructions at parse time.
-    ///
-    /// Returns `Ok(None)` if the gate name is not a decomposed gate (caller
-    /// should fall through to `resolve_gate`). Returns `Ok(Some(instrs))` for
-    /// gates that expand to multiple instructions.
     /// Decomposition-body shorthand for a gate instruction.
     fn ig(gate: Gate, targets: &[usize]) -> Instruction {
         Instruction::Gate {
@@ -2048,6 +2043,10 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Handle gates that decompose into multiple instructions at parse time.
+    ///
+    /// Returns `Ok(None)` if the gate name is not a decomposed gate (caller
+    /// should fall through to `resolve_gate`).
     fn resolve_decomposed_gate(
         name: &str,
         params: &[f64],

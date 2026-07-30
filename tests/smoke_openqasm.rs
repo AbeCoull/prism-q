@@ -512,8 +512,7 @@ fn conditional_gate_executed() {
     let circuit = openqasm::parse(qasm).unwrap();
     let result = run(&circuit, 42).unwrap();
     let probs = result.probabilities.unwrap().to_vec();
-    // q[0] measured |1⟩, so c[0]=1, conditional fires, q[1] → |1⟩
-    // After measurement q[0] collapsed to |1⟩, q[1] flipped to |1⟩ → state |11⟩ = index 3
+    // c[0]=1 deterministically, the conditional fires: state |11⟩ = index 3
     assert!((probs[3] - 1.0).abs() < 1e-10);
 }
 
@@ -529,8 +528,7 @@ fn conditional_gate_not_executed() {
     let circuit = openqasm::parse(qasm).unwrap();
     let result = run(&circuit, 42).unwrap();
     let probs = result.probabilities.unwrap().to_vec();
-    // q[0] starts as |0⟩, measured → c[0]=0, conditional doesn't fire
-    // State stays |00⟩ = index 0
+    // c[0]=0, the conditional does not fire: state stays |00⟩ = index 0
     assert!((probs[0] - 1.0).abs() < 1e-10);
 }
 

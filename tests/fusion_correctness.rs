@@ -1,9 +1,6 @@
-//! Fusion correctness tests.
-//!
-//! Verifies that the fusion pipeline preserves simulation correctness across
-//! circuit types, sizes, and fusion threshold boundaries. Each test compares
-//! **unfused** execution (manual backend.apply loop) against **fused** execution
-//! (sim::run_on, which applies the full fusion pipeline internally).
+//! Fusion pipeline correctness across circuit types, sizes, and threshold
+//! boundaries. Each test compares unfused execution (manual apply loop)
+//! against fused execution (`sim::run_on`, which runs the full pipeline).
 
 mod common;
 
@@ -37,7 +34,6 @@ fn run_unfused(circuit: &Circuit) -> Vec<f64> {
     backend.probabilities().unwrap()
 }
 
-/// Run a circuit with full fusion pipeline via sim::run_on.
 fn run_fused(circuit: &Circuit) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(42);
     sim::run_on(&mut backend, circuit).unwrap();
@@ -466,7 +462,6 @@ fn fusion_rotation_sweep() {
 }
 
 // ===== Threshold boundary tests =====
-// These specifically target the boundaries where fusion passes activate.
 
 #[test]
 fn fusion_threshold_9q_no_fusion() {
@@ -529,7 +524,6 @@ fn fusion_random_18q() {
 }
 
 // ===== 2q fusion specific tests =====
-// These test circuits where 1q gates are absorbed into adjacent 2q gates.
 // The fuse_2q_gates pass activates at 12 qubits and above.
 
 #[test]
@@ -884,16 +878,16 @@ fn fusion_diagonal_batch_respects_non_diagonal_barrier() {
     }
 }
 
-/// Seeded sweep over the gate mix that exposed both batching reorder bugs. The
-/// deterministic cases above pin the two known shapes; this covers the class,
-/// which stayed hidden because the generated bench circuits never produce it.
-///
-/// Compares probabilities, not amplitudes. Collapsing a run of three 1q gates
-/// such as `S, SX, H` into one matrix drops a global phase, which is a separate
-/// and older gap: it predates the batching fixes, reproduces at
-/// `MIN_QUBITS_FOR_FUSION` with no batching gate present, and is unobservable
-/// in the probabilities. The amplitude-level bar is held by the deterministic
-/// QFT and phase-estimation cases above.
+// Seeded sweep over the gate mix that exposed both batching reorder bugs. The
+// deterministic cases above pin the two known shapes; this covers the class,
+// which stayed hidden because the generated bench circuits never produce it.
+//
+// Compares probabilities, not amplitudes. Collapsing a run of three 1q gates
+// such as `S, SX, H` into one matrix drops a global phase, which is a separate
+// and older gap: it predates the batching fixes, reproduces at
+// `MIN_QUBITS_FOR_FUSION` with no batching gate present, and is unobservable
+// in the probabilities. The amplitude-level bar is held by the deterministic
+// QFT and phase-estimation cases above.
 #[test]
 fn fusion_seeded_sweep_matches_unfused() {
     let mut state = common::SEED;
@@ -941,7 +935,6 @@ fn fusion_seeded_sweep_matches_unfused() {
 
 #[test]
 fn fusion_2q_sparse_backend_12q() {
-    // Verify Fused2q works on sparse backend too
     use prism_q::backend::sparse::SparseBackend;
     let c = circuits::hardware_efficient_ansatz(12, 3, 42);
     let unfused = run_unfused(&c);
@@ -969,8 +962,8 @@ fn fusion_2q_mps_backend_12q() {
 
 #[test]
 fn fusion_dynamic_threshold_shallow_10q() {
-    // 10q circuit with very few instructions (< MIN_INSTRUCTIONS_FOR_FUSION = 20)
-    // Fusion should be skipped (Cow::Borrowed) but results should still be correct
+    // Fewer instructions than MIN_INSTRUCTIONS_FOR_FUSION = 20, so fusion is
+    // skipped (Cow::Borrowed).
     let mut c = Circuit::new(10, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);

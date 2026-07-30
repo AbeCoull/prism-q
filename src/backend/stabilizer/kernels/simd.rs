@@ -1,3 +1,6 @@
+//! Rowmul word kernels: XOR of X/Z words with Pauli phase accumulation, in
+//! AVX2 (with a non-temporal store variant), NEON, and scalar forms.
+
 #[cfg(target_arch = "x86_64")]
 use crate::backend::word_ops::has_avx2;
 pub(crate) use crate::backend::word_ops::xor_words_ptr as xor_words;
@@ -32,7 +35,7 @@ pub(crate) fn rowmul_words(
     }
     #[cfg(target_arch = "aarch64")]
     if nw >= 2 {
-        // SAFETY: NEON is mandatory on aarch64; slices have equal lengths.
+        // SAFETY: NEON is baseline on aarch64; slices have equal lengths.
         return unsafe { rowmul_words_neon(dst_x, dst_z, src_x, src_z, initial_sum) };
     }
 

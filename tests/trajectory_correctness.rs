@@ -196,10 +196,10 @@ fn zero_noise_deterministic_across_backends() {
 
 #[test]
 fn thermal_relaxation_preserves_superposition_statistics() {
-    // Prepare |+⟩ = (|0⟩+|1⟩)/√2. With a very short gate_time (p_reset ≈ 0,
-    // p_dephase ≈ 0), thermal relaxation should be nearly identity and the
-    // measurement distribution should remain ~50/50. This guards against the
-    // old X-then-project bug which would incorrectly collapse |+⟩.
+    // With a very short gate_time (p_reset ≈ 0, p_dephase ≈ 0), thermal
+    // relaxation is nearly identity and the measurement distribution stays
+    // ~50/50. Guards against the old X-then-project bug which would
+    // incorrectly collapse |+⟩.
     let mut circuit = Circuit::new(1, 1);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_measure(0, 0);
@@ -226,8 +226,6 @@ fn thermal_relaxation_preserves_superposition_statistics() {
 
 #[test]
 fn thermal_relaxation_strong_reset_to_ground() {
-    // Prepare |1⟩ and apply strong thermal relaxation (p_reset large).
-    // Should predominantly decay to |0⟩.
     let mut circuit = Circuit::new(1, 1);
     circuit.add_gate(Gate::X, &[0]);
     circuit.add_measure(0, 0);
@@ -255,7 +253,6 @@ fn thermal_relaxation_strong_reset_to_ground() {
 
 #[test]
 fn reset_after_superposition() {
-    // Prepare |+⟩, reset to |0⟩, then measure. Should always be 0.
     let mut circuit = Circuit::new(1, 1);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_reset(0);
@@ -269,7 +266,6 @@ fn reset_after_superposition() {
 
 #[test]
 fn reset_from_excited_state_stabilizer() {
-    // Sanity check on stabilizer backend: X then reset should yield |0⟩.
     let mut circuit = Circuit::new(1, 1);
     circuit.add_gate(Gate::X, &[0]);
     circuit.add_reset(0);
@@ -427,10 +423,10 @@ fn custom_kraus_dense_channel_uses_coherence() {
     }
 }
 
-/// `H|0>` damped at `gamma` has exact `P(1) = (1 - gamma) / 2`. With the noise
-/// sampler and the backend sharing a ChaCha stream, the jump fired on exactly the
-/// shots that would have measured `|0>` anyway and this read 0.384 against 0.425,
-/// 37 standard errors out. The tight bound is what holds the two streams apart.
+// `H|0>` damped at `gamma` has exact `P(1) = (1 - gamma) / 2`. With the noise
+// sampler and the backend sharing a ChaCha stream, the jump fired on exactly the
+// shots that would have measured `|0>` anyway and this read 0.384 against 0.425,
+// 37 standard errors out. The tight bound is what holds the two streams apart.
 #[test]
 fn noise_and_measurement_draws_are_independent() {
     let gamma = 0.15;
@@ -469,10 +465,10 @@ fn damped_two_block_circuit(num_classical: usize) -> Circuit {
     circuit
 }
 
-/// The non-Pauli trajectory path on the factored backend: the engine reads
-/// `qubit_probability`, samples a branch, and applies that branch's Kraus operator
-/// through `Backend::apply_1q_matrix`. The density matrix evolves the same channel
-/// exactly with no sampling, so it is the reference here, not a second opinion.
+// The non-Pauli trajectory path on the factored backend: the engine reads
+// `qubit_probability`, samples a branch, and applies that branch's Kraus operator
+// through `Backend::apply_1q_matrix`. The density matrix evolves the same channel
+// exactly with no sampling, so it is the reference here, not a second opinion.
 #[test]
 fn factored_amplitude_damping_matches_density_matrix() {
     let gamma = 0.15;
@@ -517,8 +513,8 @@ fn factored_amplitude_damping_matches_density_matrix() {
     }
 }
 
-/// The same channel through the density matrix and the statevector, so a
-/// disagreement above names the factored backend rather than the reference.
+// The same channel through the density matrix and the statevector, so a
+// disagreement above names the factored backend rather than the reference.
 #[test]
 fn statevector_amplitude_damping_matches_density_matrix() {
     let gamma = 0.15;
@@ -554,9 +550,9 @@ fn statevector_amplitude_damping_matches_density_matrix() {
     }
 }
 
-/// Thermal relaxation on the factored backend routes through `reset` and the
-/// dephasing branch rather than a Kraus matrix, so it exercises the other half
-/// of the non-Pauli path on the same two-block state.
+// Thermal relaxation on the factored backend routes through `reset` and the
+// dephasing branch rather than a Kraus matrix, so it exercises the other half
+// of the non-Pauli path on the same two-block state.
 #[test]
 fn factored_thermal_relaxation_matches_density_matrix() {
     let num_shots = 8000;

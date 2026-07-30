@@ -43,8 +43,10 @@ If WAIVER, explain why the regression is acceptable and what future work will re
 - [ ] `cargo test --all-features` passes locally
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks` passes
 - [ ] `cargo fmt --check` passes
-- [ ] `cargo doc --no-deps --all-features` passes
-- [ ] New public API has docstrings
+- [ ] `cargo doc --no-deps --features "parallel gpu distributed"` passes (CI denies
+      rustdoc warnings)
+- [ ] Docstrings on new and changed `pub` items add information the name and
+      signature do not carry, and stay concise; none restate the signature
 - [ ] New gate, backend, or fusion pass has golden tests against the statevector backend
 - [ ] GPU-affecting change runs `cargo test --features "parallel gpu" --test golden_gpu`
 
@@ -71,6 +73,7 @@ dispatch guards that let the change be rolled back without reverting the commit.
 ## Pre-merge checklist
 
 - [ ] Commit messages follow the style rules
+- [ ] No TODO or FIXME markers; deferred work is filed as an issue or noted above
 - [ ] No secrets, credentials, or local config added
 - [ ] No new dependencies without a rationale
 - [ ] CI is green

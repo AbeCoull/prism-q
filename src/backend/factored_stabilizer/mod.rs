@@ -4,6 +4,32 @@
 //! sub-tableaux per disentangled qubit group. Merges on-demand when
 //! entangling gates bridge groups, splits when measurement reveals
 //! product structure. O((a+b)²/64) polynomial merge cost.
+//!
+//! # Memory layout
+//!
+//! - One Aaronson-Gottesman sub-tableau per group: 2n+1 rows of bit-packed
+//!   X words then Z words plus a phase bit per row, for an n-qubit group.
+//! - Each group lists its global qubits; merging tensors two tableaux, and
+//!   measurement or reset triggers a split check that factors disentangled
+//!   qubits back out.
+//!
+//! # Gate support
+//!
+//! Clifford gates only: H, S, Sdg, SX, SXdg, X, Y, Z, Id, CX, CZ, SWAP.
+//! Non-Clifford gates return `BackendUnsupported`, and fusion is skipped
+//! (`supports_fused_gates` is false).
+//!
+//! # When to prefer this backend
+//!
+//! - Large Clifford circuits with sparse entanglement, where per-group
+//!   tableaux beat one O(n²) tableau. Auto dispatch routes such circuits here.
+//!
+//! # When NOT to use this backend
+//!
+//! - Densely entangling Clifford circuits; merges converge to one joint
+//!   tableau and the dense stabilizer backend does the same work without
+//!   merge and split overhead.
+//! - Any circuit containing a non-Clifford gate.
 
 use num_complex::Complex64;
 use rand::RngExt;

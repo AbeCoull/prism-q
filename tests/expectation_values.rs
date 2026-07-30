@@ -154,7 +154,6 @@ fn invalid_observable_is_rejected() {
 
 #[test]
 fn non_unitary_circuit_is_rejected() {
-    // Rejected for every backend kind, with empty and non-empty observables.
     let qasm = "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nh q[0];\nc[0] = measure q[0];";
     let c = prism_q::circuit::openqasm::parse(qasm).unwrap();
     let observables: [&[Vec<PauliTerm>]; 2] = [&[], &[vec![PauliTerm::z(0)]]];
@@ -240,8 +239,8 @@ fn mps_expectation_values_match_statevector() {
     );
 }
 
-/// SWAP routing permutes the site layout, so the observable's logical qubits
-/// no longer index the sites they started on.
+// SWAP routing permutes the site layout, so the observable's logical qubits
+// no longer index the sites they started on.
 #[test]
 fn mps_expectation_values_survive_swap_routing() {
     let mut c = Circuit::new(6, 0);
@@ -291,9 +290,9 @@ fn factored_expectation_values_match_statevector_when_fully_merged() {
     );
 }
 
-/// The tensor network contracts to a dense statevector by construction, so it
-/// has no native observable path. The rejection has to name the backend that
-/// cannot serve the request, not the route that selected it.
+// The tensor network contracts to a dense statevector by construction, so it
+// has no native observable path. The rejection has to name the backend that
+// cannot serve the request, not the route that selected it.
 #[test]
 fn backends_without_a_native_path_name_themselves() {
     let c = entangled_non_clifford(5);
@@ -318,8 +317,8 @@ fn backends_without_a_native_path_name_themselves() {
     }
 }
 
-/// The native path validates observables before it runs, so a bad qubit index
-/// costs nothing on a circuit the statevector could not hold.
+// The native path validates observables before it runs, so a bad qubit index
+// costs nothing on a circuit the statevector could not hold.
 #[test]
 fn invalid_observable_is_rejected_on_the_native_path() {
     use prism_q::PrismError::{InvalidParameter, InvalidQubit};

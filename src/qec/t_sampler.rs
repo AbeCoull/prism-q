@@ -37,9 +37,13 @@ pub enum QecTStrategy {
     Spd,
 }
 
+/// Caller-supplied stabilizer set for rerouting one observable on the
+/// [`run_qec_program_spd_rerouted`] path.
 #[derive(Debug, Clone)]
 pub struct QecObservableReroute {
     pub observable: usize,
+    /// Z-stabilizer supports (qubit lists carrying a Z factor). Each listed
+    /// stabilizer must fix the evaluated state.
     pub stabilizers: Vec<Vec<usize>>,
 }
 
@@ -808,6 +812,14 @@ fn verify_reroute_is_state_stabilizer(
     Ok(())
 }
 
+/// SPD analytical path with per-observable stabilizer rerouting.
+///
+/// Rewrites each rerouted observable to its cheapest-cone representative in
+/// the span of the supplied stabilizers
+/// ([`crate::qec::observable_reroute::min_cone_z_representative`]), verifies
+/// the applied product is a `+1` stabilizer of the state via SPD, then
+/// evaluates like [`QecTStrategy::Spd`]. Rejects `EXP_VAL`, postselection,
+/// and `RESET` (resets relabel qubits, making stabilizer indices ambiguous).
 pub fn run_qec_program_spd_rerouted(
     program: &QecProgram,
     reroutes: &[QecObservableReroute],

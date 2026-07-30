@@ -1060,16 +1060,13 @@ impl StabilizerBackend {
         let stride = self.stride();
         let nw = self.num_words;
 
-        // Step 1: Find a seed state in the support via Gaussian elimination
-        // (reuses the same diagonal-constraint logic as compute_probabilities)
         let seed = self.find_support_seed();
 
-        // Step 2: Initialize from seed
         let mut state = vec![Complex64::new(0.0, 0.0); dim];
         state[seed] = Complex64::new(1.0, 0.0);
 
-        // Step 3: Apply (I + g_i)/2 for each ORIGINAL stabilizer generator.
-        // Projectors commute (stabilizer generators commute) so order is irrelevant.
+        // Projectors (I + g_i)/2 commute (stabilizer generators commute) so order
+        // is irrelevant.
         //
         // AG convention: g = (-1)^r × i^m × ∏_j X_j^{x_j} Z_j^{z_j}
         // where m = popcount(x_bits & z_bits) counts the implicit i-factor from
@@ -1143,7 +1140,6 @@ impl StabilizerBackend {
             }
         }
 
-        // Step 4: Normalize
         let norm_sq: f64 = state.iter().map(|c| c.norm_sqr()).sum();
         if norm_sq > NORM_CLAMP_MIN {
             let inv_norm = 1.0 / norm_sq.sqrt();

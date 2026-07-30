@@ -33,8 +33,12 @@ cargo nextest run --all-features
 cargo test --doc --all-features
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
-cargo doc --no-deps --all-features
+cargo doc --no-deps --features "parallel gpu distributed"
 ```
+
+The doc build covers the `gpu` and `distributed` surfaces on any host: rustdoc compiles
+but never links, so no CUDA toolkit is needed. An `--all-features` doc build additionally
+requires an MPI installation (the `mpi` crate probes for one in its build script).
 
 Use `cargo test --all-features` when `cargo-nextest` is not installed. Keep doctests on
 `cargo test --doc` until nextest doctest support is no longer experimental.
@@ -161,7 +165,96 @@ bump-level check, aarch64 cross-compile, macOS ARM64 tests, and `cargo-deny`
 
 - No heap allocation in gate-application inner loops.
 - Enum dispatch only in gate kernels. No trait objects.
-- `// SAFETY:` comment on all `unsafe` blocks.
+- `// SAFETY:` comment on all `unsafe` blocks (see Comments and documentation).
+
+## Comments and documentation
+
+Whether to write a comment and how to write it are separate questions. The rules below
+settle the first. The file being edited settles the second: match its comment density
+and voice in whatever does get written.
+
+### Inline comments
+
+- Avoid inline comments. Code should carry its meaning through naming and structure.
+  Two exceptions: `// SAFETY:` comments (required, see below) and genuinely non-obvious
+  algorithmic reasoning that naming cannot express. When in doubt, leave the comment
+  out.
+- No comment that restates the line it sits above.
+- No TODO, FIXME, HACK, or XXX markers, and no tracker IDs. A finished change contains
+  no stubs. Record deferred work in an issue or in the PR description, not in the code.
+
+### Docstrings
+
+- A docstring must add a fact the name, signature, and types do not already carry: a
+  unit, an ordering or packing convention, a default, an invariant, a
+  cross-reference, a contract. If no such fact exists, write no docstring. Restating
+  the signature is noise, the same defect as a comment restating its line.
+- One line is the norm. More than three lines is reserved for real contract or
+  algorithm prose (a trait's call-order contract, a backend's applicability). Never
+  pad to look thorough, and never document to hit coverage.
+- Trivial self-describing items (`into_x`, `len`, `is_empty`, obvious constructors,
+  fields whose name says everything) get nothing.
+- A `pub` item that is not meant as public API gets demoted to `pub(crate)` instead of
+  documented. Reduce visibility before writing docs nobody should read.
+- Document private items only when they are genuinely complex.
+- No `///` on `#[test]` functions. The test name or a plain comment carries any
+  explanation.
+
+### Docstring format
+
+- First line: one sentence ending in a period. Noun phrase for types, traits, and
+  modules ("Top-level error type for PRISM-Q operations."). Imperative for functions
+  ("Append a gate operation.").
+- Wrap prose at roughly 90 columns, matching the surrounding file.
+- Use intra-doc links for crate items and drop generic arguments from the link target:
+  link `DistributedContext` behind its `Arc`, not `Arc<DistributedContext>` as a whole.
+  Items from dependency crates stay plain code spans.
+- `# Panics`: when a family of methods shares one panic condition (builder methods
+  asserting index bounds), state it once at the type level. A per-method `# Panics`
+  is for a condition that is unique to the method and not obvious from it.
+- `# Errors`: only when the failure conditions are not evident from the error
+  variants returned.
+- `# Safety` on every fully `pub` unsafe fn (clippy `missing_safety_doc` under
+  `-D warnings` enforces this), and on any unsafe fn called from outside its defining
+  module whose preconditions the caller must uphold: pointer validity, aliasing, index
+  disjointness. A kernel whose only precondition is a CPU feature check needs no
+  `# Safety` section; the call-site `// SAFETY:` comment carries it.
+- `# Examples` with a runnable doctest on top-level entry points only (`run_qasm`,
+  `simulate`, `CircuitBuilder`, `run_qec_program` and peers). Keep runnable doctests
+  out of feature-gated modules: doctests link, so a doctest behind `gpu` needs a CUDA
+  host, and CI runs doctests with `parallel` and with `--no-default-features` only.
+  Use `no_run` or plain text blocks there.
+- Panic policy: invalid user input (QASM text, incompatible backend) returns
+  `PrismError`. API misuse (out-of-range indices, wrong-variant accessors) panics and
+  is documented under `# Panics`. Do not wrap infallible paths in `Result`.
+
+### Module docs
+
+- Every file whose items are publicly reachable opens with a `//!` block of one to
+  three lines saying what the module holds. No implementation narration in module
+  headers.
+- Backend modules follow the standard template after the summary paragraph:
+  `# Memory layout`, `# Gate support`, `# When to prefer this backend`,
+  `# When NOT to use this backend`. Each section can be a sentence or a short list.
+
+### SAFETY comments
+
+- Every `unsafe` block carries `// SAFETY:` stating the invariant that makes it sound.
+  clippy `undocumented_unsafe_blocks` under `-D warnings` enforces presence; review
+  enforces substance.
+- New unsafe code outside the established kernel patterns (SIMD dispatch, `SendPtr`
+  parallelism, GPU launches) also states why the safe alternative is insufficient,
+  with a measured number when the justification is performance.
+- Inside an `unsafe fn`, a block that merely discharges the function's own contract
+  uses exactly: `// SAFETY: same contract as the enclosing unsafe fn.` Do not restate
+  the contract and do not coin variants.
+- Recurring facts use the canonical stem verbatim, extended with the site-specific
+  clause where applicable: `// SAFETY: NEON is baseline on aarch64`;
+  `// SAFETY: AVX2 detected` when the runtime dispatch happened upstream;
+  `// SAFETY: AVX2 checked above` (naming exactly what the guard checks) when the
+  feature check is visible in the same function.
+- Do not normalize existing phrasings in unrelated diffs. Align a line only when the
+  change already touches it.
 
 ## Adding a backend
 

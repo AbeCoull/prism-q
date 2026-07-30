@@ -116,7 +116,6 @@ fn cu_phase_swap_matrix(phase: Complex64) -> [[Complex64; 4]; 4] {
     [[o, z, z, z], [z, z, o, z], [z, o, z, z], [z, z, z, phase]]
 }
 
-/// Reindex a 4×4 gate matrix to swap the two qubit roles.
 fn swap_gate_qubits(g: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
     let mut out = [[ZERO; 4]; 4];
     for i in 0..2 {
@@ -172,6 +171,8 @@ fn mcu_matrix(
     gate
 }
 
+// Benchmark-only surface: benches link the crate externally and cannot see pub(crate),
+// so the SVD items are pub; doc(hidden) keeps them out of the rendered API.
 /// Thin SVD result: A = U · diag(S) · V†
 #[doc(hidden)]
 pub struct SvdResult {
@@ -1314,7 +1315,6 @@ impl MpsBackend {
         }
     }
 
-    /// Apply an N-qubit gate on N adjacent sites starting at `start_site`.
     fn apply_adjacent_n_qubit(&mut self, gate: &[Complex64], dim: usize, start_site: usize) {
         let n = dim.trailing_zeros() as usize; // dim = 2^n
         let (theta, bl, br) = self.contract_n_sites(start_site, n);
@@ -2205,11 +2205,11 @@ mod tests {
         sum
     }
 
-    /// The sampler picks each site from `site_conditional_weights`, so the
-    /// product of the conditionals along a path is the probability it draws
-    /// that path with. Comparing it to the dense vector pins the sampled
-    /// distribution exactly rather than statistically, and covers the
-    /// site-to-logical mapping the SWAP-routed layout leaves behind.
+    // The sampler picks each site from `site_conditional_weights`, so the
+    // product of the conditionals along a path is the probability it draws
+    // that path with. Comparing it to the dense vector pins the sampled
+    // distribution exactly rather than statistically, and covers the
+    // site-to-logical mapping the SWAP-routed layout leaves behind.
     #[test]
     fn mps_conditional_path_probabilities_match_the_dense_vector() {
         let mut c = Circuit::new(5, 0);

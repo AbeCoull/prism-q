@@ -4,11 +4,31 @@
 //! appends gate tensors to the network (deferred contraction). Contraction
 //! happens lazily when `probabilities()` or measurement is requested.
 //!
+//! # Memory layout
+//!
+//! - Each tensor: contiguous `Vec<Complex64>` plus a shape vector and leg ids
+//!   (up to 6 held inline).
+//! - Gates append tensors, so memory grows with gate count until a query
+//!   contracts the network; measurement leaves one dense rank-n tensor.
+//!
+//! # Gate support
+//!
+//! The full gate set: 1q and 2q gates as rank-2/rank-4 tensors, MCU as one
+//! dense multi-qubit tensor, batched variants expanded per entry.
+//! `Gate::QftBlock` is expanded to textbook gates before dispatch.
+//!
 //! # When to prefer this backend
 //!
 //! - Circuits with low treewidth (shallow or geometrically local).
 //! - Circuits where full statevector is infeasible (>30 qubits) but structure
 //!   permits efficient contraction.
+//!
+//! # When NOT to use this backend
+//!
+//! - High-treewidth circuits, where contraction intermediates outgrow the
+//!   dense statevector.
+//! - Shot- or observable-heavy workloads; both route through `probabilities()`
+//!   (see below).
 //!
 //! # Contraction strategy
 //!
@@ -328,7 +348,6 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     }
 }
 
-/// Find the number of shared legs between two tensors.
 fn shared_leg_count(a: &Tensor, b: &Tensor) -> usize {
     let mut count = 0;
     for &a_leg in &a.legs {
@@ -341,7 +360,6 @@ fn shared_leg_count(a: &Tensor, b: &Tensor) -> usize {
     count
 }
 
-/// Compute the result size if two tensors were contracted.
 fn contraction_result_size(a: &Tensor, b: &Tensor) -> usize {
     let mut a_free_size = 1usize;
     let mut b_free_size = 1usize;

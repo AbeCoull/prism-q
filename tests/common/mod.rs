@@ -1,8 +1,6 @@
-//! Shared helpers for the cross-backend correctness tests.
-//!
-//! Each per-backend test file declares `mod common;` and imports the
-//! helpers it needs. Tolerance constants are split by backend so the
-//! same helper can be reused with the right precision.
+//! Shared helpers for the cross-backend correctness tests. Tolerance
+//! constants are split per backend so the same helper runs at each backend's
+//! precision.
 
 #![allow(dead_code)]
 

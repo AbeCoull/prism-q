@@ -1,3 +1,7 @@
+//! SVG rendering for circuit diagrams and gate-density heatmaps:
+//! [`Circuit::to_svg`] and [`Circuit::to_svg_heatmap`], configured through
+//! [`SvgOptions`].
+
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
@@ -12,15 +16,22 @@ const LABEL_GAP: f64 = 8.0;
 const CHAR_WIDTH_FACTOR: f64 = 0.62;
 const LABEL_PADDING: f64 = 16.0;
 
+/// Layout and theme options for SVG rendering of a [`Circuit`].
+///
+/// All lengths are in SVG user units. `Default` gives the light theme with
+/// animations on and every annotation layer (legend, header, topology) off.
 pub struct SvgOptions {
     pub wire_spacing: f64,
+    /// Minimum width of a moment column; wide gate labels stretch it.
     pub moment_width: f64,
     pub gate_height: f64,
     pub gate_min_width: f64,
+    /// Margin on the left edge, containing the qubit labels.
     pub padding_left: f64,
     pub padding_top: f64,
     pub padding_right: f64,
     pub padding_bottom: f64,
+    /// Base font size in pixels.
     pub font_size: f64,
     pub control_radius: f64,
     pub max_moments: Option<usize>,
@@ -28,12 +39,20 @@ pub struct SvgOptions {
     pub show_idle_wires: bool,
     pub show_barriers: bool,
     pub dark_mode: bool,
+    /// Embed both themes, switched by `prefers-color-scheme`; overrides `dark_mode`.
     pub auto_theme: bool,
+    /// Include CSS animations; a `prefers-reduced-motion` query disables them.
     pub animate: bool,
+    /// Append a gate-category color legend below the circuit.
     pub show_legend: bool,
+    /// Add a qubit, gate, and depth summary line above the circuit.
     pub show_stats_header: bool,
+    /// Shrink spacing, padding, and font sizes for dense embedding.
     pub compact: bool,
+    /// `Some((first, last))` draws only the first and last moments with an
+    /// ellipsis gap between them; ignored when the circuit already fits.
     pub ellipsis_mode: Option<(usize, usize)>,
+    /// Append a circular qubit-connectivity graph beside the circuit.
     pub show_topology: bool,
 }
 
@@ -1678,11 +1697,14 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
 }
 
 impl Circuit {
+    /// Render the circuit as a self-contained SVG wire diagram.
     pub fn to_svg(&self, opts: &SvgOptions) -> String {
         let moments = assign_moments(self);
         render_svg(&moments, self.num_qubits, self.num_classical_bits, opts)
     }
 
+    /// Render the gate-density heatmap (qubits by moments) as self-contained
+    /// SVG with marginal activity bars and a color legend.
     pub fn to_svg_heatmap(&self, opts: &SvgOptions) -> String {
         let moments = assign_moments(self);
         render_svg_heatmap(&moments, self.num_qubits, opts)

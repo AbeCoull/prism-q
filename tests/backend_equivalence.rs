@@ -1,15 +1,10 @@
-//! Cross-backend equivalence on hand-written circuits.
-//!
-//! Each test runs one circuit on two implementations and requires them to
-//! agree. That catches a divergence but cannot say which side is wrong, so
-//! nothing here is an authority: the closed-form values live in
-//! `tests/golden_small_circuits.rs`, and `tests/conformance_matrix.rs` does the
-//! same comparison over a generated corpus with an explicit blame rule.
-//!
-//! Scope is the fixtures that are easier to read as literal circuits than as
-//! generated ones: individual gate kernels, the parallel-threshold crossover at
-//! 16q and 20q, `export_statevector`, and subsystem decomposition against a
-//! monolithic run.
+//! Cross-backend equivalence on hand-written circuits: gate kernels, the
+//! parallel crossover at 16q and 20q, `export_statevector`, and subsystem
+//! decomposition against a monolithic run. A comparison catches a divergence
+//! but cannot say which side is wrong, so nothing here is an authority: the
+//! closed-form values live in `tests/golden_small_circuits.rs`, and
+//! `tests/conformance_matrix.rs` runs the same comparison over a generated
+//! corpus with an explicit blame rule.
 
 mod common;
 
@@ -736,7 +731,6 @@ fn decomposed_auto_mixed_backends() {
 //
 // At 20q, all fusion passes are active (cancel, fuse_1q, reorder, fuse_2q,
 // multi_1q, multi_2q, cphase, batch_post_phase) and all parallel kernels fire.
-// These tests cross-validate parallel statevector against independent backends.
 
 #[test]
 fn par_20q_qft_sparse_matches_statevector() {
@@ -910,8 +904,8 @@ fn product_export_statevector_matches() {
     }
 }
 
-/// One entangled block spanning every qubit, which the factored backend holds as
-/// a single dense sub-state, so the export is the identity case.
+// One entangled block spanning every qubit, which the factored backend holds as
+// a single dense sub-state, so the export is the identity case.
 #[test]
 fn factored_export_statevector_single_block_matches() {
     let mut c = Circuit::new(3, 0);
@@ -933,10 +927,10 @@ fn factored_export_statevector_single_block_matches() {
     }
 }
 
-/// Three live sub-states, one of them interleaved with another in global qubit
-/// order (`{0, 3}` and `{1, 2}`), so the export cannot assume a block owns a
-/// contiguous bit range. Amplitudes, not probabilities: a tensor product of
-/// blocks carries each block's phase, and only the amplitude check sees them.
+// Three live sub-states, one of them interleaved with another in global qubit
+// order (`{0, 3}` and `{1, 2}`), so the export cannot assume a block owns a
+// contiguous bit range. Amplitudes, not probabilities: a tensor product of
+// blocks carries each block's phase, and only the amplitude check sees them.
 #[test]
 fn factored_export_statevector_interleaved_blocks_matches() {
     let mut c = Circuit::new(5, 0);
@@ -962,8 +956,8 @@ fn factored_export_statevector_interleaved_blocks_matches() {
     }
 }
 
-/// After a measurement collapses one block, the surviving amplitudes must still
-/// come out normalized, since the export carries no pending norm of its own.
+// After a measurement collapses one block, the surviving amplitudes must still
+// come out normalized, since the export carries no pending norm of its own.
 #[test]
 fn factored_export_statevector_after_measurement_is_normalized() {
     let mut c = Circuit::new(4, 1);

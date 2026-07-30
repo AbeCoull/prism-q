@@ -1,3 +1,7 @@
+//! Clifford propagation passes feeding the compiled sampler: backward
+//! Heisenberg propagation of measured Z operators (bit-packed, batched) and
+//! column-major forward stabilizer simulation.
+
 use super::{PauliVec, flip_bit, get_bit, set_bit};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
@@ -1444,13 +1448,6 @@ pub(super) fn compute_reference_bits(
     ref_bits
 }
 
-/// Forward-compile a Clifford circuit's measurements into a fast sampler.
-///
-/// SGI-optimized stabilizer processes gates forward; dependency tracking during
-/// measurement extracts reference bits and the flip matrix in one pass.
-///
-/// Compilation: O(T × active_avg × nw) gates + O(m × n × (nw + r_words)) measurements.
-/// Per-shot: O(r·m/64) where r = rank.
 /// Column-major forward stabilizer simulation.
 ///
 /// Stores x_cols[qubit][row_word] and z_cols[qubit][row_word] so gate

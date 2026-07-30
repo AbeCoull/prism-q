@@ -1,3 +1,8 @@
+//! Shot and count sampling from a terminal state or probability vector.
+//!
+//! Serves the terminal-measurement fast paths: outcomes are drawn directly
+//! from the final distribution instead of re-running the circuit per shot.
+
 use std::collections::HashMap;
 
 #[cfg(target_arch = "x86_64")]
@@ -508,11 +513,11 @@ pub(super) fn sample_counts_from_state(
 mod tests {
     use super::*;
 
-    /// Above the dense-outcome cap the direct-key shortcut must not build a
-    /// dense CDF; counts route through the same streaming sampler as the host
-    /// path, so the entry point and the streaming sampler agree byte-for-byte.
-    /// Below the cap the shortcut takes the CDF sampler, which draws from a
-    /// different RNG stream.
+    // Above the dense-outcome cap the direct-key shortcut must not build a
+    // dense CDF; counts route through the same streaming sampler as the host
+    // path, so the entry point and the streaming sampler agree byte-for-byte.
+    // Below the cap the shortcut takes the CDF sampler, which draws from a
+    // different RNG stream.
     #[test]
     fn counts_from_probs_stream_above_dense_outcome_cap() {
         let bits = 11;

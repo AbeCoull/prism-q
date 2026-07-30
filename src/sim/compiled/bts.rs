@@ -1,3 +1,7 @@
+//! Block-triangular sampling (BTS): draws one random u64 per rank column per
+//! 64-shot batch and forms each measurement row as the XOR of its parity
+//! columns' words, emitting measurement-major packed shots.
+
 use super::parity::{SparseParity, XorDag};
 use super::rng::Xoshiro256PlusPlus;
 #[cfg(target_arch = "aarch64")]

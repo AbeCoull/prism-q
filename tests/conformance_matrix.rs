@@ -149,10 +149,10 @@ fn conformance_classical_conditioning_branches_agree_across_backends() {
     }
 }
 
-/// Shot sampling on the backends that draw from their own representation, over
-/// the whole unitary corpus. Each participant is checked against its own
-/// probability vector, so a disagreement names the sampler rather than the
-/// evolution.
+// Shot sampling on the backends that draw from their own representation, over
+// the whole unitary corpus. Each participant is checked against its own
+// probability vector, so a disagreement names the sampler rather than the
+// evolution.
 #[test]
 fn conformance_native_sampling_matches_each_backend_distribution() {
     let participants = participants();
@@ -161,8 +161,8 @@ fn conformance_native_sampling_matches_each_backend_distribution() {
     }
 }
 
-/// The query matrices are differential, so a unitary case that reaches fewer
-/// than two participants compares nothing while still reporting pass.
+// The query matrices are differential, so a unitary case that reaches fewer
+// than two participants compares nothing while still reporting pass.
 #[test]
 fn conformance_query_matrix_compares_every_unitary_case() {
     let participants = participants();

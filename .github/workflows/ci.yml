@@ -12,6 +12,11 @@ env:
   # cudarc's dynamic-linking mode and can't build on hosts that don't have the NVIDIA
   # toolkit installed, so CI enumerates features instead of using --all-features.
   CI_FEATURES: parallel
+  # Doc surface. rustdoc compiles but never links, and cudarc's build script with the
+  # pinned cuda-12040 feature does not probe for a toolkit, so the gpu and distributed
+  # docs build on a bare runner. distributed-mpi stays out: mpi-sys fails in its build
+  # script when no MPI library is installed.
+  CI_DOC_FEATURES: parallel,gpu,distributed
   CI_BENCH_FEATURES: parallel,bench-fast
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
 
@@ -42,7 +47,7 @@ jobs:
         run: cargo test --doc --features "$CI_FEATURES"
 
       - name: Doc build
-        run: cargo doc --no-deps --features "$CI_FEATURES"
+        run: cargo doc --no-deps --features "$CI_DOC_FEATURES"
         env:
           RUSTDOCFLAGS: -D warnings
 

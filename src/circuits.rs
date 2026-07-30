@@ -84,6 +84,8 @@ pub fn clifford_heavy_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
+/// Build a Clifford circuit with random long-range CX pairings each layer,
+/// unlike the brick-layer nearest-neighbor pattern in [`clifford_heavy_circuit`].
 pub fn clifford_random_pairs(n: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);

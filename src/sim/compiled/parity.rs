@@ -1,3 +1,7 @@
+//! Sparse parity structures for compiled sampling: the GF(2) system mapping
+//! random bits to measurement flips, plus derived evaluation orders.
+
+/// CSR matrix over GF(2) mapping random-bit columns to measurement rows.
 #[derive(Debug, Clone)]
 pub struct SparseParity {
     pub col_indices: Vec<u32>,
@@ -230,6 +234,9 @@ pub struct XorDagEntry {
     pub residual_cols: Vec<u32>,
 }
 
+/// Row-reuse evaluation order: each row either evaluates its columns from
+/// scratch or XORs a small residual column set onto an already computed
+/// parent row, cutting total XOR work from `original_weight` to `dag_weight`.
 #[derive(Debug, Clone)]
 pub struct XorDag {
     pub entries: Vec<XorDagEntry>,
@@ -283,12 +290,15 @@ fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
     result
 }
 
+/// Row-weight statistics of a parity matrix; a row's weight is the number of
+/// random bits whose XOR determines that measurement.
 #[derive(Debug, Clone)]
 pub struct ParityStats {
     pub min_weight: usize,
     pub max_weight: usize,
     pub mean_weight: f64,
     pub total_weight: usize,
+    /// Rows with zero weight (fixed outcomes).
     pub num_deterministic: usize,
 }
 
@@ -300,6 +310,8 @@ pub struct ParityBlock {
     pub ref_bits_packed: Vec<u64>,
 }
 
+/// Measurement blocks sharing no random bits, sampled independently in
+/// parallel.
 #[derive(Debug, Clone)]
 pub struct ParityBlocks {
     pub blocks: Vec<ParityBlock>,
@@ -443,6 +455,9 @@ pub(super) fn build_parity_blocks_if_useful(
 const MAX_RANK_FOR_WEIGHT_MIN: usize = 500;
 const MAX_WEIGHT_MIN_ROUNDS: usize = 5;
 
+/// Greedy basis change: XOR one flip row into another when that lowers its
+/// weight. Elementary row operations preserve the sampled distribution.
+/// Returns total weight (before, after).
 pub(super) fn minimize_flip_row_weight(flip_rows: &mut [Vec<u64>]) -> (usize, usize) {
     let rank = flip_rows.len();
     let total: usize = flip_rows.iter().map(|r| row_weight(r) as usize).sum();

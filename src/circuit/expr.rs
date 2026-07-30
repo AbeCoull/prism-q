@@ -1,3 +1,7 @@
+//! Arithmetic expression evaluation for OpenQASM gate parameters: `+ - * /`,
+//! parentheses, radix-prefixed literals, math functions, the constants
+//! pi/tau/euler, and identifiers resolved against an optional variable table.
+
 use crate::error::{PrismError, Result};
 use std::collections::HashMap;
 

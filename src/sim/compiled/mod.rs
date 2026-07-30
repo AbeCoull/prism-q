@@ -1,3 +1,7 @@
+//! Compiled Clifford measurement sampling: each measurement outcome is a
+//! fixed reference bit XOR a parity over `rank` independent random bits, so
+//! drawing shots is GF(2) linear algebra instead of circuit re-execution.
+
 mod accumulator;
 mod bts;
 pub(crate) mod parity;
@@ -196,6 +200,11 @@ impl FlipLut {
     }
 }
 
+/// Sampler for a compiled Clifford measurement circuit, built by
+/// [`compile_measurements`] or [`compile_forward`]. Shots XOR a random subset
+/// of `rank` flip rows into fixed reference bits; deterministic per seed.
+/// `try_` methods propagate GPU errors; their plain twins fall back to the
+/// CPU path.
 pub struct CompiledSampler {
     flip_rows: Vec<Vec<u64>>,
     ref_bits_packed: Vec<u64>,
@@ -374,6 +383,7 @@ fn build_filtered_parity_blocks(
 }
 
 impl CompiledSampler {
+    /// Number of independent random bits in the compiled parity system.
     pub fn rank(&self) -> usize {
         self.rank
     }
@@ -769,6 +779,8 @@ impl CompiledSampler {
         result
     }
 
+    /// Draw `num_shots` shots as a packed bit matrix. The result layout
+    /// depends on the sampling path taken; branch on [`PackedShots::layout`].
     pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
         match self.sample_bulk_packed_inner(num_shots, false) {
             Ok(packed) => packed,
@@ -1063,6 +1075,8 @@ impl CompiledSampler {
         })
     }
 
+    /// Stream `total_shots` through `acc` in [`default_chunk_size`] chunks,
+    /// bounding peak memory.
     pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
         let chunk_size = default_chunk_size(self.num_measurements);
         self.sample_chunked_with_size(total_shots, chunk_size, acc);
@@ -1080,6 +1094,9 @@ impl CompiledSampler {
         });
     }
 
+    /// Histogram of `total_shots` outcomes keyed by packed measurement words.
+    /// Ranks small relative to the shot count use a closed-form multinomial
+    /// draw with no per-shot work.
     pub fn sample_counts(
         &mut self,
         total_shots: usize,
@@ -1290,6 +1307,8 @@ impl CompiledSampler {
         counts
     }
 
+    /// Per-measurement frequency of reading 1 across `total_shots` sampled
+    /// shots.
     pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
         match self.try_sample_marginals(total_shots) {
             Ok(marginals) => marginals,
@@ -1312,6 +1331,11 @@ impl CompiledSampler {
         })
     }
 
+    /// Sample packed detection events: output row `e` holds the XOR of
+    /// measurement pair `pairs[e]` across shots.
+    ///
+    /// # Panics
+    /// Panics if the sampler was compiled with no measurements.
     pub fn sample_detection_events(
         &mut self,
         pairs: &[(usize, usize)],
@@ -1386,6 +1410,9 @@ impl CompiledSampler {
         }
     }
 
+    /// Exact outcome multiplicities over all `2^rank` equally likely
+    /// random-bit assignments; counts sum to `2^rank`. `None` when `rank`
+    /// exceeds 25 or no sparse parity is available.
     pub fn exact_counts(&self) -> Option<std::collections::HashMap<Vec<u64>, u64>> {
         if self.rank > MAX_RANK_FOR_GRAY_CODE {
             return None;
@@ -1399,6 +1426,8 @@ impl CompiledSampler {
         ))
     }
 
+    /// Analytic per-measurement probabilities: 0.5 for any measurement that
+    /// depends on a random bit, otherwise the deterministic reference bit.
     pub fn marginal_probabilities(&self) -> Vec<f64> {
         let mut probs = vec![0.5f64; self.num_measurements];
         if let Some(sparse) = &self.sparse {
@@ -1471,9 +1500,13 @@ impl CompiledSampler {
     }
 }
 
+/// Memory layout of a [`PackedShots`] bit matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShotLayout {
+    /// Rows are shots; each row packs that shot's measurement bits.
     ShotMajor,
+    /// Rows are measurements; each row packs one measurement's outcome
+    /// across all shots.
     MeasMajor,
 }
 
@@ -1663,6 +1696,19 @@ pub(crate) fn count_vec_key_masked<S>(
     }
 }
 
+/// Bit-packed measurement outcomes for a batch of shots.
+///
+/// Stores a `num_shots` x `num_measurements` bit matrix in `u64` words with
+/// little-endian bit order inside each word. Shot-major layout stores
+/// `num_shots` rows of `m_words = ceil(num_measurements / 64)` words, so bit
+/// `m` of shot `s` lives at word `s * m_words + m / 64`, bit `m % 64`.
+/// Measurement-major layout stores `num_measurements` rows of `s_words =
+/// ceil(num_shots / 64)` words, so the same bit lives at word
+/// `m * s_words + s / 64`, bit `s % 64`. Samplers emit whichever layout they
+/// can write contiguously; consumers branch on [`Self::layout`], and the
+/// layout-specific row accessors panic when called in the other layout. Bits
+/// past the last valid index in a row's final word are padding; the validated
+/// constructors reject data with padding bits set.
 #[derive(Debug, Clone)]
 pub struct PackedShots {
     data: Vec<u64>,
@@ -1674,6 +1720,7 @@ pub struct PackedShots {
 }
 
 impl PackedShots {
+    /// Version tag for the raw word layout returned by [`Self::raw_data`].
     pub const RAW_FORMAT_VERSION: u32 = 1;
 
     pub fn raw_format_version(&self) -> u32 {
@@ -1708,10 +1755,12 @@ impl PackedShots {
         }
     }
 
+    /// Words per measurement-major row: `ceil(num_shots / 64)`.
     pub fn s_words(&self) -> usize {
         self.s_words
     }
 
+    /// Words per shot-major row: `ceil(num_measurements / 64)`.
     pub fn m_words(&self) -> usize {
         self.m_words
     }
@@ -1720,6 +1769,7 @@ impl PackedShots {
         measurement_tail_mask(self.num_measurements)
     }
 
+    /// Row of packed measurement bits for one shot (shot-major only).
     pub fn shot_words(&self, shot: usize) -> &[u64] {
         assert!(
             self.layout == ShotLayout::ShotMajor,
@@ -1729,6 +1779,8 @@ impl PackedShots {
         &self.data[base..base + self.m_words]
     }
 
+    /// Row of packed per-shot bits for one measurement (measurement-major
+    /// only).
     pub fn meas_words(&self, m: usize) -> &[u64] {
         assert!(
             self.layout == ShotLayout::MeasMajor,
@@ -1738,6 +1790,8 @@ impl PackedShots {
         &self.data[base..base + self.s_words]
     }
 
+    /// Build from raw shot-major words, rejecting a wrong data length or set
+    /// padding bits.
     pub fn try_from_shot_major(
         data: Vec<u64>,
         num_shots: usize,
@@ -1757,11 +1811,14 @@ impl PackedShots {
         })
     }
 
+    /// Like [`Self::try_from_shot_major`] but panics on invalid data.
     pub fn from_shot_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
         Self::try_from_shot_major(data, num_shots, num_measurements)
             .unwrap_or_else(|e| panic!("invalid shot-major PackedShots raw data: {e}"))
     }
 
+    /// Build from raw measurement-major words, rejecting a wrong data length
+    /// or set padding bits.
     pub fn try_from_meas_major(
         data: Vec<u64>,
         num_shots: usize,
@@ -1781,6 +1838,7 @@ impl PackedShots {
         })
     }
 
+    /// Like [`Self::try_from_meas_major`] but panics on invalid data.
     pub fn from_meas_major(data: Vec<u64>, num_shots: usize, num_measurements: usize) -> Self {
         Self::try_from_meas_major(data, num_shots, num_measurements)
             .unwrap_or_else(|e| panic!("invalid measurement-major PackedShots raw data: {e}"))
@@ -1955,6 +2013,7 @@ impl PackedShots {
         }
     }
 
+    /// Histogram of outcomes, keyed by `m_words()` packed words per shot.
     pub fn counts(&self) -> std::collections::HashMap<Vec<u64>, u64> {
         if self.m_words > 8 {
             return self.counts_wide();
@@ -2123,12 +2182,15 @@ impl CompiledDetectorSampler {
         &self.observable_rows
     }
 
+    /// Opt the underlying measurement sampler into GPU BTS sampling.
     #[cfg(feature = "gpu")]
     pub fn with_gpu(mut self, context: std::sync::Arc<crate::gpu::GpuContext>) -> Self {
         self.measurement_sampler = self.measurement_sampler.with_gpu(context);
         self
     }
 
+    /// Sample packed measurement records; errors surface only from an
+    /// attached GPU context.
     pub fn sample_measurements_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
         self.measurement_sampler.try_sample_bulk_packed(num_shots)
     }
@@ -2143,6 +2205,8 @@ impl CompiledDetectorSampler {
         measurements.parity_rows(&self.observable_rows)
     }
 
+    /// Sample measurements once and derive detector and observable bits from
+    /// the same shots.
     pub fn sample_packed(&mut self, num_shots: usize) -> Result<DetectorSampleBatch> {
         let measurements = self.sample_measurements_packed(num_shots)?;
         let detectors = measurements.parity_rows(&self.detector_rows)?;
@@ -2217,10 +2281,12 @@ impl DevicePackedShots {
         &self.context
     }
 
+    /// Words per shot-major row: `ceil(num_measurements / 64)`.
     pub fn m_words(&self) -> usize {
         self.m_words
     }
 
+    /// Words per measurement-major row: `ceil(num_shots / 64)`.
     pub fn s_words(&self) -> usize {
         self.s_words
     }
@@ -2384,6 +2450,26 @@ const MAX_RANK_FOR_RANK_SPACE: usize = 20;
 const MIN_SHOTS_PER_OUTCOME: usize = 4;
 const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
+/// Compile a Clifford circuit's measurements via forward stabilizer
+/// simulation; [`compile_measurements`] routes registers of 64 or more qubits
+/// here.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{CircuitBuilder, HistogramAccumulator, compile_forward};
+///
+/// let circuit = CircuitBuilder::new(2).h(0).cx(0, 1).measure_all().build();
+/// let mut sampler = compile_forward(&circuit, 42).expect("compile failed");
+/// assert_eq!(sampler.rank(), 1);
+///
+/// let mut acc = HistogramAccumulator::new();
+/// sampler.sample_chunked(1000, &mut acc);
+/// let counts = acc.into_counts();
+/// // Bell state: only 00 and 11 occur.
+/// assert_eq!(counts.len(), 2);
+/// assert_eq!(counts.values().sum::<u64>(), 1000);
+/// ```
 pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     if !circuit.is_clifford_only() {
         return Err(PrismError::IncompatibleBackend {
@@ -2854,13 +2940,9 @@ pub fn compile_detector_sampler(
     })
 }
 
-/// Compile a Clifford circuit's measurements into a fast sampler.
+/// Compile a Clifford circuit's measurements into a [`CompiledSampler`].
 ///
-/// Selects forward (SGI stabilizer + dependency tracking) or backward (Pauli
-/// propagation + Gaussian elimination) based on circuit depth. Forward wins
-/// for deep circuits (gate_count >= 5×measurements).
-/// Requires terminal measurements and does not support reset or conditional
-/// operations on measured data.
+/// Requires terminal measurements with no resets or classical conditionals.
 pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
     if !circuit.is_clifford_only() {
         return Err(PrismError::IncompatibleBackend {
@@ -3019,6 +3101,19 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
 ///
 /// Requires the same circuit subset as [`compile_measurements`], namely
 /// terminal measurements with no resets or classical conditionals.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{CircuitBuilder, run_shots_compiled};
+///
+/// let circuit = CircuitBuilder::new(2).h(0).cx(0, 1).measure_all().build();
+/// let result = run_shots_compiled(&circuit, 100, 42).expect("sampling failed");
+/// let counts = result.counts();
+/// // Bell state: only 00 and 11 occur.
+/// assert_eq!(counts.len(), 2);
+/// assert_eq!(counts.get(&vec![0b00]).unwrap() + counts.get(&vec![0b11]).unwrap(), 100);
+/// ```
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
     let packed = sampler.sample_bulk_packed(num_shots);

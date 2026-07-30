@@ -1,9 +1,6 @@
-//! Cross-backend correctness tests for `TensorNetworkBackend`.
-//!
-//! Deferred contraction with greedy min-size heuristic. Tests cross-validate
-//! against the Statevector reference at sizes ≤ 16q (the backend's
-//! `MAX_PROB_QUBITS = 25` cap is well above the slowest contraction covered
-//! by the unit-test suite).
+//! Cross-backend correctness for `TensorNetworkBackend` against the
+//! statevector reference at sizes up to 16q, below the backend's
+//! `MAX_PROB_QUBITS = 25` cap.
 
 mod common;
 
@@ -77,8 +74,6 @@ fn tn_clifford_12q_sv() {
         &circuits::clifford_heavy_circuit(12, 10, SEED),
     );
 }
-
-// ===== phase_estimation =====
 
 // ===== w_state =====
 

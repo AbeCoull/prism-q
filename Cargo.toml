@@ -42,6 +42,14 @@ distributed-mpi = ["distributed", "dep:mpi"]
 bench-fast = []
 bench-internal = []
 
+# rustdoc compiles but never links, so the gpu surface documents without a CUDA toolkit
+# (cudarc's build script with the pinned cuda-12040 feature does not probe for one).
+# distributed-mpi is excluded: mpi-sys fails in its build script without an MPI library,
+# which the docs.rs sandbox does not have.
+[package.metadata.docs.rs]
+features = ["parallel", "gpu", "distributed"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [profile.release]
 opt-level = 3
 lto = "fat"

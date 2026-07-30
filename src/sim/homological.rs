@@ -1,3 +1,7 @@
+//! Homological noisy sampling for Clifford circuits: precomputed syndrome
+//! classes give O(1) noise work per shot, plus exact analytic noisy
+//! marginals.
+
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use crate::sim::ShotsResult;
@@ -162,9 +166,7 @@ pub struct ErrorChainComplex {
     e_matrix: F2DenseMatrix,
     /// Error probabilities: p_total[e] = px + py + pz for error location e.
     error_probs: Vec<f64>,
-    /// Number of measurements (detectors)
     num_measurements: usize,
-    /// Number of error locations
     num_errors: usize,
     /// dim(im(∂₂) ∩ ker(∂₁)): stabilizer generators undetectable by measurements
     boundary_dim: usize,
@@ -179,7 +181,6 @@ pub struct ErrorChainComplex {
 /// The syndrome classes are elements of im(E) ⊆ F₂^m where E is the
 /// error-to-measurement propagation matrix.
 pub struct HomologicalSampler {
-    /// Compiled sampler for quantum randomness (noiseless measurement distribution)
     compiled: crate::sim::compiled::CompiledSampler,
     /// Syndrome rank = dim(im(E))
     syndrome_rank: usize,
@@ -195,7 +196,6 @@ pub struct HomologicalSampler {
     boundary_dim: usize,
     /// dim(H₁ = ker(∂₁)/im(∂₂)): independent logical error classes
     homology_dim: usize,
-    /// RNG for noise sampling
     rng: ChaCha8Rng,
 }
 
@@ -446,10 +446,13 @@ impl ErrorChainComplex {
         (boundary_dim, homology_dim)
     }
 
+    /// dim(im(∂₂) ∩ ker(∂₁)): stabilizer generators undetectable by the
+    /// measurements.
     pub fn boundary_dim(&self) -> usize {
         self.boundary_dim
     }
 
+    /// dim(H₁): independent logical error classes.
     pub fn homology_dim(&self) -> usize {
         self.homology_dim
     }
@@ -643,20 +646,22 @@ impl HomologicalSampler {
         })
     }
 
+    /// rank(E): number of independent syndrome classes is `2^rank`.
     pub fn syndrome_rank(&self) -> usize {
         self.syndrome_rank
     }
 
+    /// dim(im(∂₂) ∩ ker(∂₁)): stabilizer generators undetectable by the
+    /// measurements.
     pub fn boundary_dim(&self) -> usize {
         self.boundary_dim
     }
 
+    /// dim(H₁): independent logical error classes.
     pub fn homology_dim(&self) -> usize {
         self.homology_dim
     }
 
-    /// Sample a single shot: returns measurement outcomes.
-    ///
     /// Cost: O(r_quantum) for compiled sampler + O(1) for noise class lookup.
     pub fn sample(&mut self) -> Vec<bool> {
         let mut outcome = self.compiled.sample();
@@ -678,11 +683,11 @@ impl HomologicalSampler {
         outcome
     }
 
-    /// Sample multiple shots.
     pub fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
         (0..num_shots).map(|_| self.sample()).collect()
     }
 
+    /// Sample `num_shots` shots into a shot-major [`PackedShots`] buffer.
     pub fn sample_packed(&mut self, num_shots: usize) -> PackedShots {
         let m = self.compiled.num_measurements();
         let m_words = m.div_ceil(64);
@@ -719,6 +724,7 @@ impl HomologicalSampler {
         PackedShots::from_shot_major(accum, num_shots, m)
     }
 
+    /// Stream shots into `acc` in default-sized chunks instead of one matrix.
     pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
         let chunk_size = default_chunk_size(self.compiled.num_measurements());
         crate::sim::compiled::for_each_chunk(total_shots, chunk_size, |batch| {
@@ -727,6 +733,7 @@ impl HomologicalSampler {
         });
     }
 
+    /// Sample `total_shots` shots and return per-measurement `P(bit = 1)`.
     pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
         crate::sim::compiled::marginals_from_chunks(self.compiled.num_measurements(), |acc| {
             self.sample_chunked(total_shots, acc)

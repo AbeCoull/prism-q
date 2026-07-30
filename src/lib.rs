@@ -30,13 +30,16 @@
 //!
 //! # Backends
 //!
-//! - [`StatevectorBackend`]: full state-vector simulation (implemented)
-//! - [`StabilizerBackend`]: Clifford-only O(n^2) simulation (implemented)
-//! - [`SparseBackend`]: sparse state-vector O(k) simulation (implemented)
-//! - [`MpsBackend`]: Matrix Product State O(n * chi^2) simulation (implemented)
-//! - [`ProductStateBackend`]: per-qubit O(n) simulation for non-entangling circuits (implemented)
-//! - [`TensorNetworkBackend`]: deferred contraction for low-treewidth circuits (implemented)
-//! - [`FactoredBackend`]: dynamic split-state simulation for sparse-entanglement circuits (implemented)
+//! - [`StatevectorBackend`]: full state-vector simulation
+//! - [`StabilizerBackend`]: Clifford-only O(n^2) simulation
+//! - [`SparseBackend`]: sparse state-vector O(k) simulation
+//! - [`MpsBackend`]: Matrix Product State O(n * chi^2) simulation
+//! - [`ProductStateBackend`]: per-qubit O(n) simulation for non-entangling circuits
+//! - [`TensorNetworkBackend`]: deferred contraction for low-treewidth circuits
+//! - [`FactoredBackend`]: dynamic split-state simulation for sparse-entanglement circuits
+//! - [`FactoredStabilizerBackend`]: per-group tableaux for large sparse-entanglement Clifford circuits
+//! - [`backend::density_matrix::DensityMatrixBackend`]: 4^n density matrix for exact channel semantics
+//! - `DistributedStatevectorBackend`: statevector sharded across ranks (`distributed` feature)
 //!
 //! # Native QEC
 //!
@@ -44,6 +47,8 @@
 //! [`run_qec_program`] executes supported Clifford QEC programs through packed
 //! compiled sampling with Pauli-noise annotations. [`run_qec_program_reference`]
 //! runs small correctness checks through the reference path.
+
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 pub mod backend;
 pub mod circuit;

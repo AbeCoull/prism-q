@@ -1,3 +1,6 @@
+//! Memory caps for dense state allocation and dense outputs, derived from
+//! detected physical memory with a per-cap environment variable override.
+
 use std::mem::size_of;
 
 use num_complex::Complex64;

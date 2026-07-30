@@ -657,10 +657,12 @@ fn loopback_mixed_circuit_qft_like() {
     assert_loopback_matches(&b.build(), &[1, 2, 4]);
 }
 
-// These circuits are large enough to trigger the fusion pipeline (>= 10 qubits
-// for 1q fusion, >= 12 for 2q, >= 14 for multi 1q, >= 16 for diagonal batch).
-// The reference statevector fuses identically, so a match confirms the
-// distributed backend decomposes each fused or batched variant correctly.
+// These circuits are large enough to trigger the fusion pipeline: they meet
+// `MIN_QUBITS_FOR_FUSION` (1q), `MIN_QUBITS_FOR_2Q_FUSION`,
+// `MIN_QUBITS_FOR_MULTI_FUSION` (multi 1q), and `MIN_QUBITS_FOR_DIAG_BATCH`
+// in `circuit::fusion`. The reference statevector fuses identically, so a
+// match confirms the distributed backend decomposes each fused or batched
+// variant correctly.
 
 #[test]
 fn loopback_fused_multifused_and_2q() {
@@ -1309,10 +1311,10 @@ fn shots_without_measurements_still_validate_configuration() {
     }
 }
 
-/// The override has to reproduce the route `apply_gate` takes for a one-qubit gate
-/// at every position of the local/global split, including the diagonal shortcut.
-/// The third matrix is a non-unitary jump branch, which is what the trajectory
-/// engine actually hands this method.
+// The override has to reproduce the route `apply_gate` takes for a one-qubit gate
+// at every position of the local/global split, including the diagonal shortcut.
+// The third matrix is a non-unitary jump branch, which is what the trajectory
+// engine actually hands this method.
 #[test]
 fn loopback_apply_1q_matrix_all_qubit_splits() {
     relax_min_local_qubits();

@@ -169,10 +169,7 @@ fn gate_mat_1q(g: &Gate) -> Mat {
 fn gate_mat_2q(g: &Gate) -> Mat {
     match g {
         Gate::Cx => {
-            // q[0]=ctrl, q[1]=tgt. Project as compute basis index = (q1 q0)_2.
-            // Build CX over (q1,q0): control = q0 = LSB. Standard CNOT matrix below
-            // assumes ctrl=MSB; we transpose order.
-            // Easier: emit directly via tensor with q0 LSB.
+            // q[0]=ctrl, q[1]=tgt. Basis index = (q1 q0)_2, q0 LSB.
             let mut m = vec![vec![c(0.0, 0.0); 4]; 4];
             for q0 in 0..2usize {
                 for q1 in 0..2usize {
@@ -191,7 +188,6 @@ fn gate_mat_2q(g: &Gate) -> Mat {
             m
         }
         Gate::Swap => {
-            // swap q0 and q1.
             let mut m = vec![vec![c(0.0, 0.0); 4]; 4];
             for q0 in 0..2usize {
                 for q1 in 0..2usize {

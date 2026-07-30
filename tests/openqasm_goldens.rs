@@ -1,10 +1,6 @@
-//! Golden import tests for OpenQASM 3 exports from common quantum SDKs.
-//!
-//! These exercise representative samples of the gate sets and control-flow
-//! constructs each ecosystem typically produces. Each test parses the
-//! exported QASM and verifies parse counts, then runs the circuit through
-//! the statevector backend and checks the resulting probability distribution
-//! against an analytic reference.
+//! Golden import tests for OpenQASM 3 exports from common quantum SDKs. Each
+//! test parses a representative exported QASM, verifies parse counts, and
+//! checks statevector probabilities against an analytic reference.
 
 mod common;
 
@@ -20,8 +16,6 @@ fn run_probs(qasm: &str) -> Vec<f64> {
     result.probabilities.expect("probabilities").to_vec()
 }
 
-/// Qiskit-style export: `for` loop, `cp` controlled phase, U/u gates,
-/// `qubit[]` / `bit[]` declarations, `c[i] = measure q[i]` assignment form.
 #[test]
 fn qiskit_style_qft_3q_with_for_loop() {
     let qasm = r#"
@@ -46,9 +40,7 @@ fn qiskit_style_qft_3q_with_for_loop() {
     assert!((probs[0] - 0.125).abs() < 1e-10);
 }
 
-/// Qiskit-style: parametric `def` subroutine with a float angle parameter,
-/// register-broadcast call, and U-gate body. Mirrors the shape Qiskit's
-/// OpenQASM 3 exporter produces for compiled circuits.
+// Mirrors the shape Qiskit's OpenQASM 3 exporter produces for compiled circuits.
 #[test]
 fn qiskit_style_def_with_u_gate() {
     let qasm = r#"
@@ -65,8 +57,7 @@ fn qiskit_style_def_with_u_gate() {
     assert_probs_close(&probs, &[0.0, 0.0, 0.0, 1.0], 1e-10, "qiskit_def_u");
 }
 
-/// Qiskit-style conditional reset: `if (c[0] == 1) x q[0]` is the canonical
-/// shape Qiskit emits when lowering classical feedback after a measurement.
+// The shape Qiskit emits when lowering classical feedback after a measurement.
 #[test]
 fn qiskit_style_conditional_x_after_measure() {
     let qasm = r#"
@@ -85,8 +76,6 @@ fn qiskit_style_conditional_x_after_measure() {
     assert!(probs[0] > 0.999, "expected |0> after teleport-style reset");
 }
 
-/// Cirq-style: explicit unrolled gates, single-letter rotation names, OQ2
-/// arrow-form measurements, no `for` or `def`.
 #[test]
 fn cirq_style_unrolled_circuit() {
     let qasm = r#"
@@ -110,9 +99,7 @@ fn cirq_style_unrolled_circuit() {
     assert!((probs[0] + probs[3] - 1.0).abs() < 1e-10);
 }
 
-/// Cirq-style controlled rotation set: `crx`, `cry`, `crz`, plus `swap`.
-/// Cirq exports usually emit OQ3 with these explicit names rather than
-/// decomposing them.
+// Cirq exports emit these explicit names rather than decomposing them.
 #[test]
 fn cirq_style_controlled_rotations() {
     let qasm = r#"
@@ -129,9 +116,8 @@ fn cirq_style_controlled_rotations() {
     assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-10);
 }
 
-/// IonQ-style: native trapped-ion gate set. `gpi`, `gpi2`, and `ms`
-/// (Mølmer-Sørensen) are IonQ's native instruction set; their cloud
-/// transpiler emits these directly.
+// `gpi`, `gpi2`, and `ms` (Mølmer-Sørensen) are IonQ's native instruction
+// set; their cloud transpiler emits these directly.
 #[test]
 fn ionq_style_native_gates() {
     let qasm = r#"
@@ -149,8 +135,8 @@ fn ionq_style_native_gates() {
     assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-10);
 }
 
-/// IonQ-style with classical conditional: their compiler emits hex-prefix
-/// integer literals for register comparisons in feedforward circuits.
+// IonQ's compiler emits hex-prefix integer literals for register
+// comparisons in feedforward circuits.
 #[test]
 fn ionq_style_conditional_with_hex_literal() {
     let qasm = r#"
@@ -169,9 +155,8 @@ fn ionq_style_conditional_with_hex_literal() {
     assert_eq!(circuit.num_classical_bits, 2);
 }
 
-/// Google Sycamore-style: `syc`, `sqrt_iswap`. These are Google's hardware
-/// native two-qubit gates exposed by Cirq's OQ3 export when targeting
-/// Sycamore-class processors.
+// `syc` and `sqrt_iswap` are Google's hardware-native two-qubit gates,
+// exposed by Cirq's OQ3 export when targeting Sycamore-class processors.
 #[test]
 fn google_style_sycamore_gates() {
     let qasm = r#"
@@ -189,8 +174,7 @@ fn google_style_sycamore_gates() {
     assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-10);
 }
 
-/// Google-style: full QFT-style circuit with explicit register declarations
-/// and the cphase form their exporter prefers over the Qiskit `cp` alias.
+// `cphase` is the form Google's exporter prefers over the Qiskit `cp` alias.
 #[test]
 fn google_style_qft_with_cphase_alias() {
     let qasm = r#"
@@ -213,9 +197,8 @@ fn google_style_qft_with_cphase_alias() {
     assert!((probs[0] - 0.125).abs() < 1e-10);
 }
 
-/// Combined: a circuit that mixes static for-loop unrolling, a parametric
-/// def subroutine, and binary integer literals, the kind of structure
-/// Qiskit produces when exporting a compiled QAOA layer.
+// Mixes for-loop unrolling, a parametric def, and a binary integer literal:
+// the structure Qiskit produces when exporting a compiled QAOA layer.
 #[test]
 fn qiskit_style_qaoa_layer_with_for_and_def() {
     let qasm = r#"
@@ -244,9 +227,8 @@ fn qiskit_style_qaoa_layer_with_for_and_def() {
     assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-10);
 }
 
-/// Pre-OQ3 Qiskit (qreg/creg) style. Qiskit's older 2.0 exporter still
-/// produces these forms in the wild; OQ3 backward-compat keeps them
-/// parsing.
+// Qiskit's older 2.0 exporter still produces qreg/creg forms in the wild;
+// OQ3 backward-compat keeps them parsing.
 #[test]
 fn qiskit_legacy_qreg_creg_style() {
     let qasm = r#"

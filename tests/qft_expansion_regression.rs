@@ -1,12 +1,9 @@
 //! Regression: the native whole-state `QftBlock` FFT and the textbook
-//! expansion (`expand_qft_blocks` / `qft_textbook_steps`) must be identical
-//! transforms. The `PRISM_NO_QFT_BLOCK` kill switch documents them as A/B
-//! equivalent, and every non-statevector backend (MPS, sparse, factored,
-//! product, tensornetwork) plus the GPU path executes the textbook expansion.
-//!
-//! Existing cross-backend tests compare probabilities from the |0...0> input,
-//! where every QFT convention yields a uniform distribution and phase errors
-//! are invisible. These checks feed a non-|0> input and compare amplitudes.
+//! expansion (`expand_qft_blocks`) must be identical transforms; every
+//! non-statevector backend and the GPU path execute the expansion.
+//! Cross-backend tests start from |0...0>, where every QFT convention yields
+//! a uniform distribution and phase errors are invisible, so these checks
+//! feed a non-|0> input and compare amplitudes.
 
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::{Circuit, expand_qft_blocks};

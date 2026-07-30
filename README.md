@@ -203,7 +203,7 @@ cargo build --release
 cargo test --all-features
 cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
 cargo fmt --check
-cargo doc --no-deps --all-features
+cargo doc --no-deps --features "parallel gpu distributed"
 ```
 
 For Rayon parallelism on larger circuits:

@@ -294,7 +294,7 @@ extern "C" __global__ void apply_fused_2q(
     int hi_q = q0 < q1 ? q1 : q0;
     unsigned long long idx = expand_2q(k, lo_q, hi_q);
 
-    // Basis ordering matches CPU (src/backend/simd.rs PreparedGate2q::apply_full, line 1598):
+    // Basis ordering matches the CPU PreparedGate2q::apply_full in src/backend/simd.rs:
     //   basis index b = (q0_bit << 1) | q1_bit   i.e. q1 is LSB of the 4-element basis.
     //   b=0 → (q0=0, q1=0); b=1 → (q0=0, q1=1); b=2 → (q0=1, q1=0); b=3 → (q0=1, q1=1).
     unsigned long long i00 = idx;
@@ -649,14 +649,13 @@ pub(crate) fn kernel_source() -> String {
         )
 }
 
-// ============================================================================
-// Rust-side launchers
-// ============================================================================
+// ---- Rust-side launchers ----
 
 fn grid_for(count: u64) -> u32 {
     count.div_ceil(BLOCK_SIZE as u64).max(1) as u32
 }
 
+/// Write amplitude 0 = 1; assumes the buffer is already zeroed.
 pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -> Result<()> {
     let (stream, func) = stream_and_fn(ctx, "set_initial_state")?;
     let cfg = linear_cfg(1, 1);
@@ -850,6 +849,8 @@ pub(crate) fn launch_apply_swap(
     launch_2q(ctx, state, "apply_swap", q0, q1)
 }
 
+/// `same` multiplies amplitudes whose two target bits agree, `diff` those
+/// whose bits differ.
 pub(crate) fn launch_apply_parity_phase(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1024,6 +1025,8 @@ fn validate_mcu_qubits(n: usize, controls: &[usize], target: usize) -> Result<Ve
     Ok(sorted)
 }
 
+/// The sorted control-plus-target qubit list is uploaded through the launcher
+/// scratch for index expansion.
 pub(crate) fn launch_apply_mcu(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1123,6 +1126,7 @@ pub(crate) fn launch_apply_mcu_phase(
     Ok(())
 }
 
+/// The matrix is flattened row-major and uploaded through the launcher scratch.
 pub(crate) fn launch_apply_fused_2q(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1169,6 +1173,8 @@ pub(crate) fn launch_apply_fused_2q(
     Ok(())
 }
 
+/// Two-stage device reduction (per-block partials, then a single-block
+/// finalize); one f64 crosses PCIe.
 pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize) -> Result<f64> {
     let n = state.num_qubits();
     if qubit >= n {
@@ -1247,6 +1253,8 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
     Ok((prob_raw * norm_sq).clamp(0.0, 1.0))
 }
 
+/// Zeroes the losing branch only; renormalization is deferred to the caller
+/// via `pending_norm`.
 pub(crate) fn measure_collapse(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1623,14 +1631,9 @@ const MULTI_FUSED_BLOCK_SIZE: u32 = (MULTI_FUSED_TILE_SIZE as u32) / 2;
 
 /// The tiled kernel has fixed shared-memory load/store overhead; for MultiFused groups
 /// with fewer than this many tile-local gates, per-gate launches of `apply_gate_1q` are
-/// cheaper. Value chosen empirically on a GTX 1080 Ti (Pascal, compute_61). Below 3
-/// gates, the per-gate path wins because launch overhead is comparable to the tile's
-/// load/store cost.
-///
-/// **Needs re-tuning per architecture.** Launch overhead (Ampere/Ada reduce it),
-/// shared-memory bandwidth, and L2 behavior all shift the crossover. On
-/// A100/H100/RTX 40-series, re-run `benchmark_internal/compare_gpu.py` with values
-/// 1..=5 and take the choice with the smallest regression.
+/// cheaper. Value chosen empirically on a GTX 1080 Ti (Pascal, compute_61); launch
+/// overhead, shared-memory bandwidth, and L2 behavior shift the crossover on newer
+/// architectures, so re-tune per device generation.
 const MULTI_FUSED_TILE_MIN_GATES: usize = 3;
 
 /// Apply a non-diagonal `MultiFused` via a shared-memory tiled kernel for sub-gates with

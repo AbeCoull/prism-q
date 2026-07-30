@@ -1,3 +1,7 @@
+//! Noise channels, noise models, and noisy samplers. Pauli-only models on
+//! Clifford circuits compile into a [`NoisyCompiledSampler`]; general
+//! channels run through the trajectory engine.
+
 use num_complex::Complex64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -50,6 +54,8 @@ pub enum NoiseChannel {
 }
 
 impl NoiseChannel {
+    /// Per-Pauli `(px, py, pz)` probabilities for a Pauli or Depolarizing
+    /// channel, `None` for every other channel.
     pub fn as_pauli(&self) -> Option<(f64, f64, f64)> {
         match self {
             NoiseChannel::Pauli { px, py, pz } => Some((*px, *py, *pz)),
@@ -61,6 +67,7 @@ impl NoiseChannel {
         }
     }
 
+    /// True for the Pauli and Depolarizing channels.
     pub fn is_pauli(&self) -> bool {
         matches!(
             self,
@@ -149,9 +156,12 @@ fn validate_probability(name: &str, value: f64) -> Result<()> {
     Ok(())
 }
 
+/// A noise channel bound to its target qubits; fires after the instruction
+/// its [`NoiseModel::after_gate`] slot is attached to.
 #[derive(Debug, Clone)]
 pub struct NoiseEvent {
     pub channel: NoiseChannel,
+    /// One qubit for single-qubit channels, two for `TwoQubitDepolarizing`.
     pub qubits: SmallVec<[usize; 2]>,
 }
 
@@ -163,6 +173,7 @@ impl NoiseEvent {
         }
     }
 
+    /// First target qubit (the only one for single-qubit channels).
     pub fn qubit(&self) -> usize {
         self.qubits[0]
     }
@@ -181,18 +192,44 @@ impl NoiseEvent {
     }
 }
 
+/// Classical bit-flip error applied to a measurement outcome.
 #[derive(Debug, Clone)]
 pub struct ReadoutError {
+    /// Probability a measured 0 reads out as 1.
     pub p01: f64,
+    /// Probability a measured 1 reads out as 0.
     pub p10: f64,
 }
 
+/// Per-instruction noise attached to a specific circuit.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{Circuit, Gate, NoiseModel, run_shots_noisy};
+///
+/// let mut circuit = Circuit::new(2, 2);
+/// circuit.add_gate(Gate::H, &[0]);
+/// circuit.add_gate(Gate::Cx, &[0, 1]);
+/// circuit.add_measure(0, 0);
+/// circuit.add_measure(1, 1);
+///
+/// let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+/// let result = run_shots_noisy(&circuit, &noise, 100, 42)?;
+/// assert_eq!(result.shots.len(), 100);
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
 pub struct NoiseModel {
+    /// Events fired after each instruction, indexed by instruction position;
+    /// length must equal the circuit's instruction count.
     pub after_gate: Vec<Vec<NoiseEvent>>,
+    /// Per-classical-bit readout error; `None` means ideal readout.
     pub readout: Vec<Option<ReadoutError>>,
 }
 
 impl NoiseModel {
+    /// Depolarizing noise with total probability `p` (not per branch) on
+    /// every target of every gate, ideal readout.
     pub fn uniform_depolarizing(circuit: &Circuit, p: f64) -> Self {
         let px = p / 3.0;
         let py = p / 3.0;
@@ -220,6 +257,8 @@ impl NoiseModel {
         }
     }
 
+    /// Amplitude damping with rate `gamma` on every target of every gate,
+    /// ideal readout.
     pub fn with_amplitude_damping(circuit: &Circuit, gamma: f64) -> Self {
         let mut after_gate = Vec::with_capacity(circuit.instructions.len());
         for instr in &circuit.instructions {
@@ -246,11 +285,14 @@ impl NoiseModel {
         }
     }
 
+    /// Set the same readout error on every classical bit.
     pub fn with_readout_error(&mut self, p01: f64, p10: f64) -> &mut Self {
         self.readout.fill(Some(ReadoutError { p01, p10 }));
         self
     }
 
+    /// True when every channel is Pauli or Depolarizing and readout is ideal,
+    /// the precondition for the compiled stabilizer sampling paths.
     pub fn is_pauli_only(&self) -> bool {
         self.after_gate
             .iter()
@@ -913,7 +955,8 @@ impl GpuNoiseCache {
 /// path. Materialized shot output still returns to the CPU in shot-major
 /// form, while exact counts and marginals can keep the packed
 /// measurement-major buffer on the device through noise application and
-/// reduction.
+/// reduction. `try_` methods propagate GPU errors; their plain twins fall
+/// back to the CPU path.
 pub struct NoisyCompiledSampler {
     noiseless: crate::sim::compiled::CompiledSampler,
     events: FlatNoiseSensitivity,

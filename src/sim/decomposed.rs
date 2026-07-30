@@ -1,3 +1,8 @@
+//! Independent-subsystem decomposition.
+//!
+//! Runs each independent block on its own backend, then merges classical bits
+//! and factored probabilities into one outcome.
+
 use crate::circuit::Circuit;
 use crate::error::Result;
 

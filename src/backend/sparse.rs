@@ -7,6 +7,19 @@
 //! Every gate walks the map, so the map hashes basis-state indices with the
 //! crate's multiply-xor hasher rather than the stdlib default.
 //!
+//! # Memory layout
+//!
+//! - `FxHashMap<usize, Complex64>` keyed by basis-state index, non-zero
+//!   amplitudes only.
+//! - A retained swap-buffer map lets amplitude-moving gates rebuild the state
+//!   without reallocating.
+//!
+//! # Gate support
+//!
+//! The full gate set, including MCU and every fused or batched variant.
+//! Diagonal gates scale amplitudes in place without moving keys. Shot
+//! sampling and Pauli expectations run natively on the map.
+//!
 //! # When to prefer this backend
 //!
 //! - States with few non-zero amplitudes (computational basis states, limited superposition).

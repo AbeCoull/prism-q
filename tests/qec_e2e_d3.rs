@@ -1,19 +1,8 @@
 //! End-to-end distance-3 repetition-code fixtures for the `EXP_VAL`
-//! estimator.
-//!
-//! `e2e-d3-t`: logical |+> encoding, one syndrome round with ancilla resets
-//! (exercising reset-alias translation of `EXP_VAL` terms), deterministic
-//! postselection, transversal T, and X/Y/Z logical expectation values with
-//! closed-form references. Runs the analytical ladder, the compiled-runner
-//! routing, and the sampled reference.
-//!
-//! `e2e-d3-s`: Clifford-only encoding under X noise with detectors,
-//! sampled through the compiled runner's reference route, compared against
-//! closed-form means within a 5-sigma band.
-//!
-//! `e2e-d3-d`: the same encoding plus transversal T under depolarizing noise
-//! and without syndrome measurement, routed to the exact density-matrix
-//! estimator and compared against closed-form means at 1e-10.
+//! estimator, each against closed-form references: `e2e-d3-t` (noiseless
+//! transversal T with reset-alias translation and postselection), `e2e-d3-s`
+//! (Clifford encoding under X noise with detectors, sampled), and `e2e-d3-d`
+//! (depolarized transversal T on the exact density-matrix route).
 
 mod qec_common;
 

@@ -1,3 +1,5 @@
+//! Shot collections and probability-weighted shot sampling.
+
 use std::collections::HashMap;
 
 use rand::RngExt;
@@ -10,7 +12,6 @@ use super::compiled;
 /// Result of a multi-shot simulation run.
 #[derive(Debug, Clone)]
 pub struct ShotsResult {
-    /// Classical measurement outcomes for each shot.
     /// `shots[i][j]` is the j-th classical bit from the i-th shot.
     pub shots: Vec<Vec<bool>>,
     pub(crate) num_classical_bits: usize,
@@ -24,8 +25,6 @@ impl ShotsResult {
         }
     }
 
-    /// Build a frequency histogram of measurement outcomes.
-    ///
     /// Keys are packed `Vec<u64>` where bit `i` of word `i/64` corresponds
     /// to classical bit `i`. Use [`bitstring`] to format keys for display.
     pub fn counts(&self) -> HashMap<Vec<u64>, u64> {

@@ -1,10 +1,6 @@
-//! Cross-backend correctness tests for `StabilizerBackend`.
-//!
-//! Each test compares stabilizer probabilities against the
-//! `StatevectorBackend` reference. Only Clifford-eligible circuit
-//! families are exercised; non-Clifford gates (T, Tdg, parametric
-//! rotations, controlled-phase) would fall outside the stabilizer
-//! formalism and are caught by the `is_clifford` guard in `check`.
+//! Correctness for `StabilizerBackend` against the statevector reference, on
+//! Clifford-eligible circuit families only; the `is_clifford` guard in
+//! `check` rejects anything outside the stabilizer formalism.
 
 mod common;
 

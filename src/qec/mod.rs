@@ -60,40 +60,31 @@ use crate::sim::compiled::{PackedShots, PauliVec, get_bit, set_bit};
 /// Pauli basis used by QEC measurements and Pauli products.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QecBasis {
-    /// X basis.
     X,
-    /// Y basis.
     Y,
-    /// Z basis.
     Z,
 }
 
 /// One Pauli term in an MPP-style measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QecPauli {
-    /// Pauli basis for this term.
     pub basis: QecBasis,
-    /// Qubit acted on by this term.
     pub qubit: usize,
 }
 
 impl QecPauli {
-    /// Create a Pauli term.
     pub fn new(basis: QecBasis, qubit: usize) -> Self {
         Self { basis, qubit }
     }
 
-    /// Create an X term.
     pub fn x(qubit: usize) -> Self {
         Self::new(QecBasis::X, qubit)
     }
 
-    /// Create a Y term.
     pub fn y(qubit: usize) -> Self {
         Self::new(QecBasis::Y, qubit)
     }
 
-    /// Create a Z term.
     pub fn z(qubit: usize) -> Self {
         Self::new(QecBasis::Z, qubit)
     }
@@ -107,19 +98,15 @@ impl QecPauli {
 /// during the walk). `Lookback(1)` is the most recent measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QecRecordRef {
-    /// Absolute measurement record index.
     Absolute(usize),
-    /// Relative lookback into prior records, where `Lookback(1)` is the most recent.
     Lookback(usize),
 }
 
 impl QecRecordRef {
-    /// Create an absolute measurement reference.
     pub fn absolute(index: usize) -> Self {
         Self::Absolute(index)
     }
 
-    /// Create a relative measurement reference.
     pub fn lookback(distance: usize) -> Result<Self> {
         if distance == 0 {
             return Err(PrismError::InvalidParameter {
@@ -172,7 +159,6 @@ pub enum QecNoise {
 }
 
 impl QecNoise {
-    /// Channel probability.
     pub fn probability(self) -> f64 {
         match self {
             Self::XError(p) | Self::ZError(p) | Self::Depolarize1(p) | Self::Depolarize2(p) => p,
@@ -335,7 +321,6 @@ impl QecMeasurementRow {
         terms
     }
 
-    /// Packed row storage in bytes.
     pub fn packed_bytes(&self) -> usize {
         (self.pauli.x.len() + self.pauli.z.len()) * std::mem::size_of::<u64>()
     }
@@ -353,7 +338,6 @@ pub struct QecCompiledRows {
 }
 
 impl QecCompiledRows {
-    /// Number of qubits in the source program.
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }
@@ -373,7 +357,6 @@ impl QecCompiledRows {
         &self.observable_rows
     }
 
-    /// Postselection parity rows.
     pub fn postselection_rows(&self) -> &[Vec<usize>] {
         &self.postselection_rows
     }
@@ -391,22 +374,18 @@ impl QecCompiledRows {
             .zip(self.postselection_expected.iter().copied())
     }
 
-    /// Number of measurement records.
     pub fn num_measurements(&self) -> usize {
         self.measurement_rows.len()
     }
 
-    /// Number of detector rows.
     pub fn num_detectors(&self) -> usize {
         self.detector_rows.len()
     }
 
-    /// Number of observable rows.
     pub fn num_observables(&self) -> usize {
         self.observable_rows.len()
     }
 
-    /// Number of postselection predicates.
     pub fn num_postselections(&self) -> usize {
         self.postselection_rows.len()
     }
@@ -425,17 +404,14 @@ impl QecCompiledRows {
             .saturating_mul(std::mem::size_of::<u64>())
     }
 
-    /// Compute detector records from packed measurement records.
     pub fn detector_parities(&self, measurements: &PackedShots) -> Result<PackedShots> {
         measurements.parity_rows(&self.detector_rows)
     }
 
-    /// Compute logical observable records from packed measurement records.
     pub fn observable_parities(&self, measurements: &PackedShots) -> Result<PackedShots> {
         measurements.parity_rows(&self.observable_rows)
     }
 
-    /// Compute postselection predicate parities from packed measurement records.
     pub fn postselection_parities(&self, measurements: &PackedShots) -> Result<PackedShots> {
         measurements.parity_rows(&self.postselection_rows)
     }
@@ -444,7 +420,6 @@ impl QecCompiledRows {
 /// Options for running a native QEC program.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QecOptions {
-    /// Number of shots requested by runner APIs.
     pub shots: usize,
     /// RNG seed used by stochastic samplers and Pauli-noise dispatch.
     pub seed: u64,
@@ -482,12 +457,10 @@ pub struct QecProgram {
 }
 
 impl QecProgram {
-    /// Create an empty program.
     pub fn new(num_qubits: usize) -> Self {
         Self::with_options(num_qubits, QecOptions::default())
     }
 
-    /// Create an empty program with explicit options.
     pub fn with_options(num_qubits: usize, options: QecOptions) -> Self {
         Self {
             num_qubits,
@@ -519,22 +492,18 @@ impl QecProgram {
         parse_qec_program(input)
     }
 
-    /// Number of qubits in the program.
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }
 
-    /// Runner options.
     pub fn options(&self) -> QecOptions {
         self.options
     }
 
-    /// Set runner options.
     pub fn set_options(&mut self, options: QecOptions) {
         self.options = options;
     }
 
-    /// Operation stream.
     pub fn ops(&self) -> &[QecOp] {
         &self.ops
     }
@@ -552,7 +521,6 @@ impl QecProgram {
             .count()
     }
 
-    /// Number of detector rows.
     pub fn num_detectors(&self) -> usize {
         self.ops
             .iter()
@@ -560,7 +528,7 @@ impl QecProgram {
             .count()
     }
 
-    /// Number of logical observable slots.
+    /// Observable slot count, `max included index + 1`.
     pub fn num_observables(&self) -> usize {
         self.ops
             .iter()
@@ -593,14 +561,12 @@ impl QecProgram {
             .collect()
     }
 
-    /// Append a validated operation.
     pub fn push_op(&mut self, op: QecOp) -> Result<()> {
         self.validate_op(&op, self.num_measurements())?;
         self.ops.push(op);
         Ok(())
     }
 
-    /// Append a gate operation.
     pub fn push_gate(&mut self, gate: Gate, targets: &[usize]) -> Result<()> {
         self.push_op(QecOp::Gate {
             gate,
@@ -608,7 +574,6 @@ impl QecProgram {
         })
     }
 
-    /// Append a reset operation.
     pub fn reset(&mut self, basis: QecBasis, qubit: usize) -> Result<()> {
         self.push_op(QecOp::Reset { basis, qubit })
     }
@@ -658,7 +623,6 @@ impl QecProgram {
         Ok(detector)
     }
 
-    /// Append a logical observable parity contribution.
     pub fn observable_include(
         &mut self,
         observable: usize,
@@ -670,7 +634,6 @@ impl QecProgram {
         })
     }
 
-    /// Append expectation-value metadata.
     pub fn expectation_value(&mut self, terms: &[QecPauli], coefficient: f64) -> Result<()> {
         self.push_op(QecOp::ExpectationValue {
             terms: terms.to_vec(),
@@ -678,7 +641,6 @@ impl QecProgram {
         })
     }
 
-    /// Append a postselection predicate.
     pub fn postselect(&mut self, records: &[QecRecordRef], expected: bool) -> Result<()> {
         self.push_op(QecOp::Postselect {
             records: records.to_vec(),
@@ -686,7 +648,6 @@ impl QecProgram {
         })
     }
 
-    /// Append a Pauli-noise annotation.
     pub fn noise(&mut self, channel: QecNoise, targets: &[usize]) -> Result<()> {
         self.push_op(QecOp::Noise {
             channel,

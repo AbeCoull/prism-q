@@ -317,17 +317,13 @@ struct WeightedMpsBranch {
 /// Result of stabilizer rank probability computation.
 #[derive(Debug, Clone)]
 pub struct StabRankResult {
-    /// Probability distribution over computational basis states.
     pub probabilities: Vec<f64>,
-    /// Number of stabilizer terms in the decomposition.
     pub num_terms: usize,
-    /// T-gate count in the circuit.
     pub t_count: usize,
     /// Number of terms pruned during approximate simulation (0 for exact).
     pub pruned_count: usize,
 }
 
-/// Minimum term count for parallel Clifford gate application.
 #[cfg(feature = "parallel")]
 const MIN_TERMS_FOR_PAR: usize = 16;
 
@@ -1242,10 +1238,10 @@ mod tests {
         }
     }
 
-    /// Regression for prior two-T multi-qubit reconstruction failure.
-    /// Per-branch tableau export picked inconsistent implicit global
-    /// phases when support shifted between branches. The Pauli-offset
-    /// representation should preserve the interference pattern.
+    // Regression for prior two-T multi-qubit reconstruction failure.
+    // Per-branch tableau export picked inconsistent implicit global
+    // phases when support shifted between branches. The Pauli-offset
+    // representation should preserve the interference pattern.
     #[test]
     fn test_two_t_multi_qubit_bisect_stages() {
         type Stage<'a> = (&'a str, &'a [(Gate, &'a [usize])]);
@@ -1323,8 +1319,8 @@ mod tests {
         assert!(failures.is_empty(), "fails:\n  {}", failures.join("\n  "));
     }
 
-    /// Companion to the bisect test: minimal multi-qubit two-T fixture.
-    /// Same root cause: cross-branch phase reconstruction.
+    // Companion to the bisect test: minimal multi-qubit two-T fixture.
+    // Same root cause: cross-branch phase reconstruction.
     #[test]
     fn test_two_t_multi_qubit_entangled_matches_statevector() {
         // Surface fixture: H_0, CX(0,1), T_0, H_0, T_0, H_0, H_1.

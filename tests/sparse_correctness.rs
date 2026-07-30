@@ -1,9 +1,6 @@
-//! Cross-backend correctness tests for `SparseBackend`.
-//!
-//! Sparse stores `HashMap<usize, Complex64>` and supports the full
-//! gate set. Tests cross-validate against the Statevector reference
-//! and against the unfused apply loop on the same backend, across
-//! eight circuit families at sizes `≤ 12q`.
+//! Cross-backend correctness for `SparseBackend` against the statevector
+//! reference and the unfused apply loop, across eight circuit families at
+//! sizes up to 12q.
 
 mod common;
 

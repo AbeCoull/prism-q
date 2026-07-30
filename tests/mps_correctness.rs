@@ -1,9 +1,6 @@
-//! Cross-backend correctness tests for `MpsBackend`.
-//!
-//! Bond dimension is sized to the circuit so MPS represents the full state
-//! exactly: `bond_dim = max(2^(n/2), 64)`. Tests cross-validate against the
-//! Statevector reference and against the unfused apply loop on the same
-//! backend at sizes ≤ 16q.
+//! Cross-backend correctness for `MpsBackend` against the statevector
+//! reference and the unfused apply loop at sizes up to 16q. Bond dimension is
+//! `max(2^(n/2), 64)` so the MPS holds the full state exactly.
 
 mod common;
 

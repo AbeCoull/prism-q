@@ -1,12 +1,6 @@
-//! Cross-backend correctness tests for `FactoredBackend`.
-//!
-//! Dynamic split-state backend: handles both monolithic 2^n state vectors
-//! and independent subsystems split into blocks. Each of the 16 builders
-//! in `prism_q::circuits` runs through both an SV cross check and a
-//! fused-vs-unfused self-check on the factored backend at moderate
-//! sizes (8-12q). A second tier exercises blocked builders at 20q where
-//! the factored backend's split-state path is exercised, and monolithic
-//! builders at 16q to cover the larger fusion pipeline.
+//! Cross-backend correctness for `FactoredBackend`: SV cross checks and
+//! fused-vs-unfused self-checks over the builder corpus at 8-12q, blocked
+//! builders at 20q for the split-state path, monolithic builders at 16q.
 
 mod common;
 

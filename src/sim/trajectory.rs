@@ -1,3 +1,6 @@
+//! Monte Carlo trajectory execution for noisy circuits: one pure-state
+//! simulation per shot, sampling a noise branch after each instruction.
+
 use num_complex::Complex64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -438,11 +441,11 @@ mod tests {
     use super::*;
     use crate::circuits;
 
-    /// The replica cap is only a memory bound if it stays at or below the cap
-    /// governing a single state. Raising `MAX_QUBITS_FOR_PAR_SHOTS` past the
-    /// statevector cap would let the parallel path allocate one oversize state
-    /// per thread, which is the failure `run_trajectories` avoids by falling
-    /// back to serial execution.
+    // The replica cap is only a memory bound if it stays at or below the cap
+    // governing a single state. Raising `MAX_QUBITS_FOR_PAR_SHOTS` past the
+    // statevector cap would let the parallel path allocate one oversize state
+    // per thread, which is the failure `run_trajectories` avoids by falling
+    // back to serial execution.
     #[cfg(feature = "parallel")]
     #[test]
     fn parallel_trajectory_replicas_stay_within_a_single_state_cap() {

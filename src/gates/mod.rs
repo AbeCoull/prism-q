@@ -5,7 +5,7 @@
 //! to avoid heap allocation during gate application.
 //!
 //! # Hot-path design notes
-//! - `Gate` methods take `&self`, the enum is 16 bytes (Box indirection for `Fused`).
+//! - `Gate` methods take `&self`, the enum is 16 bytes with large payloads boxed.
 //! - `matrix_2x2` returns `[[Complex64; 2]; 2]` on the stack.
 //! - Two-qubit gates (CX, CZ, SWAP) have dedicated application routines in
 //!   backends rather than materializing a 4×4 matrix.
@@ -30,7 +30,8 @@ const IDENTITY_EPS: f64 = 1e-12;
 /// Quantum gate identifier.
 ///
 /// Covers the v0 supported gate set. Most variants are data-free or carry an `f64`
-/// parameter inline. The `Fused` variant uses `Box` to keep the enum at 16 bytes.
+/// parameter inline. Variants with larger payloads (matrices, batch data) box them
+/// to keep the enum at 16 bytes for cache-friendly instruction streams.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Gate {
     /// Identity.
@@ -78,49 +79,44 @@ pub enum Gate {
 
     /// Controlled-unitary. Applies the boxed 2×2 matrix to the target qubit
     /// only when the control qubit is |1⟩. Qubit order: [control, target].
-    /// Boxed to keep `Gate` at 16 bytes.
     Cu(Box<[[Complex64; 2]; 2]>),
 
     /// Multi-controlled unitary. Applies the 2×2 matrix to the target qubit
     /// only when all control qubits are |1⟩. Qubit order:
     /// `[ctrl_0, ctrl_1, ..., ctrl_{k-1}, target]`.
-    /// Boxed to keep `Gate` at 16 bytes.
     Mcu(Box<McuData>),
 
     /// Pre-fused single-qubit unitary (product of consecutive gates on the same target).
-    /// Boxed to keep `Gate` at 16 bytes for cache-friendly instruction streams.
     Fused(Box<[[Complex64; 2]; 2]>),
 
     /// Batched controlled-phase: multiple cphase gates sharing a control qubit,
     /// fused into a single pass over the statevector. Created by the cphase
     /// fusion pass. Targets: `[control]`. The `BatchPhaseData` holds per-target
-    /// phases. Boxed to keep `Gate` at 16 bytes.
+    /// phases.
     BatchPhase(Box<BatchPhaseData>),
 
     /// Batched ZZ rotations: multiple Rzz gates fused into a single pass.
     /// Created by the batch-Rzz fusion pass. The `BatchRzzData` holds per-edge
-    /// angles. Boxed to keep `Gate` at 16 bytes.
+    /// angles.
     BatchRzz(Box<BatchRzzData>),
 
     /// Batched diagonal gates: a contiguous run of diagonal 1q and 2q gates
     /// collapsed into a single state-vector sweep with a precomputed phase LUT.
     /// Subsumes BatchPhase and BatchRzz for mixed diagonal runs. Created by the
-    /// diagonal batch fusion pass. Boxed to keep `Gate` at 16 bytes.
+    /// diagonal batch fusion pass.
     DiagonalBatch(Box<DiagonalBatchData>),
 
     /// Multiple single-qubit gates on distinct qubits, batched for a single
     /// tiled pass over the statevector. Created by the multi-gate fusion pass.
-    /// Boxed to keep `Gate` at 16 bytes.
     MultiFused(Box<MultiFusedData>),
 
     /// Pre-fused two-qubit unitary (4×4 matrix). Created by the 2q fusion pass
     /// which absorbs adjacent single-qubit gates into a two-qubit gate.
-    /// Boxed to keep `Gate` at 16 bytes.
     Fused2q(Box<[[Complex64; 4]; 4]>),
 
     /// Multiple two-qubit gates batched for a single tiled pass over the
     /// statevector. Created by the multi-2q fusion pass. Each entry stores
-    /// `(q0, q1, 4×4 matrix)`. Boxed to keep `Gate` at 16 bytes.
+    /// `(q0, q1, 4×4 matrix)`.
     Multi2q(Box<Multi2qData>),
 
     /// Quantum Fourier Transform on `start..start+num`.
@@ -209,6 +205,8 @@ pub enum DiagEntry {
 }
 
 impl DiagEntry {
+    /// Return the qubit and dense 2×2 matrix for a [`DiagEntry::Phase1q`]
+    /// entry, or `None` for two-qubit entries.
     pub fn as_1q_matrix(&self) -> Option<(usize, [[Complex64; 2]; 2])> {
         match *self {
             DiagEntry::Phase1q { qubit, d0, d1 } => {
@@ -219,6 +217,8 @@ impl DiagEntry {
         }
     }
 
+    /// Return the qubit pair and dense 4×4 matrix for a [`DiagEntry::Phase2q`]
+    /// or [`DiagEntry::Parity2q`] entry, or `None` for single-qubit entries.
     pub fn as_2q_matrix(&self) -> Option<(usize, usize, [[Complex64; 4]; 4])> {
         let z = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
@@ -299,7 +299,6 @@ pub(crate) fn kron_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Co
     result
 }
 
-/// Product of two 4×4 matrices: A · B.
 #[inline]
 pub(crate) fn mat_mul_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
     let zero = Complex64::new(0.0, 0.0);
@@ -316,7 +315,6 @@ pub(crate) fn mat_mul_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [
     result
 }
 
-/// Conjugate-transpose of a 4×4 matrix (U†).
 fn adjoint_4x4(m: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
     let mut result = [[Complex64::new(0.0, 0.0); 4]; 4];
     for i in 0..4 {
@@ -327,7 +325,6 @@ fn adjoint_4x4(m: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
     result
 }
 
-/// Conjugate-transpose of a 2×2 matrix (U†).
 fn adjoint_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
         [m[0][0].conj(), m[1][0].conj()],
@@ -368,7 +365,6 @@ fn count_unique_diag_qubits(entries: &[DiagEntry]) -> usize {
     seen.len()
 }
 
-/// Product of two 2×2 matrices: A · B.
 #[inline]
 pub(crate) fn mat_mul_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
@@ -926,7 +922,6 @@ pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
     true
 }
 
-/// Check if two 2x2 unitary matrices are equal up to a global phase factor.
 fn matrices_equal_up_to_phase(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) -> bool {
     // Find the first non-zero entry in b to determine the phase ratio
     let mut phase = None;

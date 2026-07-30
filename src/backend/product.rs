@@ -20,6 +20,11 @@
 //! - Circuits with zero entangling gates (e.g., single-qubit randomized benchmarking).
 //! - As a fast validator for single-qubit gate correctness.
 //! - Scales to arbitrarily many qubits with constant per-qubit cost.
+//!
+//! # When NOT to use this backend
+//!
+//! - Circuits containing any entangling gate; the run stops with
+//!   `BackendUnsupported` at the first one.
 
 use num_complex::Complex64;
 use rand::RngExt;

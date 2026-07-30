@@ -29,6 +29,21 @@ use crate::sim::gradient::ParameterMap;
 /// trainable parameter for the adjoint gradient. Retrieve the recorded map with
 /// [`parameter_map`](Self::parameter_map) or
 /// [`build_parametric`](Self::build_parametric).
+///
+/// Gate and measurement methods panic when a qubit or classical bit index is
+/// out of bounds.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{CircuitBuilder, simulate};
+///
+/// let circuit = CircuitBuilder::new(2).h(0).cx(0, 1).build();
+/// let result = simulate(&circuit).seed(42).run().expect("simulation failed");
+/// let probs = result.probabilities.expect("no probabilities").to_vec();
+/// assert!((probs[0] - 0.5).abs() < 1e-10);
+/// assert!((probs[3] - 0.5).abs() < 1e-10);
+/// ```
 pub struct CircuitBuilder {
     circuit: Circuit,
     params: ParameterMap,
@@ -129,17 +144,21 @@ impl CircuitBuilder {
     gate_2q!(cz, Cz, q0, q1);
     gate_2q!(swap, Swap, q0, q1);
 
+    /// Append a controlled unitary applying `mat` to `target` when `control` is |1⟩.
     pub fn cu(&mut self, mat: [[Complex64; 2]; 2], control: usize, target: usize) -> &mut Self {
         self.circuit.add_gate(Gate::cu(mat), &[control, target]);
         self
     }
 
+    /// Append a controlled-phase gate applying phase `e^{i theta}` to |11⟩.
     pub fn cphase(&mut self, theta: f64, control: usize, target: usize) -> &mut Self {
         self.circuit
             .add_gate(Gate::cphase(theta), &[control, target]);
         self
     }
 
+    /// Append a multi-controlled unitary applying `mat` to `target` when every
+    /// qubit in `controls` is |1⟩.
     pub fn mcu(
         &mut self,
         mat: [[Complex64; 2]; 2],
@@ -161,9 +180,6 @@ impl CircuitBuilder {
     }
 
     /// Reset `qubit` to |0⟩.
-    ///
-    /// # Panics
-    /// Panics if `qubit` is out of bounds.
     pub fn reset(&mut self, qubit: usize) -> &mut Self {
         self.circuit.add_reset(qubit);
         self
@@ -177,11 +193,13 @@ impl CircuitBuilder {
         self
     }
 
+    /// Append a barrier over `qubits` (scheduling hint, no physical operation).
     pub fn barrier(&mut self, qubits: &[usize]) -> &mut Self {
         self.circuit.add_barrier(qubits);
         self
     }
 
+    /// Append `gate` on `targets`, executed only when `condition` holds at runtime.
     pub fn conditional(
         &mut self,
         condition: ClassicalCondition,
@@ -196,6 +214,8 @@ impl CircuitBuilder {
         self
     }
 
+    /// Append an arbitrary [`Gate`]; panics if the gate's arity does not
+    /// match `targets.len()`.
     pub fn gate(&mut self, gate: Gate, targets: &[usize]) -> &mut Self {
         self.circuit.add_gate(gate, targets);
         self

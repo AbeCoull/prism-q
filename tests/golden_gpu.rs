@@ -1,12 +1,9 @@
-//! Per-kernel GPU vs CPU amplitude equivalence tests.
-//!
-//! Runs each gate-dispatch path on both backends starting from |0…0⟩ (or a deliberately
-//! chosen non-trivial initial state) and compares the resulting amplitudes within 1e-12.
-//!
-//! Without a usable GPU every test here returns before asserting anything, so a green run on
-//! a CPU-only machine means "not tested", not "passed". Set `PRISM_REQUIRE_GPU=1` to turn that
-//! into a hard failure. Any machine that has a GPU should run the suite with it set; leaving it
-//! unset is only for CPU-only hosts, where the alternative is a build that cannot run at all.
+//! Per-kernel GPU vs CPU amplitude equivalence: each gate-dispatch path runs
+//! on both backends from |0...0> (or a chosen non-trivial state) and the
+//! amplitudes must agree within 1e-12. Without a usable GPU every test
+//! returns before asserting, so a green CPU-only run means "not tested", not
+//! "passed"; set `PRISM_REQUIRE_GPU=1` on any machine with a GPU to make that
+//! a hard failure.
 
 #![cfg(feature = "gpu")]
 
@@ -236,12 +233,10 @@ fn every_gate_variant_matches_cpu() {
 fn single_qubit_gates_all_targets() {
     let Some(f) = Fixture::try_new() else { return };
     let n = 4;
-    // Seed with a non-trivial superposition so each gate has something to act on.
     let mut insts = vec![];
     for q in 0..n {
         insts.push(g(Gate::H, &[q]));
     }
-    // Exercise every 1q variant on each target.
     let targets = [0usize, 1, 2, 3];
     let gates_1q = [
         Gate::X,
@@ -271,7 +266,7 @@ fn single_qubit_gates_all_targets() {
 fn fused_1q_matrix_arbitrary() {
     let Some(f) = Fixture::try_new() else { return };
     let n = 4;
-    // Non-unitary coefficients are fine here; we only compare CPU==GPU, not a unitary property.
+    // Non-unitary coefficients are fine; the check is CPU vs GPU, not unitarity.
     let mat = [
         [Complex64::new(0.3, 0.1), Complex64::new(-0.2, 0.4)],
         [Complex64::new(0.5, -0.3), Complex64::new(0.1, 0.2)],
@@ -361,7 +356,6 @@ fn mcu_toffoli_and_generic() {
     for q in 0..n {
         insts.push(g(Gate::H, &[q]));
     }
-    // Toffoli (2 controls, X target) via Mcu with an X matrix.
     let x_mat = [
         [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
         [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
@@ -372,7 +366,6 @@ fn mcu_toffoli_and_generic() {
     }));
     insts.push(g(mcu_toffoli, &[0, 1, 2]));
 
-    // Three-control arbitrary unitary.
     let mat = [
         [Complex64::new(0.4, 0.3), Complex64::new(-0.2, 0.5)],
         [Complex64::new(0.5, -0.2), Complex64::new(0.3, 0.4)],
@@ -412,8 +405,8 @@ fn mcu_phase_shortcut() {
 
 #[test]
 fn fused_2q_asymmetric_matrix() {
-    // Critical: non-diagonal 4x4 with all 16 entries distinct detects any basis-ordering bug
-    // between CPU (PreparedGate2q) and GPU apply_fused_2q.
+    // A non-diagonal 4x4 with all 16 entries distinct detects any basis-ordering
+    // bug between CPU (PreparedGate2q) and GPU apply_fused_2q.
     let Some(f) = Fixture::try_new() else { return };
     let n = 4;
     let mut mat = [[Complex64::new(0.0, 0.0); 4]; 4];
@@ -511,7 +504,6 @@ fn measurement_deterministic_with_fixed_seed() {
 #[test]
 fn reset_to_zero() {
     let Some(f) = Fixture::try_new() else { return };
-    // Put the register into |1⟩|+⟩|1⟩, then reset q0 and q2.
     let insts = [
         g(Gate::X, &[0]),
         g(Gate::H, &[1]),
@@ -528,8 +520,8 @@ fn reset_to_zero() {
 
 #[test]
 fn diagonal_batch_14q_mixed_entries_matches_cpu() {
-    // Drive a mixed DiagonalBatch (all three DiagEntry kinds across overlapping qubits)
-    // through the batched GPU kernel at a size that forces real DRAM passes.
+    // All three DiagEntry kinds on overlapping qubits, driven through the
+    // batched GPU kernel at a size that forces real DRAM passes.
     let Some(f) = Fixture::try_new() else { return };
     let n = 14;
     let mut insts = vec![];
@@ -581,8 +573,7 @@ fn batch_phase_16q_matches_cpu() {
     // `qft_circuit` emits a single `Gate::QftBlock`, so exercising the batched
     // phase kernel requires expanding to textbook gates first and running the
     // fusion pipeline, which re-batches the controlled phases into
-    // `Gate::BatchPhase` at 16q. The batched GPU kernel must match the CPU
-    // tiled kernel within tolerance.
+    // `Gate::BatchPhase` at 16q.
     let Some(f) = Fixture::try_new() else { return };
 
     let circuit = prism_q::circuits::qft_circuit(16);
@@ -635,13 +626,12 @@ fn multi_fused_nondiag_tiled_matches_cpu() {
         [Complex64::new(0.8, 0.0), Complex64::new(-0.6, 0.0)],
         [Complex64::new(0.6, 0.0), Complex64::new(0.8, 0.0)],
     ];
-    // Mix tile-local (targets 0..9) and external (targets 10..13).
     let gates: Vec<(usize, [[Complex64; 2]; 2])> = vec![
         (0, mat_h),
         (3, mat_ry),
         (5, mat_h),
         (7, mat_ry),
-        (9, mat_h), // boundary of tile (TILE_Q=10, so target 9 is the highest tile-local)
+        (9, mat_h), // tile boundary
         (10, mat_ry),
         (12, mat_h),
         (13, mat_ry),
@@ -663,9 +653,8 @@ fn multi_fused_nondiag_tiled_matches_cpu() {
 
 #[test]
 fn multi_fused_diagonal_batched_matches_cpu() {
-    // Constructs a MultiFused of 8 diagonal 1q gates on 14 qubits (above
-    // MIN_QUBITS_FOR_MULTI_FUSION so the batched path is the one being exercised) and
-    // proves the single-launch batched GPU kernel matches the CPU tiled kernel.
+    // 14q is above MIN_QUBITS_FOR_MULTI_FUSION, so the single-launch batched
+    // diagonal GPU kernel is the path exercised against the CPU tiled kernel.
     let Some(f) = Fixture::try_new() else { return };
     let n = 14;
     let gates: Vec<(usize, [[Complex64; 2]; 2])> = (0..8)
@@ -713,9 +702,8 @@ fn probabilities_match_cpu_on_random_circuit() {
 // BackendKind::StatevectorGpu end-to-end (real GPU required)
 // ============================================================================
 
-/// `run_with(BackendKind::StatevectorGpu)` on a non-decomposable random
-/// circuit at 14q (at the crossover threshold) must match CPU to within
-/// 1e-10. Exercises the dispatch → fusion → GPU kernel → probabilities path.
+// A non-decomposable random circuit at 14q (the crossover threshold)
+// exercises the dispatch → fusion → GPU kernel → probabilities path.
 #[test]
 fn statevector_gpu_builder_matches_cpu_random() {
     use prism_q::BackendKind;
@@ -742,10 +730,10 @@ fn statevector_gpu_builder_matches_cpu_random() {
     assert_probs_close(&gpu_p, &cpu_p, 1e-10, "gpu/dispatch_random_14q");
 }
 
-/// A mid-circuit measurement forces the per-shot slow path. With
-/// `BackendKind::StatevectorGpu` at 14q each per-shot backend routes to the
-/// device, and outcomes must match the host statevector shot-for-shot: both
-/// backends draw the same RNG stream for the same shot seed.
+// A mid-circuit measurement forces the per-shot slow path. With
+// `BackendKind::StatevectorGpu` at 14q each per-shot backend routes to the
+// device, and outcomes must match the host statevector shot-for-shot: both
+// backends draw the same RNG stream for the same shot seed.
 #[test]
 fn statevector_gpu_mid_measure_shots_match_cpu() {
     use prism_q::{BackendKind, Circuit};
@@ -781,10 +769,6 @@ fn statevector_gpu_mid_measure_shots_match_cpu() {
 // Stabilizer GPU scaffold
 // ============================================================================
 
-/// `StabilizerBackend::with_gpu(ctx).init(n, 0)` must allocate the device tableau
-/// successfully on a real GPU, and applying a single Clifford gate must succeed
-/// via the GPU kernel path. The full `apply` / `probabilities` / `measure` /
-/// `reset` surface is wired through the GPU route.
 #[test]
 fn stabilizer_gpu_init_allocates_tableau_and_accepts_gate() {
     use prism_q::StabilizerBackend;
@@ -811,9 +795,6 @@ fn stabilizer_gpu_init_allocates_tableau_and_accepts_gate() {
     assert!((probs[1] - 0.5).abs() < 1e-12);
 }
 
-/// `Barrier` must succeed on the GPU path (no-op), and a `Conditional` whose
-/// predicate evaluates to false must succeed without attempting to apply the
-/// gate. Both instructions need no device work.
 #[test]
 fn stabilizer_gpu_accepts_barrier_and_false_conditional() {
     use prism_q::StabilizerBackend;
@@ -830,8 +811,7 @@ fn stabilizer_gpu_accepts_barrier_and_false_conditional() {
         })
         .expect("barrier must be a no-op on the GPU path");
 
-    // Classical bit 0 starts false, so `BitIsOne(0)` evaluates to false and
-    // the gate is never applied.
+    // Classical bit 0 starts false, so the gate is never applied.
     backend
         .apply(&Instruction::Conditional {
             condition: ClassicalCondition::BitIsOne(0),
@@ -841,10 +821,8 @@ fn stabilizer_gpu_accepts_barrier_and_false_conditional() {
         .expect("false-predicate conditional must be a no-op on the GPU path");
 }
 
-/// Cloning a GPU-attached `StabilizerBackend` must panic loudly rather than
-/// silently produce an invalid state. The `#[should_panic]` matcher fires
-/// whether we reach the `backend.clone()` call (real GPU available) or the
-/// explicit skip panic below (no GPU available).
+// Cloning a GPU-attached `StabilizerBackend` must panic rather than silently
+// produce an invalid state.
 #[test]
 #[should_panic(expected = "StabilizerBackend::clone is unsupported")]
 fn stabilizer_gpu_clone_panics() {
@@ -902,8 +880,6 @@ fn stab_compare(f: &Fixture, num_qubits: usize, instructions: &[Instruction]) {
 fn stabilizer_gpu_single_qubit_gates_all_targets() {
     let Some(f) = Fixture::try_new() else { return };
     let n = 4;
-    // Seed the tableau with an H on every qubit so subsequent gates have
-    // non-trivial (x, z) bit patterns to act on.
     let mut insts = vec![];
     for q in 0..n {
         insts.push(g(Gate::H, &[q]));
@@ -918,7 +894,6 @@ fn stabilizer_gpu_single_qubit_gates_all_targets() {
         Gate::SX,
         Gate::SXdg,
     ];
-    // Apply each 1q variant to each target qubit.
     for t in 0..n {
         for gate in &gates_1q {
             insts.push(g(gate.clone(), &[t]));
@@ -927,9 +902,7 @@ fn stabilizer_gpu_single_qubit_gates_all_targets() {
     stab_compare(&f, n, &insts);
 }
 
-/// `Gate::Id` is dispatched as a no-op: no kernel launch, tableau unchanged.
-/// Driving a mix of Id and real gates must produce the same tableau as a
-/// run with Id omitted.
+// `Gate::Id` is dispatched as a no-op: no kernel launch, tableau unchanged.
 #[test]
 fn stabilizer_gpu_id_is_noop() {
     let Some(f) = Fixture::try_new() else { return };
@@ -944,7 +917,6 @@ fn stabilizer_gpu_id_is_noop() {
         g(Gate::S, &[2]),
         g(Gate::Id, &[0]),
     ];
-    // Both programs must leave the GPU tableau in the same state.
     use prism_q::StabilizerBackend;
     let mut a = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
     a.init(n, 0).unwrap();
@@ -987,8 +959,6 @@ fn stabilizer_gpu_cross_word_targets() {
     // Exercises `word_idx != 0` paths by operating on qubits >= 64.
     let Some(f) = Fixture::try_new() else { return };
     let n = 80;
-    // Seed a Bell pair straddling the 64-qubit word boundary, then exercise
-    // every gate variant on qubits in both word halves.
     let insts = vec![
         g(Gate::H, &[63]),
         g(Gate::H, &[64]),
@@ -1008,11 +978,9 @@ fn stabilizer_gpu_cross_word_targets() {
 
 #[test]
 fn stabilizer_gpu_batch_1000_gates_matches_cpu() {
-    // Runs ~1000 mixed Clifford gates via `apply_instructions` so the GPU
-    // path flushes the queued op list through `stab_apply_batch` in a single
-    // launch, then compares the post-batch device tableau against CPU
-    // byte for byte. Every opcode consumed by the batch kernel is exercised
-    // multiple times, including targets on both word halves.
+    // `apply_instructions` flushes the queued op list through `stab_apply_batch`
+    // in a single launch. Every opcode consumed by the batch kernel appears
+    // multiple times, with targets on both word halves.
     use prism_q::StabilizerBackend;
     let Some(f) = Fixture::try_new() else { return };
     let n = 80;
@@ -1039,8 +1007,7 @@ fn stabilizer_gpu_batch_1000_gates_matches_cpu() {
         let t = (step * 5 + 1) % n;
         insts.push(g(g1, &[t]));
     }
-    // Also drop in SX, SXdg, and cross-word CX/CZ/SWAP so the rarer opcodes
-    // are covered within the same batch.
+    // The rarer opcodes must land in the same batch.
     insts.push(g(Gate::SX, &[77]));
     insts.push(g(Gate::SXdg, &[2]));
     insts.push(g(Gate::Cx, &[63, 64]));
@@ -1064,11 +1031,9 @@ fn stabilizer_gpu_batch_1000_gates_matches_cpu() {
 #[test]
 fn stabilizer_gpu_bell_and_ghz() {
     let Some(f) = Fixture::try_new() else { return };
-    // Bell state on 2 qubits.
     let bell = [g(Gate::H, &[0]), g(Gate::Cx, &[0, 1])];
     stab_compare(&f, 2, &bell);
 
-    // 4q GHZ state.
     let mut ghz = vec![g(Gate::H, &[0])];
     for i in 0..3 {
         ghz.push(g(Gate::Cx, &[i, i + 1]));
@@ -1085,8 +1050,7 @@ fn stabilizer_gpu_rejects_non_clifford_via_gpu_path() {
     let mut backend = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
     backend.init(2, 0).unwrap();
 
-    // T is non-Clifford; must return BackendUnsupported with the same error
-    // shape the CPU path produces.
+    // Same error shape as the CPU path: BackendUnsupported.
     let err = backend.apply(&g(Gate::T, &[0])).unwrap_err();
     assert!(
         matches!(err, PrismError::BackendUnsupported { .. }),
@@ -1135,9 +1099,8 @@ fn stab_rowmul_compare(
 
 #[test]
 fn stabilizer_gpu_rowmul_identity_tableau() {
-    // Rowmul on a freshly initialised tableau: destabilizer row 0 (X_0) into
-    // stabilizer row 2n (scratch or another row). Destabilizer and stabilizer
-    // generators at the same qubit anticommute, so the g-function fires.
+    // Destabilizer and stabilizer generators at the same qubit anticommute, so
+    // the g-function fires even on a fresh tableau.
     let Some(f) = Fixture::try_new() else { return };
     stab_rowmul_compare(&f, 4, &[], &[(0, 4), (1, 5), (2, 6)]);
 }
@@ -1150,9 +1113,6 @@ fn stabilizer_gpu_rowmul_all_pauli_cases() {
     //   X * Y = iZ  (pos bit 1)
     //   Y * Z = iX  (pos bit 1)
     //   Z * X = iY  (pos bit 1)
-    // The preparation below drives rows into mixed Pauli strings by running H,
-    // S, CX on varied qubits, then the rowmul pairs cover many src/dst
-    // combinations so the reduction is exercised across all four cases.
     let Some(f) = Fixture::try_new() else { return };
     let prep = vec![
         g(Gate::H, &[0]),
@@ -1182,8 +1142,7 @@ fn stabilizer_gpu_rowmul_multiple_rounds() {
         g(Gate::Cx, &[1, 2]),
         g(Gate::S, &[0]),
     ];
-    // Fold rows 0, 1, 2, 3 into row 4, then row 4 into row 5, etc. Forces the
-    // kernel's in-place update to be read-after-write consistent.
+    // Forces the kernel's in-place update to be read-after-write consistent.
     let pairs = [(0, 4), (1, 4), (2, 4), (3, 4), (4, 5), (5, 6)];
     stab_rowmul_compare(&f, 4, &prep, &pairs);
 }
@@ -1300,7 +1259,6 @@ fn stabilizer_gpu_bell_measurement_correlated() {
 #[test]
 fn stabilizer_gpu_ghz_4_correlated() {
     let Some(f) = Fixture::try_new() else { return };
-    // 4-qubit GHZ: all four measurement bits must be equal.
     use prism_q::StabilizerBackend;
     for seed in [1u64, 7, 31, 777] {
         let mut b = StabilizerBackend::new(seed).with_gpu(f.ctx.clone());
@@ -1326,10 +1284,10 @@ fn stabilizer_gpu_ghz_4_correlated() {
 
 #[test]
 fn stabilizer_gpu_large_ghz_measure_all_matches_cpu() {
-    // 500q GHZ, measure every qubit. CPU uses the same seed so RNG draws line
-    // up per measurement. Exercises the on-device pivot / cascade / fixup
-    // path plus the serial deterministic-branch kernel on a tableau too
-    // large for the small-scale tests above to catch scaling regressions.
+    // CPU uses the same seed so RNG draws line up per measurement. Exercises
+    // the on-device pivot / cascade / fixup path plus the serial
+    // deterministic-branch kernel on a tableau too large for the small-scale
+    // tests above to catch scaling regressions.
     use prism_q::StabilizerBackend;
     let Some(f) = Fixture::try_new() else { return };
     let n = 500;
@@ -1361,7 +1319,6 @@ fn stabilizer_gpu_large_ghz_measure_all_matches_cpu() {
         gpu.classical_results(),
         "GHZ-{n} measure-all bits must match byte for byte"
     );
-    // GHZ sanity: every measurement bit equals the first.
     let bits = gpu.classical_results();
     assert!(
         bits.iter().all(|&x| x == bits[0]),
@@ -1376,7 +1333,6 @@ fn stabilizer_gpu_reset_collapses_to_zero() {
     let Some(f) = Fixture::try_new() else { return };
     let mut b = StabilizerBackend::new(42).with_gpu(f.ctx.clone());
     b.init(2, 2).unwrap();
-    // Prepare |1⟩⊗|1⟩, then reset q0 and measure both.
     b.apply(&g(Gate::X, &[0])).unwrap();
     b.apply(&g(Gate::X, &[1])).unwrap();
     b.apply(&Instruction::Reset { qubit: 0 }).unwrap();
@@ -1474,10 +1430,9 @@ fn stabilizer_gpu_export_statevector_matches_cpu() {
 // Stabilizer GPU public dispatch
 // ============================================================================
 
-/// `simulate(...).backend(BackendKind::StabilizerGpu)` routes through the
-/// crossover. For small n the crossover sends the circuit to the CPU
-/// stabilizer automatically. Verifies end-to-end dispatch matches a direct
-/// `BackendKind::Stabilizer` run.
+// `simulate(...).backend(BackendKind::StabilizerGpu)` routes through the
+// crossover; for small n the crossover sends the circuit to the CPU
+// stabilizer automatically.
 #[test]
 fn stabilizer_gpu_builder_matches_cpu_below_threshold() {
     use prism_q::{BackendKind, Circuit, simulate};
@@ -1508,11 +1463,9 @@ fn stabilizer_gpu_builder_matches_cpu_below_threshold() {
     assert_eq!(cpu.classical_bits, gpu.classical_bits);
 }
 
-/// End-to-end dispatch check at a large qubit count. With the default
-/// crossover (100_000) this routes to CPU underneath, so the comparison is
-/// ultimately CPU-vs-CPU at the same seed. When future milestones lower the
-/// threshold the same test exercises the real GPU path and the assertion
-/// still holds.
+// With the default crossover (100_000) this routes to CPU underneath, so the
+// comparison is ultimately CPU-vs-CPU at the same seed. When future milestones
+// lower the threshold the same test exercises the real GPU path.
 #[test]
 fn stabilizer_gpu_builder_matches_cpu_at_scale() {
     use prism_q::{BackendKind, simulate};
@@ -1546,12 +1499,10 @@ fn stabilizer_gpu_builder_matches_cpu_at_scale() {
     );
 }
 
-/// `simulate(...).gpu_auto(ctx)` must select the GPU statevector for a large
-/// entangled non-Clifford block and produce amplitudes matching the CPU `Auto`
-/// path within 1e-10. The circuit is 16 qubits (clears the 14q crossover), fully
-/// entangled by a CX chain (single component, no decomposition), and non-Clifford
-/// via arbitrary rotations (no Clifford+T shortcut), so `Auto` lands on the dense
-/// statevector and `gpu_auto` routes that block to the device.
+// The circuit is 16 qubits (clears the 14q crossover), fully entangled by a
+// CX chain (single component, no decomposition), and non-Clifford via
+// arbitrary rotations (no Clifford+T shortcut), so `Auto` lands on the dense
+// statevector and `gpu_auto` routes that block to the device.
 #[test]
 fn auto_gpu_matches_cpu_auto_above_threshold() {
     use prism_q::{BackendKind, Circuit, simulate};
@@ -1604,11 +1555,9 @@ fn bts_min_shots_env() -> usize {
         .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT)
 }
 
-/// `run_shots_compiled_with_gpu` routes BTS sampling through the GPU when the
-/// circuit compiles to a flat sparse parity. Statistical test: 50 Bell pairs
-/// measured per shot. Every shot must have each pair correlated
-/// (outcome_{2i} == outcome_{2i+1}). The correlation is deterministic, so any
-/// bit error in the GPU path surfaces.
+// BTS sampling routes through the GPU when the circuit compiles to a flat
+// sparse parity. Bell pair correlation is deterministic, so any bit error in
+// the GPU path surfaces.
 #[test]
 fn run_shots_compiled_with_gpu_bell_pairs_are_correlated() {
     use prism_q::{Circuit, run_shots_compiled_with_gpu};
@@ -1641,19 +1590,16 @@ fn run_shots_compiled_with_gpu_bell_pairs_are_correlated() {
     }
 }
 
-/// Statistical equivalence: CPU BTS (`run_shots_compiled`) and GPU BTS
-/// (`run_shots_compiled_with_gpu`) draw from the same distribution. With the
-/// same seed and a flat sparse parity their marginal per-measurement bit
-/// rates should agree to within a few sigma over 10_000 shots.
+// CPU and GPU BTS draw from the same distribution but not the same stream,
+// so the comparison is statistical.
 #[test]
 fn run_shots_compiled_with_gpu_distribution_matches_cpu() {
     use prism_q::{Circuit, run_shots_compiled, run_shots_compiled_with_gpu};
 
     let Some(f) = Fixture::try_new() else { return };
 
-    // Independent random bits: H on each qubit then measure. Each qubit's
-    // marginal should be ~0.5. Use a modest qubit count so CPU reference
-    // computes quickly.
+    // Each qubit's marginal should be ~0.5. A modest qubit count keeps the
+    // CPU reference fast.
     let n = 32;
     let num_shots = 10_000;
     let mut circuit = Circuit::new(n, n);
@@ -1687,9 +1633,9 @@ fn run_shots_compiled_with_gpu_distribution_matches_cpu() {
     }
 }
 
-/// `simulate(...).backend(BackendKind::StabilizerGpu).shots(...)` should route
-/// Clifford shot sampling through the same compiled GPU sampler as
-/// `run_shots_compiled_with_gpu`, not the raw tableau measurement loop.
+// `simulate(...).backend(BackendKind::StabilizerGpu).shots(...)` should route
+// Clifford shot sampling through the same compiled GPU sampler as
+// `run_shots_compiled_with_gpu`, not the raw tableau measurement loop.
 #[test]
 fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
     use prism_q::{BackendKind, Circuit, run_shots_compiled_with_gpu, simulate};
@@ -1716,10 +1662,8 @@ fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
     assert_eq!(explicit.shots, compiled.shots);
 }
 
-/// Reused GPU BTS scratch should not change the packed output stream for a
-/// fixed sequence of batch requests. Two samplers with the same seed and chunk
-/// schedule should produce identical packed batches, even though one sampler
-/// reuses its GPU BTS cache across calls.
+// Reused GPU BTS scratch should not change the packed output stream for a
+// fixed sequence of batch requests.
 #[test]
 fn run_shots_compiled_with_gpu_repeated_batches_match_fresh_sampler() {
     use prism_q::{Circuit, compile_measurements};
@@ -1867,16 +1811,16 @@ fn sample_bulk_packed_device_counts_match_host_counts() {
     assert_eq!(device_counts, host_counts);
 }
 
-/// Noisy GPU reductions draw from the same distribution as the CPU noisy
-/// sampler. Device noise masks come from a device-seeded RNG stream, so the
-/// comparison is statistical: per-measurement marginals, per-qubit count
-/// frequencies, and parity-violation rates must agree within 5 sigma.
-///
-/// The circuit is 16 H qubits fanned into 16 four-source parity qubits, which
-/// keeps the compiled sampler on the sparse-parity strategy and inside the GPU
-/// BTS routing gates (rank, row weight, single block). The in-crate test
-/// `noisy_gpu_test_circuit_routes_to_gpu_bts` pins that routing; a circuit
-/// change that silently drops this test back to the CPU path fails there.
+// Noisy GPU reductions draw from the same distribution as the CPU noisy
+// sampler. Device noise masks come from a device-seeded RNG stream, so the
+// comparison is statistical: per-measurement marginals, per-qubit count
+// frequencies, and parity-violation rates must agree within 5 sigma.
+//
+// The circuit is 16 H qubits fanned into 16 four-source parity qubits, which
+// keeps the compiled sampler on the sparse-parity strategy and inside the GPU
+// BTS routing gates (rank, row weight, single block). The in-crate test
+// `noisy_gpu_test_circuit_routes_to_gpu_bts` pins that routing; a circuit
+// change that silently drops this test back to the CPU path fails there.
 #[test]
 fn noisy_compiled_gpu_reductions_match_cpu_statistics() {
     use prism_q::{Circuit, NoiseModel, compile_noisy};
@@ -2002,10 +1946,9 @@ fn one_frequencies_from_counts(
         .collect()
 }
 
-/// Terminal counts under `gpu_auto` simulate on device and sample from the
-/// device-reduced probabilities. Same seed twice must reproduce identical
-/// counts, and per-qubit frequencies must agree with the CPU `Auto` sampler
-/// within statistical tolerance (different samplers, same distribution).
+// Terminal counts under `gpu_auto` simulate on device and sample from the
+// device-reduced probabilities. CPU `Auto` uses a different sampler over the
+// same distribution, so the frequency comparison is statistical.
 #[test]
 fn auto_gpu_terminal_counts_match_cpu_auto() {
     use prism_q::{BackendKind, simulate};
@@ -2053,8 +1996,6 @@ fn auto_gpu_terminal_counts_match_cpu_auto() {
     }
 }
 
-/// Terminal shots under `gpu_auto`: deterministic per seed, per-qubit
-/// frequencies statistically matching the CPU `Auto` path.
 #[test]
 fn auto_gpu_terminal_shots_match_cpu_auto() {
     use prism_q::{BackendKind, simulate};
@@ -2114,9 +2055,9 @@ fn auto_gpu_terminal_shots_match_cpu_auto() {
     }
 }
 
-/// Explicit `StatevectorGpu` terminal counts route through the same terminal
-/// fast path as `AutoGpu`: device simulation, device-reduced probabilities,
-/// and the same host sampler, so identical seeds produce identical counts.
+// Explicit `StatevectorGpu` terminal counts route through the same terminal
+// fast path as `AutoGpu`: device simulation, device-reduced probabilities,
+// and the same host sampler, so identical seeds produce identical counts.
 #[test]
 fn statevector_gpu_terminal_counts_match_auto_gpu() {
     use prism_q::simulate;
@@ -2138,9 +2079,9 @@ fn statevector_gpu_terminal_counts_match_auto_gpu() {
     assert_eq!(auto_gpu.counts, explicit.counts);
 }
 
-/// Expectation values under `gpu_auto` and explicit `.gpu(...)` simulate on
-/// device and export amplitudes for the Pauli mask reduction. GPU kernel
-/// float ordering differs from the host, so agreement is 1e-8, not 1e-12.
+// Expectation values under `gpu_auto` and explicit `.gpu(...)` simulate on
+// device and export amplitudes for the Pauli mask reduction. GPU kernel
+// float ordering differs from the host, so agreement is 1e-8, not 1e-12.
 #[test]
 fn gpu_expectation_values_match_cpu() {
     use prism_q::{BackendKind, PauliAxis, PauliTerm, simulate};
@@ -2244,9 +2185,9 @@ fn assert_run_probs_match(circuit: &prism_q::Circuit, ctx: &std::sync::Arc<GpuCo
     }
 }
 
-/// Long Clifford prefix + non-Clifford tail under `gpu_auto`: the prefix runs
-/// on the host tableau, the exported state uploads to the device, and the tail
-/// runs there. Probabilities must match the CPU `Auto` temporal path.
+// Long Clifford prefix + non-Clifford tail under `gpu_auto`: the prefix runs
+// on the host tableau, the exported state uploads to the device, and the tail
+// runs there.
 #[test]
 fn auto_gpu_temporal_clifford_matches_cpu_auto() {
     let Some(f) = Fixture::try_new() else { return };
@@ -2259,9 +2200,9 @@ fn auto_gpu_temporal_clifford_matches_cpu_auto() {
     assert_run_probs_match(&circuit, &f.ctx);
 }
 
-/// Same shape with a `QftBlock` tail: the device tail cannot run the native
-/// host FFT path, so the block is expanded at plan time. Catches any route
-/// that hands an unexpanded block to the device kernels.
+// Same shape with a `QftBlock` tail: the device tail cannot run the native
+// host FFT path, so the block is expanded at plan time. Catches any route
+// that hands an unexpanded block to the device kernels.
 #[test]
 fn auto_gpu_temporal_clifford_qft_tail_matches_cpu_auto() {
     let Some(f) = Fixture::try_new() else { return };
@@ -2282,8 +2223,6 @@ fn auto_gpu_temporal_clifford_qft_tail_matches_cpu_auto() {
     assert_run_probs_match(&circuit, &f.ctx);
 }
 
-/// Device round-trip for `init_from_state`: uploaded amplitudes must export
-/// back unchanged.
 #[test]
 fn init_from_state_gpu_round_trip() {
     let Some(f) = Fixture::try_new() else { return };
@@ -2312,10 +2251,8 @@ fn init_from_state_gpu_round_trip() {
 // AutoGpu noisy trajectories
 // ============================================================================
 
-/// Non-Pauli (amplitude damping) noise under `gpu_auto`: trajectories build
-/// soft device statevectors per shot and run serially. Per-qubit frequencies
-/// must agree statistically with the CPU `Auto` trajectory engine, and the
-/// run must be reproducible per seed.
+// Non-Pauli (amplitude damping) noise under `gpu_auto`: trajectories build
+// soft device statevectors per shot and run serially.
 #[test]
 fn auto_gpu_noisy_trajectories_match_cpu_auto() {
     use prism_q::NoiseModel;

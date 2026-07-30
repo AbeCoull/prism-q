@@ -34,7 +34,7 @@ fn compare_with_statevector(circuit: &Circuit, eps: f64) {
     assert_probs_close(&fac_probs, &sv_probs, eps);
 }
 
-// ---------- Basic single-qubit gates ----------
+// ---- Basic single-qubit gates ----
 
 #[test]
 fn test_x_gate() {
@@ -73,7 +73,7 @@ fn test_diagonal_gates() {
     compare_with_statevector(&c, 1e-10);
 }
 
-// ---------- Two-qubit gates (trigger merge) ----------
+// ---- Two-qubit gates (trigger merge) ----
 
 #[test]
 fn test_bell_state() {
@@ -104,7 +104,7 @@ fn test_cz() {
     compare_with_statevector(&c, 1e-10);
 }
 
-// ---------- Independent groups (factored advantage) ----------
+// ---- Independent groups (factored advantage) ----
 
 #[test]
 fn test_independent_bell_pairs() {
@@ -140,7 +140,7 @@ fn test_independent_groups_stay_separate() {
     compare_with_statevector(&c, 1e-10);
 }
 
-// ---------- Non-adjacent qubit merges ----------
+// ---- Non-adjacent qubit merges ----
 
 #[test]
 fn test_cx_non_adjacent() {
@@ -164,7 +164,7 @@ fn test_progressive_merge() {
     compare_with_statevector(&c, 1e-10);
 }
 
-// ---------- Controlled gates ----------
+// ---- Controlled gates ----
 
 #[test]
 fn test_cu_gate() {
@@ -203,7 +203,7 @@ fn test_mcu_toffoli() {
     compare_with_statevector(&c, 1e-10);
 }
 
-// ---------- Measurement ----------
+// ---- Measurement ----
 
 #[test]
 fn test_measurement() {
@@ -233,7 +233,7 @@ fn test_measurement_in_substate() {
     // q[2] should still be |1⟩ independently
 }
 
-// ---------- Golden tests: factored vs statevector on circuit builders ----------
+// ---- Golden tests: factored vs statevector on circuit builders ----
 
 #[test]
 fn test_golden_qft_8() {
@@ -277,7 +277,7 @@ fn test_golden_qpe() {
     compare_with_statevector(&circuit, 1e-10);
 }
 
-// ---------- Edge cases ----------
+// ---- Edge cases ----
 
 #[test]
 fn test_single_qubit_circuit() {
@@ -317,7 +317,7 @@ fn test_backend_kind_factored() {
     assert!((probs.iter().sum::<f64>() - 1.0).abs() < 1e-10);
 }
 
-// ---------- Conditional gates ----------
+// ---- Conditional gates ----
 
 #[test]
 fn test_conditional_gate() {

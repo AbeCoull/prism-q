@@ -102,7 +102,7 @@ struct MatBroadcast {
 impl MatBroadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 2]; 2]) -> Self {
-        // SAFETY: NEON is available on supported aarch64 targets, and these
+        // SAFETY: NEON is baseline on aarch64, and these
         // intrinsics only broadcast scalar f64 values into SIMD registers.
         unsafe {
             Self {
@@ -380,8 +380,8 @@ unsafe fn apply_full_loop_avx2fma_inline(
     target: usize,
     mat: &MatBroadcast256,
 ) {
+    // SAFETY: caller guarantees target >= 2 (half >= 4, avx_pairs >= 2).
     unsafe {
-        // SAFETY: caller guarantees target >= 2 (half >= 4, avx_pairs >= 2).
         let half = 1usize << target;
         let block_size = half << 1;
         let avx_pairs = half / 2;
@@ -621,7 +621,7 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "aarch64")]
         {
-            // SAFETY: NEON is available on supported aarch64 targets, and the
+            // SAFETY: NEON is baseline on aarch64, and the
             // caller provides equally sized, non-overlapping slices.
             unsafe { apply_slices_neon(lo, hi, &self.broadcast) };
         }
@@ -662,7 +662,7 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "aarch64")]
         {
-            // SAFETY: NEON is available on supported aarch64 targets. The
+            // SAFETY: NEON is baseline on aarch64. The
             // target index is validated by circuit construction.
             unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
         }
@@ -711,7 +711,7 @@ impl PreparedGate1q {
 
         #[cfg(target_arch = "aarch64")]
         {
-            // SAFETY: NEON is available on supported aarch64 targets. Tile
+            // SAFETY: NEON is baseline on aarch64. Tile
             // indices are validated by callers.
             unsafe { apply_full_loop_neon(state, target, &self.broadcast) };
         }
@@ -760,7 +760,6 @@ impl PreparedGate1q {
         }
     }
 
-    /// Apply the gate to equal-length lo/hi slice pairs.
     #[inline(always)]
     pub(crate) fn apply_slice_pairs(&self, lo: &mut [Complex64], hi: &mut [Complex64]) {
         debug_assert_eq!(lo.len(), hi.len());
@@ -879,7 +878,7 @@ pub(crate) fn apply_diagonal_sequential(
     #[cfg(target_arch = "x86_64")]
     {
         if has_fma() {
-            // SAFETY: FMA support is checked above. State indexing is handled
+            // SAFETY: FMA checked above. State indexing is handled
             // by the diagonal loop using validated target positions.
             unsafe {
                 let d0_rr = _mm_set1_pd(d0.re);
@@ -894,7 +893,7 @@ pub(crate) fn apply_diagonal_sequential(
     }
 
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: NEON is available on supported aarch64 targets. State indexing
+    // SAFETY: NEON is baseline on aarch64. State indexing
     // is handled by the diagonal loop using validated target positions.
     unsafe {
         let d0_rr = vdupq_n_f64(d0.re);
@@ -979,14 +978,14 @@ const MIN_SIMD_SLICE: usize = 4;
 pub(crate) fn negate_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 support is checked above, and the slice bounds drive
+        // SAFETY: AVX2 checked above, and the slice bounds drive
         // all pointer arithmetic inside the helper.
         unsafe { negate_slice_avx2(slice) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available on supported aarch64 targets, and the loop
+        // SAFETY: NEON is baseline on aarch64, and the loop
         // only touches elements inside the mutable slice.
         unsafe {
             let ptr = slice.as_mut_ptr() as *mut f64;
@@ -1032,14 +1031,14 @@ pub(crate) fn swap_slices(a: &mut [Complex64], b: &mut [Complex64]) {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]
     if a.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 support is checked above, slices have equal length,
+        // SAFETY: AVX2 checked above, slices have equal length,
         // and Rust's two mutable references guarantee non-overlap.
         unsafe { swap_slices_avx2(a, b) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if a.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available on supported aarch64 targets, slices have
+        // SAFETY: NEON is baseline on aarch64, slices have
         // equal length, and Rust's two mutable references guarantee non-overlap.
         unsafe {
             let ap = a.as_mut_ptr() as *mut f64;
@@ -1109,13 +1108,13 @@ unsafe fn norm_sqr_sum_avx2fma(slice: &[Complex64]) -> f64 {
 pub(crate) fn norm_sqr_sum(slice: &[Complex64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 and FMA support are checked above, and the helper reads
+        // SAFETY: AVX2 and FMA checked above, and the helper reads
         // only within the shared slice.
         return unsafe { norm_sqr_sum_avx2fma(slice) };
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available on supported aarch64 targets, and the
+        // SAFETY: NEON is baseline on aarch64, and the
         // helper reads only within the shared slice.
         return unsafe { norm_sqr_sum_neon(slice) };
     }
@@ -1190,14 +1189,14 @@ pub(crate) fn norm_sqr_to_slice(src: &[Complex64], dst: &mut [f64]) {
     debug_assert!(dst.len() >= src.len());
     #[cfg(target_arch = "x86_64")]
     if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 support is checked above. The destination length debug
+        // SAFETY: AVX2 checked above. The destination length debug
         // assert keeps all stores in bounds.
         unsafe { norm_sqr_to_slice_avx2(src, dst) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if src.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available on supported aarch64 targets. The
+        // SAFETY: NEON is baseline on aarch64. The
         // destination length debug assert keeps all stores in bounds.
         unsafe {
             let inp = src.as_ptr() as *const f64;
@@ -1258,14 +1257,14 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
     debug_assert!(dst.len() >= src.len());
     #[cfg(target_arch = "x86_64")]
     if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 support is checked above. The destination length debug
+        // SAFETY: AVX2 checked above. The destination length debug
         // assert keeps all stores in bounds.
         unsafe { norm_sqr_to_slice_scaled_avx2(src, dst, scale) };
         return;
     }
     #[cfg(target_arch = "aarch64")]
     if src.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available on supported aarch64 targets. The
+        // SAFETY: NEON is baseline on aarch64. The
         // destination length debug assert keeps all stores in bounds.
         unsafe {
             let inp = src.as_ptr() as *const f64;
@@ -1317,7 +1316,7 @@ unsafe fn zero_slice_avx2(slice: &mut [Complex64]) {
 pub(crate) fn zero_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-        // SAFETY: AVX2 support is checked above, and the helper writes only
+        // SAFETY: AVX2 checked above, and the helper writes only
         // within the mutable slice.
         unsafe { zero_slice_avx2(slice) };
         return;
@@ -1393,13 +1392,13 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     #[cfg(target_arch = "x86_64")]
     {
         if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-            // SAFETY: AVX2 and FMA support are checked above, and the helper
+            // SAFETY: AVX2 and FMA checked above, and the helper
             // writes only within the mutable slice.
             unsafe { scale_complex_slice_avx2fma(slice, factor) };
             return;
         }
         if slice.len() >= 2 && has_fma() {
-            // SAFETY: FMA support is checked above, and the helper writes only
+            // SAFETY: FMA checked above, and the helper writes only
             // within the mutable slice.
             unsafe { scale_complex_slice_fma(slice, factor) };
             return;
@@ -1407,7 +1406,7 @@ pub(crate) fn scale_complex_slice(slice: &mut [Complex64], factor: Complex64) {
     }
     #[cfg(target_arch = "aarch64")]
     if slice.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available on supported aarch64 targets, and the loop
+        // SAFETY: NEON is baseline on aarch64, and the loop
         // writes only within the mutable slice.
         unsafe {
             let c_rr = vdupq_n_f64(factor.re);
@@ -1555,7 +1554,7 @@ pub(crate) fn combine_global_half(
     }
     #[cfg(target_arch = "aarch64")]
     if dst.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available; slices have equal length.
+        // SAFETY: NEON is baseline on aarch64; slices have equal length.
         unsafe { combine_global_half_neon(dst, remote, c_self, c_remote) };
         return;
     }
@@ -1612,7 +1611,6 @@ unsafe fn scale_complex_to_slice_fma(dst: &mut [Complex64], src: &[Complex64], f
     }
 }
 
-/// Out-of-place complex scaling: `dst[i] = src[i] * factor`.
 pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], factor: Complex64) {
     assert!(
         dst.len() >= src.len(),
@@ -1621,7 +1619,7 @@ pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], f
     #[cfg(target_arch = "x86_64")]
     {
         if src.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-            // SAFETY: AVX2 and FMA support are checked above. The assert keeps
+            // SAFETY: AVX2 and FMA checked above. The assert keeps
             // every load and store in bounds, Rust references provide valid
             // slices, and SIMD avoids the measured scalar bottleneck in large
             // factored merge copies.
@@ -1629,7 +1627,7 @@ pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], f
             return;
         }
         if src.len() >= 2 && has_fma() {
-            // SAFETY: FMA support is checked above. The assert keeps every
+            // SAFETY: FMA checked above. The assert keeps every
             // load and store in bounds, Rust references provide valid slices,
             // and SIMD avoids the measured scalar bottleneck in factored merge
             // copies.
@@ -1639,7 +1637,7 @@ pub(crate) fn scale_complex_to_slice(dst: &mut [Complex64], src: &[Complex64], f
     }
     #[cfg(target_arch = "aarch64")]
     if src.len() >= MIN_SIMD_SLICE {
-        // SAFETY: NEON is available on supported aarch64 targets. The assert
+        // SAFETY: NEON is baseline on aarch64. The assert
         // keeps pointer arithmetic in bounds, Rust references provide valid
         // slices, and vector loads avoid the measured scalar bottleneck in
         // large factored merge copies.
@@ -1665,7 +1663,7 @@ fn scale_slice(slice: &mut [Complex64], factor: f64) {
     #[cfg(target_arch = "x86_64")]
     {
         if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {
-            // SAFETY: AVX2 support is checked above, and the helper writes
+            // SAFETY: AVX2 checked above, and the helper writes
             // only within the mutable slice.
             unsafe { scale_slice_avx2(slice, factor) };
         } else {
@@ -1675,7 +1673,7 @@ fn scale_slice(slice: &mut [Complex64], factor: f64) {
         }
     }
     #[cfg(target_arch = "aarch64")]
-    // SAFETY: NEON is available on supported aarch64 targets, and the loop
+    // SAFETY: NEON is baseline on aarch64, and the loop
     // only touches elements inside the mutable slice.
     unsafe {
         let f = vdupq_n_f64(factor);
@@ -1966,7 +1964,7 @@ struct Mat4x4Broadcast {
 impl Mat4x4Broadcast {
     #[inline(always)]
     fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
-        // SAFETY: NEON is available on supported aarch64 targets, and these
+        // SAFETY: NEON is baseline on aarch64, and these
         // intrinsics only broadcast scalar f64 values into SIMD registers.
         unsafe {
             let mut rr = [vdupq_n_f64(0.0); 16];
@@ -2160,7 +2158,7 @@ impl PreparedGate2q {
         #[cfg(target_arch = "aarch64")]
         {
             let base = state.as_mut_ptr() as *mut f64;
-            // SAFETY: NEON is available on supported aarch64 targets. The
+            // SAFETY: NEON is baseline on aarch64. The
             // loop builds in-bounds, disjoint 4-amplitude groups.
             unsafe {
                 apply_fused_2q_loop_neon(base, n_iter, lo, hi, mask0, mask1, &self.broadcast);
@@ -2547,14 +2545,14 @@ mod tests {
 
             if has_fma() {
                 let mut actual = dst0.clone();
-                // SAFETY: FMA support is checked above, and the slices have equal length.
+                // SAFETY: FMA checked above, and the slices have equal length.
                 unsafe { combine_global_half_fma(&mut actual, &remote, c_self, c_remote) };
                 assert_state_close(&actual, &expected, &format!("fma len={len}"));
             }
 
             if has_avx2_fma() {
                 let mut actual = dst0.clone();
-                // SAFETY: AVX2 and FMA support are checked above, and the slices have equal length.
+                // SAFETY: AVX2 and FMA checked above, and the slices have equal length.
                 unsafe { combine_global_half_avx2fma(&mut actual, &remote, c_self, c_remote) };
                 assert_state_close(&actual, &expected, &format!("avx2fma len={len}"));
             }
@@ -2726,9 +2724,9 @@ mod tests {
         }
     }
 
-    /// Reference test: AVX2 paired-group kernel must agree with the 128-bit
-    /// FMA per-group kernel across (q0, q1) configurations covering adjacent,
-    /// non-adjacent, reversed-order, and the lo == 0 fallback path.
+    // Reference test: AVX2 paired-group kernel must agree with the 128-bit
+    // FMA per-group kernel across (q0, q1) configurations covering adjacent,
+    // non-adjacent, reversed-order, and the lo == 0 fallback path.
     #[test]
     fn test_prepared_2q_apply_tiled_matches_apply_full() {
         let mat = dense_4x4();

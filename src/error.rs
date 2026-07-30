@@ -1,7 +1,9 @@
 //! Error types for PRISM-Q.
 //!
-//! All public APIs return structured errors. User-facing operations never panic.
-//! Internal debug_assert! may fire in debug builds for invariant violations.
+//! Parsing and simulation entry points return [`PrismError`] for invalid input.
+//! Construction and accessor APIs panic on API misuse (out-of-bounds indices,
+//! wrong-variant accessors); each such method documents the condition under
+//! `# Panics`. Internal invariants use `debug_assert!` and fire in debug builds.
 
 use thiserror::Error;
 
@@ -49,5 +51,4 @@ pub enum PrismError {
     IncompatibleBackend { backend: String, reason: String },
 }
 
-/// Convenience alias used throughout PRISM-Q.
 pub type Result<T> = std::result::Result<T, PrismError>;

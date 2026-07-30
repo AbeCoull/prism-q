@@ -286,7 +286,6 @@ impl Circuit {
             .collect()
     }
 
-    /// Return a copy of this circuit with all measurement instructions removed.
     pub fn without_measurements(&self) -> Circuit {
         let mut c = Circuit::new(self.num_qubits, self.num_classical_bits);
         c.instructions = self
@@ -298,7 +297,6 @@ impl Circuit {
         c
     }
 
-    /// True if the circuit contains any reset instruction.
     pub fn has_resets(&self) -> bool {
         self.instructions
             .iter()
@@ -896,7 +894,6 @@ pub enum ClassicalCondition {
 }
 
 impl ClassicalCondition {
-    /// Evaluate this condition against a classical bit array.
     pub fn evaluate(&self, classical_bits: &[bool]) -> bool {
         match self {
             ClassicalCondition::BitIsOne(bit) => classical_bits[*bit],

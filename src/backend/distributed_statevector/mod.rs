@@ -10,7 +10,7 @@
 //! bit `q` of `local_index`; otherwise it is bit `q - (n - p)` of the rank id.
 //! Qubit 0 is the least significant bit. `|0...0>` is index 0 on rank 0.
 //!
-//! # Status
+//! # Gate support
 //!
 //! Implemented: local gates, rank bit one qubit gates, two qubit gates, controlled
 //! gates across rank bits, `probabilities`, and `export_statevector`. A global
@@ -32,6 +32,20 @@
 //! so ranks agree without exchanging the draw. Reset follows the statevector
 //! convention: project onto `|0>`, renormalize, and reinitialize to `|0...0>`
 //! when the zero branch is empty.
+//!
+//! # When to prefer this backend
+//!
+//! - Amplitude vectors too large for one host, split across MPI ranks.
+//!   Requested via `BackendKind::StatevectorDistributed`; Auto never selects it.
+//! - Evaluating qubit routing strategies through the exchange counters, on one
+//!   host via the serial or loopback transports.
+//!
+//! # When NOT to use this backend
+//!
+//! - Circuits that fit one host; the inner statevector backend does the same
+//!   work without collectives.
+//! - Per-shot noise trajectories; `run_shots_with_noise` rejects the backend
+//!   (see the `backend` module docs).
 //!
 //! # Qubit relabeling
 //!
@@ -206,7 +220,7 @@ fn required_local_qubits(gate: &Gate, targets: &[usize]) -> SmallVec<[usize; 8]>
     req
 }
 
-/// Distributed state vector backend over an [`Arc<DistributedContext>`].
+/// Distributed state vector backend over an `Arc`-shared [`DistributedContext`].
 pub struct DistributedStatevectorBackend {
     context: Arc<DistributedContext>,
     inner: StatevectorBackend,

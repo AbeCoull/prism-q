@@ -1,19 +1,9 @@
-//! Cross-backend conformance for the `Backend::reset` contract.
-//!
-//! `reset` is the channel `rho -> |0><0| (x) tr_q rho`, not a projection onto
-//! `|0>`. The two agree whenever the reset qubit is unentangled, so a separable
-//! fixture cannot tell them apart. The cases below add an entangled partner,
-//! where projection leaks the `|0>`-outcome branch into the rest of the
-//! register, and a reset from `|1>`, where a projection has no branch to
-//! renormalize.
-//!
-//! The oracle is the density-matrix backend, which holds the mixture and
-//! applies the channel directly. It is deliberately not the statevector
-//! backend: the sv-reference matrices in `tests/backend_matrix.rs` and
-//! `tests/measurement_matrix.rs` cannot pin this contract, because the
-//! statevector is one of the implementations under test. Pure-state backends
-//! carry one trajectory per run, so a case whose branches differ is compared as
-//! an average over seeds.
+//! Cross-backend conformance for the `Backend::reset` contract: the channel
+//! `rho -> |0><0| (x) tr_q rho`, not a projection onto `|0>`. The cases
+//! entangle a partner or reset from `|1>`, where the two differ. The oracle
+//! is the density-matrix backend, deliberately not the statevector, which is
+//! one of the implementations under test; pure-state backends carry one
+//! trajectory per run, so cases whose branches differ are seed-averaged.
 
 mod common;
 

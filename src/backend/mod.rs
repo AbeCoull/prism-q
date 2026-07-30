@@ -62,23 +62,33 @@ use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::sim::unified_pauli::PauliTerm;
 
+/// Qubit count at which dense amplitude kernels switch to Rayon; the factored
+/// backend applies it per sub-state, the density matrix backend to its
+/// `2n`-qubit buffer.
 pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
 
+/// Minimum elements per Rayon task in amplitude loops.
 #[cfg(feature = "parallel")]
 pub(crate) const MIN_PAR_ELEMS: usize = 4096;
 
+/// `with_min_len` value giving each Rayon task at least [`MIN_PAR_ELEMS`]
+/// elements when the parallel iterator yields chunks of `chunk_size`.
 #[cfg(feature = "parallel")]
 #[inline(always)]
 pub(crate) fn chunk_min_len(chunk_size: usize) -> usize {
     (MIN_PAR_ELEMS / chunk_size).max(1)
 }
 
+/// Minimum iterations per Rayon task for index-driven loops whose
+/// per-iteration work is heavier than one element (MCU, batch phase).
 #[cfg(feature = "parallel")]
 pub(crate) const MIN_PAR_ITERS: usize = 2048;
 
+/// Tableau size at which stabilizer row loops parallelize.
 #[cfg(feature = "parallel")]
 pub(crate) const MIN_QUBITS_FOR_PAR_GATES: usize = 128;
 
+/// Minimum anticommuting rows before a measurement's rowmul pass parallelizes.
 #[cfg(feature = "parallel")]
 pub(crate) const MIN_ANTI_ROWS_FOR_PAR: usize = 4;
 
@@ -101,11 +111,14 @@ pub(crate) use memory::{
     tensor_probability_len,
 };
 
+/// Whether `phase` equals `1+0i` within [`PHASE_IS_ONE_EPS`].
 #[inline(always)]
 pub(crate) fn is_phase_one(phase: Complex64) -> bool {
     (phase.re - 1.0).abs() < PHASE_IS_ONE_EPS && phase.im.abs() < PHASE_IS_ONE_EPS
 }
 
+/// Renormalization factor `1/sqrt(P(outcome))` after measurement collapse,
+/// with the probability clamped to [`NORM_CLAMP_MIN`].
 #[inline(always)]
 pub(crate) fn measurement_inv_norm(outcome: bool, prob_one: f64) -> f64 {
     let prob_outcome = if outcome { prob_one } else { 1.0 - prob_one };
@@ -143,6 +156,7 @@ pub(crate) fn init_thread_pool() {
     });
 }
 
+/// Write `controls` plus `target` into `buf` sorted ascending, returning the count.
 #[inline(always)]
 pub(crate) fn sorted_mcu_qubits(controls: &[usize], target: usize, buf: &mut [usize; 10]) -> usize {
     let n = controls.len() + 1;
@@ -160,7 +174,9 @@ pub(crate) fn sorted_mcu_qubits(controls: &[usize], target: usize, buf: &mut [us
 /// the regime the native samplers exist for.
 #[derive(Debug, Clone)]
 pub struct BasisSamples {
+    /// Outcome words for all shots, `words_per_shot` consecutive words each.
     words: Vec<u64>,
+    /// Words per shot, `num_qubits.div_ceil(64)` with a minimum of 1.
     words_per_shot: usize,
 }
 
@@ -189,6 +205,7 @@ impl BasisSamples {
         self.words.len() / self.words_per_shot
     }
 
+    /// Measured outcome for `qubit` in `shot`, `true` for |1⟩.
     #[inline(always)]
     pub fn bit(&self, shot: usize, qubit: usize) -> bool {
         let word = self.words[shot * self.words_per_shot + qubit / 64];

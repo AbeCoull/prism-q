@@ -1348,9 +1348,9 @@ fn test_deferred_norm_export_statevector() {
     );
 }
 
-/// `apply_batch_phase` vs an independent reference. At 6 qubits the sequential path
-/// runs, so a BMI2+FMA host exercises `apply_batch_phase_bmi2` and others the scalar
-/// fallback.
+// `apply_batch_phase` vs an independent reference. At 6 qubits the sequential path
+// runs, so a BMI2+FMA host exercises `apply_batch_phase_bmi2` and others the scalar
+// fallback.
 #[test]
 fn batch_phase_matches_independent_reference() {
     use crate::circuit::{Instruction, SmallVec, smallvec};
@@ -1431,10 +1431,10 @@ mod gpu_scaffold {
         assert_eq!(backend.num_qubits(), 4);
     }
 
-    /// The soft GPU mode used by the Auto path degrades to the host state when
-    /// the device allocation fails, instead of erroring like `with_gpu`. The
-    /// stub context fails `GpuState::new`, so init must succeed on CPU and the
-    /// backend must expose a valid ground state through the host path.
+    // The soft GPU mode used by the Auto path degrades to the host state when
+    // the device allocation fails, instead of erroring like `with_gpu`. The
+    // stub context fails `GpuState::new`, so init must succeed on CPU and the
+    // backend must expose a valid ground state through the host path.
     #[test]
     fn with_gpu_auto_falls_back_to_cpu_on_alloc_failure() {
         let ctx = GpuContext::stub_for_tests();
@@ -1446,10 +1446,10 @@ mod gpu_scaffold {
         assert!(probs[1..].iter().all(|&p| p < 1e-12));
     }
 
-    /// Real-device smoke test: |0000⟩ state round-trips correctly through the GPU path.
-    ///
-    /// When CUDA is not available or the driver rejects the PTX, prints a SKIP message and
-    /// returns without failing. This avoids fighting CI on machines without a usable GPU.
+    // Real-device smoke test: |0000⟩ state round-trips correctly through the GPU path.
+    //
+    // When CUDA is not available or the driver rejects the PTX, prints a SKIP message and
+    // returns without failing. This avoids fighting CI on machines without a usable GPU.
     #[test]
     fn gpu_init_and_readback_zero_state() {
         let ctx = match GpuContext::new(0) {
@@ -1477,8 +1477,8 @@ mod gpu_scaffold {
         }
     }
 
-    /// Bell state end-to-end on GPU, comparing against CPU. Exercises H (1q) + CX (2q)
-    /// kernels, host↔device transfer, and the full dispatcher.
+    // Bell state end-to-end on GPU, comparing against CPU. Exercises H (1q) + CX (2q)
+    // kernels, host↔device transfer, and the full dispatcher.
     #[test]
     fn gpu_bell_state_matches_cpu() {
         let ctx = match GpuContext::new(0) {

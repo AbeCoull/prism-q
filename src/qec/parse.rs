@@ -1,3 +1,6 @@
+//! Text parser for the native measurement-record QEC format: line-oriented
+//! instructions, `rec[-k]` record references, and flattened `REPEAT` blocks.
+
 use super::{QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;

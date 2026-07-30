@@ -1,3 +1,7 @@
+//! Pauli-noise machinery for the compiled QEC runner: deferred-measurement
+//! lowering, backward-propagated sensitivity rows XORed onto packed records,
+//! and the density-matrix lowering for noisy `EXP_VAL` estimation.
+
 use super::{
     QecNoise, QecOp, QecPauli, QecProgram, append_basis_to_z_rotation, append_mpp_parity_rotations,
     append_z_to_basis_rotation, ensure_lowered_record_count, qec_non_clifford_error,

@@ -1,3 +1,7 @@
+//! Streaming accumulators that fold packed shot chunks into running
+//! statistics (histograms, marginals, expectations, correlators) with
+//! bounded memory.
+
 use std::collections::HashMap;
 
 use crate::hash::FxHashMap;
@@ -9,6 +13,8 @@ use super::{
 
 const DEFAULT_TARGET_BYTES: usize = 256 * 1024 * 1024;
 
+/// Shots per chunk such that a packed shot-major chunk stays near
+/// `target_bytes`. Rounded down to a multiple of 64, minimum 64.
 pub fn optimal_chunk_size(num_meas: usize, target_bytes: usize) -> usize {
     let m_words = num_meas.div_ceil(64);
     let bytes_per_shot_word = m_words * 8;
@@ -20,6 +26,7 @@ pub fn optimal_chunk_size(num_meas: usize, target_bytes: usize) -> usize {
     aligned.max(64)
 }
 
+/// [`optimal_chunk_size`] with a 256 MiB target.
 pub fn default_chunk_size(num_meas: usize) -> usize {
     optimal_chunk_size(num_meas, DEFAULT_TARGET_BYTES)
 }
@@ -57,6 +64,13 @@ pub(crate) fn marginals_from_chunks(
 #[cfg(feature = "parallel")]
 const MIN_SHOTS_FOR_PAR_HISTOGRAM: usize = 65536;
 
+/// Streaming reduction over packed shot chunks.
+///
+/// Drivers such as [`crate::CompiledSampler::sample_chunked`] call
+/// [`accumulate`](Self::accumulate) once per sampled chunk, in order. Chunks
+/// share `num_measurements` but may differ in shot count and [`ShotLayout`],
+/// and the final statistic must not depend on how shots were split. Chunk
+/// sizes typically come from [`default_chunk_size`] / [`optimal_chunk_size`].
 pub trait ShotAccumulator {
     fn accumulate(&mut self, chunk: &PackedShots);
 }
@@ -113,6 +127,8 @@ impl InlineCounts {
     }
 }
 
+/// Histogram accumulator; keys are each shot's `m_words` packed measurement
+/// words.
 pub struct HistogramAccumulator {
     counts: InlineCounts,
     batch_buf: Vec<u64>,
@@ -779,6 +795,7 @@ impl MarginalsAccumulator {
         }
     }
 
+    /// Per-measurement fraction of shots that read 1; zeros before any shots.
     pub fn marginals(&self) -> Vec<f64> {
         if self.total_shots == 0 {
             return vec![0.0; self.ones.len()];
@@ -845,6 +862,8 @@ impl ShotAccumulator for MarginalsAccumulator {
     }
 }
 
+/// Estimates parity observables: each observable is a set of measurement
+/// indices, and its expectation is `1 - 2 * P(odd parity)`, in `[-1, 1]`.
 pub struct PauliExpectationAccumulator {
     observables: Vec<Vec<usize>>,
     parity_ones: Vec<u64>,
@@ -863,6 +882,7 @@ impl PauliExpectationAccumulator {
         }
     }
 
+    /// Per-observable expectation estimates; zeros before any shots.
     pub fn expectations(&self) -> Vec<f64> {
         if self.total_shots == 0 {
             return vec![0.0; self.observables.len()];
@@ -927,6 +947,7 @@ impl ShotAccumulator for PauliExpectationAccumulator {
     }
 }
 
+/// Records only the total shot count, discarding shot contents.
 pub struct NullAccumulator {
     total_shots: u64,
 }
@@ -953,6 +974,8 @@ impl ShotAccumulator for NullAccumulator {
     }
 }
 
+/// Estimates two-point correlators: for a measurement index pair `(i, j)`
+/// the correlator is `1 - 2 * P(bits differ)`, in `[-1, 1]`.
 pub struct CorrelatorAccumulator {
     pairs: Vec<(usize, usize)>,
     differ_count: Vec<u64>,
@@ -969,6 +992,7 @@ impl CorrelatorAccumulator {
         }
     }
 
+    /// Per-pair correlator estimates; zeros before any shots.
     pub fn correlators(&self) -> Vec<f64> {
         if self.total_shots == 0 {
             return vec![0.0; self.pairs.len()];

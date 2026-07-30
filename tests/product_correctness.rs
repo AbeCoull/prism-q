@@ -1,9 +1,6 @@
-//! Cross-backend correctness tests for `ProductStateBackend`.
-//!
-//! Product state stores per-qubit `[α, β]` and rejects entangling
-//! gates. Tests cover separable circuits only: `single_qubit_rotation_circuit`
-//! and hand-built 1q-only patterns. Each runs both fused vs unfused on
-//! the product backend and SV cross at the same precision.
+//! Cross-backend correctness for `ProductStateBackend`: separable circuits
+//! only, each checked fused vs unfused and against the statevector, plus
+//! rejection of entangling gates on both the fused and raw apply paths.
 
 mod common;
 

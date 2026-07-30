@@ -1,10 +1,13 @@
+//! Bulk XOR over bit-packed u64 words with AVX2/NEON dispatch, plus the cached
+//! runtime AVX2 check shared by the SIMD word kernels.
+
 #[inline(always)]
 pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
     let len = dst.len().min(src.len());
 
     #[cfg(target_arch = "x86_64")]
     if len >= 4 && has_avx2() {
-        // SAFETY: AVX2 support is checked above. Slices provide valid pointers
+        // SAFETY: AVX2 checked above. Slices provide valid pointers
         // for len u64 values.
         unsafe { xor_words_ptr(dst.as_mut_ptr(), src.as_ptr(), len) };
         return;
@@ -12,7 +15,7 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
 
     #[cfg(target_arch = "aarch64")]
     if len >= 2 {
-        // SAFETY: NEON is available on supported aarch64 targets. Slices
+        // SAFETY: NEON is baseline on aarch64. Slices
         // provide valid pointers for len u64 values.
         unsafe { xor_words_ptr(dst.as_mut_ptr(), src.as_ptr(), len) };
         return;
@@ -27,7 +30,7 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
 pub(crate) unsafe fn xor_words_ptr(dst: *mut u64, src: *const u64, len: usize) {
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
-        // SAFETY: AVX2 support is checked above. The caller guarantees both
+        // SAFETY: AVX2 checked above. The caller guarantees both
         // pointers are valid for len u64 values.
         unsafe { xor_words_avx2(dst, src, len) };
         return;
@@ -35,7 +38,7 @@ pub(crate) unsafe fn xor_words_ptr(dst: *mut u64, src: *const u64, len: usize) {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: NEON is available on supported aarch64 targets. The caller
+        // SAFETY: NEON is baseline on aarch64. The caller
         // guarantees both pointers are valid for len u64 values.
         unsafe { xor_words_neon(dst, src, len) };
         return;
@@ -108,8 +111,8 @@ pub(crate) fn has_avx2() -> bool {
 mod tests {
     use super::*;
 
-    /// Dispatcher and the AVX2 kernel must both equal a plain scalar XOR. The
-    /// length is not a multiple of the SIMD stride, so the remainder loop runs too.
+    // Dispatcher and the AVX2 kernel must both equal a plain scalar XOR. The
+    // length is not a multiple of the SIMD stride, so the remainder loop runs too.
     #[test]
     fn xor_words_matches_scalar_reference() {
         let src: Vec<u64> = (0..37)

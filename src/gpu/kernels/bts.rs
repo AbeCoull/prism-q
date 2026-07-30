@@ -29,6 +29,8 @@ const COUNT_MEAS_BATCH_SIZE: u32 = 64;
 const COUNT_HASH_BLOCK_SIZE: u32 = 256;
 const COUNT_COMPACT_BLOCK_SIZE: u32 = 256;
 
+/// Maximum packed measurement words per shot key for the device-side count
+/// kernels; wider keys fall back to host counting.
 pub(crate) const GPU_COUNTS_MAX_WORDS: usize = 8;
 
 /// Host-side random-bits pool is allocated per chunk, so peak device memory
@@ -564,6 +566,7 @@ extern "C" __global__ void bts_apply_noise_masks_meas_major(
 
 "#;
 
+/// Return the BTS CUDA C source for concatenation into the shared PTX module.
 pub(crate) fn kernel_source() -> String {
     KERNEL_SOURCE.to_string()
 }
@@ -922,6 +925,9 @@ pub(crate) fn launch_bts_sample(
     Ok(output)
 }
 
+/// Same chunked contract as [`launch_bts_sample`], but the meas-major result
+/// (length `num_meas * s_words` u64s) stays resident on device to feed the
+/// on-device transpose and count paths.
 pub(crate) fn launch_bts_sample_device(
     ctx: &GpuContext,
     rng: &mut Xoshiro256PlusPlus,
@@ -1079,6 +1085,8 @@ pub(crate) struct NoiseApplyBase<'a> {
     pub z_row_indices: &'a GpuBuffer<u32>,
 }
 
+/// [`NoiseApplyBase`] plus per-event X/Z flip masks pre-generated on the host,
+/// as opposed to the on-device generation of [`NoiseDeviceGenApplyByRow`].
 pub(crate) struct NoiseMaskApply<'a> {
     pub base: NoiseApplyBase<'a>,
     pub x_masks: &'a GpuBuffer<u64>,
@@ -1186,6 +1194,8 @@ pub(crate) fn generate_and_apply_noise_masks_meas_major_by_row(
     Ok(())
 }
 
+/// One thread per (event, batch) pair, with atomic XOR on rows shared
+/// between events.
 pub(crate) fn apply_noise_masks_meas_major(
     ctx: &GpuContext,
     args: NoiseMaskApply<'_>,
@@ -1446,6 +1456,9 @@ fn compact_count_table(
     Ok(Some(counts))
 }
 
+/// Histogram shot-major records via an open-addressed device hash table.
+/// `Ok(None)` defers to the host path (transfer heuristic, table sizing, or
+/// table overflow).
 pub(crate) fn try_count_shot_major(
     ctx: &GpuContext,
     shot_major: &GpuBuffer<u64>,
@@ -1600,6 +1613,8 @@ fn try_count_meas_major_direct(
     )
 }
 
+/// Transpose to shot-major on device and count there, falling back to the
+/// direct meas-major count kernel. `Ok(None)` defers to the host path.
 pub(crate) fn try_count_meas_major(
     ctx: &GpuContext,
     meas_major: &GpuBuffer<u64>,

@@ -17,6 +17,8 @@ use crate::sim::unified_pauli::{PauliTerm, inverse_light_cone};
 /// count must stay tractable. `2^20 ≈ 1M` walks is the ceiling.
 pub const MAX_REROUTE_STABILIZERS: usize = 20;
 
+/// Whole-circuit versus in-cone gate and T/Tdg counts for one observable's
+/// inverse light cone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConeTelemetry {
     pub gates_total: usize,
@@ -25,6 +27,9 @@ pub struct ConeTelemetry {
     pub t_in_cone: usize,
 }
 
+/// Outcome of a reroute search. Supports are sorted ascending;
+/// `rerouted_support` equals `original_support` when no stabilizer product
+/// improves the cone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservableRerouteResult {
     pub original_support: Vec<usize>,
@@ -69,6 +74,8 @@ pub fn cone_telemetry(circuit: &Circuit, observable: &[PauliTerm]) -> ConeTeleme
     out
 }
 
+/// Support of the product of two Z-strings (`Z * Z = I` cancels shared
+/// qubits), sorted ascending.
 pub fn xor_z_support(a: &[usize], b: &[usize]) -> Vec<usize> {
     let mut support: HashSet<usize> = a.iter().copied().collect();
     for &q in b {
@@ -81,6 +88,11 @@ pub fn xor_z_support(a: &[usize], b: &[usize]) -> Vec<usize> {
     out
 }
 
+/// Scan all `2^k` subset products of `stabilizers` against the observable's
+/// Z support, keeping the minimum by `(t_in_cone, gates_in_cone, support
+/// size, support)` so ties break deterministically. Errors above
+/// [`MAX_REROUTE_STABILIZERS`]. Callers must supply stabilizers that fix the
+/// evaluated state; that is not verified here.
 pub fn min_cone_z_representative(
     circuit: &Circuit,
     observable: &[usize],

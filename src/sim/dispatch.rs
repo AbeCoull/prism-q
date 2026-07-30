@@ -1,3 +1,8 @@
+//! Backend selection and execution planning.
+//!
+//! Resolves a [`BackendKind`] against a circuit into a buildable plan,
+//! including the CPU-vs-GPU accel verdict and the temporal-Clifford split.
+
 use crate::backend::density_matrix::DensityMatrixBackend;
 use crate::backend::mps::MpsBackend;
 use crate::backend::product::ProductStateBackend;
@@ -71,15 +76,23 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 pub enum BackendKind {
     Auto,
     Statevector,
+    /// Tableau simulation for Clifford-only circuits.
     Stabilizer,
+    /// Sparse state vector holding only nonzero amplitudes.
     Sparse,
+    /// Matrix Product State simulation with a bounded bond dimension.
     Mps {
         max_bond_dim: usize,
     },
+    /// Per-qubit product state for circuits without entangling gates.
     ProductState,
+    /// Deferred-contraction tensor network for low-treewidth circuits.
     TensorNetwork,
+    /// Dynamic split-state simulation for sparse-entanglement circuits.
     Factored,
+    /// Clifford+T decomposition into weighted stabilizer branches.
     StabilizerRank,
+    /// Independent Clifford blocks, each on its own tableau.
     FactoredStabilizer,
     /// Exact density-matrix backend for mixed-state evolution.
     ///
@@ -90,9 +103,14 @@ pub enum BackendKind {
     /// variants carry qubit indices in their payload that the ket-register
     /// offset cannot relocate.
     DensityMatrix,
+    /// Stochastic Pauli propagation (SPP); serves marginal and observable
+    /// queries only.
     StochasticPauli {
         num_samples: usize,
     },
+    /// Deterministic sparse Pauli dynamics (SPD); serves marginal and
+    /// observable queries only. Terms below `epsilon` are dropped once the
+    /// weighted sum exceeds `max_terms` (0 disables truncation).
     DeterministicPauli {
         epsilon: f64,
         max_terms: usize,
@@ -180,6 +198,8 @@ impl BackendKind {
         }
     }
 
+    /// False for the engines without a per-shot pure state: stabilizer rank,
+    /// Pauli propagation, density matrix.
     pub fn supports_noisy_per_shot(&self) -> bool {
         !matches!(
             self,
@@ -190,6 +210,8 @@ impl BackendKind {
         )
     }
 
+    /// True for kinds that can run non-Pauli channels (damping, thermal
+    /// relaxation, custom Kraus) through the trajectory engine.
     pub fn supports_general_noise(&self) -> bool {
         match self {
             BackendKind::Auto
@@ -770,9 +792,9 @@ mod gpu_crossover_tests {
         crate::sim::simulate(circuit).backend(kind).seed(seed).run()
     }
 
-    /// The builder GPU shortcut must compose identically to constructing the
-    /// variant manually. Uses the stub context at a small circuit so crossover
-    /// fires and proves the composition is side-effect equivalent.
+    // The builder GPU shortcut must compose identically to constructing the
+    // variant manually. Uses the stub context at a small circuit so crossover
+    // fires and proves the composition is side-effect equivalent.
     #[test]
     fn builder_gpu_wraps_statevector_gpu_variant() {
         let ctx = GpuContext::stub_for_tests();
@@ -796,11 +818,11 @@ mod gpu_crossover_tests {
         assert_eq!(dp, mp);
     }
 
-    /// A 4q circuit is far below the default 14q threshold. If the dispatch
-    /// layer were to build a GPU backend anyway, `GpuState::new` on the stub
-    /// context would return `BackendUnsupported`. Success proves the
-    /// crossover in `select_dispatch` is routing small circuits to the host
-    /// path.
+    // A 4q circuit is far below the default 14q threshold. If the dispatch
+    // layer were to build a GPU backend anyway, `GpuState::new` on the stub
+    // context would return `BackendUnsupported`. Success proves the
+    // crossover in `select_dispatch` is routing small circuits to the host
+    // path.
     #[test]
     fn small_circuit_routes_to_cpu() {
         let mut circuit = Circuit::new(4, 0);
@@ -826,12 +848,12 @@ mod gpu_crossover_tests {
         }
     }
 
-    /// `independent_bell_pairs(8)` spans 16 qubits but decomposes into 8
-    /// independent 2q blocks. With `BackendKind::StatevectorGpu`, each
-    /// sub-block is below the 14q threshold and must route to CPU. If
-    /// decomposition failed to fire, the 16q monolithic path would attempt
-    /// `GpuState::new` through the stub and return `BackendUnsupported`.
-    /// Success here proves decomposition survives across the GPU dispatch.
+    // `independent_bell_pairs(8)` spans 16 qubits but decomposes into 8
+    // independent 2q blocks. With `BackendKind::StatevectorGpu`, each
+    // sub-block is below the 14q threshold and must route to CPU. If
+    // decomposition failed to fire, the 16q monolithic path would attempt
+    // `GpuState::new` through the stub and return `BackendUnsupported`.
+    // Success here proves decomposition survives across the GPU dispatch.
     #[test]
     fn decomposable_16q_circuit_runs_per_block_on_cpu() {
         let circuit = crate::circuits::independent_bell_pairs(8);
@@ -858,9 +880,9 @@ mod gpu_crossover_tests {
         }
     }
 
-    /// A 4q Clifford circuit is far below the stabilizer GPU threshold, so the
-    /// stub context must never be touched. Produces the same measurement bits
-    /// as a plain CPU stabilizer run.
+    // A 4q Clifford circuit is far below the stabilizer GPU threshold, so the
+    // stub context must never be touched. Produces the same measurement bits
+    // as a plain CPU stabilizer run.
     #[test]
     fn stabilizer_gpu_small_circuit_routes_to_cpu() {
         let mut circuit = Circuit::new(4, 4);
@@ -879,8 +901,8 @@ mod gpu_crossover_tests {
         assert_eq!(cpu_run.classical_bits, gpu_run.classical_bits);
     }
 
-    /// Non-Clifford circuits are rejected at dispatch time with the same error
-    /// shape as `BackendKind::Stabilizer`.
+    // Non-Clifford circuits are rejected at dispatch time with the same error
+    // shape as `BackendKind::Stabilizer`.
     #[test]
     fn stabilizer_gpu_rejects_non_clifford_at_dispatch() {
         let mut circuit = Circuit::new(2, 0);
@@ -904,9 +926,9 @@ mod gpu_crossover_tests {
         }
     }
 
-    /// A small Clifford circuit selects the stabilizer choice, which sits below
-    /// the stabilizer GPU crossover, so `AutoGpu` builds a CPU stabilizer and
-    /// never touches the stub. Results match the plain `Auto` path.
+    // A small Clifford circuit selects the stabilizer choice, which sits below
+    // the stabilizer GPU crossover, so `AutoGpu` builds a CPU stabilizer and
+    // never touches the stub. Results match the plain `Auto` path.
     #[test]
     fn auto_gpu_small_clifford_routes_to_cpu() {
         let mut circuit = Circuit::new(4, 0);
@@ -921,10 +943,10 @@ mod gpu_crossover_tests {
         assert_probs_match(&cpu, &gpu);
     }
 
-    /// `independent_bell_pairs(8)` spans 16 qubits but decomposes into 8
-    /// independent 2q blocks, each below the statevector crossover. Every block
-    /// stays on CPU under `AutoGpu`; if decomposition failed, the monolithic 16q
-    /// path would still hit the VRAM gate and fall back rather than error.
+    // `independent_bell_pairs(8)` spans 16 qubits but decomposes into 8
+    // independent 2q blocks, each below the statevector crossover. Every block
+    // stays on CPU under `AutoGpu`; if decomposition failed, the monolithic 16q
+    // path would still hit the VRAM gate and fall back rather than error.
     #[test]
     fn auto_gpu_decomposable_16q_runs_per_block_on_cpu() {
         let circuit = crate::circuits::independent_bell_pairs(8);
@@ -935,12 +957,12 @@ mod gpu_crossover_tests {
         assert_probs_match(&cpu, &gpu);
     }
 
-    /// A 16q entangled non-Clifford circuit selects the statevector choice and
-    /// clears the 14q crossover, so `AutoGpu` reaches the GPU decision. Because
-    /// the stub cannot report VRAM, the fits check fails closed and the block
-    /// runs on CPU: same results as `Auto`, no error. The explicit
-    /// `StatevectorGpu` path has no VRAM gate, so the same circuit touches the
-    /// stub and surfaces `BackendUnsupported`, isolating the added fallback.
+    // A 16q entangled non-Clifford circuit selects the statevector choice and
+    // clears the 14q crossover, so `AutoGpu` reaches the GPU decision. Because
+    // the stub cannot report VRAM, the fits check fails closed and the block
+    // runs on CPU: same results as `Auto`, no error. The explicit
+    // `StatevectorGpu` path has no VRAM gate, so the same circuit touches the
+    // stub and surfaces `BackendUnsupported`, isolating the added fallback.
     #[test]
     fn auto_gpu_large_block_falls_back_to_cpu_on_stub() {
         let mut circuit = Circuit::new(16, 0);
@@ -985,8 +1007,8 @@ mod accel_tests {
         assert!(is_cpu(&accel_for(&kind, Family::Statevector, n)));
     }
 
-    /// Above the crossover the stub cannot report VRAM, so the fit gate fails
-    /// closed and the soft path resolves to the host.
+    // Above the crossover the stub cannot report VRAM, so the fit gate fails
+    // closed and the soft path resolves to the host.
     #[test]
     fn auto_gpu_statevector_fits_fails_closed_on_stub() {
         let kind = BackendKind::AutoGpu { context: stub() };
@@ -1031,8 +1053,8 @@ mod accel_tests {
         assert!(is_cpu(&accel_for(&kind, Family::Stabilizer, n - 1)));
     }
 
-    /// An explicit GPU kind accelerates only its own family; any other family
-    /// resolves to the host regardless of size.
+    // An explicit GPU kind accelerates only its own family; any other family
+    // resolves to the host regardless of size.
     #[test]
     fn explicit_kind_other_family_is_cpu() {
         let sv = BackendKind::StatevectorGpu { context: stub() };
@@ -1053,8 +1075,8 @@ mod accel_tests {
         }
     }
 
-    /// `init_from_state` on a soft GPU backend degrades to the host when the
-    /// device upload fails, preserving the supplied amplitudes.
+    // `init_from_state` on a soft GPU backend degrades to the host when the
+    // device upload fails, preserving the supplied amplitudes.
     #[test]
     fn init_from_state_soft_falls_back_to_host_on_stub() {
         use num_complex::Complex64;
@@ -1183,9 +1205,9 @@ mod dispatch_matrix_tests {
         }
     }
 
-    /// Auto and AutoGpu make identical family choices across every circuit
-    /// shape class; on the stub context every choice resolves to the host
-    /// (small circuits by crossover, large ones by the fail-closed VRAM gate).
+    // Auto and AutoGpu make identical family choices across every circuit
+    // shape class; on the stub context every choice resolves to the host
+    // (small circuits by crossover, large ones by the fail-closed VRAM gate).
     #[test]
     fn auto_family_matrix() {
         let oversize = oversize_qubits();
@@ -1217,8 +1239,8 @@ mod dispatch_matrix_tests {
         }
     }
 
-    /// Explicit CPU kinds map 1:1 onto their family regardless of circuit
-    /// shape, always on the host.
+    // Explicit CPU kinds map 1:1 onto their family regardless of circuit
+    // shape, always on the host.
     #[test]
     fn explicit_cpu_kind_matrix() {
         let circuit = dense(6);
@@ -1303,9 +1325,9 @@ mod dispatch_matrix_tests {
         assert!(validate_explicit_backend(&BackendKind::DensityMatrix, &dense(cap)).is_ok());
     }
 
-    /// Explicit GPU kinds resolve hard device execution at their crossover
-    /// (no VRAM gate) and host execution below it; the family choice never
-    /// changes with the target.
+    // Explicit GPU kinds resolve hard device execution at their crossover
+    // (no VRAM gate) and host execution below it; the family choice never
+    // changes with the target.
     #[cfg(feature = "gpu")]
     #[test]
     fn explicit_gpu_kind_matrix() {

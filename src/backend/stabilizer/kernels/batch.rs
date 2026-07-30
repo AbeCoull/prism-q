@@ -1,3 +1,6 @@
+//! Word-group gate batching and measurement-run batching for large tableaus,
+//! amortizing full-tableau row sweeps once rows outgrow cache.
+
 use crate::backend::Backend;
 use crate::circuit::Instruction;
 use crate::error::Result;

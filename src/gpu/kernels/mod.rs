@@ -212,9 +212,9 @@ mod sync_tests {
         names
     }
 
-    /// `KERNEL_NAMES` must match the kernels in the CUDA source exactly: a missing
-    /// name is never pre-resolved by `GpuDevice::new`, an orphan name is dead drift.
-    /// Inspects the source string only, so it needs no GPU device.
+    // `KERNEL_NAMES` must match the kernels in the CUDA source exactly: a missing
+    // name is never pre-resolved by `GpuDevice::new`, an orphan name is dead drift.
+    // Inspects the source string only, so it needs no GPU device.
     #[test]
     fn kernel_names_match_source_entry_points() {
         let src = kernel_source();

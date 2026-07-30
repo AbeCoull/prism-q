@@ -1,13 +1,9 @@
-//! Auto non-Clifford expectation values above the statevector cap.
-//!
-//! Isolated in its own test binary: it overrides `PRISM_MAX_SV_QUBITS`, which
-//! `max_statevector_qubits()` caches per process, so it must not share a process
-//! with tests that expect the real memory-derived cap.
-//!
-//! Above the cap the route no longer rejects the request. It lands on a backend
-//! that evaluates the observable on its own representation, so the reference
-//! here is closed form: an explicit statevector run is unavailable under the
-//! same cap and cannot serve as one.
+//! Auto non-Clifford expectation values above the statevector cap. Isolated
+//! in its own test binary: it overrides `PRISM_MAX_SV_QUBITS`, which is
+//! cached per process, so it must not share a process with tests that expect
+//! the real cap. Above the cap the route lands on a backend that evaluates
+//! the observable on its own representation, so the reference is closed form;
+//! a statevector run is unavailable under the same cap.
 
 use prism_q::gates::Gate;
 use prism_q::{Circuit, PauliTerm, run_expectation_values};

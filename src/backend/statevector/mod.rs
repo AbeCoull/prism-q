@@ -1,13 +1,32 @@
 //! Full state-vector simulation backend.
 //!
 //! Stores the complete 2^n amplitude vector and applies gates via direct
-//! index manipulation. This is the reference backend,
-//! but memory-limited to ~25-30 qubits on typical hardware.
+//! index manipulation. This is the reference backend. The qubit cap is derived
+//! from detected system memory at dispatch time; `PRISM_MAX_SV_QUBITS`
+//! overrides it.
 //!
 //! # Memory layout
 //!
 //! State is a contiguous `Vec<Complex64>` of length 2^n, indexed by computational
 //! basis state in standard binary order (qubit 0 = least significant bit).
+//!
+//! # Gate support
+//!
+//! The full gate set, including MCU, every fused or batched variant, and a
+//! native `Gate::QftBlock` kernel on the CPU whole-state path.
+//!
+//! # When to prefer this backend
+//!
+//! - Exact amplitudes for arbitrary circuits within the memory cap.
+//! - Dense entanglement, where structured backends lose their advantage.
+//! - Reference results when validating other backends.
+//!
+//! # When NOT to use this backend
+//!
+//! - Qubit counts past the memory cap (dispatch picks sparse or MPS instead).
+//! - Clifford-only circuits, where the stabilizer tableau is exact at any size.
+//! - Non-entangling or sparse-entanglement circuits, where product or factored
+//!   states are exponentially cheaper.
 //!
 //! # Hot-path design
 //!

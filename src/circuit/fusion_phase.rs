@@ -1,3 +1,7 @@
+//! Controlled-phase batching passes: [`fuse_controlled_phases`] emits
+//! [`Gate::BatchPhase`], [`batch_post_phase_1q`] re-batches trailing 1q runs.
+//! The pass pipeline lives in [`crate::circuit::fusion`].
+
 use std::borrow::Cow;
 
 use num_complex::Complex64;

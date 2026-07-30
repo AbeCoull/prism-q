@@ -9,9 +9,13 @@
 //! `U` applied to the bra register on a conjugated buffer yields the right product
 //! `rho U^dagger`, giving `U rho U^dagger` with no gate math of its own.
 //!
+//! # Memory layout
+//!
 //! Memory is `16 * 4^n` bytes (`4^n` `Complex64` entries), so the practical
 //! ceiling is about 14 qubits on a 16 GiB host and 15 on a 32 GiB host. CPU only.
 //! This backend is explicit-dispatch only and is never chosen by `Auto`.
+//!
+//! # Gate support
 //!
 //! Supported: exact unitary evolution, basis-state probabilities, the one-qubit
 //! reduced density matrix, projective measurement with stochastic collapse,
@@ -20,6 +24,19 @@
 //! exact `Tr(rho P)` expectation (`expectation_pauli`). Fusion is disabled
 //! (`supports_fused_gates` returns `false`) so every instruction reaching the
 //! backend is a primitive whose qubits live in the instruction targets.
+//!
+//! # When to prefer this backend
+//!
+//! - Exact noise-channel evolution: one run yields the exact mixed state,
+//!   where trajectory averaging converges as `1/sqrt(shots)`.
+//! - Mixed-state diagnostics: purity and exact `Tr(rho P)` observables.
+//!
+//! # When NOT to use this backend
+//!
+//! - Pure-state circuits; a statevector covers twice the qubits in the same
+//!   memory.
+//! - Qubit counts past the `4^n` ceiling; trajectory sampling on a pure-state
+//!   backend scales further.
 
 use num_complex::Complex64;
 use rand::{RngExt, SeedableRng};

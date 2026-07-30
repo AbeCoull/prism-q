@@ -1448,8 +1448,6 @@ mod tests {
 
     #[test]
     fn test_fusion_matrix_order_matters() {
-        // Verify that fusion respects gate ordering (non-commuting gates).
-        // X then H is different from H then X.
         let mut c_xh = Circuit::new(1, 0);
         c_xh.add_gate(Gate::X, &[0]);
         c_xh.add_gate(Gate::H, &[0]);
@@ -1863,12 +1861,11 @@ mod tests {
         // Rz(0) should move past CX(0,1) since diagonal commutes on control
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Cx, &[0, 1]);
-        c.add_gate(Gate::Rz(0.5), &[0]); // diagonal on control, should commute
+        c.add_gate(Gate::Rz(0.5), &[0]);
 
         let result = reorder_1q_gates(Cow::Borrowed(&c));
         assert!(matches!(result, Cow::Owned(_)));
         assert_eq!(result.instructions.len(), 2);
-        // Rz should be moved before CX
         assert!(matches!(
             &result.instructions[0],
             Instruction::Gate {

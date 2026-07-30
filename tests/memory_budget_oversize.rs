@@ -1,11 +1,8 @@
-//! Oversize guards for the backend memory-budget contract.
-//!
-//! Isolated in its own test binary: it overrides `PRISM_MAX_SV_QUBITS` and
-//! `PRISM_MAX_DM_QUBITS`, which the cap helpers cache per process, so it must
-//! not share a process with tests that expect the real memory-derived caps.
-//!
-//! The caps are what make these cases cheap. Every rejection here is decided
-//! before the backend reserves anything, so no test allocates an oversize state.
+//! Oversize guards for the backend memory-budget contract. Isolated in its
+//! own test binary: it overrides `PRISM_MAX_SV_QUBITS` and
+//! `PRISM_MAX_DM_QUBITS`, which the cap helpers cache per process. Every
+//! rejection is decided before the backend reserves anything, so no test
+//! allocates an oversize state.
 
 use std::sync::Once;
 
@@ -57,9 +54,9 @@ fn assert_cap_error(err: PrismError, backend: &str) {
     }
 }
 
-/// The path a caller reaches by driving a backend directly instead of through
-/// dispatch, which is what the Python `state_vector()` terminal does. Before
-/// the cap moved into `init` this allocated unchecked and aborted the process.
+// The path a caller reaches by driving a backend directly instead of through
+// dispatch, which is what the Python `state_vector()` terminal does. Before
+// the cap moved into `init` this allocated unchecked and aborted the process.
 #[test]
 fn statevector_init_over_cap_returns_clean_error() {
     small_caps();

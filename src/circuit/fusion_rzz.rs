@@ -1,3 +1,7 @@
+//! Rzz fusion passes: [`fuse_rzz`] rewrites `CX(a,b) Rz(b) CX(a,b)` into
+//! [`Gate::Rzz`], [`fuse_batch_rzz`] collects Rzz runs into [`Gate::BatchRzz`].
+//! The pass pipeline lives in [`crate::circuit::fusion`].
+
 use std::borrow::Cow;
 
 use super::fusion::push_unique;

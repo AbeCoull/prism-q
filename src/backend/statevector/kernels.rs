@@ -1259,7 +1259,7 @@ fn apply_radix4_groups(
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: aarch64 targets provide NEON. The loop maps each radix-4
+        // SAFETY: NEON is baseline on aarch64. The loop maps each radix-4
         // butterfly to four in-bounds amplitudes inside `group`; the safe
         // alternative is the scalar fallback below. This SIMD counterpart is
         // required so Apple Silicon does not pay scalar Complex64 overhead in

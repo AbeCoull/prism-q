@@ -351,7 +351,7 @@ extern "C" __global__ void stab_apply_word_grouped(
 //
 // XOR source row bits into destination row and update destination phase by
 // the Aaronson-Gottesman g-function. Mirrors the scalar CPU implementation at
-// src/backend/stabilizer/kernels/simd.rs:86 exactly:
+// rowmul_words_scalar in src/backend/stabilizer/kernels/simd.rs exactly:
 //
 //     let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
 //     let pos = (x1 & z1 & !x2 & z2)
@@ -659,6 +659,7 @@ pub(crate) mod op {
     pub const Z: u32 = 5;
     pub const SX: u32 = 6;
     pub const SXDG: u32 = 7;
+    /// `a` is control, `b` is target.
     pub const CX: u32 = 8;
     pub const CZ: u32 = 9;
     pub const SWAP: u32 = 10;
@@ -676,8 +677,7 @@ const ZERO_U32: [u32; 1] = [0];
 /// as `[opcode, a, b, pad]` quads. Opcodes are the constants in [`op`]. The
 /// kernel maps one block to each tableau row, parallelises the disjoint
 /// same-word groups within that row, and leaves the cross-word tail serial
-/// on thread 0 to avoid shared-word races. Apply a flat op list to the device
-/// tableau via the word-grouped kernel.
+/// on thread 0 to avoid shared-word races.
 ///
 /// Host-side, this streams through `ops` (quads `[opcode, a, b, pad]`),
 /// sorting into word groups keyed by target-word plus a cross-word 2q list.
@@ -1051,9 +1051,8 @@ pub(crate) fn launch_rowmul_words(
 
 /// Block size for the measurement kernels that use one block per row
 /// (`stab_measure_cascade`) and the single-block measurement kernels
-/// (`stab_measure_fixup`, `stab_measure_deterministic`). Chosen so one warp-
-/// shuffle round plus one shared-memory reduction cover every num_words
-/// encountered in practice (≤ 5000 qubits ⇒ num_words ≤ 79).
+/// (`stab_measure_fixup`, `stab_measure_deterministic`). num_words bound:
+/// see `ROWMUL_BLOCK_SIZE`.
 const MEASURE_BLOCK_SIZE: u32 = 128;
 
 /// Scan stabilizer rows `n..2n` for the minimum row index whose X-bit at

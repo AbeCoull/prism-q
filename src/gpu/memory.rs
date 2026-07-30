@@ -1,6 +1,6 @@
 //! Typed GPU memory allocation wrapper.
 //!
-//! `GpuBuffer<T>` owns a [`cudarc::driver::CudaSlice<T>`] and exposes a minimal htod/dtoh
+//! `GpuBuffer<T>` owns a `cudarc::driver::CudaSlice<T>` and exposes a minimal htod/dtoh
 //! interface. Additional element types can be supported by extending the `T: DeviceRepr`
 //! bound as needed; today only `f64` is exercised.
 
@@ -55,12 +55,10 @@ impl<T: DeviceRepr> GpuBuffer<T> {
 }
 
 impl<T: DeviceRepr> GpuBuffer<T> {
-    /// Number of elements allocated.
     pub fn len(&self) -> usize {
         self.slice.len()
     }
 
-    /// Whether the allocation is zero-length.
     pub fn is_empty(&self) -> bool {
         self.slice.len() == 0
     }

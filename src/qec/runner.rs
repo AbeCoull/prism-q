@@ -1,3 +1,7 @@
+//! Execution paths for native QEC programs: the packed compiled Clifford
+//! runner, the per-shot statevector reference runner, and the routing
+//! between them for `EXP_VAL` and noisy programs.
+
 #[cfg(feature = "bench-internal")]
 use super::noise::QecCompiledNoiseSampler;
 use super::noise::compile_qec_noisy_sampler;
@@ -48,6 +52,33 @@ use rand_chacha::ChaCha8Rng;
 /// - [`QecOptions::chunk_size`] bounds the per-batch shot count. Setting
 ///   `chunk_size` together with `keep_measurements: false` keeps peak memory
 ///   at one chunk worth of measurement records.
+///
+/// # Examples
+///
+/// One noiseless round of a three-qubit repetition-code memory. Every
+/// measurement is deterministic, so no accepted shot flips the observable.
+///
+/// ```
+/// use prism_q::{QecOptions, QecProgram, run_qec_program};
+///
+/// let mut program = QecProgram::from_text(
+///     "R 0 1 2
+///      CX 0 1 2 1
+///      MR 1
+///      DETECTOR rec[-1]
+///      M 0 2
+///      OBSERVABLE_INCLUDE(0) rec[-1] rec[-2]",
+/// )?;
+/// program.set_options(QecOptions {
+///     shots: 64,
+///     seed: 42,
+///     ..QecOptions::default()
+/// });
+/// let result = run_qec_program(&program)?;
+/// assert_eq!(result.accepted_shots, 64);
+/// assert_eq!(result.logical_errors, vec![0]);
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
 pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
     if program.num_expectation_values() > 0 {
         super::validate_qec_exp_val_placement(program)?;

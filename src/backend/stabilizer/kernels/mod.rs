@@ -1,3 +1,7 @@
+//! Gate dispatch and measurement kernels for the dense stabilizer tableau:
+//! full-tableau row loops, the SGI path that touches only rows active on a
+//! gate's qubits, and entry points for word-group batching.
+
 mod batch;
 pub(crate) mod rowops;
 mod simd;

@@ -132,10 +132,6 @@ fn run_strategy_sweep<P: Copy, F, T>(
     }
 }
 
-/// Unified 5σ correctness sweep across small Clifford+T fixtures. Each
-/// fixture has a single observable whose Born rate is computed via the
-/// reference statevector runner; every strategy must land within
-/// `5·stderr + 0.03` of that rate.
 #[test]
 fn analytical_strategy_correctness_sweep() {
     fn h_t_h() -> QecProgram {
@@ -204,9 +200,8 @@ fn analytical_strategy_correctness_sweep() {
     );
 }
 
-/// Single-qubit `(H · T)^t · H` rotation. Used by the t-scaling
-/// correctness sweep; analytic Born rate for the Z observable is
-/// `sin²(t · π/8)`.
+/// Single-qubit `(H · T)^t · H` rotation. Analytic Born rate for the Z
+/// observable is `sin²(t · π/8)`.
 fn t_chain_program(shots: usize, t_count: usize) -> QecProgram {
     let mut p = QecProgram::with_options(1, options(shots));
     p.push_gate(Gate::H, &[0]).unwrap();
@@ -220,19 +215,11 @@ fn t_chain_program(shots: usize, t_count: usize) -> QecProgram {
     p
 }
 
-/// Correctness across the T-count scaling fixture. The oracle is the
-/// per-shot reference statevector runner; every other strategy must
-/// land within a strategy-specific tolerance for each
-/// `t ∈ {1, 2, 4, 8, 12}`. StabRankShots is skipped at `t ≥ 2`
-/// (documented bias on multi-T-per-path observables).
-///
-/// **Known limitation from this sweep:** SPP picks up the same multi-T
-/// bias as the previous weighted-shot estimator. The Heisenberg-frame Pauli backprop uses
-/// 50/50 branching at each T with a `√2` weight; cross-branch
-/// interference between successive T gates is dropped at the
-/// sample level. The tolerance reflects this, SPP is treated as
-/// `≤ 5σ` correct only at `t = 1`, and the table records the bias
-/// at larger `t` rather than asserting against it.
+// StabRankShots is skipped at `t ≥ 2` (documented bias on multi-T-per-path
+// observables). SPP picks up the same multi-T bias: the Heisenberg-frame
+// Pauli backprop uses 50/50 branching at each T with a `√2` weight, and
+// cross-branch interference between successive T gates is dropped at the
+// sample level, so SPP is treated as `≤ 5σ` correct only at `t = 1`.
 #[test]
 fn analytical_t_count_scaling_correctness() {
     let t_counts: &[usize] = &[1, 2, 4, 8, 12];
@@ -248,10 +235,6 @@ fn analytical_t_count_scaling_correctness() {
 
 /// Multi-qubit program with a multi-qubit twisted Pauli and a joint
 /// XOR observable that resolves the T phase.
-///
-/// Layout: `H q[0]; CX(i,i+1)` cascade prepares a GHZ-like prefix,
-/// then `T q[0]`, then `H` on every qubit, then measure every qubit
-/// and XOR the outcomes into the observable.
 ///
 /// At T application the prefix is `CX_chain · H_0`, so
 /// `Z̄ = (CX_chain)† H_0 Z_0 H_0 CX_chain = X_0 X_1 … X_{n-1}`, pure
@@ -284,12 +267,6 @@ fn entangled_t_xor_program(shots: usize, n: usize) -> QecProgram {
     p
 }
 
-/// CAMPS must match the statevector reference on multi-qubit
-/// Clifford+T programs whose twisted Pauli has multi-qubit support.
-/// Sweeps `n ∈ {2, 3, 4, 5, 6}` with an entangled `H·T·H·T·H` pattern
-/// that exercises both OFD (first T, MPS at |0⟩) and OFDS (second T,
-/// MPS holds non-Clifford content) paths and produces a non-trivial
-/// Born rate so a broken CAMPS would visibly bias.
 #[test]
 fn camps_matches_reference_on_entangled_multi_qubit_t() {
     let qubit_counts: &[usize] = &[2, 3, 4, 5, 6];
@@ -329,15 +306,10 @@ fn entangled_two_t_xor_program(shots: usize, n: usize) -> QecProgram {
     p
 }
 
-/// Two T gates in a multi-qubit program. The second T's twisted Pauli
-/// is evaluated against an MPS with non-Clifford content from the
-/// first T. Verifies CAMPS and SPD match the reference simulator
-/// across `n ∈ {2, 3, 4, 5, 6}`.
-///
-/// MagicFrame is excluded because the stabilizer-rank backend returns exactly
-/// 0.5 on every fixture regardless of `n`, which indicates the T phase is
-/// collapsed before the joint XOR observable is read. That failure is
-/// independent of the CAMPS count_y regression covered here.
+// MagicFrame is excluded because the stabilizer-rank backend returns exactly
+// 0.5 on every fixture regardless of `n`, which indicates the T phase is
+// collapsed before the joint XOR observable is read. That failure is
+// independent of the CAMPS count_y regression covered here.
 #[test]
 fn camps_matches_reference_on_two_t_multi_qubit() {
     let qubit_counts: &[usize] = &[2, 3, 4, 5, 6];
@@ -443,8 +415,7 @@ fn rerouted_spd_rejects_out_of_range_stabilizer_qubit() {
 fn rerouted_spd_rejects_reset_programs() {
     // RESET reassigns a logical qubit to a fresh lowered index, so a
     // stabilizer expressed in logical-qubit indices would silently land on
-    // the wrong physical qubit. The rerouted path must reject such programs
-    // rather than evaluate a different operator.
+    // the wrong physical qubit.
     let mut program = QecProgram::with_options(2, options(64));
     program.push_gate(Gate::T, &[0]).unwrap();
     program.reset(prism_q::QecBasis::Z, 0).unwrap();
@@ -468,9 +439,7 @@ fn rerouted_spd_rejects_reset_programs() {
 
 #[test]
 fn analytical_strategies_handle_reset() {
-    // Prepare |+>, reset to |0>, then T·H, analytic Born of Z on
-    // the post-reset circuit is sin²(π/8). The analytical strategies
-    // (SPD, CAMPS) must agree with the reference.
+    // Analytic Born rate of Z on the post-reset circuit is sin²(π/8).
     let mut program = QecProgram::with_options(1, options(STAT_SHOTS));
     program.push_gate(Gate::H, &[0]).unwrap();
     program.reset(prism_q::QecBasis::Z, 0).unwrap();
@@ -497,7 +466,6 @@ fn analytical_strategies_handle_reset() {
 
 #[test]
 fn analytical_strategies_handle_x_basis_measurement() {
-    // H on |0⟩ → |+⟩; T·H on |+⟩; measure in X basis.
     // The X-basis measurement adds an `H` rotation before the
     // Z-equivalent measurement, so the joint Pauli is X on qubit 0
     // before the rotation, or equivalently Z on qubit 0 in the
@@ -526,10 +494,7 @@ fn analytical_strategies_handle_x_basis_measurement() {
 
 #[test]
 fn analytical_strategies_handle_postselection() {
-    // Repetition-style: one qubit measured twice, postselect on the
-    // first measurement being "0" outcome, observable on the second.
-    // The postselection projector is (I + Z_q)/2 on the data qubit,
-    // and the conditional expectation should match the reference.
+    // The postselection projector is (I + Z_q)/2 on the data qubit.
     let mut program = QecProgram::with_options(1, options(STAT_SHOTS));
     program.push_gate(Gate::H, &[0]).unwrap();
     program.push_gate(Gate::T, &[0]).unwrap();
@@ -614,8 +579,7 @@ fn analytical_observable_records_match_logical_error_counts() {
 fn analytical_strategies_reject_active_noise_route_to_reference() {
     use prism_q::QecNoise;
     // Active Pauli noise channels are incompatible with pure-state
-    // expectation strategies. The runner must reject explicitly and
-    // the Reference path must continue to succeed on the same program.
+    // expectation strategies.
     let mut program = QecProgram::with_options(1, options(1_000));
     program.push_gate(Gate::H, &[0]).unwrap();
     program.noise(QecNoise::XError(0.1), &[0]).unwrap();

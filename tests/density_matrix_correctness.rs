@@ -1,8 +1,6 @@
-//! Cross-backend correctness for the density-matrix backend.
-//!
-//! On noiseless (unitary) circuits the density-matrix backend must reproduce the
-//! statevector backend's basis-state probabilities exactly, and a pure state must
-//! stay pure (`Tr(rho^2) == 1`).
+//! Cross-backend correctness for the density-matrix backend: on unitary
+//! circuits it must reproduce the statevector probabilities exactly, and a
+//! pure state must stay pure (`Tr(rho^2) == 1`).
 
 mod common;
 
@@ -25,8 +23,6 @@ fn c(re: f64, im: f64) -> Complex64 {
     Complex64::new(re, im)
 }
 
-/// Build a one-qubit backend, prepare it with `prep`, apply Kraus set `kraus`,
-/// and return the resulting one-qubit density matrix and its trace.
 fn dm_after_channel(
     prep: &[(Gate, usize)],
     kraus: &[[[Complex64; 2]; 2]],
@@ -304,7 +300,6 @@ fn dm_depolarizing_fixed_point() {
 
 #[test]
 fn dm_custom_kraus_matches_amplitude_damping() {
-    // A Custom Kraus set equal to amplitude damping must reproduce it.
     let gamma = 0.25;
     let (rho, _) = dm_after_channel(&[(Gate::X, 0)], &amplitude_damping(gamma));
     assert!(
@@ -373,7 +368,6 @@ fn dm_reset_returns_qubit_to_zero() {
 
 #[test]
 fn dm_reset_from_superposition_gives_maximally_mixed_partial_trace() {
-    // A Bell pair reset on one qubit leaves the other maximally mixed.
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
@@ -411,8 +405,7 @@ fn dm_conditional_applies_on_measured_one() {
 #[test]
 fn dm_measurement_marginals_match_statevector() {
     // Measuring a Bell pair yields 00 or 11 with probability 0.5 each; 01 and
-    // 10 never occur. The empirical frequency must match the statevector
-    // analytic marginals.
+    // 10 never occur.
     let mut c = Circuit::new(2, 2);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
@@ -454,11 +447,11 @@ fn dm_reduced_density_matrix_matches_statevector() {
     }
 }
 
-/// The override against the boxed `Gate::Fused` route it replaces, at both sides
-/// of the crossover the one-qubit path selects on: below the parallel threshold
-/// the embedded `2n`-qubit statevector takes two passes, at or above it one block
-/// superoperator pass. The second matrix is a non-unitary jump branch, so this is
-/// not restricted to `rho -> U rho U^dagger`.
+// The override against the boxed `Gate::Fused` route it replaces, at both sides
+// of the crossover the one-qubit path selects on: below the parallel threshold
+// the embedded `2n`-qubit statevector takes two passes, at or above it one block
+// superoperator pass. The second matrix is a non-unitary jump branch, so this is
+// not restricted to `rho -> U rho U^dagger`.
 #[test]
 fn dm_apply_1q_matrix_matches_fused_gate_route() {
     let dense = [[c(0.6, 0.0), c(0.8, 0.0)], [c(0.8, 0.0), c(-0.6, 0.0)]];

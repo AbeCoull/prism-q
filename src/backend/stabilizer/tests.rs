@@ -401,7 +401,6 @@ fn test_export_statevector_bell_state_matches_sv() {
     sim::run_on(&mut sv, &c).unwrap();
     let sv_ref = sv.state_vector();
 
-    // Probabilities must match exactly
     for (s, r) in stab_sv.iter().zip(sv_ref.iter()) {
         assert!(
             (s.norm_sqr() - r.norm_sqr()).abs() < 1e-10,
@@ -950,9 +949,9 @@ mod gpu_scaffold {
     use super::*;
     use crate::gpu::GpuContext;
 
-    /// With the stub context, `GpuTableau::new` returns `BackendUnsupported` at
-    /// `alloc_zeros` time. `StabilizerBackend::init` must surface that error
-    /// cleanly rather than panicking.
+    // With the stub context, `GpuTableau::new` returns `BackendUnsupported` at
+    // `alloc_zeros` time. `StabilizerBackend::init` must surface that error
+    // cleanly rather than panicking.
     #[test]
     fn with_gpu_init_on_stub_returns_unsupported() {
         let ctx = GpuContext::stub_for_tests();
@@ -961,11 +960,11 @@ mod gpu_scaffold {
         assert!(matches!(err, PrismError::BackendUnsupported { .. }));
     }
 
-    /// `with_gpu_auto` is the soft (fail-closed) mode. On the stub context,
-    /// `GpuTableau::new` fails at `init`, but instead of surfacing the error the
-    /// backend must degrade to the host tableau and run correctly. A GHZ chain
-    /// then measures deterministically-correlated bits, proving the fallback
-    /// produced a working CPU stabilizer rather than a corrupt half-state.
+    // `with_gpu_auto` is the soft (fail-closed) mode. On the stub context,
+    // `GpuTableau::new` fails at `init`, but instead of surfacing the error the
+    // backend must degrade to the host tableau and run correctly. A GHZ chain
+    // then measures deterministically-correlated bits, proving the fallback
+    // produced a working CPU stabilizer rather than a corrupt half-state.
     #[test]
     fn with_gpu_auto_falls_back_to_host_on_stub() {
         use crate::gates::Gate;
@@ -995,8 +994,8 @@ mod gpu_scaffold {
         );
     }
 
-    /// Constructing with `with_gpu(ctx)` but then not initialising must leave
-    /// the backend in a usable (context-only) state.
+    // Constructing with `with_gpu(ctx)` but then not initialising must leave
+    // the backend in a usable (context-only) state.
     #[test]
     fn with_gpu_stores_context_without_panicking() {
         let ctx = GpuContext::stub_for_tests();
@@ -1004,10 +1003,10 @@ mod gpu_scaffold {
         assert_eq!(backend.name(), "stabilizer");
     }
 
-    /// Transactional init: if `GpuTableau::new` fails, the backend must retain
-    /// its pre-init state so subsequent calls do not touch partially-updated
-    /// host buffers. Here the backend is fresh (`n == 0`), and the invariant
-    /// is that it stays that way after the failure.
+    // Transactional init: if `GpuTableau::new` fails, the backend must retain
+    // its pre-init state so subsequent calls do not touch partially-updated
+    // host buffers. Here the backend is fresh (`n == 0`), and the invariant
+    // is that it stays that way after the failure.
     #[test]
     fn failed_gpu_init_leaves_backend_uninitialised() {
         let ctx = GpuContext::stub_for_tests();
@@ -1016,9 +1015,9 @@ mod gpu_scaffold {
         assert_eq!(backend.num_qubits(), 0);
     }
 
-    /// Cloning a CPU-only backend preserves state; this covers the common
-    /// `stabilizer_rank` path and confirms the GPU-gated Clone impl still
-    /// works for non-GPU callers.
+    // Cloning a CPU-only backend preserves state; this covers the common
+    // `stabilizer_rank` path and confirms the GPU-gated Clone impl still
+    // works for non-GPU callers.
     #[test]
     fn clone_cpu_only_preserves_tableau() {
         let mut backend = StabilizerBackend::new(42);

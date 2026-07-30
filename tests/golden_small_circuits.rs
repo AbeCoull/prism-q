@@ -1,16 +1,9 @@
-//! Closed-form goldens: circuits whose output was computed by hand.
-//!
-//! The expected value is either a literal derived from the algebra in the
-//! comment above it, or a textbook decomposition of the same gate applied on
-//! the same backend. Nothing here is checked against a second simulator, which
-//! is the point: `tests/backend_equivalence.rs` compares backends against each
-//! other, and a comparison can only report that two implementations disagree,
-//! never which one is right. `tests/common/mod.rs` records what that cost once,
-//! when a projection-onto-|0> `reset` survived a green matrix because the
-//! statevector it was compared against had the same bug.
-//!
-//! Add a test here when a behavior needs an authority. Add it to
-//! `tests/backend_equivalence.rs` when two implementations need to agree.
+//! Closed-form goldens: circuits whose output was computed by hand. The
+//! expected value is a literal from the algebra in the comment above it, or a
+//! textbook decomposition of the same gate on the same backend, never a
+//! second simulator: a comparison can only report that two implementations
+//! disagree, not which one is right. Behavior needing an authority goes here;
+//! agreement between implementations goes in `tests/backend_equivalence.rs`.
 
 mod common;
 
@@ -224,7 +217,7 @@ fn double_swap_is_identity() {
 
 #[test]
 fn cz_on_11() {
-    // Prepare |11⟩, apply CZ, check phase flip
+    // CZ|11⟩ = -|11⟩
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::X, &[0]);
     c.add_gate(Gate::X, &[1]);
@@ -411,7 +404,7 @@ fn mcu_toffoli_one_inactive() {
 
 #[test]
 fn mcu_ccz_phase_flip() {
-    // CCZ: phase-flip |111⟩. Prepare equal superposition, check |111⟩ gets -1.
+    // CCZ: phase-flip |111⟩
     let z_mat = Gate::Z.matrix_2x2();
     let ccz = Gate::Mcu(Box::new(McuData {
         mat: z_mat,
@@ -456,7 +449,6 @@ fn mcu_3ctrl_x() {
 #[test]
 fn mcu_inv_ctrl_ctrl_rz() {
     // inv @ ctrl @ ctrl @ rz(pi/4): apply CRz(−π/4) with 2 controls
-    // Set all controls active, put target in superposition
     let rz_mat = Gate::Rz(std::f64::consts::FRAC_PI_4).matrix_2x2();
     let rz_inv_mat = Gate::Rz(-std::f64::consts::FRAC_PI_4).matrix_2x2();
     let mcu_fwd = Gate::Mcu(Box::new(McuData {
@@ -468,7 +460,6 @@ fn mcu_inv_ctrl_ctrl_rz() {
         num_controls: 2,
     }));
 
-    // Apply forward then inverse, should cancel to identity on target
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::X, &[0]);
     c.add_gate(Gate::X, &[1]);

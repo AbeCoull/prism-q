@@ -886,8 +886,8 @@ pub enum SkipReason {
     FactoredBlocksHaveNoJointState,
     /// Amplitudes are only defined once the trajectory is fixed.
     BranchingTrajectory,
-    /// Outside the query matrices. They cover the backends that gained a path
-    /// from their own state to shots and observables (sparse, MPS, factored)
+    /// Outside the query matrices. They cover the backends that answer shots
+    /// and observables from their own state (sparse, MPS, factored, product)
     /// plus the statevector they have to agree with. Every other participant is
     /// a route, or an engine whose query path is unchanged.
     OutsideQueryMatrix,
@@ -1173,7 +1173,7 @@ pub fn participants() -> Vec<Participant> {
             exec: Executor::Direct(|s| Box::new(ProductStateBackend::new(s))),
             rules: product_rules,
             export_rules: always,
-            query_kind: None,
+            query_kind: Some(BackendKind::ProductState),
             anchor: None,
         },
         Participant {

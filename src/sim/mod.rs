@@ -712,6 +712,13 @@ fn try_terminal_statevector_backend(
 /// backend has no native sampler, leaving the dense probability path untouched.
 /// The capability is probed before `init`, so a backend without one costs an
 /// allocation and nothing else.
+///
+/// The product state is the one route taken past subsystem decomposition: it
+/// already stores one factor per qubit, so splitting the circuit into
+/// independent blocks pays a backend, a partition, and a merge per block to
+/// rebuild what one native draw reads straight off the state, and above 64
+/// qubits the merged block distribution does not exist at all. Every other
+/// backend keeps the block split.
 fn try_native_terminal_backend(
     kind: &BackendKind,
     stripped: &Circuit,
@@ -720,15 +727,19 @@ fn try_native_terminal_backend(
     if !kind.is_auto() {
         validate_explicit_backend(kind, stripped)?;
     }
-    let ProbabilityRoute::Direct {
-        has_partial_independence,
-    } = plan_probability_route(kind, stripped)
-    else {
-        return Ok(None);
+    let (decomposed, has_partial_independence) = match plan_probability_route(kind, stripped) {
+        ProbabilityRoute::Direct {
+            has_partial_independence,
+        } => (false, has_partial_independence),
+        ProbabilityRoute::Decomposed(_) => (true, false),
+        _ => return Ok(None),
     };
     let ExecutionPlan::Backend(plan) = resolve(kind, stripped, has_partial_independence) else {
         return Ok(None);
     };
+    if decomposed && !matches!(plan, BackendPlan::ProductState) {
+        return Ok(None);
+    }
     let mut backend = plan.build(seed);
     if !backend.supports_native_sampling() {
         return Ok(None);
@@ -1673,6 +1684,52 @@ mod tests {
             if auto_terminal_statevector_candidate(circuit) {
                 assert!(candidate_is_direct(circuit));
             }
+        }
+    }
+
+    // The decomposition bypass in `try_native_terminal_backend` is scoped to
+    // the product state. Pin both halves: a product circuit reaches the native
+    // sampler even though its route is decomposed, and a decomposable circuit
+    // on any other backend keeps the block split it had before.
+    #[test]
+    fn only_the_product_state_takes_the_native_sampler_past_decomposition() {
+        let mut product = Circuit::new(12, 0);
+        for q in 0..12 {
+            product.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+        }
+        assert!(matches!(
+            plan_probability_route(&BackendKind::Auto, &product),
+            ProbabilityRoute::Decomposed(_)
+        ));
+        for kind in [BackendKind::Auto, BackendKind::ProductState] {
+            let backend = try_native_terminal_backend(&kind, &product, 42).unwrap();
+            assert_eq!(
+                backend.map(|b| b.name()),
+                Some("productstate"),
+                "{kind:?} did not reach the product sampler"
+            );
+        }
+
+        let mut blocks = Circuit::new(10, 0);
+        for pair in 0..5 {
+            blocks.add_gate(Gate::Ry(0.2 + 0.1 * pair as f64), &[2 * pair]);
+            blocks.add_gate(Gate::Cx, &[2 * pair, 2 * pair + 1]);
+        }
+        assert!(matches!(
+            plan_probability_route(&BackendKind::Sparse, &blocks),
+            ProbabilityRoute::Decomposed(_)
+        ));
+        for kind in [
+            BackendKind::Sparse,
+            BackendKind::Factored,
+            BackendKind::Mps { max_bond_dim: 32 },
+        ] {
+            assert!(
+                try_native_terminal_backend(&kind, &blocks, 42)
+                    .unwrap()
+                    .is_none(),
+                "{kind:?} left the decomposed route"
+            );
         }
     }
 

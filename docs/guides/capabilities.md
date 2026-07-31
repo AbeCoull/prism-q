@@ -60,10 +60,11 @@ bounded only by their own representation.
 | Sparse | Native, CDF over the stored amplitudes | Native, `O(k)` over the amplitude map |
 | MPS | Native, sequential conditional sampling | Native, one chain contraction per observable |
 | Factored | Native, one draw per sub-state | Native, product over the blocks |
+| Product State | Native, one Bernoulli draw per qubit | Native, one closed-form factor per qubit |
 | Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
 | Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
-| Tensor Network, Product State, Density Matrix | Dense | Rejected, naming the backend |
+| Tensor Network, Density Matrix | Dense | Rejected, naming the backend |
 
 Native sampling is deterministic from the seed alone: the same seed and shot
 count reproduce the same bitstrings. It is not shot-for-shot identical to the

@@ -752,6 +752,28 @@ fn bench_product_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+/// Product sampling is `O(shots·n)` with no `2^n` term anywhere, so the widths
+/// go past where the other samplers stop. The row exists to show the cost is
+/// linear in `n`: each step doubles the width and should double the time.
+const PRODUCT_SAMPLING_QUBITS: [usize; 4] = [64, 128, 256, 512];
+
+fn bench_product_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("product/sampling");
+    configure_group(&mut group);
+
+    for &n in &PRODUCT_SAMPLING_QUBITS {
+        let circuit = measure_all(&random_single_qubit_circuit(n, 10, SEED));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    run_shots_with(BackendKind::ProductState, circ, SAMPLING_SHOTS, SEED).unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
 // ---- Tensor Network backend ----
 
 fn bench_tn_scaling(c: &mut Criterion) {
@@ -1822,6 +1844,7 @@ criterion_group! {
     bench_mps_sampling,
     // Product state
     bench_product_scaling,
+    bench_product_sampling,
     // Tensor network
     bench_tn_scaling,
     bench_tn_linear_chain,

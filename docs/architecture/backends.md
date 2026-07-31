@@ -103,6 +103,8 @@ Hybrid SVD dispatch: faer (bidiag+D&C) for matrices with m×n ≥ 256, hand-roll
 
 Per-qubit `[Complex64; 2]` storage. O(n) memory, O(1) per single-qubit gate. Rejects entangling gates. Selected automatically for circuits with no 2q gates.
 
+Shots and Pauli expectations answer from the per-qubit states rather than the `2^n` probability vector, so both stay O(n) and the backend runs queries at widths no dense route reaches. See [Sampling Architecture](./samplers.md).
+
 ## Tensor Network
 
 Deferred contraction with a greedy min-size heuristic. Gates append tensors; contraction happens lazily at measurement or probability extraction. `MAX_PROB_QUBITS = 25` guards against exponential blowup.

@@ -113,8 +113,6 @@ native_path() {
     fi
 }
 
-TARGET_DIR_NATIVE="$(native_path "$PROJECT_DIR/target")"
-
 # Content hash of the working tree: HEAD, every tracked modification against it,
 # and every untracked file that is not ignored. Recomputed after the reference
 # build so a save from the editor between the two builds is caught rather than
@@ -133,6 +131,15 @@ tree_fingerprint() {
 # Build the bench target in `dir` and copy the resulting executable to `out`.
 # The path comes from cargo's own artifact message, not from an mtime scan of
 # the deps directory, so a build that relinks nothing still resolves correctly.
+#
+# Each worktree builds into its own target directory. Sharing one directory
+# looks like a free dependency cache and is not: cargo derives the same unit
+# metadata for both worktrees, so the second build overwrites the first's
+# artifact and fingerprint, and every later build reports "Finished" in under a
+# second while handing back whichever binary was linked last. The report then
+# reads as a pure noise floor, because both binaries really are the same one.
+# The reference worktree keeps its cache between runs whenever --ref-dir names
+# a path that persists.
 build_bench_exe() {
     local dir="$1" out="$2" label="$3"
     local log="$WORKDIR/build-$label.json"
@@ -140,7 +147,7 @@ build_bench_exe() {
     echo ">>> building $label: cargo bench --bench $BENCH --features \"$FEATURES\" --no-run"
     (
         cd "$dir"
-        CARGO_TARGET_DIR="$TARGET_DIR_NATIVE" \
+        CARGO_TARGET_DIR="$(native_path "$dir/target")" \
             cargo bench --bench "$BENCH" --features "$FEATURES" --no-run --message-format=json
     ) > "$log"
 
@@ -265,7 +272,7 @@ echo "  reference: $REF ($REF_SHA)"
 echo "  threshold: ${THRESHOLD}%"
 echo ""
 
-build_bench_exe "$PROJECT_DIR" "$WORKDIR/new" "new"
+build_bench_exe "$PROJECT_DIR" "$WORKDIR/exe-new" "new"
 
 if [[ -d "$REF_DIR/.git" || -f "$REF_DIR/.git" ]]; then
     echo ">>> reusing reference worktree $REF_DIR"
@@ -276,7 +283,7 @@ else
     git worktree add --detach --force "$REF_DIR" "$REF_SHA" >/dev/null
 fi
 
-build_bench_exe "$REF_DIR" "$WORKDIR/ref" "ref"
+build_bench_exe "$REF_DIR" "$WORKDIR/exe-ref" "ref"
 
 FINGERPRINT_AFTER="$(tree_fingerprint)"
 if [[ "$FINGERPRINT_BEFORE" != "$FINGERPRINT_AFTER" ]]; then
@@ -300,12 +307,12 @@ fi
 
 echo "=== two discarded warmup passes, then four adjacent passes ==="
 echo ""
-warm_up 1 "$WORKDIR/ref"
-warm_up 2 "$WORKDIR/new"
-run_pass 1 "ref" "$WORKDIR/ref"
-run_pass 2 "new" "$WORKDIR/new"
-run_pass 3 "new" "$WORKDIR/new"
-run_pass 4 "ref" "$WORKDIR/ref"
+warm_up 1 "$WORKDIR/exe-ref"
+warm_up 2 "$WORKDIR/exe-new"
+run_pass 1 "ref" "$WORKDIR/exe-ref"
+run_pass 2 "new" "$WORKDIR/exe-new"
+run_pass 3 "new" "$WORKDIR/exe-new"
+run_pass 4 "ref" "$WORKDIR/exe-ref"
 
 # --- Report ---
 

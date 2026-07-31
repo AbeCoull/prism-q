@@ -1,9 +1,10 @@
-//! Native shot sampling on Sparse, Factored, and MPS, which draw outcomes
-//! from their own representation instead of a dense `2^n` probability vector.
-//! Below the dense cap the statevector distribution is the reference; the
-//! 40-qubit oversize cases use GHZ and Bell-pair states, whose support is
+//! Native shot sampling on Sparse, Factored, MPS, and ProductState, which draw
+//! outcomes from their own representation instead of a dense `2^n` probability
+//! vector. Below the dense cap the statevector distribution is the reference;
+//! the 40-qubit oversize cases use GHZ and Bell-pair states, whose support is
 //! known in closed form, and open by pinning that the dense route rejects the
-//! same circuit.
+//! same circuit. The product cases run past 1000 qubits, where no dense vector
+//! and no merged block distribution exist at all.
 
 mod common;
 
@@ -240,6 +241,45 @@ fn mps_counts_match_shots() {
     check_counts_match_shots("mps ghz 10q", MPS, &ghz(10));
 }
 
+// ===== product state =====
+
+/// Single-qubit rotations only, so every qubit stays independent. The `Rz`
+/// layer detunes the per-qubit weights away from a fair coin, so a sampler
+/// that ignored the amplitudes would still fail the frequency band.
+fn product_layers(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.3 + 0.17 * q as f64), &[q]);
+        c.add_gate(Gate::Rz(0.2 * q as f64), &[q]);
+    }
+    c
+}
+
+#[test]
+fn product_samples_rotation_layers_distribution() {
+    check_sampling(
+        "product 10q",
+        BackendKind::ProductState,
+        &product_layers(10),
+    );
+}
+
+// Auto routes a circuit with no entangling gates to the product state, so the
+// same sampler has to serve it without the caller naming the backend.
+#[test]
+fn product_auto_route_samples_the_same_distribution() {
+    check_sampling("product auto 10q", BackendKind::Auto, &product_layers(10));
+}
+
+#[test]
+fn product_counts_match_shots() {
+    check_counts_match_shots(
+        "product 10q",
+        BackendKind::ProductState,
+        &product_layers(10),
+    );
+}
+
 // ===== above the dense cap =====
 
 /// Qubit count for the oversize cases. A `2^40` amplitude vector is eight
@@ -363,6 +403,153 @@ fn factored_samples_above_the_dense_cap() {
                 "factored 40q: bell pair {pair} came back uncorrelated"
             );
         }
+    }
+}
+
+// ===== wide product circuits =====
+
+/// Width for the product cases. Well past 64 qubits, where the merged block
+/// distribution the decomposed route builds stops existing, and past any dense
+/// vector by a margin no memory cap changes.
+const WIDE_QUBITS: usize = 1024;
+
+/// Qubit `q` ends in `|1>`, `|+>`, or `|0>` by `q % 3`, so every bit is either
+/// pinned or a fair coin and the shots are checkable without a reference
+/// vector. `Rz(0.4)` keeps the circuit non-Clifford, which is what stops the
+/// compiled Clifford sampler from answering instead.
+fn wide_product_circuit() -> Circuit {
+    let mut c = Circuit::new(WIDE_QUBITS, 0);
+    for q in 0..WIDE_QUBITS {
+        match q % 3 {
+            0 => c.add_gate(Gate::X, &[q]),
+            1 => c.add_gate(Gate::H, &[q]),
+            _ => c.add_gate(Gate::Rz(0.4), &[q]),
+        }
+    }
+    c
+}
+
+fn assert_wide_product_shots(label: &str, kind: BackendKind) {
+    let circuit = measure_all(&wide_product_circuit());
+    let shots = 512;
+
+    let result = simulate(&circuit)
+        .backend(kind.clone())
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(result.shots.len(), shots, "{label}: wrong shot count");
+
+    let fair: Vec<usize> = (0..WIDE_QUBITS).filter(|q| q % 3 == 1).collect();
+    let mut ones = vec![0usize; WIDE_QUBITS];
+    for shot in &result.shots {
+        for (q, &bit) in shot.iter().enumerate() {
+            match q % 3 {
+                0 => assert!(bit, "{label}: qubit {q} is |1> and came back 0"),
+                2 => assert!(!bit, "{label}: qubit {q} is |0> and came back 1"),
+                _ => ones[q] += usize::from(bit),
+            }
+        }
+        assert!(
+            fair.iter().any(|&q| shot[q] != shot[fair[0]]),
+            "{label}: every fair qubit agreed in one shot, so they share a draw"
+        );
+    }
+
+    let band = frequency_band(0.5) * (SHOTS as f64 / shots as f64).sqrt();
+    for &q in &fair {
+        let fraction = ones[q] as f64 / shots as f64;
+        assert!(
+            (fraction - 0.5).abs() < band,
+            "{label}: qubit {q} is |+> and came back at {fraction:.4}"
+        );
+    }
+
+    let counts = simulate(&circuit)
+        .backend(kind.clone())
+        .seed(SEED)
+        .sample_counts(shots)
+        .unwrap();
+    assert_eq!(
+        result.counts(),
+        counts.into_counts(),
+        "{label}: counts disagree with the shot histogram at the same seed"
+    );
+
+    let replay = simulate(&circuit)
+        .backend(kind)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(
+        result.shots, replay.shots,
+        "{label}: same seed produced different shots"
+    );
+}
+
+// Pins the premise: nothing else can serve this width, so the shots above came
+// from the per-qubit sampler.
+#[test]
+fn wide_product_dense_route_is_unavailable() {
+    let err = simulate(&measure_all(&wide_product_circuit()))
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .shots(8)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            prism_q::PrismError::IncompatibleBackend { .. }
+                | prism_q::PrismError::BackendUnsupported { .. }
+        ),
+        "expected the statevector route to reject {WIDE_QUBITS} qubits, got {err:?}"
+    );
+}
+
+#[test]
+fn product_samples_a_thousand_qubits() {
+    assert_wide_product_shots("product 1024q", BackendKind::ProductState);
+}
+
+#[test]
+fn product_auto_route_samples_a_thousand_qubits() {
+    assert_wide_product_shots("product auto 1024q", BackendKind::Auto);
+}
+
+// Closed-form observables on a product state no dense route can hold: `|1>`
+// gives `<Z> = -1` and `<X> = 0`, `|+>` gives `<X> = 1` and `<Z> = 0`, and
+// `Rz(0.4)|0>` is `|0>` up to a phase, so `<Z> = 1` and `<X> = 0`. A joint
+// string is the product of its factors.
+#[test]
+fn product_expectation_values_above_the_dense_cap() {
+    let circuit = wide_product_circuit();
+    let last_one = WIDE_QUBITS - 1 - (WIDE_QUBITS - 1) % 3;
+    let values = simulate(&circuit)
+        .backend(BackendKind::ProductState)
+        .seed(SEED)
+        .expectation_values(&[
+            vec![prism_q::PauliTerm::z(0)],
+            vec![prism_q::PauliTerm::x(0)],
+            vec![prism_q::PauliTerm::x(1)],
+            vec![prism_q::PauliTerm::z(1)],
+            vec![prism_q::PauliTerm::z(2)],
+            vec![prism_q::PauliTerm::z(0), prism_q::PauliTerm::z(last_one)],
+            vec![
+                prism_q::PauliTerm::z(0),
+                prism_q::PauliTerm::x(1),
+                prism_q::PauliTerm::z(2),
+            ],
+            vec![prism_q::PauliTerm::y(1)],
+            vec![],
+        ])
+        .unwrap();
+
+    let want = [-1.0, 0.0, 1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0];
+    for (i, (&got, &expected)) in values.iter().zip(&want).enumerate() {
+        assert!(
+            (got - expected).abs() < 1e-12,
+            "observable {i}: got {got}, want {expected}"
+        );
     }
 }
 

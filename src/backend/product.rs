@@ -15,6 +15,12 @@
 //! entries apply the same way per target. Entangling gates return
 //! `BackendUnsupported` since product states cannot represent entanglement.
 //!
+//! # Queries
+//!
+//! Shots and Pauli expectations answer from the per-qubit states: a shot is one
+//! Bernoulli draw per qubit and an observable is one factor per qubit it names,
+//! so neither builds the `2^n` vector [`Backend::probabilities`] returns.
+//!
 //! # When to prefer this backend
 //!
 //! - Circuits with zero entangling gates (e.g., single-qubit randomized benchmarking).
@@ -32,11 +38,13 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::{
-    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, reserve_dense_output,
+    Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len,
+    reserve_dense_output,
 };
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::{DiagEntry, Gate};
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Per-qubit O(n) backend for non-entangling circuits.
 pub struct ProductStateBackend {
@@ -238,6 +246,76 @@ impl Backend for ProductStateBackend {
 
     fn num_qubits(&self) -> usize {
         self.num_qubits
+    }
+
+    fn supports_native_sampling(&self) -> bool {
+        true
+    }
+
+    /// Qubits are independent, so a shot is `n` Bernoulli draws on the
+    /// per-qubit `|β|²` rather than one draw from a `2^n` CDF: `O(shots·n)`
+    /// with the probabilities computed once up front.
+    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let prob_one: Vec<f64> = self
+            .qubits
+            .iter()
+            .map(|[alpha, beta]| {
+                let weight_one = beta.norm_sqr();
+                let norm = alpha.norm_sqr() + weight_one;
+                if norm > 0.0 {
+                    (weight_one / norm).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut samples = BasisSamples::new(num_shots, self.num_qubits);
+        for shot in 0..num_shots {
+            for (qubit, &p1) in prob_one.iter().enumerate() {
+                if rng.random::<f64>() < p1 {
+                    samples.set(shot, qubit);
+                }
+            }
+        }
+        Ok(samples)
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// A product state factorizes a joint Pauli into one single-qubit
+    /// expectation per factor, so a term costs `O(1)` per qubit it names and
+    /// identity qubits contribute nothing.
+    ///
+    /// Each factor divides by its own qubit's `⟨φ|φ⟩`, which is how the whole
+    /// value ends up divided by `⟨ψ|ψ⟩`: the untouched qubits cancel between
+    /// numerator and denominator.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        observables
+            .iter()
+            .map(|observable| {
+                crate::sim::validate_observable(observable, self.num_qubits)?;
+                let mut product = 1.0f64;
+                for term in observable {
+                    let [alpha, beta] = self.qubits[term.qubit];
+                    let norm = alpha.norm_sqr() + beta.norm_sqr();
+                    if norm == 0.0 {
+                        return Ok(0.0);
+                    }
+                    let off_diagonal = alpha.conj() * beta;
+                    let factor = match term.axis {
+                        PauliAxis::X => 2.0 * off_diagonal.re,
+                        PauliAxis::Y => 2.0 * off_diagonal.im,
+                        PauliAxis::Z => alpha.norm_sqr() - beta.norm_sqr(),
+                    };
+                    product *= factor / norm;
+                }
+                Ok(product)
+            })
+            .collect()
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
@@ -480,6 +558,97 @@ mod tests {
                 assert!(p.abs() < EPS, "prob[{i}] should be 0, got {p}");
             }
         }
+    }
+
+    #[test]
+    fn test_sample_basis_states_matches_the_dense_distribution() {
+        let mut b = init_backend(6);
+        for q in 0..6 {
+            b.apply(&Instruction::Gate {
+                gate: Gate::Ry(0.3 + 0.2 * q as f64),
+                targets: smallvec![q],
+            })
+            .unwrap();
+        }
+
+        let probs = b.probabilities().unwrap();
+        let shots = 40_000;
+        let samples = b.sample_basis_states(shots, 42).unwrap();
+
+        let mut counts = vec![0usize; probs.len()];
+        for shot in 0..shots {
+            let index = (0..6)
+                .filter(|&q| samples.bit(shot, q))
+                .fold(0, |acc, q| acc | 1 << q);
+            counts[index] += 1;
+        }
+        for (index, &p) in probs.iter().enumerate() {
+            let frequency = counts[index] as f64 / shots as f64;
+            let band = 4.0 * (p * (1.0 - p) / shots as f64).sqrt() + 0.002;
+            assert!(
+                (frequency - p).abs() < band,
+                "basis state {index}: sampled {frequency:.6} against {p:.6}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sample_basis_states_repeats_from_the_seed() {
+        let mut b = init_backend(3);
+        b.apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec![1],
+        })
+        .unwrap();
+        let first = b.sample_basis_states(64, 42).unwrap();
+        let second = b.sample_basis_states(64, 42).unwrap();
+        let other_seed = b.sample_basis_states(64, 43).unwrap();
+
+        let bits = |s: &BasisSamples| -> Vec<bool> {
+            (0..64)
+                .flat_map(|shot| (0..3).map(move |q| (shot, q)))
+                .map(|(shot, q)| s.bit(shot, q))
+                .collect()
+        };
+        assert_eq!(bits(&first), bits(&second));
+        assert_ne!(bits(&first), bits(&other_seed));
+    }
+
+    #[test]
+    fn test_pauli_expectations_are_normalization_independent() {
+        let mut b = init_backend(2);
+        b.apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec![0],
+        })
+        .unwrap();
+        let scaled = b.qubits[1].map(|amp| amp * 3.0);
+        b.qubits[1] = scaled;
+
+        let values = b
+            .pauli_expectations(&[
+                vec![PauliTerm::x(0)],
+                vec![PauliTerm::z(1)],
+                vec![PauliTerm::x(0), PauliTerm::z(1)],
+                vec![],
+            ])
+            .unwrap();
+        for (got, want) in values.iter().zip(&[1.0, 1.0, 1.0, 1.0]) {
+            assert!((got - want).abs() < EPS, "got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn test_pauli_expectations_reject_bad_observables() {
+        let b = init_backend(2);
+        assert!(matches!(
+            b.pauli_expectations(&[vec![PauliTerm::z(2)]]),
+            Err(PrismError::InvalidQubit { .. })
+        ));
+        assert!(matches!(
+            b.pauli_expectations(&[vec![PauliTerm::z(0), PauliTerm::x(0)]]),
+            Err(PrismError::InvalidParameter { .. })
+        ));
     }
 
     #[test]

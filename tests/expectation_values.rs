@@ -290,6 +290,58 @@ fn factored_expectation_values_match_statevector_when_fully_merged() {
     );
 }
 
+// The product state factorizes an observable into one closed-form factor per
+// qubit. The statevector is the reference for the signs, which is the half of
+// those closed forms hand algebra gets wrong.
+#[test]
+fn product_expectation_values_match_statevector() {
+    let mut c = Circuit::new(6, 0);
+    for q in 0..6 {
+        c.add_gate(Gate::Ry(0.35 + 0.2 * q as f64), &[q]);
+        c.add_gate(Gate::Rz(0.15 + 0.25 * q as f64), &[q]);
+    }
+    c.add_gate(Gate::T, &[3]);
+    assert_matches_statevector("product expectation", BackendKind::ProductState, &c);
+}
+
+// Every single-qubit axis on every axis eigenstate, so a swapped sign or a
+// swapped real and imaginary part in one closed form cannot hide behind the
+// others averaging out.
+#[test]
+fn product_expectation_values_cover_each_axis_eigenstate() {
+    let mut c = Circuit::new(6, 0);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::X, &[2]);
+    c.add_gate(Gate::H, &[3]);
+    c.add_gate(Gate::Z, &[3]);
+    c.add_gate(Gate::H, &[4]);
+    c.add_gate(Gate::S, &[4]);
+    c.add_gate(Gate::H, &[5]);
+    c.add_gate(Gate::Sdg, &[5]);
+
+    let axes = [PauliAxis::X, PauliAxis::Y, PauliAxis::Z];
+    let observables: Vec<Vec<PauliTerm>> = (0..6)
+        .flat_map(|q| axes.iter().map(move |&axis| vec![PauliTerm::new(q, axis)]))
+        .collect();
+
+    // q0 |0>, q1 |+>, q2 |1>, q3 |->, q4 |+i>, q5 |-i>.
+    #[rustfmt::skip]
+    let want = [
+        0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0,
+        0.0, 0.0, -1.0,
+        -1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, -1.0, 0.0,
+    ];
+    let got = simulate(&c)
+        .backend(BackendKind::ProductState)
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    assert_close(&got, &want, TOL);
+}
+
 // The tensor network contracts to a dense statevector by construction, so it
 // has no native observable path. The rejection has to name the backend that
 // cannot serve the request, not the route that selected it.

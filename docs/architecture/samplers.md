@@ -66,12 +66,21 @@ divided by `⟨ψ|ψ⟩` rather than assumed unit.
 | Sparse | `O(k log k)` once, `O(log k)` per shot | CDF over the `k` stored amplitudes, ordered by basis index |
 | Factored | `O(Σ 2^kᵢ)` once, `O(B log)` per shot | One draw per sub-state, concatenated; `B` blocks |
 | MPS | `O(n·χ³)` once, `O(n·χ²)` per shot | Sequential conditional sampling against precomputed right environments |
+| Product State | `O(n)` once, `O(n)` per shot | One Bernoulli draw per qubit against that qubit's own weight on `1` |
 | Everything else | dense | Unchanged: `probabilities()` then CDF |
 
 `run_shots_with` picks the native path through `try_native_terminal_backend`,
 which requires the route to land on a single backend and probes the capability
 before `init`, so a backend without one costs an allocation and nothing else.
 `run_counts_with` needs no separate path: its tail is `run_shots_with(..).counts()`.
+
+The product state is the one backend taken past subsystem decomposition. It
+already stores one factor per qubit, so splitting a non-entangling circuit into
+independent blocks pays a backend, a partition, and a merge per block to rebuild
+what one native draw reads off the state, and past 64 qubits the merged block
+distribution has no representation at all. Every other backend keeps the block
+split it had before, which `only_the_product_state_takes_the_native_sampler_past_decomposition`
+(`src/sim/mod.rs`) pins from both sides.
 
 MPS records each bit against the logical qubit currently hosted at a site rather
 than the site index, so a layout permuted by SWAP routing needs no

@@ -48,7 +48,7 @@ use crate::backend::{
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
-use crate::gates::{DiagEntry, Gate};
+use crate::gates::{Gate, diag_entries_phase, is_diagonal_2x2};
 use crate::hash::FxHashMap;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -85,6 +85,11 @@ impl SparseBackend {
 
     #[inline(always)]
     fn apply_single_qubit(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
+        if is_diagonal_2x2(&mat) {
+            self.apply_diagonal_1q(target, mat[0][0], mat[1][1]);
+            return;
+        }
+
         let mask = 1usize << target;
         let zero = Complex64::new(0.0, 0.0);
         self.swap_buf.clear();
@@ -100,6 +105,19 @@ impl SparseBackend {
 
         std::mem::swap(&mut self.state, &mut self.swap_buf);
         self.prune();
+    }
+
+    /// A diagonal 2x2 scales amplitudes in place: no partner entries, no map rebuild.
+    /// A sub-unit diagonal (a Kraus operator) can shrink amplitudes below epsilon,
+    /// so only that case pays the prune pass.
+    #[inline(always)]
+    fn apply_diagonal_1q(&mut self, target: usize, d0: Complex64, d1: Complex64) {
+        for (idx, amp) in self.state.iter_mut() {
+            *amp *= if (*idx >> target) & 1 == 1 { d1 } else { d0 };
+        }
+        if d0.norm_sqr() < 1.0 - 1e-12 || d1.norm_sqr() < 1.0 - 1e-12 {
+            self.prune();
+        }
     }
 
     /// CX is a deterministic 1:1 index mapping. No near-zero amplitudes are created.
@@ -223,6 +241,27 @@ impl SparseBackend {
         for (idx, amp) in self.state.iter_mut() {
             let parity = ((*idx >> q0) ^ (*idx >> q1)) & 1;
             *amp *= if parity == 0 { phase_same } else { phase_diff };
+        }
+    }
+
+    /// One walk over the map with the per-edge phase pair precomputed, instead of
+    /// one walk (and two `from_polar`) per edge.
+    fn apply_batch_rzz(&mut self, edges: &[(usize, usize, f64)]) {
+        let phases: Vec<(usize, usize, [Complex64; 2])> = edges
+            .iter()
+            .map(|&(q0, q1, theta)| {
+                let same = Complex64::from_polar(1.0, -theta / 2.0);
+                let diff = Complex64::from_polar(1.0, theta / 2.0);
+                (q0, q1, [same, diff])
+            })
+            .collect();
+
+        for (idx, amp) in self.state.iter_mut() {
+            let mut combined = Complex64::new(1.0, 0.0);
+            for &(q0, q1, pair) in &phases {
+                combined *= pair[((*idx >> q0) ^ (*idx >> q1)) & 1];
+            }
+            *amp *= combined;
         }
     }
 
@@ -369,38 +408,11 @@ impl SparseBackend {
                 self.apply_batch_phase(targets[0], &data.phases);
             }
             Gate::BatchRzz(data) => {
-                for &(q0, q1, theta) in &data.edges {
-                    self.apply_rzz(q0, q1, theta);
-                }
+                self.apply_batch_rzz(&data.edges);
             }
             Gate::DiagonalBatch(data) => {
-                for entry in &data.entries {
-                    match entry {
-                        DiagEntry::Phase1q { qubit, d0, d1 } => {
-                            let mask = 1usize << qubit;
-                            for (idx, amp) in self.state.iter_mut() {
-                                if (*idx & mask) != 0 {
-                                    *amp *= d1;
-                                } else {
-                                    *amp *= d0;
-                                }
-                            }
-                        }
-                        DiagEntry::Phase2q { q0, q1, phase } => {
-                            let mask = (1usize << q0) | (1usize << q1);
-                            for (idx, amp) in self.state.iter_mut() {
-                                if (*idx & mask) == mask {
-                                    *amp *= phase;
-                                }
-                            }
-                        }
-                        DiagEntry::Parity2q { q0, q1, same, diff } => {
-                            for (idx, amp) in self.state.iter_mut() {
-                                let parity = ((*idx >> q0) ^ (*idx >> q1)) & 1;
-                                *amp *= if parity == 0 { *same } else { *diff };
-                            }
-                        }
-                    }
+                for (idx, amp) in self.state.iter_mut() {
+                    *amp *= diag_entries_phase(*idx, &data.entries);
                 }
             }
             Gate::MultiFused(data) => {
@@ -833,6 +845,103 @@ mod tests {
         c2.add_gate(Gate::Cz, &[0, 1]);
 
         let b1 = run_sparse(&c1);
+        let b2 = run_sparse(&c2);
+
+        for (&idx, &amp1) in &b1.state {
+            let amp2 = b2
+                .state
+                .get(&idx)
+                .copied()
+                .unwrap_or(Complex64::new(0.0, 0.0));
+            assert!((amp1 - amp2).norm() < EPS, "mismatch at idx {idx}");
+        }
+    }
+
+    #[test]
+    fn test_diagonal_1q_in_place() {
+        let mut c = Circuit::new(1, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::P(1.234), &[0]);
+        let b = run_sparse(&c);
+        assert_eq!(b.state.len(), 2);
+        let h = 1.0 / 2.0_f64.sqrt();
+        assert!((b.state[&0].re - h).abs() < EPS);
+        assert!((b.state[&1] - Complex64::from_polar(h, 1.234)).norm() < EPS);
+    }
+
+    #[test]
+    fn test_batch_rzz_matches_individual() {
+        use crate::gates::BatchRzzData;
+
+        let edges = vec![(0usize, 1usize, 0.7f64), (1, 2, 1.3)];
+
+        let mut c1 = Circuit::new(3, 0);
+        for q in 0..3 {
+            c1.add_gate(Gate::H, &[q]);
+        }
+        for &(q0, q1, theta) in &edges {
+            c1.add_gate(Gate::Rzz(theta), &[q0, q1]);
+        }
+        let b1 = run_sparse(&c1);
+
+        let mut c2 = Circuit::new(3, 0);
+        for q in 0..3 {
+            c2.add_gate(Gate::H, &[q]);
+        }
+        c2.add_gate(Gate::BatchRzz(Box::new(BatchRzzData { edges })), &[0, 1, 2]);
+        let b2 = run_sparse(&c2);
+
+        for (&idx, &amp1) in &b1.state {
+            let amp2 = b2
+                .state
+                .get(&idx)
+                .copied()
+                .unwrap_or(Complex64::new(0.0, 0.0));
+            assert!((amp1 - amp2).norm() < EPS, "mismatch at idx {idx}");
+        }
+    }
+
+    #[test]
+    fn test_diagonal_batch_matches_individual() {
+        use crate::gates::{DiagEntry, DiagonalBatchData};
+
+        let mut c1 = Circuit::new(3, 0);
+        for q in 0..3 {
+            c1.add_gate(Gate::H, &[q]);
+        }
+        c1.add_gate(Gate::S, &[0]);
+        c1.add_gate(Gate::Cz, &[0, 1]);
+        c1.add_gate(Gate::Rzz(0.9), &[1, 2]);
+        let b1 = run_sparse(&c1);
+
+        let s_mat = Gate::S.matrix_2x2();
+        let mut c2 = Circuit::new(3, 0);
+        for q in 0..3 {
+            c2.add_gate(Gate::H, &[q]);
+        }
+        c2.add_gate(
+            Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+                entries: vec![
+                    DiagEntry::Phase1q {
+                        qubit: 0,
+                        d0: s_mat[0][0],
+                        d1: s_mat[1][1],
+                    },
+                    DiagEntry::Phase2q {
+                        q0: 0,
+                        q1: 1,
+                        phase: Complex64::new(-1.0, 0.0),
+                    },
+                    DiagEntry::Parity2q {
+                        q0: 1,
+                        q1: 2,
+                        same: Complex64::from_polar(1.0, -0.45),
+                        diff: Complex64::from_polar(1.0, 0.45),
+                    },
+                ],
+            })),
+            &[0, 1, 2],
+        );
         let b2 = run_sparse(&c2);
 
         for (&idx, &amp1) in &b1.state {

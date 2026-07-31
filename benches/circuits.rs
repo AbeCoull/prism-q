@@ -380,6 +380,24 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
     group.finish();
 }
 
+// Gates on the parallel `DiagonalBatch` sweep: the fused stream carrying a
+// `DiagonalBatch` is pinned by `fusion_diag_mixed_batches_and_matches_unfused`.
+fn bench_statevector_diag_mixed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/diag_mixed_l6");
+    configure_group(&mut group);
+
+    for &n in &[16, 20] {
+        let circuit = circuits::diagonal_mixed_circuit(n, 6, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_statevector_qv(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qv");
     configure_group(&mut group);
@@ -1820,6 +1838,7 @@ criterion_group! {
     bench_statevector_qpe,
     bench_statevector_hea,
     bench_statevector_qaoa,
+    bench_statevector_diag_mixed,
     bench_statevector_qv,
     bench_statevector_w_state,
     bench_statevector_clifford,

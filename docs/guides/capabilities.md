@@ -18,19 +18,34 @@ scalar path is used.
 
 ## Backend support by architecture
 
+The nine CPU backends implement the `Backend` trait; the distributed statevector
+backend is a tenth, feature-gated implementation covered by the Distributed
+column. `Planned` marks only work the roadmap carries: a ROCm port of the
+existing CUDA kernels. Backends without a CUDA kernel have nothing to port, so
+their ROCm cell is `No`, and the roadmap carries no distributed execution for
+any backend other than the statevector.
+
 | Backend | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Statevector | Yes | SIMD | Yes | SIMD | Yes | Planned | Yes |
-| Stabilizer | Yes | SIMD | Yes | SIMD | Yes | Planned | Planned |
-| Factored Stabilizer | Yes | SIMD | Yes | SIMD | No | Planned | Planned |
-| Sparse | Yes | Scalar | Yes | Scalar | No | Planned | Planned |
-| MPS | Yes | SIMD | Yes | SIMD | No | Planned | Planned |
-| Product State | Yes | Scalar | Yes | Scalar | No | Planned | Planned |
-| Tensor Network | Yes | Scalar | Yes | Scalar | No | Planned | Planned |
-| Factored | Yes | SIMD | Yes | SIMD | No | Planned | Planned |
-| Stabilizer Rank | Yes | SIMD | Yes | SIMD | No | Planned | Planned |
-| Stochastic Pauli | Yes | Scalar | Yes | Scalar | No | Planned | Planned |
-| Deterministic Pauli | Yes | Scalar | Yes | Scalar | No | Planned | Planned |
+| Stabilizer | Yes | SIMD | Yes | SIMD | Yes | Planned | No |
+| Factored Stabilizer | Yes | SIMD | Yes | SIMD | No | No | No |
+| Sparse | Yes | Scalar | Yes | Scalar | No | No | No |
+| MPS | Yes | SIMD | Yes | SIMD | No | No | No |
+| Product State | Yes | Scalar | Yes | Scalar | No | No | No |
+| Tensor Network | Yes | Scalar | Yes | Scalar | No | No | No |
+| Factored | Yes | SIMD | Yes | SIMD | No | No | No |
+| Density Matrix | Yes | SIMD | Yes | SIMD | No | No | No |
+
+The Clifford+T engines below are not `Backend` implementations; they serve
+probability, shot, and observable queries through their own routes (see
+[Clifford+T Simulation](./clifford-t.md)).
+
+| Engine | x86-64 | AVX2/FMA/BMI2 | ARM64 | NEON | CUDA (NVIDIA) | ROCm (AMD) | Distributed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Stabilizer Rank | Yes | SIMD | Yes | SIMD | No | No | No |
+| Stochastic Pauli | Yes | Scalar | Yes | Scalar | No | No | No |
+| Deterministic Pauli | Yes | Scalar | Yes | Scalar | No | No | No |
 
 Notes:
 

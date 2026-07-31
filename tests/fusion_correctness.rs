@@ -878,6 +878,36 @@ fn fusion_diagonal_batch_respects_non_diagonal_barrier() {
     }
 }
 
+// Pins the fused form for the `statevector/diag_mixed_l6` bench rows: the rows
+// measure the `DiagonalBatch` sweep, so the batch must actually appear. Sizes
+// cross the parallel threshold, so the state comparison also exercises the
+// parallel sweep against the sequential per-gate reference.
+#[test]
+fn fusion_diag_mixed_batches_and_matches_unfused() {
+    for &n in &[16usize, 20] {
+        let c = circuits::diagonal_mixed_circuit(n, 6, common::SEED);
+        let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+        let batches = fused
+            .instructions
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::DiagonalBatch(_),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(
+            batches > 0,
+            "expected a DiagonalBatch in the fused stream at {n}q"
+        );
+        assert_fusion_preserves_state(&c);
+    }
+}
+
 // Seeded sweep over the gate mix that exposed both batching reorder bugs. The
 // deterministic cases above pin the two known shapes; this covers the class,
 // which stayed hidden because the generated bench circuits never produce it.

@@ -350,6 +350,29 @@ fn push_unique_qubit(seen: &mut SmallVec<[usize; 8]>, qubit: usize) {
     }
 }
 
+/// Combined phase factor `entries` apply to the basis state `index`.
+#[inline]
+pub(crate) fn diag_entries_phase(index: usize, entries: &[DiagEntry]) -> Complex64 {
+    let mut combined = Complex64::new(1.0, 0.0);
+    for entry in entries {
+        match entry {
+            DiagEntry::Phase1q { qubit, d0, d1 } => {
+                combined *= if (index >> qubit) & 1 == 1 { *d1 } else { *d0 };
+            }
+            DiagEntry::Phase2q { q0, q1, phase } => {
+                if (index >> q0) & 1 == 1 && (index >> q1) & 1 == 1 {
+                    combined *= phase;
+                }
+            }
+            DiagEntry::Parity2q { q0, q1, same, diff } => {
+                let parity = ((index >> q0) ^ (index >> q1)) & 1;
+                combined *= if parity == 0 { *same } else { *diff };
+            }
+        }
+    }
+    combined
+}
+
 #[inline]
 fn count_unique_diag_qubits(entries: &[DiagEntry]) -> usize {
     let mut seen: SmallVec<[usize; 8]> = SmallVec::new();

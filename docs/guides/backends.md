@@ -1,6 +1,6 @@
 # Backends Deep Dive
 
-PRISM-Q does not have one simulation algorithm. It has eight, each optimal for a
+PRISM-Q does not have one simulation algorithm. It has nine, each optimal for a
 different class of circuit. This guide is the task-oriented companion to the
 [architecture reference](../architecture/backends.md): it focuses on scaling and when to
 reach for each one. To select a backend in code, see
@@ -20,6 +20,11 @@ GPU architectures each backend supports, see the
 | Product | $O(n)$ | No entanglement | Unbounded |
 | Tensor Network | order-dependent | Shallow / structured | $\le 25$ prob qubits |
 | Factored | $O(2^n)$ worst case | Partially independent | Block-bound |
+| Density Matrix | $O(4^n)$ | Exact noisy evolution | ~14 qubits (RAM-bound) |
+
+The distributed statevector backend (behind the `distributed` feature) shards the dense
+state across MPI ranks; see the
+[Capability and Support Matrix](./capabilities.md) for its status.
 
 ## Statevector
 
@@ -39,7 +44,7 @@ backend no longer applies. For a small number of such gates, see
 [Clifford+T Simulation](./clifford-t.md).
 ```
 
-## Sparse, MPS, Product, Tensor Network, Factored
+## Sparse, MPS, Product, Tensor Network, Factored, Density Matrix
 
 - **Sparse** wins when the state stays concentrated in a handful of computational-basis
   states (amplitude pruning keeps the map small).
@@ -50,6 +55,8 @@ backend no longer applies. For a small number of such gates, see
   structured circuits.
 - **Factored** detects partial independence and simulates sub-registers separately,
   merging lazily via a Kronecker product computed on demand.
+- **Density Matrix** evolves the full mixed state exactly, for noise studies below the
+  $4^n$ memory ceiling. Explicit dispatch only; `Auto` never selects it.
 
 For the internal kernels behind each of these, read the
 [architecture reference](../architecture/backends.md). For raw speed mechanics, see

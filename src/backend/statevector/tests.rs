@@ -1403,6 +1403,80 @@ fn batch_phase_matches_independent_reference() {
     assert_state_close(&got, &expected, 1e-12);
 }
 
+// `apply_diagonal_batch` vs an independent reference at the parallel threshold, so a
+// BMI2+FMA host exercises `diagonal_batch_tile_bmi2` and others
+// `diagonal_batch_tile_scalar`. All three entry kinds appear, and the qubits are spread
+// past `DIAG_BATCH_MAX_QUBITS_PER_GROUP` so more than one group is built.
+#[test]
+fn diagonal_batch_par_matches_independent_reference() {
+    use crate::circuit::{Instruction, SmallVec, smallvec};
+    use crate::gates::{DiagEntry, DiagonalBatchData, Gate};
+
+    let n = 14usize;
+    let entries = vec![
+        DiagEntry::Phase1q {
+            qubit: 0,
+            d0: Complex64::from_polar(1.0, 0.21),
+            d1: Complex64::from_polar(1.0, -0.64),
+        },
+        DiagEntry::Phase2q {
+            q0: 3,
+            q1: 11,
+            phase: Complex64::from_polar(1.0, 1.07),
+        },
+        DiagEntry::Parity2q {
+            q0: 5,
+            q1: 13,
+            same: Complex64::from_polar(1.0, -0.33),
+            diff: Complex64::from_polar(1.0, 0.33),
+        },
+    ];
+
+    let mut backend = StatevectorBackend::new(42);
+    backend.init(n, 0).unwrap();
+    for q in 0..n {
+        let targets: SmallVec<[usize; 4]> = smallvec![q];
+        backend
+            .apply(&Instruction::Gate {
+                gate: Gate::H,
+                targets,
+            })
+            .unwrap();
+    }
+    let targets: SmallVec<[usize; 4]> = (0..n).collect();
+    backend
+        .apply(&Instruction::Gate {
+            gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData {
+                entries: entries.clone(),
+            })),
+            targets,
+        })
+        .unwrap();
+    let got = backend.export_statevector().unwrap();
+
+    let amp0 = Complex64::new((1.0 / (1u64 << n) as f64).sqrt(), 0.0);
+    let mut expected = vec![amp0; 1usize << n];
+    for (i, e) in expected.iter_mut().enumerate() {
+        for entry in &entries {
+            match entry {
+                DiagEntry::Phase1q { qubit, d0, d1 } => {
+                    *e *= if (i >> qubit) & 1 == 1 { *d1 } else { *d0 };
+                }
+                DiagEntry::Phase2q { q0, q1, phase } => {
+                    if (i >> q0) & 1 == 1 && (i >> q1) & 1 == 1 {
+                        *e *= phase;
+                    }
+                }
+                DiagEntry::Parity2q { q0, q1, same, diff } => {
+                    let parity = ((i >> q0) ^ (i >> q1)) & 1;
+                    *e *= if parity == 0 { *same } else { *diff };
+                }
+            }
+        }
+    }
+    assert_state_close(&got, &expected, 1e-12);
+}
+
 #[cfg(feature = "gpu")]
 mod gpu_scaffold {
     use super::*;

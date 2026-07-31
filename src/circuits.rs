@@ -197,6 +197,43 @@ pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
     c
 }
 
+/// Build a mixed diagonal-phase circuit: one H layer, then `layers` of random
+/// 1q diagonals (Rz, T, P) plus long-range CZ/CPhase/Rzz pairs at a per-layer
+/// stride. The long-range strides keep the pairs out of the same-pair 2q fusion
+/// blocks, so the runs collapse into `DiagonalBatch` instructions at 16 qubits
+/// and above.
+///
+/// # Panics
+/// Panics if `n < 2` (stride selection divides by `n / 2`).
+pub fn diagonal_mixed_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for layer in 0..layers {
+        for q in 0..n {
+            let theta = rng.random::<f64>() * std::f64::consts::TAU;
+            match rng.random_range(0..3) {
+                0 => c.add_gate(Gate::Rz(theta), &[q]),
+                1 => c.add_gate(Gate::T, &[q]),
+                _ => c.add_gate(Gate::P(theta), &[q]),
+            }
+        }
+        let stride = 1 + layer % (n / 2);
+        for q in 0..n / 2 {
+            let q1 = q + stride;
+            let theta = rng.random::<f64>() * std::f64::consts::TAU;
+            match rng.random_range(0..3) {
+                0 => c.add_gate(Gate::Cz, &[q, q1]),
+                1 => c.add_gate(Gate::cphase(theta), &[q, q1]),
+                _ => c.add_gate(Gate::Rzz(theta), &[q, q1]),
+            }
+        }
+    }
+    c
+}
+
 /// Build a circuit with only single-qubit rotation gates (no entanglement).
 ///
 /// `depth` layers of random Rx/Ry/Rz on every qubit. Useful for benchmarking

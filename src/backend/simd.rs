@@ -2907,7 +2907,7 @@ mod tests {
             ("src/backend/simd.rs", 29),
             ("src/backend/word_ops.rs", 2),
             ("src/backend/stabilizer/kernels/simd.rs", 3),
-            ("src/backend/statevector/kernels.rs", 10),
+            ("src/backend/statevector/kernels.rs", 11),
         ];
         for (file, want) in expected {
             let path = format!("{root}/{file}");

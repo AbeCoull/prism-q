@@ -62,15 +62,23 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 // dispatch layer calls `crate::gpu::min_qubits()` directly; there is no
 // private duplicate.
 
-/// Automatically select the optimal backend based on circuit analysis.
+/// Backend selection for a simulation run.
 ///
-/// Decision tree:
+/// `Auto` resolves per call from circuit shape. Two routes run before the
+/// family tree: circuits that decompose into independent blocks run per block
+/// (Clifford-only circuits at 128 qubits and above with a 16+ qubit block use
+/// FactoredStabilizer), and Clifford+T circuits up to 25 qubits route through
+/// StabilizerRank (exact to 18 T gates, sparse approximation to 28, shot
+/// paths to 40; the `MAX_AUTO_T_COUNT_*` constants above); marginal queries
+/// on Clifford+T circuits at 12 qubits and above answer via Sparse Pauli
+/// Dynamics. The remaining tree:
+///
 /// 1. No entangling gates        → ProductState (O(n))
 /// 2. All Clifford gates         → Stabilizer (O(n²))
-/// 3. Clifford+T, t ≤ 12        → StabilizerRank (O(2^t · n²))
-/// 4. Above memory limit:
+/// 3. Above the statevector memory cap:
 ///    a. Sparse-friendly         → Sparse (O(k) where k = non-zero amplitudes)
 ///    b. Otherwise               → MPS (bounded bond dimension)
+/// 4. Partial independence       → Factored (per-group dense sub-states)
 /// 5. Otherwise                  → Statevector (exact, general-purpose)
 #[derive(Debug, Clone)]
 pub enum BackendKind {

@@ -171,16 +171,22 @@ let result = simulate(&c).seed(42).run().unwrap();
 | --- | --- | --- | --- |
 | **Statevector** | General circuits | O(2ⁿ) | Full SIMD, tiled L2/L3 kernels, optional CUDA path |
 | **Stabilizer** | Clifford only | O(n²) | SIMD optimized, scales to thousands of qubits |
+| **Factored Stabilizer** | Clifford with independent blocks | O(n²) per cluster | Per-cluster tableaux, dynamic merge and split |
 | **Sparse** | Few live amplitudes | O(k) | HashMap with parallel measurement |
 | **MPS** | Low entanglement or 1D | O(nχ²) | Hybrid faer / Jacobi SVD |
 | **Product State** | No entanglement | O(n) | Per qubit, instant |
 | **Tensor Network** | Low treewidth | Depends on contraction order | Greedy min size heuristic |
 | **Factored** | Partial entanglement | Dynamic | Tracks independent sub-states |
+| **Density Matrix** | Exact noisy evolution | O(4ⁿ) | Explicit dispatch only, reuses statevector kernels |
+| **Distributed Statevector** | Beyond single-host memory | O(2ⁿ) over MPI ranks | `distributed` feature, exact results |
 
 `BackendKind::Auto` selects at dispatch time. Non-entangling circuits go to Product
-State, all-Clifford circuits go to Stabilizer, large circuits fall through to MPS with
-bond dimension 256 once they exceed the statevector memory budget, and everything else
-runs on Statevector. The memory budget is dynamic, derived from available RAM at
+State; all-Clifford circuits go to Stabilizer, or Factored Stabilizer when a large
+circuit splits into independent blocks; circuits past the statevector memory budget go
+to Sparse when sparse-friendly and otherwise to MPS with bond dimension 256; partially
+independent circuits go to Factored; everything else runs on Statevector. Clifford+T
+circuits with few T gates route through the stabilizer rank and Pauli propagation
+engines before this tree. The memory budget is dynamic, derived from available RAM at
 dispatch time, and can be overridden with `PRISM_MAX_SV_QUBITS`.
 
 ## Gates and OpenQASM support
@@ -241,7 +247,9 @@ sampling. Crossover thresholds are conservative by default and can be tuned thro
 `PRISM_GPU_MIN_QUBITS`, `PRISM_STABILIZER_GPU_MIN_QUBITS`, and
 `PRISM_GPU_BTS_MIN_SHOTS`.
 
-`BackendKind::Auto` does not yet route to GPU. See
+`simulate(&circuit).gpu_auto(ctx)` runs automatic backend selection with the device
+opted in: statevector and stabilizer workloads that clear the qubit crossover and fit
+in VRAM run on the device, and everything else takes the identical CPU path. See
 [`docs/guides/gpu.md`](docs/guides/gpu.md) for kernel design, crossover analysis,
 and the full set of tuning knobs.
 
@@ -284,13 +292,13 @@ SVGs land in `bench_results/` (gitignored).
 
 ## Roadmap
 
-- Density matrix backend: mixed state simulation for noise and decoherence modeling.
-- GPU auto dispatch: thread a GPU context into `BackendKind::Auto` so large circuits
-  route to GPU without an explicit `BackendKind::StatevectorGpu`. Crossover and
-  decomposition already work through the explicit variant.
 - Expanded classical control: mid circuit branching beyond the current `if` form, and
   parameterized circuit reuse for variational workloads.
-- Distributed statevector: multi node sharding for circuits beyond single host memory.
+- Multi GPU and distributed GPU execution: a GPU context currently binds a single
+  device, and the distributed backend is CPU only.
+- ROCm (AMD GPU) ports of the CUDA statevector and stabilizer kernels.
+- Distributed noisy shots: noise models are rejected on the distributed backend
+  because trajectory execution is not lockstep across ranks.
 
 ## Architecture
 

@@ -1,10 +1,11 @@
 # Backends
 
-PRISM-Q ships eight CPU backends plus an optional CUDA path, and an explicit-only
-density-matrix backend for exact mixed-state evolution. The
-[simulation engine](./engine.md) picks one of the eight automatically, or you can select
-explicitly. For a task-oriented version of this material, see the
-[Backends Deep Dive guide](../guides/backends.md).
+PRISM-Q ships nine CPU backends, an optional CUDA path attached to the statevector and
+stabilizer backends, and a feature-gated distributed statevector backend that shards the
+dense state across MPI ranks. The [simulation engine](./engine.md) picks a backend
+automatically (the density matrix, tensor network, and distributed backends are
+explicit-dispatch only), or you can select explicitly. For a task-oriented version of
+this material, see the [Backends Deep Dive guide](../guides/backends.md).
 
 The diagrams below are rendered directly from PRISM-Q's own SVG circuit renderer.
 
@@ -127,4 +128,6 @@ Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host a
 32 GiB (`PRISM_MAX_DM_QUBITS` overrides). This backend is CPU-only and explicit-dispatch
 only; `Auto` never selects it.
 
-The [GPU backend](../guides/gpu.md) is documented as a user guide.
+The [GPU backend](../guides/gpu.md) is documented as a user guide. The distributed
+statevector backend is covered in the
+[Capability and Support Matrix](../guides/capabilities.md).

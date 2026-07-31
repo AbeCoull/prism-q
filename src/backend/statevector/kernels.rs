@@ -16,7 +16,7 @@ use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS, SendPtr};
 use crate::backend::simd;
 use crate::backend::{is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
-use crate::gates::{DiagEntry, Gate};
+use crate::gates::{DiagEntry, Gate, diag_entries_phase};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -3133,6 +3133,12 @@ impl StatevectorBackend {
     }
 
     pub(super) fn apply_diagonal_batch(&mut self, entries: &[DiagEntry]) {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.apply_diagonal_batch_par(entries);
+            return;
+        }
+
         let Some(built) = build_diagonal_batch_tables(entries) else {
             self.apply_diagonal_batch_fallback(entries);
             return;
@@ -3164,31 +3170,64 @@ impl StatevectorBackend {
         );
     }
 
+    #[cfg(feature = "parallel")]
+    fn apply_diagonal_batch_par(&mut self, entries: &[DiagEntry]) {
+        let Some(built) = build_diagonal_batch_tables(entries) else {
+            self.state
+                .par_chunks_mut(MIN_PAR_ELEMS)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    let base = chunk_idx * MIN_PAR_ELEMS;
+                    for (j, amp) in chunk.iter_mut().enumerate() {
+                        *amp *= diag_entries_phase(base + j, entries);
+                    }
+                });
+            return;
+        };
+        if built.num_groups == 0 {
+            return;
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if simd::has_bmi2() && simd::has_fma() {
+            self.state
+                .par_chunks_mut(MIN_PAR_ELEMS)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    let base = chunk_idx * MIN_PAR_ELEMS;
+                    // SAFETY: has_bmi2() + has_fma() confirmed above
+                    unsafe {
+                        diagonal_batch_tile_bmi2(
+                            chunk,
+                            base,
+                            &built.tables,
+                            &built.group_pext_masks,
+                            built.num_groups,
+                        );
+                    }
+                });
+            return;
+        }
+
+        let group_shifts = diag_batch_group_shifts(&built.unique_qubits);
+        self.state
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                diagonal_batch_tile_scalar(
+                    chunk,
+                    chunk_idx * MIN_PAR_ELEMS,
+                    &built.tables,
+                    &group_shifts,
+                    &built.group_sizes,
+                    built.num_groups,
+                );
+            });
+    }
+
     fn apply_diagonal_batch_fallback(&mut self, entries: &[DiagEntry]) {
-        let one = Complex64::new(1.0, 0.0);
         for (i, amp) in self.state.iter_mut().enumerate() {
-            let mut phase = one;
-            for e in entries {
-                match e {
-                    DiagEntry::Phase1q { qubit, d0, d1 } => {
-                        if (i >> qubit) & 1 == 1 {
-                            phase *= d1;
-                        } else {
-                            phase *= d0;
-                        }
-                    }
-                    DiagEntry::Phase2q { q0, q1, phase: p } => {
-                        if ((i >> q0) & 1 == 1) && ((i >> q1) & 1 == 1) {
-                            phase *= p;
-                        }
-                    }
-                    DiagEntry::Parity2q { q0, q1, same, diff } => {
-                        let parity = ((i >> q0) ^ (i >> q1)) & 1;
-                        phase *= if parity == 0 { *same } else { *diff };
-                    }
-                }
-            }
-            *amp *= phase;
+            *amp *= diag_entries_phase(i, entries);
         }
     }
 }
@@ -3213,6 +3252,63 @@ unsafe fn apply_diagonal_batch_bmi2(
     }
 }
 
+#[cfg(all(target_arch = "x86_64", feature = "parallel"))]
+#[target_feature(enable = "bmi2,fma")]
+unsafe fn diagonal_batch_tile_bmi2(
+    tile: &mut [Complex64],
+    base_idx: usize,
+    tables: &[[Complex64; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
+    pext_masks: &[u64; MAX_DIAG_BATCH_GROUPS],
+    num_groups: usize,
+) {
+    use std::arch::x86_64::_pext_u64;
+    let one = Complex64::new(1.0, 0.0);
+    for (j, amp) in tile.iter_mut().enumerate() {
+        let i = base_idx + j;
+        let mut combined = one;
+        for g in 0..num_groups {
+            let bits = _pext_u64(i as u64, pext_masks[g]) as usize;
+            combined *= tables[g][bits];
+        }
+        *amp *= combined;
+    }
+}
+
+/// Per-group qubit positions, the non-x86_64 stand-in for the PEXT masks.
+fn diag_batch_group_shifts(
+    unique_qubits: &SmallVec<[usize; 32]>,
+) -> [[usize; DIAG_BATCH_MAX_QUBITS_PER_GROUP]; MAX_DIAG_BATCH_GROUPS] {
+    let mut group_shifts = [[0usize; DIAG_BATCH_MAX_QUBITS_PER_GROUP]; MAX_DIAG_BATCH_GROUPS];
+    for (idx, &q) in unique_qubits.iter().enumerate() {
+        group_shifts[idx / DIAG_BATCH_MAX_QUBITS_PER_GROUP]
+            [idx % DIAG_BATCH_MAX_QUBITS_PER_GROUP] = q;
+    }
+    group_shifts
+}
+
+fn diagonal_batch_tile_scalar(
+    tile: &mut [Complex64],
+    base_idx: usize,
+    tables: &[[Complex64; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
+    group_shifts: &[[usize; DIAG_BATCH_MAX_QUBITS_PER_GROUP]; MAX_DIAG_BATCH_GROUPS],
+    group_sizes: &[usize; MAX_DIAG_BATCH_GROUPS],
+    num_groups: usize,
+) {
+    let one = Complex64::new(1.0, 0.0);
+    for (j, amp) in tile.iter_mut().enumerate() {
+        let i = base_idx + j;
+        let mut combined = one;
+        for (g, shifts) in group_shifts.iter().enumerate().take(num_groups) {
+            let mut bits = 0usize;
+            for (p, &shift) in shifts[..group_sizes[g]].iter().enumerate() {
+                bits |= ((i >> shift) & 1) << p;
+            }
+            combined *= tables[g][bits];
+        }
+        *amp *= combined;
+    }
+}
+
 fn apply_diagonal_batch_scalar(
     state: &mut [Complex64],
     tables: &[[Complex64; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
@@ -3220,23 +3316,6 @@ fn apply_diagonal_batch_scalar(
     group_sizes: &[usize; MAX_DIAG_BATCH_GROUPS],
     num_groups: usize,
 ) {
-    let one = Complex64::new(1.0, 0.0);
-    let mut group_shifts = [[0usize; DIAG_BATCH_MAX_QUBITS_PER_GROUP]; MAX_DIAG_BATCH_GROUPS];
-    for (idx, &q) in unique_qubits.iter().enumerate() {
-        group_shifts[idx / DIAG_BATCH_MAX_QUBITS_PER_GROUP]
-            [idx % DIAG_BATCH_MAX_QUBITS_PER_GROUP] = q;
-    }
-
-    for (i, amp) in state.iter_mut().enumerate() {
-        let mut combined = one;
-        for g in 0..num_groups {
-            let k = group_sizes[g];
-            let mut bits = 0usize;
-            for (p, &shift) in group_shifts[g][..k].iter().enumerate() {
-                bits |= ((i >> shift) & 1) << p;
-            }
-            combined *= tables[g][bits];
-        }
-        *amp *= combined;
-    }
+    let group_shifts = diag_batch_group_shifts(unique_qubits);
+    diagonal_batch_tile_scalar(state, 0, tables, &group_shifts, group_sizes, num_groups);
 }

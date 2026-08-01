@@ -697,7 +697,7 @@ pub(crate) fn launch_clifford_batch(
         return Ok(());
     }
     debug_assert!(
-        ops.len() % CLIFOP_STRIDE == 0,
+        ops.len().is_multiple_of(CLIFOP_STRIDE),
         "ClifOp buffer length must be a multiple of {CLIFOP_STRIDE}"
     );
     let num_rows = tableau.total_rows();
@@ -810,7 +810,7 @@ impl CliffordBatchScratch {
             if v.is_empty() {
                 continue;
             }
-            debug_assert!(v.len() % CLIFOP_STRIDE == 0);
+            debug_assert!(v.len().is_multiple_of(CLIFOP_STRIDE));
             self.group_words
                 .push(require_u32("stab_apply_word_grouped", "group_word", w)?);
             self.ops_flat.extend_from_slice(v);

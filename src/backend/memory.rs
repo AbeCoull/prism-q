@@ -20,14 +20,23 @@ pub(crate) fn max_statevector_qubits() -> usize {
     })
 }
 
+/// Environment advice for the density-matrix cap. Both variables bind: the
+/// backend allocates its `4^n` state as a `2n`-qubit statevector, so
+/// `PRISM_MAX_DM_QUBITS` raises the cap only as far as half the statevector
+/// cap, and going past that needs `PRISM_MAX_SV_QUBITS` raised with it.
+pub(crate) const DM_QUBIT_CAP_ENV: &str = "PRISM_MAX_DM_QUBITS and PRISM_MAX_SV_QUBITS";
+
 /// Qubit cap for the exact density-matrix backend. Its state is `4^n`
 /// `Complex64` entries, the element count of a `2n`-qubit statevector, so the
 /// cap is `floor(cap_sv / 2)`: 14 on a 16 GiB host, 15 on 32 GiB.
-/// `PRISM_MAX_DM_QUBITS` overrides unconditionally.
+/// `PRISM_MAX_DM_QUBITS` moves it within that bound; see [`DM_QUBIT_CAP_ENV`].
+/// This is the only density-matrix cap, so dispatch-time validation and the
+/// backend's own `init` guard cannot disagree about where the ceiling is.
 pub(crate) fn max_density_matrix_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
-        env_qubit_override("PRISM_MAX_DM_QUBITS").unwrap_or(max_statevector_qubits() / 2)
+        let budget = max_statevector_qubits() / 2;
+        env_qubit_override("PRISM_MAX_DM_QUBITS").map_or(budget, |n| n.min(budget))
     })
 }
 

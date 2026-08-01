@@ -2481,16 +2481,12 @@ fn evolve_density_matrix(
     noise: Option<&NoiseModel>,
     seed: u64,
 ) -> Result<DensityMatrixBackend> {
-    let cap = crate::backend::max_density_matrix_qubits();
-    if circuit.num_qubits > cap {
-        return Err(crate::error::PrismError::IncompatibleBackend {
-            backend: "density_matrix".into(),
-            reason: format!(
-                "circuit has {} qubits, exceeding the density-matrix cap of {cap} on this machine (set PRISM_MAX_DM_QUBITS to override)",
-                circuit.num_qubits
-            ),
-        });
-    }
+    crate::backend::check_state_allocation(
+        "density_matrix",
+        circuit.num_qubits,
+        crate::backend::max_density_matrix_qubits(),
+        crate::backend::DM_QUBIT_CAP_ENV,
+    )?;
     if let Some(noise) = noise {
         if noise.after_gate.len() != circuit.instructions.len() {
             return Err(crate::error::PrismError::InvalidParameter {
@@ -2514,6 +2510,18 @@ fn evolve_density_matrix(
         }
     }
     Ok(dm)
+}
+
+/// Exact output distribution of `circuit` under `noise`, read off the diagonal
+/// of the evolved mixture. Measurements are not collapsed during evolution, so
+/// the distribution answers for a whole shot only when every measurement is
+/// terminal; callers gate on that shape.
+pub(crate) fn density_matrix_probabilities(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+) -> Result<Vec<f64>> {
+    evolve_density_matrix(circuit, Some(noise), seed)?.probabilities()
 }
 
 /// Exact per-classical-bit measurement marginals under a noise model, evolved

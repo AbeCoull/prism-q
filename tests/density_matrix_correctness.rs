@@ -217,23 +217,342 @@ fn dm_explicit_dispatch_matches_statevector() {
     assert_probs_close(&probs, &statevector_probs(&c), DM_EPS, "explicit dispatch");
 }
 
-#[test]
-fn dm_noisy_shot_sampling_is_rejected() {
-    use prism_q::{BackendKind, NoiseModel};
-    // Density matrix is an exact backend, not a per-shot sampler. Noisy shot
-    // sampling must fail cleanly; exact noisy expectation goes through
-    // density_matrix_expectation_values instead.
-    let mut c = Circuit::new(2, 2);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::Cx, &[0, 1]);
+const NOISY_N: usize = 4;
+const NOISY_SEEDS: u64 = 64;
+const DEPOLARIZING_P: f64 = 0.02;
+
+/// Entangled non-Clifford circuit with terminal measurements, the shape the
+/// exact noisy route accepts.
+fn noisy_circuit(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+    }
     c.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&c, 0.01);
-    let result = sim::simulate(&c)
+    c
+}
+
+fn dm_noisy_probs(circuit: &Circuit, noise: &prism_q::NoiseModel, seed: u64) -> Vec<f64> {
+    sim::simulate(circuit)
+        .backend(prism_q::BackendKind::DensityMatrix)
+        .noise(noise)
+        .seed(seed)
+        .run()
+        .unwrap()
+        .probabilities
+        .unwrap()
+        .to_vec()
+}
+
+/// Classical-bit pattern as a basis-state index, which is the same number only
+/// because `noisy_circuit` measures qubit `q` into bit `q`.
+fn outcome_index(shot: &[bool]) -> usize {
+    shot.iter()
+        .enumerate()
+        .filter(|&(_, &b)| b)
+        .fold(0usize, |acc, (bit, _)| acc | (1 << bit))
+}
+
+fn histogram(shots: &[Vec<bool>], num_outcomes: usize) -> Vec<u64> {
+    let mut counts = vec![0u64; num_outcomes];
+    for shot in shots {
+        counts[outcome_index(shot)] += 1;
+    }
+    counts
+}
+
+fn assert_within_5_sigma(counts: &[u64], exact: &[f64], total: f64, label: &str) {
+    for (idx, &count) in counts.iter().enumerate() {
+        let p = exact[idx];
+        let sigma = (p * (1.0 - p) / total).sqrt();
+        let observed = count as f64 / total;
+        assert!(
+            (observed - p).abs() <= 5.0 * sigma,
+            "{label}: outcome {idx} exact {p}, sampled {observed}, tolerance {}",
+            5.0 * sigma
+        );
+    }
+}
+
+#[test]
+fn dm_exact_noisy_distribution_is_seed_independent_and_matches_the_trajectory_mean() {
+    use prism_q::{BackendKind, NoiseModel};
+    let circuit = noisy_circuit(NOISY_N);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    let exact = dm_noisy_probs(&circuit, &noise, SEED);
+    for offset in 0..NOISY_SEEDS {
+        let repeat = dm_noisy_probs(&circuit, &noise, SEED + offset);
+        assert_probs_close(&repeat, &exact, DM_EPS, "exact noisy distribution per seed");
+    }
+
+    // Shot `i` of a run seeded `s` draws on `s + i`, so the bases are spaced by
+    // the shot count; adjacent ones would replay the same trajectories.
+    let shots_per_seed = 250;
+    let mut counts = vec![0u64; 1 << NOISY_N];
+    for offset in 0..NOISY_SEEDS {
+        let result = sim::simulate(&circuit)
+            .backend(BackendKind::Statevector)
+            .noise(&noise)
+            .seed(SEED + offset * shots_per_seed as u64)
+            .shots(shots_per_seed)
+            .unwrap();
+        for (idx, count) in histogram(&result.shots, counts.len()).iter().enumerate() {
+            counts[idx] += count;
+        }
+    }
+    let total = (NOISY_SEEDS * shots_per_seed as u64) as f64;
+    assert_within_5_sigma(&counts, &exact, total, "trajectory mean vs exact mixture");
+}
+
+#[test]
+fn dm_noisy_shots_and_counts_sample_the_exact_distribution() {
+    use prism_q::{BackendKind, NoiseModel};
+    let circuit = noisy_circuit(NOISY_N);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let exact = dm_noisy_probs(&circuit, &noise, SEED);
+
+    let num_shots = 20_000;
+    let shots = sim::simulate(&circuit)
         .backend(BackendKind::DensityMatrix)
         .noise(&noise)
         .seed(SEED)
-        .shots(100);
-    assert!(result.is_err(), "noisy DM shot sampling should be rejected");
+        .shots(num_shots)
+        .unwrap();
+    assert_eq!(shots.num_shots(), num_shots);
+    assert_within_5_sigma(
+        &histogram(&shots.shots, exact.len()),
+        &exact,
+        num_shots as f64,
+        "density-matrix shots",
+    );
+
+    // Both terminals draw from the one evolution with the same seed, so unlike
+    // the noiseless route the histograms must agree exactly, not just in
+    // distribution.
+    let counts = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .sample_counts(num_shots)
+        .unwrap();
+    assert_eq!(counts.counts, shots.counts());
+    assert_eq!(counts.counts.values().sum::<u64>(), num_shots as u64);
+}
+
+#[test]
+fn dm_noisy_marginals_agree_with_the_exact_distribution() {
+    use prism_q::{BackendKind, NoiseModel};
+    let circuit = noisy_circuit(NOISY_N);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let exact = dm_noisy_probs(&circuit, &noise, SEED);
+
+    let marginals = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .marginals()
+        .unwrap()
+        .into_vec();
+
+    for (qubit, &(p0, p1)) in marginals.iter().enumerate() {
+        let want: f64 = exact
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| (idx >> qubit) & 1 == 1)
+            .map(|(_, p)| p)
+            .sum();
+        assert!(
+            (p1 - want).abs() < DM_EPS && (p0 + p1 - 1.0).abs() < DM_EPS,
+            "qubit {qubit}: marginal ({p0}, {p1}) against exact P(1) = {want}"
+        );
+    }
+}
+
+#[test]
+fn dm_expectation_values_agree_with_the_free_function() {
+    use prism_q::{BackendKind, NoiseModel, PauliAxis, PauliTerm};
+    let mut circuit = Circuit::new(NOISY_N, 0);
+    for q in 0..NOISY_N {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..NOISY_N - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let observables: Vec<Vec<PauliTerm>> = (0..NOISY_N)
+        .flat_map(|q| {
+            [PauliAxis::X, PauliAxis::Y, PauliAxis::Z]
+                .into_iter()
+                .map(move |axis| vec![PauliTerm::new(q, axis)])
+        })
+        .chain([vec![PauliTerm::z(0), PauliTerm::x(NOISY_N - 1)]])
+        .collect();
+
+    let builder = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    let direct =
+        prism_q::density_matrix_expectation_values(&circuit, &observables, None, SEED).unwrap();
+    assert_probs_close(&builder, &direct, DM_EPS, "noiseless expectation values");
+
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let builder_noisy = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    let direct_noisy =
+        prism_q::density_matrix_expectation_values(&circuit, &observables, Some(&noise), SEED)
+            .unwrap();
+    assert_probs_close(
+        &builder_noisy,
+        &direct_noisy,
+        DM_EPS,
+        "noisy expectation values",
+    );
+}
+
+#[test]
+fn dm_noisy_terminals_reject_branching_circuits_naming_the_mixture() {
+    use prism_q::{BackendKind, NoiseModel};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::X, &[1]);
+    circuit.add_measure(1, 1);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    let err = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(16)
+        .unwrap_err();
+    match err {
+        prism_q::PrismError::IncompatibleBackend { backend, reason } => {
+            assert_eq!(backend, "density_matrix");
+            assert!(
+                reason.contains("every measurement branch at once"),
+                "the rejection must name the mixture, got {reason}"
+            );
+        }
+        other => panic!("expected a named rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn noisy_exact_terminals_without_a_mixture_name_the_density_matrix() {
+    use prism_q::{BackendKind, NoiseModel, PauliTerm};
+    let circuit = noisy_circuit(3);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let unitary = {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c
+    };
+    let unitary_noise = NoiseModel::uniform_depolarizing(&unitary, DEPOLARIZING_P);
+
+    let cases: Vec<(&str, prism_q::PrismError)> = vec![
+        (
+            "run",
+            sim::simulate(&circuit)
+                .backend(BackendKind::Statevector)
+                .noise(&noise)
+                .seed(SEED)
+                .run()
+                .unwrap_err(),
+        ),
+        (
+            "marginals",
+            sim::simulate(&circuit)
+                .backend(BackendKind::Statevector)
+                .noise(&noise)
+                .seed(SEED)
+                .marginals()
+                .unwrap_err(),
+        ),
+        (
+            "expectation_values",
+            sim::simulate(&unitary)
+                .backend(BackendKind::Statevector)
+                .noise(&unitary_noise)
+                .seed(SEED)
+                .expectation_values(&[vec![PauliTerm::z(0)]])
+                .unwrap_err(),
+        ),
+    ];
+
+    for (terminal, err) in cases {
+        match err {
+            prism_q::PrismError::IncompatibleBackend { reason, .. } => assert!(
+                reason.contains("density-matrix backend"),
+                "{terminal}: the rejection must name the exact route, got {reason}"
+            ),
+            other => panic!("{terminal}: expected a named rejection, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn noisy_expectation_gradient_is_rejected_naming_the_adjoint() {
+    use prism_q::{NoiseModel, PauliTerm};
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::Ry(0.4), &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+
+    let err = sim::simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .expectation_gradient(
+            &[(1.0, vec![PauliTerm::z(0)])],
+            &prism_q::sim::gradient::ParameterMap::new(),
+        )
+        .unwrap_err();
+    match err {
+        prism_q::PrismError::IncompatibleBackend { reason, .. } => assert!(
+            reason.contains("adjoint"),
+            "the rejection must name the adjoint method, got {reason}"
+        ),
+        other => panic!("expected a named rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn dm_noisy_readout_error_flips_sampled_bits() {
+    use prism_q::{BackendKind, NoiseModel};
+    // The exact distribution describes the state, not the classical outcome, so
+    // readout error has to reach the draw rather than the evolution.
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Id, &[0]);
+    circuit.add_gate(Gate::Id, &[1]);
+    circuit.measure_all();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.with_readout_error(0.3, 0.0);
+
+    let shots = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(20_000)
+        .unwrap();
+    let ones = shots.shots.iter().filter(|s| s[0]).count() as f64 / 20_000.0;
+    assert!(
+        (ones - 0.3).abs() < 0.02,
+        "readout p01 = 0.3 should flip about 30% of zero outcomes, got {ones}"
+    );
 }
 
 #[test]

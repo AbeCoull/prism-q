@@ -31,6 +31,9 @@ Orchestration layer in `src/sim/mod.rs`.
 | `simulate(circuit).seed(seed).shots(shots)` | Multi-shot sampling |
 | `simulate(circuit).backend(kind).seed(seed).shots(shots)` | Multi-shot with backend selection |
 | `simulate(circuit).backend(kind).noise(noise).seed(seed).shots(shots)` | Noisy multi-shot |
+| `simulate(circuit).backend(density_matrix).noise(noise).seed(seed).run()` | Exact noisy distribution |
+| `simulate(circuit).backend(density_matrix).noise(noise).seed(seed).marginals()` | Exact noisy marginals |
+| `simulate(circuit).backend(density_matrix).noise(noise).seed(seed).expectation_values(obs)` | Exact `Tr(rho P_k)` |
 | `simulate(circuit).seed(seed).sample_counts(shots)` | Auto-dispatched frequency histogram |
 | `simulate(circuit).backend(kind).seed(seed).sample_counts(shots)` | Frequency histogram with backend selection |
 | `simulate(circuit).seed(seed).marginals()` | Auto-dispatched per-qubit marginal probabilities |
@@ -49,6 +52,34 @@ either a direct Pauli marginal route or backend probability output; it returns
 is available. Stochastic and deterministic Pauli marginal backends accept only
 unitary Clifford+T circuits without measurement, reset, or conditional
 instructions.
+
+## Noise across the terminals
+
+A noise model reaches a terminal by one of two routes, and which one applies is fixed by
+the selected backend rather than by the terminal.
+
+Backends holding a per-shot pure state average trajectories: each shot re-evolves the
+circuit with the channels sampled, so a distribution converges as `1/sqrt(shots)`. Only
+`shots` and `sample_counts` take that route, since a single trajectory is not an answer
+to `run`, `marginals`, or `expectation_values`.
+
+The density matrix holds the mixture instead of a trajectory, so `shots` cannot mean
+"replay the circuit per shot". It means one exact evolution followed by a draw per shot
+from the resulting distribution. Every terminal reads that one evolution: `run` and
+`marginals` return the exact noisy distribution, `expectation_values` returns the exact
+`Tr(rho P)`, and `shots` and `sample_counts` carry sampling noise but no trajectory
+variance. Readout error is applied to the drawn outcomes rather than to the state, on an
+RNG stream of its own.
+
+The mixture holds every measurement branch at once, which is what makes it exact and also
+what it cannot undo. A noisy circuit with mid-circuit measurement or classical
+conditioning is rejected on this route: the outcome that a later gate would have been
+conditioned on was never fixed. Those circuits stay on trajectory averaging. This is the
+same property that makes the density matrix the mixture oracle rather than a comparable
+participant in the branching families of `tests/conformance_matrix.rs`.
+
+`expectation_gradient` rejects a noise model on every backend, because the adjoint method
+backpropagates through a pure state.
 
 ## Auto-dispatch decision tree
 

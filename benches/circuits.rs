@@ -1898,6 +1898,31 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
     group.finish();
 }
 
+/// The exact noisy route, reachable through `Simulate` since the noise model
+/// reached this backend. One mixed-state evolution then a draw per shot, so the
+/// row tracks the `4^n` sweep count and is nearly flat in the shot count.
+fn bench_density_matrix_noisy_shots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/noisy_shots");
+    configure_group(&mut group);
+
+    for &n in &[8, 10] {
+        let mut circuit = circuits::random_circuit(n, 4, SEED);
+        circuit.num_classical_bits = n;
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::DensityMatrix, &circuit, &noise, 1024, SEED)
+                    .unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Neutrality row: an untouched statevector row re-run under a density-matrix
 /// group name. The density-matrix backend shares no kernels with the
 /// statevector path, so this must stay within the 5% regression gate.
@@ -2001,6 +2026,7 @@ criterion_group! {
     // Density matrix (explicit backend)
     bench_density_matrix_unitary_layers,
     bench_density_matrix_noisy_channels,
+    bench_density_matrix_noisy_shots,
     bench_density_matrix_neutrality
 }
 criterion_main!(benches);

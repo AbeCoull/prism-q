@@ -349,23 +349,16 @@ fn product_expectation_values_cover_each_axis_eigenstate() {
 fn backends_without_a_native_path_name_themselves() {
     let c = entangled_non_clifford(5);
     let observables = [vec![PauliTerm::z(0)]];
-    for (backend, name) in [
-        (BackendKind::TensorNetwork, "tensornetwork"),
-        (BackendKind::DensityMatrix, "density_matrix"),
-    ] {
-        let err = simulate(&c)
-            .backend(backend.clone())
-            .seed(42)
-            .expectation_values(&observables)
-            .unwrap_err();
-        match err {
-            prism_q::PrismError::BackendUnsupported {
-                backend: reported, ..
-            } => assert_eq!(reported, name, "{backend:?} reported the wrong backend"),
-            other => {
-                panic!("{backend:?}: expected a BackendUnsupported naming {name}, got {other:?}")
-            }
-        }
+    let err = simulate(&c)
+        .backend(BackendKind::TensorNetwork)
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap_err();
+    match err {
+        prism_q::PrismError::BackendUnsupported {
+            backend: reported, ..
+        } => assert_eq!(reported, "tensornetwork"),
+        other => panic!("expected a BackendUnsupported naming tensornetwork, got {other:?}"),
     }
 }
 

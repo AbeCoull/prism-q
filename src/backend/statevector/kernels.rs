@@ -1593,15 +1593,16 @@ impl StatevectorBackend {
     fn apply_diagonal_gate_par(&mut self, target: usize, d0: Complex64, d1: Complex64) {
         let skip_lo = is_phase_one(d0);
 
-        const MIN_TILE: usize = 8192;
         let half = 1usize << target;
         let block_size = half << 1;
+        let num_blocks = self.state.len() / block_size;
 
-        if self.state.len() / block_size < 4 {
+        if num_blocks < 4 {
             apply_diagonal_high_target_par(&mut self.state, target, d0, d1, skip_lo);
             return;
         }
 
+        const MIN_TILE: usize = 8192;
         let tile_size = MIN_TILE.max(block_size);
         self.state.par_chunks_mut(tile_size).for_each(|tile| {
             simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
@@ -3024,7 +3025,8 @@ impl StatevectorBackend {
         for (target, d0, d1) in large_gates {
             let skip_lo = is_phase_one(d0);
             let block_size = 1usize << (target + 1);
-            if self.state.len() / block_size < 4 {
+            let num_blocks = self.state.len() / block_size;
+            if num_blocks < 4 {
                 apply_diagonal_high_target_par(&mut self.state, target, d0, d1, skip_lo);
                 continue;
             }
@@ -3161,7 +3163,8 @@ impl StatevectorBackend {
 
         let half = 1usize << qubit;
         let block_size = half << 1;
-        if self.state.len() / block_size >= 4 {
+        let num_blocks = self.state.len() / block_size;
+        if num_blocks >= 4 {
             self.state
                 .par_chunks_mut(block_size)
                 .with_min_len(chunk_min_len(block_size))
@@ -3186,8 +3189,9 @@ impl StatevectorBackend {
     fn fold_reset_par(&mut self, qubit: usize, outcome: bool) {
         let half = 1usize << qubit;
         let block_size = half << 1;
+        let num_blocks = self.state.len() / block_size;
 
-        if self.state.len() / block_size >= 4 {
+        if num_blocks >= 4 {
             self.state
                 .par_chunks_mut(block_size)
                 .with_min_len(chunk_min_len(block_size))

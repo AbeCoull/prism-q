@@ -116,6 +116,15 @@ fn reset_fold_pair(r0: &mut [Complex64], r1: &mut [Complex64], cmask: usize) {
     simd::zero_slice(r1);
 }
 
+/// Tile size for a parallel sweep over `rho` whose body reads the qubit's row
+/// class from the tile's own base index. Both `rmask` and `2 * cmask` are powers
+/// of two and `rmask >= 2 * cmask`, so the result is a multiple of the column run
+/// that divides `rmask`: a tile can never straddle the row bit.
+#[cfg(feature = "parallel")]
+fn row_aligned_tile(cmask: usize, rmask: usize) -> usize {
+    (cmask << 1).max(crate::backend::MIN_PAR_ELEMS).min(rmask)
+}
+
 fn conjugate_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
         [m[0][0].conj(), m[0][1].conj()],
@@ -313,7 +322,7 @@ impl DensityMatrixBackend {
 
         #[cfg(feature = "parallel")]
         if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
-            use crate::backend::{MIN_PAR_ELEMS, chunk_min_len};
+            use crate::backend::chunk_min_len;
             use rayon::prelude::*;
 
             if self.sv.state.len() / block_size >= 4 {
@@ -328,7 +337,7 @@ impl DensityMatrixBackend {
                 return;
             }
 
-            let tile = (cmask << 1).max(MIN_PAR_ELEMS).min(rmask);
+            let tile = row_aligned_tile(cmask, rmask);
             for block in self.sv.state.chunks_mut(block_size) {
                 let (r0, r1) = block.split_at_mut(rmask);
                 r0.par_chunks_mut(tile)
@@ -354,10 +363,10 @@ impl DensityMatrixBackend {
 
         #[cfg(feature = "parallel")]
         if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
-            use crate::backend::{MIN_PAR_ELEMS, chunk_min_len};
+            use crate::backend::chunk_min_len;
             use rayon::prelude::*;
 
-            let tile = (cmask << 1).max(MIN_PAR_ELEMS).min(rmask);
+            let tile = row_aligned_tile(cmask, rmask);
             self.sv
                 .state
                 .par_chunks_mut(tile)

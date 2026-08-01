@@ -1211,7 +1211,7 @@ pub(crate) fn norm_sqr_to_slice(src: &[Complex64], dst: &mut [f64]) {
                 let ns = vpaddq_f64(sq0, sq1);
                 vst1q_f64(out.add(i * 2), ns);
             }
-            if src.len() % 2 != 0 {
+            if !src.len().is_multiple_of(2) {
                 let last = src.len() - 1;
                 *out.add(last) = src[last].norm_sqr();
             }
@@ -1280,7 +1280,7 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
                 let ns = vmulq_f64(vpaddq_f64(sq0, sq1), s);
                 vst1q_f64(out.add(i * 2), ns);
             }
-            if src.len() % 2 != 0 {
+            if !src.len().is_multiple_of(2) {
                 let last = src.len() - 1;
                 *out.add(last) = src[last].norm_sqr() * scale;
             }

@@ -6,12 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Features exercised on runners without CUDA. The `gpu` feature links against CUDA via
   # cudarc's dynamic-linking mode and can't build on hosts that don't have the NVIDIA
   # toolkit installed, so CI enumerates features instead of using --all-features.
   CI_FEATURES: parallel
+  # Separate from CI_FEATURES so the default published feature set stays tested alone.
+  CI_DIST_FEATURES: parallel distributed
+  # Mirrors `rust-version` in Cargo.toml and `msrv` in clippy.toml. Update all three together.
+  CI_MSRV: 1.87.0
   # Doc surface. rustdoc compiles but never links, and cudarc's build script with the
   # pinned cuda-12040 feature does not probe for a toolkit, so the gpu and distributed
   # docs build on a bare runner. distributed-mpi stays out: mpi-sys fails in its build
@@ -72,6 +80,53 @@ jobs:
 
       - name: Doc tests
         run: cargo test --doc --no-default-features
+
+  # `distributed = []` pulls in nothing; every mpi:: reference sits behind
+  # `distributed-mpi`, and the tests drive ranks over threads, so no MPI runtime is
+  # needed. nextest is required: one test sets a process-wide environment variable.
+  check-distributed:
+    name: Lint & Test (distributed)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: taiki-e/install-action@cargo-nextest
+
+      - name: Clippy
+        run: cargo clippy --all-targets --features "$CI_DIST_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
+
+      - name: Tests
+        run: cargo nextest run --features "$CI_DIST_FEATURES"
+
+  # `rust-version` is published to crates.io, and every other job runs on stable, far
+  # ahead of the floor. 1.87 rather than the edition-2024 floor of 1.85: the SIMD kernels
+  # call `std::arch` intrinsics from `#[target_feature]` functions without an inner unsafe
+  # block, which 1.87 is the first release to accept without warning. Library targets
+  # only, since dev-dependencies do not constrain a consumer.
+  msrv:
+    name: MSRV floor
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.CI_MSRV }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      - name: Check (default features)
+        run: cargo check --features "$CI_FEATURES"
+
+      - name: Check (no default features)
+        run: cargo check --no-default-features
 
   # The release workflow publishes to crates.io with --no-confirm --execute and no
   # manual gate, so the version arithmetic in front of it is verified here rather
@@ -285,6 +340,9 @@ jobs:
       - uses: taiki-e/install-action@cargo-nextest
       - name: Compile-check GPU dispatch + golden_gpu coverage
         run: cargo check --all-targets --features "parallel gpu"
+      # The only build where all three feature-gated dispatch arms compile together.
+      - name: Compile-check the combined feature matrix
+        run: cargo check --all-targets --features "parallel gpu distributed"
       - name: Clippy GPU paths
         run: cargo clippy --all-targets --features "parallel gpu" -- -D warnings -D clippy::undocumented_unsafe_blocks
       - name: KERNEL_NAMES consistency (device-free)

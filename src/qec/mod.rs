@@ -1080,7 +1080,7 @@ fn validate_noise(channel: QecNoise, targets: &[usize], num_qubits: usize) -> Re
         });
     }
 
-    if matches!(channel, QecNoise::Depolarize2(_)) && targets.len() % 2 != 0 {
+    if matches!(channel, QecNoise::Depolarize2(_)) && !targets.len().is_multiple_of(2) {
         return Err(PrismError::InvalidParameter {
             message: "DEPOLARIZE2 requires an even number of targets".to_string(),
         });

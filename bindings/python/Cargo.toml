@@ -2,7 +2,7 @@
 name = "prism-q-py"
 version = "0.27.0"
 edition = "2024"
-rust-version = "1.85.0"
+rust-version = "1.87.0"
 authors = ["A. Coull"]
 description = "Python bindings for PRISM-Q, a performance-first quantum circuit simulator"
 license = "MIT OR Apache-2.0"

@@ -498,3 +498,197 @@ fn dm_apply_1q_matrix_matches_fused_gate_route() {
         }
     }
 }
+
+// `project`, `apply_reset`, and `apply_2q_depolarizing` walk the `4^n` buffer in
+// row-major runs whose stride is the qubit's row bit, and parallelize above the
+// embedded statevector's threshold (`2n >= 14`, so n >= 7). At n = 7 the top two
+// qubits leave fewer than four row blocks, which is the arm that splits inside a
+// block. Each case checks the low qubit and the top qubit.
+const PAR_N: usize = 7;
+
+fn pure_reference_state(circuit: &Circuit) -> Vec<Complex64> {
+    let mut backend = StatevectorBackend::new(SEED);
+    sim::run_on(&mut backend, circuit).unwrap();
+    backend.export_statevector().unwrap()
+}
+
+/// `run_dm` with a classical bit, which the shared circuit fixtures do not
+/// declare because they carry no measurement.
+fn run_dm_with_bit(circuit: &Circuit) -> DensityMatrixBackend {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(circuit.num_qubits, 1).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    backend
+}
+
+#[test]
+fn dm_measure_collapse_matches_scalar_reference_at_every_target() {
+    let circuit = circuits::random_circuit(PAR_N, 4, SEED);
+    let state = pure_reference_state(&circuit);
+
+    for target in [0usize, PAR_N - 2, PAR_N - 1] {
+        let bit = 1usize << target;
+        let mut backend = run_dm_with_bit(&circuit);
+        backend
+            .apply(&prism_q::circuit::Instruction::Measure {
+                qubit: target,
+                classical_bit: 0,
+            })
+            .unwrap();
+        let outcome = backend.classical_results()[0];
+
+        let kept: f64 = state
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| (i & bit != 0) == outcome)
+            .map(|(_, a)| a.norm_sqr())
+            .sum();
+        let expected: Vec<f64> = state
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if (i & bit != 0) == outcome {
+                    a.norm_sqr() / kept
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        assert_probs_close(
+            &backend.probabilities().unwrap(),
+            &expected,
+            DM_EPS,
+            &format!("collapse on q{target}"),
+        );
+
+        // A projected pure state is still pure, which the diagonal alone cannot
+        // show: it fails if the off-diagonal runs are scaled or zeroed wrongly.
+        assert!(
+            (backend.purity() - 1.0).abs() < DM_EPS,
+            "collapse on q{target} left purity {}",
+            backend.purity()
+        );
+        let rdm = backend.reduced_density_matrix_1q(target).unwrap();
+        let population = if outcome { rdm[1][1].re } else { rdm[0][0].re };
+        assert!(
+            (population - 1.0).abs() < DM_EPS,
+            "collapse on q{target} population {population}"
+        );
+    }
+}
+
+#[test]
+fn dm_reset_matches_scalar_reference_at_every_target() {
+    let circuit = circuits::random_circuit(PAR_N, 4, SEED);
+    let state = pure_reference_state(&circuit);
+
+    for target in [0usize, PAR_N - 2, PAR_N - 1] {
+        let bit = 1usize << target;
+        let mut backend = run_dm(&circuit);
+        backend.reset(target).unwrap();
+
+        // Reset traces the qubit out and reinserts |0>, so the two diagonal
+        // entries of each row pair merge into the one with the bit clear.
+        let expected: Vec<f64> = state
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if i & bit != 0 {
+                    0.0
+                } else {
+                    a.norm_sqr() + state[i | bit].norm_sqr()
+                }
+            })
+            .collect();
+        assert_probs_close(
+            &backend.probabilities().unwrap(),
+            &expected,
+            DM_EPS,
+            &format!("reset on q{target}"),
+        );
+
+        let rdm = backend.reduced_density_matrix_1q(target).unwrap();
+        assert!(
+            (rdm[0][0].re - 1.0).abs() < DM_EPS && rdm[0][1].norm() < DM_EPS,
+            "reset on q{target} left rdm {rdm:?}"
+        );
+
+        // Tracing one qubit out cannot change any other qubit's reduced state.
+        let mut sv = StatevectorBackend::new(SEED);
+        sim::run_on(&mut sv, &circuit).unwrap();
+        for q in (0..PAR_N).filter(|&q| q != target) {
+            let a = backend.reduced_density_matrix_1q(q).unwrap();
+            let b = sv.reduced_density_matrix_1q(q).unwrap();
+            for i in 0..2 {
+                for j in 0..2 {
+                    assert!(
+                        (a[i][j] - b[i][j]).norm() < DM_EPS,
+                        "reset on q{target}: rdm[{q}][{i}][{j}] dm={} sv={}",
+                        a[i][j],
+                        b[i][j]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dm_two_qubit_depolarizing_matches_analytic_above_parallel_threshold() {
+    // The Pauli twirl gives rho -> (1-lambda) rho + lambda (I/4) (x) tr_{q0,q1} rho
+    // with lambda = 16p/15, so each reduced state mixes toward I/2 by lambda and
+    // qubits outside the pair are untouched.
+    let p = 0.3;
+    let lambda = 16.0 * p / 15.0;
+    let circuit = circuits::random_circuit(PAR_N, 4, SEED);
+
+    for (q0, q1) in [(0usize, 1usize), (0, PAR_N - 1)] {
+        let mut sv = StatevectorBackend::new(SEED);
+        sim::run_on(&mut sv, &circuit).unwrap();
+
+        let mut backend = run_dm(&circuit);
+        backend.apply_2q_depolarizing(q0, q1, p);
+
+        for q in 0..PAR_N {
+            let before = sv.reduced_density_matrix_1q(q).unwrap();
+            let after = backend.reduced_density_matrix_1q(q).unwrap();
+            for i in 0..2 {
+                for j in 0..2 {
+                    let mixed = if i == j { c(0.5, 0.0) } else { c(0.0, 0.0) };
+                    let expected = if q == q0 || q == q1 {
+                        before[i][j] * (1.0 - lambda) + mixed * lambda
+                    } else {
+                        before[i][j]
+                    };
+                    assert!(
+                        (after[i][j] - expected).norm() < DM_EPS,
+                        "depolarizing({q0},{q1}): rdm[{q}][{i}][{j}] expected {expected}, \
+                         got {}",
+                        after[i][j]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dm_purity_matches_analytic_above_parallel_reduce_threshold() {
+    // 4^8 entries clears the reduction's parallel threshold. One qubit fully
+    // depolarized against seven in |0> gives rho = (I/2) (x) |0><0|^7, purity 1/2.
+    let n = 8usize;
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(n, 0).unwrap();
+    assert!(
+        (backend.purity() - 1.0).abs() < DM_EPS,
+        "pure |0...0> purity {}",
+        backend.purity()
+    );
+
+    backend.apply_1q_kraus(0, &depolarizing(0.75));
+    assert!(
+        (backend.purity() - 0.5).abs() < DM_EPS,
+        "one maximally mixed qubit gives purity 1/2, got {}",
+        backend.purity()
+    );
+}

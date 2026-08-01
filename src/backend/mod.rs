@@ -84,6 +84,48 @@ pub(crate) fn chunk_min_len(chunk_size: usize) -> usize {
 #[cfg(feature = "parallel")]
 pub(crate) const MIN_PAR_ITERS: usize = 2048;
 
+/// Element count above which a full-buffer reduction is worth Rayon fan-out.
+/// Higher than [`PARALLEL_THRESHOLD_QUBITS`] because a reduction is one
+/// lightweight streaming pass, so the fan-out only pays past `2^16`.
+#[cfg(feature = "parallel")]
+pub(crate) const MIN_PAR_REDUCE_ELEMS: usize = 1 << 16;
+
+/// `sum |a|^2` over a dense amplitude buffer, SIMD per chunk and parallel above
+/// [`MIN_PAR_REDUCE_ELEMS`].
+pub(crate) fn state_norm_sqr(state: &[Complex64]) -> f64 {
+    #[cfg(feature = "parallel")]
+    if state.len() >= MIN_PAR_REDUCE_ELEMS {
+        use rayon::prelude::*;
+        return state
+            .par_chunks(MIN_PAR_ELEMS)
+            .map(simd::norm_sqr_sum)
+            .sum();
+    }
+    simd::norm_sqr_sum(state)
+}
+
+#[cfg(test)]
+mod norm_tests {
+    use super::state_norm_sqr;
+    use num_complex::Complex64;
+
+    // Both sides of the reduction's parallel threshold against a scalar sum.
+    #[test]
+    fn state_norm_sqr_matches_scalar_sum_across_the_parallel_threshold() {
+        for len in [1usize, 3, 4096, (1 << 16) - 1, 1 << 16, (1 << 17) + 5] {
+            let state: Vec<Complex64> = (0..len)
+                .map(|i| Complex64::new(0.001 * i as f64 - 0.5, 0.002 * i as f64 + 0.25))
+                .collect();
+            let scalar: f64 = state.iter().map(Complex64::norm_sqr).sum();
+            let got = state_norm_sqr(&state);
+            assert!(
+                (got - scalar).abs() <= 1e-9 * scalar.max(1.0),
+                "len {len}: expected {scalar}, got {got}"
+            );
+        }
+    }
+}
+
 /// Tableau size at which stabilizer row loops parallelize.
 #[cfg(feature = "parallel")]
 pub(crate) const MIN_QUBITS_FOR_PAR_GATES: usize = 128;

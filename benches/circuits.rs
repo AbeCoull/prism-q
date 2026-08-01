@@ -4,6 +4,7 @@
 //! measurement time. Omit for the full suite with default Criterion timing.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::circuit::{Circuit, SmallVec};
@@ -1810,6 +1811,93 @@ fn bench_density_matrix_unitary_layers(c: &mut Criterion) {
     group.finish();
 }
 
+/// Kraus set for amplitude damping at rate `gamma`.
+fn amplitude_damping_kraus(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let zero = c(0.0);
+    vec![
+        [[c(1.0), zero], [zero, c((1.0 - gamma).sqrt())]],
+        [[zero, c(gamma.sqrt())], [zero, zero]],
+    ]
+}
+
+/// Kraus set for symmetric one-qubit depolarizing at rate `p`.
+fn depolarizing_kraus(p: f64) -> Vec<[[Complex64; 2]; 2]> {
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let zero = c(0.0);
+    let w = c((p / 3.0).sqrt());
+    let iw = Complex64::new(0.0, (p / 3.0).sqrt());
+    vec![
+        [[c((1.0 - p).sqrt()), zero], [zero, c((1.0 - p).sqrt())]],
+        [[zero, w], [w, zero]],
+        [[zero, -iw], [iw, zero]],
+        [[w, zero], [zero, -w]],
+    ]
+}
+
+fn dm_backend(n: usize) -> DensityMatrixBackend {
+    let circuit = circuits::random_circuit(n, 2, SEED);
+    let mut backend = DensityMatrixBackend::new(42);
+    backend.init(n, 1).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    backend
+}
+
+/// Channel, measurement, and diagnostic sweeps over the `4^n` buffer.
+///
+/// The channel mix is amplitude damping and symmetric depolarizing through
+/// `apply_1q_kraus`, plus symmetric two-qubit depolarizing. Measure and reset
+/// run at qubit 0 and at the top qubit, the two ends of the `2^(qubit+n)` row
+/// stride. Widths stop at 12: `4^14` is 4.3 GB per buffer, too large to iterate.
+fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/noisy_channels");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        let amp_damp = amplitude_damping_kraus(0.05);
+        group.bench_with_input(BenchmarkId::new("kraus_amp_damp", n), &n, |b, &n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_1q_kraus(0, &amp_damp));
+        });
+
+        let depol = depolarizing_kraus(0.02);
+        group.bench_with_input(BenchmarkId::new("kraus_depolarizing", n), &n, |b, &n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_1q_kraus(n - 1, &depol));
+        });
+
+        group.bench_with_input(BenchmarkId::new("depolarizing_2q", n), &n, |b, &n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_2q_depolarizing(0, n - 1, 0.02));
+        });
+
+        for &(qubit, label) in &[(0usize, "measure_q0"), (n - 1, "measure_qtop")] {
+            group.bench_with_input(BenchmarkId::new(label, n), &n, |b, &n| {
+                let mut backend = dm_backend(n);
+                let measure = Instruction::Measure {
+                    qubit,
+                    classical_bit: 0,
+                };
+                b.iter(|| backend.apply(&measure).unwrap());
+            });
+        }
+
+        for &(qubit, label) in &[(0usize, "reset_q0"), (n - 1, "reset_qtop")] {
+            group.bench_with_input(BenchmarkId::new(label, n), &n, |b, &n| {
+                let mut backend = dm_backend(n);
+                b.iter(|| backend.reset(qubit).unwrap());
+            });
+        }
+
+        group.bench_with_input(BenchmarkId::new("purity", n), &n, |b, &n| {
+            let backend = dm_backend(n);
+            b.iter(|| black_box(backend.purity()));
+        });
+    }
+
+    group.finish();
+}
+
 /// Neutrality row: an untouched statevector row re-run under a density-matrix
 /// group name. The density-matrix backend shares no kernels with the
 /// statevector path, so this must stay within the 5% regression gate.
@@ -1912,6 +2000,7 @@ criterion_group! {
     bench_coalesce_baseline,
     // Density matrix (explicit backend)
     bench_density_matrix_unitary_layers,
+    bench_density_matrix_noisy_channels,
     bench_density_matrix_neutrality
 }
 criterion_main!(benches);

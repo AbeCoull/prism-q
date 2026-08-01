@@ -43,6 +43,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
+use crate::backend::simd;
 use crate::backend::statevector::{StatevectorBackend, insert_zero_bit};
 use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::{ClassicalCondition, Instruction};
@@ -70,6 +71,49 @@ fn block_superoperator(kraus: &[[[Complex64; 2]; 2]]) -> [[Complex64; 4]; 4] {
         }
     }
     s
+}
+
+/// Collapse one tile of `rho` onto the `outcome` subspace of the qubit whose
+/// row and column bits in the buffer index are `rmask` and `cmask`, scaling the
+/// survivors by `scale`. `base` is the tile's buffer index, and the tile must
+/// not straddle `rmask`, so one test fixes its row class: a tile on the
+/// eliminated row is a contiguous zero fill, and only the surviving row pays a
+/// per-entry column test.
+fn project_tile(
+    tile: &mut [Complex64],
+    base: usize,
+    rmask: usize,
+    cmask: usize,
+    outcome: bool,
+    scale: Complex64,
+) {
+    if ((base & rmask) != 0) != outcome {
+        simd::zero_slice(tile);
+        return;
+    }
+    let zero = Complex64::new(0.0, 0.0);
+    for (j, amp) in tile.iter_mut().enumerate() {
+        *amp = if (((base + j) & cmask) != 0) == outcome {
+            *amp * scale
+        } else {
+            zero
+        };
+    }
+}
+
+/// Fold the row-set half of one `2 * rmask` block of `rho` onto the row-clear
+/// half, then clear it. `r0` and `r1` are the two halves, or matching sub-tiles
+/// of them, and `cmask` is the qubit's column bit.
+fn reset_fold_pair(r0: &mut [Complex64], r1: &mut [Complex64], cmask: usize) {
+    let zero = Complex64::new(0.0, 0.0);
+    for (j, amp) in r0.iter_mut().enumerate() {
+        *amp = if j & cmask == 0 {
+            *amp + r1[j | cmask]
+        } else {
+            zero
+        };
+    }
+    simd::zero_slice(r1);
 }
 
 fn conjugate_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
@@ -143,7 +187,7 @@ impl DensityMatrixBackend {
 
     /// Purity `Tr(rho^2)`, equal to `1` for a pure state and less otherwise.
     pub fn purity(&self) -> f64 {
-        self.sv.state.iter().map(Complex64::norm_sqr).sum()
+        crate::backend::state_norm_sqr(&self.sv.state)
     }
 
     #[inline]
@@ -258,22 +302,45 @@ impl DensityMatrixBackend {
 
     /// Deterministic reset `rho -> |0><0| (x) tr_q rho`: fold the block with
     /// `qubit` set on both row and column into the block with it clear on both,
-    /// then zero the three sibling entries that still touch `qubit`. One pass
-    /// over the `d*d/4` block bases.
+    /// then zero the three sibling entries that still touch `qubit`. The four
+    /// entry classes are contiguous runs of the buffer, so the pass walks
+    /// `2 * rmask` blocks rather than scattering per block base.
     fn apply_reset(&mut self, qubit: usize) {
         let n = self.num_qubits;
-        let d = self.dim();
         let rmask = 1usize << (qubit + n);
         let cmask = 1usize << qubit;
-        let both = rmask | cmask;
-        let zero = Complex64::new(0.0, 0.0);
-        for m in 0..((d * d) >> 2) {
-            let base = insert_zero_bit(insert_zero_bit(m, qubit), qubit + n);
-            let folded = self.sv.state[base | both];
-            self.sv.state[base] += folded;
-            self.sv.state[base | rmask] = zero;
-            self.sv.state[base | cmask] = zero;
-            self.sv.state[base | both] = zero;
+        let block_size = rmask << 1;
+
+        #[cfg(feature = "parallel")]
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::{MIN_PAR_ELEMS, chunk_min_len};
+            use rayon::prelude::*;
+
+            if self.sv.state.len() / block_size >= 4 {
+                self.sv
+                    .state
+                    .par_chunks_mut(block_size)
+                    .with_min_len(chunk_min_len(block_size))
+                    .for_each(|block| {
+                        let (r0, r1) = block.split_at_mut(rmask);
+                        reset_fold_pair(r0, r1, cmask);
+                    });
+                return;
+            }
+
+            let tile = (cmask << 1).max(MIN_PAR_ELEMS).min(rmask);
+            for block in self.sv.state.chunks_mut(block_size) {
+                let (r0, r1) = block.split_at_mut(rmask);
+                r0.par_chunks_mut(tile)
+                    .zip(r1.par_chunks_mut(tile))
+                    .for_each(|(t0, t1)| reset_fold_pair(t0, t1, cmask));
+            }
+            return;
+        }
+
+        for block in self.sv.state.chunks_mut(block_size) {
+            let (r0, r1) = block.split_at_mut(rmask);
+            reset_fold_pair(r0, r1, cmask);
         }
     }
 
@@ -281,17 +348,29 @@ impl DensityMatrixBackend {
     /// probability `p`, renormalizing the survivors to unit trace.
     fn project(&mut self, qubit: usize, outcome: bool, p: f64) {
         let n = self.num_qubits;
-        let d = self.dim();
         let rmask = 1usize << (qubit + n);
         let cmask = 1usize << qubit;
-        let keep = if outcome { rmask | cmask } else { 0 };
-        let inv = 1.0 / p.clamp(NORM_CLAMP_MIN, 1.0);
-        for idx in 0..d * d {
-            if idx & (rmask | cmask) == keep {
-                self.sv.state[idx] *= inv;
-            } else {
-                self.sv.state[idx] = Complex64::new(0.0, 0.0);
-            }
+        let scale = Complex64::new(1.0 / p.clamp(NORM_CLAMP_MIN, 1.0), 0.0);
+
+        #[cfg(feature = "parallel")]
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::{MIN_PAR_ELEMS, chunk_min_len};
+            use rayon::prelude::*;
+
+            let tile = (cmask << 1).max(MIN_PAR_ELEMS).min(rmask);
+            self.sv
+                .state
+                .par_chunks_mut(tile)
+                .with_min_len(chunk_min_len(tile))
+                .enumerate()
+                .for_each(|(t, chunk)| {
+                    project_tile(chunk, t * tile, rmask, cmask, outcome, scale);
+                });
+            return;
+        }
+
+        for (t, chunk) in self.sv.state.chunks_mut(rmask).enumerate() {
+            project_tile(chunk, t * rmask, rmask, cmask, outcome, scale);
         }
     }
 
@@ -380,7 +459,47 @@ impl DensityMatrixBackend {
             }
         }
 
-        for m in 0..((d * d) >> 4) {
+        let num_groups = (d * d) >> 4;
+
+        #[cfg(feature = "parallel")]
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::MIN_PAR_ITERS;
+            use crate::backend::statevector::SendPtr;
+            use rayon::prelude::*;
+
+            let ptr = SendPtr(self.sv.state.as_mut_ptr());
+            (0..num_groups)
+                .into_par_iter()
+                .with_min_len(MIN_PAR_ITERS)
+                .for_each(move |m| {
+                    let mut base = m;
+                    for &pos in &positions {
+                        base = insert_zero_bit(base, pos);
+                    }
+                    let mut v = [Complex64::new(0.0, 0.0); 16];
+                    // SAFETY: inserting a zero bit at each of the four block
+                    // positions is a bijection from `m` onto the block bases, so
+                    // the 16 offsets one iteration touches are disjoint from
+                    // every other iteration's. The safe alternative needs the
+                    // 16 entries as disjoint sub-slices, which they are not:
+                    // they are strided across four independent bit positions.
+                    unsafe {
+                        for (k, &off) in flats.iter().enumerate() {
+                            v[k] = ptr.load(base | off);
+                        }
+                        for (i, &off) in flats.iter().enumerate() {
+                            let mut acc = Complex64::new(0.0, 0.0);
+                            for j in 0..16 {
+                                acc += s[i][j] * v[j];
+                            }
+                            ptr.store(base | off, acc);
+                        }
+                    }
+                });
+            return;
+        }
+
+        for m in 0..num_groups {
             let mut base = m;
             for &pos in &positions {
                 base = insert_zero_bit(base, pos);

@@ -561,7 +561,7 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
             if accepted {
                 exp_val_accepted += 1;
                 let state = backend.state_vector();
-                let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
+                let norm = crate::backend::state_norm_sqr(state);
                 for (slot, &((xmask, zmask, num_y), coefficient)) in
                     exp_val_masks.iter().enumerate()
                 {

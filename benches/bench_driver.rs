@@ -283,6 +283,69 @@ fn bench_measurement(c: &mut Criterion) {
         );
     }
 
+    // The measurement family chunks by 2^(qubit+1), so a top-qubit target is one
+    // chunk over the whole state where qubit 0 is 2^(n-1) of them. Both rows walk
+    // the same 2^n amplitudes; only the chunking differs, so q0 is the control.
+    //
+    // The read and collapse rows hold one backend for the whole row: the reads
+    // do not mutate, and a repeated collapse on an already collapsed state walks
+    // the same amplitudes. Rebuilding a 16 MB backend per iteration would put an
+    // allocate-and-zero pass beside every measured one.
+    const N: usize = 20;
+    let hi = N - 1;
+
+    let prepared = |target: usize, classical: usize| {
+        let mut backend = StatevectorBackend::new(42);
+        backend.init(N, classical).unwrap();
+        let mut prep = Circuit::new(N, classical);
+        prep.add_gate(Gate::X, &[target]);
+        backend.apply(&prep.instructions[0]).unwrap();
+        backend
+    };
+
+    for &(target, label) in &[(0usize, "prob_one_q0_n20"), (hi, "prob_one_q19_n20")] {
+        group.bench_function(label, |b| {
+            let backend = prepared(target, 0);
+            b.iter(|| black_box(backend.qubit_probability(target).unwrap()));
+        });
+    }
+
+    for &(target, label) in &[(0usize, "rdm_q0_n20"), (hi, "rdm_q19_n20")] {
+        group.bench_function(label, |b| {
+            let backend = prepared(target, 0);
+            b.iter(|| black_box(backend.reduced_density_matrix_1q(target).unwrap()));
+        });
+    }
+
+    for &(target, label) in &[(0usize, "measure_q0_n20"), (hi, "measure_q19_n20")] {
+        let measure = prism_q::Instruction::Measure {
+            qubit: target,
+            classical_bit: 0,
+        };
+        group.bench_function(label, |b| {
+            let mut backend = prepared(target, 1);
+            b.iter(|| backend.apply(&measure).unwrap());
+        });
+    }
+
+    // Reset is the one row that cannot reuse its state: once the qubit is |0>
+    // the fold stops copying, so each iteration needs a state with weight on the
+    // |1> branch. `PerIteration` keeps that to one live backend at a time.
+    for &(target, label) in &[(0usize, "reset_q0_n20"), (hi, "reset_q19_n20")] {
+        let mut circuit = Circuit::new(N, 0);
+        circuit.add_reset(target);
+        group.bench_function(label, |b| {
+            b.iter_batched(
+                || prepared(target, 0),
+                |mut backend| {
+                    backend.apply(&circuit.instructions[0]).unwrap();
+                    black_box(backend.state_vector());
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+
     group.finish();
 }
 
@@ -338,6 +401,21 @@ fn bench_high_target_qubit(c: &mut Criterion) {
             b.iter(|| {
                 run_with(BackendKind::Statevector, &circuit, 42).unwrap();
             });
+        });
+    }
+
+    // Diagonal counterpart of the rows above. The diagonal pass tiles by
+    // 2^(target+1), so at n=20 target 19 leaves one tile and target 17 leaves
+    // four, while the general 1q kernel splits either. Rz scales both halves,
+    // where P leaves the |0> half alone. Rz is unitary, so one backend serves
+    // the whole row and no allocation lands beside a measured pass.
+    for &(n_qubits, target) in &[(20, 17), (20, 19)] {
+        let mut circuit = Circuit::new(n_qubits, 0);
+        circuit.add_gate(Gate::Rz(0.7), &[target]);
+        group.bench_function(format!("rz_q{}_n{}", target, n_qubits), |b| {
+            let mut backend = StatevectorBackend::new(42);
+            backend.init(n_qubits, 0).unwrap();
+            b.iter(|| backend.apply(&circuit.instructions[0]).unwrap());
         });
     }
 

@@ -1477,6 +1477,244 @@ fn diagonal_batch_par_matches_independent_reference() {
     assert_state_close(&got, &expected, 1e-12);
 }
 
+// Setup shared by the high-target rows below: a state with distinct amplitudes
+// on every basis index, past the parallel threshold.
+#[cfg(feature = "parallel")]
+fn spread_state_backend(n: usize) -> StatevectorBackend {
+    use crate::circuit::{Instruction, SmallVec, smallvec};
+    use crate::gates::Gate;
+
+    let mut backend = StatevectorBackend::new(42);
+    backend.init(n, 1).unwrap();
+    for q in 0..n {
+        let targets: SmallVec<[usize; 4]> = smallvec![q];
+        backend
+            .apply(&Instruction::Gate {
+                gate: Gate::Ry(0.31 + 0.07 * q as f64),
+                targets,
+            })
+            .unwrap();
+    }
+    for q in 0..n - 1 {
+        let targets: SmallVec<[usize; 4]> = smallvec![q, q + 1];
+        backend
+            .apply(&Instruction::Gate {
+                gate: Gate::Cx,
+                targets,
+            })
+            .unwrap();
+    }
+    backend
+}
+
+// The measurement family chunks by `2^(qubit+1)`, so at n = 16 the top two
+// qubits leave fewer than four chunks and take the inner split while qubit 0
+// and qubit 13 keep the per-chunk path. Both must agree with a scalar sweep.
+#[cfg(feature = "parallel")]
+#[test]
+fn measurement_reads_match_independent_reference_at_every_target() {
+    let n = 16usize;
+    let backend = spread_state_backend(n);
+    let state = backend.export_statevector().unwrap();
+
+    for qubit in [0usize, 13, 14, 15] {
+        let bit = 1usize << qubit;
+        let mut p1 = 0.0f64;
+        let mut r00 = 0.0f64;
+        let mut r11 = 0.0f64;
+        let mut r10 = Complex64::new(0.0, 0.0);
+        for (i, amp) in state.iter().enumerate() {
+            if i & bit == 0 {
+                r00 += amp.norm_sqr();
+                r10 += state[i | bit] * amp.conj();
+            } else {
+                p1 += amp.norm_sqr();
+                r11 += amp.norm_sqr();
+            }
+        }
+
+        let got_p1 = backend.qubit_probability(qubit).unwrap();
+        assert!(
+            (got_p1 - p1).abs() < 1e-12,
+            "prob_one[{qubit}]: expected {p1}, got {got_p1}"
+        );
+
+        let rdm = backend.reduced_density_matrix_1q(qubit).unwrap();
+        let expected = [
+            [Complex64::new(r00, 0.0), r10.conj()],
+            [r10, Complex64::new(r11, 0.0)],
+        ];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (rdm[i][j] - expected[i][j]).norm() < 1e-12,
+                    "rdm[{qubit}][{i}][{j}]: expected {}, got {}",
+                    expected[i][j],
+                    rdm[i][j]
+                );
+            }
+        }
+    }
+}
+
+// Collapse and reset on the same inner-split targets. The reference is built
+// from the pre-measurement amplitudes and the outcome the backend recorded, so
+// it does not depend on the draw.
+#[cfg(feature = "parallel")]
+#[test]
+fn collapse_and_reset_match_independent_reference_at_every_target() {
+    use crate::circuit::Instruction;
+
+    let n = 16usize;
+    for qubit in [0usize, 13, 14, 15] {
+        let bit = 1usize << qubit;
+        let before = spread_state_backend(n).export_statevector().unwrap();
+
+        let mut backend = spread_state_backend(n);
+        backend
+            .apply(&Instruction::Measure {
+                qubit,
+                classical_bit: 0,
+            })
+            .unwrap();
+        let outcome = backend.classical_results()[0];
+        let after = backend.export_statevector().unwrap();
+
+        let kept: f64 = before
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| (i & bit != 0) == outcome)
+            .map(|(_, a)| a.norm_sqr())
+            .sum();
+        let inv = 1.0 / kept.sqrt();
+        for (i, amp) in before.iter().enumerate() {
+            let expected = if (i & bit != 0) == outcome {
+                *amp * inv
+            } else {
+                Complex64::new(0.0, 0.0)
+            };
+            assert!(
+                (after[i] - expected).norm() < 1e-12,
+                "collapse q{qubit} amp[{i}]: expected {expected}, got {}",
+                after[i]
+            );
+        }
+
+        let mut backend = spread_state_backend(n);
+        backend.reset(qubit).unwrap();
+        let after = backend.export_statevector().unwrap();
+        for (i, expected) in after.iter().enumerate() {
+            let source = if i & bit != 0 {
+                Complex64::new(0.0, 0.0)
+            } else if outcome {
+                before[i | bit] * inv
+            } else {
+                before[i] * inv
+            };
+            assert!(
+                (*expected - source).norm() < 1e-12,
+                "reset q{qubit} amp[{i}]: expected {source}, got {expected}"
+            );
+        }
+    }
+}
+
+// `apply_diagonal_gate` tiles by `2^(target+1)`, so at n = 16 targets 14 and 15
+// leave fewer than four tiles and take the sub-tile split. Rz scales both halves
+// of every block, where a phase gate would leave the `|0>` half alone.
+#[cfg(feature = "parallel")]
+#[test]
+fn diagonal_gate_matches_independent_reference_at_every_target() {
+    use crate::circuit::{Instruction, SmallVec, smallvec};
+    use crate::gates::Gate;
+
+    let n = 16usize;
+    let theta = 0.83f64;
+    let d0 = Complex64::from_polar(1.0, -theta / 2.0);
+    let d1 = Complex64::from_polar(1.0, theta / 2.0);
+
+    for target in [0usize, 13, 14, 15] {
+        let before = spread_state_backend(n).export_statevector().unwrap();
+        let mut backend = spread_state_backend(n);
+        let targets: SmallVec<[usize; 4]> = smallvec![target];
+        backend
+            .apply(&Instruction::Gate {
+                gate: Gate::Rz(theta),
+                targets,
+            })
+            .unwrap();
+        let after = backend.export_statevector().unwrap();
+
+        let bit = 1usize << target;
+        for (i, amp) in before.iter().enumerate() {
+            let expected = *amp * if i & bit != 0 { d1 } else { d0 };
+            assert!(
+                (after[i] - expected).norm() < 1e-12,
+                "rz q{target} amp[{i}]: expected {expected}, got {}",
+                after[i]
+            );
+        }
+    }
+}
+
+// The individual tier of `apply_multi_1q_diagonal` (targets past
+// `MULTI_GATE_MAX_L3_TARGET` = 16), where at n = 20 target 19 leaves one tile
+// and takes the sub-tile split while target 17 leaves eight and stays tiled.
+// Targets 2 and 15 hold the L2 and L3 tiers.
+#[cfg(feature = "parallel")]
+#[test]
+fn multi_1q_diagonal_matches_independent_reference_across_tiers() {
+    use crate::circuit::{Instruction, SmallVec};
+    use crate::gates::{Gate, MultiFusedData};
+
+    let n = 20usize;
+    let gates: Vec<(usize, [[Complex64; 2]; 2])> = [2usize, 15, 17, 19]
+        .into_iter()
+        .enumerate()
+        .map(|(k, target)| {
+            let theta = 0.29 + 0.13 * k as f64;
+            let zero = Complex64::new(0.0, 0.0);
+            (
+                target,
+                [
+                    [Complex64::from_polar(1.0, -theta), zero],
+                    [zero, Complex64::from_polar(1.0, theta)],
+                ],
+            )
+        })
+        .collect();
+
+    let before = spread_state_backend(n).export_statevector().unwrap();
+    let mut backend = spread_state_backend(n);
+    let targets: SmallVec<[usize; 4]> = gates.iter().map(|&(t, _)| t).collect();
+    backend
+        .apply(&Instruction::Gate {
+            gate: Gate::MultiFused(Box::new(MultiFusedData {
+                gates: gates.clone(),
+                all_diagonal: true,
+            })),
+            targets,
+        })
+        .unwrap();
+    let after = backend.export_statevector().unwrap();
+
+    for (i, amp) in before.iter().enumerate() {
+        let mut expected = *amp;
+        for &(target, mat) in &gates {
+            expected *= if (i >> target) & 1 == 1 {
+                mat[1][1]
+            } else {
+                mat[0][0]
+            };
+        }
+        assert!(
+            (after[i] - expected).norm() < 1e-12,
+            "multi diagonal amp[{i}]: expected {expected}, got {}",
+            after[i]
+        );
+    }
+}
+
 #[cfg(feature = "gpu")]
 mod gpu_scaffold {
     use super::*;

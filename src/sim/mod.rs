@@ -1076,7 +1076,7 @@ fn expectation_values_statevector(
     } else {
         backend.state_vector()
     };
-    let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
+    let norm = crate::backend::state_norm_sqr(state);
     Ok(masks
         .iter()
         .map(|&(xmask, zmask, num_y)| {

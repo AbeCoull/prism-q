@@ -1292,10 +1292,7 @@ pub(crate) fn norm_sqr_to_slice_scaled(src: &[Complex64], dst: &mut [f64], scale
     }
 }
 
-#[cfg(all(
-    target_arch = "x86_64",
-    any(feature = "parallel", feature = "distributed", test)
-))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn zero_slice_avx2(slice: &mut [Complex64]) {
     // SAFETY: same contract as the enclosing unsafe fn.
@@ -1312,7 +1309,6 @@ unsafe fn zero_slice_avx2(slice: &mut [Complex64]) {
     }
 }
 
-#[cfg(any(feature = "parallel", feature = "distributed", test))]
 pub(crate) fn zero_slice(slice: &mut [Complex64]) {
     #[cfg(target_arch = "x86_64")]
     if slice.len() >= MIN_SIMD_SLICE && has_avx2_fma() {

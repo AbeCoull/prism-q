@@ -101,6 +101,25 @@ fn non_clifford_terminal_circuit(n_qubits: usize, measured_qubits: usize) -> Cir
     c
 }
 
+/// Non-Clifford circuit whose measurement sits mid-circuit on `measured`, so
+/// every shot replays the whole circuit and pays one measurement collapse.
+/// Choosing a top qubit puts that collapse on the single-chunk end of the
+/// measurement family's `2^(qubit+1)` chunking.
+fn midcircuit_measure_circuit(n_qubits: usize, measured: usize) -> Circuit {
+    let mut c = Circuit::new(n_qubits, 1);
+    for q in 0..n_qubits {
+        c.add_gate(Gate::Ry(0.17 + q as f64 * 0.013), &[q]);
+    }
+    for q in 0..n_qubits - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c.add_measure(measured, 0);
+    for q in 0..n_qubits {
+        c.add_gate(Gate::Rx(0.11 + q as f64 * 0.019), &[q]);
+    }
+    c
+}
+
 fn api_redesign_circuit(n_qubits: usize, with_measurements: bool) -> Circuit {
     let mut c = Circuit::new(n_qubits, if with_measurements { n_qubits } else { 0 });
     for q in 0..n_qubits {
@@ -229,6 +248,13 @@ fn bench_run_shots(c: &mut Criterion) {
                 b.iter(|| run_shots_with(BackendKind::Auto, &circuit, shots, SEED).unwrap());
             },
         );
+    }
+
+    for &(measured, label) in &[(0usize, "midcircuit_18q_q0"), (17, "midcircuit_18q_q17")] {
+        let circuit = midcircuit_measure_circuit(18, measured);
+        group.bench_with_input(BenchmarkId::new(label, 200), &200usize, |b, &shots| {
+            b.iter(|| run_shots_with(BackendKind::Statevector, &circuit, shots, SEED).unwrap());
+        });
     }
 
     group.finish();

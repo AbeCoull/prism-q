@@ -80,6 +80,44 @@ fn negate_slice_kernel(slice: &mut [Complex64]) {
     }
 }
 
+/// Fold the `|1>` branch of a reset onto the `|0>` branch over one aligned
+/// `(lo, hi)` pair, then clear `hi`. Shared by the block and sub-tile arms of
+/// [`StatevectorBackend::fold_reset_par`], which differ only in what they pass.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn fold_reset_pair(lo: &mut [Complex64], hi: &mut [Complex64], outcome: bool) {
+    if outcome {
+        lo.copy_from_slice(hi);
+    }
+    simd::zero_slice(hi);
+}
+
+/// Diagonal `(d0, d1)` on `target` when the state holds fewer than four
+/// `2^(target+1)` blocks, where tiling by the block leaves at most three Rayon
+/// tasks. Scales each half of every block in parallel sub-tiles instead.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_diagonal_high_target_par(
+    state: &mut [Complex64],
+    target: usize,
+    d0: Complex64,
+    d1: Complex64,
+    skip_lo: bool,
+) {
+    let half = 1usize << target;
+    for block in state.chunks_mut(half << 1) {
+        let (lo, hi) = block.split_at_mut(half);
+        lo.par_chunks_mut(MIN_PAR_ELEMS)
+            .zip(hi.par_chunks_mut(MIN_PAR_ELEMS))
+            .for_each(|(lo_t, hi_t)| {
+                if !skip_lo {
+                    simd::scale_complex_slice(lo_t, d0);
+                }
+                simd::scale_complex_slice(hi_t, d1);
+            });
+    }
+}
+
 pub(crate) const BATCH_PHASE_GROUP_SIZE: usize = 10;
 pub(crate) const BATCH_PHASE_TABLE_SIZE: usize = 1024;
 pub(crate) const MAX_BATCH_PHASE_GROUPS: usize = 4;
@@ -1555,11 +1593,17 @@ impl StatevectorBackend {
     fn apply_diagonal_gate_par(&mut self, target: usize, d0: Complex64, d1: Complex64) {
         let skip_lo = is_phase_one(d0);
 
-        const MIN_TILE: usize = 8192;
         let half = 1usize << target;
         let block_size = half << 1;
-        let tile_size = MIN_TILE.max(block_size);
+        let num_blocks = self.state.len() / block_size;
 
+        if num_blocks < 4 {
+            apply_diagonal_high_target_par(&mut self.state, target, d0, d1, skip_lo);
+            return;
+        }
+
+        const MIN_TILE: usize = 8192;
+        let tile_size = MIN_TILE.max(block_size);
         self.state.par_chunks_mut(tile_size).for_each(|tile| {
             simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
         });
@@ -2647,13 +2691,26 @@ impl StatevectorBackend {
         let half = 1usize << qubit;
         let block_size = half << 1;
         let norm_sq = self.pending_norm * self.pending_norm;
+        let num_blocks = self.state.len() / block_size;
 
-        self.state
-            .par_chunks(block_size)
-            .with_min_len(chunk_min_len(block_size))
-            .map(|chunk| simd::norm_sqr_sum(&chunk[half..]))
-            .sum::<f64>()
-            * norm_sq
+        let prob_one = if num_blocks >= 4 {
+            self.state
+                .par_chunks(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .map(|chunk| simd::norm_sqr_sum(&chunk[half..]))
+                .sum::<f64>()
+        } else {
+            self.state
+                .chunks(block_size)
+                .map(|chunk| {
+                    chunk[half..]
+                        .par_chunks(MIN_PAR_ELEMS)
+                        .map(simd::norm_sqr_sum)
+                        .sum::<f64>()
+                })
+                .sum::<f64>()
+        };
+        prob_one * norm_sq
     }
 
     #[inline(always)]
@@ -2690,16 +2747,27 @@ impl StatevectorBackend {
         let half = 1usize << qubit;
         let block_size = half << 1;
         let norm_sq = self.pending_norm * self.pending_norm;
+        let num_blocks = self.state.len() / block_size;
+        let zero_sums = || (0.0, 0.0, Complex64::new(0.0, 0.0));
 
-        let (p0, p1, r) = self
-            .state
-            .par_chunks(block_size)
-            .with_min_len(chunk_min_len(block_size))
-            .map(|block| super::rdm_block_sums(block, half))
-            .reduce(
-                || (0.0, 0.0, Complex64::new(0.0, 0.0)),
-                |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
-            );
+        let (p0, p1, r) = if num_blocks >= 4 {
+            self.state
+                .par_chunks(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .map(|block| super::rdm_block_sums(block, half))
+                .reduce(zero_sums, super::rdm_sum_add)
+        } else {
+            self.state
+                .chunks(block_size)
+                .map(|block| {
+                    let (lo, hi) = block.split_at(half);
+                    lo.par_chunks(MIN_PAR_ELEMS)
+                        .zip(hi.par_chunks(MIN_PAR_ELEMS))
+                        .map(|(lo_t, hi_t)| super::rdm_pair_sums(lo_t, hi_t))
+                        .reduce(zero_sums, super::rdm_sum_add)
+                })
+                .fold(zero_sums(), super::rdm_sum_add)
+        };
 
         let scale = Complex64::new(norm_sq, 0.0);
         let r = r * scale;
@@ -2956,8 +3024,13 @@ impl StatevectorBackend {
 
         for (target, d0, d1) in large_gates {
             let skip_lo = is_phase_one(d0);
-            let min_tile = 1usize << (target + 1);
-            let tile_size = min_tile.max(MIN_PAR_ELEMS);
+            let block_size = 1usize << (target + 1);
+            let num_blocks = self.state.len() / block_size;
+            if num_blocks < 4 {
+                apply_diagonal_high_target_par(&mut self.state, target, d0, d1, skip_lo);
+                continue;
+            }
+            let tile_size = block_size.max(MIN_PAR_ELEMS);
             self.state.par_chunks_mut(tile_size).for_each(|tile| {
                 simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
             });
@@ -3084,52 +3157,57 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_measure_par(&mut self, qubit: usize, classical_bit: usize) {
-        let half = 1usize << qubit;
-        let block_size = half << 1;
-        let norm_sq = self.pending_norm * self.pending_norm;
-
-        let prob_one: f64 = self
-            .state
-            .par_chunks(block_size)
-            .with_min_len(chunk_min_len(block_size))
-            .map(|chunk| simd::norm_sqr_sum(&chunk[half..]))
-            .sum::<f64>()
-            * norm_sq;
-
+        let prob_one = self.qubit_probability_one_par(qubit);
         let outcome = self.rng.random::<f64>() < prob_one;
         self.classical_bits[classical_bit] = outcome;
 
-        let inv_norm = measurement_inv_norm(outcome, prob_one);
-
-        self.state
-            .par_chunks_mut(block_size)
-            .with_min_len(chunk_min_len(block_size))
-            .for_each(|chunk| {
+        let half = 1usize << qubit;
+        let block_size = half << 1;
+        let num_blocks = self.state.len() / block_size;
+        if num_blocks >= 4 {
+            self.state
+                .par_chunks_mut(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .for_each(|chunk| {
+                    let (lo, hi) = chunk.split_at_mut(half);
+                    simd::zero_slice(if outcome { lo } else { hi });
+                });
+        } else {
+            for chunk in self.state.chunks_mut(block_size) {
                 let (lo, hi) = chunk.split_at_mut(half);
-                if outcome {
-                    simd::zero_slice(lo);
-                } else {
-                    simd::zero_slice(hi);
-                }
-            });
+                let dropped = if outcome { lo } else { hi };
+                dropped
+                    .par_chunks_mut(MIN_PAR_ELEMS)
+                    .for_each(simd::zero_slice);
+            }
+        }
 
-        self.pending_norm *= inv_norm;
+        self.pending_norm *= measurement_inv_norm(outcome, prob_one);
     }
 
     #[cfg(feature = "parallel")]
     fn fold_reset_par(&mut self, qubit: usize, outcome: bool) {
         let half = 1usize << qubit;
         let block_size = half << 1;
-        self.state
-            .par_chunks_mut(block_size)
-            .with_min_len(chunk_min_len(block_size))
-            .for_each(|chunk| {
-                let (lo, hi) = chunk.split_at_mut(half);
-                if outcome {
-                    lo.copy_from_slice(hi);
-                }
-                simd::zero_slice(hi);
-            });
+        let num_blocks = self.state.len() / block_size;
+
+        if num_blocks >= 4 {
+            self.state
+                .par_chunks_mut(block_size)
+                .with_min_len(chunk_min_len(block_size))
+                .for_each(|chunk| {
+                    let (lo, hi) = chunk.split_at_mut(half);
+                    fold_reset_pair(lo, hi, outcome);
+                });
+            return;
+        }
+
+        for chunk in self.state.chunks_mut(block_size) {
+            let (lo, hi) = chunk.split_at_mut(half);
+            lo.par_chunks_mut(MIN_PAR_ELEMS)
+                .zip(hi.par_chunks_mut(MIN_PAR_ELEMS))
+                .for_each(|(lo_t, hi_t)| fold_reset_pair(lo_t, hi_t, outcome));
+        }
     }
 
     pub(super) fn apply_diagonal_batch(&mut self, entries: &[DiagEntry]) {

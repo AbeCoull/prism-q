@@ -395,3 +395,45 @@ fn invalid_observable_is_rejected_on_the_native_path() {
         InvalidParameter { .. }
     ));
 }
+
+#[test]
+fn statevector_route_matches_scalar_reference_above_the_parallel_norm_threshold() {
+    // 2^16 amplitudes is where the dense route's normalization pass switches to
+    // a parallel SIMD reduction, and 2^12 is below it. Both must agree with a
+    // scalar sweep of the exported amplitudes.
+    use prism_q::backend::Backend;
+    use prism_q::backend::statevector::StatevectorBackend;
+    use prism_q::circuits;
+
+    for n in [12usize, 16] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, 42);
+        let observables: Vec<Vec<PauliTerm>> = vec![
+            vec![PauliTerm::z(0), PauliTerm::z(n - 1)],
+            vec![PauliTerm::x(n / 2)],
+        ];
+        let got = run_expectation_values(&circuit, &observables, 42).unwrap();
+
+        let mut backend = StatevectorBackend::new(42);
+        prism_q::sim::run_on(&mut backend, &circuit).unwrap();
+        let state = backend.export_statevector().unwrap();
+        let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
+
+        let zz = 1usize | (1usize << (n - 1));
+        let mut expect_zz = 0.0f64;
+        for (i, amp) in state.iter().enumerate() {
+            let sign = if (i & zz).count_ones() & 1 == 1 {
+                -1.0
+            } else {
+                1.0
+            };
+            expect_zz += sign * amp.norm_sqr();
+        }
+        let xmask = 1usize << (n / 2);
+        let mut expect_x = 0.0f64;
+        for (i, amp) in state.iter().enumerate() {
+            expect_x += (state[i ^ xmask].conj() * amp).re;
+        }
+
+        assert_close(&got, &[expect_zz / norm, expect_x / norm], TOL);
+    }
+}

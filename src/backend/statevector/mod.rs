@@ -91,17 +91,32 @@ pub(crate) use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
 #[inline(always)]
 pub(super) fn rdm_block_sums(block: &[Complex64], half: usize) -> (f64, f64, Complex64) {
     let (lo, hi) = block.split_at(half);
+    rdm_pair_sums(lo, hi)
+}
+
+/// [`rdm_block_sums`] over an already split pair, so a sub-tile of one block
+/// contributes without re-deriving the halves.
+#[inline(always)]
+pub(super) fn rdm_pair_sums(lo: &[Complex64], hi: &[Complex64]) -> (f64, f64, Complex64) {
     let mut p0 = 0.0f64;
     let mut p1 = 0.0f64;
     let mut r = Complex64::new(0.0, 0.0);
-    for i in 0..half {
-        let a0 = lo[i];
-        let a1 = hi[i];
+    for (&a0, &a1) in lo.iter().zip(hi.iter()) {
         p0 += a0.norm_sqr();
         p1 += a1.norm_sqr();
         r += a1 * a0.conj();
     }
     (p0, p1, r)
+}
+
+/// Sum of `(p0, p1, r)` triples, the reduction [`rdm_pair_sums`] folds under.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+pub(super) fn rdm_sum_add(
+    a: (f64, f64, Complex64),
+    b: (f64, f64, Complex64),
+) -> (f64, f64, Complex64) {
+    (a.0 + b.0, a.1 + b.1, a.2 + b.2)
 }
 
 #[cfg(feature = "gpu")]

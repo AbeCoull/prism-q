@@ -77,16 +77,40 @@ def test_oversize_circuit_reports_the_qubit_cap():
     circuit = CircuitBuilder(40).h(0).build()
     with pytest.raises(prism_q.PrismError) as excinfo:
         simulate(circuit).seed(SEED).density_matrix_expectation_values([[(0, "Z")]])
-    assert "density-matrix cap" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "density_matrix" in message
+    assert "exceeding the cap" in message
+    # Both variables bind: the 4^n state is allocated as a 2n-qubit statevector.
+    assert "PRISM_MAX_DM_QUBITS and PRISM_MAX_SV_QUBITS" in message
 
 
-def test_noisy_shot_sampling_is_rejected():
+def test_noisy_shots_sample_the_exact_distribution():
     circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
     model = NoiseModel.uniform_depolarizing(circuit, 0.01)
     sim = simulate(circuit).backend(BackendKind.density_matrix()).seed(SEED).noise(model)
-    with pytest.raises(prism_q.PrismError) as excinfo:
-        sim.shots(100)
-    assert "noisy per-shot simulation" in str(excinfo.value)
+    counts = sim.shots(4000).counts()
+    assert sum(counts.values()) == 4000
+    assert set(counts) <= {"00", "01", "10", "11"}
+    # Light depolarizing leaks a little weight onto the odd-parity outcomes and
+    # leaves the Bell pair dominant.
+    assert counts["00"] + counts["11"] > 3 * (counts.get("01", 0) + counts.get("10", 0))
+
+
+def test_noisy_run_probabilities_are_seed_independent():
+    circuit = CircuitBuilder(2, 2).h(0).cx(0, 1).measure_all().build()
+    model = NoiseModel.uniform_depolarizing(circuit, 0.05)
+    runs = [
+        simulate(circuit)
+        .backend(BackendKind.density_matrix())
+        .seed(seed)
+        .noise(model)
+        .run()
+        .probabilities
+        for seed in (SEED, SEED + 1, SEED + 7)
+    ]
+    for other in runs[1:]:
+        for i, (a, b) in enumerate(zip(other, runs[0])):
+            assert abs(a - b) < DM_EPS, f"basis state {i}: {a} vs {b}"
 
 
 def test_mismatched_noise_model_is_rejected():
@@ -98,7 +122,7 @@ def test_mismatched_noise_model_is_rejected():
     assert "noise model length" in str(excinfo.value)
 
 
-def test_expectation_values_rejects_noise():
+def test_expectation_values_rejects_noise_without_a_mixture():
     circuit = CircuitBuilder(1).h(0).build()
     model = NoiseModel.uniform_depolarizing(circuit, 0.01)
     with pytest.raises(prism_q.PrismError):

@@ -372,9 +372,8 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
     }
 }
 
-/// Gate for the terminals that answer a noise model from the exact mixture.
-/// Only the density matrix holds one, so every other kind is rejected here
-/// naming that route and the trajectory alternative.
+/// Gate for the terminals that answer a noise model from the exact mixture,
+/// which only the density matrix holds.
 fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
     if matches!(kind, BackendKind::DensityMatrix) {
         return Ok(());

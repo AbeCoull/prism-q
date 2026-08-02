@@ -325,7 +325,7 @@ fn apply_noise_event(
     }
 }
 
-fn apply_readout_errors(
+pub(crate) fn apply_readout_errors(
     results: &mut [bool],
     readout: &[Option<crate::sim::noise::ReadoutError>],
     rng: &mut ChaCha8Rng,

@@ -49,7 +49,8 @@ def test_readout_error_applies():
 
 
 @pytest.mark.parametrize("terminal", ["run", "marginals", "state_vector"])
-def test_noise_rejected_on_non_shot_terminals(terminal):
+def test_noise_rejected_on_backends_without_a_mixture(terminal):
+    # Auto dispatch never selects the density matrix, so no mixture exists here.
     bell = CircuitBuilder(2).h(0).cx(0, 1).build()
     model = NoiseModel.uniform_depolarizing(bell, 0.01)
     sim = simulate(bell).noise(model)

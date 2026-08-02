@@ -51,7 +51,11 @@ impl PySimulation {
         slf
     }
 
-    /// Attach a noise model. Only `.shots()` and `.sample_counts()` honor noise.
+    /// Attach a noise model.
+    ///
+    /// `.shots()` and `.sample_counts()` average trajectories. `.run()`,
+    /// `.marginals()`, and `.expectation_values()` answer from the exact
+    /// mixture, which requires `BackendKind.density_matrix()`.
     fn noise(mut slf: PyRefMut<'_, Self>, model: Py<PyNoiseModel>) -> PyRefMut<'_, Self> {
         slf.noise = Some(model);
         slf
@@ -59,18 +63,17 @@ impl PySimulation {
 
     /// Run once and return classical bits plus the probability distribution.
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyRunOutcome> {
-        if self.noise.is_some() {
-            return Err(invalid(
-                "run() does not support noise; use shots() or sample_counts()",
-            ));
-        }
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
         let outcome: RunOutcome = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
             }
             sim.seed(seed).run()
         })?;
@@ -120,16 +123,17 @@ impl PySimulation {
 
     /// Per-qubit marginal probabilities `(p0, p1)`.
     fn marginals(&self, py: Python<'_>) -> PyPrismResult<Vec<(f64, f64)>> {
-        if self.noise.is_some() {
-            return Err(invalid("marginals() does not support noise; use shots()"));
-        }
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
         let result: MarginalsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
             }
             sim.seed(seed).marginals()
         })?;
@@ -142,7 +146,9 @@ impl PySimulation {
     /// does not support an attached noise model.
     fn state_vector<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray1<Complex64>>> {
         if self.noise.is_some() {
-            return Err(invalid("state_vector() does not support noise"));
+            return Err(invalid(
+                "state_vector() does not support noise; a mixture has no statevector,                  so read run().probabilities on the density-matrix backend instead",
+            ));
         }
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let circuit = &self.circuit;
@@ -201,26 +207,26 @@ impl PySimulation {
     ///
     /// Each observable is a list of `(qubit, axis)` factors, where `axis` is one
     /// of `"X"`, `"Y"`, `"Z"` and identity factors are omitted. The circuit must
-    /// be unitary, and no noise model may be attached.
+    /// be unitary. With a noise model attached the value is the exact
+    /// `Tr(rho P)`, which requires `BackendKind.density_matrix()`.
     #[pyo3(signature = (observables))]
     fn expectation_values(
         &self,
         py: Python<'_>,
         observables: Vec<Vec<(usize, String)>>,
     ) -> PyPrismResult<Vec<f64>> {
-        if self.noise.is_some() {
-            return Err(invalid(
-                "expectation_values() does not support noise; use density_matrix_expectation_values()",
-            ));
-        }
         let observables = parse_observables(observables)?;
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
         let values = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
             }
             sim.seed(seed).expectation_values(&observables)
         })?;

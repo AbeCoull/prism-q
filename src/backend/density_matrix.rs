@@ -21,14 +21,17 @@
 //! reduced density matrix, projective measurement with stochastic collapse,
 //! reset, classically-conditioned gates, exact one-qubit Kraus channels
 //! (`apply_1q_kraus`), two-qubit depolarizing (`apply_2q_depolarizing`), and
-//! exact `Tr(rho P)` expectation (`expectation_pauli`). Fusion is disabled
-//! (`supports_fused_gates` returns `false`) so every instruction reaching the
-//! backend is a primitive whose qubits live in the instruction targets.
+//! exact `Tr(rho P)` expectation (`expectation_pauli`, reachable through
+//! `pauli_expectations`). Fusion is disabled (`supports_fused_gates` returns
+//! `false`) so every instruction reaching the backend is a primitive whose
+//! qubits live in the instruction targets.
 //!
 //! # When to prefer this backend
 //!
 //! - Exact noise-channel evolution: one run yields the exact mixed state,
-//!   where trajectory averaging converges as `1/sqrt(shots)`.
+//!   where trajectory averaging converges as `1/sqrt(shots)`. Selecting it
+//!   with a noise model attached routes every `Simulate` terminal to that one
+//!   evolution.
 //! - Mixed-state diagnostics: purity and exact `Tr(rho P)` observables.
 //!
 //! # When NOT to use this backend
@@ -37,6 +40,9 @@
 //!   memory.
 //! - Qubit counts past the `4^n` ceiling; trajectory sampling on a pure-state
 //!   backend scales further.
+//! - Noisy circuits with mid-circuit measurement or classical conditioning.
+//!   The mixture holds every branch at once, so per-shot feedback cannot be
+//!   replayed from it and the noisy terminals reject those shapes.
 
 use num_complex::Complex64;
 use rand::{RngExt, SeedableRng};
@@ -50,6 +56,7 @@ use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
 use crate::gates::{Gate, McuData};
 use crate::sim::i_pow;
+use crate::sim::unified_pauli::PauliTerm;
 
 /// Compile a one-qubit Kraus set into the 4x4 superoperator acting on the
 /// `(row-bit, col-bit)` block of `rho`, where block index `i = 2*a + b` orders
@@ -552,15 +559,11 @@ impl Backend for DensityMatrixBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
-        // The state is a 2n-qubit statevector, so the statevector cap binds at
-        // half its value. Taking the tighter of the two here keeps this backend
-        // the one that reports the rejection, whatever the two caps are set to.
         crate::backend::check_state_allocation(
             "density_matrix",
             num_qubits,
-            crate::backend::max_density_matrix_qubits()
-                .min(crate::backend::max_statevector_qubits() / 2),
-            "PRISM_MAX_DM_QUBITS",
+            crate::backend::max_density_matrix_qubits(),
+            crate::backend::DM_QUBIT_CAP_ENV,
         )?;
 
         self.num_qubits = num_qubits;
@@ -619,6 +622,23 @@ impl Backend for DensityMatrixBackend {
     fn reset(&mut self, qubit: usize) -> Result<()> {
         self.apply_reset(qubit);
         Ok(())
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// `Tr(rho P_k)` per observable, the mixed-state reading of the trait's
+    /// `<psi|P_k|psi>`. `rho` is trace-one by construction, so no
+    /// normalization divide is needed.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        observables
+            .iter()
+            .map(|observable| {
+                let (xmask, zmask, num_y) = crate::sim::pauli_masks(observable, self.num_qubits)?;
+                Ok(self.expectation_pauli(xmask, zmask, num_y))
+            })
+            .collect()
     }
 
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {

@@ -44,14 +44,17 @@ through dispatch.
 | Cap | Variable | Default |
 |-----|----------|---------|
 | Statevector state | `PRISM_MAX_SV_QUBITS` | Largest `2^n` `Complex64` state fitting half of detected physical memory |
-| Density-matrix state | `PRISM_MAX_DM_QUBITS` | `floor(cap_sv / 2)`, since a density matrix of `n` qubits is a `2n`-qubit statevector |
+| Density-matrix state | `PRISM_MAX_DM_QUBITS`, bounded by `PRISM_MAX_SV_QUBITS` | `floor(cap_sv / 2)`, since a density matrix of `n` qubits is a `2n`-qubit statevector |
 | Dense probability output | `PRISM_MAX_PROB_QUBITS` | Same budget over `f64` |
 | Dense statevector export | `PRISM_MAX_EXPORT_QUBITS` | Same budget over `Complex64` |
 | Dense outcome sampling | `PRISM_MAX_DENSE_OUTCOME_BITS` | Same budget over two `f64` per outcome |
 
-The density-matrix backend applies the tighter of its own cap and half the statevector
-cap, so it reports the rejection itself rather than surfacing an error naming the
-statevector it allocates internally. When physical memory cannot be detected the caps are
+The density-matrix cap is the tighter of its own override and half the statevector cap,
+computed in one place so dispatch-time validation and the backend's `init` guard cannot
+disagree about where the ceiling is. Raising `PRISM_MAX_DM_QUBITS` past that bound needs
+`PRISM_MAX_SV_QUBITS` raised with it, which is what the rejection says: the backend
+reports it itself rather than surfacing an error naming the statevector it allocates
+internally. When physical memory cannot be detected the caps are
 disabled and a warning is printed, because guessing a budget is worse than saying the
 budget is unknown.
 
@@ -125,8 +128,13 @@ kernels with no new gate math. A unitary `U` on the ket register gives the left 
 `rho U^dagger`, so `U rho U^dagger` costs two statevector passes and two conjugations.
 
 Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host and 15 on
-32 GiB (`PRISM_MAX_DM_QUBITS` overrides). This backend is CPU-only and explicit-dispatch
-only; `Auto` never selects it.
+32 GiB (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). This backend is
+CPU-only and explicit-dispatch only; `Auto` never selects it.
+
+Selecting it with a noise model attached is the exact route for every `Simulate`
+terminal: the mixture is evolved once and observables, marginals, probabilities, and
+shots all read that one evolution. See [Noise across the terminals](./engine.md) for
+what that route accepts and what stays on trajectory averaging.
 
 The [GPU backend](../guides/gpu.md) is documented as a user guide. The distributed
 statevector backend is covered in the

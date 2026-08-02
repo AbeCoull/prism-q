@@ -10,7 +10,10 @@ use crate::backend::sparse::SparseBackend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
-use crate::backend::{Backend, max_density_matrix_qubits, max_statevector_qubits};
+use crate::backend::{
+    Backend, DM_QUBIT_CAP_ENV, check_state_allocation, max_density_matrix_qubits,
+    max_statevector_qubits,
+};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 
@@ -106,10 +109,14 @@ pub enum BackendKind {
     ///
     /// Explicit-dispatch only: [`BackendKind::Auto`] never selects it. Stores
     /// `4^n` `Complex64` amplitudes, so the qubit ceiling is roughly half the
-    /// statevector cap (14 on a 16 GiB host); `PRISM_MAX_DM_QUBITS` overrides.
-    /// Fusion is skipped for this backend because batched and fused gate
-    /// variants carry qubit indices in their payload that the ket-register
-    /// offset cannot relocate.
+    /// statevector cap (14 on a 16 GiB host); `PRISM_MAX_DM_QUBITS` moves it
+    /// within that bound. Fusion is skipped for this backend because batched
+    /// and fused gate variants carry qubit indices in their payload that the
+    /// ket-register offset cannot relocate.
+    ///
+    /// Under an attached noise model this is the exact route: the mixture is
+    /// evolved once and every terminal reads it, so shot counts carry sampling
+    /// noise only and observables carry none.
     DensityMatrix,
     /// Stochastic Pauli propagation (SPP); serves marginal and observable
     /// queries only.
@@ -207,7 +214,10 @@ impl BackendKind {
     }
 
     /// False for the engines without a per-shot pure state: stabilizer rank,
-    /// Pauli propagation, density matrix.
+    /// Pauli propagation, density matrix. The density matrix still serves a
+    /// noise model, by evolving the mixture once and sampling the exact
+    /// distribution, so its noisy terminals route around the trajectory engine
+    /// rather than through it.
     pub fn supports_noisy_per_shot(&self) -> bool {
         !matches!(
             self,
@@ -219,7 +229,8 @@ impl BackendKind {
     }
 
     /// True for kinds that can run non-Pauli channels (damping, thermal
-    /// relaxation, custom Kraus) through the trajectory engine.
+    /// relaxation, custom Kraus): the trajectory engine everywhere except the
+    /// density matrix, which applies the channel to the mixture instead.
     pub fn supports_general_noise(&self) -> bool {
         match self {
             BackendKind::Auto
@@ -227,7 +238,8 @@ impl BackendKind {
             | BackendKind::Sparse
             | BackendKind::Mps { .. }
             | BackendKind::ProductState
-            | BackendKind::Factored => true,
+            | BackendKind::Factored
+            | BackendKind::DensityMatrix => true,
             #[cfg(feature = "gpu")]
             BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => true,
             _ => false,
@@ -253,11 +265,11 @@ impl BackendKind {
     pub(crate) fn general_noise_backend_names() -> &'static str {
         #[cfg(feature = "gpu")]
         {
-            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, or Factored"
+            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, Factored, or DensityMatrix"
         }
         #[cfg(not(feature = "gpu"))]
         {
-            "Auto, Statevector, Sparse, Mps, ProductState, or Factored"
+            "Auto, Statevector, Sparse, Mps, ProductState, Factored, or DensityMatrix"
         }
     }
 }
@@ -282,15 +294,13 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
                 reason: "circuit has no T gates; use Stabilizer instead".into(),
             });
         }
-        BackendKind::DensityMatrix if circuit.num_qubits > max_density_matrix_qubits() => {
-            return Err(PrismError::IncompatibleBackend {
-                backend: "density_matrix".into(),
-                reason: format!(
-                    "circuit has {} qubits, exceeding the density-matrix cap of {} on this machine (set PRISM_MAX_DM_QUBITS to override)",
-                    circuit.num_qubits,
-                    max_density_matrix_qubits()
-                ),
-            });
+        BackendKind::DensityMatrix => {
+            check_state_allocation(
+                "density_matrix",
+                circuit.num_qubits,
+                max_density_matrix_qubits(),
+                DM_QUBIT_CAP_ENV,
+            )?;
         }
         _ => {}
     }

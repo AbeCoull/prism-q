@@ -106,18 +106,27 @@ outcome = sim.run()
 
 | Terminal | Returns | Honors `.noise()` |
 |----------|---------|-------------------|
-| `run()` | `RunOutcome`: classical bits and the full probability array | no |
+| `run()` | `RunOutcome`: classical bits and the full probability array | density matrix only |
 | `shots(n)` | `ShotsResult`: per-shot measurement records | yes |
 | `sample_counts(n)` | `CountsResult`: frequency histogram | yes |
-| `marginals()` | `list[tuple[float, float]]`, per-qubit `(p0, p1)` | no |
+| `marginals()` | `list[tuple[float, float]]`, per-qubit `(p0, p1)` | density matrix only |
 | `state_vector()` | `complex128` amplitudes | no |
-| `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | no |
+| `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only |
 | `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes |
 | `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no |
 
-Terminals that do not support noise raise `PrismError` when a model is attached,
-rather than silently ignoring it. `state_vector()` always uses the statevector
-backend and `density_matrix_expectation_values()` always uses the density-matrix
+`shots()` and `sample_counts()` average trajectories on any backend holding a
+per-shot pure state. The three rows marked "density matrix only" read the exact
+mixed state instead, so they need
+`.backend(BackendKind.density_matrix())`; auto dispatch never selects it. There
+the mixture is evolved once and every terminal reads that one evolution, so the
+probabilities are seed independent and the observables carry no sampling error.
+Circuits with mid-circuit measurement or classical conditioning are rejected on
+that route, since the mixture holds every measurement branch at once.
+
+Terminals that cannot honor a model raise `PrismError` naming the reason, rather
+than silently ignoring it. `state_vector()` always uses the statevector backend
+and `density_matrix_expectation_values()` always uses the density-matrix
 backend, both regardless of `.backend(...)`.
 
 `ShotsResult` and `CountsResult` both expose `counts()`, returning a dict keyed

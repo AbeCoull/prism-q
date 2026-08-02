@@ -140,8 +140,15 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
         self
     }
 
-    /// Attach a noise model. Only [`Simulate::shots`] and
-    /// [`Simulate::sample_counts`] accept one; other queries reject it.
+    /// Attach a noise model.
+    ///
+    /// [`Simulate::shots`] and [`Simulate::sample_counts`] accept one on any
+    /// backend with a per-shot pure state, averaging trajectories.
+    /// [`Simulate::run`], [`Simulate::marginals`], and
+    /// [`Simulate::expectation_values`] answer from the exact mixture instead,
+    /// which only [`BackendKind::DensityMatrix`] holds, so they require that
+    /// backend. [`Simulate::expectation_gradient`] rejects a noise model on
+    /// every backend.
     #[inline]
     pub fn noise(mut self, model: &'c noise::NoiseModel) -> Self {
         self.noise_model = Some(model);
@@ -198,15 +205,24 @@ impl<'c> Simulate<'c, Seeded> {
         self.seed.seed
     }
 
-    /// Execute the circuit once. Rejects an attached noise model; noisy
-    /// simulation runs through [`Simulate::shots`].
+    /// Execute the circuit once.
+    ///
+    /// With a noise model attached the probabilities are the exact noisy
+    /// distribution rather than one trajectory, so the run needs the
+    /// density-matrix backend; the classical bits are one draw from that
+    /// distribution, matching `shots(1)`.
     #[inline]
     pub fn run(self) -> Result<RunOutcome> {
         let seed = self.seed_value();
-        if self.noise_model.is_some() {
-            return Err(crate::error::PrismError::BackendUnsupported {
-                backend: format!("{:?}", self.kind),
-                operation: "single-run noisy simulation through `run`".into(),
+        if let Some(noise_model) = self.noise_model {
+            require_exact_mixture(&self.kind, "a single run")?;
+            let probabilities = exact_noisy_probabilities(self.circuit, noise_model, seed)?;
+            let classical_bits =
+                sample_exact_noisy_shots(&probabilities, self.circuit, noise_model, 1, seed)
+                    .swap_remove(0);
+            return Ok(RunOutcome {
+                classical_bits,
+                probabilities: Some(probabilities),
             });
         }
         run_with_internal(self.kind, self.circuit, seed, SimOptions::default())
@@ -244,15 +260,18 @@ impl<'c> Simulate<'c, Seeded> {
         })
     }
 
-    /// Per-qubit marginal probabilities as `(P(0), P(1))` pairs. Rejects an
-    /// attached noise model and backends without probability output.
+    /// Per-qubit marginal probabilities as `(P(0), P(1))` pairs. Rejects
+    /// backends without probability output, and with a noise model attached
+    /// answers exactly from the mixture, which needs the density-matrix
+    /// backend.
     #[inline]
     pub fn marginals(self) -> Result<MarginalsResult> {
         let seed = self.seed_value();
-        if self.noise_model.is_some() {
-            return Err(crate::error::PrismError::BackendUnsupported {
-                backend: format!("{:?}", self.kind),
-                operation: "marginals with inline noise model".into(),
+        if let Some(noise_model) = self.noise_model {
+            require_exact_mixture(&self.kind, "marginals")?;
+            let probs = exact_noisy_probabilities(self.circuit, noise_model, seed)?;
+            return Ok(MarginalsResult {
+                marginals: probs.marginals(),
             });
         }
         run_marginals_result_with(self.kind, self.circuit, seed)
@@ -267,14 +286,21 @@ impl<'c> Simulate<'c, Seeded> {
     /// fit it; above that cap the selected backend evaluates the observable on
     /// its own representation, and a backend without one reports
     /// `BackendUnsupported` naming itself.
+    ///
+    /// With a noise model attached the value is the exact `Tr(rho P)` on the
+    /// evolved mixture, which needs the density-matrix backend.
     #[inline]
     pub fn expectation_values(self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         let seed = self.seed_value();
-        if self.noise_model.is_some() {
-            return Err(PrismError::BackendUnsupported {
-                backend: format!("{:?}", self.kind),
-                operation: "expectation values with an inline noise model".into(),
-            });
+        if let Some(noise_model) = self.noise_model {
+            require_exact_mixture(&self.kind, "expectation values")?;
+            require_unitary_circuit(&self.kind, self.circuit)?;
+            return noise::density_matrix_expectation_values(
+                self.circuit,
+                observables,
+                Some(noise_model),
+                seed,
+            );
         }
         run_expectation_values_with(self.kind, self.circuit, observables, seed)
     }
@@ -295,9 +321,12 @@ impl<'c> Simulate<'c, Seeded> {
     ) -> Result<gradient::ExpectationGradient> {
         let seed = self.seed_value();
         if self.noise_model.is_some() {
-            return Err(PrismError::BackendUnsupported {
+            return Err(PrismError::IncompatibleBackend {
                 backend: format!("{:?}", self.kind),
-                operation: "expectation gradients with an inline noise model".into(),
+                reason: "the adjoint method backpropagates through a pure state, so no backend \
+                         has a noisy gradient path; drop the noise model, or differentiate noisy \
+                         `expectation_values` numerically"
+                    .into(),
             });
         }
         if !(self.kind.is_auto() || matches!(self.kind, BackendKind::Statevector)) {
@@ -341,6 +370,79 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
         seed: Unseeded,
         noise_model: None,
     }
+}
+
+/// Gate for the terminals that answer a noise model from the exact mixture,
+/// which only the density matrix holds.
+fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
+    if matches!(kind, BackendKind::DensityMatrix) {
+        return Ok(());
+    }
+    Err(PrismError::IncompatibleBackend {
+        backend: format!("{kind:?}"),
+        reason: format!(
+            "{terminal} under a noise model reads the exact mixed state, which only the \
+             density-matrix backend holds; select it, or average trajectories through `shots` \
+             or `sample_counts`"
+        ),
+    })
+}
+
+fn require_unitary_circuit(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
+    if has_nonunitary_or_classical_ops(circuit) {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: "expectation values require a unitary circuit without measurements, resets, or conditionals".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Exact output distribution of `circuit` under `noise_model`, evolved once on
+/// the density matrix. The mixture carries every measurement branch at once,
+/// so it answers for a whole shot only when the measurements are terminal.
+fn exact_noisy_probabilities(
+    circuit: &Circuit,
+    noise_model: &noise::NoiseModel,
+    seed: u64,
+) -> Result<Probabilities> {
+    if !circuit.has_terminal_measurements_only() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: "density_matrix".into(),
+            reason: "the mixture holds every measurement branch at once, so mid-circuit \
+                     measurement and classical conditioning cannot be replayed from it; move the \
+                     measurements to the end of the circuit, or run trajectories on a backend \
+                     with a per-shot pure state"
+                .into(),
+        });
+    }
+    Ok(Probabilities::Dense(noise::density_matrix_probabilities(
+        circuit,
+        noise_model,
+        seed,
+    )?))
+}
+
+/// Draw classical bits from the exact noisy distribution, then apply readout
+/// error. Readout acts on the outcome rather than on the state, so it is not
+/// carried by the distribution and has to be applied per draw, on a stream of
+/// its own so it does not track the state draws.
+fn sample_exact_noisy_shots(
+    probs: &Probabilities,
+    circuit: &Circuit,
+    noise_model: &noise::NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> Vec<Vec<bool>> {
+    let bits = circuit.num_classical_bits;
+    let mut shots = sample_shots(probs, &circuit.measurement_map(), bits, num_shots, seed);
+    if noise_model.readout.iter().any(Option::is_some) {
+        let mut rng = trajectory::noise_rng(seed);
+        for shot in &mut shots {
+            trajectory::apply_readout_errors(shot, &noise_model.readout, &mut rng);
+        }
+    }
+    shots
 }
 
 #[inline]
@@ -1067,12 +1169,7 @@ fn run_expectation_values_with(
     observables: &[Vec<PauliTerm>],
     seed: u64,
 ) -> Result<Vec<f64>> {
-    if has_nonunitary_or_classical_ops(circuit) {
-        return Err(PrismError::IncompatibleBackend {
-            backend: format!("{kind:?}"),
-            reason: "expectation values require a unitary circuit without measurements, resets, or conditionals".into(),
-        });
-    }
+    require_unitary_circuit(&kind, circuit)?;
 
     match &kind {
         BackendKind::StochasticPauli { num_samples } => observables
@@ -1625,10 +1722,21 @@ pub(crate) fn run_shots_with_noise(
         });
     }
 
+    if matches!(kind, BackendKind::DensityMatrix) {
+        let probs = exact_noisy_probabilities(circuit, noise_model, seed)?;
+        return Ok(ShotsResult::from_shots(
+            sample_exact_noisy_shots(&probs, circuit, noise_model, num_shots, seed),
+            circuit.num_classical_bits,
+        ));
+    }
+
     if !kind.supports_noisy_per_shot() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),
-            reason: "this backend does not support noisy per-shot simulation".into(),
+            reason: "this backend holds no per-shot pure state to inject noise into; select \
+                     DensityMatrix for the exact mixed state, or a backend that evolves one \
+                     state per trajectory"
+                .into(),
         });
     }
 

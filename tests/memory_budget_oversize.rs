@@ -9,13 +9,15 @@ use std::sync::Once;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::gates::Gate;
-use prism_q::{Circuit, PrismError, StatevectorBackend, run_on};
+use prism_q::{BackendKind, Circuit, PrismError, StatevectorBackend, run_on, simulate};
 
-/// Caps keep the default relationship, where a density matrix of `n` qubits is
-/// a `2n`-qubit statevector, so neither backend's guard depends on the other
-/// being set inconsistently.
+/// A density matrix of `n` qubits is a `2n`-qubit statevector, so the effective
+/// density-matrix cap is half the statevector cap. `PRISM_MAX_DM_QUBITS` is set
+/// deliberately above that bound here, which is the case where an override that
+/// looks accepted has no room to be honored.
 const SV_CAP: usize = 8;
 const DM_CAP: usize = SV_CAP / 2;
+const DM_OVERRIDE: usize = DM_CAP + 2;
 
 fn small_caps() {
     static SET: Once = Once::new();
@@ -24,7 +26,7 @@ fn small_caps() {
         // behind this `Once`, so no thread queries a cap while it is written.
         unsafe {
             std::env::set_var("PRISM_MAX_SV_QUBITS", "8");
-            std::env::set_var("PRISM_MAX_DM_QUBITS", "4");
+            std::env::set_var("PRISM_MAX_DM_QUBITS", "6");
         }
     });
 }
@@ -94,6 +96,45 @@ fn density_matrix_init_at_the_cap_still_runs() {
         .init(DM_CAP, 0)
         .expect("a circuit at the cap must still run");
     assert_eq!(backend.num_qubits(), DM_CAP);
+}
+
+// Between the clamp and the override, dispatch used to accept a width that
+// `init` then rejected, advising an override the caller had already set.
+#[test]
+fn density_matrix_override_above_the_clamp_is_rejected_identically_at_both_gates() {
+    small_caps();
+    for width in [DM_CAP + 1, DM_OVERRIDE + 1] {
+        let dispatched = simulate(&entangling_circuit(width))
+            .backend(BackendKind::DensityMatrix)
+            .seed(42)
+            .run()
+            .expect_err("dispatch must reject a width the backend cannot allocate");
+        let initialized = DensityMatrixBackend::new(42)
+            .init(width, 0)
+            .expect_err("init must reject the same width");
+
+        for (gate, err) in [("dispatch", &dispatched), ("init", &initialized)] {
+            match err {
+                PrismError::IncompatibleBackend { backend, reason } => {
+                    assert_eq!(backend, "density_matrix", "{gate} named the wrong backend");
+                    assert!(
+                        reason.contains(&format!("exceeding the cap of {DM_CAP}")),
+                        "{width}q {gate} must report the clamped cap, got {reason}"
+                    );
+                    assert!(
+                        reason.contains("PRISM_MAX_DM_QUBITS and PRISM_MAX_SV_QUBITS"),
+                        "{width}q {gate} must name both variables that bind, got {reason}"
+                    );
+                }
+                other => panic!("{width}q {gate}: expected a clean cap error, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            format!("{dispatched:?}"),
+            format!("{initialized:?}"),
+            "{width}q: dispatch and init must report the same cap rejection"
+        );
+    }
 }
 
 #[test]

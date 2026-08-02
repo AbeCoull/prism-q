@@ -2,11 +2,59 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.28.0] - 2026-08-02
+
+### Bug Fixes
+
+- Drop the serialization feature that never had an implementation (#114)([9dfedc7](https://github.com/AbeCoull/prism-q/commit/9dfedc796cdc1d498e2f4be37393d0e2874ab606))
+- **backend:** Check the memory budget before a backend allocates its state (#112)([f4a733a](https://github.com/AbeCoull/prism-q/commit/f4a733a8aa55da365015ff97faf3448281e3f12f))
+
+### CI
+
+- **release:** Switch release workflow to manual dispatch (#106)([bb23f04](https://github.com/AbeCoull/prism-q/commit/bb23f04d7ae1ceb65fb3f130d634a2ecef8201c8))
+
+### Documentation
+
+- Restructure, condense, and consolidate docs across multiple backends (#118)([c189f6a](https://github.com/AbeCoull/prism-q/commit/c189f6a4949a594c417a2e49c42bce67cb7fcb34))
+- **python:** Add a bindings chapter and fix install-page drift (#111)([f764c97](https://github.com/AbeCoull/prism-q/commit/f764c9729476f7642dab4109b0bffdcb2376fdd1))
+
+### Features
+
+- **sim:** Route noise to the density matrix across the terminals (#123)([59596a1](https://github.com/AbeCoull/prism-q/commit/59596a19341fb83e5774714bc8891949bda0a1ba))
+- **backend:** Answer shots and observables from the product state (#119)([a6c4888](https://github.com/AbeCoull/prism-q/commit/a6c4888af72550043133b47b1e8c2b39fc107e7d))
+- **backend:** Close the trait coverage holes, fix release and bench gating (#117)([5e67d1d](https://github.com/AbeCoull/prism-q/commit/5e67d1d95ebfecc55735fe31efdd0a3848ed1b03))
+- **backend:** Sample shots and observables without a dense vector (#115)([67d40f6](https://github.com/AbeCoull/prism-q/commit/67d40f6ba7a77b8811c78f17a2e43e3985577171))
+- **python:** Expose the density-matrix backend and Pauli expectation values (#110)([aeba173](https://github.com/AbeCoull/prism-q/commit/aeba173fa9d16116cfcd279819045580c9f26ff6))
+- **backend:** Add measurement, noise, and expectation to the density-matrix backend (#107)([7282629](https://github.com/AbeCoull/prism-q/commit/72826296072e0f6a7f07943916199597348f9d5a))
+
+### Miscellaneous
+
+- Extend CI coverage, split test modules, unify shot routing (#122)([f3c5cf2](https://github.com/AbeCoull/prism-q/commit/f3c5cf2388330b948655a35b07217e0998ca0b40))
+
+### Performance
+
+- **backend:** Parallelize the full-state passes that still ran serial (#121)([80ee075](https://github.com/AbeCoull/prism-q/commit/80ee075ffa6842d945ad12169be707251c35030c))
+- **backend:** Fold diagonal gate runs into one pass, sync backend docs (#120)([5f46619](https://github.com/AbeCoull/prism-q/commit/5f4661944b67c95ce7a3678f4b94f411f54f096b))
+- **bench:** Cut test and benchmark cycle time (#116)([e776411](https://github.com/AbeCoull/prism-q/commit/e776411b9141e77f19d5a06287d62751ca9ca220))
+- **backend:** Cut redundant passes, hashing, and division from three backends (#113)([fa7c74d](https://github.com/AbeCoull/prism-q/commit/fa7c74dba92810d15b9d56721a990fc30f972ef1))
+
+### Testing
+
+- Add a cross-backend conformance harness and clean up the suite (#109)([397f02a](https://github.com/AbeCoull/prism-q/commit/397f02a52b2062daa1863bcc506383bff2e4d803))
+## [py-v0.27.0] - 2026-07-24
+
+### Miscellaneous
+
+- **python:** Release 0.27.0([b080a18](https://github.com/AbeCoull/prism-q/commit/b080a18eeb4adcff448a0c7249b6ca9b3b1f4f7a))
 ## [0.27.0] - 2026-07-24
 
 ### Features
 
 - **backend:** Add exact density-matrix simulator backend (#105)([6787816](https://github.com/AbeCoull/prism-q/commit/678781677337dec2afdd662b3ee1a55450276dde))
+
+### Miscellaneous
+
+- Release([9ef1a0f](https://github.com/AbeCoull/prism-q/commit/9ef1a0f706789c25cbb21ec58fc1d1faf1980cac))
 ## [py-v0.26.0] - 2026-07-24
 
 ### Miscellaneous

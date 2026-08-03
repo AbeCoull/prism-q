@@ -36,12 +36,13 @@ enum DeviceInner {
 impl GpuDevice {
     /// Open the device with the given ordinal and compile the kernel module.
     ///
-    /// PTX is compiled targeting the device's compute capability so the running NVIDIA
-    /// driver can load it regardless of the toolkit NVRTC version.
+    /// PTX is compiled targeting the newest supported arch at or below the device's
+    /// compute capability so the running NVIDIA driver can load it regardless of the
+    /// toolkit NVRTC version. A capability below 6.0 is rejected rather than targeted.
     pub fn new(device_id: usize) -> Result<Self> {
         let context = CudaContext::new(device_id).map_err(|e| Self::driver_err("init", e))?;
         let stream = context.default_stream();
-        let arch = detect_arch(&context).unwrap_or("compute_60");
+        let arch = detect_arch(&context)?;
         let opts = CompileOptions {
             arch: Some(arch),
             ..Default::default()
@@ -167,22 +168,50 @@ impl GpuDevice {
     }
 }
 
-fn detect_arch(context: &Arc<CudaContext>) -> Option<&'static str> {
-    let (major, minor) = context.compute_capability().ok()?;
-    match (major, minor) {
-        (6, 0) => Some("compute_60"),
-        (6, 1) => Some("compute_61"),
-        (6, 2) => Some("compute_62"),
-        (7, 0) => Some("compute_70"),
-        (7, 2) => Some("compute_72"),
-        (7, 5) => Some("compute_75"),
-        (8, 0) => Some("compute_80"),
-        (8, 6) => Some("compute_86"),
-        (8, 7) => Some("compute_87"),
-        (8, 9) => Some("compute_89"),
-        (9, 0) => Some("compute_90"),
-        _ => None,
-    }
+/// Virtual architectures NVRTC is asked to target, ascending by capability.
+///
+/// The ceiling tracks the newest arch the pinned `cudarc` NVRTC binding
+/// (`cuda-12040` in `Cargo.toml`) accepts. Naming a newer one fails compilation
+/// outright on a 12.x toolkit, so raise the pin before extending this table.
+const KNOWN_ARCHS: &[((i32, i32), &str)] = &[
+    ((6, 0), "compute_60"),
+    ((6, 1), "compute_61"),
+    ((6, 2), "compute_62"),
+    ((7, 0), "compute_70"),
+    ((7, 2), "compute_72"),
+    ((7, 5), "compute_75"),
+    ((8, 0), "compute_80"),
+    ((8, 6), "compute_86"),
+    ((8, 7), "compute_87"),
+    ((8, 9), "compute_89"),
+    ((9, 0), "compute_90"),
+];
+
+/// Newest entry of [`KNOWN_ARCHS`] at or below `capability`, or `None` below
+/// the oldest entry (6.0, the floor for double-precision atomics).
+///
+/// Capabilities past the table clamp down rather than fail: the driver JITs PTX
+/// forward, so an under-targeted module still runs, and the clamped string stays
+/// clear of the pre-Turing range NVRTC 13.x refuses.
+fn arch_for_capability(capability: (i32, i32)) -> Option<&'static str> {
+    KNOWN_ARCHS
+        .iter()
+        .rev()
+        .find(|&&(known, _)| known <= capability)
+        .map(|&(_, arch)| arch)
+}
+
+fn detect_arch(context: &Arc<CudaContext>) -> Result<&'static str> {
+    let capability = context
+        .compute_capability()
+        .map_err(|e| GpuDevice::driver_err("compute_capability", e))?;
+    arch_for_capability(capability).ok_or_else(|| PrismError::BackendUnsupported {
+        backend: "gpu".to_string(),
+        operation: format!(
+            "compute capability {}.{} is below the 6.0 floor the kernels target",
+            capability.0, capability.1
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -202,5 +231,28 @@ mod tests {
             dev.stream().unwrap_err(),
             PrismError::BackendUnsupported { .. }
         ));
+    }
+
+    #[test]
+    fn arch_maps_exact_capabilities() {
+        assert_eq!(arch_for_capability((6, 1)), Some("compute_61"));
+        assert_eq!(arch_for_capability((8, 9)), Some("compute_89"));
+        assert_eq!(arch_for_capability((9, 0)), Some("compute_90"));
+    }
+
+    #[test]
+    fn arch_clamps_down_to_the_newest_entry_at_or_below() {
+        // Blackwell (10.0 / 12.0) and any gap inside the table take the newest
+        // entry below them, never the oldest.
+        assert_eq!(arch_for_capability((10, 0)), Some("compute_90"));
+        assert_eq!(arch_for_capability((12, 0)), Some("compute_90"));
+        assert_eq!(arch_for_capability((8, 8)), Some("compute_87"));
+        assert_eq!(arch_for_capability((7, 1)), Some("compute_70"));
+    }
+
+    #[test]
+    fn arch_rejects_capabilities_below_the_floor() {
+        assert_eq!(arch_for_capability((5, 2)), None);
+        assert_eq!(arch_for_capability((3, 5)), None);
     }
 }

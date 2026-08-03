@@ -162,6 +162,12 @@ extern "C" __global__ void bts_popcount_rows(
 // Open-addressing insert-or-increment for a 3-state (empty / claiming / ready)
 // hash table. Spins on slots mid-claim, linear-probes on collision, and sets
 // `overflow` when a full sweep finds no usable slot.
+//
+// The mid-claim spin is bounded because pre-Volta SIMT gives the claiming lane
+// no forward-progress guarantee against a spinning lane of the same warp.
+// Exhausting the bound sets `overflow`, which sends counting back to the host.
+#define BTS_CLAIM_SPIN_LIMIT 4096U
+
 __device__ __forceinline__ void hash_insert_count(
     const unsigned long long *key,
     int m_words,
@@ -196,7 +202,12 @@ __device__ __forceinline__ void hash_insert_count(
             }
             continue;
         } else {
+            unsigned int spins = 0U;
             while ((state = load_state(slot_states + slot)) == 1U) {
+                if (++spins >= BTS_CLAIM_SPIN_LIMIT) {
+                    atomicExch(overflow, 1U);
+                    return;
+                }
             }
             if (state == 2U && keys_equal(slot_key, key, m_words)) {
                 atomicAdd(slot_counts + slot, 1ULL);
@@ -654,12 +665,11 @@ impl GpuBtsCache {
         chunk_shots: usize,
         chunk_s_words: usize,
     ) {
-        // Parallel path: for a large enough pool, seed one fresh xoshiro
-        // stream per worker from the master rng (matches the CPU BTS batched
-        // path in `src/sim/compiled/bts.rs`). Serial fallback keeps the
-        // existing single-stream sequence for small chunks or CPU-only
-        // builds so determinism is not accidentally coupled to the Rayon
-        // thread count.
+        // Parallel path: seed one fresh xoshiro stream per worker from the
+        // master rng, matching the CPU BTS batched path in
+        // `src/sim/compiled/bts.rs`. Partitioning by `current_num_threads()`
+        // means a seed reproduces only at a fixed thread count; the serial
+        // fallback below `MIN_PAR_DRAWS` reproduces outright.
         let required = chunk_s_words * rank;
         #[cfg(not(feature = "parallel"))]
         let _ = required;

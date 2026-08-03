@@ -297,12 +297,17 @@ pub struct GpuState {
 
 impl GpuState {
     /// Allocate a fresh |0…0⟩ state on the device bound to `context`.
+    ///
+    /// Rejects `num_qubits` at or above `usize::BITS - 4`, the bound
+    /// [`GpuContext::fits_statevector`] uses, where the 16 bytes per amplitude
+    /// overflow `usize`.
     pub fn new(context: Arc<GpuContext>, num_qubits: usize) -> Result<Self> {
-        let len = 2usize.checked_shl(num_qubits as u32).ok_or_else(|| {
-            crate::error::PrismError::InvalidParameter {
+        if num_qubits >= usize::BITS as usize - 4 {
+            return Err(crate::error::PrismError::InvalidParameter {
                 message: format!("num_qubits={num_qubits} overflows addressable memory"),
-            }
-        })?;
+            });
+        }
+        let len = 2usize << num_qubits;
         let buffer = GpuBuffer::<f64>::alloc_zeros(context.device(), len)?;
         let mut state = Self {
             context: context.clone(),
@@ -582,6 +587,18 @@ mod tests {
         // which no GPU has. The function clamps these to `Ok(false)` before
         // touching the device, so even the stub context returns cleanly.
         assert!(!ctx.fits_statevector(128).unwrap());
+    }
+
+    #[test]
+    fn state_new_rejects_overflowing_qubit_counts() {
+        let ctx = GpuContext::stub_for_tests();
+        // 63 is the silent case: `2 << 63` wraps to a zero-length buffer that
+        // allocates fine and is then written past. 62 already fails at
+        // allocation. The bound runs before allocation, so the stub reaches it.
+        assert!(matches!(
+            GpuState::new(ctx, 63).unwrap_err(),
+            PrismError::InvalidParameter { .. }
+        ));
     }
 
     #[test]

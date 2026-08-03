@@ -1192,12 +1192,7 @@ fn run_expectation_values_with(
                     .map(|r| r.mean)
             })
             .collect(),
-        _ if kind.is_auto()
-            || matches!(
-                kind,
-                BackendKind::Stabilizer | BackendKind::FactoredStabilizer
-            ) =>
-        {
+        _ if kind.is_auto() || kind.is_stabilizer_family() => {
             if circuit.is_clifford_only() {
                 observables
                     .iter()

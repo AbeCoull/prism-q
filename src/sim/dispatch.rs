@@ -110,9 +110,9 @@ pub enum BackendKind {
     /// Explicit-dispatch only: [`BackendKind::Auto`] never selects it. Stores
     /// `4^n` `Complex64` amplitudes, so the qubit ceiling is roughly half the
     /// statevector cap (14 on a 16 GiB host); `PRISM_MAX_DM_QUBITS` moves it
-    /// within that bound. Fusion is skipped for this backend because batched
-    /// and fused gate variants carry qubit indices in their payload that the
-    /// ket-register offset cannot relocate.
+    /// within that bound. Fusion is skipped for this backend: the sandwich
+    /// applies a fused payload as one ket pass plus three bra passes, which no
+    /// benchmark row covers today.
     ///
     /// Under an attached noise model this is the exact route: the mixture is
     /// evolved once and every terminal reads it, so shot counts carry sampling

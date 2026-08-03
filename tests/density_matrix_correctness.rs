@@ -1011,3 +1011,98 @@ fn dm_purity_matches_analytic_above_parallel_reduce_threshold() {
         backend.purity()
     );
 }
+
+fn assert_rdm_close(a: &DensityMatrixBackend, b: &StatevectorBackend, n: usize, label: &str) {
+    for q in 0..n {
+        let x = a.reduced_density_matrix_1q(q).unwrap();
+        let y = b.reduced_density_matrix_1q(q).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (x[i][j] - y[i][j]).norm() < DM_EPS,
+                    "{label}: rdm[{q}][{i}][{j}] dm={} sv={}",
+                    x[i][j],
+                    y[i][j]
+                );
+            }
+        }
+    }
+}
+
+// `QftBlock` holds its qubit range in the variant, so the ket-register offset
+// the sandwich applies to `targets` has to reach `start` too. The QFT of a basis
+// state is uniform over the register under either bit-order convention, which an
+// identity-acting block cannot produce.
+#[test]
+fn dm_qft_block_through_apply_evolves_the_state() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_gate(Gate::QftBlock { start: 0, num: 2 }, &[0, 1]);
+
+    let mut dm = DensityMatrixBackend::new(SEED);
+    dm.init(2, 0).unwrap();
+    dm.apply_instructions(&circuit.instructions).unwrap();
+
+    assert_probs_close(
+        &dm.probabilities().unwrap(),
+        &[0.25; 4],
+        DM_EPS,
+        "qft block of a basis state",
+    );
+    assert!(
+        (dm.purity() - 1.0).abs() < DM_EPS,
+        "qft block keeps the state pure, purity {}",
+        dm.purity()
+    );
+
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &circuit).unwrap();
+    assert_rdm_close(&dm, &sv, 2, "qft block");
+}
+
+// `BatchPhase` keeps its control in `targets[0]` and its targets in the payload,
+// so only the control picks up the ket-register offset. On the uniform two-qubit
+// superposition a cphase(pi/2) from q0 to q1 sends the amplitude 1/2 at index 3
+// to i/2. The result is symmetric in the pair, so both reduced states are
+// [[1/2, (1-i)/4], [(1+i)/4, 1/2]].
+#[test]
+fn dm_batch_phase_through_apply_matches_the_unfused_cphase() {
+    let phase = c(0.0, 1.0);
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+
+    let mut dm = DensityMatrixBackend::new(SEED);
+    dm.init(2, 0).unwrap();
+    dm.apply_instructions(&circuit.instructions).unwrap();
+    dm.apply(&prism_q::circuit::Instruction::Gate {
+        gate: Gate::BatchPhase(Box::new(prism_q::gates::BatchPhaseData {
+            phases: [(1usize, phase)].into_iter().collect(),
+        })),
+        targets: [0usize].into_iter().collect(),
+    })
+    .unwrap();
+
+    let expected = [[c(0.5, 0.0), c(0.25, -0.25)], [c(0.25, 0.25), c(0.5, 0.0)]];
+    for q in 0..2 {
+        let rdm = dm.reduced_density_matrix_1q(q).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (rdm[i][j] - expected[i][j]).norm() < DM_EPS,
+                    "batch phase: rdm[{q}][{i}][{j}] expected {} got {}",
+                    expected[i][j],
+                    rdm[i][j]
+                );
+            }
+        }
+    }
+
+    circuit.add_gate(
+        Gate::cu([[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), phase]]),
+        &[0, 1],
+    );
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &circuit).unwrap();
+    assert_rdm_close(&dm, &sv, 2, "batch phase");
+}

@@ -1100,3 +1100,65 @@ fn factored_stabilizer_export_statevector_two_clusters_matches() {
         );
     }
 }
+
+// The native marginal route (per-qubit Z expectations off the backend's own
+// representation) against the dense route it replaces. The entangled fixture
+// keeps every explicit kind on direct resolution; the product fixture is the one
+// carried past subsystem decomposition.
+#[test]
+fn native_marginals_match_the_dense_route() {
+    let mut entangled = Circuit::new(4, 0);
+    entangled.add_gate(Gate::H, &[0]);
+    entangled.add_gate(Gate::T, &[1]);
+    entangled.add_gate(Gate::Cx, &[0, 1]);
+    entangled.add_gate(Gate::Ry(0.7), &[2]);
+    entangled.add_gate(Gate::Cx, &[1, 2]);
+    entangled.add_gate(Gate::Cx, &[2, 3]);
+    entangled.add_gate(Gate::Rz(0.4), &[3]);
+
+    let mut product = Circuit::new(4, 0);
+    product.add_gate(Gate::H, &[0]);
+    product.add_gate(Gate::Ry(0.7), &[1]);
+    product.add_gate(Gate::T, &[2]);
+    product.add_gate(Gate::Rx(1.1), &[3]);
+
+    let cases: [(prism_q::BackendKind, &Circuit, &str); 5] = [
+        (prism_q::BackendKind::Sparse, &entangled, "sparse"),
+        (
+            prism_q::BackendKind::Mps { max_bond_dim: 64 },
+            &entangled,
+            "mps",
+        ),
+        (prism_q::BackendKind::Factored, &entangled, "factored"),
+        (
+            prism_q::BackendKind::DensityMatrix,
+            &entangled,
+            "density_matrix",
+        ),
+        (prism_q::BackendKind::ProductState, &product, "product"),
+    ];
+
+    for (kind, circuit, label) in cases {
+        let dense = prism_q::simulate(circuit)
+            .backend(prism_q::BackendKind::Statevector)
+            .seed(SEED)
+            .run()
+            .unwrap()
+            .probabilities
+            .unwrap()
+            .marginals();
+        let native = prism_q::simulate(circuit)
+            .backend(kind)
+            .seed(SEED)
+            .marginals()
+            .unwrap()
+            .into_vec();
+        assert_eq!(native.len(), dense.len(), "{label}");
+        for (q, (got, want)) in native.iter().zip(&dense).enumerate() {
+            assert!(
+                (got.0 - want.0).abs() < EPS && (got.1 - want.1).abs() < EPS,
+                "{label} marginal[{q}]: got {got:?}, want {want:?}"
+            );
+        }
+    }
+}

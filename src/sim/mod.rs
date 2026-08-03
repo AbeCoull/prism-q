@@ -1052,6 +1052,7 @@ fn run_marginals_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result
 
 /// Per-qubit marginals from native single-qubit Z expectations, for a backend
 /// whose own representation answers them without a dense probability vector.
+#[cfg(feature = "distributed")]
 fn marginals_from_pauli_expectations(
     backend: &dyn Backend,
     num_qubits: usize,

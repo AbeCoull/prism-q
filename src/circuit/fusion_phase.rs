@@ -35,6 +35,23 @@ fn emit_phase_chain(
     output: &mut Vec<Instruction>,
     changed: &mut bool,
 ) {
+    // Every entry is diagonal on the same control, so a chain longer than the
+    // kernel group tables hold splits into consecutive batches.
+    if phases.len() > BatchPhaseData::MAX_PHASES {
+        for chunk in phases.chunks(BatchPhaseData::MAX_PHASES) {
+            emit_phase_batch(control, PhaseVec::from_slice(chunk), output, changed);
+        }
+        return;
+    }
+    emit_phase_batch(control, phases, output, changed);
+}
+
+fn emit_phase_batch(
+    control: usize,
+    phases: PhaseVec,
+    output: &mut Vec<Instruction>,
+    changed: &mut bool,
+) {
     if phases.len() >= MIN_BATCH_PHASES {
         output.push(Instruction::Gate {
             gate: Gate::BatchPhase(Box::new(BatchPhaseData { phases })),
@@ -77,17 +94,19 @@ fn push_pending_phase(
     pending: &mut [Option<PhaseVec>],
     target_users: &mut [TargetUserVec],
 ) {
-    let already_indexed = pending[control]
-        .as_ref()
-        .is_some_and(|phases| phases.iter().any(|&(t, _)| t == target));
-    if !already_indexed {
-        target_users[target].push(control);
-    }
-
+    // The kernel indexes one bit per distinct target, so a repeated pair has to
+    // fold into the entry already there rather than push a second one.
     match &mut pending[control] {
-        Some(v) => v.push((target, phase)),
+        Some(v) => {
+            if let Some(entry) = v.iter_mut().find(|(t, _)| *t == target) {
+                entry.1 *= phase;
+                return;
+            }
+            v.push((target, phase));
+        }
         slot => *slot = Some(smallvec![(target, phase)]),
     }
+    target_users[target].push(control);
 }
 
 fn flush_phase_target_conflicts(

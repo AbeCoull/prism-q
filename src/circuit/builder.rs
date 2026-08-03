@@ -159,16 +159,22 @@ impl CircuitBuilder {
 
     /// Append a multi-controlled unitary applying `mat` to `target` when every
     /// qubit in `controls` is |1⟩.
+    ///
+    /// # Panics
+    /// Panics if `controls` holds more than `u8::MAX` entries, the width
+    /// [`McuData::num_controls`](crate::gates::McuData::num_controls) can carry.
     pub fn mcu(
         &mut self,
         mat: [[Complex64; 2]; 2],
         controls: &[usize],
         target: usize,
     ) -> &mut Self {
+        let num_controls =
+            u8::try_from(controls.len()).expect("mcu supports at most u8::MAX control qubits");
         let mut targets: SmallVec<[usize; 4]> = controls.into();
         targets.push(target);
         self.circuit.instructions.push(Instruction::Gate {
-            gate: Gate::mcu(mat, controls.len() as u8),
+            gate: Gate::mcu(mat, num_controls),
             targets,
         });
         self

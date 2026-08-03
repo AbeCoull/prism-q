@@ -43,7 +43,7 @@ use crate::backend::memory::dense_statevector_len;
 use crate::backend::simd;
 use crate::backend::statevector::insert_zero_bit;
 use crate::backend::{
-    Backend, BasisSamples, is_phase_one, measurement_inv_norm, sorted_mcu_qubits,
+    Backend, BasisSamples, MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits,
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
@@ -1080,7 +1080,7 @@ fn apply_mcu_seq(
 ) {
     let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
     let tgt_mask = 1usize << target;
-    let mut sorted_buf = [0usize; 10];
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
     let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
     let sorted = &sorted_buf[..num_special];
 
@@ -1115,7 +1115,7 @@ fn apply_mcu_phase_seq(
         .chain(std::iter::once(&target))
         .map(|&q| 1usize << q)
         .fold(0, |a, b| a | b);
-    let mut sorted_buf = [0usize; 10];
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
     let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
     let sorted = &sorted_buf[..num_special];
 
@@ -1402,7 +1402,7 @@ fn par_apply_mcu(
 ) {
     let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
     let tgt_mask = 1usize << target;
-    let mut sorted_buf = [0usize; 10];
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
     let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
     let sorted = &sorted_buf[..num_special];
 
@@ -1444,7 +1444,7 @@ fn par_apply_mcu_phase(
         .chain(std::iter::once(&target))
         .map(|&q| 1usize << q)
         .fold(0, |a, b| a | b);
-    let mut sorted_buf = [0usize; 10];
+    let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
     let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
     let sorted = &sorted_buf[..num_special];
 

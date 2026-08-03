@@ -169,6 +169,13 @@ pub struct BatchPhaseData {
     pub phases: SmallVec<[(usize, Complex64); 8]>,
 }
 
+impl BatchPhaseData {
+    /// Entry cap the fusion pass splits on, matching the kernel group tables.
+    /// Targets are distinct within one payload, so a repeated `(control, target)`
+    /// pair folds into a single entry rather than adding one.
+    pub const MAX_PHASES: usize = 40;
+}
+
 /// Data for batched ZZ rotations.
 ///
 /// Multiple Rzz gates batched into a single pass over the statevector.
@@ -177,6 +184,11 @@ pub struct BatchPhaseData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchRzzData {
     pub edges: Vec<(usize, usize, f64)>,
+}
+
+impl BatchRzzData {
+    /// Edge cap the fusion pass splits on, matching the kernel group tables.
+    pub const MAX_EDGES: usize = 32;
 }
 
 /// An individual diagonal phase contribution in a [`DiagonalBatchData`].

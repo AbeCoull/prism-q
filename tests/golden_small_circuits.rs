@@ -9,6 +9,7 @@ mod common;
 
 use common::{assert_probs_close, run_fused_probs};
 use num_complex::Complex64;
+use prism_q::CircuitBuilder;
 use prism_q::Instruction;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -471,6 +472,36 @@ fn mcu_inv_ctrl_ctrl_rz() {
     let amp = 1.0 / 2.0_f64.sqrt();
     assert_amplitude(sv[0b011], Complex64::new(amp, 0.0), "|011⟩");
     assert_amplitude(sv[0b111], Complex64::new(amp, 0.0), "|111⟩");
+}
+
+#[test]
+fn mcu_10ctrl_x_builder() {
+    let mut builder = CircuitBuilder::new(11);
+    for q in 0..10 {
+        builder.x(q);
+    }
+    builder.mcu(Gate::X.matrix_2x2(), &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], 10);
+    let probs = run_and_probs(&builder.build());
+    assert!(
+        (probs[0b111_1111_1111] - 1.0).abs() < EPS,
+        "10 active controls should flip the target"
+    );
+}
+
+#[test]
+fn mcu_10ctrl_x_openqasm_chain() {
+    let mut qasm = String::from("OPENQASM 3.0;\nqubit[11] q;\n");
+    for q in 0..10 {
+        qasm.push_str(&format!("x q[{q}];\n"));
+    }
+    qasm.push_str(&"ctrl @ ".repeat(10));
+    qasm.push_str("x q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10];\n");
+    let c = prism_q::circuit::openqasm::parse(&qasm).unwrap();
+    let probs = run_and_probs(&c);
+    assert!(
+        (probs[0b111_1111_1111] - 1.0).abs() < EPS,
+        "10 active controls should flip the target"
+    );
 }
 
 // ---- Product state backend ----

@@ -541,7 +541,7 @@ impl Backend for SparseBackend {
     /// Entries are ordered by basis index, which is the order the dense route
     /// accumulates its CDF in, so the same seed draws the same basis states
     /// the dense path would have drawn.
-    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+    fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let mut indices: Vec<usize> = self.state.keys().copied().collect();
         indices.sort_unstable();
         let probs: Vec<f64> = indices

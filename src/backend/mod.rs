@@ -407,7 +407,12 @@ pub trait Backend {
     /// Seeded from `seed` alone rather than from the backend's own RNG, so a
     /// shot request replays exactly. Does not collapse the state. The default
     /// reports that the backend has no native sampler.
-    fn sample_basis_states(&self, _num_shots: usize, _seed: u64) -> Result<BasisSamples> {
+    ///
+    /// Takes `&mut self` because a backend may have to reorganize its own
+    /// storage before it can draw: the distributed backend restores its qubit
+    /// map, which is a collective. The represented state is unchanged either
+    /// way.
+    fn sample_basis_states(&mut self, _num_shots: usize, _seed: u64) -> Result<BasisSamples> {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
             operation: "native basis-state sampling".to_string(),

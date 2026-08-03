@@ -520,6 +520,13 @@ fn run_with_internal(
     #[cfg(feature = "distributed")]
     if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
         let mut backend = resolve_backend(&kind, circuit, false).build(seed);
+        if opts.probabilities {
+            // The gather cap follows from the register width alone, so a
+            // register past it is rejected here rather than after the run has
+            // been paid for. Same check `probabilities()` applies, so the
+            // message does not depend on where it surfaced.
+            crate::backend::dense_probability_len(backend.name(), circuit.num_qubits)?;
+        }
         return execute(&mut *backend, circuit, &opts);
     }
     match plan_probability_route(&kind, circuit) {
@@ -1008,7 +1015,10 @@ pub(crate) fn run_counts_with(
                 ))
             }
         }
-        ShotSource::Native { backend, meas_map } => {
+        ShotSource::Native {
+            mut backend,
+            meas_map,
+        } => {
             let samples = backend.sample_basis_states(num_shots, seed)?;
             Ok(counts_of(
                 shots_from_basis_samples(&samples, &meas_map, bits),
@@ -1038,6 +1048,19 @@ fn run_marginals(circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
 #[cfg(test)]
 fn run_marginals_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<Vec<(f64, f64)>> {
     run_marginals_result_with(kind, circuit, seed).map(MarginalsResult::into_vec)
+}
+
+/// Per-qubit marginals from native single-qubit Z expectations, for a backend
+/// whose own representation answers them without a dense probability vector.
+fn marginals_from_pauli_expectations(
+    backend: &dyn Backend,
+    num_qubits: usize,
+) -> Result<MarginalsResult> {
+    let observables: Vec<Vec<PauliTerm>> = (0..num_qubits).map(|q| vec![PauliTerm::z(q)]).collect();
+    let expectations = backend.pauli_expectations(&observables)?;
+    Ok(MarginalsResult {
+        marginals: expectations_to_marginals(&expectations),
+    })
 }
 
 pub(crate) fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)> {
@@ -1115,6 +1138,19 @@ fn run_marginals_result_with(
         return Ok(MarginalsResult {
             marginals: expectations_to_marginals(&spd.expectations),
         });
+    }
+
+    // The distributed backend answers a marginal from rank-local sums plus one
+    // `Allreduce`, so it never needs the 2^n gather the fallback below takes.
+    #[cfg(feature = "distributed")]
+    if let BackendKind::StatevectorDistributed { context } = &kind {
+        let mut backend =
+            crate::backend::distributed_statevector::DistributedStatevectorBackend::new(
+                context.clone(),
+                seed,
+            );
+        execute(&mut backend, circuit, &SimOptions::classical_only())?;
+        return marginals_from_pauli_expectations(&backend, n);
     }
 
     let result = run_with(kind, circuit, seed)?;
@@ -1472,18 +1508,11 @@ fn run_shots_distributed(
         let stripped = circuit.without_measurements();
         let mut backend = DistributedStatevectorBackend::new(context, seed);
         execute(&mut backend, &stripped, &SimOptions::classical_only())?;
-        let indices = backend.sample_state_indices(num_shots, seed)?;
-        let shots = indices
-            .iter()
-            .map(|&idx| {
-                let mut shot = vec![false; circuit.num_classical_bits];
-                for &(qubit, cbit) in &meas_map {
-                    shot[cbit] = (idx >> qubit) & 1 == 1;
-                }
-                shot
-            })
-            .collect();
-        return Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits));
+        let samples = backend.sample_basis_states(num_shots, seed)?;
+        return Ok(ShotsResult::from_shots(
+            shots_from_basis_samples(&samples, &meas_map, circuit.num_classical_bits),
+            circuit.num_classical_bits,
+        ));
     }
 
     let probe = DistributedStatevectorBackend::new(context.clone(), seed);
@@ -1548,7 +1577,10 @@ pub(crate) fn run_shots_with(
             };
             Ok(ShotsResult::from_shots(shots, bits))
         }
-        ShotSource::Native { backend, meas_map } => {
+        ShotSource::Native {
+            mut backend,
+            meas_map,
+        } => {
             let samples = backend.sample_basis_states(num_shots, seed)?;
             Ok(ShotsResult::from_shots(
                 shots_from_basis_samples(&samples, &meas_map, bits),

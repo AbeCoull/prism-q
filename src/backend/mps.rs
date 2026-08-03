@@ -2034,7 +2034,7 @@ impl Backend for MpsBackend {
     /// Sites are visited left to right and each bit is recorded against the
     /// logical qubit currently hosted there, so a layout permuted by SWAP
     /// routing needs no canonicalization pass.
-    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+    fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let n = self.num_qubits;
         let mut samples = BasisSamples::new(num_shots, n);
         if n == 0 {

@@ -918,17 +918,41 @@ impl Backend for FactoredStabilizerBackend {
         Ok(())
     }
 
+    /// Tensor the live sub-tableaux back into a joint amplitude vector.
+    ///
+    /// Clusters are mutually unentangled, so the joint amplitude at a global
+    /// index is the product of each cluster's amplitude at the index restricted
+    /// to that cluster's qubits. `init` gives every qubit a cluster and the
+    /// merge and split passes preserve the partition, so the product covers the
+    /// whole register.
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
+        let dim = dense_statevector_len(self.name(), "statevector", self.num_qubits)?;
         let active: Vec<&SubTableau> = self.subs.iter().filter_map(|s| s.as_ref()).collect();
 
         if active.len() == 1 && active[0].n == self.num_qubits {
             return active[0].compute_statevector();
         }
 
-        Err(PrismError::BackendUnsupported {
-            backend: self.name().to_string(),
-            operation: "statevector export for multiple sub-tableaux".to_string(),
-        })
+        let blocks: Vec<(Vec<Complex64>, &[usize])> = active
+            .iter()
+            .map(|sub| Ok((sub.compute_statevector()?, sub.qubits.as_slice())))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut joint = Vec::new();
+        reserve_dense_output(&mut joint, dim, self.name(), "statevector")?;
+        joint.resize(dim, Complex64::new(0.0, 0.0));
+        for (index, amp) in joint.iter_mut().enumerate() {
+            let mut product = Complex64::new(1.0, 0.0);
+            for (state, qubits) in &blocks {
+                let mut local = 0usize;
+                for (bit, &q) in qubits.iter().enumerate() {
+                    local |= ((index >> q) & 1) << bit;
+                }
+                product *= state[local];
+            }
+            *amp = product;
+        }
+        Ok(joint)
     }
 }
 

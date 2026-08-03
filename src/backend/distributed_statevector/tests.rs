@@ -3,208 +3,30 @@ use crate::backend::Backend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::Circuit;
 use crate::circuit::builder::CircuitBuilder;
-use crate::distributed::{DistributedContext, RankComm};
+use crate::distributed::DistributedContext;
+use crate::distributed::loopback::{run_ranks, run_ranks_max_gather};
 use crate::sim::run_on;
+use crate::sim::unified_pauli::PauliTerm;
 use num_complex::Complex64;
-use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex};
 
 const SEED: u64 = 42;
 const TOL: f64 = 1e-10;
 
-/// Test transport that simulates ranks with threads.
-///
-/// This covers global gate exchange without an MPI launcher. Each rank runs the
-/// same circuit and reaches collectives in the same order.
-struct LoopbackShared {
-    size: usize,
-    state: Mutex<LoopbackState>,
-    cv: Condvar,
-}
-
-struct LoopbackState {
-    generation: u64,
-    arrived: usize,
-    cslots: Vec<Vec<Complex64>>,
-    fslots: Vec<f64>,
-    reduce: Vec<f64>,
-    // Largest block sent by a rank to allgather. Shot sampling tests
-    // assert this stays at one element, proving no dense gather happened.
-    max_gather_block: usize,
-    // Mailboxes indexed by `sender * size + receiver`. FIFO order matches MPI
-    // sendrecv order and stays separate from collective barriers.
-    mailbox: Vec<VecDeque<Vec<Complex64>>>,
-}
-
-impl LoopbackShared {
-    fn new(size: usize) -> Arc<Self> {
-        Arc::new(Self {
-            size,
-            state: Mutex::new(LoopbackState {
-                generation: 0,
-                arrived: 0,
-                cslots: vec![Vec::new(); size],
-                fslots: vec![0.0; size],
-                reduce: Vec::new(),
-                max_gather_block: 0,
-                mailbox: (0..size * size).map(|_| VecDeque::new()).collect(),
-            }),
-            cv: Condvar::new(),
-        })
-    }
-
-    fn barrier(&self) {
-        let mut st = self.state.lock().unwrap();
-        let arrival_generation = st.generation;
-        st.arrived += 1;
-        if st.arrived == self.size {
-            st.arrived = 0;
-            st.generation = st.generation.wrapping_add(1);
-            self.cv.notify_all();
-        } else {
-            while st.generation == arrival_generation {
-                st = self.cv.wait(st).unwrap();
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct LoopbackComm {
-    shared: Arc<LoopbackShared>,
-    rank: usize,
-}
-
-impl std::fmt::Debug for LoopbackComm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoopbackComm")
-            .field("rank", &self.rank)
-            .field("size", &self.shared.size)
-            .finish()
-    }
-}
-
-impl RankComm for LoopbackComm {
-    fn rank(&self) -> usize {
-        self.rank
-    }
-
-    fn size(&self) -> usize {
-        self.shared.size
-    }
-
-    fn allgather_c64(&self, local: &[Complex64]) -> Vec<Complex64> {
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            st.max_gather_block = st.max_gather_block.max(local.len());
-            st.cslots[self.rank] = local.to_vec();
-        }
-        self.shared.barrier();
-        let out = {
-            let st = self.shared.state.lock().unwrap();
-            st.cslots.iter().flat_map(|s| s.iter().copied()).collect()
-        };
-        self.shared.barrier();
-        out
-    }
-
-    fn allgather_f64(&self, local: &[f64]) -> Vec<f64> {
-        let as_c: Vec<Complex64> = local.iter().map(|&v| Complex64::new(v, 0.0)).collect();
-        self.allgather_c64(&as_c).iter().map(|c| c.re).collect()
-    }
-
-    fn allreduce_sum_f64(&self, value: f64) -> f64 {
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            st.fslots[self.rank] = value;
-        }
-        self.shared.barrier();
-        let sum = {
-            let st = self.shared.state.lock().unwrap();
-            st.fslots.iter().sum()
-        };
-        self.shared.barrier();
-        sum
-    }
-
-    fn allreduce_sum_f64_slice(&self, values: &mut [f64]) {
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            if st.reduce.len() != values.len() {
-                st.reduce = vec![0.0; values.len()];
-            }
-            for (acc, &v) in st.reduce.iter_mut().zip(values.iter()) {
-                *acc += v;
-            }
-        }
-        self.shared.barrier();
-        {
-            let st = self.shared.state.lock().unwrap();
-            values.copy_from_slice(&st.reduce);
-        }
-        self.shared.barrier();
-        if self.rank == 0 {
-            let mut st = self.shared.state.lock().unwrap();
-            st.reduce.clear();
-        }
-        self.shared.barrier();
-    }
-
-    fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
-        debug_assert_eq!(send.len(), recv.len());
-        let size = self.shared.size;
-        let mut st = self.shared.state.lock().unwrap();
-        // Send to partner, then wait for partner to send back. Ranks that skip
-        // an exchange do not block because their partner skips it too.
-        st.mailbox[self.rank * size + partner].push_back(send.to_vec());
-        self.shared.cv.notify_all();
-        let inbox = partner * size + self.rank;
-        loop {
-            if let Some(msg) = st.mailbox[inbox].pop_front() {
-                recv.copy_from_slice(&msg);
-                return;
-            }
-            st = self.shared.cv.wait(st).unwrap();
-        }
-    }
-
-    fn barrier(&self) {
-        self.shared.barrier();
-    }
-}
-
 /// Run `circuit` across simulated ranks with the given backend configuration
 /// and return rank 0's probabilities.
 fn loopback_probs_with(circuit: &Circuit, size: usize, chunk: usize, relabel: bool) -> Vec<f64> {
-    let shared = LoopbackShared::new(size);
-    let handles: Vec<_> = (0..size)
-        .map(|rank| {
-            let comm = LoopbackComm {
-                shared: shared.clone(),
-                rank,
-            };
-            let circuit = circuit.clone();
-            std::thread::Builder::new()
-                .stack_size(64 * 1024 * 1024)
-                .spawn(move || {
-                    let ctx = DistributedContext::from_comm(Arc::new(comm));
-                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
-                    backend.set_exchange_chunk(chunk);
-                    backend.set_relabel(relabel);
-                    run_on(&mut backend, &circuit)
-                        .expect("distributed run")
-                        .probabilities
-                        .expect("probabilities")
-                        .to_vec()
-                })
-                .expect("spawn rank thread")
-        })
-        .collect();
-    let mut results: Vec<Vec<f64>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
     // Every rank holds the same gathered vector.
-    let first = results.swap_remove(0);
-    results.clear();
-    first
+    run_ranks(size, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_exchange_chunk(chunk);
+        backend.set_relabel(relabel);
+        run_on(&mut backend, circuit)
+            .expect("distributed run")
+            .probabilities
+            .expect("probabilities")
+            .to_vec()
+    })
+    .swap_remove(0)
 }
 
 fn assert_loopback_matches(circuit: &Circuit, sizes: &[usize]) {
@@ -230,32 +52,14 @@ fn assert_loopback_matches(circuit: &Circuit, sizes: &[usize]) {
 /// Run `circuit` across simulated ranks and return rank 0's probabilities and
 /// classical bits.
 fn loopback_run_with(circuit: &Circuit, size: usize, relabel: bool) -> (Vec<f64>, Vec<bool>) {
-    let shared = LoopbackShared::new(size);
-    let handles: Vec<_> = (0..size)
-        .map(|rank| {
-            let comm = LoopbackComm {
-                shared: shared.clone(),
-                rank,
-            };
-            let circuit = circuit.clone();
-            std::thread::Builder::new()
-                .stack_size(64 * 1024 * 1024)
-                .spawn(move || {
-                    let ctx = DistributedContext::from_comm(Arc::new(comm));
-                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
-                    backend.set_relabel(relabel);
-                    let out = run_on(&mut backend, &circuit).expect("distributed run");
-                    let probs = out.probabilities.expect("probabilities").to_vec();
-                    (probs, out.classical_bits)
-                })
-                .expect("spawn rank thread")
-        })
-        .collect();
-    let mut results: Vec<(Vec<f64>, Vec<bool>)> =
-        handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let first = results.swap_remove(0);
-    results.clear();
-    first
+    run_ranks(size, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_relabel(relabel);
+        let out = run_on(&mut backend, circuit).expect("distributed run");
+        let probs = out.probabilities.expect("probabilities").to_vec();
+        (probs, out.classical_bits)
+    })
+    .swap_remove(0)
 }
 
 fn loopback_run(circuit: &Circuit, size: usize) -> (Vec<f64>, Vec<bool>) {
@@ -508,30 +312,14 @@ fn loopback_export_statevector_after_swap() {
     sv.apply_instructions(&circuit.instructions).unwrap();
     let expected = sv.export_statevector().unwrap();
 
-    let size = 4;
-    let shared = LoopbackShared::new(size);
-    let handles: Vec<_> = (0..size)
-        .map(|rank| {
-            let comm = LoopbackComm {
-                shared: shared.clone(),
-                rank,
-            };
-            let circuit = circuit.clone();
-            std::thread::Builder::new()
-                .stack_size(64 * 1024 * 1024)
-                .spawn(move || {
-                    let ctx = DistributedContext::from_comm(Arc::new(comm));
-                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
-                    backend
-                        .init(circuit.num_qubits, circuit.num_classical_bits)
-                        .unwrap();
-                    backend.apply_instructions(&circuit.instructions).unwrap();
-                    backend.export_statevector().unwrap()
-                })
-                .expect("spawn rank thread")
-        })
-        .collect();
-    let results: Vec<Vec<Complex64>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let results = run_ranks(4, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend
+            .init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+        backend.export_statevector().unwrap()
+    });
     for actual in &results {
         assert_eq!(expected.len(), actual.len());
         for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
@@ -663,6 +451,75 @@ fn loopback_mixed_circuit_qft_like() {
 // in `circuit::fusion`. The reference statevector fuses identically, so a
 // match confirms the distributed backend decomposes each fused or batched
 // variant correctly.
+
+// Eight ranks put three qubits in the rank id, so the four-rank group
+// `apply_2q_two_global` gathers is a strict subset of the world for the first
+// time, and a gate can name more rank bits than that group holds.
+
+#[test]
+fn loopback_eight_ranks_fused_2q_on_two_rank_bits() {
+    relax_min_local_qubits();
+    let n = 12;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+    }
+    b.ry(0.6, n - 2)
+        .rz(0.3, n - 1)
+        .cx(n - 2, n - 1)
+        .ry(-0.4, n - 1);
+    assert_loopback_matches(&b.build(), &[8]);
+}
+
+#[test]
+fn loopback_eight_ranks_mcu_spans_three_rank_bits() {
+    relax_min_local_qubits();
+    let x = [
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+    let n = 6;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+    }
+    b.rx(0.4, n - 1).mcu(x, &[n - 3, n - 2], n - 1);
+    assert_loopback_matches(&b.build(), &[8]);
+}
+
+#[test]
+fn serial_measured_circuit_matches_statevector_bit_for_bit() {
+    // One rank shares the dense backend's measurement stream, so the outcomes
+    // must agree exactly, not just in distribution.
+    let n = 5;
+    let mut b = CircuitBuilder::new_with_classical(n, n);
+    b.h(0).ry(0.7, 1).h(2).rx(1.1, 3).h(4);
+    for q in 0..n - 1 {
+        b.cx(q, q + 1);
+    }
+    for q in 0..n {
+        b.measure(q, q);
+    }
+    let mut circuit = b.build();
+    circuit.add_reset(2);
+
+    let mut sv = StatevectorBackend::new(SEED);
+    let expected = run_on(&mut sv, &circuit).expect("statevector run");
+
+    let mut dist = DistributedStatevectorBackend::new(DistributedContext::serial(), SEED);
+    let actual = run_on(&mut dist, &circuit).expect("distributed run");
+
+    assert_eq!(
+        expected.classical_bits, actual.classical_bits,
+        "single rank must reproduce the dense measurement outcomes"
+    );
+    let expected = expected.probabilities.expect("probabilities").to_vec();
+    let actual = actual.probabilities.expect("probabilities").to_vec();
+    assert_eq!(expected.len(), actual.len());
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        assert!((e - a).abs() < 1e-12, "prob[{i}] expected {e}, got {a}");
+    }
+}
 
 #[test]
 fn loopback_fused_multifused_and_2q() {
@@ -944,14 +801,13 @@ fn loopback_tiled_exchange_matches_full() {
 fn exchange_counters_track_communication() {
     relax_min_local_qubits();
     // A single rank keeps every qubit local, so no gate exchanges.
-    let ctx = DistributedContext::from_comm(Arc::new(LoopbackComm {
-        shared: LoopbackShared::new(1),
-        rank: 0,
-    }));
-    let mut dist = DistributedStatevectorBackend::new(ctx, SEED);
-    dist.init(4, 0).unwrap();
-    dist.apply(&inst_h(3)).unwrap();
-    assert_eq!(dist.exchange_messages(), 0, "single rank never exchanges");
+    let messages = run_ranks(1, |ctx| {
+        let mut dist = DistributedStatevectorBackend::new(ctx, SEED);
+        dist.init(4, 0).unwrap();
+        dist.apply(&inst_h(3)).unwrap();
+        dist.exchange_messages()
+    });
+    assert_eq!(messages[0], 0, "single rank never exchanges");
 
     // At 2 ranks qubit 3 is global and the local slice is 8 amplitudes. The
     // diagonal Z and Rz are free. Direct mode exchanges the full slice per H.
@@ -1064,34 +920,17 @@ fn loopback_exchange_stats(
     chunk: usize,
     relabel: bool,
 ) -> (u64, u64) {
-    let shared = LoopbackShared::new(size);
-    let handles: Vec<_> = (0..size)
-        .map(|rank| {
-            let comm = LoopbackComm {
-                shared: shared.clone(),
-                rank,
-            };
-            let circuit = circuit.clone();
-            std::thread::Builder::new()
-                .stack_size(64 * 1024 * 1024)
-                .spawn(move || {
-                    let ctx = DistributedContext::from_comm(Arc::new(comm));
-                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
-                    backend.set_exchange_chunk(chunk);
-                    backend.set_relabel(relabel);
-                    backend
-                        .init(circuit.num_qubits, circuit.num_classical_bits)
-                        .unwrap();
-                    backend.apply_instructions(&circuit.instructions).unwrap();
-                    (backend.exchange_messages(), backend.exchange_amplitudes())
-                })
-                .expect("spawn rank thread")
-        })
-        .collect();
-    let mut results: Vec<(u64, u64)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let first = results.swap_remove(0);
-    results.clear();
-    first
+    run_ranks(size, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_exchange_chunk(chunk);
+        backend.set_relabel(relabel);
+        backend
+            .init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+        (backend.exchange_messages(), backend.exchange_amplitudes())
+    })
+    .swap_remove(0)
 }
 
 #[test]
@@ -1110,29 +949,12 @@ fn loopback_shots(
     size: usize,
     num_shots: usize,
 ) -> (Vec<Vec<Vec<bool>>>, usize) {
-    let shared = LoopbackShared::new(size);
-    let handles: Vec<_> = (0..size)
-        .map(|rank| {
-            let comm = LoopbackComm {
-                shared: shared.clone(),
-                rank,
-            };
-            let circuit = circuit.clone();
-            std::thread::Builder::new()
-                .stack_size(64 * 1024 * 1024)
-                .spawn(move || {
-                    let ctx = DistributedContext::from_comm(Arc::new(comm));
-                    let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
-                    crate::sim::run_shots_with(kind, &circuit, num_shots, SEED)
-                        .expect("distributed shots")
-                        .shots
-                })
-                .expect("spawn rank thread")
-        })
-        .collect();
-    let results: Vec<Vec<Vec<bool>>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    let max_gather = shared.state.lock().unwrap().max_gather_block;
-    (results, max_gather)
+    run_ranks_max_gather(size, |ctx| {
+        let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
+        crate::sim::run_shots_with(kind, circuit, num_shots, SEED)
+            .expect("distributed shots")
+            .shots
+    })
 }
 
 /// Sample shots through the production dense sampler, so the comparison
@@ -1285,29 +1107,210 @@ fn noisy_shots_rejected_on_distributed_kind() {
 fn shots_without_measurements_still_validate_configuration() {
     relax_min_local_qubits();
     // Three ranks is not a power of two; the error must surface even though a
-    // circuit without measurements needs no execution to produce all false shots.
-    // The init failure happens before any collective, so ranks do not block.
+    // circuit without measurements needs no execution to produce all false
+    // shots. Every rank reaches the same rejection, so none blocks.
     let circuit = Circuit::new(4, 0);
-    let shared = LoopbackShared::new(3);
-    let handles: Vec<_> = (0..3)
-        .map(|rank| {
-            let comm = LoopbackComm {
-                shared: shared.clone(),
-                rank,
-            };
-            let circuit = circuit.clone();
-            std::thread::spawn(move || {
-                let ctx = DistributedContext::from_comm(Arc::new(comm));
-                let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
-                crate::sim::run_shots_with(kind, &circuit, 8, SEED).is_err()
-            })
-        })
-        .collect();
-    for handle in handles {
+    let failed = run_ranks(3, |ctx| {
+        let kind = crate::sim::BackendKind::StatevectorDistributed { context: ctx };
+        crate::sim::run_shots_with(kind, &circuit, 8, SEED).is_err()
+    });
+    assert!(
+        failed.iter().all(|&f| f),
+        "non power of two rank count must error"
+    );
+}
+
+// A caller holding a `dyn Backend` must reach the rank-local sampler. Before
+// the override it saw `supports_native_sampling() == false` and fell back to
+// the dense probability vector.
+#[test]
+fn trait_sampling_draws_natively_across_rank_counts() {
+    relax_min_local_qubits();
+    let n = 4;
+    let shots = 32;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(crate::gates::Gate::H, &[q]);
+    }
+    circuit.add_gate(crate::gates::Gate::Cx, &[0, n - 1]);
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    let stripped = circuit.without_measurements();
+    let expected = dense_reference_shots(&circuit, shots);
+
+    for size in [1usize, 2, 4] {
+        let (per_rank, max_gather) = run_ranks_max_gather(size, |ctx| {
+            let mut backend: Box<dyn Backend> =
+                Box::new(DistributedStatevectorBackend::new(ctx, SEED));
+            assert!(
+                backend.supports_native_sampling(),
+                "the trait must advertise the native sampler"
+            );
+            backend
+                .init(stripped.num_qubits, stripped.num_classical_bits)
+                .expect("init");
+            backend
+                .apply_instructions(&stripped.instructions)
+                .expect("apply");
+            let samples = backend
+                .sample_basis_states(shots, SEED)
+                .expect("native sampling");
+            (0..shots)
+                .map(|shot| (0..n).map(|q| samples.bit(shot, q)).collect::<Vec<bool>>())
+                .collect::<Vec<Vec<bool>>>()
+        });
+        for shots in &per_rank {
+            assert_eq!(shots, &expected, "size {size}");
+        }
         assert!(
-            handle.join().unwrap(),
-            "non power of two rank count must error"
+            max_gather <= 1,
+            "size {size}: the trait sampler must not gather a dense block"
         );
+    }
+}
+
+// Observables that put X or Y on a rank bit are the case needing an exchange;
+// Z on a rank bit is a per-rank sign. The SWAP leaves the qubit map permuted,
+// so the masks must be read through it.
+#[test]
+fn pauli_expectations_match_the_dense_route_across_rank_counts() {
+    relax_min_local_qubits();
+    let n = 5;
+    let mut b = CircuitBuilder::new(n);
+    b.h(0).ry(0.7, 1).rx(1.1, 2).h(3).ry(-0.5, 4);
+    b.cx(0, 4).cz(1, 3).swap(2, 4).cx(3, 2);
+    b.rz(0.3, 4).ry(0.9, 0);
+    let circuit = b.build();
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(n - 1)],
+        vec![PauliTerm::z(0), PauliTerm::z(n - 1)],
+        vec![PauliTerm::x(n - 1)],
+        vec![PauliTerm::y(n - 1)],
+        vec![PauliTerm::x(n - 2), PauliTerm::y(n - 1)],
+        vec![PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(n - 1)],
+        vec![PauliTerm::y(1), PauliTerm::x(n - 1)],
+    ];
+    let expected =
+        crate::sim::run_expectation_values(&circuit, &observables, SEED).expect("dense reference");
+
+    for &relabel in &[true, false] {
+        for size in [1usize, 2, 4] {
+            let (per_rank, max_gather) = run_ranks_max_gather(size, |ctx| {
+                let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                backend.set_relabel(relabel);
+                backend
+                    .init(circuit.num_qubits, circuit.num_classical_bits)
+                    .expect("init");
+                backend
+                    .apply_instructions(&circuit.instructions)
+                    .expect("apply");
+                backend
+                    .pauli_expectations(&observables)
+                    .expect("distributed expectations")
+            });
+            for values in &per_rank {
+                assert_eq!(values.len(), expected.len());
+                for (i, (e, a)) in expected.iter().zip(values.iter()).enumerate() {
+                    assert!(
+                        (e - a).abs() < 1e-12,
+                        "size {size} relabel {relabel}: observable {i} expected {e}, got {a}"
+                    );
+                }
+            }
+            assert!(
+                max_gather <= 1,
+                "size {size} relabel {relabel}: expectations must not gather a dense block"
+            );
+        }
+    }
+
+    // The public terminal rejected this backend outright before the override.
+    for values in run_ranks(4, |ctx| {
+        crate::simulate(&circuit)
+            .distributed(ctx)
+            .seed(SEED)
+            .expectation_values(&observables)
+            .expect("distributed expectation values")
+    }) {
+        for (i, (e, a)) in expected.iter().zip(values.iter()).enumerate() {
+            assert!(
+                (e - a).abs() < 1e-12,
+                "observable {i} expected {e}, got {a}"
+            );
+        }
+    }
+}
+
+// Marginals come from per-qubit Z expectations, so no rank builds the 2^n
+// vector the dense route allgathers.
+#[test]
+fn loopback_marginals_match_the_dense_route_without_gathering() {
+    relax_min_local_qubits();
+    let n = 5;
+    let mut b = CircuitBuilder::new(n);
+    b.h(0).ry(0.4, 1).rx(0.9, 2).h(3).ry(1.3, 4);
+    b.cx(0, 1).cz(2, 4).swap(1, 4).cx(3, 0);
+    let circuit = b.build();
+
+    let expected = crate::sim::Probabilities::Dense(reference_probs(&circuit)).marginals();
+
+    for size in [1usize, 2, 4] {
+        let (per_rank, max_gather) = run_ranks_max_gather(size, |ctx| {
+            crate::simulate(&circuit)
+                .distributed(ctx)
+                .seed(SEED)
+                .marginals()
+                .expect("distributed marginals")
+                .into_vec()
+        });
+        for actual in &per_rank {
+            assert_eq!(actual.len(), expected.len());
+            for (q, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+                assert!(
+                    (e.0 - a.0).abs() < 1e-12 && (e.1 - a.1).abs() < 1e-12,
+                    "size {size}: qubit {q} expected {e:?}, got {a:?}"
+                );
+            }
+        }
+        assert!(
+            max_gather <= 1,
+            "size {size}: marginals must not gather a dense block"
+        );
+    }
+}
+
+// A rank whose configuration differs from the others desynchronizes the
+// collective sequence, which surfaces as a hang or as diverging measurement
+// branches. `init` has to name the mismatch instead.
+#[test]
+fn mismatched_rank_configuration_is_rejected_at_init() {
+    relax_min_local_qubits();
+    let mut b = CircuitBuilder::new_with_classical(4, 1);
+    b.h(0).cx(0, 3).measure(3, 0);
+    let circuit = b.build();
+
+    let odd_seed = run_ranks(2, |ctx| {
+        let seed = if ctx.rank() == 1 { SEED + 1 } else { SEED };
+        let mut backend = DistributedStatevectorBackend::new(ctx, seed);
+        run_on(&mut backend, &circuit).map(|_| ()).unwrap_err()
+    });
+    let odd_relabel = run_ranks(2, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx.clone(), SEED);
+        backend.set_relabel(ctx.rank() != 1);
+        run_on(&mut backend, &circuit).map(|_| ()).unwrap_err()
+    });
+
+    for err in odd_seed.iter().chain(odd_relabel.iter()) {
+        match err {
+            crate::error::PrismError::BackendUnsupported { operation, .. } => assert!(
+                operation.contains("must be identical on every rank"),
+                "expected a configuration mismatch, got {operation}"
+            ),
+            other => panic!("expected a configuration mismatch, got {other:?}"),
+        }
     }
 }
 
@@ -1347,30 +1350,16 @@ fn loopback_apply_1q_matrix_all_qubit_splits() {
 
             for &relabel in &[true, false] {
                 for &size in &[1usize, 2, 4] {
-                    let shared = LoopbackShared::new(size);
-                    let handles: Vec<_> = (0..size)
-                        .map(|rank| {
-                            let comm = LoopbackComm {
-                                shared: shared.clone(),
-                                rank,
-                            };
-                            let prep = prep.clone();
-                            std::thread::Builder::new()
-                                .stack_size(64 * 1024 * 1024)
-                                .spawn(move || {
-                                    let ctx = DistributedContext::from_comm(Arc::new(comm));
-                                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
-                                    backend.set_relabel(relabel);
-                                    backend.init(n, 0).unwrap();
-                                    backend.apply_instructions(&prep.instructions).unwrap();
-                                    backend.apply_1q_matrix(target, &matrix).unwrap();
-                                    backend.export_statevector().unwrap()
-                                })
-                                .expect("spawn rank thread")
-                        })
-                        .collect();
+                    let results = run_ranks(size, |ctx| {
+                        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                        backend.set_relabel(relabel);
+                        backend.init(n, 0).unwrap();
+                        backend.apply_instructions(&prep.instructions).unwrap();
+                        backend.apply_1q_matrix(target, &matrix).unwrap();
+                        backend.export_statevector().unwrap()
+                    });
 
-                    for actual in handles.into_iter().map(|h| h.join().unwrap()) {
+                    for actual in results {
                         assert_eq!(expected.len(), actual.len());
                         for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
                             assert!(

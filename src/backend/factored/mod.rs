@@ -793,7 +793,7 @@ impl Backend for FactoredBackend {
     ///
     /// Blocks are visited in slot order and each consumes one draw per shot,
     /// which is the order and the count the dense factored sampler uses.
-    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+    fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let blocks: Vec<(Vec<f64>, &[usize])> = self
             .substates
             .iter()

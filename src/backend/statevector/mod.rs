@@ -476,6 +476,41 @@ impl StatevectorBackend {
         self.pending_norm * self.pending_norm
     }
 
+    /// Probabilities of the host state, skipping the dense-output cap.
+    ///
+    /// For a caller whose vector is a working buffer sized by a state it
+    /// already holds, where the output cap does not apply: the distributed
+    /// backend builds its rank-local sampling CDF from its own slice. Anything
+    /// handing the vector back to a user goes through
+    /// [`probabilities`](crate::backend::Backend::probabilities).
+    pub(crate) fn host_probability_vector(&self) -> Vec<f64> {
+        let norm_sq = self.probability_scale();
+        let mut probs = vec![0.0_f64; self.state.len()];
+
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            let src_chunks = self.state.par_chunks(MIN_PAR_ELEMS);
+            let dst_chunks = probs.par_chunks_mut(MIN_PAR_ELEMS);
+            if norm_sq == 1.0 {
+                src_chunks.zip(dst_chunks).for_each(|(s, d)| {
+                    simd::norm_sqr_to_slice(s, d);
+                });
+            } else {
+                src_chunks.zip(dst_chunks).for_each(|(s, d)| {
+                    simd::norm_sqr_to_slice_scaled(s, d, norm_sq);
+                });
+            }
+            return probs;
+        }
+
+        if norm_sq == 1.0 {
+            simd::norm_sqr_to_slice(&self.state, &mut probs);
+        } else {
+            simd::norm_sqr_to_slice_scaled(&self.state, &mut probs, norm_sq);
+        }
+        probs
+    }
+
     /// Whether the amplitudes live in device memory. When true, the host
     /// `state_vector()` slice is empty; read the state through
     /// [`probabilities`](crate::backend::Backend::probabilities) or
@@ -714,32 +749,8 @@ impl Backend for StatevectorBackend {
         if let Some(gpu) = self.gpu_state.as_ref() {
             return gpu.probabilities();
         }
-        let dim = dense_probability_len(self.name(), self.num_qubits)?;
-        let norm_sq = self.pending_norm * self.pending_norm;
-        let mut probs = vec![0.0_f64; dim];
-
-        #[cfg(feature = "parallel")]
-        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
-            let src_chunks = self.state.par_chunks(MIN_PAR_ELEMS);
-            let dst_chunks = probs.par_chunks_mut(MIN_PAR_ELEMS);
-            if norm_sq == 1.0 {
-                src_chunks.zip(dst_chunks).for_each(|(s, d)| {
-                    simd::norm_sqr_to_slice(s, d);
-                });
-            } else {
-                src_chunks.zip(dst_chunks).for_each(|(s, d)| {
-                    simd::norm_sqr_to_slice_scaled(s, d, norm_sq);
-                });
-            }
-            return Ok(probs);
-        }
-
-        if norm_sq == 1.0 {
-            simd::norm_sqr_to_slice(&self.state, &mut probs);
-        } else {
-            simd::norm_sqr_to_slice_scaled(&self.state, &mut probs, norm_sq);
-        }
-        Ok(probs)
+        dense_probability_len(self.name(), self.num_qubits)?;
+        Ok(self.host_probability_vector())
     }
 
     fn num_qubits(&self) -> usize {

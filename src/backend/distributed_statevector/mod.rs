@@ -29,9 +29,15 @@
 //!
 //! Measurement, reset, and classical conditionals are supported. Measurement
 //! probabilities are summed with `Allreduce`. Each rank uses the same seeded RNG,
-//! so ranks agree without exchanging the draw. Reset follows the statevector
-//! convention: project onto `|0>`, renormalize, and reinitialize to `|0...0>`
-//! when the zero branch is empty.
+//! so ranks agree without exchanging the draw. Reset runs one trajectory of the
+//! reset channel, as [`Backend::reset`] specifies: sample the outcome, collapse
+//! onto it, and apply X when it is 1.
+//!
+//! Per-qubit probabilities and Pauli expectation values answer from rank-local
+//! sums plus one `Allreduce`, at any register width. `probabilities` and
+//! `export_statevector` are the only queries that gather, so they carry the
+//! dense output cap; `Simulate::run` rejects a beyond-cap register before the
+//! run rather than returning no distribution after it.
 //!
 //! # When to prefer this backend
 //!
@@ -97,9 +103,9 @@
 //! Circuits whose measurements are terminal sample shots without gathering the
 //! dense state or probability vector on any rank; communication scales with
 //! the rank count and shot count, never with the state size. See
-//! [`DistributedStatevectorBackend::sample_state_indices`] for the algorithm.
-//! Circuits with mid-circuit measurements fall back to one lockstep run per
-//! shot.
+//! [`DistributedStatevectorBackend::sample_state_indices`] for the algorithm,
+//! which [`Backend::sample_basis_states`] exposes at the trait level. Circuits
+//! with mid-circuit measurements fall back to one lockstep run per shot.
 //!
 //! Not implemented yet: lookahead epoch planning that batches several relabels
 //! into one exchange.
@@ -116,11 +122,14 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::backend::simd;
 use crate::backend::statevector::StatevectorBackend;
-use crate::backend::{Backend, dense_probability_len, dense_statevector_len, measurement_inv_norm};
+use crate::backend::{
+    Backend, BasisSamples, dense_probability_len, dense_statevector_len, measurement_inv_norm,
+};
 use crate::circuit::{Instruction, SmallVec, smallvec};
 use crate::distributed::DistributedContext;
 use crate::error::{PrismError, Result};
 use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
+use crate::sim::unified_pauli::PauliTerm;
 
 const BACKEND_NAME: &str = "distributed_statevector";
 
@@ -300,7 +309,9 @@ impl DistributedStatevectorBackend {
     /// Number of `sendrecv` messages this rank has issued since `init`.
     ///
     /// Cost proxy for this backend. One host cannot measure real network
-    /// latency, so routing changes are evaluated against this count.
+    /// latency, so routing changes are evaluated against this count. Counts
+    /// gate and relabel exchanges; the query paths take `&self` and cannot
+    /// record theirs.
     pub fn exchange_messages(&self) -> u64 {
         self.exchange_messages
     }
@@ -582,6 +593,59 @@ impl DistributedStatevectorBackend {
         let mut all = true;
         for_each_gate_qubit(gate, targets, |q| all &= q < local);
         all
+    }
+
+    /// Fingerprint of every setting the collective sequence assumes is shared.
+    /// Rank id and rank count are excluded; they legitimately differ. Folded to
+    /// 53 bits so it survives the `f64` collectives exactly.
+    fn config_fingerprint(&self, num_qubits: usize, num_classical_bits: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::hash::DefaultHasher::new();
+        (
+            self.seed,
+            self.exchange_chunk,
+            self.relabel,
+            crate::distributed::min_local_qubits(),
+            num_qubits,
+            num_classical_bits,
+        )
+            .hash(&mut hasher);
+        hasher.finish() >> 11
+    }
+
+    /// Reject a run whose ranks disagree about anything the collective sequence
+    /// depends on.
+    ///
+    /// Without this the mismatch surfaces as a hang (a diverging collective
+    /// order) or as silently wrong amplitudes (measurement branches drawn from
+    /// different seeds), both far from the setting that caused them.
+    fn check_config_agreement(&self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+        let local = self.config_fingerprint(num_qubits, num_classical_bits) as f64;
+        let all = self.context.comm().allgather_f64(&[local]);
+        match all.iter().position(|&other| other != local) {
+            None => Ok(()),
+            Some(other) => Err(PrismError::BackendUnsupported {
+                backend: BACKEND_NAME.to_string(),
+                operation: format!(
+                    "configuration on rank {} differs from rank {other}: seed, relabel mode, \
+                     exchange chunk, local qubit floor, and register shape must be identical \
+                     on every rank",
+                    self.context.rank()
+                ),
+            }),
+        }
+    }
+
+    /// Translate a circuit-qubit bit mask into physical positions.
+    fn to_physical_mask(&self, mask: usize) -> usize {
+        if self.map_identity {
+            return mask;
+        }
+        let mut out = 0usize;
+        for (q, &pos) in self.qubit_map.iter().enumerate() {
+            out |= ((mask >> q) & 1) << pos;
+        }
+        out
     }
 
     /// Reorder a gathered dense vector from physical to circuit qubit order.
@@ -1210,7 +1274,9 @@ impl DistributedStatevectorBackend {
         self.restore_identity_map();
         debug_assert!(self.map_identity);
 
-        let mut local_cdf = self.inner.probabilities()?;
+        // The rank-local CDF is a working buffer half the size of the slice
+        // this rank already holds, so the dense output cap does not gate it.
+        let mut local_cdf = self.inner.host_probability_vector();
         let mut acc = 0.0f64;
         for p in &mut local_cdf {
             acc += *p;
@@ -1369,6 +1435,12 @@ impl Backend for DistributedStatevectorBackend {
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         let size = self.context.size();
+        // Before the local validations: those read `num_qubits`, so ranks given
+        // different circuits could disagree about whether to reject and leave
+        // one side alone at the next collective.
+        if size > 1 {
+            self.check_config_agreement(num_qubits, num_classical_bits)?;
+        }
         if !size.is_power_of_two() {
             return Err(PrismError::BackendUnsupported {
                 backend: BACKEND_NAME.to_string(),
@@ -1412,8 +1484,11 @@ impl Backend for DistributedStatevectorBackend {
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         match instruction {
             // Measurement routes through the distributed path even at a single
-            // rank, so `meas_rng` is the sole measurement RNG and outcomes
-            // match across every rank count for a given seed.
+            // rank, so `meas_rng` is the sole measurement RNG and one seed
+            // draws one outcome stream. Outcomes then agree across rank counts
+            // except where the `Allreduce` association order moves a summed
+            // probability across the drawn value, the caveat
+            // `sample_state_indices` documents for the same reason.
             Instruction::Measure {
                 qubit,
                 classical_bit,
@@ -1468,6 +1543,87 @@ impl Backend for DistributedStatevectorBackend {
 
     fn qubit_probability(&self, qubit: usize) -> Result<f64> {
         Ok(self.prob_one_global(self.physical_qubit(qubit)))
+    }
+
+    fn supports_native_sampling(&self) -> bool {
+        true
+    }
+
+    /// Trait-level entry to [`DistributedStatevectorBackend::sample_state_indices`],
+    /// so a caller holding a `dyn Backend` gets the same rank-local draw the
+    /// shot route takes instead of falling back to the dense vector.
+    ///
+    /// Collective: every rank must call it with identical `num_shots` and
+    /// `seed`.
+    fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let indices = self.sample_state_indices(num_shots, seed)?;
+        let mut samples = BasisSamples::new(num_shots, self.num_qubits);
+        for (shot, &index) in indices.iter().enumerate() {
+            samples.set_index(shot, index as usize);
+        }
+        Ok(samples)
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// Evaluate each observable on the sharded state with no dense gather.
+    ///
+    /// A Z factor on a rank bit is a constant sign for the whole slice, so an
+    /// observable whose X and Y factors are all local costs one `Allreduce` and
+    /// no transfer. X and Y factors on rank bits displace the bra by the same
+    /// rank offset for every amplitude, so however many there are they name one
+    /// partner rank, and one slice exchange covers them. That is the direct
+    /// route rather than a relabel because relabeling mutates the state, which
+    /// a `&self` query cannot do.
+    ///
+    /// Collective: every rank must call it with identical observables.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let comm = self.context.comm();
+        let norm = comm.allreduce_sum_f64(crate::backend::state_norm_sqr(&self.inner.state));
+        let local_qubits = self.local_qubits();
+        let local_mask = (1usize << local_qubits) - 1;
+        let mut recv: Vec<Complex64> = Vec::new();
+
+        let mut values = Vec::with_capacity(observables.len());
+        for observable in observables {
+            let (xmask, zmask, num_y) = crate::sim::pauli_masks(observable, self.num_qubits)?;
+            let xphys = self.to_physical_mask(xmask);
+            let zphys = self.to_physical_mask(zmask);
+            let partner_bits = xphys >> local_qubits;
+            if partner_bits != 0 {
+                recv.resize(self.inner.state.len(), Complex64::new(0.0, 0.0));
+                comm.sendrecv_c64(
+                    self.context.rank() ^ partner_bits,
+                    &self.inner.state,
+                    &mut recv,
+                );
+            }
+            let bra: &[Complex64] = if partner_bits == 0 {
+                &self.inner.state
+            } else {
+                &recv
+            };
+            let sandwich = crate::sim::pauli_sandwich(
+                bra,
+                &self.inner.state,
+                xphys & local_mask,
+                zphys & local_mask,
+                num_y,
+            );
+            let rank_parity = (self.context.rank() & (zphys >> local_qubits)).count_ones() & 1;
+            let signed = if rank_parity == 1 {
+                -sandwich.re
+            } else {
+                sandwich.re
+            };
+            // The total is real, so summing the per-rank real parts loses
+            // nothing even where a rank's own term is not.
+            let total = comm.allreduce_sum_f64(signed);
+            values.push(if norm == 0.0 { 0.0 } else { total / norm });
+        }
+        Ok(values)
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

@@ -76,6 +76,7 @@ bounded only by their own representation.
 | MPS | Native, sequential conditional sampling | Native, one chain contraction per observable |
 | Factored | Native, one draw per sub-state | Native, product over the blocks |
 | Product State | Native, one Bernoulli draw per qubit | Native, one closed-form factor per qubit |
+| Distributed Statevector | Native, rank-local CDF plus one scalar per rank | Native, rank-local sandwich plus one `Allreduce` |
 | Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
 | Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
@@ -89,6 +90,12 @@ distributions agree.
 Backends without an observable path return `BackendUnsupported` naming
 themselves, so a rejected request says which engine could not serve it rather
 than blaming the route that selected it.
+
+`simulate(...).marginals()` is dense everywhere except the distributed backend,
+where it is per-qubit Z expectations and therefore also uncapped.
+`simulate(...).run()` is the one terminal that needs the whole distribution, so
+on the distributed backend it rejects a register past the dense cap up front
+rather than running first and answering with no distribution.
 
 ## Not yet supported
 

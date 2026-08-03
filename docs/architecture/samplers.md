@@ -57,7 +57,10 @@ draws outcomes from its own representation, and `sample_basis_states(num_shots,
 seed)` returns packed per-qubit outcomes as `BasisSamples`
 (`ceil(n / 64)` words per shot). Seeding is from the argument, not the backend's
 RNG, so a shot request replays exactly, and the call does not collapse the
-state. `supports_pauli_expectation` and `pauli_expectations(observables)` are
+state. It takes `&mut self` because a backend may first have to reorganize its
+own storage: the distributed backend restores its qubit map, a collective, so
+that each rank owns a contiguous slice in circuit order.
+`supports_pauli_expectation` and `pauli_expectations(observables)` are
 the observable-side pair, normalization independent so a truncated MPS is
 divided by `⟨ψ|ψ⟩` rather than assumed unit.
 
@@ -67,6 +70,7 @@ divided by `⟨ψ|ψ⟩` rather than assumed unit.
 | Factored | `O(Σ 2^kᵢ)` once, `O(B log)` per shot | One draw per sub-state, concatenated; `B` blocks |
 | MPS | `O(n·χ³)` once, `O(n·χ²)` per shot | Sequential conditional sampling against precomputed right environments |
 | Product State | `O(n)` once, `O(n)` per shot | One Bernoulli draw per qubit against that qubit's own weight on `1` |
+| Distributed | `O(2^(n-p))` once, `O(log)` per shot | CDF over the rank-local slice; one scalar gathered per rank picks the owner |
 | Everything else | dense | Unchanged: `probabilities()` then CDF |
 
 `run_shots_with` picks the native path through `try_native_terminal_backend`,

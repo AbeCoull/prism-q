@@ -255,7 +255,7 @@ impl Backend for ProductStateBackend {
     /// Qubits are independent, so a shot is `n` Bernoulli draws on the
     /// per-qubit `|β|²` rather than one draw from a `2^n` CDF: `O(shots·n)`
     /// with the probabilities computed once up front.
-    fn sample_basis_states(&self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+    fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let prob_one: Vec<f64> = self
             .qubits
             .iter()

@@ -88,6 +88,27 @@ the Rust constants in `src/backend/statevector/kernels.rs`, keeping CPU and GPU 
 against the CPU statevector within 1e-10. Covers every gate variant, fusion paths, and
 the `BackendKind::StatevectorGpu` public dispatch path at the crossover boundary.
 
+### Shot reproducibility
+
+Two limits bound what a seed guarantees, and neither is visible from the golden
+equality tests.
+
+- **CPU against GPU:** agreement in distribution, not bit for bit. Both paths draw the
+  same RNG stream for a given shot seed, but the device reduction that produces a
+  measurement probability sums in tree order with FMA contraction, so it can differ from
+  the host sum in the last ulp, and a uniform draw landing between the two flips that
+  outcome and every outcome after it. Where the probability is a dyadic rational (0.5,
+  1.0, and the amplitudes reachable from Clifford gates) both sums are exact and the
+  shots do match, which is what `statevector_gpu_mid_measure_shots_match_cpu` pins.
+  `statevector_gpu_shot_frequencies_match_cpu_off_dyadic` pins the general case: equal
+  frequencies within 5 sigma after `Rx(0.3)`.
+- **GPU BTS sampling:** reproducible at a fixed Rayon thread count. Above
+  `MIN_PAR_DRAWS` random bits per chunk, `fill_random_bits` seeds one stream per worker
+  and partitions the draws by `rayon::current_num_threads()`, so the same seed on a host
+  with a different worker count produces different shots. Below that threshold the
+  serial single-stream path runs and the seed reproduces outright. Pin
+  `RAYON_NUM_THREADS` when byte-identical shot payloads matter across machines.
+
 ## Current limits
 
 - Device placement is silent. Circuits below the crossover run on the host, and the

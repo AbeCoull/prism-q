@@ -730,10 +730,10 @@ fn statevector_gpu_builder_matches_cpu_random() {
     assert_probs_close(&gpu_p, &cpu_p, 1e-10, "gpu/dispatch_random_14q");
 }
 
-// A mid-circuit measurement forces the per-shot slow path. With
-// `BackendKind::StatevectorGpu` at 14q each per-shot backend routes to the
-// device, and outcomes must match the host statevector shot-for-shot: both
-// backends draw the same RNG stream for the same shot seed.
+// A mid-circuit measurement forces the per-shot slow path. Shots match bit for
+// bit only because every measured probability here is exactly 0.5; see
+// `statevector_gpu_shot_frequencies_match_cpu_off_dyadic` for why that is a
+// special case rather than the contract.
 #[test]
 fn statevector_gpu_mid_measure_shots_match_cpu() {
     use prism_q::{BackendKind, Circuit};
@@ -763,6 +763,57 @@ fn statevector_gpu_mid_measure_shots_match_cpu() {
         .expect("gpu shots failed");
 
     assert_eq!(cpu.shots, gpu.shots);
+}
+
+// `sin^2(0.15)` is not a dyadic rational, so the device tree reduction and the
+// host sum can straddle a uniform draw and diverge from that shot onward. Equal
+// frequencies are what the two backends promise off dyadic probabilities.
+#[test]
+fn statevector_gpu_shot_frequencies_match_cpu_off_dyadic() {
+    use prism_q::{BackendKind, Circuit};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let shots = 2000;
+    let p_one = (0.3_f64 / 2.0).sin().powi(2);
+    let five_sigma = 5.0 * (p_one * (1.0 - p_one) / shots as f64).sqrt();
+
+    let mut circuit = Circuit::new(14, 2);
+    circuit.add_gate(Gate::Rx(0.3), &[0]);
+    for q in 0..13 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_measure(1, 1);
+
+    for seed in [42_u64, 43, 44] {
+        let cpu = prism_q::simulate(&circuit)
+            .backend(BackendKind::Statevector)
+            .seed(seed)
+            .shots(shots)
+            .expect("cpu shots failed");
+        let gpu = prism_q::simulate(&circuit)
+            .backend(BackendKind::StatevectorGpu {
+                context: f.ctx.clone(),
+            })
+            .seed(seed)
+            .shots(shots)
+            .expect("gpu shots failed");
+
+        let freq = |r: &prism_q::ShotsResult| {
+            r.shots.iter().filter(|s| s[0]).count() as f64 / shots as f64
+        };
+        let (cpu_f, gpu_f) = (freq(&cpu), freq(&gpu));
+        assert!(
+            (cpu_f - p_one).abs() < five_sigma,
+            "seed {seed}: cpu freq {cpu_f} off analytic {p_one}"
+        );
+        assert!(
+            (gpu_f - p_one).abs() < five_sigma,
+            "seed {seed}: gpu freq {gpu_f} off analytic {p_one}"
+        );
+    }
 }
 
 // ============================================================================
@@ -1662,6 +1713,49 @@ fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
     assert_eq!(explicit.shots, compiled.shots);
 }
 
+// Observable propagation for a Clifford circuit is host side, so `StabilizerGpu`
+// answers exactly what `Stabilizer` answers rather than rejecting.
+#[test]
+fn stabilizer_gpu_expectation_values_match_cpu_stabilizer() {
+    use prism_q::{BackendKind, Circuit, PauliTerm, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let mut circuit = Circuit::new(4, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    circuit.add_gate(Gate::S, &[3]);
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::x(0), PauliTerm::x(1), PauliTerm::x(2)],
+        vec![PauliTerm::z(3)],
+    ];
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Stabilizer)
+        .seed(42)
+        .expectation_values(&observables)
+        .expect("cpu expectation values failed");
+    let gpu = simulate(&circuit)
+        .backend(BackendKind::StabilizerGpu {
+            context: f.ctx.clone(),
+        })
+        .seed(42)
+        .expectation_values(&observables)
+        .expect("gpu expectation values failed");
+
+    assert_eq!(gpu.len(), cpu.len());
+    for (i, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
+        assert!(
+            (g - c).abs() < 1e-12,
+            "observable {i}: gpu {g}, stabilizer {c}"
+        );
+    }
+}
+
 // Reused GPU BTS scratch should not change the packed output stream for a
 // fixed sequence of batch requests.
 #[test]
@@ -1809,6 +1903,49 @@ fn sample_bulk_packed_device_counts_match_host_counts() {
     let host_counts = device.to_host().unwrap().counts();
 
     assert_eq!(device_counts, host_counts);
+}
+
+// Worst case for the device count table: a million shots over two outcomes, so
+// every thread contends for the same slot and the mid-claim spin in
+// `hash_insert_count` runs hot. Repeated because the failure mode is warp
+// scheduling. A hang is the bug; wrong totals would mean the spin dropped work.
+#[test]
+fn device_counts_survive_two_outcome_contention() {
+    use prism_q::{Circuit, compile_measurements};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 64;
+    let shots = 1_000_000;
+    let mut circuit = Circuit::new(n, n);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.measure_all();
+
+    let mut gpu = compile_measurements(&circuit, common::SEED)
+        .unwrap()
+        .with_gpu(f.ctx.clone());
+
+    for iteration in 0..50 {
+        let counts = gpu
+            .sample_bulk_packed_device(shots)
+            .unwrap()
+            .counts()
+            .unwrap();
+        assert_eq!(
+            counts.values().sum::<u64>(),
+            shots as u64,
+            "iteration {iteration}: counts lost shots"
+        );
+        assert_eq!(
+            counts.len(),
+            2,
+            "iteration {iteration}: GHZ parity gives two outcomes, got {}",
+            counts.len()
+        );
+    }
 }
 
 // Noisy GPU reductions draw from the same distribution as the CPU noisy

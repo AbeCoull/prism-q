@@ -1093,3 +1093,96 @@ fn fusion_multi_2q_threshold_12q_active() {
     assert!(has_2q_fusion(&circuit), "12q QV should use Multi2q fusion");
     assert_fusion_preserves_correctness(&circuit);
 }
+
+// ===== Fused-batch producer bounds =====
+
+// A dense Rzz layer is unbounded in edge count while the kernel group tables
+// are not, so the producer has to split the run.
+fn dense_rzz_layer_circuit(num_qubits: usize, span: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for a in 0..span {
+        for b in (a + 1)..span {
+            c.add_gate(Gate::Rzz(0.13 * (a + b + 1) as f64), &[a, b]);
+        }
+    }
+    for q in 0..num_qubits {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c
+}
+
+#[test]
+fn fusion_batch_rzz_beyond_group_capacity() {
+    let circuit = dense_rzz_layer_circuit(16, 10);
+    let unfused = run_unfused(&circuit);
+    let fused = run_fused(&circuit);
+    assert_probs_close(&fused, &unfused, EPS);
+}
+
+#[test]
+fn fusion_batch_rzz_splits_oversize_run() {
+    let circuit = dense_rzz_layer_circuit(16, 10);
+    let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+    let mut edges = 0usize;
+    for inst in &fused.instructions {
+        if let prism_q::circuit::Instruction::Gate {
+            gate: Gate::BatchRzz(data),
+            ..
+        } = inst
+        {
+            assert!(
+                data.edges.len() <= 32,
+                "BatchRzz carries {} edges, past the kernel group capacity",
+                data.edges.len()
+            );
+            edges += data.edges.len();
+        }
+    }
+    assert_eq!(edges, 45, "every Rzz edge should survive the split");
+}
+
+// Two cphase gates on the same (control, target) pair index one bit of the
+// PEXT mask, so the second phase is dropped unless the producer folds it in.
+fn stacked_cphase_circuit(num_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(num_qubits, 0);
+    for q in 0..num_qubits {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_gate(Gate::cphase(0.4), &[0, 1]);
+    c.add_gate(Gate::cphase(0.7), &[0, 1]);
+    c.add_gate(Gate::cphase(1.1), &[0, 2]);
+    for q in 0..num_qubits {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c
+}
+
+#[test]
+fn fusion_batch_phase_duplicate_pair() {
+    let circuit = stacked_cphase_circuit(16);
+    let unfused = run_unfused(&circuit);
+    let fused = run_fused(&circuit);
+    assert_probs_close(&fused, &unfused, EPS);
+}
+
+#[test]
+fn fusion_batch_phase_folds_duplicate_pair() {
+    let circuit = stacked_cphase_circuit(16);
+    let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+    for inst in &fused.instructions {
+        if let prism_q::circuit::Instruction::Gate {
+            gate: Gate::BatchPhase(data),
+            ..
+        } = inst
+        {
+            let mut seen: Vec<usize> = data.phases.iter().map(|&(t, _)| t).collect();
+            seen.sort_unstable();
+            let len = seen.len();
+            seen.dedup();
+            assert_eq!(len, seen.len(), "BatchPhase repeats a target qubit");
+        }
+    }
+}

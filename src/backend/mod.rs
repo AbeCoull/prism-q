@@ -198,9 +198,18 @@ pub(crate) fn init_thread_pool() {
     });
 }
 
+/// Buffer width for [`sorted_mcu_qubits`]. A dense state indexes amplitudes with a
+/// `usize` shift, so it never holds more than 63 qubits and an `Mcu` on one never
+/// names more than that many.
+pub(crate) const MCU_QUBIT_BUF: usize = 64;
+
 /// Write `controls` plus `target` into `buf` sorted ascending, returning the count.
 #[inline(always)]
-pub(crate) fn sorted_mcu_qubits(controls: &[usize], target: usize, buf: &mut [usize; 10]) -> usize {
+pub(crate) fn sorted_mcu_qubits(
+    controls: &[usize],
+    target: usize,
+    buf: &mut [usize; MCU_QUBIT_BUF],
+) -> usize {
     let n = controls.len() + 1;
     buf[..controls.len()].copy_from_slice(controls);
     buf[controls.len()] = target;

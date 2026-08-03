@@ -1835,7 +1835,15 @@ impl<'a> Parser<'a> {
                 Gate::Cu(mat) => Ok(Gate::mcu(**mat, 2)),
                 Gate::Cx => Ok(Gate::mcu(Gate::X.matrix_2x2(), 2)),
                 Gate::Cz => Ok(Gate::mcu(Gate::Z.matrix_2x2(), 2)),
-                Gate::Mcu(data) => Ok(Gate::mcu(data.mat, data.num_controls + 1)),
+                Gate::Mcu(data) => {
+                    let num_controls = data.num_controls.checked_add(1).ok_or_else(|| {
+                        PrismError::UnsupportedConstruct {
+                            construct: format!("ctrl @ chain past {} controls", u8::MAX),
+                            line: line_num,
+                        }
+                    })?;
+                    Ok(Gate::mcu(data.mat, num_controls))
+                }
                 _ => Err(PrismError::UnsupportedConstruct {
                     construct: format!("ctrl @ {} (unsupported gate type)", gate.name()),
                     line: line_num,

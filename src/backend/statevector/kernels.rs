@@ -14,9 +14,9 @@ use super::insert_zero_bit;
 #[cfg(feature = "parallel")]
 use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS, SendPtr};
 use crate::backend::simd;
-use crate::backend::{is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
+use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
-use crate::gates::{DiagEntry, Gate, diag_entries_phase};
+use crate::gates::{BatchPhaseData, BatchRzzData, DiagEntry, Gate, diag_entries_phase};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -129,6 +129,12 @@ pub(crate) const MAX_BATCH_RZZ_GROUPS: usize = 4;
 const BATCH_RZZ_BMI2_MAX_UNIQUE: usize = 10;
 #[cfg(target_arch = "x86_64")]
 const BATCH_RZZ_BMI2_TABLE_SIZE: usize = 1024;
+
+const _: () = assert!(
+    MAX_BATCH_PHASE_GROUPS * BATCH_PHASE_GROUP_SIZE == BatchPhaseData::MAX_PHASES
+        && MAX_BATCH_RZZ_GROUPS * BATCH_RZZ_GROUP_SIZE == BatchRzzData::MAX_EDGES,
+    "fusion splits these runs against the gate-level cap, which must match the table shape"
+);
 
 pub(crate) const DIAG_BATCH_MAX_QUBITS_PER_GROUP: usize = 10;
 pub(crate) const DIAG_BATCH_TABLE_SIZE: usize = 1024; // 2^10
@@ -311,7 +317,12 @@ pub(crate) fn build_batch_rzz_tables(
     groups: &mut [BatchRzzGroup; MAX_BATCH_RZZ_GROUPS],
 ) -> usize {
     let num_groups = edges.len().div_ceil(BATCH_RZZ_GROUP_SIZE);
-    debug_assert!(num_groups <= MAX_BATCH_RZZ_GROUPS);
+    assert!(
+        num_groups <= MAX_BATCH_RZZ_GROUPS,
+        "BatchRzz carries {} edges, past the {} the group tables hold",
+        edges.len(),
+        BatchRzzData::MAX_EDGES
+    );
 
     for (g, group) in groups.iter_mut().enumerate().take(num_groups) {
         let start = g * BATCH_RZZ_GROUP_SIZE;
@@ -470,7 +481,12 @@ pub(crate) fn build_batch_phase_tables(
 ) -> usize {
     let one = Complex64::new(1.0, 0.0);
     let num_groups = phases.len().div_ceil(BATCH_PHASE_GROUP_SIZE);
-    debug_assert!(num_groups <= MAX_BATCH_PHASE_GROUPS);
+    assert!(
+        num_groups <= MAX_BATCH_PHASE_GROUPS,
+        "BatchPhase carries {} entries, past the {} the group tables hold",
+        phases.len(),
+        BatchPhaseData::MAX_PHASES
+    );
 
     for (g, group) in groups.iter_mut().enumerate().take(num_groups) {
         let start = g * BATCH_PHASE_GROUP_SIZE;
@@ -2014,7 +2030,7 @@ impl StatevectorBackend {
 
         let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
         let tgt_mask = 1usize << target;
-        let mut sorted_buf = [0usize; 10];
+        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
         let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
         let sorted = &sorted_buf[..num_special];
 
@@ -2041,7 +2057,7 @@ impl StatevectorBackend {
     fn apply_mcu_par(&mut self, controls: &[usize], target: usize, mat: [[Complex64; 2]; 2]) {
         let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
         let tgt_mask = 1usize << target;
-        let mut sorted_buf = [0usize; 10];
+        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
         let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
         let sorted = &sorted_buf[..num_special];
 
@@ -2145,7 +2161,7 @@ impl StatevectorBackend {
             .chain(std::iter::once(&target))
             .map(|&q| 1usize << q)
             .fold(0, |a, b| a | b);
-        let mut sorted_buf = [0usize; 10];
+        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
         let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
         let sorted = &sorted_buf[..num_special];
 
@@ -2167,7 +2183,7 @@ impl StatevectorBackend {
             .chain(std::iter::once(&target))
             .map(|&q| 1usize << q)
             .fold(0, |a, b| a | b);
-        let mut sorted_buf = [0usize; 10];
+        let mut sorted_buf = [0usize; MCU_QUBIT_BUF];
         let num_special = sorted_mcu_qubits(controls, target, &mut sorted_buf);
         let sorted = &sorted_buf[..num_special];
 
@@ -3396,4 +3412,130 @@ fn apply_diagonal_batch_scalar(
 ) {
     let group_shifts = diag_batch_group_shifts(unique_qubits);
     diagonal_batch_tile_scalar(state, 0, tables, &group_shifts, group_sizes, num_groups);
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod pext_agreement_tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    const NUM_QUBITS: usize = 12;
+
+    // The scalar and BMI2 kernels index their tables differently (shift loop vs
+    // PEXT over a mask), so a table shape that indexes one bit per unique qubit
+    // silently diverges from a producer that emits a repeated qubit. Both batch
+    // families are checked against the same amplitude for every basis index.
+    fn combined_phase_scalar_batch_phase(
+        idx: usize,
+        groups: &[BatchPhaseGroup],
+        n: usize,
+    ) -> Complex64 {
+        let mut combined = Complex64::new(1.0, 0.0);
+        for group in groups.iter().take(n) {
+            combined *= group.table[extract_bits(idx, &group.shifts, group.len)];
+        }
+        combined
+    }
+
+    #[test]
+    fn batch_phase_pext_matches_scalar_lookup() {
+        if !std::is_x86_feature_detected!("bmi2") {
+            panic!("bmi2 is required to check the PEXT path against the scalar path");
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let one = Complex64::new(1.0, 0.0);
+
+        for case in 0..64 {
+            let len = 1 + case % BatchPhaseData::MAX_PHASES.min(NUM_QUBITS - 1);
+            let mut targets: Vec<usize> = (1..NUM_QUBITS).collect();
+            for i in (1..targets.len()).rev() {
+                targets.swap(i, rng.random_range(0..=i));
+            }
+            let phases: Vec<(usize, Complex64)> = targets[..len]
+                .iter()
+                .map(|&q| (q, Complex64::from_polar(1.0, rng.random_range(-3.0..3.0))))
+                .collect();
+
+            let mut groups = [BatchPhaseGroup {
+                table: [one; BATCH_PHASE_TABLE_SIZE],
+                shifts: [0; BATCH_PHASE_GROUP_SIZE],
+                len: 0,
+                pext_mask: 0,
+            }; MAX_BATCH_PHASE_GROUPS];
+            let num_groups = build_batch_phase_tables(&phases, &mut groups);
+
+            for idx in 0..(1usize << NUM_QUBITS) {
+                let scalar = combined_phase_scalar_batch_phase(idx, &groups, num_groups);
+                let mut pext = one;
+                for group in groups.iter().take(num_groups) {
+                    // SAFETY: BMI2 checked above.
+                    let bits = unsafe { std::arch::x86_64::_pext_u64(idx as u64, group.pext_mask) };
+                    pext *= group.table[bits as usize];
+                }
+                assert!(
+                    (scalar - pext).norm() < 1e-12,
+                    "case {case} idx {idx}: scalar {scalar} vs pext {pext}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn batch_rzz_pext_matches_scalar_lookup() {
+        if !std::is_x86_feature_detected!("bmi2") {
+            panic!("bmi2 is required to check the PEXT path against the scalar path");
+        }
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let one = Complex64::new(1.0, 0.0);
+
+        for case in 0..64 {
+            let num_edges = 1 + case % BatchRzzData::MAX_EDGES;
+            let edges: Vec<(usize, usize, f64)> = (0..num_edges)
+                .map(|_| {
+                    let q0 = rng.random_range(0..NUM_QUBITS);
+                    let mut q1 = rng.random_range(0..NUM_QUBITS);
+                    while q1 == q0 {
+                        q1 = rng.random_range(0..NUM_QUBITS);
+                    }
+                    (q0, q1, rng.random_range(-3.0..3.0))
+                })
+                .collect();
+
+            let mut scalar_groups = [BatchRzzGroup {
+                table: [one; BATCH_RZZ_TABLE_SIZE],
+                q0s: [0; BATCH_RZZ_GROUP_SIZE],
+                q1s: [0; BATCH_RZZ_GROUP_SIZE],
+                len: 0,
+            }; MAX_BATCH_RZZ_GROUPS];
+            let num_groups = build_batch_rzz_tables(&edges, &mut scalar_groups);
+
+            let mut bmi2_groups = [BatchRzzBmi2Group {
+                table: [one; BATCH_RZZ_BMI2_TABLE_SIZE],
+                pext_mask: 0,
+            }; MAX_BATCH_RZZ_GROUPS];
+            let Some(bmi2_num_groups) = build_batch_rzz_bmi2_tables(&edges, &mut bmi2_groups)
+            else {
+                continue;
+            };
+            assert_eq!(num_groups, bmi2_num_groups);
+
+            for idx in 0..(1usize << NUM_QUBITS) {
+                let mut scalar = one;
+                for group in scalar_groups.iter().take(num_groups) {
+                    scalar *= group.table[extract_rzz_bits(idx, group)];
+                }
+                let mut pext = one;
+                for group in bmi2_groups.iter().take(num_groups) {
+                    // SAFETY: BMI2 checked above.
+                    let bits = unsafe { std::arch::x86_64::_pext_u64(idx as u64, group.pext_mask) };
+                    pext *= group.table[bits as usize];
+                }
+                assert!(
+                    (scalar - pext).norm() < 1e-12,
+                    "case {case} idx {idx}: scalar {scalar} vs pext {pext}"
+                );
+            }
+        }
+    }
 }

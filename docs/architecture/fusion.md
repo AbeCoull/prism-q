@@ -35,6 +35,28 @@ flowchart TD
 | `MIN_QUBITS_FOR_2Q_FUSION` | 12 | Benchmarked QV and random sweeps show memory-pass reduction wins from 12q |
 | `MIN_QUBITS_FOR_MULTI_2Q_FUSION` | 12 | Same as 2q fusion |
 
+## Payload capacities
+
+The batched gates carry a lookup table sized at compile time, so the pass that emits
+them is what keeps the payload inside it. Both caps are declared on the gate payload
+(`BatchRzzData::MAX_EDGES`, `BatchPhaseData::MAX_PHASES`) and pinned to the kernel
+table shape by a compile-time assertion; the kernels assert on entry in release builds
+as well, so a producer that outgrows a table fails loudly instead of dropping work.
+
+| Payload      | Cap        | Producer behavior past the cap                                     |
+|--------------|------------|--------------------------------------------------------------------|
+| `BatchRzz`   | 32 edges   | `fuse_batch_rzz` splits the run into consecutive batches           |
+| `BatchPhase` | 40 entries | `fuse_controlled_phases` splits the chain into consecutive batches |
+
+Splitting is sound because both payloads hold mutually commuting diagonal terms. A
+repeated `(control, target)` pair folds into the entry already present rather than
+adding a second one, which both keeps the two paths in agreement (the BMI2 kernel
+indexes one bit per distinct qubit, so a repeated target has no bit of its own) and
+bounds a chain by the qubit count.
+
+`DiagonalBatch` instead declines at the kernel: `build_diagonal_batch_tables` returns
+`None` when the grouping does not fit and the backend runs the per-element path.
+
 ```admonish tip
 Fusion is not on the hot path. Worst-case fusion cost is on the order of microseconds
 against tens of milliseconds of gate application, so these passes are tuned for

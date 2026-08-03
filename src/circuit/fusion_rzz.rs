@@ -157,28 +157,37 @@ fn flush_rzz_run(
     rzz_qubits: &mut [bool],
     deferred_qubits: &mut [bool],
 ) {
-    if rzz_run.len() >= 2 {
-        let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
-        for &(q0, q1, _) in rzz_run.iter() {
-            push_unique(&mut tgts, q0);
-            push_unique(&mut tgts, q1);
-        }
-        output.push(Instruction::Gate {
-            gate: Gate::BatchRzz(Box::new(BatchRzzData {
-                edges: rzz_run.clone(),
-            })),
-            targets: tgts,
-        });
-    } else {
-        for &(q0, q1, theta) in rzz_run.iter() {
-            output.push(Instruction::Gate {
-                gate: Gate::Rzz(theta),
-                targets: smallvec![q0, q1],
-            });
-        }
+    // Rzz gates are diagonal and mutually commuting, so a run longer than the
+    // kernel group tables hold splits into consecutive batches.
+    for chunk in rzz_run.chunks(BatchRzzData::MAX_EDGES) {
+        emit_rzz_chunk(output, chunk);
     }
     output.append(deferred);
     rzz_run.clear();
     rzz_qubits.fill(false);
     deferred_qubits.fill(false);
+}
+
+fn emit_rzz_chunk(output: &mut Vec<Instruction>, chunk: &[(usize, usize, f64)]) {
+    if chunk.len() < 2 {
+        for &(q0, q1, theta) in chunk {
+            output.push(Instruction::Gate {
+                gate: Gate::Rzz(theta),
+                targets: smallvec![q0, q1],
+            });
+        }
+        return;
+    }
+
+    let mut tgts: SmallVec<[usize; 4]> = SmallVec::new();
+    for &(q0, q1, _) in chunk {
+        push_unique(&mut tgts, q0);
+        push_unique(&mut tgts, q1);
+    }
+    output.push(Instruction::Gate {
+        gate: Gate::BatchRzz(Box::new(BatchRzzData {
+            edges: chunk.to_vec(),
+        })),
+        targets: tgts,
+    });
 }

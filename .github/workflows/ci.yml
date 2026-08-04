@@ -25,7 +25,10 @@ env:
   # docs build on a bare runner. distributed-mpi stays out: mpi-sys fails in its build
   # script when no MPI library is installed.
   CI_DOC_FEATURES: parallel,gpu,distributed
-  CI_BENCH_FEATURES: parallel,bench-fast
+  # Not `bench-fast`: that tier also cuts warmup to 200ms and measurement to 1s,
+  # which the cheaper gate rows have the budget for. The sample count is pinned
+  # separately in scripts/bench_ci.sh, where the reasoning lives.
+  CI_BENCH_FEATURES: parallel
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
 
 jobs:
@@ -145,22 +148,30 @@ jobs:
       - name: Verify the conventional-commit mapping and the pre-1.0 clamp
         run: bash scripts/release_bump_level_test.sh
 
+  # Adjacent-binary A/B against the PR base. Both bench binaries are built first,
+  # then run with no build in between, so the compile no longer sits between the
+  # two measurements and every row reports its own same-code control spread. The
+  # gate fires only when a row exceeds both the threshold and that spread.
+  #
+  # The reference worktree lives beside the checkout rather than inside it: the
+  # A/B fingerprints the working tree before and after the reference build, and
+  # `/target/` in .gitignore is anchored to the repository root, so a nested
+  # worktree's build output would read as an untracked change and abort the run.
   benchmark-regression:
     name: Benchmark Regression
     runs-on: ubuntu-latest
     needs: check
     if: github.event_name == 'pull_request'
-    timeout-minutes: 45
+    # Six passes where the old gate ran two, at Criterion's default measurement
+    # window rather than the `bench-fast` one, so the measured stretch grows by
+    # roughly ten minutes on top of two reference builds.
+    timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      PRISM_BENCH_REF: ${{ github.event.pull_request.base.sha }}
+      PRISM_BENCH_REF_DIR: ${{ github.workspace }}/bench-ref
     steps:
-      - name: Checkout base
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: base
-          fetch-depth: 1
-
       - name: Checkout head
         uses: actions/checkout@v7
         with:
@@ -169,74 +180,68 @@ jobs:
           path: head
           fetch-depth: 1
 
-      - uses: dtolnay/rust-toolchain@stable
+      # A fork's origin does not carry the base commit, and the A/B needs the
+      # object locally to build the reference from it.
+      - name: Fetch the base commit
+        working-directory: head
+        run: |
+          git remote add upstream "https://github.com/${{ github.repository }}"
+          git fetch --no-tags --depth=1 upstream "$PRISM_BENCH_REF"
 
+      # There is no job-level paths filter, and a separate workflow file would
+      # duplicate the setup, so the scope check runs in-job. It reports a result
+      # either way, which keeps the job safe to promote to a required check.
+      - name: Decide whether anything benchmarked changed
+        id: scope
+        working-directory: head
+        run: |
+          changed="$(git diff --name-only "$PRISM_BENCH_REF" HEAD)"
+          if grep -Eq '^(src/|benches/|Cargo\.(toml|lock)$)' <<< "$changed"; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No change under src/, benches/, or the manifests. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Prepare the reference worktree
+        if: steps.scope.outputs.run == 'true'
+        working-directory: head
+        run: git worktree add --detach "$PRISM_BENCH_REF_DIR" "$PRISM_BENCH_REF"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.run == 'true'
+
+      # Keyed per directory, so the reference build stays warm across PRs that
+      # share a base.
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.run == 'true'
         with:
           cache-bin: false
           workspaces: |
-            base -> target
             head -> target
+            bench-ref -> target
 
-      - name: Install benchmark tools
-        run: sudo apt-get update && sudo apt-get install -y bc jq
-
-      - name: Benchmark base
-        working-directory: base
-        run: bash ../head/scripts/bench_ci.sh
-        env:
-          PRISM_BENCH_PROJECT_DIR: ${{ github.workspace }}/base
-
-      - name: Save base baseline
-        working-directory: base
-        run: bash scripts/bench_check.sh save --name ci-base
-
-      - name: Copy base baseline
-        run: |
-          mkdir -p head/bench_results/baselines
-          cp base/bench_results/baselines/ci-base.json head/bench_results/baselines/ci-base.json
-
-      - name: Benchmark head
-        working-directory: head
-        run: bash scripts/bench_ci.sh
-
-      - name: Compare benchmark results
+      - name: Benchmark regression gate
+        if: steps.scope.outputs.run == 'true'
         working-directory: head
         run: |
           set +e
-          bash scripts/bench_check.sh table --baseline ci-base | tee ../benchmark-summary.md
-          table_status=${PIPESTATUS[0]}
-          bash scripts/bench_check.sh compare --baseline ci-base | tee ../benchmark-compare.txt
-          compare_status=${PIPESTATUS[0]}
-
+          bash scripts/bench_ci.sh
+          status=$?
           {
             echo "## Benchmark Regression Gate"
             echo ""
-            cat ../benchmark-summary.md
-            echo ""
-            echo '```text'
-            cat ../benchmark-compare.txt
-            echo '```'
+            cat bench_results/ci-ab.md
           } >> "$GITHUB_STEP_SUMMARY"
-
-          if [[ "$table_status" -ne 0 ]]; then
-            exit "$table_status"
-          fi
-          exit "$compare_status"
+          exit "$status"
 
       - name: Upload benchmark artifacts
-        if: always()
+        if: always() && steps.scope.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-regression
           if-no-files-found: ignore
-          path: |
-            benchmark-summary.md
-            benchmark-compare.txt
-            base/bench_results/baselines/ci-base.json
-            head/bench_results/baselines/ci-base.json
-            head/target/criterion/**/benchmark.json
-            head/target/criterion/**/new/estimates.json
+          path: head/bench_results/ci-ab.md
 
   coverage:
     name: Coverage

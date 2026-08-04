@@ -34,6 +34,9 @@
 #   --ref-dir       reference worktree path. Persists between runs, so the
 #                   reference build is cached. Default: a temporary directory
 #                   removed on exit.
+#   --min-rows      fail when fewer than this many rows appear in all four
+#                   passes. Catches a filter that silently stopped matching a
+#                   renamed benchmark id. Default: 1.
 #   --out           markdown output path (default: bench_results/ab-<stamp>.md)
 #
 # Environment:
@@ -60,6 +63,7 @@ BENCH="circuits"
 FEATURES="parallel"
 REF_DIR=""
 OUT=""
+MIN_ROWS=1
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
 
 while [[ $# -gt 0 ]]; do
@@ -69,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --bench|-b)    BENCH="$2"; shift 2 ;;
         --features)    FEATURES="$2"; shift 2 ;;
         --ref-dir)     REF_DIR="$2"; shift 2 ;;
+        --min-rows)    MIN_ROWS="$2"; shift 2 ;;
         --out)         OUT="$2"; shift 2 ;;
         --threshold|-t) THRESHOLD="$2"; shift 2 ;;
         -h|--help)     awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -323,9 +328,9 @@ for idx in 1 2 3 4; do
 done
 
 if [[ -z "$OUT" ]]; then
-    mkdir -p "$PROJECT_DIR/bench_results"
     OUT="$PROJECT_DIR/bench_results/ab-$(date +%Y-%m-%d_%H%M%S).md"
 fi
+mkdir -p "$(dirname "$OUT")"
 
 HIGH_QUBITS_STATE="off"
 if [[ -n "${PRISM_BENCH_HIGH_QUBITS:-}" ]]; then
@@ -351,7 +356,7 @@ set +e
     echo "| Threshold | ${THRESHOLD}% |"
     echo ""
 
-    awk -v threshold="$THRESHOLD" '
+    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" '
         BEGIN { FS = "\t"; SEP = "\x1f" }
 
         {
@@ -414,6 +419,12 @@ set +e
 
             if (compared == 0) {
                 print "**Regression verdict**: NO DATA. No row appeared in all four passes."
+                exit 1
+            }
+
+            if (compared < min_rows) {
+                printf "**Regression verdict**: NO DATA. %d row(s) appeared in all four passes, expected at least %d. The filter no longer matches every benchmark id it names.\n",
+                    compared, min_rows
                 exit 1
             }
 

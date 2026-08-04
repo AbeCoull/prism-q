@@ -22,9 +22,11 @@
 //! reset, classically-conditioned gates, exact one-qubit Kraus channels
 //! (`apply_1q_kraus`), two-qubit depolarizing (`apply_2q_depolarizing`), and
 //! exact `Tr(rho P)` expectation (`expectation_pauli`, reachable through
-//! `pauli_expectations`). Fusion is disabled (`supports_fused_gates` returns
-//! `false`) so every instruction reaching the backend is a primitive whose
-//! qubits live in the instruction targets.
+//! `pauli_expectations`). Batched payload shapes (`QftBlock`, `BatchPhase`,
+//! `BatchRzz`, `DiagonalBatch`, `MultiFused`, `Multi2q`) carry qubit indices
+//! outside the instruction targets and are remapped onto the ket register
+//! before the left product; `sim` does not produce them here, since
+//! `supports_fused_gates` returns `false`, but a direct `Backend::apply` can.
 //!
 //! # When to prefer this backend
 //!
@@ -44,6 +46,8 @@
 //!   The mixture holds every branch at once, so per-shot feedback cannot be
 //!   replayed from it and the noisy terminals reject those shapes.
 
+use std::borrow::Cow;
+
 use num_complex::Complex64;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -54,7 +58,7 @@ use crate::backend::statevector::{StatevectorBackend, insert_zero_bit};
 use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
-use crate::gates::{Gate, McuData};
+use crate::gates::{DiagEntry, Gate, McuData};
 use crate::sim::i_pow;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -182,6 +186,64 @@ fn conjugate_gate(gate: &Gate) -> Option<Gate> {
     }
 }
 
+/// The gate with every qubit index stored inside its payload shifted onto the
+/// ket register. Offsetting the instruction targets is not enough for the
+/// batched shapes, whose application indices live in the payload, nor for
+/// `QftBlock`, whose whole range lives in the variant. Borrows the gate when it
+/// carries no such index.
+fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
+    match gate {
+        Gate::BatchPhase(data) => {
+            let mut data = data.clone();
+            for entry in &mut data.phases {
+                entry.0 += n;
+            }
+            Cow::Owned(Gate::BatchPhase(data))
+        }
+        Gate::BatchRzz(data) => {
+            let mut data = data.clone();
+            for entry in &mut data.edges {
+                entry.0 += n;
+                entry.1 += n;
+            }
+            Cow::Owned(Gate::BatchRzz(data))
+        }
+        Gate::DiagonalBatch(data) => {
+            let mut data = data.clone();
+            for entry in &mut data.entries {
+                match entry {
+                    DiagEntry::Phase1q { qubit, .. } => *qubit += n,
+                    DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                        *q0 += n;
+                        *q1 += n;
+                    }
+                }
+            }
+            Cow::Owned(Gate::DiagonalBatch(data))
+        }
+        Gate::MultiFused(data) => {
+            let mut data = data.clone();
+            for entry in &mut data.gates {
+                entry.0 += n;
+            }
+            Cow::Owned(Gate::MultiFused(data))
+        }
+        Gate::Multi2q(data) => {
+            let mut data = data.clone();
+            for entry in &mut data.gates {
+                entry.0 += n;
+                entry.1 += n;
+            }
+            Cow::Owned(Gate::Multi2q(data))
+        }
+        Gate::QftBlock { start, num } => Cow::Owned(Gate::QftBlock {
+            start: start + n as u8,
+            num: *num,
+        }),
+        _ => Cow::Borrowed(gate),
+    }
+}
+
 /// Exact density-matrix simulator. See the module docs for the state layout.
 pub struct DensityMatrixBackend {
     num_qubits: usize,
@@ -242,11 +304,12 @@ impl DensityMatrixBackend {
 
     /// Evolve `rho -> U rho U^dagger` for the unitary `gate` on `targets`.
     ///
-    /// `U` applies to the ket register (targets offset by `n`) for the left
-    /// product `U rho`, and `conj(U)` to the bra register (original targets) for
-    /// the right product `rho U^dagger`. Variants with no native conjugate form
-    /// fall back to conjugating the whole buffer around the gate, which costs
-    /// two extra passes.
+    /// `U` applies to the ket register (targets and payload indices offset by
+    /// `n`, see [`ket_register_gate`]) for the left product `U rho`, and
+    /// `conj(U)` to the bra register (indices unchanged) for the right product
+    /// `rho U^dagger`. Variants with no native conjugate form fall back to
+    /// conjugating the whole buffer around the gate, which costs two extra
+    /// passes.
     ///
     /// A one-qubit gate can instead compile to a block superoperator and sweep
     /// the buffer once, which wins once the buffer stops fitting in cache. Below
@@ -268,7 +331,7 @@ impl DensityMatrixBackend {
 
         let ket_targets: SmallVec<[usize; 4]> = targets.iter().map(|&t| t + n).collect();
         self.sv.apply(&Instruction::Gate {
-            gate: gate.clone(),
+            gate: ket_register_gate(gate, n).into_owned(),
             targets: ket_targets,
         })?;
 

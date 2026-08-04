@@ -22,8 +22,9 @@ pip install maturin
 maturin develop --manifest-path bindings/python/Cargo.toml
 ```
 
-The bindings enable the `parallel` feature and nothing else. The `gpu` and
-`distributed` backends are not reachable from Python.
+The bindings enable the `parallel` feature by default. The `gpu` feature is
+optional and off in the published wheels (see [GPU backends](#gpu-backends));
+the distributed backend is not reachable from Python.
 
 ## Quick start
 
@@ -186,10 +187,64 @@ Pass an explicit one to override it.
 | `density_matrix()` | Exact mixed states, never chosen by `auto()` |
 | `stochastic_pauli(num_samples=1000)` | Sampled Pauli propagation |
 | `deterministic_pauli(epsilon=0.0, max_terms=65536)` | Truncated Pauli propagation |
+| `auto_gpu(context)`, `statevector_gpu(context)`, `stabilizer_gpu(context)` | CUDA device paths, see [GPU backends](#gpu-backends) |
 
-The GPU and distributed backends have no Python constructor. The
-density-matrix backend stores `4^n` amplitudes, so its qubit ceiling is about
-half the statevector cap; exceeding it raises `PrismError` naming the cap.
+The density-matrix backend stores `4^n` amplitudes, so its qubit ceiling is
+about half the statevector cap; exceeding it raises `PrismError` naming the cap.
+The distributed statevector backend has no Python constructor: `MPI_Init`
+ownership between the interpreter, mpi4py, and the extension is unsettled.
+
+## GPU backends
+
+The GPU constructors take a `GpuContext`, an opaque handle to one CUDA device
+and its compiled kernels. Build it once and reuse it: construction compiles the
+kernel module, and passing the same handle to several simulations shares that
+work.
+
+```python
+from prism_q import BackendKind, GpuContext, circuits, simulate
+
+context = GpuContext(0)
+outcome = simulate(circuits.qft(16)).backend(BackendKind.auto_gpu(context)).seed(42).run()
+print(outcome.probabilities)
+```
+
+`GpuContext(device_id)` is where a missing or unusable device is reported, and
+it raises `PrismError` rather than falling back. Past construction, routing is
+soft by design and matches the Rust API: `statevector_gpu` runs circuits below
+the crossover (`PRISM_GPU_MIN_QUBITS`, default 14) on the host, `auto_gpu`
+routes each block independently, and a block whose device allocation fails
+degrades to the host rather than erroring. A run that produces host results is
+therefore normal, not a failure signal.
+
+`stabilizer_gpu` sets its crossover at 100000 qubits
+(`PRISM_STABILIZER_GPU_MIN_QUBITS`), so it runs on the host tableau unless that
+override is lowered. The device tableau is correct; the default stays high until
+benchmarks justify lowering it.
+
+The published wheels are built without CUDA, because two of the three wheel
+targets have no CUDA toolkit and macOS has no CUDA at all. In those wheels the
+constructors still exist and `GpuContext(...)` raises `PrismError` naming the
+missing build feature, so code written against the GPU API fails with a message
+rather than an `AttributeError`. Two predicates separate the cases:
+
+```python
+GpuContext.is_supported()   # was this build compiled with CUDA support
+GpuContext.is_available()   # ... and is a usable device present
+```
+
+To get a build with CUDA support, install the CUDA toolkit (12.x or newer) and
+build from a checkout:
+
+```bash
+maturin develop --manifest-path bindings/python/Cargo.toml --features gpu
+```
+
+On Windows that build links the toolkit's NVRTC library (`nvrtc64_120_0.dll`
+for CUDA 12.x) from the toolkit `bin` directory, which Python does not search.
+The package adds it on import when `CUDA_PATH` is set, which the toolkit
+installer does; without it the import fails with `DLL load failed while
+importing _prism_q`.
 
 ## Noise
 

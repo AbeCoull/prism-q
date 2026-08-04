@@ -55,6 +55,9 @@ BTS sampling. Six entry points are available:
 When a GPU context is attached, `Backend::init` allocates state on the device instead
 of a host `Vec<Complex64>` and every instruction routes to a CUDA kernel.
 
+The three `BackendKind` entry points are also reachable from Python, from a build
+carrying the `gpu` feature. See [Python Bindings](python.md#gpu-backends).
+
 ## Module layout (`src/gpu/`)
 
 | File | Role |

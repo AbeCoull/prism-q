@@ -48,6 +48,11 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
+      # The bindings are not a default workspace member, so the line above stops
+      # at the root crate. This is the configuration every published wheel ships.
+      - name: Clippy Python bindings
+        run: cargo clippy -p prism-q-py --all-targets -- -D warnings -D clippy::undocumented_unsafe_blocks
+
       - name: Tests
         run: cargo nextest run --features "$CI_FEATURES"
 
@@ -345,6 +350,10 @@ jobs:
         run: cargo check --all-targets --features "parallel gpu distributed"
       - name: Clippy GPU paths
         run: cargo clippy --all-targets --features "parallel gpu" -- -D warnings -D clippy::undocumented_unsafe_blocks
+      # The bindings are not a default workspace member, so the root checks above
+      # never reach their GPU arms.
+      - name: Clippy Python bindings GPU paths
+        run: cargo clippy -p prism-q-py --all-targets --features gpu -- -D warnings -D clippy::undocumented_unsafe_blocks
       - name: KERNEL_NAMES consistency (device-free)
         run: cargo nextest run --features "parallel gpu" -E 'test(kernel_names_match_source_entry_points)'
 

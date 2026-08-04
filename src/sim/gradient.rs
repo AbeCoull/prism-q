@@ -1,20 +1,18 @@
-//! Adjoint-method gradients of expectation values.
+//! Gradients of expectation values, by the adjoint method and by parameter
+//! shift.
 //!
-//! Computes the exact gradient of `⟨H⟩ = ⟨0|U†HU|0⟩` with respect to a vector
-//! of circuit parameters in a cost independent of the parameter count, by
-//! back-propagating two statevectors through the circuit. For `U = U_L…U_1`
-//! and a Hermitian Hamiltonian `H = Σ c_k P_k`:
+//! Both compute `⟨H⟩ = ⟨0|U†HU|0⟩` and `d⟨H⟩/dθ` for a Hermitian
+//! `H = Σ c_k P_k`. The adjoint method ([`run_expectation_gradient`]) is exact
+//! in one pair of statevectors and costs one circuit evaluation regardless of
+//! the parameter count, but runs only on the statevector backend. Parameter
+//! shift ([`run_expectation_gradient_shift`]) costs two evaluations per
+//! trainable gate and reaches any backend with a native observable path,
+//! including widths past the statevector cap.
 //!
-//! 1. Forward: apply `U` unfused, keep `|φ⟩ = U|0⟩`.
-//! 2. Build `|λ⟩ = H|φ⟩`; the value `⟨H⟩ = Re⟨φ|λ⟩`.
-//! 3. Backward `i = L…1`: for each trainable gate with generator `G_i`,
-//!    accumulate the gradient from `⟨λ|G_i|φ⟩` (with `|φ⟩` on the output side
-//!    of gate `i`), then step both states back through `U_i†`.
-//!
-//! Only the statevector backend is supported. The differentiated circuit must
-//! be unitary (no measurement, reset, or conditional). Differentiable gates are
-//! `Rx`, `Ry`, `Rz`, `Rzz`, and `P`; a trainable link on any other gate is an
-//! error.
+//! The differentiated circuit must be unitary (no measurement, reset, or
+//! conditional) on both paths. Differentiable gates are `Rx`, `Ry`, `Rz`,
+//! `Rzz`, and `P` for both: those are the only `Gate` variants carrying an
+//! angle inline, so the shift rule reaches no gate the adjoint rejects.
 
 use num_complex::Complex64;
 
@@ -25,7 +23,7 @@ use crate::error::{PrismError, Result};
 use crate::gates::{Gate, GeneratorKind};
 
 use super::unified_pauli::PauliTerm;
-use super::{i_pow, pauli_masks, pauli_sandwich};
+use super::{BackendKind, i_pow, pauli_masks, pauli_sandwich};
 
 /// Binds one trainable gate instruction to a slot in the parameter vector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,6 +377,114 @@ fn gradient_contribution(
             }
             -2.0 * acc.im
         }
+    }
+}
+
+/// Compute `⟨H⟩` and its gradient by the parameter-shift rule, routing every
+/// evaluation through automatic backend selection.
+///
+/// Unlike [`run_expectation_gradient`] this places no ceiling on the qubit
+/// count of its own: it holds one backend state at a time and inherits whatever
+/// the selected backend can represent. It also accepts `QftBlock`. The price is
+/// `1 + 2 * params.links().len()` circuit evaluations against the adjoint's
+/// one, so prefer the adjoint wherever it applies. Select an explicit backend
+/// with [`crate::simulate`] and `expectation_gradient_shift`.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{Circuit, Gate, ParameterMap, PauliTerm, run_expectation_gradient_shift};
+///
+/// let theta = 0.5_f64;
+/// let mut circuit = Circuit::new(2, 0);
+/// circuit.add_gate(Gate::Rx(theta), &[0]);
+///
+/// let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+/// let params = ParameterMap::all_rotations(&circuit);
+/// let g = run_expectation_gradient_shift(&circuit, &hamiltonian, &params, 42)?;
+/// assert!((g.gradient[0] + theta.sin()).abs() < 1e-9);
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
+pub fn run_expectation_gradient_shift(
+    circuit: &Circuit,
+    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    params: &ParameterMap,
+    seed: u64,
+) -> Result<ExpectationGradient> {
+    shift_gradient(&BackendKind::Auto, circuit, hamiltonian, params, None, seed)
+}
+
+/// Parameter-shift gradient on the backend `kind` selects, optionally from a
+/// start state.
+///
+/// Every differentiable gate is `exp(-iθG/2)` with `G` of eigenvalues `±1`, so
+/// `⟨H⟩` is a degree-1 trigonometric polynomial in each angle and
+/// `d⟨H⟩/dθ = (f(θ+π/2) - f(θ-π/2)) / 2` is exact. `P(θ) = diag(1, e^{iθ})` has
+/// the projector `|1⟩⟨1|` for a generator, eigenvalues `{0, 1}` rather than
+/// `{-1, +1}`, but `P(θ) = e^{iθ/2} Rz(θ)`: the θ-dependent factor is a scalar
+/// wherever the gate sits, so it cancels against its conjugate in `⟨ψ|H|ψ⟩` and
+/// the same shift applies unchanged.
+///
+/// Gates sharing a parameter slot are shifted one at a time and summed. Shifting
+/// them together is a different quantity: two `Rx(θ)` on one qubit under `⟨Z⟩`
+/// give `cos 2θ`, whose joint ±π/2 shift is zero rather than `-2 sin 2θ`.
+pub(crate) fn shift_gradient(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    params: &ParameterMap,
+    initial_state: Option<&[Complex64]>,
+    seed: u64,
+) -> Result<ExpectationGradient> {
+    params.validate(circuit)?;
+    if initial_state.is_some() {
+        super::require_unitary_circuit(kind, circuit)?;
+    }
+
+    let observables: Vec<Vec<PauliTerm>> =
+        hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
+    let evaluate = |c: &Circuit| -> Result<f64> {
+        let per_term = match initial_state {
+            Some(state) => {
+                super::expectation_values_from_initial_state(kind, c, state, &observables, seed)?
+            }
+            None => super::run_expectation_values_with(kind.clone(), c, &observables, seed)?,
+        };
+        Ok(hamiltonian
+            .iter()
+            .zip(per_term)
+            .map(|((coeff, _), v)| coeff * v)
+            .sum())
+    };
+
+    let value = evaluate(circuit)?;
+    let mut gradient = vec![0.0; params.num_params()];
+    if params.is_empty() {
+        return Ok(ExpectationGradient { value, gradient });
+    }
+
+    let shift = std::f64::consts::FRAC_PI_2;
+    let mut shifted = circuit.clone();
+    for link in params.links() {
+        let base = *angle_mut(&mut shifted.instructions[link.instruction]);
+        *angle_mut(&mut shifted.instructions[link.instruction]) = base + shift;
+        let plus = evaluate(&shifted)?;
+        *angle_mut(&mut shifted.instructions[link.instruction]) = base - shift;
+        let minus = evaluate(&shifted)?;
+        *angle_mut(&mut shifted.instructions[link.instruction]) = base;
+        gradient[link.param] += 0.5 * (plus - minus);
+    }
+
+    Ok(ExpectationGradient { value, gradient })
+}
+
+fn angle_mut(instruction: &mut Instruction) -> &mut f64 {
+    match instruction {
+        Instruction::Gate {
+            gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
+            ..
+        } => t,
+        _ => unreachable!("trainable instruction validated as differentiable"),
     }
 }
 

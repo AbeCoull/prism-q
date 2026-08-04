@@ -13,7 +13,7 @@ use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{
     BackendKind, ClassicalCondition, Instruction, MpsBackend, ParameterMap, PauliTerm,
-    run_expectation_gradient, run_expectation_values,
+    run_expectation_gradient, run_expectation_gradient_shift, run_expectation_values,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -1141,6 +1141,9 @@ fn bench_gradient(c: &mut Criterion) {
         });
         group.bench_with_input(BenchmarkId::new("finitediff", n), &circuit, |b, circ| {
             b.iter(|| black_box(finite_diff_gradient(circ, &ham, &params)));
+        });
+        group.bench_with_input(BenchmarkId::new("paramshift", n), &circuit, |b, circ| {
+            b.iter(|| black_box(run_expectation_gradient_shift(circ, &ham, &params, 42).unwrap()));
         });
     }
 

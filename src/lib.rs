@@ -95,7 +95,10 @@ pub use sim::compiled::{
     PauliExpectationAccumulator, ShotAccumulator, ShotLayout, compile_detector_sampler,
     compile_forward, compile_measurements, run_shots_compiled,
 };
-pub use sim::gradient::{ExpectationGradient, ParamLink, ParameterMap, run_expectation_gradient};
+pub use sim::gradient::{
+    ExpectationGradient, ParamLink, ParameterMap, run_expectation_gradient,
+    run_expectation_gradient_shift,
+};
 pub use sim::homological::{
     ErrorChainComplex, HomologicalSampler, noisy_marginals_analytical, run_shots_homological,
 };

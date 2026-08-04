@@ -857,6 +857,48 @@ fn try_native_terminal_backend(
     Ok(Some(backend))
 }
 
+/// Build and run the backend for a marginal query when routing lands on a
+/// single backend that evaluates observables on its own representation.
+///
+/// Returns `None` when the route is not a direct single backend, or when that
+/// backend has no native observable path, leaving the dense probability route
+/// untouched. The capability is probed before `init`, so a backend without one
+/// costs an allocation and nothing else.
+///
+/// The product state is carried past subsystem decomposition for the reason
+/// [`try_native_terminal_backend`] carries it: it already holds one factor per
+/// qubit, and the decomposed route would build the `2^n` merged distribution to
+/// read marginals a per-qubit expectation answers directly. Every other backend
+/// keeps the block split, which has no single backend holding the joint state.
+fn try_native_marginal_backend(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+) -> Result<Option<Box<dyn Backend>>> {
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, circuit)?;
+    }
+    let (decomposed, has_partial_independence) = match plan_probability_route(kind, circuit) {
+        ProbabilityRoute::Direct {
+            has_partial_independence,
+        } => (false, has_partial_independence),
+        ProbabilityRoute::Decomposed(_) => (true, false),
+        _ => return Ok(None),
+    };
+    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, has_partial_independence) else {
+        return Ok(None);
+    };
+    if decomposed && !matches!(plan, BackendPlan::ProductState) {
+        return Ok(None);
+    }
+    let mut backend = plan.build(seed);
+    if !backend.supports_pauli_expectation() {
+        return Ok(None);
+    }
+    execute(&mut *backend, circuit, &SimOptions::classical_only())?;
+    Ok(Some(backend))
+}
+
 /// A source that answers every measurement in a circuit from a single state,
 /// in the precedence [`prepare_shot_source`] applies. Shots and counts both
 /// consume it, so the two cannot disagree about which shortcut applies.
@@ -1052,7 +1094,6 @@ fn run_marginals_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result
 
 /// Per-qubit marginals from native single-qubit Z expectations, for a backend
 /// whose own representation answers them without a dense probability vector.
-#[cfg(feature = "distributed")]
 fn marginals_from_pauli_expectations(
     backend: &dyn Backend,
     num_qubits: usize,
@@ -1152,6 +1193,10 @@ fn run_marginals_result_with(
             );
         execute(&mut backend, circuit, &SimOptions::classical_only())?;
         return marginals_from_pauli_expectations(&backend, n);
+    }
+
+    if let Some(backend) = try_native_marginal_backend(&kind, circuit, seed)? {
+        return marginals_from_pauli_expectations(&*backend, n);
     }
 
     let result = run_with(kind, circuit, seed)?;

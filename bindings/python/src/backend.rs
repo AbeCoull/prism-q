@@ -1,10 +1,14 @@
 //! `BackendKind` wrapper with ergonomic static constructors.
 //!
-//! GPU and distributed variants are intentionally omitted: the bindings do not
-//! enable the `gpu` or `distributed` features.
+//! The GPU constructors exist in every build and take a [`PyGpuContext`], which
+//! is what fails when the `gpu` feature is absent. The distributed variant has
+//! no constructor: nothing here owns `MPI_Init`.
 
 use prism_q::BackendKind;
 use pyo3::prelude::*;
+
+use crate::error::PyPrismResult;
+use crate::gpu::PyGpuContext;
 
 /// Backend selection for a simulation. Construct via the static methods, e.g.
 /// `BackendKind.auto()`, `BackendKind.mps(max_bond_dim=64)`.
@@ -73,6 +77,59 @@ impl PyBackendKind {
     #[pyo3(signature = (epsilon = 0.0, max_terms = 65536))]
     fn deterministic_pauli(epsilon: f64, max_terms: usize) -> Self {
         Self(BackendKind::DeterministicPauli { epsilon, max_terms })
+    }
+
+    /// Structure-driven dispatch with the supplied device opted in. Blocks that
+    /// clear the family crossover with VRAM to spare run on the device; every
+    /// other block takes the path `auto()` would.
+    #[staticmethod]
+    fn auto_gpu(context: &PyGpuContext) -> PyPrismResult<Self> {
+        #[cfg(feature = "gpu")]
+        {
+            Ok(Self(BackendKind::AutoGpu {
+                context: context.inner.clone(),
+            }))
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = context;
+            Err(crate::gpu::unsupported())
+        }
+    }
+
+    /// Statevector on the supplied device. Circuits below the crossover
+    /// (`PRISM_GPU_MIN_QUBITS`, default 14) run on the host path instead.
+    #[staticmethod]
+    fn statevector_gpu(context: &PyGpuContext) -> PyPrismResult<Self> {
+        #[cfg(feature = "gpu")]
+        {
+            Ok(Self(BackendKind::StatevectorGpu {
+                context: context.inner.clone(),
+            }))
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = context;
+            Err(crate::gpu::unsupported())
+        }
+    }
+
+    /// Stabilizer tableau on the supplied device. Clifford-only circuits, and
+    /// below the crossover (`PRISM_STABILIZER_GPU_MIN_QUBITS`, default 100000)
+    /// the host tableau runs instead.
+    #[staticmethod]
+    fn stabilizer_gpu(context: &PyGpuContext) -> PyPrismResult<Self> {
+        #[cfg(feature = "gpu")]
+        {
+            Ok(Self(BackendKind::StabilizerGpu {
+                context: context.inner.clone(),
+            }))
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = context;
+            Err(crate::gpu::unsupported())
+        }
     }
 
     fn __repr__(&self) -> String {

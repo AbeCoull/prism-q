@@ -16,6 +16,12 @@ release = false
 name = "_prism_q"
 crate-type = ["cdylib"]
 
+# Off by default: published wheels are built on runners without a CUDA toolkit,
+# and macOS has none at all. `GpuContext` raises rather than vanishing when this
+# is absent, so the Python API surface is the same either way.
+[features]
+gpu = ["prism-q/gpu"]
+
 [dependencies]
 prism-q = { path = "../..", default-features = false, features = ["parallel"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311", "num-complex"] }

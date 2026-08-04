@@ -35,6 +35,7 @@ pub struct PySimulation {
     seed: Option<u64>,
     kind: Option<BackendKind>,
     noise: Option<Py<PyNoiseModel>>,
+    initial_state: Option<Vec<Complex64>>,
 }
 
 #[pymethods]
@@ -61,12 +62,30 @@ impl PySimulation {
         slf
     }
 
+    /// Start from `amplitudes` instead of |0...0>.
+    ///
+    /// Takes any sequence of complex numbers, including a `complex128` NumPy
+    /// array, indexed with qubit 0 in the least significant bit. The length must
+    /// be `2 ** num_qubits` and the vector must be normalized. A start state
+    /// runs on the statevector or density-matrix backend only. `.shots()` and
+    /// `.sample_counts()` reject one with a noise model attached, and
+    /// `.expectation_gradient()` and `.density_matrix_expectation_values()`
+    /// reject one outright.
+    fn initial_state(
+        mut slf: PyRefMut<'_, Self>,
+        amplitudes: Vec<Complex64>,
+    ) -> PyRefMut<'_, Self> {
+        slf.initial_state = Some(amplitudes);
+        slf
+    }
+
     /// Run once and return classical bits plus the probability distribution.
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyRunOutcome> {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
         let outcome: RunOutcome = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
@@ -74,6 +93,9 @@ impl PySimulation {
             }
             if let Some(nm) = &owned_noise {
                 sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
             }
             sim.seed(seed).run()
         })?;
@@ -86,6 +108,7 @@ impl PySimulation {
         let kind = self.kind.clone();
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
         let result: ShotsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
@@ -93,6 +116,9 @@ impl PySimulation {
             }
             if let Some(nm) = &owned_noise {
                 sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
             }
             sim.seed(seed).shots(num_shots)
         })?;
@@ -105,6 +131,7 @@ impl PySimulation {
         let kind = self.kind.clone();
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
         let result: CountsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
@@ -112,6 +139,9 @@ impl PySimulation {
             }
             if let Some(nm) = &owned_noise {
                 sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
             }
             sim.seed(seed).sample_counts(num_shots)
         })?;
@@ -127,6 +157,7 @@ impl PySimulation {
         let kind = self.kind.clone();
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
         let result: MarginalsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
@@ -134,6 +165,9 @@ impl PySimulation {
             }
             if let Some(nm) = &owned_noise {
                 sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
             }
             sim.seed(seed).marginals()
         })?;
@@ -152,9 +186,13 @@ impl PySimulation {
         }
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let circuit = &self.circuit;
+        let start = self.initial_state.as_deref();
         let amps: Vec<Complex64> = py.detach(|| {
             let mut backend = StatevectorBackend::new(seed);
-            prism_q::run_on(&mut backend, circuit)?;
+            match start {
+                Some(amplitudes) => prism_q::run_on_state(&mut backend, circuit, amplitudes)?,
+                None => prism_q::run_on(&mut backend, circuit)?,
+            };
             backend.export_statevector()
         })?;
         Ok(complex_array(py, amps))
@@ -192,10 +230,15 @@ impl PySimulation {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;
+        let start = self.initial_state.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
+            }
+            // Carried so the core rejects it rather than ignoring it here.
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
             }
             sim.seed(seed).expectation_gradient(&terms, &params)
         })?;
@@ -220,6 +263,7 @@ impl PySimulation {
         let kind = self.kind.clone();
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
         let values = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if let Some(k) = &kind {
@@ -227,6 +271,9 @@ impl PySimulation {
             }
             if let Some(nm) = &owned_noise {
                 sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
             }
             sim.seed(seed).expectation_values(&observables)
         })?;
@@ -248,6 +295,13 @@ impl PySimulation {
         py: Python<'_>,
         observables: Vec<Vec<(usize, String)>>,
     ) -> PyPrismResult<Vec<f64>> {
+        if self.initial_state.is_some() {
+            return Err(invalid(
+                "density_matrix_expectation_values() does not accept a start state; call \
+                 expectation_values() with BackendKind.density_matrix(), which takes one on a \
+                 unitary circuit",
+            ));
+        }
         let observables = parse_observables(observables)?;
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let circuit = &self.circuit;
@@ -303,6 +357,7 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
         seed: None,
         kind: None,
         noise: None,
+        initial_state: None,
     }
 }
 

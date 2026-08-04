@@ -676,3 +676,56 @@ fn density_matrix_dephasing_removes_coherence() {
     backend.apply(&hadamard).unwrap();
     assert_probs(&backend.probabilities().unwrap(), &[0.25, 0.25, 0.25, 0.25]);
 }
+
+// ---- Start states ----
+
+// H (cos(pi/8)|0> + sin(pi/8)|1>) = ((c+s)|0> + (c-s)|1>)/sqrt(2), so
+// p(0) = (c+s)^2/2 = (1 + 2cs)/2 = (1 + sin(pi/4))/2 and p(1) is its
+// complement. The density matrix holds |psi><psi| for the same start state,
+// and its diagonal is the same pair.
+#[test]
+fn hadamard_on_a_tilted_start_state() {
+    let theta = std::f64::consts::FRAC_PI_8;
+    let state = vec![
+        Complex64::new(theta.cos(), 0.0),
+        Complex64::new(theta.sin(), 0.0),
+    ];
+    let a = std::f64::consts::FRAC_1_SQRT_2;
+    let expected = [(1.0 + a) / 2.0, (1.0 - a) / 2.0];
+
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(Gate::H, &[0]);
+
+    let mut sv = StatevectorBackend::new(common::SEED);
+    sv.init_from_amplitudes(state.clone(), 0).unwrap();
+    sv.apply_instructions(&c.instructions).unwrap();
+    assert_probs(&sv.probabilities().unwrap(), &expected);
+
+    let mut dm = DensityMatrixBackend::new(common::SEED);
+    dm.init_from_amplitudes(state, 0).unwrap();
+    dm.apply_instructions(&c.instructions).unwrap();
+    assert_probs(&dm.probabilities().unwrap(), &expected);
+}
+
+// CX with the control in cos(pi/8)|0> + sin(pi/8)|1> and the target in |0>
+// gives c|00> + s|11>, so the populations are cos^2(pi/8) and sin^2(pi/8) on
+// the two correlated outcomes and zero elsewhere.
+#[test]
+fn cx_on_a_tilted_control_start_state() {
+    let theta = std::f64::consts::FRAC_PI_8;
+    let mut state = vec![Complex64::new(0.0, 0.0); 4];
+    state[0] = Complex64::new(theta.cos(), 0.0);
+    state[1] = Complex64::new(theta.sin(), 0.0);
+    let a = std::f64::consts::FRAC_1_SQRT_2;
+
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::Cx, &[0, 1]);
+
+    let mut sv = StatevectorBackend::new(common::SEED);
+    sv.init_from_amplitudes(state, 0).unwrap();
+    sv.apply_instructions(&c.instructions).unwrap();
+    assert_probs(
+        &sv.probabilities().unwrap(),
+        &[(1.0 + a) / 2.0, 0.0, 0.0, (1.0 - a) / 2.0],
+    );
+}

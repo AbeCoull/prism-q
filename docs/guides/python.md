@@ -104,16 +104,16 @@ sim = simulate(circuit).seed(7).backend(BackendKind.statevector())
 outcome = sim.run()
 ```
 
-| Terminal | Returns | Honors `.noise()` |
-|----------|---------|-------------------|
-| `run()` | `RunOutcome`: classical bits and the full probability array | density matrix only |
-| `shots(n)` | `ShotsResult`: per-shot measurement records | yes |
-| `sample_counts(n)` | `CountsResult`: frequency histogram | yes |
-| `marginals()` | `list[tuple[float, float]]`, per-qubit `(p0, p1)` | density matrix only |
-| `state_vector()` | `complex128` amplitudes | no |
-| `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only |
-| `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes |
-| `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no |
+| Terminal | Returns | Honors `.noise()` | Honors `.initial_state()` |
+|----------|---------|-------------------|---------------------------|
+| `run()` | `RunOutcome`: classical bits and the full probability array | density matrix only | yes |
+| `shots(n)` | `ShotsResult`: per-shot measurement records | yes | without `.noise()` |
+| `sample_counts(n)` | `CountsResult`: frequency histogram | yes | without `.noise()` |
+| `marginals()` | `list[tuple[float, float]]`, per-qubit `(p0, p1)` | density matrix only | yes |
+| `state_vector()` | `complex128` amplitudes | no | yes |
+| `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only | yes |
+| `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes | no |
+| `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no | no |
 
 `shots()` and `sample_counts()` average trajectories on any backend holding a
 per-shot pure state. The three rows marked "density matrix only" read the exact
@@ -131,6 +131,41 @@ backend, both regardless of `.backend(...)`.
 
 `ShotsResult` and `CountsResult` both expose `counts()`, returning a dict keyed
 by bitstring.
+
+## Starting from a state other than |0...0>
+
+`.initial_state(amplitudes)` replaces the default all-zero start. It takes any
+sequence of complex numbers, a `complex128` NumPy array included, indexed with
+qubit 0 in the least significant bit.
+
+```python
+import math
+import numpy as np
+from prism_q import CircuitBuilder, simulate
+
+theta = math.pi / 8
+start = np.array([math.cos(theta), math.sin(theta)], dtype=np.complex128)
+circuit = CircuitBuilder(1).h(0).build()
+probs = simulate(circuit).initial_state(start).seed(42).run().probabilities
+```
+
+The vector must have `2 ** num_qubits` entries and unit norm. A wrong length, a
+non-finite entry, or a norm off unity raises `PrismError`; an unnormalized
+vector is rejected rather than rescaled, so a mistake surfaces instead of
+becoming a silent factor on every amplitude.
+
+A start state also narrows the route. Auto dispatch reads circuit structure, and
+its shortcuts (tableau, product state, subsystem decomposition, Pauli
+propagation) are only valid from |0...0>: a Clifford circuit produces a
+stabilizer state only when its input is one. So `auto()` resolves to the
+statevector, `density_matrix()` is the only other backend that accepts one, and
+every other choice raises `PrismError` naming itself. `run()`, `shots()`,
+`sample_counts()`, `marginals()`, `expectation_values()`, and `state_vector()`
+carry it; `expectation_gradient()` and `density_matrix_expectation_values()`
+reject it, as do `shots()` and `sample_counts()` with a noise model attached,
+since trajectory replay reinitializes a pure state per shot. To evolve a start
+state under noise, read the exact mixture with `run()`, `marginals()`, or
+`expectation_values()` on `density_matrix()`.
 
 ## Selecting a backend
 

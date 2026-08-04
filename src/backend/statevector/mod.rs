@@ -528,7 +528,12 @@ impl StatevectorBackend {
     /// Initialize the backend from a pre-computed state vector.
     ///
     /// Accepts ownership of the amplitude vector, bypassing the default |0...0⟩
-    /// initialization. The vector length must be a power of 2.
+    /// initialization. The vector length must be a power of 2. Normalization is
+    /// not checked: the adjoint gradient seeds its lambda register with `H|ψ⟩`,
+    /// whose norm is not 1, and reads raw amplitudes. A start state coming from
+    /// a user goes through
+    /// [`init_from_amplitudes`](crate::backend::Backend::init_from_amplitudes),
+    /// which validates first.
     pub fn init_from_state(
         &mut self,
         state: Vec<Complex64>,
@@ -708,6 +713,19 @@ impl Backend for StatevectorBackend {
         }
         self.state[0] = Complex64::new(1.0, 0.0);
         Ok(())
+    }
+
+    fn supports_initial_state(&self) -> bool {
+        true
+    }
+
+    fn init_from_amplitudes(
+        &mut self,
+        amplitudes: Vec<Complex64>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        crate::backend::validate_initial_amplitudes(&amplitudes)?;
+        self.init_from_state(amplitudes, num_classical_bits)
     }
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {

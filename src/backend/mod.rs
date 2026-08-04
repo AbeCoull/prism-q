@@ -30,6 +30,7 @@
 //! | `reduced_density_matrix_1q` | DistributedStatevector | Trajectories run shots on Rayon workers whose order differs per rank, so per-shot noise would issue rank collectives out of lockstep. `run_shots_with_noise` rejects the backend for that reason, which closes the only path here. |
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
+//! | `init_from_amplitudes` | Everything except Statevector and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. |
 //!
 //! [`Backend::reduced_density_matrix_1q`] and [`Backend::apply_1q_matrix`] are
 //! two halves of one capability, sampling a non-Pauli branch and applying the
@@ -124,6 +125,44 @@ mod norm_tests {
             );
         }
     }
+}
+
+/// Tolerance on `| ||psi||^2 - 1 |` for a caller-supplied start state.
+pub(crate) const INITIAL_STATE_NORM_EPS: f64 = 1e-9;
+
+/// Reject a start state that is not a normalized amplitude vector over a whole
+/// number of qubits.
+///
+/// An unnormalized vector is rejected rather than rescaled: the dense backends
+/// carry a deferred normalization factor that a start state resets to 1, so
+/// rescaling here would hide the caller's error inside that factor. Finiteness
+/// is checked first, since a NaN amplitude makes the norm comparison itself
+/// false.
+pub(crate) fn validate_initial_amplitudes(amplitudes: &[Complex64]) -> Result<()> {
+    let dim = amplitudes.len();
+    if !dim.is_power_of_two() || dim < 2 {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: format!("start state length must be a power of 2 and >= 2, got {dim}"),
+        });
+    }
+    if amplitudes
+        .iter()
+        .any(|a| !a.re.is_finite() || !a.im.is_finite())
+    {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: "start state has a non-finite amplitude".to_string(),
+        });
+    }
+    let norm_sqr = state_norm_sqr(amplitudes);
+    if (norm_sqr - 1.0).abs() > INITIAL_STATE_NORM_EPS {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: format!(
+                "start state must be normalized, squared norm is {norm_sqr}; scale the \
+                 amplitudes by 1/sqrt of it"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Tableau size at which stabilizer row loops parallelize.
@@ -273,6 +312,33 @@ pub trait Backend {
     ///
     /// After this call the backend is in the |0...0⟩ state.
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()>;
+
+    /// Whether [`Backend::init_from_amplitudes`] can start this backend from a
+    /// caller-supplied state.
+    fn supports_initial_state(&self) -> bool {
+        false
+    }
+
+    /// Initialize from a dense amplitude vector instead of |0...0⟩.
+    ///
+    /// `amplitudes` is indexed like [`Backend::export_statevector`] output, qubit
+    /// 0 in the least significant bit, and its length sets the register width.
+    /// Implementors validate it through `validate_initial_amplitudes`, so a
+    /// length that is not a power of two, a non-finite amplitude, or a squared
+    /// norm off unity returns `InvalidParameter` rather than starting a run on a
+    /// state that is not a state. The default reports that the representation
+    /// cannot hold an arbitrary one; see the module docs for what declines it.
+    fn init_from_amplitudes(
+        &mut self,
+        amplitudes: Vec<Complex64>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        let _ = (amplitudes, num_classical_bits);
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "initialization from a caller-supplied state".to_string(),
+        })
+    }
 
     /// Apply a single instruction to the current state.
     ///

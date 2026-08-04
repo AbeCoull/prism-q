@@ -28,7 +28,7 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 [docs.rs](https://docs.rs/prism-q).
 
 **Simulation:**
-`simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_qasm`,
+`simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`,
 `run_expectation_values`, `bitstring`
 
 **Gradients:**

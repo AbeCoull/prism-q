@@ -634,6 +634,32 @@ impl Backend for DensityMatrixBackend {
         self.sv.init(2 * num_qubits, 0)
     }
 
+    fn supports_initial_state(&self) -> bool {
+        true
+    }
+
+    /// Starts from the pure mixture `|psi><psi|`, so the buffer is the `4^n`
+    /// outer product of `amplitudes` with its own conjugate. The cap check in
+    /// [`init`](Self::init) runs first, before that buffer is sized.
+    fn init_from_amplitudes(
+        &mut self,
+        amplitudes: Vec<Complex64>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        crate::backend::validate_initial_amplitudes(&amplitudes)?;
+        let num_qubits = amplitudes.len().trailing_zeros() as usize;
+        self.init(num_qubits, num_classical_bits)?;
+
+        let d = amplitudes.len();
+        for (row, &amp) in amplitudes.iter().enumerate() {
+            let dst = &mut self.sv.state[row * d..(row + 1) * d];
+            for (entry, &col) in dst.iter_mut().zip(amplitudes.iter()) {
+                *entry = amp * col.conj();
+            }
+        }
+        Ok(())
+    }
+
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         match instruction {
             Instruction::Gate { gate, targets } => self.apply_unitary(gate, targets),

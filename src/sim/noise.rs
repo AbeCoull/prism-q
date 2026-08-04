@@ -2470,7 +2470,8 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
     }
 }
 
-/// Evolve a density-matrix backend through `circuit` and optional `noise`.
+/// Evolve a density-matrix backend through `circuit` and optional `noise`,
+/// starting from `initial_state` when one is given and |0...0> otherwise.
 ///
 /// Measurements are not collapsed; observables and marginals are read off the
 /// final mixed state, so this assumes terminal (non-feedback) measurement. The
@@ -2479,6 +2480,7 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
 fn evolve_density_matrix(
     circuit: &Circuit,
     noise: Option<&NoiseModel>,
+    initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<DensityMatrixBackend> {
     crate::backend::check_state_allocation(
@@ -2497,7 +2499,13 @@ fn evolve_density_matrix(
     }
 
     let mut dm = DensityMatrixBackend::new(seed);
-    dm.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    match initial_state {
+        Some(state) => {
+            crate::sim::check_initial_state_len(state, circuit.num_qubits)?;
+            dm.init_from_amplitudes(state.to_vec(), circuit.num_classical_bits)?;
+        }
+        None => dm.init(circuit.num_qubits, circuit.num_classical_bits)?,
+    }
     for (i, inst) in circuit.instructions.iter().enumerate() {
         match inst {
             Instruction::Measure { .. } => {}
@@ -2519,9 +2527,10 @@ fn evolve_density_matrix(
 pub(crate) fn density_matrix_probabilities(
     circuit: &Circuit,
     noise: &NoiseModel,
+    initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    evolve_density_matrix(circuit, Some(noise), seed)?.probabilities()
+    evolve_density_matrix(circuit, Some(noise), initial_state, seed)?.probabilities()
 }
 
 /// Exact per-classical-bit measurement marginals under a noise model, evolved
@@ -2534,7 +2543,7 @@ pub(crate) fn dm_noisy_marginals(
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    let dm = evolve_density_matrix(circuit, Some(noise), seed)?;
+    let dm = evolve_density_matrix(circuit, Some(noise), None, seed)?;
     let mut result = vec![0.5f64; circuit.num_classical_bits];
     for inst in &circuit.instructions {
         if let Instruction::Measure {
@@ -2562,7 +2571,20 @@ pub fn density_matrix_expectation_values(
     noise: Option<&NoiseModel>,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    let dm = evolve_density_matrix(circuit, noise, seed)?;
+    dm_expectation_values(circuit, observables, noise, None, seed)
+}
+
+/// [`density_matrix_expectation_values`] with a caller-supplied start state,
+/// which `Simulate::expectation_values` carries and the public entry point
+/// leaves at |0...0>.
+pub(crate) fn dm_expectation_values(
+    circuit: &Circuit,
+    observables: &[Vec<crate::PauliTerm>],
+    noise: Option<&NoiseModel>,
+    initial_state: Option<&[Complex64]>,
+    seed: u64,
+) -> Result<Vec<f64>> {
+    let dm = evolve_density_matrix(circuit, noise, initial_state, seed)?;
     observables
         .iter()
         .map(|obs| {

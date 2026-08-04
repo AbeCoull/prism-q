@@ -27,9 +27,9 @@ use dispatch::{
     MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
     MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
     MIN_QUBITS_FOR_SPD_AUTO, TemporalCliffordPlan, accel_for, auto_selects_cpu_statevector,
-    build_statevector, has_temporal_clifford_opportunity, plan_for_family, plan_temporal_clifford,
-    resolve, resolve_backend, run_temporal_clifford, stabilizer_rank_budget,
-    validate_explicit_backend,
+    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, plan_for_family,
+    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
+    stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{ShotsResult, bitstring};
@@ -130,6 +130,7 @@ pub struct Simulate<'c, SeedState> {
     kind: BackendKind,
     seed: SeedState,
     noise_model: Option<&'c noise::NoiseModel>,
+    initial_state: Option<&'c [Complex64]>,
 }
 
 impl<'c, SeedState> Simulate<'c, SeedState> {
@@ -152,6 +153,25 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     #[inline]
     pub fn noise(mut self, model: &'c noise::NoiseModel) -> Self {
         self.noise_model = Some(model);
+        self
+    }
+
+    /// Start from `amplitudes` instead of |0...0⟩.
+    ///
+    /// Indexed with qubit 0 in the least significant bit, length `2^n` for the
+    /// circuit's `n` qubits, and normalized. A vector failing any of those is
+    /// rejected with `InvalidParameter` before the run.
+    ///
+    /// A start state also constrains the route, because shape-based dispatch
+    /// reads the circuit alone and its shortcuts hold only from |0...0⟩:
+    /// [`BackendKind::Auto`] resolves to the statevector, and every backend
+    /// other than the statevector and [`BackendKind::DensityMatrix`] reports
+    /// `IncompatibleBackend`. [`Simulate::expectation_gradient`] declines a start
+    /// state, as do [`Simulate::shots`] and [`Simulate::sample_counts`] with a
+    /// noise model attached, since trajectory replay has no start-state path.
+    #[inline]
+    pub fn initial_state(mut self, amplitudes: &'c [Complex64]) -> Self {
+        self.initial_state = Some(amplitudes);
         self
     }
 
@@ -195,6 +215,7 @@ impl<'c> Simulate<'c, Unseeded> {
             kind: self.kind,
             seed: Seeded { seed },
             noise_model: self.noise_model,
+            initial_state: self.initial_state,
         }
     }
 }
@@ -203,6 +224,20 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     fn seed_value(&self) -> u64 {
         self.seed.seed
+    }
+
+    /// Trajectory replay reinitializes a pure state per shot and the compiled
+    /// noisy samplers are tableau based, so neither carries a start state.
+    fn require_no_initial_state_under_noise(&self, terminal: &str) -> Result<()> {
+        if self.initial_state.is_some() {
+            return Err(reject_initial_state(
+                &self.kind,
+                terminal,
+                "noisy trajectory replay starts every shot from |0...0>; read the exact mixture \
+                 with `run`, `marginals`, or `expectation_values` on the density-matrix backend",
+            ));
+        }
+        Ok(())
     }
 
     /// Execute the circuit once.
@@ -216,7 +251,8 @@ impl<'c> Simulate<'c, Seeded> {
         let seed = self.seed_value();
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "a single run")?;
-            let probabilities = exact_noisy_probabilities(self.circuit, noise_model, seed)?;
+            let probabilities =
+                exact_noisy_probabilities(self.circuit, noise_model, self.initial_state, seed)?;
             let classical_bits =
                 sample_exact_noisy_shots(&probabilities, self.circuit, noise_model, 1, seed)
                     .swap_remove(0);
@@ -224,6 +260,15 @@ impl<'c> Simulate<'c, Seeded> {
                 classical_bits,
                 probabilities: Some(probabilities),
             });
+        }
+        if let Some(state) = self.initial_state {
+            return run_from_initial_state(
+                &self.kind,
+                self.circuit,
+                state,
+                seed,
+                &SimOptions::default(),
+            );
         }
         run_with_internal(self.kind, self.circuit, seed, SimOptions::default())
     }
@@ -234,7 +279,10 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         let seed = self.seed_value();
         if let Some(noise_model) = self.noise_model {
+            self.require_no_initial_state_under_noise("shot sampling")?;
             run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)
+        } else if let Some(state) = self.initial_state {
+            shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)
         } else {
             run_shots_with(self.kind, self.circuit, num_shots, seed)
         }
@@ -250,7 +298,10 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
         let seed = self.seed_value();
         let counts = if let Some(noise_model) = self.noise_model {
+            self.require_no_initial_state_under_noise("count sampling")?;
             run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)?.counts()
+        } else if let Some(state) = self.initial_state {
+            shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)?.counts()
         } else {
             run_counts_with(self.kind, self.circuit, num_shots, seed)?
         };
@@ -269,10 +320,14 @@ impl<'c> Simulate<'c, Seeded> {
         let seed = self.seed_value();
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "marginals")?;
-            let probs = exact_noisy_probabilities(self.circuit, noise_model, seed)?;
+            let probs =
+                exact_noisy_probabilities(self.circuit, noise_model, self.initial_state, seed)?;
             return Ok(MarginalsResult {
                 marginals: probs.marginals(),
             });
+        }
+        if let Some(state) = self.initial_state {
+            return marginals_from_initial_state(&self.kind, self.circuit, state, seed);
         }
         run_marginals_result_with(self.kind, self.circuit, seed)
     }
@@ -295,10 +350,21 @@ impl<'c> Simulate<'c, Seeded> {
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "expectation values")?;
             require_unitary_circuit(&self.kind, self.circuit)?;
-            return noise::density_matrix_expectation_values(
+            return noise::dm_expectation_values(
                 self.circuit,
                 observables,
                 Some(noise_model),
+                self.initial_state,
+                seed,
+            );
+        }
+        if let Some(state) = self.initial_state {
+            require_unitary_circuit(&self.kind, self.circuit)?;
+            return expectation_values_from_initial_state(
+                &self.kind,
+                self.circuit,
+                state,
+                observables,
                 seed,
             );
         }
@@ -328,6 +394,14 @@ impl<'c> Simulate<'c, Seeded> {
                          `expectation_values` numerically"
                     .into(),
             });
+        }
+        if self.initial_state.is_some() {
+            return Err(reject_initial_state(
+                &self.kind,
+                "the adjoint gradient",
+                "the backward pass reconstructs the input register by inverting the circuit from \
+                 |0...0>, so a start state would have to be inverted with it",
+            ));
         }
         if !(self.kind.is_auto() || matches!(self.kind, BackendKind::Statevector)) {
             return Err(PrismError::IncompatibleBackend {
@@ -369,6 +443,7 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
         kind: BackendKind::Auto,
         seed: Unseeded,
         noise_model: None,
+        initial_state: None,
     }
 }
 
@@ -388,6 +463,178 @@ fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
     })
 }
 
+/// Gate for the terminals that cannot carry a start state through their own
+/// machinery.
+fn reject_initial_state(kind: &BackendKind, terminal: &str, instead: &str) -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: format!("{kind:?}"),
+        reason: format!("{terminal} does not accept a start state; {instead}"),
+    }
+}
+
+/// Reject a start state whose width disagrees with the circuit's.
+///
+/// The circuit's declared register wins: the amplitude vector sets the backend's
+/// width, so a shorter or longer one would silently simulate a different
+/// register than the one the instructions index. A register too wide to index
+/// with a `usize` has no dense start state at all.
+fn check_initial_state_len(state: &[Complex64], num_qubits: usize) -> Result<()> {
+    let want = (num_qubits < usize::BITS as usize).then(|| 1usize << num_qubits);
+    if want == Some(state.len()) {
+        return Ok(());
+    }
+    let needs = match want {
+        Some(count) => count.to_string(),
+        None => format!("2^{num_qubits}"),
+    };
+    Err(PrismError::InvalidParameter {
+        message: format!(
+            "start state has {} amplitudes, but a {num_qubits}-qubit circuit needs {needs}",
+            state.len()
+        ),
+    })
+}
+
+/// Build the constrained backend for a start state and load it.
+fn backend_from_initial_state(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    state: &[Complex64],
+    seed: u64,
+) -> Result<Box<dyn Backend>> {
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, circuit)?;
+    }
+    check_initial_state_len(state, circuit.num_qubits)?;
+    let mut backend = initial_state_plan(kind, circuit.num_qubits)?.build(seed);
+    backend.init_from_amplitudes(state.to_vec(), circuit.num_classical_bits)?;
+    Ok(backend)
+}
+
+/// Fuse `circuit` for `backend` and apply it, leaving initialization to the
+/// caller. The start-state analogue of [`execute`], which owns the |0...0⟩ init.
+fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<()> {
+    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
+        std::borrow::Cow::Borrowed(circuit)
+    } else {
+        crate::circuit::expand_qft_blocks(circuit)
+    };
+    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    backend.apply_instructions(&fused.instructions)
+}
+
+fn run_from_initial_state(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    state: &[Complex64],
+    seed: u64,
+    opts: &SimOptions,
+) -> Result<RunOutcome> {
+    let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
+    apply_fused_circuit(&mut *backend, circuit)?;
+
+    let probabilities = if opts.probabilities {
+        try_backend_probabilities(&*backend)?
+    } else {
+        None
+    };
+    Ok(RunOutcome {
+        classical_bits: backend.classical_results().to_vec(),
+        probabilities,
+    })
+}
+
+/// Shots for a start state. Terminal measurements sample one evolved
+/// distribution; anything else replays the start state per shot, which is what
+/// mid-circuit collapse and classical feedback need.
+fn shots_from_initial_state(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    state: &[Complex64],
+    num_shots: usize,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let bits = circuit.num_classical_bits;
+    if circuit.has_terminal_measurements_only() {
+        let stripped = circuit.without_measurements();
+        let outcome = run_from_initial_state(kind, &stripped, state, seed, &SimOptions::default())?;
+        if let Some(probs) = outcome.probabilities {
+            let meas_map = circuit.measurement_map();
+            return Ok(ShotsResult::from_shots(
+                sample_shots(&probs, &meas_map, bits, num_shots, seed),
+                bits,
+            ));
+        }
+    }
+
+    // Plan, expansion, and fusion are shot independent, so they are hoisted out
+    // of the replay loop, matching `run_shots_per_shot`.
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, circuit)?;
+    }
+    check_initial_state_len(state, circuit.num_qubits)?;
+    let plan = initial_state_plan(kind, circuit.num_qubits)?;
+    let probe = plan.build(seed);
+    let expanded: std::borrow::Cow<'_, Circuit> = if probe.supports_qft_block() {
+        std::borrow::Cow::Borrowed(circuit)
+    } else {
+        crate::circuit::expand_qft_blocks(circuit)
+    };
+    let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
+
+    collect_shots(circuit, num_shots, seed, |shot_seed| {
+        let mut backend = plan.build(shot_seed);
+        backend.init_from_amplitudes(state.to_vec(), circuit.num_classical_bits)?;
+        backend.apply_instructions(&fused.instructions)?;
+        Ok(backend.classical_results().to_vec())
+    })
+}
+
+fn marginals_from_initial_state(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    state: &[Complex64],
+    seed: u64,
+) -> Result<MarginalsResult> {
+    let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
+    apply_fused_circuit(&mut *backend, circuit)?;
+    if backend.supports_pauli_expectation() {
+        return marginals_from_pauli_expectations(&*backend, circuit.num_qubits);
+    }
+    Ok(MarginalsResult {
+        marginals: Probabilities::Dense(backend.probabilities()?).marginals(),
+    })
+}
+
+fn expectation_values_from_initial_state(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    state: &[Complex64],
+    observables: &[Vec<PauliTerm>],
+    seed: u64,
+) -> Result<Vec<f64>> {
+    // Before the run, matching the dense statevector path.
+    let masks = observables
+        .iter()
+        .map(|obs| pauli_masks(obs, circuit.num_qubits))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
+    apply_fused_circuit(&mut *backend, circuit)?;
+    if backend.supports_pauli_expectation() {
+        return backend.pauli_expectations(observables);
+    }
+
+    let evolved = backend.export_statevector()?;
+    let norm = crate::backend::state_norm_sqr(&evolved);
+    Ok(masks
+        .iter()
+        .map(|&(xmask, zmask, num_y)| {
+            pauli_expectation_from_masks(&evolved, xmask, zmask, num_y, norm)
+        })
+        .collect())
+}
+
 fn require_unitary_circuit(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
     if has_nonunitary_or_classical_ops(circuit) {
         return Err(PrismError::IncompatibleBackend {
@@ -404,6 +651,7 @@ fn require_unitary_circuit(kind: &BackendKind, circuit: &Circuit) -> Result<()> 
 fn exact_noisy_probabilities(
     circuit: &Circuit,
     noise_model: &noise::NoiseModel,
+    initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<Probabilities> {
     if !circuit.has_terminal_measurements_only() {
@@ -419,6 +667,7 @@ fn exact_noisy_probabilities(
     Ok(Probabilities::Dense(noise::density_matrix_probabilities(
         circuit,
         noise_model,
+        initial_state,
         seed,
     )?))
 }
@@ -593,6 +842,25 @@ fn run_with_internal(
 /// use [`simulate`].
 pub fn run_on(backend: &mut dyn Backend, circuit: &Circuit) -> Result<RunOutcome> {
     execute(backend, circuit, &SimOptions::default())
+}
+
+/// Execute a circuit on a pre-constructed backend from a start state other than
+/// |0...0⟩, the [`run_on`] sibling for a caller holding its own amplitudes.
+///
+/// The backend must accept one; see [`Backend::init_from_amplitudes`] for the
+/// validation applied to `initial_state` and for which backends decline it.
+pub fn run_on_state(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    initial_state: &[Complex64],
+) -> Result<RunOutcome> {
+    check_initial_state_len(initial_state, circuit.num_qubits)?;
+    backend.init_from_amplitudes(initial_state.to_vec(), circuit.num_classical_bits)?;
+    apply_fused_circuit(backend, circuit)?;
+    Ok(RunOutcome {
+        classical_bits: backend.classical_results().to_vec(),
+        probabilities: try_backend_probabilities(backend)?,
+    })
 }
 
 /// Parse an OpenQASM string and execute with automatic backend selection.
@@ -1796,7 +2064,7 @@ pub(crate) fn run_shots_with_noise(
     }
 
     if matches!(kind, BackendKind::DensityMatrix) {
-        let probs = exact_noisy_probabilities(circuit, noise_model, seed)?;
+        let probs = exact_noisy_probabilities(circuit, noise_model, None, seed)?;
         return Ok(ShotsResult::from_shots(
             sample_exact_noisy_shots(&probs, circuit, noise_model, num_shots, seed),
             circuit.num_classical_bits,

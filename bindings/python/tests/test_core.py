@@ -148,3 +148,33 @@ def test_invalid_programmatic_indices_raise_prism_error():
         prism_q.Circuit(1).add_gate(prism_q.Gate.h(), [2])
     with pytest.raises(prism_q.PrismError):
         CircuitBuilder(1, 0).measure(0, 0)
+
+
+def test_initial_state_evolves_from_the_given_amplitudes():
+    # H (cos(pi/8)|0> + sin(pi/8)|1>) has p(0) = (1 + sin(pi/4))/2.
+    theta = math.pi / 8
+    start = np.array([math.cos(theta), math.sin(theta)], dtype=np.complex128)
+    circuit = CircuitBuilder(1).h(0).build()
+
+    probs = simulate(circuit).initial_state(start).seed(42).run().probabilities
+    assert math.isclose(probs[0], (1 + 1 / math.sqrt(2)) / 2, abs_tol=1e-12)
+    assert math.isclose(probs[1], (1 - 1 / math.sqrt(2)) / 2, abs_tol=1e-12)
+
+    amps = simulate(circuit).initial_state([1.0, 0.0]).seed(42).state_vector()
+    assert math.isclose(abs(amps[0]), 1 / math.sqrt(2), abs_tol=1e-12)
+
+
+def test_initial_state_validation_and_backend_limits():
+    circuit = CircuitBuilder(2).cx(0, 1).build()
+    with pytest.raises(prism_q.PrismError):
+        simulate(circuit).initial_state([1.0, 0.0]).seed(42).run()
+    with pytest.raises(prism_q.PrismError):
+        simulate(circuit).initial_state([1.0, 1.0, 0.0, 0.0]).seed(42).run()
+    with pytest.raises(prism_q.PrismError):
+        (
+            simulate(circuit)
+            .backend(prism_q.BackendKind.stabilizer())
+            .initial_state([1.0, 0.0, 0.0, 0.0])
+            .seed(42)
+            .run()
+        )

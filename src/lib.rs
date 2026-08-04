@@ -114,7 +114,8 @@ pub use sim::unified_pauli::{
 };
 pub use sim::{
     BackendKind, CountsResult, FactoredBlock, MarginalsResult, Probabilities, RunOutcome, Seeded,
-    ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values, run_on, run_qasm, simulate,
+    ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values, run_on, run_on_state,
+    run_qasm, simulate,
 };
 
 #[cfg(feature = "gpu")]

@@ -101,6 +101,26 @@ Memory limit is dynamically computed from available system RAM (50% budget, capp
 
 For a user-facing version of this decision, see [Choosing a Backend](../getting-started/choosing-a-backend.md).
 
+## Start states other than |0...0>
+
+`Simulate::initial_state` bypasses the tree above entirely. Every branch of it
+reads circuit structure alone and is sound only from the all-zero start: a
+Clifford circuit yields a stabilizer state when its input is one, the product
+state and the subsystem split assume an unentangled input, and the Pauli engines
+propagate observables back to |0...0>. Picking one of them for an arbitrary
+start state returns a wrong answer rather than an error, so `initial_state_plan`
+in `src/sim/dispatch.rs` constrains the route instead of consulting it: `Auto`
+resolves to the statevector, `DensityMatrix` is the only other backend that
+accepts one (as the pure mixture `|psi><psi|`), and every other kind returns
+`IncompatibleBackend`. Auto needs no memory check on that path, since a caller
+holding `2^n` amplitudes can already afford the dense state.
+
+The amplitude vector is validated before the run: `2^n` entries for the
+circuit's `n` qubits, every component finite, and unit norm to 1e-9. An
+unnormalized vector is rejected rather than rescaled, because the statevector's
+deferred-normalization factor is reset to 1 by the load and a silent rescale
+would hide the error inside it.
+
 ## Subsystem decomposition
 
 Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately with per-block Auto dispatch. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.

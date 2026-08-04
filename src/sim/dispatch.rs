@@ -676,6 +676,36 @@ pub(super) fn resolve(
     ExecutionPlan::Backend(plan_for_family(kind, family, circuit.num_qubits))
 }
 
+/// Backend plan for a run that starts from a caller-supplied state.
+///
+/// Routing is constrained here rather than consulted. Every shortcut the
+/// shape-based tree can pick reads the circuit alone and is only valid from the
+/// |0...0⟩ start: a Clifford circuit is a stabilizer state only when its input
+/// is one, a product state and a subsystem split assume unentangled inputs, and
+/// the Pauli engines propagate observables back to |0...0⟩. Selecting one of
+/// them for an arbitrary start state is a wrong answer rather than an error, so
+/// only the two representations that can hold an arbitrary state are reachable.
+/// `Auto` lands on the statevector unconditionally: the caller already holds
+/// `2^n` amplitudes, so the dense state is affordable by construction.
+pub(super) fn initial_state_plan(kind: &BackendKind, num_qubits: usize) -> Result<BackendPlan> {
+    match kind {
+        BackendKind::Auto | BackendKind::Statevector => {
+            Ok(plan_for_family(kind, Family::Statevector, num_qubits))
+        }
+        #[cfg(feature = "gpu")]
+        BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => {
+            Ok(plan_for_family(kind, Family::Statevector, num_qubits))
+        }
+        BackendKind::DensityMatrix => Ok(BackendPlan::DensityMatrix),
+        other => Err(PrismError::IncompatibleBackend {
+            backend: format!("{other:?}"),
+            reason: "a start state other than |0...0> runs on the statevector or the density \
+                     matrix; every other representation is derived from that start"
+                .into(),
+        }),
+    }
+}
+
 pub(super) fn resolve_backend(
     kind: &BackendKind,
     circuit: &Circuit,

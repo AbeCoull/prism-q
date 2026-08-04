@@ -1073,3 +1073,30 @@ fn factored_conditional_gate() {
     let fp = fac.probabilities().unwrap();
     assert_probs(&fp, &sv);
 }
+
+// Two clusters that are mutually unentangled and interleaved in register order
+// (`{0, 3}` and `{1, 2}`), so the export cannot assume a cluster owns a
+// contiguous bit range. Amplitudes, not probabilities: `S` on q2 puts an `i` on
+// one branch that only the amplitude check sees.
+#[test]
+fn factored_stabilizer_export_statevector_two_clusters_matches() {
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 3]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::S, &[2]);
+
+    let sv_ref = run_and_state(&c);
+
+    let mut fs = prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::new(SEED);
+    sim::run_on(&mut fs, &c).unwrap();
+    let sv = fs.export_statevector().unwrap();
+    assert_eq!(sv.len(), sv_ref.len());
+    for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
+        assert!(
+            (a - e).norm() < EPS,
+            "factored-stabilizer export[{i}]: expected {e}, got {a}"
+        );
+    }
+}

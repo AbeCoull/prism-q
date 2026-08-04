@@ -1,14 +1,15 @@
-//! Adjoint-gradient correctness: `run_expectation_gradient` and
-//! `Simulate::expectation_gradient` validated against central finite
-//! differences and the parameter-shift rule, at the fixed test seed.
+//! Gradient correctness: the adjoint entry points validated against central
+//! finite differences and a hand-rolled parameter-shift rule, and the shipped
+//! parameter-shift path validated against the adjoint, at the fixed test seed.
 
 mod common;
 
 use common::SEED;
+use num_complex::Complex64;
 use prism_q::circuits;
 use prism_q::{
-    Circuit, Gate, Instruction, ParameterMap, PauliTerm, run_expectation_gradient,
-    run_expectation_values, simulate,
+    BackendKind, Circuit, Gate, Instruction, ParameterMap, PauliTerm, run_expectation_gradient,
+    run_expectation_gradient_shift, run_expectation_values, simulate,
 };
 
 type Hamiltonian = Vec<(f64, Vec<PauliTerm>)>;
@@ -252,6 +253,148 @@ fn nontrainable_prefix_is_skipped_correctly() {
             g.gradient[slot]
         );
     }
+}
+
+#[test]
+fn shift_matches_adjoint_on_statevector() {
+    let c = circuits::hardware_efficient_ansatz(4, 2, SEED);
+    let params = ParameterMap::all_rotations(&c);
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.7, vec![PauliTerm::x(0)]),
+        (0.5, vec![PauliTerm::y(2)]),
+        (-0.3, vec![PauliTerm::z(3)]),
+    ];
+
+    let adjoint = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    let shift = simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .expectation_gradient_shift(&obs, &params)
+        .unwrap();
+
+    assert!((shift.value - adjoint.value).abs() < 1e-12);
+    assert_eq!(shift.gradient.len(), params.num_params());
+    for slot in 0..params.num_params() {
+        assert!(
+            (shift.gradient[slot] - adjoint.gradient[slot]).abs() < 1e-9,
+            "slot {slot}: shift {} vs adjoint {}",
+            shift.gradient[slot],
+            adjoint.gradient[slot]
+        );
+    }
+}
+
+#[test]
+fn shift_matches_adjoint_on_phase_and_rzz() {
+    // P(theta) = e^{i theta/2} Rz(theta) and the scalar cancels in <H>, so P
+    // takes the same pi/2 shift as the rotations despite its {0, 1} generator
+    // eigenvalues.
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::P(0.9), &[0]);
+    c.add_gate(Gate::Rzz(0.4), &[0, 1]);
+    let mut params = ParameterMap::new();
+    params.push(2, 0);
+    params.push(3, 1);
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::x(0)]),
+        (0.6, vec![PauliTerm::y(0), PauliTerm::x(1)]),
+    ];
+    let adjoint = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    let shift = run_expectation_gradient_shift(&c, &obs, &params, SEED).unwrap();
+    for slot in 0..2 {
+        assert!(
+            (shift.gradient[slot] - adjoint.gradient[slot]).abs() < 1e-9,
+            "slot {slot}: shift {} vs adjoint {}",
+            shift.gradient[slot],
+            adjoint.gradient[slot]
+        );
+    }
+}
+
+#[test]
+fn shift_accumulates_a_shared_slot() {
+    // Two Rx on one qubit bound to a single slot: <Z> = cos(2 theta), so the
+    // shared gradient is -2 sin(2 theta). Each bound gate must be shifted on
+    // its own; shifting both at once gives zero here.
+    let theta = 0.35;
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(Gate::Rx(theta), &[0]);
+    c.add_gate(Gate::Rx(theta), &[0]);
+    let mut params = ParameterMap::new();
+    params.push(0, 0);
+    params.push(1, 0);
+
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+    let shift = run_expectation_gradient_shift(&c, &obs, &params, SEED).unwrap();
+    assert_eq!(shift.gradient.len(), 1);
+    assert!((shift.gradient[0] - (-2.0 * (2.0 * theta).sin())).abs() < 1e-9);
+
+    let adjoint = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    assert!((shift.gradient[0] - adjoint.gradient[0]).abs() < 1e-12);
+}
+
+#[test]
+fn shift_differentiates_a_circuit_holding_a_qft_block() {
+    // The adjoint rejects QftBlock outright; parameter shift differentiates
+    // through it because it only ever calls the forward observable path.
+    let mut c = Circuit::new(3, 0);
+    c.add_gate(Gate::Rx(0.4), &[0]);
+    c.add_gate(Gate::QftBlock { start: 0, num: 3 }, &[0, 1, 2]);
+    let mut params = ParameterMap::new();
+    params.push(0, 0);
+
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(2)])];
+    assert!(run_expectation_gradient(&c, &obs, &params, SEED).is_err());
+
+    let shift = run_expectation_gradient_shift(&c, &obs, &params, SEED).unwrap();
+    assert!((shift.gradient[0] - finite_diff(&c, &obs, &params, 0)).abs() < 1e-6);
+}
+
+#[test]
+fn shift_differentiates_from_a_start_state() {
+    // The adjoint declines a start state: its backward pass inverts the circuit
+    // back to |0...0>. Parameter shift only ever runs forward. Starting from
+    // |1> on q0, Rx(theta) gives <Z0> = -cos(theta), so the gradient is
+    // sin(theta).
+    let theta = 0.8;
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(Gate::Rx(theta), &[0]);
+    let mut params = ParameterMap::new();
+    params.push(0, 0);
+
+    let start = [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)];
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+    let g = simulate(&c)
+        .initial_state(&start)
+        .seed(SEED)
+        .expectation_gradient_shift(&obs, &params)
+        .unwrap();
+
+    assert!((g.value - (-theta.cos())).abs() < 1e-12);
+    assert!((g.gradient[0] - theta.sin()).abs() < 1e-9);
+}
+
+#[test]
+fn shift_on_a_backend_without_an_observable_path_names_it() {
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rx(0.3), &[0]);
+    let mut params = ParameterMap::new();
+    params.push(2, 0);
+
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+    let err = simulate(&c)
+        .backend(BackendKind::TensorNetwork)
+        .seed(SEED)
+        .expectation_gradient_shift(&obs, &params)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("tensornetwork"), "{err}");
 }
 
 #[test]

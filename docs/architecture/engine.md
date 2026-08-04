@@ -40,6 +40,7 @@ Orchestration layer in `src/sim/mod.rs`.
 | `simulate(circuit).backend(kind).seed(seed).marginals()` | Per-qubit marginal probabilities with backend selection |
 | `simulate(circuit).seed(seed).expectation_values(observables)` | `⟨P_k⟩` per Pauli string |
 | `simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` | `⟨H⟩` and adjoint gradient |
+| `simulate(circuit).backend(kind).seed(seed).expectation_gradient_shift(hamiltonian, params)` | `⟨H⟩` and parameter-shift gradient |
 | `run_on(backend, circuit)` | Pre-constructed backend |
 | `run_qasm(qasm, seed)` | Parse + simulate |
 
@@ -79,7 +80,9 @@ same property that makes the density matrix the mixture oracle rather than a com
 participant in the branching families of `tests/conformance_matrix.rs`.
 
 `expectation_gradient` rejects a noise model on every backend, because the adjoint method
-backpropagates through a pure state.
+backpropagates through a pure state. `expectation_gradient_shift` rejects one too, though
+the obstacle there is only that the path is not wired: the shift rule holds under a
+parameter-independent channel, so the density matrix could serve it.
 
 ## Auto-dispatch decision tree
 
@@ -131,7 +134,14 @@ Block-level Rayon parallelism when all blocks are <14 qubits (avoids oversubscri
 
 For Clifford+T circuits: Clifford prefix runs on the Stabilizer backend, state is exported to Statevector for the non-Clifford tail. Saves exponential memory for circuits with a long Clifford preamble.
 
-## Expectation-value gradients (adjoint method)
+## Expectation-value gradients
+
+Two methods, chosen by the caller rather than by the engine: the adjoint method is the
+default and the reference, parameter shift is the fallback for what the adjoint declines.
+Selection is explicit because the two differ by a factor of `2 * links` in evaluation
+count, which is not a difference a caller should discover from a wall clock.
+
+### Adjoint method
 
 `run_expectation_gradient(circuit, hamiltonian, params, seed)` and
 `simulate(circuit).seed(seed).expectation_gradient(hamiltonian, params)` compute
@@ -164,8 +174,38 @@ inverse applications), and a trainable gate outside the Hamiltonian's inverse
 light cone has a provably zero gradient, so its sandwich is skipped.
 
 Memory is two statevectors, so the qubit ceiling is about one below a single
-run. Only the statevector backend is supported; stabilizer/MPS/factored/GPU
-gradients are not implemented.
+run. Only the statevector backend is supported.
+
+### Parameter shift (fallback)
+
+`run_expectation_gradient_shift(circuit, hamiltonian, params, seed)` and
+`simulate(circuit).backend(kind).seed(seed).expectation_gradient_shift(hamiltonian,
+params)` evaluate `d⟨H⟩/dθ = (f(θ+π/2) - f(θ-π/2)) / 2` per trainable gate, exactly, from
+forward `expectation_values` calls alone. That is what makes it the fallback: it inherits
+whatever the selected backend can represent, so it serves Sparse, MPS, Factored,
+ProductState, DensityMatrix, and Distributed, widths past the statevector cap, and
+circuits containing `QftBlock`. A backend with no native observable path reports
+`BackendUnsupported` naming itself.
+
+The rule is exact because each differentiable gate is `exp(-iθG/2)` with `G` of
+eigenvalues `±1`, making `⟨H⟩` a degree-1 trigonometric polynomial in that angle. `P(θ)`
+is the apparent exception, its generator being the projector `|1⟩⟨1|` with eigenvalues
+`{0, 1}`, but `P(θ) = e^{iθ/2} Rz(θ)` and that scalar cancels against its conjugate in
+`⟨ψ|H|ψ⟩` wherever the gate sits, so the same shift applies.
+
+The differentiable gate set is unchanged: `Rx`, `Ry`, `Rz`, `Rzz`, and `P` are the only
+`Gate` variants carrying an angle inline, so parameter shift reaches no gate the adjoint
+rejects. Its reach is backends and circuit shapes, not gates.
+
+Gates sharing a parameter slot are shifted one at a time and their contributions summed.
+Shifting them together is a different quantity: two `Rx(θ)` on one qubit under `⟨Z⟩` give
+`cos 2θ`, whose joint ±π/2 shift is zero rather than `-2 sin 2θ`.
+
+Cost is `1 + 2 * links` circuit evaluations against the adjoint's one, and there is no
+light-cone pruning to recover any of it: a trainable gate with a provably zero gradient is
+still evaluated twice. Evaluations run in sequence, because each already drives a
+Rayon-parallel backend run and holding several in flight would multiply peak state memory
+by the parameter count, which is the resource this path exists to stay under.
 
 ## Backend dispatch variants
 

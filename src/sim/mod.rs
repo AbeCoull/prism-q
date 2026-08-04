@@ -413,6 +413,42 @@ impl<'c> Simulate<'c, Seeded> {
         }
         gradient::run_expectation_gradient(self.circuit, hamiltonian, params, seed)
     }
+
+    /// Compute `⟨H⟩` and its gradient by the parameter-shift rule on the
+    /// selected backend.
+    ///
+    /// Serves the cases [`Simulate::expectation_gradient`] declines: any
+    /// backend with a native observable path, circuits containing `QftBlock`,
+    /// and widths past the statevector cap. It differentiates the same gate set
+    /// (`Rx`, `Ry`, `Rz`, `Rzz`, `P`) at `1 + 2 * links` circuit evaluations
+    /// against the adjoint's one, so the adjoint stays the better choice where
+    /// it applies. A backend with no native observable path reports
+    /// `BackendUnsupported` naming itself. See
+    /// [`gradient::run_expectation_gradient_shift`].
+    #[inline]
+    pub fn expectation_gradient_shift(
+        self,
+        hamiltonian: &[(f64, Vec<PauliTerm>)],
+        params: &gradient::ParameterMap,
+    ) -> Result<gradient::ExpectationGradient> {
+        let seed = self.seed_value();
+        if self.noise_model.is_some() {
+            return Err(PrismError::IncompatibleBackend {
+                backend: format!("{:?}", self.kind),
+                reason: "noisy parameter-shift gradients are not wired; drop the noise model, or \
+                         differentiate noisy `expectation_values` numerically"
+                    .into(),
+            });
+        }
+        gradient::shift_gradient(
+            &self.kind,
+            self.circuit,
+            hamiltonian,
+            params,
+            self.initial_state,
+            seed,
+        )
+    }
 }
 
 /// Start a query-aware simulation request for `circuit`.

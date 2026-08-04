@@ -32,7 +32,8 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 `run_expectation_values`, `bitstring`
 
 **Gradients:**
-`run_expectation_gradient`, `ExpectationGradient`, `ParamLink`, `ParameterMap`
+`run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`,
+`ParamLink`, `ParameterMap`
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`,

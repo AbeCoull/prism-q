@@ -357,3 +357,95 @@ fn factored_phase_estimation_8q_sv() {
 fn factored_phase_estimation_12q_fused() {
     check_fused_vs_unfused("qpe 12q fused", &circuits::phase_estimation_circuit(12));
 }
+
+// A factored register past 64 qubits has no dense probability vector and no
+// representable lazy one either: the block mask is a u64 and Probabilities::len
+// is 1 << total_qubits. The terminal must decline rather than shift past the
+// word. Self-inverse bridges keep static analysis at one component so the sim
+// runs the whole circuit on one backend instead of decomposing it.
+#[test]
+fn factored_oversize_probabilities_decline_instead_of_panicking() {
+    use prism_q::sim::BackendKind;
+
+    let n = 100;
+    let block = 5;
+    let mut circuit = Circuit::new(n, 0);
+    for base in (0..n).step_by(block) {
+        circuit.add_gate(Gate::H, &[base]);
+        for q in base..(base + block - 1).min(n - 1) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    for base in (block..n).step_by(block) {
+        circuit.add_gate(Gate::Cx, &[0, base]);
+        circuit.add_gate(Gate::Cx, &[0, base]);
+    }
+    assert_eq!(
+        circuit.independent_subsystems().len(),
+        1,
+        "bridges must leave one static component or the sim decomposes instead"
+    );
+
+    let out = prism_q::sim::simulate(&circuit)
+        .backend(BackendKind::Factored)
+        .seed(SEED)
+        .run()
+        .expect("an oversize register must not fail the run");
+    assert!(
+        out.probabilities.is_none(),
+        "a 100 qubit factored register cannot serve a dense probability vector"
+    );
+}
+
+// The multi-block probability terminal now returns per-block marginals instead
+// of the merged 2^n vector. Expanding that lazy form must reproduce the merge
+// exactly, which pins the block bit-order convention: each block's probs are
+// indexed by its own qubits in ascending global order, and `mask` records which
+// global positions those are.
+#[test]
+fn factored_block_probabilities_expand_to_the_merged_vector() {
+    use prism_q::backend::Backend;
+    use prism_q::sim::{BackendKind, Probabilities};
+
+    for n in [10usize, 14, 16] {
+        let circuit = circuits::partially_independent_circuit(n, 4, SEED);
+        assert!(
+            circuit.independent_subsystems().len() > 1,
+            "{n}q: circuit must stay partially independent for this to test anything"
+        );
+
+        let mut backend = FactoredBackend::new(SEED);
+        prism_q::sim::run_on(&mut backend, &circuit).unwrap();
+
+        let lazy = backend
+            .block_probabilities()
+            .expect("multi-block state must offer per-block probabilities");
+        match &lazy {
+            Probabilities::Factored { blocks, .. } => {
+                assert!(blocks.len() > 1, "{n}q: expected more than one block")
+            }
+            Probabilities::Dense(_) => panic!("{n}q: expected the factored variant"),
+        }
+
+        let merged = backend.probabilities().unwrap();
+        let expanded = lazy.to_vec();
+        assert_eq!(expanded.len(), merged.len(), "{n}q: length mismatch");
+        for (i, (a, b)) in expanded.iter().zip(&merged).enumerate() {
+            assert!(
+                (a - b).abs() < FACTORED_EPS,
+                "{n}q: state {i}: lazy {a} vs merged {b}"
+            );
+        }
+
+        // The public run must now carry the lazy form end to end.
+        let out = prism_q::sim::simulate(&circuit)
+            .backend(BackendKind::Factored)
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert!(matches!(
+            out.probabilities,
+            Some(Probabilities::Factored { .. })
+        ));
+    }
+}

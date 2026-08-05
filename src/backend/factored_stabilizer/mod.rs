@@ -901,6 +901,32 @@ impl Backend for FactoredStabilizerBackend {
         Ok(crate::sim::merge_probabilities(&blocks, self.num_qubits))
     }
 
+    fn block_probabilities(&self) -> Option<crate::sim::Probabilities> {
+        // `FactoredBlock::mask` is a u64 and `Probabilities::len` is
+        // `1 << total_qubits`, so a wider register has no representable lazy
+        // form either; the dense terminal declines it.
+        if self.num_qubits > 64 {
+            return None;
+        }
+
+        let active: Vec<&SubTableau> = self.subs.iter().filter_map(|s| s.as_ref()).collect();
+        if active.len() < 2 {
+            return None;
+        }
+
+        let mut blocks = Vec::with_capacity(active.len());
+        for sub in active {
+            let probs = sub.compute_probabilities().ok()?;
+            let mask = sub.qubits.iter().fold(0u64, |m, &q| m | 1 << q);
+            blocks.push(crate::sim::FactoredBlock { probs, mask });
+        }
+
+        Some(crate::sim::Probabilities::Factored {
+            blocks,
+            total_qubits: self.num_qubits,
+        })
+    }
+
     fn num_qubits(&self) -> usize {
         self.num_qubits
     }

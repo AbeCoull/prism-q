@@ -39,7 +39,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::{SmallVec, smallvec};
 
-use crate::backend::memory::dense_statevector_len;
+use crate::backend::memory::{dense_probability_len, dense_statevector_len};
 use crate::backend::simd;
 use crate::backend::statevector::insert_zero_bit;
 use crate::backend::{
@@ -745,6 +745,7 @@ impl Backend for FactoredBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        dense_probability_len(self.name(), self.num_qubits)?;
         let active: SmallVec<[&SubState; 16]> = self
             .substates
             .iter()
@@ -778,6 +779,40 @@ impl Backend for FactoredBackend {
             .collect();
 
         Ok(crate::sim::merge_probabilities(&blocks, self.num_qubits))
+    }
+
+    fn block_probabilities(&self) -> Option<crate::sim::Probabilities> {
+        // `FactoredBlock::mask` is a u64 and `Probabilities::len` is
+        // `1 << total_qubits`, so a wider register has no representable lazy
+        // form either; the dense terminal declines it.
+        if self.num_qubits > 64 {
+            return None;
+        }
+
+        let active: SmallVec<[&SubState; 16]> = self
+            .substates
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .collect();
+
+        if active.len() < 2 {
+            return None;
+        }
+
+        let blocks = active
+            .iter()
+            .map(|sub| {
+                let mut probs = vec![0.0_f64; sub.state.len()];
+                simd::norm_sqr_to_slice(&sub.state, &mut probs);
+                let mask = sub.qubits.iter().fold(0u64, |m, &q| m | 1 << q);
+                crate::sim::FactoredBlock { probs, mask }
+            })
+            .collect();
+
+        Some(crate::sim::Probabilities::Factored {
+            blocks,
+            total_qubits: self.num_qubits,
+        })
     }
 
     fn num_qubits(&self) -> usize {

@@ -342,7 +342,7 @@ set +e
     echo "| Reference | \`$REF\` ($REF_SHA) |"
     echo "| Features | \`$FEATURES\` |"
     echo "| Pass order | ref, new discarded, then ref, new, new, ref (adjacent, no rebuild) |"
-    echo "| Samples | ${PRISM_BENCH_SAMPLES:-100} |"
+    echo "| Samples | ${PRISM_BENCH_SAMPLES:-30} |"
     echo "| High-qubit rows | $HIGH_QUBITS_STATE |"
     echo "| CPU | $(host_cpu) |"
     echo "| OS | $(uname -srm) |"

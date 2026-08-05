@@ -1293,9 +1293,10 @@ fn bench_factored_dynamic(c: &mut Criterion) {
     let mut group = c.benchmark_group("factored/dynamic_advantage");
     configure_group(&mut group);
 
-    // Independent blocks with ONE bridging CX at the end.
-    // Static analysis: single component (union-find merges all).
-    // Dynamic reality: groups stay small until the bridging CX.
+    // Independent blocks with ONE bridging CX at the end. The bridge merges the
+    // first and last block only, so static analysis still finds several
+    // components and the run takes the decomposed route rather than the
+    // factored backend's own multi-block terminal.
     for &total_q in &[16, 20, 24] {
         let block_size = 4;
         let num_blocks = total_q / block_size;

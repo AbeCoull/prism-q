@@ -1322,6 +1322,29 @@ fn bench_factored_dynamic(c: &mut Criterion) {
     group.finish();
 }
 
+/// The factored backend's multi-block probability terminal, which
+/// `dynamic_advantage` does not reach: that group decomposes at the sim layer,
+/// which returns per-block probabilities without merging. Here the largest
+/// component is `n - 2`, so `should_decompose` declines and the whole circuit
+/// runs on one backend while the factored state stays in two sub-states. The
+/// statevector row is the reference for the same terminal cost.
+fn bench_factored_partial_independence(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored/partial_independence");
+    configure_group(&mut group);
+
+    for &n in &[16, 20] {
+        let circuit = circuits::partially_independent_circuit(n, 5, SEED);
+        group.bench_with_input(BenchmarkId::new("statevector", n), &circuit, |b, circ| {
+            b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
+        });
+        group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
+            b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
 /// Non-Pauli trajectory noise on the factored backend, the only path that reaches
 /// `Backend::apply_1q_matrix`. Pauli noise routes to gate application instead, so
 /// `noisy_sampling` does not cover this at all.
@@ -2008,6 +2031,7 @@ criterion_group! {
     bench_factored_independent,
     bench_factored_sim_only,
     bench_factored_dynamic,
+    bench_factored_partial_independence,
     bench_factored_dense,
     bench_factored_noise_kraus,
     // Clifford+T (SPD/SPP)

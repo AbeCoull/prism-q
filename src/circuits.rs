@@ -127,6 +127,50 @@ pub fn independent_bell_pairs(n_pairs: usize) -> Circuit {
     c
 }
 
+/// One connected block spanning `n - 2` qubits plus one independent pair.
+///
+/// Sized so the decomposition heuristic declines: it needs the largest
+/// component to be at least three qubits smaller than the register, which
+/// `n - 2` fails. The circuit is therefore partially independent but runs whole
+/// on one backend, which is the shape that reaches the factored backend's
+/// multi-block probability terminal.
+pub fn partially_independent_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
+    assert!(
+        n >= 4,
+        "partially_independent_circuit needs at least 4 qubits"
+    );
+    let big = n - 2;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let singles = [Gate::H, Gate::X, Gate::Y, Gate::Z, Gate::S, Gate::T];
+
+    for layer in 0..depth {
+        for q in 0..big {
+            c.add_gate(singles[rng.random_range(0..singles.len())].clone(), &[q]);
+        }
+        for q in (layer % 2..big - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    // The chain runs unconditionally so the large block is one component at
+    // every seed; group count must not be a seed property.
+    for q in 0..big - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+
+    for layer in 0..depth {
+        c.add_gate(singles[rng.random_range(0..singles.len())].clone(), &[big]);
+        c.add_gate(
+            singles[rng.random_range(0..singles.len())].clone(),
+            &[big + 1],
+        );
+        if layer == 0 {
+            c.add_gate(Gate::Cx, &[big, big + 1]);
+        }
+    }
+    c
+}
+
 /// K independent random sub-circuits of `block_size` qubits each.
 ///
 /// Total qubits = `num_blocks * block_size`. Each block has its own

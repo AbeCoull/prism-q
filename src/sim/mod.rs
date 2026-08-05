@@ -739,6 +739,9 @@ fn probs_only_result(probs: Vec<f64>) -> RunOutcome {
 }
 
 fn try_backend_probabilities(backend: &dyn Backend) -> Result<Option<Probabilities>> {
+    if let Some(factored) = backend.block_probabilities() {
+        return Ok(Some(factored));
+    }
     match backend.probabilities() {
         Ok(probs) => Ok(Some(Probabilities::Dense(probs))),
         Err(PrismError::BackendUnsupported { .. }) => Ok(None),

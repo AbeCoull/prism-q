@@ -358,6 +358,18 @@ pub trait Backend {
     /// provide this efficiently, they may return `Err(BackendUnsupported)`.
     fn probabilities(&self) -> Result<Vec<f64>>;
 
+    /// Per-block probabilities for a backend holding a product of independent
+    /// sub-states, skipping the `2^n` Kronecker expansion
+    /// [`Backend::probabilities`] would materialize.
+    ///
+    /// `None` means the caller takes [`Backend::probabilities`] instead, which
+    /// is the right answer for a single block or a monolithic state. Each
+    /// block's `probs` is indexed by its own qubits in ascending global order,
+    /// matching the `mask` convention of [`crate::sim::FactoredBlock`].
+    fn block_probabilities(&self) -> Option<crate::sim::Probabilities> {
+        None
+    }
+
     /// Number of qubits the backend is currently configured for.
     fn num_qubits(&self) -> usize;
 

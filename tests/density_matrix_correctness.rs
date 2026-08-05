@@ -1106,3 +1106,80 @@ fn dm_batch_phase_through_apply_matches_the_unfused_cphase() {
     sim::run_on(&mut sv, &circuit).unwrap();
     assert_rdm_close(&dm, &sv, 2, "batch phase");
 }
+
+// A 1q gate and the 1q channel that follows it compose into one superoperator
+// sweep on the noisy density-matrix route. The composed map is order sensitive,
+// so comparing every 1q Pauli expectation against sequential application pins
+// the order as well as the value: the three expectations fix each reduced
+// density matrix completely.
+#[test]
+fn fused_gate_and_channel_matches_sequential_application() {
+    use prism_q::sim::noise::{NoiseModel, density_matrix_expectation_values};
+    use prism_q::sim::unified_pauli::PauliTerm;
+
+    let gamma = 0.17;
+    let n = 4;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.63 + q as f64), &[q]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::S, &[q]);
+    }
+
+    let noise = NoiseModel::with_amplitude_damping(&circuit, gamma);
+    let observables: Vec<Vec<PauliTerm>> = (0..n)
+        .flat_map(|q| {
+            [
+                vec![PauliTerm::x(q)],
+                vec![PauliTerm::y(q)],
+                vec![PauliTerm::z(q)],
+            ]
+        })
+        .collect();
+    let fused =
+        density_matrix_expectation_values(&circuit, &observables, Some(&noise), SEED).unwrap();
+
+    // Sequential reference: gate, then the channel, as two separate sweeps.
+    let damping = [
+        [c(1.0, 0.0), c(0.0, 0.0)],
+        [c(0.0, 0.0), c((1.0 - gamma).sqrt(), 0.0)],
+    ];
+    let jump = [
+        [c(0.0, 0.0), c(gamma.sqrt(), 0.0)],
+        [c(0.0, 0.0), c(0.0, 0.0)],
+    ];
+    let mut reference = DensityMatrixBackend::new(SEED);
+    reference.init(n, 0).unwrap();
+    for instr in &circuit.instructions {
+        reference.apply(instr).unwrap();
+        if let prism_q::circuit::Instruction::Gate { targets, .. } = instr {
+            for &q in targets.iter() {
+                reference.apply_1q_kraus(q, &[damping, jump]);
+            }
+        }
+    }
+
+    for q in 0..n {
+        let rdm = reference.reduced_density_matrix_1q(q).unwrap();
+        let expected = [
+            (rdm[0][1] + rdm[1][0]).re,
+            (Complex64::new(0.0, 1.0) * (rdm[0][1] - rdm[1][0])).re,
+            (rdm[0][0] - rdm[1][1]).re,
+        ];
+        for (k, label) in ["X", "Y", "Z"].iter().enumerate() {
+            let got = fused[3 * q + k];
+            assert!(
+                (got - expected[k]).abs() < DM_EPS,
+                "qubit {q} <{label}>: fused {got} vs sequential {}",
+                expected[k]
+            );
+        }
+    }
+}

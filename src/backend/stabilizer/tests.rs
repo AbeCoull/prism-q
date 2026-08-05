@@ -843,6 +843,109 @@ fn test_sgi_index_consistency() {
     }
 }
 
+// The brick layer keeps row weight low so the SGI path stays engaged, and the
+// long-range CX fan out of the reset target gives the measurement pivot support
+// on qubits that the rows anticommuting with it do not already touch. That is
+// what makes the post-reset index staleness observable.
+fn sgi_reset_circuit(n: usize) -> Circuit {
+    let mut c = crate::circuits::clifford_heavy_circuit(n, 2, 42);
+    for k in 0..8 {
+        c.add_gate(Gate::Cx, &[1, 30 + 17 * k]);
+    }
+    c.add_gate(Gate::H, &[1]);
+    c.add_reset(1);
+    for instr in crate::circuits::clifford_heavy_circuit(n, 2, 7).instructions {
+        c.instructions.push(instr);
+    }
+    c.measure_all();
+    c
+}
+
+// Guards the two tests below against passing vacuously: they only exercise the
+// defect if the SGI path is still engaged when the reset is reached.
+fn assert_sgi_engaged_at_reset(circuit: &Circuit) {
+    let reset_at = circuit
+        .instructions
+        .iter()
+        .position(|i| matches!(i, Instruction::Reset { .. }))
+        .expect("circuit must contain a reset");
+
+    let mut probe = StabilizerBackend::new(42);
+    probe
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    probe
+        .apply_instructions(&circuit.instructions[..reset_at])
+        .unwrap();
+    assert!(
+        probe.sgi_enabled(),
+        "SGI path not engaged at the reset; the test would pass vacuously"
+    );
+}
+
+#[test]
+fn test_sgi_reset_random_outcome_matches_gate_by_gate() {
+    let n = 300;
+    let circuit = sgi_reset_circuit(n);
+    assert_sgi_engaged_at_reset(&circuit);
+
+    let mut b1 = StabilizerBackend::new(42);
+    b1.init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for instr in &circuit.instructions {
+        b1.apply(instr).unwrap();
+    }
+    let r1 = b1.classical_results().to_vec();
+
+    let mut b2 = StabilizerBackend::new(42);
+    sim::run_on(&mut b2, &circuit).unwrap();
+    let r2 = b2.classical_results().to_vec();
+
+    assert_eq!(
+        r1, r2,
+        "SGI mid-circuit reset: gate-by-gate vs apply_instructions mismatch"
+    );
+}
+
+#[test]
+fn test_sgi_reset_leaves_index_consistent() {
+    let n = 300;
+    let circuit = sgi_reset_circuit(n);
+    assert_sgi_engaged_at_reset(&circuit);
+
+    // Stop at the reset. Past it the run drops out of the SGI path, and the
+    // word-batch route does not maintain the index at all, so a whole-circuit
+    // check would assert an invariant that only holds while SGI is engaged.
+    let through_reset = circuit
+        .instructions
+        .iter()
+        .position(|i| matches!(i, Instruction::Reset { .. }))
+        .expect("circuit must contain a reset")
+        + 1;
+
+    let mut b = StabilizerBackend::new(42);
+    b.init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    b.apply_instructions(&circuit.instructions[..through_reset])
+        .unwrap();
+
+    let stride = b.stride();
+    let nw = b.num_words;
+    for g in 0..2 * n {
+        let row = &b.xz[g * stride..(g + 1) * stride];
+        for q in 0..n {
+            let word = q / 64;
+            let bit_mask = 1u64 << (q % 64);
+            let active = row[word] & bit_mask != 0 || row[nw + word] & bit_mask != 0;
+            assert_eq!(
+                active,
+                b.qubit_active[q].contains(&(g as u32)),
+                "after reset: generator {g} qubit {q} active={active} disagrees with the index"
+            );
+        }
+    }
+}
+
 #[test]
 fn test_pcc_random_pairs_matches_gate_by_gate() {
     use crate::circuits;

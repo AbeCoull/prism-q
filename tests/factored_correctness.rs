@@ -357,3 +357,42 @@ fn factored_phase_estimation_8q_sv() {
 fn factored_phase_estimation_12q_fused() {
     check_fused_vs_unfused("qpe 12q fused", &circuits::phase_estimation_circuit(12));
 }
+
+// A factored register past 64 qubits has no dense probability vector and no
+// representable lazy one either: the block mask is a u64 and Probabilities::len
+// is 1 << total_qubits. The terminal must decline rather than shift past the
+// word. Self-inverse bridges keep static analysis at one component so the sim
+// runs the whole circuit on one backend instead of decomposing it.
+#[test]
+fn factored_oversize_probabilities_decline_instead_of_panicking() {
+    use prism_q::sim::BackendKind;
+
+    let n = 100;
+    let block = 5;
+    let mut circuit = Circuit::new(n, 0);
+    for base in (0..n).step_by(block) {
+        circuit.add_gate(Gate::H, &[base]);
+        for q in base..(base + block - 1).min(n - 1) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    for base in (block..n).step_by(block) {
+        circuit.add_gate(Gate::Cx, &[0, base]);
+        circuit.add_gate(Gate::Cx, &[0, base]);
+    }
+    assert_eq!(
+        circuit.independent_subsystems().len(),
+        1,
+        "bridges must leave one static component or the sim decomposes instead"
+    );
+
+    let out = prism_q::sim::simulate(&circuit)
+        .backend(BackendKind::Factored)
+        .seed(SEED)
+        .run()
+        .expect("an oversize register must not fail the run");
+    assert!(
+        out.probabilities.is_none(),
+        "a 100 qubit factored register cannot serve a dense probability vector"
+    );
+}

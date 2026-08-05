@@ -39,7 +39,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::{SmallVec, smallvec};
 
-use crate::backend::memory::dense_statevector_len;
+use crate::backend::memory::{dense_probability_len, dense_statevector_len};
 use crate::backend::simd;
 use crate::backend::statevector::insert_zero_bit;
 use crate::backend::{
@@ -745,6 +745,7 @@ impl Backend for FactoredBackend {
     }
 
     fn probabilities(&self) -> Result<Vec<f64>> {
+        dense_probability_len(self.name(), self.num_qubits)?;
         let active: SmallVec<[&SubState; 16]> = self
             .substates
             .iter()

@@ -448,6 +448,25 @@ impl StabilizerBackend {
         }
     }
 
+    /// Measure `qubit` into a scratch classical bit, then correct a |1> outcome
+    /// in place.
+    ///
+    /// Routed through [`Self::sgi_measure`] rather than the dense `apply_reset`
+    /// because a random outcome widens row Pauli support by rowmul, and only the
+    /// SGI measurement rebuilds the qubit index that every later SGI gate
+    /// iterates.
+    fn sgi_reset(&mut self, qubit: usize) {
+        self.ensure_destabilizers();
+        let scratch = self.classical_bits.len();
+        self.classical_bits.push(false);
+        self.sgi_measure(qubit, scratch);
+        let outcome = self.classical_bits[scratch];
+        self.classical_bits.truncate(scratch);
+        if outcome {
+            self.sgi_apply_1q(&Gate::X, qubit);
+        }
+    }
+
     fn sgi_measure_random(&mut self, p_row: usize, qubit: usize, classical_bit: usize) {
         let n = self.n;
         let nw = self.num_words;
@@ -652,7 +671,7 @@ impl StabilizerBackend {
                     self.sgi_measure(*qubit, *classical_bit);
                 }
                 Instruction::Reset { qubit } => {
-                    self.apply_reset(*qubit)?;
+                    self.sgi_reset(*qubit);
                 }
                 Instruction::Barrier { .. } => {}
                 Instruction::Conditional {

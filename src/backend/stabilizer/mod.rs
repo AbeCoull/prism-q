@@ -849,14 +849,10 @@ impl StabilizerBackend {
         }
 
         let mut first_destab = vec![usize::MAX; num_meas];
-        let mut match_count = vec![0u16; num_meas];
-        let mut match_a = vec![0usize; num_meas];
-        let mut match_b = vec![0usize; num_meas];
 
+        // Only the stabilizer half can set `first_destab`, so the destabilizer
+        // rows carry no information this index reads.
         let build_index = |first_destab: &mut [usize],
-                           match_count: &mut [u16],
-                           match_a: &mut [usize],
-                           match_b: &mut [usize],
                            xz: &[u64],
                            qubit_to_meas: &[usize],
                            n: usize,
@@ -864,8 +860,7 @@ impl StabilizerBackend {
                            stride: usize,
                            num_meas: usize| {
             first_destab.fill(usize::MAX);
-            match_count.fill(0);
-            for r in 0..2 * n {
+            for r in n..2 * n {
                 let r_base = r * stride;
                 for w in 0..nw {
                     let x_word = xz[r_base + w];
@@ -878,20 +873,8 @@ impl StabilizerBackend {
                         let q = w * 64 + b;
                         if q < n {
                             let mi = qubit_to_meas[q];
-                            if mi < num_meas {
-                                if r >= n {
-                                    if first_destab[mi] == usize::MAX {
-                                        first_destab[mi] = r;
-                                    }
-                                } else {
-                                    let c = match_count[mi];
-                                    if c == 0 {
-                                        match_a[mi] = r;
-                                    } else if c == 1 {
-                                        match_b[mi] = r;
-                                    }
-                                    match_count[mi] = c.saturating_add(1);
-                                }
+                            if mi < num_meas && first_destab[mi] == usize::MAX {
+                                first_destab[mi] = r;
                             }
                         }
                         bits &= bits - 1;
@@ -902,9 +885,6 @@ impl StabilizerBackend {
 
         build_index(
             &mut first_destab,
-            &mut match_count,
-            &mut match_a,
-            &mut match_b,
             &self.xz,
             &qubit_to_meas,
             n,
@@ -922,9 +902,6 @@ impl StabilizerBackend {
                 random_x_support[mi] = support;
                 build_index(
                     &mut first_destab,
-                    &mut match_count,
-                    &mut match_a,
-                    &mut match_b,
                     &self.xz,
                     &qubit_to_meas,
                     n,

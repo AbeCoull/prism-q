@@ -781,6 +781,40 @@ impl Backend for FactoredBackend {
         Ok(crate::sim::merge_probabilities(&blocks, self.num_qubits))
     }
 
+    fn block_probabilities(&self) -> Option<crate::sim::Probabilities> {
+        // `FactoredBlock::mask` is a u64 and `Probabilities::len` is
+        // `1 << total_qubits`, so a wider register has no representable lazy
+        // form either; the dense terminal declines it.
+        if self.num_qubits > 64 {
+            return None;
+        }
+
+        let active: SmallVec<[&SubState; 16]> = self
+            .substates
+            .iter()
+            .filter_map(|opt| opt.as_ref())
+            .collect();
+
+        if active.len() < 2 {
+            return None;
+        }
+
+        let blocks = active
+            .iter()
+            .map(|sub| {
+                let mut probs = vec![0.0_f64; sub.state.len()];
+                simd::norm_sqr_to_slice(&sub.state, &mut probs);
+                let mask = sub.qubits.iter().fold(0u64, |m, &q| m | 1 << q);
+                crate::sim::FactoredBlock { probs, mask }
+            })
+            .collect();
+
+        Some(crate::sim::Probabilities::Factored {
+            blocks,
+            total_qubits: self.num_qubits,
+        })
+    }
+
     fn num_qubits(&self) -> usize {
         self.num_qubits
     }

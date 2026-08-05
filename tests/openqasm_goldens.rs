@@ -73,7 +73,10 @@ fn qiskit_style_conditional_x_after_measure() {
     let mut backend = StatevectorBackend::new(42);
     let result = sim::run_on(&mut backend, &circuit).expect("run");
     let probs = result.probabilities.expect("probs");
-    assert!(probs[0] > 0.999, "expected |0> after teleport-style reset");
+    assert!(
+        probs.get(0) > 0.999,
+        "expected |0> after teleport-style reset"
+    );
 }
 
 #[test]

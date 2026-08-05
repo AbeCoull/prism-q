@@ -396,3 +396,56 @@ fn factored_oversize_probabilities_decline_instead_of_panicking() {
         "a 100 qubit factored register cannot serve a dense probability vector"
     );
 }
+
+// The multi-block probability terminal now returns per-block marginals instead
+// of the merged 2^n vector. Expanding that lazy form must reproduce the merge
+// exactly, which pins the block bit-order convention: each block's probs are
+// indexed by its own qubits in ascending global order, and `mask` records which
+// global positions those are.
+#[test]
+fn factored_block_probabilities_expand_to_the_merged_vector() {
+    use prism_q::backend::Backend;
+    use prism_q::sim::{BackendKind, Probabilities};
+
+    for n in [10usize, 14, 16] {
+        let circuit = circuits::partially_independent_circuit(n, 4, SEED);
+        assert!(
+            circuit.independent_subsystems().len() > 1,
+            "{n}q: circuit must stay partially independent for this to test anything"
+        );
+
+        let mut backend = FactoredBackend::new(SEED);
+        prism_q::sim::run_on(&mut backend, &circuit).unwrap();
+
+        let lazy = backend
+            .block_probabilities()
+            .expect("multi-block state must offer per-block probabilities");
+        match &lazy {
+            Probabilities::Factored { blocks, .. } => {
+                assert!(blocks.len() > 1, "{n}q: expected more than one block")
+            }
+            Probabilities::Dense(_) => panic!("{n}q: expected the factored variant"),
+        }
+
+        let merged = backend.probabilities().unwrap();
+        let expanded = lazy.to_vec();
+        assert_eq!(expanded.len(), merged.len(), "{n}q: length mismatch");
+        for (i, (a, b)) in expanded.iter().zip(&merged).enumerate() {
+            assert!(
+                (a - b).abs() < FACTORED_EPS,
+                "{n}q: state {i}: lazy {a} vs merged {b}"
+            );
+        }
+
+        // The public run must now carry the lazy form end to end.
+        let out = prism_q::sim::simulate(&circuit)
+            .backend(BackendKind::Factored)
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert!(matches!(
+            out.probabilities,
+            Some(Probabilities::Factored { .. })
+        ));
+    }
+}

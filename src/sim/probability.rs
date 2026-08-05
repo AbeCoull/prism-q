@@ -173,24 +173,6 @@ impl Probabilities {
     }
 }
 
-impl std::ops::Index<usize> for Probabilities {
-    type Output = f64;
-
-    /// Index into a dense probability vector.
-    ///
-    /// Only works for `Dense`. Panics on `Factored` because `Index` must
-    /// return `&f64` and factored values are computed, not stored.
-    /// Use [`Probabilities::get`] or [`Probabilities::iter`] instead.
-    fn index(&self, index: usize) -> &f64 {
-        match self {
-            Probabilities::Dense(v) => &v[index],
-            Probabilities::Factored { .. } => {
-                panic!("cannot index Factored probabilities; use .get(i) or .to_vec()")
-            }
-        }
-    }
-}
-
 /// Concrete iterator for [`Probabilities::iter`].
 pub struct ProbabilitiesIter<'a> {
     inner: ProbabilitiesIterInner<'a>,
@@ -291,7 +273,7 @@ mod tests {
         assert_eq!(p.len(), 4);
         assert!(!p.is_empty());
         assert_eq!(p.get(2), 0.3);
-        assert_eq!(p[3], 0.4);
+        assert_eq!(p.get(3), 0.4);
         assert_eq!(p.to_vec(), vec![0.1, 0.2, 0.3, 0.4]);
         let collected: Vec<f64> = p.iter().collect();
         assert_eq!(collected, vec![0.1, 0.2, 0.3, 0.4]);
@@ -340,13 +322,6 @@ mod tests {
         let p = Probabilities::Dense(vec![0.5, 0.5]);
         let it = p.iter();
         assert_eq!(it.size_hint(), (2, Some(2)));
-    }
-
-    #[test]
-    #[should_panic(expected = "cannot index Factored")]
-    fn factored_index_panics() {
-        let p = factored_2x3();
-        let _ = p[0];
     }
 
     #[test]

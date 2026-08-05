@@ -12,7 +12,7 @@ Criterion.rs. Two benchmark binaries:
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `PRISM_BENCH_PLOTS` | unset | Set to render the Criterion HTML report. Off by default: on the reference host a five-row group took 335s with plots and 47s without, so roughly 58s per row goes to rendering against 9s of measurement. Gating reads stdout and `target/criterion/**/estimates.json`, which the plots do not feed. |
-| `PRISM_BENCH_SAMPLES` | 100 | Samples per row outside the `bench-fast` tier. Criterion divides `measurement_time` across the sample count rather than multiplying by it, so the same five-row group took 47s at 10 samples and 48s at 100. Lower it only for opt-in rows whose single iteration is slow enough that the sample count, not the time budget, sets the cost. Values below 10 are clamped. |
+| `PRISM_BENCH_SAMPLES` | 30 | Samples per row outside the `bench-fast` tier. Criterion divides `measurement_time` across the sample count rather than multiplying by it, so the count is free while one iteration still fits in `measurement_time / samples`. Past that it sets the cost outright: `density_matrix/unitary_layers/12` runs 3.87s per iteration, where 100 samples cost 39 minutes across the six passes of an adjacent A/B against 4 minutes at 10. Raise it for a row needing a tighter interval, lower it for triage. Values below 10 are clamped. |
 
 Sample count controls the precision of one run's mean. It does not remove
 drift between runs: on the reference host, back-to-back runs of identical code
@@ -266,7 +266,7 @@ independent pairs.
 ## Reproducibility checklist
 
 - [ ] Fixed RNG seed (`0xDEAD_BEEF` for circuit generation, `42` for simulation)
-- [ ] Criterion defaults: 5s warm-up, 5s measurement, 100 samples
+- [ ] Criterion settings: 5s warm-up, 5s measurement, 30 samples (`PRISM_BENCH_SAMPLES`)
 - [ ] Gating comparisons run through `scripts/bench_ab.sh`, with the control column reported
 - [ ] Document CPU model, OS, Rust version, RUSTFLAGS (`bench_ab.sh` records these in its table)
 - [ ] Disable CPU frequency scaling if possible (`performance` governor on Linux)

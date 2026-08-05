@@ -56,19 +56,24 @@ pub fn criterion_config() -> criterion::Criterion {
 /// Samples per row outside the `bench-fast` tier.
 ///
 /// Criterion splits `measurement_time` across the sample count rather than
-/// multiplying by it, so for every row recorded so far (the slowest is 75ms per
-/// iteration) raising this from 10 costs almost nothing: the same five-row group
-/// took 47s at 10 samples and 48s at 100, while the standard error of the mean
-/// falls by roughly three.
+/// multiplying by it, so the count is free while one iteration still fits in
+/// `measurement_time / samples`. Past that the count sets the cost outright, and
+/// the corpus now holds rows well past it: `density_matrix/unitary_layers/12`
+/// runs 3.87s per iteration, where 100 samples cost 39 minutes across the six
+/// passes of an adjacent A/B against 4 minutes at 10.
 ///
-/// `PRISM_BENCH_SAMPLES` overrides it for opt-in rows whose single iteration is
-/// slow enough that the sample count, not the time budget, sets the cost.
-/// Criterion rejects fewer than 10.
+/// 30 is the compromise. Standard error falls as `1/sqrt(n)`, so dropping from
+/// 100 widens it by about 1.8x while cutting slow-row wall time by 3.3x, and a
+/// 2026-08-05 A/B at 30 held every control row on the stabilizer and factored
+/// groups under 3%.
+///
+/// `PRISM_BENCH_SAMPLES` raises it for a row that needs a tighter interval, or
+/// lowers it for triage. Criterion rejects fewer than 10.
 pub fn sample_size() -> usize {
     std::env::var("PRISM_BENCH_SAMPLES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(100)
+        .unwrap_or(30)
         .max(10)
 }
 

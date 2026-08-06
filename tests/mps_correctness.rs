@@ -171,3 +171,52 @@ fn mps_cz_chain_12q_fused() {
         &circuits::cz_chain_circuit(12, 3, SEED),
     );
 }
+
+// ===== dense expansion =====
+
+// The dense expansion splits the top sites across Rayon tasks once the chain
+// is deeper than the per-task leaf floor, so 6 qubits take the serial walk and
+// 7 and up take the split. Both must agree with the statevector.
+#[test]
+fn mps_dense_expansion_across_the_parallel_split() {
+    for n in [6usize, 7, 8, 13] {
+        check_sv_cross(
+            &format!("dense expansion {n}q"),
+            &circuits::random_circuit(n, 4, SEED),
+        );
+    }
+}
+
+// SWAP routing permutes the site layout, so the basis bit a site decides is no
+// longer the site's own index. Long-range CX force that permutation, and
+// export_statevector orders amplitudes by logical qubit, not by site.
+#[test]
+fn mps_dense_expansion_survives_swap_routing() {
+    use prism_q::backend::Backend;
+    use prism_q::gates::Gate;
+
+    let n = 8;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.3 + 0.2 * q as f64), &[q]);
+    }
+    for (control, target) in [(0usize, 7usize), (1, 6), (2, 5), (0, 4)] {
+        circuit.add_gate(Gate::Cx, &[control, target]);
+    }
+    circuit.add_gate(Gate::T, &[3]);
+
+    let mut backend = MpsBackend::new(SEED, bond_dim_for(n));
+    assert_backend_matches_sv(&mut backend, &circuit, MPS_EPS, "swap-routed expansion");
+
+    let amplitudes = backend.export_statevector().unwrap();
+    let probs = backend.probabilities().unwrap();
+    assert_eq!(amplitudes.len(), probs.len());
+    for (basis, amp) in amplitudes.iter().enumerate() {
+        assert!(
+            (amp.norm_sqr() - probs[basis]).abs() < MPS_EPS,
+            "basis {basis}: |amp|^2 {} vs probability {}",
+            amp.norm_sqr(),
+            probs[basis]
+        );
+    }
+}

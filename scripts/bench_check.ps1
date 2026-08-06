@@ -173,11 +173,21 @@ function Compare-BenchBaseline {
         $cMean = $currBench.mean_ns
         $pctChange = (($cMean - $bMean) / $bMean) * 100.0
 
+        # A baseline written before the interval fields existed collapses to a
+        # zero-width interval, which reduces the separation test below to the
+        # mean comparison it replaces.
+        $bLo = if ($null -ne $baseBench.ci_lo_ns) { $baseBench.ci_lo_ns } else { $bMean }
+        $bHi = if ($null -ne $baseBench.ci_hi_ns) { $baseBench.ci_hi_ns } else { $bMean }
+        $cLo = if ($null -ne $currBench.ci_lo_ns) { $currBench.ci_lo_ns } else { $cMean }
+        $cHi = if ($null -ne $currBench.ci_hi_ns) { $currBench.ci_hi_ns } else { $cMean }
+
         $rows += [PSCustomObject]@{
             Name       = $name
             BeforeNs   = $bMean
             AfterNs    = $cMean
             PctChange  = $pctChange
+            Slower     = ($pctChange -gt $Threshold) -and ($cLo -gt $bHi)
+            Faster     = ($pctChange -lt (-$Threshold)) -and ($cHi -lt $bLo)
         }
     }
 
@@ -186,8 +196,11 @@ function Compare-BenchBaseline {
         return
     }
 
-    $regressions = @($rows | Where-Object { $_.PctChange -gt $Threshold })
-    $improvements = @($rows | Where-Object { $_.PctChange -lt (-$Threshold) })
+    # Both sides of a verdict: past the threshold, and the two confidence
+    # intervals do not overlap. A mean that moved further than the gate while the
+    # intervals still overlap is host noise.
+    $regressions = @($rows | Where-Object { $_.Slower })
+    $improvements = @($rows | Where-Object { $_.Faster })
 
     if ($Markdown) {
         Write-Output ''
@@ -195,8 +208,8 @@ function Compare-BenchBaseline {
         Write-Output '|-----------|--------|-------|--------|'
         foreach ($r in $rows) {
             $flag = ''
-            if ($r.PctChange -gt $Threshold) { $flag = ' :x:' }
-            elseif ($r.PctChange -lt (-$Threshold)) { $flag = ' :white_check_mark:' }
+            if ($r.Slower) { $flag = ' :x:' }
+            elseif ($r.Faster) { $flag = ' :white_check_mark:' }
             $sign = if ($r.PctChange -ge 0) { '+' } else { '' }
             $before = Format-Duration $r.BeforeNs
             $after = Format-Duration $r.AfterNs
@@ -205,7 +218,7 @@ function Compare-BenchBaseline {
         }
         Write-Output ''
         $verdict = if ($regressions.Count -gt 0) { 'FAIL' } else { 'PASS' }
-        Write-Output ('**Regression verdict**: {0} (threshold: {1}%)' -f $verdict, $Threshold)
+        Write-Output ('**Regression verdict**: {0} (threshold: {1}%, confidence intervals must not overlap)' -f $verdict, $Threshold)
         return
     }
 
@@ -229,8 +242,8 @@ function Compare-BenchBaseline {
         $changeStr = "{0}{1:F1}%" -f $sign, $r.PctChange
 
         $color = "Gray"
-        if ($r.PctChange -gt $Threshold) { $color = "Red" }
-        elseif ($r.PctChange -lt (-$Threshold)) { $color = "Green" }
+        if ($r.Slower) { $color = "Red" }
+        elseif ($r.Faster) { $color = "Green" }
 
         $truncName = $r.Name
         if ($truncName.Length -gt $nameWidth) {
@@ -245,6 +258,7 @@ function Compare-BenchBaseline {
     Write-Host ("  {0} benchmarks | {1} regressions | {2} improvements | {3} unchanged" -f `
         $rows.Count, $regressions.Count, $improvements.Count, `
         ($rows.Count - $regressions.Count - $improvements.Count))
+    Write-Host "  A verdict needs both a move past ${Threshold}% and non-overlapping confidence intervals."
 
     if ($regressions.Count -gt 0) {
         Write-Host ""

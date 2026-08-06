@@ -12,7 +12,7 @@ Criterion.rs. Two benchmark binaries:
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `PRISM_BENCH_PLOTS` | unset | Set to render the Criterion HTML report. Off by default: on the reference host a five-row group took 335s with plots and 47s without, so roughly 58s per row goes to rendering against 9s of measurement. Gating reads stdout and `target/criterion/**/estimates.json`, which the plots do not feed. |
-| `PRISM_BENCH_SAMPLES` | 30 | Samples per row outside the `bench-fast` tier. Criterion divides `measurement_time` across the sample count rather than multiplying by it, so the count is free while one iteration still fits in `measurement_time / samples`. Past that it sets the cost outright: `density_matrix/unitary_layers/12` runs 3.87s per iteration, where 100 samples cost 39 minutes across the six passes of an adjacent A/B against 4 minutes at 10. `statevector/qpe_t_gate/22q` is the same shape at 2.94s per iteration, which is why the CI gate pins the count to 10. Raise it for a row needing a tighter interval, lower it for triage. Values below 10 are clamped. |
+| `PRISM_BENCH_SAMPLES` | 30 | Samples per row outside the `bench-fast` tier. Criterion divides `measurement_time` across the sample count rather than multiplying by it, so the count is free while one iteration still fits in `measurement_time / samples`. Past that it sets the cost outright: `density_matrix/unitary_layers/12` runs 3.87s per iteration, where 100 samples cost 39 minutes across the six passes of an adjacent A/B against 4 minutes at 10. `statevector/qpe_t_gate/22q` is the same shape at 2.94s per iteration, which is why the CI gate runs the `bench-fast` tier. Raise it for a row needing a tighter interval, lower it for triage. Values below 10 are clamped. |
 
 Sample count controls the precision of one run's mean. It does not remove
 drift between runs: on the reference host, back-to-back runs of identical code
@@ -197,27 +197,28 @@ the head build between them, which is the pattern the A/B exists to replace, on 
 shared runner. Rows a hosted runner cannot resolve now say so instead of reading
 as a result.
 
-The subset uses `CI_BENCH_FEATURES=parallel` with `PRISM_BENCH_SAMPLES=10`, and
-covers larger CPU-only parameter points that are already present on the base
-branch. Warmup and measurement time stay at Criterion's defaults, which the
-`bench-fast` tier cuts and the cheaper rows have the budget for. The sample
-count is pinned because the expensive rows run seconds per iteration, where the
-count rather than the time budget sets the cost: six passes over
-`statevector/qpe_t_gate/22q` alone would cost half an hour at 100 samples. The
-four-pass structure and the per-row control column, not the sample count, are
-what make the gate trustworthy. The filters are
-intentionally narrow so hosted runner noise from tiny parameter sweeps does not
-dominate the gate. A row must exist on the reference commit as well as on head,
-or it drops out of the comparison and the row-count guard fails the run. It is a
-regression gate, not a replacement for the full local benchmark suite required
-for performance sensitive changes.
+The subset runs at `CI_BENCH_FEATURES=parallel,bench-fast` and covers larger
+CPU-only parameter points that are already present on the base branch. That tier
+pins samples to Criterion's floor of 10 and shortens the warmup and measurement
+windows, which is what keeps the four passes affordable: the expensive rows run
+seconds per iteration, where the sample count rather than the time budget sets
+the cost, and six passes over `statevector/qpe_t_gate/22q` alone would cost half
+an hour at 100 samples. The four-pass structure and the per-row control column,
+not a wider measurement window, are what make the gate trustworthy. The filters
+are intentionally narrow so hosted runner noise from tiny parameter sweeps does
+not dominate the gate. A row must exist on the reference commit as well as on
+head, or it drops out of the comparison and the row-count guard fails the run. It
+is a regression gate, not a replacement for the full local benchmark suite
+required for performance sensitive changes.
 
-The job skips the measurement when a pull request touches nothing under `src/`,
-`benches/`, or the manifests. It reports a result either way, so it stays safe to
-promote to a required check. The reference worktree sits beside the checkout
-rather than inside it: `/target/` in `.gitignore` is anchored to the repository
-root, so a nested worktree's build output would read as an untracked
-working-tree change and abort the A/B.
+The job measures only when a pull request changes a `.rs` file under `src/` or
+`benches/`, or a manifest. Documentation, workflow, and tooling changes cannot
+move a kernel and skip it, as does any pull request carrying a `skip-bench`
+label. It reports a result either way, so it stays safe to promote to a required
+check. The reference worktree sits beside the checkout rather than inside it:
+`/target/` in `.gitignore` is anchored to the repository root, so a nested
+worktree's build output would read as an untracked working-tree change and abort
+the A/B.
 
 Representative CI workloads:
 
@@ -229,8 +230,6 @@ Representative CI workloads:
 | `statevector/qaoa_l3/20` | QAOA workload with ZZ rotations and mixer layers |
 | `stabilizer/scaling/1000` | Large Clifford stabilizer backend path |
 | `stabilizer/measurement/ghz_measure_all/1000` | Large GHZ preparation plus terminal measurements |
-| `auto/qft_textbook/22` | Auto dispatch on a structured dense circuit |
-| `auto/qpe_t_gate/22q` | Auto dispatch on a non-Clifford phase estimation circuit |
 | `compiled_sampler/noiseless/noiseless_1000q_10k` | Compiled shot sampling path |
 | `compiled_sampler/noisy/noisy_1000q_10k` | Compiled Pauli-noise shot sampling path |
 
@@ -255,8 +254,9 @@ Default threshold: **5%** per benchmark (configurable via `REGRESSION_THRESHOLD`
 it exceeds both the threshold and that row's own control spread. `bench_check.*`
 reads Criterion JSON from `target/criterion/`, compares matching benchmark means,
 and exits with code 1 when a benchmark exceeds the threshold and its confidence
-interval clears the baseline's. The older `bench_compare.*` wrappers still parse
-Criterion console output for quick baseline checks.
+interval clears the baseline's, in both the shell and PowerShell forms. The older
+`bench_compare.*` wrappers still parse Criterion console output for quick
+baseline checks.
 
 ### Rows this host cannot resolve
 

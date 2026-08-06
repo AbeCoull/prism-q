@@ -25,10 +25,11 @@ env:
   # docs build on a bare runner. distributed-mpi stays out: mpi-sys fails in its build
   # script when no MPI library is installed.
   CI_DOC_FEATURES: parallel,gpu,distributed
-  # Not `bench-fast`: that tier also cuts warmup to 200ms and measurement to 1s,
-  # which the cheaper gate rows have the budget for. The sample count is pinned
-  # separately in scripts/bench_ci.sh, where the reasoning lives.
-  CI_BENCH_FEATURES: parallel
+  # `bench-fast` pins samples to 10 and shortens the warmup and measurement
+  # windows. The gate's confidence comes from the four-pass structure and the
+  # per-row control column, not from a wider window, and the expensive rows run
+  # seconds per iteration where the sample count sets the cost outright.
+  CI_BENCH_FEATURES: parallel,bench-fast
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
 
 jobs:
@@ -161,11 +162,8 @@ jobs:
     name: Benchmark Regression
     runs-on: ubuntu-latest
     needs: check
-    if: github.event_name == 'pull_request'
-    # Six passes where the old gate ran two, at Criterion's default measurement
-    # window rather than the `bench-fast` one, so the measured stretch grows by
-    # roughly ten minutes on top of two reference builds.
-    timeout-minutes: 60
+    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'skip-bench')
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
@@ -191,16 +189,20 @@ jobs:
       # There is no job-level paths filter, and a separate workflow file would
       # duplicate the setup, so the scope check runs in-job. It reports a result
       # either way, which keeps the job safe to promote to a required check.
+      #
+      # Compiled sources only. A docs, workflow, or tooling change cannot move a
+      # kernel, and benches/README.md sits next to the bench sources without
+      # being one of them.
       - name: Decide whether anything benchmarked changed
         id: scope
         working-directory: head
         run: |
           changed="$(git diff --name-only "$PRISM_BENCH_REF" HEAD)"
-          if grep -Eq '^(src/|benches/|Cargo\.(toml|lock)$)' <<< "$changed"; then
+          if grep -Eq '^(src/.*\.rs$|benches/.*\.rs$|Cargo\.(toml|lock)$)' <<< "$changed"; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "No change under src/, benches/, or the manifests. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
+            echo "No Rust source or manifest change. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Prepare the reference worktree

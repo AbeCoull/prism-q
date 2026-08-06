@@ -179,7 +179,6 @@ cmd_compare() {
     local base_date
     base_date="$(jq -r '.date' "$base_file")"
 
-    # Collect current estimates into associative arrays
     declare -A curr_mean curr_ci_lo curr_ci_hi
     while IFS='|' read -r id mean ci_lo ci_hi stddev; do
         [[ -z "$id" ]] && continue
@@ -210,9 +209,8 @@ cmd_compare() {
         local cur="${curr_mean[$id]:-}"
         [[ -z "$cur" ]] && continue
 
-        # A baseline written before the interval fields existed collapses to a
-        # zero-width interval, which reduces the separation test below to the
-        # mean comparison it replaces.
+        # A pre-interval baseline falls back to a zero-width interval, which
+        # reduces the test below to the mean comparison it replaces.
         local base_ci_lo base_ci_hi
         base_ci_lo="$(jq -r ".benchmarks.\"$id\".ci_lo_ns // .benchmarks.\"$id\".mean_ns" "$base_file")"
         base_ci_hi="$(jq -r ".benchmarks.\"$id\".ci_hi_ns // .benchmarks.\"$id\".mean_ns" "$base_file")"
@@ -226,10 +224,6 @@ cmd_compare() {
         rows+=("$id|$base_mean|$cur|$sign$pct%")
         total=$((total + 1))
 
-        # Both sides of a verdict: past the threshold, and the two confidence
-        # intervals do not overlap. A mean that moved further than the gate while
-        # the intervals still overlap is host noise, which is the majority of
-        # what a shared runner produces.
         local slower_separated faster_separated
         slower_separated="$(echo "${curr_ci_lo[$id]} > $base_ci_hi" | bc -l)"
         faster_separated="$(echo "${curr_ci_hi[$id]} < $base_ci_lo" | bc -l)"

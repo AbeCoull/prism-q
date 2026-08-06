@@ -35,8 +35,8 @@
 #                   reference build is cached. Default: a temporary directory
 #                   removed on exit.
 #   --min-rows      fail when fewer than this many rows appear in all four
-#                   passes. Catches a filter that silently stopped matching a
-#                   renamed benchmark id. Default: 1.
+#                   passes, catching a filter that stopped matching a renamed
+#                   benchmark id. Default: 1.
 #   --out           markdown output path (default: bench_results/ab-<stamp>.md)
 #
 # Environment:

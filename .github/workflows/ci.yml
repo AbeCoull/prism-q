@@ -25,10 +25,6 @@ env:
   # docs build on a bare runner. distributed-mpi stays out: mpi-sys fails in its build
   # script when no MPI library is installed.
   CI_DOC_FEATURES: parallel,gpu,distributed
-  # `bench-fast` pins samples to 10 and shortens the warmup and measurement
-  # windows. The gate's confidence comes from the four-pass structure and the
-  # per-row control column, not from a wider window, and the expensive rows run
-  # seconds per iteration where the sample count sets the cost outright.
   CI_BENCH_FEATURES: parallel,bench-fast
   REGRESSION_THRESHOLD: ${{ vars.REGRESSION_THRESHOLD || '5.0' }}
 
@@ -149,15 +145,10 @@ jobs:
       - name: Verify the conventional-commit mapping and the pre-1.0 clamp
         run: bash scripts/release_bump_level_test.sh
 
-  # Adjacent-binary A/B against the PR base. Both bench binaries are built first,
-  # then run with no build in between, so the compile no longer sits between the
-  # two measurements and every row reports its own same-code control spread. The
-  # gate fires only when a row exceeds both the threshold and that spread.
-  #
-  # The reference worktree lives beside the checkout rather than inside it: the
-  # A/B fingerprints the working tree before and after the reference build, and
-  # `/target/` in .gitignore is anchored to the repository root, so a nested
-  # worktree's build output would read as an untracked change and abort the run.
+  # Adjacent-binary A/B against the PR base; see scripts/bench_ci.sh. The
+  # reference worktree sits beside the checkout, not inside it: `/target/` in
+  # .gitignore is anchored to the repository root, so a nested worktree's build
+  # output would read as an untracked change and abort the A/B.
   benchmark-regression:
     name: Benchmark Regression
     runs-on: ubuntu-latest
@@ -178,21 +169,15 @@ jobs:
           path: head
           fetch-depth: 1
 
-      # A fork's origin does not carry the base commit, and the A/B needs the
-      # object locally to build the reference from it.
+      # A fork's origin does not carry the base commit.
       - name: Fetch the base commit
         working-directory: head
         run: |
           git remote add upstream "https://github.com/${{ github.repository }}"
           git fetch --no-tags --depth=1 upstream "$PRISM_BENCH_REF"
 
-      # There is no job-level paths filter, and a separate workflow file would
-      # duplicate the setup, so the scope check runs in-job. It reports a result
-      # either way, which keeps the job safe to promote to a required check.
-      #
-      # Compiled sources only. A docs, workflow, or tooling change cannot move a
-      # kernel, and benches/README.md sits next to the bench sources without
-      # being one of them.
+      # In-job rather than a paths filter, so a skip still reports a result and
+      # the job stays safe to promote to a required check.
       - name: Decide whether anything benchmarked changed
         id: scope
         working-directory: head
@@ -213,8 +198,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.scope.outputs.run == 'true'
 
-      # Keyed per directory, so the reference build stays warm across PRs that
-      # share a base.
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.run == 'true'
         with:

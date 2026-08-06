@@ -1,25 +1,13 @@
 #!/usr/bin/env bash
 # Run the benchmark subset used by the CI regression gate.
 #
-# Delegates to the adjacent-binary A/B. Measuring the base branch, building the
-# head branch, then measuring head is not a valid comparison: the build sits
-# between the two measurements and drifts them by more than the gate on its own
-# (see scripts/bench_ab.sh). The A/B builds both binaries first, then runs them
-# adjacent in ref, new, new, ref order, so linear drift cancels and every row
-# carries a same-code control column.
+# Delegates to the adjacent-binary A/B in scripts/bench_ab.sh, which explains why
+# measuring the base, building head, then measuring head is not a comparison.
 #
 # The filter covers representative hot paths rather than the full Criterion
-# suite. A row must exist on the reference commit as well as on the working
-# tree, or it drops out of the comparison and the row-count guard fails the run.
-#
-# The `bench-fast` tier holds the wall time down: it pins samples to Criterion's
-# floor of 10 and shortens the warmup and measurement windows. These rows are
-# large on purpose, and Criterion only divides `measurement_time` across the
-# samples while one iteration still fits the budget, so at 100 samples
-# `statevector/qpe_t_gate/22q` alone reports 293.8s per pass against six passes.
-# The A/B's four passes give two independent measurements per binary and a
-# control column per row, which is what the gate reads; a tighter single-pass
-# mean on top of that is not worth the wall time.
+# suite, and `--min-rows` fails the run if one stops matching. `bench-fast` keeps
+# the four passes affordable: the 22q rows run seconds per iteration, where the
+# sample count sets the cost outright.
 #
 # Environment:
 #   PRISM_BENCH_REF       git ref for the reference build (required)
@@ -38,10 +26,8 @@ if [[ -z "${PRISM_BENCH_REF:-}" ]]; then
     exit 1
 fi
 
-# The `auto/` twins of the two 22q rows are deliberately absent. They run the
-# same circuits through dispatch, which resolves to the statevector backend
-# already covered above, so they doubled the most expensive pair in the set
-# without covering a distinct kernel.
+# The `auto/` twins of the 22q rows are absent on purpose: dispatch resolves them
+# to the statevector rows above, doubling the most expensive pair for nothing.
 CIRCUITS_FILTER="^(statevector/(scalability_d5/22|qft_textbook/22|qpe_t_gate/22q|qaoa_l3/20)"
 CIRCUITS_FILTER+="|stabilizer/(scaling/1000|measurement/ghz_measure_all/1000)"
 CIRCUITS_FILTER+="|compiled_sampler/(noiseless/noiseless_1000q_10k|noisy/noisy_1000q_10k))$"

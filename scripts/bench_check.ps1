@@ -173,9 +173,8 @@ function Compare-BenchBaseline {
         $cMean = $currBench.mean_ns
         $pctChange = (($cMean - $bMean) / $bMean) * 100.0
 
-        # A baseline written before the interval fields existed collapses to a
-        # zero-width interval, which reduces the separation test below to the
-        # mean comparison it replaces.
+        # A pre-interval baseline falls back to a zero-width interval, which
+        # reduces the test below to the mean comparison it replaces.
         $bLo = if ($null -ne $baseBench.ci_lo_ns) { $baseBench.ci_lo_ns } else { $bMean }
         $bHi = if ($null -ne $baseBench.ci_hi_ns) { $baseBench.ci_hi_ns } else { $bMean }
         $cLo = if ($null -ne $currBench.ci_lo_ns) { $currBench.ci_lo_ns } else { $cMean }
@@ -196,9 +195,6 @@ function Compare-BenchBaseline {
         return
     }
 
-    # Both sides of a verdict: past the threshold, and the two confidence
-    # intervals do not overlap. A mean that moved further than the gate while the
-    # intervals still overlap is host noise.
     $regressions = @($rows | Where-Object { $_.Slower })
     $improvements = @($rows | Where-Object { $_.Faster })
 

@@ -864,6 +864,15 @@ impl Backend for FactoredBackend {
     /// the product of the per-block expectations. Blocks the observable does
     /// not touch contribute one and are skipped.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let norms: Vec<f64> = self
+            .substates
+            .iter()
+            .map(|slot| {
+                slot.as_ref()
+                    .map_or(0.0, |sub| crate::backend::state_norm_sqr(&sub.state))
+            })
+            .collect();
+
         observables
             .iter()
             .map(|observable| {
@@ -875,9 +884,8 @@ impl Backend for FactoredBackend {
                     if xmask == 0 && zmask == 0 {
                         continue;
                     }
-                    let norm: f64 = sub.state.iter().map(|amp| amp.norm_sqr()).sum();
                     product *= crate::sim::pauli_expectation_from_masks(
-                        &sub.state, xmask, zmask, num_y, norm,
+                        &sub.state, xmask, zmask, num_y, norms[ss],
                     );
                 }
                 Ok(product)

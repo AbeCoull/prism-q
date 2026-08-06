@@ -430,3 +430,34 @@ fn statevector_route_matches_scalar_reference_above_the_parallel_norm_threshold(
         assert_close(&got, &[expect_zz / norm, expect_x / norm], TOL);
     }
 }
+
+// A batch of observables shares one traversal of the amplitude buffer, while a
+// batch of one keeps the single-observable reduction. The two must agree, and
+// the batch must return values in request order: the shared pass splits the
+// list into a Z-only family and a family carrying an X or Y factor, then
+// interleaves them back. Sizes straddle the parallel threshold at 2^16, and the
+// observable order alternates between the two families so a mismatched
+// interleave cannot pass.
+#[test]
+fn batched_observables_match_one_at_a_time() {
+    use prism_q::circuits;
+
+    for n in [12usize, 16, 17] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, 42);
+        let observables: Vec<Vec<PauliTerm>> = vec![
+            vec![PauliTerm::x(0), PauliTerm::y(1)],
+            vec![PauliTerm::z(2), PauliTerm::z(n - 1)],
+            vec![PauliTerm::y(n / 2)],
+            vec![PauliTerm::z(n - 2)],
+            vec![],
+        ];
+
+        let batched = run_expectation_values(&circuit, &observables, 42).unwrap();
+        let one_at_a_time: Vec<f64> = observables
+            .iter()
+            .map(|obs| run_expectation_values(&circuit, std::slice::from_ref(obs), 42).unwrap()[0])
+            .collect();
+
+        assert_close(&batched, &one_at_a_time, TOL);
+    }
+}

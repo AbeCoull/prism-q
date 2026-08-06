@@ -58,7 +58,7 @@ use crate::backend::statevector::{StatevectorBackend, insert_zero_bit};
 use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
-use crate::gates::{DiagEntry, Gate, McuData};
+use crate::gates::{DiagEntry, Gate, McuData, mat_mul_4x4};
 use crate::sim::i_pow;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -472,6 +472,31 @@ impl DensityMatrixBackend {
     pub fn apply_1q_kraus(&mut self, qubit: usize, kraus: &[[[Complex64; 2]; 2]]) {
         let s = block_superoperator(kraus);
         self.apply_block_superoperator(qubit, &s);
+    }
+
+    /// Apply `gate` and then every Kraus set in `channels`, all one-qubit maps
+    /// on `qubit`, in one buffer sweep instead of one per map.
+    ///
+    /// Returns false with the buffer untouched when `gate` has no one-qubit
+    /// matrix. Each block superoperator acts on the same `(row-bit, col-bit)`
+    /// 4-vector of `qubit`, so the composition is their matrix product in
+    /// application order and costs 64 complex multiplies per factor, once per
+    /// instruction rather than once per amplitude.
+    pub(crate) fn try_apply_fused_1q_channels(
+        &mut self,
+        gate: &Gate,
+        qubit: usize,
+        channels: &[Vec<[[Complex64; 2]; 2]>],
+    ) -> bool {
+        let Some(mat) = matrix_1q(gate) else {
+            return false;
+        };
+        let mut s = block_superoperator(&[mat]);
+        for kraus in channels {
+            s = mat_mul_4x4(&block_superoperator(kraus), &s);
+        }
+        self.apply_block_superoperator(qubit, &s);
+        true
     }
 
     /// Apply symmetric two-qubit depolarizing on `(q0, q1)`:

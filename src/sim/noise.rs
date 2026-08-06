@@ -2507,14 +2507,33 @@ fn evolve_density_matrix(
         None => dm.init(circuit.num_qubits, circuit.num_classical_bits)?,
     }
     for (i, inst) in circuit.instructions.iter().enumerate() {
+        let events: &[NoiseEvent] = match noise {
+            Some(noise) => &noise.after_gate[i],
+            None => &[],
+        };
+
+        if let Instruction::Gate { gate, targets } = inst {
+            if targets.len() == 1
+                && !events.is_empty()
+                && events.iter().all(|event| {
+                    !matches!(event.channel, NoiseChannel::TwoQubitDepolarizing { .. })
+                        && event.qubits[0] == targets[0]
+                })
+            {
+                let channels: Vec<Vec<[[Complex64; 2]; 2]>> =
+                    events.iter().map(|e| kraus_1q(&e.channel)).collect();
+                if dm.try_apply_fused_1q_channels(gate, targets[0], &channels) {
+                    continue;
+                }
+            }
+        }
+
         match inst {
             Instruction::Measure { .. } => {}
             other => dm.apply(other)?,
         }
-        if let Some(noise) = noise {
-            for event in &noise.after_gate[i] {
-                apply_noise_event_dm(&mut dm, event);
-            }
+        for event in events {
+            apply_noise_event_dm(&mut dm, event);
         }
     }
     Ok(dm)

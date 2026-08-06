@@ -1225,6 +1225,41 @@ fn bench_expectation(c: &mut Criterion) {
     group.finish();
 }
 
+/// `expectation/pauli_sum` runs `Auto` and resolves to the statevector family,
+/// so it never reaches the factored observable path. `hardware_efficient_ansatz`
+/// is one connected component, so the factored state is a single sub-state
+/// spanning every qubit.
+fn bench_expectation_factored(c: &mut Criterion) {
+    let mut group = c.benchmark_group("expectation/pauli_sum_factored");
+    configure_group(&mut group);
+
+    for &n in &[16, 20] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let observables: Vec<Vec<PauliTerm>> = (0..n - 1)
+            .map(|q| vec![PauliTerm::z(q), PauliTerm::z(q + 1)])
+            .collect();
+
+        for &(name, ref kind) in &[
+            ("factored", BackendKind::Factored),
+            ("statevector", BackendKind::Statevector),
+        ] {
+            group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(kind.clone())
+                            .seed(42)
+                            .expectation_values(&observables)
+                            .unwrap(),
+                    )
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 // ---- Factored backend benchmarks ----
 
 fn bench_factored_random(c: &mut Criterion) {
@@ -2027,6 +2062,7 @@ criterion_group! {
     bench_gradient_prefix,
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)
     bench_expectation,
+    bench_expectation_factored,
     // Factored backend
     bench_factored_random,
     bench_factored_independent,

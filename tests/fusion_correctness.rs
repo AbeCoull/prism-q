@@ -1186,3 +1186,18 @@ fn fusion_batch_phase_folds_duplicate_pair() {
         }
     }
 }
+
+// qaoa puts three targets past the L3 tier at 20q (17, 18, 19) and two at 19q,
+// so both the k=3 and k=2 shapes run; 18q leaves one gate on the single-gate
+// path. Compared at amplitude level because the tail carries phases.
+#[test]
+fn fusion_multi_1q_high_targets_match_unfused() {
+    for n in [18usize, 19, 20] {
+        let circuit = circuits::qaoa_circuit(n, 3, 42);
+        assert_state_close(
+            &run_fused_state(&circuit),
+            &run_unfused_state(&circuit),
+            EPS,
+        );
+    }
+}

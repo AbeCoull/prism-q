@@ -663,12 +663,7 @@ fn expectation_values_from_initial_state(
 
     let evolved = backend.export_statevector()?;
     let norm = crate::backend::state_norm_sqr(&evolved);
-    Ok(masks
-        .iter()
-        .map(|&(xmask, zmask, num_y)| {
-            pauli_expectation_from_masks(&evolved, xmask, zmask, num_y, norm)
-        })
-        .collect())
+    Ok(pauli_expectations_from_masks(&evolved, &masks, norm))
 }
 
 fn require_unitary_circuit(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
@@ -1685,12 +1680,7 @@ fn expectation_values_statevector(
         backend.state_vector()
     };
     let norm = crate::backend::state_norm_sqr(state);
-    Ok(masks
-        .iter()
-        .map(|&(xmask, zmask, num_y)| {
-            pauli_expectation_from_masks(state, xmask, zmask, num_y, norm)
-        })
-        .collect())
+    Ok(pauli_expectations_from_masks(state, &masks, norm))
 }
 
 /// Reject out-of-range qubits and duplicate factors in a joint Pauli
@@ -1764,6 +1754,11 @@ pub(crate) fn pauli_masks(
 /// `P|j⟩ = i^{#Y}·(-1)^{popcount(j & Zmask)}·|j ⊕ Xmask⟩`. Returns the raw
 /// (unnormalized) complex value. The adjoint gradient engine uses this with
 /// distinct `λ` and `φ`; `pauli_expectation_from_masks` is the `λ = φ` case.
+///
+/// Inlined explicitly: this is the adjoint engine's inner reduction, called
+/// once per parameter, and leaving the decision to LTO ties it to how many
+/// other callers the function happens to have.
+#[inline]
 pub(crate) fn pauli_sandwich(
     lambda: &[Complex64],
     phi: &[Complex64],
@@ -1827,6 +1822,121 @@ pub(crate) fn pauli_expectation_from_masks(
         return 0.0;
     }
     pauli_sandwich(state, state, xmask, zmask, num_y).re / norm
+}
+
+/// Exact `⟨ψ|P_i|ψ⟩` for every mask triple in one traversal of `state`.
+///
+/// Same value as [`pauli_expectation_from_masks`] per entry, to within the
+/// association of the sum. A Z-only observable has `xmask == 0` and therefore
+/// no Y factor, so its contribution is `±|amp|^2` and needs neither the partner
+/// load nor complex arithmetic; the two families are accumulated separately for
+/// that reason.
+pub(crate) fn pauli_expectations_from_masks(
+    state: &[Complex64],
+    masks: &[(usize, usize, u32)],
+    norm: f64,
+) -> Vec<f64> {
+    if norm == 0.0 {
+        return vec![0.0; masks.len()];
+    }
+    if masks.len() < 2 {
+        return masks
+            .iter()
+            .map(|&(xmask, zmask, num_y)| {
+                pauli_expectation_from_masks(state, xmask, zmask, num_y, norm)
+            })
+            .collect();
+    }
+
+    let z_only: Vec<usize> = masks
+        .iter()
+        .filter(|&&(xmask, _, _)| xmask == 0)
+        .map(|&(_, zmask, _)| zmask)
+        .collect();
+    let general: Vec<(usize, usize)> = masks
+        .iter()
+        .filter(|&&(xmask, _, _)| xmask != 0)
+        .map(|&(xmask, zmask, _)| (xmask, zmask))
+        .collect();
+
+    let accumulate = |z_acc: &mut [f64], g_acc: &mut [Complex64], base: usize, len: usize| {
+        for j in base..base + len {
+            let amp = state[j];
+            let n2 = amp.norm_sqr();
+            for (slot, &zmask) in z_acc.iter_mut().zip(z_only.iter()) {
+                *slot += if (j & zmask).count_ones() & 1 == 1 {
+                    -n2
+                } else {
+                    n2
+                };
+            }
+            for (slot, &(xmask, zmask)) in g_acc.iter_mut().zip(general.iter()) {
+                let partner = state[j ^ xmask];
+                let sign = if (j & zmask).count_ones() & 1 == 1 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                *slot += partner.conj() * amp * sign;
+            }
+        }
+    };
+
+    let zeros = || {
+        (
+            vec![0.0f64; z_only.len()],
+            vec![Complex64::new(0.0, 0.0); general.len()],
+        )
+    };
+    let (mut z_sum, mut g_sum) = zeros();
+
+    #[cfg(feature = "parallel")]
+    if state.len() >= crate::backend::MIN_PAR_REDUCE_ELEMS {
+        use rayon::prelude::*;
+        let chunk = crate::backend::MIN_PAR_ELEMS;
+        let (z, g) = state
+            .par_chunks(chunk)
+            .enumerate()
+            .fold(zeros, |mut acc, (c, block)| {
+                accumulate(&mut acc.0, &mut acc.1, c * chunk, block.len());
+                acc
+            })
+            .reduce(zeros, |mut a, b| {
+                for (slot, v) in a.0.iter_mut().zip(b.0) {
+                    *slot += v;
+                }
+                for (slot, v) in a.1.iter_mut().zip(b.1) {
+                    *slot += v;
+                }
+                a
+            });
+        return finish_expectations(masks, &z, &g, norm);
+    }
+
+    accumulate(&mut z_sum, &mut g_sum, 0, state.len());
+    finish_expectations(masks, &z_sum, &g_sum, norm)
+}
+
+/// Interleave the two accumulator families back into observable order.
+fn finish_expectations(
+    masks: &[(usize, usize, u32)],
+    z_sum: &[f64],
+    g_sum: &[Complex64],
+    norm: f64,
+) -> Vec<f64> {
+    let (mut zi, mut gi) = (0, 0);
+    masks
+        .iter()
+        .map(|&(xmask, _, num_y)| {
+            if xmask == 0 {
+                zi += 1;
+                z_sum[zi - 1] / norm
+            } else {
+                gi += 1;
+                (g_sum[gi - 1] * i_pow(num_y)).re / norm
+            }
+        })
+        .collect()
 }
 
 /// Multi-shot execution for the distributed statevector backend.

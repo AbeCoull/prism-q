@@ -190,6 +190,11 @@ impl SendPtr {
     pub(crate) fn as_f64_ptr(self) -> *mut f64 {
         self.0 as *mut f64
     }
+
+    #[inline(always)]
+    pub(crate) fn as_complex_ptr(self) -> *mut Complex64 {
+        self.0
+    }
 }
 
 /// Full state-vector backend.

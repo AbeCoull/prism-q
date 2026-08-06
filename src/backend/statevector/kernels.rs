@@ -37,6 +37,11 @@ const MULTI_GATE_L2_TILE: usize = 16_384;
 const MULTI_GATE_L3_TILE: usize = 131_072;
 const MULTI_GATE_MAX_L2_TARGET: usize = max_target_for_tile(MULTI_GATE_L2_TILE);
 const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
+/// Targets folded into one shared high-target traversal. `lanes * tile_len` is
+/// fixed at the L2 budget, so each lane's run shrinks as `2^-k` while the
+/// stream count grows; past three the tiles are too short to prefetch.
+#[cfg(feature = "parallel")]
+const MAX_SHARED_1Q_TARGETS: usize = 3;
 
 #[inline(always)]
 fn adjacent_2q_indices(offset: usize, stride: usize, q0_is_lo: bool) -> [usize; 4] {
@@ -2825,12 +2830,92 @@ impl StatevectorBackend {
         self.pending_norm *= inv_norm;
     }
 
+    /// Apply gates on `k` distinct targets in one traversal instead of `k`.
+    ///
+    /// Gates on disjoint qubits commute, so the stages run in target order.
+    /// For targets above the L3 tier only: below it the tiered passes keep a
+    /// tile cache resident across gates, which this shape cannot.
+    #[cfg(feature = "parallel")]
+    fn apply_multi_1q_shared(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
+        let mut sorted: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = gates.into();
+        sorted.sort_unstable_by_key(|&(target, _)| target);
+        let k = sorted.len();
+        let lanes = 1usize << k;
+        let low_target = sorted[0].0;
+
+        let prepared: SmallVec<[simd::PreparedGate1q; 4]> = sorted
+            .iter()
+            .map(|(_, mat)| simd::PreparedGate1q::new(mat))
+            .collect();
+
+        let mut offsets: SmallVec<[usize; 16]> = SmallVec::with_capacity(lanes);
+        for j in 0..lanes {
+            let mut offset = 0usize;
+            for (axis, &(target, _)) in sorted.iter().enumerate() {
+                if (j >> axis) & 1 == 1 {
+                    offset |= 1usize << target;
+                }
+            }
+            offsets.push(offset);
+        }
+
+        let run = 1usize << low_target;
+        let tile_len = (MULTI_GATE_L2_TILE / lanes).max(1);
+        let tiles_per_run = run / tile_len;
+        let blocks = (self.state.len() >> k) >> low_target;
+
+        let base_of = |block: usize| {
+            let mut base = block << low_target;
+            for &(target, _) in sorted.iter() {
+                base = insert_zero_bit(base, target);
+            }
+            base
+        };
+
+        let start_of =
+            |unit: usize| base_of(unit / tiles_per_run) + (unit % tiles_per_run) * tile_len;
+        let units = blocks * tiles_per_run;
+
+        #[cfg(feature = "parallel")]
+        {
+            let ptr = SendPtr(self.state.as_mut_ptr());
+            (0..units).into_par_iter().for_each(|unit| {
+                let start = start_of(unit);
+                for (axis, prep) in prepared.iter().enumerate() {
+                    let stride = 1usize << axis;
+                    for j in 0..lanes {
+                        if j & stride != 0 {
+                            continue;
+                        }
+                        // SAFETY: the target weights are super-increasing, so
+                        // the target bits and tile index partition the buffer
+                        // into disjoint `tile_len` runs; no two lanes or units
+                        // alias.
+                        unsafe {
+                            let base = ptr.as_complex_ptr();
+                            let lo = std::slice::from_raw_parts_mut(
+                                base.add(start + offsets[j]),
+                                tile_len,
+                            );
+                            let hi = std::slice::from_raw_parts_mut(
+                                base.add(start + offsets[j | stride]),
+                                tile_len,
+                            );
+                            prep.apply(lo, hi);
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     /// Apply multiple single-qubit gates in a multi-tier tiled pass.
     ///
     /// Three tiers based on gate target qubit:
     /// - **L2 tier** (target 0..13): 256KB tiles, all applied per tile in L2 cache
     /// - **L3 tier** (target 14..16): 2MB tiles, applied per tile in L3 cache
-    /// - **Individual** (target 17+): separate full-state passes
+    /// - **Individual** (target 17+): one shared traversal, or a single
+    ///   full-state pass when only one gate lands there
     #[inline(always)]
     pub(super) fn apply_multi_1q(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
         if gates.is_empty() {
@@ -2929,8 +3014,12 @@ impl StatevectorBackend {
                 });
         }
 
-        for (target, mat) in large_gates {
-            self.apply_single_gate(target, mat);
+        for chunk in large_gates.chunks(MAX_SHARED_1Q_TARGETS) {
+            if chunk.len() > 1 {
+                self.apply_multi_1q_shared(chunk);
+            } else {
+                self.apply_single_gate(chunk[0].0, chunk[0].1);
+            }
         }
     }
 

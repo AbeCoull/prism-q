@@ -742,6 +742,12 @@ pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm
     network.contract()
 }
 
+/// Bench-visible wrapper over [`expectation_zero_state`]; not stable API.
+#[cfg(feature = "bench-internal")]
+pub fn scalar_expectation(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
+    expectation_zero_state(circuit, pauli_terms)
+}
+
 /// Elementary tensor operation a gate decomposes into when appended to a
 /// tensor network. `NQ` carries the full `2^k × 2^k` matrix for
 /// multi-controlled unitaries.
@@ -1513,5 +1519,16 @@ mod tests {
         .unwrap();
 
         assert_probs_close(&tn.probabilities().unwrap(), &sv.probabilities().unwrap());
+    }
+
+    #[test]
+    fn test_scalar_expectation_matches_statevector() {
+        let circuit = crate::circuits::hardware_efficient_ansatz(8, 2, 42);
+        let terms = [PauliTerm::z(1), PauliTerm::x(5)];
+
+        let expected =
+            crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
+        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 }

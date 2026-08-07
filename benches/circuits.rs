@@ -7,6 +7,8 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
+#[cfg(feature = "bench-internal")]
+use prism_q::backend::tensornetwork::scalar_expectation;
 use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
@@ -819,6 +821,29 @@ fn bench_tn_linear_chain(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_scalar_expectation(_c: &mut Criterion) {}
+
+/// Wide low-treewidth rows. The other two `tn/` groups run the dense terminal,
+/// whose intermediates are `2^n` whatever the circuit structure; here the
+/// largest holds 128 to 256 elements, flat across 20 to 50 qubits.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_scalar_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/scalar_hea_l2");
+    configure_group(&mut group);
+
+    for &n in &[20, 30, 40, 50] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(scalar_expectation(circ, &observable).unwrap());
             });
         });
     }
@@ -2042,6 +2067,7 @@ criterion_group! {
     // Tensor network
     bench_tn_scaling,
     bench_tn_linear_chain,
+    bench_tn_scalar_expectation,
     // Auto dispatch
     bench_auto_random,
     bench_auto_qft,

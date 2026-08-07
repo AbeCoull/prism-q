@@ -152,6 +152,26 @@ quiet. `density_matrix/neutrality/22` has read a control spread of -15.9% to
 control column on every run rather than assuming any row is stable. When the
 controls are wide, the answer is "not measurable right now", not a number.
 
+### What the reference worktree cannot resolve
+
+The reference binary is built in a separate worktree, so the two binaries differ in
+embedded paths and therefore in code layout. The control columns compare each binary
+against itself, so neither can see that difference. For a change to a hot loop's
+arithmetic this does not matter. For a change that adds or removes linked code it can
+invert the result.
+
+Adding a faer matmul call to `tensornetwork.rs` measured -10.3% to -13.2% on the four
+`tn/scalar_hea_l2` rows under this script. Rebuilt with both commits compiled from one
+directory, the same rows read +11.3% to +13.2%: the change costs 13% there, and the
+script had reported it as a 13% gain. A build with the crossover raised past every
+reachable size, so the new code is linked but never called, carries the same +13%, which
+is what identifies layout rather than execution as the cause.
+
+So: when a change adds a dependency call, instantiates a large generic, or deletes a
+sizeable function, compare two binaries built from the same directory before trusting
+this script. Marking the added function `#[inline(never)]` or `#[cold]` does not recover
+the difference; both were tried and both left it intact.
+
 The two binaries are never byte identical even from identical sources, because
 `[profile.bench] debug = "line-tables-only"` records the package path and the two
 worktrees differ. The script decides "same code" from git, not from `cmp`.

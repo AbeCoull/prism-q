@@ -49,7 +49,7 @@ jobs:
         run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
 
       # The bindings are not a default workspace member, so the line above stops
-      # at the root crate. This is the configuration every published wheel ships.
+      # at the root crate. This is the configuration every wheel ships.
       - name: Clippy Python bindings
         run: cargo clippy -p prism-q-py --all-targets -- -D warnings -D clippy::undocumented_unsafe_blocks
 

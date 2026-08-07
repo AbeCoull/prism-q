@@ -24,6 +24,9 @@ builds both bench binaries first and runs them adjacent, which is the only metho
 reads correctly on a development host: separate `cargo bench` invocations minutes apart
 have moved a byte-identical control group by as much as +98%. See `benches/README.md`.
 
+Include at least one control row the diff cannot reach. When a control moves, the change
+altered a shared callee's inlining or the binary layout, which no target row will show.
+
 If this PR only changes documentation or non-performance code, write "N/A, no hot-path
 changes" and skip the table.
 
@@ -34,14 +37,21 @@ changes" and skip the table.
 Keep the control column. A change no larger than its row's same-code control spread is
 noise, not a result; say so rather than rounding it into a win.
 
+Name the tier. A `bench-fast` or reduced-sample run is triage, not a measurement.
+
 Regression verdict: PASS / FAIL / WAIVER
 
 If WAIVER, explain why the regression is acceptable and what future work will recover it.
 
+If the CI gate fails, read the failing row's control column first. A row the diff cannot
+reach, or one whose control moved as far as its mean, is the runner. Say which, and paste
+a local A/B on the same two commits before merging through it.
+
 ## Correctness
 
-- [ ] `cargo test --all-features` passes locally
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks` passes
+- [ ] `cargo nextest run --features "parallel gpu distributed"` passes locally
+- [ ] `cargo test --doc --features "parallel gpu distributed"` passes
+- [ ] `cargo clippy --all-targets --features "parallel gpu distributed" -- -D warnings -D clippy::undocumented_unsafe_blocks` passes
 - [ ] `cargo fmt --check` passes
 - [ ] `cargo doc --no-deps --features "parallel gpu distributed"` passes (CI denies
       rustdoc warnings)
@@ -49,6 +59,10 @@ If WAIVER, explain why the regression is acceptable and what future work will re
       signature do not carry, and stay concise; none restate the signature
 - [ ] New gate, backend, or fusion pass has golden tests against the statevector backend
 - [ ] GPU-affecting change runs `cargo test --features "parallel gpu" --test golden_gpu`
+
+`--all-features` pulls `distributed-mpi`, whose build script needs an MPI toolkit, so CI
+enumerates features instead. Reach for it only when the diff touches the MPI surface or
+the `Cargo.toml` feature wiring, from a shell set up by `scripts/mpi-env.ps1`.
 
 ## Hotspot notes
 

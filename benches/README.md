@@ -12,7 +12,7 @@ Criterion.rs. Two benchmark binaries:
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `PRISM_BENCH_PLOTS` | unset | Set to render the Criterion HTML report. Off by default: on the reference host a five-row group took 335s with plots and 47s without, so roughly 58s per row goes to rendering against 9s of measurement. Gating reads stdout and `target/criterion/**/estimates.json`, which the plots do not feed. |
-| `PRISM_BENCH_SAMPLES` | 30 | Samples per row outside the `bench-fast` tier. Criterion divides `measurement_time` across the sample count rather than multiplying by it, so the count is free while one iteration still fits in `measurement_time / samples`. Past that it sets the cost outright: `density_matrix/unitary_layers/12` runs 3.87s per iteration, where 100 samples cost 39 minutes across the six passes of an adjacent A/B against 4 minutes at 10. Raise it for a row needing a tighter interval, lower it for triage. Values below 10 are clamped. |
+| `PRISM_BENCH_SAMPLES` | 30 | Samples per row outside the `bench-fast` tier. Criterion divides `measurement_time` across the sample count rather than multiplying by it, so the count is free while one iteration still fits in `measurement_time / samples`. Past that it sets the cost outright: `density_matrix/unitary_layers/12` runs 3.87s per iteration, where 100 samples cost 39 minutes across the six passes of an adjacent A/B against 4 minutes at 10. Raise it for a row needing a tighter interval, lower it for triage; the CI gate runs the `bench-fast` tier for the same reason. Values below 10 are clamped. |
 
 Sample count controls the precision of one run's mean. It does not remove
 drift between runs: on the reference host, back-to-back runs of identical code
@@ -158,9 +158,9 @@ directory.
 
 ## Stored baselines
 
-Point-in-time snapshots for tracking a number across weeks, and the mechanism the
-CI gate uses (where both sides run in one job on one runner, so the drift the
-method above defends against does not apply). Not a substitute for it locally.
+Point-in-time snapshots for tracking a number across weeks. Not a gating
+mechanism: one job on one runner does not make two measurements comparable when
+a build sits between them, which is why the CI gate runs the A/B above.
 
 ```bash
 # Save (Unix)
@@ -185,18 +185,31 @@ and `bc`, so it runs in CI but not on the Windows reference host.
 
 ## CI regression gate
 
-Pull requests run a focused benchmark gate after lint and tests pass. The job
-checks out the base commit and PR head on the same runner, runs
-`scripts/bench_ci.sh` in both worktrees, saves the base results with
-`scripts/bench_check.sh`, then fails if any matching benchmark regresses beyond
-the configured threshold.
+Pull requests run a focused benchmark gate after lint and tests pass.
+`scripts/bench_ci.sh` delegates to the adjacent-binary A/B above, with the PR
+base commit as the reference, so the gate reports a same-code control column per
+row and fires only when a row exceeds both the threshold and its own control
+spread.
 
-The CI subset uses `CI_BENCH_FEATURES=parallel,bench-fast` and covers larger
-CPU-only parameter points that are already present on the base branch. The
-filters are intentionally narrow so GitHub hosted runner noise from tiny
-parameter sweeps does not dominate the gate. It is a regression gate, not a
-replacement for the full local benchmark suite required for performance
-sensitive changes.
+Until 2026-08, the two sides ran as separate `cargo bench` invocations with the
+head build between them, on a shared runner. A row a hosted runner cannot resolve
+now says so instead of reading as a result.
+
+The subset runs at `CI_BENCH_FEATURES=parallel,bench-fast` and covers larger
+CPU-only parameter points already present on the base branch. That tier pins
+samples to 10 and shortens the measurement windows, which is what keeps four
+passes affordable: at 100 samples, `statevector/qpe_t_gate/22q` alone would cost
+half an hour. The filters stay narrow so noise from tiny parameter sweeps does
+not dominate. A row missing from either side drops out of the comparison and the
+row-count guard fails the run. This is a regression gate, not a replacement for
+the local suite a performance change needs.
+
+It measures only when a pull request changes a `.rs` file under `src/` or
+`benches/`, or a manifest; a `skip-bench` label opts out. Either way it reports a
+result, so it stays safe to promote to a required check. The reference worktree
+sits beside the checkout rather than inside it: `/target/` in `.gitignore` is
+anchored to the repository root, so a nested worktree's build output would read
+as an untracked change and abort the A/B.
 
 Representative CI workloads:
 
@@ -208,26 +221,20 @@ Representative CI workloads:
 | `statevector/qaoa_l3/20` | QAOA workload with ZZ rotations and mixer layers |
 | `stabilizer/scaling/1000` | Large Clifford stabilizer backend path |
 | `stabilizer/measurement/ghz_measure_all/1000` | Large GHZ preparation plus terminal measurements |
-| `auto/qft_textbook/22` | Auto dispatch on a structured dense circuit |
-| `auto/qpe_t_gate/22q` | Auto dispatch on a non-Clifford phase estimation circuit |
 | `compiled_sampler/noiseless/noiseless_1000q_10k` | Compiled shot sampling path |
 | `compiled_sampler/noisy/noisy_1000q_10k` | Compiled Pauli-noise shot sampling path |
 
-The script builds the `circuits` benchmark binary once with
-`cargo bench --no-run`, then runs the compiled executable directly with
-Criterion filters. This keeps Cargo setup out of the timed regression subset.
-
-Local reproduction:
+Local reproduction, against `main` as the reference:
 
 ```bash
-CI_BENCH_FEATURES=parallel,bench-fast ./scripts/bench_ci.sh
-./scripts/bench_check.sh save --name ci-base
+PRISM_BENCH_REF=main ./scripts/bench_ci.sh
 
-# After applying changes:
-CI_BENCH_FEATURES=parallel,bench-fast ./scripts/bench_ci.sh
-./scripts/bench_check.sh table --baseline ci-base
-./scripts/bench_check.sh compare --baseline ci-base
+# Cache the reference build between runs:
+PRISM_BENCH_REF=main PRISM_BENCH_REF_DIR=/tmp/prism-q-ref ./scripts/bench_ci.sh
 ```
+
+`PRISM_BENCH_REF=HEAD` on a clean tree builds both binaries from the same code,
+so every row is a control row and the report is this host's noise floor.
 
 ## Regression detection
 
@@ -236,9 +243,10 @@ Default threshold: **5%** per benchmark (configurable via `REGRESSION_THRESHOLD`
 `bench_ab.sh` applies the threshold per row and only calls a row a regression when
 it exceeds both the threshold and that row's own control spread. `bench_check.*`
 reads Criterion JSON from `target/criterion/`, compares matching benchmark means,
-and exits with code 1 when any benchmark exceeds the threshold. The older
-`bench_compare.*` wrappers still parse Criterion console output for quick baseline
-checks.
+and exits with code 1 when a benchmark exceeds the threshold and its confidence
+interval clears the baseline's, in both the shell and PowerShell forms. The older
+`bench_compare.*` wrappers still parse Criterion console output for quick
+baseline checks.
 
 ### Rows this host cannot resolve
 

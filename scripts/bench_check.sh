@@ -179,11 +179,12 @@ cmd_compare() {
     local base_date
     base_date="$(jq -r '.date' "$base_file")"
 
-    # Collect current estimates into an associative array
-    declare -A curr_mean
+    declare -A curr_mean curr_ci_lo curr_ci_hi
     while IFS='|' read -r id mean ci_lo ci_hi stddev; do
         [[ -z "$id" ]] && continue
         curr_mean["$id"]="$mean"
+        curr_ci_lo["$id"]="${ci_lo:-$mean}"
+        curr_ci_hi["$id"]="${ci_hi:-$mean}"
     done < <(get_criterion_estimates "$SOURCE")
 
     if (( ${#curr_mean[@]} == 0 )); then
@@ -208,6 +209,12 @@ cmd_compare() {
         local cur="${curr_mean[$id]:-}"
         [[ -z "$cur" ]] && continue
 
+        # A pre-interval baseline falls back to a zero-width interval, which
+        # reduces the test below to the mean comparison it replaces.
+        local base_ci_lo base_ci_hi
+        base_ci_lo="$(jq -r ".benchmarks.\"$id\".ci_lo_ns // .benchmarks.\"$id\".mean_ns" "$base_file")"
+        base_ci_hi="$(jq -r ".benchmarks.\"$id\".ci_hi_ns // .benchmarks.\"$id\".mean_ns" "$base_file")"
+
         local pct
         pct="$(echo "scale=1; ($cur - $base_mean) * 100 / $base_mean" | bc -l)"
 
@@ -217,9 +224,13 @@ cmd_compare() {
         rows+=("$id|$base_mean|$cur|$sign$pct%")
         total=$((total + 1))
 
-        if (( $(echo "$pct > $THRESHOLD" | bc -l) )); then
+        local slower_separated faster_separated
+        slower_separated="$(echo "${curr_ci_lo[$id]} > $base_ci_hi" | bc -l)"
+        faster_separated="$(echo "${curr_ci_hi[$id]} < $base_ci_lo" | bc -l)"
+
+        if (( $(echo "$pct > $THRESHOLD" | bc -l) )) && (( slower_separated )); then
             reg_count=$((reg_count + 1))
-        elif (( $(echo "$pct < -$THRESHOLD" | bc -l) )); then
+        elif (( $(echo "$pct < -$THRESHOLD" | bc -l) )) && (( faster_separated )); then
             imp_count=$((imp_count + 1))
         fi
     done < <(jq -r '.benchmarks | keys[]' "$base_file" | sort)
@@ -240,7 +251,7 @@ cmd_compare() {
         echo ""
         local verdict="PASS"
         if (( reg_count > 0 )); then verdict="FAIL"; fi
-        echo "**Regression verdict**: $verdict (threshold: ${THRESHOLD}%)"
+        echo "**Regression verdict**: $verdict (threshold: ${THRESHOLD}%, confidence intervals must not overlap)"
         return
     fi
 
@@ -269,6 +280,7 @@ cmd_compare() {
 
     echo ""
     echo "  $total benchmarks | $reg_count regressions | $imp_count improvements | $((total - reg_count - imp_count)) unchanged"
+    echo "  A verdict needs both a move past ${THRESHOLD}% and non-overlapping confidence intervals."
 
     if (( reg_count > 0 )); then
         echo ""

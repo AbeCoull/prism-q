@@ -850,6 +850,30 @@ fn bench_tn_scalar_expectation(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_scalar_depth(_c: &mut Criterion) {}
+
+/// Rising-treewidth rows: 20 qubits, layer count swept, so the intermediates
+/// grow instead of staying flat as they do in `tn/scalar_hea_l2`. 4 layers is
+/// where the largest first clears `MIN_PAR_ELEMS`, below which the parallel arms
+/// of `contract` and `transpose` never run.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_scalar_depth(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/scalar_depth_20q");
+    configure_group(&mut group);
+
+    let observable = [PauliTerm::z(0), PauliTerm::z(10)];
+    for &layers in &[4, 5, 6, 7] {
+        let circuit = circuits::hardware_efficient_ansatz(20, layers, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(layers), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(scalar_expectation(circ, &observable).unwrap());
+            });
+        });
+    }
+    group.finish();
+}
+
 // ---- Cross-backend comparisons ----
 
 fn bench_compare_clifford(c: &mut Criterion) {
@@ -2068,6 +2092,7 @@ criterion_group! {
     bench_tn_scaling,
     bench_tn_linear_chain,
     bench_tn_scalar_expectation,
+    bench_tn_scalar_depth,
     // Auto dispatch
     bench_auto_random,
     bench_auto_qft,

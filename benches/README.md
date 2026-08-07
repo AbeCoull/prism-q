@@ -58,9 +58,10 @@ worth the disk.
 | `stabilizer_rank/shots_terminal` | Clifford+T shot sampling with terminal measurements, including 1000q chi2 |
 | `stabilizer_rank/shots_mid_circuit` | Clifford+T shot sampling with measurement, reset, and conditional gates |
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |
+| `tn/scalar_depth_20q` | Same contraction at 20 qubits, 4–7 layers, where intermediates grow large enough to reach the parallel contraction arms (`bench-internal`) |
 
-`tn/scalar_hea_l2` is compiled out unless `bench-internal` is enabled, and
-`bench_ab.sh` defaults to `--features parallel`, so a gating run over it needs
+The two `tn/scalar_*` groups are compiled out unless `bench-internal` is enabled, and
+`bench_ab.sh` defaults to `--features parallel`, so a gating run over them needs
 `--features "parallel bench-internal"` or it silently reports zero rows. Cargo
 fingerprints feature sets separately, so the first such run pays a cold build in
 both the working tree and the reference worktree.

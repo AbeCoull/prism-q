@@ -78,8 +78,18 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use rayon::prelude::*;
 
 type LegId = usize;
+
 #[cfg(feature = "parallel")]
 use crate::backend::MIN_PAR_ELEMS;
+
+/// `m*k*n` at or above which a contraction goes to faer instead of the scalar
+/// loop below.
+///
+/// A 64-cubed complex product. Routing everything to faer instead costs 23% on
+/// `tn/scalar_depth_20q/4`, where the operands are too small to cover its
+/// packing.
+#[cfg(feature = "parallel")]
+const MIN_FAER_GEMM_WORK: usize = 1 << 18;
 
 /// Dense multidimensional tensor with named legs for contraction.
 ///
@@ -105,13 +115,9 @@ impl Tensor {
 /// Fill `out` with transposed elements, `out[0]` being output index `start`.
 ///
 /// The output index is walked as an odometer over the permuted axes, so the
-/// source offset advances by addition. Only the initial `start` decomposition
-/// divides, which is once per call rather than once per axis per element. The
-/// odometer carries a fixed setup cost, so this is worth calling only for
-/// chunks large enough to amortize it, which is what the parallel path does.
+/// source offset advances by addition and only a nonzero `start` needs division.
 ///
 /// `steps[a]` is the source stride of the axis that output axis `a` came from.
-#[cfg(feature = "parallel")]
 fn transpose_range(
     out: &mut [Complex64],
     src: &[Complex64],
@@ -180,7 +186,6 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         stride *= new_shape[i];
     }
 
-    #[cfg(feature = "parallel")]
     let steps: SmallVec<[usize; 6]> = perm.iter().map(|&old_ax| old_strides[old_ax]).collect();
 
     #[cfg(feature = "parallel")]
@@ -207,29 +212,32 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         };
     }
 
-    let perm_strides: SmallVec<[usize; 6]> = (0..rank)
-        .map(|old_ax| {
-            let new_ax = perm.iter().position(|&p| p == old_ax).unwrap();
-            new_strides[new_ax]
-        })
-        .collect();
-
-    for (old_linear, &amp) in t.data.iter().enumerate() {
-        let mut new_linear = 0usize;
-        let mut rem = old_linear;
-        for i in 0..rank {
-            let idx = rem / old_strides[i];
-            rem %= old_strides[i];
-            new_linear += idx * perm_strides[i];
-        }
-        new_data[new_linear] = amp;
-    }
+    transpose_range(&mut new_data, &t.data, 0, &new_shape, &new_strides, &steps);
 
     Tensor {
         data: new_data,
         shape: new_shape,
         legs: new_legs,
     }
+}
+
+/// Multiply the row-major `m` by `k` and `k` by `n` operands into `c`.
+///
+/// A row-major array is its own transpose read column-major, so `C = A*B` is
+/// issued as `C^T = B^T * A^T` over the same buffers with no repacking.
+#[cfg(feature = "parallel")]
+fn faer_gemm(a: &[Complex64], b: &[Complex64], c: &mut [Complex64], m: usize, k: usize, n: usize) {
+    use faer::linalg::matmul::matmul;
+    use faer::{Accum, MatMut, MatRef, Par};
+
+    matmul(
+        MatMut::from_column_major_slice_mut(c, n, m),
+        Accum::Replace,
+        MatRef::from_column_major_slice(b, n, k),
+        MatRef::from_column_major_slice(a, k, m),
+        Complex64::new(1.0, 0.0),
+        Par::rayon(0),
+    );
 }
 
 /// Contract two tensors over shared legs (matching LegId).
@@ -283,7 +291,9 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     let mut c_data = vec![zero; m * n];
 
     #[cfg(feature = "parallel")]
-    if m * n >= MIN_PAR_ELEMS {
+    if m * k * n >= MIN_FAER_GEMM_WORK {
+        faer_gemm(&a_t.data, &b_t.data, &mut c_data, m, k, n);
+    } else if m * n >= MIN_PAR_ELEMS {
         let a_data = &a_t.data;
         let b_data = &b_t.data;
         c_data.par_chunks_mut(n).enumerate().for_each(|(i, c_row)| {

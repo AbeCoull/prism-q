@@ -59,6 +59,7 @@ worth the disk.
 | `stabilizer_rank/shots_mid_circuit` | Clifford+T shot sampling with measurement, reset, and conditional gates |
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |
 | `tn/scalar_depth_20q` | Same contraction at 20 qubits, 4–7 layers, where intermediates grow large enough to reach the parallel contraction arms (`bench-internal`) |
+| `tn/scalar_hea_l6` | Same contraction at 6 layers, 20–50 qubits, the only rows where qubit count drives how many contractions reach the faer arm (`bench-internal`) |
 
 The two `tn/scalar_*` groups are compiled out unless `bench-internal` is enabled, and
 `bench_ab.sh` defaults to `--features parallel`, so a gating run over them needs
@@ -151,6 +152,40 @@ quiet. `density_matrix/neutrality/22` has read a control spread of -15.9% to
 +37.0% under this method with the editor consuming about half the CPU, so read the
 control column on every run rather than assuming any row is stable. When the
 controls are wide, the answer is "not measurable right now", not a number.
+
+### What the reference worktree cannot resolve
+
+The reference binary is built in a separate worktree, so the two binaries differ in
+embedded paths and therefore in code layout. The control columns compare each binary
+against itself, so neither can see that difference. For a change to a hot loop's
+arithmetic this does not matter. For a change that adds or removes linked code it can
+invert the result.
+
+Adding a faer matmul call to `tensornetwork.rs` measured -10.3% to -13.2% on the four
+`tn/scalar_hea_l2` rows under this script. Rebuilt with both commits compiled from one
+directory, the same rows read +11.3% to +13.2%: the change costs 13% there, and the
+script had reported it as a 13% gain. A build with the crossover raised past every
+reachable size, so the new code is linked but never called, carries the same +13%, which
+is what identifies layout rather than execution as the cause.
+
+So: when a change adds a dependency call, instantiates a large generic, or deletes a
+sizeable function, compare two binaries built from the same directory before trusting
+this script. Marking the added function `#[inline(never)]` or `#[cold]` does not recover
+the difference; both were tried and both left it intact.
+
+Building both binaries from one directory narrows the difference but does not remove it.
+To remove it, put both implementations in the same binary behind a switch read once at
+startup, and run that one binary twice:
+
+```rust
+static SCATTER: OnceLock<bool> = OnceLock::new();
+if *SCATTER.get_or_init(|| std::env::var("PRISM_TRANSPOSE_SCATTER").is_ok()) { .. }
+```
+
+Code, layout and embedded paths are then identical by construction, so the layout term
+cancels exactly rather than approximately, and the branch is paid on both sides. It costs
+one build rather than two. Use it whenever the change itself adds or removes linked code,
+which is the case this section's caveat exists for.
 
 The two binaries are never byte identical even from identical sources, because
 `[profile.bench] debug = "line-tables-only"` records the package path and the two

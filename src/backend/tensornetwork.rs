@@ -115,13 +115,9 @@ impl Tensor {
 /// Fill `out` with transposed elements, `out[0]` being output index `start`.
 ///
 /// The output index is walked as an odometer over the permuted axes, so the
-/// source offset advances by addition. Only the initial `start` decomposition
-/// divides, which is once per call rather than once per axis per element. The
-/// odometer carries a fixed setup cost, so this is worth calling only for
-/// chunks large enough to amortize it, which is what the parallel path does.
+/// source offset advances by addition and only a nonzero `start` needs division.
 ///
 /// `steps[a]` is the source stride of the axis that output axis `a` came from.
-#[cfg(feature = "parallel")]
 fn transpose_range(
     out: &mut [Complex64],
     src: &[Complex64],
@@ -190,7 +186,6 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         stride *= new_shape[i];
     }
 
-    #[cfg(feature = "parallel")]
     let steps: SmallVec<[usize; 6]> = perm.iter().map(|&old_ax| old_strides[old_ax]).collect();
 
     #[cfg(feature = "parallel")]
@@ -217,23 +212,7 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         };
     }
 
-    let perm_strides: SmallVec<[usize; 6]> = (0..rank)
-        .map(|old_ax| {
-            let new_ax = perm.iter().position(|&p| p == old_ax).unwrap();
-            new_strides[new_ax]
-        })
-        .collect();
-
-    for (old_linear, &amp) in t.data.iter().enumerate() {
-        let mut new_linear = 0usize;
-        let mut rem = old_linear;
-        for i in 0..rank {
-            let idx = rem / old_strides[i];
-            rem %= old_strides[i];
-            new_linear += idx * perm_strides[i];
-        }
-        new_data[new_linear] = amp;
-    }
+    transpose_range(&mut new_data, &t.data, 0, &new_shape, &new_strides, &steps);
 
     Tensor {
         data: new_data,

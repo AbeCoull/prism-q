@@ -850,6 +850,59 @@ fn bench_tn_scalar_expectation(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_scalar_depth(_c: &mut Criterion) {}
+
+/// Rising-treewidth rows: 20 qubits, layer count swept, so the intermediates
+/// grow instead of staying flat as they do in `tn/scalar_hea_l2`. 4 layers is
+/// where the largest first clears `MIN_PAR_ELEMS`, below which the parallel arms
+/// of `contract` and `transpose` never run.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_scalar_depth(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/scalar_depth_20q");
+    configure_group(&mut group);
+
+    let observable = [PauliTerm::z(0), PauliTerm::z(10)];
+    for &layers in &[4, 5, 6, 7] {
+        let circuit = circuits::hardware_efficient_ansatz(20, layers, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(layers), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(scalar_expectation(circ, &observable).unwrap());
+            });
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_scalar_wide_deep(_c: &mut Criterion) {}
+
+/// Wide and deep together, the only rows where width drives the faer arm.
+///
+/// `tn/scalar_hea_l2` sweeps the same widths two layers deep, where the largest
+/// intermediate holds 256 elements and no contraction reaches
+/// `MIN_FAER_GEMM_WORK`; `tn/scalar_depth_20q` reaches it but only at 20 qubits.
+/// Six layers puts 12 contractions over the threshold at 20 qubits and 37 at 50,
+/// so a change to the crossover shows up here as a function of width. Seven
+/// layers would be the natural next row and is left out: its peak intermediate
+/// jumps to 16.8M elements and an iteration costs 3.3 s.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_scalar_wide_deep(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/scalar_hea_l6");
+    configure_group(&mut group);
+
+    for &n in &[20, 30, 40, 50] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 6, SEED);
+        let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(scalar_expectation(circ, &observable).unwrap());
+            });
+        });
+    }
+    group.finish();
+}
+
 // ---- Cross-backend comparisons ----
 
 fn bench_compare_clifford(c: &mut Criterion) {
@@ -2068,6 +2121,8 @@ criterion_group! {
     bench_tn_scaling,
     bench_tn_linear_chain,
     bench_tn_scalar_expectation,
+    bench_tn_scalar_depth,
+    bench_tn_scalar_wide_deep,
     // Auto dispatch
     bench_auto_random,
     bench_auto_qft,

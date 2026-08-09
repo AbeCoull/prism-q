@@ -33,7 +33,8 @@
 //! # Contraction strategy
 //!
 //! Greedy min-size heuristic: repeatedly contract the pair of tensors whose
-//! result has the smallest total element count. O(T²) where T = tensor count.
+//! result has the smallest total element count, preferring pairs sharing a leg.
+//! O(T·r·log T) for T tensors of rank at most r.
 //!
 //! # Shot and observable queries stay on the dense route
 //!
@@ -59,6 +60,8 @@
 //! only. Revisit if Auto starts routing wide low-treewidth circuits here.
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -75,8 +78,18 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use rayon::prelude::*;
 
 type LegId = usize;
+
 #[cfg(feature = "parallel")]
 use crate::backend::MIN_PAR_ELEMS;
+
+/// `m*k*n` at or above which a contraction goes to faer instead of the scalar
+/// loop below.
+///
+/// A 64-cubed complex product. Routing everything to faer instead costs 23% on
+/// `tn/scalar_depth_20q/4`, where the operands are too small to cover its
+/// packing.
+#[cfg(feature = "parallel")]
+const MIN_FAER_GEMM_WORK: usize = 1 << 18;
 
 /// Dense multidimensional tensor with named legs for contraction.
 ///
@@ -102,13 +115,9 @@ impl Tensor {
 /// Fill `out` with transposed elements, `out[0]` being output index `start`.
 ///
 /// The output index is walked as an odometer over the permuted axes, so the
-/// source offset advances by addition. Only the initial `start` decomposition
-/// divides, which is once per call rather than once per axis per element. The
-/// odometer carries a fixed setup cost, so this is worth calling only for
-/// chunks large enough to amortize it, which is what the parallel path does.
+/// source offset advances by addition and only a nonzero `start` needs division.
 ///
 /// `steps[a]` is the source stride of the axis that output axis `a` came from.
-#[cfg(feature = "parallel")]
 fn transpose_range(
     out: &mut [Complex64],
     src: &[Complex64],
@@ -177,7 +186,6 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         stride *= new_shape[i];
     }
 
-    #[cfg(feature = "parallel")]
     let steps: SmallVec<[usize; 6]> = perm.iter().map(|&old_ax| old_strides[old_ax]).collect();
 
     #[cfg(feature = "parallel")]
@@ -204,29 +212,32 @@ fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
         };
     }
 
-    let perm_strides: SmallVec<[usize; 6]> = (0..rank)
-        .map(|old_ax| {
-            let new_ax = perm.iter().position(|&p| p == old_ax).unwrap();
-            new_strides[new_ax]
-        })
-        .collect();
-
-    for (old_linear, &amp) in t.data.iter().enumerate() {
-        let mut new_linear = 0usize;
-        let mut rem = old_linear;
-        for i in 0..rank {
-            let idx = rem / old_strides[i];
-            rem %= old_strides[i];
-            new_linear += idx * perm_strides[i];
-        }
-        new_data[new_linear] = amp;
-    }
+    transpose_range(&mut new_data, &t.data, 0, &new_shape, &new_strides, &steps);
 
     Tensor {
         data: new_data,
         shape: new_shape,
         legs: new_legs,
     }
+}
+
+/// Multiply the row-major `m` by `k` and `k` by `n` operands into `c`.
+///
+/// A row-major array is its own transpose read column-major, so `C = A*B` is
+/// issued as `C^T = B^T * A^T` over the same buffers with no repacking.
+#[cfg(feature = "parallel")]
+fn faer_gemm(a: &[Complex64], b: &[Complex64], c: &mut [Complex64], m: usize, k: usize, n: usize) {
+    use faer::linalg::matmul::matmul;
+    use faer::{Accum, MatMut, MatRef, Par};
+
+    matmul(
+        MatMut::from_column_major_slice_mut(c, n, m),
+        Accum::Replace,
+        MatRef::from_column_major_slice(b, n, k),
+        MatRef::from_column_major_slice(a, k, m),
+        Complex64::new(1.0, 0.0),
+        Par::rayon(0),
+    );
 }
 
 /// Contract two tensors over shared legs (matching LegId).
@@ -280,7 +291,9 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     let mut c_data = vec![zero; m * n];
 
     #[cfg(feature = "parallel")]
-    if m * n >= MIN_PAR_ELEMS {
+    if m * k * n >= MIN_FAER_GEMM_WORK {
+        faer_gemm(&a_t.data, &b_t.data, &mut c_data, m, k, n);
+    } else if m * n >= MIN_PAR_ELEMS {
         let a_data = &a_t.data;
         let b_data = &b_t.data;
         c_data.par_chunks_mut(n).enumerate().for_each(|(i, c_row)| {
@@ -348,18 +361,6 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     }
 }
 
-fn shared_leg_count(a: &Tensor, b: &Tensor) -> usize {
-    let mut count = 0;
-    for &a_leg in &a.legs {
-        for &b_leg in &b.legs {
-            if a_leg == b_leg {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
 fn contraction_result_size(a: &Tensor, b: &Tensor) -> usize {
     let mut a_free_size = 1usize;
     let mut b_free_size = 1usize;
@@ -378,76 +379,109 @@ fn contraction_result_size(a: &Tensor, b: &Tensor) -> usize {
     a_free_size * b_free_size
 }
 
-/// Contract an entire tensor network using a greedy min-size heuristic.
+/// Contraction candidates ordered by result element count, then by the higher
+/// slot id descending, then the lower.
 ///
-/// Repeatedly finds the pair with the smallest contraction result and
-/// contracts them, until a single tensor remains.
+/// Newest-first on ties keeps the contraction on its frontier instead of letting
+/// fresh tensors accumulate legs. Reversing the tie-break raises peak
+/// intermediates 16x on `hardware_efficient_ansatz(50, 3)`.
+type PairQueue = BinaryHeap<Reverse<(usize, Reverse<usize>, Reverse<usize>)>>;
+
+/// Record `slot` against each of its legs and queue it against every live tensor
+/// already sharing one, pruning contracted slots off the holder lists it walks.
+///
+/// A tensor carrying one leg twice would otherwise queue against itself; no
+/// valid circuit produces one.
+fn queue_slot_pairs(
+    slots: &[Option<Tensor>],
+    slot: usize,
+    leg_holders: &mut Vec<SmallVec<[usize; 2]>>,
+    queue: &mut PairQueue,
+) {
+    let tensor = slots[slot].as_ref().expect("slot just filled");
+    for &leg in &tensor.legs {
+        if leg >= leg_holders.len() {
+            leg_holders.resize(leg + 1, SmallVec::new());
+        }
+        leg_holders[leg].retain(|held| slots[*held].is_some());
+        for &other in leg_holders[leg].iter().filter(|&&held| held != slot) {
+            let cost = contraction_result_size(
+                tensor,
+                slots[other].as_ref().expect("holder list pruned above"),
+            );
+            queue.push(Reverse((
+                cost,
+                Reverse(other.max(slot)),
+                Reverse(other.min(slot)),
+            )));
+        }
+        leg_holders[leg].push(slot);
+    }
+}
+
+/// Pop the cheapest queued pair whose members are both still live.
+///
+/// Returns `None` once no two live tensors share a leg.
+fn pop_live_pair(queue: &mut PairQueue, slots: &[Option<Tensor>]) -> Option<(usize, usize)> {
+    while let Some(Reverse((_, Reverse(j), Reverse(i)))) = queue.pop() {
+        if slots[i].is_some() && slots[j].is_some() {
+            return Some((i, j));
+        }
+    }
+    None
+}
+
+/// Multiply out the tensors left once no pair shares a leg, smallest first.
+///
+/// Reached when every connected component has collapsed to a single tensor, and
+/// stable from there: merging two tensors that share no leg with anything cannot
+/// create a shared leg. For disjoint operands the greedy cost reduces to the
+/// product of their element counts, so smallest-first is the same choice a scan
+/// over every pair would make, without the scan.
+fn join_disjoint(mut slots: Vec<Option<Tensor>>) -> Tensor {
+    let mut by_size: BinaryHeap<Reverse<(usize, usize)>> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, held)| held.as_ref().map(|t| Reverse((t.num_elements(), idx))))
+        .collect();
+
+    while by_size.len() > 1 {
+        let Reverse((_, i)) = by_size.pop().expect("two or more queued");
+        let Reverse((_, j)) = by_size.pop().expect("two or more queued");
+        let a_tensor = slots[i].take().expect("queued slots are live");
+        let b_tensor = slots[j].take().expect("queued slots are live");
+        let merged = contract(&a_tensor, &b_tensor);
+        by_size.push(Reverse((merged.num_elements(), slots.len())));
+        slots.push(Some(merged));
+    }
+
+    let Reverse((_, last)) = by_size.pop().expect("the network is never empty");
+    slots[last].take().expect("queued slots are live")
+}
+
+/// Contract an entire tensor network with the greedy min-size heuristic.
+///
+/// Only pairs involving the tensor a contraction produced change cost, so
+/// candidates come off a leg-indexed queue.
 fn greedy_contract(tensors: &mut Vec<Tensor>) -> Tensor {
     debug_assert!(!tensors.is_empty());
 
-    while tensors.len() > 1 {
-        let len = tensors.len();
+    let mut slots: Vec<Option<Tensor>> = std::mem::take(tensors).into_iter().map(Some).collect();
+    let mut leg_holders: Vec<SmallVec<[usize; 2]>> = Vec::new();
+    let mut queue: PairQueue = BinaryHeap::new();
 
-        #[cfg(feature = "parallel")]
-        let (best_i, best_j) = if len >= 50 {
-            let t_ref: &[Tensor] = tensors;
-            let (_, bi, bj) = (0..len)
-                .into_par_iter()
-                .flat_map_iter(|i| {
-                    (i + 1..len).map(move |j| {
-                        let shared = shared_leg_count(&t_ref[i], &t_ref[j]);
-                        let cost = contraction_result_size(&t_ref[i], &t_ref[j]);
-                        let priority = if shared > 0 { 0usize } else { 1 };
-                        ((priority, cost), i, j)
-                    })
-                })
-                .min_by_key(|&(key, _, _)| key)
-                .unwrap();
-            (bi, bj)
-        } else {
-            find_best_pair(tensors, len)
-        };
-
-        #[cfg(not(feature = "parallel"))]
-        let (best_i, best_j) = find_best_pair(tensors, len);
-
-        let b_tensor = tensors.swap_remove(best_j);
-        let a_tensor = tensors.swap_remove(best_i);
-        let result = contract(&a_tensor, &b_tensor);
-        tensors.push(result);
+    for slot in 0..slots.len() {
+        queue_slot_pairs(&slots, slot, &mut leg_holders, &mut queue);
     }
 
-    tensors.pop().unwrap()
-}
-
-fn find_best_pair(tensors: &[Tensor], len: usize) -> (usize, usize) {
-    let mut best_i = 0;
-    let mut best_j = 1;
-    let mut best_cost = usize::MAX;
-    let mut found_shared = false;
-
-    for i in 0..len {
-        for j in (i + 1)..len {
-            let shared = shared_leg_count(&tensors[i], &tensors[j]);
-            if shared > 0 {
-                let cost = contraction_result_size(&tensors[i], &tensors[j]);
-                if !found_shared || cost < best_cost {
-                    best_i = i;
-                    best_j = j;
-                    best_cost = cost;
-                    found_shared = true;
-                }
-            } else if !found_shared {
-                let cost = contraction_result_size(&tensors[i], &tensors[j]);
-                if cost < best_cost {
-                    best_i = i;
-                    best_j = j;
-                    best_cost = cost;
-                }
-            }
-        }
+    while let Some((i, j)) = pop_live_pair(&mut queue, &slots) {
+        let a_tensor = slots[i].take().expect("popped pair is live");
+        let b_tensor = slots[j].take().expect("popped pair is live");
+        slots.push(Some(contract(&a_tensor, &b_tensor)));
+        queue_slot_pairs(&slots, slots.len() - 1, &mut leg_holders, &mut queue);
     }
-    (best_i, best_j)
+
+    join_disjoint(slots)
 }
 
 struct ScalarExpectationNetwork {
@@ -740,6 +774,12 @@ pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm
     }
     network.append_observable(pauli_terms)?;
     network.contract()
+}
+
+/// Bench-visible wrapper over [`expectation_zero_state`]; not stable API.
+#[cfg(feature = "bench-internal")]
+pub fn scalar_expectation(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
+    expectation_zero_state(circuit, pauli_terms)
 }
 
 /// Elementary tensor operation a gate decomposes into when appended to a
@@ -1513,5 +1553,53 @@ mod tests {
         .unwrap();
 
         assert_probs_close(&tn.probabilities().unwrap(), &sv.probabilities().unwrap());
+    }
+
+    #[test]
+    fn test_scalar_expectation_matches_statevector() {
+        let circuit = crate::circuits::hardware_efficient_ansatz(8, 2, 42);
+        let terms = [PauliTerm::z(1), PauliTerm::x(5)];
+
+        let expected =
+            crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
+        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
+    }
+
+    // Idle qubits leave one disconnected component each, which is what
+    // join_disjoint exists for.
+    #[test]
+    fn test_scalar_expectation_with_idle_qubits() {
+        let mut circuit = Circuit::new(9, 0);
+        circuit.add_gate(Gate::H, &[2]);
+        circuit.add_gate(Gate::Cx, &[2, 3]);
+        circuit.add_gate(Gate::Ry(0.7), &[6]);
+        let terms = [PauliTerm::z(2), PauliTerm::z(3), PauliTerm::x(6)];
+
+        let expected =
+            crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
+        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
+    }
+
+    // Two entangled components of unequal size, so join_disjoint merges tensors
+    // rather than bare scalars and its smallest-first order is observable.
+    #[test]
+    fn test_scalar_expectation_unequal_disjoint_components() {
+        let mut circuit = Circuit::new(10, 0);
+        for &q in &[0usize, 1, 2, 3, 4] {
+            circuit.add_gate(Gate::Ry(0.3 + q as f64 * 0.1), &[q]);
+        }
+        for &(a, b) in &[(0usize, 1usize), (1, 2), (2, 3), (3, 4)] {
+            circuit.add_gate(Gate::Cx, &[a, b]);
+        }
+        circuit.add_gate(Gate::H, &[7]);
+        circuit.add_gate(Gate::Cx, &[7, 8]);
+        let terms = [PauliTerm::z(0), PauliTerm::x(4), PauliTerm::z(7)];
+
+        let expected =
+            crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
+        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::Backend;
+use crate::circuit::plan::Tracer;
 const EPS: f64 = 1e-12;
 
 fn assert_mat_close(actual: &[[Complex64; 2]; 2], expected: &[[Complex64; 2]; 2]) {
@@ -91,7 +92,7 @@ fn extract_fused_matrix(inst: &Instruction) -> [[Complex64; 2]; 2] {
 #[test]
 fn test_empty_circuit() {
     let c = Circuit::new(2, 0);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 0);
 }
 
@@ -99,7 +100,7 @@ fn test_empty_circuit() {
 fn test_no_fusion_single_gate() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::H, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 1);
     assert_eq!(count_fused(&fused), 0);
     match &fused.instructions[0] {
@@ -116,7 +117,7 @@ fn test_no_fusion_different_qubits() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::X, &[1]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 2);
     assert_eq!(count_fused(&fused), 0);
 }
@@ -126,7 +127,7 @@ fn test_fuse_adjacent_same_qubit() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::T, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 1);
     assert_eq!(count_fused(&fused), 1);
     let expected = mat_mul_2x2(&Gate::T.matrix_2x2(), &Gate::H.matrix_2x2());
@@ -140,7 +141,7 @@ fn test_fuse_across_different_qubit() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::X, &[1]);
     c.add_gate(Gate::T, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 2);
     // H·T on q0 stays Fused (no named match), X on q1 recognized as Gate::X
     assert_eq!(count_fused(&fused), 1);
@@ -156,7 +157,7 @@ fn test_two_qubit_breaks_run() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::T, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 3);
     assert_eq!(count_fused(&fused), 0);
 }
@@ -167,7 +168,7 @@ fn test_measure_breaks_run() {
     c.add_gate(Gate::H, &[0]);
     c.add_measure(0, 0);
     c.add_gate(Gate::T, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 3);
     assert_eq!(count_fused(&fused), 0);
 }
@@ -178,7 +179,7 @@ fn test_barrier_breaks_run() {
     c.add_gate(Gate::H, &[0]);
     c.add_barrier(&[0]);
     c.add_gate(Gate::T, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 3);
     assert_eq!(count_fused(&fused), 0);
 }
@@ -190,7 +191,7 @@ fn test_multiple_qubits_independent() {
     c.add_gate(Gate::Rz(2.0), &[0]);
     c.add_gate(Gate::Ry(1.0), &[1]);
     c.add_gate(Gate::Rz(2.0), &[1]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 2);
     assert_eq!(count_fused(&fused), 2);
 }
@@ -203,7 +204,7 @@ fn test_long_chain() {
     c.add_gate(Gate::T, &[0]);
     c.add_gate(Gate::X, &[0]);
     c.add_gate(Gate::Z, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 1);
     assert_eq!(count_fused(&fused), 1);
     let expected = mat_mul_2x2(
@@ -228,7 +229,7 @@ fn test_gate_count_after_fusion() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::H, &[1]);
     c.add_measure(1, 0);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.gate_count(), 3);
     assert_eq!(fused.instructions.len(), 4);
 }
@@ -257,7 +258,7 @@ fn test_fused_probabilities_match_unfused() {
         b1.apply(inst).unwrap();
     }
     let probs_unfused = b1.probabilities().unwrap();
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     let mut b2 = StatevectorBackend::new(42);
     b2.init(fused.num_qubits, fused.num_classical_bits).unwrap();
     for inst in &fused.instructions {
@@ -286,7 +287,7 @@ fn test_hea_style_fusion() {
         c.add_gate(Gate::Rz(3.0 + q as f64), &[q]);
     }
 
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.gate_count(), 11);
     assert_eq!(count_fused(&fused), 8);
     assert_eq!(c.gate_count(), 19);
@@ -302,8 +303,8 @@ fn test_fusion_matrix_order_matters() {
     c_hx.add_gate(Gate::H, &[0]);
     c_hx.add_gate(Gate::X, &[0]);
 
-    let fused_xh = fuse_single_qubit_gates(&c_xh);
-    let fused_hx = fuse_single_qubit_gates(&c_hx);
+    let fused_xh = fuse_single_qubit_gates(&c_xh, &mut Tracer::off());
+    let fused_hx = fuse_single_qubit_gates(&c_hx, &mut Tracer::off());
 
     let mat_xh = extract_fused_matrix(&fused_xh.instructions[0]);
     let mat_hx = extract_fused_matrix(&fused_hx.instructions[0]);
@@ -324,7 +325,7 @@ fn test_s_squared_is_z_via_fusion() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::S, &[0]);
     c.add_gate(Gate::S, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 1);
     // S·S recognized as Gate::Z
     assert!(matches!(
@@ -338,7 +339,7 @@ fn test_t_tdg_cancel_via_fusion() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::T, &[0]);
     c.add_gate(Gate::Tdg, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 0);
 }
 
@@ -347,7 +348,7 @@ fn test_identity_elision_h_h() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 0);
 }
 
@@ -357,7 +358,7 @@ fn test_identity_elision_partial() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::T, &[1]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 1);
     // H·H on q0 elided, lone T on q1 recognized as Gate::T
     assert!(matches!(
@@ -384,7 +385,7 @@ fn test_identity_elision_preserves_probabilities() {
     }
     let p1 = b1.probabilities().unwrap();
 
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 1);
 
     let mut b2 = StatevectorBackend::new(42);
@@ -405,7 +406,7 @@ fn test_cphase_breaks_fusion_run() {
     c.add_gate(Gate::Rz(0.5), &[0]);
     c.add_gate(Gate::cphase(0.3), &[0, 1]);
     c.add_gate(Gate::T, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 3);
     assert_eq!(count_fused(&fused), 0);
 }
@@ -418,7 +419,7 @@ fn test_fusion_around_cphase() {
     c.add_gate(Gate::cphase(0.5), &[0, 1]);
     c.add_gate(Gate::S, &[0]);
     c.add_gate(Gate::X, &[0]);
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert_eq!(fused.instructions.len(), 3);
     assert_eq!(count_fused(&fused), 2);
 }
@@ -441,7 +442,7 @@ fn test_cphase_fused_probabilities_match() {
     c.add_gate(Gate::T, &[0]);
     c.add_gate(Gate::S, &[0]);
 
-    let fused_circuit = fuse_single_qubit_gates(&c);
+    let fused_circuit = fuse_single_qubit_gates(&c, &mut Tracer::off());
 
     let mut b1 = StatevectorBackend::new(42);
     sim::run_on(&mut b1, &c).unwrap();
@@ -464,7 +465,7 @@ fn test_cancel_adjacent_cx() {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     assert!(matches!(result, Cow::Owned(_)));
     assert_eq!(result.instructions.len(), 0);
 }
@@ -475,7 +476,7 @@ fn test_cancel_cx_with_non_conflicting_between() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::H, &[2]); // doesn't touch q0 or q1
     c.add_gate(Gate::Cx, &[0, 1]);
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     assert!(matches!(result, Cow::Owned(_)));
     assert_eq!(result.instructions.len(), 1); // only H(2) remains
 }
@@ -486,7 +487,7 @@ fn test_no_cancel_cx_with_conflicting_between() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::H, &[0]); // touches q0, breaks the chain
     c.add_gate(Gate::Cx, &[0, 1]);
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     // No cancellation, H on q0 intervenes
     assert_eq!(result.instructions.len(), 3);
 }
@@ -496,7 +497,7 @@ fn test_no_cancel_cx_reversed_targets() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cx, &[1, 0]); // reversed, CX is NOT symmetric
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     assert_eq!(result.instructions.len(), 2);
 }
 
@@ -505,7 +506,7 @@ fn test_cancel_cz_symmetric() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::Cz, &[0, 1]);
     c.add_gate(Gate::Cz, &[1, 0]); // reversed, CZ IS symmetric
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     assert_eq!(result.instructions.len(), 0);
 }
 
@@ -515,7 +516,7 @@ fn test_cancel_swap_symmetric() {
     c.add_gate(Gate::Swap, &[0, 1]);
     c.add_gate(Gate::H, &[2]);
     c.add_gate(Gate::Swap, &[1, 0]); // reversed order
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     assert_eq!(result.instructions.len(), 1); // only H(2)
 }
 
@@ -526,7 +527,7 @@ fn test_cancel_multiple_pairs() {
     c.add_gate(Gate::Cx, &[2, 3]);
     c.add_gate(Gate::Cx, &[2, 3]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     assert_eq!(result.instructions.len(), 0);
 }
 
@@ -535,7 +536,7 @@ fn test_cancel_no_candidates() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::T, &[1]);
-    let result = cancel_self_inverse_pairs(&c);
+    let result = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     assert!(matches!(result, Cow::Borrowed(_)));
 }
 
@@ -558,7 +559,7 @@ fn test_cancel_preserves_probabilities() {
     }
     let p1 = b1.probabilities().unwrap();
 
-    let cancelled = cancel_self_inverse_pairs(&c);
+    let cancelled = cancel_self_inverse_pairs(&c, &mut Tracer::off());
     let mut b2 = StatevectorBackend::new(42);
     b2.init(3, 0).unwrap();
     for inst in &cancelled.instructions {
@@ -581,7 +582,7 @@ fn test_reorder_1q_basic() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Fused(Box::new(Gate::T.matrix_2x2())), &[2]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert!(matches!(result, Cow::Owned(_)));
     assert_eq!(result.instructions.len(), 3);
     assert!(
@@ -615,7 +616,7 @@ fn test_reorder_no_opportunity() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Fused(Box::new(Gate::T.matrix_2x2())), &[1]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert!(matches!(result, Cow::Borrowed(_)));
 }
 
@@ -631,7 +632,7 @@ fn test_reorder_hea_pattern() {
     c.add_gate(fused(0.4), &[3]);
     c.add_gate(Gate::Cx, &[2, 3]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert_eq!(result.instructions.len(), 7);
     for i in 0..4 {
         assert!(
@@ -675,7 +676,7 @@ fn test_reorder_preserves_probabilities() {
     }
     let p1 = b1.probabilities().unwrap();
 
-    let reordered = reorder_1q_gates(Cow::Borrowed(&c));
+    let reordered = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     let mut b2 = StatevectorBackend::new(42);
     b2.init(4, 0).unwrap();
     for inst in &reordered.instructions {
@@ -698,7 +699,7 @@ fn test_reorder_respects_barrier() {
     c.add_barrier(&[0, 1, 2]);
     c.add_gate(Gate::T, &[2]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert!(matches!(result, Cow::Borrowed(_)));
 }
 
@@ -709,7 +710,7 @@ fn test_reorder_diagonal_commutes_through_cx_control() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Rz(0.5), &[0]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert!(matches!(result, Cow::Owned(_)));
     assert_eq!(result.instructions.len(), 2);
     assert!(matches!(
@@ -732,7 +733,7 @@ fn test_reorder_nondiagonal_blocked_by_cx_control() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::H, &[0]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     // No reorder, H is blocked by CX on q0
     assert!(matches!(result, Cow::Borrowed(_)));
 }
@@ -744,7 +745,7 @@ fn test_reorder_diagonal_blocked_on_cx_target() {
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Rz(0.5), &[1]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert!(matches!(result, Cow::Borrowed(_)));
 }
 
@@ -756,7 +757,7 @@ fn test_reorder_diagonal_commutes_through_cz() {
     c.add_gate(Gate::T, &[0]);
     c.add_gate(Gate::S, &[1]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert!(matches!(result, Cow::Owned(_)));
     assert_eq!(result.instructions.len(), 3);
     // Both diagonal gates should precede CZ
@@ -791,7 +792,7 @@ fn test_reorder_commutation_preserves_probabilities() {
     }
     let p1 = b1.probabilities().unwrap();
 
-    let reordered = reorder_1q_gates(Cow::Borrowed(&c));
+    let reordered = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     let mut b2 = StatevectorBackend::new(42);
     b2.init(3, 0).unwrap();
     for inst in &reordered.instructions {
@@ -814,7 +815,7 @@ fn test_reorder_respects_measurement() {
     c.add_measure(0, 0);
     c.add_gate(Gate::T, &[1]);
 
-    let result = reorder_1q_gates(Cow::Borrowed(&c));
+    let result = reorder_1q_gates(Cow::Borrowed(&c), &mut Tracer::off());
     assert!(matches!(result, Cow::Owned(_)));
     assert_eq!(result.instructions.len(), 3);
     assert!(
@@ -846,8 +847,8 @@ fn test_smart_multi_fusion_across_cx() {
     c.add_gate(Gate::S, &[2]);
     c.add_gate(Gate::Rx(1.0), &[3]);
 
-    let pass1 = fuse_single_qubit_gates(&c);
-    let pass2 = fuse_multi_1q_gates(pass1);
+    let pass1 = fuse_single_qubit_gates(&c, &mut Tracer::off());
+    let pass2 = fuse_multi_1q_gates(pass1, &mut Tracer::off());
 
     let multi_count = pass2
         .instructions
@@ -976,9 +977,9 @@ fn reorder_exposes_cz_cancellation() {
 #[test]
 fn same_pair_2q_block_fuses_w_state_pairs() {
     let circuit = crate::circuits::w_state_circuit(20);
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
     let before = count_fused_2q(&pass_2q);
-    let fused = fuse_same_pair_2q_blocks(pass_2q);
+    let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
 
     assert!(before >= 2, "w-state should expose paired Fused2q gates");
@@ -991,9 +992,9 @@ fn same_pair_2q_block_fuses_w_state_pairs() {
 #[test]
 fn same_pair_2q_block_fuses_qv_blocks() {
     let circuit = crate::circuits::quantum_volume_circuit(20, 1, 42);
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
     let before = count_fused_2q(&pass_2q);
-    let fused = fuse_same_pair_2q_blocks(pass_2q);
+    let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
 
     assert!(before >= 2, "qv block should expose paired Fused2q gates");
@@ -1011,9 +1012,9 @@ fn same_pair_2q_block_accepts_reversed_targets() {
     circuit.add_gate(Gate::Ry(0.7), &[1]);
     circuit.add_gate(Gate::Cx, &[1, 0]);
 
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
     let before = count_fused_2q(&pass_2q);
-    let fused = fuse_same_pair_2q_blocks(pass_2q);
+    let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
 
     assert_eq!(before, 2);
@@ -1035,9 +1036,9 @@ fn same_pair_2q_block_leaves_diagonal_runs() {
     circuit.add_gate(Gate::T, &[1]);
     circuit.add_gate(Gate::Cz, &[1, 0]);
 
-    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit));
+    let pass_2q = fuse_2q_gates(Cow::Borrowed(&circuit), &mut Tracer::off());
     let before = count_fused_2q(&pass_2q);
-    let fused = fuse_same_pair_2q_blocks(pass_2q);
+    let fused = fuse_same_pair_2q_blocks(pass_2q, &mut Tracer::off());
     let after = count_fused_2q(&fused);
 
     assert_eq!(before, 2);
@@ -1050,7 +1051,10 @@ fn fuse_1q_returns_borrowed_without_consecutive_pair() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Rx(0.3), &[0]);
-    assert!(matches!(fuse_single_qubit_gates(&c), Cow::Borrowed(_)));
+    assert!(matches!(
+        fuse_single_qubit_gates(&c, &mut Tracer::off()),
+        Cow::Borrowed(_)
+    ));
 }
 
 #[test]
@@ -1058,7 +1062,10 @@ fn fuse_2q_returns_borrowed_without_absorbable_1q() {
     let mut c = Circuit::new(12, 0);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Cz, &[1, 2]);
-    assert!(matches!(fuse_2q_gates(Cow::Borrowed(&c)), Cow::Borrowed(_)));
+    assert!(matches!(
+        fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off()),
+        Cow::Borrowed(_)
+    ));
 }
 
 #[test]
@@ -1068,7 +1075,7 @@ fn fuse_multi_2q_returns_borrowed_without_tileable_run() {
     c.add_gate(Gate::H, &[2]);
     c.add_gate(Gate::Fused2q(Box::new(Gate::Cz.matrix_4x4())), &[2, 3]);
     assert!(matches!(
-        fuse_multi_2q_gates(Cow::Borrowed(&c)),
+        fuse_multi_2q_gates(Cow::Borrowed(&c), &mut Tracer::off()),
         Cow::Borrowed(_)
     ));
 }
@@ -1082,7 +1089,7 @@ fn fuse_controlled_phases_returns_borrowed_without_batchable_chain() {
     c.add_gate(Gate::cu([[one, zero], [zero, phase]]), &[0, 1]);
     c.add_gate(Gate::Cx, &[2, 3]);
     assert!(matches!(
-        fuse_controlled_phases(Cow::Borrowed(&c)),
+        fuse_controlled_phases(Cow::Borrowed(&c), &mut Tracer::off()),
         Cow::Borrowed(_)
     ));
 }
@@ -1156,7 +1163,7 @@ fn test_recognition_extends_clifford_prefix() {
     assert!(c.clifford_prefix_split().is_none());
 
     // After fusion: T·T recognized as S (Clifford), so prefix = [S, CX], tail = [Rx]
-    let fused = fuse_single_qubit_gates(&c);
+    let fused = fuse_single_qubit_gates(&c, &mut Tracer::off());
     assert!(matches!(
         &fused.instructions[0],
         Instruction::Gate { gate: Gate::S, .. }

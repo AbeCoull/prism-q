@@ -11,7 +11,7 @@ use num_complex::Complex64;
 use numpy::PyArray1;
 use prism_q::backend::Backend;
 use prism_q::{
-    BackendKind, Circuit, CountsResult, MarginalsResult, NoiseModel, ParamLink, ParameterMap,
+    BackendKind, Circuit, CountsResult, MarginalsResult, NoiseModel, ParamLink, Parameters,
     PauliAxis, PauliTerm, RunOutcome, ShotsResult, StatevectorBackend, bitstring,
     simulate as core_simulate,
 };
@@ -221,12 +221,12 @@ impl PySimulation {
         for (coeff, factors) in hamiltonian {
             terms.push((coeff, parse_pauli_string(factors)?));
         }
-        let params = ParameterMap::from_links(
-            parameters
-                .into_iter()
-                .map(|(instruction, param)| ParamLink { instruction, param })
-                .collect(),
-        );
+        let links: Vec<ParamLink> = parameters
+            .into_iter()
+            .map(|(instruction, slot)| ParamLink { instruction, slot })
+            .collect();
+        let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
+        let params = Parameters::from_links(links, num_slots);
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let circuit = &self.circuit;

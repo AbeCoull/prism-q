@@ -1,5 +1,6 @@
 use super::*;
 use crate::circuit::Circuit;
+use crate::circuit::plan::Tracer;
 use crate::sim;
 
 fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
@@ -936,8 +937,8 @@ fn test_multi_fused_fusion_pass() {
     c.add_gate(Gate::Ry(1.0), &[2]);
     c.add_gate(Gate::Rz(2.0), &[3]);
 
-    let pass1 = fuse_single_qubit_gates(&c);
-    let pass2 = fuse_multi_1q_gates(pass1);
+    let pass1 = fuse_single_qubit_gates(&c, &mut Tracer::off());
+    let pass2 = fuse_multi_1q_gates(pass1, &mut Tracer::off());
 
     let multi_count = pass2
         .instructions

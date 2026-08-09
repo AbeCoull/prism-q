@@ -253,31 +253,37 @@ impl PyCircuitBuilder {
         Ok(slf)
     }
 
-    /// Mark the most recently appended gate as trainable parameter `slot` for
+    /// Bind the most recently appended gate to parameter `slot` for
     /// `Simulation.expectation_gradient`. Several gates may share a slot (their
-    /// gradients accumulate). Example: `builder.rz(theta, q).trainable(0)`.
-    fn trainable(mut slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
-        let differentiable = matches!(
+    /// gradients accumulate). Example: `builder.rz(theta, q).param(0)`.
+    fn param(mut slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let bindable = matches!(
             slf.inner.circuit().instructions.last(),
             Some(Instruction::Gate { gate, .. }) if gate.pauli_generator().is_some()
         );
-        if !differentiable {
+        if !bindable {
             return Err(invalid(
-                "trainable() requires the last appended instruction to be a differentiable gate (rx, ry, rz, rzz, p)",
+                "param() requires the last appended instruction to be a gate carrying an angle (rx, ry, rz, rzz, p)",
             ));
         }
-        slf.inner.trainable(slot);
+        slf.inner.param(slot);
         Ok(slf)
     }
 
-    /// The `(instruction_index, parameter_slot)` links recorded by
-    /// `trainable`, for passing to `Simulation.expectation_gradient`.
+    /// Deprecated spelling of `param`, kept so published callers keep working.
+    /// Slated for removal in the next minor release.
+    fn trainable(slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
+        Self::param(slf, slot)
+    }
+
+    /// The `(instruction_index, parameter_slot)` links recorded by `param`, for
+    /// passing to `Simulation.expectation_gradient`.
     fn parameter_links(&self) -> Vec<(usize, usize)> {
         self.inner
-            .parameter_map()
+            .parameters()
             .links()
             .iter()
-            .map(|l| (l.instruction, l.param))
+            .map(|l| (l.instruction, l.slot))
             .collect()
     }
 

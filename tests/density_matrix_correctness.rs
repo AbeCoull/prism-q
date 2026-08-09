@@ -518,7 +518,7 @@ fn noisy_expectation_gradient_is_rejected_naming_the_adjoint() {
         .seed(SEED)
         .expectation_gradient(
             &[(1.0, vec![PauliTerm::z(0)])],
-            &prism_q::sim::gradient::ParameterMap::new(),
+            &prism_q::Parameters::new(0),
         )
         .unwrap_err();
     match err {

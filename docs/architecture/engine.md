@@ -163,8 +163,8 @@ kernel to two vectors (`pauli_sandwich`, Rayon-parallel at 16+ qubits).
 Differentiable gates are `Rx`, `Ry`, `Rz`, `Rzz`, and `P` (identified by
 `Gate::pauli_generator`, a method, so `Gate` stays 16 bytes). Trainable links on
 other gates, non-unitary instructions, and `QftBlock` are rejected. Parameter
-identity is an index-based side table (`ParameterMap` of instruction→slot links,
-recorded by the `*_param` `CircuitBuilder` methods); many gates may share a slot.
+identity is an index-based side table (`Parameters`, instruction→slot links
+recorded by `CircuitBuilder::param`); many gates may share a slot.
 
 Differentiation runs on the unfused instruction stream so each gate keeps a 1:1
 correspondence with its generator (fusion would erase both the stored angle and

@@ -4,14 +4,14 @@
 //! form rather than a statevector comparison.
 
 use prism_q::gates::Gate;
-use prism_q::{BackendKind, Circuit, ParameterMap, PauliTerm, run_expectation_gradient, simulate};
+use prism_q::{BackendKind, Circuit, Parameters, PauliTerm, run_expectation_gradient, simulate};
 
 const SEED: u64 = 42;
 const TOL: f64 = 1e-9;
 
 struct Fixture {
     circuit: Circuit,
-    params: ParameterMap,
+    params: Parameters,
     hamiltonian: Vec<(f64, Vec<PauliTerm>)>,
     want: Vec<f64>,
 }
@@ -30,7 +30,7 @@ fn fixture(n: usize) -> Fixture {
     circuit.add_gate(Gate::Cx, &[0, 1]);
     circuit.add_gate(Gate::Cx, &[2, 3]);
 
-    let params = ParameterMap::all_rotations(&circuit);
+    let params = Parameters::all_rotations(&circuit);
     let hamiltonian = vec![
         (1.0, vec![PauliTerm::z(0)]),
         (0.5, vec![PauliTerm::z(0), PauliTerm::z(1)]),

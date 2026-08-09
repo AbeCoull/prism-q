@@ -371,11 +371,11 @@ impl<'c> Simulate<'c, Seeded> {
         run_expectation_values_with(self.kind, self.circuit, observables, seed)
     }
 
-    /// Compute `⟨H⟩` and its exact gradient with respect to the trainable
+    /// Compute `⟨H⟩` and its exact gradient with respect to the bound
     /// parameters using the adjoint method.
     ///
     /// `hamiltonian` is a weighted Pauli sum `Σ c_k P_k` with real
-    /// coefficients. `params` declares which gate instructions are trainable.
+    /// coefficients. `params` declares which gate instructions carry parameters.
     /// Runs on the statevector backend; the selected backend must be `Auto` or
     /// `Statevector`. The circuit must be unitary. See
     /// [`gradient::run_expectation_gradient`].
@@ -383,7 +383,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn expectation_gradient(
         self,
         hamiltonian: &[(f64, Vec<PauliTerm>)],
-        params: &gradient::ParameterMap,
+        params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
         let seed = self.seed_value();
         if self.noise_model.is_some() {
@@ -429,7 +429,7 @@ impl<'c> Simulate<'c, Seeded> {
     pub fn expectation_gradient_shift(
         self,
         hamiltonian: &[(f64, Vec<PauliTerm>)],
-        params: &gradient::ParameterMap,
+        params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
         let seed = self.seed_value();
         if self.noise_model.is_some() {
@@ -753,6 +753,75 @@ fn execute(backend: &mut dyn Backend, circuit: &Circuit, opts: &SimOptions) -> R
     };
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
     execute_circuit(backend, &fused, opts)
+}
+
+/// The execution route a template settles on, for a caller that holds one
+/// circuit across many bindings and fuses it itself.
+///
+/// Resolving the route from the template rather than from a bound circuit
+/// matters twice over: it is the work being amortized, and a fused stream
+/// misreports the circuit to dispatch (a fused Clifford circuit no longer
+/// looks Clifford).
+pub(crate) struct PreparedRoute {
+    plan: BackendPlan,
+    supports_fused: bool,
+    /// Backend held across points. `init` reuses its state buffer when the
+    /// width matches, so a sweep pays one `2^n` allocation rather than one per
+    /// point. Rebuilt when the seed changes, since the seed feeds its RNG.
+    held: Option<(u64, Box<dyn Backend>)>,
+}
+
+impl PreparedRoute {
+    /// True when the chosen backend accepts fused gates, so the caller should
+    /// hand `run` a fused stream rather than the bound template.
+    pub(crate) fn supports_fused(&self) -> bool {
+        self.supports_fused
+    }
+
+    /// Apply `circuit` verbatim, with no further fusion.
+    pub(crate) fn run(&mut self, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
+        if !matches!(&self.held, Some((s, _)) if *s == seed) {
+            self.held = Some((seed, self.plan.build(seed)));
+        }
+        let (_, backend) = self.held.as_mut().expect("just built");
+        execute_circuit(&mut **backend, circuit, &SimOptions::default())
+    }
+}
+
+/// Settle the route for `template`, or `None` when it takes one that reshapes
+/// execution (decomposition, stabilizer rank, temporal Clifford) or expands
+/// `QftBlock`, where a caller-supplied stream has nowhere to go.
+pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<PreparedRoute> {
+    if !kind.is_auto() && validate_explicit_backend(kind, template).is_err() {
+        return None;
+    }
+    let ProbabilityRoute::Direct {
+        has_partial_independence,
+    } = plan_probability_route(kind, template)
+    else {
+        return None;
+    };
+    let ExecutionPlan::Backend(plan) = resolve(kind, template, has_partial_independence) else {
+        return None;
+    };
+    let probe = plan.build(0);
+    let has_qft_block = template.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: crate::gates::Gate::QftBlock { .. },
+                ..
+            }
+        )
+    });
+    if has_qft_block && !probe.supports_qft_block() {
+        return None;
+    }
+    Some(PreparedRoute {
+        supports_fused: probe.supports_fused_gates(),
+        plan,
+        held: None,
+    })
 }
 
 /// Shared init → apply → extract logic.

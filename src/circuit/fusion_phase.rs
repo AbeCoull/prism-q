@@ -10,6 +10,7 @@ use super::{Circuit, Instruction, SmallVec, smallvec};
 use crate::gates::{BatchPhaseData, Gate, MultiFusedData, is_diagonal_2x2};
 
 use super::fusion::push_unique;
+use super::plan::{Place, Tracer};
 
 const MIN_BATCH_PHASES: usize = 2;
 
@@ -164,7 +165,7 @@ fn flush_phase_qubits_in_use(
 }
 
 /// Returns the input unchanged unless at least one `BatchPhase` is emitted.
-pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     if !circuit.instructions.iter().any(is_controlled_phase_2q) {
         return circuit;
     }
@@ -255,6 +256,7 @@ pub fn fuse_controlled_phases(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
     }
 
     if changed {
+        t.bail();
         Cow::Owned(circuit.with_instructions(output))
     } else {
         circuit
@@ -270,7 +272,10 @@ fn is_batchable_1q(inst: &Instruction) -> bool {
     )
 }
 
-pub(super) fn batch_post_phase_1q(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit> {
+pub(super) fn batch_post_phase_1q<'a>(
+    circuit: Cow<'a, Circuit>,
+    t: &mut Tracer,
+) -> Cow<'a, Circuit> {
     let mut max_run = 0usize;
     let mut run = 0usize;
     for inst in &circuit.instructions {
@@ -287,8 +292,13 @@ pub(super) fn batch_post_phase_1q(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit>
 
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
     let mut pending: Vec<(usize, [[Complex64; 2]; 2])> = Vec::new();
+    let mut pending_src: Vec<usize> = Vec::new();
+    t.begin();
 
-    let flush = |pending: &mut Vec<(usize, [[Complex64; 2]; 2])>, output: &mut Vec<Instruction>| {
+    let flush = |pending: &mut Vec<(usize, [[Complex64; 2]; 2])>,
+                 pending_src: &mut Vec<usize>,
+                 output: &mut Vec<Instruction>,
+                 t: &mut Tracer| {
         if pending.len() >= 2 {
             let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
             for &(q, _) in pending.iter() {
@@ -303,28 +313,42 @@ pub(super) fn batch_post_phase_1q(circuit: Cow<'_, Circuit>) -> Cow<'_, Circuit>
                 })),
                 targets,
             });
+            if t.on {
+                let entries: Vec<Vec<(usize, Place)>> = pending_src
+                    .drain(..)
+                    .map(|src| vec![(src, Place::Plain)])
+                    .collect();
+                t.batch(&entries);
+            }
         } else {
-            for (q, mat) in pending.drain(..) {
+            for (k, (q, mat)) in pending.drain(..).enumerate() {
                 output.push(Instruction::Gate {
                     gate: Gate::Fused(Box::new(mat)),
                     targets: smallvec![q],
                 });
+                if t.on {
+                    t.keep(pending_src[k]);
+                }
             }
+            pending_src.clear();
         }
     };
 
-    for inst in &circuit.instructions {
+    for (i, inst) in circuit.instructions.iter().enumerate() {
         if is_batchable_1q(inst) {
             if let Instruction::Gate { gate, targets, .. } = inst {
                 pending.push((targets[0], gate.matrix_2x2()));
+                t.note_idx(&mut pending_src, i);
             }
         } else {
-            flush(&mut pending, &mut output);
+            flush(&mut pending, &mut pending_src, &mut output, t);
             output.push(inst.clone());
+            t.keep(i);
         }
     }
 
-    flush(&mut pending, &mut output);
+    flush(&mut pending, &mut pending_src, &mut output, t);
+    t.commit();
 
     Cow::Owned(circuit.with_instructions(output))
 }

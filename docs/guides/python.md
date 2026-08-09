@@ -69,7 +69,7 @@ circuit = (
 | Two qubit | `cx(control, target)`, `cz(q0, q1)`, `swap(q0, q1)`, `rzz(theta, q0, q1)`, `cphase(theta, control, target)` |
 | Arbitrary unitary | `cu(matrix, control, target)`, `mcu(matrix, controls, target)`, `gate(gate, targets)` |
 | Non-unitary | `measure(qubit, bit)`, `measure_all()`, `barrier(qubits)` |
-| Gradients | `trainable(slot)`, `parameter_links()` |
+| Gradients | `param(slot)`, `parameter_links()` |
 
 `cu` and `mcu` take a 2x2 matrix as nested Python sequences of complex numbers.
 Out-of-range qubits raise `PrismError` at build time rather than at simulation
@@ -313,8 +313,8 @@ asserting exact equality.
 ## Gradients
 
 `expectation_gradient` computes `⟨H⟩` and its exact gradient with respect to the
-trainable parameters by the adjoint method, at a cost independent of the
-parameter count. Mark parameters with `trainable(slot)` while building, then
+bound parameters by the adjoint method, at a cost independent of the
+parameter count. Mark parameters with `param(slot)` while building, then
 pass `parameter_links()` through.
 
 ```python
@@ -322,9 +322,9 @@ import numpy as np
 from prism_q import CircuitBuilder, simulate
 
 builder = CircuitBuilder(2)
-builder.ry(0.3, 0).trainable(0)
+builder.ry(0.3, 0).param(0)
 builder.cx(0, 1)
-builder.rz(0.7, 1).trainable(1)
+builder.rz(0.7, 1).param(1)
 circuit, links = builder.build(), builder.parameter_links()
 
 hamiltonian = [(1.0, [(0, "Z")]), (0.5, [(0, "Z"), (1, "Z")])]
@@ -332,7 +332,7 @@ value, gradient = simulate(circuit).seed(42).expectation_gradient(hamiltonian, l
 ```
 
 A Hamiltonian term is `(coefficient, observable)`. Several gates may share a
-slot, in which case their gradients accumulate. `trainable()` rejects anything
+slot, in which case their gradients accumulate. `param()` rejects anything
 but a differentiable gate (`rx`, `ry`, `rz`, `rzz`, `p`), and the circuit must be
 unitary.
 

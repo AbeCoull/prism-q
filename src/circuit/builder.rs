@@ -14,9 +14,9 @@
 
 use num_complex::Complex64;
 
+use super::parameter::Parameters;
 use super::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use crate::gates::Gate;
-use crate::sim::gradient::ParameterMap;
 
 /// Fluent builder for quantum circuits.
 ///
@@ -25,9 +25,8 @@ use crate::sim::gradient::ParameterMap;
 /// Call [`build`](Self::build) to extract the finished [`Circuit`], or
 /// use [`run`](Self::run) / [`run_with`](Self::run_with) for direct execution.
 ///
-/// [`trainable`](Self::trainable) marks the most recently appended gate as a
-/// trainable parameter for the adjoint gradient. Retrieve the recorded map with
-/// [`parameter_map`](Self::parameter_map) or
+/// [`param`](Self::param) binds the most recently appended gate to a parameter
+/// slot. Retrieve the recorded set with [`parameters`](Self::parameters) or
 /// [`build_parametric`](Self::build_parametric).
 ///
 /// Gate and measurement methods panic when a qubit or classical bit index is
@@ -46,7 +45,7 @@ use crate::sim::gradient::ParameterMap;
 /// ```
 pub struct CircuitBuilder {
     circuit: Circuit,
-    params: ParameterMap,
+    params: Parameters,
 }
 
 macro_rules! gate_1q {
@@ -81,7 +80,7 @@ impl CircuitBuilder {
     pub fn new(num_qubits: usize) -> Self {
         Self {
             circuit: Circuit::new(num_qubits, 0),
-            params: ParameterMap::new(),
+            params: Parameters::new(0),
         }
     }
 
@@ -89,7 +88,7 @@ impl CircuitBuilder {
     pub fn new_with_classical(num_qubits: usize, num_classical_bits: usize) -> Self {
         Self {
             circuit: Circuit::new(num_qubits, num_classical_bits),
-            params: ParameterMap::new(),
+            params: Parameters::new(0),
         }
     }
 
@@ -115,28 +114,30 @@ impl CircuitBuilder {
         self
     }
 
-    /// Mark the most recently appended gate as trainable parameter `slot` for
-    /// the adjoint gradient. Several gates may share a slot (their gradients
-    /// accumulate). Example: `builder.rz(theta, q).trainable(0)`.
+    /// Bind the most recently appended gate to parameter `slot`. Several gates
+    /// may share a slot: binding writes one angle to each and the adjoint
+    /// gradient accumulates them. Example: `builder.rz(theta, q).param(0)`.
+    ///
+    /// The declared slot count grows to cover the highest slot named here.
     ///
     /// # Panics
     /// Panics if no gate has been appended yet, or if the last instruction is
-    /// not an analytically differentiable gate (`Rx`, `Ry`, `Rz`, `Rzz`, `P`).
-    pub fn trainable(&mut self, slot: usize) -> &mut Self {
+    /// not a gate carrying an angle (`Rx`, `Ry`, `Rz`, `Rzz`, `P`).
+    pub fn param(&mut self, slot: usize) -> &mut Self {
         let last = self
             .circuit
             .instructions
             .len()
             .checked_sub(1)
-            .expect("trainable() called before any gate was appended");
+            .expect("param() called before any gate was appended");
         match &self.circuit.instructions[last] {
             Instruction::Gate { gate, .. } if gate.pauli_generator().is_some() => {}
             other => panic!(
-                "trainable() requires the last instruction to be a differentiable gate \
+                "param() requires the last instruction to be a gate carrying an angle \
                  (rx, ry, rz, rzz, p), got {other:?}"
             ),
         }
-        self.params.push(last, slot);
+        self.params.link_growing(last, slot);
         self
     }
 
@@ -229,15 +230,15 @@ impl CircuitBuilder {
 
     /// Extract the finished circuit, replacing the builder's internal circuit with an empty one.
     pub fn build(&mut self) -> Circuit {
-        self.params = ParameterMap::new();
+        self.params = Parameters::new(0);
         std::mem::replace(&mut self.circuit, Circuit::new(0, 0))
     }
 
-    /// Extract the finished circuit together with the recorded parameter map,
+    /// Extract the finished circuit together with the recorded parameters,
     /// resetting the builder.
-    pub fn build_parametric(&mut self) -> (Circuit, ParameterMap) {
+    pub fn build_parametric(&mut self) -> (Circuit, Parameters) {
         let circuit = std::mem::replace(&mut self.circuit, Circuit::new(0, 0));
-        let params = std::mem::take(&mut self.params);
+        let params = std::mem::replace(&mut self.params, Parameters::new(0)).pinned_to(&circuit);
         (circuit, params)
     }
 
@@ -246,8 +247,9 @@ impl CircuitBuilder {
         &self.circuit
     }
 
-    /// Borrow the parameter map recorded by [`trainable`](Self::trainable).
-    pub fn parameter_map(&self) -> &ParameterMap {
+    /// The parameters recorded by [`param`](Self::param). Not yet pinned to the
+    /// circuit; [`build_parametric`](Self::build_parametric) pins on the way out.
+    pub fn parameters(&self) -> &Parameters {
         &self.params
     }
 

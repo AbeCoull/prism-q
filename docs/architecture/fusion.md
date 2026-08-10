@@ -57,8 +57,50 @@ bounds a chain by the qubit count.
 `DiagonalBatch` instead declines at the kernel: `build_diagonal_batch_tables` returns
 `None` when the grouping does not fit and the backend runs the per-element path.
 
+## Plan capture and replay
+
+A variational sweep holds one gate sequence and varies only the angles. Fusion
+decides the same block structure at every point, so `PreparedCircuit` settles it once
+and rebinds against it.
+
+What is reusable is the plan, not the matrices: a changed angle changes every fused
+matrix it feeds. `FusionPlan` therefore records a recipe per angle-derived payload, a
+list of template instructions and how each one's matrix enters the product. Replay
+recomputes the products; it never caches them. Nested recipes splice by rewriting a
+placement flag rather than by materializing the inner product, which is sound because
+both widening to a pair and SWAP conjugation are multiplicative.
+
+The passes record this under a `Tracer` that is inactive on the ordinary path, so a
+fusion outside the prepared form allocates what it always did.
+
+A few decisions read a matrix rather than the gate sequence, and those the plan cannot
+assume:
+
+| Decision | Read by | Recorded as |
+|----------|---------|-------------|
+| A 1q run collapsing to the identity | `flush`, which elides it | `Guard::Fuses1q` |
+| A 1q run matching a named gate | `Gate::recognize_matrix` | `Guard::Fuses1q` |
+| Whether a 1q block is diagonal | `reorder_1q_gates`, commuting it past a control | `Guard::Fuses1q` |
+| Whether a 2q block is diagonal | `PairRun::should_fuse` | `Guard::Diag4q` |
+
+Each guard is re-tested per binding, and a binding that flips one falls back to running
+the pipeline, so the stream matches an independently fused circuit either way. The 1q
+diagonality guard has to live on the run rather than on a payload site: the block is
+often absorbed into a `Fused2q` and keeps no 2x2 of its own, while the reorder it
+steered has already happened.
+
+`DiagonalBatch` and `BatchPhase` have no recipe, so a template reaching either declines
+capture and re-fuses per binding.
+
+## Fusion cost against apply cost
+
+Fusion cost tracks instruction count and is close to flat in qubit count, while gate
+application is `2^n`. The ratio therefore moves by an order of magnitude across the
+useful range: for `hardware_efficient_ansatz(n, 5)` on this project's reference host,
+fusion is about 22% of a run at 12 qubits and about 0.3% at 20.
+
 ```admonish tip
-Fusion is not on the hot path. Worst-case fusion cost is on the order of microseconds
-against tens of milliseconds of gate application, so these passes are tuned for
-correctness and clarity, not for their own runtime.
+At 16 qubits and above, fusion is not on the hot path, and these passes are tuned for
+correctness and clarity rather than for their own runtime. Below that it is worth
+amortizing, which is what plan capture exists for.
 ```

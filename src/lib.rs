@@ -74,7 +74,10 @@ pub use backend::stabilizer::StabilizerBackend;
 pub use backend::statevector::StatevectorBackend;
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;
-pub use circuit::{Circuit, ClassicalCondition, Instruction, SvgOptions, TextOptions};
+pub use circuit::{
+    Circuit, ClassicalCondition, Instruction, ParamLink, Parameters, PreparedCircuit, SvgOptions,
+    TextOptions,
+};
 #[cfg(feature = "distributed-mpi")]
 pub use distributed::MpiComm;
 #[cfg(feature = "distributed")]
@@ -96,8 +99,7 @@ pub use sim::compiled::{
     compile_forward, compile_measurements, run_shots_compiled,
 };
 pub use sim::gradient::{
-    ExpectationGradient, ParamLink, ParameterMap, run_expectation_gradient,
-    run_expectation_gradient_shift,
+    ExpectationGradient, run_expectation_gradient, run_expectation_gradient_shift,
 };
 pub use sim::homological::{
     ErrorChainComplex, HomologicalSampler, noisy_marginals_analytical, run_shots_homological,

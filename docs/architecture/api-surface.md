@@ -32,8 +32,11 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 `run_expectation_values`, `bitstring`
 
 **Gradients:**
-`run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`,
-`ParamLink`, `ParameterMap`
+`run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`
+
+**Parameters and binding:**
+`Parameters`, `ParamLink`, `PreparedCircuit`. One parameter model serves both
+consumers: the gradient path reads the links, and binding writes through them.
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`,

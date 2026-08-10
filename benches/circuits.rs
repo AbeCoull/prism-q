@@ -9,13 +9,15 @@ use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 #[cfg(feature = "bench-internal")]
 use prism_q::backend::tensornetwork::scalar_expectation;
+use prism_q::circuit::fusion::fuse_circuit;
 use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{
-    BackendKind, ClassicalCondition, Instruction, MpsBackend, ParameterMap, PauliTerm,
-    run_expectation_gradient, run_expectation_gradient_shift, run_expectation_values,
+    BackendKind, ClassicalCondition, Instruction, MpsBackend, Parameters, PauliTerm,
+    PreparedCircuit, run_expectation_gradient, run_expectation_gradient_shift,
+    run_expectation_values,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -291,6 +293,85 @@ fn bench_statevector_qft(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// Setup cost of a variational sweep: 100 points of the same ansatz.
+///
+/// `rebuild` constructs and fuses the circuit at every point, which is what a
+/// sweep does without a parameter surface. `bind` holds one [`PreparedCircuit`]
+/// and rebinds, reusing the recorded fusion plan. Both arms live in this one
+/// binary so an A/B compares them without a second build; see `benches/README.md`
+/// on why a reference worktree cannot resolve a change that adds linked code.
+///
+/// Setup only, no simulation: the claim is amortized setup, and the apply cost
+/// that would otherwise dominate is identical on both arms.
+fn bench_parameter_sweep(c: &mut Criterion) {
+    const POINTS: usize = 100;
+
+    let mut group = c.benchmark_group("sweep_setup");
+    configure_group(&mut group);
+
+    // Quantum volume carries a far higher guard-to-site ratio than the ansatz
+    // shapes, so it is the row that shows what replay costs rather than what it
+    // saves.
+    let shapes: [(&str, usize); 8] = [
+        ("hea", 12),
+        ("hea", 16),
+        ("hea", 20),
+        ("qaoa", 12),
+        ("qaoa", 16),
+        ("qaoa", 20),
+        ("qv", 12),
+        ("qv", 20),
+    ];
+
+    for (tag, n) in shapes {
+        let build = move || match tag {
+            "qaoa" => circuits::qaoa_circuit(n, 3, SEED),
+            "qv" => circuits::quantum_volume_circuit(n, 5, SEED),
+            _ => circuits::hardware_efficient_ansatz(n, 5, SEED),
+        };
+        let template = build();
+        let params = Parameters::all_rotations(&template);
+        let points: Vec<Vec<f64>> = (0..POINTS)
+            .map(|k| {
+                let mut rng = ChaCha8Rng::seed_from_u64(SEED.wrapping_add(k as u64));
+                (0..params.num_slots())
+                    .map(|_| rng.random::<f64>() * std::f64::consts::TAU)
+                    .collect()
+            })
+            .collect();
+
+        group.bench_function(BenchmarkId::new("rebuild", format!("{tag}/{n}")), |b| {
+            b.iter(|| {
+                for values in &points {
+                    let mut circuit = build();
+                    for link in params.links() {
+                        if let Instruction::Gate {
+                            gate:
+                                Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
+                            ..
+                        } = &mut circuit.instructions[link.instruction]
+                        {
+                            *t = values[link.slot];
+                        }
+                    }
+                    black_box(fuse_circuit(&circuit, true).into_owned());
+                }
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("bind", format!("{tag}/{n}")), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| {
+                for values in &points {
+                    black_box(prepared.bind_fused(values).unwrap().instructions.len());
+                }
             });
         });
     }
@@ -1165,9 +1246,9 @@ fn z_chain_hamiltonian(n: usize) -> Vec<(f64, Vec<PauliTerm>)> {
 }
 
 /// Add `delta` to the angle of every gate bound to parameter `slot`.
-fn shift_slot(circuit: &Circuit, params: &ParameterMap, slot: usize, delta: f64) -> Circuit {
+fn shift_slot(circuit: &Circuit, params: &Parameters, slot: usize, delta: f64) -> Circuit {
     let mut out = circuit.clone();
-    for link in params.links().iter().filter(|l| l.param == slot) {
+    for link in params.links().iter().filter(|l| l.slot == slot) {
         if let Instruction::Gate {
             gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
             ..
@@ -1184,7 +1265,7 @@ fn shift_slot(circuit: &Circuit, params: &ParameterMap, slot: usize, delta: f64)
 fn finite_diff_gradient(
     circuit: &Circuit,
     hamiltonian: &[(f64, Vec<PauliTerm>)],
-    params: &ParameterMap,
+    params: &Parameters,
 ) -> Vec<f64> {
     let observables: Vec<Vec<PauliTerm>> = hamiltonian.iter().map(|(_, p)| p.clone()).collect();
     let eps = 1e-5;
@@ -1196,7 +1277,7 @@ fn finite_diff_gradient(
             .map(|((coeff, _), v)| coeff * v)
             .sum()
     };
-    (0..params.num_params())
+    (0..params.num_slots())
         .map(|slot| {
             let plus = expval(&shift_slot(circuit, params, slot, eps));
             let minus = expval(&shift_slot(circuit, params, slot, -eps));
@@ -1211,7 +1292,7 @@ fn bench_gradient(c: &mut Criterion) {
 
     for &n in &[14, 18, 20, 22] {
         let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
-        let params = ParameterMap::all_rotations(&circuit);
+        let params = Parameters::all_rotations(&circuit);
         let ham = z_chain_hamiltonian(n);
 
         group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
@@ -1234,7 +1315,7 @@ fn bench_gradient_qaoa(c: &mut Criterion) {
 
     for &n in &[14, 18, 20] {
         let circuit = circuits::qaoa_circuit(n, 1, SEED);
-        let params = ParameterMap::all_rotations(&circuit);
+        let params = Parameters::all_rotations(&circuit);
         let ham = z_chain_hamiltonian(n);
 
         group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
@@ -1274,7 +1355,7 @@ fn bench_gradient_prefix(c: &mut Criterion) {
 
     for &n in &[16, 18, 20] {
         let circuit = prefix_local_circuit(n, 6);
-        let params = ParameterMap::all_rotations(&circuit);
+        let params = Parameters::all_rotations(&circuit);
         let ham = vec![(1.0, vec![PauliTerm::z(0)])];
 
         group.bench_with_input(BenchmarkId::new("adjoint", n), &circuit, |b, circ| {
@@ -2137,6 +2218,8 @@ criterion_group! {
     bench_compare_general,
     // Decomposition
     bench_decomposition,
+    // Parameter sweep setup (rebuild vs rebind)
+    bench_parameter_sweep,
     // Adjoint gradient (adjoint vs finite-difference per parameter)
     bench_gradient,
     bench_gradient_qaoa,

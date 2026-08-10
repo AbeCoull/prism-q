@@ -8,7 +8,7 @@ use common::SEED;
 use num_complex::Complex64;
 use prism_q::circuits;
 use prism_q::{
-    BackendKind, Circuit, Gate, Instruction, ParameterMap, PauliTerm, run_expectation_gradient,
+    BackendKind, Circuit, Gate, Instruction, Parameters, PauliTerm, run_expectation_gradient,
     run_expectation_gradient_shift, run_expectation_values, simulate,
 };
 
@@ -27,9 +27,9 @@ fn expval(circuit: &Circuit, hamiltonian: &Hamiltonian) -> f64 {
 
 /// Return a copy of `circuit` with `delta` added to the angle of every gate
 /// bound to parameter `slot`.
-fn shift_slot(circuit: &Circuit, params: &ParameterMap, slot: usize, delta: f64) -> Circuit {
+fn shift_slot(circuit: &Circuit, params: &Parameters, slot: usize, delta: f64) -> Circuit {
     let mut out = circuit.clone();
-    for link in params.links().iter().filter(|l| l.param == slot) {
+    for link in params.links().iter().filter(|l| l.slot == slot) {
         if let Instruction::Gate { gate, .. } = &mut out.instructions[link.instruction] {
             *gate = shifted_gate(gate, delta);
         }
@@ -52,7 +52,7 @@ fn shifted_gate(gate: &Gate, delta: f64) -> Gate {
 fn finite_diff(
     circuit: &Circuit,
     hamiltonian: &Hamiltonian,
-    params: &ParameterMap,
+    params: &Parameters,
     slot: usize,
 ) -> f64 {
     let eps = 1e-5;
@@ -66,7 +66,7 @@ fn finite_diff(
 fn param_shift(
     circuit: &Circuit,
     hamiltonian: &Hamiltonian,
-    params: &ParameterMap,
+    params: &Parameters,
     slot: usize,
 ) -> f64 {
     let s = std::f64::consts::FRAC_PI_2;
@@ -80,8 +80,8 @@ fn single_rx_matches_analytic() {
     let theta = 0.6;
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::Rx(theta), &[0]);
-    let mut params = ParameterMap::new();
-    params.push(0, 0);
+    let mut params = Parameters::new(1);
+    params.link(0, 0);
 
     let obs = vec![(1.0, vec![PauliTerm::z(0)])];
     let g = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
@@ -94,7 +94,7 @@ fn single_rx_matches_analytic() {
 #[test]
 fn hea_multiterm_hamiltonian_all_params() {
     let c = circuits::hardware_efficient_ansatz(4, 2, SEED);
-    let params = ParameterMap::all_rotations(&c);
+    let params = Parameters::all_rotations(&c);
     let obs: Hamiltonian = vec![
         (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (0.7, vec![PauliTerm::x(0)]),
@@ -108,8 +108,8 @@ fn hea_multiterm_hamiltonian_all_params() {
         .unwrap();
 
     assert!((g.value - expval(&c, &obs)).abs() < 1e-10);
-    assert_eq!(g.gradient.len(), params.num_params());
-    for slot in 0..params.num_params() {
+    assert_eq!(g.gradient.len(), params.num_slots());
+    for slot in 0..params.num_slots() {
         let fd = finite_diff(&c, &obs, &params, slot);
         let ps = param_shift(&c, &obs, &params, slot);
         assert!(
@@ -128,7 +128,7 @@ fn hea_multiterm_hamiltonian_all_params() {
 #[test]
 fn qaoa_layer_rzz_and_rx() {
     let c = circuits::qaoa_circuit(6, 1, SEED);
-    let params = ParameterMap::all_rotations(&c);
+    let params = Parameters::all_rotations(&c);
     let obs: Hamiltonian = vec![
         (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (1.0, vec![PauliTerm::z(2), PauliTerm::z(3)]),
@@ -137,7 +137,7 @@ fn qaoa_layer_rzz_and_rx() {
 
     let g = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
     assert!((g.value - expval(&c, &obs)).abs() < 1e-10);
-    for slot in 0..params.num_params() {
+    for slot in 0..params.num_slots() {
         let fd = finite_diff(&c, &obs, &params, slot);
         assert!(
             (g.gradient[slot] - fd).abs() < 1e-6,
@@ -150,7 +150,7 @@ fn qaoa_layer_rzz_and_rx() {
 #[test]
 fn value_matches_forward_expectation() {
     let c = circuits::hardware_efficient_ansatz(5, 3, SEED);
-    let params = ParameterMap::all_rotations(&c);
+    let params = Parameters::all_rotations(&c);
     let obs: Hamiltonian = vec![
         (1.2, vec![PauliTerm::z(0)]),
         (-0.5, vec![PauliTerm::x(1), PauliTerm::x(2)]),
@@ -164,12 +164,7 @@ fn builder_records_and_differentiates() {
     use prism_q::CircuitBuilder;
     let theta = 0.9;
     let mut b = CircuitBuilder::new(2);
-    b.h(0)
-        .rz(theta, 0)
-        .trainable(0)
-        .cx(0, 1)
-        .ry(0.4, 1)
-        .trainable(1);
+    b.h(0).rz(theta, 0).param(0).cx(0, 1).ry(0.4, 1).param(1);
     let (circuit, params) = b.build_parametric();
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0), PauliTerm::z(1)])];
@@ -187,9 +182,9 @@ fn builder_shared_slot_accumulates() {
     // Two Rx gates on separate qubits sharing slot 0 via the builder marker.
     let theta = 0.4;
     let mut b = CircuitBuilder::new(2);
-    b.rx(theta, 0).trainable(0).rx(theta, 1).trainable(0);
+    b.rx(theta, 0).param(0).rx(theta, 1).param(0);
     let (circuit, params) = b.build_parametric();
-    assert_eq!(params.num_params(), 1);
+    assert_eq!(params.num_slots(), 1);
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)]), (1.0, vec![PauliTerm::z(1)])];
     let g = run_expectation_gradient(&circuit, &obs, &params, SEED).unwrap();
@@ -198,10 +193,10 @@ fn builder_shared_slot_accumulates() {
 }
 
 #[test]
-#[should_panic(expected = "differentiable gate")]
-fn trainable_on_nondifferentiable_gate_panics() {
+#[should_panic(expected = "gate carrying an angle")]
+fn param_on_gate_without_an_angle_panics() {
     use prism_q::CircuitBuilder;
-    CircuitBuilder::new(1).h(0).trainable(0);
+    CircuitBuilder::new(1).h(0).param(0);
 }
 
 #[test]
@@ -212,9 +207,9 @@ fn out_of_cone_gate_has_zero_gradient() {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::Rx(0.5), &[0]);
     c.add_gate(Gate::Rx(0.7), &[2]);
-    let mut params = ParameterMap::new();
-    params.push(0, 0);
-    params.push(1, 1);
+    let mut params = Parameters::new(2);
+    params.link(0, 0);
+    params.link(1, 1);
 
     let obs = vec![(1.0, vec![PauliTerm::z(0)])];
     let g = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
@@ -235,10 +230,10 @@ fn nontrainable_prefix_is_skipped_correctly() {
     c.add_gate(Gate::Ry(0.6), &[0]);
     c.add_gate(Gate::Rz(0.4), &[1]);
     c.add_gate(Gate::Rx(0.9), &[2]);
-    let mut params = ParameterMap::new();
-    params.push(3, 0);
-    params.push(4, 1);
-    params.push(5, 2);
+    let mut params = Parameters::new(3);
+    params.link(3, 0);
+    params.link(4, 1);
+    params.link(5, 2);
 
     let obs: Hamiltonian = vec![
         (1.0, vec![PauliTerm::z(0), PauliTerm::z(2)]),
@@ -258,7 +253,7 @@ fn nontrainable_prefix_is_skipped_correctly() {
 #[test]
 fn shift_matches_adjoint_on_statevector() {
     let c = circuits::hardware_efficient_ansatz(4, 2, SEED);
-    let params = ParameterMap::all_rotations(&c);
+    let params = Parameters::all_rotations(&c);
     let obs: Hamiltonian = vec![
         (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
         (0.7, vec![PauliTerm::x(0)]),
@@ -274,8 +269,8 @@ fn shift_matches_adjoint_on_statevector() {
         .unwrap();
 
     assert!((shift.value - adjoint.value).abs() < 1e-12);
-    assert_eq!(shift.gradient.len(), params.num_params());
-    for slot in 0..params.num_params() {
+    assert_eq!(shift.gradient.len(), params.num_slots());
+    for slot in 0..params.num_slots() {
         assert!(
             (shift.gradient[slot] - adjoint.gradient[slot]).abs() < 1e-9,
             "slot {slot}: shift {} vs adjoint {}",
@@ -295,9 +290,9 @@ fn shift_matches_adjoint_on_phase_and_rzz() {
     c.add_gate(Gate::H, &[1]);
     c.add_gate(Gate::P(0.9), &[0]);
     c.add_gate(Gate::Rzz(0.4), &[0, 1]);
-    let mut params = ParameterMap::new();
-    params.push(2, 0);
-    params.push(3, 1);
+    let mut params = Parameters::new(2);
+    params.link(2, 0);
+    params.link(3, 1);
 
     let obs: Hamiltonian = vec![
         (1.0, vec![PauliTerm::x(0)]),
@@ -324,9 +319,9 @@ fn shift_accumulates_a_shared_slot() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::Rx(theta), &[0]);
     c.add_gate(Gate::Rx(theta), &[0]);
-    let mut params = ParameterMap::new();
-    params.push(0, 0);
-    params.push(1, 0);
+    let mut params = Parameters::new(1);
+    params.link(0, 0);
+    params.link(1, 0);
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
     let shift = run_expectation_gradient_shift(&c, &obs, &params, SEED).unwrap();
@@ -344,8 +339,8 @@ fn shift_differentiates_a_circuit_holding_a_qft_block() {
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::Rx(0.4), &[0]);
     c.add_gate(Gate::QftBlock { start: 0, num: 3 }, &[0, 1, 2]);
-    let mut params = ParameterMap::new();
-    params.push(0, 0);
+    let mut params = Parameters::new(1);
+    params.link(0, 0);
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(2)])];
     assert!(run_expectation_gradient(&c, &obs, &params, SEED).is_err());
@@ -363,8 +358,8 @@ fn shift_differentiates_from_a_start_state() {
     let theta = 0.8;
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::Rx(theta), &[0]);
-    let mut params = ParameterMap::new();
-    params.push(0, 0);
+    let mut params = Parameters::new(1);
+    params.link(0, 0);
 
     let start = [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)];
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
@@ -384,8 +379,8 @@ fn shift_on_a_backend_without_an_observable_path_names_it() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
     c.add_gate(Gate::Rx(0.3), &[0]);
-    let mut params = ParameterMap::new();
-    params.push(2, 0);
+    let mut params = Parameters::new(1);
+    params.link(2, 0);
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
     let err = simulate(&c)
@@ -401,8 +396,8 @@ fn shift_on_a_backend_without_an_observable_path_names_it() {
 fn out_of_range_link_is_rejected() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::Rx(0.3), &[0]);
-    let mut params = ParameterMap::new();
-    params.push(5, 0);
+    let mut params = Parameters::new(1);
+    params.link(5, 0);
     let obs = vec![(1.0, vec![PauliTerm::z(0)])];
     assert!(run_expectation_gradient(&c, &obs, &params, SEED).is_err());
 }

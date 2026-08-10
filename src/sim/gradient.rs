@@ -18,116 +18,13 @@ use num_complex::Complex64;
 
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits, reserve_dense_output};
+use crate::circuit::parameter::{Parameters, angle_mut};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::{Gate, GeneratorKind};
 
 use super::unified_pauli::PauliTerm;
 use super::{BackendKind, i_pow, pauli_masks, pauli_sandwich};
-
-/// Binds one trainable gate instruction to a slot in the parameter vector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ParamLink {
-    /// Index into [`Circuit::instructions`].
-    pub instruction: usize,
-    /// Slot in the parameter (theta) vector this gate feeds.
-    pub param: usize,
-}
-
-/// Maps trainable gate instructions to parameter-vector slots for the adjoint
-/// gradient. Many instructions may share one slot (weight sharing); their
-/// contributions accumulate. Built by the parametric [`crate::CircuitBuilder`]
-/// methods or constructed directly.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ParameterMap {
-    links: Vec<ParamLink>,
-}
-
-impl ParameterMap {
-    /// An empty map (no trainable parameters).
-    pub fn new() -> Self {
-        Self { links: Vec::new() }
-    }
-
-    /// Build a map from explicit instruction-to-slot links.
-    pub fn from_links(links: Vec<ParamLink>) -> Self {
-        Self { links }
-    }
-
-    /// Mark every analytically differentiable gate (`Rx`, `Ry`, `Rz`, `Rzz`,
-    /// `P`) as its own parameter, in circuit order. The common "every rotation
-    /// is trainable" case for a variational ansatz.
-    pub fn all_rotations(circuit: &Circuit) -> Self {
-        let mut links = Vec::new();
-        for (i, inst) in circuit.instructions.iter().enumerate() {
-            if let Instruction::Gate { gate, .. } = inst {
-                if gate.pauli_generator().is_some() {
-                    links.push(ParamLink {
-                        instruction: i,
-                        param: links.len(),
-                    });
-                }
-            }
-        }
-        Self { links }
-    }
-
-    /// Record that `instruction` feeds parameter slot `param`.
-    pub fn push(&mut self, instruction: usize, param: usize) {
-        self.links.push(ParamLink { instruction, param });
-    }
-
-    /// The recorded links.
-    pub fn links(&self) -> &[ParamLink] {
-        &self.links
-    }
-
-    /// True if no trainable parameters are recorded.
-    pub fn is_empty(&self) -> bool {
-        self.links.is_empty()
-    }
-
-    /// Number of distinct parameters, `max slot + 1` (0 if empty). The returned
-    /// gradient vector has this length.
-    pub fn num_params(&self) -> usize {
-        self.links.iter().map(|l| l.param + 1).max().unwrap_or(0)
-    }
-
-    fn validate(&self, circuit: &Circuit) -> Result<()> {
-        let n = circuit.instructions.len();
-        for link in &self.links {
-            if link.instruction >= n {
-                return Err(PrismError::InvalidParameter {
-                    message: format!(
-                        "parameter link references instruction {} but the circuit has {n} instructions",
-                        link.instruction
-                    ),
-                });
-            }
-            match &circuit.instructions[link.instruction] {
-                Instruction::Gate { gate, .. } if gate.pauli_generator().is_some() => {}
-                Instruction::Gate { gate, .. } => {
-                    return Err(PrismError::InvalidParameter {
-                        message: format!(
-                            "instruction {} (`{}`) is not analytically differentiable; supported gates are rx, ry, rz, rzz, p",
-                            link.instruction,
-                            gate.name()
-                        ),
-                    });
-                }
-                _ => {
-                    return Err(PrismError::InvalidParameter {
-                        message: format!(
-                            "parameter link references instruction {} which is not a gate",
-                            link.instruction
-                        ),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-}
 
 /// Expectation value and its gradient with respect to each parameter slot.
 #[derive(Debug, Clone, PartialEq)]
@@ -144,19 +41,19 @@ pub struct ExpectationGradient {
 /// `hamiltonian` is a weighted Pauli sum `Σ c_k P_k` with real coefficients;
 /// each `P_k` is a joint Pauli string (identity factors omitted). `params`
 /// declares which gate instructions are trainable and how they map to the
-/// gradient vector. The returned gradient has length `params.num_params()`.
+/// gradient vector. The returned gradient has length `params.num_slots()`.
 ///
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, ParameterMap, PauliTerm, run_expectation_gradient};
+/// use prism_q::{Circuit, Gate, Parameters, PauliTerm, run_expectation_gradient};
 ///
 /// let theta = 0.5_f64;
 /// let mut circuit = Circuit::new(2, 0);
 /// circuit.add_gate(Gate::Rx(theta), &[0]);
 ///
 /// let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
-/// let params = ParameterMap::all_rotations(&circuit);
+/// let params = Parameters::all_rotations(&circuit);
 /// let g = run_expectation_gradient(&circuit, &hamiltonian, &params, 42)?;
 /// // <Z0> = cos(theta), d<Z0>/dtheta = -sin(theta).
 /// assert!((g.value - theta.cos()).abs() < 1e-12);
@@ -166,7 +63,7 @@ pub struct ExpectationGradient {
 pub fn run_expectation_gradient(
     circuit: &Circuit,
     hamiltonian: &[(f64, Vec<PauliTerm>)],
-    params: &ParameterMap,
+    params: &Parameters,
     seed: u64,
 ) -> Result<ExpectationGradient> {
     if super::has_nonunitary_or_classical_ops(circuit) {
@@ -219,7 +116,7 @@ pub fn run_expectation_gradient(
 
     let (value, lambda_state) = build_lambda_and_value(phi.state_vector(), &masked)?;
 
-    let num_params = params.num_params();
+    let num_params = params.num_slots();
     let mut gradient = vec![0.0; num_params];
     if params.is_empty() {
         return Ok(ExpectationGradient { value, gradient });
@@ -268,7 +165,7 @@ pub fn run_expectation_gradient(
                 let contrib =
                     gradient_contribution(kind, targets, lambda.state_vector(), phi.state_vector());
                 while cursor < links.len() && links[cursor].instruction == i {
-                    gradient[links[cursor].param] += contrib;
+                    gradient[links[cursor].slot] += contrib;
                     cursor += 1;
                 }
             } else {
@@ -393,14 +290,14 @@ fn gradient_contribution(
 /// # Examples
 ///
 /// ```
-/// use prism_q::{Circuit, Gate, ParameterMap, PauliTerm, run_expectation_gradient_shift};
+/// use prism_q::{Circuit, Gate, Parameters, PauliTerm, run_expectation_gradient_shift};
 ///
 /// let theta = 0.5_f64;
 /// let mut circuit = Circuit::new(2, 0);
 /// circuit.add_gate(Gate::Rx(theta), &[0]);
 ///
 /// let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
-/// let params = ParameterMap::all_rotations(&circuit);
+/// let params = Parameters::all_rotations(&circuit);
 /// let g = run_expectation_gradient_shift(&circuit, &hamiltonian, &params, 42)?;
 /// assert!((g.gradient[0] + theta.sin()).abs() < 1e-9);
 /// # Ok::<(), prism_q::PrismError>(())
@@ -408,7 +305,7 @@ fn gradient_contribution(
 pub fn run_expectation_gradient_shift(
     circuit: &Circuit,
     hamiltonian: &[(f64, Vec<PauliTerm>)],
-    params: &ParameterMap,
+    params: &Parameters,
     seed: u64,
 ) -> Result<ExpectationGradient> {
     shift_gradient(&BackendKind::Auto, circuit, hamiltonian, params, None, seed)
@@ -432,7 +329,7 @@ pub(crate) fn shift_gradient(
     kind: &BackendKind,
     circuit: &Circuit,
     hamiltonian: &[(f64, Vec<PauliTerm>)],
-    params: &ParameterMap,
+    params: &Parameters,
     initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<ExpectationGradient> {
@@ -458,7 +355,7 @@ pub(crate) fn shift_gradient(
     };
 
     let value = evaluate(circuit)?;
-    let mut gradient = vec![0.0; params.num_params()];
+    let mut gradient = vec![0.0; params.num_slots()];
     if params.is_empty() {
         return Ok(ExpectationGradient { value, gradient });
     }
@@ -472,20 +369,10 @@ pub(crate) fn shift_gradient(
         *angle_mut(&mut shifted.instructions[link.instruction]) = base - shift;
         let minus = evaluate(&shifted)?;
         *angle_mut(&mut shifted.instructions[link.instruction]) = base;
-        gradient[link.param] += 0.5 * (plus - minus);
+        gradient[link.slot] += 0.5 * (plus - minus);
     }
 
     Ok(ExpectationGradient { value, gradient })
-}
-
-fn angle_mut(instruction: &mut Instruction) -> &mut f64 {
-    match instruction {
-        Instruction::Gate {
-            gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
-            ..
-        } => t,
-        _ => unreachable!("trainable instruction validated as differentiable"),
-    }
 }
 
 #[cfg(test)]
@@ -503,8 +390,8 @@ mod tests {
         let theta = 0.7;
         let mut c = Circuit::new(1, 0);
         c.add_gate(Gate::Rx(theta), &[0]);
-        let mut params = ParameterMap::new();
-        params.push(0, 0);
+        let mut params = Parameters::new(1);
+        params.link(0, 0);
 
         let g = run_expectation_gradient(&c, &z_obs(0), &params, 42).unwrap();
         assert!((g.value - theta.cos()).abs() < 1e-12);
@@ -517,8 +404,8 @@ mod tests {
         let theta = 1.3;
         let mut c = Circuit::new(1, 0);
         c.add_gate(Gate::Ry(theta), &[0]);
-        let mut params = ParameterMap::new();
-        params.push(0, 0);
+        let mut params = Parameters::new(1);
+        params.link(0, 0);
 
         let g = run_expectation_gradient(&c, &z_obs(0), &params, 42).unwrap();
         assert!((g.gradient[0] - (-theta.sin())).abs() < 1e-9);
@@ -531,8 +418,8 @@ mod tests {
         let mut c = Circuit::new(1, 0);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::P(theta), &[0]);
-        let mut params = ParameterMap::new();
-        params.push(1, 0);
+        let mut params = Parameters::new(1);
+        params.link(1, 0);
 
         let obs = vec![(1.0, vec![PauliTerm::x(0)])];
         let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
@@ -548,9 +435,9 @@ mod tests {
         let mut c = Circuit::new(2, 0);
         c.add_gate(Gate::Rx(theta), &[0]);
         c.add_gate(Gate::Rx(theta), &[1]);
-        let mut params = ParameterMap::new();
-        params.push(0, 0);
-        params.push(1, 0);
+        let mut params = Parameters::new(1);
+        params.link(0, 0);
+        params.link(1, 0);
 
         let obs = vec![(1.0, vec![PauliTerm::z(0)]), (1.0, vec![PauliTerm::z(1)])];
         let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
@@ -562,7 +449,7 @@ mod tests {
     fn empty_params_returns_value_only() {
         let mut c = Circuit::new(1, 0);
         c.add_gate(Gate::Rx(0.5), &[0]);
-        let g = run_expectation_gradient(&c, &z_obs(0), &ParameterMap::new(), 42).unwrap();
+        let g = run_expectation_gradient(&c, &z_obs(0), &Parameters::new(0), 42).unwrap();
         assert!(g.gradient.is_empty());
         assert!((g.value - 0.5f64.cos()).abs() < 1e-12);
     }
@@ -571,8 +458,8 @@ mod tests {
     fn nondifferentiable_trainable_gate_is_rejected() {
         let mut c = Circuit::new(1, 0);
         c.add_gate(Gate::H, &[0]);
-        let mut params = ParameterMap::new();
-        params.push(0, 0);
+        let mut params = Parameters::new(1);
+        params.link(0, 0);
         assert!(run_expectation_gradient(&c, &z_obs(0), &params, 42).is_err());
     }
 
@@ -581,6 +468,6 @@ mod tests {
         let mut c = Circuit::new(1, 1);
         c.add_gate(Gate::Rx(0.3), &[0]);
         c.add_measure(0, 0);
-        assert!(run_expectation_gradient(&c, &z_obs(0), &ParameterMap::new(), 42).is_err());
+        assert!(run_expectation_gradient(&c, &z_obs(0), &Parameters::new(0), 42).is_err());
     }
 }

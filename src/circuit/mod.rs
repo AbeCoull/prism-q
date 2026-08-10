@@ -20,6 +20,12 @@ pub mod fusion;
 mod fusion_phase;
 mod fusion_rzz;
 pub mod openqasm;
+pub mod parameter;
+pub(crate) mod plan;
+pub mod prepared;
+
+pub use parameter::{ParamLink, Parameters};
+pub use prepared::PreparedCircuit;
 
 use crate::gates::Gate;
 pub use smallvec::{SmallVec, smallvec};

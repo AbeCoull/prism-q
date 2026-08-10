@@ -8,7 +8,7 @@ use common::SEED;
 use num_complex::Complex64;
 use prism_q::gates::Gate;
 use prism_q::{
-    BackendKind, Circuit, NoiseModel, ParamLink, ParameterMap, PauliTerm, PrismError, simulate,
+    BackendKind, Circuit, NoiseModel, ParamLink, Parameters, PauliTerm, PrismError, simulate,
 };
 
 const EPS: f64 = 1e-12;
@@ -315,10 +315,13 @@ fn noisy_shots_decline_a_start_state() {
 fn the_adjoint_gradient_declines_a_start_state() {
     let mut circuit = Circuit::new(1, 0);
     circuit.add_gate(Gate::Rz(0.3), &[0]);
-    let params = ParameterMap::from_links(vec![ParamLink {
-        instruction: 0,
-        param: 0,
-    }]);
+    let params = Parameters::from_links(
+        vec![ParamLink {
+            instruction: 0,
+            slot: 0,
+        }],
+        1,
+    );
 
     let err = simulate(&circuit)
         .initial_state(&tilted())

@@ -1,6 +1,6 @@
 //! Out-of-core tiled statevector prototype: file-backed tiles streamed
-//! through a bounded DRAM window. Available to tests and, behind
-//! `bench-internal`, to benchmarks; no production selector exists yet.
+//! through a bounded DRAM window. Not part of production builds, and no
+//! production selector exists yet.
 //!
 //! The `2^n` amplitude vector lives in one raw `Complex64` file inside a
 //! run-scoped temporary directory, split into `2^(n - w)` tiles of `2^w`

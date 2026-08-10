@@ -13,6 +13,7 @@ Fallible public APIs return `Result<T, PrismError>`. Error variants:
 | `InvalidClassicalBit` | Validation | Classical bit index exceeds register |
 | `GateArity` | Validation | Wrong number of qubits for gate |
 | `InvalidParameter` | Validation | Invalid gate parameter (NaN, etc.) |
+| `ExportUnsupported` | Export | Instruction with no OpenQASM 3.0 spelling |
 | `BackendUnsupported` | Runtime | Backend can't perform requested operation |
 | `IncompatibleBackend` | Runtime | Backend incompatible with circuit |
 

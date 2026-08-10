@@ -46,6 +46,8 @@
 //!
 //! All parse failures return `PrismError::Parse` or `PrismError::UnsupportedConstruct`
 //! with the source line number. The parser never panics on user input.
+//!
+//! The reverse direction is [`qasm_export`](super::qasm_export).
 
 use num_complex::Complex64;
 
@@ -141,7 +143,7 @@ struct BlockState {
     depth: usize,
 }
 
-struct Parser<'a> {
+pub(crate) struct Parser<'a> {
     input: &'a str,
     qregs: HashMap<String, Register>,
     cregs: HashMap<String, Register>,
@@ -2254,7 +2256,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn u_matrix(theta: f64, phi: f64, lam: f64) -> [[Complex64; 2]; 2] {
+    pub(crate) fn u_matrix(theta: f64, phi: f64, lam: f64) -> [[Complex64; 2]; 2] {
         let c = (theta / 2.0).cos();
         let s = (theta / 2.0).sin();
         [
@@ -2275,7 +2277,12 @@ impl<'a> Parser<'a> {
         ]
     }
 
-    fn cu_target_matrix(theta: f64, phi: f64, lam: f64, gamma: f64) -> [[Complex64; 2]; 2] {
+    pub(crate) fn cu_target_matrix(
+        theta: f64,
+        phi: f64,
+        lam: f64,
+        gamma: f64,
+    ) -> [[Complex64; 2]; 2] {
         let phase = Complex64::from_polar(1.0, gamma);
         let u = Self::u_matrix(theta, phi, lam);
         [
@@ -2284,7 +2291,7 @@ impl<'a> Parser<'a> {
         ]
     }
 
-    fn xx_plus_yy_matrix(theta: f64, beta: f64) -> [[Complex64; 4]; 4] {
+    pub(crate) fn xx_plus_yy_matrix(theta: f64, beta: f64) -> [[Complex64; 4]; 4] {
         let zero = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
         let c = Complex64::new((theta / 2.0).cos(), 0.0);
@@ -2297,7 +2304,7 @@ impl<'a> Parser<'a> {
         ]
     }
 
-    fn xx_minus_yy_matrix(theta: f64, beta: f64) -> [[Complex64; 4]; 4] {
+    pub(crate) fn xx_minus_yy_matrix(theta: f64, beta: f64) -> [[Complex64; 4]; 4] {
         let zero = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
         let c = Complex64::new((theta / 2.0).cos(), 0.0);
@@ -2339,7 +2346,7 @@ impl<'a> Parser<'a> {
         ]
     }
 
-    fn ms_matrix(phi0: f64, phi1: f64, theta: f64) -> [[Complex64; 4]; 4] {
+    pub(crate) fn ms_matrix(phi0: f64, phi1: f64, theta: f64) -> [[Complex64; 4]; 4] {
         let zero = Complex64::new(0.0, 0.0);
         let c = Complex64::new((std::f64::consts::PI * theta).cos(), 0.0);
         let s = Complex64::new(0.0, -(std::f64::consts::PI * theta).sin());
@@ -2373,7 +2380,7 @@ impl<'a> Parser<'a> {
         ]
     }
 
-    fn syc_matrix() -> [[Complex64; 4]; 4] {
+    pub(crate) fn syc_matrix() -> [[Complex64; 4]; 4] {
         let zero = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
         let neg_i = Complex64::new(0.0, -1.0);
@@ -2390,7 +2397,7 @@ impl<'a> Parser<'a> {
         ]
     }
 
-    fn sqrt_iswap_matrix(sign: f64) -> [[Complex64; 4]; 4] {
+    pub(crate) fn sqrt_iswap_matrix(sign: f64) -> [[Complex64; 4]; 4] {
         let zero = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
         let half = Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);

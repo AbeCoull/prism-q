@@ -16,6 +16,27 @@ let result = simulate(&circuit).seed(42).run().unwrap();
 
 `run_qasm(qasm, seed)` parses and simulates in one call.
 
+## Exporting
+
+```rust
+use prism_q::circuit::qasm_export;
+
+let qasm = qasm_export::to_qasm3(&circuit).expect("export error");
+```
+
+Export inverts the parser: re-parsing the result gives back the same instruction
+stream, with gate matrices agreeing to floating-point round-off and inline angles
+(`rx`, `rz`, `rzz`, `p`) surviving exactly. Qubits come out as one `qubit[n] q`
+register, classical bits as one `bit[m] c` register, split only where a condition
+compares against a register narrower than the whole.
+
+A circuit that has been through [fusion](../architecture/fusion.md) is not
+exportable: fused blocks, tiled multi-gate passes, and diagonal batches carry
+matrices with no OpenQASM spelling, and `to_qasm3` returns `ExportUnsupported`
+naming the instruction index. Export the circuit before fusing it, or the template
+a `PreparedCircuit` binds. A `QftBlock` is the one exception, expanded to its
+textbook Hadamard, controlled-phase, and swap sequence on the way out.
+
 ## Declarations and measurement
 
 ```text

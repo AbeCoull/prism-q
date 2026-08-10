@@ -2,6 +2,52 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.29.0] - 2026-08-10
+
+### Bug Fixes
+
+- **factored:** Decline oversize probabilities instead of shifting past a word (#138)([5831fad](https://github.com/AbeCoull/prism-q/commit/5831fadb45f2aa06fd10000b4fc82039d6104a2d))
+- **stabilizer:** Rebuild the SGI index after a random-outcome reset (#134)([d42c421](https://github.com/AbeCoull/prism-q/commit/d42c421210f5c22717cd19c0df057990d4f48c41))
+- **density-matrix:** Remap payload qubit indices onto the ket register (#128)([788f5ff](https://github.com/AbeCoull/prism-q/commit/788f5ffb9b6abc857832c5b38dcdc88104e3828f))
+- **gpu:** Close bound, contract, and portability holes (#125)([9ea002f](https://github.com/AbeCoull/prism-q/commit/9ea002fce7231ae0c1128bd4b84cec4ef32698a2))
+- **fusion:** Bound the fused-batch payloads to the kernel tables (#124)([37209ca](https://github.com/AbeCoull/prism-q/commit/37209ca8e9635e7fda21c0f69941d3c5fd7e7a1a))
+
+### CI
+
+- **bench:** Gate on an adjacent-binary A/B against the PR base (#144)([74934ea](https://github.com/AbeCoull/prism-q/commit/74934ea3929bb3fdbfd94870fdff879182b98b0b))
+
+### Documentation
+
+- **bench:** Correct the dynamic_advantage component comment (#136)([6bad133](https://github.com/AbeCoull/prism-q/commit/6bad13397ed4edb06e7a4b7d3b603fe40d7139f9))
+
+### Features
+
+- **tn:** Reduced density matrix and native Pauli expectations (#153)([f7345a4](https://github.com/AbeCoull/prism-q/commit/f7345a46b9f0b4ce9acab6a5bcf99784b4de638a))
+- **circuit:** Export a Circuit to OpenQASM 3.0 (#152)([2d66336](https://github.com/AbeCoull/prism-q/commit/2d66336d8d32f9e0604500261d28dcdd15b9654f))
+- **sim:** Parameter-shift gradients on any observable backend (#133)([0736c3d](https://github.com/AbeCoull/prism-q/commit/0736c3d223634e8a3d3b080a247395e619bfe47b))
+- **python:** Reach the GPU backends from Python (#132)([18ce57b](https://github.com/AbeCoull/prism-q/commit/18ce57b3b8ba1b2095a89d53f1242563afb13f00))
+- **sim:** Start a simulation from a state other than |0...0> (#131)([2535bcf](https://github.com/AbeCoull/prism-q/commit/2535bcfef89c11930e9161fd0a197933cf248caa))
+- **sim:** Answer marginals from a backend's native observable path (#129)([d903c21](https://github.com/AbeCoull/prism-q/commit/d903c2150b4738be00669caf8404c6bfa6c0a55a))
+- **factored-stabilizer:** Export a statevector across clusters (#130)([06ee1c9](https://github.com/AbeCoull/prism-q/commit/06ee1c90c99227944fa7b76e1db44b6b51d9aae3))
+- **distributed:** Answer shots, observables, and marginals per rank (#127)([70eaba7](https://github.com/AbeCoull/prism-q/commit/70eaba7d965e3127bdd2caaaf774c9655e998671))
+
+### Performance
+
+- Factored observable norm and high-target 1q traversal (#143)([fa92719](https://github.com/AbeCoull/prism-q/commit/fa92719a4c72978dbfa00f3d9b2f0f92eee1663b))
+- **mps:** Share prefix contractions across the dense expansion (#142)([9b0860c](https://github.com/AbeCoull/prism-q/commit/9b0860c85d9e3d815473f405da23d43f575899a4))
+- **sim:** Share one state traversal across a batch of observables (#141)([c1068c2](https://github.com/AbeCoull/prism-q/commit/c1068c2bad40dea0174d29883edb7da5ba41282d))
+- **density-matrix:** Compose a 1q gate with the channel that follows it (#140)([89a0350](https://github.com/AbeCoull/prism-q/commit/89a0350d4a295986c691e9f4233cb0d6ae2da465))
+- **stabilizer:** Restrict the batch measure index to the stabilizer half (#135)([2c6378a](https://github.com/AbeCoull/prism-q/commit/2c6378a23d9c160b1f1253760cd982571bd3474a))
+
+### Bench
+
+- **tn:** Add a wide low-treewidth scalar-expectation row (#145)([abfec50](https://github.com/AbeCoull/prism-q/commit/abfec50600ab7b84d1891f389c2fc75839c5c323))
+- **config:** Lower the default sample count from 100 to 30 (#137)([c5e661a](https://github.com/AbeCoull/prism-q/commit/c5e661a9f2d867fb5b25c1b5696b4067ce7ff746))
+## [py-v0.28.0] - 2026-08-02
+
+### Miscellaneous
+
+- **python:** Release 0.28.0([b23eb28](https://github.com/AbeCoull/prism-q/commit/b23eb2854d32c33ccc7eaa031e15c0d334e33b7d))
 ## [0.28.0] - 2026-08-02
 
 ### Bug Fixes
@@ -29,6 +75,7 @@ All notable changes to PRISM-Q will be documented in this file.
 
 ### Miscellaneous
 
+- Release([658cd71](https://github.com/AbeCoull/prism-q/commit/658cd71a3387edac98de6e3bf3dbf8c1a37c93d4))
 - Extend CI coverage, split test modules, unify shot routing (#122)([f3c5cf2](https://github.com/AbeCoull/prism-q/commit/f3c5cf2388330b948655a35b07217e0998ca0b40))
 
 ### Performance

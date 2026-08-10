@@ -11,6 +11,7 @@ mod common;
 use common::{SEED, TN_EPS, assert_probs_close, run_fused_probs};
 use num_complex::Complex64;
 use prism_q::Instruction;
+use prism_q::PauliTerm;
 use prism_q::backend::Backend;
 use prism_q::backend::mps::MpsBackend;
 use prism_q::backend::product::ProductStateBackend;
@@ -511,6 +512,176 @@ fn tn_complex_circuit_matches_statevector() {
     c.add_gate(Gate::T, &[3]);
     c.add_gate(Gate::Rz(0.7), &[0]);
     assert_probs_tn(&run_tn_probs(&c), &run_and_probs(&c));
+}
+
+fn assert_rdm_matches_statevector(circuit: &Circuit) {
+    let mut tn = TensorNetworkBackend::new(SEED);
+    sim::run_on(&mut tn, circuit).unwrap();
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, circuit).unwrap();
+
+    for q in 0..circuit.num_qubits {
+        let actual = tn.reduced_density_matrix_1q(q).unwrap();
+        let expected = sv.reduced_density_matrix_1q(q).unwrap();
+        for row in 0..2 {
+            for col in 0..2 {
+                assert!(
+                    (actual[row][col] - expected[row][col]).norm() < TN_EPS,
+                    "tn rdm q{q}[{row}][{col}]: {} vs {}",
+                    actual[row][col],
+                    expected[row][col]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tn_reduced_density_matrix_matches_statevector() {
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Ry(0.6), &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cz, &[1, 2]);
+    c.add_gate(Gate::Rx(1.1), &[3]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::S, &[0]);
+    assert_rdm_matches_statevector(&c);
+}
+
+// An untouched qubit leaves its ket and bra tensors sharing no leg, so the 2x2
+// comes out of join_disjoint as an outer product rather than a contraction.
+#[test]
+fn tn_reduced_density_matrix_with_idle_qubit_matches_statevector() {
+    let mut c = Circuit::new(5, 0);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::Rz(0.9), &[2]);
+    c.add_gate(Gate::Rx(0.4), &[4]);
+    assert_rdm_matches_statevector(&c);
+}
+
+// The ancilla is prepared in |1> before it is measured, so both backends take
+// the same branch and the tensor network answers from the dense tensor
+// replace_with_statevector leaves behind.
+#[test]
+fn tn_reduced_density_matrix_after_measurement_matches_statevector() {
+    let mut c = Circuit::new(3, 1);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::X, &[2]);
+    c.add_measure(2, 0);
+    c.add_gate(Gate::Ry(0.8), &[1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    assert_rdm_matches_statevector(&c);
+}
+
+fn assert_pauli_expectations_match_statevector(circuit: &Circuit, observables: &[Vec<PauliTerm>]) {
+    let mut tn = TensorNetworkBackend::new(SEED);
+    sim::run_on(&mut tn, circuit).unwrap();
+
+    let actual = tn.pauli_expectations(observables).unwrap();
+    let expected = sim::run_expectation_values(circuit, observables, SEED).unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for (i, (a, b)) in actual.iter().zip(&expected).enumerate() {
+        assert!(
+            (a - b).abs() < TN_EPS,
+            "observable {i}: tn={a}, statevector={b}"
+        );
+    }
+}
+
+#[test]
+fn tn_pauli_expectations_match_statevector() {
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Ry(0.6), &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cz, &[1, 2]);
+    c.add_gate(Gate::Rx(1.1), &[3]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::S, &[0]);
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(2)],
+        vec![PauliTerm::y(3)],
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::x(1), PauliTerm::y(2)],
+        vec![
+            PauliTerm::y(0),
+            PauliTerm::x(1),
+            PauliTerm::z(2),
+            PauliTerm::y(3),
+        ],
+        vec![],
+    ];
+    assert_pauli_expectations_match_statevector(&c, &observables);
+}
+
+// A weight-k observable appends k tensors and closes the other n-k legs
+// directly, so an idle qubit exercises the elided-identity path.
+#[test]
+fn tn_pauli_expectations_with_idle_qubit_match_statevector() {
+    let mut c = Circuit::new(5, 0);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::Rz(0.9), &[2]);
+    c.add_gate(Gate::Rx(0.4), &[4]);
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::y(4)],
+        vec![PauliTerm::z(1), PauliTerm::z(2)],
+        vec![PauliTerm::x(1), PauliTerm::x(2), PauliTerm::y(4)],
+    ];
+    assert_pauli_expectations_match_statevector(&c, &observables);
+}
+
+// The builder terminal rejected this backend before it answered observables
+// natively, so the route matters as much as the trait method.
+#[test]
+fn tn_expectation_values_route_matches_auto() {
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Ry(0.6), &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cz, &[1, 2]);
+    c.add_gate(Gate::Rx(1.1), &[3]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+
+    let observables = vec![
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::x(1), PauliTerm::y(2)],
+        vec![PauliTerm::y(3)],
+    ];
+
+    let actual = sim::simulate(&c)
+        .backend(prism_q::BackendKind::TensorNetwork)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    let expected = sim::run_expectation_values(&c, &observables, SEED).unwrap();
+    for (i, (a, b)) in actual.iter().zip(&expected).enumerate() {
+        assert!((a - b).abs() < TN_EPS, "observable {i}: tn={a}, auto={b}");
+    }
+}
+
+#[test]
+fn tn_pauli_expectations_reject_duplicate_and_out_of_range_factors() {
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    let mut tn = TensorNetworkBackend::new(SEED);
+    sim::run_on(&mut tn, &c).unwrap();
+
+    assert!(
+        tn.pauli_expectations(&[vec![PauliTerm::z(0), PauliTerm::x(0)]])
+            .is_err()
+    );
+    assert!(tn.pauli_expectations(&[vec![PauliTerm::z(7)]]).is_err());
 }
 
 #[test]

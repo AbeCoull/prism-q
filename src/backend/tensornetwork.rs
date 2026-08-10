@@ -36,28 +36,28 @@
 //! result has the smallest total element count, preferring pairs sharing a leg.
 //! O(T·r·log T) for T tensors of rank at most r.
 //!
-//! # Shot and observable queries stay on the dense route
+//! # Observables contract natively; shots stay on the dense route
 //!
-//! Unlike the sparse, MPS, and factored backends, this one does not override
-//! `Backend::sample_basis_states` or `Backend::pauli_expectations`. Both report
-//! `BackendUnsupported` naming this backend, and shots continue to route through
-//! `probabilities()`.
+//! `Backend::pauli_expectations` and `Backend::reduced_density_matrix_1q` both
+//! answer by doubling the network against its conjugate: the bra copy's legs are
+//! shifted clear of the ket id space, and each qubit's boundary is either closed
+//! against its twin (a trace) or joined through an operator. No `2^n` vector is
+//! built, so neither query passes the dense ceiling.
 //!
-//! Sampling one bitstring from a deferred network means contracting it once per
-//! qubit to get each conditional, so a shot costs `n` contractions against the
-//! single contraction the dense route pays for the whole distribution. That is
-//! strictly worse whenever the statevector fits, and when it does not fit the
-//! per-qubit contractions do not fit either: the cost is set by treewidth, which
-//! conditioning does not reduce.
+//! An identity factor is a closed leg rather than an appended tensor, so a
+//! weight-`k` observable adds `k` tensors to a network of `2T`, not `n`.
 //!
-//! An exact scalar observable path does exist here, `expectation_zero_state`,
-//! which contracts `⟨0|U†PU|0⟩` without a statevector. It takes a circuit rather
-//! than an evolved backend, and this backend swaps its network for a dense
-//! statevector after any measurement, so reaching it from the trait hook would
-//! need a second contraction path carrying its own bra-side leg bookkeeping.
-//! Auto never selects this backend above the statevector cap (it picks sparse or
-//! MPS), so that path would serve explicit `BackendKind::TensorNetwork` requests
-//! only. Revisit if Auto starts routing wide low-treewidth circuits here.
+//! `Backend::sample_basis_states` is not overridden, and shots continue to route
+//! through `probabilities()`. Sampling one bitstring from a deferred network
+//! means contracting it once per qubit to get each conditional, so a shot costs
+//! `n` contractions against the single contraction the dense route pays for the
+//! whole distribution. That is strictly worse whenever the statevector fits, and
+//! when it does not fit the per-qubit contractions do not fit either: the cost is
+//! set by treewidth, which conditioning does not reduce.
+//!
+//! `expectation_zero_state` remains a separate path, contracting `⟨0|U†PU|0⟩`
+//! from a circuit rather than an evolved backend, and is what the QEC estimator
+//! ladder uses.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -1092,6 +1092,86 @@ impl TensorNetworkBackend {
         Ok(())
     }
 
+    /// Leg ids the bra copy uses, one entry per live ket leg.
+    ///
+    /// Every leg is shifted clear of the ket id space by [`Self::next_leg`], so a
+    /// bra tensor contracts only against other bra tensors. Callers then map back
+    /// to the ket id the legs they want summed over: an output leg mapped to
+    /// itself closes that qubit against its twin, which is a trace with identity.
+    fn bra_leg_map(&self) -> Vec<LegId> {
+        (0..self.next_leg).map(|leg| leg + self.next_leg).collect()
+    }
+
+    /// Pair every tensor with a conjugated twin whose legs are read off `bra_legs`.
+    fn double_through(&self, bra_legs: &[LegId]) -> Vec<Tensor> {
+        let mut network = Vec::with_capacity(self.tensors.len() * 2);
+        for tensor in &self.tensors {
+            network.push(tensor.clone());
+            network.push(Tensor {
+                data: tensor.data.iter().map(Complex64::conj).collect(),
+                shape: tensor.shape.clone(),
+                legs: tensor.legs.iter().map(|&leg| bra_legs[leg]).collect(),
+            });
+        }
+        network
+    }
+
+    /// Build the network for `tr_{q != qubit} |psi><psi|`, leaving `qubit`'s ket
+    /// and bra indices open.
+    ///
+    /// Returns the network and the two open leg ids as `(ket, bra)`.
+    fn double_for_partial_trace(&self, qubit: usize) -> (Vec<Tensor>, LegId, LegId) {
+        let ket_leg = self.output_legs[qubit];
+        let mut bra_legs = self.bra_leg_map();
+        for (q, &leg) in self.output_legs.iter().enumerate() {
+            if q != qubit {
+                bra_legs[leg] = leg;
+            }
+        }
+
+        let network = self.double_through(&bra_legs);
+        (network, ket_leg, ket_leg + self.next_leg)
+    }
+
+    /// Contract `<psi|P|psi>` for one joint Pauli observable, unnormalized.
+    ///
+    /// Qubits the observable omits carry identity, and an identity factor is a
+    /// leg closed directly against its twin rather than a tensor appended, which
+    /// keeps `n - k` tensors out of the network for a weight-`k` observable.
+    fn contract_pauli_sandwich(&self, axes: &[Option<PauliAxis>]) -> f64 {
+        let mut bra_legs = self.bra_leg_map();
+        for (q, axis) in axes.iter().enumerate() {
+            if axis.is_none() {
+                let leg = self.output_legs[q];
+                bra_legs[leg] = leg;
+            }
+        }
+
+        let mut network = self.double_through(&bra_legs);
+
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let i = Complex64::new(0.0, 1.0);
+        for (q, axis) in axes.iter().enumerate() {
+            let Some(axis) = axis else { continue };
+            let data = match axis {
+                PauliAxis::X => vec![zero, one, one, zero],
+                PauliAxis::Y => vec![zero, -i, i, zero],
+                PauliAxis::Z => vec![one, zero, zero, -one],
+            };
+            let ket_leg = self.output_legs[q];
+            network.push(Tensor {
+                data,
+                shape: smallvec::smallvec![2, 2],
+                legs: smallvec::smallvec![bra_legs[ket_leg], ket_leg],
+            });
+        }
+
+        let result = greedy_contract(&mut network);
+        debug_assert!(result.legs.is_empty(), "sandwich leaves every leg paired");
+        result.data[0].re
+    }
+
     /// Contract the full network and return the amplitude vector in
     /// computational basis order.
     fn contract_to_statevector(&self) -> Result<Vec<Complex64>> {
@@ -1112,7 +1192,7 @@ impl TensorNetworkBackend {
                     .legs
                     .iter()
                     .position(|l| l == target_leg)
-                    .unwrap_or(0)
+                    .expect("greedy_contract consumes every tensor, so output legs survive")
             })
             .collect();
 
@@ -1244,6 +1324,73 @@ impl Backend for TensorNetworkBackend {
 
     fn num_qubits(&self) -> usize {
         self.num_qubits
+    }
+
+    /// Contracts the network against its conjugate with every other qubit's
+    /// output leg closed, so the cost is set by the doubled network's treewidth
+    /// rather than by `2^n`.
+    ///
+    /// # Panics
+    ///
+    /// If `qubit` is outside the register.
+    fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
+        let (mut network, ket_leg, bra_leg) = self.double_for_partial_trace(qubit);
+        let rho = greedy_contract(&mut network);
+
+        let axis = |leg: LegId| {
+            rho.legs
+                .iter()
+                .position(|&l| l == leg)
+                .expect("partial trace leaves both open legs on the result")
+        };
+        let ket_stride = if axis(ket_leg) == 0 { 2 } else { 1 };
+        let bra_stride = if axis(bra_leg) == 0 { 2 } else { 1 };
+
+        Ok([
+            [rho.data[0], rho.data[bra_stride]],
+            [rho.data[ket_stride], rho.data[ket_stride + bra_stride]],
+        ])
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// Contracts `<psi|P|psi>` directly, so no `2^n` vector is built and the
+    /// dense query ceiling does not apply.
+    ///
+    /// # Errors
+    ///
+    /// [`PrismError::InvalidQubit`] for a factor outside the register, and
+    /// [`PrismError::InvalidParameter`] for two factors on one qubit.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let mut axes: Vec<Option<PauliAxis>> = vec![None; self.num_qubits];
+        let mut expectations = Vec::with_capacity(observables.len());
+        let norm_sq = self.contract_pauli_sandwich(&axes);
+
+        for observable in observables {
+            axes.iter_mut().for_each(|axis| *axis = None);
+            for term in observable {
+                if term.qubit >= self.num_qubits {
+                    return Err(PrismError::InvalidQubit {
+                        index: term.qubit,
+                        register_size: self.num_qubits,
+                    });
+                }
+                if axes[term.qubit].is_some() {
+                    return Err(PrismError::InvalidParameter {
+                        message: format!(
+                            "tensor-network observable has duplicate factor on qubit {}",
+                            term.qubit
+                        ),
+                    });
+                }
+                axes[term.qubit] = Some(term.axis);
+            }
+            expectations.push(self.contract_pauli_sandwich(&axes) / norm_sq);
+        }
+
+        Ok(expectations)
     }
 
     fn supports_fused_gates(&self) -> bool {

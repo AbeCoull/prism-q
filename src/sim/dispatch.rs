@@ -239,6 +239,7 @@ impl BackendKind {
             | BackendKind::Mps { .. }
             | BackendKind::ProductState
             | BackendKind::Factored
+            | BackendKind::TensorNetwork
             | BackendKind::DensityMatrix => true,
             #[cfg(feature = "gpu")]
             BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => true,
@@ -265,11 +266,11 @@ impl BackendKind {
     pub(crate) fn general_noise_backend_names() -> &'static str {
         #[cfg(feature = "gpu")]
         {
-            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, Factored, or DensityMatrix"
+            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, Factored, TensorNetwork, or DensityMatrix"
         }
         #[cfg(not(feature = "gpu"))]
         {
-            "Auto, Statevector, Sparse, Mps, ProductState, Factored, or DensityMatrix"
+            "Auto, Statevector, Sparse, Mps, ProductState, Factored, TensorNetwork, or DensityMatrix"
         }
     }
 }

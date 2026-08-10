@@ -82,6 +82,31 @@ fn amplitude_damping_analytic_single_qubit() {
     );
 }
 
+// Each damping event reads the target's reduced density matrix, which the
+// tensor network answers by contracting against its conjugate with the other
+// qubit traced out.
+#[test]
+fn tensor_network_amplitude_damping_analytic() {
+    let gamma = 0.8;
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_gate(Gate::X, &[1]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+
+    let noise = NoiseModel::with_amplitude_damping(&circuit, gamma);
+    let result =
+        run_shots_with_noise(BackendKind::TensorNetwork, &circuit, &noise, 5000, 42).unwrap();
+
+    for q in 0..2 {
+        let p_zero = result.shots.iter().filter(|s| !s[q]).count() as f64 / 5000.0;
+        assert!(
+            (p_zero - gamma).abs() < 0.05,
+            "q{q}: P(0) should be ~gamma={gamma}, got {p_zero}"
+        );
+    }
+}
+
 #[test]
 fn amplitude_damping_ground_state_unchanged() {
     let mut circuit = Circuit::new(1, 1);

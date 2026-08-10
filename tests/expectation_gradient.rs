@@ -374,7 +374,7 @@ fn shift_differentiates_from_a_start_state() {
 }
 
 #[test]
-fn shift_on_a_backend_without_an_observable_path_names_it() {
+fn shift_runs_on_the_tensor_network() {
     let mut c = Circuit::new(2, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
@@ -383,13 +383,15 @@ fn shift_on_a_backend_without_an_observable_path_names_it() {
     params.link(2, 0);
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
-    let err = simulate(&c)
+    let tn = simulate(&c)
         .backend(BackendKind::TensorNetwork)
         .seed(SEED)
         .expectation_gradient_shift(&obs, &params)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("tensornetwork"), "{err}");
+        .unwrap();
+    let routed = run_expectation_gradient_shift(&c, &obs, &params, SEED).unwrap();
+
+    assert!((tn.value - routed.value).abs() < 1e-12);
+    assert!((tn.gradient[0] - routed.gradient[0]).abs() < 1e-9);
 }
 
 #[test]

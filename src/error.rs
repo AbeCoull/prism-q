@@ -46,6 +46,10 @@ pub enum PrismError {
     #[error("undefined register `{name}` at line {line}")]
     UndefinedRegister { name: String, line: usize },
 
+    /// Circuit holds an instruction with no OpenQASM 3.0 spelling.
+    #[error("cannot export instruction {index} to OpenQASM 3.0: {reason}")]
+    ExportUnsupported { index: usize, reason: String },
+
     /// Incompatible backend for the given circuit.
     #[error("backend `{backend}` is incompatible: {reason}")]
     IncompatibleBackend { backend: String, reason: String },

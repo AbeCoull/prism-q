@@ -23,6 +23,7 @@ pub mod openqasm;
 pub mod parameter;
 pub(crate) mod plan;
 pub mod prepared;
+pub mod qasm_export;
 
 pub use parameter::{ParamLink, Parameters};
 pub use prepared::PreparedCircuit;

@@ -112,6 +112,8 @@
 
 #[cfg(test)]
 mod tests;
+#[cfg(any(test, feature = "bench-internal"))]
+pub mod tiled;
 
 use std::borrow::Cow;
 use std::sync::Arc;

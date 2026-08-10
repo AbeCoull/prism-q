@@ -113,6 +113,22 @@ Shots and Pauli expectations answer from the per-qubit states rather than the `2
 
 Deferred contraction with a greedy min-size heuristic. Gates append tensors; contraction happens lazily at measurement or probability extraction. `MAX_PROB_QUBITS = 25` guards against exponential blowup.
 
+Two queries stay off the dense route by contracting the network against its conjugate.
+The bra copy's legs are shifted clear of the ket index space, and each qubit's boundary
+is either closed against its twin, which is a trace, or joined through an operator. A
+one-qubit reduced density matrix leaves that qubit's ket and bra indices open and
+returns a `2x2`; a Pauli expectation joins every non-identity factor through its
+operator and contracts to a scalar. Both follow the doubled network's cost rather than
+the qubit count. An identity factor is a closed leg rather than an appended tensor, so a
+weight-`k` observable adds `k` tensors and not `n`.
+
+Nothing about the planner changed: an index is open when exactly one tensor holds it,
+which the greedy ordering already carries through to its result.
+
+The reduced density matrix is the half of general-noise support the backend was missing,
+so the trajectory engine now runs amplitude damping, phase damping, thermal relaxation,
+and custom Kraus channels here under explicit dispatch.
+
 ## Factored
 
 Dynamic split-state simulation. Starts with n independent 1-qubit states, merges via tensor product only when 2q gates bridge groups. Parallel kernels match statevector patterns for sub-states ≥14 qubits. Selected when subsystem decomposition detects partial independence.

@@ -48,7 +48,7 @@
 //! compiled sampling with Pauli-noise annotations. [`run_qec_program_reference`]
 //! runs small correctness checks through the reference path.
 
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod backend;
 pub mod circuit;

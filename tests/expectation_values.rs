@@ -346,20 +346,12 @@ fn product_expectation_values_cover_each_axis_eigenstate() {
 // has no native observable path. The rejection has to name the backend that
 // cannot serve the request, not the route that selected it.
 #[test]
-fn backends_without_a_native_path_name_themselves() {
-    let c = entangled_non_clifford(5);
-    let observables = [vec![PauliTerm::z(0)]];
-    let err = simulate(&c)
-        .backend(BackendKind::TensorNetwork)
-        .seed(42)
-        .expectation_values(&observables)
-        .unwrap_err();
-    match err {
-        prism_q::PrismError::BackendUnsupported {
-            backend: reported, ..
-        } => assert_eq!(reported, "tensornetwork"),
-        other => panic!("expected a BackendUnsupported naming tensornetwork, got {other:?}"),
-    }
+fn tensor_network_expectation_values_match_statevector() {
+    assert_matches_statevector(
+        "tensor network expectation",
+        BackendKind::TensorNetwork,
+        &entangled_non_clifford(6),
+    );
 }
 
 // The native path validates observables before it runs, so a bad qubit index

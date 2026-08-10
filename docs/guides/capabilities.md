@@ -80,7 +80,8 @@ bounded only by their own representation.
 | Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
 | Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
-| Tensor Network, Density Matrix | Dense | Rejected, naming the backend |
+| Tensor Network | Dense | Native, one doubled-network contraction per observable |
+| Density Matrix | Dense | Rejected, naming the backend |
 
 Native sampling is deterministic from the seed alone: the same seed and shot
 count reproduce the same bitstrings. It is not shot-for-shot identical to the

@@ -19,9 +19,10 @@ PRISM-Q is a Rust quantum circuit simulator built for speed. It dispatches acros
 multiple specialized backends, runs a multi pass fusion pipeline, and uses AVX2, FMA,
 and BMI2 SIMD kernels in the inner loop. CPU kernels are the default path, with
 optional CUDA support for statevector and experimental stabilizer workloads. Input is
-OpenQASM 3.0 with backward compatible 2.0 syntax.
+OpenQASM 3.0 with backward compatible 2.0 syntax; circuits also export back to
+OpenQASM 3.0.
 
-For which CPU and GPU architectures each backend supports, see the
+For the CPU and GPU architectures each backend supports, see the
 [capability and support matrix](https://abecoull.github.io/prism-q/guides/capabilities.html).
 
 ## Documentation
@@ -56,7 +57,7 @@ Building from source or pinning to a git revision is covered in
 ### Python
 
 Python bindings (PyO3 + maturin) live in [`bindings/python`](bindings/python) and
-expose core simulation, noise, and QEC with NumPy output:
+expose core simulation, noise, QEC, and the CUDA backends with NumPy output:
 
 ```python
 import prism_q
@@ -111,6 +112,30 @@ for (bits, count) in counts.into_counts() {
 }
 ```
 
+### Expectation values and marginals
+
+```rust
+use prism_q::{simulate, CircuitBuilder, PauliTerm};
+
+let bell = CircuitBuilder::new(2).h(0).cx(0, 1).build();
+
+let observables = [
+    vec![PauliTerm::z(0), PauliTerm::z(1)],
+    vec![PauliTerm::x(0), PauliTerm::x(1)],
+];
+let values = simulate(&bell).seed(42).expectation_values(&observables).unwrap();
+// [1.0, 1.0]: ⟨ZZ⟩ and ⟨XX⟩ on the Bell state.
+
+let marginals = simulate(&bell).seed(42).marginals().unwrap();
+// Per-qubit (P(0), P(1)) pairs: [(0.5, 0.5), (0.5, 0.5)].
+```
+
+Observables are products of single-qubit Paulis, identity factors omitted. Clifford
+circuits propagate them exactly; past the statevector memory budget the selected
+backend answers from its own representation. Runs can also start from a state other
+than |0...0⟩: `initial_state` takes a normalized amplitude vector of length 2^n with
+qubit 0 in the least significant bit.
+
 ### Backend dispatch
 
 ```rust
@@ -118,7 +143,7 @@ use prism_q::{circuit::openqasm, simulate, BackendKind};
 
 let circuit = openqasm::parse(qasm).unwrap();
 
-// Auto picks the optimal backend based on circuit properties.
+// Auto selects a backend from the circuit's structure.
 let auto = simulate(&circuit).seed(42).run().unwrap();
 
 // Or choose explicitly.
@@ -165,6 +190,44 @@ c.add_gate(Gate::Cx, &[1, 2]);
 let result = simulate(&c).seed(42).run().unwrap();
 ```
 
+### Parameterized circuits
+
+Mark rotation angles as parameters while building, then rebind without rebuilding.
+`PreparedCircuit` also reuses one fusion plan across bindings, falling back to a full
+fusion pass when a binding changes what fusion would emit:
+
+```rust
+use prism_q::{simulate, CircuitBuilder, PauliTerm, PreparedCircuit};
+
+let (template, params) = CircuitBuilder::new(2)
+    .ry(0.0, 0)
+    .param(0)
+    .cx(0, 1)
+    .rz(0.0, 1)
+    .param(1)
+    .build_parametric();
+
+let bound = params.bind(&template, &[0.3, 1.1]).unwrap();
+let result = simulate(&bound).seed(42).run().unwrap();
+
+let mut prepared = PreparedCircuit::new(template, params.clone()).unwrap();
+let fused = prepared.bind_fused(&[0.4, 1.2]).unwrap();
+```
+
+The same `Parameters` drives gradients. `expectation_gradient` computes ⟨H⟩ and its
+exact gradient by the adjoint method on the statevector backend, and
+`expectation_gradient_shift` covers the backends and circuit shapes the adjoint
+declines, using the parameter-shift rule:
+
+```rust
+let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+let g = simulate(&bound)
+    .seed(42)
+    .expectation_gradient(&hamiltonian, &params)
+    .unwrap();
+println!("<H> = {}, gradient = {:?}", g.value, g.gradient);
+```
+
 ## Backends
 
 | Backend | Best for | Scaling | Key property |
@@ -191,11 +254,16 @@ dispatch time, and can be overridden with `PRISM_MAX_SV_QUBITS`.
 
 ## Gates and OpenQASM support
 
-Covers the standard OpenQASM `stdgates.inc` set, common controlled and multi-controlled
-variants, Qiskit exporter gates, IonQ and Google/Cirq native gate names, decomposed
-multi-instruction gates, and IBM legacy u1/u2/u3 syntax. Modifiers `inv @`, `ctrl @`,
-`pow(k) @` chain arbitrarily for direct gates, and user-defined `gate` declarations are
-supported.
+The parser covers the standard OpenQASM `stdgates.inc` set, common controlled and
+multi-controlled variants, Qiskit exporter gates, IonQ and Google/Cirq native gate
+names, decomposed multi-instruction gates, and IBM legacy u1/u2/u3 syntax. Modifiers
+`inv @`, `ctrl @`, `pow(k) @` chain arbitrarily for direct gates, and user-defined
+`gate` declarations are supported.
+
+Export runs the other way: `qasm_export::to_qasm3` renders a `Circuit` as an OpenQASM
+3.0 program that re-parses to the same instruction stream, with inline angles
+surviving exactly. Gates with no OpenQASM spelling (fused payloads) are rejected with
+an error naming the offending instruction.
 
 The authoritative list of supported gate keywords, language features, and modifiers
 lives in the parser at [`src/circuit/openqasm.rs`](src/circuit/openqasm.rs). See
@@ -273,7 +341,7 @@ cargo bench --bench bench_gpu    --features "parallel gpu"   # GPU dispatch benc
 ```
 
 Always use `--features parallel`; baselines were taken with Rayon enabled. Do not run
-two `cargo bench` invocations concurrently on the same machine — Rayon thread pools
+two `cargo bench` invocations concurrently on the same machine: Rayon thread pools
 contend for cores and skew results.
 
 Baseline capture, regression checks, and the markdown table workflow used in PRs live
@@ -292,8 +360,7 @@ SVGs land in `bench_results/` (gitignored).
 
 ## Roadmap
 
-- Expanded classical control: mid circuit branching beyond the current `if` form, and
-  parameterized circuit reuse for variational workloads.
+- Expanded classical control: mid circuit branching beyond the current `if` form.
 - Multi GPU and distributed GPU execution: a GPU context currently binds a single
   device, and the distributed backend is CPU only.
 - ROCm (AMD GPU) ports of the CUDA statevector and stabilizer kernels.

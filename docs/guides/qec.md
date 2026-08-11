@@ -77,9 +77,11 @@ Each mechanism carries a probability and the detector and observable indices
 it flips; detector coordinates pass through from the program. In Python the
 model also exposes `probabilities()`, `detector_matrix()`, and
 `observable_matrix()`, the check-matrix triple that in-process decoder
-libraries accept directly. See
-[QEC program execution](../architecture/qec-programs.md) for the derivation
-semantics and the emitted grammar.
+libraries accept directly. Matching decoders need at most two detectors per
+mechanism: `decompose_graphlike` returns that form, splitting each hypergraph
+mechanism across existing graphlike ones and erroring loudly when no split
+exists. See [QEC program execution](../architecture/qec-programs.md) for the
+derivation semantics and the emitted grammar.
 
 ## Homological sampling
 

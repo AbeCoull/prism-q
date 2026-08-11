@@ -253,9 +253,18 @@ survivor. Non-Clifford gates and reuse of a measured qubit without reset are
 rejected, as on the compiled sampling path.
 
 Hypergraph mechanisms (more than two detectors, as `DEPOLARIZE2` produces)
-stay intact; the model does not decompose them. Decoders that accept a check
-matrix consume them directly. A matching decoder needs a graphlike
-decomposition, which is deliberately never applied silently.
+stay intact in the derived model; decoders that accept a check matrix consume
+them directly. A matching decoder needs the graphlike form, which is opt-in:
+`decompose_graphlike` returns a new model in which every hypergraph mechanism
+is replaced by two or more existing graphlike mechanisms whose non-empty
+detector sets partition its detectors and whose observable XOR matches it,
+with the mechanism's probability composed into every component. A `DEPOLARIZE2`
+`Y`-`Y` branch, for example, splits into the same channel's single-qubit
+branches. Cross-component correlations are lost; single-detector marginals are
+unchanged, since each hyperedge composes into exactly one component containing
+any given detector. A mechanism with no such cover is an error naming its
+symptom; decomposition is never applied silently, and the writer serializes
+whichever model it is given.
 
 ### Text format
 

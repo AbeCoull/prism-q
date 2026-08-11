@@ -113,3 +113,7 @@ def test_detector_error_model_matches_program():
     assert text.count("error(") == 3
     assert "detector(0.5, 0) D0" in text
     assert "logical_observable L0" in text
+
+    graphlike = dem.decompose_graphlike()
+    assert graphlike.num_mechanisms == dem.num_mechanisms
+    assert (graphlike.detector_matrix() == dem.detector_matrix()).all()

@@ -378,8 +378,9 @@ model itself.
 decoding: `probabilities()` (float64), `detector_matrix()`, and
 `observable_matrix()` (bool, detectors or observables by mechanisms) feed
 check-matrix decoder constructors directly, `detector_coords()` carries the
-per-detector coordinates, and `to_text()` writes the common detector error
-model text format for file-based decoders:
+per-detector coordinates, `decompose_graphlike()` returns the form matching
+decoders need (at most two detectors per mechanism), and `to_text()` writes
+the common detector error model text format for file-based decoders:
 
 ```python
 dem = qp.detector_error_model()

@@ -160,7 +160,13 @@ fn pauli_engines_share_observable_statistics() {
         (
             "trajectory",
             crate::sim::trajectory::run_trajectories(
-                sv_factory, &circuit, &noise, num_shots, seed, false,
+                sv_factory,
+                &circuit,
+                &noise,
+                num_shots,
+                seed,
+                false,
+                crate::sim::ResolvedBackend::Statevector,
             )
             .unwrap(),
         ),

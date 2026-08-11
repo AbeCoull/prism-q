@@ -249,6 +249,91 @@ fn thermal_relaxation_preserves_superposition_statistics() {
     );
 }
 
+// A Ramsey sequence reads the coherence decay that the population tests above
+// are blind to. `H; TR(1, 1, 1); H` leaves `P(1) = (1 - exp(-1)) / 2`, so a
+// dephasing rate off by a factor of two is visible where `<Z>` alone is not.
+#[test]
+fn thermal_relaxation_ramsey_matches_exact_t2() {
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate[0] = vec![NoiseEvent {
+        channel: NoiseChannel::ThermalRelaxation {
+            t1: 1.0,
+            t2: 1.0,
+            gate_time: 1.0,
+        },
+        qubits: SmallVec::from_slice(&[0]),
+    }];
+
+    let num_shots = 20_000;
+    let result =
+        run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, num_shots, 42).unwrap();
+    let p_one = result.shots.iter().filter(|s| s[0]).count() as f64 / num_shots as f64;
+
+    let exact = (1.0 - (-1.0f64).exp()) / 2.0;
+    let sigma = (exact * (1.0 - exact) / num_shots as f64).sqrt();
+    assert!(
+        (p_one - exact).abs() <= 5.0 * sigma,
+        "ramsey P(1) = {p_one}, exact {exact} (5 sigma = {})",
+        5.0 * sigma
+    );
+}
+
+// At `t2 = 2*t1` the channel is pure amplitude damping, the boundary of the
+// domain `validate` admits and the case a reset-plus-Z mixture reaches only
+// through a negative dephasing probability.
+#[test]
+fn thermal_relaxation_amplitude_damping_limit_matches_density_matrix() {
+    let channel = NoiseChannel::ThermalRelaxation {
+        t1: 1.0,
+        t2: 2.0,
+        gate_time: 0.5,
+    };
+
+    let mut unitary = Circuit::new(1, 0);
+    unitary.add_gate(Gate::H, &[0]);
+    unitary.add_gate(Gate::H, &[0]);
+    let mut unitary_noise = NoiseModel::uniform_depolarizing(&unitary, 0.0);
+    unitary_noise.after_gate[0] = vec![NoiseEvent {
+        channel: channel.clone(),
+        qubits: SmallVec::from_slice(&[0]),
+    }];
+    let exact_z = density_matrix_expectation_values(
+        &unitary,
+        &[vec![PauliTerm::z(0)]],
+        Some(&unitary_noise),
+        42,
+    )
+    .unwrap()[0];
+
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.after_gate[0] = vec![NoiseEvent {
+        channel,
+        qubits: SmallVec::from_slice(&[0]),
+    }];
+
+    let num_shots = 20_000;
+    let result =
+        run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, num_shots, 42).unwrap();
+    let p_one = result.shots.iter().filter(|s| s[0]).count() as f64 / num_shots as f64;
+
+    let exact = (1.0 - exact_z) / 2.0;
+    let sigma = (exact * (1.0 - exact) / num_shots as f64).sqrt();
+    assert!(
+        (p_one - exact).abs() <= 5.0 * sigma,
+        "t2 = 2*t1 P(1) = {p_one}, density matrix {exact} (5 sigma = {})",
+        5.0 * sigma
+    );
+}
+
 #[test]
 fn thermal_relaxation_strong_reset_to_ground() {
     let mut circuit = Circuit::new(1, 1);
@@ -575,9 +660,9 @@ fn statevector_amplitude_damping_matches_density_matrix() {
     }
 }
 
-// Thermal relaxation on the factored backend routes through `reset` and the
-// dephasing branch rather than a Kraus matrix, so it exercises the other half
-// of the non-Pauli path on the same two-block state.
+// Thermal relaxation composes two damping channels into a three-branch sampler,
+// so it exercises a wider branch set than the single-channel tests on the same
+// two-block state.
 #[test]
 fn factored_thermal_relaxation_matches_density_matrix() {
     let num_shots = 8000;

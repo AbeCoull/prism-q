@@ -119,7 +119,7 @@ def test_mismatched_noise_model_is_rejected():
     model = NoiseModel.uniform_depolarizing(other, 0.01)
     with pytest.raises(prism_q.PrismError) as excinfo:
         simulate(circuit).seed(SEED).noise(model).density_matrix_expectation_values([[(0, "Z")]])
-    assert "noise model length" in str(excinfo.value)
+    assert "2 event slots for 1 instructions" in str(excinfo.value)
 
 
 def test_expectation_values_rejects_noise_without_a_mixture():

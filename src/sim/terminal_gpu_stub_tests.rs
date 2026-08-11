@@ -29,8 +29,12 @@ fn auto_gpu_stub() -> BackendKind {
 #[test]
 fn auto_gpu_terminal_counts_match_auto_on_stub() {
     let circuit = terminal_circuit(16);
-    let auto_counts = run_counts_with(BackendKind::Auto, &circuit, 500, 42).unwrap();
-    let gpu_counts = run_counts_with(auto_gpu_stub(), &circuit, 500, 42).unwrap();
+    let auto_counts = run_counts_with(BackendKind::Auto, &circuit, 500, 42)
+        .unwrap()
+        .0;
+    let gpu_counts = run_counts_with(auto_gpu_stub(), &circuit, 500, 42)
+        .unwrap()
+        .0;
     assert_eq!(auto_counts, gpu_counts);
 }
 
@@ -66,7 +70,9 @@ fn statevector_gpu_terminal_counts_below_crossover_match_statevector() {
     let kind = BackendKind::StatevectorGpu {
         context: GpuContext::stub_for_tests(),
     };
-    let sv = run_counts_with(BackendKind::Statevector, &circuit, 200, 42).unwrap();
-    let gpu = run_counts_with(kind, &circuit, 200, 42).unwrap();
+    let sv = run_counts_with(BackendKind::Statevector, &circuit, 200, 42)
+        .unwrap()
+        .0;
+    let gpu = run_counts_with(kind, &circuit, 200, 42).unwrap().0;
     assert_eq!(sv, gpu);
 }

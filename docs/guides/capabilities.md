@@ -98,6 +98,34 @@ where it is per-qubit Z expectations and therefore also uncapped.
 on the distributed backend it rejects a register past the dense cap up front
 rather than running first and answering with no distribution.
 
+## What kind of answer a result is
+
+Every result type carries a `metadata` field describing how it was produced:
+the engine automatic dispatch resolved to, whether that engine can discard state
+weight, where the state lived, and the shot count for a sampled result.
+
+| Field | Reads |
+| --- | --- |
+| `backend` | The engine that answered, after `Auto` routing |
+| `exactness` | `Exact`, or `Approximate` with a fidelity lower bound when the engine reports one |
+| `placement` | `Host` or `Device` |
+| `shots` | Shots drawn, `None` for an analytic result |
+
+`Approximate` marks the route rather than the run. An MPS at bond 256 on a
+circuit that never fills a bond truncates nothing and still reports
+`Approximate`, with a bound of 1.0: the variant answers whether the answer could
+have been approximated, the bound answers whether it was.
+
+`Auto` sends a circuit past the statevector cap to an MPS at a bounded bond
+dimension, which is the only route those circuits have. It is taken by default
+and the result says so. `simulate(...).require_exact()` rejects that route
+instead, with an error naming the engine it would have used.
+
+`Simulate::expectation_values_reported` returns the values with a standard error
+per value on a route that estimates rather than evaluates. An evaluated route
+reports `Exact` and no interval, so a caller distinguishes "converged" from "not
+estimated" without comparing a float against zero.
+
 ## Not yet supported
 
 | Target | Status | Notes |

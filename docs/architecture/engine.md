@@ -73,9 +73,11 @@ variance. Readout error is applied to the drawn outcomes rather than to the stat
 RNG stream of its own.
 
 The mixture holds every measurement branch at once, which is what makes it exact and also
-what it cannot undo. A noisy circuit with mid-circuit measurement or classical
-conditioning is rejected on this route: the outcome that a later gate would have been
-conditioned on was never fixed. Those circuits stay on trajectory averaging. This is the
+what it cannot undo. A circuit with mid-circuit measurement or classical conditioning is
+rejected on this route, with or without a noise model attached: the outcome that a later
+gate would have been conditioned on was never fixed. The rejection sits on the evolution
+itself, so `density_matrix_expectation_values` refuses the same circuits the `Simulate`
+terminals do. Those circuits stay on trajectory averaging. This is the
 same property that makes the density matrix the mixture oracle rather than a comparable
 participant in the branching families of `tests/conformance_matrix.rs`.
 
@@ -83,6 +85,20 @@ participant in the branching families of `tests/conformance_matrix.rs`.
 backpropagates through a pure state. `expectation_gradient_shift` rejects one too, though
 the obstacle there is only that the path is not wired: the shift rule holds under a
 parameter-independent channel, so the density matrix could serve it.
+
+## Result provenance
+
+Every terminal returns a result carrying a `RunMetadata`: the resolved engine,
+whether that engine is exact, where the state lived, and the shot count for a
+sampled result. `Auto` selecting an approximate backend is disclosed by the
+result, which is what makes `require_exact()` an opt-out: rejecting by default
+would remove the only route an oversize non-sparse circuit has.
+
+`require_exact()` resolves the route from the circuit and errors before
+allocating, so it does not pay for state it would discard. Sparse Pauli dynamics
+truncates on coefficient magnitudes it only learns while propagating, so that
+route cannot be decided in advance and is caught by a second check on the
+finished result. Both checks run in every terminal.
 
 ## Auto-dispatch decision tree
 

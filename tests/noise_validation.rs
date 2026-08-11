@@ -1,11 +1,22 @@
 use num_complex::Complex64;
-use prism_q::CircuitBuilder;
-use prism_q::circuit::Circuit;
+use prism_q::circuit::{Circuit, ClassicalCondition, Instruction};
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
+use prism_q::{
+    BackendKind, CircuitBuilder, Gate, PauliTerm, PrismError, density_matrix_expectation_values,
+    simulate,
+};
 use smallvec::smallvec;
 
 fn one_gate_circuit() -> Circuit {
     CircuitBuilder::new_with_classical(1, 1).h(0).build()
+}
+
+fn silent_noise(circuit: &Circuit) -> NoiseModel {
+    NoiseModel::uniform_depolarizing(circuit, 0.0)
+}
+
+fn z0() -> Vec<Vec<PauliTerm>> {
+    vec![vec![PauliTerm::z(0)]]
 }
 
 #[test]
@@ -189,6 +200,133 @@ fn validate_rejects_wrong_qubit_count() {
         qubits: smallvec![0],
     });
     assert!(noise.validate().is_err());
+}
+
+#[test]
+fn validate_rejects_duplicate_two_qubit_targets() {
+    let circuit = one_gate_circuit();
+    let mut noise = silent_noise(&circuit);
+    noise.after_gate[0].push(NoiseEvent {
+        channel: NoiseChannel::TwoQubitDepolarizing { p: 0.3 },
+        qubits: smallvec![0, 0],
+    });
+    let err = noise.validate().unwrap_err();
+    assert!(
+        matches!(&err, PrismError::InvalidParameter { message }
+            if message.contains("distinct targets") && message.contains("qubit 0 twice")),
+        "{err:?}"
+    );
+}
+
+// A one-qubit channel on qubit 5 of a two-qubit circuit used to reach the
+// density matrix's embedded statevector, where the channel is applied as a
+// two-qubit gate on `(q, q + n)` and the write is unchecked.
+#[test]
+fn out_of_range_one_qubit_channel_rejected_before_evolution() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    let mut noise = silent_noise(&circuit);
+    noise.after_gate[0].push(NoiseEvent {
+        channel: NoiseChannel::Depolarizing { p: 0.1 },
+        qubits: smallvec![5],
+    });
+
+    assert!(noise.validate_for(&circuit).is_err());
+    let err = density_matrix_expectation_values(&circuit, &z0(), Some(&noise), 42).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::InvalidParameter { message }
+            if message.contains("qubit 5") && message.contains("2-qubit register")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn out_of_range_two_qubit_channel_rejected_on_the_shot_route() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    let mut noise = silent_noise(&circuit);
+    noise.after_gate[0].push(NoiseEvent {
+        channel: NoiseChannel::TwoQubitDepolarizing { p: 0.1 },
+        qubits: smallvec![1, 4],
+    });
+
+    let err = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .noise(&noise)
+        .seed(42)
+        .shots(16)
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::InvalidParameter { message } if message.contains("qubit 4")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn noise_model_length_mismatch_rejected() {
+    let circuit = one_gate_circuit();
+    let mut noise = silent_noise(&circuit);
+    noise.after_gate.push(Vec::new());
+    assert!(noise.validate_for(&circuit).is_err());
+}
+
+// The exact route applies a declared channel literally and the trajectory route
+// renormalizes its branch probabilities, so a channel that is not trace
+// preserving means two different things depending on where it runs. Rejecting
+// it in `validate` is what keeps the two routes agreeing.
+#[test]
+fn custom_kraus_not_trace_preserving_rejected() {
+    let half = Complex64::new(0.5, 0.0);
+    let zero = Complex64::new(0.0, 0.0);
+    let scaled_identity = NoiseChannel::Custom {
+        kraus: vec![[[half, zero], [zero, half]]],
+    };
+    assert!(scaled_identity.validate().is_err());
+    assert!(!scaled_identity.is_exactly_samplable());
+
+    let inv_sqrt2 = Complex64::new(1.0 / 2.0_f64.sqrt(), 0.0);
+    let bit_flip = NoiseChannel::Custom {
+        kraus: vec![
+            [[inv_sqrt2, zero], [zero, inv_sqrt2]],
+            [[zero, inv_sqrt2], [inv_sqrt2, zero]],
+        ],
+    };
+    assert!(bit_flip.validate().is_ok());
+}
+
+#[test]
+fn density_matrix_rejects_mid_circuit_measurement() {
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[0]);
+
+    let err = density_matrix_expectation_values(&circuit, &z0(), None, 42).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { backend, .. } if backend == "density_matrix"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn density_matrix_rejects_classical_conditional() {
+    let mut circuit = Circuit::new(2, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: smallvec![1],
+    });
+
+    let err = density_matrix_expectation_values(&circuit, &[vec![PauliTerm::z(1)]], None, 42)
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { backend, .. } if backend == "density_matrix"),
+        "{err:?}"
+    );
 }
 
 #[test]

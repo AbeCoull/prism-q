@@ -130,6 +130,23 @@ reset, classical conditionals, and non-Clifford gates, at per-shot state
 evolution cost. Distributed backends reject noisy sampling entirely; per-shot
 trajectories cannot keep rank collectives in lockstep.
 
+Every noisy entry point calls `NoiseModel::validate_for` against the circuit
+before allocating state: one event slot per instruction, channel parameters in
+range, distinct targets on a two-qubit channel, and every target inside the
+register. Bounds cannot be checked from the model alone, and a target outside
+the register reaches kernels that index amplitudes without one.
+
+Custom Kraus sets must be trace preserving, `sum_k Kdagger_k K_k = I` to 1e-9.
+The exact route applies a declared set literally while the trajectory route
+normalizes its branch probabilities, so a set that is not trace preserving would
+mean two different things depending on which engine ran it.
+
+`ThermalRelaxation { t1, t2, gate_time }` is amplitude damping composed with
+pure dephasing on both routes, at rates chosen so populations decay as
+`exp(-gate_time/t1)` and coherences as `exp(-gate_time/t2)`. A mixture of reset
+and `Z` reproduces the population decay but reaches the coherence decay only for
+`t2 <= t1`, and needs a negative dephasing probability above it.
+
 All engines sample from the same measurement-record distribution for the noise
 models and circuits they accept. The equivalence is statistical, not
 shot-for-shot: engines consume independent RNG streams, so the same seed

@@ -219,7 +219,7 @@ fn with_terminal_measurements(mut circuit: Circuit) -> Circuit {
 }
 
 /// Thermal relaxation on every gate target. `t2 < 2 * t1` keeps the dephasing
-/// branch live, so the event costs a reset draw plus a possible Z.
+/// rate above zero, so the event samples three branches rather than two.
 fn thermal_noise_model(circuit: &Circuit) -> prism_q::NoiseModel {
     let mut model = prism_q::NoiseModel::uniform_depolarizing(circuit, 0.0);
     for (index, instruction) in circuit.instructions.iter().enumerate() {
@@ -1549,9 +1549,11 @@ fn bench_factored_partial_independence(c: &mut Criterion) {
 /// shot allocates a fresh backend per block: at depth 5 with 256 shots that
 /// construction read a 36% spread on identical code.
 ///
-/// The thermal rows are the control. Thermal relaxation samples a reset branch and
-/// a `Z` branch, never a Kraus matrix, so it shares the shape and the allocator
-/// behavior without touching the method under test.
+/// The thermal rows measure the same method with a three-branch sampler instead
+/// of two, since thermal relaxation is amplitude damping composed with pure
+/// dephasing and the composition folds to one probability read and one matrix
+/// pass. The group has no in-group control; gate a change here against its own
+/// control column.
 fn bench_factored_noise_kraus(c: &mut Criterion) {
     let mut group = c.benchmark_group("factored/noise_kraus");
     configure_group(&mut group);

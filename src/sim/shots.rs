@@ -8,6 +8,11 @@ use rand_chacha::ChaCha8Rng;
 
 use super::Probabilities;
 use super::compiled;
+use super::metadata::{ResolvedBackend, RunMetadata};
+
+/// Marker on a result no route has stamped yet; `every_terminal_stamps_metadata`
+/// asserts none reaches a caller.
+pub(crate) const UNSTAMPED: &str = "unstamped";
 
 /// Result of a multi-shot simulation run.
 #[derive(Debug, Clone)]
@@ -15,14 +20,26 @@ pub struct ShotsResult {
     /// `shots[i][j]` is the j-th classical bit from the i-th shot.
     pub shots: Vec<Vec<bool>>,
     pub(crate) num_classical_bits: usize,
+    /// Which engine ran, whether the answer is exact, and where the state lived.
+    pub metadata: RunMetadata,
 }
 
 impl ShotsResult {
+    /// Build with placeholder provenance; the entry point that picked the
+    /// engine overwrites it through [`ShotsResult::with_metadata`], which
+    /// `every_terminal_stamps_metadata` pins.
     pub(crate) fn from_shots(shots: Vec<Vec<bool>>, num_classical_bits: usize) -> Self {
         Self {
             shots,
             num_classical_bits,
+            metadata: RunMetadata::exact(ResolvedBackend::Other(UNSTAMPED)),
         }
+    }
+
+    pub(crate) fn with_metadata(mut self, metadata: RunMetadata) -> Self {
+        let shots = self.shots.len();
+        self.metadata = metadata.with_shots(shots);
+        self
     }
 
     /// Keys are packed `Vec<u64>` where bit `i` of word `i/64` corresponds
@@ -319,10 +336,10 @@ mod tests {
 
     #[test]
     fn shots_result_counts_and_display() {
-        let result = ShotsResult {
-            shots: vec![vec![true, false], vec![true, false], vec![false, true]],
-            num_classical_bits: 2,
-        };
+        let result = ShotsResult::from_shots(
+            vec![vec![true, false], vec![true, false], vec![false, true]],
+            2,
+        );
         assert_eq!(result.num_shots(), 3);
         assert_eq!(result.num_classical_bits(), 2);
         let counts = result.counts();

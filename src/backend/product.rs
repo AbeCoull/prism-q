@@ -128,6 +128,10 @@ impl Backend for ProductStateBackend {
         "productstate"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::ProductState
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         let zero_state = [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];

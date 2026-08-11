@@ -344,6 +344,7 @@ pub(crate) fn shift_gradient(
         let per_term = match initial_state {
             Some(state) => {
                 super::expectation_values_from_initial_state(kind, c, state, &observables, seed)?
+                    .into_values()
             }
             None => super::run_expectation_values_with(kind.clone(), c, &observables, seed)?,
         };

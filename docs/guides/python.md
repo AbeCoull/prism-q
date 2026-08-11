@@ -133,6 +133,34 @@ backend, both regardless of `.backend(...)`.
 `ShotsResult` and `CountsResult` both expose `counts()`, returning a dict keyed
 by bitstring.
 
+## Result metadata
+
+`RunOutcome`, `ShotsResult`, and `CountsResult` each carry a `metadata` object
+describing how the result was produced.
+
+```python
+result = simulate(circuit).seed(42).run()
+print(result.metadata.backend)               # 'Statevector'
+print(result.metadata.is_exact)              # True
+print(result.metadata.fidelity_lower_bound)  # None when exact
+print(result.metadata.placement)             # 'host' or 'device'
+```
+
+`is_exact` is False when the engine that ran can discard state weight or
+estimate by sampling. It marks the route, not the run: an MPS whose bond
+dimension the circuit never fills reports `is_exact == False` with
+`fidelity_lower_bound == 1.0`, so the flag answers whether the answer could have
+been approximated and the bound answers whether it was.
+
+Automatic dispatch sends a circuit past the statevector cap to a bounded-bond
+MPS, which is the only route those circuits have. That is taken by default and
+the result says so. `.require_exact()` rejects it instead, raising `PrismError`
+naming the engine it would have used.
+
+```python
+simulate(big_circuit).seed(42).require_exact().marginals()  # raises
+```
+
 ## Starting from a state other than |0...0>
 
 `.initial_state(amplitudes)` replaces the default all-zero start. It takes any

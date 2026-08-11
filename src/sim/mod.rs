@@ -9,6 +9,7 @@ mod decomposed;
 mod dispatch;
 pub mod gradient;
 pub mod homological;
+mod metadata;
 pub mod noise;
 mod probability;
 pub(crate) mod shots;
@@ -26,11 +27,12 @@ use dispatch::{
     AUTO_APPROX_MAX_TERMS, AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family,
     MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
     MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO, TemporalCliffordPlan, accel_for, auto_selects_cpu_statevector,
-    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, plan_for_family,
-    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
-    stabilizer_rank_budget, validate_explicit_backend,
+    MIN_QUBITS_FOR_SPD_AUTO, TemporalCliffordPlan, accel_for, approximate_route_name,
+    auto_selects_cpu_statevector, build_statevector, has_temporal_clifford_opportunity,
+    initial_state_plan, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
+    run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
+pub use metadata::{Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{ShotsResult, bitstring};
 
@@ -84,6 +86,8 @@ pub struct RunOutcome {
     /// distribution for this circuit. Other probability extraction failures
     /// are returned as errors by the query that produced this result.
     pub probabilities: Option<Probabilities>,
+    /// Which engine ran, whether the answer is exact, and where the state lived.
+    pub metadata: RunMetadata,
 }
 
 /// Frequency histogram returned by query-aware count sampling.
@@ -93,6 +97,7 @@ pub struct CountsResult {
     /// [`ShotsResult::counts`], formattable with [`bitstring`].
     pub counts: HashMap<Vec<u64>, u64>,
     pub num_classical_bits: usize,
+    pub metadata: RunMetadata,
 }
 
 impl CountsResult {
@@ -106,6 +111,7 @@ impl CountsResult {
 pub struct MarginalsResult {
     /// `(P(0), P(1))` per qubit, indexed by qubit number.
     pub marginals: Vec<(f64, f64)>,
+    pub metadata: RunMetadata,
 }
 
 impl MarginalsResult {
@@ -131,6 +137,7 @@ pub struct Simulate<'c, SeedState> {
     seed: SeedState,
     noise_model: Option<&'c noise::NoiseModel>,
     initial_state: Option<&'c [Complex64]>,
+    require_exact: bool,
 }
 
 impl<'c, SeedState> Simulate<'c, SeedState> {
@@ -138,6 +145,24 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     #[inline]
     pub fn backend(mut self, kind: BackendKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Reject a route that could return an approximate answer, rather than
+    /// taking it and saying so in the result.
+    ///
+    /// [`BackendKind::Auto`] sends a circuit past the statevector cap to an MPS
+    /// at a bounded bond dimension, which is the only route those circuits have;
+    /// the result reports [`Exactness::Approximate`] either way. Call this when
+    /// an approximate answer is worse than no answer, and the run returns
+    /// `IncompatibleBackend` naming the engine it would have used.
+    ///
+    /// Routes that can be decided from the circuit are rejected before any state
+    /// is allocated; sparse Pauli dynamics only learns that it truncated while
+    /// propagating, so that one is caught on the finished result instead.
+    #[inline]
+    pub fn require_exact(mut self) -> Self {
+        self.require_exact = true;
         self
     }
 
@@ -216,6 +241,7 @@ impl<'c> Simulate<'c, Unseeded> {
             seed: Seeded { seed },
             noise_model: self.noise_model,
             initial_state: self.initial_state,
+            require_exact: self.require_exact,
         }
     }
 }
@@ -249,6 +275,9 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     pub fn run(self) -> Result<RunOutcome> {
         let seed = self.seed_value();
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "a single run")?;
             let probabilities =
@@ -259,6 +288,7 @@ impl<'c> Simulate<'c, Seeded> {
             return Ok(RunOutcome {
                 classical_bits,
                 probabilities: Some(probabilities),
+                metadata: RunMetadata::exact(ResolvedBackend::DensityMatrix),
             });
         }
         if let Some(state) = self.initial_state {
@@ -270,7 +300,9 @@ impl<'c> Simulate<'c, Seeded> {
                 &SimOptions::default(),
             );
         }
-        run_with_internal(self.kind, self.circuit, seed, SimOptions::default())
+        let outcome = run_with_internal(self.kind, self.circuit, seed, SimOptions::default())?;
+        ensure_exact_result(self.require_exact, &outcome.metadata)?;
+        Ok(outcome)
     }
 
     /// Execute `num_shots` times, collecting per-shot classical bits. Accepts
@@ -278,14 +310,20 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
         let seed = self.seed_value();
-        if let Some(noise_model) = self.noise_model {
-            self.require_no_initial_state_under_noise("shot sampling")?;
-            run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)
-        } else if let Some(state) = self.initial_state {
-            shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)
-        } else {
-            run_shots_with(self.kind, self.circuit, num_shots, seed)
+        let require_exact = self.require_exact;
+        if require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
         }
+        let result = if let Some(noise_model) = self.noise_model {
+            self.require_no_initial_state_under_noise("shot sampling")?;
+            run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)?
+        } else if let Some(state) = self.initial_state {
+            shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)?
+        } else {
+            run_shots_with(self.kind, self.circuit, num_shots, seed)?
+        };
+        ensure_exact_result(require_exact, &result.metadata)?;
+        Ok(result)
     }
 
     /// Sample a frequency histogram over `num_shots` executions. Accepts an
@@ -297,17 +335,25 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
         let seed = self.seed_value();
-        let counts = if let Some(noise_model) = self.noise_model {
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        let (counts, metadata) = if let Some(noise_model) = self.noise_model {
             self.require_no_initial_state_under_noise("count sampling")?;
-            run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)?.counts()
+            let shots =
+                run_shots_with_noise(self.kind, self.circuit, noise_model, num_shots, seed)?;
+            (shots.counts(), shots.metadata)
         } else if let Some(state) = self.initial_state {
-            shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)?.counts()
+            let shots = shots_from_initial_state(&self.kind, self.circuit, state, num_shots, seed)?;
+            (shots.counts(), shots.metadata)
         } else {
             run_counts_with(self.kind, self.circuit, num_shots, seed)?
         };
+        ensure_exact_result(self.require_exact, &metadata)?;
         Ok(CountsResult {
             counts,
             num_classical_bits: self.circuit.num_classical_bits,
+            metadata,
         })
     }
 
@@ -318,18 +364,25 @@ impl<'c> Simulate<'c, Seeded> {
     #[inline]
     pub fn marginals(self) -> Result<MarginalsResult> {
         let seed = self.seed_value();
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "marginals")?;
             let probs =
                 exact_noisy_probabilities(self.circuit, noise_model, self.initial_state, seed)?;
             return Ok(MarginalsResult {
                 marginals: probs.marginals(),
+                metadata: RunMetadata::exact(ResolvedBackend::DensityMatrix),
             });
         }
-        if let Some(state) = self.initial_state {
-            return marginals_from_initial_state(&self.kind, self.circuit, state, seed);
-        }
-        run_marginals_result_with(self.kind, self.circuit, seed)
+        let result = if let Some(state) = self.initial_state {
+            marginals_from_initial_state(&self.kind, self.circuit, state, seed)?
+        } else {
+            run_marginals_result_with(self.kind, self.circuit, seed)?
+        };
+        ensure_exact_result(self.require_exact, &result.metadata)?;
+        Ok(result)
     }
 
     /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on the circuit's
@@ -346,17 +399,34 @@ impl<'c> Simulate<'c, Seeded> {
     /// evolved mixture, which needs the density-matrix backend.
     #[inline]
     pub fn expectation_values(self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        self.expectation_values_reported(observables)
+            .map(ExpectationResult::into_values)
+    }
+
+    /// [`Simulate::expectation_values`] with the provenance of the run and, for
+    /// a route that estimates rather than evaluates, a standard error per value.
+    pub fn expectation_values_reported(
+        self,
+        observables: &[Vec<PauliTerm>],
+    ) -> Result<ExpectationResult> {
         let seed = self.seed_value();
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "expectation values")?;
             require_unitary_circuit(&self.kind, self.circuit)?;
-            return noise::dm_expectation_values(
+            let values = noise::dm_expectation_values(
                 self.circuit,
                 observables,
                 Some(noise_model),
                 self.initial_state,
                 seed,
-            );
+            )?;
+            return Ok(analytic_expectations(
+                values,
+                RunMetadata::exact(ResolvedBackend::DensityMatrix),
+            ));
         }
         if let Some(state) = self.initial_state {
             require_unitary_circuit(&self.kind, self.circuit)?;
@@ -368,7 +438,9 @@ impl<'c> Simulate<'c, Seeded> {
                 seed,
             );
         }
-        run_expectation_values_with(self.kind, self.circuit, observables, seed)
+        let result = run_expectation_values_reported(self.kind, self.circuit, observables, seed)?;
+        ensure_exact_result(self.require_exact, &result.metadata)?;
+        Ok(result)
     }
 
     /// Compute `⟨H⟩` and its exact gradient with respect to the bound
@@ -386,6 +458,9 @@ impl<'c> Simulate<'c, Seeded> {
         params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
         let seed = self.seed_value();
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
         if self.noise_model.is_some() {
             return Err(PrismError::IncompatibleBackend {
                 backend: format!("{:?}", self.kind),
@@ -432,6 +507,9 @@ impl<'c> Simulate<'c, Seeded> {
         params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
         let seed = self.seed_value();
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
         if self.noise_model.is_some() {
             return Err(PrismError::IncompatibleBackend {
                 backend: format!("{:?}", self.kind),
@@ -480,6 +558,7 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
         seed: Unseeded,
         noise_model: None,
         initial_state: None,
+        require_exact: false,
     }
 }
 
@@ -577,6 +656,7 @@ fn run_from_initial_state(
     Ok(RunOutcome {
         classical_bits: backend.classical_results().to_vec(),
         probabilities,
+        metadata: backend_metadata(&*backend),
     })
 }
 
@@ -599,7 +679,8 @@ fn shots_from_initial_state(
             return Ok(ShotsResult::from_shots(
                 sample_shots(&probs, &meas_map, bits, num_shots, seed),
                 bits,
-            ));
+            )
+            .with_metadata(outcome.metadata));
         }
     }
 
@@ -618,11 +699,14 @@ fn shots_from_initial_state(
     };
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
 
-    collect_shots(circuit, num_shots, seed, |shot_seed| {
+    collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
         let mut backend = plan.build(shot_seed);
         backend.init_from_amplitudes(state.to_vec(), circuit.num_classical_bits)?;
         backend.apply_instructions(&fused.instructions)?;
-        Ok(backend.classical_results().to_vec())
+        Ok((
+            backend.classical_results().to_vec(),
+            backend_metadata(&*backend),
+        ))
     })
 }
 
@@ -639,6 +723,7 @@ fn marginals_from_initial_state(
     }
     Ok(MarginalsResult {
         marginals: Probabilities::Dense(backend.probabilities()?).marginals(),
+        metadata: backend_metadata(&*backend),
     })
 }
 
@@ -648,7 +733,7 @@ fn expectation_values_from_initial_state(
     state: &[Complex64],
     observables: &[Vec<PauliTerm>],
     seed: u64,
-) -> Result<Vec<f64>> {
+) -> Result<ExpectationResult> {
     // Before the run, matching the dense statevector path.
     let masks = observables
         .iter()
@@ -657,13 +742,49 @@ fn expectation_values_from_initial_state(
 
     let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
     apply_fused_circuit(&mut *backend, circuit)?;
+    let metadata = backend_metadata(&*backend);
     if backend.supports_pauli_expectation() {
-        return backend.pauli_expectations(observables);
+        let values = backend.pauli_expectations(observables)?;
+        return Ok(analytic_expectations(values, metadata));
     }
 
     let evolved = backend.export_statevector()?;
     let norm = crate::backend::state_norm_sqr(&evolved);
-    Ok(pauli_expectations_from_masks(&evolved, &masks, norm))
+    let values = pauli_expectations_from_masks(&evolved, &masks, norm);
+    Ok(analytic_expectations(values, metadata))
+}
+
+/// Reject a result that turned out approximate, for a caller that opted out.
+///
+/// The backstop behind [`reject_approximate_route`], which decides from the
+/// circuit alone. Sparse Pauli dynamics truncates on coefficient magnitudes it
+/// only learns while propagating, so whether it stayed exact is not knowable
+/// before the run.
+fn ensure_exact_result(require_exact: bool, metadata: &RunMetadata) -> Result<()> {
+    if require_exact && !metadata.is_exact() {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{:?}", metadata.backend),
+            reason: "require_exact rejects an approximate result; this engine discarded state                      weight while running, which the route could not predict"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+/// Reject an approximate route for a caller that opted out of one. The engine
+/// is named in the error, since a caller who asked for exactness wants to know
+/// which one would have answered.
+fn reject_approximate_route(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
+    match approximate_route_name(kind, circuit) {
+        Some(engine) => Err(PrismError::IncompatibleBackend {
+            backend: engine.into(),
+            reason: "require_exact rejects a route that can discard state weight; drop the \
+                     requirement to accept the approximation, which the result reports, or \
+                     select a backend that represents this circuit exactly"
+                .into(),
+        }),
+        None => Ok(()),
+    }
 }
 
 fn require_unitary_circuit(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
@@ -685,16 +806,6 @@ fn exact_noisy_probabilities(
     initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<Probabilities> {
-    if !circuit.has_terminal_measurements_only() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "density_matrix".into(),
-            reason: "the mixture holds every measurement branch at once, so mid-circuit \
-                     measurement and classical conditioning cannot be replayed from it; move the \
-                     measurements to the end of the circuit, or run trajectories on a backend \
-                     with a per-shot pure state"
-                .into(),
-        });
-    }
     Ok(Probabilities::Dense(noise::density_matrix_probabilities(
         circuit,
         noise_model,
@@ -726,10 +837,11 @@ fn sample_exact_noisy_shots(
 }
 
 #[inline]
-fn probs_only_result(probs: Vec<f64>) -> RunOutcome {
+fn probs_only_result(probs: Vec<f64>, metadata: RunMetadata) -> RunOutcome {
     RunOutcome {
         probabilities: Some(Probabilities::Dense(probs)),
         classical_bits: vec![],
+        metadata,
     }
 }
 
@@ -842,7 +954,16 @@ fn execute_circuit(
     Ok(RunOutcome {
         classical_bits: backend.classical_results().to_vec(),
         probabilities,
+        metadata: backend_metadata(backend),
     })
+}
+
+/// Provenance read off the engine that ran, after it ran. Exactness and
+/// placement are reports rather than predictions: the MPS bound reflects what
+/// this run discarded, and the placement reflects where the amplitudes ended up
+/// after any device fallback.
+pub(crate) fn backend_metadata(backend: &dyn Backend) -> RunMetadata {
+    RunMetadata::new(backend.resolved(), backend.exactness(), backend.placement())
 }
 
 #[cfg(test)]
@@ -898,12 +1019,18 @@ fn run_with_internal(
             run_decomposed(&kind, &components, circuit, seed, &opts)
         }
         ProbabilityRoute::StabilizerRank { t_count } => {
-            let sr = if t_count <= MAX_AUTO_T_COUNT_EXACT {
+            let exact = t_count <= MAX_AUTO_T_COUNT_EXACT;
+            let sr = if exact {
                 stabilizer_rank::run_stabilizer_rank(circuit, seed)?
             } else {
                 stabilizer_rank::run_stabilizer_rank_approx(circuit, AUTO_APPROX_MAX_TERMS, seed)?
             };
-            Ok(probs_only_result(sr.probabilities))
+            let metadata = if exact {
+                RunMetadata::exact(ResolvedBackend::StabilizerRank)
+            } else {
+                RunMetadata::approximate(ResolvedBackend::StabilizerRank)
+            };
+            Ok(probs_only_result(sr.probabilities, metadata))
         }
         ProbabilityRoute::TemporalClifford(tc) => {
             run_temporal_clifford(&tc, seed, opts.probabilities)
@@ -917,7 +1044,10 @@ fn run_with_internal(
             }
             ExecutionPlan::StabilizerRank => {
                 let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
-                Ok(probs_only_result(sr.probabilities))
+                Ok(probs_only_result(
+                    sr.probabilities,
+                    RunMetadata::exact(ResolvedBackend::StabilizerRank),
+                ))
             }
             ExecutionPlan::StochasticPauli { num_samples } => {
                 Err(crate::error::PrismError::IncompatibleBackend {
@@ -963,6 +1093,7 @@ pub fn run_on_state(
     Ok(RunOutcome {
         classical_bits: backend.classical_results().to_vec(),
         probabilities: try_backend_probabilities(backend)?,
+        metadata: backend_metadata(backend),
     })
 }
 
@@ -1081,7 +1212,7 @@ fn auto_clifford_t_budget(circuit: &Circuit) -> Option<(usize, usize)> {
 /// Auto-dispatch gate for the Clifford+T stabilizer-rank shortcut: the T
 /// count must fit both the caller's ceiling and the size-derived
 /// stabilizer-rank budget. Returns the T count when the shortcut applies.
-fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> Option<usize> {
+pub(super) fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> Option<usize> {
     let (t, sr_budget) = auto_clifford_t_budget(circuit)?;
     (t <= max_t && t <= sr_budget).then_some(t)
 }
@@ -1290,13 +1421,33 @@ enum ShotSource {
         backend: Box<dyn Backend>,
         meas_map: Vec<(usize, usize)>,
     },
-    /// Dense output distribution of the measurement-stripped circuit.
+    /// Dense output distribution of the measurement-stripped circuit, with the
+    /// provenance of the run that produced it.
     TerminalProbabilities {
         probs: Probabilities,
         meas_map: Vec<(usize, usize)>,
+        metadata: RunMetadata,
     },
     StabilizerRank,
     PerShot,
+}
+
+impl ShotSource {
+    /// Which engine will answer, decided by `prepare_shot_source` and read here
+    /// so the shot and count entry points do not re-derive it. `None` for the
+    /// per-shot route, which builds one backend per shot and stamps its own.
+    fn metadata(&self) -> Option<RunMetadata> {
+        match self {
+            ShotSource::Compiled { .. } => {
+                Some(RunMetadata::exact(ResolvedBackend::CompiledStabilizer))
+            }
+            ShotSource::TerminalStatevector { backend, .. } => Some(backend_metadata(&**backend)),
+            ShotSource::Native { backend, .. } => Some(backend_metadata(&**backend)),
+            ShotSource::TerminalProbabilities { metadata, .. } => Some(metadata.clone()),
+            ShotSource::StabilizerRank => Some(RunMetadata::exact(ResolvedBackend::StabilizerRank)),
+            ShotSource::PerShot => None,
+        }
+    }
 }
 
 /// Select and prepare the sampling source for `circuit`.
@@ -1359,6 +1510,7 @@ fn prepare_shot_source(
             return Ok(ShotSource::TerminalProbabilities {
                 probs,
                 meas_map: circuit.measurement_map(),
+                metadata: result.metadata,
             });
         }
     }
@@ -1368,7 +1520,7 @@ fn prepare_shot_source(
 
 #[cfg(test)]
 fn run_counts(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<HashMap<Vec<u64>, u64>> {
-    run_counts_with(BackendKind::Auto, circuit, num_shots, seed)
+    run_counts_with(BackendKind::Auto, circuit, num_shots, seed).map(|(counts, _)| counts)
 }
 
 /// Execute a circuit multiple times with explicit backend selection and return counts.
@@ -1388,14 +1540,20 @@ pub(crate) fn run_counts_with(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
-) -> Result<HashMap<Vec<u64>, u64>> {
+) -> Result<(HashMap<Vec<u64>, u64>, RunMetadata)> {
     #[cfg(feature = "distributed")]
     if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
-        return Ok(run_shots_with(kind, circuit, num_shots, seed)?.counts());
+        let shots = run_shots_with(kind, circuit, num_shots, seed)?;
+        return Ok((shots.counts(), shots.metadata));
     }
 
     let bits = circuit.num_classical_bits;
-    match prepare_shot_source(&kind, circuit, num_shots, seed)? {
+    let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;
+    let Some(metadata) = source.metadata() else {
+        let shots = run_shots_per_shot(kind, circuit, num_shots, seed)?;
+        return Ok((shots.counts(), shots.metadata));
+    };
+    let counts = match source {
         ShotSource::Compiled {
             mut sampler,
             meas_map,
@@ -1403,29 +1561,27 @@ pub(crate) fn run_counts_with(
         } => {
             if deferred {
                 let packed = sampler.try_sample_bulk_packed(num_shots)?;
-                Ok(counts_of(
+                counts_of(
                     packed_shots_to_classical_bits(&packed, &meas_map, bits),
                     bits,
-                ))
+                )
             } else {
-                sampler.try_sample_counts(num_shots)
+                sampler.try_sample_counts(num_shots)?
             }
         }
         ShotSource::TerminalStatevector { backend, meas_map } => {
             if backend.is_gpu_resident() {
                 let probs = backend.probabilities()?;
-                Ok(sample_counts_from_probs(
-                    &probs, &meas_map, bits, num_shots, seed,
-                ))
+                sample_counts_from_probs(&probs, &meas_map, bits, num_shots, seed)
             } else {
-                Ok(sample_counts_from_state(
+                sample_counts_from_state(
                     backend.state_vector(),
                     backend.probability_scale(),
                     &meas_map,
                     bits,
                     num_shots,
                     seed,
-                ))
+                )
             }
         }
         ShotSource::Native {
@@ -1433,20 +1589,17 @@ pub(crate) fn run_counts_with(
             meas_map,
         } => {
             let samples = backend.sample_basis_states(num_shots, seed)?;
-            Ok(counts_of(
-                shots_from_basis_samples(&samples, &meas_map, bits),
-                bits,
-            ))
+            counts_of(shots_from_basis_samples(&samples, &meas_map, bits), bits)
         }
-        ShotSource::TerminalProbabilities { probs, meas_map } => Ok(counts_of(
-            sample_shots(&probs, &meas_map, bits, num_shots, seed),
-            bits,
-        )),
+        ShotSource::TerminalProbabilities {
+            probs, meas_map, ..
+        } => counts_of(sample_shots(&probs, &meas_map, bits, num_shots, seed), bits),
         ShotSource::StabilizerRank => {
-            Ok(stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)?.counts())
+            stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)?.counts()
         }
-        ShotSource::PerShot => Ok(run_shots_per_shot(kind, circuit, num_shots, seed)?.counts()),
-    }
+        ShotSource::PerShot => unreachable!("handled above"),
+    };
+    Ok((counts, metadata.with_shots(num_shots)))
 }
 
 fn counts_of(shots: Vec<Vec<bool>>, num_classical_bits: usize) -> HashMap<Vec<u64>, u64> {
@@ -1473,7 +1626,19 @@ fn marginals_from_pauli_expectations(
     let expectations = backend.pauli_expectations(&observables)?;
     Ok(MarginalsResult {
         marginals: expectations_to_marginals(&expectations),
+        metadata: backend_metadata(backend),
     })
+}
+
+/// Sparse Pauli dynamics is exact when it truncated nothing. `total_discarded`
+/// is a coefficient magnitude rather than a state overlap, so a truncated run
+/// reports approximate with no fidelity bound.
+fn spd_metadata(total_discarded: f64) -> RunMetadata {
+    if total_discarded == 0.0 {
+        RunMetadata::exact(ResolvedBackend::DeterministicPauli)
+    } else {
+        RunMetadata::approximate(ResolvedBackend::DeterministicPauli)
+    }
 }
 
 pub(crate) fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)> {
@@ -1486,7 +1651,7 @@ pub(crate) fn expectations_to_marginals(expectations: &[f64]) -> Vec<(f64, f64)>
         .collect()
 }
 
-fn has_nonunitary_or_classical_ops(circuit: &Circuit) -> bool {
+pub(super) fn has_nonunitary_or_classical_ops(circuit: &Circuit) -> bool {
     circuit.instructions.iter().any(|inst| {
         matches!(
             inst,
@@ -1530,6 +1695,8 @@ fn run_marginals_result_with(
             let spp = unified_pauli::run_spp(circuit, *num_samples, seed)?;
             return Ok(MarginalsResult {
                 marginals: expectations_to_marginals(&spp.expectations),
+                metadata: RunMetadata::approximate(ResolvedBackend::StochasticPauli)
+                    .with_shots(*num_samples),
             });
         }
         BackendKind::DeterministicPauli { epsilon, max_terms } => {
@@ -1537,6 +1704,7 @@ fn run_marginals_result_with(
             let spd = unified_pauli::run_spd(circuit, *epsilon, *max_terms)?;
             return Ok(MarginalsResult {
                 marginals: expectations_to_marginals(&spd.expectations),
+                metadata: spd_metadata(spd.total_discarded),
             });
         }
         _ => {}
@@ -1550,6 +1718,7 @@ fn run_marginals_result_with(
         let spd = unified_pauli::run_spd(circuit, 0.0, AUTO_SPD_MAX_TERMS)?;
         return Ok(MarginalsResult {
             marginals: expectations_to_marginals(&spd.expectations),
+            metadata: spd_metadata(spd.total_discarded),
         });
     }
 
@@ -1574,6 +1743,7 @@ fn run_marginals_result_with(
     if let Some(probs) = &result.probabilities {
         Ok(MarginalsResult {
             marginals: probs.marginals(),
+            metadata: result.metadata.clone(),
         })
     } else {
         Err(PrismError::BackendUnsupported {
@@ -1622,37 +1792,59 @@ fn run_expectation_values_with(
     observables: &[Vec<PauliTerm>],
     seed: u64,
 ) -> Result<Vec<f64>> {
+    run_expectation_values_reported(kind, circuit, observables, seed)
+        .map(ExpectationResult::into_values)
+}
+
+fn run_expectation_values_reported(
+    kind: BackendKind,
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    seed: u64,
+) -> Result<ExpectationResult> {
     require_unitary_circuit(&kind, circuit)?;
 
     match &kind {
-        BackendKind::StochasticPauli { num_samples } => observables
-            .iter()
-            .enumerate()
-            .map(|(i, obs)| {
-                unified_pauli::run_spp_observable(
+        BackendKind::StochasticPauli { num_samples } => {
+            let mut values = Vec::with_capacity(observables.len());
+            let mut std_errors = Vec::with_capacity(observables.len());
+            for (i, obs) in observables.iter().enumerate() {
+                let r = unified_pauli::run_spp_observable(
                     circuit,
                     obs,
                     *num_samples,
                     seed.wrapping_add(i as u64),
-                )
-                .map(|r| r.mean)
+                )?;
+                values.push(r.mean);
+                std_errors.push(r.std_error);
+            }
+            Ok(ExpectationResult {
+                values,
+                std_errors: Some(std_errors),
+                metadata: RunMetadata::approximate(ResolvedBackend::StochasticPauli)
+                    .with_shots(*num_samples),
             })
-            .collect(),
-        BackendKind::DeterministicPauli { epsilon, max_terms } => observables
-            .iter()
-            .map(|obs| {
-                unified_pauli::run_spd_observable(circuit, obs, *epsilon, *max_terms)
-                    .map(|r| r.mean)
-            })
-            .collect(),
+        }
+        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+            let mut values = Vec::with_capacity(observables.len());
+            let mut discarded = 0.0;
+            for obs in observables {
+                let r = unified_pauli::run_spd_observable(circuit, obs, *epsilon, *max_terms)?;
+                values.push(r.mean);
+                discarded += r.total_discarded;
+            }
+            Ok(analytic_expectations(values, spd_metadata(discarded)))
+        }
         _ if kind.is_auto() || kind.is_stabilizer_family() => {
             if circuit.is_clifford_only() {
-                observables
-                    .iter()
-                    .map(|obs| {
-                        unified_pauli::run_spd_observable(circuit, obs, 0.0, 0).map(|r| r.mean)
-                    })
-                    .collect()
+                let mut values = Vec::with_capacity(observables.len());
+                let mut discarded = 0.0;
+                for obs in observables {
+                    let r = unified_pauli::run_spd_observable(circuit, obs, 0.0, 0)?;
+                    values.push(r.mean);
+                    discarded += r.total_discarded;
+                }
+                Ok(analytic_expectations(values, spd_metadata(discarded)))
             } else if kind.is_auto() {
                 if circuit.num_qubits > max_statevector_qubits() {
                     return expectation_values_native(&kind, circuit, observables, seed);
@@ -1676,6 +1868,16 @@ fn run_expectation_values_with(
     }
 }
 
+/// Values from a route that evaluates rather than samples, so there is no
+/// interval to report.
+fn analytic_expectations(values: Vec<f64>, metadata: RunMetadata) -> ExpectationResult {
+    ExpectationResult {
+        values,
+        std_errors: None,
+        metadata,
+    }
+}
+
 /// Evaluate `observables` on the backend `kind` resolves to, using that
 /// backend's own representation.
 ///
@@ -1687,7 +1889,7 @@ fn expectation_values_native(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     seed: u64,
-) -> Result<Vec<f64>> {
+) -> Result<ExpectationResult> {
     if !kind.is_auto() {
         validate_explicit_backend(kind, circuit)?;
     }
@@ -1715,7 +1917,8 @@ fn expectation_values_native(
         });
     }
     execute(&mut *backend, circuit, &SimOptions::classical_only())?;
-    backend.pauli_expectations(observables)
+    let values = backend.pauli_expectations(observables)?;
+    Ok(analytic_expectations(values, backend_metadata(&*backend)))
 }
 
 fn expectation_values_statevector(
@@ -1723,7 +1926,7 @@ fn expectation_values_statevector(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     seed: u64,
-) -> Result<Vec<f64>> {
+) -> Result<ExpectationResult> {
     // Validate before the 2^n simulation so bad observables fail cheaply.
     let masks = observables
         .iter()
@@ -1749,7 +1952,9 @@ fn expectation_values_statevector(
         backend.state_vector()
     };
     let norm = crate::backend::state_norm_sqr(state);
-    Ok(pauli_expectations_from_masks(state, &masks, norm))
+    let values = pauli_expectations_from_masks(state, &masks, norm);
+    let metadata = backend_metadata(&backend);
+    Ok(analytic_expectations(values, metadata))
 }
 
 /// Reject out-of-range qubits and duplicate factors in a joint Pauli
@@ -2033,7 +2238,8 @@ fn run_shots_distributed(
         return Ok(ShotsResult::from_shots(
             vec![vec![false; circuit.num_classical_bits]; num_shots],
             circuit.num_classical_bits,
-        ));
+        )
+        .with_metadata(backend_metadata(&backend)));
     }
 
     if circuit.has_terminal_measurements_only() {
@@ -2044,7 +2250,8 @@ fn run_shots_distributed(
         return Ok(ShotsResult::from_shots(
             shots_from_basis_samples(&samples, &meas_map, circuit.num_classical_bits),
             circuit.num_classical_bits,
-        ));
+        )
+        .with_metadata(backend_metadata(&backend)));
     }
 
     let probe = DistributedStatevectorBackend::new(context.clone(), seed);
@@ -2056,13 +2263,15 @@ fn run_shots_distributed(
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
     let opts = SimOptions::classical_only();
     let mut shots = Vec::with_capacity(num_shots);
+    let mut metadata = RunMetadata::exact(ResolvedBackend::Distributed);
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
         let mut backend = DistributedStatevectorBackend::new(context.clone(), shot_seed);
         let result = execute_circuit(&mut backend, &fused, &opts)?;
+        metadata.weaken_with(&result.metadata);
         shots.push(result.classical_bits);
     }
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
 /// Execute a circuit multiple times with explicit backend selection.
@@ -2081,17 +2290,21 @@ pub(crate) fn run_shots_with(
     }
 
     let bits = circuit.num_classical_bits;
-    match prepare_shot_source(&kind, circuit, num_shots, seed)? {
+    let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;
+    let Some(metadata) = source.metadata() else {
+        return run_shots_per_shot(kind, circuit, num_shots, seed);
+    };
+    let result = match source {
         ShotSource::Compiled {
             mut sampler,
             meas_map,
             ..
         } => {
             let packed = sampler.try_sample_bulk_packed(num_shots)?;
-            Ok(ShotsResult::from_shots(
+            ShotsResult::from_shots(
                 packed_shots_to_classical_bits(&packed, &meas_map, bits),
                 bits,
-            ))
+            )
         }
         ShotSource::TerminalStatevector { backend, meas_map } => {
             let shots = if backend.is_gpu_resident() {
@@ -2107,27 +2320,24 @@ pub(crate) fn run_shots_with(
                     seed,
                 )
             };
-            Ok(ShotsResult::from_shots(shots, bits))
+            ShotsResult::from_shots(shots, bits)
         }
         ShotSource::Native {
             mut backend,
             meas_map,
         } => {
             let samples = backend.sample_basis_states(num_shots, seed)?;
-            Ok(ShotsResult::from_shots(
-                shots_from_basis_samples(&samples, &meas_map, bits),
-                bits,
-            ))
+            ShotsResult::from_shots(shots_from_basis_samples(&samples, &meas_map, bits), bits)
         }
-        ShotSource::TerminalProbabilities { probs, meas_map } => Ok(ShotsResult::from_shots(
-            sample_shots(&probs, &meas_map, bits, num_shots, seed),
-            bits,
-        )),
+        ShotSource::TerminalProbabilities {
+            probs, meas_map, ..
+        } => ShotsResult::from_shots(sample_shots(&probs, &meas_map, bits, num_shots, seed), bits),
         ShotSource::StabilizerRank => {
-            stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)
+            stabilizer_rank::run_stabilizer_rank_shots(circuit, num_shots, seed)?
         }
-        ShotSource::PerShot => run_shots_per_shot(kind, circuit, num_shots, seed),
-    }
+        ShotSource::PerShot => unreachable!("handled above"),
+    };
+    Ok(result.with_metadata(metadata))
 }
 
 /// Run `circuit` once per shot, which mid-circuit measurements force.
@@ -2163,8 +2373,10 @@ fn run_shots_per_shot(
     if has_temporal_clifford_opportunity(&kind, circuit) {
         if decompose.is_none() {
             if let Some(tc) = plan_temporal_clifford(&kind, circuit) {
-                return collect_shots(circuit, num_shots, seed, |shot_seed| {
-                    Ok(run_temporal_clifford(&tc, shot_seed, false)?.classical_bits)
+                let route = ResolvedBackend::Statevector;
+                return collect_shots(circuit, num_shots, seed, route, |shot_seed| {
+                    let outcome = run_temporal_clifford(&tc, shot_seed, false)?;
+                    Ok((outcome.classical_bits, outcome.metadata))
                 });
             }
         }
@@ -2172,8 +2384,10 @@ fn run_shots_per_shot(
         // full-pipeline route; the prefix spans blocks that decomposition
         // would otherwise split.
         let opts = SimOptions::classical_only();
-        return collect_shots(circuit, num_shots, seed, |shot_seed| {
-            Ok(run_with_internal(kind.clone(), circuit, shot_seed, opts)?.classical_bits)
+        let route = resolve_backend(&kind, circuit, has_partial_independence).resolved();
+        return collect_shots(circuit, num_shots, seed, route, |shot_seed| {
+            let outcome = run_with_internal(kind.clone(), circuit, shot_seed, opts)?;
+            Ok((outcome.classical_bits, outcome.metadata))
         });
     }
 
@@ -2198,40 +2412,58 @@ fn run_shots_per_shot(
             })
             .collect();
 
-        collect_shots(circuit, num_shots, seed, |shot_seed| {
-            let result = run_decomposed_prefused(
-                &block_plans,
-                comps,
-                &partitions,
-                &fused_blocks,
-                shot_seed,
-                &opts,
-                circuit,
-            )?;
-            Ok(result.classical_bits)
-        })
+        collect_shots(
+            circuit,
+            num_shots,
+            seed,
+            ResolvedBackend::Decomposed,
+            |shot_seed| {
+                let result = run_decomposed_prefused(
+                    &block_plans,
+                    comps,
+                    &partitions,
+                    &fused_blocks,
+                    shot_seed,
+                    &opts,
+                    circuit,
+                )?;
+                Ok((result.classical_bits, result.metadata))
+            },
+        )
     } else {
         let plan = resolve_backend(&kind, circuit, has_partial_independence);
         let fused = crate::circuit::fusion::fuse_circuit(circuit, plan.supports_fused());
 
-        collect_shots(circuit, num_shots, seed, |shot_seed| {
+        collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
             let mut backend = plan.build(shot_seed);
-            Ok(execute_circuit(&mut *backend, &fused, &opts)?.classical_bits)
+            let outcome = execute_circuit(&mut *backend, &fused, &opts)?;
+            Ok((outcome.classical_bits, outcome.metadata))
         })
     }
 }
 
+/// Each shot evolves its own state, so `shot` returns the provenance of its own
+/// run and the ensemble keeps the weakest claim across them. `route` names the
+/// engine for a zero-shot request, which runs nothing to read provenance off.
 fn collect_shots(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
-    mut shot: impl FnMut(u64) -> Result<Vec<bool>>,
+    route: ResolvedBackend,
+    mut shot: impl FnMut(u64) -> Result<(Vec<bool>, RunMetadata)>,
 ) -> Result<ShotsResult> {
     let mut shots = Vec::with_capacity(num_shots);
+    let mut metadata = RunMetadata::exact(route);
     for i in 0..num_shots {
-        shots.push(shot(seed.wrapping_add(i as u64))?);
+        let (bits, shot_metadata) = shot(seed.wrapping_add(i as u64))?;
+        if i == 0 {
+            metadata = shot_metadata;
+        } else {
+            metadata.weaken_with(&shot_metadata);
+        }
+        shots.push(bits);
     }
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
 /// Family choice for auto-routed non-Pauli noise trajectories. Restricted to
@@ -2267,6 +2499,8 @@ pub(crate) fn run_shots_with_noise(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    noise_model.validate_for(circuit)?;
+
     // Trajectory execution runs shots on Rayon worker threads, whose
     // scheduling order differs per rank. Per-shot distributed backends would
     // issue collectives out of lockstep and deadlock or corrupt exchanges.
@@ -2286,7 +2520,8 @@ pub(crate) fn run_shots_with_noise(
         return Ok(ShotsResult::from_shots(
             sample_exact_noisy_shots(&probs, circuit, noise_model, num_shots, seed),
             circuit.num_classical_bits,
-        ));
+        )
+        .with_metadata(RunMetadata::exact(ResolvedBackend::DensityMatrix)));
     }
 
     if !kind.supports_noisy_per_shot() {
@@ -2371,6 +2606,7 @@ pub(crate) fn run_shots_with_noise(
     } else {
         resolve_backend(&kind, circuit, false)
     };
+    let route = plan.resolved();
     trajectory::run_trajectories(
         |s| plan.build(s),
         circuit,
@@ -2378,6 +2614,7 @@ pub(crate) fn run_shots_with_noise(
         num_shots,
         seed,
         plan.is_gpu(),
+        route,
     )
 }
 

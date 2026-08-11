@@ -998,10 +998,11 @@ fn sample_terminal_mps_branches(
         }
         shots.push(classical_bits);
     }
-    Ok(super::ShotsResult::from_shots(
-        shots,
-        circuit.num_classical_bits,
-    ))
+    Ok(
+        super::ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
+            super::RunMetadata::exact(super::ResolvedBackend::StabilizerRank),
+        ),
+    )
 }
 
 fn sample_mps_branches_online(
@@ -1020,10 +1021,11 @@ fn sample_mps_branches_online(
         }
         shots.push(classical_bits);
     }
-    Ok(super::ShotsResult::from_shots(
-        shots,
-        circuit.num_classical_bits,
-    ))
+    Ok(
+        super::ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
+            super::RunMetadata::exact(super::ResolvedBackend::StabilizerRank),
+        ),
+    )
 }
 
 /// Shot sampling on a Clifford+T circuit.

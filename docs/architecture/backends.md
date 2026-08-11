@@ -152,6 +152,27 @@ terminal: the mixture is evolved once and observables, marginals, probabilities,
 shots all read that one evolution. See [Noise across the terminals](./engine.md) for
 what that route accepts and what stays on trajectory averaging.
 
+## What a backend reports about its own result
+
+Three `Backend` methods carry provenance onto every result: `resolved` names the
+engine, `exactness` says whether its representation can discard state weight and
+how much this run discarded, and `placement` says whether the state lived on the
+device. All three have defaults, so an out-of-tree backend compiles unchanged and
+is named by `Backend::name`.
+
+These are reports, not predictions. `exactness` is read after the circuit has
+been applied, so the MPS bound reflects the singular values this run actually
+discarded, and `placement` reflects where the amplitudes ended up after any
+device fallback. The MPS accumulates discarded weight per SVD and returns
+`1 - total` as a fidelity lower bound; the sum is over relative discarded
+weights, so the bound is conservative.
+
+The decomposed route runs one backend per independent block and merges: its
+exactness is the weakest of the parts, its fidelity bound is the product, and its
+placement is `Device` only when every block was. Per-shot routes evolve one state
+per shot and keep the weakest claim across them, with the bound a minimum rather
+than a product.
+
 The [GPU backend](../guides/gpu.md) is documented as a user guide. The distributed
 statevector backend is covered in the
 [Capability and Support Matrix](../guides/capabilities.md).

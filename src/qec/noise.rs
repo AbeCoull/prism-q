@@ -17,10 +17,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 #[derive(Clone)]
-struct QecDeferredNoiseEvent {
-    channel: QecNoise,
-    targets: Vec<usize>,
-    position: usize,
+pub(super) struct QecDeferredNoiseEvent {
+    pub(super) channel: QecNoise,
+    pub(super) targets: Vec<usize>,
+    pub(super) position: usize,
 }
 
 pub(super) struct QecDeferredProgram {
@@ -317,7 +317,9 @@ fn push_density_matrix_noise_events(
     }
 }
 
-fn lower_qec_program_to_deferred_circuit(program: &QecProgram) -> Result<QecDeferredProgram> {
+pub(super) fn lower_qec_program_to_deferred_circuit(
+    program: &QecProgram,
+) -> Result<QecDeferredProgram> {
     lower_qec_program_to_deferred_circuit_inner(program, false)
 }
 
@@ -559,6 +561,23 @@ fn qec_deferred_noise_target(
 }
 
 fn compile_qec_noise_sensitivity(deferred: &QecDeferredProgram) -> Result<QecNoiseSensitivity> {
+    let mut events = QecNoiseSensitivity::new();
+    walk_qec_noise_sensitivity(deferred, |event, x_packed, z_packed| {
+        push_qec_noise_sensitivity_event(event, x_packed, z_packed, &mut events);
+    })?;
+    Ok(events)
+}
+
+/// Walk the deferred circuit backward and visit every noise event with the
+/// record-sensitivity masks at its anchor. `x_packed[q]` / `z_packed[q]` hold
+/// the X / Z support on qubit `q` of each record's back-propagated Pauli, one
+/// bit per measurement record: a Z fault at the anchor flips the records in
+/// `x_packed[q]`, an X fault those in `z_packed[q]`, a Y fault the XOR of the
+/// two. Events are visited in reverse circuit order.
+pub(super) fn walk_qec_noise_sensitivity(
+    deferred: &QecDeferredProgram,
+    mut visit: impl FnMut(&QecDeferredNoiseEvent, &[Vec<u64>], &[Vec<u64>]),
+) -> Result<()> {
     let num_measurements = deferred.measurement_qubits.len();
     let m_words = num_measurements.div_ceil(64);
     let mut x_packed = vec![vec![0u64; m_words]; deferred.circuit.num_qubits];
@@ -585,10 +604,9 @@ fn compile_qec_noise_sensitivity(deferred: &QecDeferredProgram) -> Result<QecNoi
         noise_by_position[event.position].push(event.clone());
     }
 
-    let mut events = QecNoiseSensitivity::new();
     for gate_position in (0..gate_count).rev() {
         for event in &noise_by_position[gate_position + 1] {
-            push_qec_noise_sensitivity_event(event, &x_packed, &z_packed, &mut events);
+            visit(event, &x_packed, &z_packed);
         }
         let (gate, targets) = match &deferred.circuit.instructions[gate_position] {
             Instruction::Gate { gate, targets } => (gate, targets.as_slice()),
@@ -610,10 +628,10 @@ fn compile_qec_noise_sensitivity(deferred: &QecDeferredProgram) -> Result<QecNoi
     }
 
     for event in &noise_by_position[0] {
-        push_qec_noise_sensitivity_event(event, &x_packed, &z_packed, &mut events);
+        visit(event, &x_packed, &z_packed);
     }
 
-    Ok(events)
+    Ok(())
 }
 
 fn push_qec_noise_sensitivity_event(
@@ -761,7 +779,12 @@ fn apply_qec_pair_noise_branch(
     );
 }
 
-fn append_qec_pauli_noise_effect(branch: &mut [u64], pauli: usize, x_flip: &[u64], z_flip: &[u64]) {
+pub(super) fn append_qec_pauli_noise_effect(
+    branch: &mut [u64],
+    pauli: usize,
+    x_flip: &[u64],
+    z_flip: &[u64],
+) {
     match pauli {
         0 => {}
         1 => xor_words(branch, z_flip),

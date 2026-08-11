@@ -81,3 +81,35 @@ def test_lookback_zero_raises():
 
     with pytest.raises(prism_q.PrismError):
         RecordRef.lookback(0)
+
+
+def test_detector_error_model_matches_program():
+    qp = QecProgram(3)
+    qp.noise(QecNoise.x_error(0.05), [0, 1, 2])
+    r0 = qp.measure_pauli_product([(QecBasis.Z, 0), (QecBasis.Z, 1)])
+    r1 = qp.measure_pauli_product([(QecBasis.Z, 1), (QecBasis.Z, 2)])
+    qp.detector([RecordRef.absolute(r0)], coords=[0.5, 0.0])
+    qp.detector([RecordRef.absolute(r1)])
+    m0 = qp.measure_z(0)
+    qp.observable_include(0, [RecordRef.absolute(m0)])
+
+    dem = qp.detector_error_model()
+    assert dem.num_detectors == qp.num_detectors == 2
+    assert dem.num_observables == qp.num_observables == 1
+    # X on qubit 0 flips check 0 and the observable, X on qubit 1 both checks,
+    # X on qubit 2 check 1.
+    assert dem.num_mechanisms == 3
+    probs = dem.probabilities()
+    assert probs.dtype == np.float64
+    assert np.allclose(probs, 0.05)
+    det = dem.detector_matrix()
+    obs = dem.observable_matrix()
+    assert det.dtype == np.bool_ and det.shape == (2, 3)
+    assert obs.shape == (1, 3)
+    assert det.tolist() == [[True, True, False], [False, True, True]]
+    assert obs.tolist() == [[True, False, False]]
+    assert dem.detector_coords() == [[0.5, 0.0], []]
+    text = dem.to_text()
+    assert text.count("error(") == 3
+    assert "detector(0.5, 0) D0" in text
+    assert "logical_observable L0" in text

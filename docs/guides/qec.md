@@ -61,6 +61,26 @@ grammar, and [QEC program execution](../architecture/qec-programs.md) for the
 runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.
 ```
 
+## Detector error model export
+
+Matching and belief-propagation decoders consume an error model, not raw
+detector samples. `QecProgram::detector_error_model` derives one from the
+program's noise annotations, detectors, and observables, and `to_text` renders
+it in the common detector error model text format that external decoders read:
+
+```rust
+let model = program.detector_error_model().unwrap();
+std::fs::write("memory_d3.dem", model.to_text()).unwrap();
+```
+
+Each mechanism carries a probability and the detector and observable indices
+it flips; detector coordinates pass through from the program. In Python the
+model also exposes `probabilities()`, `detector_matrix()`, and
+`observable_matrix()`, the check-matrix triple that in-process decoder
+libraries accept directly. See
+[QEC program execution](../architecture/qec-programs.md) for the derivation
+semantics and the emitted grammar.
+
 ## Homological sampling
 
 `run_shots_homological` and `ErrorChainComplex` model the GF(2) chain complex over noise

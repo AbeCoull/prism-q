@@ -210,6 +210,92 @@ two-qubit depolarizing channel on each target pair. How the QEC noise path
 relates to the circuit-level noisy engines is covered by the noisy engine
 routing section of the [compiled samplers](./samplers.md) page.
 
+## Detector error model export
+
+`QecProgram::detector_error_model` derives a `DetectorErrorModel`: the set of
+independent error mechanisms implied by the program's noise annotations,
+detectors, and observables. Matching and belief-propagation decoders consume
+this model rather than raw detector samples.
+
+The derivation reuses the noisy data flow above. The deferred lowering
+produces the noiseless circuit and the positioned noise events, and the same
+backward Pauli propagation supplies, at every event position, the set of
+measurement records each single-Pauli fault flips. Every annotation then
+expands into its fault branches (one per target for `X_ERROR` and `Z_ERROR`,
+three per target for `DEPOLARIZE1`, fifteen per pair for `DEPOLARIZE2`), and
+each branch's record mask is projected through the detector and observable
+rows to its symptom: the detectors and observables it flips.
+
+Branches merge into mechanisms under two rules, at fault-site granularity
+(one target of a single-qubit annotation, or one target pair of
+`DEPOLARIZE2`):
+
+- Branches at one fault site are mutually exclusive, so branches with the
+  same symptom sum. A `DEPOLARIZE1` site whose X and Y branches flip the same
+  records yields one mechanism at exactly `2p/3`.
+- Distinct fault sites are independent, distinct targets of one annotation
+  included, so mechanisms with the same symptom compose as
+  `p = p1(1-p2) + p2(1-p1)`.
+
+Faults that flip no detector and no observable are omitted. Mechanisms keep
+program order (the position of the annotation that first produced each
+symptom). Mechanisms are independent in the model even where the underlying
+branches were exclusive, so model statistics agree with the sampler to second
+order in the branch probabilities; validation compares at tolerances, never
+exactly.
+
+Consequences of the sampler semantics carry over unchanged: a measurement
+error argument (`M(p)`) is already a pre-measurement Pauli fault, so it
+appears as an ordinary mechanism on that record's detectors; noise on an
+already-measured qubit contributes nothing; and a `DEPOLARIZE2` pair with one
+measured target enters as the exact `DEPOLARIZE1(0.8p)` marginal on the
+survivor. Non-Clifford gates and reuse of a measured qubit without reset are
+rejected, as on the compiled sampling path.
+
+Hypergraph mechanisms (more than two detectors, as `DEPOLARIZE2` produces)
+stay intact; the model does not decompose them. Decoders that accept a check
+matrix consume them directly. A matching decoder needs a graphlike
+decomposition, which is deliberately never applied silently.
+
+### Text format
+
+`DetectorErrorModel::to_text` renders the model in the common detector error
+model text format that external matching and belief-propagation decoders
+read. The emitted subset:
+
+```text
+error(<p>) D<i> ... L<j> ...
+detector D<i>
+detector(<c0>, <c1>, ...) D<i>
+logical_observable L<j>
+```
+
+One `error` line per mechanism in mechanism order, carrying its probability
+and the `D`-prefixed detector indices and `L`-prefixed observable indices it
+flips, both ascending. One `detector` line per detector in index order, with
+the coordinates of the program's detector op when present. One
+`logical_observable` line per observable slot. Indices are zero-based and
+dense; probabilities print with enough digits to round-trip exactly. Flat
+models only: no repeat blocks, no coordinate shifts, no decomposition
+suggestions.
+
+Example, one syndrome round of the three-qubit repetition memory under
+`X_ERROR(0.05)` on the data qubits:
+
+```text
+error(0.05) D0
+error(0.05) D0 D1
+error(0.05) D1
+detector D0
+detector D1
+```
+
+In Python, `QecProgram.detector_error_model()` returns the model with
+`probabilities()` (float64), `detector_matrix()` and `observable_matrix()`
+(bool, detectors or observables by mechanisms), `detector_coords()`, and
+`to_text()`. The matrix triple feeds check-matrix decoder constructors
+directly, with no file in between.
+
 ## Expectation values
 
 `EXP_VAL(c) P1*...*Pk` estimates `c * <P>` for the Pauli product `P` in the

@@ -85,10 +85,11 @@ pub use distributed::{DistributedContext, RankComm, SerialComm};
 pub use error::{PrismError, Result};
 pub use gates::{BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData};
 pub use qec::{
-    QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise, QecObservableEstimate,
-    QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, QecSampleResult,
-    QecTStrategy, compile_qec_program_rows, parse_qec_program, run_qec_program,
-    run_qec_program_reference, run_qec_program_spd_rerouted, run_qec_program_with_strategy,
+    DetectorErrorModel, ErrorMechanism, QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise,
+    QecObservableEstimate, QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram,
+    QecRecordRef, QecSampleResult, QecTStrategy, compile_qec_program_rows, parse_qec_program,
+    run_qec_program, run_qec_program_reference, run_qec_program_spd_rerouted,
+    run_qec_program_with_strategy,
 };
 #[cfg(feature = "bench-internal")]
 pub use qec::{QecProfiledCounts, QecProfiledSampler, compile_qec_profiled_sampler};

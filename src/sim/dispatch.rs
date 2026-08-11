@@ -28,6 +28,7 @@ use crate::backend::distributed_statevector::DistributedStatevectorBackend;
 #[cfg(feature = "distributed")]
 use crate::distributed::DistributedContext;
 
+use super::metadata::ResolvedBackend;
 use super::{RunOutcome, try_backend_probabilities};
 
 pub(super) const AUTO_MPS_BOND_DIM: usize = 256;
@@ -522,6 +523,24 @@ pub(super) enum BackendPlan {
 }
 
 impl BackendPlan {
+    /// Engine this plan builds, for a shot request that runs the plan zero
+    /// times and so has no backend to read provenance off.
+    pub(super) fn resolved(&self) -> ResolvedBackend {
+        match self {
+            BackendPlan::ProductState => ResolvedBackend::ProductState,
+            BackendPlan::Sparse => ResolvedBackend::Sparse,
+            BackendPlan::TensorNetwork => ResolvedBackend::TensorNetwork,
+            BackendPlan::Factored => ResolvedBackend::Factored,
+            BackendPlan::FactoredStabilizer => ResolvedBackend::FactoredStabilizer,
+            BackendPlan::Mps { .. } => ResolvedBackend::Mps,
+            BackendPlan::Stabilizer { .. } => ResolvedBackend::Stabilizer,
+            BackendPlan::Statevector { .. } => ResolvedBackend::Statevector,
+            BackendPlan::DensityMatrix => ResolvedBackend::DensityMatrix,
+            #[cfg(feature = "distributed")]
+            BackendPlan::Distributed(_) => ResolvedBackend::Distributed,
+        }
+    }
+
     pub(super) fn build(&self, seed: u64) -> Box<dyn Backend> {
         match self {
             BackendPlan::ProductState => Box::new(ProductStateBackend::new(seed)),
@@ -598,6 +617,48 @@ pub(super) enum ExecutionPlan {
     StabilizerRank,
     StochasticPauli { num_samples: usize },
     DeterministicPauli { epsilon: f64, max_terms: usize },
+}
+
+/// Name the engine `kind` resolves to when that engine can discard state
+/// weight or estimate by sampling, `None` when the route is exact.
+///
+/// Resolved from the circuit rather than read off a finished run, so
+/// [`Simulate::require_exact`] rejects before paying for the state it would
+/// throw away.
+///
+/// [`Simulate::require_exact`]: crate::sim::Simulate::require_exact
+pub(super) fn approximate_route_name(
+    kind: &BackendKind,
+    circuit: &Circuit,
+) -> Option<&'static str> {
+    match kind {
+        BackendKind::Mps { .. } => return Some("Mps"),
+        BackendKind::StochasticPauli { .. } => return Some("StochasticPauli"),
+        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+            if *epsilon > 0.0 || *max_terms > 0 {
+                return Some("DeterministicPauli");
+            }
+            return None;
+        }
+        _ => {}
+    }
+    if !kind.is_auto() {
+        return None;
+    }
+    // Sparse stabilizer-rank approximation is chosen ahead of the family tree,
+    // so the tree below never sees it.
+    if circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
+        && !crate::sim::has_nonunitary_or_classical_ops(circuit)
+        && crate::sim::auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_APPROX)
+            .is_some_and(|t_count| t_count > MAX_AUTO_T_COUNT_EXACT)
+    {
+        return Some("StabilizerRank");
+    }
+    let (_, has_partial_independence) = crate::sim::analyze_independence(circuit);
+    match select_auto_backend_choice(circuit, has_partial_independence) {
+        Family::Mps => Some("Mps"),
+        _ => None,
+    }
 }
 
 pub(super) fn plan_for_family(
@@ -823,6 +884,7 @@ pub(super) fn run_temporal_clifford(
     Ok(RunOutcome {
         classical_bits: sv.classical_results().to_vec(),
         probabilities,
+        metadata: crate::sim::backend_metadata(&sv),
     })
 }
 

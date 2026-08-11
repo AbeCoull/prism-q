@@ -816,6 +816,10 @@ impl Backend for FactoredStabilizerBackend {
         "factored-stabilizer"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::FactoredStabilizer
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         self.qubit_to_sub.clear();

@@ -23,7 +23,7 @@ use gate::PyGate;
 use gpu::PyGpuContext;
 use noise::{PyNoiseChannel, PyNoiseModel};
 use qec::{PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef};
-use sim::{PyCountsResult, PyRunOutcome, PyShotsResult, PySimulation};
+use sim::{PyCountsResult, PyRunMetadata, PyRunOutcome, PyShotsResult, PySimulation};
 
 #[pymodule]
 fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -41,6 +41,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRunOutcome>()?;
     m.add_class::<PyShotsResult>()?;
     m.add_class::<PyCountsResult>()?;
+    m.add_class::<PyRunMetadata>()?;
     m.add_class::<PyQecBasis>()?;
     m.add_class::<PyRecordRef>()?;
     m.add_class::<PyQecNoise>()?;

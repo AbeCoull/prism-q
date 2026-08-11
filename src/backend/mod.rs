@@ -61,6 +61,7 @@ use num_complex::Complex64;
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::sim::unified_pauli::PauliTerm;
+use crate::sim::{Exactness, Placement, ResolvedBackend};
 
 /// Qubit count at which dense amplitude kernels switch to Rayon; the factored
 /// backend applies it per sub-state, the density matrix backend to its
@@ -306,6 +307,25 @@ impl BasisSamples {
 pub trait Backend {
     /// Human-readable backend name (for error messages, logging, and benchmarks).
     fn name(&self) -> &'static str;
+
+    /// Which engine this is, for the provenance attached to every result. The
+    /// default names an out-of-tree backend by its [`Backend::name`].
+    fn resolved(&self) -> ResolvedBackend {
+        ResolvedBackend::Other(self.name())
+    }
+
+    /// Whether this representation can discard state weight, and how much it
+    /// discarded on the run just executed. Called once per run, after the
+    /// circuit has been applied; the default reports an exact representation.
+    fn exactness(&self) -> Exactness {
+        Exactness::Exact
+    }
+
+    /// Where the state lived during the run. Only the statevector has a device
+    /// path, and only when the `gpu` feature is on.
+    fn placement(&self) -> Placement {
+        Placement::Host
+    }
 
     /// Initialize (or reset) state for a circuit with the given dimensions.
     ///

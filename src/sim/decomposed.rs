@@ -7,8 +7,8 @@ use crate::circuit::Circuit;
 use crate::error::Result;
 
 use super::{
-    BackendKind, FactoredBlock, Probabilities, RunOutcome, SimOptions, dispatch::BackendPlan,
-    execute_circuit,
+    BackendKind, FactoredBlock, Probabilities, RunMetadata, RunOutcome, SimOptions,
+    dispatch::BackendPlan, execute_circuit,
 };
 
 pub(super) const MIN_DECOMPOSITION_QUBITS: usize = 8;
@@ -105,9 +105,11 @@ fn merge_decomposed_results(
 ) -> Result<RunOutcome> {
     let mut factored_blocks: Vec<FactoredBlock> = Vec::new();
     let mut merged_classical = vec![false; num_classical_bits];
+    let mut block_metadata: Vec<RunMetadata> = Vec::with_capacity(partitions.len());
 
     for (i, result) in results.into_iter().enumerate() {
         let result = result?;
+        block_metadata.push(result.metadata);
         let (_, ref qubit_map, ref classical_map) = partitions[i];
 
         for (local_idx, &global_idx) in classical_map.iter().enumerate() {
@@ -138,6 +140,7 @@ fn merge_decomposed_results(
     Ok(RunOutcome {
         classical_bits: merged_classical,
         probabilities,
+        metadata: RunMetadata::decomposed(block_metadata),
     })
 }
 

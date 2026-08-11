@@ -1342,6 +1342,10 @@ impl Backend for StabilizerBackend {
         "stabilizer"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::Stabilizer
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         let n = num_qubits;
         let nw = n.div_ceil(64);

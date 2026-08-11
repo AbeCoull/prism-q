@@ -665,6 +665,18 @@ impl Backend for StatevectorBackend {
         "statevector"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::Statevector
+    }
+
+    fn placement(&self) -> crate::sim::Placement {
+        if self.is_gpu_resident() {
+            crate::sim::Placement::Device
+        } else {
+            crate::sim::Placement::Host
+        }
+    }
+
     fn supports_qft_block(&self) -> bool {
         if !qft_block_enabled() {
             return false;

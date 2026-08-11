@@ -3117,10 +3117,11 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
     let packed = sampler.sample_bulk_packed(num_shots);
-    Ok(ShotsResult::from_shots(
-        packed.to_shots(),
-        circuit.num_classical_bits,
-    ))
+    Ok(
+        ShotsResult::from_shots(packed.to_shots(), circuit.num_classical_bits).with_metadata(
+            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer),
+        ),
+    )
 }
 
 /// Like [`run_shots_compiled`] but routes BTS sampling through the GPU when the
@@ -3138,8 +3139,9 @@ pub fn run_shots_compiled_with_gpu(
 ) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?.with_gpu(context);
     let packed = sampler.sample_bulk_packed(num_shots);
-    Ok(ShotsResult::from_shots(
-        packed.to_shots(),
-        circuit.num_classical_bits,
-    ))
+    Ok(
+        ShotsResult::from_shots(packed.to_shots(), circuit.num_classical_bits).with_metadata(
+            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer),
+        ),
+    )
 }

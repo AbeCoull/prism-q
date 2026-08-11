@@ -11,9 +11,9 @@ use num_complex::Complex64;
 use numpy::PyArray1;
 use prism_q::backend::Backend;
 use prism_q::{
-    BackendKind, Circuit, CountsResult, MarginalsResult, NoiseModel, ParamLink, Parameters,
-    PauliAxis, PauliTerm, RunOutcome, ShotsResult, StatevectorBackend, bitstring,
-    simulate as core_simulate,
+    BackendKind, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel, ParamLink,
+    Parameters, PauliAxis, PauliTerm, Placement, RunMetadata, RunOutcome, ShotsResult,
+    StatevectorBackend, bitstring, simulate as core_simulate,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -36,6 +36,7 @@ pub struct PySimulation {
     kind: Option<BackendKind>,
     noise: Option<Py<PyNoiseModel>>,
     initial_state: Option<Vec<Complex64>>,
+    require_exact: bool,
 }
 
 #[pymethods]
@@ -49,6 +50,17 @@ impl PySimulation {
     /// Select an explicit backend.
     fn backend(mut slf: PyRefMut<'_, Self>, kind: PyBackendKind) -> PyRefMut<'_, Self> {
         slf.kind = Some(kind.0);
+        slf
+    }
+
+    /// Reject a route that could return an approximate answer instead of
+    /// taking it and reporting it through `result.metadata`.
+    ///
+    /// Automatic dispatch sends a circuit past the statevector cap to a
+    /// bounded-bond MPS, which is the only route those circuits have. Call this
+    /// when an approximate answer is worse than no answer.
+    fn require_exact(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
+        slf.require_exact = true;
         slf
     }
 
@@ -83,11 +95,15 @@ impl PySimulation {
     fn run(&self, py: Python<'_>) -> PyPrismResult<PyRunOutcome> {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
+        let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
         let outcome: RunOutcome = py.detach(|| {
             let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
             }
@@ -106,11 +122,15 @@ impl PySimulation {
     fn shots(&self, py: Python<'_>, num_shots: usize) -> PyPrismResult<PyShotsResult> {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
+        let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
         let result: ShotsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
             }
@@ -129,11 +149,15 @@ impl PySimulation {
     fn sample_counts(&self, py: Python<'_>, num_shots: usize) -> PyPrismResult<PyCountsResult> {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
+        let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
         let result: CountsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
             }
@@ -148,6 +172,7 @@ impl PySimulation {
         Ok(PyCountsResult {
             counts: result.counts,
             num_classical_bits: result.num_classical_bits,
+            metadata: PyRunMetadata::new(result.metadata),
         })
     }
 
@@ -155,11 +180,15 @@ impl PySimulation {
     fn marginals(&self, py: Python<'_>) -> PyPrismResult<Vec<(f64, f64)>> {
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
+        let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
         let result: MarginalsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
             }
@@ -229,10 +258,14 @@ impl PySimulation {
         let params = Parameters::from_links(links, num_slots);
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
+        let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let start = self.initial_state.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
             }
@@ -261,11 +294,15 @@ impl PySimulation {
         let observables = parse_observables(observables)?;
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
+        let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
         let values = py.detach(|| {
             let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
             if let Some(k) = &kind {
                 sim = sim.backend(k.clone());
             }
@@ -358,6 +395,7 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
         kind: None,
         noise: None,
         initial_state: None,
+        require_exact: false,
     }
 }
 
@@ -380,11 +418,81 @@ fn counts_to_dict<'py>(
     Ok(dict)
 }
 
+/// How a result was produced: which engine ran, whether the answer is exact,
+/// and where the state lived.
+#[pyclass(name = "RunMetadata", module = "prism_q", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyRunMetadata {
+    inner: RunMetadata,
+}
+
+impl PyRunMetadata {
+    fn new(inner: RunMetadata) -> Self {
+        Self { inner }
+    }
+}
+
+#[pymethods]
+impl PyRunMetadata {
+    /// Engine name after automatic dispatch, for example `"Mps"`.
+    #[getter]
+    fn backend(&self) -> String {
+        format!("{:?}", self.inner.backend)
+    }
+
+    /// False when the engine that ran can discard state weight or estimate by
+    /// sampling. Marks the route rather than the run; `fidelity_lower_bound`
+    /// reports what this run discarded.
+    #[getter]
+    fn is_exact(&self) -> bool {
+        self.inner.is_exact()
+    }
+
+    /// Lower bound on the fidelity of the produced state. `None` when the
+    /// result is exact or the engine reports no bound; 1.0 when an approximate
+    /// engine discarded nothing.
+    #[getter]
+    fn fidelity_lower_bound(&self) -> Option<f64> {
+        self.inner.fidelity_lower_bound()
+    }
+
+    /// `"host"` or `"device"`.
+    #[getter]
+    fn placement(&self) -> &'static str {
+        match self.inner.placement {
+            Placement::Host => "host",
+            Placement::Device => "device",
+        }
+    }
+
+    /// Shots drawn, `None` for an analytic result.
+    #[getter]
+    fn shots(&self) -> Option<usize> {
+        self.inner.shots
+    }
+
+    fn __repr__(&self) -> String {
+        let exact = match self.inner.exactness {
+            Exactness::Exact => "exact".to_string(),
+            Exactness::Approximate {
+                fidelity_lower_bound: Some(bound),
+            } => format!("approximate(fidelity>={bound:.6})"),
+            Exactness::Approximate { .. } => "approximate".to_string(),
+        };
+        format!(
+            "RunMetadata(backend={}, {exact}, placement={})",
+            self.backend(),
+            self.placement()
+        )
+    }
+}
+
 /// Result of a single run: classical bits and the probability distribution.
 #[pyclass(name = "RunOutcome", module = "prism_q")]
 pub struct PyRunOutcome {
     classical_bits: Vec<bool>,
     probabilities: Option<Vec<f64>>,
+    metadata: PyRunMetadata,
 }
 
 impl PyRunOutcome {
@@ -392,6 +500,7 @@ impl PyRunOutcome {
         Self {
             classical_bits: outcome.classical_bits,
             probabilities: outcome.probabilities.map(|p| p.to_vec()),
+            metadata: PyRunMetadata::new(outcome.metadata),
         }
     }
 }
@@ -410,6 +519,11 @@ impl PyRunOutcome {
         self.probabilities
             .as_ref()
             .map(|v| f64_array(py, v.clone()))
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
     }
 
     fn __repr__(&self) -> String {
@@ -453,6 +567,11 @@ impl PyShotsResult {
         counts_to_dict(py, &self.inner.counts(), self.inner.num_classical_bits())
     }
 
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        PyRunMetadata::new(self.inner.metadata.clone())
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "ShotsResult(num_shots={}, num_classical_bits={})",
@@ -467,6 +586,7 @@ impl PyShotsResult {
 pub struct PyCountsResult {
     counts: HashMap<Vec<u64>, u64>,
     num_classical_bits: usize,
+    metadata: PyRunMetadata,
 }
 
 #[pymethods]
@@ -483,6 +603,11 @@ impl PyCountsResult {
     /// least-significant qubit, so keys read reversed relative to Qiskit.
     fn counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         counts_to_dict(py, &self.counts, self.num_classical_bits)
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
     }
 
     fn __repr__(&self) -> String {

@@ -585,6 +585,10 @@ impl Backend for FactoredBackend {
         "factored"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::Factored
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         #[cfg(feature = "parallel")]
         crate::backend::init_thread_pool();

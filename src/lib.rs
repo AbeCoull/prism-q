@@ -118,9 +118,10 @@ pub use sim::unified_pauli::{
     run_spp_observable,
 };
 pub use sim::{
-    BackendKind, CountsResult, FactoredBlock, MarginalsResult, Probabilities, RunOutcome, Seeded,
-    ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values, run_on, run_on_state,
-    run_qasm, simulate,
+    BackendKind, CountsResult, Exactness, ExpectationResult, FactoredBlock, MarginalsResult,
+    Placement, Probabilities, ResolvedBackend, RunMetadata, RunOutcome, Seeded, ShotsResult,
+    Simulate, Unseeded, bitstring, run_expectation_values, run_on, run_on_state, run_qasm,
+    simulate,
 };
 
 #[cfg(feature = "gpu")]

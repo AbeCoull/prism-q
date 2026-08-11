@@ -1224,6 +1224,10 @@ impl Backend for TensorNetworkBackend {
         "tensornetwork"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::TensorNetwork
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         self.tensors = Vec::new();

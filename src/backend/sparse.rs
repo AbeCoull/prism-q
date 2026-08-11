@@ -446,6 +446,10 @@ impl Backend for SparseBackend {
         "sparse"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::Sparse
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         self.state.clear();

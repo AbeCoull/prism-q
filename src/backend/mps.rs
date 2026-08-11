@@ -15,7 +15,8 @@
 //!
 //! - Each site tensor: contiguous `Vec<Complex64>` of length bond_left × 2 × bond_right.
 //! - Element A[α, i, β] at index: `α * (2 * bond_right) + i * bond_right + β`.
-//! - Bond dimension capped at `max_bond_dim` (configurable, default 64).
+//! - Bond dimension capped at `max_bond_dim`, which has no default: `MpsBackend::new`
+//!   takes it, and automatic dispatch passes 256.
 //! - SVD truncation uses relative tolerance (default 1e-12) AND bond dim cap.
 //!
 //! # When to prefer this backend
@@ -504,7 +505,6 @@ pub struct MpsBackend {
     site_to_logical: Vec<usize>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
-    track_truncation: bool,
     truncation_discarded: f64,
 }
 
@@ -520,7 +520,6 @@ impl MpsBackend {
             site_to_logical: Vec::new(),
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
-            track_truncation: false,
             truncation_discarded: 0.0,
         }
     }
@@ -532,28 +531,28 @@ impl MpsBackend {
         backend
     }
 
-    /// Begin tracking the cumulative SVD-truncation weight, resetting the
-    /// running total to zero. Callers that need to know whether a bounded
-    /// sequence of operations truncated any state weight (for example the CAMPS
-    /// T-gate path, which must reject silent truncation) call this before the
-    /// sequence and read [`Self::truncation_discarded`] after. Tracking is off
-    /// by default so the common simulation path pays only a single branch per
-    /// SVD, not an extra pass over the singular values.
+    /// Zero the cumulative SVD-truncation weight. [`Backend::init`] does this,
+    /// so a caller needs it only to scope the total to a sequence shorter than a
+    /// run: the CAMPS T-gate path, which must reject silent truncation, brackets
+    /// its sequence with this and [`Self::truncation_discarded`].
+    ///
+    /// [`Backend::init`]: crate::backend::Backend::init
     pub fn reset_truncation_tracking(&mut self) {
-        self.track_truncation = true;
         self.truncation_discarded = 0.0;
     }
 
-    /// Cumulative relative state weight discarded by SVD truncation since the
-    /// last [`Self::reset_truncation_tracking`]. Epsilon-threshold truncation
-    /// contributes negligibly (`~svd_epsilon²`); a meaningful value indicates
-    /// the bond-dimension cap discarded real weight.
+    /// Cumulative relative state weight discarded by SVD truncation since
+    /// [`Backend::init`] or the last [`Self::reset_truncation_tracking`].
+    ///
+    /// [`Backend::init`]: crate::backend::Backend::init
+    /// Epsilon-threshold truncation contributes negligibly (`~svd_epsilon²`); a
+    /// meaningful value indicates the bond-dimension cap discarded real weight.
     pub fn truncation_discarded(&self) -> f64 {
         self.truncation_discarded
     }
 
     fn record_truncation(&mut self, singular_values: &[f64], chi_kept: usize) {
-        if !self.track_truncation || chi_kept >= singular_values.len() {
+        if chi_kept >= singular_values.len() {
             return;
         }
         let total: f64 = singular_values.iter().map(|s| s * s).sum();
@@ -2084,8 +2083,19 @@ impl Backend for MpsBackend {
         "mps"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::Mps
+    }
+
+    fn exactness(&self) -> crate::sim::Exactness {
+        crate::sim::Exactness::Approximate {
+            fidelity_lower_bound: Some((1.0 - self.truncation_discarded).max(0.0)),
+        }
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
+        self.truncation_discarded = 0.0;
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         self.sites = (0..num_qubits)
             .map(|_| SiteTensor::new_zero_state())

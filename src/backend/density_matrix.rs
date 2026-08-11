@@ -646,6 +646,10 @@ impl Backend for DensityMatrixBackend {
         "density_matrix"
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::DensityMatrix
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         crate::backend::check_state_allocation(
             "density_matrix",

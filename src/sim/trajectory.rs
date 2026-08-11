@@ -122,6 +122,17 @@ fn apply_phase_damping(
     apply_diagonal_kraus_2op(backend, qubit, gamma, false, rng)
 }
 
+/// Unravel thermal relaxation as the amplitude-damping and phase-damping
+/// composition [`crate::sim::noise::kraus_1q`] lowers it to, so the trajectory
+/// average reproduces `exp(-t/t1)` populations and `exp(-t/t2)` coherences. A
+/// mixture of reset and `Z` cannot: it needs a negative dephasing probability
+/// whenever `t1 < t2 <= 2*t1`.
+///
+/// The composition has four Kraus operators, but every one of them has a
+/// diagonal `Kdagger K`, so the branch probabilities read off `P(1)` alone and
+/// need no reduced density matrix. The two that move population are both
+/// proportional to `|0><1|` and leave the same normalized state, so they merge.
+/// That leaves three branches behind one probability read and one matrix pass.
 fn apply_thermal_relaxation(
     backend: &mut dyn Backend,
     qubit: usize,
@@ -130,29 +141,35 @@ fn apply_thermal_relaxation(
     gate_time: f64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    if t1 <= 0.0 || t2 <= 0.0 || gate_time < 0.0 {
+    if t1 <= 0.0 || t2 <= 0.0 || gate_time <= 0.0 {
         return Ok(());
     }
-    let p_reset = 1.0 - (-gate_time / t1).exp();
-    let p_dephase = if t2 < 2.0 * t1 {
-        1.0 - (-gate_time * (1.0 / t2 - 0.5 / t1)).exp()
-    } else {
-        0.0
-    };
+    let (gad, gpd) = crate::sim::noise::thermal_relaxation_rates(t1, t2, gate_time);
+    let p1 = backend.qubit_probability(qubit)?;
+    let p_relax = gad * p1;
+    let p_dephase = (1.0 - gad) * gpd * p1;
 
+    let zero = Complex64::new(0.0, 0.0);
     let r: f64 = rand::RngExt::random(rng);
-    if r < p_reset {
-        backend.reset(qubit)?;
+    let mat = if r < p_relax {
+        let s = (1.0 / p1).sqrt();
+        [[zero, Complex64::new(s, 0.0)], [zero, zero]]
+    } else if r < p_relax + p_dephase {
+        let s = (1.0 / p1).sqrt();
+        [[zero, zero], [zero, Complex64::new(s, 0.0)]]
     } else {
-        let r2: f64 = rand::RngExt::random(rng);
-        if r2 < p_dephase {
-            backend.apply(&Instruction::Gate {
-                gate: Gate::Z,
-                targets: smallvec![qubit],
-            })?;
+        let denom = 1.0 - p_relax - p_dephase;
+        if denom <= JUMP_EPSILON {
+            return Ok(());
         }
-    }
-    Ok(())
+        let inv = 1.0 / denom.sqrt();
+        let keep = ((1.0 - gad) * (1.0 - gpd)).sqrt() * inv;
+        [
+            [Complex64::new(inv, 0.0), zero],
+            [zero, Complex64::new(keep, 0.0)],
+        ]
+    };
+    backend.apply_1q_matrix(qubit, &mat)
 }
 
 fn apply_two_qubit_depolarizing(
@@ -224,7 +241,7 @@ fn apply_pauli_op(backend: &mut dyn Backend, qubit: usize, op: PauliOp) -> Resul
 
 /// Compute the branch effect `Kdagger K` for a single-qubit Kraus operator.
 #[inline]
-fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
+pub(crate) fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
         [
             k[0][0].conj() * k[0][0] + k[1][0].conj() * k[1][0],
@@ -393,26 +410,34 @@ pub(crate) fn run_trajectories(
     num_shots: usize,
     seed: u64,
     force_serial: bool,
+    route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
     #[cfg(not(feature = "parallel"))]
     let _ = force_serial;
     #[cfg(feature = "parallel")]
     {
         if !force_serial && circuit.num_qubits < MAX_QUBITS_FOR_PAR_SHOTS && num_shots >= 4 {
-            return run_trajectories_par(&backend_factory, circuit, noise, num_shots, seed);
+            return run_trajectories_par(&backend_factory, circuit, noise, num_shots, seed, route);
         }
     }
 
     let mut shots = Vec::with_capacity(num_shots);
+    let mut metadata = crate::sim::RunMetadata::exact(route);
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
         let mut rng = noise_rng(shot_seed);
         let mut backend = backend_factory(shot_seed);
         let result = run_trajectory_shot(backend.as_mut(), circuit, noise, &mut rng)?;
+        let shot_metadata = crate::sim::backend_metadata(backend.as_ref());
+        if i == 0 {
+            metadata = shot_metadata;
+        } else {
+            metadata.weaken_with(&shot_metadata);
+        }
         shots.push(result);
     }
 
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
 #[cfg(feature = "parallel")]
@@ -422,18 +447,30 @@ fn run_trajectories_par(
     noise: &NoiseModel,
     num_shots: usize,
     seed: u64,
+    route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
-    let shots: Result<Vec<Vec<bool>>> = (0..num_shots)
+    let results: Result<Vec<(Vec<bool>, crate::sim::RunMetadata)>> = (0..num_shots)
         .into_par_iter()
         .map(|i| {
             let shot_seed = seed.wrapping_add(i as u64);
             let mut rng = noise_rng(shot_seed);
             let mut backend = backend_factory(shot_seed);
-            run_trajectory_shot(backend.as_mut(), circuit, noise, &mut rng)
+            let bits = run_trajectory_shot(backend.as_mut(), circuit, noise, &mut rng)?;
+            Ok((bits, crate::sim::backend_metadata(backend.as_ref())))
         })
         .collect();
 
-    Ok(ShotsResult::from_shots(shots?, circuit.num_classical_bits))
+    let mut metadata = crate::sim::RunMetadata::exact(route);
+    let mut shots = Vec::with_capacity(num_shots);
+    for (index, (bits, shot_metadata)) in results?.into_iter().enumerate() {
+        if index == 0 {
+            metadata = shot_metadata;
+        } else {
+            metadata.weaken_with(&shot_metadata);
+        }
+        shots.push(bits);
+    }
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
 #[cfg(test)]
@@ -474,7 +511,16 @@ mod tests {
         let factory = |s: u64| -> Box<dyn Backend> {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
-        let trajectory = run_trajectories(factory, &circuit, &noise, num_shots, 42, false).unwrap();
+        let trajectory = run_trajectories(
+            factory,
+            &circuit,
+            &noise,
+            num_shots,
+            42,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
         let brute = crate::sim::noise::run_shots_noisy_brute_with(
             |s| Box::new(crate::backend::stabilizer::StabilizerBackend::new(s)),
             &circuit,
@@ -515,7 +561,16 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &noise, 1000, 42, false).unwrap();
+        let result = run_trajectories(
+            factory,
+            &circuit,
+            &noise,
+            1000,
+            42,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
         let num_zero = result.shots.iter().filter(|s| !s[0]).count();
         // With gamma=0.9 on |1⟩, P(decay) ≈ 0.9
         assert!(
@@ -547,7 +602,16 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &pd_noise, 1000, 42, false).unwrap();
+        let result = run_trajectories(
+            factory,
+            &circuit,
+            &pd_noise,
+            1000,
+            42,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
         let num_one = result.shots.iter().filter(|s| s[0]).count();
         // Phase damping on |1⟩ should keep it as |1⟩ (only dephases superpositions)
         assert_eq!(num_one, 1000, "PD should not change |1⟩ population");
@@ -565,7 +629,16 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &noise, 1000, 42, false).unwrap();
+        let result = run_trajectories(
+            factory,
+            &circuit,
+            &noise,
+            1000,
+            42,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
         let num_one = result.shots.iter().filter(|s| s[0]).count();
         // Should see ~30% readout flips
         assert!(
@@ -593,7 +666,16 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let result = run_trajectories(factory, &circuit, &noise, 1000, 42, false).unwrap();
+        let result = run_trajectories(
+            factory,
+            &circuit,
+            &noise,
+            1000,
+            42,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
         // With 50% 2q depolarizing, varied outcomes should appear.
         let num_00 = result.shots.iter().filter(|s| !s[0] && !s[1]).count();
         assert!(
@@ -614,8 +696,26 @@ mod tests {
             Box::new(crate::backend::statevector::StatevectorBackend::new(s))
         };
 
-        let r1 = run_trajectories(factory, &circuit, &noise, 100, 42, false).unwrap();
-        let r2 = run_trajectories(factory, &circuit, &noise, 100, 42, false).unwrap();
+        let r1 = run_trajectories(
+            factory,
+            &circuit,
+            &noise,
+            100,
+            42,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
+        let r2 = run_trajectories(
+            factory,
+            &circuit,
+            &noise,
+            100,
+            42,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap();
         assert_eq!(r1.shots, r2.shots, "same seed must produce same results");
     }
 }

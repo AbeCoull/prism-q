@@ -751,6 +751,7 @@ pub fn run_shots_homological(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    noise.validate_for(circuit)?;
     let sampler = HomologicalSampler::compile(circuit, noise, seed)?;
     run_shots_homological_inner(sampler, circuit, num_shots)
 }
@@ -783,7 +784,11 @@ pub(crate) fn run_shots_homological_inner(
         shots.push(out);
     }
 
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
+    Ok(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
+            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer),
+        ),
+    )
 }
 
 /// Compute exact noisy marginals analytically. No sampling, no rank limit.

@@ -1424,6 +1424,10 @@ impl Backend for DistributedStatevectorBackend {
         BACKEND_NAME
     }
 
+    fn resolved(&self) -> crate::sim::ResolvedBackend {
+        crate::sim::ResolvedBackend::Distributed
+    }
+
     fn supports_fused_gates(&self) -> bool {
         // Fusion runs in every mode. Fully local fused gates dispatch to the
         // inner backend's tiled SIMD kernels; fused or batched gates that span a

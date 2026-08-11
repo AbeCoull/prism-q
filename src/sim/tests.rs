@@ -745,7 +745,9 @@ fn test_shots_counts_sum() {
 #[test]
 fn test_run_counts_factored_stabilizer() {
     let circuit = make_bell_with_measure();
-    let counts = run_counts_with(BackendKind::FactoredStabilizer, &circuit, 128, 42).unwrap();
+    let counts = run_counts_with(BackendKind::FactoredStabilizer, &circuit, 128, 42)
+        .unwrap()
+        .0;
     let total: u64 = counts.values().sum();
     let bell_total = counts.get(&vec![0u64]).copied().unwrap_or(0)
         + counts.get(&vec![3u64]).copied().unwrap_or(0);
@@ -1057,7 +1059,9 @@ fn test_terminal_statevector_counts_match_probability_path_all_measured() {
         shots::sample_shots(&probs, &c.measurement_map(), c.num_classical_bits, 512, 7);
     let expected = ShotsResult::from_shots(expected_shots, c.num_classical_bits).counts();
 
-    let actual = run_counts_with(BackendKind::Statevector, &c, 512, 7).unwrap();
+    let actual = run_counts_with(BackendKind::Statevector, &c, 512, 7)
+        .unwrap()
+        .0;
     assert_eq!(actual, expected);
 }
 
@@ -1073,7 +1077,9 @@ fn test_terminal_statevector_duplicate_classical_bit_uses_last_measurement() {
         assert_eq!(shot, &vec![false]);
     }
 
-    let counts = run_counts_with(BackendKind::Statevector, &c, 16, 42).unwrap();
+    let counts = run_counts_with(BackendKind::Statevector, &c, 16, 42)
+        .unwrap()
+        .0;
     assert_eq!(counts.get(&vec![0]), Some(&16));
 }
 
@@ -1083,7 +1089,9 @@ fn test_terminal_statevector_counts_wide_classical_register() {
     c.add_gate(Gate::X, &[0]);
     c.add_measure(0, 70);
 
-    let counts = run_counts_with(BackendKind::Statevector, &c, 10, 11).unwrap();
+    let counts = run_counts_with(BackendKind::Statevector, &c, 10, 11)
+        .unwrap()
+        .0;
     let mut expected = vec![0u64; 2];
     expected[1] = 1u64 << 6;
     assert_eq!(counts.get(&expected), Some(&10));
@@ -1100,7 +1108,9 @@ fn test_terminal_statevector_subset_counts_sum_to_shots() {
     c.add_measure(1, 4);
     c.add_measure(4, 0);
 
-    let counts = run_counts_with(BackendKind::Statevector, &c, 1024, 42).unwrap();
+    let counts = run_counts_with(BackendKind::Statevector, &c, 1024, 42)
+        .unwrap()
+        .0;
     assert_eq!(counts.values().sum::<u64>(), 1024);
     assert!(counts.keys().all(|key| key[0] & !0b1_0001 == 0));
 }

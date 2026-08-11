@@ -36,9 +36,11 @@ pub enum NoiseChannel {
     /// Pure dephasing: phase randomisation with amplitude `sqrt(gamma)` on the
     /// `|1⟩` state. Populations are preserved.
     PhaseDamping { gamma: f64 },
-    /// Combined T1 + T2 relaxation over a gate of duration `gate_time`.
-    /// Sampled as a population reset (prob. `1 - exp(-gate_time/t1)`) followed
-    /// by a pure-dephasing branch when `t2 < 2·t1`.
+    /// Combined T1 + T2 relaxation over a gate of duration `gate_time`, at zero
+    /// temperature and requiring `t2 <= 2·t1`. Populations decay as
+    /// `exp(-gate_time/t1)` and coherences as `exp(-gate_time/t2)`; both the
+    /// exact and the trajectory route realize that as amplitude damping composed
+    /// with pure dephasing.
     ThermalRelaxation { t1: f64, t2: f64, gate_time: f64 },
     /// Symmetric two-qubit depolarizing: each of the 15 non-identity
     /// two-qubit Paulis occurs with probability `p/15`.
@@ -141,10 +143,42 @@ impl NoiseChannel {
                         }
                     }
                 }
+                validate_trace_preserving(kraus)?;
             }
         }
         Ok(())
     }
+}
+
+/// Deviation from `sum_k Kdagger_k K_k = I` tolerated in a declared Custom
+/// channel. Loose enough for a set assembled from square roots, tight enough
+/// that a channel scaled by a constant is rejected.
+const CPTP_TOLERANCE: f64 = 1e-9;
+
+fn validate_trace_preserving(kraus: &[[[Complex64; 2]; 2]]) -> Result<()> {
+    let mut sum = [[Complex64::new(0.0, 0.0); 2]; 2];
+    for op in kraus {
+        let effect = crate::sim::trajectory::kdagger_k(op);
+        for (row, effect_row) in effect.iter().enumerate() {
+            for (col, entry) in effect_row.iter().enumerate() {
+                sum[row][col] += entry;
+            }
+        }
+    }
+    for (row, sum_row) in sum.iter().enumerate() {
+        for (col, entry) in sum_row.iter().enumerate() {
+            let expected = if row == col { 1.0 } else { 0.0 };
+            if (entry.re - expected).abs() > CPTP_TOLERANCE || entry.im.abs() > CPTP_TOLERANCE {
+                return Err(crate::error::PrismError::InvalidParameter {
+                    message: format!(
+                        "Custom Kraus operators must be trace preserving: \
+                         sum of Kdagger K at ({row},{col}) is {entry}, expected {expected}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_probability(name: &str, value: f64) -> Result<()> {
@@ -323,6 +357,42 @@ impl NoiseModel {
         Ok(())
     }
 
+    /// Validate as [`NoiseModel::validate`] does, plus the checks that need the
+    /// circuit: one event slot per instruction, and every target qubit inside
+    /// the register.
+    ///
+    /// Every noisy entry point calls this before allocating state. Qubit bounds
+    /// cannot be checked without the circuit, and an out-of-range target reaches
+    /// kernels that index amplitudes without one.
+    pub fn validate_for(&self, circuit: &Circuit) -> Result<()> {
+        if self.after_gate.len() != circuit.instructions.len() {
+            return Err(crate::error::PrismError::InvalidParameter {
+                message: format!(
+                    "noise model carries {} event slots for {} instructions",
+                    self.after_gate.len(),
+                    circuit.instructions.len()
+                ),
+            });
+        }
+        self.validate()?;
+
+        for (instr_idx, events) in self.after_gate.iter().enumerate() {
+            for (event_idx, event) in events.iter().enumerate() {
+                for &qubit in &event.qubits {
+                    if qubit >= circuit.num_qubits {
+                        return Err(crate::error::PrismError::InvalidParameter {
+                            message: format!(
+                                "noise event {event_idx} after instruction {instr_idx}: qubit {qubit} is outside the {}-qubit register",
+                                circuit.num_qubits
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Validate all channels and readout errors in this noise model.
     pub fn validate(&self) -> Result<()> {
         for (instr_idx, events) in self.after_gate.iter().enumerate() {
@@ -344,6 +414,14 @@ impl NoiseModel {
                         message: format!(
                             "noise event {event_idx} after instruction {instr_idx}: expected {expected_qubits} qubit(s), got {}",
                             event.qubits.len()
+                        ),
+                    });
+                }
+                if expected_qubits == 2 && event.qubits[0] == event.qubits[1] {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: format!(
+                            "noise event {event_idx} after instruction {instr_idx}: two-qubit channel needs distinct targets, got qubit {} twice",
+                            event.qubits[0]
                         ),
                     });
                 }
@@ -1612,6 +1690,7 @@ pub fn compile_noisy(
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<NoisyCompiledSampler> {
+    noise.validate_for(circuit)?;
     noise.ensure_pauli_only()?;
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
@@ -2164,7 +2243,11 @@ fn run_shots_noisy_frame(
         num_classical,
     );
 
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
+    Ok(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
+            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer),
+        ),
+    )
 }
 
 /// Sample a Pauli-noisy Clifford circuit through the compiled noisy sampler,
@@ -2180,6 +2263,7 @@ pub fn run_shots_noisy(
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
+    noise.validate_for(circuit)?;
     noise.ensure_pauli_only()?;
     if !circuit.is_clifford_only() {
         return run_shots_noisy_brute_with(
@@ -2249,7 +2333,11 @@ fn finish_noisy_compiled_run(
     let packed = sampler.try_sample_bulk_packed(num_shots)?;
     let shots = unpack_and_remap_packed(&packed, num_shots, &classical_bit_order, num_classical);
 
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
+    Ok(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
+            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer),
+        ),
+    )
 }
 
 fn run_shots_noisy_compiled(
@@ -2327,6 +2415,7 @@ pub(crate) fn run_shots_noisy_brute_with(
     seed: u64,
 ) -> Result<ShotsResult> {
     let mut shots = Vec::with_capacity(num_shots);
+    let mut metadata = crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::Stabilizer);
 
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
@@ -2361,10 +2450,16 @@ pub(crate) fn run_shots_noisy_brute_with(
             }
         }
 
+        let shot_metadata = crate::sim::backend_metadata(backend.as_ref());
+        if i == 0 {
+            metadata = shot_metadata;
+        } else {
+            metadata.weaken_with(&shot_metadata);
+        }
         shots.push(backend.classical_results().to_vec());
     }
 
-    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits))
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
 fn amplitude_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {
@@ -2395,6 +2490,18 @@ fn phase_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {
             [Complex64::new(0.0, 0.0), Complex64::new(g, 0.0)],
         ],
     ]
+}
+
+/// Amplitude-damping and phase-damping rates whose composition decays
+/// populations as `exp(-t/t1)` and coherences as `exp(-t/t2)`. Shared by the
+/// exact Kraus lowering and the trajectory unraveling so the two routes cannot
+/// disagree on what a declared channel means. Requires `t2 <= 2*t1`, which
+/// [`NoiseChannel::validate`] enforces; the clamp only absorbs rounding at the
+/// boundary.
+pub(crate) fn thermal_relaxation_rates(t1: f64, t2: f64, gate_time: f64) -> (f64, f64) {
+    let gad = 1.0 - (-gate_time / t1).exp();
+    let gpd = (1.0 - (gate_time / t1 - 2.0 * gate_time / t2).exp()).clamp(0.0, 1.0);
+    (gad, gpd)
 }
 
 /// Lower a single-qubit noise channel to its Kraus operators for exact
@@ -2438,8 +2545,7 @@ pub(crate) fn kraus_1q(channel: &NoiseChannel) -> Vec<[[Complex64; 2]; 2]> {
         NoiseChannel::AmplitudeDamping { gamma } => amplitude_damping_kraus(*gamma).to_vec(),
         NoiseChannel::PhaseDamping { gamma } => phase_damping_kraus(*gamma).to_vec(),
         NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
-            let gad = 1.0 - (-gate_time / t1).exp();
-            let gpd = (1.0 - (gate_time / t1 - 2.0 * gate_time / t2).exp()).clamp(0.0, 1.0);
+            let (gad, gpd) = thermal_relaxation_rates(*t1, *t2, *gate_time);
             let ad = amplitude_damping_kraus(gad);
             let pd = phase_damping_kraus(gpd);
             let mut out = Vec::with_capacity(4);
@@ -2474,9 +2580,11 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
 /// starting from `initial_state` when one is given and |0...0> otherwise.
 ///
 /// Measurements are not collapsed; observables and marginals are read off the
-/// final mixed state, so this assumes terminal (non-feedback) measurement. The
-/// circuit is checked against the density-matrix qubit cap and the noise model
-/// is validated before any allocation.
+/// final mixed state, so the circuit must carry terminal measurements only and
+/// no classical conditionals, which [`Circuit::has_terminal_measurements_only`]
+/// decides and this function rejects. The circuit is checked against the
+/// density-matrix qubit cap and the noise model is validated before any
+/// allocation.
 fn evolve_density_matrix(
     circuit: &Circuit,
     noise: Option<&NoiseModel>,
@@ -2489,13 +2597,18 @@ fn evolve_density_matrix(
         crate::backend::max_density_matrix_qubits(),
         crate::backend::DM_QUBIT_CAP_ENV,
     )?;
+    if !circuit.has_terminal_measurements_only() {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: "density_matrix".into(),
+            reason: "the mixture holds every measurement branch at once, so mid-circuit \
+                     measurement and classical conditioning cannot be replayed from it; move the \
+                     measurements to the end of the circuit, or run trajectories on a backend \
+                     with a per-shot pure state"
+                .into(),
+        });
+    }
     if let Some(noise) = noise {
-        if noise.after_gate.len() != circuit.instructions.len() {
-            return Err(crate::error::PrismError::InvalidParameter {
-                message: "noise model length does not match circuit instruction count".into(),
-            });
-        }
-        noise.validate()?;
+        noise.validate_for(circuit)?;
     }
 
     let mut dm = DensityMatrixBackend::new(seed);

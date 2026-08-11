@@ -22,6 +22,9 @@
 //! - [`compile_qec_program_rows`] lowers basis measurements and `MPP` records
 //!   into the packed X/Z Pauli row representation used by sampler internals.
 //!   It does not execute gates, resets, or active noise.
+//! - [`QecProgram::detector_error_model`] derives the [`DetectorErrorModel`]
+//!   implied by the program's noise annotations, detectors, and observables,
+//!   for export to matching and belief-propagation decoders.
 //!
 //! [`QecSampleResult`] carries packed measurement, detector, and observable
 //! shots, plus accepted and discarded shot counts after postselection and
@@ -36,6 +39,7 @@ mod camps_prefix;
 /// committing them to the stable public API.
 #[cfg(feature = "bench-internal")]
 pub mod cut_selection;
+mod dem;
 mod noise;
 pub mod observable_reroute;
 mod parse;
@@ -43,6 +47,7 @@ mod result;
 mod runner;
 mod t_sampler;
 
+pub use dem::{DetectorErrorModel, ErrorMechanism};
 pub use parse::parse_qec_program;
 pub use result::{QecObservableEstimate, QecSampleResult};
 #[cfg(feature = "bench-internal")]

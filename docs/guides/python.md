@@ -374,6 +374,20 @@ detector, observable, and measurement arrays as NumPy `bool_` matrices, plus
 text with `QecProgram.from_text`. See the [Noise and QEC guide](./qec.md) for the
 model itself.
 
+`detector_error_model()` derives the program's `DetectorErrorModel` for
+decoding: `probabilities()` (float64), `detector_matrix()`, and
+`observable_matrix()` (bool, detectors or observables by mechanisms) feed
+check-matrix decoder constructors directly, `detector_coords()` carries the
+per-detector coordinates, and `to_text()` writes the common detector error
+model text format for file-based decoders:
+
+```python
+dem = qp.detector_error_model()
+H, p, L = dem.detector_matrix(), dem.probabilities(), dem.observable_matrix()
+with open("memory_d3.dem", "w") as f:
+    f.write(dem.to_text())
+```
+
 ## Errors and typing
 
 Every failure surfaces as `prism_q.PrismError`, carrying the message from the

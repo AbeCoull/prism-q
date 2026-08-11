@@ -1,15 +1,15 @@
 //! Native QEC programs: construction, sampling, and packed-shot output.
 
-use numpy::PyArray2;
+use numpy::{PyArray1, PyArray2};
 use prism_q::{
-    PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef,
-    QecSampleResult, run_qec_program,
+    DetectorErrorModel, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
+    QecRecordRef, QecSampleResult, run_qec_program,
 };
 use pyo3::prelude::*;
 
 use crate::error::PyPrismResult;
 use crate::gate::PyGate;
-use crate::numpy_util::bool_matrix;
+use crate::numpy_util::{bool_matrix, f64_array};
 
 /// Pauli basis for QEC measurements and resets.
 #[pyclass(name = "QecBasis", module = "prism_q", eq, eq_int, from_py_object)]
@@ -229,11 +229,98 @@ impl PyQecProgram {
         Ok(PyQecResult { inner: result })
     }
 
+    /// Derive the detector error model from the program's noise annotations,
+    /// detectors, and observables.
+    fn detector_error_model(&self) -> PyPrismResult<PyDetectorErrorModel> {
+        Ok(PyDetectorErrorModel {
+            inner: self.inner.detector_error_model()?,
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "QecProgram(num_qubits={}, measurements={}, detectors={}, observables={})",
             self.inner.num_qubits(),
             self.inner.num_measurements(),
+            self.inner.num_detectors(),
+            self.inner.num_observables()
+        )
+    }
+}
+
+/// Detector error model derived from a QEC program: independent error
+/// mechanisms over the program's detectors and observables.
+#[pyclass(name = "DetectorErrorModel", module = "prism_q", frozen)]
+pub struct PyDetectorErrorModel {
+    inner: DetectorErrorModel,
+}
+
+#[pymethods]
+impl PyDetectorErrorModel {
+    #[getter]
+    fn num_detectors(&self) -> usize {
+        self.inner.num_detectors()
+    }
+    #[getter]
+    fn num_observables(&self) -> usize {
+        self.inner.num_observables()
+    }
+    #[getter]
+    fn num_mechanisms(&self) -> usize {
+        self.inner.num_mechanisms()
+    }
+
+    /// Mechanism probabilities as a `(num_mechanisms,)` float64 array.
+    fn probabilities<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        let probabilities = self
+            .inner
+            .mechanisms()
+            .iter()
+            .map(|m| m.probability())
+            .collect();
+        f64_array(py, probabilities)
+    }
+
+    /// Check matrix as a `(num_detectors, num_mechanisms)` bool array:
+    /// entry `(d, m)` is true when mechanism `m` flips detector `d`.
+    fn detector_matrix<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
+        let cols = self.inner.num_mechanisms();
+        let mut flat = vec![false; self.inner.num_detectors() * cols];
+        for (mechanism, entry) in self.inner.mechanisms().iter().enumerate() {
+            for &detector in entry.detectors() {
+                flat[detector * cols + mechanism] = true;
+            }
+        }
+        bool_matrix(py, self.inner.num_detectors(), cols, flat)
+    }
+
+    /// Observable flip matrix as a `(num_observables, num_mechanisms)` bool
+    /// array: entry `(o, m)` is true when mechanism `m` flips observable `o`.
+    fn observable_matrix<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
+        let cols = self.inner.num_mechanisms();
+        let mut flat = vec![false; self.inner.num_observables() * cols];
+        for (mechanism, entry) in self.inner.mechanisms().iter().enumerate() {
+            for &observable in entry.observables() {
+                flat[observable * cols + mechanism] = true;
+            }
+        }
+        bool_matrix(py, self.inner.num_observables(), cols, flat)
+    }
+
+    /// Coordinates per detector, empty lists for detectors without any.
+    fn detector_coords(&self) -> Vec<Vec<f64>> {
+        self.inner.detector_coords().to_vec()
+    }
+
+    /// Render the model in the common detector error model text format.
+    fn to_text(&self) -> String {
+        self.inner.to_text()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DetectorErrorModel(mechanisms={}, detectors={}, observables={})",
+            self.inner.num_mechanisms(),
             self.inner.num_detectors(),
             self.inner.num_observables()
         )

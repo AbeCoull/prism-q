@@ -117,3 +117,68 @@ def test_detector_error_model_matches_program():
     graphlike = dem.decompose_graphlike()
     assert graphlike.num_mechanisms == dem.num_mechanisms
     assert (graphlike.detector_matrix() == dem.detector_matrix()).all()
+
+
+def _repetition_memory(rounds, p, shots):
+    qp = QecProgram(3)
+    qp.set_options(shots=shots, seed=42, chunk_size=4096, keep_measurements=False)
+    prev = None
+    for _ in range(rounds):
+        qp.noise(QecNoise.depolarize1(p), [0, 1, 2])
+        checks = [
+            qp.measure_pauli_product([(QecBasis.Z, q), (QecBasis.Z, q + 1)])
+            for q in range(2)
+        ]
+        if prev is None:
+            for record in checks:
+                qp.detector([RecordRef.absolute(record)])
+        else:
+            for record, prior in zip(checks, prev):
+                qp.detector([RecordRef.absolute(record), RecordRef.absolute(prior)])
+        prev = checks
+    readout = [qp.measure_z(q) for q in range(3)]
+    for check in range(2):
+        qp.detector(
+            [
+                RecordRef.absolute(readout[check]),
+                RecordRef.absolute(readout[check + 1]),
+                RecordRef.absolute(prev[check]),
+            ]
+        )
+    qp.observable_include(0, [RecordRef.absolute(readout[0])])
+    return qp
+
+
+def test_decoder_beats_physical_error_rate():
+    p = 0.02
+    qp = _repetition_memory(3, p, 20_000)
+    decoder = prism_q.Decoder(qp.detector_error_model())
+    assert decoder.num_detectors == qp.num_detectors == 8
+    assert decoder.num_observables == 1
+
+    res = qp.run()
+    predicted = decoder.decode(res.detectors)
+    assert predicted.dtype == np.bool_
+    assert predicted.shape == (res.total_shots, 1)
+    failures = int((predicted[:, 0] != res.observables[:, 0]).sum())
+    # The fixed-seed golden decode count, pinned in `tests/qec_decoder.rs`.
+    assert failures == 23
+    assert failures / res.total_shots < p
+
+
+def test_decoder_rejects_bad_inputs():
+    import pytest
+
+    qp = _repetition_memory(1, 0.05, 16)
+    dem = qp.detector_error_model()
+    decoder = prism_q.Decoder(dem)
+    with pytest.raises(prism_q.PrismError):
+        decoder.decode(np.zeros((4, 2), dtype=np.bool_))
+
+    hyper = QecProgram(1)
+    hyper.noise(QecNoise.x_error(0.1), [0])
+    for _ in range(3):
+        record = hyper.measure_pauli_product([(QecBasis.Z, 0)])
+        hyper.detector([RecordRef.absolute(record)])
+    with pytest.raises(prism_q.PrismError, match="decompose_graphlike"):
+        prism_q.Decoder(hyper.detector_error_model())

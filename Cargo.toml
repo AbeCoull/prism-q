@@ -128,3 +128,7 @@ required-features = ["distributed-mpi"]
 [[bench]]
 name = "qec_t_strategies"
 harness = false
+
+[[bench]]
+name = "qec_decoder"
+harness = false

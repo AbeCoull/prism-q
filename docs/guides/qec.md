@@ -83,6 +83,33 @@ mechanism across existing graphlike ones and erroring loudly when no split
 exists. See [QEC program execution](../architecture/qec-programs.md) for the
 derivation semantics and the emitted grammar.
 
+## Decoding
+
+`UnionFindDecoder` decodes sampled detectors against a graphlike model
+in-process, so the logical error rate of a memory experiment never leaves the
+tool:
+
+```rust
+use prism_q::{UnionFindDecoder, run_qec_program};
+
+let model = program.detector_error_model()?.decompose_graphlike()?;
+let decoder = UnionFindDecoder::from_model(&model)?;
+let result = run_qec_program(&program)?;
+let predicted = decoder.decode_packed(&result.detectors)?;
+let failures = (0..result.total_shots)
+    .filter(|&shot| predicted.get_bit(shot, 0) != result.observables.get_bit(shot, 0))
+    .count();
+```
+
+The decoder is weighted union-find with peeling: edges weigh `ln((1-p)/p)`,
+one-detector mechanisms are boundary edges, and mechanisms flipping no
+detector bound the achievable logical error rate from below. Construction
+rejects hypergraph models with a pointer to `decompose_graphlike`. Decoding is
+deterministic and allocation-free per shot; large batches decode in parallel.
+See the decoding section of
+[QEC program execution](../architecture/qec-programs.md) for the growth and
+peeling semantics and the validation against the exact ML rate.
+
 ## Homological sampling
 
 `run_shots_homological` and `ErrorChainComplex` model the GF(2) chain complex over noise

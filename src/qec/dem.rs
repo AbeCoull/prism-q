@@ -477,7 +477,7 @@ fn symmetric_difference(a: &[usize], b: &[usize]) -> Vec<usize> {
     out
 }
 
-fn symptom_label(mechanism: &ErrorMechanism) -> String {
+pub(super) fn symptom_label(mechanism: &ErrorMechanism) -> String {
     let mut label = String::new();
     for detector in &mechanism.detectors {
         if !label.is_empty() {

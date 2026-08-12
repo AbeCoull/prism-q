@@ -50,7 +50,8 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 `run_qec_program_reference`, `run_qec_program_with_strategy`,
 `run_qec_program_spd_rerouted`, `QecProgram`, `QecOp`, `QecOptions`, `QecSampleResult`,
 `QecBasis`, `QecPauli`, `QecRecordRef`, `QecNoise`, `QecMeasurementRow`,
-`QecCompiledRows`, `QecObservableEstimate`, `QecObservableReroute`, `QecTStrategy`
+`QecCompiledRows`, `QecObservableEstimate`, `QecObservableReroute`, `QecTStrategy`,
+`DetectorErrorModel`, `ErrorMechanism`, `UnionFindDecoder`
 
 **Clifford+T:**
 `run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`,

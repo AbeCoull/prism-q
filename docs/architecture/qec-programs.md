@@ -305,6 +305,50 @@ In Python, `QecProgram.detector_error_model()` returns the model with
 `to_text()`. The matrix triple feeds check-matrix decoder constructors
 directly, with no file in between.
 
+### Decoding
+
+`UnionFindDecoder` closes the pipeline in-tool: sample, derive, decompose,
+decode, logical error rate, one API. The decoder family is union-find with
+peeling (Delfosse and Nickerson, arXiv:1709.06218), chosen for its
+almost-linear decode cost; a minimum-weight perfect matching decoder remains a
+possible second family behind the same model input if accuracy on hard
+workloads ever justifies its cost.
+
+`UnionFindDecoder::from_model` compiles a graphlike model: detectors become
+vertices, a two-detector mechanism an internal edge, a one-detector mechanism
+a boundary edge, each weighted `ln((1-p)/p)` clamped at zero. A mechanism with
+more than two detectors is rejected with a pointer to `decompose_graphlike`.
+Mechanisms flipping no detector cannot enter the graph; their probability mass
+is a floor under the logical error rate of any decoder over the model.
+Mechanisms sharing one detector set collapse to the most probable of them, and
+the mass of single faults this misroutes is measured (not assumed away) by the
+enumeration tests in `tests/qec_decoder.rs`.
+
+`decode_packed` maps a `PackedShots` of detector samples (either layout) to
+shot-major predicted observable flips, one bit per observable per shot. Per
+shot, clusters grow from the defects in the `ln((1-p)/p)` metric: each round
+adds the minimum slack over the active clusters' unsaturated incident edges,
+so at least one edge saturates per round; a cluster becomes inactive when its
+parity is even or it touches a boundary edge. Peeling then walks a spanning
+forest of each grown cluster, rooted at the boundary contact when one exists,
+and XORs the observable mask of every selected edge into the prediction. A
+component with odd parity and no boundary edge is impossible under the model
+and rejects the batch, naming the shot. Decoding is deterministic: no
+randomness anywhere, ties break by ascending edge index in mechanism order,
+and results are identical on the serial and Rayon paths (shots are
+independent; batches of at least 1024 shots decode in parallel over
+256-shot chunks with per-chunk scratch reuse and no per-shot allocation).
+
+Validation ties the decoder to the exact ML lookup rate: at distance 3 the
+full syndrome set is enumerable, so the tests compute the exact expected
+union-find failure rate alongside the exact ML rate and assert
+`rate_ML <= rate_UF <= P(two or more faults) + measured single-fault misses`,
+pin the analytic rate at 1e-12, and hold fixed-seed golden decode counts. On
+repetition memory at p=0.02 (20k shots, seed 42, 3 rounds) the decoded rate
+falls from distance 3 to distance 5 and both sit below the physical rate.
+Python exposes the same surface as `Decoder(model)` with
+`decode(detectors) -> (shots, num_observables)` over numpy bool arrays.
+
 ## Expectation values
 
 `EXP_VAL(c) P1*...*Pk` estimates `c * <P>` for the Pauli product `P` in the
@@ -405,9 +449,10 @@ Derive rates with `logical_error_rates` (denominator `accepted_shots`); do
 not align these rows shot-for-shot with detector rows on the analytical
 path.
 
-Record buffers reuse the measurement-major `PackedShots` layout of the
-compiled sampler: one contiguous bit row per record across all shots, shot
-`j` at bit `j % 64` of word `j / 64`. Detector, observable, and
-postselection parities XOR whole shot words of the referenced measurement
-rows. Summary statistics are available as `survivor_rate`,
+The compiled runner delivers shot-major `PackedShots` record buffers: one
+row of packed record bits per shot, record `j` at bit `j % 64` of word
+`j / 64` of that row. The Clifford+T sampler emits measurement-major records
+instead, so consumers branch on `layout()` or read through `get_bit`.
+Detector, observable, and postselection parities are XORs of the referenced
+measurement records. Summary statistics are available as `survivor_rate`,
 `logical_error_rates`, and their Wilson-interval variants.

@@ -389,6 +389,18 @@ with open("memory_d3.dem", "w") as f:
     f.write(dem.to_text())
 ```
 
+`Decoder` runs the built-in union-find decoder over a graphlike model, so a
+memory experiment's logical error rate needs no external decoder. `decode`
+takes the `(shots, num_detectors)` bool detector array and returns the
+`(shots, num_observables)` predicted observable flips:
+
+```python
+decoder = prism_q.Decoder(dem.decompose_graphlike())
+res = qp.run()
+predicted = decoder.decode(res.detectors)
+failures = (predicted[:, 0] != res.observables[:, 0]).sum()
+```
+
 ## Errors and typing
 
 Every failure surfaces as `prism_q.PrismError`, carrying the message from the

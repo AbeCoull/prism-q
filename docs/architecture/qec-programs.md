@@ -335,9 +335,11 @@ and XORs the observable mask of every selected edge into the prediction. A
 component with odd parity and no boundary edge is impossible under the model
 and rejects the batch, naming the shot. Decoding is deterministic: no
 randomness anywhere, ties break by ascending edge index in mechanism order,
-and results are identical on the serial and Rayon paths (shots are
-independent; batches of at least 1024 shots decode in parallel over
-256-shot chunks with per-chunk scratch reuse and no per-shot allocation).
+and results are identical on the serial and Rayon paths. Shots are
+independent: under the `parallel` feature, batches of at least 1024 shots
+decode in parallel over 256-shot chunks with per-chunk scratch reuse and no
+per-shot allocation; a model with no observables decodes serially at any
+batch size.
 
 Validation ties the decoder to the exact ML lookup rate: at distance 3 the
 full syndrome set is enumerable, so the tests compute the exact expected

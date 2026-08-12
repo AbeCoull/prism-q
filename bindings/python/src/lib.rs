@@ -22,7 +22,9 @@ use error::PrismError;
 use gate::PyGate;
 use gpu::PyGpuContext;
 use noise::{PyNoiseChannel, PyNoiseModel};
-use qec::{PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef};
+use qec::{
+    PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
+};
 use sim::{PyCountsResult, PyRunMetadata, PyRunOutcome, PyShotsResult, PySimulation};
 
 #[pymodule]
@@ -48,6 +50,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQecProgram>()?;
     m.add_class::<PyQecResult>()?;
     m.add_class::<PyDetectorErrorModel>()?;
+    m.add_class::<PyDecoder>()?;
 
     m.add_function(wrap_pyfunction!(circuit::parse_qasm, m)?)?;
     m.add_function(wrap_pyfunction!(sim::simulate, m)?)?;

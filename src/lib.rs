@@ -87,8 +87,8 @@ pub use gates::{BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, Multi
 pub use qec::{
     DetectorErrorModel, ErrorMechanism, QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise,
     QecObservableEstimate, QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, QecTStrategy, compile_qec_program_rows, parse_qec_program,
-    run_qec_program, run_qec_program_reference, run_qec_program_spd_rerouted,
+    QecRecordRef, QecSampleResult, QecTStrategy, UnionFindDecoder, compile_qec_program_rows,
+    parse_qec_program, run_qec_program, run_qec_program_reference, run_qec_program_spd_rerouted,
     run_qec_program_with_strategy,
 };
 #[cfg(feature = "bench-internal")]

@@ -1,9 +1,9 @@
 //! Native QEC programs: construction, sampling, and packed-shot output.
 
-use numpy::{PyArray1, PyArray2};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     DetectorErrorModel, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, run_qec_program,
+    QecRecordRef, QecSampleResult, UnionFindDecoder, run_qec_program,
 };
 use pyo3::prelude::*;
 
@@ -329,6 +329,67 @@ impl PyDetectorErrorModel {
         format!(
             "DetectorErrorModel(mechanisms={}, detectors={}, observables={})",
             self.inner.num_mechanisms(),
+            self.inner.num_detectors(),
+            self.inner.num_observables()
+        )
+    }
+}
+
+/// Union-find decoder over a graphlike detector error model: predicts
+/// observable flips from detector samples.
+#[pyclass(name = "Decoder", module = "prism_q", frozen)]
+pub struct PyDecoder {
+    inner: UnionFindDecoder,
+}
+
+#[pymethods]
+impl PyDecoder {
+    /// Compile a decoder from a graphlike model (at most two detectors per
+    /// mechanism; apply `decompose_graphlike` first when needed).
+    #[new]
+    fn new(model: &PyDetectorErrorModel) -> PyPrismResult<Self> {
+        Ok(Self {
+            inner: UnionFindDecoder::from_model(&model.inner)?,
+        })
+    }
+
+    #[getter]
+    fn num_detectors(&self) -> usize {
+        self.inner.num_detectors()
+    }
+    #[getter]
+    fn num_observables(&self) -> usize {
+        self.inner.num_observables()
+    }
+
+    /// Decode a `(shots, num_detectors)` bool array of detector samples into
+    /// a `(shots, num_observables)` bool array of predicted observable flips.
+    fn decode<'py>(
+        &self,
+        py: Python<'py>,
+        detectors: PyReadonlyArray2<'py, bool>,
+    ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
+        let array = detectors.as_array();
+        let shots = array.nrows();
+        let columns = array.ncols();
+        let m_words = columns.div_ceil(64);
+        let mut data = vec![0u64; shots * m_words];
+        for (shot, row) in array.outer_iter().enumerate() {
+            let base = shot * m_words;
+            for (column, &bit) in row.iter().enumerate() {
+                if bit {
+                    data[base + column / 64] |= 1u64 << (column % 64);
+                }
+            }
+        }
+        let packed = PackedShots::try_from_shot_major(data, shots, columns)?;
+        let decoded = py.detach(|| self.inner.decode_packed(&packed))?;
+        packed_to_2d(py, &decoded)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Decoder(detectors={}, observables={})",
             self.inner.num_detectors(),
             self.inner.num_observables()
         )

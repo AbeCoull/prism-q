@@ -69,116 +69,13 @@ fn bit_rate(shots: &PackedShots, column: usize) -> f64 {
     count as f64 / shots.num_shots() as f64
 }
 
-// Distance-3 repetition-code Z memory: noise on the data qubits before each
-// round of MPP ZZ checks, consecutive-round detectors, final data readout
-// detectors, observable on the final M 0 record.
+// Distance-3 instances of the shared memory fixtures in `qec_common`.
 fn repetition_memory(rounds: usize, noise: QecNoise) -> QecProgram {
-    let mut program = QecProgram::with_options(3, qec_common::qec_options(STAT_SHOTS, 4096, false));
-    let mut prev: Option<(usize, usize)> = None;
-    for _ in 0..rounds {
-        program.noise(noise, &[0, 1, 2]).unwrap();
-        let c0 = program
-            .measure_pauli_product(&[QecPauli::z(0), QecPauli::z(1)])
-            .unwrap();
-        let c1 = program
-            .measure_pauli_product(&[QecPauli::z(1), QecPauli::z(2)])
-            .unwrap();
-        match prev {
-            None => {
-                program.detector(&[QecRecordRef::absolute(c0)]).unwrap();
-                program.detector(&[QecRecordRef::absolute(c1)]).unwrap();
-            }
-            Some((last0, last1)) => {
-                program
-                    .detector(&[QecRecordRef::absolute(c0), QecRecordRef::absolute(last0)])
-                    .unwrap();
-                program
-                    .detector(&[QecRecordRef::absolute(c1), QecRecordRef::absolute(last1)])
-                    .unwrap();
-            }
-        }
-        prev = Some((c0, c1));
-    }
-    let (last0, last1) = prev.unwrap();
-    let m0 = program.measure_z(0).unwrap();
-    let m1 = program.measure_z(1).unwrap();
-    let m2 = program.measure_z(2).unwrap();
-    program
-        .detector(&[
-            QecRecordRef::absolute(m0),
-            QecRecordRef::absolute(m1),
-            QecRecordRef::absolute(last0),
-        ])
-        .unwrap();
-    program
-        .detector(&[
-            QecRecordRef::absolute(m1),
-            QecRecordRef::absolute(m2),
-            QecRecordRef::absolute(last1),
-        ])
-        .unwrap();
-    program
-        .observable_include(0, &[QecRecordRef::absolute(m0)])
-        .unwrap();
-    program
+    qec_common::repetition_memory(3, rounds, noise, STAT_SHOTS)
 }
 
-const SURFACE_X_STABILIZERS: [&[usize]; 4] = [&[0, 1, 3, 4], &[4, 5, 7, 8], &[2, 5], &[3, 6]];
-const SURFACE_Z_STABILIZERS: [&[usize]; 4] = [&[1, 2, 4, 5], &[3, 4, 6, 7], &[0, 1], &[7, 8]];
-
-// Distance-3 rotated surface-code Z memory via MPP stabilizer measurements.
-// Round-0 detectors on the Z checks only (deterministic on |0..0>), compare
-// detectors on later rounds, final Z checks reconstructed from the data
-// readout, observable on the left-column logical Z.
 fn surface_memory_d3(rounds: usize, noise: QecNoise, noise_targets: &[usize]) -> QecProgram {
-    let mut program = QecProgram::with_options(9, qec_common::qec_options(STAT_SHOTS, 4096, false));
-    let mut prev: Option<Vec<usize>> = None;
-    for _ in 0..rounds {
-        program.noise(noise, noise_targets).unwrap();
-        let mut records = Vec::with_capacity(8);
-        for stab in SURFACE_Z_STABILIZERS {
-            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();
-            records.push(program.measure_pauli_product(&terms).unwrap());
-        }
-        for stab in SURFACE_X_STABILIZERS {
-            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::x(q)).collect();
-            records.push(program.measure_pauli_product(&terms).unwrap());
-        }
-        match &prev {
-            None => {
-                for &record in &records[..4] {
-                    program.detector(&[QecRecordRef::absolute(record)]).unwrap();
-                }
-            }
-            Some(previous) => {
-                for (&record, &prior) in records.iter().zip(previous) {
-                    program
-                        .detector(&[
-                            QecRecordRef::absolute(record),
-                            QecRecordRef::absolute(prior),
-                        ])
-                        .unwrap();
-                }
-            }
-        }
-        prev = Some(records);
-    }
-    let previous = prev.unwrap();
-    let data: Vec<usize> = (0..9).map(|q| program.measure_z(q).unwrap()).collect();
-    for (stab, &prior) in SURFACE_Z_STABILIZERS.iter().zip(&previous[..4]) {
-        let mut refs: Vec<QecRecordRef> = stab
-            .iter()
-            .map(|&q| QecRecordRef::absolute(data[q]))
-            .collect();
-        refs.push(QecRecordRef::absolute(prior));
-        program.detector(&refs).unwrap();
-    }
-    let logical: Vec<QecRecordRef> = [0usize, 3, 6]
-        .iter()
-        .map(|&q| QecRecordRef::absolute(data[q]))
-        .collect();
-    program.observable_include(0, &logical).unwrap();
-    program
+    qec_common::surface_memory_d3(rounds, noise, noise_targets, STAT_SHOTS)
 }
 
 #[test]

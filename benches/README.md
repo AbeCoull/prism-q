@@ -75,6 +75,13 @@ both the working tree and the reference worktree.
 | `qec_noisy_runner` | Packed native QEC execution with Pauli-noise rows |
 | `qec_noisy_runner_split` | Parse, compile, sample, noise, detector, postselection, logical count, and total QEC timings |
 
+### Decoder benchmarks (qec_decoder)
+
+| Group | What it measures |
+|-------|-----------------|
+| `qec_decoder/rep_d3_r3`, `qec_decoder/rep_d5_r5` | Bulk union-find decode of sampled repetition-memory detector batches, 1k and 20k shots |
+| `qec_decoder/surface_d3_r3`, `qec_decoder/surface_d5_r5` | Bulk union-find decode of sampled rotated-surface-memory detector batches, 1k and 20k shots |
+
 ## Circuit families
 
 All seeded with `0xDEAD_BEEF` for reproducibility.

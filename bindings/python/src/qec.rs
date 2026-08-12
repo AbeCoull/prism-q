@@ -312,6 +312,14 @@ impl PyDetectorErrorModel {
         self.inner.detector_coords().to_vec()
     }
 
+    /// Decompose hypergraph mechanisms into graphlike components (at most two
+    /// detectors per mechanism); errors when a mechanism has no cover.
+    fn decompose_graphlike(&self) -> PyPrismResult<PyDetectorErrorModel> {
+        Ok(PyDetectorErrorModel {
+            inner: self.inner.decompose_graphlike()?,
+        })
+    }
+
     /// Render the model in the common detector error model text format.
     fn to_text(&self) -> String {
         self.inner.to_text()

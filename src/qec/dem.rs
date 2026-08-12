@@ -11,7 +11,7 @@ use super::noise::{
     walk_qec_noise_sensitivity,
 };
 use super::{QecNoise, QecOp, QecProgram};
-use crate::error::Result;
+use crate::error::{PrismError, Result};
 use crate::sim::compiled::xor_words;
 
 /// One error mechanism: an independent fault process that flips a fixed set of
@@ -75,6 +75,55 @@ impl DetectorErrorModel {
     /// op carried no coordinates.
     pub fn detector_coords(&self) -> &[Vec<f64>] {
         &self.detector_coords
+    }
+
+    /// Decompose hypergraph mechanisms into graphlike components.
+    ///
+    /// Returns a model in which every mechanism flips at most two detectors.
+    /// A mechanism with more is replaced by existing graphlike mechanisms
+    /// whose non-empty detector sets partition its detectors and whose
+    /// observable XOR matches; its probability composes into every component
+    /// as `p = p1(1-p2) + p2(1-p1)`. Cross-component correlations are lost;
+    /// single-detector marginals are unchanged. Deterministic: retained
+    /// mechanisms keep their order, the first cover in mechanism order wins.
+    ///
+    /// # Errors
+    ///
+    /// A hypergraph mechanism with no cover; the error names its symptom.
+    pub fn decompose_graphlike(&self) -> Result<DetectorErrorModel> {
+        let mut graphlike: Vec<ErrorMechanism> = Vec::new();
+        for mechanism in &self.mechanisms {
+            if mechanism.detectors.len() <= 2 {
+                graphlike.push(mechanism.clone());
+            }
+        }
+
+        for mechanism in &self.mechanisms {
+            if mechanism.detectors.len() <= 2 {
+                continue;
+            }
+            let Some(components) = partition_cover(mechanism, &graphlike) else {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "graphlike decomposition failed: mechanism `{}` has no \
+                         cover by graphlike mechanisms",
+                        symptom_label(mechanism)
+                    ),
+                });
+            };
+            let p = mechanism.probability;
+            for at in components {
+                let prior = graphlike[at].probability;
+                graphlike[at].probability = prior * (1.0 - p) + p * (1.0 - prior);
+            }
+        }
+
+        Ok(DetectorErrorModel {
+            mechanisms: graphlike,
+            detector_coords: self.detector_coords.clone(),
+            num_detectors: self.num_detectors,
+            num_observables: self.num_observables,
+        })
     }
 
     /// Render the model in the common detector error model text format.
@@ -336,6 +385,113 @@ fn pack_record_rows(rows: &[Vec<usize>], m_words: usize) -> Vec<Vec<u64>> {
             mask
         })
         .collect()
+}
+
+/// Depth-first over candidates in mechanism order; the first cover found is
+/// the result.
+fn partition_cover(mechanism: &ErrorMechanism, graphlike: &[ErrorMechanism]) -> Option<Vec<usize>> {
+    fn search(
+        remaining: &[usize],
+        observables: &[usize],
+        start: usize,
+        graphlike: &[ErrorMechanism],
+        chosen: &mut Vec<usize>,
+    ) -> bool {
+        if remaining.is_empty() {
+            return observables.is_empty();
+        }
+        for at in start..graphlike.len() {
+            let candidate = &graphlike[at];
+            if candidate.detectors.is_empty() || !is_subset(&candidate.detectors, remaining) {
+                continue;
+            }
+            let next_remaining = symmetric_difference(remaining, &candidate.detectors);
+            let next_observables = symmetric_difference(observables, &candidate.observables);
+            chosen.push(at);
+            if search(
+                &next_remaining,
+                &next_observables,
+                at + 1,
+                graphlike,
+                chosen,
+            ) {
+                return true;
+            }
+            chosen.pop();
+        }
+        false
+    }
+
+    let mut chosen = Vec::new();
+    search(
+        &mechanism.detectors,
+        &mechanism.observables,
+        0,
+        graphlike,
+        &mut chosen,
+    )
+    .then_some(chosen)
+}
+
+/// True when every element of ascending `a` appears in ascending `b`.
+fn is_subset(a: &[usize], b: &[usize]) -> bool {
+    let mut j = 0;
+    'outer: for &x in a {
+        while j < b.len() {
+            match b[j].cmp(&x) {
+                std::cmp::Ordering::Less => j += 1,
+                std::cmp::Ordering::Equal => {
+                    j += 1;
+                    continue 'outer;
+                }
+                std::cmp::Ordering::Greater => return false,
+            }
+        }
+        return false;
+    }
+    true
+}
+
+/// Symmetric difference of two ascending index lists, ascending.
+fn symmetric_difference(a: &[usize], b: &[usize]) -> Vec<usize> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Less => {
+                out.push(a[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(b[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&a[i..]);
+    out.extend_from_slice(&b[j..]);
+    out
+}
+
+fn symptom_label(mechanism: &ErrorMechanism) -> String {
+    let mut label = String::new();
+    for detector in &mechanism.detectors {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(&format!("D{detector}"));
+    }
+    for observable in &mechanism.observables {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(&format!("L{observable}"));
+    }
+    label
 }
 
 fn detector_coordinates(program: &QecProgram) -> Vec<Vec<f64>> {

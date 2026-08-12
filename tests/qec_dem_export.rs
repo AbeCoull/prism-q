@@ -130,12 +130,11 @@ const SURFACE_Z_STABILIZERS: [&[usize]; 4] = [&[1, 2, 4, 5], &[3, 4, 6, 7], &[0,
 // Round-0 detectors on the Z checks only (deterministic on |0..0>), compare
 // detectors on later rounds, final Z checks reconstructed from the data
 // readout, observable on the left-column logical Z.
-fn surface_memory_d3(rounds: usize, noise: QecNoise) -> QecProgram {
+fn surface_memory_d3(rounds: usize, noise: QecNoise, noise_targets: &[usize]) -> QecProgram {
     let mut program = QecProgram::with_options(9, qec_common::qec_options(STAT_SHOTS, 4096, false));
-    let data_qubits: Vec<usize> = (0..9).collect();
     let mut prev: Option<Vec<usize>> = None;
     for _ in 0..rounds {
-        program.noise(noise, &data_qubits).unwrap();
+        program.noise(noise, noise_targets).unwrap();
         let mut records = Vec::with_capacity(8);
         for stab in SURFACE_Z_STABILIZERS {
             let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();
@@ -307,7 +306,7 @@ fn dem_rejects_non_clifford_gates() {
 
 #[test]
 fn dem_surface_d3_round_trip_counts() {
-    let program = surface_memory_d3(2, QecNoise::Depolarize1(0.02));
+    let program = surface_memory_d3(2, QecNoise::Depolarize1(0.02), &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
     let model = program.detector_error_model().unwrap();
     assert_eq!(model.num_detectors(), program.num_detectors());
     assert_eq!(model.num_detectors(), 16);
@@ -334,27 +333,29 @@ fn predicted_odd_rate(parity_probabilities: &[f64]) -> f64 {
     (1.0 - attenuation) / 2.0
 }
 
+fn assert_marginals_match(mechanisms: &[ParsedMechanism], detectors: &PackedShots, label: &str) {
+    for detector in 0..detectors.num_measurements() {
+        let hits: Vec<f64> = mechanisms
+            .iter()
+            .filter(|m| m.detectors.contains(&detector))
+            .map(|m| m.probability)
+            .collect();
+        let predicted = predicted_odd_rate(&hits);
+        let sampled = bit_rate(detectors, detector);
+        assert!(
+            (sampled - predicted).abs() < 0.025,
+            "{label} detector {detector}: sampled {sampled:.4} vs predicted {predicted:.4}"
+        );
+    }
+}
+
 fn assert_model_predicts_statistics(program: &QecProgram, label: &str) {
     let model = program.detector_error_model().unwrap();
     let parsed = parse_dem_text(&model.to_text());
     let result = run_qec_program(program).unwrap();
     let num_detectors = model.num_detectors();
     assert_eq!(result.detectors.num_measurements(), num_detectors);
-
-    for detector in 0..num_detectors {
-        let hits: Vec<f64> = parsed
-            .mechanisms
-            .iter()
-            .filter(|m| m.detectors.contains(&detector))
-            .map(|m| m.probability)
-            .collect();
-        let predicted = predicted_odd_rate(&hits);
-        let sampled = bit_rate(&result.detectors, detector);
-        assert!(
-            (sampled - predicted).abs() < 0.025,
-            "{label} detector {detector}: sampled {sampled:.4} vs predicted {predicted:.4}"
-        );
-    }
+    assert_marginals_match(&parsed.mechanisms, &result.detectors, label);
 
     for i in 0..num_detectors {
         for j in (i + 1)..num_detectors {
@@ -387,8 +388,127 @@ fn dem_model_predicts_detector_statistics() {
         "repetition d3",
     );
     assert_model_predicts_statistics(
-        &surface_memory_d3(2, QecNoise::Depolarize1(0.02)),
+        &surface_memory_d3(2, QecNoise::Depolarize1(0.02), &[0, 1, 2, 3, 4, 5, 6, 7, 8]),
         "surface d3",
+    );
+}
+
+#[test]
+fn dem_decompose_graphlike_covers_depolarize2() {
+    // DEPOLARIZE2 branches combining an X-type and a Z-type single-qubit
+    // fault flip both check families, so hyperedges with three or more
+    // detectors exist; the single-qubit branches of the same channel provide
+    // the graphlike components.
+    let program = surface_memory_d3(2, QecNoise::Depolarize2(0.02), &[0, 1, 2, 3, 4, 5, 6, 7]);
+    let model = program.detector_error_model().unwrap();
+    let hyperedges: Vec<_> = model
+        .mechanisms()
+        .iter()
+        .filter(|m| m.detectors().len() > 2)
+        .collect();
+    assert!(!hyperedges.is_empty(), "fixture must produce hyperedges");
+
+    let decomposed = model.decompose_graphlike().unwrap();
+    assert_eq!(decomposed.num_detectors(), model.num_detectors());
+    assert_eq!(decomposed.num_observables(), model.num_observables());
+    assert_eq!(decomposed.detector_coords(), model.detector_coords());
+    assert!(
+        decomposed
+            .mechanisms()
+            .iter()
+            .all(|m| m.detectors().len() <= 2)
+    );
+
+    // Retained mechanisms are exactly the original graphlike ones, in order.
+    let original_graphlike: Vec<(&[usize], &[usize])> = model
+        .mechanisms()
+        .iter()
+        .filter(|m| m.detectors().len() <= 2)
+        .map(|m| (m.detectors(), m.observables()))
+        .collect();
+    assert_eq!(decomposed.num_mechanisms(), original_graphlike.len());
+    for (mechanism, (detectors, observables)) in
+        decomposed.mechanisms().iter().zip(&original_graphlike)
+    {
+        assert_eq!(mechanism.detectors(), *detectors);
+        assert_eq!(mechanism.observables(), *observables);
+    }
+
+    // Decomposed-model predictions, read back from the emitted text, still
+    // match sampling.
+    let parsed = parse_dem_text(&decomposed.to_text());
+    let result = run_qec_program(&program).unwrap();
+    assert_marginals_match(
+        &parsed.mechanisms,
+        &result.detectors,
+        "decomposed surface d3",
+    );
+}
+
+#[test]
+fn dem_decompose_graphlike_composes_probabilities() {
+    // Hand-built cover: X on qubit 0 before everything flips all three
+    // records ({D0, D1, D2}, the hyperedge), X on qubit 1 flips only the
+    // joint record ({D0}), X on qubit 0 after the joint record flips the
+    // remaining two ({D1, D2}). Each component must absorb the hyperedge
+    // probability as p(1-ph) + ph(1-p), pinned exactly.
+    let (ph, pa, pb) = (0.02, 0.05, 0.07);
+    let mut program = QecProgram::new(2);
+    program.noise(QecNoise::XError(ph), &[0]).unwrap();
+    program.noise(QecNoise::XError(pa), &[1]).unwrap();
+    let joint = program
+        .measure_pauli_product(&[QecPauli::z(0), QecPauli::z(1)])
+        .unwrap();
+    program.detector(&[QecRecordRef::absolute(joint)]).unwrap();
+    program.noise(QecNoise::XError(pb), &[0]).unwrap();
+    for _ in 0..2 {
+        let record = program.measure_pauli_product(&[QecPauli::z(0)]).unwrap();
+        program.detector(&[QecRecordRef::absolute(record)]).unwrap();
+    }
+
+    let model = program.detector_error_model().unwrap();
+    let symptoms: Vec<&[usize]> = model.mechanisms().iter().map(|m| m.detectors()).collect();
+    assert_eq!(symptoms, vec![&[0, 1, 2][..], &[0][..], &[1, 2][..]]);
+
+    let decomposed = model.decompose_graphlike().unwrap();
+    assert_eq!(decomposed.num_mechanisms(), 2);
+    let expected = [(vec![0usize], pa), (vec![1usize, 2], pb)];
+    for (mechanism, (detectors, prior)) in decomposed.mechanisms().iter().zip(&expected) {
+        assert_eq!(mechanism.detectors(), detectors.as_slice());
+        let composed = prior * (1.0 - ph) + ph * (1.0 - prior);
+        assert!(
+            (mechanism.probability() - composed).abs() < 1e-12,
+            "composed probability {} vs expected {composed}",
+            mechanism.probability()
+        );
+    }
+}
+
+#[test]
+fn dem_decompose_graphlike_is_identity_on_graphlike_models() {
+    let model = repetition_memory(2, QecNoise::Depolarize1(0.05))
+        .detector_error_model()
+        .unwrap();
+    assert!(model.mechanisms().iter().all(|m| m.detectors().len() <= 2));
+    assert_eq!(model.decompose_graphlike().unwrap(), model);
+}
+
+#[test]
+fn dem_decompose_graphlike_errors_on_uncoverable() {
+    // One X fault flipping three detectors, with no other mechanism in the
+    // model, has no cover; the error names the symptom.
+    let mut program = QecProgram::new(1);
+    program.noise(QecNoise::XError(0.1), &[0]).unwrap();
+    for _ in 0..3 {
+        let record = program.measure_pauli_product(&[QecPauli::z(0)]).unwrap();
+        program.detector(&[QecRecordRef::absolute(record)]).unwrap();
+    }
+    let model = program.detector_error_model().unwrap();
+    assert_eq!(model.num_mechanisms(), 1);
+    let err = model.decompose_graphlike().unwrap_err();
+    assert!(
+        err.to_string().contains("D0 D1 D2"),
+        "error names the symptom, got: {err}"
     );
 }
 

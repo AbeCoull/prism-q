@@ -593,8 +593,11 @@ impl StatevectorBackend {
         Ok(())
     }
 
+    /// Apply a gate to the host state without constructing an owned
+    /// [`Instruction`]. The distributed backend dispatches its local gates
+    /// through this to avoid deep-cloning boxed gate payloads per application.
     #[inline(always)]
-    fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) {
+    pub(crate) fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) {
         match gate {
             Gate::Rzz(theta) => self.apply_rzz(targets[0], targets[1], *theta),
             Gate::Cx => self.apply_cx(targets[0], targets[1]),

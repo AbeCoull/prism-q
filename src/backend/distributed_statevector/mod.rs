@@ -199,11 +199,14 @@ fn required_local_qubits(gate: &Gate, targets: &[usize]) -> SmallVec<[usize; 8]>
         | Gate::DiagonalBatch(_) => {}
         Gate::Cu(_) | Gate::Mcu(_) => {
             if gate.controlled_phase().is_none() {
-                let target = match gate {
-                    Gate::Mcu(data) => targets[data.num_controls as usize],
-                    _ => targets[1],
+                let (target, mat) = match gate {
+                    Gate::Mcu(data) => (targets[data.num_controls as usize], &data.mat),
+                    Gate::Cu(mat) => (targets[1], &**mat),
+                    _ => unreachable!("outer match arm is Cu | Mcu"),
                 };
-                push(&mut req, target);
+                if !is_diagonal_2x2(mat) {
+                    push(&mut req, target);
+                }
             }
         }
         Gate::Fused2q(_) => {
@@ -414,14 +417,15 @@ impl DistributedStatevectorBackend {
         }
     }
 
-    /// Physically swap the qubits at a local and a global position, then update
-    /// the map. Only amplitudes whose local bit differs from this rank's bit of
-    /// the global position move, so each rank exchanges half its slice. Both
-    /// ranks enumerate their moving halves in ascending index order, which the
+    /// Exchange the moving half of a local/global SWAP with the partner rank.
+    /// Only amplitudes whose local bit differs from this rank's bit of the
+    /// global position move, so each rank exchanges half its slice. Both ranks
+    /// enumerate their moving halves in ascending index order, which the
     /// single-bit XOR relation between the two sets preserves, so the k-th
     /// received amplitude lands at the k-th moving index. Tiled by
-    /// `exchange_chunk` like the direct global exchange.
-    fn relabel_swap(&mut self, local_pos: usize, global_pos: usize) {
+    /// `exchange_chunk` like the direct global exchange. Pure data movement:
+    /// the qubit map is untouched.
+    fn half_slice_swap(&mut self, local_pos: usize, global_pos: usize) {
         let partner = self.context.rank() ^ (1usize << self.global_bit(global_pos));
         let gbit = self.rank_bit_set(global_pos);
         let stride = 1usize << local_pos;
@@ -451,6 +455,12 @@ impl DistributedStatevectorBackend {
             }
             off += count;
         }
+    }
+
+    /// Physically swap the qubits at a local and a global position, then update
+    /// the map.
+    fn relabel_swap(&mut self, local_pos: usize, global_pos: usize) {
+        self.half_slice_swap(local_pos, global_pos);
 
         let local_q = self.phys_map[local_pos];
         let global_q = self.phys_map[global_pos];
@@ -539,49 +549,80 @@ impl DistributedStatevectorBackend {
             return (Cow::Borrowed(gate), targets.into());
         }
         let ptargets: SmallVec<[usize; 4]> = targets.iter().map(|&q| self.qubit_map[q]).collect();
+        // A payload whose every index maps to itself is borrowed unchanged:
+        // once any relabel leaves the map non-identity, a per-application deep
+        // clone of every batched payload is the steady state otherwise.
+        let fixed = |q: usize| self.qubit_map[q] == q;
         let pgate = match gate {
             Gate::MultiFused(data) => {
-                let mut data = data.clone();
-                for entry in &mut data.gates {
-                    entry.0 = self.qubit_map[entry.0];
+                if data.gates.iter().all(|&(q, _)| fixed(q)) {
+                    Cow::Borrowed(gate)
+                } else {
+                    let mut data = data.clone();
+                    for entry in &mut data.gates {
+                        entry.0 = self.qubit_map[entry.0];
+                    }
+                    Cow::Owned(Gate::MultiFused(data))
                 }
-                Cow::Owned(Gate::MultiFused(data))
             }
             Gate::Multi2q(data) => {
-                let mut data = data.clone();
-                for entry in &mut data.gates {
-                    entry.0 = self.qubit_map[entry.0];
-                    entry.1 = self.qubit_map[entry.1];
+                if data.gates.iter().all(|&(q0, q1, _)| fixed(q0) && fixed(q1)) {
+                    Cow::Borrowed(gate)
+                } else {
+                    let mut data = data.clone();
+                    for entry in &mut data.gates {
+                        entry.0 = self.qubit_map[entry.0];
+                        entry.1 = self.qubit_map[entry.1];
+                    }
+                    Cow::Owned(Gate::Multi2q(data))
                 }
-                Cow::Owned(Gate::Multi2q(data))
             }
             Gate::BatchPhase(data) => {
-                let mut data = data.clone();
-                for entry in &mut data.phases {
-                    entry.0 = self.qubit_map[entry.0];
+                if data.phases.iter().all(|&(q, _)| fixed(q)) {
+                    Cow::Borrowed(gate)
+                } else {
+                    let mut data = data.clone();
+                    for entry in &mut data.phases {
+                        entry.0 = self.qubit_map[entry.0];
+                    }
+                    Cow::Owned(Gate::BatchPhase(data))
                 }
-                Cow::Owned(Gate::BatchPhase(data))
             }
             Gate::BatchRzz(data) => {
-                let mut data = data.clone();
-                for entry in &mut data.edges {
-                    entry.0 = self.qubit_map[entry.0];
-                    entry.1 = self.qubit_map[entry.1];
+                if data.edges.iter().all(|&(q0, q1, _)| fixed(q0) && fixed(q1)) {
+                    Cow::Borrowed(gate)
+                } else {
+                    let mut data = data.clone();
+                    for entry in &mut data.edges {
+                        entry.0 = self.qubit_map[entry.0];
+                        entry.1 = self.qubit_map[entry.1];
+                    }
+                    Cow::Owned(Gate::BatchRzz(data))
                 }
-                Cow::Owned(Gate::BatchRzz(data))
             }
             Gate::DiagonalBatch(data) => {
-                let mut data = data.clone();
-                for entry in &mut data.entries {
-                    match entry {
-                        DiagEntry::Phase1q { qubit, .. } => *qubit = self.qubit_map[*qubit],
-                        DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
-                            *q0 = self.qubit_map[*q0];
-                            *q1 = self.qubit_map[*q1];
+                let entry_fixed = |entry: &DiagEntry| match *entry {
+                    DiagEntry::Phase1q { qubit, .. } => fixed(qubit),
+                    DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                        fixed(q0) && fixed(q1)
+                    }
+                };
+                if data.entries.iter().all(entry_fixed) {
+                    Cow::Borrowed(gate)
+                } else {
+                    let mut data = data.clone();
+                    for entry in &mut data.entries {
+                        match entry {
+                            DiagEntry::Phase1q { qubit, .. } => *qubit = self.qubit_map[*qubit],
+                            DiagEntry::Phase2q { q0, q1, .. }
+                            | DiagEntry::Parity2q { q0, q1, .. } => {
+                                *q0 = self.qubit_map[*q0];
+                                *q1 = self.qubit_map[*q1];
+                            }
                         }
                     }
+                    Cow::Owned(Gate::DiagonalBatch(data))
                 }
-                Cow::Owned(Gate::DiagonalBatch(data))
             }
             _ => Cow::Borrowed(gate),
         };
@@ -734,44 +775,67 @@ impl DistributedStatevectorBackend {
     }
 
     /// Apply a 2x2 matrix to a global target qubit, gated by local control
-    /// qubits (all must be 1). Exchanges with the partner rank, then combines
-    /// only the controlled indices; uncontrolled indices keep their own value.
+    /// qubits (all must be 1). Only the control-selected sublattice is
+    /// consumed, so with `k` controls each rank packs and exchanges `len / 2^k`
+    /// amplitudes instead of the full slice. Both ranks enumerate the same
+    /// sublattice in ascending index order, so the exchange stays aligned.
+    /// Tiled by `exchange_chunk` like the direct global exchange.
     fn apply_global_controlled_1q(
         &mut self,
         local_controls: &[usize],
         target: usize,
         mat: [[Complex64; 2]; 2],
     ) {
-        let partner = self.context.rank() ^ (1usize << self.global_bit(target));
-        let len = self.inner.state.len();
-        if self.recv.len() != len {
-            self.recv.resize(len, Complex64::new(0.0, 0.0));
+        if local_controls.is_empty() {
+            self.apply_global_1q(target, mat);
+            return;
         }
-        self.count_exchange(len);
-        self.context
-            .comm()
-            .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
-
+        let partner = self.context.rank() ^ (1usize << self.global_bit(target));
         let (c_self, c_remote) = if self.rank_bit_set(target) {
             (mat[1][1], mat[1][0])
         } else {
             (mat[0][0], mat[0][1])
         };
 
-        if local_controls.is_empty() {
-            simd::combine_global_half(&mut self.inner.state, &self.recv, c_self, c_remote);
-            return;
-        }
-        let ctrl_mask: usize = local_controls.iter().map(|&c| 1usize << c).sum();
-        for (i, amp) in self.inner.state.iter_mut().enumerate() {
-            if i & ctrl_mask == ctrl_mask {
-                *amp = c_self * *amp + c_remote * self.recv[i];
+        let mut ctrl_pos: SmallVec<[usize; 4]> = local_controls.iter().copied().collect();
+        ctrl_pos.sort_unstable();
+        let index_of = |flat: usize| {
+            let mut i = flat;
+            for &p in &ctrl_pos {
+                let low = i & ((1usize << p) - 1);
+                i = ((i >> p) << (p + 1)) | (1usize << p) | low;
             }
+            i
+        };
+        let moving = self.inner.state.len() >> ctrl_pos.len();
+        let chunk = self.exchange_chunk.min(moving).max(1);
+        if self.pack.len() != chunk {
+            self.pack.resize(chunk, Complex64::new(0.0, 0.0));
+        }
+        if self.recv.len() != chunk {
+            self.recv.resize(chunk, Complex64::new(0.0, 0.0));
+        }
+        let mut off = 0;
+        while off < moving {
+            let count = (off + chunk).min(moving) - off;
+            for (k, slot) in self.pack[..count].iter_mut().enumerate() {
+                *slot = self.inner.state[index_of(off + k)];
+            }
+            self.count_exchange(count);
+            self.context
+                .comm()
+                .sendrecv_c64(partner, &self.pack[..count], &mut self.recv[..count]);
+            for (k, &remote) in self.recv[..count].iter().enumerate() {
+                let i = index_of(off + k);
+                self.inner.state[i] = c_self * self.inner.state[i] + c_remote * remote;
+            }
+            off += count;
         }
     }
 
     /// Apply a controlled gate (one target, zero or more controls) whose qubit
     /// set may span local and global qubits. Covers Cx, Cu, and Mcu uniformly.
+    /// A diagonal target matrix needs no communication regardless of the split.
     fn apply_controlled_dist(
         &mut self,
         controls: &[usize],
@@ -791,6 +855,24 @@ impl DistributedStatevectorBackend {
 
         if target < local {
             self.apply_local_controlled_1q(&local_controls, target, mat);
+        } else if is_diagonal_2x2(&mat) {
+            // A global diagonal target contributes its rank bit: scale the
+            // control-selected sublattice by the selected diagonal entry.
+            let d = if self.rank_bit_set(target) {
+                mat[1][1]
+            } else {
+                mat[0][0]
+            };
+            if local_controls.is_empty() {
+                simd::scale_complex_slice(&mut self.inner.state, d);
+                return;
+            }
+            let ctrl_mask: usize = local_controls.iter().map(|&c| 1usize << c).sum();
+            for (i, amp) in self.inner.state.iter_mut().enumerate() {
+                if i & ctrl_mask == ctrl_mask {
+                    *amp *= d;
+                }
+            }
         } else {
             self.apply_global_controlled_1q(&local_controls, target, mat);
         }
@@ -942,27 +1024,7 @@ impl DistributedStatevectorBackend {
             }
             (true, false) | (false, true) => {
                 let (local_q, global_q) = if a < local { (a, b) } else { (b, a) };
-                let partner = self.context.rank() ^ (1usize << self.global_bit(global_q));
-                let len = self.inner.state.len();
-                if self.recv.len() != len {
-                    self.recv.resize(len, Complex64::new(0.0, 0.0));
-                }
-                self.count_exchange(len);
-                self.context
-                    .comm()
-                    .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
-                // The global bit is fixed on this rank. Entries where the local
-                // bit differs take the partner value at the flipped local index.
-                let global_bit = self.rank_bit_set(global_q);
-                let half = 1usize << local_q;
-                let len = self.inner.state.len();
-                for i in 0..len {
-                    let local_bit = (i >> local_q) & 1 == 1;
-                    if local_bit != global_bit {
-                        let partner_idx = i ^ half;
-                        self.inner.state[i] = self.recv[partner_idx];
-                    }
-                }
+                self.half_slice_swap(local_q, global_q);
             }
         }
     }
@@ -1032,6 +1094,73 @@ impl DistributedStatevectorBackend {
             acc += mat[row][basis(1 - g, 0)] * self.recv[sib0];
             acc += mat[row][basis(1 - g, 1)] * self.recv[sib1];
             self.inner.state[i] = acc;
+        }
+    }
+
+    /// Apply a run of two qubit gates that all pair a local qubit with the same
+    /// global qubit. One exchange serves the whole run: after it this rank holds
+    /// both halves of the pair subspace, so each entry updates the local slice
+    /// and the mirrored partner copy together, exactly as the partner does with
+    /// the roles flipped. Sums run in canonical basis order so both ranks
+    /// produce bit-identical copies and stay in lockstep without further
+    /// communication.
+    fn apply_2q_run_one_global(
+        &mut self,
+        global_q: usize,
+        entries: &[(usize, usize, [[Complex64; 4]; 4])],
+    ) {
+        let partner = self.context.rank() ^ (1usize << self.global_bit(global_q));
+        let len = self.inner.state.len();
+        if self.recv.len() != len {
+            self.recv.resize(len, Complex64::new(0.0, 0.0));
+        }
+        self.count_exchange(len);
+        self.context
+            .comm()
+            .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
+
+        let g = self.rank_bit_set(global_q) as usize;
+        let state = &mut self.inner.state;
+        let recv = &mut self.recv[..len];
+        for &(q0, q1, ref mat) in entries {
+            let (local_q, global_is_q0) = if q0 == global_q {
+                (q1, true)
+            } else {
+                (q0, false)
+            };
+            let half = 1usize << local_q;
+            let basis = |gbit: usize, lbit: usize| -> usize {
+                if global_is_q0 {
+                    (gbit << 1) | lbit
+                } else {
+                    (lbit << 1) | gbit
+                }
+            };
+            // Slot order: state[i0], state[i1], recv[i0], recv[i1].
+            let slots = [basis(g, 0), basis(g, 1), basis(1 - g, 0), basis(1 - g, 1)];
+            let zero = Complex64::new(0.0, 0.0);
+            let mut base = 0;
+            while base < len {
+                for i0 in base..base + half {
+                    let i1 = i0 | half;
+                    let mut by_col = [zero; 4];
+                    by_col[slots[0]] = state[i0];
+                    by_col[slots[1]] = state[i1];
+                    by_col[slots[2]] = recv[i0];
+                    by_col[slots[3]] = recv[i1];
+                    let mut outs = [zero; 4];
+                    for (out, &row) in outs.iter_mut().zip(slots.iter()) {
+                        for (c, &amp) in by_col.iter().enumerate() {
+                            *out += mat[row][c] * amp;
+                        }
+                    }
+                    state[i0] = outs[0];
+                    state[i1] = outs[1];
+                    recv[i0] = outs[2];
+                    recv[i1] = outs[3];
+                }
+                base += half << 1;
+            }
         }
     }
 
@@ -1127,8 +1256,37 @@ impl DistributedStatevectorBackend {
                 Ok(())
             }
             Gate::Multi2q(data) => {
-                for &(q0, q1, ref mat) in &data.gates {
-                    self.apply_2q_dist(q0, q1, mat);
+                // Consecutive entries sharing one global qubit have the same
+                // partner (a CNOT star onto one qubit); one exchange serves
+                // the whole run.
+                let local = self.local_qubits();
+                let one_global_on = |entry: &(usize, usize, [[Complex64; 4]; 4])| {
+                    let (q0, q1, _) = *entry;
+                    match (q0 < local, q1 < local) {
+                        (true, false) => Some(q1),
+                        (false, true) => Some(q0),
+                        _ => None,
+                    }
+                };
+                let mut i = 0;
+                while i < data.gates.len() {
+                    let Some(g) = one_global_on(&data.gates[i]) else {
+                        let (q0, q1, ref mat) = data.gates[i];
+                        self.apply_2q_dist(q0, q1, mat);
+                        i += 1;
+                        continue;
+                    };
+                    let mut end = i + 1;
+                    while end < data.gates.len() && one_global_on(&data.gates[end]) == Some(g) {
+                        end += 1;
+                    }
+                    if end - i == 1 {
+                        let (q0, q1, ref mat) = data.gates[i];
+                        self.apply_2q_one_global(q0, q1, mat);
+                    } else {
+                        self.apply_2q_run_one_global(g, &data.gates[i..end]);
+                    }
+                    i = end;
                 }
                 Ok(())
             }
@@ -1371,10 +1529,8 @@ impl DistributedStatevectorBackend {
     /// or relabeling is disabled.
     fn apply_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         if self.global_qubits == 0 {
-            return self.inner.apply(&Instruction::Gate {
-                gate: gate.clone(),
-                targets: targets.into(),
-            });
+            self.inner.dispatch_gate(gate, targets);
+            return Ok(());
         }
         if self.relabel {
             self.touch_instruction(gate, targets);
@@ -1392,10 +1548,8 @@ impl DistributedStatevectorBackend {
         }
         let (pgate, ptargets) = self.to_physical(gate, targets);
         if self.instruction_qubits_local(&pgate, &ptargets) {
-            return self.inner.apply(&Instruction::Gate {
-                gate: pgate.into_owned(),
-                targets: ptargets,
-            });
+            self.inner.dispatch_gate(pgate.as_ref(), &ptargets);
+            return Ok(());
         }
         let pgate = pgate.as_ref();
         if pgate.num_qubits() == 1 {

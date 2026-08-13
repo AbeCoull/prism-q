@@ -905,6 +905,129 @@ fn tiled_exchange_splits_messages_not_volume() {
     );
 }
 
+#[test]
+fn boundary_swap_direct_exchanges_half_the_slice() {
+    relax_min_local_qubits();
+    let circuit = {
+        let mut b = CircuitBuilder::new(5);
+        b.x(0).swap(0, 4);
+        b.build()
+    };
+    let full = loopback_exchange_stats(&circuit, 2, usize::MAX, false);
+    assert_eq!(
+        full,
+        (1, 8),
+        "only the moving half of the 16-amplitude slice crosses"
+    );
+    let tiled = loopback_exchange_stats(&circuit, 2, 4, false);
+    assert_eq!(tiled, (2, 8), "8 moving amplitudes in chunks of 4");
+    assert_loopback_matches(&circuit, &[2, 4]);
+}
+
+#[test]
+fn local_controls_cut_the_controlled_exchange_volume() {
+    relax_min_local_qubits();
+    let x_mat = [
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+    // One local control selects half the slice.
+    let single = {
+        let mut b = CircuitBuilder::new(5);
+        b.h(0).cx(0, 4);
+        b.build()
+    };
+    let stats = loopback_exchange_stats(&single, 2, usize::MAX, false);
+    assert_eq!(stats, (1, 8), "one control selects len/2 of the slice");
+
+    // Two local controls select a quarter.
+    let double = {
+        let mut b = CircuitBuilder::new(5);
+        b.h(0).h(1).mcu(x_mat, &[0, 1], 4);
+        b.build()
+    };
+    let stats = loopback_exchange_stats(&double, 2, usize::MAX, false);
+    assert_eq!(stats, (1, 4), "two controls select len/4 of the slice");
+    let tiled = loopback_exchange_stats(&double, 2, 2, false);
+    assert_eq!(tiled, (2, 4), "4 sublattice amplitudes in chunks of 2");
+
+    assert_loopback_matches(&single, &[2, 4]);
+    assert_loopback_matches(&double, &[2, 4]);
+}
+
+#[test]
+fn diagonal_cu_with_global_target_is_communication_free() {
+    relax_min_local_qubits();
+    let diag = [
+        [Complex64::cis(0.3), Complex64::new(0.0, 0.0)],
+        [Complex64::new(0.0, 0.0), Complex64::cis(0.7)],
+    ];
+    // The prep pays for x(4); the trailing h(0) makes the phase visible in
+    // probabilities. The diagonal cu itself must add no exchange, so the
+    // prep-only circuit and the full circuit report identical counters.
+    let prep_only = {
+        let mut b = CircuitBuilder::new(5);
+        b.x(4).h(0).h(0);
+        b.build()
+    };
+    let with_cu = {
+        let mut b = CircuitBuilder::new(5);
+        b.x(4).h(0).cu(diag, 0, 4).h(0);
+        b.build()
+    };
+    for relabel in [false, true] {
+        let base = loopback_exchange_stats(&prep_only, 2, usize::MAX, relabel);
+        let full = loopback_exchange_stats(&with_cu, 2, usize::MAX, relabel);
+        assert_eq!(
+            base, full,
+            "diagonal cu on a global target adds no exchange (relabel {relabel})"
+        );
+    }
+    assert_loopback_matches(&with_cu, &[2, 4]);
+}
+
+#[test]
+fn multi2q_star_shares_one_exchange_per_run() {
+    relax_min_local_qubits();
+    // Fan-out onto one global qubit, the syndrome-extraction shape: three
+    // same-partner entries share a single exchange.
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let z = c(0.0);
+    let cx_mat = [
+        [c(1.0), z, z, z],
+        [z, c(1.0), z, z],
+        [z, z, z, c(1.0)],
+        [z, z, c(1.0), z],
+    ];
+    let cry_mat = |theta: f64| {
+        let (sin, cos) = (theta / 2.0).sin_cos();
+        [
+            [c(1.0), z, z, z],
+            [z, c(1.0), z, z],
+            [z, z, c(cos), c(-sin)],
+            [z, z, c(sin), c(cos)],
+        ]
+    };
+    let mut circuit = Circuit::new(5, 0);
+    {
+        let gates = vec![(0, 4, cx_mat), (1, 4, cry_mat(0.3)), (2, 4, cry_mat(0.8))];
+        for q in 0..3 {
+            circuit.add_gate(crate::gates::Gate::H, &[q]);
+        }
+        circuit.add_gate(
+            crate::gates::Gate::Multi2q(Box::new(crate::gates::Multi2qData { gates })),
+            &[0, 1, 2, 4],
+        );
+    }
+    let stats = loopback_exchange_stats(&circuit, 2, usize::MAX, false);
+    assert_eq!(
+        stats,
+        (1, 16),
+        "the three-entry run exchanges the slice once, not per entry"
+    );
+    assert_loopback_matches(&circuit, &[2, 4]);
+}
+
 fn inst_h(q: usize) -> crate::circuit::Instruction {
     crate::circuit::Instruction::Gate {
         gate: crate::gates::Gate::H,

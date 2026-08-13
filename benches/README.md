@@ -82,6 +82,18 @@ both the working tree and the reference worktree.
 | `qec_decoder/rep_d3_r3`, `qec_decoder/rep_d5_r5` | Bulk union-find decode of sampled repetition-memory detector batches, 1k and 20k shots |
 | `qec_decoder/surface_d3_r3`, `qec_decoder/surface_d5_r5` | Bulk union-find decode of sampled rotated-surface-memory detector batches, 1k and 20k shots |
 
+### Distributed loopback benchmarks (bench_distributed)
+
+Requires `--features "parallel distributed bench-internal"`. Rank pairs run on the
+thread loopback transport, so exchanges move at memcpy speed: the rows resolve
+packing, copying, and per-gate dispatch cost, not network latency.
+
+| Group | What it measures |
+|-------|-----------------|
+| `distributed/steady_state_batched` | Fused QAOA behind one SWAP: batched-payload dispatch with a non-identity qubit map |
+| `distributed/boundary_swap_direct` | Repeated boundary SWAPs with relabeling off: the half-slice pack path |
+| `distributed/controlled_star_direct` | Controlled gates and a Multi2q star onto one global qubit with relabeling off |
+
 ## Circuit families
 
 All seeded with `0xDEAD_BEEF` for reproducibility.

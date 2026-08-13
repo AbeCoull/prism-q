@@ -192,7 +192,8 @@ impl GpuContext {
         self.device.vram_available()
     }
 
-    /// Maximum qubit count for a dense Complex64 statevector on this device.
+    /// Maximum qubit count for a dense Complex64 statevector in the currently
+    /// free VRAM of this device.
     pub fn max_qubits_for_statevector(&self) -> Result<usize> {
         self.device.max_qubits_for_statevector()
     }

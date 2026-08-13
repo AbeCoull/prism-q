@@ -119,25 +119,35 @@ pub(super) fn rdm_sum_add(
     (a.0 + b.0, a.1 + b.1, a.2 + b.2)
 }
 
+/// Reject a device statevector that cannot fit the currently free VRAM.
+///
+/// Guards the hard GPU path before the allocation is attempted, so an
+/// over-VRAM circuit surfaces a budget error naming the request and the free
+/// memory instead of the raw driver failure. A context that cannot report
+/// free memory (stub device) falls through to the allocation attempt, whose
+/// own error stays authoritative; so does a lost race against another process
+/// allocating between this check and the allocation.
 #[cfg(feature = "gpu")]
-fn reduced_density_matrix_from_state(state: &[Complex64], qubit: usize) -> [[Complex64; 2]; 2] {
-    let half = 1usize << qubit;
-    let block_size = half << 1;
-    let mut p0 = 0.0f64;
-    let mut p1 = 0.0f64;
-    let mut r = Complex64::new(0.0, 0.0);
-
-    for block in state.chunks(block_size) {
-        let (b0, b1, br) = rdm_block_sums(block, half);
-        p0 += b0;
-        p1 += b1;
-        r += br;
+fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error::Result<()> {
+    if num_qubits >= usize::BITS as usize - 4 {
+        return Ok(());
     }
-
-    [
-        [Complex64::new(p0, 0.0), r.conj()],
-        [r, Complex64::new(p1, 0.0)],
-    ]
+    let Ok(free) = context.vram_available() else {
+        return Ok(());
+    };
+    let needed = (1usize << num_qubits) * 16;
+    if needed > free {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: "statevector-gpu".to_string(),
+            reason: format!(
+                "circuit has {num_qubits} qubits needing {} MiB of device memory, \
+                 exceeding the {} MiB free on the GPU",
+                needed >> 20,
+                free >> 20
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Insert a zero bit at `bit_pos`, shifting all higher bits left by one.
@@ -562,6 +572,9 @@ impl StatevectorBackend {
 
         #[cfg(feature = "gpu")]
         if let Some(ctx) = self.gpu_context.clone() {
+            if !self.gpu_soft {
+                check_device_budget(&ctx, self.num_qubits)?;
+            }
             match GpuState::from_host_amplitudes(ctx, &state) {
                 Ok(gpu) => {
                     self.state.clear();
@@ -580,8 +593,11 @@ impl StatevectorBackend {
         Ok(())
     }
 
+    /// Apply a gate to the host state without constructing an owned
+    /// [`Instruction`]. The distributed backend dispatches its local gates
+    /// through this to avoid deep-cloning boxed gate payloads per application.
     #[inline(always)]
-    fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) {
+    pub(crate) fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) {
         match gate {
             Gate::Rzz(theta) => self.apply_rzz(targets[0], targets[1], *theta),
             Gate::Cx => self.apply_cx(targets[0], targets[1]),
@@ -692,13 +708,6 @@ impl Backend for StatevectorBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
-        crate::backend::check_state_allocation(
-            "statevector",
-            num_qubits,
-            crate::backend::max_statevector_qubits(),
-            "PRISM_MAX_SV_QUBITS",
-        )?;
-
         #[cfg(feature = "parallel")]
         crate::backend::init_thread_pool();
 
@@ -706,8 +715,13 @@ impl Backend for StatevectorBackend {
         self.pending_norm = 1.0;
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
 
+        // The device path is budgeted by VRAM, not by the host cap: the host
+        // vector is never allocated while the state lives on the device.
         #[cfg(feature = "gpu")]
         if let Some(ctx) = self.gpu_context.clone() {
+            if !self.gpu_soft {
+                check_device_budget(&ctx, num_qubits)?;
+            }
             match GpuState::new(ctx, num_qubits) {
                 Ok(state) => {
                     self.state.clear();
@@ -721,6 +735,13 @@ impl Backend for StatevectorBackend {
                 }
             }
         }
+
+        crate::backend::check_state_allocation(
+            "statevector",
+            num_qubits,
+            crate::backend::max_statevector_qubits(),
+            "PRISM_MAX_SV_QUBITS",
+        )?;
 
         let dim = 1usize << num_qubits;
         if self.state.len() == dim {
@@ -816,8 +837,11 @@ impl Backend for StatevectorBackend {
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         #[cfg(feature = "gpu")]
         if let Some(gpu) = self.gpu_state.as_ref() {
-            let state = gpu.export_statevector()?;
-            return Ok(reduced_density_matrix_from_state(&state, qubit));
+            return crate::gpu::kernels::dense::reduced_density_matrix_1q(
+                gpu.context(),
+                gpu,
+                qubit,
+            );
         }
         Ok(self.reduced_density_matrix_one(qubit))
     }

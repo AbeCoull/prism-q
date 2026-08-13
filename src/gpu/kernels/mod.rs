@@ -84,6 +84,9 @@ pub(crate) struct LauncherScratch {
     pub(crate) measure_partials: Option<GpuBuffer<f64>>,
     /// One-element output for the measure-prob finalize reduction.
     pub(crate) measure_result: Option<GpuBuffer<f64>>,
+    /// Four-element output for the reduced-density-matrix finalize reduction.
+    /// Separate from `measure_result`: readback length must match the buffer.
+    pub(crate) rdm_result: Option<GpuBuffer<f64>>,
 }
 
 /// Ensure `slot` has at least `host.len()` elements allocated, growing if not,
@@ -162,6 +165,8 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "apply_fused_2q",
     "measure_prob_one",
     "measure_prob_one_finalize",
+    "rdm_qubit",
+    "rdm_qubit_finalize",
     "measure_collapse",
     "compute_probabilities",
     "apply_multi_fused_diagonal",

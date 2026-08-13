@@ -121,6 +121,11 @@ name = "bench_gpu"
 harness = false
 required-features = ["gpu"]
 
+[[bench]]
+name = "bench_distributed"
+harness = false
+required-features = ["distributed", "bench-internal"]
+
 [[example]]
 name = "dist_mpi_check"
 required-features = ["distributed-mpi"]

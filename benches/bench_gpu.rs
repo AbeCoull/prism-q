@@ -23,12 +23,15 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use num_complex::Complex64;
 use prism_q::backend::Backend;
-use prism_q::circuit::Circuit;
+use prism_q::circuit::{Circuit, Instruction};
 use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::gpu::GpuContext;
-use prism_q::{BackendKind, StabilizerBackend, StatevectorBackend};
+use prism_q::{
+    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, StabilizerBackend, StatevectorBackend, sim,
+};
 
 mod common;
 use common::{SEED, configure_group, is_fast, run_shots_with, run_with};
@@ -230,6 +233,111 @@ fn bench_gpu_measurement(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(kind.clone(), circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ============================================================================
+// Noisy trajectory (general noise on the GPU statevector)
+// ============================================================================
+
+/// Kraus set for amplitude damping at rate `gamma`.
+fn amplitude_damping_kraus(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
+    let c = |re: f64| Complex64::new(re, 0.0);
+    let zero = c(0.0);
+    vec![
+        [[c(1.0), zero], [zero, c((1.0 - gamma).sqrt())]],
+        [[zero, c(gamma.sqrt())], [zero, zero]],
+    ]
+}
+
+/// Custom Kraus amplitude damping after every gate. `Custom` keeps the
+/// channel on the general trajectory route, where branch probabilities
+/// come from `reduced_density_matrix_1q` per event.
+fn custom_kraus_noise(circuit: &Circuit) -> NoiseModel {
+    let kraus = amplitude_damping_kraus(0.05);
+    let after_gate = circuit
+        .instructions
+        .iter()
+        .map(|instr| match instr {
+            Instruction::Gate { targets, .. } => vec![NoiseEvent {
+                channel: NoiseChannel::Custom {
+                    kraus: kraus.clone(),
+                },
+                qubits: std::iter::once(targets[0]).collect(),
+            }],
+            _ => Vec::new(),
+        })
+        .collect();
+    NoiseModel {
+        after_gate,
+        readout: vec![None; circuit.num_classical_bits],
+    }
+}
+
+fn measured_random_circuit(n: usize) -> Circuit {
+    let mut circuit = circuits::random_circuit(n, 10, SEED);
+    circuit.num_classical_bits = n;
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+fn noisy_sweep_sizes() -> &'static [usize] {
+    if is_fast() { &[16] } else { &[20] }
+}
+
+const NOISY_SHOTS: usize = 2;
+
+fn run_shots_with_noise(
+    kind: BackendKind,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    num_shots: usize,
+    seed: u64,
+) -> prism_q::Result<prism_q::ShotsResult> {
+    sim::simulate(circuit)
+        .backend(kind)
+        .noise(noise)
+        .seed(seed)
+        .shots(num_shots)
+}
+
+fn bench_gpu_noisy_kraus(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/noisy_kraus_d10");
+    configure_group(&mut group);
+    let kind = gpu_kind(&ctx);
+
+    for &n in noisy_sweep_sizes() {
+        let circuit = measured_random_circuit(n);
+        let noise = custom_kraus_noise(&circuit);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_shots_with_noise(kind.clone(), circ, &noise, NOISY_SHOTS, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// CPU statevector sibling of `gpu/noisy_kraus_d10` for crossover context.
+fn bench_cpu_noisy_kraus(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gpu_noisy_cpu/kraus_d10");
+    configure_group(&mut group);
+
+    for &n in noisy_sweep_sizes() {
+        let circuit = measured_random_circuit(n);
+        let noise = custom_kraus_noise(&circuit);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::Statevector, circ, &noise, NOISY_SHOTS, 42)
+                    .unwrap();
             });
         });
     }
@@ -729,6 +837,8 @@ criterion_group! {
     bench_gpu_decomposed,
     bench_gpu_direct_kernel,
     bench_gpu_measurement,
+    bench_gpu_noisy_kraus,
+    bench_cpu_noisy_kraus,
     bench_stab_cpu_clifford_d10,
     bench_stab_gpu_clifford_d10,
     bench_stab_direct_cpu_clifford_d10,

@@ -53,7 +53,11 @@ BTS sampling. Six entry points are available:
   matrix. Otherwise the API uses a host copy for correctness.
 
 When a GPU context is attached, `Backend::init` allocates state on the device instead
-of a host `Vec<Complex64>` and every instruction routes to a CUDA kernel.
+of a host `Vec<Complex64>` and every instruction routes to a CUDA kernel. On the hard
+statevector path (`StatevectorGpu`, `with_gpu`), a state that does not fit the
+currently free VRAM is rejected at `init` with an error naming the requested and free
+device memory; `GpuContext::max_qubits_for_statevector` reports the advisory cap from
+free memory.
 
 The three `BackendKind` entry points are also reachable from Python, from a build
 carrying the `gpu` feature. See [Python Bindings](python.md#gpu-backends).
@@ -119,7 +123,9 @@ equality tests.
   user-visible says whether a run executed on the device.
 - Stabilizer `probabilities()`, `export_tableau()`, and `export_statevector()` read
   back to the CPU.
-- A `Custom` Kraus noise event reads the full state back to the host, and every
-  trajectory shot rebuilds the backend, reallocating the device buffer.
+- Every trajectory shot rebuilds the backend, reallocating the device buffer
+  (measured at 0.1 ms per shot at 20 qubits, so not a practical cost). `Custom`
+  Kraus branch probabilities come from an on-device reduced-density-matrix
+  reduction (`rdm_qubit`), not a full-state readback.
 - Kernel design and crossover analysis live in the module docstrings on
   `src/gpu/kernels/dense.rs`.

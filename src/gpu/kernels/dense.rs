@@ -374,6 +374,93 @@ extern "C" __global__ void measure_prob_one_finalize(
     if (tid == 0) result[0] = sdata[0];
 }
 
+// rdm_qubit: per-block reduction of the four 1q reduced-density-matrix sums over
+// amplitude pairs (i0, i1 = i0 | 1<<qubit): sum |a0|^2, sum |a1|^2, and sum
+// a1 * conj(a0) (re, im). Pair index p maps to i0 by inserting a zero bit at
+// `qubit`. Each block reduces 2*BLOCK_SIZE pairs into out_partials[4*blockIdx..].
+// Shared memory holds four blockDim.x columns.
+
+extern "C" __global__ void rdm_qubit(
+    const double2 *state, unsigned long long pairs, int qubit, double *out_partials)
+{
+    extern __shared__ double sdata[];
+    double *s0 = sdata;
+    double *s1 = sdata + blockDim.x;
+    double *sr = sdata + 2 * blockDim.x;
+    double *si = sdata + 3 * blockDim.x;
+    unsigned long long tid = threadIdx.x;
+    unsigned long long low_mask = (1ULL << qubit) - 1ULL;
+    double p0 = 0.0, p1 = 0.0, rr = 0.0, ri = 0.0;
+    unsigned long long p = (unsigned long long)blockIdx.x * (blockDim.x * 2) + tid;
+    for (int rep = 0; rep < 2; ++rep) {
+        if (p < pairs) {
+            unsigned long long i0 = ((p & ~low_mask) << 1) | (p & low_mask);
+            double2 a0 = state[i0];
+            double2 a1 = state[i0 | (1ULL << qubit)];
+            p0 += a0.x*a0.x + a0.y*a0.y;
+            p1 += a1.x*a1.x + a1.y*a1.y;
+            rr += a1.x*a0.x + a1.y*a0.y;
+            ri += a1.y*a0.x - a1.x*a0.y;
+        }
+        p += blockDim.x;
+    }
+    s0[tid] = p0; s1[tid] = p1; sr[tid] = rr; si[tid] = ri;
+    __syncthreads();
+    for (unsigned long long stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s0[tid] += s0[tid + stride];
+            s1[tid] += s1[tid + stride];
+            sr[tid] += sr[tid + stride];
+            si[tid] += si[tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        out_partials[4 * blockIdx.x + 0] = s0[0];
+        out_partials[4 * blockIdx.x + 1] = s1[0];
+        out_partials[4 * blockIdx.x + 2] = sr[0];
+        out_partials[4 * blockIdx.x + 3] = si[0];
+    }
+}
+
+// Single-block reduction of the four-column partials (length 4*count) into
+// result[0..4]. Same shape as measure_prob_one_finalize; replaces a
+// 4*num_blocks-element D2H plus a host sum with one 32-byte D2H.
+extern "C" __global__ void rdm_qubit_finalize(
+    const double *partials, unsigned int count, double *result)
+{
+    extern __shared__ double sdata[];
+    double *s0 = sdata;
+    double *s1 = sdata + blockDim.x;
+    double *sr = sdata + 2 * blockDim.x;
+    double *si = sdata + 3 * blockDim.x;
+    unsigned int tid = threadIdx.x;
+    double p0 = 0.0, p1 = 0.0, rr = 0.0, ri = 0.0;
+    for (unsigned int i = tid; i < count; i += blockDim.x) {
+        p0 += partials[4 * i + 0];
+        p1 += partials[4 * i + 1];
+        rr += partials[4 * i + 2];
+        ri += partials[4 * i + 3];
+    }
+    s0[tid] = p0; s1[tid] = p1; sr[tid] = rr; si[tid] = ri;
+    __syncthreads();
+    for (unsigned int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s0[tid] += s0[tid + stride];
+            s1[tid] += s1[tid + stride];
+            sr[tid] += sr[tid + stride];
+            si[tid] += si[tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        result[0] = s0[0];
+        result[1] = s1[0];
+        result[2] = sr[0];
+        result[3] = si[0];
+    }
+}
+
 // measure_collapse: zero amplitudes where qubit bit != outcome.
 // Launch over 2^n threads, block size BLOCK_SIZE.
 
@@ -1251,6 +1338,100 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
     let prob_raw = host_result[0];
     let norm_sq = state.pending_norm() * state.pending_norm();
     Ok((prob_raw * norm_sq).clamp(0.0, 1.0))
+}
+
+/// One-qubit reduced density matrix from the device state, `pending_norm²`
+/// applied. Two reduction launches and a 32-byte readback replace the
+/// full-state export the host fallback would need.
+pub(crate) fn reduced_density_matrix_1q(
+    ctx: &GpuContext,
+    state: &GpuState,
+    qubit: usize,
+) -> Result<[[Complex64; 2]; 2]> {
+    let n = state.num_qubits();
+    if qubit >= n {
+        return Err(PrismError::InvalidQubit {
+            index: qubit,
+            register_size: n,
+        });
+    }
+    let pairs: u64 = 1u64 << (n - 1);
+    let elems_per_block = 2u64 * BLOCK_SIZE as u64;
+    let num_blocks = pairs.div_ceil(elems_per_block).max(1) as u32;
+
+    let device = ctx.device();
+    let stream = device.stream()?;
+    let stage1 = device.function("rdm_qubit")?;
+    let stage2 = device.function("rdm_qubit_finalize")?;
+    let shared_bytes = 4 * BLOCK_SIZE * std::mem::size_of::<f64>() as u32;
+    let stage1_cfg = LaunchConfig {
+        grid_dim: (num_blocks, 1, 1),
+        block_dim: (BLOCK_SIZE, 1, 1),
+        shared_mem_bytes: shared_bytes,
+    };
+    let stage2_cfg = LaunchConfig {
+        grid_dim: (1, 1, 1),
+        block_dim: (BLOCK_SIZE, 1, 1),
+        shared_mem_bytes: shared_bytes,
+    };
+
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let partials = super::ensure_capacity(
+        &mut scratch.measure_partials,
+        device,
+        4 * num_blocks as usize,
+    )?;
+
+    let qubit_i = qubit as i32;
+    {
+        let mut builder = stream.launch_builder(&stage1);
+        let state_buf = state.buffer().raw();
+        builder
+            .arg(state_buf)
+            .arg(&pairs)
+            .arg(&qubit_i)
+            .arg(partials.raw_mut());
+        // SAFETY: signature matches kernel; num_blocks * 2*BLOCK_SIZE covers pairs and
+        // out_partials holds 4*num_blocks f64s.
+        unsafe {
+            builder
+                .launch(stage1_cfg)
+                .map_err(|e| launch_err("rdm_qubit", e))?;
+        }
+    }
+
+    let result = super::ensure_capacity(&mut scratch.rdm_result, device, 4)?;
+    let count_u32 = num_blocks;
+    {
+        let mut builder = stream.launch_builder(&stage2);
+        builder
+            .arg(scratch.measure_partials.as_ref().unwrap().raw())
+            .arg(&count_u32)
+            .arg(result.raw_mut());
+        // SAFETY: signature matches kernel; one block of BLOCK_SIZE threads, grid-stride
+        // loop over `count_u32` four-column partials. Both buffers held by the scratch guard.
+        unsafe {
+            builder
+                .launch(stage2_cfg)
+                .map_err(|e| launch_err("rdm_qubit_finalize", e))?;
+        }
+    }
+
+    let mut host_result = [0.0_f64; 4];
+    scratch
+        .rdm_result
+        .as_ref()
+        .unwrap()
+        .copy_to_host(device, &mut host_result[..])?;
+    let norm_sq = state.pending_norm() * state.pending_norm();
+    let p0 = host_result[0] * norm_sq;
+    let p1 = host_result[1] * norm_sq;
+    let r = Complex64::new(host_result[2], host_result[3]) * norm_sq;
+    Ok([
+        [Complex64::new(p0, 0.0), r.conj()],
+        [r, Complex64::new(p1, 0.0)],
+    ])
 }
 
 /// Zeroes the losing branch only; renormalization is deferred to the caller

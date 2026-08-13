@@ -2457,3 +2457,190 @@ fn auto_gpu_noisy_trajectories_match_cpu_auto() {
         );
     }
 }
+
+#[test]
+fn over_vram_init_reports_the_device_budget() {
+    let Some(f) = Fixture::try_new() else { return };
+    let over = f.ctx.max_qubits_for_statevector().unwrap() + 1;
+    let mut backend = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    match backend.init(over, 0).unwrap_err() {
+        prism_q::PrismError::IncompatibleBackend { backend, reason } => {
+            assert_eq!(backend, "statevector-gpu");
+            assert!(
+                reason.contains("free on the GPU"),
+                "expected the budget message, got: {reason}"
+            );
+            assert!(reason.contains(&format!("{over} qubits")));
+        }
+        other => panic!("expected the device budget error, got {other:?}"),
+    }
+}
+
+#[test]
+fn statevector_vram_advisory_tracks_free_memory() {
+    let Some(f) = Fixture::try_new() else { return };
+    let max = f.ctx.max_qubits_for_statevector().unwrap();
+    assert!(!f.ctx.fits_statevector(max + 1).unwrap());
+}
+
+fn rx_cx_t_instructions(n: usize) -> Vec<Instruction> {
+    let mut circuit = prism_q::Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3 + 0.1 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    circuit.instructions
+}
+
+#[test]
+fn gpu_reduced_density_matrix_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 10;
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(n, 0).unwrap();
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(n, 0).unwrap();
+    for inst in &rx_cx_t_instructions(n) {
+        cpu.apply(inst).unwrap();
+        gpu.apply(inst).unwrap();
+    }
+    for q in 0..n {
+        let c = cpu.reduced_density_matrix_1q(q).unwrap();
+        let g = gpu.reduced_density_matrix_1q(q).unwrap();
+        for (i, row) in c.iter().enumerate() {
+            for (j, want) in row.iter().enumerate() {
+                let diff = (want - g[i][j]).norm();
+                assert!(
+                    diff < EPS,
+                    "qubit {q} rho[{i}][{j}]: cpu={want}, gpu={}",
+                    g[i][j]
+                );
+            }
+        }
+        let trace = g[0][0].re + g[1][1].re;
+        assert!((trace - 1.0).abs() < EPS, "qubit {q} trace={trace}");
+    }
+}
+
+#[test]
+fn gpu_reduced_density_matrix_after_measurement_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 10;
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(n, 1).unwrap();
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(n, 1).unwrap();
+    let mut instructions = rx_cx_t_instructions(n);
+    instructions.push(Instruction::Measure {
+        qubit: 0,
+        classical_bit: 0,
+    });
+    for inst in &instructions {
+        cpu.apply(inst).unwrap();
+        gpu.apply(inst).unwrap();
+    }
+    assert_eq!(cpu.classical_results(), gpu.classical_results());
+    for q in 0..n {
+        let c = cpu.reduced_density_matrix_1q(q).unwrap();
+        let g = gpu.reduced_density_matrix_1q(q).unwrap();
+        for (i, row) in c.iter().enumerate() {
+            for (j, want) in row.iter().enumerate() {
+                let diff = (want - g[i][j]).norm();
+                assert!(
+                    diff < EPS,
+                    "qubit {q} rho[{i}][{j}]: cpu={want}, gpu={}",
+                    g[i][j]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn statevector_gpu_custom_kraus_trajectories_match_cpu() {
+    use prism_q::{BackendKind, NoiseChannel, NoiseEvent, NoiseModel, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 10;
+    let num_shots = 400;
+    let mut circuit = prism_q::Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    circuit.measure_all();
+
+    let gamma: f64 = 0.05;
+    let zero = Complex64::new(0.0, 0.0);
+    let kraus = vec![
+        [
+            [Complex64::new(1.0, 0.0), zero],
+            [zero, Complex64::new((1.0 - gamma).sqrt(), 0.0)],
+        ],
+        [[zero, Complex64::new(gamma.sqrt(), 0.0)], [zero, zero]],
+    ];
+    let after_gate = circuit
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Gate { targets, .. } => vec![NoiseEvent {
+                channel: NoiseChannel::Custom {
+                    kraus: kraus.clone(),
+                },
+                qubits: std::iter::once(targets[0]).collect(),
+            }],
+            _ => Vec::new(),
+        })
+        .collect();
+    let noise = NoiseModel {
+        after_gate,
+        readout: vec![None; n],
+    };
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .noise(&noise)
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .noise(&noise)
+        .seed(42)
+        .shots(num_shots)
+        .unwrap();
+
+    let freq = |shots: &[Vec<bool>]| -> Vec<f64> {
+        let mut ones = vec![0usize; n];
+        for shot in shots {
+            for (q, one_count) in ones.iter_mut().enumerate() {
+                if shot[q] {
+                    *one_count += 1;
+                }
+            }
+        }
+        ones.into_iter()
+            .map(|c| c as f64 / shots.len() as f64)
+            .collect()
+    };
+    let cpu_freq = freq(&cpu.shots);
+    let gpu_freq = freq(&gpu.shots);
+    for q in 0..n {
+        let diff = (cpu_freq[q] - gpu_freq[q]).abs();
+        assert!(
+            diff < 0.15,
+            "qubit {q}: cpu freq={}, gpu freq={}, diff={diff}",
+            cpu_freq[q],
+            gpu_freq[q]
+        );
+    }
+}

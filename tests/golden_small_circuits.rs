@@ -729,3 +729,145 @@ fn cx_on_a_tilted_control_start_state() {
         &[(1.0 + a) / 2.0, 0.0, 0.0, (1.0 - a) / 2.0],
     );
 }
+
+// ===== Weighted-observable variance anchors, forced onto the grouped
+// statevector route so the Clifford engines cannot serve them =====
+
+// |+>: <Z>=0 with <Z^2>=1 gives Var(2Z0)=4; <X>=1 gives Var(X0)=0. Two
+// groups (X and Z collide on qubit 0), mean 2*0 + 1 = 1, variance 4 + 0 = 4.
+#[test]
+fn weighted_observable_variance_on_plus_is_four() {
+    use prism_q::{BackendKind, PauliObservable, PauliTerm};
+
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(Gate::H, &[0]);
+    let observable =
+        PauliObservable::from_terms([(2.0, vec![PauliTerm::z(0)]), (1.0, vec![PauliTerm::x(0)])])
+            .unwrap();
+    let result = sim::simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(common::SEED)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!((result.mean - 1.0).abs() < 1e-12);
+    let variances = result.group_variances.unwrap();
+    assert_eq!(variances.len(), 2);
+    assert!((result.variance.unwrap() - 4.0).abs() < 1e-12);
+}
+
+// H = X0 + Y1 on |00> is one qubit-wise-commuting group exercising both the
+// H and the Sdg-H rotations at once: mean 0, H^2 = 2I + 2*X0Y1 with
+// <X0 Y1> = 0, so Var(H) = 2 exactly (single group, no excluded covariance).
+#[test]
+fn weighted_observable_single_group_variance_is_two() {
+    use prism_q::{BackendKind, PauliObservable, PauliTerm};
+
+    let c = Circuit::new(2, 0);
+    let observable =
+        PauliObservable::from_terms([(1.0, vec![PauliTerm::x(0)]), (1.0, vec![PauliTerm::y(1)])])
+            .unwrap();
+    assert_eq!(observable.num_groups(), 1);
+    let result = sim::simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(common::SEED)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!(result.mean.abs() < 1e-12);
+    assert!((result.variance.unwrap() - 2.0).abs() < 1e-12);
+}
+
+// S H |0> = (|0> + i|1>)/sqrt(2) is the +1 eigenstate of Y: Y|0> = i|1> and
+// Y|1> = -i|0>, so Y(|0> + i|1>) = |0> + i|1>. A sign error in the i^y phase
+// of the term evaluation would report -1.
+#[test]
+fn weighted_observable_y_sign_is_pinned() {
+    use prism_q::{BackendKind, PauliObservable, PauliTerm};
+
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::S, &[0]);
+    let observable = PauliObservable::from_terms([(1.0, vec![PauliTerm::y(0)])]).unwrap();
+    let result = sim::simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(common::SEED)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!((result.mean - 1.0).abs() < 1e-12);
+    assert!(result.variance.unwrap().abs() < 1e-12);
+}
+
+// Twelve disjoint X factors qubit-wise commute, so H = sum X_i is one group
+// of 66 pairs, past the pair budget: the basis-rotated moments pass serves
+// it. On |0..0>: <X_i> = 0 and <X_i X_j> = 0, so mean 0 and Var(H) = 12.
+#[test]
+fn weighted_observable_large_x_group_takes_the_moments_pass() {
+    use prism_q::{BackendKind, PauliObservable, PauliTerm};
+
+    let n = 12;
+    let c = Circuit::new(n, 0);
+    let observable =
+        PauliObservable::from_terms((0..n).map(|q| (1.0, vec![PauliTerm::x(q)]))).unwrap();
+    assert_eq!(observable.num_groups(), 1);
+    let result = sim::simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(common::SEED)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!(result.mean.abs() < 1e-12);
+    assert!((result.variance.unwrap() - 12.0).abs() < 1e-12);
+}
+
+// The Z-only analogue on |+>^12: one group of Z_i terms past the pair
+// budget, served by the unrotated moments pass. Each <Z_i> = 0 and
+// <Z_i Z_j> = 0 on the product state, so mean 0 and Var(H) = 12.
+#[test]
+fn weighted_observable_large_z_group_takes_the_moments_pass() {
+    use prism_q::{BackendKind, PauliObservable, PauliTerm};
+
+    let n = 12;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    let observable =
+        PauliObservable::from_terms((0..n).map(|q| (1.0, vec![PauliTerm::z(q)]))).unwrap();
+    assert_eq!(observable.num_groups(), 1);
+    let result = sim::simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(common::SEED)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!(result.mean.abs() < 1e-12);
+    assert!((result.variance.unwrap() - 12.0).abs() < 1e-12);
+}
+
+// H(0), CX(0,1), S(0) gives (|00> + i|11>)/sqrt(2), a +1 eigenstate of
+// Y0 X1: Y0 X1 (|00> + i|11>) = Y0(|01> + i|10>) = i|11> + i(-i)|00> =
+// |00> + i|11>. With six spectator X factors on |0>, H = Y0 + X1 + X2..X7
+// is one group of 28 pairs, past the pair budget, so the Sdg-H rotated
+// moments pass serves it: every single-factor mean is 0 and every cross
+// term except <Y0 X1> = 1 vanishes, so mean 0 and Var(H) = 8 + 2 = 10.
+// Rotating q0 with the wrong sign (measuring -Y0) would report 6.
+#[test]
+fn weighted_observable_y_bearing_large_group_variance_pins_the_rotation_sign() {
+    use prism_q::{BackendKind, PauliObservable, PauliTerm};
+
+    let n = 8;
+    let mut c = Circuit::new(n, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::S, &[0]);
+    let mut terms = vec![(1.0, vec![PauliTerm::y(0)])];
+    for q in 1..n {
+        terms.push((1.0, vec![PauliTerm::x(q)]));
+    }
+    let observable = PauliObservable::from_terms(terms).unwrap();
+    assert_eq!(observable.num_groups(), 1);
+    let result = sim::simulate(&c)
+        .backend(BackendKind::Statevector)
+        .seed(common::SEED)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!(result.mean.abs() < 1e-12);
+    assert!((result.variance.unwrap() - 10.0).abs() < 1e-12);
+}

@@ -15,9 +15,9 @@ use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{
-    BackendKind, ClassicalCondition, Instruction, MpsBackend, Parameters, PauliTerm,
-    PreparedCircuit, run_expectation_gradient, run_expectation_gradient_shift,
-    run_expectation_values,
+    BackendKind, ClassicalCondition, Instruction, MpsBackend, Parameters, PauliObservable,
+    PauliTerm, PreparedCircuit, run_expectation_gradient, run_expectation_gradient_shift,
+    run_expectation_values, run_observable_expectation,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -1419,6 +1419,46 @@ fn bench_expectation_factored(c: &mut Criterion) {
     group.finish();
 }
 
+/// Weighted-observable evaluation at a molecular-Hamiltonian term count:
+/// 2000 Jordan-Wigner strings per size. The `grouped` arm is the
+/// qubit-wise-commuting route with variance; the `ungrouped` control is the
+/// pre-existing batched per-term path with weights applied caller-side, which
+/// the grouped route shares no evaluation code with. Observable evaluation
+/// dominates the iteration, not the circuit run.
+fn bench_expectation_grouped(c: &mut Criterion) {
+    let mut group = c.benchmark_group("expectation/pauli_sum_grouped");
+    group.sample_size(10);
+    if common::is_fast() {
+        group.warm_up_time(Duration::from_millis(200));
+        group.measurement_time(Duration::from_secs(1));
+    } else {
+        group.warm_up_time(Duration::from_secs(1));
+        group.measurement_time(Duration::from_secs(10));
+    }
+
+    for &n in &[16, 20] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let terms = circuits::jordan_wigner_hamiltonian(n, 2000, SEED);
+        let observable = PauliObservable::from_terms(terms.clone()).unwrap();
+        let obs_vecs: Vec<Vec<PauliTerm>> =
+            terms.iter().map(|(_, factors)| factors.clone()).collect();
+        let coefficients: Vec<f64> = terms.iter().map(|(c, _)| *c).collect();
+
+        group.bench_with_input(BenchmarkId::new("grouped", n), &circuit, |b, circ| {
+            b.iter(|| black_box(run_observable_expectation(circ, &observable, 42).unwrap()));
+        });
+        group.bench_with_input(BenchmarkId::new("ungrouped", n), &circuit, |b, circ| {
+            b.iter(|| {
+                let values = run_expectation_values(circ, &obs_vecs, 42).unwrap();
+                let mean: f64 = coefficients.iter().zip(&values).map(|(c, v)| c * v).sum();
+                black_box(mean)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // ---- Factored backend benchmarks ----
 
 fn bench_factored_random(c: &mut Criterion) {
@@ -2229,6 +2269,7 @@ criterion_group! {
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)
     bench_expectation,
     bench_expectation_factored,
+    bench_expectation_grouped,
     // Factored backend
     bench_factored_random,
     bench_factored_independent,

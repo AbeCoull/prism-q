@@ -4,12 +4,14 @@
 //! comparison runner. All randomized builders use `ChaCha8Rng` for
 //! deterministic output given the same seed.
 
+use num_complex::Complex64;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::circuit::Circuit;
 use crate::gates::Gate;
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Build an n-qubit QFT circuit.
 ///
@@ -477,4 +479,162 @@ pub fn phase_estimation_circuit(n: usize) -> Circuit {
     }
     apply_inverse_qft(&mut c, 0, n_counting);
     c
+}
+
+/// Jordan-Wigner Pauli strings of a seeded random number-conserving two-body
+/// fermionic operator on `n` modes, truncated to the `max_terms` largest
+/// coefficients.
+///
+/// One-body terms cover every `p <= q` pair; two-body terms draw `3 * n^2`
+/// quadruples `a_dag_p a_dag_q a_r a_s + h.c.` with `p < q`, `r < s`. Ladder
+/// operators expand through explicit Pauli-string products, so the output is
+/// the exact transform of the sampled operator and Hermitian by construction.
+/// Sorted by descending coefficient magnitude; deterministic for a given seed.
+pub fn jordan_wigner_hamiltonian(
+    n: usize,
+    max_terms: usize,
+    seed: u64,
+) -> Vec<(f64, Vec<PauliTerm>)> {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut accumulated: std::collections::HashMap<Vec<PauliTerm>, Complex64> =
+        std::collections::HashMap::new();
+
+    let mut absorb = |strings: Vec<PauliString>, weight: f64| {
+        for string in strings {
+            let mut factors: Vec<PauliTerm> = string
+                .axes
+                .iter()
+                .enumerate()
+                .filter_map(|(qubit, axis)| axis.map(|axis| PauliTerm::new(qubit, axis)))
+                .collect();
+            factors.sort_unstable_by_key(|term| term.qubit);
+            *accumulated
+                .entry(factors)
+                .or_insert(Complex64::new(0.0, 0.0)) += string.phase * weight;
+        }
+    };
+
+    for p in 0..n {
+        for q in p..n {
+            let t = rng.random::<f64>() * 2.0 - 1.0;
+            let hop = ladder_product(n, &[(p, true), (q, false)]);
+            if p == q {
+                absorb(hop, t);
+            } else {
+                absorb(hop, t);
+                absorb(ladder_product(n, &[(q, true), (p, false)]), t);
+            }
+        }
+    }
+
+    for _ in 0..3 * n * n {
+        let mut pair = || loop {
+            let a = rng.random_range(0..n);
+            let b = rng.random_range(0..n);
+            if a != b {
+                return (a.min(b), a.max(b));
+            }
+        };
+        let (p, q) = pair();
+        let (r, s) = pair();
+        let v = rng.random::<f64>() * 2.0 - 1.0;
+        absorb(
+            ladder_product(n, &[(p, true), (q, true), (r, false), (s, false)]),
+            v,
+        );
+        absorb(
+            ladder_product(n, &[(s, true), (r, true), (q, false), (p, false)]),
+            v,
+        );
+    }
+
+    let mut terms: Vec<(f64, Vec<PauliTerm>)> = accumulated
+        .into_iter()
+        .filter(|(_, coefficient)| coefficient.re.abs() > 1e-12)
+        .map(|(factors, coefficient)| {
+            debug_assert!(coefficient.im.abs() < 1e-9);
+            (coefficient.re, factors)
+        })
+        .collect();
+    terms.sort_by(|a, b| b.0.abs().total_cmp(&a.0.abs()).then_with(|| a.1.cmp(&b.1)));
+    terms.truncate(max_terms);
+    terms
+}
+
+/// One Pauli string of a fermionic-operator expansion: a complex phase and an
+/// optional axis per mode.
+struct PauliString {
+    phase: Complex64,
+    axes: Vec<Option<PauliAxis>>,
+}
+
+/// `a * b` for single-qubit Paulis: the phase and the resulting axis, `None`
+/// for identity.
+fn pauli_axis_mul(a: PauliAxis, b: PauliAxis) -> (Complex64, Option<PauliAxis>) {
+    use PauliAxis::{X, Y, Z};
+    let i = Complex64::new(0.0, 1.0);
+    match (a, b) {
+        (X, X) | (Y, Y) | (Z, Z) => (Complex64::new(1.0, 0.0), None),
+        (X, Y) => (i, Some(Z)),
+        (Y, X) => (-i, Some(Z)),
+        (Y, Z) => (i, Some(X)),
+        (Z, Y) => (-i, Some(X)),
+        (Z, X) => (i, Some(Y)),
+        (X, Z) => (-i, Some(Y)),
+    }
+}
+
+fn pauli_string_mul(a: &PauliString, b: &PauliString) -> PauliString {
+    let mut phase = a.phase * b.phase;
+    let axes = a
+        .axes
+        .iter()
+        .zip(&b.axes)
+        .map(|(&left, &right)| match (left, right) {
+            (None, axis) | (axis, None) => axis,
+            (Some(left), Some(right)) => {
+                let (factor, axis) = pauli_axis_mul(left, right);
+                phase *= factor;
+                axis
+            }
+        })
+        .collect();
+    PauliString { phase, axes }
+}
+
+/// Product of Jordan-Wigner ladder operators, `(mode, is_creation)` in
+/// operator order, expanded as a sum of Pauli strings.
+///
+/// `a_p = Z_0..Z_{p-1} (X_p + i Y_p) / 2`, with `-i` for the creation
+/// operator.
+fn ladder_product(n: usize, ops: &[(usize, bool)]) -> Vec<PauliString> {
+    let mut product = vec![PauliString {
+        phase: Complex64::new(1.0, 0.0),
+        axes: vec![None; n],
+    }];
+    for &(mode, is_creation) in ops {
+        let mut x_axes = vec![None; n];
+        for chain in x_axes.iter_mut().take(mode) {
+            *chain = Some(PauliAxis::Z);
+        }
+        let mut y_axes = x_axes.clone();
+        x_axes[mode] = Some(PauliAxis::X);
+        y_axes[mode] = Some(PauliAxis::Y);
+        let y_phase = Complex64::new(0.0, if is_creation { -0.5 } else { 0.5 });
+        let factor = [
+            PauliString {
+                phase: Complex64::new(0.5, 0.0),
+                axes: x_axes,
+            },
+            PauliString {
+                phase: y_phase,
+                axes: y_axes,
+            },
+        ];
+        product = product
+            .iter()
+            .flat_map(|left| factor.iter().map(|right| pauli_string_mul(left, right)))
+            .collect();
+    }
+    product
 }

@@ -241,15 +241,16 @@ fn estimate_qubit_expectation(
 
 /// Pauli axis for a joint-observable term. Identity factors are omitted
 /// from the term list and contribute trivially.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PauliAxis {
     X,
     Y,
     Z,
 }
 
-/// One non-identity factor of a joint Pauli observable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// One non-identity factor of a joint Pauli observable. Ordered by qubit,
+/// then axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PauliTerm {
     pub qubit: usize,
     pub axis: PauliAxis,

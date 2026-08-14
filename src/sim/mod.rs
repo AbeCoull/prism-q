@@ -11,6 +11,7 @@ pub mod gradient;
 pub mod homological;
 mod metadata;
 pub mod noise;
+mod observable;
 mod probability;
 pub(crate) mod shots;
 pub mod stabilizer_rank;
@@ -33,6 +34,7 @@ use dispatch::{
     run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use metadata::{Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
+pub use observable::{ObservableExpectation, PauliObservable};
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{ShotsResult, bitstring};
 
@@ -439,6 +441,62 @@ impl<'c> Simulate<'c, Seeded> {
             );
         }
         let result = run_expectation_values_reported(self.kind, self.circuit, observables, seed)?;
+        ensure_exact_result(self.require_exact, &result.metadata)?;
+        Ok(result)
+    }
+
+    /// Compute `⟨H⟩` and its grouped-measurement variance for a weighted
+    /// Pauli observable on the circuit's output state.
+    ///
+    /// The statevector family evaluates one traversal per qubit-wise-commuting
+    /// group and reports the variance; see [`ObservableExpectation::variance`]
+    /// for what the number means. Every other route, including runs with a
+    /// noise model or start state attached, evaluates term by term through
+    /// [`Simulate::expectation_values`] semantics and reports the weighted
+    /// mean with no variance.
+    pub fn observable_expectation(
+        self,
+        observable: &PauliObservable,
+    ) -> Result<ObservableExpectation> {
+        let seed = self.seed_value();
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if let Some(noise_model) = self.noise_model {
+            require_exact_mixture(&self.kind, "expectation values")?;
+            require_unitary_circuit(&self.kind, self.circuit)?;
+            let values = noise::dm_expectation_values(
+                self.circuit,
+                &observable_vecs(observable),
+                Some(noise_model),
+                self.initial_state,
+                seed,
+            )?;
+            return Ok(weighted_observable_result(
+                observable,
+                &values,
+                None,
+                RunMetadata::exact(ResolvedBackend::DensityMatrix),
+            ));
+        }
+        if let Some(state) = self.initial_state {
+            require_unitary_circuit(&self.kind, self.circuit)?;
+            let result = expectation_values_from_initial_state(
+                &self.kind,
+                self.circuit,
+                state,
+                &observable_vecs(observable),
+                seed,
+            )?;
+            return Ok(weighted_observable_result(
+                observable,
+                &result.values,
+                result.std_errors.as_deref(),
+                result.metadata,
+            ));
+        }
+        let result =
+            run_observable_expectation_reported(self.kind, self.circuit, observable, seed)?;
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
     }
@@ -1867,6 +1925,247 @@ fn run_expectation_values_reported(
         other => expectation_values_native(other, circuit, observables, seed),
     }
 }
+
+/// Compute `⟨H⟩` and its grouped-measurement variance for a weighted Pauli
+/// observable, using automatic backend selection. See
+/// [`Simulate::observable_expectation`] for explicit backend control and
+/// [`ObservableExpectation::variance`] for the variance contract.
+///
+/// # Examples
+///
+/// ```
+/// use prism_q::{Circuit, Gate, PauliObservable, PauliTerm, run_observable_expectation};
+///
+/// let mut circuit = Circuit::new(2, 0);
+/// circuit.add_gate(Gate::H, &[0]);
+/// circuit.add_gate(Gate::Cx, &[0, 1]);
+/// circuit.add_gate(Gate::T, &[0]);
+///
+/// let hamiltonian = PauliObservable::from_terms([
+///     (1.0, vec![PauliTerm::z(0)]),
+///     (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+/// ])?;
+///
+/// // The T phase moves nothing here: both terms are Z-only, one commuting
+/// // group covers them, and the variance is exactly Var(H) with outcomes
+/// // 2 and 0 at probability 1/2 each.
+/// let result = run_observable_expectation(&circuit, &hamiltonian, 42)?;
+/// assert!((result.mean - 1.0).abs() < 1e-10);
+/// assert!((result.variance.unwrap() - 1.0).abs() < 1e-10);
+/// # Ok::<(), prism_q::PrismError>(())
+/// ```
+pub fn run_observable_expectation(
+    circuit: &Circuit,
+    observable: &PauliObservable,
+    seed: u64,
+) -> Result<ObservableExpectation> {
+    run_observable_expectation_reported(BackendKind::Auto, circuit, observable, seed)
+}
+
+fn run_observable_expectation_reported(
+    kind: BackendKind,
+    circuit: &Circuit,
+    observable: &PauliObservable,
+    seed: u64,
+) -> Result<ObservableExpectation> {
+    require_unitary_circuit(&kind, circuit)?;
+
+    let grouped_statevector = match &kind {
+        BackendKind::Statevector => true,
+        #[cfg(feature = "gpu")]
+        BackendKind::StatevectorGpu { .. } => true,
+        _ => {
+            kind.is_auto()
+                && !circuit.is_clifford_only()
+                && circuit.num_qubits <= max_statevector_qubits()
+        }
+    };
+    if grouped_statevector {
+        return grouped_expectation_statevector(&kind, circuit, observable, seed);
+    }
+
+    let result =
+        run_expectation_values_reported(kind, circuit, &observable_vecs(observable), seed)?;
+    Ok(weighted_observable_result(
+        observable,
+        &result.values,
+        result.std_errors.as_deref(),
+        result.metadata,
+    ))
+}
+
+fn observable_vecs(observable: &PauliObservable) -> Vec<Vec<PauliTerm>> {
+    observable
+        .terms()
+        .iter()
+        .map(|(_, factors)| factors.clone())
+        .collect()
+}
+
+/// Fold per-term values into the weighted mean; no grouped traversal ran, so
+/// there is no variance to report. Independent per-term estimates combine
+/// into the weighted-sum standard error.
+fn weighted_observable_result(
+    observable: &PauliObservable,
+    values: &[f64],
+    std_errors: Option<&[f64]>,
+    metadata: RunMetadata,
+) -> ObservableExpectation {
+    let coefficients = observable.terms().iter().map(|(c, _)| *c);
+    let mean = coefficients.clone().zip(values).map(|(c, v)| c * v).sum();
+    let std_error = std_errors.map(|errors| {
+        coefficients
+            .zip(errors)
+            .map(|(c, e)| (c * e).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    });
+    ObservableExpectation {
+        mean,
+        variance: None,
+        group_variances: None,
+        std_error,
+        metadata,
+    }
+}
+
+/// Evaluate a weighted observable on the statevector: the mean and most group
+/// variances from one shared batched traversal, large groups from a dedicated
+/// moments pass.
+///
+/// `Var(H_g) = <H_g^2> - <H_g>^2` per commuting group. For a small group the
+/// square expands into pairwise product strings appended to the same
+/// traversal that serves the term means; a group past the pair budget takes a
+/// single-pass moment accumulation instead, on the state as run when the
+/// group is Z-only and on a basis-rotated copy otherwise.
+fn grouped_expectation_statevector(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    observable: &PauliObservable,
+    seed: u64,
+) -> Result<ObservableExpectation> {
+    let terms = observable.terms();
+    // Validate before the 2^n simulation so bad observables fail cheaply.
+    let masks = terms
+        .iter()
+        .map(|(_, factors)| pauli_masks(factors, circuit.num_qubits))
+        .collect::<Result<Vec<_>>>()?;
+
+    let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
+    let mut backend = build_statevector(&accel, seed);
+    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
+        std::borrow::Cow::Borrowed(circuit)
+    } else {
+        crate::circuit::expand_qft_blocks(circuit)
+    };
+    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    backend.apply_instructions(&fused.instructions)?;
+
+    let exported;
+    let state: &[Complex64] = if backend.is_gpu_resident() {
+        exported = backend.export_statevector()?;
+        &exported
+    } else {
+        backend.state_vector()
+    };
+    let norm = crate::backend::state_norm_sqr(state);
+    let metadata = backend_metadata(&backend);
+
+    let grouping = observable.grouping();
+
+    // Small groups get `<H_g^2>` from pairwise product strings appended to the
+    // shared traversal: qubit-wise-commuting strings multiply phase-free
+    // (shared qubits carry equal axes and cancel to identity), so each pair is
+    // one more mask. Large groups fall back to a dedicated moments pass, which
+    // costs a fixed number of state sweeps where the pair expansion grows
+    // quadratically.
+    let mut combined = masks.clone();
+    let mut pair_blocks: Vec<(usize, usize, Vec<f64>)> = Vec::new();
+    let mut deferred: Vec<usize> = Vec::new();
+    for (gi, group) in grouping.groups.iter().enumerate() {
+        let members = &group.term_indices;
+        if members.len() * (members.len() - 1) / 2 > MAX_PAIR_MASKS_PER_GROUP {
+            deferred.push(gi);
+            continue;
+        }
+        let first_mask = combined.len();
+        let mut pair_coefficients = Vec::with_capacity(members.len() * (members.len() - 1) / 2);
+        for (pos, &i) in members.iter().enumerate() {
+            for &j in &members[pos + 1..] {
+                let product_x = masks[i].0 ^ masks[j].0;
+                let product_z = masks[i].1 ^ masks[j].1;
+                combined.push((product_x, product_z, (product_x & product_z).count_ones()));
+                pair_coefficients.push(2.0 * terms[i].0 * terms[j].0);
+            }
+        }
+        pair_blocks.push((gi, first_mask, pair_coefficients));
+    }
+
+    let values = pauli_expectations_from_masks(state, &combined, norm);
+
+    let mean: f64 = terms.iter().zip(&values).map(|((c, _), v)| c * v).sum();
+    let mut group_variances = vec![0.0; grouping.groups.len()];
+
+    for (gi, first_mask, pair_coefficients) in &pair_blocks {
+        let group = &grouping.groups[*gi];
+        let m1: f64 = group
+            .term_indices
+            .iter()
+            .map(|&i| terms[i].0 * values[i])
+            .sum();
+        let square_diag: f64 = group
+            .term_indices
+            .iter()
+            .map(|&i| terms[i].0 * terms[i].0)
+            .sum();
+        let square_cross: f64 = pair_coefficients
+            .iter()
+            .zip(&values[*first_mask..])
+            .map(|(c, v)| c * v)
+            .sum();
+        group_variances[*gi] = (square_diag + square_cross - m1 * m1).max(0.0);
+    }
+
+    let mut scratch: Option<StatevectorBackend> = None;
+    for &gi in &deferred {
+        let group = &grouping.groups[gi];
+        let coefficients: Vec<f64> = group.term_indices.iter().map(|&i| terms[i].0).collect();
+        let (m1, m2) = if group.is_z_only() {
+            let zmasks: Vec<usize> = group.term_indices.iter().map(|&i| masks[i].1).collect();
+            observable::weighted_group_moments(state, &zmasks, &coefficients, norm)
+        } else {
+            let zmasks: Vec<usize> = group
+                .term_indices
+                .iter()
+                .map(|&i| masks[i].0 | masks[i].1)
+                .collect();
+            let rotation_circuit = group.basis_rotation_circuit(circuit.num_qubits);
+            let rotation = crate::circuit::fusion::fuse_circuit(&rotation_circuit, true);
+            let rotated = scratch.get_or_insert_with(|| StatevectorBackend::new(seed));
+            rotated.init_from_amplitudes(state.to_vec(), 0)?;
+            rotated.apply_instructions(&rotation.instructions)?;
+            observable::weighted_group_moments(rotated.state_vector(), &zmasks, &coefficients, norm)
+        };
+        group_variances[gi] = (m2 - m1 * m1).max(0.0);
+    }
+
+    let variance = group_variances.iter().sum();
+    Ok(ObservableExpectation {
+        mean,
+        variance: Some(variance),
+        group_variances: Some(group_variances),
+        std_error: None,
+        metadata,
+    })
+}
+
+/// Pair-expansion budget per commuting group. Measured on the 2000-string
+/// Jordan-Wigner fixture at n=20: one extra general mask in the shared
+/// traversal costs about 0.6 ms while a scratch-rotation moments pass costs
+/// about 11 ms, so groups whose pair count stays under that ratio expand
+/// inline and larger groups take the dedicated pass.
+const MAX_PAIR_MASKS_PER_GROUP: usize = 20;
 
 /// Values from a route that evaluates rather than samples, so there is no
 /// interval to report.

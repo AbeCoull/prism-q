@@ -188,8 +188,9 @@ pub(crate) const PHASE_IS_ONE_EPS: f64 = 1e-15;
 
 pub(crate) use memory::{
     DM_QUBIT_CAP_ENV, check_state_allocation, dense_probability_len, dense_statevector_len,
-    max_dense_outcome_bits, max_density_matrix_qubits, max_statevector_qubits,
-    reserve_dense_output, tensor_probability_len,
+    max_dense_outcome_bits, max_density_matrix_qubits, max_factored_merge_qubits,
+    max_sparse_entries, max_statevector_qubits, mps_workspace_cap_elements, reserve_dense_output,
+    tensor_probability_len, workspace_allocation_error,
 };
 
 /// Whether `phase` equals `1+0i` within [`PHASE_IS_ONE_EPS`].

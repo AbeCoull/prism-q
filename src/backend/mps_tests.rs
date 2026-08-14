@@ -615,7 +615,7 @@ fn canonicalize_logical_order_preserves_state() {
 
     let mut b = run_mps(&c);
     let before = b.export_statevector().unwrap();
-    b.canonicalize_logical_order();
+    b.canonicalize_logical_order().unwrap();
     assert_eq!(b.logical_to_site, vec![0, 1, 2, 3, 4, 5]);
     let after = b.export_statevector().unwrap();
     for (i, (a, e)) in after.iter().zip(&before).enumerate() {

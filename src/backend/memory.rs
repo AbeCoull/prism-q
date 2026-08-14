@@ -93,6 +93,83 @@ pub(crate) fn max_dense_outcome_bits() -> usize {
     })
 }
 
+/// Entry cap for the sparse backend's amplitude map.
+///
+/// Derived from the memory budget at 64 bytes per entry, the worst-case peak
+/// across the double-buffered maps (24 payload bytes, table slot overhead, and
+/// load-factor headroom on both buffers). `PRISM_MAX_SPARSE_QUBITS` overrides
+/// the cap as a power of two: the map may hold at most `2^q` entries.
+pub(crate) fn max_sparse_entries() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let q =
+            configured_or_detected_dense_qubits("PRISM_MAX_SPARSE_QUBITS", 64, "sparse entry cap");
+        if q >= usize::BITS as usize - 1 {
+            usize::MAX
+        } else {
+            1usize << q
+        }
+    })
+}
+
+/// Merged-block qubit cap for the factored backend, checked at merge time.
+///
+/// Defaults to the detected-memory dense budget, independent of the
+/// statevector override: lowering `PRISM_MAX_SV_QUBITS` to steer routing must
+/// not shrink the block a factored run may legitimately hold.
+pub(crate) fn max_factored_merge_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        configured_or_detected_dense_qubits(
+            "PRISM_MAX_FACTORED_MERGE_QUBITS",
+            size_of::<Complex64>(),
+            "factored merge cap",
+        )
+    })
+}
+
+/// Workspace cap for MPS gate application, as `2^q` amplitudes of live
+/// contraction buffers. Independent of the statevector override for the same
+/// reason as the factored merge cap: MPS exists to run above that cap.
+fn max_mps_workspace_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        configured_or_detected_dense_qubits(
+            "PRISM_MAX_MPS_WORKSPACE_QUBITS",
+            size_of::<Complex64>(),
+            "MPS workspace cap",
+        )
+    })
+}
+
+/// MPS workspace cap in amplitudes: `2^q` from the budget above, or
+/// `u128::MAX` when detection is disabled. Read once per backend at
+/// construction so the per-gate check is a field compare, not an atomic load.
+pub(crate) fn mps_workspace_cap_elements() -> u128 {
+    let cap = max_mps_workspace_qubits();
+    if cap >= u128::BITS as usize {
+        u128::MAX
+    } else {
+        1u128 << cap
+    }
+}
+
+/// Error for a dense transient workspace of `elements` amplitudes over the
+/// MPS workspace budget: the growth-path analogue of the
+/// [`check_state_allocation`] rejection, for scratch whose natural unit is
+/// amplitudes rather than circuit qubits.
+#[cold]
+pub(crate) fn workspace_allocation_error(backend: &str, what: &str, elements: u128) -> PrismError {
+    let cap = max_mps_workspace_qubits();
+    PrismError::IncompatibleBackend {
+        backend: backend.to_string(),
+        reason: format!(
+            "{what} needs {elements} amplitudes of workspace, exceeding the cap of \
+             2^{cap} on this machine (set PRISM_MAX_MPS_WORKSPACE_QUBITS to override)"
+        ),
+    }
+}
+
 fn configured_or_detected_dense_qubits(
     env_var: &str,
     bytes_per_basis_state: usize,

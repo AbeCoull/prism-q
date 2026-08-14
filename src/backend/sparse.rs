@@ -62,6 +62,9 @@ pub struct SparseBackend {
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     epsilon: f64,
+    /// [`crate::backend::max_sparse_entries`] read once at construction, so the
+    /// per-gate growth check is a field compare rather than an atomic load.
+    entry_cap: usize,
 }
 
 impl SparseBackend {
@@ -74,6 +77,7 @@ impl SparseBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             epsilon: DEFAULT_EPSILON,
+            entry_cap: crate::backend::max_sparse_entries(),
         }
     }
 
@@ -83,12 +87,40 @@ impl SparseBackend {
         self.state.retain(|_, amp| amp.norm_sqr() >= eps);
     }
 
+    /// Reject a gate whose worst-case fan-out would grow the map past the
+    /// entry budget. `factor` is the per-source-entry fan-out of the caller
+    /// (2 for a branching 1q gate, 4 for a dense 2q), so rejection can fire
+    /// one gate early on a state that would have deduplicated below the cap.
     #[inline(always)]
-    fn apply_single_qubit(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
+    fn check_entry_growth(&self, factor: usize) -> Result<()> {
+        let projected = self.state.len().saturating_mul(factor);
+        if projected > self.entry_cap {
+            return Err(self.entry_growth_error(projected));
+        }
+        Ok(())
+    }
+
+    #[cold]
+    fn entry_growth_error(&self, projected: usize) -> crate::error::PrismError {
+        crate::error::PrismError::IncompatibleBackend {
+            backend: "sparse".to_string(),
+            reason: format!(
+                "state holds {} entries and this gate can reach {projected}, \
+                 exceeding the cap of {} entries on this machine \
+                 (set PRISM_MAX_SPARSE_QUBITS to override)",
+                self.state.len(),
+                self.entry_cap
+            ),
+        }
+    }
+
+    #[inline(always)]
+    fn apply_single_qubit(&mut self, target: usize, mat: [[Complex64; 2]; 2]) -> Result<()> {
         if is_diagonal_2x2(&mat) {
             self.apply_diagonal_1q(target, mat[0][0], mat[1][1]);
-            return;
+            return Ok(());
         }
+        self.check_entry_growth(2)?;
 
         let mask = 1usize << target;
         let zero = Complex64::new(0.0, 0.0);
@@ -105,6 +137,7 @@ impl SparseBackend {
 
         std::mem::swap(&mut self.state, &mut self.swap_buf);
         self.prune();
+        Ok(())
     }
 
     /// A diagonal 2x2 scales amplitudes in place: no partner entries, no map rebuild.
@@ -167,7 +200,8 @@ impl SparseBackend {
     }
 
     #[inline(always)]
-    fn apply_cu(&mut self, control: usize, target: usize, mat: [[Complex64; 2]; 2]) {
+    fn apply_cu(&mut self, control: usize, target: usize, mat: [[Complex64; 2]; 2]) -> Result<()> {
+        self.check_entry_growth(2)?;
         let ctrl_mask = 1usize << control;
         let tgt_mask = 1usize << target;
         let zero = Complex64::new(0.0, 0.0);
@@ -187,10 +221,17 @@ impl SparseBackend {
 
         std::mem::swap(&mut self.state, &mut self.swap_buf);
         self.prune();
+        Ok(())
     }
 
     #[inline(always)]
-    fn apply_mcu(&mut self, controls: &[usize], target: usize, mat: [[Complex64; 2]; 2]) {
+    fn apply_mcu(
+        &mut self,
+        controls: &[usize],
+        target: usize,
+        mat: [[Complex64; 2]; 2],
+    ) -> Result<()> {
+        self.check_entry_growth(2)?;
         let ctrl_mask: usize = controls.iter().map(|&q| 1usize << q).fold(0, |a, b| a | b);
         let tgt_mask = 1usize << target;
         let zero = Complex64::new(0.0, 0.0);
@@ -210,6 +251,7 @@ impl SparseBackend {
 
         std::mem::swap(&mut self.state, &mut self.swap_buf);
         self.prune();
+        Ok(())
     }
 
     #[inline(always)]
@@ -284,7 +326,8 @@ impl SparseBackend {
         }
     }
 
-    fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
+    fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) -> Result<()> {
+        self.check_entry_growth(4)?;
         let mask0 = 1usize << q0;
         let mask1 = 1usize << q1;
         let zero = Complex64::new(0.0, 0.0);
@@ -311,6 +354,7 @@ impl SparseBackend {
 
         std::mem::swap(&mut self.state, &mut self.swap_buf);
         self.prune();
+        Ok(())
     }
 
     fn masked_prob(&self, mask: usize, bit_set: bool) -> f64 {
@@ -375,7 +419,7 @@ impl SparseBackend {
         });
     }
 
-    fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) {
+    fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         match gate {
             Gate::Rzz(theta) => {
                 self.apply_rzz(targets[0], targets[1], *theta);
@@ -393,7 +437,7 @@ impl SparseBackend {
                 if let Some(phase) = gate.controlled_phase() {
                     self.apply_cu_phase(targets[0], targets[1], phase);
                 } else {
-                    self.apply_cu(targets[0], targets[1], **mat);
+                    self.apply_cu(targets[0], targets[1], **mat)?;
                 }
             }
             Gate::Mcu(data) => {
@@ -401,7 +445,7 @@ impl SparseBackend {
                 if let Some(phase) = gate.controlled_phase() {
                     self.apply_mcu_phase(&targets[..num_ctrl], targets[num_ctrl], phase);
                 } else {
-                    self.apply_mcu(&targets[..num_ctrl], targets[num_ctrl], data.mat);
+                    self.apply_mcu(&targets[..num_ctrl], targets[num_ctrl], data.mat)?;
                 }
             }
             Gate::BatchPhase(data) => {
@@ -417,15 +461,15 @@ impl SparseBackend {
             }
             Gate::MultiFused(data) => {
                 for &(target, mat) in &data.gates {
-                    self.apply_single_qubit(target, mat);
+                    self.apply_single_qubit(target, mat)?;
                 }
             }
             Gate::Fused2q(mat) => {
-                self.apply_fused_2q(targets[0], targets[1], mat);
+                self.apply_fused_2q(targets[0], targets[1], mat)?;
             }
             Gate::Multi2q(data) => {
                 for &(q0, q1, ref mat) in &data.gates {
-                    self.apply_fused_2q(q0, q1, mat);
+                    self.apply_fused_2q(q0, q1, mat)?;
                 }
             }
             other => {
@@ -435,9 +479,10 @@ impl SparseBackend {
                     other
                 );
                 let mat = other.matrix_2x2();
-                self.apply_single_qubit(targets[0], mat);
+                self.apply_single_qubit(targets[0], mat)?;
             }
         }
+        Ok(())
     }
 }
 
@@ -460,7 +505,7 @@ impl Backend for SparseBackend {
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         match instruction {
-            Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets),
+            Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets)?,
             Instruction::Measure {
                 qubit,
                 classical_bit,
@@ -477,7 +522,7 @@ impl Backend for SparseBackend {
                 targets,
             } => {
                 if condition.evaluate(&self.classical_bits) {
-                    self.dispatch_gate(gate, targets);
+                    self.dispatch_gate(gate, targets)?;
                 }
             }
         }
@@ -490,8 +535,7 @@ impl Backend for SparseBackend {
     }
 
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
-        self.apply_single_qubit(qubit, *matrix);
-        Ok(())
+        self.apply_single_qubit(qubit, *matrix)
     }
 
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {

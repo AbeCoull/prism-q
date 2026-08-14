@@ -506,6 +506,10 @@ pub struct MpsBackend {
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     truncation_discarded: f64,
+    /// [`crate::backend::mps_workspace_cap_elements`] read once at
+    /// construction, so the per-gate check is a field compare rather than an
+    /// atomic load.
+    workspace_cap: u128,
 }
 
 impl MpsBackend {
@@ -521,6 +525,7 @@ impl MpsBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             truncation_discarded: 0.0,
+            workspace_cap: crate::backend::mps_workspace_cap_elements(),
         }
     }
 
@@ -578,16 +583,17 @@ impl MpsBackend {
 
     /// Restore the internal MPS site order to logical qubit order without
     /// changing the represented logical state.
-    pub fn canonicalize_logical_order(&mut self) {
+    pub fn canonicalize_logical_order(&mut self) -> Result<()> {
         let swap_mat = swap_matrix_4x4();
         for target_site in 0..self.num_qubits {
             while self.site_to_logical[target_site] != target_site {
                 let logical = target_site;
                 let site = self.logical_to_site[logical];
                 debug_assert!(site > target_site);
-                self.apply_virtual_swap(site - 1, &swap_mat);
+                self.apply_virtual_swap(site - 1, &swap_mat)?;
             }
         }
+        Ok(())
     }
 
     /// Inner product between two MPS values that share the same site
@@ -792,9 +798,14 @@ impl MpsBackend {
         self.logical_to_site[right_logical] = left_site;
     }
 
-    fn apply_virtual_swap(&mut self, left_site: usize, swap_mat: &[[Complex64; 4]; 4]) {
-        self.apply_adjacent_two_qubit(swap_mat, left_site, true);
+    fn apply_virtual_swap(
+        &mut self,
+        left_site: usize,
+        swap_mat: &[[Complex64; 4]; 4],
+    ) -> Result<()> {
+        self.apply_adjacent_two_qubit(swap_mat, left_site, true)?;
         self.swap_layout_labels(left_site);
+        Ok(())
     }
 
     #[inline(always)]
@@ -815,11 +826,23 @@ impl MpsBackend {
         gate: &[[Complex64; 4]; 4],
         left_site: usize,
         left_is_first_qubit: bool,
-    ) {
+    ) -> Result<()> {
         let right_site = left_site + 1;
         let bl = self.sites[left_site].bond_left;
         let bond_mid = self.sites[left_site].bond_right;
         let br = self.sites[right_site].bond_right;
+
+        // Live contraction buffers: theta, theta_prime, and the SVD input plus
+        // its internals at 4*bl*br each (about five at peak), and the right
+        // transpose at 2*bond_mid*br.
+        let workspace = 20u128 * bl as u128 * br as u128 + 2u128 * bond_mid as u128 * br as u128;
+        if workspace > self.workspace_cap {
+            return Err(crate::backend::workspace_allocation_error(
+                "mps",
+                "two-qubit gate application",
+                workspace,
+            ));
+        }
 
         let g = if left_is_first_qubit {
             *gate
@@ -1004,9 +1027,15 @@ impl MpsBackend {
             bond_right: br,
             data: right_data,
         };
+        Ok(())
     }
 
-    fn apply_two_qubit_gate(&mut self, gate: &[[Complex64; 4]; 4], q0: usize, q1: usize) {
+    fn apply_two_qubit_gate(
+        &mut self,
+        gate: &[[Complex64; 4]; 4],
+        q0: usize,
+        q1: usize,
+    ) -> Result<()> {
         let p0 = self.site_for_logical(q0);
         let p1 = self.site_for_logical(q1);
         let k = p0.min(p1);
@@ -1014,29 +1043,33 @@ impl MpsBackend {
         let left_is_first = p0 < p1;
 
         if m - k == 1 {
-            self.apply_adjacent_two_qubit(gate, k, left_is_first);
+            self.apply_adjacent_two_qubit(gate, k, left_is_first)?;
         } else {
             let swap_mat = swap_matrix_4x4();
             for s in (k + 1..m).rev() {
-                self.apply_virtual_swap(s, &swap_mat);
+                self.apply_virtual_swap(s, &swap_mat)?;
             }
-            self.apply_adjacent_two_qubit(gate, k, left_is_first);
+            self.apply_adjacent_two_qubit(gate, k, left_is_first)?;
         }
+        Ok(())
     }
 
     /// Apply BatchPhase via bubble routing: sweep control toward targets,
     /// applying each CU-phase+SWAP as a single 2-site operation. O(k) tensor
     /// ops instead of O(k²) for k non-adjacent phases.
-    fn apply_batch_phase_bubble(&mut self, control: usize, phases: &[(usize, Complex64)]) {
+    fn apply_batch_phase_bubble(
+        &mut self,
+        control: usize,
+        phases: &[(usize, Complex64)],
+    ) -> Result<()> {
         if phases.is_empty() {
-            return;
+            return Ok(());
         }
         if phases.len() == 1 {
             let (target, phase) = phases[0];
             let mat = [[ONE, ZERO], [ZERO, phase]];
             let g = cu_matrix_4x4(&mat);
-            self.apply_two_qubit_gate(&g, control, target);
-            return;
+            return self.apply_two_qubit_gate(&g, control, target);
         }
 
         let mut right: Vec<(usize, Complex64)> = Vec::new();
@@ -1059,22 +1092,22 @@ impl MpsBackend {
             let last_idx = right.len() - 1;
             for (idx, &(target, phase)) in right.iter().enumerate() {
                 while cur_pos + 1 < target {
-                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true);
+                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
                     cur_pos += 1;
                 }
                 if idx < last_idx {
                     let combined = cu_phase_swap_matrix(phase);
-                    self.apply_adjacent_two_qubit(&combined, cur_pos, true);
+                    self.apply_adjacent_two_qubit(&combined, cur_pos, true)?;
                     cur_pos += 1;
                 } else {
                     let mat = [[ONE, ZERO], [ZERO, phase]];
                     let g = cu_matrix_4x4(&mat);
-                    self.apply_adjacent_two_qubit(&g, cur_pos, true);
+                    self.apply_adjacent_two_qubit(&g, cur_pos, true)?;
                 }
             }
             while cur_pos > control {
                 cur_pos -= 1;
-                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true);
+                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
             }
         }
 
@@ -1085,23 +1118,24 @@ impl MpsBackend {
             for (idx, &(target, phase)) in left.iter().enumerate() {
                 while cur_pos > target + 1 {
                     cur_pos -= 1;
-                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true);
+                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
                 }
                 if idx < last_idx {
                     let combined = cu_phase_swap_matrix(phase);
-                    self.apply_adjacent_two_qubit(&combined, cur_pos - 1, true);
+                    self.apply_adjacent_two_qubit(&combined, cur_pos - 1, true)?;
                     cur_pos -= 1;
                 } else {
                     let mat = [[ONE, ZERO], [ZERO, phase]];
                     let g = cu_matrix_4x4(&mat);
-                    self.apply_adjacent_two_qubit(&g, cur_pos - 1, false);
+                    self.apply_adjacent_two_qubit(&g, cur_pos - 1, false)?;
                 }
             }
             while cur_pos < control {
-                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true);
+                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
                 cur_pos += 1;
             }
         }
+        Ok(())
     }
 
     /// Contract N adjacent site tensors into Θ with shape (χ_left, 2^N, χ_right).
@@ -1346,18 +1380,43 @@ impl MpsBackend {
         }
     }
 
-    fn apply_adjacent_n_qubit(&mut self, gate: &[Complex64], dim: usize, start_site: usize) {
+    fn apply_adjacent_n_qubit(
+        &mut self,
+        gate: &[Complex64],
+        dim: usize,
+        start_site: usize,
+    ) -> Result<()> {
         let n = dim.trailing_zeros() as usize; // dim = 2^n
+        // Contraction, gate application, and decomposition each hold a
+        // (bl, 2^n, br) tensor, with the decomposition remainder and SVD input
+        // making about four live at peak.
+        let bl = self.sites[start_site].bond_left;
+        let br = self.sites[start_site + n - 1].bond_right;
+        let workspace = 4u128 * dim as u128 * bl as u128 * br as u128;
+        if workspace > self.workspace_cap {
+            return Err(crate::backend::workspace_allocation_error(
+                "mps",
+                "multi-qubit gate application",
+                workspace,
+            ));
+        }
+
         let (theta, bl, br) = self.contract_n_sites(start_site, n);
         let theta_prime = Self::apply_gate_to_theta(&theta, gate, dim, bl, br);
         self.decompose_n_sites(&theta_prime, start_site, n, bl, br);
+        Ok(())
     }
 
     /// Apply an N-qubit gate to arbitrary (possibly non-adjacent) qubits.
     ///
     /// SWAP-routes qubits into a contiguous block, applies the gate, then
     /// reverses the SWAPs. Returns nothing; modifies `self.sites` in place.
-    fn apply_n_qubit_gate(&mut self, gate: &[Complex64], dim: usize, qubits: &[usize]) {
+    fn apply_n_qubit_gate(
+        &mut self,
+        gate: &[Complex64],
+        dim: usize,
+        qubits: &[usize],
+    ) -> Result<()> {
         let n = qubits.len();
         debug_assert_eq!(dim, 1 << n);
 
@@ -1376,7 +1435,7 @@ impl MpsBackend {
         if contiguous {
             let qubit_order: Vec<usize> = indexed.iter().map(|&(_, role)| role).collect();
             let reordered_gate = Self::reorder_n_gate(gate, dim, &qubit_order, n);
-            self.apply_adjacent_n_qubit(&reordered_gate, dim, start);
+            self.apply_adjacent_n_qubit(&reordered_gate, dim, start)?;
         } else {
             let swap_mat = swap_matrix_4x4();
             let mut current_positions = sorted_positions;
@@ -1386,7 +1445,7 @@ impl MpsBackend {
                 let target_pos = start + i;
                 while current_positions[i] > target_pos {
                     let s = current_positions[i] - 1;
-                    self.apply_adjacent_two_qubit(&swap_mat, s, true);
+                    self.apply_adjacent_two_qubit(&swap_mat, s, true)?;
                     swap_log.push(s);
                     // Update any tracked qubit that was displaced
                     for cp in &mut current_positions[(i + 1)..n] {
@@ -1400,12 +1459,13 @@ impl MpsBackend {
 
             let qubit_order: Vec<usize> = indexed.iter().map(|&(_, role)| role).collect();
             let reordered_gate = Self::reorder_n_gate(gate, dim, &qubit_order, n);
-            self.apply_adjacent_n_qubit(&reordered_gate, dim, start);
+            self.apply_adjacent_n_qubit(&reordered_gate, dim, start)?;
 
             for &s in swap_log.iter().rev() {
-                self.apply_adjacent_two_qubit(&swap_mat, s, true);
+                self.apply_adjacent_two_qubit(&swap_mat, s, true)?;
             }
         }
+        Ok(())
     }
 
     /// Reorder an N-qubit gate matrix to match the physical qubit ordering.
@@ -1999,27 +2059,27 @@ impl MpsBackend {
         self.expand_subtree(0, 0, &mut scratch, &mut |idx, amp| out[idx] = convert(amp));
     }
 
-    fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) {
+    fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         match gate {
             Gate::Rzz(_) => {
                 let g = gate.matrix_4x4();
-                self.apply_two_qubit_gate(&g, targets[0], targets[1]);
+                self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Cx => {
                 let g = cx_matrix_4x4();
-                self.apply_two_qubit_gate(&g, targets[0], targets[1]);
+                self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Cz => {
                 let g = cz_matrix_4x4();
-                self.apply_two_qubit_gate(&g, targets[0], targets[1]);
+                self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Swap => {
                 let g = swap_matrix_4x4();
-                self.apply_two_qubit_gate(&g, targets[0], targets[1]);
+                self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Cu(mat) => {
                 let g = cu_matrix_4x4(mat);
-                self.apply_two_qubit_gate(&g, targets[0], targets[1]);
+                self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Mcu(data) => {
                 let num_ctrl = data.num_controls as usize;
@@ -2031,7 +2091,7 @@ impl MpsBackend {
                 let dim = 1usize << n;
                 let role_order: Vec<usize> = (0..n).collect();
                 let gate_mat = mcu_matrix(num_ctrl, &data.mat, &role_order);
-                self.apply_n_qubit_gate(&gate_mat, dim, &all_qubits);
+                self.apply_n_qubit_gate(&gate_mat, dim, &all_qubits)?;
             }
             Gate::BatchPhase(data) => {
                 let control = self.site_for_logical(targets[0]);
@@ -2040,12 +2100,12 @@ impl MpsBackend {
                     .iter()
                     .map(|&(qubit, phase)| (self.site_for_logical(qubit), phase))
                     .collect();
-                self.apply_batch_phase_bubble(control, &phases);
+                self.apply_batch_phase_bubble(control, &phases)?;
             }
             Gate::BatchRzz(data) => {
                 for &(q0, q1, theta) in &data.edges {
                     let g = Gate::Rzz(theta).matrix_4x4();
-                    self.apply_two_qubit_gate(&g, q0, q1);
+                    self.apply_two_qubit_gate(&g, q0, q1)?;
                 }
             }
             Gate::DiagonalBatch(data) => {
@@ -2053,7 +2113,7 @@ impl MpsBackend {
                     if let Some((q, mat)) = entry.as_1q_matrix() {
                         self.apply_single_qubit_gate(self.site_for_logical(q), &mat);
                     } else if let Some((q0, q1, mat)) = entry.as_2q_matrix() {
-                        self.apply_two_qubit_gate(&mat, q0, q1);
+                        self.apply_two_qubit_gate(&mat, q0, q1)?;
                     }
                 }
             }
@@ -2063,11 +2123,11 @@ impl MpsBackend {
                 }
             }
             Gate::Fused2q(mat) => {
-                self.apply_two_qubit_gate(mat, targets[0], targets[1]);
+                self.apply_two_qubit_gate(mat, targets[0], targets[1])?;
             }
             Gate::Multi2q(data) => {
                 for &(q0, q1, ref mat) in &data.gates {
-                    self.apply_two_qubit_gate(mat, q0, q1);
+                    self.apply_two_qubit_gate(mat, q0, q1)?;
                 }
             }
             single_qubit => {
@@ -2075,6 +2135,7 @@ impl MpsBackend {
                 self.apply_single_qubit_gate(self.site_for_logical(targets[0]), &mat);
             }
         }
+        Ok(())
     }
 }
 
@@ -2107,7 +2168,7 @@ impl Backend for MpsBackend {
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         match instruction {
-            Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets),
+            Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets)?,
             Instruction::Measure {
                 qubit,
                 classical_bit,
@@ -2124,7 +2185,7 @@ impl Backend for MpsBackend {
                 targets,
             } => {
                 if condition.evaluate(&self.classical_bits) {
-                    self.dispatch_gate(gate, targets);
+                    self.dispatch_gate(gate, targets)?;
                 }
             }
         }

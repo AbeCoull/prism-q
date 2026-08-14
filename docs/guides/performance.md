@@ -27,8 +27,12 @@ memory latency, but on a contended host it adds noise to benchmarks.
 
 ## Determinism
 
-Same circuit plus same seed yields the same result regardless of thread count. Parallel
-backends use deterministic work partitioning, so reproducibility never costs correctness.
+Deterministic partitioning makes unitary evolution and seeded terminal sampling on the
+dense backends bitwise reproducible at any thread count. Parallel reductions (norms,
+collapse probabilities, expectation values) are stable to about 1e-12 but not bitwise,
+and the batched compiled sampler seeds one RNG stream per worker, so its shots reproduce
+only at a fixed thread count. The per-path contract is in
+[Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 
 ## Tuning environment variables
 

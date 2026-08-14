@@ -97,8 +97,9 @@ impl FactoredBackend {
     }
 
     /// Ensure all target qubits reside in the same sub-state, merging as needed.
-    /// Returns the sub-state index containing all targets.
-    fn ensure_same_substate(&mut self, targets: &[usize]) -> usize {
+    /// Returns the sub-state index containing all targets, or the memory-budget
+    /// error when a merge would need a dense block over the statevector cap.
+    fn ensure_same_substate(&mut self, targets: &[usize]) -> Result<usize> {
         let first_ss = self.qubit_to_substate[targets[0]];
         let mut need_merge: SmallVec<[usize; 4]> = SmallVec::new();
 
@@ -110,10 +111,38 @@ impl FactoredBackend {
         }
 
         for other_ss in need_merge {
-            self.merge_substates(first_ss, other_ss);
+            self.merge_substates(first_ss, other_ss)?;
         }
 
-        first_ss
+        Ok(first_ss)
+    }
+
+    /// Reject a merge whose dense block would exceed the statevector budget.
+    /// The transient peak also holds both source blocks, but they are bounded
+    /// by prior merges through this same gate, so the merged width carries the
+    /// contract.
+    fn check_merge_allocation(total_n: usize) -> Result<()> {
+        if total_n >= usize::BITS as usize {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "factored".to_string(),
+                reason: format!(
+                    "merging entangled sub-states needs a {total_n}-qubit dense block, \
+                     exceeding addressable memory"
+                ),
+            });
+        }
+        let cap = crate::backend::max_factored_merge_qubits();
+        if total_n > cap {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "factored".to_string(),
+                reason: format!(
+                    "merging entangled sub-states needs a {total_n}-qubit dense block, \
+                     exceeding the cap of {cap} on this machine \
+                     (set PRISM_MAX_FACTORED_MERGE_QUBITS to override)"
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Merge sub-state `src_idx` into `dst_idx` via tensor product.
@@ -122,13 +151,14 @@ impl FactoredBackend {
     /// also has sorted qubits. When one set of qubits is wholly less than the
     /// other, the kernel reduces to a SIMD-friendly Kronecker product with a
     /// contiguous inner loop. The interleaved case falls back to scalar scatter.
-    fn merge_substates(&mut self, dst_idx: usize, src_idx: usize) {
+    fn merge_substates(&mut self, dst_idx: usize, src_idx: usize) -> Result<()> {
+        let dst_n = self.substates[dst_idx].as_ref().unwrap().qubits.len();
+        let src_n = self.substates[src_idx].as_ref().unwrap().qubits.len();
+        let total_n = dst_n + src_n;
+        Self::check_merge_allocation(total_n)?;
+
         let src = self.substates[src_idx].take().unwrap();
         let dst = self.substates[dst_idx].as_ref().unwrap();
-
-        let dst_n = dst.qubits.len();
-        let src_n = src.qubits.len();
-        let total_n = dst_n + src_n;
         let total_dim = 1usize << total_n;
 
         let mut merged_qubits: SmallVec<[usize; 8]> = SmallVec::with_capacity(total_n);
@@ -172,6 +202,7 @@ impl FactoredBackend {
         for &q in &src.qubits {
             self.qubit_to_substate[q] = dst_idx;
         }
+        Ok(())
     }
 
     /// Central gate dispatch. Translates global qubit indices to local and
@@ -186,7 +217,7 @@ impl FactoredBackend {
         if let Gate::Multi2q(data) = gate {
             for &(q0, q1, ref mat) in &data.gates {
                 let tgts = [q0, q1];
-                let ss_idx = self.ensure_same_substate(&tgts);
+                let ss_idx = self.ensure_same_substate(&tgts)?;
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let lq0 = Self::local_qubit(sub, q0);
                 let lq1 = Self::local_qubit(sub, q1);
@@ -206,9 +237,9 @@ impl FactoredBackend {
                     all_qubits.push(q);
                 }
             }
-            self.ensure_same_substate(&all_qubits)
+            self.ensure_same_substate(&all_qubits)?
         } else {
-            self.ensure_same_substate(targets)
+            self.ensure_same_substate(targets)?
         };
 
         #[cfg(feature = "parallel")]

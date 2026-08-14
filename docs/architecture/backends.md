@@ -48,6 +48,14 @@ through dispatch.
 | Dense probability output | `PRISM_MAX_PROB_QUBITS` | Same budget over `f64` |
 | Dense statevector export | `PRISM_MAX_EXPORT_QUBITS` | Same budget over `Complex64` |
 | Dense outcome sampling | `PRISM_MAX_DENSE_OUTCOME_BITS` | Same budget over two `f64` per outcome |
+| Sparse entry count | `PRISM_MAX_SPARSE_QUBITS` (the map holds at most `2^q` entries) | Same budget at 64 bytes per entry across the double-buffered maps |
+| Factored merged-block width | `PRISM_MAX_FACTORED_MERGE_QUBITS` | Same budget over `Complex64` |
+| MPS gate workspace | `PRISM_MAX_MPS_WORKSPACE_QUBITS` (at most `2^q` amplitudes of live contraction buffers) | Same budget over `Complex64` |
+
+The three growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
+factored, and MPS backends exist to run above the statevector cap, so lowering that cap
+to steer routing must not shrink what they may hold. Their defaults come from the same
+detected-memory budget.
 
 The density-matrix cap is the tighter of its own override and half the statevector cap,
 computed in one place so dispatch-time validation and the backend's `init` guard cannot
@@ -64,9 +72,15 @@ restricted to circuits below 14 qubits, where a statevector replica is 256 KiB a
 thread pool stays in the tens of megabytes. Above it trajectories run serially with one
 live backend, bounded by the ordinary state cap.
 
-Three growth paths are not yet bounded and can still exhaust memory on an adversarial
-input: MPS bond dimension when `max_bond_dim` is set very high, sparse-state entry count
-when a circuit densifies, and the transient peak inside a factored sub-state merge.
+The three growth paths that once sat outside this contract are bounded at their growth
+events, each rejecting with an error naming its own backend before the allocation: a
+factored sub-state merge checks the merged block width against the statevector cap, the
+sparse map checks a branching gate's worst-case fan-out against the entry cap (so a
+rejection can fire one gate early on a state that would have deduplicated below it), and
+MPS gate application checks its live contraction-buffer total against the statevector
+budget. The MPS check bounds the workspace, not `max_bond_dim` itself: a large cap on a
+circuit whose bonds stay small is fine, and the rejection fires only when the bonds
+actually grow past what memory holds.
 
 ## Statevector
 

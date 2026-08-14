@@ -178,3 +178,51 @@ def test_initial_state_validation_and_backend_limits():
             .seed(42)
             .run()
         )
+
+
+def test_observable_expectation_matches_weighted_expectation_values():
+    circuit = circuits.hardware_efficient_ansatz(6, 2, 42)
+    hamiltonian = [
+        (0.5, [(0, "Z")]),
+        (-1.25, [(1, "Z"), (3, "Z")]),
+        (2.0, [(0, "X"), (2, "X")]),
+        (0.75, [(1, "Y"), (4, "Y")]),
+        (0.25, []),
+    ]
+    result = simulate(circuit).seed(42).observable_expectation(hamiltonian)
+    values = simulate(circuit).seed(42).expectation_values([t for _, t in hamiltonian])
+    weighted = sum(c * v for (c, _), v in zip(hamiltonian, values))
+    assert result.mean == pytest.approx(weighted, abs=1e-12)
+    assert result.variance is not None
+    assert result.group_variances is not None
+    assert result.variance == pytest.approx(sum(result.group_variances), abs=1e-12)
+    assert result.metadata.backend == "Statevector"
+
+
+def test_observable_expectation_variance_matches_hand_value():
+    # |+>: Var(2 Z0) = 4 and Var(X0) = 0 in two commuting groups; forced onto
+    # the statevector so the Clifford route cannot serve it.
+    from prism_q import BackendKind
+
+    plus = CircuitBuilder(1).h(0).build()
+    result = (
+        simulate(plus)
+        .backend(BackendKind.statevector())
+        .seed(42)
+        .observable_expectation([(2.0, [(0, "Z")]), (1.0, [(0, "X")])])
+    )
+    assert result.mean == pytest.approx(1.0, abs=1e-12)
+    assert result.variance == pytest.approx(4.0, abs=1e-12)
+    assert len(result.group_variances) == 2
+
+
+def test_observable_expectation_clifford_route_has_no_variance():
+    bell = CircuitBuilder(2).h(0).cx(0, 1).build()
+    result = (
+        simulate(bell)
+        .seed(42)
+        .observable_expectation([(2.0, [(0, "Z"), (1, "Z")]), (-1.0, [(0, "X"), (1, "X")])])
+    )
+    assert result.mean == pytest.approx(1.0, abs=1e-12)
+    assert result.variance is None
+    assert result.group_variances is None

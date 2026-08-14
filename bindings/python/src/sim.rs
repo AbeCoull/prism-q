@@ -12,8 +12,8 @@ use numpy::PyArray1;
 use prism_q::backend::Backend;
 use prism_q::{
     BackendKind, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel, ParamLink,
-    Parameters, PauliAxis, PauliTerm, Placement, RunMetadata, RunOutcome, ShotsResult,
-    StatevectorBackend, bitstring, simulate as core_simulate,
+    Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, RunMetadata, RunOutcome,
+    ShotsResult, StatevectorBackend, bitstring, simulate as core_simulate,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -317,6 +317,58 @@ impl PySimulation {
         Ok(values)
     }
 
+    /// Compute `⟨H⟩` and its grouped-measurement variance for a weighted Pauli
+    /// observable on the circuit's output state.
+    ///
+    /// `hamiltonian` takes the [`expectation_gradient`] term shape: a list of
+    /// `(coefficient, [(qubit, axis), ...])` pairs with `axis` one of `"X"`,
+    /// `"Y"`, `"Z"`, identity factors omitted, and an empty factor list acting
+    /// as a constant offset. Identical strings merge by summing coefficients.
+    /// The statevector family reports the variance (see
+    /// `ObservableExpectation.variance` for the contract); every other route
+    /// returns the weighted mean with `variance` of `None`.
+    #[pyo3(signature = (hamiltonian))]
+    fn observable_expectation(
+        &self,
+        py: Python<'_>,
+        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+    ) -> PyPrismResult<PyObservableExpectation> {
+        let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
+        for (coefficient, factors) in hamiltonian {
+            terms.push((coefficient, parse_pauli_string(factors)?));
+        }
+        let observable = PauliObservable::from_terms(terms)?;
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
+        let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
+        let result = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).observable_expectation(&observable)
+        })?;
+        Ok(PyObservableExpectation {
+            mean: result.mean,
+            variance: result.variance,
+            group_variances: result.group_variances,
+            std_error: result.std_error,
+            metadata: PyRunMetadata::new(result.metadata),
+        })
+    }
+
     /// Exact `Tr(rho P)` for each joint Pauli observable, evolving the
     /// density-matrix backend through the circuit and the attached noise model.
     ///
@@ -484,6 +536,66 @@ impl PyRunMetadata {
             self.backend(),
             self.placement()
         )
+    }
+}
+
+/// Weighted-observable expectation: mean, grouped-measurement variance, and
+/// provenance.
+#[pyclass(name = "ObservableExpectation", module = "prism_q")]
+pub struct PyObservableExpectation {
+    mean: f64,
+    variance: Option<f64>,
+    group_variances: Option<Vec<f64>>,
+    std_error: Option<f64>,
+    metadata: PyRunMetadata,
+}
+
+#[pymethods]
+impl PyObservableExpectation {
+    /// `⟨H⟩`, including identity-term constants.
+    #[getter]
+    fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    /// Sum of per-group variances `Var(H_g)`, the variance of a grouped
+    /// measurement estimate drawing one shot per commuting group. Excludes
+    /// cross-group covariances, so it equals `Var(H)` only when one group
+    /// covers every term. `None` on a route without the grouped evaluator.
+    #[getter]
+    fn variance(&self) -> Option<f64> {
+        self.variance
+    }
+
+    /// Per-group `Var(H_g)` as a `float64` array in grouping order, the input
+    /// to shot allocation. `None` whenever `variance` is.
+    #[getter]
+    fn group_variances<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.group_variances
+            .as_ref()
+            .map(|v| f64_array(py, v.clone()))
+    }
+
+    /// Standard error of `mean` when a sampling route estimated the per-term
+    /// values, `None` for analytic routes.
+    #[getter]
+    fn std_error(&self) -> Option<f64> {
+        self.std_error
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        match self.variance {
+            Some(variance) => format!(
+                "ObservableExpectation(mean={}, variance={variance})",
+                self.mean
+            ),
+            None => format!("ObservableExpectation(mean={}, variance=None)", self.mean),
+        }
     }
 }
 

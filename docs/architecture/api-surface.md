@@ -30,7 +30,8 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 
 **Simulation:**
 `simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`,
-`run_expectation_values`, `bitstring`
+`run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
+`ObservableExpectation`, `bitstring`
 
 **Gradients:**
 `run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`

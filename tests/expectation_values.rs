@@ -4,7 +4,11 @@
 mod common;
 
 use prism_q::gates::Gate;
-use prism_q::{BackendKind, Circuit, PauliAxis, PauliTerm, run_expectation_values, simulate};
+use prism_q::{
+    BackendKind, Circuit, NoiseModel, PauliAxis, PauliObservable, PauliTerm,
+    density_matrix_expectation_values, run_expectation_values, run_observable_expectation,
+    simulate,
+};
 
 const TOL: f64 = 1e-10;
 
@@ -452,4 +456,220 @@ fn batched_observables_match_one_at_a_time() {
 
         assert_close(&batched, &one_at_a_time, TOL);
     }
+}
+
+// ---- Weighted observables ----
+
+#[test]
+fn grouped_observable_matches_the_per_term_weighted_sum() {
+    use prism_q::circuits;
+
+    for n in [8usize, 12] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, 42);
+        let terms = circuits::jordan_wigner_hamiltonian(n, 300, 42);
+        let observable = PauliObservable::from_terms(terms).unwrap();
+        assert!(observable.num_groups() < observable.num_terms());
+
+        let grouped = run_observable_expectation(&circuit, &observable, 42).unwrap();
+        assert!(grouped.variance.is_some());
+        assert_eq!(
+            grouped.group_variances.as_ref().unwrap().len(),
+            observable.num_groups()
+        );
+
+        let obs_vecs: Vec<Vec<PauliTerm>> = observable
+            .terms()
+            .iter()
+            .map(|(_, factors)| factors.clone())
+            .collect();
+        let values = run_expectation_values(&circuit, &obs_vecs, 42).unwrap();
+        let weighted: f64 = observable
+            .terms()
+            .iter()
+            .zip(&values)
+            .map(|((c, _), v)| c * v)
+            .sum();
+        assert!(
+            (grouped.mean - weighted).abs() < 1e-12,
+            "grouped mean {} vs per-term weighted sum {} at n={n}",
+            grouped.mean,
+            weighted
+        );
+    }
+}
+
+// Z-string products carry no phase, so <H^2> expands client-side through the
+// per-term path and pins the single-group variance to Var(H) exactly.
+#[test]
+fn single_group_variance_matches_the_operator_square() {
+    use prism_q::circuits;
+
+    let n = 6;
+    let circuit = circuits::hardware_efficient_ansatz(n, 2, 7);
+    let strings: Vec<(f64, usize)> = vec![
+        (0.5, 0b000001),
+        (-1.25, 0b001010),
+        (2.0, 0b110100),
+        (0.75, 0b000110),
+    ];
+    let factors_of = |mask: usize| -> Vec<PauliTerm> {
+        (0..n)
+            .filter(|q| mask >> q & 1 == 1)
+            .map(PauliTerm::z)
+            .collect()
+    };
+    let observable =
+        PauliObservable::from_terms(strings.iter().map(|&(c, mask)| (c, factors_of(mask))))
+            .unwrap();
+    assert_eq!(observable.num_groups(), 1);
+
+    let result = run_observable_expectation(&circuit, &observable, 42).unwrap();
+
+    let mut square_terms: Vec<Vec<PauliTerm>> = Vec::new();
+    let mut square_coefficients = Vec::new();
+    for &(ca, ma) in &strings {
+        for &(cb, mb) in &strings {
+            square_terms.push(factors_of(ma ^ mb));
+            square_coefficients.push(ca * cb);
+        }
+    }
+    let values = run_expectation_values(&circuit, &square_terms, 42).unwrap();
+    let h_square: f64 = square_coefficients
+        .iter()
+        .zip(&values)
+        .map(|(c, v)| c * v)
+        .sum();
+    let expected = h_square - result.mean * result.mean;
+    assert!(
+        (result.variance.unwrap() - expected).abs() < 1e-10,
+        "grouped variance {} vs <H^2>-<H>^2 = {expected}",
+        result.variance.unwrap()
+    );
+}
+
+#[test]
+fn clifford_route_reports_the_weighted_mean_without_variance() {
+    let observable = PauliObservable::from_terms([
+        (2.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (-1.0, vec![PauliTerm::x(0), PauliTerm::x(1)]),
+        (0.5, vec![]),
+    ])
+    .unwrap();
+    let result = run_observable_expectation(&bell(), &observable, 42).unwrap();
+    assert!((result.mean - 1.5).abs() < TOL);
+    assert!(result.variance.is_none());
+    assert!(result.std_error.is_none());
+}
+
+#[test]
+fn explicit_statevector_reaches_the_grouped_route_on_clifford_circuits() {
+    let observable = PauliObservable::from_terms([
+        (2.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (-1.0, vec![PauliTerm::x(0), PauliTerm::x(1)]),
+        (0.5, vec![]),
+    ])
+    .unwrap();
+    let result = simulate(&bell())
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!((result.mean - 1.5).abs() < TOL);
+    // ZZ and XX split into two groups, and each is deterministic on the Bell
+    // state, so every group variance vanishes.
+    let group_variances = result.group_variances.unwrap();
+    assert_eq!(group_variances.len(), 2);
+    assert!(result.variance.unwrap().abs() < TOL);
+}
+
+#[test]
+fn cross_backend_weighted_means_agree() {
+    use prism_q::circuits;
+
+    let n = 6;
+    let circuit = circuits::hardware_efficient_ansatz(n, 1, 3);
+    let terms = circuits::jordan_wigner_hamiltonian(n, 60, 5);
+    let observable = PauliObservable::from_terms(terms).unwrap();
+
+    let reference = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!(reference.variance.is_some());
+
+    for kind in [
+        BackendKind::Mps { max_bond_dim: 64 },
+        BackendKind::DensityMatrix,
+        BackendKind::Factored,
+    ] {
+        let result = simulate(&circuit)
+            .backend(kind.clone())
+            .seed(42)
+            .observable_expectation(&observable)
+            .unwrap();
+        assert!(
+            (result.mean - reference.mean).abs() < 1e-9,
+            "{kind:?} mean {} vs statevector {}",
+            result.mean,
+            reference.mean
+        );
+        assert!(result.variance.is_none(), "{kind:?} has no grouped route");
+    }
+}
+
+#[test]
+fn noisy_route_matches_density_matrix_expectations() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
+
+    let observable = PauliObservable::from_terms([
+        (2.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (-0.5, vec![PauliTerm::x(0)]),
+    ])
+    .unwrap();
+
+    let result = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(42)
+        .observable_expectation(&observable)
+        .unwrap();
+
+    let obs_vecs: Vec<Vec<PauliTerm>> = observable
+        .terms()
+        .iter()
+        .map(|(_, factors)| factors.clone())
+        .collect();
+    let values = density_matrix_expectation_values(&circuit, &obs_vecs, Some(&noise), 42).unwrap();
+    let weighted: f64 = observable
+        .terms()
+        .iter()
+        .zip(&values)
+        .map(|((c, _), v)| c * v)
+        .sum();
+    assert!((result.mean - weighted).abs() < 1e-12);
+    assert!(result.variance.is_none());
+}
+
+#[test]
+fn initial_state_route_returns_the_weighted_mean() {
+    use num_complex::Complex64;
+
+    let s = std::f64::consts::FRAC_1_SQRT_2;
+    let plus = [Complex64::new(s, 0.0), Complex64::new(s, 0.0)];
+    let theta = 0.7_f64;
+    let mut circuit = Circuit::new(1, 0);
+    circuit.add_gate(Gate::Rz(theta), &[0]);
+
+    let observable = PauliObservable::from_terms([(2.0, vec![PauliTerm::x(0)])]).unwrap();
+    let result = simulate(&circuit)
+        .initial_state(&plus)
+        .seed(42)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!((result.mean - 2.0 * theta.cos()).abs() < TOL);
+    assert!(result.variance.is_none());
 }

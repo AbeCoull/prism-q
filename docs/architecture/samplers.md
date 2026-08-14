@@ -97,6 +97,52 @@ lives in `mps_conditional_path_probabilities_match_the_dense_vector`
 The tensor network stays on the dense route by decision, not by omission; its
 module docstring records why.
 
+## Weighted observables and commuting-set grouping (`src/sim/observable.rs`)
+
+`PauliObservable` carries a weighted Pauli sum `H = Σ c_k P_k` in the same
+`(f64, Vec<PauliTerm>)` term shape the gradient surface takes. Terms are kept
+canonical (factors sorted by qubit, identical strings merged) and the
+qubit-wise-commuting grouping is computed by greedy first-fit-decreasing
+coloring, cached inside the observable, and invalidated on mutation. Two
+strings qubit-wise commute when every shared qubit carries the same axis, so a
+group has one well-defined axis per qubit it touches.
+
+`observable_expectation` computes `Var(H_g) = ⟨H_g²⟩ - ⟨H_g⟩²` per group on
+the statevector family, with the mean and most group variances served by one
+shared batched traversal (`pauli_expectations_from_masks`). Two strings in a
+QWC group multiply phase-free: shared qubits carry equal axes and cancel to
+identity, so each `P_i P_j` is just another Pauli string, and a small group's
+`⟨H_g²⟩` expands into pairwise product masks appended to the same traversal
+that serves the term means. A group past the pair budget
+(`MAX_PAIR_MASKS_PER_GROUP`, set where the quadratic expansion would cost
+more than a state sweep) takes a dedicated single-pass moment accumulation
+instead: on the state as run when the group is Z-only, otherwise on a copy
+rotated by H on X-assigned qubits and Sdg then H on Y-assigned qubits, after
+which members are plus-sign Z strings, and `h(j)` accumulates per element
+before squaring so both moments come from the one pass.
+
+A per-group state pass is the fallback rather than the default because it
+loses at molecular shapes: on the 2000-string Jordan-Wigner bench fixture
+the grouping yields about 850 groups of mean size 2.3, and an engine paying
+copy, rotate, and sweep per group measured 8.3-8.5x slower than the
+ungrouped batched traversal. That traversal already made the mean one pass
+regardless of grouping, so grouping buys no mean throughput; what it buys is
+the variance, priced at the pair-mask expansion.
+
+The reported variance is `Σ_g Var(H_g)`: the variance of a grouped measurement
+estimate drawing one shot per group, and the input to shot allocation via the
+per-group vector. It excludes cross-group covariances, so it equals `Var(H)`
+of the full operator only when a single group covers every term; including
+them would cost `O(M²)` Pauli products at molecular term counts. Routes
+without the grouped evaluator (Clifford/SPD, the per-backend native paths, a
+run with a noise model or start state) report the weighted mean with no
+variance.
+
+Grouping cost is `O(M · G)` word operations for `M` terms and `G` groups,
+sub-millisecond at thousands of terms; stronger colorings were declined
+because fewer groups would shrink neither the mean's single traversal nor the
+pair expansion, which scales with group size rather than group count.
+
 ## Noisy compiled sampler (`src/sim/noise.rs`)
 
 Backward Pauli propagation through circuit + noise sensitivity analysis. Each noise location gets an X-flip and Z-flip sensitivity row. During sampling, Bernoulli coin flips determine which noise channels fire, then XOR the sensitivity rows into the sample.

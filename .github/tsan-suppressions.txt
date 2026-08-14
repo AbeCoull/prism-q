@@ -1,0 +1,6 @@
+# ThreadSanitizer does not model standalone atomic fences, and Rayon's work-stealing
+# deque (crossbeam-deque over crossbeam-epoch) synchronizes epoch reclamation with
+# them, so the handoff is reported as a race. Scoped to those crates: a real race in
+# this repository's kernels symbolizes under prism_q and stays visible.
+race:crossbeam_epoch
+race:crossbeam_deque

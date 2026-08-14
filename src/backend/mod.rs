@@ -66,11 +66,21 @@ use crate::sim::{Exactness, Placement, ResolvedBackend};
 /// Qubit count at which dense amplitude kernels switch to Rayon; the factored
 /// backend applies it per sub-state, the density matrix backend to its
 /// `2n`-qubit buffer.
+///
+/// Under miri the four parallelism floors here drop so the same kernels split
+/// across real worker threads at sizes the interpreter can execute; a 14-qubit
+/// pass with the race detector on runs minutes per gate. `tests/determinism.rs`
+/// is the miri CI target that relies on this.
+#[cfg(not(miri))]
 pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
+#[cfg(miri)]
+pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 8;
 
 /// Minimum elements per Rayon task in amplitude loops.
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "parallel", not(miri)))]
 pub(crate) const MIN_PAR_ELEMS: usize = 4096;
+#[cfg(all(feature = "parallel", miri))]
+pub(crate) const MIN_PAR_ELEMS: usize = 64;
 
 /// `with_min_len` value giving each Rayon task at least [`MIN_PAR_ELEMS`]
 /// elements when the parallel iterator yields chunks of `chunk_size`.
@@ -82,14 +92,18 @@ pub(crate) fn chunk_min_len(chunk_size: usize) -> usize {
 
 /// Minimum iterations per Rayon task for index-driven loops whose
 /// per-iteration work is heavier than one element (MCU, batch phase).
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "parallel", not(miri)))]
 pub(crate) const MIN_PAR_ITERS: usize = 2048;
+#[cfg(all(feature = "parallel", miri))]
+pub(crate) const MIN_PAR_ITERS: usize = 32;
 
 /// Element count above which a full-buffer reduction is worth Rayon fan-out.
 /// Higher than [`PARALLEL_THRESHOLD_QUBITS`] because a reduction is one
 /// lightweight streaming pass, so the fan-out only pays past `2^16`.
-#[cfg(feature = "parallel")]
+#[cfg(all(feature = "parallel", not(miri)))]
 pub(crate) const MIN_PAR_REDUCE_ELEMS: usize = 1 << 16;
+#[cfg(all(feature = "parallel", miri))]
+pub(crate) const MIN_PAR_REDUCE_ELEMS: usize = 1 << 8;
 
 /// `sum |a|^2` over a dense amplitude buffer, SIMD per chunk and parallel above
 /// [`MIN_PAR_REDUCE_ELEMS`].

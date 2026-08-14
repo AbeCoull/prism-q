@@ -36,20 +36,33 @@ pub(super) const IDENTITY_EPS: f64 = 1e-12;
 
 use super::plan::{Place, Tracer};
 
+// Under miri the fusion floors drop to the reduced parallel threshold (see
+// `PARALLEL_THRESHOLD_QUBITS` in `backend/mod.rs`), so the fused kernel forms
+// appear at sizes the interpreter can execute. Native values are unchanged.
+
 /// Minimum qubit count for 1q fusion, reorder, and batching passes.
 ///
 /// Below 10 qubits, statevectors are small enough that gate execution is
 /// nanoseconds. The instruction-clone cost of fusion passes (allocating output
 /// Vec, cloning non-fuseable instructions) exceeds any simulation savings.
+#[cfg(not(miri))]
 const MIN_QUBITS_FOR_FUSION: usize = 10;
+#[cfg(miri)]
+const MIN_QUBITS_FOR_FUSION: usize = 8;
 
 /// Minimum qubit count for multi-gate tiled fusion to be profitable.
+#[cfg(not(miri))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 14;
+#[cfg(miri)]
+const MIN_QUBITS_FOR_MULTI_FUSION: usize = 8;
 
 /// Minimum qubit count for diagonal-family batch passes (BatchRzz, BatchPhase,
 /// DiagonalBatch) to be profitable. LUT kernel overhead needs enough state size
 /// to amortize.
+#[cfg(not(miri))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
+#[cfg(miri)]
+const MIN_QUBITS_FOR_DIAG_BATCH: usize = 8;
 
 /// Minimum qubit count for post-phase-fusion 1q batching.
 ///
@@ -57,13 +70,19 @@ const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
 /// batched into MultiFused for tiled execution. At 16q (1MB, L3-resident),
 /// tiling overhead exceeds savings. Profitable at 18q+ where DRAM bandwidth
 /// dominates.
+#[cfg(not(miri))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 18;
+#[cfg(miri)]
+const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 8;
 
 /// Minimum qubit count for two-qubit gate fusion (absorb 1q into CX/CZ) to be profitable.
 ///
 /// The generic 4×4 kernel does ~4x the FLOPs of specialized CX/CZ + SIMD 1q kernels.
 /// Benchmarked QV and random sweeps show memory-pass reduction wins from 12q.
+#[cfg(not(miri))]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 12;
+#[cfg(miri)]
+const MIN_QUBITS_FOR_2Q_FUSION: usize = 8;
 
 /// Bench-only kill switch for `reorder_disjoint_fused2q`. Reads
 /// `PRISM_NO_REORDER` once and caches the result. Toggle for A/B timing

@@ -5,8 +5,9 @@
 //! gate matrices agreeing to floating-point round-off rather than bit for bit.
 //! Angles carried inline (`rx`, `rz`, `rzz`, `p`) survive exactly.
 //!
-//! [`Gate::QftBlock`] expands to its textbook sequence before emission. Fusion
-//! payloads have no OpenQASM spelling and are rejected: `MultiFused`, `Multi2q`,
+//! [`Gate::QftBlock`] expands to its textbook sequence before emission, and
+//! [`Gate::PauliRot`] to its CNOT-ladder lowering. Fusion payloads have no
+//! OpenQASM spelling and are rejected: `MultiFused`, `Multi2q`,
 //! `BatchPhase`, `BatchRzz`, `DiagonalBatch`, a `Fused2q` outside the two-qubit
 //! families the parser builds, and a single-qubit matrix carrying a global phase
 //! no named rotation absorbs.
@@ -17,7 +18,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::fmt::Write;
 
 use super::openqasm::Parser;
-use super::{Circuit, ClassicalCondition, Instruction, expand_qft_blocks};
+use super::{Circuit, ClassicalCondition, Instruction, expand_pauli_rotations, expand_qft_blocks};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
@@ -50,6 +51,7 @@ const EPS: f64 = 1e-12;
 /// ```
 pub fn to_qasm3(circuit: &Circuit) -> Result<String> {
     let expanded = expand_qft_blocks(circuit);
+    let expanded = expand_pauli_rotations(&expanded);
     let circuit = expanded.as_ref();
     let cregs = CregLayout::of(circuit)?;
 

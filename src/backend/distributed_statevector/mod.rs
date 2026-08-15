@@ -1593,6 +1593,10 @@ impl Backend for DistributedStatevectorBackend {
         self.is_single_rank() && self.inner.supports_qft_block()
     }
 
+    fn supports_pauli_rotation(&self) -> bool {
+        self.is_single_rank() && self.inner.supports_pauli_rotation()
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         let size = self.context.size();
         // Before the local validations: those read `num_qubits`, so ranks given

@@ -464,6 +464,46 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
     group.finish();
 }
 
+// One first-order Trotter step of the seeded Jordan-Wigner two-body operator,
+// truncated to the 200 largest coefficients. The recognizing constructor
+// lowers weight-1 and ZZ terms, so the native arm mixes named rotations with
+// `PauliRot` strings; the ladder arm pre-expands those strings, so the delta
+// isolates the native kernel against the fused CNOT-ladder form.
+fn trotter_step_circuit(n: usize) -> Circuit {
+    let terms = circuits::jordan_wigner_hamiltonian(n, 200, SEED);
+    let dt = 0.05;
+    let mut c = Circuit::new(n, 0);
+    for (coefficient, factors) in &terms {
+        if factors.is_empty() {
+            continue;
+        }
+        c.add_pauli_rotation(2.0 * coefficient * dt, factors);
+    }
+    c
+}
+
+fn bench_statevector_trotter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/trotter");
+    configure_group(&mut group);
+
+    for &n in &[16, 20] {
+        let native = trotter_step_circuit(n);
+        let ladder = prism_q::circuit::expand_pauli_rotations(&native).into_owned();
+        group.bench_with_input(BenchmarkId::new("native", n), &native, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("ladder", n), &ladder, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // Gates on the parallel `DiagonalBatch` sweep: the fused stream carrying a
 // `DiagonalBatch` is pinned by `fusion_diag_mixed_batches_and_matches_unfused`.
 fn bench_statevector_diag_mixed(c: &mut Criterion) {
@@ -2214,6 +2254,7 @@ criterion_group! {
     bench_statevector_qpe,
     bench_statevector_hea,
     bench_statevector_qaoa,
+    bench_statevector_trotter,
     bench_statevector_diag_mixed,
     bench_statevector_qv,
     bench_statevector_w_state,

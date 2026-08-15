@@ -47,6 +47,7 @@ payloads.
 | `BatchPhase(Box<BatchPhaseData>)` | Batched cphase with shared control | 16B |
 | `BatchRzz(Box<BatchRzzData>)` | Batched ZZ rotations | 16B |
 | `DiagonalBatch(Box<DiagonalBatchData>)` | Mixed diagonal 1q/2q batch | 16B |
+| `PauliRot(Box<PauliRotData>)` | Multi-qubit Pauli rotation, boxed angle plus letters | 16B |
 
 ```admonish note title="Qubit ordering"
 `q[0]` is the least significant bit. Applying `x q[0]` produces state index 1, not 2.

@@ -436,6 +436,15 @@ pub trait Backend {
         false
     }
 
+    /// Whether this backend has a native kernel for `Gate::PauliRot`.
+    ///
+    /// Native support is currently limited to the host CPU statevector. Other
+    /// backends receive the CNOT-ladder lowering from
+    /// `circuit::expand_pauli_rotations` before dispatch.
+    fn supports_pauli_rotation(&self) -> bool {
+        false
+    }
+
     /// Export the current quantum state as a dense statevector.
     ///
     /// Returns a `Vec<Complex64>` of length 2^n containing the full amplitude

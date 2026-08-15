@@ -121,6 +121,11 @@ pub fn run_unfused_probs<B: Backend>(backend: &mut B, circuit: &Circuit) -> Vec<
     } else {
         prism_q::circuit::expand_qft_blocks(circuit)
     };
+    let expanded = if backend.supports_pauli_rotation() {
+        expanded
+    } else {
+        std::borrow::Cow::Owned(prism_q::circuit::expand_pauli_rotations(&expanded).into_owned())
+    };
     for instr in &expanded.instructions {
         backend.apply(instr).unwrap();
     }

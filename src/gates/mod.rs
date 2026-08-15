@@ -10,6 +10,7 @@
 //! - Two-qubit gates (CX, CZ, SWAP) have dedicated application routines in
 //!   backends rather than materializing a 4×4 matrix.
 
+use crate::sim::unified_pauli::PauliAxis;
 use num_complex::Complex64;
 use smallvec::SmallVec;
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
@@ -126,6 +127,16 @@ pub enum Gate {
     /// gates before execution.
     /// Boxless: `(u8, u8)` fits within the 16-byte enum slot.
     QftBlock { start: u8, num: u8 },
+
+    /// Multi-qubit Pauli rotation `exp(-i θ P / 2)`. The `PauliRotData` letter
+    /// at index `i` acts on the instruction's `targets[i]`.
+    ///
+    /// Built by [`crate::Circuit::add_pauli_rotation`], which lowers weight-1
+    /// strings to `Rx`/`Ry`/`Rz` and two-qubit `ZZ` to `Rzz`, so only the
+    /// residual multi-qubit strings construct this variant. The CPU
+    /// statevector applies it in one pass; backends without the kernel receive
+    /// the CNOT-ladder lowering from `circuit::expand_pauli_rotations`.
+    PauliRot(Box<PauliRotData>),
 }
 
 /// Analytic differentiation generator for a parametric gate.
@@ -148,6 +159,29 @@ pub enum GeneratorKind {
     RotZz,
     /// `P(θ)`: generator is the projector `|1⟩⟨1|` on `targets[0]`.
     Phase,
+}
+
+/// Data for a multi-qubit Pauli rotation `exp(-i θ P / 2)`.
+///
+/// `axes[i]` is the letter of `P` on the owning instruction's `targets[i]`.
+/// Fields are private so every construction path runs the recognizing
+/// lowering in [`crate::Circuit::add_pauli_rotation`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PauliRotData {
+    pub(crate) theta: f64,
+    pub(crate) axes: Vec<PauliAxis>,
+}
+
+impl PauliRotData {
+    /// Rotation angle in radians.
+    pub fn theta(&self) -> f64 {
+        self.theta
+    }
+
+    /// Pauli letters aligned with the instruction targets.
+    pub fn axes(&self) -> &[PauliAxis] {
+        &self.axes
+    }
 }
 
 /// Data for a multi-controlled unitary gate.
@@ -427,6 +461,7 @@ impl Gate {
                 count_unique_qubits(data.edges.iter().flat_map(|&(q0, q1, _)| [q0, q1]))
             }
             Gate::DiagonalBatch(data) => count_unique_diag_qubits(&data.entries),
+            Gate::PauliRot(data) => data.axes.len(),
             Gate::MultiFused(data) => data.gates.len(),
             Gate::Multi2q(data) => {
                 count_unique_qubits(data.gates.iter().flat_map(|&(q0, q1, _)| [q0, q1]))
@@ -510,6 +545,7 @@ impl Gate {
             | Gate::QftBlock { .. }
             | Gate::BatchRzz(_)
             | Gate::DiagonalBatch(_)
+            | Gate::PauliRot(_)
             | Gate::MultiFused(_)
             | Gate::Fused2q(_)
             | Gate::Multi2q(_) => {
@@ -584,6 +620,7 @@ impl Gate {
             Gate::Fused(_) => "fused",
             Gate::BatchPhase(_) => "batch_phase",
             Gate::QftBlock { .. } => "qft_block",
+            Gate::PauliRot(_) => "pauli_rot",
             Gate::BatchRzz(_) => "batch_rzz",
             Gate::DiagonalBatch(_) => "diagonal_batch",
             Gate::MultiFused(_) => "multi_fused",
@@ -621,6 +658,10 @@ impl Gate {
                      transform that calls Gate::inverse()."
                 )
             }
+            Gate::PauliRot(data) => Gate::PauliRot(Box::new(PauliRotData {
+                theta: -data.theta,
+                axes: data.axes.clone(),
+            })),
             Gate::BatchRzz(data) => Gate::BatchRzz(Box::new(BatchRzzData {
                 edges: data
                     .edges
@@ -870,6 +911,7 @@ impl Gate {
                 is_diag || is_antidiag
             }
             Gate::BatchPhase(_) | Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => true,
+            Gate::PauliRot(data) => data.axes.iter().all(|axis| *axis == PauliAxis::Z),
             _ => false,
         }
     }
@@ -1055,6 +1097,17 @@ impl fmt::Display for Gate {
             Gate::MultiFused(data) => write!(f, "MF[{}]", data.gates.len()),
             Gate::BatchPhase(data) => write!(f, "BP[{}]", data.phases.len()),
             Gate::QftBlock { start, num } => write!(f, "QFT[{}..{}]", start, start + num),
+            Gate::PauliRot(data) => {
+                f.write_str("R[")?;
+                for axis in &data.axes {
+                    f.write_str(match axis {
+                        PauliAxis::X => "X",
+                        PauliAxis::Y => "Y",
+                        PauliAxis::Z => "Z",
+                    })?;
+                }
+                write!(f, "]({})", format_angle(data.theta))
+            }
             Gate::BatchRzz(data) => write!(f, "BZZ[{}]", data.edges.len()),
             Gate::DiagonalBatch(data) => write!(f, "BD[{}]", data.entries.len()),
             Gate::Multi2q(data) => write!(f, "M2[{}]", data.gates.len()),

@@ -17,6 +17,7 @@ use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{BatchPhaseData, BatchRzzData, DiagEntry, Gate, diag_entries_phase};
+use crate::sim::unified_pauli::PauliAxis;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -1549,6 +1550,38 @@ fn fft_stage_pair_par(
     apply_group(state, 0);
 }
 
+/// Mix the pairs `(lo[i], hi[i ^ xlow])` of one Pauli-rotation pivot block.
+///
+/// `base` is the global index of `lo[0]` and must be a multiple of `lo.len()`,
+/// so `(base + i) & zmask` reads the pair's parity sign directly. `m_lo` and
+/// `m_hi` are the parity-even cross coefficients toward the pivot-clear and
+/// pivot-set side respectively.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn pauli_rot_pair_halves(
+    lo: &mut [Complex64],
+    hi: &mut [Complex64],
+    base: usize,
+    xlow: usize,
+    zmask: usize,
+    c: f64,
+    m_lo: Complex64,
+    m_hi: Complex64,
+) {
+    for (i, amp_lo) in lo.iter_mut().enumerate() {
+        let k = i ^ xlow;
+        let a = *amp_lo;
+        let b = hi[k];
+        if ((base + i) & zmask).count_ones() & 1 == 0 {
+            *amp_lo = a * c + b * m_lo;
+            hi[k] = b * c + a * m_hi;
+        } else {
+            *amp_lo = a * c - b * m_lo;
+            hi[k] = b * c - a * m_hi;
+        }
+    }
+}
+
 impl StatevectorBackend {
     #[inline(always)]
     pub(super) fn apply_single_gate(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
@@ -1835,6 +1868,144 @@ impl StatevectorBackend {
                     let i = base + j;
                     let parity = ((i >> q0) ^ (i >> q1)) & 1;
                     *amp *= phases[parity];
+                }
+            });
+    }
+
+    /// Apply `exp(-i θ P / 2)` in one pass, `P` given as one letter per target.
+    ///
+    /// `P|j> = i^{num_y} (-1)^{popcount(j & zmask)} |j ^ xmask>`, so the gate
+    /// mixes each pair `(j, j ^ xmask)` with `cos(θ/2)` on the diagonal and a
+    /// sign-resolved `-i sin(θ/2) i^{num_y}` cross term. A Z-only string has
+    /// `xmask == 0` and reduces to parity phases on the diagonal.
+    #[inline(always)]
+    pub(super) fn apply_pauli_rot(&mut self, targets: &[usize], theta: f64, axes: &[PauliAxis]) {
+        let mut xmask = 0usize;
+        let mut zmask = 0usize;
+        let mut num_y = 0u32;
+        for (&q, axis) in targets.iter().zip(axes) {
+            let bit = 1usize << q;
+            match axis {
+                PauliAxis::X => xmask |= bit,
+                PauliAxis::Z => zmask |= bit,
+                PauliAxis::Y => {
+                    xmask |= bit;
+                    zmask |= bit;
+                    num_y += 1;
+                }
+            }
+        }
+        let c = (theta / 2.0).cos();
+        let s = (theta / 2.0).sin();
+        if xmask == 0 {
+            self.apply_parity_phase(zmask, Complex64::new(c, -s), Complex64::new(c, s));
+            return;
+        }
+
+        // Cross-term coefficient toward the pivot-set side of a pair; the
+        // opposite direction differs by the parity of `xmask & zmask`, which
+        // is the Y count, hoisted into `m_lo`.
+        let m_hi = match num_y % 4 {
+            0 => Complex64::new(0.0, -s),
+            1 => Complex64::new(s, 0.0),
+            2 => Complex64::new(0.0, s),
+            _ => Complex64::new(-s, 0.0),
+        };
+        let m_lo = if num_y % 2 == 1 { -m_hi } else { m_hi };
+        let pivot = usize::BITS as usize - 1 - xmask.leading_zeros() as usize;
+        let half = 1usize << pivot;
+        let block = half << 1;
+        let xlow = xmask ^ half;
+
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.apply_pauli_rot_pairs_par(pivot, xlow, zmask, c, m_lo, m_hi);
+            return;
+        }
+
+        for (chunk_idx, chunk) in self.state.chunks_mut(block).enumerate() {
+            let (lo, hi) = chunk.split_at_mut(half);
+            pauli_rot_pair_halves(lo, hi, chunk_idx * block, xlow, zmask, c, m_lo, m_hi);
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[inline(always)]
+    fn apply_pauli_rot_pairs_par(
+        &mut self,
+        pivot: usize,
+        xlow: usize,
+        zmask: usize,
+        c: f64,
+        m_lo: Complex64,
+        m_hi: Complex64,
+    ) {
+        let half = 1usize << pivot;
+        let block = half << 1;
+        let num_blocks = self.state.len() / block;
+
+        if num_blocks >= 4 {
+            self.state
+                .par_chunks_mut(block)
+                .with_min_len(chunk_min_len(block))
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    let (lo, hi) = chunk.split_at_mut(half);
+                    pauli_rot_pair_halves(lo, hi, chunk_idx * block, xlow, zmask, c, m_lo, m_hi);
+                });
+        } else {
+            // Tiles are a power of two above `xlow`, so `i ^ xlow` stays
+            // inside its tile and each (lo, hi) tile pair is disjoint.
+            let tile = MIN_PAR_ELEMS.max((xlow + 1).next_power_of_two());
+            for (chunk_idx, chunk) in self.state.chunks_mut(block).enumerate() {
+                let chunk_base = chunk_idx * block;
+                let (lo, hi) = chunk.split_at_mut(half);
+                lo.par_chunks_mut(tile)
+                    .zip(hi.par_chunks_mut(tile))
+                    .enumerate()
+                    .for_each(|(t, (lo_t, hi_t))| {
+                        pauli_rot_pair_halves(
+                            lo_t,
+                            hi_t,
+                            chunk_base + t * tile,
+                            xlow,
+                            zmask,
+                            c,
+                            m_lo,
+                            m_hi,
+                        );
+                    });
+            }
+        }
+    }
+
+    /// Multiply each amplitude by `even` or `odd` from the parity of its
+    /// index bits under `zmask`.
+    #[inline(always)]
+    fn apply_parity_phase(&mut self, zmask: usize, even: Complex64, odd: Complex64) {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            self.apply_parity_phase_par(zmask, even, odd);
+            return;
+        }
+
+        let phases = [even, odd];
+        for (i, amp) in self.state.iter_mut().enumerate() {
+            *amp *= phases[((i & zmask).count_ones() & 1) as usize];
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[inline(always)]
+    fn apply_parity_phase_par(&mut self, zmask: usize, even: Complex64, odd: Complex64) {
+        let phases = [even, odd];
+        self.state
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(chunk_idx, chunk)| {
+                let base = chunk_idx * MIN_PAR_ELEMS;
+                for (j, amp) in chunk.iter_mut().enumerate() {
+                    *amp *= phases[(((base + j) & zmask).count_ones() & 1) as usize];
                 }
             });
     }

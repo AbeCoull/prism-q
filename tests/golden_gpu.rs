@@ -175,7 +175,26 @@ fn gate_samples() -> Vec<Gate> {
             gates: vec![(0, 1, m4)],
         })),
         Gate::QftBlock { start: 0, num: 4 },
+        pauli_rot_sample(),
     ]
+}
+
+// `PauliRotData` has no public constructor; pull the gate out of the circuit
+// builder, whose recognizing lowering keeps a weight-3 mixed string native.
+fn pauli_rot_sample() -> Gate {
+    let mut circuit = prism_q::Circuit::new(3, 0);
+    circuit.add_pauli_rotation(
+        0.53,
+        &[
+            prism_q::PauliTerm::x(0),
+            prism_q::PauliTerm::y(1),
+            prism_q::PauliTerm::z(2),
+        ],
+    );
+    match &circuit.instructions[0] {
+        Instruction::Gate { gate, .. } => gate.clone(),
+        _ => unreachable!("add_pauli_rotation appends a gate"),
+    }
 }
 
 /// Maps each `Gate` variant to a target layout. Exhaustive by design.
@@ -210,6 +229,7 @@ fn representative(gate: &Gate) -> (usize, Vec<Instruction>) {
         Gate::QftBlock { start, num } => {
             (*start as usize..*start as usize + *num as usize).collect()
         }
+        Gate::PauliRot(data) => (0..data.axes().len()).map(|i| i + 1).collect(),
     };
     let mut insts: Vec<Instruction> = (0..N).map(|q| g(Gate::H, &[q])).collect();
     insts.push(g(gate.clone(), &targets));

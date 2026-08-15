@@ -871,3 +871,150 @@ fn weighted_observable_y_bearing_large_group_variance_pins_the_rotation_sign() {
     assert!(result.mean.abs() < 1e-12);
     assert!((result.variance.unwrap() - 10.0).abs() < 1e-12);
 }
+
+// ---- Pauli rotations ----
+
+// exp(-i t/2 X0 Y1 Z2)|000> = cos(t/2)|000> + sin(t/2)|011>: the string maps
+// |000> to X|0> (x) Y|0> (x) Z|0> = i|110> read q0-first, i.e. i times index 3,
+// and -i sin(t/2) * i = sin(t/2).
+#[test]
+fn pauli_rot_xyz_on_zero() {
+    use prism_q::PauliTerm;
+    let theta = 0.7f64;
+    let mut c = Circuit::new(3, 0);
+    c.add_pauli_rotation(theta, &[PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)]);
+    let sv = run_and_state(&c);
+    let (s, cos) = (theta / 2.0).sin_cos();
+    for (i, amp) in sv.iter().enumerate() {
+        let expected = match i {
+            0 => Complex64::new(cos, 0.0),
+            3 => Complex64::new(s, 0.0),
+            _ => Complex64::new(0.0, 0.0),
+        };
+        assert_amplitude(*amp, expected, &format!("index {i}"));
+    }
+}
+
+// exp(-i t/2 X0 X1)|00> = cos(t/2)|00> - i sin(t/2)|11>.
+#[test]
+fn pauli_rot_xx_on_zero() {
+    use prism_q::PauliTerm;
+    let theta = 1.1f64;
+    let mut c = Circuit::new(2, 0);
+    c.add_pauli_rotation(theta, &[PauliTerm::x(0), PauliTerm::x(1)]);
+    let sv = run_and_state(&c);
+    let (s, cos) = (theta / 2.0).sin_cos();
+    assert_amplitude(sv[0], Complex64::new(cos, 0.0), "|00>");
+    assert_amplitude(sv[1], Complex64::new(0.0, 0.0), "|01>");
+    assert_amplitude(sv[2], Complex64::new(0.0, 0.0), "|10>");
+    assert_amplitude(sv[3], Complex64::new(0.0, -s), "|11>");
+}
+
+// A Z-only weight-3 string is diagonal: on H^3|000>, every basis state picks
+// up e^{-i t/2} at even parity of its three bits and e^{+i t/2} at odd.
+#[test]
+fn pauli_rot_zzz_applies_parity_phases() {
+    use prism_q::PauliTerm;
+    let theta = 0.9f64;
+    let mut c = Circuit::new(3, 0);
+    for q in 0..3 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_pauli_rotation(theta, &[PauliTerm::z(0), PauliTerm::z(1), PauliTerm::z(2)]);
+    let sv = run_and_state(&c);
+    let amp = 1.0 / (8.0f64).sqrt();
+    for (i, actual) in sv.iter().enumerate() {
+        let sign = if (i as u32).count_ones().is_multiple_of(2) {
+            -1.0
+        } else {
+            1.0
+        };
+        let expected = Complex64::from_polar(amp, sign * theta / 2.0);
+        assert_amplitude(*actual, expected, &format!("index {i}"));
+    }
+}
+
+// The recognizing constructor lowers weight-1 strings to the named rotation
+// and two-qubit ZZ to Rzz, with factors sorted by qubit.
+#[test]
+fn pauli_rot_constructor_lowers_recognized_forms() {
+    use prism_q::PauliTerm;
+    let mut c = Circuit::new(3, 0);
+    c.add_pauli_rotation(0.3, &[PauliTerm::x(1)]);
+    c.add_pauli_rotation(0.4, &[PauliTerm::y(0)]);
+    c.add_pauli_rotation(0.5, &[PauliTerm::z(2)]);
+    c.add_pauli_rotation(0.6, &[PauliTerm::z(2), PauliTerm::z(0)]);
+    let gates: Vec<_> = c
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Gate { gate, targets } => (gate.clone(), targets.to_vec()),
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(gates[0], (Gate::Rx(0.3), vec![1]));
+    assert_eq!(gates[1], (Gate::Ry(0.4), vec![0]));
+    assert_eq!(gates[2], (Gate::Rz(0.5), vec![2]));
+    assert_eq!(gates[3], (Gate::Rzz(0.6), vec![0, 2]));
+}
+
+// exp(-i t/2 P) followed by its inverse restores the prepared state exactly
+// up to floating-point roundoff.
+#[test]
+fn pauli_rot_inverse_round_trips() {
+    use prism_q::PauliTerm;
+    let factors = [PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(3)];
+    let mut c = Circuit::new(4, 0);
+    for q in 0..4 {
+        c.add_gate(Gate::Ry(0.4 + 0.2 * q as f64), &[q]);
+    }
+    c.add_pauli_rotation(0.8, &factors);
+    let rot = match c.instructions.last().unwrap() {
+        Instruction::Gate { gate, targets } => (gate.inverse(), targets.clone()),
+        _ => unreachable!(),
+    };
+    c.instructions.push(Instruction::Gate {
+        gate: rot.0,
+        targets: rot.1,
+    });
+
+    let mut reference = Circuit::new(4, 0);
+    for q in 0..4 {
+        reference.add_gate(Gate::Ry(0.4 + 0.2 * q as f64), &[q]);
+    }
+    let sv = run_and_state(&c);
+    let expected = run_and_state(&reference);
+    for (i, (a, e)) in sv.iter().zip(&expected).enumerate() {
+        assert_amplitude(*a, *e, &format!("index {i}"));
+    }
+}
+
+// The native kernel against the textbook CNOT-ladder lowering of the same
+// string on the same backend, from a non-symmetric product state.
+#[test]
+fn pauli_rot_matches_ladder_lowering() {
+    use prism_q::PauliTerm;
+    let factors = [
+        PauliTerm::x(0),
+        PauliTerm::y(1),
+        PauliTerm::z(2),
+        PauliTerm::x(3),
+    ];
+    let mut c = Circuit::new(4, 0);
+    for q in 0..4 {
+        c.add_gate(Gate::Ry(0.3 + 0.15 * q as f64), &[q]);
+        c.add_gate(Gate::Rz(0.1 + 0.07 * q as f64), &[q]);
+    }
+    c.add_pauli_rotation(0.65, &factors);
+
+    let expanded = prism_q::circuit::expand_pauli_rotations(&c);
+    assert!(
+        matches!(expanded, std::borrow::Cow::Owned(_)),
+        "expansion must rewrite the native gate"
+    );
+    let sv = run_and_state(&c);
+    let lowered = run_and_state(&expanded);
+    for (i, (a, e)) in sv.iter().zip(&lowered).enumerate() {
+        assert_amplitude(*a, *e, &format!("index {i}"));
+    }
+}

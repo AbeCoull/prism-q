@@ -69,8 +69,9 @@ fn phase_matrix(theta: f64) -> [[Complex64; 2]; 2] {
 
 // Non-Clifford circuit whose fused form walks the parallel kernel families:
 // 1q runs, CX with absorbable neighbors, Rzz and phase runs for the diagonal
-// batch tiers, plus Swap, Cu, and both Mcu shapes, which fuse into nothing and
-// keep their own index-bijection kernels.
+// batch tiers, the three Pauli-rotation branches (pair mix at low and high
+// pivot, Z-parity diagonal), plus Swap, Cu, and both Mcu shapes, which fuse
+// into nothing and keep their own index-bijection kernels.
 fn representative_dense_circuit(n: usize) -> Circuit {
     let mut c = Circuit::new(n, 0);
     for q in 0..n {
@@ -88,6 +89,10 @@ fn representative_dense_circuit(n: usize) -> Circuit {
     for q in 0..n {
         c.add_gate(Gate::P(0.05 + 0.02 * q as f64), &[q]);
     }
+    c.add_pauli_rotation(0.19, &[PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(4)]);
+    c.add_pauli_rotation(0.27, &[PauliTerm::z(1), PauliTerm::z(3), PauliTerm::z(5)]);
+    c.add_pauli_rotation(0.33, &[PauliTerm::z(0), PauliTerm::x(n - 1)]);
+    c.add_pauli_rotation(0.21, &[PauliTerm::x(n - 3), PauliTerm::x(n - 1)]);
     c.add_gate(Gate::Swap, &[0, n - 1]);
     c.add_gate(Gate::Cu(Box::new(rx_matrix(0.4))), &[1, n - 2]);
     c.add_gate(

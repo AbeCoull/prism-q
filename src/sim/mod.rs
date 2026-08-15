@@ -684,14 +684,37 @@ fn backend_from_initial_state(
     Ok(backend)
 }
 
-/// Fuse `circuit` for `backend` and apply it, leaving initialization to the
-/// caller. The start-state analogue of [`execute`], which owns the |0...0⟩ init.
-fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<()> {
-    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
-        std::borrow::Cow::Borrowed(circuit)
+/// Expand the gate forms `backend` has no native kernel for, `QftBlock` and
+/// `PauliRot`, leaving the stream borrowed when both probes accept it.
+fn expand_for_backend<'c>(
+    backend: &dyn Backend,
+    circuit: &'c Circuit,
+) -> std::borrow::Cow<'c, Circuit> {
+    use std::borrow::Cow;
+    let expanded = if backend.supports_qft_block() {
+        Cow::Borrowed(circuit)
     } else {
         crate::circuit::expand_qft_blocks(circuit)
     };
+    if backend.supports_pauli_rotation() {
+        return expanded;
+    }
+    match expanded {
+        Cow::Borrowed(borrowed) => crate::circuit::expand_pauli_rotations(borrowed),
+        Cow::Owned(owned) => {
+            let rotations = crate::circuit::expand_pauli_rotations(&owned);
+            if let Cow::Owned(expanded_rotations) = rotations {
+                return Cow::Owned(expanded_rotations);
+            }
+            Cow::Owned(owned)
+        }
+    }
+}
+
+/// Fuse `circuit` for `backend` and apply it, leaving initialization to the
+/// caller. The start-state analogue of [`execute`], which owns the |0...0⟩ init.
+fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<()> {
+    let expanded = expand_for_backend(&*backend, circuit);
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
     backend.apply_instructions(&fused.instructions)
 }
@@ -750,11 +773,7 @@ fn shots_from_initial_state(
     check_initial_state_len(state, circuit.num_qubits)?;
     let plan = initial_state_plan(kind, circuit.num_qubits)?;
     let probe = plan.build(seed);
-    let expanded: std::borrow::Cow<'_, Circuit> = if probe.supports_qft_block() {
-        std::borrow::Cow::Borrowed(circuit)
-    } else {
-        crate::circuit::expand_qft_blocks(circuit)
-    };
+    let expanded = expand_for_backend(&*probe, circuit);
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
 
     collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
@@ -916,11 +935,7 @@ fn try_backend_probabilities(backend: &dyn Backend) -> Result<Option<Probabiliti
 
 /// Core execution: fuse, init, apply, extract.
 fn execute(backend: &mut dyn Backend, circuit: &Circuit, opts: &SimOptions) -> Result<RunOutcome> {
-    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
-        std::borrow::Cow::Borrowed(circuit)
-    } else {
-        crate::circuit::expand_qft_blocks(circuit)
-    };
+    let expanded = expand_for_backend(&*backend, circuit);
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
     execute_circuit(backend, &fused, opts)
 }
@@ -985,6 +1000,18 @@ pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<P
         )
     });
     if has_qft_block && !probe.supports_qft_block() {
+        return None;
+    }
+    let has_pauli_rot = template.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: crate::gates::Gate::PauliRot(_),
+                ..
+            }
+        )
+    });
+    if has_pauli_rot && !probe.supports_pauli_rotation() {
         return None;
     }
     Some(PreparedRoute {
@@ -1362,11 +1389,7 @@ fn try_terminal_statevector_backend(
 
     let accel = accel_for(kind, Family::Statevector, stripped.num_qubits);
     let mut backend = build_statevector(&accel, seed);
-    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
-        std::borrow::Cow::Borrowed(&stripped)
-    } else {
-        crate::circuit::expand_qft_blocks(&stripped)
-    };
+    let expanded = expand_for_backend(&backend, &stripped);
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
@@ -2053,11 +2076,7 @@ fn grouped_expectation_statevector(
 
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let mut backend = build_statevector(&accel, seed);
-    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
-        std::borrow::Cow::Borrowed(circuit)
-    } else {
-        crate::circuit::expand_qft_blocks(circuit)
-    };
+    let expanded = expand_for_backend(&backend, circuit);
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
@@ -2234,11 +2253,7 @@ fn expectation_values_statevector(
 
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let mut backend = build_statevector(&accel, seed);
-    let expanded: std::borrow::Cow<'_, Circuit> = if backend.supports_qft_block() {
-        std::borrow::Cow::Borrowed(circuit)
-    } else {
-        crate::circuit::expand_qft_blocks(circuit)
-    };
+    let expanded = expand_for_backend(&backend, circuit);
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
@@ -2554,11 +2569,7 @@ fn run_shots_distributed(
     }
 
     let probe = DistributedStatevectorBackend::new(context.clone(), seed);
-    let expanded: std::borrow::Cow<'_, Circuit> = if probe.supports_qft_block() {
-        std::borrow::Cow::Borrowed(circuit)
-    } else {
-        crate::circuit::expand_qft_blocks(circuit)
-    };
+    let expanded = expand_for_backend(&probe, circuit);
     let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
     let opts = SimOptions::classical_only();
     let mut shots = Vec::with_capacity(num_shots);
@@ -2703,11 +2714,16 @@ fn run_shots_per_shot(
                 Ok(resolve_backend(&kind, sub, false))
             })
             .collect::<Result<_>>()?;
-        let fused_blocks: Vec<_> = partitions
+        let fused_blocks: Vec<std::borrow::Cow<'_, Circuit>> = partitions
             .iter()
             .zip(&block_plans)
             .map(|((sub, _, _), plan)| {
-                crate::circuit::fusion::fuse_circuit(sub, plan.supports_fused())
+                let probe = plan.build(seed);
+                let expanded = expand_for_backend(&*probe, sub);
+                std::borrow::Cow::Owned(
+                    crate::circuit::fusion::fuse_circuit(&expanded, plan.supports_fused())
+                        .into_owned(),
+                )
             })
             .collect();
 
@@ -2731,7 +2747,9 @@ fn run_shots_per_shot(
         )
     } else {
         let plan = resolve_backend(&kind, circuit, has_partial_independence);
-        let fused = crate::circuit::fusion::fuse_circuit(circuit, plan.supports_fused());
+        let probe = plan.build(seed);
+        let expanded = expand_for_backend(&*probe, circuit);
+        let fused = crate::circuit::fusion::fuse_circuit(&expanded, plan.supports_fused());
 
         collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
             let mut backend = plan.build(shot_seed);
@@ -2905,6 +2923,36 @@ pub(crate) fn run_shots_with_noise(
     } else {
         resolve_backend(&kind, circuit, false)
     };
+    // Noise events are indexed per instruction, so trajectories apply the
+    // stream raw and the Pauli-rotation lowering pass cannot run. The
+    // statevector applies the gate natively (its device path lowers inline);
+    // any other backend without the kernel is rejected before a shot starts.
+    let has_pauli_rot = circuit.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: crate::gates::Gate::PauliRot(_),
+                ..
+            } | Instruction::Conditional {
+                gate: crate::gates::Gate::PauliRot(_),
+                ..
+            }
+        )
+    });
+    if has_pauli_rot
+        && !matches!(plan, BackendPlan::Statevector { .. })
+        && !plan.build(seed).supports_pauli_rotation()
+    {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{:?}", plan.resolved()),
+            reason: "noisy trajectories apply the instruction stream raw so noise events \
+                     stay aligned to it, which leaves no room for the Pauli-rotation \
+                     lowering this backend needs; run on the statevector, or expand the \
+                     rotations with circuit::expand_pauli_rotations and attach the noise \
+                     model to the expanded circuit"
+                .into(),
+        });
+    }
     let route = plan.resolved();
     trajectory::run_trajectories(
         |s| plan.build(s),

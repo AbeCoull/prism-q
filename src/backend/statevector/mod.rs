@@ -12,8 +12,9 @@
 //!
 //! # Gate support
 //!
-//! The full gate set, including MCU, every fused or batched variant, and a
-//! native `Gate::QftBlock` kernel on the CPU whole-state path.
+//! The full gate set, including MCU, every fused or batched variant, a native
+//! `Gate::QftBlock` kernel on the CPU whole-state path, and a native
+//! `Gate::PauliRot` kernel on the CPU path.
 //!
 //! # When to prefer this backend
 //!
@@ -368,6 +369,31 @@ impl StatevectorBackend {
                 }
                 Ok(())
             }
+            Gate::PauliRot(data) => {
+                let mut result = Ok(());
+                crate::circuit::pauli_rotation_lowering(data.theta, targets, &data.axes, {
+                    let (result, gpu) = (&mut result, &mut *gpu);
+                    move |step, tgts| {
+                        if result.is_err() {
+                            return;
+                        }
+                        *result = match &step {
+                            Gate::Cx => k::launch_apply_cx(&ctx, gpu, tgts[0], tgts[1]),
+                            _ => {
+                                let mat = step.matrix_2x2();
+                                if step.is_diagonal_1q() {
+                                    k::launch_apply_diagonal_1q(
+                                        &ctx, gpu, tgts[0], mat[0][0], mat[1][1],
+                                    )
+                                } else {
+                                    k::launch_apply_gate_1q(&ctx, gpu, tgts[0], mat)
+                                }
+                            }
+                        };
+                    }
+                });
+                result
+            }
             Gate::MultiFused(data) => {
                 if data.all_diagonal {
                     k::launch_apply_multi_fused_diagonal(&ctx, gpu, &data.gates)
@@ -636,6 +662,9 @@ impl StatevectorBackend {
             Gate::DiagonalBatch(data) => {
                 self.apply_diagonal_batch(&data.entries);
             }
+            Gate::PauliRot(data) => {
+                self.apply_pauli_rot(targets, data.theta, &data.axes);
+            }
             Gate::MultiFused(data) => {
                 if data.all_diagonal {
                     self.apply_multi_1q_diagonal(&data.gates);
@@ -697,6 +726,17 @@ impl Backend for StatevectorBackend {
         if !qft_block_enabled() {
             return false;
         }
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_context.is_none()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            true
+        }
+    }
+
+    fn supports_pauli_rotation(&self) -> bool {
         #[cfg(feature = "gpu")]
         {
             self.gpu_context.is_none()

@@ -844,6 +844,7 @@ pub(super) fn plan_temporal_clifford(
         #[cfg(feature = "gpu")]
         Accel::Gpu { .. } => {
             let expanded = crate::circuit::expand_qft_blocks(&tail);
+            let expanded = crate::circuit::expand_pauli_rotations(&expanded).into_owned();
             crate::circuit::fusion::fuse_circuit(&expanded, true).into_owned()
         }
     };

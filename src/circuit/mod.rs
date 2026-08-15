@@ -28,7 +28,8 @@ pub mod qasm_export;
 pub use parameter::{ParamLink, Parameters};
 pub use prepared::PreparedCircuit;
 
-use crate::gates::Gate;
+use crate::gates::{Gate, PauliRotData};
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 pub use smallvec::{SmallVec, smallvec};
 
 /// A quantum circuit in PRISM-Q's internal representation.
@@ -81,6 +82,55 @@ impl Circuit {
             gate,
             targets: SmallVec::from_slice(targets),
         });
+    }
+
+    /// Append the Pauli rotation `exp(-i θ P / 2)` for the Pauli string `P`
+    /// given as one factor per qubit.
+    ///
+    /// Recognized forms lower at insert: a weight-1 string appends `Rx`, `Ry`,
+    /// or `Rz`, and a two-qubit `ZZ` string appends `Rzz`, so Clifford
+    /// recognition, diagonal batching, and fusion keep firing on them. Any
+    /// other string appends the native [`Gate::PauliRot`], factors sorted by
+    /// qubit.
+    ///
+    /// # Panics
+    /// Panics if `factors` is empty, names a qubit twice, or names a qubit out
+    /// of bounds.
+    pub fn add_pauli_rotation(&mut self, theta: f64, factors: &[PauliTerm]) {
+        assert!(
+            !factors.is_empty(),
+            "Pauli rotation needs at least one factor"
+        );
+        let mut sorted: SmallVec<[PauliTerm; 4]> = SmallVec::from_slice(factors);
+        sorted.sort_unstable_by_key(|term| term.qubit);
+        for pair in sorted.windows(2) {
+            assert_ne!(
+                pair[0].qubit, pair[1].qubit,
+                "Pauli rotation has duplicate factor on qubit {}",
+                pair[0].qubit
+            );
+        }
+        match sorted.as_slice() {
+            [term] => {
+                let gate = match term.axis {
+                    PauliAxis::X => Gate::Rx(theta),
+                    PauliAxis::Y => Gate::Ry(theta),
+                    PauliAxis::Z => Gate::Rz(theta),
+                };
+                self.add_gate(gate, &[term.qubit]);
+            }
+            [a, b] if a.axis == PauliAxis::Z && b.axis == PauliAxis::Z => {
+                self.add_gate(Gate::Rzz(theta), &[a.qubit, b.qubit]);
+            }
+            _ => {
+                let targets: SmallVec<[usize; 4]> = sorted.iter().map(|term| term.qubit).collect();
+                let axes: Vec<PauliAxis> = sorted.iter().map(|term| term.axis).collect();
+                self.add_gate(
+                    Gate::PauliRot(Box::new(PauliRotData { theta, axes })),
+                    &targets,
+                );
+            }
+        }
     }
 
     /// Append a measurement operation.
@@ -871,6 +921,87 @@ pub fn expand_qft_blocks(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
                     }),
                 }
             }
+        } else {
+            out.push(inst.clone());
+        }
+    }
+
+    std::borrow::Cow::Owned(circuit.with_instructions(out))
+}
+
+/// Emit the CNOT-ladder lowering of `exp(-i θ P / 2)` gate by gate.
+///
+/// Basis layer first (`H` for an X letter, `Sdg` then `H` for Y), a CX chain
+/// accumulating the parity on the last target, one `Rz(θ)`, then the chain and
+/// basis layer unwound. Shared by [`expand_pauli_rotations`] and the GPU
+/// inline expansion so both routes lower identically.
+pub(crate) fn pauli_rotation_lowering(
+    theta: f64,
+    targets: &[usize],
+    axes: &[PauliAxis],
+    mut emit: impl FnMut(Gate, &[usize]),
+) {
+    for (&q, axis) in targets.iter().zip(axes) {
+        match axis {
+            PauliAxis::X => emit(Gate::H, &[q]),
+            PauliAxis::Y => {
+                emit(Gate::Sdg, &[q]);
+                emit(Gate::H, &[q]);
+            }
+            PauliAxis::Z => {}
+        }
+    }
+    for pair in targets.windows(2) {
+        emit(Gate::Cx, &[pair[0], pair[1]]);
+    }
+    emit(Gate::Rz(theta), &[targets[targets.len() - 1]]);
+    for pair in targets.windows(2).rev() {
+        emit(Gate::Cx, &[pair[0], pair[1]]);
+    }
+    for (&q, axis) in targets.iter().zip(axes) {
+        match axis {
+            PauliAxis::X => emit(Gate::H, &[q]),
+            PauliAxis::Y => {
+                emit(Gate::H, &[q]);
+                emit(Gate::S, &[q]);
+            }
+            PauliAxis::Z => {}
+        }
+    }
+}
+
+/// Expand `Gate::PauliRot` instructions to the CNOT-ladder lowering.
+///
+/// Backends without the native kernel call this before dispatch, the same
+/// probe-plus-expansion route as [`expand_qft_blocks`]. Returns
+/// `Cow::Borrowed` when there is nothing to expand.
+pub fn expand_pauli_rotations(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
+    let has_pauli_rot = circuit.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::PauliRot(_),
+                ..
+            }
+        )
+    });
+    if !has_pauli_rot {
+        return std::borrow::Cow::Borrowed(circuit);
+    }
+
+    let mut out: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len() * 2);
+    for inst in &circuit.instructions {
+        if let Instruction::Gate {
+            gate: Gate::PauliRot(data),
+            targets,
+        } = inst
+        {
+            pauli_rotation_lowering(data.theta, targets, &data.axes, |gate, tgts| {
+                out.push(Instruction::Gate {
+                    gate,
+                    targets: SmallVec::from_slice(tgts),
+                });
+            });
         } else {
             out.push(inst.clone());
         }

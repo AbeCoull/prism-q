@@ -92,6 +92,11 @@ steered has already happened.
 `DiagonalBatch` and `BatchPhase` have no recipe, so a template reaching either declines
 capture and re-fuses per binding.
 
+A gate the passes leave untouched still needs a site when it carries an angle. `PauliRot`
+holds its angle in a boxed payload rather than in the enum slot, and replay patches it
+exactly as it patches an `Rz`; without that site a bound rotation would keep the
+template's angle while every other payload moved.
+
 ## Fusion cost against apply cost
 
 Fusion cost tracks instruction count and is close to flat in qubit count, while gate

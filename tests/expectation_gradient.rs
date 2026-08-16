@@ -44,6 +44,11 @@ fn shifted_gate(gate: &Gate, delta: f64) -> Gate {
         Gate::Rz(t) => Gate::Rz(t + delta),
         Gate::Rzz(t) => Gate::Rzz(t + delta),
         Gate::P(t) => Gate::P(t + delta),
+        Gate::PauliRot(data) => {
+            let mut shifted = data.clone();
+            shifted.set_theta(data.theta() + delta);
+            Gate::PauliRot(shifted)
+        }
         other => panic!("gate {} is not differentiable", other.name()),
     }
 }
@@ -392,6 +397,138 @@ fn shift_runs_on_the_tensor_network() {
 
     assert!((tn.value - routed.value).abs() < 1e-12);
     assert!((tn.gradient[0] - routed.gradient[0]).abs() < 1e-9);
+}
+
+// One Trotter step over every letter and weight the constructor can produce:
+// weight-1 X/Y/Z and ZZ lower to named rotations at insert, the rest stay
+// native. Slot order follows circuit order.
+fn trotter_fixture() -> Circuit {
+    let mut c = Circuit::new(4, 0);
+    for q in 0..4 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_pauli_rotation(0.31, &[PauliTerm::x(0)]);
+    c.add_pauli_rotation(0.24, &[PauliTerm::y(1)]);
+    c.add_pauli_rotation(0.47, &[PauliTerm::z(2)]);
+    c.add_pauli_rotation(0.19, &[PauliTerm::z(0), PauliTerm::z(1)]);
+    c.add_pauli_rotation(0.53, &[PauliTerm::x(1), PauliTerm::y(2)]);
+    c.add_pauli_rotation(0.37, &[PauliTerm::x(0), PauliTerm::y(2), PauliTerm::z(3)]);
+    c.add_pauli_rotation(0.29, &[PauliTerm::y(0), PauliTerm::y(1), PauliTerm::y(3)]);
+    c.add_pauli_rotation(0.41, &[PauliTerm::z(1), PauliTerm::z(2), PauliTerm::z(3)]);
+    c
+}
+
+fn trotter_observable() -> Hamiltonian {
+    vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.7, vec![PauliTerm::x(2)]),
+        (-0.4, vec![PauliTerm::y(1), PauliTerm::z(3)]),
+    ]
+}
+
+#[test]
+fn pauli_rotation_gradients_match_finite_differences() {
+    let c = trotter_fixture();
+    let params = Parameters::all_rotations(&c);
+    assert_eq!(
+        params.num_slots(),
+        8,
+        "one slot per rotation, native or not"
+    );
+
+    let obs = trotter_observable();
+    let adjoint = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    let shift = run_expectation_gradient_shift(&c, &obs, &params, SEED).unwrap();
+
+    assert!((adjoint.value - expval(&c, &obs)).abs() < 1e-10);
+    for slot in 0..params.num_slots() {
+        let fd = finite_diff(&c, &obs, &params, slot);
+        assert!(
+            (adjoint.gradient[slot] - fd).abs() < 1e-6,
+            "slot {slot}: adjoint {} vs finite-diff {fd}",
+            adjoint.gradient[slot]
+        );
+        assert!(
+            (shift.gradient[slot] - adjoint.gradient[slot]).abs() < 1e-9,
+            "slot {slot}: shift {} vs adjoint {}",
+            shift.gradient[slot],
+            adjoint.gradient[slot]
+        );
+    }
+}
+
+// The lowered forms keep the gradients they had before the native variant
+// became differentiable: the constructor recognizes these strings at insert,
+// so nothing routes them through the new path.
+#[test]
+fn recognized_lowerings_still_differentiate_as_named_rotations() {
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_pauli_rotation(0.31, &[PauliTerm::x(0)]);
+    c.add_pauli_rotation(0.24, &[PauliTerm::y(1)]);
+    c.add_pauli_rotation(0.47, &[PauliTerm::z(0)]);
+    c.add_pauli_rotation(0.19, &[PauliTerm::z(0), PauliTerm::z(1)]);
+
+    let kinds: Vec<&str> = c.instructions[1..]
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Gate { gate, .. } => gate.name(),
+            _ => unreachable!(),
+        })
+        .collect();
+    assert_eq!(kinds, ["rx", "ry", "rz", "rzz"]);
+
+    let params = Parameters::all_rotations(&c);
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.6, vec![PauliTerm::x(1)]),
+    ];
+    let g = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    for slot in 0..params.num_slots() {
+        let fd = finite_diff(&c, &obs, &params, slot);
+        assert!((g.gradient[slot] - fd).abs() < 1e-6, "slot {slot}");
+    }
+}
+
+// The native gate is what carries the gradient, not a lowering that happens to
+// agree: the linked instruction is a `PauliRot` at differentiation time, and the
+// ladder expansion (a separate circuit, whose slot links its `Rz`) reproduces it.
+#[test]
+fn the_native_gate_carries_the_gradient() {
+    let mut native = Circuit::new(3, 0);
+    native.add_gate(Gate::H, &[0]);
+    native.add_gate(Gate::Cx, &[0, 1]);
+    native.add_pauli_rotation(0.63, &[PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)]);
+    let params = Parameters::all_rotations(&native);
+    assert_eq!(params.num_slots(), 1);
+    assert!(matches!(
+        native.instructions[params.links()[0].instruction],
+        Instruction::Gate {
+            gate: Gate::PauliRot(_),
+            ..
+        }
+    ));
+
+    let ladder = prism_q::circuit::expand_pauli_rotations(&native).into_owned();
+    let ladder_params = Parameters::all_rotations(&ladder);
+    assert_eq!(ladder_params.num_slots(), 1);
+    assert!(matches!(
+        ladder.instructions[ladder_params.links()[0].instruction],
+        Instruction::Gate {
+            gate: Gate::Rz(_),
+            ..
+        }
+    ));
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(2)]),
+        (0.5, vec![PauliTerm::x(1)]),
+    ];
+    let g = run_expectation_gradient(&native, &obs, &params, SEED).unwrap();
+    let lowered = run_expectation_gradient(&ladder, &obs, &ladder_params, SEED).unwrap();
+    assert!((g.value - lowered.value).abs() < 1e-12);
+    assert!((g.gradient[0] - lowered.gradient[0]).abs() < 1e-12);
+    assert!((g.gradient[0] - finite_diff(&native, &obs, &params, 0)).abs() < 1e-6);
 }
 
 #[test]

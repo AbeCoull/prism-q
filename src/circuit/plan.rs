@@ -338,6 +338,12 @@ impl Tracer {
 /// when the gate carries no angle-derived data.
 fn identity_prov(index: u32, inst: &Instruction) -> Prov {
     match inst {
+        // A Pauli rotation carries an angle at any width and no pass folds it
+        // into a matrix product, so it names itself for the angle recipe alone.
+        Instruction::Gate {
+            gate: Gate::PauliRot(_),
+            ..
+        } => vec![vec![Step::M1 { src: index }]],
         Instruction::Gate { gate, .. } => match gate.num_qubits() {
             1 => vec![vec![Step::M1 { src: index }]],
             2 => vec![vec![Step::M2 {
@@ -504,6 +510,10 @@ fn gate_angle(inst: &Instruction) -> f64 {
             gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
             ..
         } => *t,
+        Instruction::Gate {
+            gate: Gate::PauliRot(data),
+            ..
+        } => data.theta(),
         _ => unreachable!("angle recipe names a gate carrying an angle"),
     }
 }
@@ -569,7 +579,7 @@ fn record_sites(
             }
             true
         }
-        Gate::Rx(_) | Gate::Ry(_) | Gate::Rz(_) | Gate::P(_) | Gate::Rzz(_) => {
+        Gate::Rx(_) | Gate::Ry(_) | Gate::Rz(_) | Gate::P(_) | Gate::Rzz(_) | Gate::PauliRot(_) => {
             let [single] = prov.as_slice() else {
                 return false;
             };
@@ -689,6 +699,10 @@ fn write_angle(inst: &mut Instruction, entry: usize, theta: f64) -> bool {
     match gate {
         Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::P(t) | Gate::Rzz(t) => {
             *t = theta;
+            true
+        }
+        Gate::PauliRot(d) => {
+            d.set_theta(theta);
             true
         }
         Gate::BatchRzz(d) => match d.edges.get_mut(entry) {

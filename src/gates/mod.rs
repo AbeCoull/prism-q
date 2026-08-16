@@ -146,9 +146,10 @@ pub enum Gate {
 /// the enum. Each rotation variant is `exp(-i θ/2 G)` with the named Pauli
 /// generator `G` acting on the gate's `targets` (in order); `Phase` is the
 /// non-Pauli phase gate `diag(1, e^{iθ})` whose generator is the projector
-/// `|1⟩⟨1|` on `targets[0]`.
+/// `|1⟩⟨1|` on `targets[0]`. The borrow is of the gate the generator was read
+/// from, so a caller holding one cannot pair it with another gate's letters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GeneratorKind {
+pub enum GeneratorKind<'a> {
     /// `Rx(θ)`: generator `X` on `targets[0]`.
     RotX,
     /// `Ry(θ)`: generator `Y` on `targets[0]`.
@@ -159,6 +160,9 @@ pub enum GeneratorKind {
     RotZz,
     /// `P(θ)`: generator is the projector `|1⟩⟨1|` on `targets[0]`.
     Phase,
+    /// `PauliRot(θ)`: generator is the Pauli string whose letter at index `i`
+    /// acts on `targets[i]`.
+    RotPauli(&'a [PauliAxis]),
 }
 
 /// Data for a multi-qubit Pauli rotation `exp(-i θ P / 2)`.
@@ -178,10 +182,43 @@ impl PauliRotData {
         self.theta
     }
 
+    /// Overwrite the rotation angle, leaving the Pauli string alone. The
+    /// recognizing lowering runs on the string, so rebinding an angle cannot
+    /// invalidate it.
+    pub fn set_theta(&mut self, theta: f64) {
+        self.theta = theta;
+    }
+
     /// Pauli letters aligned with the instruction targets.
     pub fn axes(&self) -> &[PauliAxis] {
         &self.axes
     }
+}
+
+/// Pack the Pauli string of a rotation into `(xmask, zmask, num_y)`, where
+/// `xmask` covers X and Y letters and `zmask` covers Z and Y, and `axes[i]`
+/// acts on `targets[i]`.
+///
+/// The native kernel and the adjoint gradient both derive their masks here, so
+/// a change to the letter convention cannot move one without the other.
+#[inline]
+pub(crate) fn pauli_rot_masks(targets: &[usize], axes: &[PauliAxis]) -> (usize, usize, u32) {
+    let mut xmask = 0usize;
+    let mut zmask = 0usize;
+    let mut num_y = 0u32;
+    for (&q, axis) in targets.iter().zip(axes) {
+        let bit = 1usize << q;
+        match axis {
+            PauliAxis::X => xmask |= bit,
+            PauliAxis::Z => zmask |= bit,
+            PauliAxis::Y => {
+                xmask |= bit;
+                zmask |= bit;
+                num_y += 1;
+            }
+        }
+    }
+    (xmask, zmask, num_y)
 }
 
 /// Data for a multi-controlled unitary gate.
@@ -715,17 +752,19 @@ impl Gate {
 
     /// Return the analytic differentiation generator for a parametric gate,
     /// or `None` if the gate has no defined generator (all non-parametric
-    /// gates, and parametric gates whose angle is not stored inline as `f64`,
-    /// e.g. controlled unitaries built from a boxed matrix). Used by the
-    /// adjoint gradient engine to decide which instructions are differentiable.
+    /// gates, and parametric gates whose angle is not recoverable from the
+    /// variant, e.g. controlled unitaries built from a boxed matrix). Used by
+    /// the adjoint gradient engine to decide which instructions are
+    /// differentiable.
     #[inline]
-    pub fn pauli_generator(&self) -> Option<GeneratorKind> {
+    pub fn pauli_generator(&self) -> Option<GeneratorKind<'_>> {
         match self {
             Gate::Rx(_) => Some(GeneratorKind::RotX),
             Gate::Ry(_) => Some(GeneratorKind::RotY),
             Gate::Rz(_) => Some(GeneratorKind::RotZ),
             Gate::Rzz(_) => Some(GeneratorKind::RotZz),
             Gate::P(_) => Some(GeneratorKind::Phase),
+            Gate::PauliRot(data) => Some(GeneratorKind::RotPauli(&data.axes)),
             _ => None,
         }
     }

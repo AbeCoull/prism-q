@@ -24,8 +24,8 @@ pub struct ParamLink {
 /// inferred from the links, so a value vector of the wrong length is rejected
 /// even when the trailing slots carry no link.
 ///
-/// Bindable gates are `Rx`, `Ry`, `Rz`, `Rzz`, and `P`, the `Gate` variants
-/// carrying an angle inline.
+/// Bindable gates are `Rx`, `Ry`, `Rz`, `Rzz`, `P`, and `PauliRot`, the `Gate`
+/// variants carrying a rotation angle.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Parameters {
     links: Vec<ParamLink>,
@@ -197,7 +197,7 @@ impl Parameters {
                 Instruction::Gate { gate, .. } => {
                     return Err(PrismError::InvalidParameter {
                         message: format!(
-                            "instruction {} (`{}`) carries no bindable angle; bindable gates are rx, ry, rz, rzz, p",
+                            "instruction {} (`{}`) carries no bindable angle; bindable gates are rx, ry, rz, rzz, p, pauli_rot",
                             link.instruction,
                             gate.name()
                         ),
@@ -331,6 +331,10 @@ fn angle_of(instruction: &Instruction) -> f64 {
             gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
             ..
         } => *t,
+        Instruction::Gate {
+            gate: Gate::PauliRot(data),
+            ..
+        } => data.theta(),
         _ => unreachable!("parameter link validated as bindable"),
     }
 }
@@ -341,6 +345,10 @@ pub(crate) fn angle_mut(instruction: &mut Instruction) -> &mut f64 {
             gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
             ..
         } => t,
+        Instruction::Gate {
+            gate: Gate::PauliRot(data),
+            ..
+        } => &mut data.theta,
         _ => unreachable!("parameter link validated as bindable"),
     }
 }

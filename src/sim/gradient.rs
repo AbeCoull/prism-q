@@ -11,8 +11,8 @@
 //!
 //! The differentiated circuit must be unitary (no measurement, reset, or
 //! conditional) on both paths. Differentiable gates are `Rx`, `Ry`, `Rz`,
-//! `Rzz`, and `P` for both: those are the only `Gate` variants carrying an
-//! angle inline, so the shift rule reaches no gate the adjoint rejects.
+//! `Rzz`, `P`, and `PauliRot` for both: those are the `Gate` variants carrying
+//! a rotation angle, so the shift rule reaches no gate the adjoint rejects.
 
 use num_complex::Complex64;
 
@@ -21,7 +21,7 @@ use crate::backend::{Backend, max_statevector_qubits, reserve_dense_output};
 use crate::circuit::parameter::{Parameters, angle_mut};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
-use crate::gates::{Gate, GeneratorKind};
+use crate::gates::{Gate, GeneratorKind, pauli_rot_masks};
 
 use super::unified_pauli::PauliTerm;
 use super::{BackendKind, i_pow, pauli_masks, pauli_sandwich};
@@ -242,7 +242,7 @@ fn build_lambda_and_value(
 /// Gradient contribution `d⟨H⟩/dθ` of a single trainable gate, from the
 /// generator sandwich `⟨λ|G|φ⟩` with `|φ⟩` on the output side of the gate.
 fn gradient_contribution(
-    kind: GeneratorKind,
+    kind: GeneratorKind<'_>,
     targets: &[usize],
     lambda: &[Complex64],
     phi: &[Complex64],
@@ -273,6 +273,10 @@ fn gradient_contribution(
                 }
             }
             -2.0 * acc.im
+        }
+        GeneratorKind::RotPauli(axes) => {
+            let (xmask, zmask, num_y) = pauli_rot_masks(targets, axes);
+            pauli_sandwich(lambda, phi, xmask, zmask, num_y).im
         }
     }
 }

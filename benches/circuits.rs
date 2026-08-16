@@ -1406,6 +1406,87 @@ fn bench_gradient_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+// A Trotter ansatz over the largest Jordan-Wigner strings of the seeded
+// two-body operator, on an alternating occupation reference. The recognizing
+// constructor lowers the weight-1 and ZZ generators, so the stream mixes named
+// rotations with `PauliRot` and the gradient runs over both.
+fn vqe_ansatz(n: usize, generators: &[Vec<PauliTerm>], values: &[f64]) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in (0..n).step_by(2) {
+        c.add_gate(Gate::X, &[q]);
+    }
+    for (theta, factors) in values.iter().zip(generators) {
+        c.add_pauli_rotation(*theta, factors);
+    }
+    c
+}
+
+/// One variational loop iteration: evaluate the weighted observable, take the
+/// adjoint gradient, step the parameters.
+///
+/// `rebuild` constructs the ansatz at every iteration, which is what a loop
+/// without a parameter surface does; `bind` holds one [`PreparedCircuit`] and
+/// rebinds. Both arms live in this one binary so an A/B compares them without a
+/// second build; see `benches/README.md` on why a reference worktree cannot
+/// resolve a change that adds linked code.
+///
+/// The `sweep_setup` group times the same two arms with no simulation. This one
+/// pays the evaluation and gradient cost the setup is amortized over, so the two
+/// rows together say what share of a real iteration the parameter surface moves.
+fn bench_vqe_loop(c: &mut Criterion) {
+    const GENERATORS: usize = 16;
+    const OBSERVABLE_TERMS: usize = 64;
+    const LEARNING_RATE: f64 = 0.01;
+
+    let mut group = c.benchmark_group("vqe");
+    configure_group(&mut group);
+
+    for &n in &[12, 16] {
+        let terms = circuits::jordan_wigner_hamiltonian(n, OBSERVABLE_TERMS, SEED);
+        let observable = PauliObservable::from_terms(terms.clone()).unwrap();
+        let generators: Vec<Vec<PauliTerm>> = terms
+            .iter()
+            .map(|(_, factors)| factors.clone())
+            .filter(|factors| !factors.is_empty())
+            .take(GENERATORS)
+            .collect();
+        let values: Vec<f64> = (0..generators.len())
+            .map(|k| 0.05 + 0.01 * k as f64)
+            .collect();
+
+        let template = vqe_ansatz(n, &generators, &values);
+        let params = Parameters::all_rotations(&template);
+
+        let iteration = |circuit: &Circuit| {
+            let energy = run_observable_expectation(circuit, &observable, 42).unwrap();
+            let grad = run_expectation_gradient(circuit, &terms, &params, 42).unwrap();
+            let stepped: Vec<f64> = values
+                .iter()
+                .zip(&grad.gradient)
+                .map(|(v, g)| v - LEARNING_RATE * g)
+                .collect();
+            (energy.mean, stepped)
+        };
+
+        group.bench_function(BenchmarkId::new("rebuild", n), |b| {
+            b.iter(|| {
+                let circuit = vqe_ansatz(n, &generators, &values);
+                black_box(iteration(&circuit));
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("bind", n), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| {
+                let circuit = prepared.bind(&values).unwrap();
+                black_box(iteration(circuit));
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_expectation(c: &mut Criterion) {
     let mut group = c.benchmark_group("expectation/pauli_sum");
     configure_group(&mut group);
@@ -2307,6 +2388,8 @@ criterion_group! {
     bench_gradient,
     bench_gradient_qaoa,
     bench_gradient_prefix,
+    // Variational loop iteration (rebuild vs rebind under simulation cost)
+    bench_vqe_loop,
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)
     bench_expectation,
     bench_expectation_factored,

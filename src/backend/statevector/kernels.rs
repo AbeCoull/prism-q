@@ -16,7 +16,9 @@ use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS, SendPtr};
 use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
-use crate::gates::{BatchPhaseData, BatchRzzData, DiagEntry, Gate, diag_entries_phase};
+use crate::gates::{
+    BatchPhaseData, BatchRzzData, DiagEntry, Gate, diag_entries_phase, pauli_rot_masks,
+};
 use crate::sim::unified_pauli::PauliAxis;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -1880,21 +1882,7 @@ impl StatevectorBackend {
     /// `xmask == 0` and reduces to parity phases on the diagonal.
     #[inline(always)]
     pub(super) fn apply_pauli_rot(&mut self, targets: &[usize], theta: f64, axes: &[PauliAxis]) {
-        let mut xmask = 0usize;
-        let mut zmask = 0usize;
-        let mut num_y = 0u32;
-        for (&q, axis) in targets.iter().zip(axes) {
-            let bit = 1usize << q;
-            match axis {
-                PauliAxis::X => xmask |= bit,
-                PauliAxis::Z => zmask |= bit,
-                PauliAxis::Y => {
-                    xmask |= bit;
-                    zmask |= bit;
-                    num_y += 1;
-                }
-            }
-        }
+        let (xmask, zmask, num_y) = pauli_rot_masks(targets, axes);
         let c = (theta / 2.0).cos();
         let s = (theta / 2.0).sin();
         if xmask == 0 {

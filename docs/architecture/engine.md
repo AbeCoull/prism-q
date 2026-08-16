@@ -176,8 +176,11 @@ The method back-propagates two statevectors. With `U = U_L…U_1` and `|φ⟩ = 
 The `⟨λ|G|φ⟩` sandwich generalizes the forward `pauli_expectation_from_masks`
 kernel to two vectors (`pauli_sandwich`, Rayon-parallel at 16+ qubits).
 
-Differentiable gates are `Rx`, `Ry`, `Rz`, `Rzz`, and `P` (identified by
-`Gate::pauli_generator`, a method, so `Gate` stays 16 bytes). Trainable links on
+Differentiable gates are `Rx`, `Ry`, `Rz`, `Rzz`, `P`, and `PauliRot` (identified by
+`Gate::pauli_generator`, a method, so `Gate` stays 16 bytes). A multi-qubit Pauli
+rotation is `exp(-iθP/2)` like the named rotations, so its generator is the string
+itself: `GeneratorKind::RotPauli` borrows the letters off the gate, and the sandwich
+takes the masks they imply rather than a per-variant special case. Trainable links on
 other gates, non-unitary instructions, and `QftBlock` are rejected. Parameter
 identity is an index-based side table (`Parameters`, instruction→slot links
 recorded by `CircuitBuilder::param`); many gates may share a slot.
@@ -209,9 +212,11 @@ is the apparent exception, its generator being the projector `|1⟩⟨1|` with e
 `{0, 1}`, but `P(θ) = e^{iθ/2} Rz(θ)` and that scalar cancels against its conjugate in
 `⟨ψ|H|ψ⟩` wherever the gate sits, so the same shift applies.
 
-The differentiable gate set is unchanged: `Rx`, `Ry`, `Rz`, `Rzz`, and `P` are the only
-`Gate` variants carrying an angle inline, so parameter shift reaches no gate the adjoint
-rejects. Its reach is backends and circuit shapes, not gates.
+The differentiable gate set is the same one the adjoint takes: `Rx`, `Ry`, `Rz`, `Rzz`,
+`P`, and `PauliRot` are the `Gate` variants carrying a rotation angle, so parameter shift
+reaches no gate the adjoint rejects. Its reach is backends and circuit shapes, not gates.
+A `PauliRot` on a backend without the native kernel is shifted in the same place, because
+the ladder expansion happens below the forward evaluation the rule calls.
 
 Gates sharing a parameter slot are shifted one at a time and their contributions summed.
 Shifting them together is a different quantity: two `Rx(θ)` on one qubit under `⟨Z⟩` give

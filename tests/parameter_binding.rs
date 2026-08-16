@@ -5,7 +5,9 @@ use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::fusion::fuse_circuit;
-use prism_q::{Circuit, Gate, Instruction, ParamLink, Parameters, PreparedCircuit, circuits};
+use prism_q::{
+    Circuit, Gate, Instruction, ParamLink, Parameters, PauliTerm, PreparedCircuit, circuits,
+};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -150,8 +152,28 @@ fn assert_payloads_match(a: &Gate, b: &Gate, what: &str) {
     }
 }
 
+// A Trotter layer over the native Pauli rotation: the strings the constructor
+// does not recognize stay as `PauliRot`, whose angle a binding has to reach
+// through the plan like any other rotation.
+fn trotter_layer(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.17 + 0.03 * q as f64), &[q]);
+    }
+    for q in 0..n - 2 {
+        c.add_pauli_rotation(
+            0.21 + 0.01 * q as f64,
+            &[PauliTerm::x(q), PauliTerm::y(q + 1), PauliTerm::z(q + 2)],
+        );
+        c.add_pauli_rotation(0.13, &[PauliTerm::y(q), PauliTerm::x(q + 2)]);
+        c.add_pauli_rotation(0.09, &[PauliTerm::z(q), PauliTerm::z(q + 1)]);
+    }
+    c
+}
+
 fn ansatz_cases() -> Vec<(&'static str, Circuit)> {
     vec![
+        ("trotter/12", trotter_layer(12)),
         ("hea/6", circuits::hardware_efficient_ansatz(6, 2, SEED)),
         ("hea/12", circuits::hardware_efficient_ansatz(12, 3, SEED)),
         ("hea/16", circuits::hardware_efficient_ansatz(16, 2, SEED)),
@@ -364,6 +386,48 @@ fn slot_that_no_gate_reads_binds_and_is_reported() {
         &statevector(&fuse_circuit(&narrow, true)),
         "widened slot set",
     );
+}
+
+// A replayed plan patches payloads in place, so a rotation it records no site
+// for keeps the template's angle while the states still look plausible. Read
+// the angle back off the fused stream rather than trusting agreement.
+#[test]
+fn a_bound_pauli_rotation_reaches_the_fused_stream() {
+    let template = trotter_layer(12);
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan());
+
+    let values = angles(params.num_slots(), 77);
+    let fused = prepared.bind_fused(&values).unwrap();
+    let bound: Vec<f64> = fused
+        .instructions
+        .iter()
+        .filter_map(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::PauliRot(data),
+                ..
+            } => Some(data.theta()),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<f64> = params
+        .links()
+        .iter()
+        .filter(|link| {
+            matches!(
+                template.instructions[link.instruction],
+                Instruction::Gate {
+                    gate: Gate::PauliRot(_),
+                    ..
+                }
+            )
+        })
+        .map(|link| values[link.slot])
+        .collect();
+    assert_eq!(bound.len(), 20, "two native rotations per site, 10 sites");
+
+    assert_eq!(bound, expected);
 }
 
 // A circuit with no parameters must still bind and fuse exactly as the

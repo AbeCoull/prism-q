@@ -553,7 +553,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// Serves the cases [`Simulate::expectation_gradient`] declines: any
     /// backend with a native observable path, circuits containing `QftBlock`,
     /// and widths past the statevector cap. It differentiates the same gate set
-    /// (`Rx`, `Ry`, `Rz`, `Rzz`, `P`) at `1 + 2 * links` circuit evaluations
+    /// (`Rx`, `Ry`, `Rz`, `Rzz`, `P`, `PauliRot`) at `1 + 2 * links` circuit evaluations
     /// against the adjoint's one, so the adjoint stays the better choice where
     /// it applies. A backend with no native observable path reports
     /// `BackendUnsupported` naming itself. See

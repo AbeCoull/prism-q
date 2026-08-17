@@ -133,7 +133,14 @@ cargo bench -- --baseline my_baseline
 ./scripts/bench_ab.sh --filter '^factored/noise_kraus/'
 ./scripts/bench_ab.sh -f '^density_matrix/' -r main -b circuits
 ./scripts/bench_ab.sh -f '^sparse/' --ref-dir /tmp/prism-q-ref   # cache the reference build
+./scripts/bench_ab.sh --build-only /tmp/ref-circuits             # build a reference to reuse
+./scripts/bench_ab.sh -f '^sparse/' --ref-exe /tmp/ref-circuits  # skip the reference build
 ```
+
+`--build-only` and `--ref-exe` are a pair: the first produces a bench binary through the
+same build path the A/B uses, the second consumes one and skips the reference build
+entirely. Nothing checks that the supplied executable was built from `--ref`, so whatever
+stores it owns that claim; the report records which of the two ways the reference arrived.
 
 The script builds the bench binary from the working tree, builds the same target
 from a reference git ref in a separate worktree, verifies the working tree did
@@ -174,10 +181,22 @@ controls are wide, the answer is "not measurable right now", not a number.
 
 ### What the reference worktree cannot resolve
 
-The reference binary is built in a separate worktree, so the two binaries differ in
-embedded paths and therefore in code layout. The control columns compare each binary
-against itself, so neither can see that difference. For a change to a hot loop's
-arithmetic this does not matter. For a change that adds or removes linked code it can
+Two claims have been filed under this heading, and only one of them survives
+measurement.
+
+The build directory does not, by itself, change code layout. The same commit built in
+the project directory and in a worktree produces byte-identical `.text` (9323520 bytes)
+and `.data`; the two images differ in 24 bytes out of 10797056, all metadata, being the
+COFF `TimeDateStamp` and a 16-byte PDB GUID. On MSVC `debug = "line-tables-only"` writes
+paths into the `.pdb` rather than the image, so there is no package path in the
+executable for the directory to change. Measured on x86_64-pc-windows-msvc; the ELF case
+is untested, and Linux keeps line tables in the binary, so the same is not assumed there.
+Do not explain a moved row by naming the build directory without measuring it.
+
+What does survive is the second claim, and it is the one worth acting on: a change that
+adds or removes linked code can move rows that never execute it. The control columns
+compare each binary against itself, so neither can see that. For a change to a hot loop's
+arithmetic it does not matter. For a change that adds or removes linked code it can
 invert the result.
 
 Adding a faer matmul call to `tensornetwork.rs` measured -10.3% to -13.2% on the four
@@ -188,27 +207,28 @@ reachable size, so the new code is linked but never called, carries the same +13
 is what identifies layout rather than execution as the cause.
 
 So: when a change adds a dependency call, instantiates a large generic, or deletes a
-sizeable function, compare two binaries built from the same directory before trusting
-this script. Marking the added function `#[inline(never)]` or `#[cold]` does not recover
-the difference; both were tried and both left it intact.
+sizeable function, take repeated runs before trusting this script. Marking the added
+function `#[inline(never)]` or `#[cold]` does not recover the difference; both were tried
+and both left it intact.
 
-Building both binaries from one directory narrows the difference but does not remove it.
-To remove it, put both implementations in the same binary behind a switch read once at
-startup, and run that one binary twice:
+Rebuilding from one directory does not address this, now that the directory is known not
+to matter for a fixed commit. To remove the term, put both implementations in the same
+binary behind a switch read once at startup, and run that one binary twice:
 
 ```rust
 static SCATTER: OnceLock<bool> = OnceLock::new();
 if *SCATTER.get_or_init(|| std::env::var("PRISM_TRANSPOSE_SCATTER").is_ok()) { .. }
 ```
 
-Code, layout and embedded paths are then identical by construction, so the layout term
-cancels exactly rather than approximately, and the branch is paid on both sides. It costs
-one build rather than two. Use it whenever the change itself adds or removes linked code,
-which is the case this section's caveat exists for.
+One binary means one layout, so the term cancels exactly rather than approximately, and
+the branch is paid on both sides. It costs one build rather than two. Use it whenever the
+change itself adds or removes linked code, which is the case this section's caveat exists
+for.
 
-The two binaries are never byte identical even from identical sources, because
-`[profile.bench] debug = "line-tables-only"` records the package path and the two
-worktrees differ. The script decides "same code" from git, not from `cmp`.
+The two binaries are never byte identical even from identical sources, but not for the
+reason once given here: the difference is the link timestamp and the PDB GUID, 24 bytes
+in total, not an embedded package path. The script decides "same code" from git rather
+than from `cmp` because those bytes differ on every link.
 
 Reference-build cost: the first `--ref-dir` build is a cold build of the crate in
 a second package path (about 2m30s here); later runs against the same ref reuse
@@ -257,12 +277,12 @@ Until 2026-08, the two sides ran as separate `cargo bench` invocations with the
 head build between them, on a shared runner. A row a hosted runner cannot resolve
 now says so instead of reading as a result.
 
-The subset runs at `CI_BENCH_FEATURES=parallel,bench-fast` and covers larger
-CPU-only parameter points already present on the base branch. That tier pins
-samples to 10 and shortens the measurement windows, which is what keeps four
-passes affordable: at 100 samples, `statevector/qpe_t_gate/22q` alone would cost
-half an hour. The filters stay narrow so noise from tiny parameter sweeps does
-not dominate. A row missing from either side drops out of the comparison and the
+The subset runs at `CI_BENCH_FEATURES=parallel,bench-fast` and covers CPU-only
+parameter points already present on the base branch. That tier pins samples to 10
+and shortens the measurement windows, which is what keeps four passes affordable:
+at 100 samples, a single 22q statevector row would cost half an hour, which is why
+the set above tops out at 20. The filters stay narrow so noise from tiny parameter
+sweeps does not dominate. A row missing from either side drops out of the comparison and the
 row-count guard fails the run. This is a regression gate, not a replacement for
 the local suite a performance change needs.
 
@@ -277,14 +297,21 @@ Representative CI workloads:
 
 | Filter | Coverage |
 |--------|----------|
-| `statevector/scalability_d5/22` | Dense statevector scaling at a larger qubit count |
-| `statevector/qft_textbook/22` | Structured controlled phase and swap workload |
-| `statevector/qpe_t_gate/22q` | Phase estimation with non-Clifford gates |
-| `statevector/qaoa_l3/20` | QAOA workload with ZZ rotations and mixer layers |
-| `stabilizer/scaling/1000` | Large Clifford stabilizer backend path |
-| `stabilizer/measurement/ghz_measure_all/1000` | Large GHZ preparation plus terminal measurements |
-| `compiled_sampler/noiseless/noiseless_1000q_10k` | Compiled shot sampling path |
-| `compiled_sampler/noisy/noisy_1000q_10k` | Compiled Pauli-noise shot sampling path |
+| `statevector/scalability_d5/18` | Dense statevector scaling, above the post-phase rebatch floor |
+| `statevector/qft_textbook/20` | Structured controlled phase and swap workload |
+| `statevector/qpe_t_gate/16q` | Phase estimation with non-Clifford gates |
+| `statevector/qaoa_l3/16` | QAOA workload with ZZ rotations and mixer layers |
+| `stabilizer/scaling/500` | Clifford stabilizer backend path |
+| `stabilizer/measurement/ghz_measure_all/500` | GHZ preparation plus terminal measurements |
+| `compiled_sampler/noiseless/noiseless_500q_10k` | Compiled shot sampling path |
+| `compiled_sampler/noisy/noisy_500q_10k` | Compiled Pauli-noise shot sampling path |
+
+The sizes are the smallest that still exercise the pipeline that ships, not the smallest
+available: `MIN_QUBITS_FOR_DIAG_BATCH = 16` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
+`circuit/fusion.rs` are the floors, and `qft_textbook` has no 18 in its size list so it
+stays at 20. Six passes over the eight rows take about 75 seconds. On a quiet host they
+resolve the 5% gate: three same-code runs read worst control spreads of 6.0%, 7.1%, and
+5.9%, with no row moving more than 3.6% against an identical binary.
 
 Local reproduction, against `main` as the reference:
 
@@ -293,7 +320,15 @@ PRISM_BENCH_REF=main ./scripts/bench_ci.sh
 
 # Cache the reference build between runs:
 PRISM_BENCH_REF=main PRISM_BENCH_REF_DIR=/tmp/prism-q-ref ./scripts/bench_ci.sh
+
+# Or skip the reference build outright, given a binary already built from that ref:
+PRISM_BENCH_REF=main PRISM_BENCH_REF_EXE=/tmp/ref-circuits ./scripts/bench_ci.sh
 ```
+
+In CI the third form is the normal path: every push to `main` builds the bench binary and
+caches it under that commit, and the gate restores it for the PR base. The key is the
+commit alone, with no `restore-keys`, so a restore is either the binary for that exact
+base or nothing; a miss falls back to building the reference in a worktree.
 
 `PRISM_BENCH_REF=HEAD` on a clean tree builds both binaries from the same code,
 so every row is a control row and the report is this host's noise floor.

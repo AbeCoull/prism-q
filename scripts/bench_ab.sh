@@ -34,6 +34,18 @@
 #   --ref-dir       reference worktree path. Persists between runs, so the
 #                   reference build is cached. Default: a temporary directory
 #                   removed on exit.
+#   --ref-exe       prebuilt reference executable. Skips the reference build and
+#                   the worktree entirely, so only the working tree is compiled.
+#                   Takes precedence over --ref-dir. The caller owns the claim
+#                   that the executable was built from --ref: nothing here can
+#                   check it, so key whatever cache supplies it on the ref sha,
+#                   the toolchain, and the feature list. The sha already pins the
+#                   lockfile it was built from.
+#   --build-only    build the working-tree bench binary, copy it to this path,
+#                   and exit without measuring. The producer side of --ref-exe:
+#                   the build runs through the same code path as the A/B's own
+#                   build, so a binary cached by one is what the other expects.
+#                   --filter is not required in this mode.
 #   --min-rows      fail when fewer than this many rows appear in all four
 #                   passes, catching a filter that stopped matching a renamed
 #                   benchmark id. Default: 1.
@@ -62,6 +74,8 @@ REF="HEAD"
 BENCH="circuits"
 FEATURES="parallel"
 REF_DIR=""
+REF_EXE=""
+BUILD_ONLY=""
 OUT=""
 MIN_ROWS=1
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
@@ -73,6 +87,8 @@ while [[ $# -gt 0 ]]; do
         --bench|-b)    BENCH="$2"; shift 2 ;;
         --features)    FEATURES="$2"; shift 2 ;;
         --ref-dir)     REF_DIR="$2"; shift 2 ;;
+        --ref-exe)     REF_EXE="$2"; shift 2 ;;
+        --build-only)  BUILD_ONLY="$2"; shift 2 ;;
         --min-rows)    MIN_ROWS="$2"; shift 2 ;;
         --out)         OUT="$2"; shift 2 ;;
         --threshold|-t) THRESHOLD="$2"; shift 2 ;;
@@ -81,7 +97,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$FILTER" ]]; then
+if [[ -z "$FILTER" && -z "$BUILD_ONLY" ]]; then
     echo "Error: --filter is required. Name the rows to compare." >&2
     exit 1
 fi
@@ -266,6 +282,12 @@ host_cpu() {
 
 # --- Build both binaries ---
 
+if [[ -n "$BUILD_ONLY" ]]; then
+    mkdir -p "$(dirname "$BUILD_ONLY")"
+    build_bench_exe "$PROJECT_DIR" "$BUILD_ONLY" "build-only"
+    exit 0
+fi
+
 REF_SHA="$(git rev-parse --short "$REF")"
 FINGERPRINT_BEFORE="$(tree_fingerprint)"
 
@@ -279,28 +301,45 @@ echo ""
 
 build_bench_exe "$PROJECT_DIR" "$WORKDIR/exe-new" "new"
 
-if [[ -d "$REF_DIR/.git" || -f "$REF_DIR/.git" ]]; then
-    echo ">>> reusing reference worktree $REF_DIR"
-    git -C "$REF_DIR" checkout --detach --force "$REF_SHA" >/dev/null 2>&1
-    git -C "$REF_DIR" clean -fdq
+if [[ -n "$REF_EXE" ]]; then
+    if [[ ! -f "$REF_EXE" ]]; then
+        echo "Error: --ref-exe '$REF_EXE' does not exist." >&2
+        exit 1
+    fi
+    echo ">>> using the supplied reference executable $REF_EXE"
+    cp "$REF_EXE" "$WORKDIR/exe-ref"
+    chmod +x "$WORKDIR/exe-ref"
+    REF_PROVENANCE="supplied via \`--ref-exe\`, not built here"
 else
-    echo ">>> adding reference worktree $REF_DIR at $REF_SHA"
-    git worktree add --detach --force "$REF_DIR" "$REF_SHA" >/dev/null
+    if [[ -d "$REF_DIR/.git" || -f "$REF_DIR/.git" ]]; then
+        echo ">>> reusing reference worktree $REF_DIR"
+        git -C "$REF_DIR" checkout --detach --force "$REF_SHA" >/dev/null 2>&1
+        git -C "$REF_DIR" clean -fdq
+    else
+        echo ">>> adding reference worktree $REF_DIR at $REF_SHA"
+        git worktree add --detach --force "$REF_DIR" "$REF_SHA" >/dev/null
+    fi
+
+    build_bench_exe "$REF_DIR" "$WORKDIR/exe-ref" "ref"
+    REF_PROVENANCE="built from a worktree at \`$REF_DIR\`"
+
+    # Only meaningful when a second build follows the first: it catches an editor
+    # save landing between them, which would leave two binaries that no longer
+    # differ by the change under test.
+    FINGERPRINT_AFTER="$(tree_fingerprint)"
+    if [[ "$FINGERPRINT_BEFORE" != "$FINGERPRINT_AFTER" ]]; then
+        echo "Error: the working tree changed between the two builds." >&2
+        echo "  The two binaries no longer differ by the change under test, so the" >&2
+        echo "  comparison would be meaningless. Re-run with the tree settled." >&2
+        exit 1
+    fi
 fi
 
-build_bench_exe "$REF_DIR" "$WORKDIR/exe-ref" "ref"
-
-FINGERPRINT_AFTER="$(tree_fingerprint)"
-if [[ "$FINGERPRINT_BEFORE" != "$FINGERPRINT_AFTER" ]]; then
-    echo "Error: the working tree changed between the two builds." >&2
-    echo "  The two binaries no longer differ by the change under test, so the" >&2
-    echo "  comparison would be meaningless. Re-run with the tree settled." >&2
-    exit 1
-fi
-
-# The two binaries are never byte identical even from identical sources, because
-# `debug = "line-tables-only"` records the package path and the worktrees differ.
-# Same code is decided from git instead.
+# The two binaries are never byte identical even from identical sources: the link
+# timestamp and the PDB GUID differ on every link. Same code is decided from git
+# instead. Those bytes are all that differs, measured 2026-08-17: the same commit
+# built in two directories has byte-identical `.text`, so the build directory is
+# not a reason to distrust a row on this target.
 if [[ -z "$(git status --porcelain)" && "$(git rev-parse HEAD)" == "$(git rev-parse "$REF_SHA")" ]]; then
     echo "Note: the working tree matches $REF exactly, so both binaries carry the"
     echo "      same code and every row is a control row. This is the same-code"
@@ -345,6 +384,7 @@ set +e
     echo "| --- | --- |"
     echo "| Filter | \`$FILTER\` |"
     echo "| Reference | \`$REF\` ($REF_SHA) |"
+    echo "| Reference binary | $REF_PROVENANCE |"
     echo "| Features | \`$FEATURES\` |"
     echo "| Pass order | ref, new discarded, then ref, new, new, ref (adjacent, no rebuild) |"
     echo "| Samples | ${PRISM_BENCH_SAMPLES:-30} |"

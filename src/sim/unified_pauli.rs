@@ -50,7 +50,8 @@ fn validate_clifford_t_unitary(circuit: &Circuit, backend: &'static str) -> Resu
             Instruction::Barrier { .. } => {}
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
-            | Instruction::Conditional { .. } => {
+            | Instruction::Conditional { .. }
+            | Instruction::Region(_) => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: backend.to_string(),
                     reason: "Pauli propagation requires a unitary Clifford+T circuit without measurements, resets, or conditionals"

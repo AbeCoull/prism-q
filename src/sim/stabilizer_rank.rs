@@ -274,7 +274,7 @@ fn validate_stabilizer_rank_circuit(circuit: &Circuit) -> Result<()> {
                             .to_string(),
                 });
             }
-            Instruction::Conditional { .. } => {
+            Instruction::Conditional { .. } | Instruction::Region(_) => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "stabilizer_rank".into(),
                     reason:
@@ -722,9 +722,17 @@ pub fn stabilizer_inner_product(
 }
 
 fn validate_stabilizer_rank_shot_circuit(circuit: &Circuit) -> Result<()> {
-    for inst in &circuit.instructions {
+    validate_shot_instructions(&circuit.instructions)
+}
+
+fn validate_shot_instructions(instructions: &[Instruction]) -> Result<()> {
+    for inst in instructions {
         let gate = match inst {
             Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => gate,
+            Instruction::Region(region) => {
+                validate_shot_instructions(region.body())?;
+                continue;
+            }
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
             | Instruction::Barrier { .. } => {
@@ -951,6 +959,14 @@ fn process_mps_instruction(
             }
             Ok(())
         }
+        Instruction::Region(region) => {
+            if region.condition().evaluate(classical_bits) {
+                for inner in region.body() {
+                    process_mps_instruction(branches, inner, classical_bits, rng)?;
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -965,7 +981,8 @@ fn build_mps_branches_for_unitary(circuit: &Circuit, seed: u64) -> Result<Vec<We
             }
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
-            | Instruction::Conditional { .. } => {
+            | Instruction::Conditional { .. }
+            | Instruction::Region(_) => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "stabilizer_rank".into(),
                     reason: "unitary branch preparation cannot include measurements, resets, or conditionals"

@@ -376,6 +376,22 @@ impl NoiseModel {
         }
         self.validate()?;
 
+        // One event slot per top-level instruction, so a region's body has no
+        // slots to carry noise and would run noiselessly without this.
+        if let Some(index) = circuit
+            .instructions
+            .iter()
+            .position(|inst| matches!(inst, Instruction::Region(_)))
+        {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "NoiseModel".to_string(),
+                reason: format!(
+                    "noise events are indexed per instruction, which leaves the body of the \
+                     guarded region at instruction {index} without noise slots"
+                ),
+            });
+        }
+
         for (instr_idx, events) in self.after_gate.iter().enumerate() {
             for (event_idx, event) in events.iter().enumerate() {
                 for &qubit in &event.qubits {

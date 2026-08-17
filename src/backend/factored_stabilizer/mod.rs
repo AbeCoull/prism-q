@@ -877,6 +877,7 @@ impl Backend for FactoredStabilizerBackend {
                     sub.dispatch_gate(gate, &local)?;
                 }
             }
+            Instruction::Region(region) => self.apply_region(region)?,
         }
         Ok(())
     }

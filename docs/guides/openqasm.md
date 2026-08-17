@@ -66,8 +66,21 @@ OpenQASM 2.0 syntax also works: `qreg q[3];` / `creg c[3];` declarations and
 
 - Gate modifiers: `ctrl @`, `inv @`, `pow(k) @`.
 - User-defined `gate` blocks.
-- Classical `if` conditionals.
+- Classical `if` conditionals, guarding either a single statement or a braced
+  body. A braced body admits any supported statement, `measure` and `reset`
+  included, and may nest.
 - Multi-register broadcast, `barrier`, and an expression evaluator with math functions.
+
+```qasm
+bit[2] c;
+qubit[3] q;
+c[0] = measure q[0];
+if (c[0]) {
+  x q[1];
+  c[1] = measure q[1];
+  if (c[1]) { reset q[2]; }
+}
+```
 
 ```admonish warning title="Not supported"
 `for` / `while` loops, subroutines, and classical expressions beyond `if`. A construct

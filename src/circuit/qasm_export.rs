@@ -65,44 +65,80 @@ pub fn to_qasm3(circuit: &Circuit) -> Result<String> {
     }
 
     for (index, inst) in circuit.instructions.iter().enumerate() {
-        match inst {
-            Instruction::Gate { gate, targets } => {
-                let _ = writeln!(out, "{} {};", require_head(gate, index)?, args(targets));
-            }
-            Instruction::Measure {
-                qubit,
-                classical_bit,
-            } => {
-                let _ = writeln!(out, "{} = measure q[{qubit}];", cregs.bit(*classical_bit));
-            }
-            Instruction::Reset { qubit } => {
-                let _ = writeln!(out, "reset q[{qubit}];");
-            }
-            Instruction::Barrier { qubits } => {
-                if qubits.is_empty() {
-                    return Err(PrismError::ExportUnsupported {
-                        index,
-                        reason: "barrier over no qubits".to_string(),
-                    });
-                }
-                let _ = writeln!(out, "barrier {};", args(qubits));
-            }
-            Instruction::Conditional {
-                condition,
-                gate,
-                targets,
-            } => {
-                let _ = writeln!(
-                    out,
-                    "if ({}) {} {};",
-                    cregs.condition(condition, index)?,
-                    require_head(gate, index)?,
-                    args(targets)
-                );
-            }
-        }
+        emit(&mut out, inst, index, &cregs, 0)?;
     }
     Ok(out)
+}
+
+/// Write one instruction, recursing into guarded regions as a braced `if`.
+///
+/// `index` names the top-level instruction in any error, so an unexportable
+/// gate nested in a region is still located by the position a caller can see.
+fn emit(
+    out: &mut String,
+    inst: &Instruction,
+    index: usize,
+    cregs: &CregLayout,
+    depth: usize,
+) -> Result<()> {
+    let pad = "  ".repeat(depth);
+    match inst {
+        Instruction::Gate { gate, targets } => {
+            let _ = writeln!(
+                out,
+                "{pad}{} {};",
+                require_head(gate, index)?,
+                args(targets)
+            );
+        }
+        Instruction::Measure {
+            qubit,
+            classical_bit,
+        } => {
+            let _ = writeln!(
+                out,
+                "{pad}{} = measure q[{qubit}];",
+                cregs.bit(*classical_bit)
+            );
+        }
+        Instruction::Reset { qubit } => {
+            let _ = writeln!(out, "{pad}reset q[{qubit}];");
+        }
+        Instruction::Barrier { qubits } => {
+            if qubits.is_empty() {
+                return Err(PrismError::ExportUnsupported {
+                    index,
+                    reason: "barrier over no qubits".to_string(),
+                });
+            }
+            let _ = writeln!(out, "{pad}barrier {};", args(qubits));
+        }
+        Instruction::Conditional {
+            condition,
+            gate,
+            targets,
+        } => {
+            let _ = writeln!(
+                out,
+                "{pad}if ({}) {} {};",
+                cregs.condition(condition, index)?,
+                require_head(gate, index)?,
+                args(targets)
+            );
+        }
+        Instruction::Region(region) => {
+            let _ = writeln!(
+                out,
+                "{pad}if ({}) {{",
+                cregs.condition(region.condition(), index)?
+            );
+            for inner in region.body() {
+                emit(out, inner, index, cregs, depth + 1)?;
+            }
+            let _ = writeln!(out, "{pad}}}");
+        }
+    }
+    Ok(())
 }
 
 fn args(targets: &[usize]) -> String {
@@ -290,30 +326,49 @@ struct CregLayout {
     names: Vec<String>,
 }
 
+/// Record the register boundaries every condition in `inst` needs, descending
+/// into region bodies so a nested condition still names a whole register.
+fn cut_register_conditions(
+    inst: &Instruction,
+    index: usize,
+    total: usize,
+    cuts: &mut BTreeSet<usize>,
+) -> Result<()> {
+    let condition = match inst {
+        Instruction::Conditional { condition, .. } => condition,
+        Instruction::Region(region) => {
+            for inner in region.body() {
+                cut_register_conditions(inner, index, total, cuts)?;
+            }
+            region.condition()
+        }
+        _ => return Ok(()),
+    };
+    let (ClassicalCondition::RegisterEquals { offset, size, .. }
+    | ClassicalCondition::RegisterNotEquals { offset, size, .. }) = condition
+    else {
+        return Ok(());
+    };
+    if offset + size > total {
+        return Err(PrismError::ExportUnsupported {
+            index,
+            reason: format!(
+                "condition covers bits {offset}..{} but the circuit has {total}",
+                offset + size
+            ),
+        });
+    }
+    cuts.insert(*offset);
+    cuts.insert(offset + size);
+    Ok(())
+}
+
 impl CregLayout {
     fn of(circuit: &Circuit) -> Result<Self> {
         let total = circuit.num_classical_bits;
         let mut cuts = BTreeSet::from([0, total]);
         for (index, inst) in circuit.instructions.iter().enumerate() {
-            let Instruction::Conditional { condition, .. } = inst else {
-                continue;
-            };
-            let (ClassicalCondition::RegisterEquals { offset, size, .. }
-            | ClassicalCondition::RegisterNotEquals { offset, size, .. }) = condition
-            else {
-                continue;
-            };
-            if offset + size > total {
-                return Err(PrismError::ExportUnsupported {
-                    index,
-                    reason: format!(
-                        "condition covers bits {offset}..{} but the circuit has {total}",
-                        offset + size
-                    ),
-                });
-            }
-            cuts.insert(*offset);
-            cuts.insert(offset + size);
+            cut_register_conditions(inst, index, total, &mut cuts)?;
         }
 
         let bounds: Vec<usize> = cuts.into_iter().collect();

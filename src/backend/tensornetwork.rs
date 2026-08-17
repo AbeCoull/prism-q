@@ -764,7 +764,8 @@ pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm
             Instruction::Barrier { .. } => {}
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
-            | Instruction::Conditional { .. } => {
+            | Instruction::Conditional { .. }
+            | Instruction::Region(_) => {
                 return Err(PrismError::BackendUnsupported {
                     backend: "tensor_network_scalar".to_string(),
                     operation: format!("non-unitary instruction {instruction:?}"),
@@ -1299,6 +1300,7 @@ impl Backend for TensorNetworkBackend {
                     self.dispatch_gate(gate, targets)?;
                 }
             }
+            Instruction::Region(region) => self.apply_region(region)?,
         }
         Ok(())
     }

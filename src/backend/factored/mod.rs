@@ -668,6 +668,7 @@ impl Backend for FactoredBackend {
                 }
                 Ok(())
             }
+            Instruction::Region(region) => self.apply_region(region),
         }
     }
 

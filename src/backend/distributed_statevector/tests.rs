@@ -765,6 +765,30 @@ fn loopback_conditional_on_global_measurement() {
 }
 
 #[test]
+fn loopback_guarded_region_takes_the_same_branch_on_every_rank() {
+    relax_min_local_qubits();
+    // The region body measures and entangles, so a rank that disagreed on the
+    // branch would diverge in both the state and the classical bits.
+    let n = 4;
+    let mut b = CircuitBuilder::new_with_classical(n, 2);
+    b.x(n - 1);
+    b.measure(n - 1, 0);
+    b.guarded(crate::circuit::ClassicalCondition::BitIsOne(0), |body| {
+        body.x(0).cx(0, 1).measure(1, 1);
+    });
+    let circuit = b.build();
+    for &size in &[1usize, 2, 4, 8] {
+        let (probs, bits) = loopback_run(&circuit, size);
+        assert!(bits[0] && bits[1], "size {size}: both bits should be 1");
+        let expected = 0b11usize | (1usize << (n - 1));
+        assert!(
+            (probs[expected] - 1.0).abs() < TOL,
+            "size {size}: the region body should have run"
+        );
+    }
+}
+
+#[test]
 fn loopback_tiled_exchange_matches_full() {
     relax_min_local_qubits();
     // Every chunk size must match the statevector reference, so tiling the

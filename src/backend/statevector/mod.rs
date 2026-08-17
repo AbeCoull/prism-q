@@ -307,6 +307,7 @@ impl StatevectorBackend {
                     Ok(())
                 }
             }
+            Instruction::Region(region) => self.apply_region(region),
         }
     }
 
@@ -832,6 +833,7 @@ impl Backend for StatevectorBackend {
                     self.dispatch_gate(gate, targets);
                 }
             }
+            Instruction::Region(region) => self.apply_region(region)?,
         }
         Ok(())
     }

@@ -709,6 +709,7 @@ impl Backend for DensityMatrixBackend {
                 gate,
                 targets,
             } => self.apply_conditional(condition, gate, targets),
+            Instruction::Region(region) => self.apply_region(region),
         }
     }
 

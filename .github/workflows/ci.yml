@@ -242,8 +242,12 @@ jobs:
           fetch-depth: 1
 
       - uses: dtolnay/rust-toolchain@stable
+      # `actions/cache` rejects a comma in a key, and the feature list carries
+      # one, so the key takes a slug of it rather than the list itself.
       - id: toolchain
-        run: echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+          echo "features=${CI_BENCH_FEATURES//,/-}" >> "$GITHUB_OUTPUT"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -266,7 +270,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: bench-ref-exe/circuits
-          key: bench-ref-exe-${{ runner.os }}-${{ steps.toolchain.outputs.version }}-${{ env.CI_BENCH_FEATURES }}-${{ github.sha }}
+          key: bench-ref-exe-${{ runner.os }}-${{ steps.toolchain.outputs.version }}-${{ steps.toolchain.outputs.features }}-${{ github.sha }}
 
   # Adjacent-binary A/B against the PR base; see scripts/bench_ci.sh. The
   # reference worktree sits beside the checkout, not inside it: `/target/` in
@@ -323,7 +327,9 @@ jobs:
 
       - id: toolchain
         if: steps.scope.outputs.run == 'true'
-        run: echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+          echo "features=${CI_BENCH_FEATURES//,/-}" >> "$GITHUB_OUTPUT"
 
       # A hit means the base commit went through Benchmark Reference Build, so
       # its binary was compiled at this same path and the reference build below
@@ -335,7 +341,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: bench-ref-exe/circuits
-          key: bench-ref-exe-${{ runner.os }}-${{ steps.toolchain.outputs.version }}-${{ env.CI_BENCH_FEATURES }}-${{ env.PRISM_BENCH_REF }}
+          key: bench-ref-exe-${{ runner.os }}-${{ steps.toolchain.outputs.version }}-${{ steps.toolchain.outputs.features }}-${{ env.PRISM_BENCH_REF }}
 
       - name: Prepare the reference worktree
         if: steps.scope.outputs.run == 'true' && steps.refexe.outputs.cache-hit != 'true'

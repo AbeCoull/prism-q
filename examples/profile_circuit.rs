@@ -65,6 +65,7 @@ fn profile_one(circuit: &Circuit) -> IterProfile {
             Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => gate.name(),
             Instruction::Measure { .. } => "measure",
             Instruction::Reset { .. } => "reset",
+            Instruction::Region(_) => "if",
             Instruction::Barrier { .. } => continue,
         };
 

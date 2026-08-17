@@ -119,6 +119,7 @@ fn inst_qubits(inst: &Instruction) -> &[usize] {
             std::slice::from_ref(qubit)
         }
         Instruction::Barrier { qubits } => qubits,
+        Instruction::Region(region) => region.qubits(),
     }
 }
 

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
+use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec, guarded};
 use prism_q::circuits as builtins;
 use prism_q::gates::Gate;
 
@@ -392,7 +392,37 @@ pub fn exact_small_cases() -> [CircuitCase; 18] {
     ]
 }
 
-pub fn measurement_cases() -> [CircuitCase; 4] {
+// The region body holds a gate, a measure, and a reset, so a backend that
+// handled only the guarded-gate case cannot pass it.
+pub fn measurement_reset_region() -> Circuit {
+    let mut circuit = Circuit::new(3, 2);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(
+        guarded(
+            ClassicalCondition::BitIsOne(0),
+            vec![
+                Instruction::Gate {
+                    gate: Gate::X,
+                    targets: SmallVec::from_slice(&[1]),
+                },
+                Instruction::Reset { qubit: 0 },
+                Instruction::Measure {
+                    qubit: 1,
+                    classical_bit: 1,
+                },
+                Instruction::Gate {
+                    gate: Gate::Cx,
+                    targets: SmallVec::from_slice(&[1, 2]),
+                },
+            ],
+        )
+        .expect("body is not empty"),
+    );
+    circuit
+}
+
+pub fn measurement_cases() -> [CircuitCase; 5] {
     [
         CircuitCase::new(
             "deterministic_measurement",
@@ -413,6 +443,11 @@ pub fn measurement_cases() -> [CircuitCase; 4] {
             "measurement_reset_conditional",
             measurement_reset_conditional,
             CircuitCapabilities::new().product_separable(),
+        ),
+        CircuitCase::new(
+            "measurement_reset_region",
+            measurement_reset_region,
+            CircuitCapabilities::new(),
         ),
     ]
 }

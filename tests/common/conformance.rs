@@ -368,8 +368,12 @@ impl GeneratedCase {
 
 /// One-line rendering of every instruction, in order.
 pub fn describe(circuit: &Circuit) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(circuit.instructions.len());
-    for instr in &circuit.instructions {
+    describe_instructions(&circuit.instructions)
+}
+
+fn describe_instructions(instructions: &[Instruction]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(instructions.len());
+    for instr in instructions {
         parts.push(match instr {
             Instruction::Gate { gate, targets } => describe_gate(gate, targets),
             Instruction::Measure {
@@ -386,6 +390,11 @@ pub fn describe(circuit: &Circuit) -> String {
                 "if({}) {}",
                 describe_condition(condition),
                 describe_gate(gate, targets)
+            ),
+            Instruction::Region(region) => format!(
+                "if({}) {{{}}}",
+                describe_condition(region.condition()),
+                describe_instructions(region.body())
             ),
         });
     }

@@ -300,6 +300,12 @@ impl ErrorChainComplex {
                         m_words,
                     );
                 }
+                Instruction::Region(_) => {
+                    return Err(crate::error::PrismError::IncompatibleBackend {
+                        backend: "HomologicalDetectorModel".to_string(),
+                        reason: "error propagation does not support guarded regions".to_string(),
+                    });
+                }
             }
         }
 

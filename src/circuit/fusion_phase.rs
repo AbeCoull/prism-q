@@ -231,6 +231,17 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                 );
                 output.push(inst.clone());
             }
+            Instruction::Region(region) => {
+                flush_phase_qubits_in_use(
+                    region.qubits(),
+                    false,
+                    &mut pending,
+                    &mut target_users,
+                    &mut output,
+                    &mut changed,
+                );
+                output.push(inst.clone());
+            }
             Instruction::Conditional { targets, .. } => {
                 flush_phase_qubits_in_use(
                     targets,

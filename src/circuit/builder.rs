@@ -15,7 +15,7 @@
 use num_complex::Complex64;
 
 use super::parameter::Parameters;
-use super::{Circuit, ClassicalCondition, Instruction, SmallVec};
+use super::{Circuit, ClassicalCondition, Instruction, SmallVec, guarded};
 use crate::gates::Gate;
 
 /// Fluent builder for quantum circuits.
@@ -218,6 +218,28 @@ impl CircuitBuilder {
             gate,
             targets: targets.into(),
         });
+        self
+    }
+
+    /// Append a guarded region: everything `body` appends runs only when
+    /// `condition` holds at runtime, measurement and reset included.
+    ///
+    /// The body builder starts empty and shares this circuit's dimensions, so
+    /// its qubit and classical-bit indices are the enclosing circuit's. Nesting
+    /// is allowed to [`MAX_REGION_DEPTH`]; an empty body appends nothing.
+    ///
+    /// [`MAX_REGION_DEPTH`]: crate::circuit::MAX_REGION_DEPTH
+    pub fn guarded(
+        &mut self,
+        condition: ClassicalCondition,
+        body: impl FnOnce(&mut CircuitBuilder),
+    ) -> &mut Self {
+        let mut inner = CircuitBuilder::new(self.circuit.num_qubits);
+        inner.circuit.num_classical_bits = self.circuit.num_classical_bits;
+        body(&mut inner);
+        if let Some(inst) = guarded(condition, inner.circuit.instructions) {
+            self.circuit.instructions.push(inst);
+        }
         self
     }
 

@@ -1674,6 +1674,11 @@ impl Backend for DistributedStatevectorBackend {
                 }
             }
             Instruction::Gate { gate, targets } => self.apply_gate(gate, targets),
+            // Every rank draws measurement outcomes from the same seeded RNG
+            // against an `Allreduce`d probability, so every rank holds the same
+            // classical bits and takes the same branch without a consensus
+            // exchange.
+            Instruction::Region(region) => self.apply_region(region),
         }
     }
 

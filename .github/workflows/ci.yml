@@ -220,10 +220,60 @@ jobs:
       - name: Verify the conventional-commit mapping and the pre-1.0 clamp
         run: bash scripts/release_bump_level_test.sh
 
+  # Builds the bench binary for each commit that lands on main and caches it, so
+  # the gate below can measure against a reference it did not have to compile.
+  # That is the whole benefit: one build instead of two. The checkout path also
+  # matches the gate's `head`, which costs nothing and keeps the two builds
+  # differing only in code. It is not claimed to fix anything: on this project's
+  # Windows host the build directory was measured not to change `.text` at all,
+  # and the ELF case that could differ is untested.
+  benchmark-reference:
+    name: Benchmark Reference Build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout at the path the gate uses
+        uses: actions/checkout@v7
+        with:
+          path: head
+          fetch-depth: 1
+
+      - uses: dtolnay/rust-toolchain@stable
+      - id: toolchain
+        run: echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: head -> target
+
+      - name: Build the reference bench binary
+        working-directory: head
+        run: |
+          bash scripts/bench_ab.sh \
+            --bench circuits \
+            --features "$CI_BENCH_FEATURES" \
+            --build-only "$GITHUB_WORKSPACE/bench-ref-exe/circuits"
+
+      # Keyed on the commit, which already pins the lockfile it was built from,
+      # so hashing the lockfile as well would only miss on PRs that touch it. No
+      # restore-keys: a near-miss would silently measure against a commit the PR
+      # was not based on, which is worse than paying for the build.
+      - name: Cache it for the gate
+        uses: actions/cache/save@v4
+        with:
+          path: bench-ref-exe/circuits
+          key: bench-ref-exe-${{ runner.os }}-${{ steps.toolchain.outputs.version }}-${{ env.CI_BENCH_FEATURES }}-${{ github.sha }}
+
   # Adjacent-binary A/B against the PR base; see scripts/bench_ci.sh. The
   # reference worktree sits beside the checkout, not inside it: `/target/` in
   # .gitignore is anchored to the repository root, so a nested worktree's build
-  # output would read as an untracked change and abort the A/B.
+  # output would read as an untracked change and abort the A/B. The worktree is
+  # the fallback path now: on a cache hit from the job above there is no
+  # reference build at all.
   benchmark-regression:
     name: Benchmark Regression
     runs-on: ubuntu-latest
@@ -237,6 +287,7 @@ jobs:
     env:
       PRISM_BENCH_REF: ${{ github.event.pull_request.base.sha }}
       PRISM_BENCH_REF_DIR: ${{ github.workspace }}/bench-ref
+      PRISM_BENCH_REF_EXE: ${{ github.workspace }}/bench-ref-exe/circuits
     steps:
       - name: Checkout head
         uses: actions/checkout@v7
@@ -267,21 +318,46 @@ jobs:
             echo "No Rust source or manifest change. Nothing to measure." >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Prepare the reference worktree
-        if: steps.scope.outputs.run == 'true'
-        working-directory: head
-        run: git worktree add --detach "$PRISM_BENCH_REF_DIR" "$PRISM_BENCH_REF"
-
       - uses: dtolnay/rust-toolchain@stable
         if: steps.scope.outputs.run == 'true'
+
+      - id: toolchain
+        if: steps.scope.outputs.run == 'true'
+        run: echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
+
+      # A hit means the base commit went through Benchmark Reference Build, so
+      # its binary was compiled at this same path and the reference build below
+      # is skipped entirely. A miss falls back to the worktree, which still
+      # gates correctly, just slower and carrying the package-path term.
+      - name: Restore the reference bench binary
+        id: refexe
+        if: steps.scope.outputs.run == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: bench-ref-exe/circuits
+          key: bench-ref-exe-${{ runner.os }}-${{ steps.toolchain.outputs.version }}-${{ env.CI_BENCH_FEATURES }}-${{ env.PRISM_BENCH_REF }}
+
+      - name: Prepare the reference worktree
+        if: steps.scope.outputs.run == 'true' && steps.refexe.outputs.cache-hit != 'true'
+        working-directory: head
+        run: git worktree add --detach "$PRISM_BENCH_REF_DIR" "$PRISM_BENCH_REF"
 
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.run == 'true'
         with:
           cache-bin: false
-          workspaces: |
-            head -> target
-            bench-ref -> target
+          key: head
+          workspaces: head -> target
+
+      # Only when the reference has to be compiled. Restoring this workspace on
+      # a cache hit would also re-save it empty at job end, making the next miss
+      # more expensive than it needs to be.
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.run == 'true' && steps.refexe.outputs.cache-hit != 'true'
+        with:
+          cache-bin: false
+          key: ref
+          workspaces: bench-ref -> target
 
       - name: Benchmark regression gate
         if: steps.scope.outputs.run == 'true'

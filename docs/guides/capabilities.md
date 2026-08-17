@@ -132,7 +132,7 @@ estimated" without comparing a float against zero.
 | --- | --- | --- |
 | ROCm (AMD GPU) | Planned | No AMD device kernels; the GPU path is CUDA-only |
 | Distributed GPU | Planned | No multi-node GPU execution |
-| Multi-GPU | Planned | A GPU context binds a single device |
+| Multi-GPU | Planned | A GPU context binds a single device; sharding one statevector across devices also needs peer access between them to stay ahead of the host path |
 | Distributed noisy shots | Planned | Noise models are rejected on the distributed backend; trajectory execution is not lockstep across ranks |
 
 These targets are listed so the matrix reflects the roadmap rather than hiding

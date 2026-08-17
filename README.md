@@ -362,7 +362,9 @@ SVGs land in `bench_results/` (gitignored).
 
 - Expanded classical control: mid circuit branching beyond the current `if` form.
 - Multi GPU and distributed GPU execution: a GPU context currently binds a single
-  device, and the distributed backend is CPU only.
+  device, and the distributed backend is CPU only. Sharding one statevector
+  across devices also needs peer access between them, since a host-staged
+  exchange costs far more than the gate it serves.
 - ROCm (AMD GPU) ports of the CUDA statevector and stabilizer kernels.
 - Distributed noisy shots: noise models are rejected on the distributed backend
   because trajectory execution is not lockstep across ranks.

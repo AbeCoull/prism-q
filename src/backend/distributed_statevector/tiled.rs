@@ -448,6 +448,14 @@ impl TiledStatevector {
                 self.reset(*qubit)
             }
             Instruction::Barrier { .. } => Ok(()),
+            Instruction::Region(region) => {
+                if region.condition().evaluate(&self.classical_bits) {
+                    for inner in region.body() {
+                        self.step(inner, batch)?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -741,6 +749,47 @@ impl TiledStatevector {
         Ok(())
     }
 
+    /// Accumulate the dry pass counts, counting a guarded region as if it were
+    /// taken: the ratio is a rejection threshold, so over-counting is the safe
+    /// direction.
+    fn count_passes(
+        &self,
+        instructions: &[Instruction],
+        gate_passes: &mut u64,
+        gate_count: &mut u64,
+        open_batch: &mut bool,
+    ) -> Result<()> {
+        for instruction in instructions {
+            let (gate, targets) = match instruction {
+                Instruction::Gate { gate, targets } => (gate, targets),
+                Instruction::Conditional { gate, targets, .. } => (gate, targets),
+                Instruction::Barrier { .. } => continue,
+                Instruction::Region(region) => {
+                    self.count_passes(region.body(), gate_passes, gate_count, open_batch)?;
+                    continue;
+                }
+                Instruction::Measure { .. } | Instruction::Reset { .. } => {
+                    *open_batch = false;
+                    continue;
+                }
+            };
+            *gate_count += 1;
+            match self.translate(gate, targets)? {
+                Translated::Window(_) => {
+                    if !*open_batch {
+                        *gate_passes += 1;
+                        *open_batch = true;
+                    }
+                }
+                Translated::Pair(_) => {
+                    *gate_passes += 1;
+                    *open_batch = false;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Dry scheduling pass: count full-shard streaming passes without
     /// touching storage and reject a schedule whose passes-per-gate ratio
     /// exceeds the configured threshold.
@@ -748,30 +797,12 @@ impl TiledStatevector {
         let mut gate_passes = 0u64;
         let mut gate_count = 0u64;
         let mut open_batch = false;
-        for instruction in instructions {
-            let (gate, targets) = match instruction {
-                Instruction::Gate { gate, targets } => (gate, targets),
-                Instruction::Conditional { gate, targets, .. } => (gate, targets),
-                Instruction::Barrier { .. } => continue,
-                Instruction::Measure { .. } | Instruction::Reset { .. } => {
-                    open_batch = false;
-                    continue;
-                }
-            };
-            gate_count += 1;
-            match self.translate(gate, targets)? {
-                Translated::Window(_) => {
-                    if !open_batch {
-                        gate_passes += 1;
-                        open_batch = true;
-                    }
-                }
-                Translated::Pair(_) => {
-                    gate_passes += 1;
-                    open_batch = false;
-                }
-            }
-        }
+        self.count_passes(
+            instructions,
+            &mut gate_passes,
+            &mut gate_count,
+            &mut open_batch,
+        )?;
         if gate_count == 0 || gate_passes < MIN_PASSES_FOR_REJECTION {
             return Ok(());
         }

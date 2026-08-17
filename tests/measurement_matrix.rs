@@ -21,6 +21,7 @@ backend_matrix_outcome_tests! {
         measurement_sparse_reset_from_one_matches_statevector => "reset_from_one",
         measurement_sparse_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_sparse_reset_conditional_matches_statevector => "measurement_reset_conditional",
+        measurement_sparse_reset_region_matches_statevector => "measurement_reset_region",
     }
 }
 
@@ -44,6 +45,7 @@ backend_matrix_outcome_tests! {
         measurement_mps_reset_from_one_matches_statevector => "reset_from_one",
         measurement_mps_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_mps_reset_conditional_matches_statevector => "measurement_reset_conditional",
+        measurement_mps_reset_region_matches_statevector => "measurement_reset_region",
     }
 }
 
@@ -67,6 +69,7 @@ backend_matrix_outcome_tests! {
         measurement_tensor_network_reset_from_one_matches_statevector => "reset_from_one",
         measurement_tensor_network_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_tensor_network_reset_conditional_matches_statevector => "measurement_reset_conditional",
+        measurement_tensor_network_reset_region_matches_statevector => "measurement_reset_region",
     }
 }
 
@@ -90,6 +93,7 @@ backend_matrix_outcome_tests! {
         measurement_factored_reset_from_one_matches_statevector => "reset_from_one",
         measurement_factored_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_factored_reset_conditional_matches_statevector => "measurement_reset_conditional",
+        measurement_factored_reset_region_matches_statevector => "measurement_reset_region",
     }
 }
 
@@ -113,6 +117,7 @@ backend_matrix_outcome_tests! {
         measurement_stabilizer_reset_from_one_matches_statevector => "reset_from_one",
         measurement_stabilizer_reset_from_one_with_spectator_matches_statevector => "reset_from_one_with_spectator",
         measurement_stabilizer_reset_conditional_matches_statevector => "measurement_reset_conditional",
+        measurement_stabilizer_reset_region_matches_statevector => "measurement_reset_region",
     }
 }
 

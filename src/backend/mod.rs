@@ -419,6 +419,21 @@ pub trait Backend {
         Ok(())
     }
 
+    /// Execute a guarded region's body iff its condition holds.
+    ///
+    /// Every backend routes [`Instruction::Region`] here, so the branch
+    /// semantics live in one place. The body reaches
+    /// [`apply_instructions`](Backend::apply_instructions), which keeps any
+    /// batching a backend overrides it with.
+    fn apply_region(&mut self, region: &crate::circuit::GuardedRegion) -> Result<()> {
+        let taken = region.condition().evaluate(self.classical_results());
+        if taken {
+            self.apply_instructions(region.body())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Whether this backend can handle `Gate::Fused` variants.
     ///
     /// Backends that operate on symbolic gate representations (e.g. stabilizer

@@ -205,37 +205,26 @@ impl Circuit {
 
     /// Count of gate instructions (excludes measurements and barriers).
     pub fn gate_count(&self) -> usize {
-        self.instructions
-            .iter()
-            .filter(|i| {
-                matches!(
-                    i,
-                    Instruction::Gate { .. } | Instruction::Conditional { .. }
-                )
-            })
-            .count()
+        let mut count = 0;
+        for_each_gate(&self.instructions, &mut |_| count += 1);
+        count
     }
 
     /// Count T and Tdg gates in the circuit.
     pub fn t_count(&self) -> usize {
-        self.instructions
-            .iter()
-            .filter(|inst| match inst {
-                Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
-                    matches!(gate, Gate::T | Gate::Tdg)
-                }
-                _ => false,
-            })
-            .count()
+        let mut count = 0;
+        for_each_gate(&self.instructions, &mut |gate| {
+            if matches!(gate, Gate::T | Gate::Tdg) {
+                count += 1;
+            }
+        });
+        count
     }
 
     /// Returns true if the circuit contains any T or Tdg gates.
     pub fn has_t_gates(&self) -> bool {
-        self.instructions.iter().any(|inst| match inst {
-            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
-                matches!(gate, Gate::T | Gate::Tdg)
-            }
-            _ => false,
+        any_gate(&self.instructions, &mut |gate| {
+            matches!(gate, Gate::T | Gate::Tdg)
         })
     }
 
@@ -244,21 +233,13 @@ impl Circuit {
     /// When true, the stabilizer backend can simulate this circuit exactly
     /// in O(n^2) time regardless of qubit count.
     pub fn is_clifford_only(&self) -> bool {
-        self.instructions.iter().all(|inst| match inst {
-            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
-                gate.is_clifford()
-            }
-            _ => true,
-        })
+        !any_gate(&self.instructions, &mut |gate| !gate.is_clifford())
     }
 
     /// True if every gate is Clifford or T/Tdg.
     pub fn is_clifford_plus_t(&self) -> bool {
-        self.instructions.iter().all(|inst| match inst {
-            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
-                gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg)
-            }
-            _ => true,
+        !any_gate(&self.instructions, &mut |gate| {
+            !(gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg))
         })
     }
 
@@ -267,24 +248,14 @@ impl Circuit {
     /// always has exactly one non-zero amplitude, giving O(1) memory and O(n)
     /// per-gate cost regardless of qubit count.
     pub fn is_sparse_friendly(&self) -> bool {
-        self.instructions.iter().all(|inst| match inst {
-            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
-                gate.preserves_sparsity()
-            }
-            _ => true,
-        })
+        !any_gate(&self.instructions, &mut |gate| !gate.preserves_sparsity())
     }
 
     /// True if the circuit contains any multi-qubit (entangling) gates.
     ///
     /// When false, the product state backend can simulate in O(n) time.
     pub fn has_entangling_gates(&self) -> bool {
-        self.instructions.iter().any(|inst| match inst {
-            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => {
-                gate.num_qubits() >= 2
-            }
-            _ => false,
-        })
+        any_gate(&self.instructions, &mut |gate| gate.num_qubits() >= 2)
     }
 
     /// Herfindahl-Hirschman index of the qubit interaction graph partition.
@@ -314,7 +285,7 @@ impl Circuit {
         let mut seen_measurement = false;
         for inst in &self.instructions {
             match inst {
-                Instruction::Conditional { .. } => return false,
+                Instruction::Conditional { .. } | Instruction::Region(_) => return false,
                 Instruction::Measure { .. } => {
                     seen_measurement = true;
                 }
@@ -330,34 +301,27 @@ impl Circuit {
     }
 
     /// Extract the qubit-to-classical-bit mapping from all measurements.
+    ///
+    /// Measurements inside a guarded region are included; whether the region is
+    /// taken is a runtime fact, so the map covers what the circuit can write.
     pub fn measurement_map(&self) -> Vec<(usize, usize)> {
-        self.instructions
-            .iter()
-            .filter_map(|inst| match inst {
-                Instruction::Measure {
-                    qubit,
-                    classical_bit,
-                } => Some((*qubit, *classical_bit)),
-                _ => None,
-            })
-            .collect()
+        let mut out = Vec::new();
+        for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
+            out.push((qubit, classical_bit))
+        });
+        out
     }
 
     pub fn without_measurements(&self) -> Circuit {
         let mut c = Circuit::new(self.num_qubits, self.num_classical_bits);
-        c.instructions = self
-            .instructions
-            .iter()
-            .filter(|inst| !matches!(inst, Instruction::Measure { .. }))
-            .cloned()
-            .collect();
+        c.instructions = strip_measurements(&self.instructions);
         c
     }
 
     pub fn has_resets(&self) -> bool {
-        self.instructions
-            .iter()
-            .any(|i| matches!(i, Instruction::Reset { .. }))
+        any_instruction(&self.instructions, &mut |i| {
+            matches!(i, Instruction::Reset { .. })
+        })
     }
 
     /// Partition qubits into independent (non-interacting) subsystems.
@@ -402,44 +366,38 @@ impl Circuit {
 
         // Build cbit → measurement qubit map for classical dependency tracking
         let mut cbit_to_qubit: Vec<Option<usize>> = vec![None; self.num_classical_bits.max(1)];
-        for inst in &self.instructions {
-            if let Instruction::Measure {
-                qubit,
-                classical_bit,
-            } = inst
-            {
-                cbit_to_qubit[*classical_bit] = Some(*qubit);
-            }
-        }
+        for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
+            cbit_to_qubit[classical_bit] = Some(qubit);
+        });
 
+        let mut condition_bits: Vec<usize> = Vec::new();
         for inst in &self.instructions {
+            condition_bits.clear();
             let targets = match inst {
-                Instruction::Gate { targets, .. } => targets,
+                Instruction::Gate { targets, .. } => targets.as_slice(),
                 Instruction::Conditional {
                     condition, targets, ..
                 } => {
-                    match condition {
-                        ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => {
-                            if let Some(mq) = cbit_to_qubit[*bit] {
-                                union(&mut parent, &mut rank, targets[0], mq);
-                            }
-                        }
-                        ClassicalCondition::RegisterEquals { offset, size, .. }
-                        | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
-                            for mq in cbit_to_qubit.iter().skip(*offset).take(*size).flatten() {
-                                union(&mut parent, &mut rank, targets[0], *mq);
-                            }
-                        }
-                    }
-                    targets
+                    collect_condition_bits(condition, &mut condition_bits);
+                    targets.as_slice()
+                }
+                Instruction::Region(region) => {
+                    collect_condition_bits(region.condition(), &mut condition_bits);
+                    collect_body_condition_bits(region.body(), &mut condition_bits);
+                    region.qubits()
                 }
                 _ => continue,
             };
-            if targets.len() >= 2 {
-                let first = targets[0];
-                for &t in &targets[1..] {
-                    union(&mut parent, &mut rank, first, t);
+            let Some(&first) = targets.first() else {
+                continue;
+            };
+            for &bit in &condition_bits {
+                if let Some(mq) = cbit_to_qubit.get(bit).copied().flatten() {
+                    union(&mut parent, &mut rank, first, mq);
                 }
+            }
+            for &t in &targets[1..] {
+                union(&mut parent, &mut rank, first, t);
             }
         }
 
@@ -470,23 +428,18 @@ impl Circuit {
         let max_cb = self.num_classical_bits.max(1);
         let mut old_to_new_classical: Vec<Option<usize>> = vec![None; max_cb];
 
-        for inst in &self.instructions {
-            if let Instruction::Measure {
-                qubit,
-                classical_bit,
-            } = inst
-            {
-                if old_to_new_qubit[*qubit].is_some()
-                    && old_to_new_classical[*classical_bit].is_none()
-                {
-                    let new_idx = classical_bits_used.len();
-                    old_to_new_classical[*classical_bit] = Some(new_idx);
-                    classical_bits_used.push(*classical_bit);
-                }
+        for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
+            if old_to_new_qubit[qubit].is_some() && old_to_new_classical[classical_bit].is_none() {
+                let new_idx = classical_bits_used.len();
+                old_to_new_classical[classical_bit] = Some(new_idx);
+                classical_bits_used.push(classical_bit);
             }
-        }
+        });
 
         let mut sub = Circuit::new(qubit_set.len(), classical_bits_used.len());
+
+        let qubit_of = |q: usize| old_to_new_qubit[q].expect("membership checked by the caller");
+        let cbit_of = |c: usize| old_to_new_classical[c].unwrap_or(c);
 
         for inst in &self.instructions {
             match inst {
@@ -529,47 +482,20 @@ impl Circuit {
                             .push(Instruction::Barrier { qubits: new_qs });
                     }
                 }
-                Instruction::Conditional {
-                    condition,
-                    gate,
-                    targets,
-                } => {
+                Instruction::Conditional { targets, .. } => {
                     if targets.iter().all(|&t| old_to_new_qubit[t].is_some()) {
-                        let new_targets: SmallVec<[usize; 4]> = targets
-                            .iter()
-                            .map(|&t| old_to_new_qubit[t].unwrap())
-                            .collect();
-                        let new_condition = match condition {
-                            ClassicalCondition::BitIsOne(bit) => ClassicalCondition::BitIsOne(
-                                old_to_new_classical[*bit].unwrap_or(*bit),
-                            ),
-                            ClassicalCondition::BitIsZero(bit) => ClassicalCondition::BitIsZero(
-                                old_to_new_classical[*bit].unwrap_or(*bit),
-                            ),
-                            ClassicalCondition::RegisterEquals {
-                                offset,
-                                size,
-                                value,
-                            } => ClassicalCondition::RegisterEquals {
-                                offset: old_to_new_classical[*offset].unwrap_or(*offset),
-                                size: *size,
-                                value: *value,
-                            },
-                            ClassicalCondition::RegisterNotEquals {
-                                offset,
-                                size,
-                                value,
-                            } => ClassicalCondition::RegisterNotEquals {
-                                offset: old_to_new_classical[*offset].unwrap_or(*offset),
-                                size: *size,
-                                value: *value,
-                            },
-                        };
-                        sub.instructions.push(Instruction::Conditional {
-                            condition: new_condition,
-                            gate: gate.clone(),
-                            targets: new_targets,
-                        });
+                        sub.instructions
+                            .push(remap_instruction(inst, &qubit_of, &cbit_of));
+                    }
+                }
+                Instruction::Region(region) => {
+                    if region
+                        .qubits()
+                        .iter()
+                        .all(|&q| old_to_new_qubit[q].is_some())
+                    {
+                        sub.instructions
+                            .push(remap_instruction(inst, &qubit_of, &cbit_of));
                     }
                 }
             }
@@ -602,26 +528,23 @@ impl Circuit {
         let max_cb = self.num_classical_bits.max(1);
         let mut cbit_map: Vec<Option<(usize, usize)>> = vec![None; max_cb];
 
-        for inst in &self.instructions {
-            if let Instruction::Measure {
-                qubit,
-                classical_bit,
-            } = inst
-            {
-                let (comp_idx, _) = qubit_map[*qubit];
-                if cbit_map[*classical_bit].is_none() {
-                    let new_idx = classical_bits_per_comp[comp_idx].len();
-                    cbit_map[*classical_bit] = Some((comp_idx, new_idx));
-                    classical_bits_per_comp[comp_idx].push(*classical_bit);
-                }
+        for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
+            let (comp_idx, _) = qubit_map[qubit];
+            if cbit_map[classical_bit].is_none() {
+                let new_idx = classical_bits_per_comp[comp_idx].len();
+                cbit_map[classical_bit] = Some((comp_idx, new_idx));
+                classical_bits_per_comp[comp_idx].push(classical_bit);
             }
-        }
+        });
 
         let mut subs: Vec<Circuit> = (0..k)
             .map(|i| Circuit::new(components[i].len(), classical_bits_per_comp[i].len()))
             .collect();
 
         let mut barrier_buf: Vec<SmallVec<[usize; 4]>> = (0..k).map(|_| SmallVec::new()).collect();
+
+        let qubit_of = |q: usize| qubit_map[q].1;
+        let cbit_of = |c: usize| cbit_map[c].map(|(_, nc)| nc).unwrap_or(c);
 
         // Pass 2: route each instruction to its component
         for inst in &self.instructions {
@@ -669,53 +592,20 @@ impl Circuit {
                         }
                     }
                 }
-                Instruction::Conditional {
-                    condition,
-                    gate,
-                    targets,
-                } => {
+                Instruction::Conditional { targets, .. } => {
                     let (comp_idx, _) = qubit_map[targets[0]];
-                    let new_targets: SmallVec<[usize; 4]> =
-                        targets.iter().map(|&t| qubit_map[t].1).collect();
-                    let new_condition = match condition {
-                        ClassicalCondition::BitIsOne(bit) => {
-                            let (_, nc) = cbit_map[*bit].unwrap_or((comp_idx, *bit));
-                            ClassicalCondition::BitIsOne(nc)
-                        }
-                        ClassicalCondition::BitIsZero(bit) => {
-                            let (_, nc) = cbit_map[*bit].unwrap_or((comp_idx, *bit));
-                            ClassicalCondition::BitIsZero(nc)
-                        }
-                        ClassicalCondition::RegisterEquals {
-                            offset,
-                            size,
-                            value,
-                        } => {
-                            let new_offset = cbit_map[*offset].map(|(_, nc)| nc).unwrap_or(*offset);
-                            ClassicalCondition::RegisterEquals {
-                                offset: new_offset,
-                                size: *size,
-                                value: *value,
-                            }
-                        }
-                        ClassicalCondition::RegisterNotEquals {
-                            offset,
-                            size,
-                            value,
-                        } => {
-                            let new_offset = cbit_map[*offset].map(|(_, nc)| nc).unwrap_or(*offset);
-                            ClassicalCondition::RegisterNotEquals {
-                                offset: new_offset,
-                                size: *size,
-                                value: *value,
-                            }
-                        }
+                    subs[comp_idx]
+                        .instructions
+                        .push(remap_instruction(inst, &qubit_of, &cbit_of));
+                }
+                Instruction::Region(region) => {
+                    let Some(&first) = region.qubits().first() else {
+                        continue;
                     };
-                    subs[comp_idx].instructions.push(Instruction::Conditional {
-                        condition: new_condition,
-                        gate: gate.clone(),
-                        targets: new_targets,
-                    });
+                    let (comp_idx, _) = qubit_map[first];
+                    subs[comp_idx]
+                        .instructions
+                        .push(remap_instruction(inst, &qubit_of, &cbit_of));
                 }
             }
         }
@@ -757,7 +647,8 @@ impl Circuit {
                 }
                 Instruction::Measure { .. }
                 | Instruction::Reset { .. }
-                | Instruction::Conditional { .. } => {
+                | Instruction::Conditional { .. }
+                | Instruction::Region(_) => {
                     split_at = i;
                     break;
                 }
@@ -828,6 +719,14 @@ fn for_each_placement(
                     qubit_depth[q] = d + 1;
                 }
             }
+            Instruction::Region(region) => {
+                let qubits = region.qubits();
+                let d = qubits.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
+                visit(inst, d);
+                for &q in qubits {
+                    qubit_depth[q] = d + 1;
+                }
+            }
             Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 let d = qubit_depth[*qubit];
                 visit(inst, d);
@@ -881,21 +780,17 @@ pub fn qft_textbook_steps(start: usize, num: usize) -> impl Iterator<Item = QftT
 /// Backends without native support call this before dispatch. Returns
 /// `Cow::Borrowed` when there is nothing to expand.
 pub fn expand_qft_blocks(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
-    let has_qft = circuit.instructions.iter().any(|inst| {
-        matches!(
-            inst,
-            Instruction::Gate {
-                gate: Gate::QftBlock { .. },
-                ..
-            }
-        )
-    });
-    if !has_qft {
+    if !any_bare_gate(&circuit.instructions, &mut |gate| {
+        matches!(gate, Gate::QftBlock { .. })
+    }) {
         return std::borrow::Cow::Borrowed(circuit);
     }
+    std::borrow::Cow::Owned(circuit.with_instructions(expanded_qft_blocks(&circuit.instructions)))
+}
 
-    let mut out: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len() * 2);
-    for inst in &circuit.instructions {
+fn expanded_qft_blocks(instructions: &[Instruction]) -> Vec<Instruction> {
+    let mut out: Vec<Instruction> = Vec::with_capacity(instructions.len() * 2);
+    for inst in instructions {
         if let Instruction::Gate {
             gate: Gate::QftBlock { start, num },
             ..
@@ -921,12 +816,16 @@ pub fn expand_qft_blocks(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
                     }),
                 }
             }
+        } else if let Instruction::Region(region) = inst {
+            out.push(Instruction::Region(Box::new(GuardedRegion::new(
+                region.condition().clone(),
+                expanded_qft_blocks(region.body()),
+            ))));
         } else {
             out.push(inst.clone());
         }
     }
-
-    std::borrow::Cow::Owned(circuit.with_instructions(out))
+    out
 }
 
 /// Emit the CNOT-ladder lowering of `exp(-i θ P / 2)` gate by gate.
@@ -976,21 +875,19 @@ pub(crate) fn pauli_rotation_lowering(
 /// probe-plus-expansion route as [`expand_qft_blocks`]. Returns
 /// `Cow::Borrowed` when there is nothing to expand.
 pub fn expand_pauli_rotations(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
-    let has_pauli_rot = circuit.instructions.iter().any(|inst| {
-        matches!(
-            inst,
-            Instruction::Gate {
-                gate: Gate::PauliRot(_),
-                ..
-            }
-        )
-    });
-    if !has_pauli_rot {
+    if !any_bare_gate(&circuit.instructions, &mut |gate| {
+        matches!(gate, Gate::PauliRot(_))
+    }) {
         return std::borrow::Cow::Borrowed(circuit);
     }
+    std::borrow::Cow::Owned(
+        circuit.with_instructions(expanded_pauli_rotations(&circuit.instructions)),
+    )
+}
 
-    let mut out: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len() * 2);
-    for inst in &circuit.instructions {
+fn expanded_pauli_rotations(instructions: &[Instruction]) -> Vec<Instruction> {
+    let mut out: Vec<Instruction> = Vec::with_capacity(instructions.len() * 2);
+    for inst in instructions {
         if let Instruction::Gate {
             gate: Gate::PauliRot(data),
             targets,
@@ -1002,12 +899,16 @@ pub fn expand_pauli_rotations(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit
                     targets: SmallVec::from_slice(tgts),
                 });
             });
+        } else if let Instruction::Region(region) = inst {
+            out.push(Instruction::Region(Box::new(GuardedRegion::new(
+                region.condition().clone(),
+                expanded_pauli_rotations(region.body()),
+            ))));
         } else {
             out.push(inst.clone());
         }
     }
-
-    std::borrow::Cow::Owned(circuit.with_instructions(out))
+    out
 }
 
 /// Condition for classically-controlled gate execution.
@@ -1063,6 +964,280 @@ impl ClassicalCondition {
     }
 }
 
+/// Deepest guarded-region nesting the parser accepts.
+///
+/// Every pass walks a region body recursively, so the depth is bounded at
+/// construction to keep those walks finite.
+pub const MAX_REGION_DEPTH: usize = 16;
+
+/// A guarded region: `body` executes in order iff `condition` holds.
+///
+/// The condition is evaluated once, against the classical bits as they stand
+/// when control reaches the region. Bits written by measurements inside a taken
+/// body are visible to later instructions.
+///
+/// Fields are private because [`GuardedRegion::qubits`] caches the union over
+/// the body; build a new region rather than editing one in place.
+#[derive(Debug, Clone)]
+pub struct GuardedRegion {
+    condition: ClassicalCondition,
+    body: Vec<Instruction>,
+    qubits: SmallVec<[usize; 4]>,
+}
+
+impl GuardedRegion {
+    /// Compute the body's qubit union once, so each pass reads it instead of
+    /// re-walking the body.
+    pub fn new(condition: ClassicalCondition, body: Vec<Instruction>) -> Self {
+        let mut qubits: SmallVec<[usize; 4]> = SmallVec::new();
+        collect_region_qubits(&body, &mut qubits);
+        qubits.sort_unstable();
+        qubits.dedup();
+        Self {
+            condition,
+            body,
+            qubits,
+        }
+    }
+
+    pub fn condition(&self) -> &ClassicalCondition {
+        &self.condition
+    }
+
+    pub fn body(&self) -> &[Instruction] {
+        &self.body
+    }
+
+    /// Sorted union of every qubit the body touches, nested regions included.
+    pub fn qubits(&self) -> &[usize] {
+        &self.qubits
+    }
+
+    /// Nesting depth, counting this region as 1.
+    pub fn depth(&self) -> usize {
+        1 + self
+            .body
+            .iter()
+            .filter_map(|inst| match inst {
+                Instruction::Region(inner) => Some(inner.depth()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Visit every gate, including a guarded one, descending into region bodies.
+fn for_each_gate(instructions: &[Instruction], visit: &mut impl FnMut(&Gate)) {
+    for inst in instructions {
+        match inst {
+            Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => visit(gate),
+            Instruction::Region(region) => for_each_gate(region.body(), visit),
+            _ => {}
+        }
+    }
+}
+
+/// Short-circuiting scan over unguarded [`Instruction::Gate`] payloads only,
+/// which is the set the lowering passes rewrite.
+fn any_bare_gate(instructions: &[Instruction], pred: &mut impl FnMut(&Gate) -> bool) -> bool {
+    instructions.iter().any(|inst| match inst {
+        Instruction::Gate { gate, .. } => pred(gate),
+        Instruction::Region(region) => any_bare_gate(region.body(), pred),
+        _ => false,
+    })
+}
+
+/// Short-circuiting [`for_each_gate`].
+pub(crate) fn any_gate(instructions: &[Instruction], pred: &mut impl FnMut(&Gate) -> bool) -> bool {
+    instructions.iter().any(|inst| match inst {
+        Instruction::Gate { gate, .. } | Instruction::Conditional { gate, .. } => pred(gate),
+        Instruction::Region(region) => any_gate(region.body(), pred),
+        _ => false,
+    })
+}
+
+/// True when `pred` holds for `inst` or for anything inside a region body.
+fn any_instruction(
+    instructions: &[Instruction],
+    pred: &mut impl FnMut(&Instruction) -> bool,
+) -> bool {
+    instructions.iter().any(|inst| {
+        pred(inst)
+            || match inst {
+                Instruction::Region(region) => any_instruction(region.body(), pred),
+                _ => false,
+            }
+    })
+}
+
+fn strip_measurements(instructions: &[Instruction]) -> Vec<Instruction> {
+    instructions
+        .iter()
+        .filter(|inst| !matches!(inst, Instruction::Measure { .. }))
+        .filter_map(|inst| match inst {
+            // A region whose body was all measurements drops out entirely,
+            // rather than surviving as the empty region `guarded` never builds.
+            Instruction::Region(region) => guarded(
+                region.condition().clone(),
+                strip_measurements(region.body()),
+            ),
+            other => Some(other.clone()),
+        })
+        .collect()
+}
+
+/// Visit every measurement in `instructions`, descending into region bodies.
+fn for_each_measure(instructions: &[Instruction], visit: &mut impl FnMut(usize, usize)) {
+    for inst in instructions {
+        match inst {
+            Instruction::Measure {
+                qubit,
+                classical_bit,
+            } => visit(*qubit, *classical_bit),
+            Instruction::Region(region) => for_each_measure(region.body(), visit),
+            _ => {}
+        }
+    }
+}
+
+fn collect_condition_bits(condition: &ClassicalCondition, out: &mut Vec<usize>) {
+    match condition {
+        ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => out.push(*bit),
+        ClassicalCondition::RegisterEquals { offset, size, .. }
+        | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
+            out.extend(*offset..offset.saturating_add(*size))
+        }
+    }
+}
+
+/// Every classical bit read by a condition anywhere in `body`, nested regions
+/// included. A subsystem partition that ignored these would split a circuit
+/// whose halves are coupled through the classical bits alone.
+fn collect_body_condition_bits(body: &[Instruction], out: &mut Vec<usize>) {
+    for inst in body {
+        match inst {
+            Instruction::Conditional { condition, .. } => collect_condition_bits(condition, out),
+            Instruction::Region(region) => {
+                collect_condition_bits(region.condition(), out);
+                collect_body_condition_bits(region.body(), out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn remap_condition(
+    condition: &ClassicalCondition,
+    cbit: &impl Fn(usize) -> usize,
+) -> ClassicalCondition {
+    match condition {
+        ClassicalCondition::BitIsOne(bit) => ClassicalCondition::BitIsOne(cbit(*bit)),
+        ClassicalCondition::BitIsZero(bit) => ClassicalCondition::BitIsZero(cbit(*bit)),
+        ClassicalCondition::RegisterEquals {
+            offset,
+            size,
+            value,
+        } => ClassicalCondition::RegisterEquals {
+            offset: cbit(*offset),
+            size: *size,
+            value: *value,
+        },
+        ClassicalCondition::RegisterNotEquals {
+            offset,
+            size,
+            value,
+        } => ClassicalCondition::RegisterNotEquals {
+            offset: cbit(*offset),
+            size: *size,
+            value: *value,
+        },
+    }
+}
+
+/// Rebuild `inst` under a qubit and classical-bit relabeling.
+///
+/// Callers must have established that every qubit `inst` touches has an image
+/// under `qubit`, which for a region means its whole body.
+fn remap_instruction(
+    inst: &Instruction,
+    qubit: &impl Fn(usize) -> usize,
+    cbit: &impl Fn(usize) -> usize,
+) -> Instruction {
+    match inst {
+        Instruction::Gate { gate, targets } => Instruction::Gate {
+            gate: gate.clone(),
+            targets: targets.iter().map(|&t| qubit(t)).collect(),
+        },
+        Instruction::Measure {
+            qubit: q,
+            classical_bit,
+        } => Instruction::Measure {
+            qubit: qubit(*q),
+            classical_bit: cbit(*classical_bit),
+        },
+        Instruction::Reset { qubit: q } => Instruction::Reset { qubit: qubit(*q) },
+        Instruction::Barrier { qubits } => Instruction::Barrier {
+            qubits: qubits.iter().map(|&q| qubit(q)).collect(),
+        },
+        Instruction::Conditional {
+            condition,
+            gate,
+            targets,
+        } => Instruction::Conditional {
+            condition: remap_condition(condition, cbit),
+            gate: gate.clone(),
+            targets: targets.iter().map(|&t| qubit(t)).collect(),
+        },
+        Instruction::Region(region) => Instruction::Region(Box::new(GuardedRegion::new(
+            remap_condition(region.condition(), cbit),
+            region
+                .body()
+                .iter()
+                .map(|inner| remap_instruction(inner, qubit, cbit))
+                .collect(),
+        ))),
+    }
+}
+
+fn collect_region_qubits(body: &[Instruction], out: &mut SmallVec<[usize; 4]>) {
+    for inst in body {
+        match inst {
+            Instruction::Gate { targets, .. }
+            | Instruction::Conditional { targets, .. }
+            | Instruction::Barrier { qubits: targets } => out.extend_from_slice(targets),
+            Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => out.push(*qubit),
+            Instruction::Region(inner) => out.extend_from_slice(inner.qubits()),
+        }
+    }
+}
+
+/// Build the guarded form of `body`, or `None` when the body is empty.
+///
+/// A single-gate body lowers to [`Instruction::Conditional`] so the common
+/// `if (c) x q[0];` keeps its allocation-free representation; anything else
+/// becomes an [`Instruction::Region`].
+pub fn guarded(condition: ClassicalCondition, mut body: Vec<Instruction>) -> Option<Instruction> {
+    if body.is_empty() {
+        return None;
+    }
+    if body.len() == 1
+        && let Instruction::Gate { .. } = &body[0]
+    {
+        let Some(Instruction::Gate { gate, targets }) = body.pop() else {
+            unreachable!("length and variant both checked above")
+        };
+        return Some(Instruction::Conditional {
+            condition,
+            gate,
+            targets,
+        });
+    }
+    Some(Instruction::Region(Box::new(GuardedRegion::new(
+        condition, body,
+    ))))
+}
+
 /// A single instruction in the circuit.
 #[derive(Debug, Clone)]
 pub enum Instruction {
@@ -1079,16 +1254,67 @@ pub enum Instruction {
     /// Backends should treat this as a no-op.
     Barrier { qubits: SmallVec<[usize; 4]> },
     /// Conditionally apply a gate based on classical measurement results.
+    ///
+    /// The single-gate lowering of [`Instruction::Region`]; see [`guarded`].
     Conditional {
         condition: ClassicalCondition,
         gate: Gate,
         targets: SmallVec<[usize; 4]>,
     },
+    /// Conditionally execute a span of instructions, measure and reset included.
+    ///
+    /// Boxed so the variant costs a pointer: `Instruction` is 96 bytes and this
+    /// keeps it there.
+    Region(Box<GuardedRegion>),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Every backend routes a conditional through ClassicalCondition::evaluate,
+    // so the variant semantics are pinned once here rather than per backend.
+    // Registers read bit `offset + i` as `1 << i`.
+    #[test]
+    fn classical_condition_evaluates_every_variant() {
+        let bits = [true, false, true];
+
+        assert!(ClassicalCondition::BitIsOne(0).evaluate(&bits));
+        assert!(!ClassicalCondition::BitIsOne(1).evaluate(&bits));
+        assert!(ClassicalCondition::BitIsZero(1).evaluate(&bits));
+        assert!(!ClassicalCondition::BitIsZero(0).evaluate(&bits));
+
+        let reg = |value| ClassicalCondition::RegisterEquals {
+            offset: 0,
+            size: 3,
+            value,
+        };
+        assert!(reg(0b101).evaluate(&bits));
+        assert!(!reg(0b100).evaluate(&bits));
+
+        let reg_ne = |value| ClassicalCondition::RegisterNotEquals {
+            offset: 0,
+            size: 3,
+            value,
+        };
+        assert!(reg_ne(0b100).evaluate(&bits));
+        assert!(!reg_ne(0b101).evaluate(&bits));
+    }
+
+    #[test]
+    fn classical_condition_register_honors_offset() {
+        let bits = [true, true, false, true];
+        let at = |offset| ClassicalCondition::RegisterEquals {
+            offset,
+            size: 2,
+            value: 0b01,
+        };
+        assert!(at(1).evaluate(&bits), "bits 1..3 are 1,0 so the value is 1");
+        assert!(
+            !at(0).evaluate(&bits),
+            "bits 0..2 are 1,1 so the value is 3"
+        );
+    }
 
     #[test]
     fn test_circuit_builder() {

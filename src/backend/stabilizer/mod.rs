@@ -721,7 +721,22 @@ impl StabilizerBackend {
     /// measurements, resets, and barriers. Routes through the SGI or
     /// word-batch bulk paths at the same thresholds as
     /// [`Backend::apply_instructions`].
+    ///
+    /// # Errors
+    /// A guarded region can hold a measurement or reset, which this path drops
+    /// by contract, so one is rejected rather than silently skipped.
     pub fn apply_gates_only(&mut self, instructions: &[Instruction]) -> Result<()> {
+        if instructions
+            .iter()
+            .any(|inst| matches!(inst, Instruction::Region(_)))
+        {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "Stabilizer".to_string(),
+                reason: "the gates-only path skips measurement and reset, so it cannot carry a \
+                         guarded region"
+                    .to_string(),
+            });
+        }
         let nw = self.num_words;
         if nw < MIN_WORDS_FOR_BATCH {
             for instruction in instructions {
@@ -1409,6 +1424,9 @@ impl Backend for StabilizerBackend {
                 Instruction::Reset { qubit } => {
                     return self.apply_reset_gpu(*qubit);
                 }
+                Instruction::Region(region) => {
+                    return self.apply_region(region);
+                }
             }
         }
         if self.lazy_destab
@@ -1444,6 +1462,7 @@ impl Backend for StabilizerBackend {
                     self.dispatch_gate(gate, targets)?;
                 }
             }
+            Instruction::Region(region) => self.apply_region(region)?,
         }
         Ok(())
     }

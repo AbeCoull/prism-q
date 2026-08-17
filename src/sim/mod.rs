@@ -990,26 +990,14 @@ pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<P
         return None;
     };
     let probe = plan.build(0);
-    let has_qft_block = template.instructions.iter().any(|inst| {
-        matches!(
-            inst,
-            Instruction::Gate {
-                gate: crate::gates::Gate::QftBlock { .. },
-                ..
-            }
-        )
+    let has_qft_block = crate::circuit::any_gate(&template.instructions, &mut |gate| {
+        matches!(gate, crate::gates::Gate::QftBlock { .. })
     });
     if has_qft_block && !probe.supports_qft_block() {
         return None;
     }
-    let has_pauli_rot = template.instructions.iter().any(|inst| {
-        matches!(
-            inst,
-            Instruction::Gate {
-                gate: crate::gates::Gate::PauliRot(_),
-                ..
-            }
-        )
+    let has_pauli_rot = crate::circuit::any_gate(&template.instructions, &mut |gate| {
+        matches!(gate, crate::gates::Gate::PauliRot(_))
     });
     if has_pauli_rot && !probe.supports_pauli_rotation() {
         return None;
@@ -1210,10 +1198,12 @@ fn supports_deferred_measurement_sampling(circuit: &Circuit) -> bool {
             .instructions
             .iter()
             .any(|inst| matches!(inst, Instruction::Measure { .. }))
-        && !circuit
-            .instructions
-            .iter()
-            .any(|inst| matches!(inst, Instruction::Conditional { .. }))
+        && !circuit.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                Instruction::Conditional { .. } | Instruction::Region(_)
+            )
+        })
 }
 
 fn is_clifford_sampler_kind(kind: &BackendKind) -> bool {
@@ -1739,6 +1729,7 @@ pub(super) fn has_nonunitary_or_classical_ops(circuit: &Circuit) -> bool {
             Instruction::Measure { .. }
                 | Instruction::Reset { .. }
                 | Instruction::Conditional { .. }
+                | Instruction::Region(_)
         )
     })
 }
@@ -2927,17 +2918,8 @@ pub(crate) fn run_shots_with_noise(
     // stream raw and the Pauli-rotation lowering pass cannot run. The
     // statevector applies the gate natively (its device path lowers inline);
     // any other backend without the kernel is rejected before a shot starts.
-    let has_pauli_rot = circuit.instructions.iter().any(|inst| {
-        matches!(
-            inst,
-            Instruction::Gate {
-                gate: crate::gates::Gate::PauliRot(_),
-                ..
-            } | Instruction::Conditional {
-                gate: crate::gates::Gate::PauliRot(_),
-                ..
-            }
-        )
+    let has_pauli_rot = crate::circuit::any_gate(&circuit.instructions, &mut |gate| {
+        matches!(gate, crate::gates::Gate::PauliRot(_))
     });
     if has_pauli_rot
         && !matches!(plan, BackendPlan::Statevector { .. })

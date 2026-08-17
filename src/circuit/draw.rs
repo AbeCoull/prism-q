@@ -94,6 +94,23 @@ fn classify_op(gate: &Gate, targets: &[usize]) -> (String, OpKind) {
     (label, kind)
 }
 
+fn condition_label(condition: &ClassicalCondition) -> String {
+    match condition {
+        ClassicalCondition::BitIsOne(b) => format!("c[{}]", b),
+        ClassicalCondition::BitIsZero(b) => format!("!c[{}]", b),
+        ClassicalCondition::RegisterEquals {
+            offset,
+            size,
+            value,
+        } => format!("c[{}..{}]=={}", offset, offset + size, value),
+        ClassicalCondition::RegisterNotEquals {
+            offset,
+            size,
+            value,
+        } => format!("c[{}..{}]!={}", offset, offset + size, value),
+    }
+}
+
 fn place_op(moments: &mut Vec<Vec<PlacedOp>>, moment: usize, op: PlacedOp) {
     if moment >= moments.len() {
         moments.resize_with(moment + 1, Vec::new);
@@ -142,32 +159,22 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                 condition,
                 gate,
                 targets,
-            } => {
-                let cbit_label = match condition {
-                    ClassicalCondition::BitIsOne(b) => format!("c[{}]", b),
-                    ClassicalCondition::BitIsZero(b) => format!("!c[{}]", b),
-                    ClassicalCondition::RegisterEquals {
-                        offset,
-                        size,
-                        value,
-                    } => {
-                        format!("c[{}..{}]=={}", offset, offset + size, value)
-                    }
-                    ClassicalCondition::RegisterNotEquals {
-                        offset,
-                        size,
-                        value,
-                    } => {
-                        format!("c[{}..{}]!={}", offset, offset + size, value)
-                    }
-                };
-                PlacedOp {
-                    label: gate.to_string(),
-                    qubits: SmallVec::from_slice(targets),
-                    kind: OpKind::Conditional { cbit_label },
-                    gate: Some(gate.clone()),
-                }
-            }
+            } => PlacedOp {
+                label: gate.to_string(),
+                qubits: SmallVec::from_slice(targets),
+                kind: OpKind::Conditional {
+                    cbit_label: condition_label(condition),
+                },
+                gate: Some(gate.clone()),
+            },
+            Instruction::Region(region) => PlacedOp {
+                label: format!("if[{}]", region.body().len()),
+                qubits: SmallVec::from_slice(region.qubits()),
+                kind: OpKind::Conditional {
+                    cbit_label: condition_label(region.condition()),
+                },
+                gate: None,
+            },
         };
         place_op(&mut moments, d, op);
     });
@@ -804,6 +811,7 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
                 conditional_count += 1;
                 *gate_counts.entry(gate.name()).or_default() += 1;
             }
+            Instruction::Region(_) => conditional_count += 1,
         }
     }
 
@@ -854,6 +862,7 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
             Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => {
                 std::slice::from_ref(qubit)
             }
+            Instruction::Region(region) => region.qubits(),
             Instruction::Barrier { .. } => continue,
         };
         for &q in targets {

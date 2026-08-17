@@ -158,10 +158,21 @@ pub fn is_clifford(circuit: &Circuit) -> bool {
                     return false;
                 }
             }
+            Instruction::Region(region) => {
+                if !is_clifford_body(region.body()) {
+                    return false;
+                }
+            }
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
             | Instruction::Barrier { .. } => {}
         }
     }
     true
+}
+
+fn is_clifford_body(instructions: &[Instruction]) -> bool {
+    let mut probe = Circuit::new(1, 0);
+    probe.instructions = instructions.to_vec();
+    is_clifford(&probe)
 }

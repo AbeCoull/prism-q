@@ -803,7 +803,8 @@ pub(super) fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Ci
             }
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
-            | Instruction::Conditional { .. } => break,
+            | Instruction::Conditional { .. }
+            | Instruction::Region(_) => break,
             Instruction::Barrier { .. } => {}
         }
     }

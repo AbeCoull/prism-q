@@ -682,10 +682,23 @@ impl StabilizerBackend {
                 } if condition.evaluate(&self.classical_bits) => {
                     self.sgi_dispatch_gate(gate, targets)?;
                 }
+                Instruction::Region(region)
+                    if region.condition().evaluate(&self.classical_bits) =>
+                {
+                    self.sgi_region_body(region)?;
+                }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Out of line so [`Self::apply_instructions_sgi`] keeps a plain call site
+    /// rather than becoming directly self-recursive, which is a per-gate cost
+    /// on every circuit for a branch most circuits never take.
+    #[inline(never)]
+    fn sgi_region_body(&mut self, region: &crate::circuit::GuardedRegion) -> Result<()> {
+        self.apply_instructions_sgi(region.body())
     }
 
     pub(super) fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {

@@ -2855,7 +2855,7 @@ pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> 
                     .instructions
                     .push(Instruction::Barrier { qubits: mapped });
             }
-            Instruction::Conditional { .. } => {
+            Instruction::Conditional { .. } | Instruction::Region(_) => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "CompiledSampler".to_string(),
                     reason: "deferred measurement sampling does not support classical conditionals"

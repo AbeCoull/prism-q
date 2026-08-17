@@ -22,6 +22,7 @@
 //! | Conditional inequality | `if (c != 0) x q[0];` | Register or bit `!=` |
 //! | Conditional bit literal | `if (c[0] == 1) x q[0];` | Bit equality vs `0` / `1` |
 //! | Conditional negation | `if (!c[0]) x q[0];` | Negated bit truthy test |
+//! | Guarded region | `if (c[0]) { x q[0]; measure q[1] -> c[1]; }` | Braced body, any statement, nestable |
 //! | Hex / binary literals | `if (c == 0xff) ...` | `0x`, `0b`, `0o` integer prefixes with optional `_` separators |
 //! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
@@ -32,7 +33,7 @@
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `defcal`, `extern`, `opaque`, `box`, `while`
+//! - `defcal`, `extern`, `opaque`, `box`, `while`, `switch`, `else`
 //! - `def` bodies that contain `measure`, `reset`, `bit`, `creg`, `return`,
 //!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
 //! - `def` declarations with a return type
@@ -51,7 +52,9 @@
 
 use num_complex::Complex64;
 
-use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec, smallvec};
+use crate::circuit::{
+    Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, SmallVec, guarded, smallvec,
+};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use std::collections::HashMap;
@@ -106,6 +109,7 @@ enum BlockKind {
     Gate,
     Def,
     For,
+    If,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +156,7 @@ pub(crate) struct Parser<'a> {
     total_qubits: usize,
     total_cbits: usize,
     gate_expansion_depth: usize,
+    region_depth: usize,
     param_vars: Option<HashMap<String, f64>>,
     int_vars: Option<HashMap<String, i64>>,
 }
@@ -173,6 +178,7 @@ fn block_kind_name(kind: BlockKind) -> &'static str {
         BlockKind::Gate => "gate",
         BlockKind::Def => "def",
         BlockKind::For => "for",
+        BlockKind::If => "if",
     }
 }
 
@@ -453,6 +459,7 @@ impl<'a> Parser<'a> {
             total_qubits: 0,
             total_cbits: 0,
             gate_expansion_depth: 0,
+            region_depth: 0,
             param_vars: None,
             int_vars: None,
         }
@@ -519,11 +526,17 @@ impl<'a> Parser<'a> {
             .next()
             .unwrap_or(line);
 
-        if matches!(first_word, "gate" | "def" | "for") {
+        // A braced `if` is a guarded region and takes the block path; the
+        // one-statement `if (c) x q[0];` form has no brace and falls through to
+        // `parse_if_statement` below.
+        if matches!(first_word, "gate" | "def" | "for")
+            || (first_word == "if" && line.contains('{'))
+        {
             let kind = match first_word {
                 "gate" => BlockKind::Gate,
                 "def" => BlockKind::Def,
                 "for" => BlockKind::For,
+                "if" => BlockKind::If,
                 _ => unreachable!(),
             };
             let depth = update_brace_depth(0, line);
@@ -602,7 +615,7 @@ impl<'a> Parser<'a> {
 
         if matches!(
             first_word,
-            "defcal" | "opaque" | "while" | "box" | "extern" | "return"
+            "defcal" | "opaque" | "while" | "switch" | "box" | "extern" | "return" | "else"
         ) {
             return Err(PrismError::UnsupportedConstruct {
                 construct: first_word.to_string(),
@@ -624,6 +637,7 @@ impl<'a> Parser<'a> {
                 Ok(Vec::new())
             }
             BlockKind::For => self.expand_for_block(&state.buf, state.start_line),
+            BlockKind::If => self.parse_if_block(&state.buf, state.start_line),
         }
     }
 
@@ -1229,9 +1243,57 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// Parse `if(creg==value) gate args` (OQ2) or `if (c[i]) gate args` (OQ3).
-    fn parse_if_statement(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
-        let rest = line.strip_prefix("if").unwrap().trim();
+    /// Parse `if (cond) { ... }` into a guarded region.
+    ///
+    /// The body reaches [`Parser::parse_lines`], so it admits any statement the
+    /// parser already accepts, nested regions included.
+    fn parse_if_block(&mut self, buf: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        let (condition, body_str) = self.split_if_header(buf, line_num)?;
+
+        let open = body_str.find('{').ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "expected `{` after `if(...)` condition".to_string(),
+        })?;
+        let after_open = &body_str[open + 1..];
+        let close = find_matching_close_brace(after_open).ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "unmatched `{` in `if` body".to_string(),
+        })?;
+        let trailing = after_open[close + 1..].trim();
+        if !trailing.is_empty() {
+            let word = trailing
+                .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
+                .next()
+                .unwrap_or(trailing);
+            return Err(PrismError::UnsupportedConstruct {
+                construct: word.to_string(),
+                line: line_num,
+            });
+        }
+
+        if self.region_depth >= MAX_REGION_DEPTH {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("`if` blocks nest deeper than {MAX_REGION_DEPTH}"),
+            });
+        }
+        self.region_depth += 1;
+        let body_lines = split_body_into_lines(after_open[..close].trim());
+        let refs: Vec<&str> = body_lines.iter().map(String::as_str).collect();
+        let body = self.parse_lines(&refs, line_num.saturating_sub(1));
+        self.region_depth -= 1;
+
+        Ok(guarded(condition, body?).into_iter().collect())
+    }
+
+    /// Split `if (cond) rest` into the parsed condition and the trimmed rest,
+    /// which is empty when the condition is the whole statement.
+    fn split_if_header<'s>(
+        &self,
+        line: &'s str,
+        line_num: usize,
+    ) -> Result<(ClassicalCondition, &'s str)> {
+        let rest = line.trim_start().strip_prefix("if").unwrap().trim();
         let open = rest.find('(').ok_or_else(|| PrismError::Parse {
             line: line_num,
             message: "expected `(` after `if`".to_string(),
@@ -1242,30 +1304,22 @@ impl<'a> Parser<'a> {
                 line: line_num,
                 message: "expected `)` in `if` condition".to_string(),
             })?;
-        let cond_str = after_open[..close_offset].trim();
-        let body_str = after_open[close_offset + 1..].trim();
+        let condition =
+            self.parse_classical_condition(after_open[..close_offset].trim(), line_num)?;
+        Ok((condition, after_open[close_offset + 1..].trim()))
+    }
 
+    /// Parse `if(creg==value) gate args` (OQ2) or `if (c[i]) gate args` (OQ3).
+    fn parse_if_statement(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        let (condition, body_str) = self.split_if_header(line, line_num)?;
         if body_str.is_empty() {
             return Err(PrismError::Parse {
                 line: line_num,
                 message: "expected gate after `if(...)` condition".to_string(),
             });
         }
-
-        let condition = self.parse_classical_condition(cond_str, line_num)?;
-
-        let gate_instrs = self.parse_gate_application(body_str, line_num)?;
-        Ok(gate_instrs
-            .into_iter()
-            .map(|inst| match inst {
-                Instruction::Gate { gate, targets } => Instruction::Conditional {
-                    condition: condition.clone(),
-                    gate,
-                    targets,
-                },
-                other => other,
-            })
-            .collect())
+        let body = self.parse_gate_application(body_str, line_num)?;
+        Ok(guarded(condition, body).into_iter().collect())
     }
 
     /// Parse a classical condition expression for `if (...)`.
@@ -1537,6 +1591,7 @@ impl<'a> Parser<'a> {
             total_qubits: max_qubit,
             total_cbits: self.total_cbits,
             gate_expansion_depth: self.gate_expansion_depth + 1,
+            region_depth: self.region_depth,
             param_vars: Some(var_map),
             int_vars: self.int_vars.clone(),
         };
@@ -1724,6 +1779,7 @@ impl<'a> Parser<'a> {
             total_qubits: max_qubit,
             total_cbits: self.total_cbits,
             gate_expansion_depth: self.gate_expansion_depth + 1,
+            region_depth: self.region_depth,
             param_vars: Some(float_vars),
             int_vars: Some(int_vars),
         };

@@ -20,7 +20,8 @@
 //! Supported: exact unitary evolution, basis-state probabilities, the one-qubit
 //! reduced density matrix, projective measurement with stochastic collapse,
 //! reset, classically-conditioned gates, exact one-qubit Kraus channels
-//! (`apply_1q_kraus`), two-qubit depolarizing (`apply_2q_depolarizing`), and
+//! (`apply_1q_kraus`), exact two-qubit Kraus channels (`apply_2q_kraus`, which
+//! `apply_2q_depolarizing` lowers onto), and
 //! exact `Tr(rho P)` expectation (`expectation_pauli`, reachable through
 //! `pauli_expectations`). Batched payload shapes (`QftBlock`, `BatchPhase`,
 //! `BatchRzz`, `DiagonalBatch`, `MultiFused`, `Multi2q`) carry qubit indices
@@ -501,12 +502,7 @@ impl DensityMatrixBackend {
 
     /// Apply symmetric two-qubit depolarizing on `(q0, q1)`:
     /// `rho -> (1-p) rho + (p/15) sum_{P != I(x)I} P rho P`, summed over the 15
-    /// non-identity two-qubit Paulis. The 16 two-qubit Pauli Kraus operators are
-    /// compiled once into a 16x16 block superoperator over the four-bit
-    /// `(q0-row, q1-row, q0-col, q1-col)` block, so the buffer is swept once.
-    ///
-    /// Block index `4*tr + tc` orders the two-qubit row value `tr` (bit 0 = q0,
-    /// bit 1 = q1) against the column value `tc`.
+    /// non-identity two-qubit Paulis.
     pub fn apply_2q_depolarizing(&mut self, q0: usize, q1: usize, p: f64) {
         let c1 = Complex64::new(1.0, 0.0);
         let c0 = Complex64::new(0.0, 0.0);
@@ -517,9 +513,7 @@ impl DensityMatrixBackend {
             [[c0, -ci], [ci, c0]],
             [[c1, c0], [c0, -c1]],
         ];
-        // K_(a,b) = weight * (paulis[b] (x) paulis[a]) with q0 as the low bit;
-        // S[4*tr+tc][4*trp+tcp] = sum_(a,b) K[tr][trp] * conj(K[tc][tcp]).
-        let mut s = [[Complex64::new(0.0, 0.0); 16]; 16];
+        let mut kraus = [[[c0; 4]; 4]; 16];
         for a in 0..4 {
             for b in 0..4 {
                 let w = if a == 0 && b == 0 {
@@ -527,19 +521,39 @@ impl DensityMatrixBackend {
                 } else {
                     (p / 15.0).sqrt()
                 };
-                let kentry = |t: usize, tp: usize| {
-                    Complex64::new(w, 0.0) * paulis[b][t >> 1][tp >> 1] * paulis[a][t & 1][tp & 1]
-                };
-                for tr in 0..4 {
-                    for trp in 0..4 {
-                        let kr = kentry(tr, trp);
-                        if kr == Complex64::new(0.0, 0.0) {
-                            continue;
-                        }
-                        for tc in 0..4 {
-                            for tcp in 0..4 {
-                                s[4 * tr + tc][4 * trp + tcp] += kr * kentry(tc, tcp).conj();
-                            }
+                let w = Complex64::new(w, 0.0);
+                let k = &mut kraus[4 * a + b];
+                for (t, row) in k.iter_mut().enumerate() {
+                    for (tp, entry) in row.iter_mut().enumerate() {
+                        *entry = w * paulis[a][t >> 1][tp >> 1] * paulis[b][t & 1][tp & 1];
+                    }
+                }
+            }
+        }
+        self.apply_2q_kraus(q0, q1, &kraus);
+    }
+
+    /// Apply a general two-qubit channel `rho -> sum_k K_k rho K_k^dagger` on
+    /// `(q0, q1)`. Each operator is indexed `K[t][t']` with
+    /// `t = 2 * bit(q0) + bit(q1)`, matching [`Gate::matrix_4x4`].
+    ///
+    /// The Kraus set is compiled once into a 16x16 block superoperator over the
+    /// four-bit `(q0-row, q1-row, q0-col, q1-col)` block, so the buffer is swept
+    /// once. Block index `4*tr + tc` orders the two-qubit row value `tr` against
+    /// the column value `tc`.
+    pub fn apply_2q_kraus(&mut self, q0: usize, q1: usize, kraus: &[[[Complex64; 4]; 4]]) {
+        // S[4*tr+tc][4*trp+tcp] = sum_k K_k[tr][trp] * conj(K_k[tc][tcp]).
+        let mut s = [[Complex64::new(0.0, 0.0); 16]; 16];
+        for k in kraus {
+            for tr in 0..4 {
+                for trp in 0..4 {
+                    let kr = k[tr][trp];
+                    if kr == Complex64::new(0.0, 0.0) {
+                        continue;
+                    }
+                    for tc in 0..4 {
+                        for tcp in 0..4 {
+                            s[4 * tr + tc][4 * trp + tcp] += kr * k[tc][tcp].conj();
                         }
                     }
                 }
@@ -551,10 +565,10 @@ impl DensityMatrixBackend {
         let mut positions = [q0, q1, q0 + n, q1 + n];
         positions.sort_unstable();
         let flat_offset = |tr: usize, tc: usize| {
-            (if tr & 1 != 0 { 1usize << (q0 + n) } else { 0 })
-                | (if tr & 2 != 0 { 1usize << (q1 + n) } else { 0 })
-                | (if tc & 1 != 0 { 1usize << q0 } else { 0 })
-                | (if tc & 2 != 0 { 1usize << q1 } else { 0 })
+            (if tr & 2 != 0 { 1usize << (q0 + n) } else { 0 })
+                | (if tr & 1 != 0 { 1usize << (q1 + n) } else { 0 })
+                | (if tc & 2 != 0 { 1usize << q0 } else { 0 })
+                | (if tc & 1 != 0 { 1usize << q1 } else { 0 })
         };
         let mut flats = [0usize; 16];
         for tr in 0..4 {

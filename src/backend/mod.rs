@@ -27,6 +27,7 @@
 //! | `apply_1q_matrix` | Stabilizer, FactoredStabilizer | A tableau stores a state by its stabilizer group, closed under Clifford conjugation. A general 2x2 has no image in that group, and a Kraus branch is not even unitary. |
 //! | `reduced_density_matrix_1q` | Stabilizer, FactoredStabilizer | Derivable from a tableau, but the operator it feeds cannot be applied (row above), so the branch would be sampled and never used. |
 //! | `reduced_density_matrix_1q` | DistributedStatevector | Trajectories run shots on Rayon workers whose order differs per rank, so per-shot noise would issue rank collectives out of lockstep. `run_shots_with_noise` rejects the backend for that reason, which closes the only path here. |
+//! | `reduced_density_matrix_2q` | Everything except Statevector | Feeds the branch weights of a correlated two-qubit Kraus channel, which needs the joint state of the pair. A tableau, a product state, and a factored register hold no joint amplitude for an arbitrary pair; MPS and sparse could answer but do not yet. `Backend::supports_two_qubit_kraus` reports the coverage, and `run_shots_with_noise` rejects on it before allocating state. |
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
 //! | `init_from_amplitudes` | Everything except Statevector and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. |
@@ -497,6 +498,31 @@ pub trait Backend {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
             operation: "reduced_density_matrix_1q".to_string(),
+        })
+    }
+
+    /// Whether this backend can run a [`NoiseChannel::Kraus2q`](crate::sim::noise::NoiseChannel)
+    /// branch, which needs both [`Backend::reduced_density_matrix_2q`] and a
+    /// `Gate::Fused2q` kernel. Checked before a shot starts, so an incapable
+    /// backend is named at dispatch rather than part way through a trajectory.
+    fn supports_two_qubit_kraus(&self) -> bool {
+        false
+    }
+
+    /// Compute the two-qubit reduced density matrix without collapsing the state.
+    ///
+    /// Indexed `rho[t][t']` with `t = 2 * bit(q0) + bit(q1)`, the packing
+    /// [`crate::gates::Gate::matrix_4x4`] uses, so `q0` is the high bit.
+    ///
+    /// # Panics
+    ///
+    /// Implementations index the two qubits as distinct bit positions, so
+    /// `q0 == q1` panics rather than returning a block read from overlapping
+    /// amplitudes.
+    fn reduced_density_matrix_2q(&self, _q0: usize, _q1: usize) -> Result<[[Complex64; 4]; 4]> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "reduced_density_matrix_2q".to_string(),
         })
     }
 

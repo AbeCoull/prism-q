@@ -149,8 +149,25 @@ Backward Pauli propagation through circuit + noise sensitivity analysis. Each no
 
 `NoiseModel`: per-instruction noise events. Pauli and depolarizing channels are
 supported by every noisy engine. Amplitude damping, phase damping, thermal
-relaxation, two-qubit depolarizing, custom Kraus operators, and readout error
-require the trajectory engine.
+relaxation, two-qubit depolarizing, one- and two-qubit custom Kraus operators,
+and readout error require the trajectory engine.
+
+`NoiseBuilder` (`src/sim/noise_builder.rs`) compiles declarative rules into that
+same per-instruction vector: per-gate-type and per-qubit rates, idle
+decoherence against circuit layers, crosstalk through a coupling map, coherent
+over-rotation proportional to a rotation gate's own angle, reset error,
+pre-measurement error, and per-bit readout. Every rule is evaluated once at
+build time, so nothing it expresses reaches a per-shot or per-instruction loop.
+
+Two-qubit Kraus operators are indexed `K[t][t']` with `t = 2*bit(q0) +
+bit(q1)`, the packing `Gate::matrix_4x4` uses. The density matrix compiles the
+set into a 16x16 block superoperator (`apply_2q_kraus`, which
+`apply_2q_depolarizing` lowers onto). The trajectory engine draws a branch from
+`Tr(Kdagger K rho)` over `Backend::reduced_density_matrix_2q` and applies the
+normalized operator as a `Fused2q`. Only the host statevector implements that
+reduction, and `run_shots_with_noise` checks `Backend::supports_two_qubit_kraus`
+before the first shot, so an `Auto` route that picked another backend is named
+at dispatch rather than part way through a trajectory.
 
 ## Noisy engine routing and the observable-result contract
 
@@ -181,6 +198,14 @@ before allocating state: one event slot per instruction, channel parameters in
 range, distinct targets on a two-qubit channel, and every target inside the
 register. Bounds cannot be checked from the model alone, and a target outside
 the register reaches kernels that index amplitudes without one.
+
+A guarded region (`Instruction::Region`) is rejected whenever the model carries
+at least one quantum event: slots are indexed per top-level instruction, so a
+region body has none and would run noiselessly. A readout-only model has
+nothing to lose there and is accepted. Reaching noise inside a region body
+needs the event stream keyed by something other than a top-level index, which
+the compiled sampler, the homological builder, and the density-matrix evolution
+all walk today.
 
 Custom Kraus sets must be trace preserving, `sum_k Kdagger_k K_k = I` to 1e-9.
 The exact route applies a declared set literally while the trajectory route

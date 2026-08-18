@@ -24,7 +24,7 @@ use crate::sim::compiled::{
 /// `NoiseModel::after_gate` entry contains a matching `NoiseEvent`. For
 /// Pauli-only noise on Clifford circuits, the compiled stabilizer sampler
 /// is used instead, see [`NoiseModel::is_pauli_only`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum NoiseChannel {
     /// Independent Pauli X/Y/Z error with given per-branch probabilities.
     Pauli { px: f64, py: f64, pz: f64 },
@@ -53,9 +53,49 @@ pub enum NoiseChannel {
     /// as well as populations. Call [`NoiseModel::validate`] in setup code to
     /// catch empty or non-finite custom channels before sampling.
     Custom { kraus: Vec<[[Complex64; 2]; 2]> },
+    /// General two-qubit channel described by a set of 4x4 Kraus operators.
+    ///
+    /// Each operator is indexed `K[t][t']` with `t = 2 * bit(qubits[0]) +
+    /// bit(qubits[1])`, the packing [`crate::gates::Gate::matrix_4x4`] uses, so
+    /// the first target is the high bit. Runs exactly on the density matrix and
+    /// on trajectory backends reporting [`Backend::supports_two_qubit_kraus`].
+    ///
+    /// Correlated `ZZ` dephasing of strength `p`, as the diagonal pair
+    /// `sqrt(1-p) I` and `sqrt(p) (Z (x) Z)`:
+    ///
+    /// ```
+    /// use num_complex::Complex64;
+    /// use prism_q::NoiseChannel;
+    ///
+    /// let p = 0.02_f64;
+    /// let diag = |scale: f64, signs: [f64; 4]| {
+    ///     let mut m = [[Complex64::new(0.0, 0.0); 4]; 4];
+    ///     for (t, sign) in signs.iter().enumerate() {
+    ///         m[t][t] = Complex64::new(scale * sign, 0.0);
+    ///     }
+    ///     m
+    /// };
+    /// let zz = NoiseChannel::Kraus2q {
+    ///     kraus: vec![
+    ///         diag((1.0 - p).sqrt(), [1.0, 1.0, 1.0, 1.0]),
+    ///         diag(p.sqrt(), [1.0, -1.0, -1.0, 1.0]),
+    ///     ],
+    /// };
+    /// zz.validate()?;
+    /// # Ok::<(), prism_q::PrismError>(())
+    /// ```
+    Kraus2q { kraus: Vec<[[Complex64; 4]; 4]> },
 }
 
 impl NoiseChannel {
+    /// Number of qubits an event carrying this channel must name.
+    pub fn num_qubits(&self) -> usize {
+        match self {
+            NoiseChannel::TwoQubitDepolarizing { .. } | NoiseChannel::Kraus2q { .. } => 2,
+            _ => 1,
+        }
+    }
+
     /// Per-Pauli `(px, py, pz)` probabilities for a Pauli or Depolarizing
     /// channel, `None` for every other channel.
     pub fn as_pauli(&self) -> Option<(f64, f64, f64)> {
@@ -124,27 +164,8 @@ impl NoiseChannel {
                     });
                 }
             }
-            NoiseChannel::Custom { kraus } => {
-                if kraus.is_empty() {
-                    return Err(crate::error::PrismError::InvalidParameter {
-                        message: "Custom Kraus channel must contain at least one operator".into(),
-                    });
-                }
-                for (op_idx, op) in kraus.iter().enumerate() {
-                    for (row_idx, row) in op.iter().enumerate() {
-                        for (col_idx, val) in row.iter().enumerate() {
-                            if !val.re.is_finite() || !val.im.is_finite() {
-                                return Err(crate::error::PrismError::InvalidParameter {
-                                    message: format!(
-                                        "Custom Kraus operator {op_idx} entry ({row_idx},{col_idx}) must be finite"
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                }
-                validate_trace_preserving(kraus)?;
-            }
+            NoiseChannel::Custom { kraus } => validate_kraus_set("Custom", kraus)?,
+            NoiseChannel::Kraus2q { kraus } => validate_kraus_set("Kraus2q", kraus)?,
         }
         Ok(())
     }
@@ -155,13 +176,36 @@ impl NoiseChannel {
 /// that a channel scaled by a constant is rejected.
 const CPTP_TOLERANCE: f64 = 1e-9;
 
-fn validate_trace_preserving(kraus: &[[[Complex64; 2]; 2]]) -> Result<()> {
-    let mut sum = [[Complex64::new(0.0, 0.0); 2]; 2];
+/// Reject an empty operator set, a non-finite entry, and any deviation from
+/// `sum_k Kdagger_k K_k = I` past [`CPTP_TOLERANCE`]. Shared by the one-qubit
+/// and two-qubit dense channels, which differ only in `D`.
+fn validate_kraus_set<const D: usize>(name: &str, kraus: &[[[Complex64; D]; D]]) -> Result<()> {
+    if kraus.is_empty() {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: format!("{name} Kraus channel must contain at least one operator"),
+        });
+    }
+    for (op_idx, op) in kraus.iter().enumerate() {
+        for (row_idx, row) in op.iter().enumerate() {
+            for (col_idx, val) in row.iter().enumerate() {
+                if !val.re.is_finite() || !val.im.is_finite() {
+                    return Err(crate::error::PrismError::InvalidParameter {
+                        message: format!(
+                            "{name} Kraus operator {op_idx} entry ({row_idx},{col_idx}) must be finite"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    let mut sum = [[Complex64::new(0.0, 0.0); D]; D];
     for op in kraus {
-        let effect = crate::sim::trajectory::kdagger_k(op);
-        for (row, effect_row) in effect.iter().enumerate() {
-            for (col, entry) in effect_row.iter().enumerate() {
-                sum[row][col] += entry;
+        for (row, sum_row) in sum.iter_mut().enumerate() {
+            for (col, entry) in sum_row.iter_mut().enumerate() {
+                for op_row in op.iter() {
+                    *entry += op_row[row].conj() * op_row[col];
+                }
             }
         }
     }
@@ -171,7 +215,7 @@ fn validate_trace_preserving(kraus: &[[[Complex64; 2]; 2]]) -> Result<()> {
             if (entry.re - expected).abs() > CPTP_TOLERANCE || entry.im.abs() > CPTP_TOLERANCE {
                 return Err(crate::error::PrismError::InvalidParameter {
                     message: format!(
-                        "Custom Kraus operators must be trace preserving: \
+                        "{name} Kraus operators must be trace preserving: \
                          sum of Kdagger K at ({row},{col}) is {entry}, expected {expected}"
                     ),
                 });
@@ -192,10 +236,11 @@ fn validate_probability(name: &str, value: f64) -> Result<()> {
 
 /// A noise channel bound to its target qubits; fires after the instruction
 /// its [`NoiseModel::after_gate`] slot is attached to.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NoiseEvent {
     pub channel: NoiseChannel,
-    /// One qubit for single-qubit channels, two for `TwoQubitDepolarizing`.
+    /// As many entries as [`NoiseChannel::num_qubits`] requires, in the order
+    /// the channel indexes them.
     pub qubits: SmallVec<[usize; 2]>,
 }
 
@@ -227,7 +272,7 @@ impl NoiseEvent {
 }
 
 /// Classical bit-flip error applied to a measurement outcome.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReadoutError {
     /// Probability a measured 0 reads out as 1.
     pub p01: f64,
@@ -253,6 +298,7 @@ pub struct ReadoutError {
 /// assert_eq!(result.shots.len(), 100);
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
+#[derive(Debug)]
 pub struct NoiseModel {
     /// Events fired after each instruction, indexed by instruction position;
     /// length must equal the circuit's instruction count.
@@ -325,6 +371,25 @@ impl NoiseModel {
         self
     }
 
+    /// Set the readout error of one classical bit, leaving the rest alone.
+    ///
+    /// Indexed by classical bit rather than by qubit: a qubit measured into
+    /// several bits carries an independent rate per bit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bit` is outside the classical register the model was built
+    /// for, matching the index-bounds policy of the circuit builders.
+    pub fn set_bit_readout_error(&mut self, bit: usize, p01: f64, p10: f64) -> &mut Self {
+        assert!(
+            bit < self.readout.len(),
+            "classical bit {bit} is outside the {}-bit register",
+            self.readout.len()
+        );
+        self.readout[bit] = Some(ReadoutError { p01, p10 });
+        self
+    }
+
     /// True when every channel is Pauli or Depolarizing and readout is ideal,
     /// the precondition for the compiled stabilizer sampling paths.
     pub fn is_pauli_only(&self) -> bool {
@@ -333,6 +398,15 @@ impl NoiseModel {
             .flat_map(|events| events.iter())
             .all(|e| e.channel.is_pauli())
             && self.readout.iter().all(|r| r.is_none())
+    }
+
+    /// True when any event carries a [`NoiseChannel::Kraus2q`], the one channel
+    /// needing a two-qubit reduction from the backend running the trajectory.
+    pub(crate) fn has_two_qubit_kraus(&self) -> bool {
+        self.after_gate
+            .iter()
+            .flat_map(|events| events.iter())
+            .any(|event| matches!(event.channel, NoiseChannel::Kraus2q { .. }))
     }
 
     pub fn has_noise(&self) -> bool {
@@ -377,19 +451,23 @@ impl NoiseModel {
         self.validate()?;
 
         // One event slot per top-level instruction, so a region's body has no
-        // slots to carry noise and would run noiselessly without this.
-        if let Some(index) = circuit
-            .instructions
-            .iter()
-            .position(|inst| matches!(inst, Instruction::Region(_)))
-        {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "NoiseModel".to_string(),
-                reason: format!(
-                    "noise events are indexed per instruction, which leaves the body of the \
-                     guarded region at instruction {index} without noise slots"
-                ),
-            });
+        // slots to carry noise and would run noiselessly without this. A model
+        // carrying no quantum events has nothing to lose there, so readout-only
+        // noise stays legal on a circuit with regions.
+        if self.after_gate.iter().any(|events| !events.is_empty()) {
+            if let Some(index) = circuit
+                .instructions
+                .iter()
+                .position(|inst| matches!(inst, Instruction::Region(_)))
+            {
+                return Err(crate::error::PrismError::IncompatibleBackend {
+                    backend: "NoiseModel".to_string(),
+                    reason: format!(
+                        "noise events are indexed per instruction, which leaves the body of the \
+                         guarded region at instruction {index} without noise slots"
+                    ),
+                });
+            }
         }
 
         for (instr_idx, events) in self.after_gate.iter().enumerate() {
@@ -421,10 +499,7 @@ impl NoiseModel {
                     }
                 })?;
 
-                let expected_qubits = match &event.channel {
-                    NoiseChannel::TwoQubitDepolarizing { .. } => 2,
-                    _ => 1,
-                };
+                let expected_qubits = event.channel.num_qubits();
                 if event.qubits.len() != expected_qubits {
                     return Err(crate::error::PrismError::InvalidParameter {
                         message: format!(
@@ -2573,8 +2648,8 @@ pub(crate) fn kraus_1q(channel: &NoiseChannel) -> Vec<[[Complex64; 2]; 2]> {
             out
         }
         NoiseChannel::Custom { kraus } => kraus.clone(),
-        NoiseChannel::TwoQubitDepolarizing { .. } => {
-            unreachable!("two-qubit depolarizing has no single-qubit Kraus lowering")
+        NoiseChannel::TwoQubitDepolarizing { .. } | NoiseChannel::Kraus2q { .. } => {
+            unreachable!("two-qubit channels have no single-qubit Kraus lowering")
         }
     }
 }
@@ -2584,6 +2659,9 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
     match &event.channel {
         NoiseChannel::TwoQubitDepolarizing { p } => {
             dm.apply_2q_depolarizing(event.qubits[0], event.qubits[1], *p);
+        }
+        NoiseChannel::Kraus2q { kraus } => {
+            dm.apply_2q_kraus(event.qubits[0], event.qubits[1], kraus);
         }
         other => {
             let kraus = kraus_1q(other);
@@ -2644,10 +2722,9 @@ fn evolve_density_matrix(
         if let Instruction::Gate { gate, targets } = inst {
             if targets.len() == 1
                 && !events.is_empty()
-                && events.iter().all(|event| {
-                    !matches!(event.channel, NoiseChannel::TwoQubitDepolarizing { .. })
-                        && event.qubits[0] == targets[0]
-                })
+                && events
+                    .iter()
+                    .all(|event| event.channel.num_qubits() == 1 && event.qubits[0] == targets[0])
             {
                 let channels: Vec<Vec<[[Complex64; 2]; 2]>> =
                     events.iter().map(|e| kraus_1q(&e.channel)).collect();
@@ -2741,6 +2818,11 @@ pub(crate) fn dm_expectation_values(
         })
         .collect()
 }
+
+#[path = "noise_builder.rs"]
+pub mod builder;
+
+pub use builder::{GateFilter, NoiseBuilder};
 
 #[cfg(test)]
 #[path = "noise_tests.rs"]

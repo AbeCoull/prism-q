@@ -2935,6 +2935,20 @@ pub(crate) fn run_shots_with_noise(
                 .into(),
         });
     }
+    // A correlated two-qubit Kraus branch reads a two-qubit reduced density
+    // matrix, which only the host statevector answers. Without this the model
+    // clears every routing gate and fails part way through the first shot, on a
+    // backend an Auto route may have picked for the caller.
+    if noise_model.has_two_qubit_kraus() && !plan.build(seed).supports_two_qubit_kraus() {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: format!("{:?}", plan.resolved()),
+            reason: "a two-qubit Kraus channel needs the two-qubit reduced density matrix \
+                     its branch probabilities are drawn from, which only the host \
+                     statevector provides; run on BackendKind::Statevector, or evaluate \
+                     the channel exactly on BackendKind::DensityMatrix"
+                .into(),
+        });
+    }
     let route = plan.resolved();
     trajectory::run_trajectories(
         |s| plan.build(s),

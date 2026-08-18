@@ -81,8 +81,8 @@ the `distributed-mpi` feature: `MpiComm`
 
 **Data types:**
 `CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`,
-`NoisyCompiledSampler`, `NoiseChannel`, `NoiseEvent`, `NoiseModel`, `ReadoutError`,
-`HomologicalSampler`, `ErrorChainComplex`
+`NoisyCompiledSampler`, `NoiseChannel`, `NoiseEvent`, `NoiseModel`, `NoiseBuilder`,
+`GateFilter`, `ReadoutError`, `HomologicalSampler`, `ErrorChainComplex`
 
 Not re-exported at the root but part of the documented surface: the `Backend` trait and
 `BasisSamples` at `prism_q::backend`, the density matrix backend at

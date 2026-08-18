@@ -677,6 +677,201 @@ fn density_matrix_dephasing_removes_coherence() {
     assert_probs(&backend.probabilities().unwrap(), &[0.25, 0.25, 0.25, 0.25]);
 }
 
+// A two-qubit Kraus set is indexed `K[t][t']` with `t = 2*bit(q0) + bit(q1)`,
+// so the first qubit named is the high bit. `diag(1, 1, -1, -1)` is therefore
+// `Z` on the first and identity on the second, and swapping the two qubit
+// arguments has to move the dephasing to the other qubit.
+#[test]
+fn density_matrix_two_qubit_kraus_orders_the_first_qubit_high() {
+    let p = 0.25f64;
+    let zero = Complex64::new(0.0, 0.0);
+    let diag = |scale: f64, signs: [f64; 4]| {
+        let mut m = [[zero; 4]; 4];
+        for (t, sign) in signs.iter().enumerate() {
+            m[t][t] = Complex64::new(scale * sign, 0.0);
+        }
+        m
+    };
+    // K0 = sqrt(1-p) I, K1 = sqrt(p) (Z (x) I): dephasing of strength p on the
+    // high qubit alone. On |++> that leaves <X> = 1 - 2p there and <X> = 1 on
+    // the untouched one.
+    let z_on_high = [
+        diag((1.0 - p).sqrt(), [1.0, 1.0, 1.0, 1.0]),
+        diag(p.sqrt(), [1.0, 1.0, -1.0, -1.0]),
+    ];
+
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[1]);
+
+    for (q0, q1, x0, x1) in [(0, 1, 1.0 - 2.0 * p, 1.0), (1, 0, 1.0, 1.0 - 2.0 * p)] {
+        let mut backend = DensityMatrixBackend::new(common::SEED);
+        sim::run_on(&mut backend, &c).unwrap();
+        backend.apply_2q_kraus(q0, q1, &z_on_high);
+        let got = backend
+            .pauli_expectations(&[
+                vec![prism_q::PauliTerm::x(0)],
+                vec![prism_q::PauliTerm::x(1)],
+            ])
+            .unwrap();
+        assert!(
+            (got[0] - x0).abs() < EPS && (got[1] - x1).abs() < EPS,
+            "({q0},{q1}): expected ({x0}, {x1}), got ({}, {})",
+            got[0],
+            got[1]
+        );
+    }
+}
+
+// Correlated dephasing {sqrt(1-p) I, sqrt(p) Z(x)Z} maps |++> onto the mixture
+// (1-p)|++><++| + p|--><--|. Both single-qubit <X> read 1 - 2p, while <X0 X1>
+// stays at 1 because the two branches flip together. Independent single-qubit
+// dephasing at the same rate would give (1-2p)^2 there, so the joint term is
+// what separates a correlated channel from two local ones.
+#[test]
+fn density_matrix_correlated_zz_dephasing_keeps_the_joint_term() {
+    let p = 0.25f64;
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[1]);
+
+    let mut backend = DensityMatrixBackend::new(common::SEED);
+    sim::run_on(&mut backend, &c).unwrap();
+    let zero = Complex64::new(0.0, 0.0);
+    let diag = |scale: f64, signs: [f64; 4]| {
+        let mut m = [[zero; 4]; 4];
+        for (t, sign) in signs.iter().enumerate() {
+            m[t][t] = Complex64::new(scale * sign, 0.0);
+        }
+        m
+    };
+    let zz = [
+        diag((1.0f64 - p).sqrt(), [1.0, 1.0, 1.0, 1.0]),
+        diag(p.sqrt(), [1.0, -1.0, -1.0, 1.0]),
+    ];
+    backend.apply_2q_kraus(0, 1, &zz);
+
+    let got = backend
+        .pauli_expectations(&[
+            vec![prism_q::PauliTerm::x(0)],
+            vec![prism_q::PauliTerm::x(1)],
+            vec![prism_q::PauliTerm::x(0), prism_q::PauliTerm::x(1)],
+        ])
+        .unwrap();
+    let expected = [1.0 - 2.0 * p, 1.0 - 2.0 * p, 1.0];
+    for (i, (a, e)) in got.iter().zip(&expected).enumerate() {
+        assert!((a - e).abs() < EPS, "term {i}: expected {e}, got {a}");
+    }
+}
+
+// `reduced_density_matrix_2q` packs `t = 2*bit(q0) + bit(q1)`. On
+// (|00> + |01>)/sqrt(2), written with qubit 0 in the low state-index bit, the
+// occupied pair is t in {0, 2} when qubit 0 is named first and t in {0, 1}
+// when qubit 1 is, with every entry of the block equal to 1/2.
+#[test]
+fn statevector_two_qubit_reduced_density_matrix_orders_the_first_qubit_high() {
+    use prism_q::backend::Backend;
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+
+    let mut backend = StatevectorBackend::new(common::SEED);
+    sim::run_on(&mut backend, &c).unwrap();
+
+    for (q0, q1, occupied) in [(0usize, 1usize, [0usize, 2usize]), (1, 0, [0, 1])] {
+        let rho = backend.reduced_density_matrix_2q(q0, q1).unwrap();
+        for (t, row) in rho.iter().enumerate() {
+            for (tp, entry) in row.iter().enumerate() {
+                let expected = if occupied.contains(&t) && occupied.contains(&tp) {
+                    Complex64::new(0.5, 0.0)
+                } else {
+                    Complex64::new(0.0, 0.0)
+                };
+                assert_amplitude(*entry, expected, &format!("({q0},{q1}) rho[{t}][{tp}]"));
+            }
+        }
+    }
+}
+
+// `Gate::Fused2q` indexes its matrix `i*2 + j` with `i` on `targets[0]`, and the
+// two-qubit Kraus path relies on that packing. `diag(1, 1, -1, -1)` is `Z` on
+// the high index, so on `|++>` it takes the first-named target to `|->` and
+// leaves the other at `|+>`. A closing Hadamard on both turns that into the one
+// basis state with the first-named target set. Nothing else on the CPU path
+// pins this: the fused fixtures elsewhere are symmetric or are compared against
+// another `Fused2q`.
+#[test]
+fn fused_2q_orders_the_first_target_high() {
+    let zero = Complex64::new(0.0, 0.0);
+    let one = Complex64::new(1.0, 0.0);
+    let neg = Complex64::new(-1.0, 0.0);
+    let z_on_high = [
+        [one, zero, zero, zero],
+        [zero, one, zero, zero],
+        [zero, zero, neg, zero],
+        [zero, zero, zero, neg],
+    ];
+
+    // State index bit 0 is qubit 0, so naming qubit 0 first lands on index 1
+    // and naming qubit 1 first lands on index 2.
+    for (q0, q1, expected) in [
+        (0usize, 1usize, [0.0, 1.0, 0.0, 0.0]),
+        (1, 0, [0.0, 0.0, 1.0, 0.0]),
+    ] {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::H, &[1]);
+        c.add_gate(Gate::Fused2q(Box::new(z_on_high)), &[q0, q1]);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::H, &[1]);
+        assert_probs(&run_and_probs(&c), &expected);
+    }
+}
+
+// A complex, non-Hermitian two-qubit Kraus operator. Every other two-qubit set
+// in the suite is real, and the Pauli depolarizing channel is invariant under
+// conjugating all its operators, so a conjugate swap in the superoperator sum
+// would survive them. `K = sqrt(p) |00><11|` moves the `|11>` population onto
+// `|00>` with an `i` phase that only the `K rho K^dagger` order reproduces.
+#[test]
+fn density_matrix_two_qubit_kraus_uses_the_conjugate_transpose() {
+    let p = 0.4f64;
+    let zero = Complex64::new(0.0, 0.0);
+    let mut keep = [[zero; 4]; 4];
+    for (t, row) in keep.iter_mut().enumerate() {
+        row[t] = Complex64::new(if t == 3 { (1.0 - p).sqrt() } else { 1.0 }, 0.0);
+    }
+    let mut jump = [[zero; 4]; 4];
+    jump[0][3] = Complex64::new(0.0, p.sqrt());
+
+    // Start from (|00> + |11>)/sqrt(2), which has coherence between the two
+    // levels the jump connects.
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+
+    let mut backend = DensityMatrixBackend::new(common::SEED);
+    sim::run_on(&mut backend, &c).unwrap();
+    backend.apply_2q_kraus(0, 1, &[keep, jump]);
+
+    // rho = 1/2 (|00><00| + |11><11|) with coherence sqrt(1-p)/2, plus the
+    // jump branch p/2 landing back on |00>. Populations: |00> = (1 + p)/2,
+    // |11> = (1 - p)/2. The jump term is |00><00| whatever the phase, so the
+    // diagonal alone does not test the conjugate; <X0 X1> does, and it reads
+    // sqrt(1-p) with the correct order.
+    let probs = backend.probabilities().unwrap();
+    assert_probs(&probs, &[(1.0 + p) / 2.0, 0.0, 0.0, (1.0 - p) / 2.0]);
+
+    let got = backend
+        .pauli_expectations(&[vec![prism_q::PauliTerm::x(0), prism_q::PauliTerm::x(1)]])
+        .unwrap();
+    assert!(
+        (got[0] - (1.0 - p).sqrt()).abs() < EPS,
+        "expected <X0 X1> = {}, got {}",
+        (1.0 - p).sqrt(),
+        got[0]
+    );
+}
+
 // ---- Start states ----
 
 // H (cos(pi/8)|0> + sin(pi/8)|1>) = ((c+s)|0> + (c-s)|1>)/sqrt(2), so

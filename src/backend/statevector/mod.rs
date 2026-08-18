@@ -888,6 +888,26 @@ impl Backend for StatevectorBackend {
         Ok(self.reduced_density_matrix_one(qubit))
     }
 
+    fn supports_two_qubit_kraus(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            return false;
+        }
+        true
+    }
+
+    fn reduced_density_matrix_2q(&self, q0: usize, q1: usize) -> Result<[[Complex64; 4]; 4]> {
+        assert_ne!(q0, q1, "reduced_density_matrix_2q needs distinct qubits");
+        #[cfg(feature = "gpu")]
+        if self.gpu_state.is_some() {
+            return Err(crate::error::PrismError::BackendUnsupported {
+                backend: "statevector (device-resident)".to_string(),
+                operation: "reduced_density_matrix_2q".to_string(),
+            });
+        }
+        Ok(self.reduced_density_matrix_two(q0, q1))
+    }
+
     fn reset(&mut self, qubit: usize) -> Result<()> {
         #[cfg(feature = "gpu")]
         if self.gpu_state.is_some() {

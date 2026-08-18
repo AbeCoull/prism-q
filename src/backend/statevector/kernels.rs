@@ -2922,6 +2922,67 @@ impl StatevectorBackend {
         ]
     }
 
+    /// `rho[t][t'] = sum_e psi[idx(t, e)] * conj(psi[idx(t', e)])`, where `t`
+    /// packs `q0` in bit 1 and `q1` in bit 0 and `e` runs over the remaining
+    /// `n - 2` qubits. Requires `q0 != q1`; the bit insertion is a bijection
+    /// onto the block bases only for distinct positions.
+    pub(super) fn reduced_density_matrix_two(&self, q0: usize, q1: usize) -> [[Complex64; 4]; 4] {
+        debug_assert_ne!(q0, q1);
+        let offsets = [
+            0usize,
+            1usize << q1,
+            1usize << q0,
+            (1usize << q0) | (1usize << q1),
+        ];
+        let (lo, hi) = (q0.min(q1), q0.max(q1));
+        let state = self.state.as_slice();
+        let groups = state.len() >> 2;
+        let block = |g: usize| {
+            let base = insert_zero_bit(insert_zero_bit(g, lo), hi);
+            let mut amps = [Complex64::new(0.0, 0.0); 4];
+            for (t, off) in offsets.iter().enumerate() {
+                amps[t] = state[base | off];
+            }
+            let mut out = [[Complex64::new(0.0, 0.0); 4]; 4];
+            for (t, row) in out.iter_mut().enumerate() {
+                for (tp, entry) in row.iter_mut().enumerate() {
+                    *entry = amps[t] * amps[tp].conj();
+                }
+            }
+            out
+        };
+        let add = |mut a: [[Complex64; 4]; 4], b: [[Complex64; 4]; 4]| {
+            for (row, brow) in a.iter_mut().zip(b.iter()) {
+                for (entry, bentry) in row.iter_mut().zip(brow.iter()) {
+                    *entry += bentry;
+                }
+            }
+            a
+        };
+        let zero = || [[Complex64::new(0.0, 0.0); 4]; 4];
+
+        #[cfg(feature = "parallel")]
+        let mut rho = if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            (0..groups)
+                .into_par_iter()
+                .with_min_len(MIN_PAR_ITERS)
+                .map(block)
+                .reduce(zero, add)
+        } else {
+            (0..groups).map(block).fold(zero(), add)
+        };
+        #[cfg(not(feature = "parallel"))]
+        let mut rho = (0..groups).map(block).fold(zero(), add);
+
+        let scale = self.pending_norm * self.pending_norm;
+        for row in rho.iter_mut() {
+            for entry in row.iter_mut() {
+                *entry *= scale;
+            }
+        }
+        rho
+    }
+
     #[cfg(feature = "parallel")]
     fn reduced_density_matrix_one_par(&self, qubit: usize) -> [[Complex64; 2]; 2] {
         let half = 1usize << qubit;

@@ -241,7 +241,7 @@ fn apply_pauli_op(backend: &mut dyn Backend, qubit: usize, op: PauliOp) -> Resul
 
 /// Compute the branch effect `Kdagger K` for a single-qubit Kraus operator.
 #[inline]
-pub(crate) fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
+fn kdagger_k(k: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
         [
             k[0][0].conj() * k[0][0] + k[1][0].conj() * k[1][0],
@@ -313,6 +313,76 @@ fn apply_custom_kraus(
     backend.apply_1q_matrix(qubit, &normalized)
 }
 
+/// Sample and apply one of a set of two-qubit Kraus operators, indexed
+/// `K[t][t']` with `t = 2 * bit(q0) + bit(q1)`.
+///
+/// Branch probabilities are `p_k = Tr(Kdagger K rho)` over the pair's reduced
+/// density matrix, so a correlated channel sees the coherence between the two
+/// qubits and not only their populations. Backends without
+/// [`Backend::reduced_density_matrix_2q`] report that rather than sampling a
+/// branch from an approximation.
+fn apply_custom_kraus_2q(
+    backend: &mut dyn Backend,
+    q0: usize,
+    q1: usize,
+    kraus: &[[[Complex64; 4]; 4]],
+    rng: &mut ChaCha8Rng,
+) -> Result<()> {
+    let rho = backend.reduced_density_matrix_2q(q0, q1)?;
+
+    let mut cumulative: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    let mut total = 0.0;
+    for k in kraus {
+        total += kraus_probability_2q(k, &rho);
+        cumulative.push(total);
+    }
+
+    if total <= JUMP_EPSILON {
+        return Ok(());
+    }
+
+    let r: f64 = rand::RngExt::random::<f64>(rng) * total;
+    let chosen = cumulative
+        .iter()
+        .position(|&c| r < c)
+        .unwrap_or(kraus.len() - 1);
+    let pk = if chosen == 0 {
+        cumulative[0]
+    } else {
+        cumulative[chosen] - cumulative[chosen - 1]
+    };
+    if pk <= JUMP_EPSILON {
+        return Ok(());
+    }
+
+    let inv = Complex64::new(1.0 / pk.sqrt(), 0.0);
+    let mut normalized = kraus[chosen];
+    for row in normalized.iter_mut() {
+        for entry in row.iter_mut() {
+            *entry *= inv;
+        }
+    }
+    backend.apply(&Instruction::Gate {
+        gate: Gate::Fused2q(Box::new(normalized)),
+        targets: smallvec![q0, q1],
+    })
+}
+
+/// `Tr(Kdagger K rho) = sum_{i,j,r} conj(K[r][i]) K[r][j] rho[j][i]`.
+fn kraus_probability_2q(k: &[[Complex64; 4]; 4], rho: &[[Complex64; 4]; 4]) -> f64 {
+    let mut p = Complex64::new(0.0, 0.0);
+    for i in 0..4 {
+        for j in 0..4 {
+            let mut effect = Complex64::new(0.0, 0.0);
+            for row in k.iter() {
+                effect += row[i].conj() * row[j];
+            }
+            p += effect * rho[j][i];
+        }
+    }
+    p.re.max(0.0)
+}
+
 fn apply_noise_event(
     backend: &mut dyn Backend,
     event: &NoiseEvent,
@@ -339,6 +409,9 @@ fn apply_noise_event(
             apply_two_qubit_depolarizing(backend, event.qubits[0], event.qubits[1], *p, rng)
         }
         NoiseChannel::Custom { kraus } => apply_custom_kraus(backend, event.qubits[0], kraus, rng),
+        NoiseChannel::Kraus2q { kraus } => {
+            apply_custom_kraus_2q(backend, event.qubits[0], event.qubits[1], kraus, rng)
+        }
     }
 }
 

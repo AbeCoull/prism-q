@@ -2036,6 +2036,35 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         },
     );
 
+    // The correlated two-qubit branch, the only trajectory path that reads a
+    // two-qubit reduced density matrix and applies the selected operator as a
+    // `Fused2q`. One `2^n` reduction plus one `2^n` gate pass per event, plus a
+    // boxed 4x4 per event, against the single gate pass a Pauli branch costs.
+    // Same circuit shape and shot count as `trajectory_pauli`, so the pair is
+    // comparable; the noise differs and nothing else does.
+    let correlated_noise = prism_q::NoiseBuilder::new()
+        .after_gates_joint(
+            prism_q::GateFilter::all().named("cx"),
+            correlated_zz_channel(0.001),
+        )
+        .build(&non_clifford)
+        .unwrap();
+    group.bench_function(
+        BenchmarkId::new("trajectory_kraus_2q", "non_clifford_12q_512"),
+        |b| {
+            b.iter(|| {
+                run_shots_with_noise(
+                    BackendKind::Statevector,
+                    &non_clifford,
+                    &correlated_noise,
+                    512,
+                    SEED,
+                )
+                .unwrap();
+            });
+        },
+    );
+
     group.finish();
 }
 
@@ -2219,6 +2248,29 @@ fn depolarizing_kraus(p: f64) -> Vec<[[Complex64; 2]; 2]> {
     ]
 }
 
+/// Kraus pair for correlated `ZZ` dephasing at rate `p`, in the
+/// `2*bit(q0) + bit(q1)` packing `NoiseChannel::Kraus2q` takes.
+fn correlated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
+    let zero = Complex64::new(0.0, 0.0);
+    let diag = |scale: f64, signs: [f64; 4]| {
+        let mut m = [[zero; 4]; 4];
+        for (t, sign) in signs.iter().enumerate() {
+            m[t][t] = Complex64::new(scale * sign, 0.0);
+        }
+        m
+    };
+    vec![
+        diag((1.0 - p).sqrt(), [1.0, 1.0, 1.0, 1.0]),
+        diag(p.sqrt(), [1.0, -1.0, -1.0, 1.0]),
+    ]
+}
+
+fn correlated_zz_channel(p: f64) -> prism_q::NoiseChannel {
+    prism_q::NoiseChannel::Kraus2q {
+        kraus: correlated_zz_kraus(p),
+    }
+}
+
 fn dm_backend(n: usize) -> DensityMatrixBackend {
     let circuit = circuits::random_circuit(n, 2, SEED);
     let mut backend = DensityMatrixBackend::new(42);
@@ -2253,6 +2305,16 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("depolarizing_2q", n), &n, |b, &n| {
             let mut backend = dm_backend(n);
             b.iter(|| backend.apply_2q_depolarizing(0, n - 1, 0.02));
+        });
+
+        // The general two-qubit channel `depolarizing_2q` now lowers onto. Both
+        // compile to one 16x16 superoperator and then sweep the same `4^n`
+        // buffer; at these widths the compile is under 0.01% of the row either
+        // way, so this reads the sweep and not the operator count.
+        let zz = correlated_zz_kraus(0.02);
+        group.bench_with_input(BenchmarkId::new("kraus_2q", n), &n, |b, &n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_2q_kraus(0, n - 1, &zz));
         });
 
         for &(qubit, label) in &[(0usize, "measure_q0"), (n - 1, "measure_qtop")] {

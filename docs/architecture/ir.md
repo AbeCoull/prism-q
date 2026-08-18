@@ -51,6 +51,29 @@ probabilities) reject a region for the same reason they reject a bare
 conditional. Noise models index one event slot per instruction, so they reject a
 region rather than leave its body noiseless.
 
+`Circuit::fold_static_guards` runs once per shots or counts call and resolves the
+guards that cannot depend on a measurement. A condition reading only bits no preceding
+measurement writes is a function of the initial classical state, which every
+backend zeroes, so the guard is statically dead or statically taken and is
+dropped or inlined. That returns a circuit whose only guard can never fire to
+the terminal-measurement sampling path, worth 252x on `dynamic/dead_region/16`
+at 1000 shots. A circuit with no guard borrows through unchanged.
+
+### Condition language
+
+`ClassicalCondition` is a pure function of a bit slice: `BitIsOne`, `BitIsZero`,
+`RegisterEquals` and `RegisterNotEquals` over a contiguous range read as `u64`,
+and `Parity` over an arbitrary bit set compared against an expected value. The
+bit set is boxed, so the enum stays at the size the register variants set. The
+language is closed under negation (`ClassicalCondition::negate`), which is what
+lets `else` lower rather than grow the instruction.
+
+`else` emits the `then` guard followed by a second guard carrying the negated
+condition, and `switch` emits one `RegisterEquals` guard per case label with the
+`default` arm nested once per label to spell the conjunction of their negations.
+Both lowerings re-read the classical bits after an earlier body has run, so the
+parser rejects a source whose body measures into a bit its own guard reads.
+
 ## Gate enum
 
 `Gate` is a `Clone` enum kept at **16 bytes**. Simple variants carry parameters inline. Composite variants use `Box` to stay within the 16-byte budget for cache-friendly dispatch.

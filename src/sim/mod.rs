@@ -1618,6 +1618,9 @@ pub(crate) fn run_counts_with(
         return Ok((shots.counts(), shots.metadata));
     }
 
+    let folded = circuit.fold_static_guards();
+    let circuit = folded.as_ref();
+
     let bits = circuit.num_classical_bits;
     let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;
     let Some(metadata) = source.metadata() else {
@@ -2589,6 +2592,12 @@ pub(crate) fn run_shots_with(
     if let BackendKind::StatevectorDistributed { context } = &kind {
         return run_shots_distributed(context.clone(), circuit, num_shots, seed);
     }
+
+    // Once per shots call, not per shot: a guard that cannot depend on a
+    // measurement is resolved here so the sampling predicates below see the
+    // circuit that actually runs. A circuit with no guard borrows through.
+    let folded = circuit.fold_static_guards();
+    let circuit = folded.as_ref();
 
     let bits = circuit.num_classical_bits;
     let source = prepare_shot_source(&kind, circuit, num_shots, seed)?;

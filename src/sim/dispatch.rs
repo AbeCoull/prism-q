@@ -791,6 +791,12 @@ pub(super) fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Ci
     if circuit.num_qubits > max_statevector_qubits() {
         return false;
     }
+    // The split pays for itself only when the tail needs a dense state. A
+    // Clifford-only circuit has no such tail, and exporting the tableau to run
+    // measurements or a guarded region densely is strictly a loss.
+    if circuit.is_clifford_only() {
+        return false;
+    }
     let min_gates = min_clifford_prefix_gates(circuit.num_qubits);
     let mut prefix_gates = 0;
     for inst in &circuit.instructions {
@@ -832,6 +838,9 @@ pub(super) fn plan_temporal_clifford(
         return None;
     }
     if circuit.num_qubits > max_statevector_qubits() {
+        return None;
+    }
+    if circuit.is_clifford_only() {
         return None;
     }
     let (prefix, tail) = circuit.clifford_prefix_split()?;

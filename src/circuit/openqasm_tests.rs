@@ -97,17 +97,38 @@ fn test_unsupported_def_with_measurement() {
 }
 
 #[test]
-fn test_switch_rejected_by_name() {
+fn test_switch_lowers_to_a_guard_per_label() {
     let qasm = "OPENQASM 3.0;
 qubit[1] q;
 bit[2] c;
 switch (c) { case 0 { x q[0]; } }";
+    let circuit = parse(qasm).expect("parse");
+    assert_eq!(circuit.instructions.len(), 1);
+    assert!(matches!(
+        &circuit.instructions[0],
+        Instruction::Conditional {
+            condition: ClassicalCondition::RegisterEquals {
+                value: 0,
+                size: 2,
+                ..
+            },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn test_switch_body_must_be_case_or_default() {
+    let qasm = "OPENQASM 3.0;
+qubit[1] q;
+bit[2] c;
+switch (c) { x q[0]; }";
     match parse(qasm).unwrap_err() {
-        PrismError::UnsupportedConstruct { construct, line } => {
-            assert_eq!(construct, "switch");
+        PrismError::Parse { message, line } => {
+            assert!(message.contains("`case` or `default`"), "{message}");
             assert_eq!(line, 4);
         }
-        other => panic!("expected UnsupportedConstruct, got {other:?}"),
+        other => panic!("expected a parse error, got {other:?}"),
     }
 }
 

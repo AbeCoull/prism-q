@@ -23,6 +23,10 @@
 //! | Conditional bit literal | `if (c[0] == 1) x q[0];` | Bit equality vs `0` / `1` |
 //! | Conditional negation | `if (!c[0]) x q[0];` | Negated bit truthy test |
 //! | Guarded region | `if (c[0]) { x q[0]; measure q[1] -> c[1]; }` | Braced body, any statement, nestable |
+//! | Conditional parity | `if (c[0] ^ c[2]) x q[0];` | Parity over bits, optionally `(...) == 0` |
+//! | Else arm | `if (c[0]) { ... } else { ... }` | Lowers to a second guard on the negated condition |
+//! | Else-if chain | `if (c[0]) { ... } else if (c[1]) { ... }` | Nests under the negated arm |
+//! | Switch | `switch (c) { case 0 { ... } default { ... } }` | Lowers to one guard per case label |
 //! | Hex / binary literals | `if (c == 0xff) ...` | `0x`, `0b`, `0o` integer prefixes with optional `_` separators |
 //! | Boolean literals | `rx(true * pi) ...` | `true` / `false` evaluate to `1.0` / `0.0` |
 //! | Gate definition | `gate rxx(t) a,b { ... }` | User-defined gates |
@@ -33,7 +37,7 @@
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `defcal`, `extern`, `opaque`, `box`, `while`, `switch`, `else`
+//! - `defcal`, `extern`, `opaque`, `box`, `while`, `return`, `break`
 //! - `def` bodies that contain `measure`, `reset`, `bit`, `creg`, `return`,
 //!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
 //! - `def` declarations with a return type
@@ -41,6 +45,10 @@
 //! - `pow(k) @` with non-integer k (fractional powers)
 //! - Bit literal comparisons against integers other than `0` / `1`
 //! - Negative integer literals in `if` register comparisons
+//! - `else` whose `if` body measures into a bit the condition reads, and
+//!   `switch` whose arm measures into the switched register: both lowerings
+//!   re-read the bits after an earlier body ran
+//! - `switch` with a `default` and more case labels than the region depth bound
 //! - `duration`, `stretch` outside `def` parameter lists
 //!
 //! # Error behaviour
@@ -110,6 +118,7 @@ enum BlockKind {
     Def,
     For,
     If,
+    Switch,
 }
 
 #[derive(Clone, Copy)]
@@ -179,6 +188,7 @@ fn block_kind_name(kind: BlockKind) -> &'static str {
         BlockKind::Def => "def",
         BlockKind::For => "for",
         BlockKind::If => "if",
+        BlockKind::Switch => "switch",
     }
 }
 
@@ -226,6 +236,169 @@ fn find_matching_close_paren(s: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// True when the next statement after a closed `if` block is its `else`.
+///
+/// An `else` on its own line would otherwise reach the top-level dispatcher,
+/// which rejects the keyword by name.
+fn awaits_else(kind: BlockKind, lines: &[&str], line_idx: usize) -> bool {
+    if kind != BlockKind::If {
+        return false;
+    }
+    lines[line_idx + 1..]
+        .iter()
+        .map(|line| strip_comment(line).trim())
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| strip_leading_keyword(line, "else").is_some())
+}
+
+/// True for an unbraced `if` whose `else` sits on a later line, which has to
+/// buffer so both arms reach the same parse.
+fn opens_split_else(line: &str, lines: &[&str], line_idx: usize) -> bool {
+    strip_leading_keyword(line, "if").is_some()
+        && !line.contains('{')
+        && awaits_else(BlockKind::If, lines, line_idx)
+}
+
+/// Split an unbraced `if` body at its `else`, or return the whole body when it
+/// has none.
+fn split_at_else(s: &str) -> (&str, &str) {
+    let mut depth = 0usize;
+    for (index, _) in s.char_indices() {
+        match s.as_bytes()[index] {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b'e' if depth == 0 && strip_leading_keyword(&s[index..], "else").is_some() => {
+                let preceded_by_word = s[..index]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if !preceded_by_word {
+                    return (&s[..index], &s[index..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    (s, "")
+}
+
+/// True when a buffered block ends on the `else` keyword, so its arm is still
+/// on a later line.
+fn ends_on_bare_else(buf: &str) -> bool {
+    let trimmed = buf.trim_end();
+    let Some(head) = trimmed.strip_suffix("else") else {
+        return false;
+    };
+    !head.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+}
+
+/// Strip `keyword` when it opens `s` as a whole word, returning the rest.
+fn strip_leading_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = s.trim_start().strip_prefix(keyword)?;
+    if rest.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+/// Split a leading `{ ... }` off `s`, returning the body and what follows it.
+fn split_braced_body<'a>(s: &'a str, line_num: usize, what: &str) -> Result<(&'a str, &'a str)> {
+    let s = s.trim_start();
+    let open = s.find('{').ok_or_else(|| PrismError::Parse {
+        line: line_num,
+        message: format!("expected `{{` in `{what}` body"),
+    })?;
+    if !s[..open].trim().is_empty() {
+        return Err(PrismError::Parse {
+            line: line_num,
+            message: format!("unexpected `{}` before `{what}` body", s[..open].trim()),
+        });
+    }
+    let after = &s[open + 1..];
+    let close = find_matching_close_brace(after).ok_or_else(|| PrismError::Parse {
+        line: line_num,
+        message: format!("unmatched `{{` in `{what}` body"),
+    })?;
+    Ok((&after[..close], &after[close + 1..]))
+}
+
+/// One `case` or `default` arm of a `switch`; `labels_src` is `None` for
+/// `default`.
+struct SwitchArm<'a> {
+    labels_src: Option<&'a str>,
+    body: &'a str,
+}
+
+fn split_switch_arms<'a>(src: &'a str, line_num: usize) -> Result<Vec<SwitchArm<'a>>> {
+    let mut out = Vec::new();
+    let mut rest = src.trim();
+    while !rest.is_empty() {
+        if let Some(after) = strip_leading_keyword(rest, "case") {
+            let open = after.find('{').ok_or_else(|| PrismError::Parse {
+                line: line_num,
+                message: "expected `{` after `switch` case labels".to_string(),
+            })?;
+            let (body, tail) = split_braced_body(&after[open..], line_num, "case")?;
+            out.push(SwitchArm {
+                labels_src: Some(&after[..open]),
+                body,
+            });
+            rest = tail.trim();
+        } else if let Some(after) = strip_leading_keyword(rest, "default") {
+            let (body, tail) = split_braced_body(after, line_num, "default")?;
+            out.push(SwitchArm {
+                labels_src: None,
+                body,
+            });
+            rest = tail.trim();
+        } else {
+            let word = rest
+                .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
+                .next()
+                .unwrap_or(rest);
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("expected `case` or `default` in `switch` body, got `{word}`"),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Wrap `body` in one negated-equality region per case label, which is how a
+/// conjunction is spelled in a condition language that has no `and`.
+fn nest_default_arm(
+    offset: usize,
+    size: usize,
+    labels: &[u64],
+    body: Vec<Instruction>,
+    region_depth: usize,
+    line_num: usize,
+) -> Result<Vec<Instruction>> {
+    // The nesting the default costs is on top of wherever the `switch` sits, so
+    // the bound is the sum rather than the label count alone.
+    if region_depth + labels.len() > MAX_REGION_DEPTH {
+        return Err(PrismError::Parse {
+            line: line_num,
+            message: format!(
+                "`switch` with a `default` nests one region per case label and would \
+                 pass the depth bound of {MAX_REGION_DEPTH} at {} labels",
+                labels.len()
+            ),
+        });
+    }
+    let mut current = body;
+    for &value in labels.iter().rev() {
+        let condition = ClassicalCondition::RegisterNotEquals {
+            offset,
+            size,
+            value,
+        };
+        current = guarded(condition, current).into_iter().collect();
+    }
+    Ok(current)
 }
 
 fn find_matching_close_brace(s: &str) -> Option<usize> {
@@ -492,14 +665,25 @@ impl<'a> Parser<'a> {
                 state.buf.push(' ');
                 state.buf.push_str(line);
                 state.depth = update_brace_depth(state.depth, line);
-                if state.depth == 0 {
-                    let finished = block.take().unwrap();
-                    instructions.extend(self.dispatch_block(&finished)?);
-                }
-                continue;
+            } else if opens_split_else(line, lines, line_idx) {
+                block = Some(BlockState {
+                    kind: BlockKind::If,
+                    buf: line.to_string(),
+                    start_line: line_num,
+                    depth: 0,
+                });
+            } else {
+                instructions.extend(self.process_top_line(line, line_num, &mut block)?);
             }
 
-            instructions.extend(self.process_top_line(line, line_num, &mut block)?);
+            if let Some(state) = block.as_ref()
+                && state.depth == 0
+                && !awaits_else(state.kind, lines, line_idx)
+                && !ends_on_bare_else(&state.buf)
+            {
+                let finished = block.take().unwrap();
+                instructions.extend(self.dispatch_block(&finished)?);
+            }
         }
 
         if let Some(state) = block {
@@ -528,8 +712,9 @@ impl<'a> Parser<'a> {
 
         // A braced `if` is a guarded region and takes the block path; the
         // one-statement `if (c) x q[0];` form has no brace and falls through to
-        // `parse_if_statement` below.
-        if matches!(first_word, "gate" | "def" | "for")
+        // `parse_if_statement` below. The caller dispatches the block once its
+        // braces balance and no `else` follows.
+        if matches!(first_word, "gate" | "def" | "for" | "switch")
             || (first_word == "if" && line.contains('{'))
         {
             let kind = match first_word {
@@ -537,18 +722,9 @@ impl<'a> Parser<'a> {
                 "def" => BlockKind::Def,
                 "for" => BlockKind::For,
                 "if" => BlockKind::If,
+                "switch" => BlockKind::Switch,
                 _ => unreachable!(),
             };
-            let depth = update_brace_depth(0, line);
-            if line.contains('{') && depth == 0 {
-                let state = BlockState {
-                    kind,
-                    buf: line.to_string(),
-                    start_line: line_num,
-                    depth: 0,
-                };
-                return self.dispatch_block(&state);
-            }
             if !line.contains('{') {
                 return Err(PrismError::Parse {
                     line: line_num,
@@ -559,7 +735,7 @@ impl<'a> Parser<'a> {
                 kind,
                 buf: line.to_string(),
                 start_line: line_num,
-                depth,
+                depth: update_brace_depth(0, line),
             });
             return Ok(Vec::new());
         }
@@ -610,15 +786,24 @@ impl<'a> Parser<'a> {
         }
 
         if line.starts_with("if") {
-            return self.parse_if_statement(line, line_num);
+            if split_at_else(line).1.is_empty() {
+                return self.parse_if_statement(line, line_num);
+            }
+            return self.parse_if_block(line, line_num);
         }
 
+        // Recomputed: the trailing `;` is gone now, so a bare `break;` reports
+        // the keyword rather than falling through to gate parsing.
+        let keyword = line
+            .split(|c: char| c.is_whitespace() || c == '(')
+            .next()
+            .unwrap_or(line);
         if matches!(
-            first_word,
-            "defcal" | "opaque" | "while" | "switch" | "box" | "extern" | "return" | "else"
+            keyword,
+            "defcal" | "opaque" | "while" | "box" | "extern" | "return" | "else" | "break"
         ) {
             return Err(PrismError::UnsupportedConstruct {
-                construct: first_word.to_string(),
+                construct: keyword.to_string(),
                 line: line_num,
             });
         }
@@ -638,6 +823,7 @@ impl<'a> Parser<'a> {
             }
             BlockKind::For => self.expand_for_block(&state.buf, state.start_line),
             BlockKind::If => self.parse_if_block(&state.buf, state.start_line),
+            BlockKind::Switch => self.parse_switch_block(&state.buf, state.start_line),
         }
     }
 
@@ -1243,24 +1429,27 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    /// Parse `if (cond) { ... }` into a guarded region.
+    /// Parse `if (cond) { ... }`, with an optional `else`, into guarded regions.
     ///
     /// The body reaches [`Parser::parse_lines`], so it admits any statement the
-    /// parser already accepts, nested regions included.
+    /// parser already accepts, nested regions included. An `else` arm becomes a
+    /// second region carrying the negated condition rather than a second span on
+    /// the instruction; see [`Parser::lower_else_arm`] for what that costs.
     fn parse_if_block(&mut self, buf: &str, line_num: usize) -> Result<Vec<Instruction>> {
         let (condition, body_str) = self.split_if_header(buf, line_num)?;
+        let body_str = body_str.trim_start();
+        let (then_src, trailing) = if body_str.starts_with('{') {
+            split_braced_body(body_str, line_num, "if")?
+        } else {
+            split_at_else(body_str)
+        };
+        let then_body = self.parse_region_body(then_src, line_num)?;
 
-        let open = body_str.find('{').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `{` after `if(...)` condition".to_string(),
-        })?;
-        let after_open = &body_str[open + 1..];
-        let close = find_matching_close_brace(after_open).ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "unmatched `{` in `if` body".to_string(),
-        })?;
-        let trailing = after_open[close + 1..].trim();
-        if !trailing.is_empty() {
+        let trailing = trailing.trim();
+        if trailing.is_empty() {
+            return Ok(guarded(condition, then_body).into_iter().collect());
+        }
+        let Some(after_else) = strip_leading_keyword(trailing, "else") else {
             let word = trailing
                 .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
                 .next()
@@ -1269,8 +1458,82 @@ impl<'a> Parser<'a> {
                 construct: word.to_string(),
                 line: line_num,
             });
+        };
+        self.lower_else_arm(condition, then_body, after_else, line_num)
+    }
+
+    /// Emit the `then` region followed by a region guarded on the negated
+    /// condition.
+    ///
+    /// The negated region re-reads the classical bits after the `then` body has
+    /// run, so a `then` body that measures into its own guard bits could take
+    /// both arms. That case is rejected rather than lowered.
+    fn lower_else_arm(
+        &mut self,
+        condition: ClassicalCondition,
+        then_body: Vec<Instruction>,
+        after_else: &str,
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        if crate::circuit::body_writes_condition_bits(&then_body, &condition) {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: "`else` needs a condition the `if` body does not overwrite; \
+                          this body measures into a bit the condition reads"
+                    .to_string(),
+            });
         }
 
+        if after_else.trim().is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: "expected a statement or block after `else`".to_string(),
+            });
+        }
+        let else_body = if let Some(nested) = strip_leading_keyword(after_else, "if") {
+            self.parse_nested_else_if(nested, line_num)?
+        } else if after_else.starts_with('{') {
+            let (else_src, trailing) = split_braced_body(after_else, line_num, "else")?;
+            if !trailing.trim().is_empty() {
+                return Err(PrismError::Parse {
+                    line: line_num,
+                    message: format!("unexpected `{}` after `else` body", trailing.trim()),
+                });
+            }
+            self.parse_region_body(else_src, line_num)?
+        } else {
+            self.parse_region_body(after_else.trim_end_matches(';'), line_num)?
+        };
+
+        let mut out = Vec::new();
+        out.extend(guarded(condition.clone(), then_body));
+        out.extend(guarded(condition.negate(), else_body));
+        Ok(out)
+    }
+
+    /// Parse the `if` of an `else if` chain, which nests one region deeper.
+    fn parse_nested_else_if(&mut self, nested: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        self.enter_region(line_num)?;
+        let parsed = if nested.contains('{') {
+            self.parse_if_block(&format!("if {nested}"), line_num)
+        } else {
+            self.parse_if_statement(&format!("if {nested}"), line_num)
+        };
+        self.region_depth -= 1;
+        parsed
+    }
+
+    /// Parse a region body's source text one nesting level down.
+    fn parse_region_body(&mut self, src: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        self.enter_region(line_num)?;
+        let body_lines = split_body_into_lines(src.trim());
+        let refs: Vec<&str> = body_lines.iter().map(String::as_str).collect();
+        let body = self.parse_lines(&refs, line_num.saturating_sub(1));
+        self.region_depth -= 1;
+        body
+    }
+
+    fn enter_region(&mut self, line_num: usize) -> Result<()> {
         if self.region_depth >= MAX_REGION_DEPTH {
             return Err(PrismError::Parse {
                 line: line_num,
@@ -1278,12 +1541,135 @@ impl<'a> Parser<'a> {
             });
         }
         self.region_depth += 1;
-        let body_lines = split_body_into_lines(after_open[..close].trim());
-        let refs: Vec<&str> = body_lines.iter().map(String::as_str).collect();
-        let body = self.parse_lines(&refs, line_num.saturating_sub(1));
-        self.region_depth -= 1;
+        Ok(())
+    }
 
-        Ok(guarded(condition, body?).into_iter().collect())
+    /// Parse `switch (creg) { case v { .. } default { .. } }` into a chain of
+    /// guarded regions, one per case label.
+    ///
+    /// The chain is exclusive only because no arm body may write the switched
+    /// register; that is checked rather than assumed. `default` becomes the case
+    /// labels' negations nested, since a conjunction has no flat form in the
+    /// condition language.
+    fn parse_switch_block(&mut self, buf: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        let rest = buf.trim_start().strip_prefix("switch").unwrap().trim();
+        let open = rest.find('(').ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "expected `(` after `switch`".to_string(),
+        })?;
+        let after_open = &rest[open + 1..];
+        let close = find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
+            line: line_num,
+            message: "expected `)` in `switch` operand".to_string(),
+        })?;
+        let (offset, size) = self.resolve_switch_operand(after_open[..close].trim(), line_num)?;
+        let (arms_src, trailing) =
+            split_braced_body(after_open[close + 1..].trim(), line_num, "switch")?;
+        if !trailing.trim().is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("unexpected `{}` after `switch` body", trailing.trim()),
+            });
+        }
+
+        let arms = split_switch_arms(arms_src, line_num)?;
+        let mut labels: Vec<u64> = Vec::new();
+        let mut cases: Vec<(Vec<u64>, Vec<Instruction>)> = Vec::new();
+        let mut default: Option<Vec<Instruction>> = None;
+        for arm in arms {
+            let body = self.parse_region_body(arm.body, line_num)?;
+            let Some(labels_src) = arm.labels_src else {
+                if default.replace(body).is_some() {
+                    return Err(PrismError::Parse {
+                        line: line_num,
+                        message: "`switch` has more than one `default` arm".to_string(),
+                    });
+                }
+                continue;
+            };
+            let mut arm_labels = Vec::new();
+            for token in labels_src.split(',') {
+                let value = self.parse_switch_label(token, line_num)?;
+                if labels.contains(&value) {
+                    return Err(PrismError::Parse {
+                        line: line_num,
+                        message: format!("`switch` case label {value} appears twice"),
+                    });
+                }
+                labels.push(value);
+                arm_labels.push(value);
+            }
+            cases.push((arm_labels, body));
+        }
+
+        let probe = ClassicalCondition::RegisterEquals {
+            offset,
+            size,
+            value: 0,
+        };
+        let writes_operand = cases
+            .iter()
+            .map(|(_, body)| body)
+            .chain(default.iter())
+            .any(|body| crate::circuit::body_writes_condition_bits(body, &probe));
+        if writes_operand {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: "`switch` needs an operand no arm overwrites; \
+                          an arm here measures into the switched register"
+                    .to_string(),
+            });
+        }
+
+        let mut out = Vec::new();
+        for (values, body) in &cases {
+            for &value in values {
+                let condition = ClassicalCondition::RegisterEquals {
+                    offset,
+                    size,
+                    value,
+                };
+                out.extend(guarded(condition, body.clone()));
+            }
+        }
+        if let Some(body) = default {
+            out.extend(nest_default_arm(
+                offset,
+                size,
+                &labels,
+                body,
+                self.region_depth,
+                line_num,
+            )?);
+        }
+        Ok(out)
+    }
+
+    fn parse_switch_label(&self, token: &str, line_num: usize) -> Result<u64> {
+        let value = eval_int_expr(token.trim(), line_num, self.int_vars.as_ref())?;
+        u64::try_from(value).map_err(|_| PrismError::Parse {
+            line: line_num,
+            message: format!(
+                "`switch` case label must be non-negative, got `{}`",
+                token.trim()
+            ),
+        })
+    }
+
+    /// Resolve a `switch` operand to the `(offset, size)` of the classical bit
+    /// range it names. A bit reference resolves to size 1.
+    fn resolve_switch_operand(&self, operand: &str, line_num: usize) -> Result<(usize, usize)> {
+        if operand.contains('[') {
+            return Ok((self.resolve_cbit(operand, line_num)?, 1));
+        }
+        let reg = self
+            .cregs
+            .get(operand)
+            .ok_or_else(|| PrismError::UndefinedRegister {
+                name: operand.to_string(),
+                line: line_num,
+            })?;
+        Ok((reg.offset, reg.size))
     }
 
     /// Split `if (cond) rest` into the parsed condition and the trimmed rest,
@@ -1322,6 +1708,62 @@ impl<'a> Parser<'a> {
         Ok(guarded(condition, body).into_iter().collect())
     }
 
+    /// Parse `a ^ b ^ c` or `(a ^ b ^ c) == 0` into a parity condition.
+    ///
+    /// Returns `None` when the expression holds no `^`, which leaves the
+    /// register and bit forms to the caller.
+    fn parse_parity_condition(
+        &self,
+        cond_str: &str,
+        line_num: usize,
+    ) -> Result<Option<ClassicalCondition>> {
+        if !cond_str.contains('^') {
+            return Ok(None);
+        }
+        let malformed = || PrismError::Parse {
+            line: line_num,
+            message: format!("expected `a ^ b` or `(a ^ b) == 0/1`, got: `{cond_str}`"),
+        };
+        let (inner, expected) = match cond_str.strip_prefix('(') {
+            None => (cond_str, true),
+            Some(rest) => {
+                let close = find_matching_close_paren(rest).ok_or_else(malformed)?;
+                let tail = rest[close + 1..].trim();
+                let expected = if tail.is_empty() {
+                    true
+                } else {
+                    let (negate, literal) = match (tail.strip_prefix("=="), tail.strip_prefix("!="))
+                    {
+                        (Some(literal), _) => (false, literal),
+                        (_, Some(literal)) => (true, literal),
+                        _ => return Err(malformed()),
+                    };
+                    match eval_int_expr(literal.trim(), line_num, self.int_vars.as_ref())? {
+                        0 => negate,
+                        1 => !negate,
+                        _ => return Err(malformed()),
+                    }
+                };
+                (&rest[..close], expected)
+            }
+        };
+
+        let mut bits = Vec::new();
+        for token in inner.split('^') {
+            let token = token.trim();
+            // `resolve_cbit` stops at the closing bracket, so a term carrying a
+            // comparison would be silently truncated to its bit reference.
+            if !token.ends_with(']') {
+                return Err(malformed());
+            }
+            bits.push(self.resolve_cbit(token, line_num)?);
+        }
+        Ok(Some(ClassicalCondition::Parity {
+            bits: bits.into(),
+            expected,
+        }))
+    }
+
     /// Parse a classical condition expression for `if (...)`.
     ///
     /// Supported forms:
@@ -1329,12 +1771,17 @@ impl<'a> Parser<'a> {
     /// - `c[i] == 0`, `c[i] == 1`, `c[i] != 0`, `c[i] != 1` (bit vs literal)
     /// - `c[i]` (bit truthy)
     /// - `!c[i]` (bit falsy)
+    /// - `c[i] ^ c[j]`, `(c[i] ^ c[j]) == 0/1` (parity over bits)
     fn parse_classical_condition(
         &self,
         cond_str: &str,
         line_num: usize,
     ) -> Result<ClassicalCondition> {
         let cond_str = cond_str.trim();
+
+        if let Some(parity) = self.parse_parity_condition(cond_str, line_num)? {
+            return Ok(parity);
+        }
 
         if let Some(rest) = cond_str.strip_prefix('!') {
             let inner = rest.trim();

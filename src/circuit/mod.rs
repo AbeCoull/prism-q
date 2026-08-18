@@ -31,6 +31,7 @@ pub use prepared::PreparedCircuit;
 use crate::gates::{Gate, PauliRotData};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 pub use smallvec::{SmallVec, smallvec};
+use std::borrow::Cow;
 
 /// A quantum circuit in PRISM-Q's internal representation.
 #[derive(Debug, Clone)]
@@ -298,6 +299,38 @@ impl Circuit {
             }
         }
         true
+    }
+
+    /// Drop guards whose condition no measurement can reach, and inline the
+    /// ones that must be taken. Borrows unchanged when nothing folds.
+    ///
+    /// A condition reading only bits no preceding measurement writes evaluates
+    /// against the initial classical state, which every backend zeroes.
+    pub fn fold_static_guards(&self) -> Cow<'_, Circuit> {
+        let guarded = self.instructions.iter().any(|inst| {
+            matches!(
+                inst,
+                Instruction::Conditional { .. } | Instruction::Region(_)
+            )
+        });
+        if !guarded {
+            return Cow::Borrowed(self);
+        }
+        let mut state = FoldState {
+            written: vec![false; self.num_classical_bits],
+            zeros: vec![false; self.num_classical_bits],
+            folded: false,
+        };
+        let mut instructions = Vec::with_capacity(self.instructions.len());
+        fold_static_guards_into(&self.instructions, &mut state, &mut instructions);
+        if !state.folded {
+            return Cow::Borrowed(self);
+        }
+        Cow::Owned(Circuit {
+            num_qubits: self.num_qubits,
+            num_classical_bits: self.num_classical_bits,
+            instructions,
+        })
     }
 
     /// Extract the qubit-to-classical-bit mapping from all measurements.
@@ -930,9 +963,48 @@ pub enum ClassicalCondition {
         size: usize,
         value: u64,
     },
+    /// True when the XOR of the listed bits equals `expected`.
+    ///
+    /// The bits need not be contiguous, which is what a register comparison
+    /// cannot express and what a detector-style predicate over measurement
+    /// records needs. Boxed to keep the enum at the size the register variants
+    /// already set. An empty bit list has parity zero and no OpenQASM form, so
+    /// [`qasm_export`] rejects it.
+    Parity { bits: Box<[usize]>, expected: bool },
 }
 
 impl ClassicalCondition {
+    /// The condition that holds exactly when this one does not. Total: the
+    /// language is closed under negation.
+    pub fn negate(&self) -> ClassicalCondition {
+        match self {
+            ClassicalCondition::BitIsOne(bit) => ClassicalCondition::BitIsZero(*bit),
+            ClassicalCondition::BitIsZero(bit) => ClassicalCondition::BitIsOne(*bit),
+            ClassicalCondition::RegisterEquals {
+                offset,
+                size,
+                value,
+            } => ClassicalCondition::RegisterNotEquals {
+                offset: *offset,
+                size: *size,
+                value: *value,
+            },
+            ClassicalCondition::RegisterNotEquals {
+                offset,
+                size,
+                value,
+            } => ClassicalCondition::RegisterEquals {
+                offset: *offset,
+                size: *size,
+                value: *value,
+            },
+            ClassicalCondition::Parity { bits, expected } => ClassicalCondition::Parity {
+                bits: bits.clone(),
+                expected: !expected,
+            },
+        }
+    }
+
     pub fn evaluate(&self, classical_bits: &[bool]) -> bool {
         match self {
             ClassicalCondition::BitIsOne(bit) => classical_bits[*bit],
@@ -959,6 +1031,11 @@ impl ClassicalCondition {
                 } else {
                     !eq
                 }
+            }
+            ClassicalCondition::Parity { bits, expected } => {
+                bits.iter()
+                    .fold(false, |acc, &bit| acc ^ classical_bits[bit])
+                    == *expected
             }
         }
     }
@@ -1101,6 +1178,104 @@ fn for_each_measure(instructions: &[Instruction], visit: &mut impl FnMut(usize, 
     }
 }
 
+/// Which classical bits a preceding measurement may have written, plus the
+/// all-zero vector a statically decidable condition evaluates against.
+struct FoldState {
+    written: Vec<bool>,
+    zeros: Vec<bool>,
+    folded: bool,
+}
+
+impl FoldState {
+    /// `Some(value)` when no preceding measurement can have written a bit the
+    /// condition reads, so its value is fixed before the run starts.
+    fn static_value(&self, condition: &ClassicalCondition) -> Option<bool> {
+        let mut read = Vec::new();
+        collect_condition_bits(condition, &mut read);
+        if read
+            .iter()
+            .any(|&bit| bit >= self.written.len() || self.written[bit])
+        {
+            return None;
+        }
+        Some(condition.evaluate(&self.zeros))
+    }
+
+    fn mark_written(&mut self, body: &[Instruction]) {
+        let written = &mut self.written;
+        for_each_measure(body, &mut |_, classical_bit| {
+            if let Some(slot) = written.get_mut(classical_bit) {
+                *slot = true;
+            }
+        });
+    }
+}
+
+fn fold_static_guards_into(
+    instructions: &[Instruction],
+    state: &mut FoldState,
+    out: &mut Vec<Instruction>,
+) {
+    for inst in instructions {
+        match inst {
+            Instruction::Measure { classical_bit, .. } => {
+                if let Some(slot) = state.written.get_mut(*classical_bit) {
+                    *slot = true;
+                }
+                out.push(inst.clone());
+            }
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } => match state.static_value(condition) {
+                Some(true) => {
+                    state.folded = true;
+                    out.push(Instruction::Gate {
+                        gate: gate.clone(),
+                        targets: targets.clone(),
+                    });
+                }
+                Some(false) => state.folded = true,
+                None => out.push(inst.clone()),
+            },
+            Instruction::Region(region) => match state.static_value(region.condition()) {
+                Some(true) => {
+                    state.folded = true;
+                    fold_static_guards_into(region.body(), state, out);
+                }
+                Some(false) => state.folded = true,
+                None => {
+                    state.mark_written(region.body());
+                    out.push(inst.clone());
+                }
+            },
+            Instruction::Gate { .. } | Instruction::Reset { .. } | Instruction::Barrier { .. } => {
+                out.push(inst.clone())
+            }
+        }
+    }
+}
+
+/// True when a measurement anywhere in `body` writes a bit `condition` reads.
+///
+/// Lowering `else` and `switch` to a chain of guarded regions is only sound
+/// while this is false. Each region in the chain re-evaluates its condition
+/// after the earlier bodies have run, so a body that rewrites its own guard bits
+/// could take two arms of what the source wrote as one choice.
+pub(crate) fn body_writes_condition_bits(
+    body: &[Instruction],
+    condition: &ClassicalCondition,
+) -> bool {
+    let mut read = Vec::new();
+    collect_condition_bits(condition, &mut read);
+    let mut written = false;
+    for_each_measure(body, &mut |_, classical_bit| {
+        written |= read.contains(&classical_bit)
+    });
+    written
+}
+
 fn collect_condition_bits(condition: &ClassicalCondition, out: &mut Vec<usize>) {
     match condition {
         ClassicalCondition::BitIsOne(bit) | ClassicalCondition::BitIsZero(bit) => out.push(*bit),
@@ -1108,6 +1283,7 @@ fn collect_condition_bits(condition: &ClassicalCondition, out: &mut Vec<usize>) 
         | ClassicalCondition::RegisterNotEquals { offset, size, .. } => {
             out.extend(*offset..offset.saturating_add(*size))
         }
+        ClassicalCondition::Parity { bits, .. } => out.extend_from_slice(bits),
     }
 }
 
@@ -1151,6 +1327,10 @@ fn remap_condition(
             offset: cbit(*offset),
             size: *size,
             value: *value,
+        },
+        ClassicalCondition::Parity { bits, expected } => ClassicalCondition::Parity {
+            bits: bits.iter().map(|&bit| cbit(bit)).collect(),
+            expected: *expected,
         },
     }
 }
@@ -1299,6 +1479,21 @@ mod tests {
         };
         assert!(reg_ne(0b100).evaluate(&bits));
         assert!(!reg_ne(0b101).evaluate(&bits));
+
+        let parity = |list: &[usize], expected| ClassicalCondition::Parity {
+            bits: list.to_vec().into(),
+            expected,
+        };
+        assert!(parity(&[0, 1], true).evaluate(&bits), "one bit set is odd");
+        assert!(!parity(&[0, 2], true).evaluate(&bits), "two set is even");
+        assert!(parity(&[0, 2], false).evaluate(&bits));
+        assert!(parity(&[0], true).evaluate(&bits), "one bit is a bit test");
+        assert!(
+            !parity(&[0, 0], true).evaluate(&bits),
+            "a bit cancels itself"
+        );
+        assert!(!parity(&[], true).evaluate(&bits), "no bits is parity zero");
+        assert!(parity(&[], false).evaluate(&bits));
     }
 
     #[test]

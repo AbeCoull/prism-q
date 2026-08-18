@@ -422,7 +422,55 @@ pub fn measurement_reset_region() -> Circuit {
     circuit
 }
 
-pub fn measurement_cases() -> [CircuitCase; 5] {
+// The shape `else` and `switch` lower to: sibling guards on a condition and its
+// negation, each re-reading the classical bits after the previous body ran, and
+// each body measuring. The condition is a parity, so every backend's shared
+// `ClassicalCondition::evaluate` carries that variant here too.
+pub fn parity_sibling_regions() -> Circuit {
+    let mut circuit = Circuit::new(4, 4);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    let parity = ClassicalCondition::Parity {
+        bits: vec![0, 1].into(),
+        expected: true,
+    };
+    circuit.instructions.push(
+        guarded(
+            parity.clone(),
+            vec![
+                Instruction::Gate {
+                    gate: Gate::X,
+                    targets: SmallVec::from_slice(&[2]),
+                },
+                Instruction::Measure {
+                    qubit: 2,
+                    classical_bit: 2,
+                },
+            ],
+        )
+        .expect("body is not empty"),
+    );
+    circuit.instructions.push(
+        guarded(
+            parity.negate(),
+            vec![
+                Instruction::Gate {
+                    gate: Gate::X,
+                    targets: SmallVec::from_slice(&[3]),
+                },
+                Instruction::Gate {
+                    gate: Gate::Cx,
+                    targets: SmallVec::from_slice(&[3, 2]),
+                },
+            ],
+        )
+        .expect("body is not empty"),
+    );
+    circuit
+}
+
+pub fn measurement_cases() -> [CircuitCase; 6] {
     [
         CircuitCase::new(
             "deterministic_measurement",
@@ -447,6 +495,11 @@ pub fn measurement_cases() -> [CircuitCase; 5] {
         CircuitCase::new(
             "measurement_reset_region",
             measurement_reset_region,
+            CircuitCapabilities::new(),
+        ),
+        CircuitCase::new(
+            "parity_sibling_regions",
+            parity_sibling_regions,
             CircuitCapabilities::new(),
         ),
     ]

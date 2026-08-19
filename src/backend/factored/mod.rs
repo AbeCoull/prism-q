@@ -901,34 +901,41 @@ impl Backend for FactoredBackend {
     /// A joint Pauli factorizes across independent sub-states, so the value is
     /// the product of the per-block expectations. Blocks the observable does
     /// not touch contribute one and are skipped.
+    ///
+    /// Every observable that touches a given sub-state is evaluated in one
+    /// traversal of it, so the block is read once rather than once per
+    /// observable. The cross-block product stays per observable.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
-        let norms: Vec<f64> = self
-            .substates
+        let masks: Vec<Vec<(usize, usize, u32)>> = observables
             .iter()
-            .map(|slot| {
-                slot.as_ref()
-                    .map_or(0.0, |sub| crate::backend::state_norm_sqr(&sub.state))
-            })
-            .collect();
+            .map(|observable| self.substate_pauli_masks(observable))
+            .collect::<Result<_>>()?;
 
-        observables
-            .iter()
-            .map(|observable| {
-                let masks = self.substate_pauli_masks(observable)?;
-                let mut product = 1.0f64;
-                for (ss, slot) in self.substates.iter().enumerate() {
-                    let Some(sub) = slot else { continue };
-                    let (xmask, zmask, num_y) = masks[ss];
-                    if xmask == 0 && zmask == 0 {
-                        continue;
-                    }
-                    product *= crate::sim::pauli_expectation_from_masks(
-                        &sub.state, xmask, zmask, num_y, norms[ss],
-                    );
+        let mut products = vec![1.0f64; observables.len()];
+        let mut rows: Vec<usize> = Vec::new();
+        let mut group: Vec<(usize, usize, u32)> = Vec::new();
+        for (ss, slot) in self.substates.iter().enumerate() {
+            let Some(sub) = slot else { continue };
+            rows.clear();
+            group.clear();
+            for (index, observable_masks) in masks.iter().enumerate() {
+                let entry = observable_masks[ss];
+                if entry.0 == 0 && entry.1 == 0 {
+                    continue;
                 }
-                Ok(product)
-            })
-            .collect()
+                rows.push(index);
+                group.push(entry);
+            }
+            if group.is_empty() {
+                continue;
+            }
+            let norm = crate::backend::state_norm_sqr(&sub.state);
+            let values = crate::sim::pauli_expectations_from_masks(&sub.state, &group, norm);
+            for (&index, value) in rows.iter().zip(values) {
+                products[index] *= value;
+            }
+        }
+        Ok(products)
     }
 }
 

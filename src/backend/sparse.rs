@@ -612,30 +612,57 @@ impl Backend for SparseBackend {
         true
     }
 
+    /// Every observable is accumulated in one walk of the stored amplitudes.
+    /// A Z-only observable has `xmask == 0`, so its partner is the entry
+    /// itself and it costs a popcount instead of a hash lookup; the two
+    /// families are accumulated separately for that reason.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
-        let norm: f64 = self.state.values().map(|amp| amp.norm_sqr()).sum();
-        observables
+        let masks = observables
             .iter()
-            .map(|observable| {
-                let (xmask, zmask, num_y) = crate::sim::pauli_masks(observable, self.num_qubits)?;
-                if norm == 0.0 {
-                    return Ok(0.0);
+            .map(|observable| crate::sim::pauli_masks(observable, self.num_qubits))
+            .collect::<Result<Vec<_>>>()?;
+
+        let norm: f64 = self.state.values().map(|amp| amp.norm_sqr()).sum();
+        if norm == 0.0 {
+            return Ok(vec![0.0; masks.len()]);
+        }
+
+        let z_only: Vec<usize> = masks
+            .iter()
+            .filter(|&&(xmask, _, _)| xmask == 0)
+            .map(|&(_, zmask, _)| zmask)
+            .collect();
+        let general: Vec<(usize, usize)> = masks
+            .iter()
+            .filter(|&&(xmask, _, _)| xmask != 0)
+            .map(|&(xmask, zmask, _)| (xmask, zmask))
+            .collect();
+
+        let mut z_sum = vec![0.0f64; z_only.len()];
+        let mut g_sum = vec![Complex64::new(0.0, 0.0); general.len()];
+        for (&idx, &amp) in &self.state {
+            let parity_sign = |mask: usize| {
+                if (idx & mask).count_ones() & 1 == 1 {
+                    -1.0
+                } else {
+                    1.0
                 }
-                let mut acc = Complex64::new(0.0, 0.0);
-                for (&idx, &amp) in &self.state {
-                    let Some(&partner) = self.state.get(&(idx ^ xmask)) else {
-                        continue;
-                    };
-                    let sign = if (idx & zmask).count_ones() & 1 == 1 {
-                        -1.0
-                    } else {
-                        1.0
-                    };
-                    acc += partner.conj() * amp * sign;
-                }
-                Ok((acc * crate::sim::i_pow(num_y)).re / norm)
-            })
-            .collect()
+            };
+            let norm_sqr = amp.norm_sqr();
+            for (slot, &zmask) in z_sum.iter_mut().zip(&z_only) {
+                *slot += norm_sqr * parity_sign(zmask);
+            }
+            for (slot, &(xmask, zmask)) in g_sum.iter_mut().zip(&general) {
+                let Some(&partner) = self.state.get(&(idx ^ xmask)) else {
+                    continue;
+                };
+                *slot += partner.conj() * amp * parity_sign(zmask);
+            }
+        }
+
+        Ok(crate::sim::finish_expectations(
+            &masks, &z_sum, &g_sum, norm,
+        ))
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {

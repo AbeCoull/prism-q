@@ -478,6 +478,20 @@ pub enum MpsPauliAxis {
     Z,
 }
 
+fn mps_pauli_factors(observable: &[PauliTerm]) -> Vec<(usize, MpsPauliAxis)> {
+    observable
+        .iter()
+        .map(|term| {
+            let axis = match term.axis {
+                PauliAxis::X => MpsPauliAxis::X,
+                PauliAxis::Y => MpsPauliAxis::Y,
+                PauliAxis::Z => MpsPauliAxis::Z,
+            };
+            (term.qubit, axis)
+        })
+        .collect()
+}
+
 #[inline]
 fn pauli_matrix_entry(axis: Option<MpsPauliAxis>, j: usize, k: usize) -> Complex64 {
     match (axis, j, k) {
@@ -682,6 +696,25 @@ impl MpsBackend {
             return Ok(ONE);
         }
 
+        let site_axis = self.pauli_site_axes(pauli_factors)?;
+
+        let mut env: Vec<Complex64> = vec![ONE; 1];
+        let mut env_cols: usize = 1;
+
+        for (i, a) in self.sites.iter().enumerate().take(self.num_qubits) {
+            env = self.contract_pauli_env(i, &env, env_cols, site_axis[i]);
+            env_cols = a.bond_right;
+        }
+
+        Ok(env[0])
+    }
+
+    /// Site index of each requested Pauli factor, `None` where the string acts
+    /// as identity. Rejects out-of-range qubits and duplicate factors.
+    fn pauli_site_axes(
+        &self,
+        pauli_factors: &[(usize, MpsPauliAxis)],
+    ) -> Result<Vec<Option<MpsPauliAxis>>> {
         let mut site_axis: Vec<Option<MpsPauliAxis>> = vec![None; self.num_qubits];
         for &(qubit, axis) in pauli_factors {
             if qubit >= self.num_qubits {
@@ -700,62 +733,86 @@ impl MpsBackend {
             }
             site_axis[site] = Some(axis);
         }
+        Ok(site_axis)
+    }
 
-        let mut env: Vec<Complex64> = vec![ONE; 1];
-        let mut env_cols: usize = 1;
+    /// Absorb one site into the `⟨ψ|P|ψ⟩` environment, applying `axis` as the
+    /// site's Pauli matrix (identity when `None`).
+    ///
+    /// `env` is indexed `[bra bond, ket bond]` with `env_cols` columns; the
+    /// result is indexed the same way with `bond_right` columns.
+    fn contract_pauli_env(
+        &self,
+        site: usize,
+        env: &[Complex64],
+        env_cols: usize,
+        axis: Option<MpsPauliAxis>,
+    ) -> Vec<Complex64> {
+        let a = &self.sites[site];
+        let bl = a.bond_left;
+        let br = a.bond_right;
 
-        for (i, a) in self.sites.iter().enumerate().take(self.num_qubits) {
-            let bl = a.bond_left;
-            let br = a.bond_right;
-
-            // Step 1: tmp[β, j, α'] = Σ_α env[α, β] · conj(A[α, j, α'])
-            let mut tmp = vec![ZERO; bl * 2 * br];
-            for alpha in 0..bl {
-                for j in 0..2 {
-                    for alpha_p in 0..br {
-                        let a_val = a.data[a.idx(alpha, j, alpha_p)].conj();
-                        if a_val == ZERO {
-                            continue;
-                        }
-                        for beta in 0..bl {
-                            let e_ab = env[alpha * env_cols + beta];
-                            tmp[beta * (2 * br) + j * br + alpha_p] += a_val * e_ab;
-                        }
+        // Step 1: tmp[β, j, α'] = Σ_α env[α, β] · conj(A[α, j, α'])
+        let mut tmp = vec![ZERO; bl * 2 * br];
+        for alpha in 0..bl {
+            for j in 0..2 {
+                for alpha_p in 0..br {
+                    let a_val = a.data[a.idx(alpha, j, alpha_p)].conj();
+                    if a_val == ZERO {
+                        continue;
+                    }
+                    for beta in 0..bl {
+                        let e_ab = env[alpha * env_cols + beta];
+                        tmp[beta * (2 * br) + j * br + alpha_p] += a_val * e_ab;
                     }
                 }
             }
-
-            // Step 2: new_env[α', β'] = Σ_{β, j, k} tmp[β, j, α'] · M[j,k] · A[β, k, β']
-            // with M = local Pauli matrix at site i (or identity if no factor).
-            let mut new_env = vec![ZERO; br * br];
-            let axis = site_axis[i];
-            for beta in 0..bl {
-                for j in 0..2 {
-                    for k in 0..2 {
-                        let m_jk = pauli_matrix_entry(axis, j, k);
-                        if m_jk == ZERO {
-                            continue;
-                        }
-                        for beta_p in 0..br {
-                            let a_bk = a.data[a.idx(beta, k, beta_p)];
-                            if a_bk == ZERO {
-                                continue;
-                            }
-                            let ma_val = m_jk * a_bk;
-                            for alpha_p in 0..br {
-                                let t = tmp[beta * (2 * br) + j * br + alpha_p];
-                                new_env[alpha_p * br + beta_p] += t * ma_val;
-                            }
-                        }
-                    }
-                }
-            }
-
-            env = new_env;
-            env_cols = br;
         }
 
-        Ok(env[0])
+        // Step 2: new_env[α', β'] = Σ_{β, j, k} tmp[β, j, α'] · M[j,k] · A[β, k, β']
+        // with M = local Pauli matrix at this site (or identity if no factor).
+        let mut new_env = vec![ZERO; br * br];
+        for beta in 0..bl {
+            for j in 0..2 {
+                for k in 0..2 {
+                    let m_jk = pauli_matrix_entry(axis, j, k);
+                    if m_jk == ZERO {
+                        continue;
+                    }
+                    for beta_p in 0..br {
+                        let a_bk = a.data[a.idx(beta, k, beta_p)];
+                        if a_bk == ZERO {
+                            continue;
+                        }
+                        let ma_val = m_jk * a_bk;
+                        for alpha_p in 0..br {
+                            let t = tmp[beta * (2 * br) + j * br + alpha_p];
+                            new_env[alpha_p * br + beta_p] += t * ma_val;
+                        }
+                    }
+                }
+            }
+        }
+
+        new_env
+    }
+
+    /// Identity environments left of every site, plus `⟨ψ|ψ⟩` as the last
+    /// entry, in the `[bra bond, ket bond]` convention of
+    /// [`MpsBackend::contract_pauli_env`].
+    ///
+    /// Entry `s` is the contraction of sites `0..s`, so it has `bond_left(s)`
+    /// columns and entry `num_qubits` is the `1x1` norm.
+    fn pauli_env_prefixes(&self) -> Vec<Vec<Complex64>> {
+        let mut prefixes = Vec::with_capacity(self.num_qubits + 1);
+        prefixes.push(vec![ONE; 1]);
+        let mut env_cols = 1usize;
+        for site in 0..self.num_qubits {
+            let next = self.contract_pauli_env(site, prefixes.last().unwrap(), env_cols, None);
+            env_cols = self.sites[site].bond_right;
+            prefixes.push(next);
+        }
+        prefixes
     }
 
     /// MPS site index currently hosting logical qubit `q`. SWAP-routing
@@ -2285,27 +2342,67 @@ impl Backend for MpsBackend {
         true
     }
 
-    /// Routes each observable through [`MpsBackend::pauli_expectation`], which
-    /// contracts the chain once per observable. Divided by `⟨ψ|ψ⟩` because a
-    /// truncated chain is not exactly normalized.
+    /// Identity environments are swept once and shared, so an observable
+    /// contracts only the sites between its first and last non-identity
+    /// factor: a single-qubit observable costs one site instead of a full
+    /// chain walk. Divided by `⟨ψ|ψ⟩` because a truncated chain is not
+    /// exactly normalized.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
-        let norm = self.pauli_expectation(&[])?.re;
+        if self.num_qubits == 0 {
+            return Ok(vec![1.0; observables.len()]);
+        }
+        if observables.len() < 2 {
+            // One observable costs the same two sweeps either way, and keeping
+            // the plain contraction here leaves a route that shares no code
+            // with the windowed one for a test to compare against.
+            let norm = self.pauli_expectation(&[])?.re;
+            return observables
+                .iter()
+                .map(|observable| {
+                    let value = self.pauli_expectation(&mps_pauli_factors(observable))?;
+                    Ok(if norm == 0.0 { 0.0 } else { value.re / norm })
+                })
+                .collect();
+        }
+
+        let prefixes = self.pauli_env_prefixes();
+        let rights = self.right_environments();
+        let norm = prefixes[self.num_qubits][0].re;
+
         observables
             .iter()
             .map(|observable| {
-                let factors: Vec<(usize, MpsPauliAxis)> = observable
-                    .iter()
-                    .map(|term| {
-                        let axis = match term.axis {
-                            PauliAxis::X => MpsPauliAxis::X,
-                            PauliAxis::Y => MpsPauliAxis::Y,
-                            PauliAxis::Z => MpsPauliAxis::Z,
-                        };
-                        (term.qubit, axis)
-                    })
-                    .collect();
-                let value = self.pauli_expectation(&factors)?;
-                Ok(if norm == 0.0 { 0.0 } else { value.re / norm })
+                let site_axis = self.pauli_site_axes(&mps_pauli_factors(observable))?;
+                if norm == 0.0 {
+                    return Ok(0.0);
+                }
+                let Some(first) = site_axis.iter().position(Option::is_some) else {
+                    return Ok(1.0);
+                };
+                let last = site_axis.iter().rposition(Option::is_some).unwrap();
+
+                let mut env = self.contract_pauli_env(
+                    first,
+                    &prefixes[first],
+                    self.sites[first].bond_left,
+                    site_axis[first],
+                );
+                let mut cols = self.sites[first].bond_right;
+                for (site, axis) in site_axis.iter().enumerate().take(last + 1).skip(first + 1) {
+                    env = self.contract_pauli_env(site, &env, cols, *axis);
+                    cols = self.sites[site].bond_right;
+                }
+
+                // The identity cap right of `last` carries the ket bond first,
+                // so closing the two chains is a trace of the two matrices.
+                let right = &rights[last];
+                let mut value = ZERO;
+                for bra in 0..cols {
+                    for ket in 0..cols {
+                        value += env[bra * cols + ket] * right[ket * cols + bra];
+                    }
+                }
+                Ok(value.re / norm)
             })
             .collect()
     }

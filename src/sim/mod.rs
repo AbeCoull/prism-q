@@ -1741,13 +1741,9 @@ fn supports_pauli_marginal_backend(circuit: &Circuit) -> bool {
     circuit.is_clifford_plus_t() && !has_nonunitary_or_classical_ops(circuit)
 }
 
+/// Gate-set support is left to the engines, which accept Clifford gates and
+/// Z-axis rotations and report the offending gate by name.
 fn validate_pauli_marginal_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
-    if !circuit.is_clifford_plus_t() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: format!("{kind:?}"),
-            reason: "Pauli marginal backends require Clifford+T gates".into(),
-        });
-    }
     if has_nonunitary_or_classical_ops(circuit) {
         return Err(PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),

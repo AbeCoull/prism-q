@@ -1,6 +1,11 @@
 use super::*;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use std::f64::consts::{FRAC_PI_4, SQRT_2};
+
+fn t_branch() -> RotBranch {
+    RotBranch::new(FRAC_PI_4)
+}
 
 #[test]
 fn test_no_t_gates_matches_propagate_backward() {
@@ -59,11 +64,11 @@ fn test_branch_t_gate_passthrough_iz() {
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
     let mut pauli_i = PauliVec::new(1);
-    let w = branch_t_gate(&mut pauli_i, 0, false, &mut rng);
+    let w = branch_z_rotation(&mut pauli_i, 0, &t_branch(), &mut rng);
     assert!((w - Complex64::new(1.0, 0.0)).norm() < 1e-14);
 
     let mut pauli_z = PauliVec::z_on_qubit(1, 0);
-    let w = branch_t_gate(&mut pauli_z, 0, false, &mut rng);
+    let w = branch_z_rotation(&mut pauli_z, 0, &t_branch(), &mut rng);
     assert!((w - Complex64::new(1.0, 0.0)).norm() < 1e-14);
 }
 
@@ -77,7 +82,7 @@ fn test_branch_t_gate_x_branches() {
     for _ in 0..num_samples {
         let mut pauli = PauliVec::new(1);
         pauli.x[0] = 1;
-        let w = branch_t_gate(&mut pauli, 0, false, &mut rng);
+        let w = branch_z_rotation(&mut pauli, 0, &t_branch(), &mut rng);
         assert!((w.norm() - SQRT_2).abs() < 1e-14);
         if pauli.z[0] == 0 {
             x_count += 1;

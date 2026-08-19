@@ -184,23 +184,23 @@ impl Backend for ProbabilityFailureBackend {
     }
 }
 
-fn assert_pauli_marginals_reject(circuit: &Circuit) {
-    for backend in [
+fn pauli_marginal_errors(circuit: &Circuit) -> Vec<PrismError> {
+    [
         BackendKind::StochasticPauli { num_samples: 100 },
         BackendKind::DeterministicPauli {
             epsilon: 0.0,
             max_terms: 0,
         },
-    ] {
-        assert!(matches!(
-            simulate(circuit)
-                .backend(backend)
-                .seed(42)
-                .marginals()
-                .unwrap_err(),
-            PrismError::IncompatibleBackend { .. }
-        ));
-    }
+    ]
+    .into_iter()
+    .map(|backend| {
+        simulate(circuit)
+            .backend(backend)
+            .seed(42)
+            .marginals()
+            .unwrap_err()
+    })
+    .collect()
 }
 
 #[test]
@@ -1657,11 +1657,33 @@ fn test_pauli_backends_return_marginals_through_builder() {
 }
 
 #[test]
-fn test_pauli_marginals_reject_non_clifford_t_gates() {
+fn test_pauli_marginals_reject_gates_off_the_z_axis() {
     let mut c = Circuit::new(1, 0);
     c.add_gate(Gate::Rx(0.25), &[0]);
 
-    assert_pauli_marginals_reject(&c);
+    for err in pauli_marginal_errors(&c) {
+        assert!(
+            matches!(err, PrismError::BackendUnsupported { .. }),
+            "{err:?}"
+        );
+    }
+
+    let mut supported = Circuit::new(1, 0);
+    supported.add_gate(Gate::H, &[0]);
+    supported.add_gate(Gate::Rz(0.25), &[0]);
+    assert_eq!(
+        simulate(&supported)
+            .backend(BackendKind::DeterministicPauli {
+                epsilon: 0.0,
+                max_terms: 0,
+            })
+            .seed(42)
+            .marginals()
+            .unwrap()
+            .marginals
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -1684,7 +1706,12 @@ fn test_pauli_marginals_reject_measurements_resets_and_conditionals() {
     });
 
     for circuit in [&measured, &reset, &conditional] {
-        assert_pauli_marginals_reject(circuit);
+        for err in pauli_marginal_errors(circuit) {
+            assert!(
+                matches!(err, PrismError::IncompatibleBackend { .. }),
+                "{err:?}"
+            );
+        }
     }
 }
 

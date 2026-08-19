@@ -10,8 +10,8 @@ use common::SEED;
 use num_complex::Complex64;
 use prism_q::circuits::qft_circuit;
 use prism_q::{
-    BackendKind, Circuit, Gate, McuData, PauliTerm, StatevectorBackend, run_on, run_on_state,
-    run_shots_compiled, simulate,
+    BackendKind, Circuit, Gate, McuData, PauliTerm, StatevectorBackend, ThreadPool, run_on,
+    run_on_state, run_shots_compiled, simulate,
 };
 
 #[cfg(not(miri))]
@@ -45,9 +45,7 @@ const SAMPLING_SHOTS: usize = 256;
 const REDUCTION_EPS: f64 = 1e-12;
 
 fn in_pool<T: Send>(threads: usize, op: impl FnOnce() -> T + Send) -> T {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
+    ThreadPool::with_threads(threads)
         .expect("scoped Rayon pool")
         .install(op)
 }

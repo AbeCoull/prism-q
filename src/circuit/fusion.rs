@@ -23,7 +23,7 @@ use std::borrow::Cow;
 
 use num_complex::Complex64;
 
-use super::{Circuit, Instruction, SmallVec, smallvec};
+use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{
     DiagEntry, DiagonalBatchData, Gate, Multi2qData, MultiFusedData, is_diagonal_2x2,
     is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
@@ -1347,6 +1347,52 @@ where
     }
 }
 
+/// Fuse each guarded region's body in isolation.
+///
+/// Every other pass treats a region as one opaque instruction spanning its
+/// qubit union, so a body would otherwise run entirely unfused. A body is an
+/// ordinary instruction list over the same register, so the pipeline applies to
+/// it unchanged. Nothing moves across the boundary here, and nesting is handled
+/// by the recursive call rather than by descending twice.
+///
+/// The tracer is left alone deliberately: this pass rewrites region payloads in
+/// place, and a region carries no provenance of its own, so the input mapping
+/// still describes the output exactly.
+pub(super) fn fuse_region_bodies<'a>(circuit: &'a Circuit) -> Cow<'a, Circuit> {
+    let insts = &circuit.instructions;
+    let mut out: Option<Vec<Instruction>> = None;
+
+    for (i, inst) in insts.iter().enumerate() {
+        let fused_region = match inst {
+            Instruction::Region(region) => {
+                let body = circuit.with_instructions(region.body().to_vec());
+                match fuse_traced(&body, &mut Tracer::off()) {
+                    Cow::Owned(fused) => Some(Instruction::Region(Box::new(GuardedRegion::new(
+                        region.condition().clone(),
+                        fused.instructions,
+                    )))),
+                    Cow::Borrowed(_) => None,
+                }
+            }
+            _ => None,
+        };
+
+        match fused_region {
+            Some(region) => out.get_or_insert_with(|| insts[..i].to_vec()).push(region),
+            None => {
+                if let Some(buf) = out.as_mut() {
+                    buf.push(inst.clone());
+                }
+            }
+        }
+    }
+
+    match out {
+        Some(buf) => Cow::Owned(circuit.with_instructions(buf)),
+        None => Cow::Borrowed(circuit),
+    }
+}
+
 /// Returns `Cow::Borrowed` when no fusion is profitable (zero overhead).
 /// Set `supports_fused` to `false` for backends that cannot handle fused gates
 /// (e.g., stabilizer).
@@ -1360,7 +1406,8 @@ pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, C
 /// The pass pipeline, recording provenance into `t` when it is tracking.
 pub(super) fn fuse_traced<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circuit> {
     let n = circuit.num_qubits;
-    let pass0 = cancel_self_inverse_pairs(circuit, t);
+    let pass_r = fuse_region_bodies(circuit);
+    let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);
     let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {
         apply_pass(c, t, fuse_batch_rzz)

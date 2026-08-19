@@ -53,6 +53,8 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::SendPtr;
 #[cfg(feature = "parallel")]
+use crate::backend::statevector::kernels::{apply_multi_1q_par, apply_single_gate_par};
+#[cfg(feature = "parallel")]
 use crate::backend::{
     MIN_PAR_ELEMS, MIN_PAR_ITERS, PARALLEL_THRESHOLD_QUBITS, chunk_min_len as par_chunk_min_len,
 };
@@ -471,7 +473,7 @@ impl FactoredBackend {
                     seq_or_par!(
                         simd::PreparedGate1q::new(&mat)
                             .apply_full_sequential(&mut sub.state, local),
-                        par_apply_1q(&mut sub.state, local, &mat)
+                        apply_single_gate_par(&mut sub.state, local, &mat)
                     );
                 }
             }
@@ -500,7 +502,7 @@ impl FactoredBackend {
 
             #[cfg(feature = "parallel")]
             if sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS {
-                par_apply_multi_1q(&mut sub.state, &gate_list);
+                apply_multi_1q_par(&mut sub.state, &gate_list);
                 continue;
             }
 
@@ -734,7 +736,7 @@ impl Backend for FactoredBackend {
         } else {
             #[cfg(feature = "parallel")]
             if par {
-                par_apply_1q(&mut sub.state, local, matrix);
+                apply_single_gate_par(&mut sub.state, local, matrix);
                 return Ok(());
             }
             simd::PreparedGate1q::new(matrix).apply_full_sequential(&mut sub.state, local);
@@ -1241,39 +1243,6 @@ fn apply_batch_phase_seq(
 
 #[cfg(feature = "parallel")]
 #[inline(always)]
-fn par_apply_1q(state: &mut [Complex64], target: usize, mat: &[[Complex64; 2]; 2]) {
-    let half = 1usize << target;
-    let block_size = half << 1;
-    let prepared = simd::PreparedGate1q::new(mat);
-
-    const MIN_TILE: usize = 8192;
-    let tile_size = MIN_TILE.max(block_size);
-    let num_tiles = state.len() / tile_size;
-
-    if block_size <= MIN_TILE && num_tiles >= 4 {
-        state.par_chunks_mut(MIN_TILE).for_each(|tile| {
-            prepared.apply_full_sequential(tile, target);
-        });
-    } else if num_tiles >= 4 {
-        state.par_chunks_mut(block_size).for_each(|chunk| {
-            let (lo, hi) = chunk.split_at_mut(half);
-            prepared.apply(lo, hi);
-        });
-    } else {
-        let sub_tile = MIN_TILE.min(half);
-        for block in state.chunks_mut(block_size) {
-            let (lo, hi) = block.split_at_mut(half);
-            lo.par_chunks_mut(sub_tile)
-                .zip(hi.par_chunks_mut(sub_tile))
-                .for_each(|(lo_t, hi_t)| {
-                    prepared.apply(lo_t, hi_t);
-                });
-        }
-    }
-}
-
-#[cfg(feature = "parallel")]
-#[inline(always)]
 fn par_apply_diagonal(
     state: &mut [Complex64],
     target: usize,
@@ -1608,73 +1577,4 @@ fn par_apply_fused2q(
                 prepared.apply_group_ptr(ptr.as_f64_ptr(), i);
             }
         });
-}
-
-#[cfg(feature = "parallel")]
-fn par_apply_multi_1q(state: &mut [Complex64], gates: &[(usize, [[Complex64; 2]; 2])]) {
-    if gates.is_empty() {
-        return;
-    }
-    if gates.len() == 1 {
-        par_apply_1q(state, gates[0].0, &gates[0].1);
-        return;
-    }
-
-    const MULTI_TILE: usize = 16384;
-    const L3_TILE: usize = 131072;
-
-    const fn max_target_for_tile(tile_size: usize) -> usize {
-        let mut t = 0usize;
-        while (1usize << (t + 1)) <= tile_size {
-            t += 1;
-        }
-        t - 1
-    }
-
-    let max_l2_target = max_target_for_tile(MULTI_TILE);
-    let max_l3_target = max_target_for_tile(L3_TILE);
-
-    let mut small_gates: SmallVec<[(usize, simd::PreparedGate1q); 16]> = SmallVec::new();
-    let mut medium_gates: SmallVec<[(usize, simd::PreparedGate1q); 4]> = SmallVec::new();
-    let mut large_gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = SmallVec::new();
-
-    for &(target, mat) in gates {
-        if target <= max_l2_target {
-            small_gates.push((target, simd::PreparedGate1q::new(&mat)));
-        } else if target <= max_l3_target {
-            medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
-        } else {
-            large_gates.push((target, mat));
-        }
-    }
-
-    if !small_gates.is_empty() {
-        let outer_block = 1usize << (max_l2_target + 1);
-        let tile_size = MULTI_TILE.max(outer_block);
-        state
-            .par_chunks_mut(tile_size)
-            .with_min_len(par_chunk_min_len(tile_size))
-            .for_each(|tile| {
-                for &(target, ref prepared) in &small_gates {
-                    prepared.apply_tiled(tile, target);
-                }
-            });
-    }
-
-    if !medium_gates.is_empty() {
-        let outer_block = 1usize << (max_l3_target + 1);
-        let tile_size = L3_TILE.max(outer_block);
-        state
-            .par_chunks_mut(tile_size)
-            .with_min_len(par_chunk_min_len(tile_size))
-            .for_each(|tile| {
-                for &(target, ref prepared) in &medium_gates {
-                    prepared.apply_tiled(tile, target);
-                }
-            });
-    }
-
-    for (target, mat) in large_gates {
-        par_apply_1q(state, target, &mat);
-    }
 }

@@ -19,6 +19,19 @@ fn check_fused_vs_unfused(label: &str, circuit: &Circuit) {
     assert_fused_matches_unfused(|| FactoredBackend::new(SEED), circuit, FACTORED_EPS, label);
 }
 
+fn has_multi_fused(circuit: &Circuit) -> bool {
+    let fused = prism_q::circuit::fusion::fuse_circuit(circuit, true);
+    fused.instructions.iter().any(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::MultiFused(_),
+                ..
+            }
+        )
+    })
+}
+
 fn has_batch_phase(circuit: &Circuit) -> bool {
     let fused = prism_q::circuit::fusion::fuse_circuit(circuit, true);
     fused.instructions.iter().any(|inst| {
@@ -181,6 +194,40 @@ fn factored_random_blocks_12q_fused() {
         "random_blocks 4x3 d5 fused",
         &circuits::independent_random_blocks(4, 3, 5, SEED),
     );
+}
+
+// The factored MultiFused path shares the statevector's tiered kernel, so it
+// needs a block wide enough to reach every tier: local targets 0-13 land in L2,
+// 14-16 in L3, and 17 above both. A 4-qubit block would exercise none of them.
+#[test]
+fn factored_multi_fused_spans_every_tier_20q_sv() {
+    const WIDE: usize = 18;
+    let mut c = Circuit::new(20, 0);
+    for q in 0..WIDE {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..WIDE - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c.add_gate(Gate::H, &[18]);
+    c.add_gate(Gate::Cx, &[18, 19]);
+    for q in 0..WIDE {
+        c.add_gate(Gate::Ry(0.19 + q as f64 * 0.07), &[q]);
+    }
+
+    assert_eq!(
+        c.independent_subsystems().len(),
+        2,
+        "the wide block and the trailing pair must stay separate or nothing is factored"
+    );
+    assert!(
+        has_multi_fused(&c),
+        "the trailing rotation layer should batch into MultiFused"
+    );
+    // The SV cross alone cannot see a broken tiered kernel: both backends share
+    // it. The unfused arm applies each rotation on its own, so it can.
+    check_fused_vs_unfused("multi_fused all tiers 20q fused", &c);
+    check_sv_cross("multi_fused all tiers 20q sv", &c);
 }
 
 #[test]

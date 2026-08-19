@@ -62,6 +62,8 @@ pub mod gpu;
 mod hash;
 pub mod qec;
 pub mod sim;
+#[cfg(feature = "parallel")]
+pub mod threading;
 
 #[cfg(feature = "distributed")]
 pub use backend::distributed_statevector::DistributedStatevectorBackend;
@@ -124,6 +126,8 @@ pub use sim::{
     RunOutcome, Seeded, ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values,
     run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
 };
+#[cfg(feature = "parallel")]
+pub use threading::ThreadPool;
 
 #[cfg(feature = "gpu")]
 pub use sim::compiled::{DevicePackedShots, run_shots_compiled_with_gpu};

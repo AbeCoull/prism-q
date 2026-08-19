@@ -237,9 +237,19 @@ pub(crate) fn init_classical_bits(bits: &mut Vec<bool>, num: usize) {
 /// latency. Benchmarks show 17% improvement with logical cores at 24q.
 /// The user can override via `RAYON_NUM_THREADS`.
 ///
+/// Does nothing when the caller already runs inside a Rayon pool, as under
+/// [`ThreadPool::install`](crate::ThreadPool::install): that pool serves the
+/// work, and the global one stays as the caller left it. The `Once` is not
+/// consumed on that path, so a later call from outside a pool still installs
+/// the global pool.
+///
 /// Safe to call multiple times. Only the first call takes effect.
 #[cfg(feature = "parallel")]
 pub(crate) fn init_thread_pool() {
+    if rayon::current_thread_index().is_some() {
+        return;
+    }
+
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -251,6 +261,24 @@ pub(crate) fn init_thread_pool() {
                 .ok();
         }
     });
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod thread_pool_tests {
+    // The global pool is process state, so this is the only case in the lib
+    // test binary that may configure it. The scoped half lives in
+    // `tests/thread_pool.rs`.
+    #[test]
+    fn init_thread_pool_sizes_the_global_pool() {
+        let expected: usize = match std::env::var("RAYON_NUM_THREADS") {
+            Ok(requested) => requested.parse().expect("RAYON_NUM_THREADS is a count"),
+            Err(_) => num_cpus::get(),
+        };
+
+        super::init_thread_pool();
+
+        assert_eq!(rayon::current_num_threads(), expected);
+    }
 }
 
 /// Buffer width for [`sorted_mcu_qubits`]. A dense state indexes amplitudes with a

@@ -23,6 +23,10 @@ dominates), with `MIN_PAR_ELEMS = 4096` per task. The pool defaults to all logic
 ```admonish tip title="Control the thread pool"
 Set `RAYON_NUM_THREADS` to cap parallelism. Hyperthreading helps at 24+ qubits by hiding
 memory latency, but on a contended host it adds noise to benchmarks.
+
+An application that already owns the process-wide Rayon pool can keep it: build a
+`ThreadPool::with_threads(n)` and run simulations inside `install`. The global pool is
+left unbuilt on that path.
 ```
 
 ## Determinism

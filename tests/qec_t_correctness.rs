@@ -543,7 +543,7 @@ fn auto_routes_non_clifford_non_t_gate_to_tensor_network() {
         .expect_err("SPD must reject gates outside Clifford+T");
     let spd_msg = format!("{spd_err:?}");
     assert!(
-        spd_msg.contains("non-Clifford+T"),
+        spd_msg.contains("rx"),
         "unexpected SPD rejection: {spd_msg}"
     );
 

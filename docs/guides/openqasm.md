@@ -69,6 +69,10 @@ OpenQASM 2.0 syntax also works: `qreg q[3];` / `creg c[3];` declarations and
 - Classical `if` conditionals, guarding either a single statement or a braced
   body. A braced body admits any supported statement, `measure` and `reset`
   included, and may nest.
+- `else` and `else if` arms, and `switch` with `case` and `default` arms. Both
+  lower to guards on the existing condition language rather than new syntax in
+  the IR.
+- Parity conditions, `if (c[0] ^ c[2])` or `if ((c[0] ^ c[2]) == 0)`.
 - Multi-register broadcast, `barrier`, and an expression evaluator with math functions.
 
 ```qasm
@@ -83,9 +87,16 @@ if (c[0]) {
 ```
 
 ```admonish warning title="Not supported"
-`for` / `while` loops, subroutines, and classical expressions beyond `if`. A construct
-that parses as valid OpenQASM but is unsupported returns `UnsupportedConstruct` rather
-than panicking; see the [Error Model](../architecture/api-surface.md).
+`while` loops and classical expressions beyond the condition language. A `for` loop
+with a compile-time trip count unrolls at parse time; a `def` subroutine inlines at
+its call site, but only a unitary one. A construct that parses as valid OpenQASM but
+is unsupported returns `UnsupportedConstruct` rather than panicking; see the
+[Error Model](../architecture/api-surface.md).
+
+`else` is rejected when the `if` body measures into a bit the condition reads, and
+`switch` when any arm measures into the switched register. Both lower to a chain of
+guards that re-read the classical bits, so such a source could otherwise take two arms
+of one choice. An `else` body may write freely: nothing re-reads after it.
 ```
 
 ```admonish note title="Qubit ordering"

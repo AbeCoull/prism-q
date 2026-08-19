@@ -273,6 +273,14 @@ pub(super) fn lower_qec_program_to_density_matrix(
                         .to_string(),
                 });
             }
+            QecOp::Feedforward { .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC density-matrix estimator".to_string(),
+                    reason: "`FEEDFORWARD` reads a measurement record, and the density matrix \
+                             holds none; call `run_qec_program_reference` for such programs"
+                        .to_string(),
+                });
+            }
             QecOp::Noise { .. }
             | QecOp::ExpectationValue { .. }
             | QecOp::Detector { .. }
@@ -418,6 +426,15 @@ fn lower_qec_program_to_deferred_circuit_inner(
                         &mut noise_events,
                     )?;
                 }
+            }
+            QecOp::Feedforward { .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC deferred sampler".to_string(),
+                    reason: "deferred measurement sampling evaluates a static map from random \
+                             bits to outcomes, which `FEEDFORWARD` makes depend on the sample; \
+                             `run_qec_program_reference` executes such programs"
+                        .to_string(),
+                });
             }
             QecOp::ExpectationValue { .. }
             | QecOp::Detector { .. }

@@ -344,10 +344,23 @@ fn cut_register_conditions(
         }
         _ => return Ok(()),
     };
-    let (ClassicalCondition::RegisterEquals { offset, size, .. }
-    | ClassicalCondition::RegisterNotEquals { offset, size, .. }) = condition
-    else {
-        return Ok(());
+    let (offset, size) = match condition {
+        ClassicalCondition::RegisterEquals { offset, size, .. }
+        | ClassicalCondition::RegisterNotEquals { offset, size, .. } => (offset, size),
+        // A parity names bits rather than a range, so it cuts nothing. Its bounds
+        // still need checking here: `CregLayout::bit` panics on a bit past the
+        // declared registers, and export of a hand-built circuit is not API
+        // misuse.
+        ClassicalCondition::Parity { bits, .. } => {
+            if let Some(&bit) = bits.iter().find(|&&bit| bit >= total) {
+                return Err(PrismError::ExportUnsupported {
+                    index,
+                    reason: format!("condition reads bit {bit} but the circuit has {total}"),
+                });
+            }
+            return Ok(());
+        }
+        _ => return Ok(()),
     };
     if offset + size > total {
         return Err(PrismError::ExportUnsupported {
@@ -411,6 +424,31 @@ impl CregLayout {
                 size,
                 value,
             } => format!("{} != {value}", self.register(*offset, *size, index)?),
+            // A parity over one bit is a bit test, and only the bit spelling
+            // reparses: the parser routes an expression to the parity form on
+            // the `^` that a single term does not have.
+            ClassicalCondition::Parity { bits, expected } => match bits.as_ref() {
+                [] => {
+                    return Err(PrismError::ExportUnsupported {
+                        index,
+                        reason: "parity condition over no bits has no OpenQASM form".to_string(),
+                    });
+                }
+                [bit] if *expected => self.bit(*bit),
+                [bit] => format!("!{}", self.bit(*bit)),
+                _ => {
+                    let terms = bits
+                        .iter()
+                        .map(|&bit| self.bit(bit))
+                        .collect::<Vec<_>>()
+                        .join(" ^ ");
+                    if *expected {
+                        terms
+                    } else {
+                        format!("({terms}) == 0")
+                    }
+                }
+            },
         })
     }
 

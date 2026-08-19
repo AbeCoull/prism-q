@@ -2369,6 +2369,164 @@ fn bench_density_matrix_noisy_shots(c: &mut Criterion) {
     group.finish();
 }
 
+/// Clifford layers over `n` qubits, emitted either as bare instructions or as
+/// one guarded region per layer.
+///
+/// The guard holds for every layer, so both forms execute the same gates.
+fn layered_clifford_body(circuit: &mut Circuit, n: usize, depth: usize, seed: u64) {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let cliffords = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Y, Gate::Z];
+    for layer in 0..depth {
+        for q in 0..n {
+            let pick = rng.random_range(0..cliffords.len());
+            circuit.add_gate(cliffords[pick].clone(), &[q]);
+        }
+        for q in ((layer % 2)..n - 1).step_by(2) {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+}
+
+fn guarded_layers_circuit(n: usize, depth: usize, guard: Option<ClassicalCondition>) -> Circuit {
+    let mut circuit = Circuit::new(n, 1);
+    circuit.add_measure(0, 0);
+    for layer in 0..depth {
+        let mut body = Circuit::new(n, 1);
+        layered_clifford_body(&mut body, n, 1, SEED ^ layer as u64);
+        match &guard {
+            Some(condition) => {
+                if let Some(region) =
+                    prism_q::circuit::guarded(condition.clone(), body.instructions)
+                {
+                    circuit.instructions.push(region);
+                }
+            }
+            None => circuit.instructions.extend(body.instructions),
+        }
+    }
+    circuit
+}
+
+/// What a guard costs: identical Clifford layers, once wrapped in a per-layer
+/// guarded region that always holds and once emitted bare.
+///
+/// The statevector pair is dominated by fusion rather than by the branch, since
+/// no pass fuses inside a region body or across its boundary. The `nofuse_`
+/// pair on the stabilizer backend, which declines fused gates so the pass is
+/// skipped on both sides, is the one that prices the branch alone.
+fn bench_dynamic_guarded_region(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic/guarded_region");
+    configure_group(&mut group);
+
+    for &n in &[16usize, 20] {
+        let taken = ClassicalCondition::BitIsZero(0);
+        let guarded_circuit = guarded_layers_circuit(n, 20, Some(taken));
+        let plain_circuit = guarded_layers_circuit(n, 20, None);
+
+        group.bench_function(format!("{n}"), |b| {
+            b.iter(|| run_with(BackendKind::Statevector, &guarded_circuit, SEED).unwrap());
+        });
+        group.bench_function(format!("unguarded_{n}"), |b| {
+            b.iter(|| run_with(BackendKind::Statevector, &plain_circuit, SEED).unwrap());
+        });
+
+        // The stabilizer backend declines fused gates, so the fusion pass is
+        // skipped for both forms and the pair prices the branch alone.
+        group.bench_function(format!("nofuse_{n}"), |b| {
+            b.iter(|| run_with(BackendKind::Stabilizer, &guarded_circuit, SEED).unwrap());
+        });
+        group.bench_function(format!("nofuse_unguarded_{n}"), |b| {
+            b.iter(|| run_with(BackendKind::Stabilizer, &plain_circuit, SEED).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
+/// A region guarded on a bit no preceding measurement writes, so it can never
+/// be taken. Prices the coarse sampling predicate: the `absent` row is the same
+/// circuit with the region deleted.
+fn dead_region_circuit(n: usize, with_region: bool) -> Circuit {
+    let mut circuit = Circuit::new(n, n);
+    if with_region {
+        let mut body = Circuit::new(n, n);
+        body.add_gate(Gate::X, &[0]);
+        body.add_gate(Gate::Cx, &[0, 1]);
+        if let Some(region) =
+            prism_q::circuit::guarded(ClassicalCondition::BitIsOne(n - 1), body.instructions)
+        {
+            circuit.instructions.push(region);
+        }
+    }
+    layered_clifford_body(&mut circuit, n, 10, SEED);
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+fn bench_dynamic_dead_region(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic/dead_region");
+    configure_group(&mut group);
+
+    for &n in &[16usize, 20] {
+        let with_region = dead_region_circuit(n, true);
+        let without_region = dead_region_circuit(n, false);
+
+        group.bench_function(format!("{n}"), |b| {
+            b.iter(|| run_shots_with(BackendKind::Auto, &with_region, 1_000, SEED).unwrap());
+        });
+        group.bench_function(format!("absent_{n}"), |b| {
+            b.iter(|| run_shots_with(BackendKind::Auto, &without_region, 1_000, SEED).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
+/// A region that genuinely branches on a measured bit, so the run replays once
+/// per shot. The `terminal` row is the same circuit with the region deleted,
+/// which samples one evolved distribution.
+fn shot_cliff_circuit(n: usize, with_region: bool) -> Circuit {
+    let mut circuit = Circuit::new(n, n);
+    layered_clifford_body(&mut circuit, n, 6, SEED);
+    circuit.add_measure(0, 0);
+    if with_region {
+        let mut body = Circuit::new(n, n);
+        body.add_gate(Gate::X, &[1]);
+        body.add_gate(Gate::Cx, &[1, 2]);
+        if let Some(region) =
+            prism_q::circuit::guarded(ClassicalCondition::BitIsOne(0), body.instructions)
+        {
+            circuit.instructions.push(region);
+        }
+    }
+    for q in 1..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+fn bench_dynamic_shots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic/shots");
+    configure_group(&mut group);
+
+    let n = 16;
+    let with_region = shot_cliff_circuit(n, true);
+    let without_region = shot_cliff_circuit(n, false);
+
+    for &shots in &[1_000usize, 10_000] {
+        group.bench_function(format!("{shots}"), |b| {
+            b.iter(|| run_shots_with(BackendKind::Auto, &with_region, shots, SEED).unwrap());
+        });
+        group.bench_function(format!("terminal_{shots}"), |b| {
+            b.iter(|| run_shots_with(BackendKind::Auto, &without_region, shots, SEED).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
 /// Neutrality row: an untouched statevector row re-run under a density-matrix
 /// group name. The density-matrix backend shares no kernels with the
 /// statevector path, so this must stay within the 5% regression gate.
@@ -2484,6 +2642,10 @@ criterion_group! {
     bench_density_matrix_unitary_layers,
     bench_density_matrix_noisy_channels,
     bench_density_matrix_noisy_shots,
-    bench_density_matrix_neutrality
+    bench_density_matrix_neutrality,
+    // Dynamic circuits (guard cost, dead-region predicate, per-shot cliff)
+    bench_dynamic_guarded_region,
+    bench_dynamic_dead_region,
+    bench_dynamic_shots
 }
 criterion_main!(benches);

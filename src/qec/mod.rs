@@ -230,6 +230,19 @@ pub enum QecOp {
         records: Vec<QecRecordRef>,
         expected: bool,
     },
+    /// Feed-forward: `body` executes iff the parity over `records` equals
+    /// `expected`.
+    ///
+    /// The predicate has the shape a detector has, because that is what
+    /// adaptive correction reads. `body` admits gates and resets only: the
+    /// record space is a static address space that detectors and observables
+    /// index, so a measurement whose execution depends on a record would make
+    /// those indices depend on the shot.
+    Feedforward {
+        records: Vec<QecRecordRef>,
+        expected: bool,
+        body: Vec<QecOp>,
+    },
     /// Pauli-noise annotation applied at this point in the program. Zero
     /// probability is treated as inactive.
     Noise {
@@ -664,6 +677,23 @@ impl QecProgram {
         })
     }
 
+    /// Append a feed-forward correction: `body` runs iff the parity over
+    /// `records` equals `expected`.
+    ///
+    /// See [`QecOp::Feedforward`] for what the body admits.
+    pub fn feedforward(
+        &mut self,
+        records: &[QecRecordRef],
+        expected: bool,
+        body: Vec<QecOp>,
+    ) -> Result<()> {
+        self.push_op(QecOp::Feedforward {
+            records: records.to_vec(),
+            expected,
+            body,
+        })
+    }
+
     /// Walk the ops with a running count of measurement records emitted so
     /// far. Record-referencing ops resolve relative offsets against that
     /// count; the row-resolver methods below share this walk.
@@ -780,12 +810,57 @@ impl QecProgram {
                     });
                 }
             }
+            QecOp::Feedforward {
+                records,
+                body,
+                expected: _,
+            } => {
+                if records.is_empty() {
+                    return Err(PrismError::InvalidParameter {
+                        message: "feed-forward predicate requires at least one record".to_string(),
+                    });
+                }
+                if body.is_empty() {
+                    return Err(PrismError::InvalidParameter {
+                        message: "feed-forward body requires at least one operation".to_string(),
+                    });
+                }
+                resolve_records(records, next_measurement)?;
+                for inner in body {
+                    if !matches!(inner, QecOp::Gate { .. } | QecOp::Reset { .. }) {
+                        return Err(PrismError::InvalidParameter {
+                            message: format!(
+                                "feed-forward body admits gates and resets only, got `{}`",
+                                qec_op_name(inner)
+                            ),
+                        });
+                    }
+                    self.validate_op(inner, next_measurement)?;
+                }
+            }
             QecOp::Noise { channel, targets } => {
                 validate_noise(*channel, targets, self.num_qubits)?;
             }
             QecOp::Tick => {}
         }
         Ok(())
+    }
+}
+
+/// Short name for an op, used when an error must say which one it found.
+fn qec_op_name(op: &QecOp) -> &'static str {
+    match op {
+        QecOp::Gate { .. } => "gate",
+        QecOp::Measure { .. } => "M",
+        QecOp::MeasurePauliProduct { .. } => "MPP",
+        QecOp::Reset { .. } => "R",
+        QecOp::Detector { .. } => "DETECTOR",
+        QecOp::ObservableInclude { .. } => "OBSERVABLE_INCLUDE",
+        QecOp::ExpectationValue { .. } => "EXP_VAL",
+        QecOp::Postselect { .. } => "POSTSELECT",
+        QecOp::Feedforward { .. } => "FEEDFORWARD",
+        QecOp::Noise { .. } => "noise",
+        QecOp::Tick => "TICK",
     }
 }
 
@@ -836,6 +911,14 @@ pub fn compile_qec_program_rows(program: &QecProgram) -> Result<QecCompiledRows>
                     backend: "QEC row compiler".to_string(),
                     reason: "QEC row compilation has no row representation for `EXP_VAL`; \
                              use `run_qec_program`"
+                        .to_string(),
+                });
+            }
+            QecOp::Feedforward { .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "QEC row compiler".to_string(),
+                    reason: "QEC row compilation has no row representation for `FEEDFORWARD`; \
+                             use `run_qec_program_reference`"
                         .to_string(),
                 });
             }
@@ -944,6 +1027,13 @@ pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()>
                 if seen_exp_val {
                     return Err(terminal_violation(channel.name()));
                 }
+            }
+            QecOp::Feedforward { .. } => {
+                if seen_exp_val {
+                    return Err(terminal_violation("FEEDFORWARD"));
+                }
+                // A conditional reset does not restore liveness: the shots where
+                // the predicate is false leave the qubit collapsed.
             }
             QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }

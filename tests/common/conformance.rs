@@ -449,6 +449,14 @@ fn describe_condition(condition: &ClassicalCondition) -> String {
             size,
             value,
         } => format!("c[{offset}..{}]!={value}", offset + size),
+        ClassicalCondition::Parity { bits, expected } => {
+            let terms = bits
+                .iter()
+                .map(|bit| format!("c{bit}"))
+                .collect::<Vec<_>>()
+                .join("^");
+            format!("({terms})=={}", u8::from(*expected))
+        }
     }
 }
 

@@ -108,6 +108,18 @@ fn condition_label(condition: &ClassicalCondition) -> String {
             size,
             value,
         } => format!("c[{}..{}]!={}", offset, offset + size, value),
+        ClassicalCondition::Parity { bits, expected } => {
+            let terms = bits
+                .iter()
+                .map(|bit| format!("c[{bit}]"))
+                .collect::<Vec<_>>()
+                .join("^");
+            if *expected {
+                terms
+            } else {
+                format!("!({terms})")
+            }
+        }
     }
 }
 

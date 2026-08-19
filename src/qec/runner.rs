@@ -7,11 +7,11 @@ use super::noise::QecCompiledNoiseSampler;
 use super::noise::compile_qec_noisy_sampler;
 use super::{
     QecBasis, QecNoise, QecObservableEstimate, QecOp, QecOptions, QecPauli, QecProgram,
-    QecSampleResult, append_basis_to_z_rotation, append_mpp_parity_rotations,
+    QecRecordRef, QecSampleResult, append_basis_to_z_rotation, append_mpp_parity_rotations,
     append_z_to_basis_rotation, ensure_lowered_record_count, qec_non_clifford_error,
 };
 use crate::backend::{Backend, statevector::StatevectorBackend};
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 #[cfg(feature = "bench-internal")]
@@ -498,6 +498,9 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
         })
         .collect::<Result<Vec<_>>>()?;
     let postselection_rows = program.postselection_rows()?;
+    // Record indices are shot-invariant, so the guarded regions are built once
+    // rather than per shot inside the loop below.
+    let feedforward_regions = build_feedforward_regions(program, backend_qubits)?;
     let mut exp_val_sums = vec![0.0f64; exp_val_masks.len()];
     let mut exp_val_sq_sums = vec![0.0f64; exp_val_masks.len()];
     let mut exp_val_accepted = 0usize;
@@ -505,6 +508,7 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
     for shot in 0..shots {
         backend.init(backend_qubits, num_measurements)?;
         let mut next_record = 0;
+        let mut next_feedforward = 0;
 
         for op in program.ops() {
             match op {
@@ -532,6 +536,10 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                 }
                 QecOp::Noise { channel, targets } => {
                     apply_reference_noise(&mut backend, &mut noise_rng, *channel, targets)?;
+                }
+                QecOp::Feedforward { .. } => {
+                    backend.apply(&feedforward_regions[next_feedforward])?;
+                    next_feedforward += 1;
                 }
                 QecOp::ExpectationValue { .. }
                 | QecOp::Detector { .. }
@@ -607,6 +615,86 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
         })
         .collect();
     Ok(result.with_expectation_values(estimates))
+}
+
+/// Lower every feed-forward op in `program` to its guarded instruction, in op
+/// order.
+fn build_feedforward_regions(program: &QecProgram, num_qubits: usize) -> Result<Vec<Instruction>> {
+    let mut regions = Vec::new();
+    let mut next_record = 0usize;
+    for op in program.ops() {
+        match op {
+            QecOp::Measure { .. } | QecOp::MeasurePauliProduct { .. } => next_record += 1,
+            QecOp::Feedforward {
+                records,
+                expected,
+                body,
+            } => regions.push(feedforward_region(
+                records,
+                *expected,
+                body,
+                next_record,
+                num_qubits,
+            )?),
+            _ => {}
+        }
+    }
+    Ok(regions)
+}
+
+/// Build the guarded instruction a feed-forward op executes as.
+///
+/// The QEC record space and the classical bit vector are one address space: the
+/// reference runner writes record `i` to classical bit `i`, so a resolved
+/// record index is the bit the condition reads with no translation. A one-gate
+/// body takes the [`Instruction::Conditional`] lowering [`crate::circuit::guarded`]
+/// picks for it.
+fn feedforward_region(
+    records: &[QecRecordRef],
+    expected: bool,
+    body: &[QecOp],
+    next_record: usize,
+    num_qubits: usize,
+) -> Result<Instruction> {
+    let bits = super::resolve_records(records, next_record)?;
+    let mut lowered = Circuit::new(num_qubits, 0);
+    for op in body {
+        match op {
+            QecOp::Gate { gate, targets } => lowered.add_gate(gate.clone(), targets),
+            QecOp::Reset { basis, qubit } => {
+                lowered.add_reset(*qubit);
+                super::append_z_to_basis_rotation(&mut lowered, *basis, *qubit);
+            }
+            other => {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "feed-forward body admits gates and resets only, got `{}`",
+                        super::qec_op_name(other)
+                    ),
+                });
+            }
+        }
+    }
+    let condition = ClassicalCondition::Parity {
+        bits: bits.into(),
+        expected,
+    };
+    crate::circuit::guarded(condition, lowered.instructions).ok_or_else(|| {
+        PrismError::InvalidParameter {
+            message: "feed-forward body is empty".to_string(),
+        }
+    })
+}
+
+/// The compiled sampler's map is fixed before sampling starts, so a
+/// record-conditioned branch cannot route through it.
+fn qec_feedforward_rejection() -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: "QEC compiled runner".to_string(),
+        reason: "the compiled QEC sampler evaluates a static affine map, which `FEEDFORWARD` \
+                 makes depend on the sample; `run_qec_program_reference` executes such programs"
+            .to_string(),
+    }
 }
 
 fn qec_result_from_measurements(
@@ -1082,6 +1170,9 @@ fn validate_qec_compiled_program(program: &QecProgram) -> Result<bool> {
             QecOp::Noise { channel, .. } => {
                 has_noise |= channel.probability() > 0.0;
             }
+            QecOp::Feedforward { .. } => {
+                return Err(qec_feedforward_rejection());
+            }
             _ => {}
         }
     }
@@ -1153,6 +1244,9 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
                              reference runners"
                         .to_string(),
                 });
+            }
+            QecOp::Feedforward { .. } => {
+                return Err(qec_feedforward_rejection());
             }
             QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }

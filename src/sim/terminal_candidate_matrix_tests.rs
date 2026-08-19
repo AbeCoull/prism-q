@@ -82,3 +82,49 @@ fn temporal_prefix_circuit_is_not_candidate() {
     ));
     assert!(!auto_terminal_statevector_candidate(&circuit));
 }
+
+// A Clifford-only circuit has no dense tail to accelerate, so exporting the
+// tableau to run its measurements and guards densely is a loss. Deleting the
+// `is_clifford_only` guards in `dispatch.rs` makes both assertions fail.
+#[test]
+fn clifford_only_circuit_is_not_a_temporal_prefix_candidate() {
+    use crate::circuit::{ClassicalCondition, guarded};
+    use crate::circuit::{Instruction, SmallVec};
+
+    let n = 8;
+    let mut circuit = Circuit::new(n, n);
+    circuit.add_gate(Gate::H, &[0]);
+    for _ in 0..4 {
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    circuit.add_measure(0, 0);
+    circuit.instructions.extend(guarded(
+        ClassicalCondition::BitIsOne(0),
+        vec![
+            Instruction::Gate {
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[1]),
+            },
+            Instruction::Gate {
+                gate: Gate::Z,
+                targets: SmallVec::from_slice(&[2]),
+            },
+        ],
+    ));
+    assert!(circuit.is_clifford_only());
+    assert!(!has_temporal_clifford_opportunity(
+        &BackendKind::Auto,
+        &circuit
+    ));
+    assert!(plan_temporal_clifford(&BackendKind::Auto, &circuit).is_none());
+
+    // The same prefix with a non-Clifford tail still qualifies.
+    let mut mixed = circuit.clone();
+    mixed.add_gate(Gate::Rx(0.3), &[0]);
+    assert!(has_temporal_clifford_opportunity(
+        &BackendKind::Auto,
+        &mixed
+    ));
+}

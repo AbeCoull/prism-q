@@ -8,12 +8,36 @@ OpenQASM semantics.
 
 `QecOp` stores gates, basis measurements, MPP-style Pauli-product
 measurements, resets, detector rows, observable includes, expectation-value
-metadata, postselection predicates, noise annotations, and tick separators.
+metadata, postselection predicates, feed-forward corrections, noise
+annotations, and tick separators.
 Record references can be absolute indices or `rec[-k]` style lookbacks.
 Construction validates qubit bounds, gate arity, finite coordinates and
 coefficients, finite probabilities, and measurement-record scope. Detector,
 observable, and postselection rows can be resolved to absolute measurement
 indices for later compilation into packed samplers.
+
+## Feed-forward
+
+`QecOp::Feedforward` conditions a body on the parity of a record list against an
+expected value, the shape a detector already has. It is a consumer of the
+guarded-region contract rather than a second conditional mechanism: the QEC
+record space and the classical bit vector are one address space, because the
+reference runner writes record `i` to classical bit `i`, so a resolved record
+index is directly the bit a `ClassicalCondition::Parity` reads. The op executes
+as the guarded instruction `circuit::guarded` picks for its body: a `Region`
+through `Backend::apply_region`, or a `Conditional` when the body is one gate.
+
+The body admits gates and resets only. Detectors and observables index the
+record space absolutely, so a measurement whose execution depended on a record
+would make every later index depend on the shot.
+
+The compiled QEC sampler evaluates a static affine map from random bits to
+outcomes, which a record-conditioned branch makes depend on the sample. It
+rejects by name and points at `run_qec_program_reference`, as do the deferred
+lowering and the density-matrix estimator. The detector-error-model derivation
+inherits the deferred lowering's rejection rather than carrying its own. The op
+is built through `QecProgram::feedforward`; the native text format does not
+spell it.
 
 ## Parsing
 

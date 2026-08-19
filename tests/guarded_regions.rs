@@ -119,22 +119,16 @@ fn nesting_past_the_bound_is_rejected() {
     );
 }
 
-// `else` is stage-3 work. Until then it must reject by name with a line number
-// in every shape, the way `while` and `switch` do: a braced `if` body invites an
-// `else` after it, and falling through to gate parsing reports a register error
-// naming a brace.
+// `else` lowers to a second guard carrying the negated condition, in every
+// shape the source can spell it: same line, own line, and unbraced.
 #[test]
-fn else_rejects_by_name_in_every_shape() {
-    let cases = [
-        (
-            "OPENQASM 3.0;
+fn else_lowers_to_a_negated_sibling_in_every_shape() {
+    let sources = [
+        "OPENQASM 3.0;
 qubit[1] q;
 bit[1] c;
 if (c[0]) { x q[0]; } else { z q[0]; }",
-            4,
-        ),
-        (
-            "OPENQASM 3.0;
+        "OPENQASM 3.0;
 qubit[1] q;
 bit[1] c;
 if (c[0]) {
@@ -143,29 +137,262 @@ if (c[0]) {
 else {
   z q[0];
 }",
-            7,
-        ),
-        (
-            "OPENQASM 3.0;
+        "OPENQASM 3.0;
 qubit[1] q;
 bit[1] c;
 if (c[0]) x q[0];
 else z q[0];",
-            5,
-        ),
+        "OPENQASM 3.0;
+qubit[1] q;
+bit[1] c;
+if (c[0]) x q[0]; else z q[0];",
+        "OPENQASM 3.0;
+qubit[1] q;
+bit[1] c;
+if (c[0]) { x q[0]; }
+else
+z q[0];",
     ];
-    for (qasm, line) in cases {
-        match openqasm::parse(qasm).expect_err("else is unsupported") {
+    for qasm in sources {
+        let circuit = openqasm::parse(qasm).expect("parse");
+        assert_eq!(circuit.instructions.len(), 2, "in {qasm:?}");
+        let arms: Vec<_> = circuit
+            .instructions
+            .iter()
+            .map(|inst| match inst {
+                Instruction::Conditional {
+                    condition, gate, ..
+                } => (format!("{condition:?}"), gate.name().to_string()),
+                other => panic!("expected a conditional, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(arms[0].1, "x", "in {qasm:?}");
+        assert_eq!(arms[1].1, "z", "in {qasm:?}");
+        assert!(arms[0].0.contains("BitIsOne"), "in {qasm:?}");
+        assert!(arms[1].0.contains("BitIsZero"), "in {qasm:?}");
+    }
+}
+
+#[test]
+fn exactly_one_else_arm_runs() {
+    let qasm = "OPENQASM 3.0;
+qubit[3] q;
+bit[1] c;
+x q[0];
+measure q[0] -> c[0];
+if (c[0]) { x q[1]; } else { x q[2]; }";
+    let circuit = openqasm::parse(qasm).expect("parse");
+    let probs = probabilities(&circuit);
+    // q0 and q1 set, q2 clear: index 0b011.
+    assert!(probs[0b011] > 0.999, "{probs:?}");
+}
+
+#[test]
+fn else_if_chains_nest_under_the_negated_arm() {
+    let qasm = "OPENQASM 3.0;
+qubit[4] q;
+bit[2] c;
+x q[1];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+if (c[0]) { x q[2]; } else if (c[1]) { x q[3]; } else { x q[2]; x q[3]; }";
+    let circuit = openqasm::parse(qasm).expect("parse");
+    let probs = probabilities(&circuit);
+    // c[0] is 0 and c[1] is 1, so only the middle arm runs: q1 and q3 set.
+    assert!(probs[0b1010] > 0.999, "{probs:?}");
+}
+
+// The negated arm re-reads the bits after the first body ran, so a body that
+// measures into its own guard could take both arms. That is rejected, not
+// lowered.
+#[test]
+fn else_rejects_a_body_that_overwrites_its_own_guard() {
+    let qasm = "OPENQASM 3.0;
+qubit[1] q;
+bit[1] c;
+if (c[0]) { measure q[0] -> c[0]; } else { x q[0]; }";
+    match openqasm::parse(qasm).expect_err("unsound lowering") {
+        PrismError::Parse { line, message } => {
+            assert_eq!(line, 4);
+            assert!(message.contains("overwrite"), "{message}");
+        }
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn switch_lowers_to_one_region_per_case_label() {
+    let qasm = "OPENQASM 3.0;
+qubit[4] q;
+bit[2] c;
+switch (c) {
+  case 0 { x q[0]; cx q[0], q[1]; }
+  case 1, 2 { x q[2]; }
+  default { x q[3]; z q[3]; }
+}";
+    let circuit = openqasm::parse(qasm).expect("parse");
+    // One guard per case label, so the two-label arm emits two, then the
+    // default nested once per label to spell the conjunction of its negations.
+    assert_eq!(circuit.instructions.len(), 4);
+    assert_eq!(region(&circuit.instructions[0]).body().len(), 2);
+    let default = region(&circuit.instructions[3]);
+    assert_eq!(default.depth(), 3);
+}
+
+#[test]
+fn switch_selects_the_matching_case() {
+    let qasm = "OPENQASM 3.0;
+qubit[5] q;
+bit[2] c;
+x q[1];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+switch (c) {
+  case 0 { x q[2]; }
+  case 2 { x q[3]; }
+  default { x q[4]; }
+}";
+    let circuit = openqasm::parse(qasm).expect("parse");
+    let probs = probabilities(&circuit);
+    // c reads 0b10, so the `case 2` arm runs and sets q3.
+    assert!(probs[0b01010] > 0.999, "{probs:?}");
+}
+
+#[test]
+fn switch_default_runs_when_no_label_matches() {
+    let qasm = "OPENQASM 3.0;
+qubit[4] q;
+bit[2] c;
+x q[0];
+x q[1];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+switch (c) {
+  case 0 { x q[2]; }
+  case 1 { x q[2]; }
+  default { x q[3]; }
+}";
+    let circuit = openqasm::parse(qasm).expect("parse");
+    let probs = probabilities(&circuit);
+    assert!(probs[0b1011] > 0.999, "{probs:?}");
+}
+
+#[test]
+fn switch_rejects_a_duplicate_label_and_a_body_writing_its_operand() {
+    let duplicate = "OPENQASM 3.0;
+qubit[1] q;
+bit[2] c;
+switch (c) {
+  case 1 { x q[0]; }
+  case 1 { z q[0]; }
+}";
+    match openqasm::parse(duplicate).expect_err("duplicate label") {
+        PrismError::Parse { message, .. } => assert!(message.contains("twice"), "{message}"),
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+
+    let writes = "OPENQASM 3.0;
+qubit[1] q;
+bit[2] c;
+switch (c) {
+  case 1 { measure q[0] -> c[0]; }
+  case 2 { x q[0]; }
+}";
+    match openqasm::parse(writes).expect_err("arm writes the operand") {
+        PrismError::Parse { message, .. } => {
+            assert!(message.contains("overwrites"), "{message}")
+        }
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+}
+
+#[test]
+fn while_and_break_still_reject_by_name() {
+    for (source, construct, line) in [
+        (
+            "OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nwhile (c[0]) { x q[0]; }",
+            "while",
+            4,
+        ),
+        ("OPENQASM 3.0;\nqubit[1] q;\nbit[1] c;\nbreak;", "break", 4),
+    ] {
+        match openqasm::parse(source).expect_err("unsupported") {
             PrismError::UnsupportedConstruct {
-                construct,
+                construct: got,
                 line: at,
             } => {
-                assert_eq!(construct, "else", "in {qasm:?}");
-                assert_eq!(at, line, "in {qasm:?}");
+                assert_eq!(got, construct);
+                assert_eq!(at, line);
             }
-            other => panic!("expected UnsupportedConstruct for {qasm:?}, got {other:?}"),
+            other => panic!("expected UnsupportedConstruct for {construct}, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn negation_round_trips_every_condition_variant() {
+    let variants = [
+        ClassicalCondition::BitIsOne(0),
+        ClassicalCondition::BitIsZero(1),
+        ClassicalCondition::RegisterEquals {
+            offset: 0,
+            size: 2,
+            value: 3,
+        },
+        ClassicalCondition::RegisterNotEquals {
+            offset: 1,
+            size: 2,
+            value: 1,
+        },
+        ClassicalCondition::Parity {
+            bits: vec![0, 2].into(),
+            expected: true,
+        },
+    ];
+    let bits = [true, false, true, false];
+    for condition in variants {
+        assert_ne!(
+            condition.evaluate(&bits),
+            condition.negate().evaluate(&bits),
+            "{condition:?}"
+        );
+        assert_eq!(
+            condition.evaluate(&bits),
+            condition.negate().negate().evaluate(&bits),
+            "{condition:?}"
+        );
+    }
+}
+
+#[test]
+fn parity_conditions_round_trip_through_qasm() {
+    for source in [
+        "OPENQASM 3.0;\nqubit[1] q;\nbit[3] c;\nif (c[0] ^ c[2]) { x q[0]; }",
+        "OPENQASM 3.0;\nqubit[1] q;\nbit[3] c;\nif ((c[0] ^ c[2]) == 0) { x q[0]; }",
+    ] {
+        let circuit = openqasm::parse(source).expect("parse");
+        let exported = qasm_export::to_qasm3(&circuit).expect("export");
+        let reparsed = openqasm::parse(&exported).expect("reparse");
+        assert_eq!(
+            format!("{:?}", circuit.instructions),
+            format!("{:?}", reparsed.instructions),
+            "exported: {exported}"
+        );
+    }
+}
+
+#[test]
+fn parity_selects_on_the_measured_bits() {
+    let qasm = "OPENQASM 3.0;
+qubit[3] q;
+bit[3] c;
+x q[0];
+measure q[0] -> c[0];
+measure q[1] -> c[1];
+if (c[0] ^ c[1]) { x q[2]; }";
+    let circuit = openqasm::parse(qasm).expect("parse");
+    let probs = probabilities(&circuit);
+    assert!(probs[0b101] > 0.999, "{probs:?}");
 }
 
 // A `def` body can expand to a non-gate instruction. Before regions the parser
@@ -473,4 +700,358 @@ fn a_noise_model_rejects_a_region() {
         matches!(&err, PrismError::IncompatibleBackend { reason, .. } if reason.contains("noise slots")),
         "{err:?}"
     );
+}
+
+// ---- Static-guard folding (the sampling reachability refinement) ----
+
+fn dead_guard_circuit(with_guard: bool) -> Circuit {
+    let mut circuit = Circuit::new(3, 3);
+    if with_guard {
+        let mut body = Circuit::new(3, 3);
+        body.add_gate(Gate::X, &[0]);
+        body.add_gate(Gate::Cx, &[0, 1]);
+        circuit
+            .instructions
+            .extend(guarded(ClassicalCondition::BitIsOne(2), body.instructions));
+    }
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    for q in 0..3 {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+#[test]
+fn folding_drops_a_dead_guard_and_inlines_a_taken_one() {
+    let dead = dead_guard_circuit(true);
+    assert!(!dead.has_terminal_measurements_only());
+    let folded = dead.fold_static_guards();
+    assert_eq!(
+        folded.instructions.len(),
+        dead_guard_circuit(false).instructions.len()
+    );
+    assert!(folded.has_terminal_measurements_only());
+
+    let mut taken = Circuit::new(2, 2);
+    let mut body = Circuit::new(2, 2);
+    body.add_gate(Gate::X, &[0]);
+    body.add_gate(Gate::Cx, &[0, 1]);
+    taken
+        .instructions
+        .extend(guarded(ClassicalCondition::BitIsZero(0), body.instructions));
+    let folded = taken.fold_static_guards();
+    assert_eq!(folded.instructions.len(), 2);
+    assert!(
+        folded
+            .instructions
+            .iter()
+            .all(|inst| matches!(inst, Instruction::Gate { .. }))
+    );
+}
+
+// The obligation the refinement carries: fold only what is genuinely constant.
+#[test]
+fn folding_keeps_a_guard_a_measurement_can_reach() {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+    let mut body = Circuit::new(2, 2);
+    body.add_gate(Gate::X, &[1]);
+    body.add_gate(Gate::Z, &[1]);
+    circuit
+        .instructions
+        .extend(guarded(ClassicalCondition::BitIsOne(0), body.instructions));
+    let folded = circuit.fold_static_guards();
+    assert!(matches!(
+        folded.instructions.last(),
+        Some(Instruction::Region(_))
+    ));
+
+    // A measurement inside a live region writes bits later guards read, so a
+    // guard on those bits stays too.
+    let mut chained = Circuit::new(2, 2);
+    chained.add_gate(Gate::H, &[0]);
+    chained.add_measure(0, 0);
+    let mut body = Circuit::new(2, 2);
+    body.add_gate(Gate::X, &[1]);
+    body.add_measure(1, 1);
+    chained
+        .instructions
+        .extend(guarded(ClassicalCondition::BitIsOne(0), body.instructions));
+    chained.instructions.extend(guarded(
+        ClassicalCondition::BitIsOne(1),
+        vec![
+            Instruction::Gate {
+                gate: Gate::Z,
+                targets: SmallVec::from_slice(&[0]),
+            },
+            Instruction::Gate {
+                gate: Gate::Z,
+                targets: SmallVec::from_slice(&[1]),
+            },
+        ],
+    ));
+    let folded = chained.fold_static_guards();
+    assert_eq!(folded.instructions.len(), chained.instructions.len());
+}
+
+#[test]
+fn a_static_circuit_borrows_through_the_fold() {
+    let circuit = dead_guard_circuit(false);
+    let folded = circuit.fold_static_guards();
+    assert!(matches!(folded, std::borrow::Cow::Borrowed(_)));
+}
+
+#[test]
+fn a_dead_guard_samples_the_same_shots_as_its_absence() {
+    let with_guard = dead_guard_circuit(true);
+    let without = dead_guard_circuit(false);
+    let a = simulate(&with_guard).seed(SEED).shots(512).expect("shots");
+    let b = simulate(&without).seed(SEED).shots(512).expect("shots");
+    assert_eq!(a.counts(), b.counts());
+}
+
+// Obligation (ii) on a distribution the fold cannot make trivially equal: the
+// folded circuit samples through the compiled path, the unfolded one runs
+// per shot on the statevector, and the two must agree.
+#[test]
+fn folding_preserves_a_nontrivial_distribution() {
+    let mut circuit = Circuit::new(3, 3);
+    // Statically taken: bit 2 is unwritten and BitIsZero holds on all-zero.
+    circuit.instructions.extend(guarded(
+        ClassicalCondition::BitIsZero(2),
+        vec![
+            Instruction::Gate {
+                gate: Gate::H,
+                targets: SmallVec::from_slice(&[0]),
+            },
+            Instruction::Gate {
+                gate: Gate::Cx,
+                targets: SmallVec::from_slice(&[0, 1]),
+            },
+        ],
+    ));
+    circuit.add_measure(0, 0);
+    // Live: bit 0 was just written, so this one survives the fold.
+    circuit.instructions.extend(guarded(
+        ClassicalCondition::BitIsOne(0),
+        vec![
+            Instruction::Gate {
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[2]),
+            },
+            Instruction::Gate {
+                gate: Gate::Z,
+                targets: SmallVec::from_slice(&[2]),
+            },
+        ],
+    ));
+    circuit.add_measure(1, 1);
+    circuit.add_measure(2, 2);
+
+    let folded = circuit.fold_static_guards();
+    assert!(matches!(folded, std::borrow::Cow::Owned(_)));
+    assert!(
+        folded
+            .instructions
+            .iter()
+            .filter(|inst| matches!(inst, Instruction::Region(_)))
+            .count()
+            == 1,
+        "the live guard survives and the taken one inlined"
+    );
+
+    let shots = 4096;
+    let counts = simulate(&circuit).seed(SEED).shots(shots).expect("shots");
+    let reference = simulate(&folded)
+        .seed(SEED + 1)
+        .shots(shots)
+        .expect("shots");
+    let share = |result: &prism_q::ShotsResult, key: &[u64]| {
+        *result.counts().get(key).unwrap_or(&0) as f64 / shots as f64
+    };
+    // q0 and q1 agree; q2 is set only on the 1 branch. So 000 and 111.
+    for key in [vec![0u64], vec![0b111u64]] {
+        let a = share(&counts, &key);
+        let b = share(&reference, &key);
+        assert!((a - b).abs() < 0.05, "{key:?}: {a} against {b}");
+        assert!((a - 0.5).abs() < 0.05, "{key:?} should be about half: {a}");
+    }
+}
+
+// `static_value` must decline a condition it cannot decide: a register
+// straddling a written bit, and a bit past the classical register.
+#[test]
+fn folding_declines_a_partially_written_register_and_an_out_of_range_bit() {
+    let mut straddle = Circuit::new(2, 2);
+    straddle.add_gate(Gate::H, &[0]);
+    straddle.add_measure(0, 0);
+    straddle.instructions.extend(guarded(
+        ClassicalCondition::RegisterEquals {
+            offset: 0,
+            size: 2,
+            value: 0,
+        },
+        vec![
+            Instruction::Gate {
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[1]),
+            },
+            Instruction::Gate {
+                gate: Gate::Z,
+                targets: SmallVec::from_slice(&[1]),
+            },
+        ],
+    ));
+    assert!(matches!(
+        straddle.fold_static_guards().instructions.last(),
+        Some(Instruction::Region(_))
+    ));
+
+    let mut out_of_range = Circuit::new(1, 1);
+    out_of_range.instructions.extend(guarded(
+        ClassicalCondition::BitIsZero(7),
+        vec![
+            Instruction::Gate {
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[0]),
+            },
+            Instruction::Gate {
+                gate: Gate::Z,
+                targets: SmallVec::from_slice(&[0]),
+            },
+        ],
+    ));
+    let folded = out_of_range.fold_static_guards();
+    assert!(matches!(folded, std::borrow::Cow::Borrowed(_)));
+}
+
+#[test]
+fn switch_default_nesting_respects_the_enclosing_depth() {
+    let mut qasm = String::from("OPENQASM 3.0;\nqubit[1] q;\nbit[2] c;\n");
+    for _ in 0..MAX_REGION_DEPTH - 1 {
+        qasm.push_str("if (c[0]) {\n");
+    }
+    qasm.push_str("switch (c) { case 0 { x q[0]; } case 1 { z q[0]; } default { h q[0]; } }\n");
+    for _ in 0..MAX_REGION_DEPTH - 1 {
+        qasm.push_str("}\n");
+    }
+    let err = openqasm::parse(&qasm).expect_err("the default would nest past the bound");
+    assert!(
+        matches!(&err, PrismError::Parse { message, .. } if message.contains("depth bound")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn a_single_bit_parity_round_trips_as_a_bit_test() {
+    for (expected, spelling) in [(true, "c[1]"), (false, "!c[1]")] {
+        let mut circuit = Circuit::new(1, 2);
+        circuit.instructions.extend(guarded(
+            ClassicalCondition::Parity {
+                bits: vec![1].into(),
+                expected,
+            },
+            vec![Instruction::Gate {
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[0]),
+            }],
+        ));
+        let exported = qasm_export::to_qasm3(&circuit).expect("export");
+        assert!(exported.contains(spelling), "{exported}");
+        let reparsed = openqasm::parse(&exported).expect("reparse");
+        let bits = [false, true];
+        let condition = match &reparsed.instructions[0] {
+            Instruction::Conditional { condition, .. } => condition,
+            other => panic!("expected a conditional, got {other:?}"),
+        };
+        assert_eq!(condition.evaluate(&bits), expected);
+    }
+}
+
+#[test]
+fn export_rejects_a_parity_past_the_classical_register() {
+    let mut circuit = Circuit::new(1, 1);
+    circuit.instructions.extend(guarded(
+        ClassicalCondition::Parity {
+            bits: vec![0, 5].into(),
+            expected: true,
+        },
+        vec![Instruction::Gate {
+            gate: Gate::X,
+            targets: SmallVec::from_slice(&[0]),
+        }],
+    ));
+    assert!(matches!(
+        qasm_export::to_qasm3(&circuit),
+        Err(PrismError::ExportUnsupported { .. })
+    ));
+}
+
+#[test]
+fn a_parity_term_carrying_a_comparison_is_rejected() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nbit[2] c;\nif (c[0] == 1 ^ c[1]) x q[0];";
+    assert!(matches!(
+        openqasm::parse(qasm),
+        Err(PrismError::Parse { .. })
+    ));
+}
+
+// An `else` whose arm never arrives keeps the block open rather than dropping
+// the guard and letting a following statement run unconditionally.
+#[test]
+fn an_else_with_no_arm_is_rejected() {
+    for qasm in [
+        "OPENQASM 3.0;
+qubit[1] q;
+bit[1] c;
+if (c[0]) { x q[0]; } else",
+        "OPENQASM 3.0;
+qubit[1] q;
+bit[1] c;
+if (c[0]) { x q[0]; }
+else",
+    ] {
+        assert!(
+            matches!(openqasm::parse(qasm), Err(PrismError::Parse { .. })),
+            "dangling else accepted in {qasm:?}"
+        );
+    }
+}
+
+// Both arms are guarded in every spelling, so exactly one body runs and nothing
+// leaks out unguarded.
+#[test]
+fn no_else_spelling_emits_an_unguarded_body() {
+    let sources = [
+        "if (c[0]) x q[1]; else x q[2];",
+        "if (c[0]) { x q[1]; }
+else
+x q[2];",
+        "if (c[0]) { x q[1]; }
+else
+{ x q[2]; }",
+    ];
+    for tail in sources {
+        let qasm = format!(
+            "OPENQASM 3.0;
+qubit[3] q;
+bit[1] c;
+measure q[0] -> c[0];
+{tail}"
+        );
+        let circuit = openqasm::parse(&qasm).expect("parse");
+        assert!(
+            circuit
+                .instructions
+                .iter()
+                .all(|inst| !matches!(inst, Instruction::Gate { .. })),
+            "an arm escaped its guard in {tail:?}: {:?}",
+            circuit.instructions
+        );
+        let probs = probabilities(&circuit);
+        // c[0] reads 0, so only the else arm runs and q2 is set.
+        assert!(probs[0b100] > 0.999, "{tail:?}: {probs:?}");
+    }
 }

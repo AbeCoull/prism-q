@@ -513,3 +513,111 @@ fn export_round_trips_a_bound_parameter_point() {
     let bound = prepared.bind(&[0.41, 1.27]).expect("bind").clone();
     assert_streams_match(&bound, &round_trip(&bound), "bound_point");
 }
+
+/// Every classical-control construct the parser module header lists, with the
+/// outcome it promises: parse, or reject by name with a line number. The
+/// rejections are the half worth pinning, because a construct that falls
+/// through to gate parsing reports a register error naming a brace.
+#[test]
+fn classical_control_constructs_parse_or_reject_by_name() {
+    const PROLOGUE: &str = "OPENQASM 3.0;\nqubit[3] q;\nbit[2] c;\n";
+
+    let accepted = [
+        ("guarded gate", "if (c[0]) x q[0];"),
+        ("guarded gate, legacy register", "if (c == 1) x q[0];"),
+        (
+            "guarded region",
+            "if (c[0]) { x q[0]; measure q[1] -> c[1]; }",
+        ),
+        ("negated bit", "if (!c[0]) x q[0];"),
+        ("bit literal", "if (c[0] == 1) x q[0];"),
+        ("register inequality", "if (c != 0) x q[0];"),
+        ("parity", "if (c[0] ^ c[1]) x q[0];"),
+        ("parity against zero", "if ((c[0] ^ c[1]) == 0) x q[0];"),
+        ("else, one line", "if (c[0]) x q[0]; else z q[0];"),
+        ("else, braced", "if (c[0]) { x q[0]; } else { z q[0]; }"),
+        (
+            "else on its own line",
+            "if (c[0]) { x q[0]; }\nelse\nz q[0];",
+        ),
+        (
+            "else if",
+            "if (c[0]) { x q[0]; } else if (c[1]) { z q[0]; }",
+        ),
+        (
+            "switch",
+            "switch (c) { case 0 { x q[0]; } case 1 { z q[0]; } }",
+        ),
+        (
+            "switch with default",
+            "switch (c) { case 0 { x q[0]; } default { h q[0]; } }",
+        ),
+        ("bounded for", "for int i in [0:2] { x q[i]; }"),
+    ];
+    for (label, body) in accepted {
+        let qasm = format!("{PROLOGUE}{body}");
+        assert!(
+            openqasm::parse(&qasm).is_ok(),
+            "{label} should parse: {qasm}"
+        );
+    }
+
+    let rejected = [
+        ("while", "while (c[0]) { x q[0]; }", "while"),
+        ("break", "break;", "break"),
+        ("box", "box { x q[0]; }", "box"),
+        ("defcal", "defcal x $0 { }", "defcal"),
+        ("opaque", "opaque foo q;", "opaque"),
+        ("extern", "extern foo(int);", "extern"),
+        ("return", "return;", "return"),
+        ("stray else", "else { x q[0]; }", "else"),
+    ];
+    for (label, body, construct) in rejected {
+        let qasm = format!("{PROLOGUE}{body}");
+        match openqasm::parse(&qasm) {
+            Err(PrismError::UnsupportedConstruct {
+                construct: got,
+                line,
+            }) => {
+                assert_eq!(got, construct, "{label}");
+                assert_eq!(line, 4, "{label} should report its own line");
+            }
+            other => panic!("{label} should reject by name, got {other:?}"),
+        }
+    }
+
+    // Rejected for a reason the construct name does not carry, so these report a
+    // parse error with the line and the reason instead.
+    let explained = [
+        (
+            "else whose body overwrites its guard",
+            "if (c[0]) { measure q[0] -> c[0]; } else { x q[1]; }",
+            "overwrite",
+        ),
+        (
+            "switch arm writing the switched register",
+            "switch (c) { case 1 { measure q[0] -> c[0]; } case 2 { x q[0]; } }",
+            "overwrites",
+        ),
+        (
+            "duplicate case label",
+            "switch (c) { case 1 { x q[0]; } case 1 { z q[0]; } }",
+            "twice",
+        ),
+        (
+            "switch body that is not an arm",
+            "switch (c) { x q[0]; }",
+            "`case` or `default`",
+        ),
+    ];
+    for (label, body, needle) in explained {
+        let qasm = format!("{PROLOGUE}{body}");
+        match openqasm::parse(&qasm) {
+            Err(PrismError::Parse { message, line }) => {
+                assert!(message.contains(needle), "{label}: {message}");
+                assert_eq!(line, 4, "{label} should report its own line");
+            }
+            other => panic!("{label} should be a parse error, got {other:?}"),
+        }
+    }
+}

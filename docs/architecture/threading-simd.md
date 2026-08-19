@@ -24,6 +24,12 @@ Gate kernels have `_par` variants using `par_chunks_mut` for safe Rayon parallel
 
 Thread pool defaults to all logical cores (HT helps at 24q+ by hiding memory latency). Overridable via `RAYON_NUM_THREADS`.
 
+The default is the process-wide Rayon pool, sized on the first simulation call. An
+application that owns that pool can hand PRISM-Q a bounded one instead:
+`ThreadPool::with_threads(n)` builds it and `install` runs a closure on it, leaving the
+global pool unbuilt and unresized. Calls made outside `install` take the global path.
+Pool width is not free of consequences for results; see the determinism contract below.
+
 ## SIMD
 
 `Complex64` maps to 128-bit SIMD naturally. Single-qubit gate kernels use `PreparedGate1q` with runtime CPU detection and tiered dispatch:
@@ -50,6 +56,12 @@ unitary, terminal sampling, reduction, and compiled-sampler claims by running th
 seeded circuits in scoped 1-thread and 4-thread pools; the trajectory, SPD, and
 stabilizer bullets stand on the mechanisms they state.
 
+What every clause below turns on is thread count, not which pool supplied the threads. A
+caller-supplied `ThreadPool` therefore moves exactly the results a different
+`RAYON_NUM_THREADS` would: the bitwise claims survive it, the reduction bound holds
+across it, and compiled shot payloads change with it whenever the pool is narrower or
+wider than the one the comparison run used.
+
 - **Unitary evolution on the dense kernels: bitwise, at any thread count.** Gate kernels
   partition the state into index-derived disjoint ranges (fixed chunk boundaries, index
   bijections for the `SendPtr` kernels) and write elementwise, so the schedule cannot
@@ -71,8 +83,9 @@ stabilizer bullets stand on the mechanisms they state.
 - **Compiled (BTS) sampling: reproducible at a fixed thread count only.** The batched
   sampler derives one RNG stream per worker and splits shots by
   `rayon::current_num_threads()`, so a different pool width yields a different, equally
-  distributed shot set. Pin `RAYON_NUM_THREADS` when byte-identical shot payloads matter
-  across machines. The GPU analogue is documented in the [GPU guide](../guides/gpu.md).
+  distributed shot set. Pin the width when byte-identical shot payloads matter across
+  machines, through `RAYON_NUM_THREADS` on the global path or through the width passed to
+  `ThreadPool::with_threads` on the scoped one. The GPU analogue is documented in the [GPU guide](../guides/gpu.md).
 - **SPD analytic estimates: stable to about 1e-12 between runs.** Hash-order term
   accumulation moves the last ulp even at a fixed thread count; tests carry that
   tolerance.

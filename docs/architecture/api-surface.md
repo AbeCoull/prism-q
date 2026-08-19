@@ -74,6 +74,10 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 `DistributedStatevectorBackend`, `DistributedContext`, `RankComm`, `SerialComm`; with
 the `distributed-mpi` feature: `MpiComm`
 
+**Threading:** with the `parallel` feature: `ThreadPool`, a caller-supplied Rayon pool
+that simulation runs inside instead of sizing the process-wide one. See
+[Threading, SIMD, and Memory Layout](./threading-simd.md).
+
 **Accumulators:**
 `ShotAccumulator`, `HistogramAccumulator`, `MarginalsAccumulator`,
 `PauliExpectationAccumulator`, `CorrelatorAccumulator`, `NullAccumulator`,

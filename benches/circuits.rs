@@ -1540,6 +1540,87 @@ fn bench_expectation_factored(c: &mut Criterion) {
     group.finish();
 }
 
+/// Observable evaluation on the backends that answer from their own
+/// representation instead of a dense amplitude buffer. Same circuit family and
+/// observable shape as `expectation/pauli_sum_factored`, with the same
+/// `statevector` control arm; sparse stops at 16 qubits because its state is
+/// dense here and the per-observable walk is a hash lookup per stored
+/// amplitude.
+fn bench_expectation_native(c: &mut Criterion) {
+    for &(group_name, ref kind, ref sizes) in &[
+        (
+            "expectation/pauli_sum_sparse",
+            BackendKind::Sparse,
+            vec![12usize, 16],
+        ),
+        (
+            "expectation/pauli_sum_mps",
+            BackendKind::Mps { max_bond_dim: 64 },
+            vec![16usize, 20],
+        ),
+    ] {
+        let mut group = c.benchmark_group(group_name);
+        configure_group(&mut group);
+
+        for &n in sizes {
+            let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+            let observables: Vec<Vec<PauliTerm>> = (0..n - 1)
+                .map(|q| vec![PauliTerm::z(q), PauliTerm::z(q + 1)])
+                .collect();
+
+            for &(name, ref arm) in &[
+                ("native", kind.clone()),
+                ("statevector", BackendKind::Statevector),
+            ] {
+                group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
+                    b.iter(|| {
+                        black_box(
+                            sim::simulate(circ)
+                                .backend(arm.clone())
+                                .seed(42)
+                                .expectation_values(&observables)
+                                .unwrap(),
+                        )
+                    });
+                });
+            }
+        }
+
+        group.finish();
+    }
+}
+
+/// Observable evaluation on a prepared density matrix.
+///
+/// Evolution is outside the timed section here, unlike the groups above. A
+/// `4^n` buffer costs seconds to evolve and microseconds to read observables
+/// off, so a whole-pipeline row cannot resolve a change to the reduction.
+/// No in-group control arm: the statevector answers observables through the
+/// simulation helper rather than the trait method, so it cannot be timed on
+/// the same footing. The statevector arms of the groups above serve instead.
+fn bench_expectation_density_matrix(c: &mut Criterion) {
+    use prism_q::backend::Backend;
+    use prism_q::backend::density_matrix::DensityMatrixBackend;
+
+    let mut group = c.benchmark_group("expectation/pauli_sum_density_matrix");
+    configure_group(&mut group);
+
+    for &n in &[8usize, 10] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let observables: Vec<Vec<PauliTerm>> = (0..n - 1)
+            .map(|q| vec![PauliTerm::z(q), PauliTerm::z(q + 1)])
+            .collect();
+
+        let mut dm = DensityMatrixBackend::new(SEED);
+        sim::run_on(&mut dm, &circuit).unwrap();
+        group.bench_with_input(BenchmarkId::new("native", n), &dm, |b, backend| {
+            b.iter(|| black_box(backend.pauli_expectations(&observables).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
 /// Weighted-observable evaluation at a molecular-Hamiltonian term count:
 /// 2000 Jordan-Wigner strings per size. The `grouped` arm is the
 /// qubit-wise-commuting route with variance; the `ungrouped` control is the
@@ -2613,6 +2694,8 @@ criterion_group! {
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)
     bench_expectation,
     bench_expectation_factored,
+    bench_expectation_native,
+    bench_expectation_density_matrix,
     bench_expectation_grouped,
     // Factored backend
     bench_factored_random,

@@ -468,6 +468,101 @@ fn nested_region_runs_only_when_both_conditions_hold() {
     assert!((inner_then_outer(false)[0] - 1.0).abs() < 1e-12);
 }
 
+// A region is opaque to every other pass, so its body is fused on its own or
+// not at all. Pin both halves: that the body really does fuse, and that fusing
+// it changes nothing observable on either branch of the guard.
+#[test]
+fn a_fused_region_body_agrees_with_the_bare_layers_on_both_branches() {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Body {
+        Guarded,
+        Bare,
+        Absent,
+    }
+
+    fn layers() -> Vec<Instruction> {
+        let mut body = Vec::new();
+        for q in 1..16u32 {
+            for gate in [Gate::H, Gate::T] {
+                body.push(Instruction::Gate {
+                    gate,
+                    targets: SmallVec::from_slice(&[q as usize]),
+                });
+            }
+        }
+        for q in 1..15usize {
+            body.push(Instruction::Gate {
+                gate: Gate::Cx,
+                targets: SmallVec::from_slice(&[q, q + 1]),
+            });
+        }
+        body
+    }
+
+    // BitIsZero(0) holds after measuring |0> and fails after the flip, so the
+    // same guard drives both branches without touching the body.
+    fn build(flip: bool, body: Body) -> Circuit {
+        let mut circuit = Circuit::new(16, 1);
+        if flip {
+            circuit.add_gate(Gate::X, &[0]);
+        }
+        circuit.add_measure(0, 0);
+        match body {
+            Body::Guarded => circuit.instructions.push(
+                guarded(ClassicalCondition::BitIsZero(0), layers()).expect("body is not empty"),
+            ),
+            Body::Bare => circuit.instructions.extend(layers()),
+            Body::Absent => {}
+        }
+        circuit
+    }
+
+    let guarded_circuit = build(false, Body::Guarded);
+    let fused = fuse_circuit(&guarded_circuit, true);
+    let body = fused
+        .instructions
+        .iter()
+        .find_map(|inst| match inst {
+            Instruction::Region(region) => Some(region.body()),
+            _ => None,
+        })
+        .expect("the region must survive fusion");
+    assert!(
+        body.len() < layers().len(),
+        "fusion must shorten the body, got {} of {}",
+        body.len(),
+        layers().len()
+    );
+    assert!(
+        body.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Fused(_) | Gate::Fused2q(_) | Gate::MultiFused(_) | Gate::Multi2q(_),
+                ..
+            }
+        )),
+        "a fused body must carry at least one fused gate"
+    );
+
+    let taken = probabilities(&guarded_circuit);
+    let bare = probabilities(&build(false, Body::Bare));
+    for (i, (a, b)) in taken.iter().zip(&bare).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-12,
+            "taken branch differs at {i}: {a} vs {b}"
+        );
+    }
+
+    let skipped = probabilities(&build(true, Body::Guarded));
+    let absent = probabilities(&build(true, Body::Absent));
+    for (i, (a, b)) in skipped.iter().zip(&absent).enumerate() {
+        assert!(
+            (a - b).abs() < 1e-12,
+            "skipped branch differs at {i}: {a} vs {b}"
+        );
+    }
+}
+
 #[test]
 fn fusion_never_absorbs_a_region_and_flushes_only_its_qubits() {
     let mut circuit = Circuit::new(16, 1);

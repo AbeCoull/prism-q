@@ -38,6 +38,12 @@ flushes exactly those qubits at the region boundary and is transparent
 elsewhere, and no pass fuses across the boundary because a region is not an
 `Instruction::Gate`.
 
+The body itself is fused, by `fuse_region_bodies` running the same pipeline over
+it as an ordinary instruction list on the same register, nested bodies included.
+That is body-local only and does not weaken the boundary above: a body is fused
+as a unit, which is sound because it executes as a unit. Leaving it unfused cost
+73.5% of `dynamic/guarded_region/20`.
+
 `Conditional` is the single-gate lowering of the same construct. `if (c) x q[0];`
 keeps that form, so the common guarded gate costs no allocation; anything else
 becomes a `Region`. Build either through `circuit::guarded`, which picks the

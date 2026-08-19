@@ -4,7 +4,8 @@ Gate optimizations before execution, gated by qubit count thresholds. Every pass
 
 ```mermaid
 flowchart TD
-    IN[Input Circuit] --> P0["cancel_self_inverse_pairs (always)"]
+    IN[Input Circuit] --> PR["fuse_region_bodies (always): each guarded body through this same pipeline"]
+    PR --> P0["cancel_self_inverse_pairs (always)"]
     P0 --> P0r["fuse_rzz (always): CX&middot;Rz&middot;CX to Rzz"]
     P0r --> P0b["fuse_batch_rzz (>=16q): N&times;Rzz to BatchRzz"]
     P0b --> G{"qubits >= MIN_QUBITS_FOR_FUSION (10)?"}

@@ -358,6 +358,154 @@ fn tensor_network_expectation_values_match_statevector() {
     );
 }
 
+// ---- batched traversal vs the per-observable loop ----
+
+// Each of these backends evaluates a batch of observables in one pass over its
+// state and a batch of one with the single-observable reduction. Batching
+// reassociates the sum across observables and never within one, so the two must
+// agree. The list alternates between the Z-only family and the family carrying
+// an X or Y factor, since the batched pass splits on exactly that and has to
+// interleave the halves back into request order; the empty observable is the
+// identity, which touches no site at all. Comparing against the same backend
+// one observable at a time rather than against the statevector, because a
+// cross-backend check cannot witness a shared batched helper breaking.
+fn batch_observables() -> [Vec<PauliTerm>; 6] {
+    [
+        vec![PauliTerm::x(0), PauliTerm::y(1)],
+        vec![PauliTerm::z(2), PauliTerm::z(5)],
+        vec![PauliTerm::y(4)],
+        vec![PauliTerm::z(0), PauliTerm::z(1), PauliTerm::z(3)],
+        vec![],
+        vec![PauliTerm::x(3), PauliTerm::z(5)],
+    ]
+}
+
+fn assert_batch_matches_per_observable_loop(label: &str, backend: BackendKind, circuit: &Circuit) {
+    let observables = batch_observables();
+    let batched = simulate(circuit)
+        .backend(backend.clone())
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    let one_at_a_time: Vec<f64> = observables
+        .iter()
+        .map(|obs| {
+            simulate(circuit)
+                .backend(backend.clone())
+                .seed(42)
+                .expectation_values(std::slice::from_ref(obs))
+                .unwrap()[0]
+        })
+        .collect();
+    common::assert_probs_close(&batched, &one_at_a_time, 1e-12, label);
+}
+
+#[test]
+fn factored_batch_matches_the_per_observable_loop() {
+    let mut c = Circuit::new(6, 0);
+    for q in 0..6 {
+        c.add_gate(Gate::Ry(0.4 + 0.1 * q as f64), &[q]);
+    }
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::Cx, &[4, 5]);
+    assert_batch_matches_per_observable_loop("factored batch blocks", BackendKind::Factored, &c);
+    assert_batch_matches_per_observable_loop(
+        "factored batch merged",
+        BackendKind::Factored,
+        &entangled_non_clifford(6),
+    );
+}
+
+#[test]
+fn sparse_batch_matches_the_per_observable_loop() {
+    assert_batch_matches_per_observable_loop(
+        "sparse batch",
+        BackendKind::Sparse,
+        &entangled_non_clifford(6),
+    );
+}
+
+// The identity environment right of an observable's last site is closed against
+// the swept environment as a trace, so it enters transposed. A chain of real
+// site tensors makes both matrices real symmetric and hides a wrong transpose;
+// the diagonal T alone does not help, because its phase cancels in the
+// environment contraction. Rx after T is what puts an imaginary part in the
+// environments, and the statevector value is the independent authority for it.
+fn complex_environment_chain(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.3 + 0.15 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::Rx(0.2 + 0.1 * q as f64), &[q]);
+    }
+    c.add_gate(Gate::Cx, &[0, n - 1]);
+    c.add_gate(Gate::Cx, &[2, 4]);
+    c
+}
+
+#[test]
+fn mps_batch_matches_the_per_observable_loop() {
+    let mps = BackendKind::Mps {
+        max_bond_dim: 1 << 8,
+    };
+    assert_batch_matches_per_observable_loop("mps batch", mps.clone(), &entangled_non_clifford(6));
+    assert_batch_matches_per_observable_loop(
+        "mps batch complex environments",
+        mps.clone(),
+        &complex_environment_chain(6),
+    );
+    assert_matches_statevector(
+        "mps expectation complex environments",
+        mps,
+        &complex_environment_chain(6),
+    );
+}
+
+// SWAP routing permutes the site layout, so the first and last site an
+// observable touches are not its first and last logical qubit, and the shared
+// identity environments are read at the routed positions.
+#[test]
+fn mps_batch_matches_the_per_observable_loop_under_swap_routing() {
+    let mut c = Circuit::new(6, 0);
+    for q in 0..6 {
+        c.add_gate(Gate::Ry(0.25 * (q + 1) as f64), &[q]);
+    }
+    c.add_gate(Gate::Cx, &[0, 5]);
+    c.add_gate(Gate::T, &[2]);
+    c.add_gate(Gate::Cx, &[1, 4]);
+    assert_batch_matches_per_observable_loop(
+        "mps batch swap routed",
+        BackendKind::Mps {
+            max_bond_dim: 1 << 8,
+        },
+        &c,
+    );
+}
+
+#[test]
+fn density_matrix_batch_matches_the_per_observable_loop() {
+    let circuit = entangled_non_clifford(6);
+    let observables = batch_observables();
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let batched =
+        density_matrix_expectation_values(&circuit, &observables, Some(&noise), 42).unwrap();
+    let one_at_a_time: Vec<f64> = observables
+        .iter()
+        .map(|obs| {
+            density_matrix_expectation_values(&circuit, std::slice::from_ref(obs), Some(&noise), 42)
+                .unwrap()[0]
+        })
+        .collect();
+    common::assert_probs_close(&batched, &one_at_a_time, 1e-12, "density matrix batch");
+}
+
 // The native path validates observables before it runs, so a bad qubit index
 // costs nothing on a circuit the statevector could not hold.
 #[test]

@@ -2496,7 +2496,11 @@ pub(crate) fn pauli_expectations_from_masks(
 }
 
 /// Interleave the two accumulator families back into observable order.
-fn finish_expectations(
+///
+/// Entries of `z_sum` and `g_sum` are in `masks` order within their family:
+/// the `i`-th `xmask == 0` entry of `masks` reads `z_sum[i]`, and the `i`-th
+/// `xmask != 0` entry reads `g_sum[i]`.
+pub(crate) fn finish_expectations(
     masks: &[(usize, usize, u32)],
     z_sum: &[f64],
     g_sum: &[Complex64],

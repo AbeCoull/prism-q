@@ -2810,13 +2810,11 @@ pub(crate) fn dm_expectation_values(
     seed: u64,
 ) -> Result<Vec<f64>> {
     let dm = evolve_density_matrix(circuit, noise, initial_state, seed)?;
-    observables
+    let masks = observables
         .iter()
-        .map(|obs| {
-            let (xmask, zmask, num_y) = crate::sim::pauli_masks(obs, circuit.num_qubits)?;
-            Ok(dm.expectation_pauli(xmask, zmask, num_y))
-        })
-        .collect()
+        .map(|obs| crate::sim::pauli_masks(obs, circuit.num_qubits))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(dm.expectations_pauli(&masks))
 }
 
 #[path = "noise_builder.rs"]

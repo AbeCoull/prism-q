@@ -641,17 +641,34 @@ impl DensityMatrixBackend {
     /// trace collapses to a single diagonal-offset sweep:
     /// `Tr(rho P) = i^{num_y} sum_j (-1)^{popcount(j & zmask)} rho[j][j ^ xmask]`.
     pub fn expectation_pauli(&self, xmask: usize, zmask: usize, num_y: u32) -> f64 {
+        self.expectations_pauli(&[(xmask, zmask, num_y)])[0]
+    }
+
+    /// [`DensityMatrixBackend::expectation_pauli`] for every mask triple in one
+    /// sweep of the `4^n` buffer.
+    ///
+    /// Each row is visited once and contributes one entry per observable, so
+    /// the strided sweep is paid once instead of once per observable. Values
+    /// match the single-observable form exactly: the accumulation order within
+    /// an observable is unchanged.
+    pub fn expectations_pauli(&self, masks: &[(usize, usize, u32)]) -> Vec<f64> {
         let d = self.dim();
-        let mut acc = Complex64::new(0.0, 0.0);
+        let mut acc = vec![Complex64::new(0.0, 0.0); masks.len()];
         for j in 0..d {
-            let sign = if (j & zmask).count_ones() & 1 == 1 {
-                -1.0
-            } else {
-                1.0
-            };
-            acc += self.sv.state[j * d + (j ^ xmask)] * sign;
+            let row = &self.sv.state[j * d..(j + 1) * d];
+            for (slot, &(xmask, zmask, _)) in acc.iter_mut().zip(masks) {
+                let sign = if (j & zmask).count_ones() & 1 == 1 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                *slot += row[j ^ xmask] * sign;
+            }
         }
-        (acc * i_pow(num_y)).re
+        acc.iter()
+            .zip(masks)
+            .map(|(value, &(_, _, num_y))| (value * i_pow(num_y)).re)
+            .collect()
     }
 }
 
@@ -765,13 +782,11 @@ impl Backend for DensityMatrixBackend {
     /// `<psi|P_k|psi>`. `rho` is trace-one by construction, so no
     /// normalization divide is needed.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
-        observables
+        let masks = observables
             .iter()
-            .map(|observable| {
-                let (xmask, zmask, num_y) = crate::sim::pauli_masks(observable, self.num_qubits)?;
-                Ok(self.expectation_pauli(xmask, zmask, num_y))
-            })
-            .collect()
+            .map(|observable| crate::sim::pauli_masks(observable, self.num_qubits))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self.expectations_pauli(&masks))
     }
 
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {

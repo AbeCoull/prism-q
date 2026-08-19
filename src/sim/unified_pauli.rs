@@ -1,6 +1,7 @@
-//! Pauli propagation engines for Clifford+T circuits: SPP samples backward
-//! Heisenberg propagation stochastically, SPD carries the full weighted Pauli
-//! sum with optional truncation. Neither materializes a state vector.
+//! Pauli propagation engines for circuits of Clifford gates and Z-axis
+//! rotations: SPP samples backward Heisenberg propagation stochastically, SPD
+//! carries the full weighted Pauli sum with optional truncation. Neither
+//! materializes a state vector.
 
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -12,14 +13,12 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::{PauliVec, flip_bit, propagate_backward};
 
-const SQRT_2: f64 = std::f64::consts::SQRT_2;
-
 /// Absolute ceiling on the weighted-Pauli term count, enforced even in exact
 /// mode (`max_terms == 0`). Without a per-step truncation budget the term set
-/// grows as `2^(in-cone T count)`; this caps transient memory the same way the
-/// stabilizer-rank backend does. Exceeding it is an error, not a silent
-/// truncation: callers wanting bounded approximate evaluation pass a nonzero
-/// `max_terms` instead.
+/// grows as `2^(in-cone branching rotations)`; this caps transient memory the
+/// same way the stabilizer-rank backend does. Exceeding it is an error, not a
+/// silent truncation: callers wanting bounded approximate evaluation pass a
+/// nonzero `max_terms` instead.
 const SPD_MAX_TERMS_CEILING: usize = 1 << 20;
 
 #[inline]
@@ -36,14 +35,33 @@ fn check_spd_term_ceiling(len: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate_clifford_t_unitary(circuit: &Circuit, backend: &'static str) -> Result<()> {
+/// Rotation angle of the Z-axis rotation a gate lowers to, if any.
+///
+/// `P(λ)` and `Rz(λ)` differ by the global phase `e^{-iλ/2}`, which conjugation
+/// discards, so both report `λ`. Clifford Z rotations (`Z`, `S`, `Sdg`) are
+/// deliberately absent: they conjugate exactly through the Clifford path and
+/// would otherwise branch into a term with a rounding-noise coefficient.
+#[inline]
+fn z_rotation_angle(gate: &Gate) -> Option<f64> {
+    match gate {
+        Gate::T => Some(std::f64::consts::FRAC_PI_4),
+        Gate::Tdg => Some(-std::f64::consts::FRAC_PI_4),
+        Gate::Rz(theta) | Gate::P(theta) => Some(*theta),
+        _ => None,
+    }
+}
+
+fn validate_pauli_unitary(circuit: &Circuit, backend: &'static str) -> Result<()> {
     for inst in &circuit.instructions {
         match inst {
             Instruction::Gate { gate, .. } => {
-                if !(gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg)) {
+                if !(gate.is_clifford() || z_rotation_angle(gate).is_some()) {
                     return Err(PrismError::BackendUnsupported {
                         backend: backend.to_string(),
-                        operation: format!("non-Clifford+T gate `{}`", gate.name()),
+                        operation: format!(
+                            "gate `{}` is neither Clifford nor a Z-axis rotation",
+                            gate.name()
+                        ),
                     });
                 }
             }
@@ -54,7 +72,8 @@ fn validate_clifford_t_unitary(circuit: &Circuit, backend: &'static str) -> Resu
             | Instruction::Region(_) => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: backend.to_string(),
-                    reason: "Pauli propagation requires a unitary Clifford+T circuit without measurements, resets, or conditionals"
+                    reason: "Pauli propagation requires a unitary circuit without measurements, \
+                         resets, or conditionals"
                         .to_string(),
                 });
             }
@@ -67,7 +86,7 @@ fn validate_clifford_t_unitary(circuit: &Circuit, backend: &'static str) -> Resu
 
 enum CoalescedOp {
     SmallCliff(Vec<(Gate, SmallVec<[usize; 4]>)>),
-    T { qubit: usize, is_dagger: bool },
+    ZRot { qubit: usize, branch: RotBranch },
 }
 
 fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
@@ -76,24 +95,14 @@ fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
 
     for inst in &circuit.instructions {
         if let Instruction::Gate { gate, targets } = inst {
-            match gate {
-                Gate::T => {
-                    flush_cliff_buf(&mut cliff_buf, &mut ops);
-                    ops.push(CoalescedOp::T {
-                        qubit: targets[0],
-                        is_dagger: false,
-                    });
-                }
-                Gate::Tdg => {
-                    flush_cliff_buf(&mut cliff_buf, &mut ops);
-                    ops.push(CoalescedOp::T {
-                        qubit: targets[0],
-                        is_dagger: true,
-                    });
-                }
-                _ => {
-                    cliff_buf.push((gate.clone(), SmallVec::from_slice(targets)));
-                }
+            if let Some(theta) = z_rotation_angle(gate) {
+                flush_cliff_buf(&mut cliff_buf, &mut ops);
+                ops.push(CoalescedOp::ZRot {
+                    qubit: targets[0],
+                    branch: RotBranch::new(theta),
+                });
+            } else {
+                cliff_buf.push((gate.clone(), SmallVec::from_slice(targets)));
             }
         } else {
             flush_cliff_buf(&mut cliff_buf, &mut ops);
@@ -112,33 +121,52 @@ fn flush_cliff_buf(buf: &mut Vec<(Gate, SmallVec<[usize; 4]>)>, ops: &mut Vec<Co
 
 // ---- SPP (Stochastic Pauli Propagation) ----
 
+/// Sampling data for one Z-axis rotation, built once per gate so the per-sample
+/// loop stays free of trigonometry.
+#[derive(Clone, Copy)]
+struct RotBranch {
+    p_keep: f64,
+    keep_weight: f64,
+    flip_weight_im: f64,
+}
+
+impl RotBranch {
+    /// Branch probability and importance weights for `Rz(theta)`.
+    ///
+    /// Backward conjugation sends an in-support Pauli `P` to
+    /// `cos(theta) P + (-i sin(theta)) P Z_q`. PauliVec stores the Y letter as
+    /// the ordered product XZ and actual `Y = i XZ`, which is where the flip
+    /// branch picks up its imaginary unit. Branch selection is proportional to
+    /// coefficient magnitude, so the per-sample weight magnitude is
+    /// `|cos| + |sin|`: 1 at the Clifford angles, `sqrt(2)` at `theta = pi/4`.
+    fn new(theta: f64) -> Self {
+        let (sin, cos) = theta.sin_cos();
+        let norm1 = cos.abs() + sin.abs();
+        Self {
+            p_keep: cos.abs() / norm1,
+            keep_weight: norm1 * cos.signum(),
+            flip_weight_im: -norm1 * sin.signum(),
+        }
+    }
+}
+
 #[inline(always)]
-fn branch_t_gate(
+fn branch_z_rotation(
     pauli: &mut PauliVec,
     qubit: usize,
-    is_dagger: bool,
+    branch: &RotBranch,
     rng: &mut impl Rng,
 ) -> Complex64 {
-    // PauliVec stores the Y letter as the ordered product XZ. Since
-    // actual Y = i XZ, the T flip branch is imaginary in this basis:
-    // T contributes -i/sqrt(2), and Tdg contributes +i/sqrt(2).
-    // SPP samples one branch with probability 1/2, so the per-shot
-    // flip weight is +/-i*sqrt(2).
     if !pauli.has_x_or_y(qubit) {
         return Complex64::new(1.0, 0.0);
     }
 
-    let keep = rng.random_bool(0.5);
-    if keep {
-        return Complex64::new(SQRT_2, 0.0);
+    if rng.random_bool(branch.p_keep) {
+        return Complex64::new(branch.keep_weight, 0.0);
     }
 
     flip_bit(&mut pauli.z, qubit);
-    if is_dagger {
-        Complex64::new(0.0, SQRT_2)
-    } else {
-        Complex64::new(0.0, -SQRT_2)
-    }
+    Complex64::new(0.0, branch.flip_weight_im)
 }
 
 fn backward_propagate_coalesced(
@@ -164,8 +192,8 @@ fn backward_propagate_coalesced(
                     propagate_backward(&mut pauli, gate, targets);
                 }
             }
-            CoalescedOp::T { qubit, is_dagger } => {
-                weight *= branch_t_gate(&mut pauli, *qubit, *is_dagger, rng);
+            CoalescedOp::ZRot { qubit, branch } => {
+                weight *= branch_z_rotation(&mut pauli, *qubit, branch, rng);
             }
         }
     }
@@ -173,18 +201,13 @@ fn backward_propagate_coalesced(
     (pauli, weight)
 }
 
-fn count_t_gates(circuit: &Circuit) -> usize {
+fn count_branching_gates(circuit: &Circuit) -> usize {
     circuit
         .instructions
         .iter()
-        .filter(|inst| {
-            matches!(
-                inst,
-                Instruction::Gate {
-                    gate: Gate::T | Gate::Tdg,
-                    ..
-                }
-            )
+        .filter(|inst| match inst {
+            Instruction::Gate { gate, .. } => z_rotation_angle(gate).is_some(),
+            _ => false,
         })
         .count()
 }
@@ -195,7 +218,7 @@ pub struct SppResult {
     pub std_errors: Vec<f64>,
     /// Samples drawn per qubit, not in total.
     pub num_samples: usize,
-    /// T plus Tdg gates in the circuit.
+    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, and `P`.
     pub t_count: usize,
     /// Fraction of samples whose propagated Pauli was diagonal (contributed a
     /// nonzero value).
@@ -341,23 +364,28 @@ fn pauli_vec_from_terms(
     Ok((pv, coeff))
 }
 
-/// Estimate `⟨0^n| U† P U |0^n⟩` for joint Pauli observable `P` on a
-/// Clifford+T circuit `U` via stochastic Pauli propagation.
+/// Estimate `⟨0^n| U† P U |0^n⟩` for joint Pauli observable `P` on a circuit
+/// `U` of Clifford gates and Z-axis rotations, via stochastic Pauli
+/// propagation.
 ///
 /// Each sample backward-propagates the observable through the circuit
-/// (Clifford segments as coalesced gate runs, T gates via a stochastic
-/// Pauli branch that records a complex weight). The
+/// (Clifford segments as coalesced gate runs, `Rz(theta)` and its `T` special
+/// case via a stochastic Pauli branch that records a complex weight). The
 /// contribution is `Re(weight)` when the final Pauli is diagonal in
 /// `{I, Z}` (i.e. evaluates trivially on `|0^n⟩`), else zero.
+///
+/// Sample variance grows with the product of `|cos θ| + |sin θ|` over the
+/// in-support rotations, so it is largest at `θ = π/4` and vanishes as the
+/// angles approach a Clifford multiple of `π/2`.
 pub fn run_spp_observable(
     circuit: &Circuit,
     observable: &[PauliTerm],
     num_samples: usize,
     seed: u64,
 ) -> Result<SppObservableResult> {
-    validate_clifford_t_unitary(circuit, "SPP observable")?;
+    validate_pauli_unitary(circuit, "SPP observable")?;
     let n = circuit.num_qubits;
-    let t_count = count_t_gates(circuit);
+    let t_count = count_branching_gates(circuit);
     let ops = coalesce_cliffords(circuit);
     let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
 
@@ -398,8 +426,8 @@ pub fn run_spp_observable(
     })
 }
 
-/// Estimate `⟨Z_q⟩` for every qubit of a unitary Clifford+T circuit via
-/// stochastic Pauli propagation.
+/// Estimate `⟨Z_q⟩` for every qubit of a unitary circuit of Clifford gates and
+/// Z-axis rotations, via stochastic Pauli propagation.
 ///
 /// Draws `num_samples` backward propagations per qubit; the cost scales with
 /// samples and gate count, not `2^n`. See [`run_spp_observable`] for a single
@@ -423,10 +451,10 @@ pub fn run_spp_observable(
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppResult> {
-    validate_clifford_t_unitary(circuit, "SPP")?;
+    validate_pauli_unitary(circuit, "SPP")?;
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
-    let t_count = count_t_gates(circuit);
+    let t_count = count_branching_gates(circuit);
     let ops = coalesce_cliffords(circuit);
 
     #[cfg(feature = "parallel")]
@@ -607,15 +635,14 @@ impl WeightedPauliSum {
         }
     }
 
-    fn branch_t_deterministic(&mut self, qubit: usize, is_dagger: bool) {
+    /// Split every in-support term under backward conjugation by a Z rotation,
+    /// which sends `P` to `cos(theta) P + (-i sin(theta)) P Z_q`. Takes the
+    /// evaluated `(sin, cos)` because `run_spd` replays the circuit once per
+    /// qubit and the trigonometry is per gate, not per replay. A branch whose
+    /// coefficient is exactly zero is not inserted, so `Rz(0)` and `P(0)` leave
+    /// the term count alone.
+    fn branch_z_rotation(&mut self, qubit: usize, sin: f64, cos: f64) {
         let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
-        let inv_sqrt2 = 1.0 / SQRT_2;
-        let keep_coeff = Complex64::new(inv_sqrt2, 0.0);
-        let flip_coeff = if is_dagger {
-            Complex64::new(0.0, inv_sqrt2)
-        } else {
-            Complex64::new(0.0, -inv_sqrt2)
-        };
 
         for (pauli, coeff) in old_terms {
             if !pauli.has_x_or_y(qubit) {
@@ -623,12 +650,14 @@ impl WeightedPauliSum {
                 continue;
             }
 
-            let pauli_keep = pauli.clone();
-            let mut pauli_flip = pauli;
-            flip_bit(&mut pauli_flip.z, qubit);
-
-            self.insert(pauli_keep, coeff * keep_coeff);
-            self.insert(pauli_flip, coeff * flip_coeff);
+            if cos != 0.0 {
+                self.insert(pauli.clone(), coeff * cos);
+            }
+            if sin != 0.0 {
+                let mut pauli_flip = pauli;
+                flip_bit(&mut pauli_flip.z, qubit);
+                self.insert(pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin));
+            }
         }
     }
 
@@ -660,7 +689,7 @@ impl WeightedPauliSum {
 pub struct SpdResult {
     /// `⟨Z_q⟩` per qubit; exact when nothing was truncated.
     pub expectations: Vec<f64>,
-    /// T plus Tdg gates in the circuit.
+    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, and `P`.
     pub t_count: usize,
     /// Peak size of the weighted Pauli sum across all per-qubit runs, not the
     /// truncation budget passed in.
@@ -672,20 +701,32 @@ pub struct SpdResult {
 /// Deterministic SPD on a joint Pauli observable.
 ///
 /// Starts with the single weighted term `(observable, 1.0)`, backward-
-/// propagates through every gate, branches each T into two terms with
-/// `α / β` coefficients, and truncates terms whose magnitude falls below
-/// `epsilon` whenever the sum exceeds `max_terms`. Returns
-/// `⟨0^n| U† P U |0^n⟩` as the sum of remaining diagonal-term
+/// propagates through every gate, splits each in-support term at an `Rz(theta)`
+/// into `cos(theta)` and `-i sin(theta)` branches, and truncates terms whose
+/// magnitude falls below `epsilon` whenever the sum exceeds `max_terms`.
+/// Returns `⟨0^n| U† P U |0^n⟩` as the sum of remaining diagonal-term
 /// coefficients.
+///
+/// # Truncation
+///
+/// Every rotation with a non-Clifford angle branches, so a variational circuit
+/// branches on each of its rotations rather than only on its `T` gates, and the
+/// term count is bounded by `2^(in-support rotations)`. With `max_terms == 0`
+/// the run is exact and errors once the sum passes an internal ceiling. With
+/// `max_terms > 0`, sub-`epsilon` terms are dropped whenever the sum exceeds
+/// the budget and `total_discarded` bounds the resulting error, per the
+/// 1-norm bound `|error| ≤ Σ |discarded|`. An `epsilon` too small to prune the
+/// growth still reaches the ceiling and errors there: the run never returns a
+/// silently over-truncated value.
 pub fn run_spd_observable(
     circuit: &Circuit,
     observable: &[PauliTerm],
     epsilon: f64,
     max_terms: usize,
 ) -> Result<SpdObservableResult> {
-    validate_clifford_t_unitary(circuit, "SPD observable")?;
+    validate_pauli_unitary(circuit, "SPD observable")?;
     let n = circuit.num_qubits;
-    let t_count = count_t_gates(circuit);
+    let t_count = count_branching_gates(circuit);
     let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
 
     let mut sum = WeightedPauliSum::new();
@@ -695,10 +736,10 @@ pub fn run_spd_observable(
 
     for inst in circuit.instructions.iter().rev() {
         if let Instruction::Gate { gate, targets } = inst {
-            match gate {
-                Gate::T => sum.branch_t_deterministic(targets[0], false),
-                Gate::Tdg => sum.branch_t_deterministic(targets[0], true),
-                _ => sum.conjugate_all_backward_phased(gate, targets),
+            if let Some((sin, cos)) = z_rotation_angle(gate).map(f64::sin_cos) {
+                sum.branch_z_rotation(targets[0], sin, cos);
+            } else {
+                sum.conjugate_all_backward_phased(gate, targets);
             }
         }
         if max_terms > 0 && sum.terms.len() > max_terms {
@@ -722,34 +763,44 @@ pub fn run_spd_observable(
     })
 }
 
-/// Compute `⟨Z_q⟩` for every qubit of a unitary Clifford+T circuit via
-/// deterministic sparse Pauli dynamics.
+/// Compute `⟨Z_q⟩` for every qubit of a unitary circuit of Clifford gates and
+/// Z-axis rotations, via deterministic sparse Pauli dynamics.
 ///
-/// Each qubit's `Z_q` propagates backward as a weighted Pauli sum; T gates
-/// double the in-support terms. When the sum exceeds `max_terms`, terms with
-/// coefficient magnitude below `epsilon` are dropped. `max_terms == 0`
-/// disables truncation: exact, but the sum must stay under a hard term
-/// ceiling. See [`run_spd_observable`] for a single joint observable.
+/// Each qubit's `Z_q` propagates backward as a weighted Pauli sum; every
+/// rotation with a non-Clifford angle doubles the in-support terms. When the
+/// sum exceeds `max_terms`, terms with coefficient magnitude below `epsilon`
+/// are dropped. `max_terms == 0` disables truncation: exact, but the sum must
+/// stay under a hard term ceiling. See [`run_spd_observable`] for a single
+/// joint observable and for the truncation contract.
 pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdResult> {
-    validate_clifford_t_unitary(circuit, "SPD")?;
+    validate_pauli_unitary(circuit, "SPD")?;
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
-    let t_count = count_t_gates(circuit);
+    let t_count = count_branching_gates(circuit);
 
     let mut expectations = Vec::with_capacity(n);
     let mut peak_terms = 0usize;
     let mut total_discarded = 0.0;
 
+    let rotations: Vec<Option<(f64, f64)>> = circuit
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Gate { gate, .. } => z_rotation_angle(gate).map(f64::sin_cos),
+            _ => None,
+        })
+        .collect();
+
     for q in 0..n {
         let mut sum = WeightedPauliSum::new();
         sum.insert(PauliVec::z_on_qubit(num_words, q), Complex64::new(1.0, 0.0));
 
-        for inst in circuit.instructions.iter().rev() {
+        for (idx, inst) in circuit.instructions.iter().enumerate().rev() {
             if let Instruction::Gate { gate, targets } = inst {
-                match gate {
-                    Gate::T => sum.branch_t_deterministic(targets[0], false),
-                    Gate::Tdg => sum.branch_t_deterministic(targets[0], true),
-                    _ => sum.conjugate_all_backward_phased(gate, targets),
+                if let Some((sin, cos)) = rotations[idx] {
+                    sum.branch_z_rotation(targets[0], sin, cos);
+                } else {
+                    sum.conjugate_all_backward_phased(gate, targets);
                 }
             }
 
@@ -814,20 +865,20 @@ pub fn inverse_light_cone(circuit: &Circuit, observable: &[PauliTerm]) -> Vec<bo
 
 /// SPD on a joint Pauli observable, restricted to the inverse light cone.
 ///
-/// Identical in result to `run_spd_observable` for any Clifford+T circuit, but
-/// skips gates whose support is disjoint from the propagated observable's
-/// causal cone. For QEC syndrome and detector observables with bounded
-/// spatial support, this turns the SPD cliff from a function of total T-count
-/// into a function of in-cone T-count.
+/// Identical in result to `run_spd_observable`, but skips gates whose support
+/// is disjoint from the propagated observable's causal cone. For QEC syndrome
+/// and detector observables with bounded spatial support, this turns the SPD
+/// cliff from a function of the total branching-gate count into a function of
+/// the in-cone count.
 pub fn run_spd_observable_light_cone(
     circuit: &Circuit,
     observable: &[PauliTerm],
     epsilon: f64,
     max_terms: usize,
 ) -> Result<SpdObservableResult> {
-    validate_clifford_t_unitary(circuit, "light-cone SPD observable")?;
+    validate_pauli_unitary(circuit, "light-cone SPD observable")?;
     let n = circuit.num_qubits;
-    let t_count = count_t_gates(circuit);
+    let t_count = count_branching_gates(circuit);
     let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
     let keep = inverse_light_cone(circuit, observable);
 
@@ -841,10 +892,10 @@ pub fn run_spd_observable_light_cone(
             continue;
         }
         if let Instruction::Gate { gate, targets } = inst {
-            match gate {
-                Gate::T => sum.branch_t_deterministic(targets[0], false),
-                Gate::Tdg => sum.branch_t_deterministic(targets[0], true),
-                _ => sum.conjugate_all_backward_phased(gate, targets),
+            if let Some((sin, cos)) = z_rotation_angle(gate).map(f64::sin_cos) {
+                sum.branch_z_rotation(targets[0], sin, cos);
+            } else {
+                sum.conjugate_all_backward_phased(gate, targets);
             }
         }
         if max_terms > 0 && sum.terms.len() > max_terms {

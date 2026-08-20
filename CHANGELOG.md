@@ -2,6 +2,58 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.30.0] - 2026-08-20
+
+### Bug Fixes
+
+- **bench:** Measure the backend each row names (#176)([700cff7](https://github.com/AbeCoull/prism-q/commit/700cff7e543c9fded961e8519a98e0da1e9520f1))
+
+### CI
+
+- **bench:** Cut the gate to eight rows and a cached reference (#167)([ab5b952](https://github.com/AbeCoull/prism-q/commit/ab5b952a168885bd08bf19ca4094237d3f56cd53))
+
+### Documentation
+
+- Name the peer-access condition on multi GPU (#166)([287f490](https://github.com/AbeCoull/prism-q/commit/287f4904a61ec74f6c456889606fe7afd850a6ab))
+- **readme:** Sync with the current API surface and revise wording (#154)([56faebe](https://github.com/AbeCoull/prism-q/commit/56faebe1516ea48ffe29eff464143d783a9e869e))
+
+### Features
+
+- **python:** Parameter binding and Pauli rotations from Python (#177)([e2331f1](https://github.com/AbeCoull/prism-q/commit/e2331f113817913bd64cb275f110710928bdd5e7))
+- **qasm:** Parse input and output declarations (#178)([85d6dda](https://github.com/AbeCoull/prism-q/commit/85d6ddad67cfdd5ac47917932b3395d5af44db05))
+- **pauli:** Arbitrary-angle Z rotations in the Pauli engines (#174)([5e04400](https://github.com/AbeCoull/prism-q/commit/5e04400d46ad4b418dea0cc0f8cdecb799805477))
+- **threading:** Caller-supplied Rayon pool (#173)([3b6cd73](https://github.com/AbeCoull/prism-q/commit/3b6cd73a7b1f05ccc4de4ac14b15396f39313540))
+- **circuit:** Else, switch, and QEC feed-forward on guarded regions (#170)([04897a0](https://github.com/AbeCoull/prism-q/commit/04897a01e6d1acceea1d4cbe8adf491c08a81dfb))
+- **noise:** Rule-based noise model construction (#169)([df1f81f](https://github.com/AbeCoull/prism-q/commit/df1f81f6194122a5ee77156e2a36aa5eff7889d5))
+- **circuit:** Guarded regions over spans of instructions (#168)([2f51bda](https://github.com/AbeCoull/prism-q/commit/2f51bda58638719f289584e3357fa945956df288))
+- **gradient:** Differentiate the native Pauli rotation (#165)([07c37db](https://github.com/AbeCoull/prism-q/commit/07c37db7aaf31105f73f3b24d8b62b6d32a7ae8d))
+- Native multi-qubit Pauli rotation gate with ladder fallback (#164)([1bd7713](https://github.com/AbeCoull/prism-q/commit/1bd77137d1149cb1d51362fd6d9f1bfabea4a7d9))
+- Weighted Pauli observables with grouped variance (#162)([7a321bb](https://github.com/AbeCoull/prism-q/commit/7a321bb7a76b6d084f98369d3acdf7a42dd627c1))
+- **backend:** Bound the sparse, MPS, and factored growth paths (#161)([15ab247](https://github.com/AbeCoull/prism-q/commit/15ab2471808c2ae4128f85c4b644f6bfc06ea18c))
+- **qec:** Decode detector samples with a built-in union-find decoder (#159)([79bd347](https://github.com/AbeCoull/prism-q/commit/79bd347728399b23da2d84ce0c1851dea08542ae))
+- **qec:** Decompose detector error models into graphlike form (#158)([57c312a](https://github.com/AbeCoull/prism-q/commit/57c312a7224122221cda2b35471056925dd09c13))
+- **qec:** Derive and export detector error models (#157)([647bcb6](https://github.com/AbeCoull/prism-q/commit/647bcb6a4951f4533571160d120208fa46c3fd86))
+- Report result provenance and close noise-surface holes (#156)([9c767a4](https://github.com/AbeCoull/prism-q/commit/9c767a4060d6c8f20919bfb6d08c8d14c3dfcd5d))
+- **distributed:** Out-of-core tiled statevector prototype (#155)([5a5e018](https://github.com/AbeCoull/prism-q/commit/5a5e01873e60753036942506a3eb6eb828b1a237))
+
+### Performance
+
+- **backend:** Evaluate a batch of observables in one traversal (#175)([7415856](https://github.com/AbeCoull/prism-q/commit/7415856c7ad5f18d748beafd481fe8da14b9570d))
+- **circuit:** Fuse guarded region bodies (#172)([b49fcb0](https://github.com/AbeCoull/prism-q/commit/b49fcb0e1fa26226676c2e3422e8133eab057253))
+- On-device 1q density matrix and distributed exchange cuts (#160)([fb8c1e0](https://github.com/AbeCoull/prism-q/commit/fb8c1e076ccc2e5fb8a317134bbaf54cab95286b))
+
+### Refactor
+
+- **statevector:** Share the tiered 1q sweep with factored (#171)([6e8ac63](https://github.com/AbeCoull/prism-q/commit/6e8ac63daaecf6a958c4efbcc3d77e8edc867f7c))
+
+### Testing
+
+- Pin thread-count determinism and add miri and TSan CI jobs (#163)([f5c4492](https://github.com/AbeCoull/prism-q/commit/f5c449208a27006e8831fd83e286f8b943c648bf))
+## [py-v0.29.0] - 2026-08-10
+
+### Miscellaneous
+
+- **python:** Release 0.29.0([4903042](https://github.com/AbeCoull/prism-q/commit/490304272184e44fbff32d26ae7739688f984157))
 ## [0.29.0] - 2026-08-10
 
 ### Bug Fixes
@@ -30,6 +82,10 @@ All notable changes to PRISM-Q will be documented in this file.
 - **sim:** Answer marginals from a backend's native observable path (#129)([d903c21](https://github.com/AbeCoull/prism-q/commit/d903c2150b4738be00669caf8404c6bfa6c0a55a))
 - **factored-stabilizer:** Export a statevector across clusters (#130)([06ee1c9](https://github.com/AbeCoull/prism-q/commit/06ee1c90c99227944fa7b76e1db44b6b51d9aae3))
 - **distributed:** Answer shots, observables, and marginals per rank (#127)([70eaba7](https://github.com/AbeCoull/prism-q/commit/70eaba7d965e3127bdd2caaaf774c9655e998671))
+
+### Miscellaneous
+
+- Release([14c4d97](https://github.com/AbeCoull/prism-q/commit/14c4d97eeb760149e20edb43d7744053aa8dc4f7))
 
 ### Performance
 

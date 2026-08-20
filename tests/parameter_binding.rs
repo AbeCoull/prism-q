@@ -6,7 +6,8 @@ use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::fusion::fuse_circuit;
 use prism_q::{
-    Circuit, Gate, Instruction, ParamLink, Parameters, PauliTerm, PreparedCircuit, circuits,
+    Circuit, CircuitBuilder, Gate, Instruction, ParamLink, Parameters, PauliTerm, PreparedCircuit,
+    circuits,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -606,4 +607,46 @@ fn named_slots_resolve_both_ways() {
     assert_eq!(named.slot_of("theta_3"), Some(3));
     assert_eq!(named.slot_of("nope"), None);
     assert_eq!(base.name_of(0), None);
+}
+
+#[test]
+fn the_builder_lowers_a_pauli_rotation_the_way_the_circuit_does() {
+    let factors = [PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)];
+    let built = CircuitBuilder::new(3)
+        .h(0)
+        .pauli_rotation(0.7, &factors)
+        .pauli_rotation(0.3, &[PauliTerm::z(0), PauliTerm::z(1)])
+        .build();
+
+    let mut direct = Circuit::new(3, 0);
+    direct.add_gate(Gate::H, &[0]);
+    direct.add_pauli_rotation(0.7, &factors);
+    direct.add_pauli_rotation(0.3, &[PauliTerm::z(0), PauliTerm::z(1)]);
+
+    assert_eq!(
+        format!("{:?}", built.instructions),
+        format!("{:?}", direct.instructions)
+    );
+}
+
+#[test]
+fn a_builder_pauli_rotation_takes_a_parameter_slot() {
+    let mut builder = CircuitBuilder::new(3);
+    builder
+        .h(0)
+        .pauli_rotation(0.1, &[PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)])
+        .param(0);
+    let (template, params) = builder.build_parametric();
+
+    let bound = params.bind(&template, &[1.25]).expect("bind");
+    assert_eq!(params.values(&bound).expect("values"), vec![1.25]);
+}
+
+// A prepared circuit crosses a thread boundary in the Python bindings, which
+// release the GIL around `run`. The backend the route holds is what makes this
+// non-obvious, so pin it here rather than discovering it downstream.
+#[test]
+fn a_prepared_circuit_is_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<PreparedCircuit>();
 }

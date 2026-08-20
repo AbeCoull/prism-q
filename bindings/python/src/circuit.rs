@@ -1,12 +1,14 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
 use prism_q::circuit::openqasm;
-use prism_q::{Circuit, CircuitBuilder, Gate, Instruction, circuits};
+use prism_q::{Circuit, CircuitBuilder, Gate, Instruction, PauliTerm, circuits};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::PyGate;
+use crate::parameter::PyParameters;
+use crate::sim::parse_pauli_string;
 
 /// A quantum circuit. Construct via [`CircuitBuilder`], [`parse_qasm`], or one
 /// of the reusable circuit generators under `prism_q.circuits`.
@@ -49,6 +51,30 @@ fn check_targets(num_qubits: usize, gate: &Gate, targets: &[usize]) -> PyPrismRe
         check_qubit(num_qubits, target, format!("target[{idx}]"))?;
     }
     Ok(())
+}
+
+/// Parse `(qubit, axis)` factors and reject what `Circuit::add_pauli_rotation`
+/// panics on, so bad input reaches Python as a `PrismError`.
+fn check_pauli_factors(
+    num_qubits: usize,
+    factors: Vec<(usize, String)>,
+) -> PyPrismResult<Vec<PauliTerm>> {
+    if factors.is_empty() {
+        return Err(invalid("pauli rotation needs at least one factor"));
+    }
+    let terms = parse_pauli_string(factors)?;
+    for (idx, term) in terms.iter().enumerate() {
+        check_qubit(num_qubits, term.qubit, format!("factor[{idx}] qubit"))?;
+    }
+    let mut seen: Vec<usize> = terms.iter().map(|t| t.qubit).collect();
+    seen.sort_unstable();
+    if let Some(pair) = seen.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(invalid(format!(
+            "pauli rotation has duplicate factor on qubit {}",
+            pair[0]
+        )));
+    }
+    Ok(terms)
 }
 
 fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> PyPrismResult<()> {
@@ -103,6 +129,23 @@ impl PyCircuit {
     fn add_gate(&mut self, gate: &PyGate, targets: Vec<usize>) -> PyPrismResult<()> {
         check_targets(self.0.num_qubits, gate.inner(), &targets)?;
         self.0.add_gate(gate.inner().clone(), &targets);
+        Ok(())
+    }
+
+    /// Append the Pauli rotation `exp(-i * theta * P / 2)` for the Pauli string
+    /// `P` given as `(qubit, axis)` factors, where `axis` is one of `"X"`,
+    /// `"Y"`, `"Z"` and identity factors are omitted.
+    ///
+    /// A weight-1 string lowers to `rx`, `ry`, or `rz` and a two-qubit `ZZ`
+    /// string to `rzz`, so fusion and Clifford recognition keep firing on them;
+    /// any other string appends the native multi-qubit rotation.
+    fn add_pauli_rotation(
+        &mut self,
+        theta: f64,
+        factors: Vec<(usize, String)>,
+    ) -> PyPrismResult<()> {
+        let terms = check_pauli_factors(self.0.num_qubits, factors)?;
+        self.0.add_pauli_rotation(theta, &terms);
         Ok(())
     }
 
@@ -253,9 +296,23 @@ impl PyCircuitBuilder {
         Ok(slf)
     }
 
+    /// Append the Pauli rotation `exp(-i * theta * P / 2)`, taking the
+    /// `(qubit, axis)` factors `Circuit.add_pauli_rotation` takes and lowering
+    /// the same way. Chain `.param(slot)` after it to make the angle bindable.
+    fn pauli_rotation(
+        mut slf: PyRefMut<'_, Self>,
+        theta: f64,
+        factors: Vec<(usize, String)>,
+    ) -> PyPrismResult<PyRefMut<'_, Self>> {
+        let terms = check_pauli_factors(slf.inner.circuit().num_qubits, factors)?;
+        slf.inner.pauli_rotation(theta, &terms);
+        Ok(slf)
+    }
+
     /// Bind the most recently appended gate to parameter `slot` for
-    /// `Simulation.expectation_gradient`. Several gates may share a slot (their
-    /// gradients accumulate). Example: `builder.rz(theta, q).param(0)`.
+    /// `Simulation.expectation_gradient` and `PreparedCircuit`. Several gates
+    /// may share a slot (their gradients accumulate and binding writes one
+    /// angle to each). Example: `builder.rz(theta, q).param(0)`.
     fn param(mut slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
         let bindable = matches!(
             slf.inner.circuit().instructions.last(),
@@ -263,7 +320,7 @@ impl PyCircuitBuilder {
         );
         if !bindable {
             return Err(invalid(
-                "param() requires the last appended instruction to be a gate carrying an angle (rx, ry, rz, rzz, p)",
+                "param() requires the last appended instruction to be a gate carrying an angle (rx, ry, rz, rzz, p, pauli_rot)",
             ));
         }
         slf.inner.param(slot);
@@ -285,6 +342,18 @@ impl PyCircuitBuilder {
             .iter()
             .map(|l| (l.instruction, l.slot))
             .collect()
+    }
+
+    /// The parameter set recorded by `param`, for `PreparedCircuit` and
+    /// `Parameters.bind`. Pinned to the circuit as it stands, so binding after
+    /// further edits fails rather than writing the wrong gates.
+    fn parameters(&self) -> PyParameters {
+        PyParameters(
+            self.inner
+                .parameters()
+                .clone()
+                .pinned_to(self.inner.circuit()),
+        )
     }
 
     fn cx(

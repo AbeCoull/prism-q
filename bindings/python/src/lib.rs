@@ -13,6 +13,7 @@ mod gate;
 mod gpu;
 mod noise;
 mod numpy_util;
+mod parameter;
 mod qec;
 mod sim;
 
@@ -22,6 +23,7 @@ use error::PrismError;
 use gate::PyGate;
 use gpu::PyGpuContext;
 use noise::{PyNoiseChannel, PyNoiseModel};
+use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
@@ -39,6 +41,8 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCircuit>()?;
     m.add_class::<PyCircuitBuilder>()?;
     m.add_class::<PyBackendKind>()?;
+    m.add_class::<PyParameters>()?;
+    m.add_class::<PyPreparedCircuit>()?;
     m.add_class::<PyGpuContext>()?;
     m.add_class::<PyNoiseChannel>()?;
     m.add_class::<PyNoiseModel>()?;

@@ -953,7 +953,7 @@ pub(crate) struct PreparedRoute {
     /// Backend held across points. `init` reuses its state buffer when the
     /// width matches, so a sweep pays one `2^n` allocation rather than one per
     /// point. Rebuilt when the seed changes, since the seed feeds its RNG.
-    held: Option<(u64, Box<dyn Backend>)>,
+    held: Option<(u64, Box<dyn Backend + Send>)>,
 }
 
 impl PreparedRoute {

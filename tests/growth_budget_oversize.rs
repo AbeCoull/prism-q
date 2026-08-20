@@ -6,7 +6,10 @@
 use std::sync::Once;
 
 use prism_q::gates::Gate;
-use prism_q::{Circuit, FactoredBackend, MpsBackend, PrismError, SparseBackend, run_on};
+use prism_q::{
+    Circuit, FactoredBackend, FactoredStabilizerBackend, MpsBackend, PrismError, SparseBackend,
+    run_on,
+};
 
 // Merge cap 8: a factored merge past 8 qubits rejects. MPS workspace cap
 // 2^8 = 256 amplitudes. Sparse cap 6: the map may hold at most 64 entries.
@@ -23,6 +26,7 @@ fn small_caps() {
             std::env::set_var("PRISM_MAX_FACTORED_MERGE_QUBITS", "8");
             std::env::set_var("PRISM_MAX_MPS_WORKSPACE_QUBITS", "8");
             std::env::set_var("PRISM_MAX_SPARSE_QUBITS", "6");
+            std::env::set_var("PRISM_MAX_STABILIZER_CLUSTER_QUBITS", "8");
         }
     });
 }
@@ -132,6 +136,23 @@ fn mps_workspace_over_the_cap_is_rejected() {
     let mut backend = MpsBackend::new(42, 1 << 20);
     let err = run_on(&mut backend, &circuit).unwrap_err();
     assert_cap_error(err, "mps");
+}
+
+#[test]
+fn stabilizer_cluster_merge_over_the_cap_is_rejected() {
+    small_caps();
+    let circuit = bridged_blocks(5, 5);
+    let mut backend = FactoredStabilizerBackend::new(42);
+    let err = run_on(&mut backend, &circuit).unwrap_err();
+    assert_cap_error(err, "factored-stabilizer");
+}
+
+#[test]
+fn stabilizer_cluster_merge_at_the_cap_still_runs() {
+    small_caps();
+    let circuit = bridged_blocks(MERGE_CAP / 2, MERGE_CAP / 2);
+    let mut backend = FactoredStabilizerBackend::new(42);
+    run_on(&mut backend, &circuit).expect("an at-cap cluster merge must run");
 }
 
 #[test]

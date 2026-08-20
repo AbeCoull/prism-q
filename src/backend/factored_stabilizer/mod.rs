@@ -484,12 +484,17 @@ pub struct FactoredStabilizerBackend {
     subs: Vec<Option<SubTableau>>,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
+    /// Merged-cluster qubit cap from
+    /// [`crate::backend::max_stabilizer_cluster_qubits`], read once at
+    /// construction so the per-merge check is a field compare.
+    cluster_cap: usize,
 }
 
 impl FactoredStabilizerBackend {
     pub fn new(seed: u64) -> Self {
         Self {
             num_qubits: 0,
+            cluster_cap: crate::backend::max_stabilizer_cluster_qubits(),
             qubit_to_sub: Vec::new(),
             subs: Vec::new(),
             classical_bits: Vec::new(),
@@ -497,7 +502,7 @@ impl FactoredStabilizerBackend {
         }
     }
 
-    fn ensure_same_sub(&mut self, targets: &[usize]) -> usize {
+    fn ensure_same_sub(&mut self, targets: &[usize]) -> Result<usize> {
         let first = self.qubit_to_sub[targets[0]];
         let mut need_merge: SmallVec<[usize; 4]> = SmallVec::new();
         for &q in &targets[1..] {
@@ -507,18 +512,26 @@ impl FactoredStabilizerBackend {
             }
         }
         for other in need_merge {
-            self.merge_subs(first, other);
+            self.merge_subs(first, other)?;
         }
-        first
+        Ok(first)
     }
 
-    fn merge_subs(&mut self, dst_idx: usize, src_idx: usize) {
+    fn merge_subs(&mut self, dst_idx: usize, src_idx: usize) -> Result<()> {
+        let total_n =
+            self.subs[dst_idx].as_ref().unwrap().n + self.subs[src_idx].as_ref().unwrap().n;
+        if total_n > self.cluster_cap {
+            return Err(crate::backend::stabilizer_cluster_error(
+                total_n,
+                self.cluster_cap,
+            ));
+        }
+
         let src = self.subs[src_idx].take().unwrap();
         let dst = self.subs[dst_idx].as_ref().unwrap();
 
         let a = dst.n;
         let b = src.n;
-        let total_n = a + b;
         let new_nw = total_n.div_ceil(64);
         let new_stride = 2 * new_nw;
         let total_rows = 2 * total_n + 1;
@@ -612,6 +625,7 @@ impl FactoredStabilizerBackend {
         for &q in &src.qubits {
             self.qubit_to_sub[q] = dst_idx;
         }
+        Ok(())
     }
 
     fn try_split(&mut self, sub_idx: usize) -> bool {
@@ -835,7 +849,7 @@ impl Backend for FactoredStabilizerBackend {
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         match instruction {
             Instruction::Gate { gate, targets } => {
-                let ss = self.ensure_same_sub(targets);
+                let ss = self.ensure_same_sub(targets)?;
                 let sub = self.subs[ss].as_mut().unwrap();
                 let mut local = SmallVec::<[usize; 4]>::new();
                 for &t in targets.iter() {
@@ -868,7 +882,7 @@ impl Backend for FactoredStabilizerBackend {
                 targets,
             } => {
                 if condition.evaluate(&self.classical_bits) {
-                    let ss = self.ensure_same_sub(targets);
+                    let ss = self.ensure_same_sub(targets)?;
                     let sub = self.subs[ss].as_mut().unwrap();
                     let mut local = SmallVec::<[usize; 4]>::new();
                     for &t in targets.iter() {

@@ -788,18 +788,74 @@ fn test_rzz_gate() {
     ));
 }
 
+// `rxx` and `ryy` took a seven-gate basis-change ladder until the native
+// multi-qubit rotation gained a spelling. Equivalence to that ladder is checked
+// numerically in `tests/pauli_rot_correctness.rs`; the shape belongs here.
 #[test]
 fn test_rxx_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nrxx(pi/4) q[0], q[1];";
     let c = parse(qasm).unwrap();
-    assert_eq!(c.instructions.len(), 7);
+    assert_eq!(c.instructions.len(), 1);
+    let Instruction::Gate {
+        gate: Gate::PauliRot(data),
+        targets,
+    } = &c.instructions[0]
+    else {
+        panic!("expected a PauliRot, got {:?}", c.instructions[0]);
+    };
+    assert_eq!(data.axes(), [PauliAxis::X, PauliAxis::X]);
+    assert_eq!(targets.as_slice(), [0, 1]);
 }
 
 #[test]
 fn test_ryy_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nryy(pi/4) q[0], q[1];";
     let c = parse(qasm).unwrap();
-    assert_eq!(c.instructions.len(), 7);
+    assert_eq!(c.instructions.len(), 1);
+    assert!(matches!(
+        &c.instructions[0],
+        Instruction::Gate {
+            gate: Gate::PauliRot(data),
+            ..
+        } if data.axes() == [PauliAxis::Y, PauliAxis::Y]
+    ));
+}
+
+#[test]
+fn test_wide_pauli_rotation_gate() {
+    let qasm = "OPENQASM 3.0;\nqubit[4] q;\nrxyz(0.7) q[2], q[0], q[3];";
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.instructions.len(), 1);
+    let Instruction::Gate {
+        gate: Gate::PauliRot(data),
+        targets,
+    } = &c.instructions[0]
+    else {
+        panic!("expected a PauliRot, got {:?}", c.instructions[0]);
+    };
+    // Targets sort by qubit and the letters follow them, so `y` stays on q[0].
+    assert_eq!(targets.as_slice(), [0, 2, 3]);
+    assert_eq!(data.axes(), [PauliAxis::Y, PauliAxis::X, PauliAxis::Z]);
+}
+
+#[test]
+fn test_pauli_rotation_rejections() {
+    let repeated = parse("OPENQASM 3.0;\nqubit[3] q;\nrxx(0.3) q[0], q[0];");
+    assert!(matches!(repeated, Err(PrismError::Parse { .. })));
+
+    let arity = parse("OPENQASM 3.0;\nqubit[3] q;\nrxyz(0.3) q[0], q[1];");
+    assert!(matches!(arity, Err(PrismError::GateArity { .. })));
+
+    let modified = parse("OPENQASM 3.0;\nqubit[3] q;\ninv @ rxyz(0.3) q[0], q[1], q[2];");
+    assert!(matches!(
+        modified,
+        Err(PrismError::UnsupportedConstruct { .. })
+    ));
+
+    // `rccx` is not a Pauli string, `c` being no Pauli letter, so the name
+    // still reaches its own decomposition.
+    let rccx = parse("OPENQASM 3.0;\nqubit[3] q;\nrccx q[0], q[1], q[2];").unwrap();
+    assert!(rccx.instructions.len() > 1);
 }
 
 #[test]
@@ -2656,8 +2712,20 @@ fn gate_names_round_trip_through_resolve_gate() {
             Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::P(t) | Gate::Rzz(t) => vec![*t],
             _ => vec![],
         };
-        let resolved = Parser::resolve_gate(gate.name(), &params, 0)
-            .unwrap_or_else(|e| panic!("`{}` did not resolve: {e}", gate.name()));
+        // `rzz` reaches the Pauli-rotation rule first, the way the parser
+        // dispatches it, and that rule lowers ZZ back to `Gate::Rzz`.
+        let resolved = match super::pauli_rotation_axes(gate.name()) {
+            Some(axes) => {
+                let factors: Vec<PauliTerm> = axes
+                    .iter()
+                    .enumerate()
+                    .map(|(q, &axis)| PauliTerm::new(q, axis))
+                    .collect();
+                super::pauli_rotation_gate(params[0], &factors).0
+            }
+            None => Parser::resolve_gate(gate.name(), &params, 0)
+                .unwrap_or_else(|e| panic!("`{}` did not resolve: {e}", gate.name())),
+        };
         assert_eq!(
             resolved,
             gate,

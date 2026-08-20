@@ -621,3 +621,227 @@ fn classical_control_constructs_parse_or_reject_by_name() {
         }
     }
 }
+
+const PARAMETRIC: &str = r#"
+OPENQASM 3.0;
+include "stdgates.inc";
+input float[64] theta;
+input angle phi;
+qubit[3] q;
+output bit[3] c;
+h q[0];
+rx(theta) q[0];
+cx q[0], q[1];
+rz(phi) q[1];
+rzz(theta) q[1], q[2];
+"#;
+
+// The deliverable is a round trip rather than a parse: an `input` declaration
+// becomes a named slot, a value vector binds through it, and the bound point
+// exports and re-imports as the same instruction stream.
+#[test]
+fn an_input_declaration_round_trips_through_a_bound_point() {
+    let (template, params) = openqasm::parse_parametric(PARAMETRIC).expect("parse");
+    assert_eq!(template.num_qubits, 3);
+    assert_eq!(template.num_classical_bits, 3);
+    assert_eq!(params.num_slots(), 2);
+
+    let bound = params.bind(&template, &[0.41, 1.27]).expect("bind");
+    assert_eq!(params.values(&bound).expect("values"), vec![0.41, 1.27]);
+
+    let round = round_trip(&bound);
+    assert_streams_match(&bound, &round, "input_bound_point");
+
+    // The exported text carries the bound angles, not the declarations, so the
+    // reparse needs no parameter surface of its own.
+    let qasm = to_qasm3(&bound).expect("export");
+    assert!(!qasm.contains("input"), "export emitted an input: {qasm}");
+    assert_probs_close(
+        &sv_reference_probs(&round),
+        &sv_reference_probs(&bound),
+        SV_EPS,
+        "input_bound_point",
+    );
+}
+
+#[test]
+fn input_slots_are_named_and_ordered_by_declaration() {
+    let (template, params) = openqasm::parse_parametric(PARAMETRIC).expect("parse");
+    assert_eq!(params.name_of(0), Some("theta"));
+    assert_eq!(params.name_of(1), Some("phi"));
+    assert_eq!(params.slot_of("phi"), Some(1));
+    assert_eq!(params.slot_of("psi"), None);
+    assert!(params.unread_slots().is_empty());
+
+    // `theta` drives two gates and `phi` one, which is the weight sharing the
+    // parameter surface already models.
+    let mut per_slot = [0usize; 2];
+    for link in params.links() {
+        per_slot[link.slot] += 1;
+    }
+    assert_eq!(per_slot, [2, 1]);
+    params.validate(&template).expect("links validate");
+}
+
+#[test]
+fn a_bound_program_agrees_with_the_same_angles_written_out() {
+    let (template, params) = openqasm::parse_parametric(PARAMETRIC).expect("parse");
+    let bound = params.bind(&template, &[0.41, 1.27]).expect("bind");
+
+    let literal = openqasm::parse(
+        r#"
+        OPENQASM 3.0;
+        qubit[3] q;
+        bit[3] c;
+        h q[0];
+        rx(0.41) q[0];
+        cx q[0], q[1];
+        rz(1.27) q[1];
+        rzz(0.41) q[1], q[2];
+        "#,
+    )
+    .expect("parse literal");
+    assert_probs_close(
+        &sv_reference_probs(&bound),
+        &sv_reference_probs(&literal),
+        SV_EPS,
+        "bound_vs_literal",
+    );
+}
+
+#[test]
+fn parse_rejects_a_program_that_leaves_inputs_unbound() {
+    let err = openqasm::parse(PARAMETRIC).expect_err("unbound inputs");
+    assert!(
+        matches!(err, PrismError::InvalidParameter { .. }),
+        "expected InvalidParameter, got {err:?}"
+    );
+}
+
+#[test]
+fn an_input_broadcast_over_a_register_shares_one_slot() {
+    let qasm = "OPENQASM 3.0;\ninput float[64] t;\nqubit[3] q;\nrx(t) q;\n";
+    let (template, params) = openqasm::parse_parametric(qasm).expect("parse");
+    assert_eq!(params.num_slots(), 1);
+    assert_eq!(params.links().len(), 3);
+    assert!(params.links().iter().all(|l| l.slot == 0));
+
+    let bound = params.bind(&template, &[0.9]).expect("bind");
+    let literal = openqasm::parse(
+        "OPENQASM 3.0;\nqubit[3] q;\nrx(0.9) q[0];\nrx(0.9) q[1];\nrx(0.9) q[2];\n",
+    )
+    .expect("parse literal");
+    assert_probs_close(
+        &sv_reference_probs(&bound),
+        &sv_reference_probs(&literal),
+        SV_EPS,
+        "broadcast_vs_literal",
+    );
+}
+
+// Every way an `input` can be written that the binding surface cannot carry.
+// One angle is written per link, so an input reaching anything but a whole
+// top-level rotation angle has nowhere to land, and a silent wrong angle is the
+// failure worth pinning against.
+#[test]
+fn input_uses_the_binding_surface_cannot_carry_reject_by_name() {
+    const PROLOGUE: &str = "OPENQASM 3.0;\ninput float[64] t;\nqubit[3] q;\nbit[3] c;\n";
+
+    let rejected = [
+        ("expression over an input", "rx(2 * t) q[0];"),
+        ("expression with a function", "rx(sin(t)) q[0];"),
+        (
+            "two inputs on one gate",
+            "input float[64] u;\nr(t, u) q[0];",
+        ),
+        ("gate carrying no angle", "cu(t, 0, 0, 0) q[0], q[1];"),
+        ("modified gate", "ctrl @ rx(t) q[0], q[1];"),
+        ("inside a for body", "for int i in [0:1] { rx(t) q[i]; }"),
+        ("inside a guarded region", "if (c[0]) { rx(t) q[0]; }"),
+        ("inside a guarded statement", "if (c[0]) rx(t) q[0];"),
+        (
+            "user-defined gate",
+            "gate myrot(a) x { rx(2 * a) x; }
+myrot(t) q[0];",
+        ),
+        ("lowered gate", "xx_plus_yy(t, 0.2) q[0], q[1];"),
+        (
+            "inside a def body",
+            "def d(qubit a, float w) { rx(w) a; }
+d(q[0], t);",
+        ),
+    ];
+    for (label, body) in rejected {
+        let qasm = format!("{PROLOGUE}{body}");
+        let err = openqasm::parse_parametric(&qasm)
+            .err()
+            .unwrap_or_else(|| panic!("{label}: expected a rejection, parsed"));
+        assert!(
+            matches!(err, PrismError::UnsupportedConstruct { .. }),
+            "{label}: expected UnsupportedConstruct, got {err:?}"
+        );
+    }
+
+    let bad_types = [
+        (
+            "integer input",
+            "OPENQASM 3.0;\ninput int[32] n;\nqubit[1] q;\n",
+        ),
+        (
+            "qubit output",
+            "OPENQASM 3.0;\nqubit[1] q;\noutput float[64] x;\n",
+        ),
+    ];
+    for (label, qasm) in bad_types {
+        assert!(
+            matches!(
+                openqasm::parse_parametric(qasm),
+                Err(PrismError::UnsupportedConstruct { .. })
+            ),
+            "{label}: expected UnsupportedConstruct"
+        );
+    }
+
+    assert!(
+        openqasm::parse_parametric("OPENQASM 3.0;\ninput float[64] t;\ninput float[64] t;\n")
+            .is_err(),
+        "a name declared twice should not silently take the second slot"
+    );
+}
+
+// A Pauli rotation is one gate carrying one angle, so an `input` binds it the
+// way it binds `rx`: the spelling exists and the binding surface reaches it.
+#[test]
+fn an_input_binds_a_pauli_rotation_and_survives_the_round_trip() {
+    let qasm = "OPENQASM 3.0;\ninput float[64] t;\nqubit[3] q;\nh q[0];\nrxyz(0.0) q[0], q[1], q[2];\nrxx(t) q[0], q[1];\n";
+    let (template, params) = openqasm::parse_parametric(qasm).expect("parse");
+    assert_eq!(params.num_slots(), 1);
+    assert_eq!(params.links().len(), 1);
+
+    let bound = params.bind(&template, &[0.63]).expect("bind");
+    assert!(
+        matches!(
+            &bound.instructions[2],
+            Instruction::Gate { gate: Gate::PauliRot(data), .. } if data.theta() == 0.63
+        ),
+        "expected the bound angle on a PauliRot, got {:?}",
+        bound.instructions[2]
+    );
+
+    let round = round_trip(&bound);
+    assert_streams_match(&bound, &round, "bound_pauli_rotation");
+    let native = round
+        .instructions
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Instruction::Gate {
+                    gate: Gate::PauliRot(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(native, 2, "the round trip lost a native rotation");
+}

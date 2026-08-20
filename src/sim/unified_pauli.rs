@@ -272,6 +272,27 @@ pub enum PauliAxis {
     Z,
 }
 
+impl PauliAxis {
+    /// Uppercase letter naming the axis, the spelling Pauli strings carry.
+    pub fn letter(self) -> char {
+        match self {
+            PauliAxis::X => 'X',
+            PauliAxis::Y => 'Y',
+            PauliAxis::Z => 'Z',
+        }
+    }
+
+    /// Inverse of [`letter`](Self::letter), accepting either case.
+    pub fn from_letter(letter: char) -> Option<Self> {
+        match letter.to_ascii_uppercase() {
+            'X' => Some(PauliAxis::X),
+            'Y' => Some(PauliAxis::Y),
+            'Z' => Some(PauliAxis::Z),
+            _ => None,
+        }
+    }
+}
+
 /// One non-identity factor of a joint Pauli observable. Ordered by qubit,
 /// then axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

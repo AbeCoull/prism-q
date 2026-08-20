@@ -183,12 +183,47 @@ fn z_only_rotation_preserves_sparsity() {
     assert!(!mixed.is_sparse_friendly());
 }
 
+// Agreement with the ladder is not the property to assert: the ladder passes it
+// whether or not the native gate survived. Assert the reparsed instruction is a
+// `PauliRot`, the way `the_native_gate_carries_the_gradient` does on the
+// gradient side.
 #[test]
-fn qasm_export_emits_the_lowering() {
+fn qasm_export_keeps_the_native_pauli_rotation() {
     let circuit = trotter_like_circuit(4);
     let qasm = prism_q::circuit::qasm_export::to_qasm3(&circuit).unwrap();
-    assert!(!qasm.contains("pauli_rot"));
+    let round = prism_q::circuit::openqasm::parse(&qasm).expect("reparse");
+
+    assert_eq!(circuit.instructions.len(), round.instructions.len());
+    let native = |c: &Circuit| {
+        c.instructions
+            .iter()
+            .filter(|i| {
+                matches!(
+                    i,
+                    Instruction::Gate {
+                        gate: Gate::PauliRot(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    assert!(native(&circuit) > 0, "fixture carries no PauliRot");
+    assert_eq!(native(&circuit), native(&round));
+    assert!(
+        !qasm.contains("cx"),
+        "export fell back to the ladder: {qasm}"
+    );
+}
+
+// The ladder is still reachable for a consumer that cannot read the extension.
+#[test]
+fn expanding_first_exports_the_portable_ladder() {
+    let circuit = trotter_like_circuit(4);
+    let lowered = prism_q::circuit::expand_pauli_rotations(&circuit);
+    let qasm = prism_q::circuit::qasm_export::to_qasm3(&lowered).unwrap();
     assert!(qasm.contains("cx"));
+    assert!(!qasm.contains("rxyz"));
 }
 
 // Noise events are indexed per instruction, so the trajectory engine applies
@@ -231,4 +266,53 @@ fn constructor_rejects_duplicate_qubits() {
 fn constructor_rejects_empty_strings() {
     let mut c = Circuit::new(1, 0);
     c.add_pauli_rotation(0.1, &[]);
+}
+
+// `rxx` and `ryy` parsed to a seven-gate basis-change ladder before the native
+// rotation gained a spelling. Both forms are the same unitary, so pin that
+// rather than trusting the change: the ladder is written out here so the
+// comparison does not run through the code that replaced it.
+#[test]
+fn parsed_rxx_and_ryy_agree_with_the_ladder_they_replaced() {
+    use prism_q::circuit::openqasm;
+
+    let cases = [
+        (
+            "rxx",
+            "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nrxx(0.7) q[0], q[1];",
+            "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\n\
+             h q[0];\nh q[1];\ncx q[0], q[1];\nrz(0.7) q[1];\ncx q[0], q[1];\nh q[0];\nh q[1];",
+        ),
+        (
+            "ryy",
+            "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nryy(0.7) q[0], q[1];",
+            "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\n\
+             rx(pi/2) q[0];\nrx(pi/2) q[1];\ncx q[0], q[1];\nrz(0.7) q[1];\ncx q[0], q[1];\n\
+             rx(-pi/2) q[0];\nrx(-pi/2) q[1];",
+        ),
+    ];
+
+    for (label, native_src, ladder_src) in cases {
+        let native = openqasm::parse(native_src).expect("parse native");
+        assert_eq!(
+            native.instructions.len(),
+            2,
+            "{label}: expected one rotation"
+        );
+
+        let ladder = openqasm::parse(ladder_src).expect("parse ladder");
+        let mut a = StatevectorBackend::new(SEED);
+        let mut b = StatevectorBackend::new(SEED);
+        let native_probs = sim::run_on(&mut a, &native)
+            .expect("run native")
+            .probabilities
+            .expect("probs")
+            .to_vec();
+        let ladder_probs = sim::run_on(&mut b, &ladder)
+            .expect("run ladder")
+            .probabilities
+            .expect("probs")
+            .to_vec();
+        assert_probs_close(&native_probs, &ladder_probs, SV_EPS, label);
+    }
 }

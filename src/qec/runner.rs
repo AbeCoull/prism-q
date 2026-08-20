@@ -48,7 +48,9 @@ use rand_chacha::ChaCha8Rng;
 ///   route accepts them via the analytical strategies).
 /// - A measured qubit must be `Reset` before any later gate reuses it; the
 ///   compiled lowering defers measurements to the terminal records of an
-///   internal circuit.
+///   internal circuit. Reuse after a non-Z basis measurement is rejected
+///   rather than left to the caller, since that case also leaves the qubit in
+///   the Z frame.
 /// - [`QecOptions::chunk_size`] bounds the per-batch shot count. Setting
 ///   `chunk_size` together with `keep_measurements: false` keeps peak memory
 ///   at one chunk worth of measurement records.
@@ -80,6 +82,7 @@ use rand_chacha::ChaCha8Rng;
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
+    super::validate_measured_qubit_reuse(program)?;
     if program.num_expectation_values() > 0 {
         super::validate_qec_exp_val_placement(program)?;
         let has_active_noise = program
@@ -464,6 +467,7 @@ impl QecProfiledSampler {
 /// [`QecOptions::chunk_size`] is validated for shape but not used to bound
 /// execution batches.
 pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult> {
+    super::validate_measured_qubit_reuse(program)?;
     qec_runner_chunk_size(program.options())?;
     super::validate_qec_exp_val_placement(program)?;
     let shots = program.options().shots;

@@ -17,6 +17,7 @@ use num_complex::Complex64;
 use super::parameter::Parameters;
 use super::{Circuit, ClassicalCondition, Instruction, SmallVec, guarded};
 use crate::gates::Gate;
+use crate::sim::unified_pauli::PauliTerm;
 
 /// Fluent builder for quantum circuits.
 ///
@@ -111,6 +112,18 @@ impl CircuitBuilder {
 
     pub fn rzz(&mut self, theta: f64, q0: usize, q1: usize) -> &mut Self {
         self.circuit.add_gate(Gate::Rzz(theta), &[q0, q1]);
+        self
+    }
+
+    /// Append the Pauli rotation `exp(-i θ P / 2)` for the Pauli string given
+    /// as one factor per qubit, lowering as
+    /// [`Circuit::add_pauli_rotation`] does.
+    ///
+    /// # Panics
+    /// Panics if `factors` is empty or names a qubit twice, as well as on the
+    /// out-of-bounds index every gate method panics on.
+    pub fn pauli_rotation(&mut self, theta: f64, factors: &[PauliTerm]) -> &mut Self {
+        self.circuit.add_pauli_rotation(theta, factors);
         self
     }
 

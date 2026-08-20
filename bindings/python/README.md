@@ -50,6 +50,8 @@ qubit. This is reversed relative to Qiskit. For example, the state where only
   hardware-efficient ansatz, quantum volume, and more.
 - Backend selection via `BackendKind` (statevector, stabilizer, sparse, MPS,
   Pauli propagation, ...).
+- Parameter sweeps without a rebuild (`Parameters`, `PreparedCircuit`) plus
+  adjoint gradients.
 - Noise models (`NoiseModel`, `NoiseChannel`) for shot sampling.
 - Native QEC programs (`QecProgram`) with detector and observable sampling.
 - NumPy output for probabilities, statevectors, and QEC bit matrices.

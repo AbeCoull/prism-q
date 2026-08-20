@@ -541,7 +541,7 @@ impl BackendPlan {
         }
     }
 
-    pub(super) fn build(&self, seed: u64) -> Box<dyn Backend> {
+    pub(super) fn build(&self, seed: u64) -> Box<dyn Backend + Send> {
         match self {
             BackendPlan::ProductState => Box::new(ProductStateBackend::new(seed)),
             BackendPlan::Sparse => Box::new(SparseBackend::new(seed)),

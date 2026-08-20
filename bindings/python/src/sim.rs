@@ -24,7 +24,7 @@ use crate::error::{PyPrismResult, invalid};
 use crate::noise::PyNoiseModel;
 use crate::numpy_util::{complex_array, f64_array};
 
-const DEFAULT_SEED: u64 = 42;
+pub(crate) const DEFAULT_SEED: u64 = 42;
 
 /// A configured simulation. Set options with `.seed()`, `.backend()`,
 /// `.noise()`, then run a terminal: `.run()`, `.shots()`, `.sample_counts()`,
@@ -411,7 +411,7 @@ fn parse_observables(observables: Vec<Vec<(usize, String)>>) -> PyPrismResult<Ve
     observables.into_iter().map(parse_pauli_string).collect()
 }
 
-fn parse_pauli_string(factors: Vec<(usize, String)>) -> PyPrismResult<Vec<PauliTerm>> {
+pub(crate) fn parse_pauli_string(factors: Vec<(usize, String)>) -> PyPrismResult<Vec<PauliTerm>> {
     factors
         .into_iter()
         .map(|(qubit, axis)| Ok(PauliTerm::new(qubit, parse_axis(&axis)?)))
@@ -608,7 +608,7 @@ pub struct PyRunOutcome {
 }
 
 impl PyRunOutcome {
-    fn from_outcome(outcome: RunOutcome) -> Self {
+    pub(crate) fn from_outcome(outcome: RunOutcome) -> Self {
         Self {
             classical_bits: outcome.classical_bits,
             probabilities: outcome.probabilities.map(|p| p.to_vec()),

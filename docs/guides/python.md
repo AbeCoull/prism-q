@@ -67,9 +67,20 @@ circuit = (
 | Single qubit | `id`, `x`, `y`, `z`, `h`, `s`, `sdg`, `t`, `tdg`, `sx`, `sxdg` |
 | Rotations | `rx(theta, q)`, `ry(theta, q)`, `rz(theta, q)`, `p(theta, q)` |
 | Two qubit | `cx(control, target)`, `cz(q0, q1)`, `swap(q0, q1)`, `rzz(theta, q0, q1)`, `cphase(theta, control, target)` |
+| Multi-qubit rotation | `pauli_rotation(theta, factors)` |
 | Arbitrary unitary | `cu(matrix, control, target)`, `mcu(matrix, controls, target)`, `gate(gate, targets)` |
 | Non-unitary | `measure(qubit, bit)`, `measure_all()`, `barrier(qubits)` |
-| Gradients | `param(slot)`, `parameter_links()` |
+| Parameters | `param(slot)`, `parameters()`, `parameter_links()` |
+
+`pauli_rotation(theta, factors)` appends `exp(-i * theta * P / 2)` for the Pauli
+string `P` given as `(qubit, axis)` factors with `axis` one of `"X"`, `"Y"`,
+`"Z"`; identity factors are omitted. A weight-1 string lowers to `rx`, `ry`, or
+`rz` and a two-qubit `ZZ` string to `rzz`, so fusion and Clifford recognition
+keep firing on them. `Circuit.add_pauli_rotation` is the imperative spelling.
+
+```python
+builder.pauli_rotation(0.4, [(0, "X"), (1, "Y"), (3, "Z")]).param(0)
+```
 
 `cu` and `mcu` take a 2x2 matrix as nested Python sequences of complex numbers.
 Out-of-range qubits raise `PrismError` at build time rather than at simulation
@@ -338,6 +349,61 @@ accumulation can move the last ulp, so compare against `1e-12` rather than
 asserting exact equality.
 ```
 
+## Parameter sweeps
+
+A variational loop rebinds angles while the gate sequence stays fixed.
+`Parameters` names the slots those angles land in, and `PreparedCircuit` holds
+the circuit across bindings so fusion and backend selection are settled once
+rather than per point.
+
+```python
+from prism_q import CircuitBuilder, PreparedCircuit
+
+builder = CircuitBuilder(4)
+for q in range(4):
+    builder.ry(0.1, q).param(q)
+for q in range(3):
+    builder.cx(q, q + 1)
+
+prepared = PreparedCircuit(builder.build(), builder.parameters())
+for values in [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]:
+    outcome = prepared.run(values, seed=42)
+```
+
+`run(values, seed=42)` returns the same `RunOutcome` as `simulate(...).run()`.
+`bind(values)` returns the bound `Circuit` instead, for handing to
+`simulate(...)` with different options or to any other consumer of a circuit.
+
+Automatic dispatch reads the template, so build it at angles representative of
+the sweep. A template whose rotations are all zero reads as Clifford and settles
+on a backend that then rejects the bound circuit. Pass an explicit backend as
+the third argument to decide it yourself:
+
+```python
+prepared = PreparedCircuit(circuit, params, BackendKind.statevector())
+```
+
+`reuses_fusion_plan` reports whether the recorded fused structure is being
+replayed. It is a performance fact, not an error: results agree either way.
+
+Build a `Parameters` three ways. `builder.parameters()` returns the set recorded
+by `param(slot)`; `Parameters.all_rotations(circuit)` gives every bindable gate
+its own slot in circuit order; `Parameters(n)` plus `link(instruction, slot)`
+declares the slots up front. Several gates may share a slot, in which case
+binding writes one angle to each.
+
+| Method | Returns |
+|--------|---------|
+| `bind(template, values)` | `template` with the linked angles overwritten |
+| `values(circuit)` | the angle each slot currently holds |
+| `validate(circuit)` | nothing; raises if a link no longer points at a bindable gate |
+| `with_names(names)` | a copy naming the slots, matching OpenQASM `input` declarations |
+| `name_of(slot)`, `slot_of(name)` | the name and slot of a named set, else `None` |
+| `unread_slots()` | declared slots no instruction reads, whose values are discarded |
+
+A wrong-length value vector, a non-finite angle, and a link pointing at a gate
+that carries no angle all raise `PrismError`.
+
 ## Gradients
 
 `expectation_gradient` computes `⟨H⟩` and its exact gradient with respect to the
@@ -361,8 +427,8 @@ value, gradient = simulate(circuit).seed(42).expectation_gradient(hamiltonian, l
 
 A Hamiltonian term is `(coefficient, observable)`. Several gates may share a
 slot, in which case their gradients accumulate. `param()` rejects anything
-but a differentiable gate (`rx`, `ry`, `rz`, `rzz`, `p`), and the circuit must be
-unitary.
+but a differentiable gate (`rx`, `ry`, `rz`, `rzz`, `p`, `pauli_rotation`), and
+the circuit must be unitary.
 
 ## Quantum error correction
 

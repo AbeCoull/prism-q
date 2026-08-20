@@ -98,40 +98,8 @@ impl Circuit {
     /// Panics if `factors` is empty, names a qubit twice, or names a qubit out
     /// of bounds.
     pub fn add_pauli_rotation(&mut self, theta: f64, factors: &[PauliTerm]) {
-        assert!(
-            !factors.is_empty(),
-            "Pauli rotation needs at least one factor"
-        );
-        let mut sorted: SmallVec<[PauliTerm; 4]> = SmallVec::from_slice(factors);
-        sorted.sort_unstable_by_key(|term| term.qubit);
-        for pair in sorted.windows(2) {
-            assert_ne!(
-                pair[0].qubit, pair[1].qubit,
-                "Pauli rotation has duplicate factor on qubit {}",
-                pair[0].qubit
-            );
-        }
-        match sorted.as_slice() {
-            [term] => {
-                let gate = match term.axis {
-                    PauliAxis::X => Gate::Rx(theta),
-                    PauliAxis::Y => Gate::Ry(theta),
-                    PauliAxis::Z => Gate::Rz(theta),
-                };
-                self.add_gate(gate, &[term.qubit]);
-            }
-            [a, b] if a.axis == PauliAxis::Z && b.axis == PauliAxis::Z => {
-                self.add_gate(Gate::Rzz(theta), &[a.qubit, b.qubit]);
-            }
-            _ => {
-                let targets: SmallVec<[usize; 4]> = sorted.iter().map(|term| term.qubit).collect();
-                let axes: Vec<PauliAxis> = sorted.iter().map(|term| term.axis).collect();
-                self.add_gate(
-                    Gate::PauliRot(Box::new(PauliRotData { theta, axes })),
-                    &targets,
-                );
-            }
-        }
+        let (gate, targets) = pauli_rotation_gate(theta, factors);
+        self.add_gate(gate, &targets);
     }
 
     /// Append a measurement operation.
@@ -907,6 +875,55 @@ pub(crate) fn pauli_rotation_lowering(
 /// Backends without the native kernel call this before dispatch, the same
 /// probe-plus-expansion route as [`expand_qft_blocks`]. Returns
 /// `Cow::Borrowed` when there is nothing to expand.
+/// Lower a Pauli rotation to the gate and target order a circuit stores it as,
+/// the recognizing step behind [`Circuit::add_pauli_rotation`].
+///
+/// Shared with the OpenQASM parser, which builds the instruction itself and so
+/// cannot go through `add_pauli_rotation`. Targets come back sorted by qubit
+/// with the letters aligned to them.
+///
+/// # Panics
+/// Panics if `factors` is empty or names a qubit twice.
+pub(crate) fn pauli_rotation_gate(
+    theta: f64,
+    factors: &[PauliTerm],
+) -> (Gate, SmallVec<[usize; 4]>) {
+    assert!(
+        !factors.is_empty(),
+        "Pauli rotation needs at least one factor"
+    );
+    let mut sorted: SmallVec<[PauliTerm; 4]> = SmallVec::from_slice(factors);
+    sorted.sort_unstable_by_key(|term| term.qubit);
+    for pair in sorted.windows(2) {
+        assert_ne!(
+            pair[0].qubit, pair[1].qubit,
+            "Pauli rotation has duplicate factor on qubit {}",
+            pair[0].qubit
+        );
+    }
+    match sorted.as_slice() {
+        [term] => {
+            let gate = match term.axis {
+                PauliAxis::X => Gate::Rx(theta),
+                PauliAxis::Y => Gate::Ry(theta),
+                PauliAxis::Z => Gate::Rz(theta),
+            };
+            (gate, smallvec![term.qubit])
+        }
+        [a, b] if a.axis == PauliAxis::Z && b.axis == PauliAxis::Z => {
+            (Gate::Rzz(theta), smallvec![a.qubit, b.qubit])
+        }
+        _ => {
+            let targets: SmallVec<[usize; 4]> = sorted.iter().map(|term| term.qubit).collect();
+            let axes: Vec<PauliAxis> = sorted.iter().map(|term| term.axis).collect();
+            (
+                Gate::PauliRot(Box::new(PauliRotData { theta, axes })),
+                targets,
+            )
+        }
+    }
+}
+
 pub fn expand_pauli_rotations(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
     if !any_bare_gate(&circuit.instructions, &mut |gate| {
         matches!(gate, Gate::PauliRot(_))

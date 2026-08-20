@@ -364,6 +364,22 @@ fn utf8_char_width(lead: u8) -> usize {
     }
 }
 
+/// True when `needle` occurs in `haystack` at identifier boundaries, the same
+/// rule [`replace_word`] substitutes on.
+pub(super) fn contains_word(haystack: &str, needle: &str) -> bool {
+    let hb = haystack.as_bytes();
+    let nb = needle.as_bytes();
+    let nlen = nb.len();
+    if nlen == 0 || nlen > hb.len() {
+        return false;
+    }
+    (0..=hb.len() - nlen).any(|i| {
+        &hb[i..i + nlen] == nb
+            && (i == 0 || !is_ident_char(hb[i - 1]))
+            && (i + nlen >= hb.len() || !is_ident_char(hb[i + nlen]))
+    })
+}
+
 pub(super) fn replace_word(haystack: &str, needle: &str, replacement: &str) -> String {
     let hb = haystack.as_bytes();
     let nb = needle.as_bytes();

@@ -144,6 +144,31 @@ backend, both regardless of `.backend(...)`.
 `ShotsResult` and `CountsResult` both expose `counts()`, returning a dict keyed
 by bitstring.
 
+### Distributions too wide to write down
+
+A circuit whose qubits fall into independent groups is answered per group, and
+`RunOutcome` keeps it that way: the dense vector is built only when
+`probabilities` is read. Fifteen independent Bell pairs span 30 qubits, whose
+dense form is 8 GB, and the blocks are 15 arrays of four entries.
+
+```python
+outcome = simulate(circuits.independent_bell_pairs(15)).seed(42).run()
+
+outcome.num_basis_states            # 2 ** 30, and nothing was materialized
+for qubits, probs in outcome.probabilities_factored():
+    print(qubits, probs)            # [0, 1] [0.5 0. 0. 0.5], ...
+```
+
+Each block is `(qubits, probs)` with `qubits` ascending, and `probs` indexed by
+those qubits packed in that order with `qubits[0]` in the least significant bit.
+The probability of a basis state is the product of one entry per block, which is
+what `probabilities` computes.
+
+`probabilities_factored()` returns `None` when the run produced a dense
+distribution, which is the common case: the decomposed route needs the widest
+group several qubits narrower than the register, so two Bell pairs stay dense.
+`num_basis_states` is `None` when the backend exposed no distribution at all.
+
 ## Result metadata
 
 `RunOutcome`, `ShotsResult`, and `CountsResult` each carry a `metadata` object

@@ -12,8 +12,8 @@ use numpy::PyArray1;
 use prism_q::backend::Backend;
 use prism_q::{
     BackendKind, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel, ParamLink,
-    Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, RunMetadata, RunOutcome,
-    ShotsResult, StatevectorBackend, bitstring, simulate as core_simulate,
+    Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities, RunMetadata,
+    RunOutcome, ShotsResult, StatevectorBackend, bitstring, simulate as core_simulate,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -599,11 +599,19 @@ impl PyObservableExpectation {
     }
 }
 
+/// One block of a factored distribution as Python receives it: the qubits it
+/// covers, ascending, and its own distribution over them.
+type FactoredBlockPy<'py> = (Vec<usize>, Bound<'py, PyArray1<f64>>);
+
 /// Result of a single run: classical bits and the probability distribution.
+///
+/// The distribution is held in whatever form the run produced it and is only
+/// made dense when `probabilities` is read, so a factored result wider than
+/// memory is still usable through `probabilities_factored`.
 #[pyclass(name = "RunOutcome", module = "prism_q")]
 pub struct PyRunOutcome {
     classical_bits: Vec<bool>,
-    probabilities: Option<Vec<f64>>,
+    probabilities: Option<Probabilities>,
     metadata: PyRunMetadata,
 }
 
@@ -611,7 +619,7 @@ impl PyRunOutcome {
     pub(crate) fn from_outcome(outcome: RunOutcome) -> Self {
         Self {
             classical_bits: outcome.classical_bits,
-            probabilities: outcome.probabilities.map(|p| p.to_vec()),
+            probabilities: outcome.probabilities,
             metadata: PyRunMetadata::new(outcome.metadata),
         }
     }
@@ -626,11 +634,46 @@ impl PyRunOutcome {
 
     /// Probability of each basis state as a `float64` array, or `None` if the
     /// backend cannot expose a dense distribution.
+    ///
+    /// A factored result is multiplied out here, which costs `2 ** num_qubits`
+    /// entries. Read `num_basis_states` first, or take the blocks from
+    /// `probabilities_factored()`.
     #[getter]
     fn probabilities<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.probabilities
             .as_ref()
-            .map(|v| f64_array(py, v.clone()))
+            .map(|p| f64_array(py, py.detach(|| p.to_vec())))
+    }
+
+    /// Per-block distributions of a factored result, or `None` when the run
+    /// produced a dense one.
+    ///
+    /// Each block is `(qubits, probs)`, where `qubits` is ascending and `probs`
+    /// is indexed by those qubits packed in that order, `qubits[0]` in the
+    /// least significant bit. The joint probability of a basis state is the
+    /// product of one entry per block, which is what `probabilities` computes.
+    fn probabilities_factored<'py>(&self, py: Python<'py>) -> Option<Vec<FactoredBlockPy<'py>>> {
+        let Some(Probabilities::Factored { blocks, .. }) = &self.probabilities else {
+            return None;
+        };
+        Some(
+            blocks
+                .iter()
+                .map(|block| {
+                    let qubits = (0..u64::BITS as usize)
+                        .filter(|bit| block.mask & (1 << bit) != 0)
+                        .collect();
+                    (qubits, f64_array(py, block.probs.clone()))
+                })
+                .collect(),
+        )
+    }
+
+    /// Basis states the distribution covers, `2 ** num_qubits`, without
+    /// materializing it. `None` when the backend exposed no distribution.
+    #[getter]
+    fn num_basis_states(&self) -> Option<usize> {
+        self.probabilities.as_ref().map(Probabilities::len)
     }
 
     #[getter]
@@ -639,10 +682,14 @@ impl PyRunOutcome {
     }
 
     fn __repr__(&self) -> String {
+        let form = match &self.probabilities {
+            None => "none",
+            Some(Probabilities::Dense(_)) => "dense",
+            Some(Probabilities::Factored { .. }) => "factored",
+        };
         format!(
-            "RunOutcome(classical_bits={}, has_probabilities={})",
-            self.classical_bits.len(),
-            self.probabilities.is_some()
+            "RunOutcome(classical_bits={}, probabilities={form})",
+            self.classical_bits.len()
         )
     }
 }

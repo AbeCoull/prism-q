@@ -53,6 +53,47 @@ c[0] = measure q[0]; // OQ3 measurement
 OpenQASM 2.0 syntax also works: `qreg q[3];` / `creg c[3];` declarations and
 `measure q[0] -> c[0];` measurement.
 
+`output bit[3] c;` declares the register and marks it as the program's result.
+Every classical bit is reported either way, so the marking costs nothing and
+changes nothing.
+
+## Input parameters
+
+An `input` declaration names a parameter slot. `openqasm::parse_parametric`
+returns the template circuit alongside the `Parameters` that binds it, in
+declaration order and under the declared names:
+
+```qasm
+OPENQASM 3.0;
+input float[64] theta;
+input float[64] phi;
+qubit[2] q;
+h q[0];
+rx(theta) q[0];
+cx q[0], q[1];
+rz(phi) q[1];
+```
+
+```rust
+let (template, params) = openqasm::parse_parametric(qasm)?;
+let bound = params.bind(&template, &[0.41, 1.27])?;
+let text = to_qasm3(&bound)?;   // angles written out, no `input` line
+```
+
+Several gates may read one input, which is the weight sharing `Parameters`
+already models: `rx(theta) q;` over a register links every gate it produces to
+the same slot, and binding writes one angle to each.
+
+`parse` itself rejects a program that declares an input, because it has nowhere
+to take the value and a zero would be a quiet wrong answer. Feed those through
+`parse_parametric`, or through `PreparedCircuit` for a sweep.
+
+An input binds an angle whole, so it may only be the entire angle argument of a
+directly named parametric gate at the top level. `rx(2 * theta)`, an input on a
+gate carrying no rotation angle, one reaching a `gate`, `def`, `for`, or guarded
+body, and one on a modified gate all return `UnsupportedConstruct` naming the
+reason rather than binding something the source did not mean.
+
 ## Supported gates
 
 - **Standard / aliases**: x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase, cx/CX/cnot,

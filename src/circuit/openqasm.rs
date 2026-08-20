@@ -9,6 +9,8 @@
 //! | Qubit declaration | `qubit[4] q;` | OQ3 syntax (primary) |
 //! | Bit declaration | `bit[4] c;` | OQ3 syntax (primary) |
 //! | Legacy qreg/creg | `qreg q[4]; creg c[4];` | OQ2 compat |
+//! | Input parameter | `input float[64] theta;` | One named slot; [`parse_parametric`] returns them |
+//! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
 //! | 1-qubit gates | `h q[0]; x q[1];` | id, x, y, z, h, s, sdg, t, tdg, sx, sxdg, p/phase, r, gpi, gpi2, u/U forms |
 //! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz, cu, ms, arithmetic expressions with `pi`, math functions |
 //! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase, crx, cry, crz, csx, swap, rzz, rxx, ryy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
@@ -50,6 +52,12 @@
 //!   re-read the bits after an earlier body ran
 //! - `switch` with a `default` and more case labels than the region depth bound
 //! - `duration`, `stretch` outside `def` parameter lists
+//! - `input` of any type but `float` and `angle`, and `output` of any type but
+//!   `bit`
+//! - an `input` anywhere but as the whole angle argument of a top-level
+//!   parametric gate: an expression over one, two on one gate, a modified gate,
+//!   a gate carrying no rotation angle, and a use inside a `gate`, `def`,
+//!   `for`, or guarded-region body all reject
 //!
 //! # Error behaviour
 //!
@@ -61,7 +69,8 @@
 use num_complex::Complex64;
 
 use crate::circuit::{
-    Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, SmallVec, guarded, smallvec,
+    Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, ParamLink, Parameters, SmallVec,
+    guarded, smallvec,
 };
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -74,8 +83,40 @@ use std::collections::HashMap;
 ///
 /// # Errors
 ///
-/// Returns structured [`PrismError`] for any parse failure or unsupported construct.
+/// Returns structured [`PrismError`] for any parse failure or unsupported
+/// construct, and [`PrismError::InvalidParameter`] when the program declares an
+/// `input`, whose value this entry point has nowhere to take. Use
+/// [`parse_parametric`] for those.
 pub fn parse(input: &str) -> Result<Circuit> {
+    let (circuit, params) = Parser::new(input).parse()?;
+    if params.num_slots() > 0 {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "program declares {} `input` parameter(s); parse it with `parse_parametric` and bind them",
+                params.num_slots()
+            ),
+        });
+    }
+    Ok(circuit)
+}
+
+/// Parse an OpenQASM 3.0 string into a [`Circuit`] plus the [`Parameters`] its
+/// `input` declarations name.
+///
+/// Slots are ordered by declaration and carry the declared names, so
+/// [`Parameters::slot_of`] resolves an angle by the name the source used. The
+/// returned circuit is a template holding zero for every input; bind it before
+/// running, since dispatch reads the angles it is given.
+///
+/// An `input` may only be the whole angle argument of a directly named
+/// parametric gate at the top level. An expression over one, a use inside a
+/// gate, `def`, `for`, or guarded-region body, and a use on a gate carrying no
+/// rotation angle all return [`PrismError::UnsupportedConstruct`].
+///
+/// # Errors
+///
+/// Same conditions as [`parse`], less the `input` rejection.
+pub fn parse_parametric(input: &str) -> Result<(Circuit, Parameters)> {
     Parser::new(input).parse()
 }
 
@@ -168,12 +209,23 @@ pub(crate) struct Parser<'a> {
     region_depth: usize,
     param_vars: Option<HashMap<String, f64>>,
     int_vars: Option<HashMap<String, i64>>,
+    /// `input` slot per declared name, and the names in slot order.
+    inputs: HashMap<String, usize>,
+    input_names: Vec<String>,
+    links: Vec<ParamLink>,
+    /// Slot the statement just parsed reads, handed from `process_top_line` up
+    /// to `parse_lines`, which is the only place that knows the instruction
+    /// index the link needs.
+    pending_input_slot: Option<usize>,
+    /// True while parsing a block body, whose instruction indices are local to
+    /// that body and so cannot carry a top-level parameter link.
+    nested: bool,
 }
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 
-use super::expr::{eval_expr, replace_word, split_top_level_commas};
+use super::expr::{contains_word, eval_expr, replace_word, split_top_level_commas};
 
 fn strip_comment(line: &str) -> &str {
     match line.find("//") {
@@ -635,18 +687,27 @@ impl<'a> Parser<'a> {
             region_depth: 0,
             param_vars: None,
             int_vars: None,
+            inputs: HashMap::new(),
+            input_names: Vec::new(),
+            links: Vec::new(),
+            pending_input_slot: None,
+            nested: false,
         }
     }
 
-    fn parse(mut self) -> Result<Circuit> {
+    fn parse(mut self) -> Result<(Circuit, Parameters)> {
         let lines: Vec<&str> = self.input.lines().collect();
         let instructions = self.parse_lines(&lines, 0)?;
 
-        Ok(Circuit {
+        let circuit = Circuit {
             num_qubits: self.total_qubits,
             num_classical_bits: self.total_cbits,
             instructions,
-        })
+        };
+        let params = Parameters::from_links(self.links, self.input_names.len())
+            .with_names(self.input_names)
+            .pinned_to(&circuit);
+        Ok((circuit, params))
     }
 
     fn parse_lines(&mut self, lines: &[&str], line_offset: usize) -> Result<Vec<Instruction>> {
@@ -673,7 +734,17 @@ impl<'a> Parser<'a> {
                     depth: 0,
                 });
             } else {
-                instructions.extend(self.process_top_line(line, line_num, &mut block)?);
+                let base = instructions.len();
+                let produced = self.process_top_line(line, line_num, &mut block)?;
+                if let Some(slot) = self.pending_input_slot.take() {
+                    for offset in 0..produced.len() {
+                        self.links.push(ParamLink {
+                            instruction: base + offset,
+                            slot,
+                        });
+                    }
+                }
+                instructions.extend(produced);
             }
 
             if let Some(state) = block.as_ref()
@@ -705,6 +776,7 @@ impl<'a> Parser<'a> {
         line_num: usize,
         block: &mut Option<BlockState>,
     ) -> Result<Vec<Instruction>> {
+        self.pending_input_slot = None;
         let first_word = line
             .split(|c: char| c.is_whitespace() || c == '(')
             .next()
@@ -760,6 +832,14 @@ impl<'a> Parser<'a> {
             self.parse_bit_decl(line, line_num)?;
             return Ok(Vec::new());
         }
+        if first_word == "input" {
+            self.parse_input_decl(line, line_num)?;
+            return Ok(Vec::new());
+        }
+        if first_word == "output" {
+            self.parse_output_decl(line, line_num)?;
+            return Ok(Vec::new());
+        }
         if line.starts_with("qreg") {
             self.parse_qreg_legacy(line, line_num)?;
             return Ok(Vec::new());
@@ -808,7 +888,9 @@ impl<'a> Parser<'a> {
             });
         }
 
-        self.parse_gate_application(line, line_num)
+        let (instrs, slot) = self.parse_gate_application(line, line_num)?;
+        self.pending_input_slot = slot;
+        Ok(instrs)
     }
 
     fn dispatch_block(&mut self, state: &BlockState) -> Result<Vec<Instruction>> {
@@ -835,6 +917,94 @@ impl<'a> Parser<'a> {
         self.total_qubits += size;
         self.qregs.insert(name, Register { offset, size });
         Ok(())
+    }
+
+    /// `input float[64] theta` declares one parameter slot, named and ordered
+    /// by declaration. The template holds zero until a binding writes it.
+    fn parse_input_decl(&mut self, line: &str, line_num: usize) -> Result<()> {
+        let rest = line.strip_prefix("input").unwrap().trim();
+        let (ty, name) = Self::split_declared_type(rest, "input", line_num)?;
+        if !matches!(Self::type_keyword(ty), "float" | "angle") {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("`input {ty}` (only float and angle inputs bind to an angle)"),
+                line: line_num,
+            });
+        }
+        if self.inputs.contains_key(&name) {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("input `{name}` declared twice"),
+            });
+        }
+        self.inputs.insert(name.clone(), self.input_names.len());
+        self.input_names.push(name);
+        Ok(())
+    }
+
+    /// `output bit[4] c` declares the register and marks it as the program's
+    /// result. Every classical bit is already reported, so the marking is
+    /// carried by the declaration alone.
+    fn parse_output_decl(&mut self, line: &str, line_num: usize) -> Result<()> {
+        let rest = line.strip_prefix("output").unwrap().trim();
+        let (ty, _) = Self::split_declared_type(rest, "output", line_num)?;
+        if Self::type_keyword(ty) != "bit" {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("`output {ty}` (only bit outputs are reported)"),
+                line: line_num,
+            });
+        }
+        self.parse_bit_decl(rest, line_num)
+    }
+
+    /// Split `float[64] theta` into its type and its name.
+    fn split_declared_type<'s>(
+        rest: &'s str,
+        keyword: &str,
+        line_num: usize,
+    ) -> Result<(&'s str, String)> {
+        let split = rest
+            .rfind(|c: char| c.is_whitespace())
+            .ok_or_else(|| PrismError::Parse {
+                line: line_num,
+                message: format!("expected `{keyword} <type> <name>`, got `{keyword} {rest}`"),
+            })?;
+        let (ty, name) = (rest[..split].trim(), rest[split..].trim());
+        if ty.is_empty() || name.is_empty() {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("expected `{keyword} <type> <name>`, got `{keyword} {rest}`"),
+            });
+        }
+        Ok((ty, name.to_string()))
+    }
+
+    /// Type name with any width suffix dropped: `float[64]` reads as `float`.
+    fn type_keyword(ty: &str) -> &str {
+        ty.split('[').next().unwrap_or(ty).trim()
+    }
+
+    /// Evaluate one gate argument, reporting the slot when it is exactly an
+    /// `input` name.
+    fn resolve_param(&self, expr: &str, line_num: usize) -> Result<(f64, Option<usize>)> {
+        let expr = expr.trim();
+        if let Some(&slot) = self.inputs.get(expr) {
+            if self.nested {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("input `{expr}` inside a block body"),
+                    line: line_num,
+                });
+            }
+            return Ok((0.0, Some(slot)));
+        }
+        if let Some(name) = self.input_names.iter().find(|n| contains_word(expr, n)) {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "expression `{expr}` over input `{name}`; an input binds an angle whole"
+                ),
+                line: line_num,
+            });
+        }
+        Ok((eval_expr(expr, line_num, self.param_vars.as_ref())?, None))
     }
 
     /// OQ3 syntax: `bit[4] c` or `bit c` (single bit).
@@ -1392,7 +1562,9 @@ impl<'a> Parser<'a> {
             self.int_vars = Some(new_vars);
 
             let lines: Vec<&str> = substituted.iter().map(String::as_str).collect();
+            let was_nested = std::mem::replace(&mut self.nested, true);
             let result = self.parse_lines(&lines, line_num.saturating_sub(1));
+            self.nested = was_nested;
 
             self.int_vars = saved;
             all_instrs.extend(result?);
@@ -1528,7 +1700,9 @@ impl<'a> Parser<'a> {
         self.enter_region(line_num)?;
         let body_lines = split_body_into_lines(src.trim());
         let refs: Vec<&str> = body_lines.iter().map(String::as_str).collect();
+        let was_nested = std::mem::replace(&mut self.nested, true);
         let body = self.parse_lines(&refs, line_num.saturating_sub(1));
+        self.nested = was_nested;
         self.region_depth -= 1;
         body
     }
@@ -1704,7 +1878,13 @@ impl<'a> Parser<'a> {
                 message: "expected gate after `if(...)` condition".to_string(),
             });
         }
-        let body = self.parse_gate_application(body_str, line_num)?;
+        let (body, input_slot) = self.parse_gate_application(body_str, line_num)?;
+        if input_slot.is_some() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "`input` inside a guarded statement".to_string(),
+                line: line_num,
+            });
+        }
         Ok(guarded(condition, body).into_iter().collect())
     }
 
@@ -1870,16 +2050,30 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_gate_application(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
+    /// Parse one gate application, reporting the `input` slot every instruction
+    /// it produced reads. A register broadcast produces several, and they share
+    /// the slot, which is the weight sharing [`Parameters`] already models.
+    fn parse_gate_application(
+        &self,
+        line: &str,
+        line_num: usize,
+    ) -> Result<(Vec<Instruction>, Option<usize>)> {
         let (modifiers, gate_line) = Self::strip_modifiers(line, line_num)?;
 
         if modifiers.is_empty() {
             if let Some(instrs) = self.try_expand_def_call(gate_line, line_num)? {
-                return Ok(instrs);
+                return Ok((instrs, None));
             }
         }
 
-        let (gate_name, params, args_str) = self.split_gate_line(gate_line, line_num)?;
+        let (gate_name, params, input_slot, args_str) =
+            self.split_gate_line(gate_line, line_num)?;
+        if input_slot.is_some() && !modifiers.is_empty() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("modifier on `{gate_name}` reading an `input`"),
+                line: line_num,
+            });
+        }
 
         let qubit_tokens: Vec<&str> = args_str
             .split(',')
@@ -1893,12 +2087,6 @@ impl<'a> Parser<'a> {
 
         let broadcast_len = self.broadcast_length(&resolved, &gate_name, line_num)?;
 
-        if broadcast_len <= 1 {
-            let qubits: SmallVec<[usize; 4]> = resolved.iter().map(|v| v[0]).collect();
-            return self
-                .resolve_gate_application_once(&gate_name, &params, &modifiers, &qubits, line_num);
-        }
-
         let mut all_instrs = Vec::with_capacity(broadcast_len);
         for i in 0..broadcast_len {
             let qubits: SmallVec<[usize; 4]> = resolved
@@ -1907,10 +2095,40 @@ impl<'a> Parser<'a> {
                 .collect();
 
             all_instrs.append(&mut self.resolve_gate_application_once(
-                &gate_name, &params, &modifiers, &qubits, line_num,
+                &gate_name,
+                &params,
+                &modifiers,
+                &qubits,
+                input_slot.is_some(),
+                line_num,
             )?);
         }
-        Ok(all_instrs)
+
+        if input_slot.is_some() {
+            Self::check_every_instruction_is_bindable(&all_instrs, &gate_name, line_num)?;
+        }
+        Ok((all_instrs, input_slot))
+    }
+
+    /// A slot writes one angle onto each instruction it links, so every
+    /// instruction a gate reading an `input` produced has to carry one.
+    fn check_every_instruction_is_bindable(
+        instrs: &[Instruction],
+        gate_name: &str,
+        line_num: usize,
+    ) -> Result<()> {
+        let bindable = instrs.iter().all(|instr| {
+            matches!(instr, Instruction::Gate { gate, .. } if gate.pauli_generator().is_some())
+        });
+        if !bindable {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "`input` on `{gate_name}`, which carries no rotation angle to bind"
+                ),
+                line: line_num,
+            });
+        }
+        Ok(())
     }
 
     fn resolve_gate_application_once(
@@ -1919,9 +2137,18 @@ impl<'a> Parser<'a> {
         params: &[f64],
         modifiers: &[Modifier],
         qubits: &SmallVec<[usize; 4]>,
+        has_input: bool,
         line_num: usize,
     ) -> Result<Vec<Instruction>> {
         if let Some(instrs) = Self::resolve_decomposed_gate(gate_name, params, qubits, line_num)? {
+            // A lowering folds the angle into its own arithmetic, so binding a
+            // slot afterwards would write the raw value over a derived one.
+            if has_input {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("`input` on `{gate_name}`, which lowers to a gate sequence"),
+                    line: line_num,
+                });
+            }
             if !modifiers.is_empty() {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: format!("modifier on decomposed gate `{gate_name}`"),
@@ -1932,6 +2159,14 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
+            // Expansion substitutes the numeric value into the body, so a body
+            // writing `rx(2 * a)` would take a bound angle whole.
+            if has_input {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("`input` on user-defined gate `{gate_name}`"),
+                    line: line_num,
+                });
+            }
             return Ok(instrs);
         }
 
@@ -2041,6 +2276,11 @@ impl<'a> Parser<'a> {
             region_depth: self.region_depth,
             param_vars: Some(var_map),
             int_vars: self.int_vars.clone(),
+            inputs: HashMap::new(),
+            input_names: Vec::new(),
+            links: Vec::new(),
+            pending_input_slot: None,
+            nested: true,
         };
         sub_parser.qregs.insert(
             "__q__".to_string(),
@@ -2087,7 +2327,8 @@ impl<'a> Parser<'a> {
                     replace_word(&expanded, qubit_name, &format!("__q__[{}]", call_qubits[i]));
             }
 
-            let instrs = sub_parser.parse_gate_application(expanded.trim(), line_num)?;
+            // The sub-parser declares no inputs, so the slot is always `None`.
+            let (instrs, _) = sub_parser.parse_gate_application(expanded.trim(), line_num)?;
             all_instrs.extend(instrs);
         }
 
@@ -2175,6 +2416,21 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // The body is inlined with the argument's numeric value substituted in,
+        // so a slot recorded here would bind an angle the body derives from.
+        // Rejecting by name beats the unknown-identifier error the substitution
+        // would otherwise raise on a name that is declared.
+        if let Some(input) = self
+            .input_names
+            .iter()
+            .find(|input| raw_args.iter().any(|arg| contains_word(arg, input)))
+        {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("input `{input}` as an argument to `def {name}`"),
+                line: line_num,
+            });
+        }
+
         let mut qubit_substs: Vec<(String, usize)> = Vec::new();
         let mut float_vars: HashMap<String, f64> = self.param_vars.clone().unwrap_or_default();
         let mut int_vars: HashMap<String, i64> = self.int_vars.clone().unwrap_or_default();
@@ -2229,6 +2485,11 @@ impl<'a> Parser<'a> {
             region_depth: self.region_depth,
             param_vars: Some(float_vars),
             int_vars: Some(int_vars),
+            inputs: HashMap::new(),
+            input_names: Vec::new(),
+            links: Vec::new(),
+            pending_input_slot: None,
+            nested: true,
         };
         sub_parser.qregs.insert(
             "__q__".to_string(),
@@ -2382,7 +2643,11 @@ impl<'a> Parser<'a> {
         Gate::cu(mat)
     }
 
-    fn split_gate_line(&self, line: &str, line_num: usize) -> Result<(String, Vec<f64>, String)> {
+    fn split_gate_line(
+        &self,
+        line: &str,
+        line_num: usize,
+    ) -> Result<(String, Vec<f64>, Option<usize>, String)> {
         if let Some(paren_start) = line.find('(') {
             let mut depth = 0usize;
             let mut paren_end = None;
@@ -2405,10 +2670,9 @@ impl<'a> Parser<'a> {
             })?;
             let gate_name = line[..paren_start].trim().to_string();
             let params_str = &line[paren_start + 1..paren_end];
-            let params =
-                Self::parse_params_with_vars(params_str, line_num, self.param_vars.as_ref())?;
+            let (params, input_slot) = self.parse_params(params_str, line_num)?;
             let args_str = line[paren_end + 1..].trim().to_string();
-            Ok((gate_name, params, args_str))
+            Ok((gate_name, params, input_slot, args_str))
         } else {
             let first_space = line
                 .find(char::is_whitespace)
@@ -2418,19 +2682,29 @@ impl<'a> Parser<'a> {
                 })?;
             let gate_name = line[..first_space].trim().to_string();
             let args_str = line[first_space..].trim().to_string();
-            Ok((gate_name, vec![], args_str))
+            Ok((gate_name, vec![], None, args_str))
         }
     }
 
-    fn parse_params_with_vars(
-        params_str: &str,
-        line_num: usize,
-        vars: Option<&HashMap<String, f64>>,
-    ) -> Result<Vec<f64>> {
-        split_top_level_commas(params_str)
-            .iter()
-            .map(|p| eval_expr(p.trim(), line_num, vars))
-            .collect()
+    /// Evaluate a gate's argument list, reporting the one `input` slot it reads.
+    ///
+    /// Two inputs on one gate are rejected: a slot is written onto the single
+    /// angle a bindable gate carries, so a second one would have nowhere to go.
+    fn parse_params(&self, params_str: &str, line_num: usize) -> Result<(Vec<f64>, Option<usize>)> {
+        let mut values = Vec::new();
+        let mut input_slot = None;
+        for part in split_top_level_commas(params_str) {
+            let (value, slot) = self.resolve_param(part, line_num)?;
+            if slot.is_some() && input_slot.is_some() {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: "two `input` parameters on one gate".to_string(),
+                    line: line_num,
+                });
+            }
+            input_slot = input_slot.or(slot);
+            values.push(value);
+        }
+        Ok((values, input_slot))
     }
 
     fn resolve_gate(name: &str, params: &[f64], line_num: usize) -> Result<Gate> {

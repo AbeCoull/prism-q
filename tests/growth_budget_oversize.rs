@@ -5,6 +5,7 @@
 
 use std::sync::Once;
 
+use num_complex::Complex64;
 use prism_q::gates::Gate;
 use prism_q::{
     Circuit, FactoredBackend, FactoredStabilizerBackend, MpsBackend, PrismError, SparseBackend,
@@ -136,6 +137,36 @@ fn mps_workspace_over_the_cap_is_rejected() {
     let mut backend = MpsBackend::new(42, 1 << 20);
     let err = run_on(&mut backend, &circuit).unwrap_err();
     assert_cap_error(err, "mps");
+}
+
+// The N-site path holds the assembled 4^n gate matrix and its reordered copy
+// at peak, so a 4-control MCU needs 512 amplitudes against the cap's 256.
+fn wide_mcu(n: usize, num_controls: u8) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    let x = [
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+    let targets: Vec<usize> = (0..=num_controls as usize).collect();
+    c.add_gate(Gate::mcu(x, num_controls), &targets);
+    c
+}
+
+#[test]
+fn mps_mcu_gate_matrix_over_the_cap_is_rejected() {
+    small_caps();
+    let circuit = wide_mcu(8, 4);
+    let mut backend = MpsBackend::new(42, 1 << 20);
+    let err = run_on(&mut backend, &circuit).unwrap_err();
+    assert_cap_error(err, "mps");
+}
+
+#[test]
+fn mps_narrow_mcu_still_runs() {
+    small_caps();
+    let circuit = wide_mcu(8, 2);
+    let mut backend = MpsBackend::new(42, 1 << 20);
+    run_on(&mut backend, &circuit).expect("an at-cap MCU must run");
 }
 
 #[test]

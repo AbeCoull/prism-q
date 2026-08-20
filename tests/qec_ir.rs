@@ -246,10 +246,11 @@ fn qec_reference_runner_executes_gates_and_postselection() {
     assert_eq!(result.observables.to_shots(), vec![vec![true]; 4]);
 }
 
-// Measuring X on |+> is deterministic and leaves the qubit in |+>, so a Z
-// measurement of the same qubit with no intervening reset is deterministic too.
-// The two runners must agree on both records and on the post-measurement state
-// the second one reads.
+// Measuring X on |+> is deterministic, and the qubit is left in the Z frame
+// rather than rotated back, so it sits in |0> and the following Z measurement
+// reads 0 deterministically. Under the restoring convention the qubit would
+// return to |+> and that second record would be random, which is how the two
+// runners used to differ.
 #[test]
 fn qec_basis_measurement_leaves_the_same_state_in_both_runners() {
     let options = QecOptions {

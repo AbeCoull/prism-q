@@ -12,9 +12,10 @@ use prism_q::{
     run_on,
 };
 
-// Merge cap 8: a factored merge past 8 qubits rejects. MPS workspace cap
-// 2^8 = 256 amplitudes. Sparse cap 6: the map may hold at most 64 entries.
-// The statevector cap stays untouched: these ceilings must bind on their own.
+// Merge cap 8: a factored merge past 8 qubits rejects, and so does a stabilizer
+// cluster merge past 8. MPS workspace cap 2^8 = 256 amplitudes. Sparse cap 6:
+// the map may hold at most 64 entries. The statevector cap stays untouched:
+// these ceilings must bind on their own.
 const MERGE_CAP: usize = 8;
 const SPARSE_ENTRY_CAP: usize = 1 << 6;
 
@@ -140,7 +141,8 @@ fn mps_workspace_over_the_cap_is_rejected() {
 }
 
 // The N-site path holds the assembled 4^n gate matrix and its reordered copy
-// at peak, so a 4-control MCU needs 512 amplitudes against the cap's 256.
+// at peak, which is 2^(2n + 1) amplitudes for n = controls + 1. Four controls
+// needs 2048 against the cap's 256; two controls needs 128 and fits.
 fn wide_mcu(n: usize, num_controls: u8) -> Circuit {
     let mut c = Circuit::new(n, 0);
     let x = [
@@ -166,7 +168,7 @@ fn mps_narrow_mcu_still_runs() {
     small_caps();
     let circuit = wide_mcu(8, 2);
     let mut backend = MpsBackend::new(42, 1 << 20);
-    run_on(&mut backend, &circuit).expect("an at-cap MCU must run");
+    run_on(&mut backend, &circuit).expect("an MCU within the cap must run");
 }
 
 #[test]

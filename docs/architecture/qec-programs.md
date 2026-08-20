@@ -24,8 +24,8 @@ scope, duplicate qubits in a Pauli product, and `DEPOLARIZE2` target pairing.
 | `QecOp` variant | Payload | Semantics |
 | --- | --- | --- |
 | `Gate` | `gate`, `targets` | Standard gate. The compiled runner requires Clifford gates; the reference runner accepts any gate the statevector backend supports. |
-| `Measure` | `basis`, `qubit` | Single-qubit measurement in the requested basis. One record. |
-| `MeasurePauliProduct` | `terms` | One record equal to the parity of the listed Pauli terms. |
+| `Measure` | `basis`, `qubit` | Single-qubit measurement in the requested basis. One record. The qubit is left in the Z frame: the basis rotation is not undone. Reset it before a later operation reuses it. |
+| `MeasurePauliProduct` | `terms` | One record equal to the parity of the listed Pauli terms. Unlike `Measure`, the per-term basis rotations are undone before the record is taken. |
 | `Reset` | `basis`, `qubit` | Reset to the `+1` eigenstate of the requested basis. |
 | `Detector` | `records`, `coords` | Parity over the listed records. `coords` is passthrough metadata with no effect on sampling. |
 | `ObservableInclude` | `observable`, `records` | Includes for the same observable index XOR into a single row. |

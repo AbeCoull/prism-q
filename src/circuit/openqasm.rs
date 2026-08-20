@@ -13,7 +13,8 @@
 //! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
 //! | 1-qubit gates | `h q[0]; x q[1];` | id, x, y, z, h, s, sdg, t, tdg, sx, sxdg, p/phase, r, gpi, gpi2, u/U forms |
 //! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz, cu, ms, arithmetic expressions with `pi`, math functions |
-//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase, crx, cry, crz, csx, swap, rzz, rxx, ryy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
+//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase, crx, cry, crz, csx, swap, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
+//! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases |
 //! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
 //! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) for direct gates |
 //! | Measurement (OQ3) | `c[0] = measure q[0];` | Assignment syntax (primary) |
@@ -70,10 +71,11 @@ use num_complex::Complex64;
 
 use crate::circuit::{
     Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, ParamLink, Parameters, SmallVec,
-    guarded, smallvec,
+    guarded, pauli_rotation_gate, smallvec,
 };
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::collections::HashMap;
 
 /// Parse an OpenQASM 3.0 string into a PRISM-Q [`Circuit`].
@@ -226,6 +228,23 @@ const MAX_GATE_EXPANSION_DEPTH: usize = 32;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 
 use super::expr::{contains_word, eval_expr, replace_word, split_top_level_commas};
+
+/// Pauli letters of an `r<letters>` rotation name, or `None` when the name is
+/// not one.
+///
+/// Covers the `rxx`, `ryy`, and `rzz` OpenQASM already spells as well as the
+/// wider strings it does not, so one rule serves the whole family. `rzz` still
+/// resolves to `Gate::Rzz` and a weight-1 name to `Rx`/`Ry`/`Rz`, because
+/// `pauli_rotation_gate` lowers those; only the residual strings build the
+/// native multi-qubit gate. Names like `rccx` do not match, `c` being no Pauli
+/// letter.
+fn pauli_rotation_axes(name: &str) -> Option<Vec<PauliAxis>> {
+    let letters = name.strip_prefix('r')?;
+    if letters.len() < 2 {
+        return None;
+    }
+    letters.chars().map(PauliAxis::from_letter).collect()
+}
 
 fn strip_comment(line: &str) -> &str {
     match line.find("//") {
@@ -2110,6 +2129,47 @@ impl<'a> Parser<'a> {
         Ok((all_instrs, input_slot))
     }
 
+    /// Build the instruction an `r<letters>` application names, checking the
+    /// arity and distinctness `pauli_rotation_gate` would otherwise panic on.
+    fn resolve_pauli_rotation(
+        gate_name: &str,
+        axes: &[PauliAxis],
+        params: &[f64],
+        modifiers: &[Modifier],
+        qubits: &SmallVec<[usize; 4]>,
+        line_num: usize,
+    ) -> Result<Instruction> {
+        if !modifiers.is_empty() {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("modifier on Pauli rotation `{gate_name}`"),
+                line: line_num,
+            });
+        }
+        Self::expect_param_count(gate_name, params, 1, line_num)?;
+        if qubits.len() != axes.len() {
+            return Err(PrismError::GateArity {
+                gate: gate_name.to_string(),
+                expected: axes.len(),
+                got: qubits.len(),
+            });
+        }
+        let mut seen: SmallVec<[usize; 4]> = qubits.clone();
+        seen.sort_unstable();
+        if let Some(pair) = seen.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(PrismError::Parse {
+                line: line_num,
+                message: format!("Pauli rotation `{gate_name}` names qubit {} twice", pair[0]),
+            });
+        }
+        let factors: Vec<PauliTerm> = qubits
+            .iter()
+            .zip(axes)
+            .map(|(&qubit, &axis)| PauliTerm::new(qubit, axis))
+            .collect();
+        let (gate, targets) = pauli_rotation_gate(params[0], &factors);
+        Ok(Instruction::Gate { gate, targets })
+    }
+
     /// A slot writes one angle onto each instruction it links, so every
     /// instruction a gate reading an `input` produced has to carry one.
     fn check_every_instruction_is_bindable(
@@ -2168,6 +2228,13 @@ impl<'a> Parser<'a> {
                 });
             }
             return Ok(instrs);
+        }
+
+        if let Some(axes) = pauli_rotation_axes(gate_name) {
+            return Self::resolve_pauli_rotation(
+                gate_name, &axes, params, modifiers, qubits, line_num,
+            )
+            .map(|instr| vec![instr]);
         }
 
         let mut gate = Self::resolve_gate(gate_name, params, line_num)?;
@@ -2744,10 +2811,6 @@ impl<'a> Parser<'a> {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::cphase(params[0]))
             }
-            "rzz" => {
-                Self::expect_param_count(name, params, 1, line_num)?;
-                Ok(Gate::Rzz(params[0]))
-            }
             "cx" | "CX" | "cnot" => Ok(Gate::Cx),
             "cy" => Ok(Gate::cu(Gate::Y.matrix_2x2())),
             "cs" => Ok(Gate::cu(Gate::S.matrix_2x2())),
@@ -2916,37 +2979,6 @@ impl<'a> Parser<'a> {
                     Self::ig(Gate::Cx, &[t2, t1]),
                     Self::ig(Gate::mcu(Gate::X.matrix_2x2(), 2), &[ctrl, t1, t2]),
                     Self::ig(Gate::Cx, &[t2, t1]),
-                ]))
-            }
-            "rxx" => {
-                Self::expect_param_count(name, params, 1, line_num)?;
-                Self::check_arity(name, qubits, 2)?;
-                let q0 = qubits[0];
-                let q1 = qubits[1];
-                Ok(Some(vec![
-                    Self::ig(Gate::H, &[q0]),
-                    Self::ig(Gate::H, &[q1]),
-                    Self::ig(Gate::Cx, &[q0, q1]),
-                    Self::ig(Gate::Rz(params[0]), &[q1]),
-                    Self::ig(Gate::Cx, &[q0, q1]),
-                    Self::ig(Gate::H, &[q0]),
-                    Self::ig(Gate::H, &[q1]),
-                ]))
-            }
-            "ryy" => {
-                Self::expect_param_count(name, params, 1, line_num)?;
-                Self::check_arity(name, qubits, 2)?;
-                let q0 = qubits[0];
-                let q1 = qubits[1];
-                let half_pi = std::f64::consts::FRAC_PI_2;
-                Ok(Some(vec![
-                    Self::ig(Gate::Rx(half_pi), &[q0]),
-                    Self::ig(Gate::Rx(half_pi), &[q1]),
-                    Self::ig(Gate::Cx, &[q0, q1]),
-                    Self::ig(Gate::Rz(params[0]), &[q1]),
-                    Self::ig(Gate::Cx, &[q0, q1]),
-                    Self::ig(Gate::Rx(-half_pi), &[q0]),
-                    Self::ig(Gate::Rx(-half_pi), &[q1]),
                 ]))
             }
             "ecr" => {

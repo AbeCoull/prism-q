@@ -99,9 +99,20 @@ reason rather than binding something the source did not mean.
 - **Standard / aliases**: x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase, cx/CX/cnot,
   cy, cz, cp/cphase, crx, cry, crz, ch, swap, ccx/toffoli, cswap/fredkin, cu, u1, u2,
   u3/u/U.
-- **Qiskit / exporter**: sxdg, cs, csdg, csx, ccz, r, rzz, rxx, ryy, xx_plus_yy,
+- **Qiskit / exporter**: sxdg, cs, csdg, csx, ccz, r, xx_plus_yy,
   xx_minus_yy, ecr, iswap, dcx, c3x, c4x, mcx, rccx, rc3x/rcccx.
 - **Hardware-native**: gpi, gpi2, ms, syc, sqrt_iswap, sqrt_iswap_inv.
+- **Pauli rotations**: `r` followed by one Pauli letter per qubit argument.
+  `rxx`, `ryy`, and `rzz` are the two-letter cases; `rxyz(0.7) q[0], q[1], q[2];`
+  is `exp(-i * 0.7 * (X⊗Y⊗Z) / 2)` with `x` on `q[0]`. `rzz` resolves to the
+  native two-qubit rotation and a one-letter name to `rx`/`ry`/`rz`; wider
+  strings build the native multi-qubit gate, which the statevector applies in
+  one pass and every other backend receives as its CNOT-ladder lowering.
+
+  The wider spelling is a PRISM-Q extension rather than standard OpenQASM, and
+  `to_qasm3` emits it so a round trip preserves the gate instead of a lowering
+  of it. For output another toolchain reads, run
+  `circuit::expand_pauli_rotations` before exporting.
 
 ## Other supported constructs
 

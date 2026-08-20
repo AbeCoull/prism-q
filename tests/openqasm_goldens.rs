@@ -764,7 +764,7 @@ fn input_uses_the_binding_surface_cannot_carry_reject_by_name() {
             "gate myrot(a) x { rx(2 * a) x; }
 myrot(t) q[0];",
         ),
-        ("lowered gate", "rxx(t) q[0], q[1];"),
+        ("lowered gate", "xx_plus_yy(t, 0.2) q[0], q[1];"),
         (
             "inside a def body",
             "def d(qubit a, float w) { rx(w) a; }
@@ -807,4 +807,41 @@ d(q[0], t);",
             .is_err(),
         "a name declared twice should not silently take the second slot"
     );
+}
+
+// A Pauli rotation is one gate carrying one angle, so an `input` binds it the
+// way it binds `rx`: the spelling exists and the binding surface reaches it.
+#[test]
+fn an_input_binds_a_pauli_rotation_and_survives_the_round_trip() {
+    let qasm = "OPENQASM 3.0;\ninput float[64] t;\nqubit[3] q;\nh q[0];\nrxyz(0.0) q[0], q[1], q[2];\nrxx(t) q[0], q[1];\n";
+    let (template, params) = openqasm::parse_parametric(qasm).expect("parse");
+    assert_eq!(params.num_slots(), 1);
+    assert_eq!(params.links().len(), 1);
+
+    let bound = params.bind(&template, &[0.63]).expect("bind");
+    assert!(
+        matches!(
+            &bound.instructions[2],
+            Instruction::Gate { gate: Gate::PauliRot(data), .. } if data.theta() == 0.63
+        ),
+        "expected the bound angle on a PauliRot, got {:?}",
+        bound.instructions[2]
+    );
+
+    let round = round_trip(&bound);
+    assert_streams_match(&bound, &round, "bound_pauli_rotation");
+    let native = round
+        .instructions
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Instruction::Gate {
+                    gate: Gate::PauliRot(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(native, 2, "the round trip lost a native rotation");
 }

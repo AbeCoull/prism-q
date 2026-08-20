@@ -5,8 +5,14 @@
 //! gate matrices agreeing to floating-point round-off rather than bit for bit.
 //! Angles carried inline (`rx`, `rz`, `rzz`, `p`) survive exactly.
 //!
-//! [`Gate::QftBlock`] expands to its textbook sequence before emission, and
-//! [`Gate::PauliRot`] to its CNOT-ladder lowering. Fusion payloads have no
+//! [`Gate::QftBlock`] expands to its textbook sequence before emission.
+//! [`Gate::PauliRot`] keeps its native form, spelled `r` followed by the Pauli
+//! letters (`rxyz(0.7) q[0], q[1], q[2];`), which generalizes the `rzz` the
+//! parser already takes and is what makes the round trip preserve the gate
+//! rather than a lowering of it. That spelling is a PRISM-Q extension: for
+//! output another toolchain reads, run
+//! [`expand_pauli_rotations`](super::expand_pauli_rotations) first and export
+//! the CNOT ladder instead. Fusion payloads have no
 //! OpenQASM spelling and are rejected: `MultiFused`, `Multi2q`,
 //! `BatchPhase`, `BatchRzz`, `DiagonalBatch`, a `Fused2q` outside the two-qubit
 //! families the parser builds, and a single-qubit matrix carrying a global phase
@@ -18,7 +24,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::fmt::Write;
 
 use super::openqasm::Parser;
-use super::{Circuit, ClassicalCondition, Instruction, expand_pauli_rotations, expand_qft_blocks};
+use super::{Circuit, ClassicalCondition, Instruction, expand_qft_blocks};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
@@ -51,7 +57,6 @@ const EPS: f64 = 1e-12;
 /// ```
 pub fn to_qasm3(circuit: &Circuit) -> Result<String> {
     let expanded = expand_qft_blocks(circuit);
-    let expanded = expand_pauli_rotations(&expanded);
     let circuit = expanded.as_ref();
     let cregs = CregLayout::of(circuit)?;
 
@@ -176,6 +181,14 @@ fn gate_head(gate: &Gate) -> Option<String> {
         Gate::Rz(theta) => format!("rz({theta})"),
         Gate::P(theta) => format!("p({theta})"),
         Gate::Rzz(theta) => format!("rzz({theta})"),
+        Gate::PauliRot(data) => {
+            let letters: String = data
+                .axes()
+                .iter()
+                .map(|axis| axis.letter().to_ascii_lowercase())
+                .collect();
+            format!("r{letters}({})", data.theta())
+        }
         Gate::Cx => "cx".to_string(),
         Gate::Cz => "cz".to_string(),
         Gate::Swap => "swap".to_string(),

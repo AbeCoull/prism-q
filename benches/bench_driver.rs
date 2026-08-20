@@ -3,7 +3,10 @@
 //! Use `--features bench-fast` for a quick run that reduces warmup and
 //! measurement time. Omit for the full suite with default Criterion timing.
 
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::measurement::WallTime;
+use criterion::{
+    BatchSize, BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main,
+};
 use prism_q::backend::Backend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
@@ -15,34 +18,52 @@ use common::{configure_group, run_with};
 
 const QUBIT_COUNTS: [usize; 5] = [4, 8, 12, 16, 20];
 
+/// Time one gate's kernel over a full-superposition `n_qubits` state.
+///
+/// Two deliberate choices, both of which a row gets wrong by default.
+///
+/// Applies through [`StatevectorBackend`] rather than `simulate()`. A circuit
+/// holding a few gates on a wide register has a largest connected block far
+/// narrower than the register, and independent-subsystem decomposition claims
+/// such a circuit before a backend is resolved, so the `simulate()` route
+/// reports `Decomposed` and never reaches the dense kernel.
+///
+/// Holds one backend for the whole row rather than rebuilding per iteration.
+/// Every gate benched here is unitary, so repeated application walks the same
+/// amplitudes and cannot drift the norm, and at 20 qubits a per-iteration
+/// rebuild puts a 16 MB allocate-and-zero pass beside every measured one. The
+/// state is prepared in full superposition so no amplitude is zero.
+fn bench_kernel_row(
+    group: &mut BenchmarkGroup<WallTime>,
+    name: &str,
+    n_qubits: usize,
+    gate: Gate,
+    targets: &[usize],
+) {
+    let mut circuit = Circuit::new(n_qubits, 0);
+    circuit.add_gate(gate, targets);
+    group.bench_function(BenchmarkId::new(name, n_qubits), |b| {
+        let mut backend = StatevectorBackend::new(42);
+        backend.init(n_qubits, 0).unwrap();
+        let mut prep = Circuit::new(n_qubits, 0);
+        for q in 0..n_qubits {
+            prep.add_gate(Gate::H, &[q]);
+        }
+        for inst in &prep.instructions {
+            backend.apply(inst).unwrap();
+        }
+        b.iter(|| backend.apply(&circuit.instructions[0]).unwrap());
+    });
+}
+
 fn bench_single_qubit_gates(c: &mut Criterion) {
     let mut group = c.benchmark_group("single_qubit_gates");
     configure_group(&mut group);
 
     for &n_qubits in &QUBIT_COUNTS {
-        group.bench_with_input(BenchmarkId::new("h_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::H, &[0]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("rx_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::Rx(1.234), &[0]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("t_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::T, &[0]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
+        bench_kernel_row(&mut group, "h_gate", n_qubits, Gate::H, &[0]);
+        bench_kernel_row(&mut group, "rx_gate", n_qubits, Gate::Rx(1.234), &[0]);
+        bench_kernel_row(&mut group, "t_gate", n_qubits, Gate::T, &[0]);
     }
 
     group.finish();
@@ -52,101 +73,36 @@ fn bench_two_qubit_gates(c: &mut Criterion) {
     let mut group = c.benchmark_group("two_qubit_gates");
     configure_group(&mut group);
 
+    let cx_4x4 = Gate::Cx.matrix_4x4();
+
     for &n_qubits in &QUBIT_COUNTS {
-        group.bench_with_input(BenchmarkId::new("cx_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::Cx, &[0, 1]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(
-            BenchmarkId::new("cx_ctrl_gt_adjacent", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::Cx, &[1, 0]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
+        let hi = n_qubits - 1;
+        bench_kernel_row(&mut group, "cx_gate", n_qubits, Gate::Cx, &[0, 1]);
+        bench_kernel_row(
+            &mut group,
+            "cx_ctrl_gt_adjacent",
+            n_qubits,
+            Gate::Cx,
+            &[1, 0],
         );
-
-        group.bench_with_input(
-            BenchmarkId::new("cx_ctrl_lt_high", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::Cx, &[0, n - 1]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
+        bench_kernel_row(&mut group, "cx_ctrl_lt_high", n_qubits, Gate::Cx, &[0, hi]);
+        bench_kernel_row(&mut group, "cx_ctrl_gt_high", n_qubits, Gate::Cx, &[hi, 0]);
+        bench_kernel_row(&mut group, "cz_gate", n_qubits, Gate::Cz, &[0, 1]);
+        bench_kernel_row(&mut group, "cz_high", n_qubits, Gate::Cz, &[0, hi]);
+        bench_kernel_row(&mut group, "swap_gate", n_qubits, Gate::Swap, &[0, 1]);
+        bench_kernel_row(
+            &mut group,
+            "fused2q_adjacent",
+            n_qubits,
+            Gate::Fused2q(Box::new(cx_4x4)),
+            &[0, 1],
         );
-
-        group.bench_with_input(
-            BenchmarkId::new("cx_ctrl_gt_high", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::Cx, &[n - 1, 0]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
-        );
-
-        group.bench_with_input(BenchmarkId::new("cz_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::Cz, &[0, 1]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("cz_high", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::Cz, &[0, n - 1]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(
-            BenchmarkId::new("swap_gate", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::Swap, &[0, 1]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("fused2q_adjacent", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[0, 1]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("fused2q_high", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())), &[0, n - 1]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
+        bench_kernel_row(
+            &mut group,
+            "fused2q_high",
+            n_qubits,
+            Gate::Fused2q(Box::new(cx_4x4)),
+            &[0, hi],
         );
     }
 
@@ -394,14 +350,13 @@ fn bench_high_target_qubit(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &(n_qubits, target) in &[(16, 13), (20, 15), (20, 17)] {
-        let label = format!("h_q{}_n{}", target, n_qubits);
-        group.bench_function(&label, |b| {
-            let mut circuit = Circuit::new(n_qubits, 0);
-            circuit.add_gate(Gate::H, &[target]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
+        bench_kernel_row(
+            &mut group,
+            &format!("h_q{}", target),
+            n_qubits,
+            Gate::H,
+            &[target],
+        );
     }
 
     // Diagonal counterpart of the rows above. The diagonal pass tiles by
@@ -422,43 +377,39 @@ fn bench_high_target_qubit(c: &mut Criterion) {
     group.finish();
 }
 
+// Driven through `StatevectorBackend::apply` rather than `simulate()`, like
+// `two_qubit_gate_kernels` above. A single controlled gate leaves every other
+// qubit isolated, so the largest connected block is far narrower than the
+// register and independent-subsystem decomposition claims the circuit before
+// any backend is chosen: routed through `simulate()` these rows resolve to
+// `Decomposed` and never reach the kernel they are named for.
 fn bench_controlled_gates(c: &mut Criterion) {
     let mut group = c.benchmark_group("controlled_gates");
     configure_group(&mut group);
 
     let h_mat = Gate::H.matrix_2x2();
+    let x_mat = Gate::X.matrix_2x2();
 
     for &n_qubits in &QUBIT_COUNTS {
-        group.bench_with_input(BenchmarkId::new("cu_h", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::cu(h_mat), &[0, 1]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-    }
+        bench_kernel_row(&mut group, "cu_h", n_qubits, Gate::cu(h_mat), &[0, 1]);
 
-    let x_mat = Gate::X.matrix_2x2();
-    for &n_qubits in &[4, 8, 12, 16, 20] {
-        if n_qubits < 3 {
-            continue;
+        if n_qubits >= 3 {
+            bench_kernel_row(
+                &mut group,
+                "toffoli",
+                n_qubits,
+                Gate::mcu(x_mat, 2),
+                &[0, 1, 2],
+            );
         }
-        group.bench_with_input(BenchmarkId::new("toffoli", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::mcu(x_mat, 2), &[0, 1, 2]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
         if n_qubits >= 4 {
-            group.bench_with_input(BenchmarkId::new("cccx", n_qubits), &n_qubits, |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::mcu(x_mat, 3), &[0, 1, 2, 3]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            });
+            bench_kernel_row(
+                &mut group,
+                "cccx",
+                n_qubits,
+                Gate::mcu(x_mat, 3),
+                &[0, 1, 2, 3],
+            );
         }
     }
 
@@ -470,29 +421,9 @@ fn bench_diagonal_parametric_gates(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n_qubits in &QUBIT_COUNTS {
-        group.bench_with_input(BenchmarkId::new("rz_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::Rz(1.234), &[0]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("ry_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::Ry(1.234), &[0]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(BenchmarkId::new("p_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::P(1.234), &[0]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
+        bench_kernel_row(&mut group, "rz_gate", n_qubits, Gate::Rz(1.234), &[0]);
+        bench_kernel_row(&mut group, "ry_gate", n_qubits, Gate::Ry(1.234), &[0]);
+        bench_kernel_row(&mut group, "p_gate", n_qubits, Gate::P(1.234), &[0]);
     }
 
     group.finish();
@@ -505,28 +436,19 @@ fn bench_cphase_kernel(c: &mut Criterion) {
     let theta = std::f64::consts::FRAC_PI_4;
 
     for &n_qubits in &QUBIT_COUNTS {
-        group.bench_with_input(
-            BenchmarkId::new("ctrl_lt_target", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::cphase(theta), &[0, 1]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
+        bench_kernel_row(
+            &mut group,
+            "ctrl_lt_target",
+            n_qubits,
+            Gate::cphase(theta),
+            &[0, 1],
         );
-
-        group.bench_with_input(
-            BenchmarkId::new("ctrl_gt_target", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::cphase(theta), &[1, 0]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
+        bench_kernel_row(
+            &mut group,
+            "ctrl_gt_target",
+            n_qubits,
+            Gate::cphase(theta),
+            &[1, 0],
         );
     }
 
@@ -538,25 +460,8 @@ fn bench_new_gate_types(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n_qubits in &QUBIT_COUNTS {
-        group.bench_with_input(BenchmarkId::new("sx_gate", n_qubits), &n_qubits, |b, &n| {
-            let mut circuit = Circuit::new(n, 0);
-            circuit.add_gate(Gate::SX, &[0]);
-            b.iter(|| {
-                run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-            });
-        });
-
-        group.bench_with_input(
-            BenchmarkId::new("sxdg_gate", n_qubits),
-            &n_qubits,
-            |b, &n| {
-                let mut circuit = Circuit::new(n, 0);
-                circuit.add_gate(Gate::SXdg, &[0]);
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, &circuit, 42).unwrap();
-                });
-            },
-        );
+        bench_kernel_row(&mut group, "sx_gate", n_qubits, Gate::SX, &[0]);
+        bench_kernel_row(&mut group, "sxdg_gate", n_qubits, Gate::SXdg, &[0]);
     }
 
     group.finish();

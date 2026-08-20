@@ -255,6 +255,12 @@ pub enum QecOp {
 }
 
 /// Packed Pauli row for one QEC measurement record.
+///
+/// The row names the Hermitian operator measured, with `Y` carried as both the
+/// `x` and `z` bit of its qubit. A consumer that rebuilds the operator as a
+/// per-qubit product of `X` and `Z` recovers `(-i)^k` times it, for `k` the
+/// number of `Y` letters, since `XZ = -iY`. The row carries no sign of its own;
+/// the measured eigenvalue comes from the state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QecMeasurementRow {
     num_qubits: usize,

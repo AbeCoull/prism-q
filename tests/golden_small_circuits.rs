@@ -19,6 +19,7 @@ use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::{Gate, McuData};
 use prism_q::sim;
+use prism_q::{QecOptions, QecPauli, QecProgram, run_qec_program, run_qec_program_reference};
 
 const EPS: f64 = 1e-12;
 
@@ -1212,4 +1213,48 @@ fn pauli_rot_matches_ladder_lowering() {
     for (i, (a, e)) in sv.iter().zip(&lowered).enumerate() {
         assert_amplitude(*a, *e, &format!("index {i}"));
     }
+}
+
+// Y (x) Y on a Bell pair, by hand.
+//
+// H then CX prepares |Phi+> = (|00> + |11>)/sqrt(2). With Y|0> = i|1> and
+// Y|1> = -i|0>:
+//   (Y (x) Y)|00> = (i|1>)(x)(i|1>) = -|11>
+//   (Y (x) Y)|11> = (-i|0>)(x)(-i|0>) = -|00>
+// so (Y (x) Y)|Phi+> = -|Phi+>, eigenvalue -1. A record bit is 1 for
+// eigenvalue -1, as measuring Z on |1> shows, so every shot reads true.
+//
+// Cross-check on the sign, which is the whole point of the case: Y = i XZ, so
+// Y (x) Y = -(X (x) X)(Z (x) Z), and |Phi+> is a +1 eigenstate of both
+// factors, giving -1. An implementation that packs Y as X and Z without the
+// i^2 would read false here.
+#[test]
+fn y_tensor_y_on_a_bell_pair_measures_minus_one() {
+    let options = QecOptions {
+        shots: 32,
+        seed: 42,
+        chunk_size: None,
+        keep_measurements: true,
+    };
+    let mut program = QecProgram::with_options(2, options);
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.push_gate(Gate::Cx, &[0, 1]).unwrap();
+    program
+        .measure_pauli_product(&[QecPauli::y(0), QecPauli::y(1)])
+        .unwrap();
+
+    let expected = vec![vec![true]; 32];
+    assert_eq!(
+        run_qec_program(&program).unwrap().measurements.to_shots(),
+        expected,
+        "compiled runner disagrees with the hand-computed -1 eigenvalue"
+    );
+    assert_eq!(
+        run_qec_program_reference(&program)
+            .unwrap()
+            .measurements
+            .to_shots(),
+        expected,
+        "reference runner disagrees with the hand-computed -1 eigenvalue"
+    );
 }

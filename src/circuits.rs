@@ -32,6 +32,12 @@ pub fn qft_circuit(n: usize) -> Circuit {
 }
 
 /// Build a random circuit with `n` qubits, `depth` layers of 1q + brick-layer CX.
+///
+/// The interaction graph is connected at `depth >= 2`: the first two layers lay
+/// down both halves of the brick pattern unconditionally, and later layers keep
+/// each bond at random. Without that guarantee a dropped bond can split the
+/// register into independent blocks, which routes the circuit to the decomposed
+/// path instead of the backend a caller selected.
 pub fn random_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
@@ -42,7 +48,8 @@ pub fn random_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
         }
         let offset = layer % 2;
         for q in (offset..n - 1).step_by(2) {
-            if rng.random_bool(0.5) {
+            let keep = rng.random_bool(0.5);
+            if layer < 2 || keep {
                 c.add_gate(Gate::Cx, &[q, q + 1]);
             }
         }
@@ -249,6 +256,12 @@ pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
 /// blocks, so the runs collapse into `DiagonalBatch` instructions at 16 qubits
 /// and above.
 ///
+/// Pairs sweep the register modulo `n`, which is what keeps the interaction
+/// graph connected at `layers >= 2` for any `n`. Anchoring them to the low half
+/// instead leaves every qubit above `n / 2 + layers` untouched by any 2q gate,
+/// splitting the register once that tail is wide enough for the decomposed
+/// route to claim the circuit.
+///
 /// # Panics
 /// Panics if `n < 2` (stride selection divides by `n / 2`).
 pub fn diagonal_mixed_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
@@ -268,12 +281,13 @@ pub fn diagonal_mixed_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
         }
         let stride = 1 + layer % (n / 2);
         for q in 0..n / 2 {
-            let q1 = q + stride;
+            let q0 = 2 * q;
+            let q1 = (q0 + stride) % n;
             let theta = rng.random::<f64>() * std::f64::consts::TAU;
             match rng.random_range(0..3) {
-                0 => c.add_gate(Gate::Cz, &[q, q1]),
-                1 => c.add_gate(Gate::cphase(theta), &[q, q1]),
-                _ => c.add_gate(Gate::Rzz(theta), &[q, q1]),
+                0 => c.add_gate(Gate::Cz, &[q0, q1]),
+                1 => c.add_gate(Gate::cphase(theta), &[q0, q1]),
+                _ => c.add_gate(Gate::Rzz(theta), &[q0, q1]),
             }
         }
     }

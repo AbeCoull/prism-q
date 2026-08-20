@@ -246,6 +246,36 @@ fn qec_reference_runner_executes_gates_and_postselection() {
     assert_eq!(result.observables.to_shots(), vec![vec![true]; 4]);
 }
 
+// Measuring X on |+> is deterministic and leaves the qubit in |+>, so a Z
+// measurement of the same qubit with no intervening reset is deterministic too.
+// The two runners must agree on both records and on the post-measurement state
+// the second one reads.
+#[test]
+fn qec_basis_measurement_leaves_the_same_state_in_both_runners() {
+    let options = QecOptions {
+        shots: 64,
+        seed: 42,
+        chunk_size: None,
+        keep_measurements: true,
+    };
+    let mut program = QecProgram::with_options(1, options);
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.measure_x(0).unwrap();
+    program.measure_z(0).unwrap();
+
+    let compiled = run_qec_program(&program).unwrap().measurements.to_shots();
+    let reference = run_qec_program_reference(&program)
+        .unwrap()
+        .measurements
+        .to_shots();
+
+    assert_eq!(
+        compiled, reference,
+        "compiled and reference runners disagree on the post-measurement state"
+    );
+    assert_eq!(compiled, vec![vec![false, false]; 64]);
+}
+
 #[test]
 fn qec_compiled_runner_executes_clifford_programs_without_statevector_fallback() {
     let options = QecOptions {

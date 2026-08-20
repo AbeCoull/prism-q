@@ -1279,6 +1279,15 @@ fn reset_reference_basis(
     rotate_reference_z_to_basis(backend, basis, qubit)
 }
 
+/// Measure `qubit` in `basis`, leaving it in the Z frame.
+///
+/// The basis rotation is not undone, matching what
+/// [`lower_qec_program_to_clifford_circuit`] emits and what the deferred noisy
+/// lowering in [`crate::qec::noise`] emits. Restoring here instead would append
+/// a gate after every basis measurement, which costs
+/// [`Circuit::has_terminal_measurements_only`] and the terminal sampling paths
+/// it gates. A program that reuses the qubit resets it first, which is what
+/// makes the convention unobservable in well-formed programs.
 fn measure_reference_basis(
     backend: &mut StatevectorBackend,
     basis: QecBasis,
@@ -1290,9 +1299,7 @@ fn measure_reference_basis(
         qubit,
         classical_bit: record,
     })?;
-    let outcome = backend.classical_results()[record];
-    rotate_reference_z_to_basis(backend, basis, qubit)?;
-    Ok(outcome)
+    Ok(backend.classical_results()[record])
 }
 
 fn measure_reference_mpp(

@@ -255,6 +255,12 @@ pub enum QecOp {
 }
 
 /// Packed Pauli row for one QEC measurement record.
+///
+/// The row names the Hermitian operator measured, with `Y` carried as both the
+/// `x` and `z` bit of its qubit. A consumer that rebuilds the operator as a
+/// per-qubit product of `X` and `Z` recovers `(-i)^k` times it, for `k` the
+/// number of `Y` letters, since `XZ = -iY`. The row carries no sign of its own;
+/// the measured eigenvalue comes from the state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QecMeasurementRow {
     num_qubits: usize,
@@ -965,6 +971,52 @@ pub(crate) fn qec_terms_to_pauli(terms: &[QecPauli]) -> Vec<crate::sim::unified_
             QecBasis::Z => PauliTerm::z(t.qubit),
         })
         .collect()
+}
+
+/// Reject reuse of a qubit measured in a non-Z basis before its next reset.
+///
+/// A basis measurement leaves the qubit in the Z frame rather than in the basis
+/// it named, so a later operation on that qubit reads a state the program did
+/// not ask for. Both lowerings take that convention, and it is only unobservable
+/// while the qubit is reset before reuse, which is the contract
+/// [`run_qec_program`] already documents. This makes it an error rather than a
+/// silent difference.
+///
+/// Z-basis measurements are unaffected: they rotate nothing, so nothing is left
+/// behind to observe. `MPP` is unaffected for the same reason, since it undoes
+/// each term's rotation before taking the record.
+pub(crate) fn validate_measured_qubit_reuse(program: &QecProgram) -> Result<()> {
+    let reuse = |qubit: usize| PrismError::InvalidParameter {
+        message: format!(
+            "qubit {qubit} was measured in a non-Z basis and must be reset before it is used \
+             again: a basis measurement leaves the qubit in the Z frame, not in the basis it \
+             named"
+        ),
+    };
+    let mut rotated = vec![false; program.num_qubits()];
+    for op in program.ops() {
+        match op {
+            QecOp::Gate { targets, .. } => {
+                if let Some(&qubit) = targets.iter().find(|&&q| rotated[q]) {
+                    return Err(reuse(qubit));
+                }
+            }
+            QecOp::Measure { basis, qubit } => {
+                if rotated[*qubit] {
+                    return Err(reuse(*qubit));
+                }
+                rotated[*qubit] = *basis != QecBasis::Z;
+            }
+            QecOp::MeasurePauliProduct { terms } => {
+                if let Some(term) = terms.iter().find(|t| rotated[t.qubit]) {
+                    return Err(reuse(term.qubit));
+                }
+            }
+            QecOp::Reset { qubit, .. } => rotated[*qubit] = false,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Validate `EXP_VAL` placement for execution.

@@ -51,11 +51,17 @@ through dispatch.
 | Sparse entry count | `PRISM_MAX_SPARSE_QUBITS` (the map holds at most `2^q` entries) | Same budget at 64 bytes per entry across the double-buffered maps |
 | Factored merged-block width | `PRISM_MAX_FACTORED_MERGE_QUBITS` | Same budget over `Complex64` |
 | MPS gate workspace | `PRISM_MAX_MPS_WORKSPACE_QUBITS` (at most `2^q` amplitudes of live contraction buffers) | Same budget over `Complex64` |
+| Factored stabilizer merged-cluster width | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | Widest joint tableau fitting the same budget, counted as `2n + 1` rows of `2 * ceil(n / 64)` words and halved to cover the peak while both source tableaux are still live |
 
-The three growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
-factored, and MPS backends exist to run above the statevector cap, so lowering that cap
-to steer routing must not shrink what they may hold. Their defaults come from the same
-detected-memory budget.
+The four growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
+factored, MPS, and factored stabilizer backends exist to run above the statevector cap,
+so lowering that cap to steer routing must not shrink what they may hold. Their defaults
+come from the same detected-memory budget.
+
+The factored stabilizer cap is the one that is not a `2^n` amplitude count. A stabilizer
+cluster costs `O(n^2 / 64)` words, so a dense cap is the wrong scale here: it would hold
+a cluster to the dense backends' qubit ceiling, far below the widths reached by the
+Clifford circuits at 128 qubits and above that dispatch selects that backend for.
 
 The density-matrix cap is the tighter of its own override and half the statevector cap,
 computed in one place so dispatch-time validation and the backend's `init` guard cannot

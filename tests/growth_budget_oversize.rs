@@ -5,12 +5,17 @@
 
 use std::sync::Once;
 
+use num_complex::Complex64;
 use prism_q::gates::Gate;
-use prism_q::{Circuit, FactoredBackend, MpsBackend, PrismError, SparseBackend, run_on};
+use prism_q::{
+    Circuit, FactoredBackend, FactoredStabilizerBackend, MpsBackend, PrismError, SparseBackend,
+    run_on,
+};
 
-// Merge cap 8: a factored merge past 8 qubits rejects. MPS workspace cap
-// 2^8 = 256 amplitudes. Sparse cap 6: the map may hold at most 64 entries.
-// The statevector cap stays untouched: these ceilings must bind on their own.
+// Merge cap 8: a factored merge past 8 qubits rejects, and so does a stabilizer
+// cluster merge past 8. MPS workspace cap 2^8 = 256 amplitudes. Sparse cap 6:
+// the map may hold at most 64 entries. The statevector cap stays untouched:
+// these ceilings must bind on their own.
 const MERGE_CAP: usize = 8;
 const SPARSE_ENTRY_CAP: usize = 1 << 6;
 
@@ -23,6 +28,7 @@ fn small_caps() {
             std::env::set_var("PRISM_MAX_FACTORED_MERGE_QUBITS", "8");
             std::env::set_var("PRISM_MAX_MPS_WORKSPACE_QUBITS", "8");
             std::env::set_var("PRISM_MAX_SPARSE_QUBITS", "6");
+            std::env::set_var("PRISM_MAX_STABILIZER_CLUSTER_QUBITS", "8");
         }
     });
 }
@@ -132,6 +138,54 @@ fn mps_workspace_over_the_cap_is_rejected() {
     let mut backend = MpsBackend::new(42, 1 << 20);
     let err = run_on(&mut backend, &circuit).unwrap_err();
     assert_cap_error(err, "mps");
+}
+
+// The N-site path holds the assembled 4^n gate matrix and its reordered copy
+// at peak, which is 2^(2n + 1) amplitudes for n = controls + 1. Four controls
+// needs 2048 against the cap's 256; two controls needs 128 and fits.
+fn wide_mcu(n: usize, num_controls: u8) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    let x = [
+        [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
+        [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
+    ];
+    let targets: Vec<usize> = (0..=num_controls as usize).collect();
+    c.add_gate(Gate::mcu(x, num_controls), &targets);
+    c
+}
+
+#[test]
+fn mps_mcu_gate_matrix_over_the_cap_is_rejected() {
+    small_caps();
+    let circuit = wide_mcu(8, 4);
+    let mut backend = MpsBackend::new(42, 1 << 20);
+    let err = run_on(&mut backend, &circuit).unwrap_err();
+    assert_cap_error(err, "mps");
+}
+
+#[test]
+fn mps_narrow_mcu_still_runs() {
+    small_caps();
+    let circuit = wide_mcu(8, 2);
+    let mut backend = MpsBackend::new(42, 1 << 20);
+    run_on(&mut backend, &circuit).expect("an MCU within the cap must run");
+}
+
+#[test]
+fn stabilizer_cluster_merge_over_the_cap_is_rejected() {
+    small_caps();
+    let circuit = bridged_blocks(5, 5);
+    let mut backend = FactoredStabilizerBackend::new(42);
+    let err = run_on(&mut backend, &circuit).unwrap_err();
+    assert_cap_error(err, "factored-stabilizer");
+}
+
+#[test]
+fn stabilizer_cluster_merge_at_the_cap_still_runs() {
+    small_caps();
+    let circuit = bridged_blocks(MERGE_CAP / 2, MERGE_CAP / 2);
+    let mut backend = FactoredStabilizerBackend::new(42);
+    run_on(&mut backend, &circuit).expect("an at-cap cluster merge must run");
 }
 
 #[test]

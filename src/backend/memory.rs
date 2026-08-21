@@ -128,6 +128,74 @@ pub(crate) fn max_factored_merge_qubits() -> usize {
     })
 }
 
+/// Words a stabilizer tableau of `n` qubits occupies: `2n + 1` rows of
+/// `2 * ceil(n / 64)` words each.
+fn stabilizer_tableau_words(n: u128) -> u128 {
+    (2 * n + 1) * 2 * n.div_ceil(64)
+}
+
+/// Merged-cluster qubit cap for the factored stabilizer backend, checked at
+/// merge time.
+///
+/// Separate from [`max_factored_merge_qubits`] because the resources differ in
+/// kind: a factored merge allocates `2^n` amplitudes, while a stabilizer merge
+/// allocates a tableau of `O(n^2 / 64)` words. Reusing a dense cap would hold a
+/// cluster to the dense backends' qubit ceiling, far below the widths reached by
+/// the Clifford circuits at 128 qubits and above that dispatch selects this
+/// backend for. `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` overrides it.
+pub(crate) fn max_stabilizer_cluster_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if let Some(n) = env_qubit_override("PRISM_MAX_STABILIZER_CLUSTER_QUBITS") {
+            return n;
+        }
+        match detect_physical_memory_bytes() {
+            Some(bytes) => {
+                // The old pair is still live when the joint tableau allocates,
+                // and is strictly smaller than it, so peak is under twice the
+                // merged size.
+                let budget_words = u128::from(bytes / MEMORY_BUDGET_DIVISOR) / 8 / 2;
+                let mut n: u128 = 1;
+                while stabilizer_tableau_words(2 * n) <= budget_words
+                    && 2 * n < u128::from(u32::MAX)
+                {
+                    n *= 2;
+                }
+                let mut step = n / 2;
+                while step > 0 {
+                    if stabilizer_tableau_words(n + step) <= budget_words {
+                        n += step;
+                    }
+                    step /= 2;
+                }
+                usize::try_from(n).unwrap_or(usize::MAX)
+            }
+            None => {
+                eprintln!(
+                    "warning: could not detect system memory; stabilizer cluster cap is \
+                     disabled. Large merges may abort on allocation. Set \
+                     PRISM_MAX_STABILIZER_CLUSTER_QUBITS to suppress."
+                );
+                usize::MAX
+            }
+        }
+    })
+}
+
+/// Error for a stabilizer cluster merge of `total_n` qubits over the cluster
+/// budget, raised before the joint tableau allocates.
+#[cold]
+pub(crate) fn stabilizer_cluster_error(total_n: usize, cap: usize) -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: "factored-stabilizer".to_string(),
+        reason: format!(
+            "merging entangled clusters needs a {total_n}-qubit joint tableau, exceeding \
+             the cap of {cap} on this machine \
+             (set PRISM_MAX_STABILIZER_CLUSTER_QUBITS to override)"
+        ),
+    }
+}
+
 /// Workspace cap for MPS gate application, as `2^q` amplitudes of live
 /// contraction buffers. Independent of the statevector override for the same
 /// reason as the factored merge cap: MPS exists to run above that cap.

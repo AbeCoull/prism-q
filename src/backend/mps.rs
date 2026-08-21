@@ -1437,6 +1437,35 @@ impl MpsBackend {
         }
     }
 
+    /// Reject a dense `2^n x 2^n` gate matrix over the workspace budget before
+    /// it is built.
+    ///
+    /// The N-site path holds two of them at peak, the assembled matrix and the
+    /// role-reordered copy, and both are allocated before
+    /// [`Self::apply_adjacent_n_qubit`] reaches its own theta check.
+    fn check_n_qubit_gate_matrix(&self, n: usize) -> Result<()> {
+        // Rejected outright rather than by comparison: `2^(2n + 1)` is not
+        // representable here, and the cap is itself `u128::MAX` when memory
+        // detection is unavailable, so a comparison would pass and leave the
+        // caller to shift `1usize` by more than its width.
+        if n >= 63 {
+            return Err(crate::backend::workspace_allocation_error(
+                "mps",
+                "multi-qubit gate matrix",
+                u128::MAX,
+            ));
+        }
+        let elements = 2u128 << (2 * n);
+        if elements > self.workspace_cap {
+            return Err(crate::backend::workspace_allocation_error(
+                "mps",
+                "multi-qubit gate matrix",
+                elements,
+            ));
+        }
+        Ok(())
+    }
+
     fn apply_adjacent_n_qubit(
         &mut self,
         gate: &[Complex64],
@@ -2140,11 +2169,12 @@ impl MpsBackend {
             }
             Gate::Mcu(data) => {
                 let num_ctrl = data.num_controls as usize;
+                let n = num_ctrl + 1;
+                self.check_n_qubit_gate_matrix(n)?;
                 let all_qubits: Vec<usize> = targets
                     .iter()
                     .map(|&qubit| self.site_for_logical(qubit))
                     .collect();
-                let n = num_ctrl + 1;
                 let dim = 1usize << n;
                 let role_order: Vec<usize> = (0..n).collect();
                 let gate_mat = mcu_matrix(num_ctrl, &data.mat, &role_order);

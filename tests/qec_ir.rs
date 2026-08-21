@@ -1,7 +1,7 @@
 use prism_q::circuit::openqasm;
 use prism_q::{
-    Gate, PackedShots, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef,
-    QecSampleResult, compile_qec_program_rows, parse_qec_program, run_qec_program,
+    Gate, PackedShots, PrismError, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram,
+    QecRecordRef, QecSampleResult, compile_qec_program_rows, parse_qec_program, run_qec_program,
     run_qec_program_reference,
 };
 
@@ -244,6 +244,58 @@ fn qec_reference_runner_executes_gates_and_postselection() {
     assert_eq!(result.measurements.to_shots(), vec![vec![true]; 4]);
     assert_eq!(result.detectors.to_shots(), vec![vec![true]; 4]);
     assert_eq!(result.observables.to_shots(), vec![vec![true]; 4]);
+}
+
+// A non-Z basis measurement leaves the qubit in the Z frame rather than in the
+// basis it named, so reusing it without a reset would read a state the program
+// never asked for. Both runners reject instead of quietly disagreeing, which is
+// what keeps the convention unobservable rather than merely documented.
+#[test]
+fn qec_rejects_reuse_of_a_basis_measured_qubit() {
+    let mut program = QecProgram::new(1);
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.measure_x(0).unwrap();
+    program.measure_z(0).unwrap();
+
+    for err in [
+        run_qec_program(&program).unwrap_err(),
+        run_qec_program_reference(&program).unwrap_err(),
+    ] {
+        match err {
+            PrismError::InvalidParameter { message } => assert!(
+                message.contains("must be reset before it is used again"),
+                "expected a reuse rejection, got {message}"
+            ),
+            other => panic!("expected a reuse rejection, got {other:?}"),
+        }
+    }
+}
+
+// The same shape with the reset the contract requires. Measuring X on |+> is
+// deterministic, the reset returns the qubit to |0>, and the Z measurement that
+// follows reads 0 on both runners.
+#[test]
+fn qec_basis_measurement_then_reset_agrees_across_runners() {
+    let options = QecOptions {
+        shots: 64,
+        seed: 42,
+        chunk_size: None,
+        keep_measurements: true,
+    };
+    let mut program = QecProgram::with_options(1, options);
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.measure_x(0).unwrap();
+    program.reset(QecBasis::Z, 0).unwrap();
+    program.measure_z(0).unwrap();
+
+    let compiled = run_qec_program(&program).unwrap().measurements.to_shots();
+    let reference = run_qec_program_reference(&program)
+        .unwrap()
+        .measurements
+        .to_shots();
+
+    assert_eq!(compiled, reference, "runners disagree after a legal reuse");
+    assert_eq!(compiled, vec![vec![false, false]; 64]);
 }
 
 #[test]

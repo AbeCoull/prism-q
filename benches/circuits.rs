@@ -2305,6 +2305,68 @@ fn bench_density_matrix_unitary_layers(c: &mut Criterion) {
     group.finish();
 }
 
+/// The same layers through the `Simulate` terminal, the only density-matrix
+/// entry point that runs `fuse_circuit`.
+///
+/// `density_matrix/unitary_layers` calls `apply_instructions` directly and so
+/// never reaches the fusion pipeline whatever `supports_fused_gates` returns.
+/// Widths bracket the fusion constants: 8 is below `MIN_QUBITS_FOR_FUSION` and
+/// fuses nothing, which makes it the in-group control; 10 admits one-qubit
+/// fusion only; 12 adds the two-qubit and tiled passes.
+fn bench_density_matrix_fused_layers(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/fused_layers");
+    configure_group(&mut group);
+
+    for &n in &[8, 10, 12] {
+        let circuit = circuits::random_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::DensityMatrix)
+                        .seed(SEED)
+                        .run()
+                        .unwrap(),
+                );
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// The two noisy-sampling routes over the same circuit and noise model, swept
+/// over width and shot count.
+///
+/// One exact density-matrix evolution answers any shot count, so the exact
+/// route is near flat in shots and grows as `4^n`; the trajectory route
+/// re-simulates per shot, so it is linear in shots and grows as `2^n`. Two
+/// shot counts per width give both the intercept and the slope, which is what
+/// a routing rule keyed on width alone cannot have.
+fn bench_density_matrix_exact_vs_trajectory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/exact_vs_trajectory");
+    configure_group(&mut group);
+
+    for &n in &[8usize, 10, 12] {
+        let circuit = non_clifford_noise_circuit(n, 4);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        for &shots in &[256usize, 4096] {
+            for (label, kind) in [
+                ("exact", BackendKind::DensityMatrix),
+                ("trajectory", BackendKind::Statevector),
+            ] {
+                group.bench_function(BenchmarkId::new(label, format!("{n}q_{shots}")), |b| {
+                    b.iter(|| {
+                        run_shots_with_noise(kind.clone(), &circuit, &noise, shots, SEED).unwrap();
+                    });
+                });
+            }
+        }
+    }
+
+    group.finish();
+}
+
 /// Kraus set for amplitude damping at rate `gamma`.
 fn amplitude_damping_kraus(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
     let c = |re: f64| Complex64::new(re, 0.0);
@@ -2388,14 +2450,42 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
             b.iter(|| backend.apply_2q_depolarizing(0, n - 1, 0.02));
         });
 
-        // The general two-qubit channel `depolarizing_2q` now lowers onto. Both
-        // compile to one 16x16 superoperator and then sweep the same `4^n`
-        // buffer; at these widths the compile is under 0.01% of the row either
-        // way, so this reads the sweep and not the operator count.
+        // The general two-qubit channel. Both compile to one 16x16
+        // superoperator and then sweep the same `4^n` buffer; at these widths
+        // the compile is under 0.01% of the row either way, so this reads the
+        // sweep and not the operator count.
+        //
+        // The pair is not incidental. The sweep runs four blocks per step when
+        // `min(q0, q1) >= 2` and one otherwise, so `(2, 3)` reads the batched
+        // path and `(0, n-1)` the fallback. `(1, 2)` is the boundary: it once
+        // took a two-block step, which measured +0.2% and +1.9% against one and
+        // so was dropped, and the row stays to hold that null.
         let zz = correlated_zz_kraus(0.02);
-        group.bench_with_input(BenchmarkId::new("kraus_2q", n), &n, |b, &n| {
+        group.bench_with_input(BenchmarkId::new("kraus_2q_q0_qtop", n), &n, |b, &n| {
             let mut backend = dm_backend(n);
             b.iter(|| backend.apply_2q_kraus(0, n - 1, &zz));
+        });
+        group.bench_with_input(BenchmarkId::new("kraus_2q_adjacent", n), &n, |b, &_n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_2q_kraus(2, 3, &zz));
+        });
+        group.bench_with_input(BenchmarkId::new("kraus_2q_mid", n), &n, |b, &_n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_2q_kraus(1, 2, &zz));
+        });
+
+        // A `Fused2q` that no `Multi2q` batch absorbs, which is what fusion
+        // emits for an isolated two-qubit run. It takes the bra register
+        // through `conjugate_gate`; without that arm it costs two extra
+        // full-buffer conjugations, and no circuit row reaches it because the
+        // brick layers in `random_circuit` batch every run.
+        group.bench_with_input(BenchmarkId::new("fused_2q_gate", n), &n, |b, &_n| {
+            let mut backend = dm_backend(n);
+            let fused = Instruction::Gate {
+                gate: Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())),
+                targets: SmallVec::from_slice(&[0, 1]),
+            };
+            b.iter(|| backend.apply(&fused).unwrap());
         });
 
         for &(qubit, label) in &[(0usize, "measure_q0"), (n - 1, "measure_qtop")] {
@@ -2723,6 +2813,8 @@ criterion_group! {
     bench_coalesce_baseline,
     // Density matrix (explicit backend)
     bench_density_matrix_unitary_layers,
+    bench_density_matrix_fused_layers,
+    bench_density_matrix_exact_vs_trajectory,
     bench_density_matrix_noisy_channels,
     bench_density_matrix_noisy_shots,
     bench_density_matrix_neutrality,

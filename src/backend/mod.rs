@@ -469,6 +469,12 @@ pub trait Backend {
     /// Backends that operate on symbolic gate representations (e.g. stabilizer
     /// tableau) cannot decode a fused matrix back to individual gates. The
     /// simulation engine skips the fusion pass when this returns `false`.
+    ///
+    /// Returning `true` also accepts `MultiFused` and `Multi2q`, whose payload
+    /// gate lists must be applied in the order they are stored. Fusion emits
+    /// each list within one cache tier so the tiled kernels preserve that
+    /// order; a backend that rewrites the payload's qubit indices can push
+    /// gates across a tier boundary and get them silently reordered.
     fn supports_fused_gates(&self) -> bool {
         true
     }

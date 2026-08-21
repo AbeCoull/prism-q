@@ -20,14 +20,16 @@
 //! Supported: exact unitary evolution, basis-state probabilities, the one-qubit
 //! reduced density matrix, projective measurement with stochastic collapse,
 //! reset, classically-conditioned gates, exact one-qubit Kraus channels
-//! (`apply_1q_kraus`), exact two-qubit Kraus channels (`apply_2q_kraus`, which
-//! `apply_2q_depolarizing` lowers onto), and
+//! (`apply_1q_kraus`), exact two-qubit Kraus channels (`apply_2q_kraus`, with
+//! `apply_2q_depolarizing` taking the twirled closed form instead), and
 //! exact `Tr(rho P)` expectation (`expectation_pauli`, reachable through
-//! `pauli_expectations`). Batched payload shapes (`QftBlock`, `BatchPhase`,
-//! `BatchRzz`, `DiagonalBatch`, `MultiFused`, `Multi2q`) carry qubit indices
-//! outside the instruction targets and are remapped onto the ket register
-//! before the left product; `sim` does not produce them here, since
-//! `supports_fused_gates` returns `false`, but a direct `Backend::apply` can.
+//! `pauli_expectations`). Fused gates are accepted, so `sim` fuses for this
+//! backend. The diagonal batches (`QftBlock`, `BatchPhase`, `BatchRzz`,
+//! `DiagonalBatch`) carry qubit indices outside the instruction targets and are
+//! remapped onto the ket register before the left product; the tiled shapes
+//! (`MultiFused`, `Multi2q`) apply their constituent gates one at a time
+//! instead. See [`Backend::supports_fused_gates`] for the ordering contract
+//! that requires it.
 //!
 //! # When to prefer this backend
 //!
@@ -137,11 +139,32 @@ fn row_aligned_tile(cmask: usize, rmask: usize) -> usize {
     (cmask << 1).max(crate::backend::MIN_PAR_ELEMS).min(rmask)
 }
 
+/// Base buffer index of block `m`, expanding the four block bit positions out
+/// of the compacted index. `positions` must be ascending.
+#[inline(always)]
+fn block_base(m: usize, positions: &[usize; 4]) -> usize {
+    let mut base = m;
+    for &pos in positions {
+        base = insert_zero_bit(base, pos);
+    }
+    base
+}
+
 fn conjugate_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
         [m[0][0].conj(), m[0][1].conj()],
         [m[1][0].conj(), m[1][1].conj()],
     ]
+}
+
+fn conjugate_4x4(m: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let mut out = *m;
+    for row in &mut out {
+        for entry in row {
+            *entry = entry.conj();
+        }
+    }
+    out
 }
 
 /// The gate's 2x2 matrix, or `None` for anything else. `Gate::num_qubits` is
@@ -178,6 +201,7 @@ fn conjugate_gate(gate: &Gate) -> Option<Gate> {
     match gate {
         Gate::Cx | Gate::Cz | Gate::Swap => Some(gate.clone()),
         Gate::Rzz(theta) => Some(Gate::Rzz(-*theta)),
+        Gate::Fused2q(mat) => Some(Gate::Fused2q(Box::new(conjugate_4x4(mat)))),
         Gate::Cu(mat) => Some(Gate::Cu(Box::new(conjugate_2x2(mat)))),
         Gate::Mcu(data) => Some(Gate::Mcu(Box::new(McuData {
             mat: conjugate_2x2(&data.mat),
@@ -189,9 +213,12 @@ fn conjugate_gate(gate: &Gate) -> Option<Gate> {
 
 /// The gate with every qubit index stored inside its payload shifted onto the
 /// ket register. Offsetting the instruction targets is not enough for the
-/// batched shapes, whose application indices live in the payload, nor for
+/// diagonal batches, whose application indices live in the payload, nor for
 /// `QftBlock`, whose whole range lives in the variant. Borrows the gate when it
 /// carries no such index.
+///
+/// `MultiFused` and `Multi2q` are deliberately absent: shifting a `Multi2q`
+/// payload reorders it, so both apply their constituents directly.
 fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
     match gate {
         Gate::BatchPhase(data) => {
@@ -221,21 +248,6 @@ fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
                 }
             }
             Cow::Owned(Gate::DiagonalBatch(data))
-        }
-        Gate::MultiFused(data) => {
-            let mut data = data.clone();
-            for entry in &mut data.gates {
-                entry.0 += n;
-            }
-            Cow::Owned(Gate::MultiFused(data))
-        }
-        Gate::Multi2q(data) => {
-            let mut data = data.clone();
-            for entry in &mut data.gates {
-                entry.0 += n;
-                entry.1 += n;
-            }
-            Cow::Owned(Gate::Multi2q(data))
         }
         Gate::QftBlock { start, num } => Cow::Owned(Gate::QftBlock {
             start: start + n as u8,
@@ -312,22 +324,43 @@ impl DensityMatrixBackend {
     /// conjugating the whole buffer around the gate, which costs two extra
     /// passes.
     ///
-    /// A one-qubit gate can instead compile to a block superoperator and sweep
-    /// the buffer once, which wins once the buffer stops fitting in cache. Below
-    /// that the superoperator's dense 4x4 block loses to two cheap passes, so
-    /// the crossover is the point where the embedded `2n`-qubit statevector
-    /// reaches the kernels' own parallel threshold.
+    /// One-qubit gates take [`DensityMatrixBackend::apply_1q_sandwich`].
+    ///
+    /// `Multi2q` carries a gate list that the statevector kernel partitions by
+    /// cache tier and runs one tier at a time, which preserves application
+    /// order only while the whole list sits in one tier. Fusion guarantees that
+    /// against the circuit's own qubit indices, and the `+n` shift onto the ket
+    /// register moves gates across the tier bounds, so the ket half applies its
+    /// constituents one at a time. The bra half keeps the circuit's indices and
+    /// so is not at risk; it is applied that way only for symmetry, and batching
+    /// it is the open win recorded against this backend. `MultiFused` entries
+    /// are one per qubit and commute, so its list is order independent; it takes
+    /// the same treatment because the one-qubit sandwich is cheaper than the
+    /// tiled pass here.
     fn apply_unitary(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         let n = self.num_qubits;
 
         if let Some(mat) = matrix_1q(gate) {
-            if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
-                let s = block_superoperator(&[mat]);
-                self.apply_block_superoperator(targets[0], &s);
+            return self.apply_1q_sandwich(targets[0], &mat);
+        }
+
+        match gate {
+            Gate::MultiFused(data) => {
+                for (qubit, mat) in data.gates.iter() {
+                    self.apply_1q_sandwich(*qubit, mat)?;
+                }
                 return Ok(());
             }
-            self.sv.apply_1q_matrix(targets[0] + n, &mat)?;
-            return self.sv.apply_1q_matrix(targets[0], &conjugate_2x2(&mat));
+            Gate::Multi2q(data) => {
+                for &(q0, q1, ref mat) in data.gates.iter() {
+                    self.sv.apply_fused_2q(q0 + n, q1 + n, mat);
+                }
+                for &(q0, q1, ref mat) in data.gates.iter() {
+                    self.sv.apply_fused_2q(q0, q1, &conjugate_4x4(mat));
+                }
+                return Ok(());
+            }
+            _ => {}
         }
 
         let ket_targets: SmallVec<[usize; 4]> = targets.iter().map(|&t| t + n).collect();
@@ -351,6 +384,22 @@ impl DensityMatrixBackend {
         })?;
         self.conjugate_buffer();
         Ok(())
+    }
+
+    /// Evolve `rho -> U rho U^dagger` for a one-qubit `U`.
+    ///
+    /// Above the parallel threshold the two products compile to one block
+    /// superoperator and sweep the buffer once; below it the superoperator's
+    /// dense 4x4 block loses to two cheap register passes.
+    fn apply_1q_sandwich(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
+        let n = self.num_qubits;
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            let s = block_superoperator(&[*matrix]);
+            self.apply_block_superoperator(qubit, &s);
+            return Ok(());
+        }
+        self.sv.apply_1q_matrix(qubit + n, matrix)?;
+        self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
     }
 
     /// `P(qubit = |1>) = Tr(P_1 rho)`, the sum of the diagonal `rho` entries
@@ -503,34 +552,106 @@ impl DensityMatrixBackend {
     /// Apply symmetric two-qubit depolarizing on `(q0, q1)`:
     /// `rho -> (1-p) rho + (p/15) sum_{P != I(x)I} P rho P`, summed over the 15
     /// non-identity two-qubit Paulis.
+    ///
+    /// The Pauli twirl `sum_P P B P = 4 Tr(B) I4` over all 16 two-qubit Paulis
+    /// holds for any 4x4 `B`, so on each `(q0, q1)` block the map collapses to
+    /// `B -> alpha B + beta Tr(B) I4` with `alpha = 1 - 16p/15` and
+    /// `beta = 4p/15`. That is one real scale per amplitude against the 16
+    /// complex multiply-accumulates the equivalent 16x16 superoperator pays in
+    /// [`DensityMatrixBackend::apply_2q_kraus`].
+    ///
+    /// # Panics
+    ///
+    /// If `q0` and `q1` are equal or outside the register, as
+    /// [`DensityMatrixBackend::apply_2q_kraus`] does.
     pub fn apply_2q_depolarizing(&mut self, q0: usize, q1: usize, p: f64) {
-        let c1 = Complex64::new(1.0, 0.0);
-        let c0 = Complex64::new(0.0, 0.0);
-        let ci = Complex64::new(0.0, 1.0);
-        let paulis: [[[Complex64; 2]; 2]; 4] = [
-            [[c1, c0], [c0, c1]],
-            [[c0, c1], [c1, c0]],
-            [[c0, -ci], [ci, c0]],
-            [[c1, c0], [c0, -c1]],
-        ];
-        let mut kraus = [[[c0; 4]; 4]; 16];
-        for a in 0..4 {
-            for b in 0..4 {
-                let w = if a == 0 && b == 0 {
-                    (1.0 - p).sqrt()
-                } else {
-                    (p / 15.0).sqrt()
-                };
-                let w = Complex64::new(w, 0.0);
-                let k = &mut kraus[4 * a + b];
-                for (t, row) in k.iter_mut().enumerate() {
-                    for (tp, entry) in row.iter_mut().enumerate() {
-                        *entry = w * paulis[a][t >> 1][tp >> 1] * paulis[b][t & 1][tp & 1];
+        let alpha = 1.0 - 16.0 * p / 15.0;
+        let beta = 4.0 * p / 15.0;
+        let (positions, flats, num_groups) = self.block_layout(q0, q1);
+
+        #[cfg(feature = "parallel")]
+        if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::MIN_PAR_ITERS;
+            use crate::backend::statevector::SendPtr;
+            use rayon::prelude::*;
+
+            let ptr = SendPtr(self.sv.state.as_mut_ptr());
+            (0..num_groups)
+                .into_par_iter()
+                .with_min_len(MIN_PAR_ITERS)
+                .for_each(move |m| {
+                    let base = block_base(m, &positions);
+                    // SAFETY: inserting a zero bit at each of the four block
+                    // positions is a bijection from `m` onto the block bases, so
+                    // the 16 offsets one iteration touches are disjoint from
+                    // every other iteration's. The safe alternative needs the
+                    // 16 entries as disjoint sub-slices, which they are not:
+                    // they are strided across four independent bit positions.
+                    unsafe {
+                        let mut trace = Complex64::new(0.0, 0.0);
+                        for t in 0..4 {
+                            trace += ptr.load(base | flats[5 * t]);
+                        }
+                        let shift = trace * beta;
+                        for (i, &off) in flats.iter().enumerate() {
+                            let mut out = ptr.load(base | off) * alpha;
+                            if i % 5 == 0 {
+                                out += shift;
+                            }
+                            ptr.store(base | off, out);
+                        }
                     }
+                });
+            return;
+        }
+
+        for m in 0..num_groups {
+            let base = block_base(m, &positions);
+            let mut trace = Complex64::new(0.0, 0.0);
+            for t in 0..4 {
+                trace += self.sv.state[base | flats[5 * t]];
+            }
+            let shift = trace * beta;
+            for (i, &off) in flats.iter().enumerate() {
+                let mut out = self.sv.state[base | off] * alpha;
+                if i % 5 == 0 {
+                    out += shift;
                 }
+                self.sv.state[base | off] = out;
             }
         }
-        self.apply_2q_kraus(q0, q1, &kraus);
+    }
+
+    /// Block traversal for a two-qubit map on `(q0, q1)`: the four buffer bit
+    /// positions the block spans in ascending order, the 16 offsets from a
+    /// block base indexed `4 * tr + tc`, and the number of blocks. Block index
+    /// `5 * t` is the diagonal entry `tr == tc == t`.
+    ///
+    /// The four positions must be distinct and inside the register, or the
+    /// zero-bit insertion in [`block_base`] stops being a bijection onto the
+    /// block bases and the sweep reads and writes the wrong entries. Both
+    /// callers are public, so this is the choke point that enforces it.
+    fn block_layout(&self, q0: usize, q1: usize) -> ([usize; 4], [usize; 16], usize) {
+        let n = self.num_qubits;
+        assert!(
+            q0 != q1 && q0 < n && q1 < n,
+            "two-qubit channel on ({q0}, {q1}) needs distinct targets inside the {n}-qubit register"
+        );
+        let mut positions = [q0, q1, q0 + n, q1 + n];
+        positions.sort_unstable();
+
+        let mut flats = [0usize; 16];
+        for tr in 0..4 {
+            for tc in 0..4 {
+                flats[4 * tr + tc] = (if tr & 2 != 0 { 1usize << (q0 + n) } else { 0 })
+                    | (if tr & 1 != 0 { 1usize << (q1 + n) } else { 0 })
+                    | (if tc & 2 != 0 { 1usize << q0 } else { 0 })
+                    | (if tc & 1 != 0 { 1usize << q1 } else { 0 });
+            }
+        }
+
+        let d = self.dim();
+        (positions, flats, (d * d) >> 4)
     }
 
     /// Apply a general two-qubit channel `rho -> sum_k K_k rho K_k^dagger` on
@@ -541,6 +662,11 @@ impl DensityMatrixBackend {
     /// four-bit `(q0-row, q1-row, q0-col, q1-col)` block, so the buffer is swept
     /// once. Block index `4*tr + tc` orders the two-qubit row value `tr` against
     /// the column value `tc`.
+    ///
+    /// # Panics
+    ///
+    /// If `q0` and `q1` are equal or outside the register. A model built through
+    /// [`NoiseModel`](crate::NoiseModel) is rejected before it reaches here.
     pub fn apply_2q_kraus(&mut self, q0: usize, q1: usize, kraus: &[[[Complex64; 4]; 4]]) {
         // S[4*tr+tc][4*trp+tcp] = sum_k K_k[tr][trp] * conj(K_k[tc][tcp]).
         let mut s = [[Complex64::new(0.0, 0.0); 16]; 16];
@@ -560,78 +686,101 @@ impl DensityMatrixBackend {
             }
         }
 
-        let n = self.num_qubits;
-        let d = self.dim();
-        let mut positions = [q0, q1, q0 + n, q1 + n];
-        positions.sort_unstable();
-        let flat_offset = |tr: usize, tc: usize| {
-            (if tr & 2 != 0 { 1usize << (q0 + n) } else { 0 })
-                | (if tr & 1 != 0 { 1usize << (q1 + n) } else { 0 })
-                | (if tc & 2 != 0 { 1usize << q0 } else { 0 })
-                | (if tc & 1 != 0 { 1usize << q1 } else { 0 })
-        };
-        let mut flats = [0usize; 16];
-        for tr in 0..4 {
-            for tc in 0..4 {
-                flats[4 * tr + tc] = flat_offset(tr, tc);
-            }
-        }
+        let (positions, flats, num_groups) = self.block_layout(q0, q1);
 
-        let num_groups = (d * d) >> 4;
+        match positions[0] {
+            0 | 1 => self.kraus_2q_sweep::<1>(&s, &positions, &flats, num_groups),
+            _ => self.kraus_2q_sweep::<4>(&s, &positions, &flats, num_groups),
+        }
+    }
+
+    /// Sweep the buffer applying the compiled 16x16 block superoperator `s`,
+    /// `W` blocks per iteration.
+    ///
+    /// `W` must divide `2^positions[0]`. Blocks whose compacted indices form an
+    /// aligned run of that length have consecutive bases, because
+    /// [`insert_zero_bit`] preserves every bit below its position and no `flats`
+    /// entry has a bit below `positions[0]`. Each of the 16 slots is then a
+    /// contiguous run of `W` amplitudes, which amortizes the base and offset
+    /// arithmetic over `W` blocks and gives the accumulator chains room to
+    /// overlap. The arithmetic itself stays scalar: the crate builds at the
+    /// x86-64 baseline and every wide kernel here takes its width from
+    /// `#[target_feature]` dispatch in [`crate::backend::simd`], which this does
+    /// not use.
+    ///
+    /// Only `W = 1` and `W = 4` are instantiated. `W = 1` is forced when
+    /// `min(q0, q1) == 0`, where one block bit is bit 0 and no run exists, and
+    /// it also serves `min(q0, q1) == 1`: a two-block step measured +0.2% and
+    /// +1.9% against one, so it earned no arm of its own.
+    fn kraus_2q_sweep<const W: usize>(
+        &mut self,
+        s: &[[Complex64; 16]; 16],
+        positions: &[usize; 4],
+        flats: &[usize; 16],
+        num_groups: usize,
+    ) {
+        let zero = Complex64::new(0.0, 0.0);
+        let steps = num_groups / W;
 
         #[cfg(feature = "parallel")]
-        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+        if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use crate::backend::MIN_PAR_ITERS;
             use crate::backend::statevector::SendPtr;
             use rayon::prelude::*;
 
             let ptr = SendPtr(self.sv.state.as_mut_ptr());
-            (0..num_groups)
+            let s = *s;
+            let positions = *positions;
+            let flats = *flats;
+            (0..steps)
                 .into_par_iter()
-                .with_min_len(MIN_PAR_ITERS)
-                .for_each(move |m| {
-                    let mut base = m;
-                    for &pos in &positions {
-                        base = insert_zero_bit(base, pos);
-                    }
-                    let mut v = [Complex64::new(0.0, 0.0); 16];
+                .with_min_len(MIN_PAR_ITERS.div_ceil(W))
+                .for_each(move |step| {
+                    let base = block_base(step * W, &positions);
+                    let mut v = [[zero; W]; 16];
                     // SAFETY: inserting a zero bit at each of the four block
-                    // positions is a bijection from `m` onto the block bases, so
-                    // the 16 offsets one iteration touches are disjoint from
-                    // every other iteration's. The safe alternative needs the
-                    // 16 entries as disjoint sub-slices, which they are not:
-                    // they are strided across four independent bit positions.
+                    // positions is a bijection from the compacted index onto the
+                    // block bases, so the `16 * W` offsets one iteration touches
+                    // are disjoint from every other iteration's. The safe
+                    // alternative needs them as disjoint sub-slices, which they
+                    // are not: the 16 slots are strided across four independent
+                    // bit positions.
                     unsafe {
-                        for (k, &off) in flats.iter().enumerate() {
-                            v[k] = ptr.load(base | off);
-                        }
-                        for (i, &off) in flats.iter().enumerate() {
-                            let mut acc = Complex64::new(0.0, 0.0);
-                            for j in 0..16 {
-                                acc += s[i][j] * v[j];
+                        for (slot, &off) in v.iter_mut().zip(flats.iter()) {
+                            for (j, lane) in slot.iter_mut().enumerate() {
+                                *lane = ptr.load((base | off) + j);
                             }
-                            ptr.store(base | off, acc);
+                        }
+                        for (row, &off) in s.iter().zip(flats.iter()) {
+                            let mut acc = [zero; W];
+                            for (&coeff, slot) in row.iter().zip(v.iter()) {
+                                for (a, &lane) in acc.iter_mut().zip(slot.iter()) {
+                                    *a += coeff * lane;
+                                }
+                            }
+                            for (j, &a) in acc.iter().enumerate() {
+                                ptr.store((base | off) + j, a);
+                            }
                         }
                     }
                 });
             return;
         }
 
-        for m in 0..num_groups {
-            let mut base = m;
-            for &pos in &positions {
-                base = insert_zero_bit(base, pos);
-            }
-            let mut v = [Complex64::new(0.0, 0.0); 16];
+        for step in 0..steps {
+            let base = block_base(step * W, positions);
+            let mut v = [[zero; W]; 16];
             for (k, &off) in flats.iter().enumerate() {
-                v[k] = self.sv.state[base | off];
+                v[k].copy_from_slice(&self.sv.state[(base | off)..(base | off) + W]);
             }
-            for (i, &off) in flats.iter().enumerate() {
-                let mut acc = Complex64::new(0.0, 0.0);
-                for j in 0..16 {
-                    acc += s[i][j] * v[j];
+            for (row, &off) in s.iter().zip(flats.iter()) {
+                let mut acc = [zero; W];
+                for (&coeff, slot) in row.iter().zip(v.iter()) {
+                    for (a, &lane) in acc.iter_mut().zip(slot.iter()) {
+                        *a += coeff * lane;
+                    }
                 }
-                self.sv.state[base | off] = acc;
+                self.sv.state[(base | off)..(base | off) + W].copy_from_slice(&acc);
             }
         }
     }
@@ -761,8 +910,11 @@ impl Backend for DensityMatrixBackend {
         self.num_qubits
     }
 
+    /// `MultiFused` and `Multi2q` apply their constituents one at a time here
+    /// rather than through the tiled kernels, which the ket register's shifted
+    /// indices would reorder.
     fn supports_fused_gates(&self) -> bool {
-        false
+        true
     }
 
     fn qubit_probability(&self, qubit: usize) -> Result<f64> {
@@ -815,13 +967,6 @@ impl Backend for DensityMatrixBackend {
     /// favour of `apply_1q_kraus` on the mixture; this keeps the trait method
     /// allocation-free on every backend that holds a state.
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
-        let n = self.num_qubits;
-        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
-            let s = block_superoperator(&[*matrix]);
-            self.apply_block_superoperator(qubit, &s);
-            return Ok(());
-        }
-        self.sv.apply_1q_matrix(qubit + n, matrix)?;
-        self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
+        self.apply_1q_sandwich(qubit, matrix)
     }
 }

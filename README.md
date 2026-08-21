@@ -9,9 +9,12 @@
  ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚═╝     ╚═╝       ╚══▀▀═╝
 ```
 
+[![Crates.io](https://img.shields.io/crates/v/prism-q?logo=rust)](https://crates.io/crates/prism-q)
+[![docs.rs](https://img.shields.io/docsrs/prism-q?logo=docsdotrs&logoColor=white)](https://docs.rs/prism-q)
+[![PyPI](https://img.shields.io/pypi/v/prism-q?logo=pypi&logoColor=white)](https://pypi.org/project/prism-q/)
 [![CI](https://github.com/AbeCoull/prism-q/actions/workflows/ci.yml/badge.svg)](https://github.com/AbeCoull/prism-q/actions/workflows/ci.yml)
 ![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/AbeCoull/4ea63a3791840048749e67b2484098a3/raw/coverage.json)
-![Rust](https://img.shields.io/badge/rust-1.87%2B-orange?logo=rust)
+![MSRV](https://img.shields.io/crates/msrv/prism-q?logo=rust)
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 

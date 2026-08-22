@@ -2414,6 +2414,21 @@ fn correlated_zz_channel(p: f64) -> prism_q::NoiseChannel {
     }
 }
 
+/// The correlated `ZZ` pair conjugated by `H` on `q0`: `{sqrt(1-p) I, sqrt(p) X(x)Z}`.
+/// Unitary conjugation of the whole set preserves CPTP, and the `X` factor fills the
+/// compiled 16x16 superoperator, where the `ZZ` pair compiles to its diagonal.
+fn h_conjugated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
+    let zero = Complex64::new(0.0, 0.0);
+    let mut k0 = [[zero; 4]; 4];
+    let mut k1 = [[zero; 4]; 4];
+    for t in 0..4 {
+        k0[t][t] = Complex64::new((1.0 - p).sqrt(), 0.0);
+        let sign = if t & 1 == 0 { 1.0 } else { -1.0 };
+        k1[t][t ^ 2] = Complex64::new(p.sqrt() * sign, 0.0);
+    }
+    vec![k0, k1]
+}
+
 fn dm_backend(n: usize) -> DensityMatrixBackend {
     let circuit = circuits::random_circuit(n, 2, SEED);
     let mut backend = DensityMatrixBackend::new(42);
@@ -2472,6 +2487,20 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("kraus_2q_mid", n), &n, |b, &_n| {
             let mut backend = dm_backend(n);
             b.iter(|| backend.apply_2q_kraus(1, 2, &zz));
+        });
+
+        // The same channel with off-diagonal structure: the zz pair is
+        // diagonal, so no row above pins the sweep on a set that fills the
+        // superoperator. The sweep's cost is data-independent, so these
+        // compare directly against the zz rows at the same pairs.
+        let hzz = h_conjugated_zz_kraus(0.02);
+        group.bench_with_input(BenchmarkId::new("kraus_2q_dense", n), &n, |b, &_n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_2q_kraus(2, 3, &hzz));
+        });
+        group.bench_with_input(BenchmarkId::new("kraus_2q_dense_q0", n), &n, |b, &n| {
+            let mut backend = dm_backend(n);
+            b.iter(|| backend.apply_2q_kraus(0, n - 1, &hzz));
         });
 
         // A `Fused2q` that no `Multi2q` batch absorbs, which is what fusion

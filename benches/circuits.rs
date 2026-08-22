@@ -2465,16 +2465,11 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
             b.iter(|| backend.apply_2q_depolarizing(0, n - 1, 0.02));
         });
 
-        // The general two-qubit channel. Both compile to one 16x16
-        // superoperator and then sweep the same `4^n` buffer; at these widths
-        // the compile is under 0.01% of the row either way, so this reads the
-        // sweep and not the operator count.
-        //
-        // The pair is not incidental. The sweep runs four blocks per step when
-        // `min(q0, q1) >= 2` and one otherwise, so `(2, 3)` reads the batched
-        // path and `(0, n-1)` the fallback. `(1, 2)` is the boundary: it once
-        // took a two-block step, which measured +0.2% and +1.9% against one and
-        // so was dropped, and the row stays to hold that null.
+        // The general two-qubit channel: every set compiles to one 16x16
+        // superoperator, and at these widths the compile is under 0.01% of the
+        // row, so each row reads its sweep and not the operator count. The zz
+        // pair compiles to a diagonal superoperator and takes the contiguous
+        // one-multiply pass; the three pairs pin its position independence.
         let zz = correlated_zz_kraus(0.02);
         group.bench_with_input(BenchmarkId::new("kraus_2q_q0_qtop", n), &n, |b, &n| {
             let mut backend = dm_backend(n);
@@ -2489,10 +2484,12 @@ fn bench_density_matrix_noisy_channels(c: &mut Criterion) {
             b.iter(|| backend.apply_2q_kraus(1, 2, &zz));
         });
 
-        // The same channel with off-diagonal structure: the zz pair is
-        // diagonal, so no row above pins the sweep on a set that fills the
-        // superoperator. The sweep's cost is data-independent, so these
-        // compare directly against the zz rows at the same pairs.
+        // The same channel with off-diagonal structure, which fills the
+        // superoperator and holds the dense sweep: `(2, 3)` reads its
+        // four-block step and `(0, n-1)` the one-block fallback, where a
+        // two-block step once measured +0.2% and +1.9% against one and was
+        // dropped. The sweep's cost is data-independent, so these compare
+        // directly against the zz rows at the same pairs.
         let hzz = h_conjugated_zz_kraus(0.02);
         group.bench_with_input(BenchmarkId::new("kraus_2q_dense", n), &n, |b, &_n| {
             let mut backend = dm_backend(n);

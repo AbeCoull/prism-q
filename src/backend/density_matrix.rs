@@ -150,6 +150,18 @@ fn block_base(m: usize, positions: &[usize; 4]) -> usize {
     base
 }
 
+/// Index into the 16-entry superoperator diagonal for the amplitude at buffer
+/// index `idx`: `4 * tr + tc` with `tr` read from the ket bits and `tc` from
+/// the bra bits of `(q0, q1)`, matching the flat order in
+/// [`DensityMatrixBackend::block_layout`].
+#[inline(always)]
+fn diag_slot(idx: usize, q0: usize, q1: usize, n: usize) -> usize {
+    ((idx >> (q0 + n)) & 1) << 3
+        | ((idx >> (q1 + n)) & 1) << 2
+        | ((idx >> q0) & 1) << 1
+        | ((idx >> q1) & 1)
+}
+
 fn conjugate_2x2(m: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
         [m[0][0].conj(), m[0][1].conj()],
@@ -661,7 +673,9 @@ impl DensityMatrixBackend {
     /// The Kraus set is compiled once into a 16x16 block superoperator over the
     /// four-bit `(q0-row, q1-row, q0-col, q1-col)` block, so the buffer is swept
     /// once. Block index `4*tr + tc` orders the two-qubit row value `tr` against
-    /// the column value `tc`.
+    /// the column value `tc`. An all-diagonal set compiles to a diagonal
+    /// superoperator and is applied as one complex multiply per amplitude in a
+    /// contiguous pass instead of the dense sweep.
     ///
     /// # Panics
     ///
@@ -688,9 +702,50 @@ impl DensityMatrixBackend {
 
         let (positions, flats, num_groups) = self.block_layout(q0, q1);
 
+        // Off-diagonal entries of an all-diagonal set only ever accumulate
+        // `kr * conj(0.0)`, so exact zero is the test.
+        let zero = Complex64::new(0.0, 0.0);
+        let diagonal = s
+            .iter()
+            .enumerate()
+            .all(|(r, row)| row.iter().enumerate().all(|(c, &e)| r == c || e == zero));
+        if diagonal {
+            let diag = std::array::from_fn(|i| s[i][i]);
+            self.kraus_2q_diagonal_sweep(&diag, q0, q1);
+            return;
+        }
+
         match positions[0] {
             0 | 1 => self.kraus_2q_sweep::<1>(&s, &positions, &flats, num_groups),
             _ => self.kraus_2q_sweep::<4>(&s, &positions, &flats, num_groups),
+        }
+    }
+
+    /// Apply a diagonal block superoperator in one contiguous pass: the
+    /// amplitude at `idx` is scaled by `diag[diag_slot(idx, q0, q1, n)]`, one
+    /// complex multiply against the dense sweep's 16 multiply-accumulates.
+    fn kraus_2q_diagonal_sweep(&mut self, diag: &[Complex64; 16], q0: usize, q1: usize) {
+        let n = self.num_qubits;
+
+        #[cfg(feature = "parallel")]
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::MIN_PAR_ELEMS;
+            use rayon::prelude::*;
+
+            let diag = *diag;
+            self.sv
+                .state
+                .par_iter_mut()
+                .enumerate()
+                .with_min_len(MIN_PAR_ELEMS)
+                .for_each(move |(idx, amp)| {
+                    *amp *= diag[diag_slot(idx, q0, q1, n)];
+                });
+            return;
+        }
+
+        for (idx, amp) in self.sv.state.iter_mut().enumerate() {
+            *amp *= diag[diag_slot(idx, q0, q1, n)];
         }
     }
 

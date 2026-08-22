@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{SEED, assert_probs_close};
+use common::{SEED, assert_fused_matches_unfused, assert_probs_close};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -648,6 +648,168 @@ fn dm_two_qubit_depolarizing_bell_analytic() {
     assert!((probs[2] - off_bell).abs() < DM_EPS, "p10: {probs:?}");
     let total: f64 = probs.iter().sum();
     assert!((total - 1.0).abs() < DM_EPS, "trace preserved: {total}");
+}
+
+fn count_gates(circuit: &Circuit, want: fn(&Gate) -> bool) -> usize {
+    circuit
+        .instructions
+        .iter()
+        .filter(
+            |inst| matches!(inst, prism_q::circuit::Instruction::Gate { gate, .. } if want(gate)),
+        )
+        .count()
+}
+
+#[test]
+fn dm_fused_route_matches_unfused_across_fusion_widths() {
+    // 8 is below MIN_QUBITS_FOR_FUSION and fuses nothing, 10 admits one-qubit
+    // fusion, 12 the two-qubit and Multi2q passes. MultiFused needs 14 and the
+    // diagonal batches 16, both past the 4^n ceiling, so neither is reachable
+    // here and neither is covered. The payload assertions are what keep the
+    // widths meaningful: a reorder that dropped 12q to Fused2q-only would still
+    // match probabilities, and Multi2q ordering is the reason this test exists.
+    for (n, want_multi2q, want_fused1q) in [(8usize, 0, 0), (10, 0, 1), (12, 1, 0)] {
+        let circuit = circuits::random_circuit(n, 4, SEED);
+        let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::Multi2q(_))) >= want_multi2q,
+            "expected {want_multi2q} Multi2q at {n}q, got {:?}",
+            count_gates(&fused, |g| matches!(g, Gate::Multi2q(_)))
+        );
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::Fused(_))) >= want_fused1q,
+            "expected {want_fused1q} fused 1q run at {n}q"
+        );
+        if n == 8 {
+            assert_eq!(
+                fused.instructions.len(),
+                circuit.instructions.len(),
+                "8q must fuse nothing, it is the control"
+            );
+        }
+        assert_fused_matches_unfused(
+            || DensityMatrixBackend::new(SEED),
+            &circuit,
+            DM_EPS,
+            &format!("density matrix fused vs unfused at {n}q"),
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "distinct targets")]
+fn dm_two_qubit_channel_on_a_repeated_qubit_panics() {
+    // The block traversal needs four distinct bit positions. NoiseModel rejects
+    // this before it reaches a backend, so the panic covers only direct callers
+    // of the public kernel.
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(4, 0).unwrap();
+    backend.apply_2q_depolarizing(2, 2, 0.02);
+}
+
+#[test]
+#[should_panic(expected = "inside the 4-qubit register")]
+fn dm_two_qubit_channel_outside_the_register_panics() {
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(4, 0).unwrap();
+    backend.apply_2q_depolarizing(0, 4, 0.02);
+}
+
+#[test]
+fn dm_bare_fused_2q_matches_its_unfused_pair() {
+    // A Fused2q that no Multi2q batch absorbs takes conjugate_gate rather than
+    // the buffer-conjugation fallback. Built directly, since random_circuit's
+    // brick layers batch every 2q run into Multi2q.
+    let mat = Gate::Cx.matrix_4x4();
+    let mut fused = Circuit::new(3, 0);
+    fused.add_gate(Gate::H, &[0]);
+    fused.add_gate(Gate::Ry(0.7), &[1]);
+    fused.add_gate(Gate::Fused2q(Box::new(mat)), &[0, 1]);
+    fused.add_gate(Gate::H, &[2]);
+
+    let mut plain = Circuit::new(3, 0);
+    plain.add_gate(Gate::H, &[0]);
+    plain.add_gate(Gate::Ry(0.7), &[1]);
+    plain.add_gate(Gate::Cx, &[0, 1]);
+    plain.add_gate(Gate::H, &[2]);
+
+    assert_probs_close(&dm_probs(&fused), &dm_probs(&plain), DM_EPS, "bare Fused2q");
+}
+
+// The 16 Pauli Kraus operators the twirled closed form replaces, weighted
+// sqrt(1-p) on I(x)I and sqrt(p/15) elsewhere, indexed 2*bit(q0)+bit(q1).
+fn depolarizing_2q_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
+    let paulis: [[[Complex64; 2]; 2]; 4] = [
+        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(1.0, 0.0)]],
+        [[c(0.0, 0.0), c(1.0, 0.0)], [c(1.0, 0.0), c(0.0, 0.0)]],
+        [[c(0.0, 0.0), c(0.0, -1.0)], [c(0.0, 1.0), c(0.0, 0.0)]],
+        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(-1.0, 0.0)]],
+    ];
+    let mut kraus = vec![[[c(0.0, 0.0); 4]; 4]; 16];
+    for a in 0..4 {
+        for b in 0..4 {
+            let w = if a == 0 && b == 0 {
+                (1.0 - p).sqrt()
+            } else {
+                (p / 15.0).sqrt()
+            };
+            let k = &mut kraus[4 * a + b];
+            for (t, row) in k.iter_mut().enumerate() {
+                for (tp, entry) in row.iter_mut().enumerate() {
+                    *entry = c(w, 0.0) * paulis[a][t >> 1][tp >> 1] * paulis[b][t & 1][tp & 1];
+                }
+            }
+        }
+    }
+    kraus
+}
+
+// Every `n`-qubit Pauli as (xmask, zmask, num_y); the 4^n expectations
+// determine rho uniquely.
+fn all_pauli_masks(n: usize) -> Vec<(usize, usize, u32)> {
+    let d = 1usize << n;
+    let mut masks = Vec::with_capacity(d * d);
+    for xmask in 0..d {
+        for zmask in 0..d {
+            masks.push((xmask, zmask, (xmask & zmask).count_ones()));
+        }
+    }
+    masks
+}
+
+#[test]
+fn dm_two_qubit_depolarizing_matches_kraus_sum() {
+    // The closed form and the 16-operator Kraus sum are separate kernels,
+    // compared here by full tomography. A pair selects the Kraus sweep's block
+    // width, 4 when min(q0,q1) >= 2 and 1 otherwise, and n selects the arm:
+    // 2n < 14 is serial. The pairs are each width on each arm. p = 15/16 is the
+    // edge where alpha goes to zero.
+    for (n, pairs) in [
+        (3usize, &[(0usize, 1usize), (1, 2)][..]),
+        (5, &[(2, 3)][..]),
+        (PAR_N, &[(0, PAR_N - 1), (2, 5)][..]),
+    ] {
+        let circuit = circuits::random_circuit(n, 4, SEED);
+        let masks = all_pauli_masks(n);
+        for &(q0, q1) in pairs {
+            for p in [0.02, 0.3, 15.0 / 16.0, 1.0] {
+                let mut closed = run_dm(&circuit);
+                closed.apply_2q_depolarizing(q0, q1, p);
+                let mut kraus = run_dm(&circuit);
+                kraus.apply_2q_kraus(q0, q1, &depolarizing_2q_kraus(p));
+
+                let got = closed.expectations_pauli(&masks);
+                let want = kraus.expectations_pauli(&masks);
+                for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                    assert!(
+                        (a - b).abs() < DM_EPS,
+                        "n={n} pair=({q0},{q1}) p={p} pauli {:?}: closed {a}, kraus {b}",
+                        masks[k]
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]

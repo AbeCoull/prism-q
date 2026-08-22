@@ -555,9 +555,8 @@ impl StabilizerBackend {
     /// Defer destabilizer rows: gates update only the n stabilizer rows until
     /// a measurement or reset materializes the destabilizers via Gaussian
     /// elimination. Halves gate cost for long Clifford prefixes with few
-    /// measurements. The per-instruction [`Backend::apply`] path switches back
-    /// to an eager tableau before the first gate; only the bulk apply paths
-    /// preserve laziness.
+    /// measurements. Both the per-instruction [`Backend::apply`] path and the
+    /// bulk apply paths preserve laziness across gates.
     pub fn enable_lazy_destab(&mut self) {
         if self.lazy_destab || self.n == 0 {
             return;
@@ -574,19 +573,28 @@ impl StabilizerBackend {
         if !self.lazy_destab {
             return;
         }
+        let sgi_live = self.sgi_enabled();
         self.materialize_destabilizers();
         self.lazy_destab = false;
         self.gate_row_start = 0;
-        let n = self.n;
-        for q in 0..n {
-            if !self.qubit_active[q].contains(&(q as u32)) {
-                self.qubit_active[q].push(q as u32);
-            }
+        if sgi_live {
+            // Materialization replaced the stabilizer half with its reduced
+            // basis, so the per-row supports the index tracked no longer
+            // describe the rows.
+            self.rebuild_qubit_active();
         }
-        self.total_weight = self.qubit_active.iter().map(|v| v.len()).sum();
-        self.sgi_max_active = self.qubit_active.iter().map(|v| v.len()).max().unwrap_or(0);
+        // When the SGI guard is off, the index is dead and the counters stay
+        // heavy. Rebuilding here would re-arm the guard over an index that the
+        // dense paths do not maintain, and a later bulk entry would then run
+        // SGI against stale supports.
     }
 
+    /// Rebuild rows 0..n as unit destabilizers via Gaussian elimination and
+    /// replace the stabilizer half with the reduced basis they pair with.
+    /// Row operations preserve the stabilizer group and its phases, so the
+    /// state is unchanged; the write-back is what makes destabilizer i
+    /// anticommute with stabilizer i and commute with every other generator,
+    /// which measurement relies on.
     fn materialize_destabilizers(&mut self) {
         let n = self.n;
         if n == 0 {
@@ -605,6 +613,7 @@ impl StabilizerBackend {
 
         let mut stab_copy: Vec<u64> = self.xz[n * stride..2 * n * stride].to_vec();
         let mut stab_phase: Vec<bool> = self.phase[n..2 * n].to_vec();
+        let mut pivot_row: Vec<u64> = vec![0u64; stride];
 
         for col in 0..n {
             let mut pivot = None;
@@ -640,15 +649,14 @@ impl StabilizerBackend {
                     let word = col / 64;
                     let bit = col % 64;
                     let bit_mask = 1u64 << bit;
+                    pivot_row.copy_from_slice(&stab_copy[col * stride..(col + 1) * stride]);
+                    let sp = stab_phase[col];
 
                     for row in 0..n {
                         if row == col {
                             continue;
                         }
                         if stab_copy[row * stride + nw + word] & bit_mask != 0 {
-                            let src: Vec<u64> =
-                                stab_copy[col * stride..(col + 1) * stride].to_vec();
-                            let sp = stab_phase[col];
                             let dst = &mut stab_copy[row * stride..(row + 1) * stride];
                             let initial =
                                 if sp { 2u64 } else { 0 } + if stab_phase[row] { 2u64 } else { 0 };
@@ -656,8 +664,8 @@ impl StabilizerBackend {
                             let sum = rowmul_words(
                                 dx,
                                 &mut dz[..nw],
-                                &src[..nw],
-                                &src[nw..2 * nw],
+                                &pivot_row[..nw],
+                                &pivot_row[nw..2 * nw],
                                 initial,
                             );
                             stab_phase[row] = (sum & 3) >= 2;
@@ -686,26 +694,36 @@ impl StabilizerBackend {
             let word = col / 64;
             let bit = col % 64;
             let bit_mask = 1u64 << bit;
+            pivot_row.copy_from_slice(&stab_copy[col * stride..(col + 1) * stride]);
+            let sp = stab_phase[col];
 
             for row in 0..n {
                 if row == col {
                     continue;
                 }
                 if stab_copy[row * stride + word] & bit_mask != 0 {
-                    let src: Vec<u64> = stab_copy[col * stride..(col + 1) * stride].to_vec();
-                    let sp = stab_phase[col];
                     let dst = &mut stab_copy[row * stride..(row + 1) * stride];
                     let initial =
                         if sp { 2u64 } else { 0 } + if stab_phase[row] { 2u64 } else { 0 };
                     let (dx, dz) = dst.split_at_mut(nw);
-                    let sum =
-                        rowmul_words(dx, &mut dz[..nw], &src[..nw], &src[nw..2 * nw], initial);
+                    let sum = rowmul_words(
+                        dx,
+                        &mut dz[..nw],
+                        &pivot_row[..nw],
+                        &pivot_row[nw..2 * nw],
+                        initial,
+                    );
                     stab_phase[row] = (sum & 3) >= 2;
                 }
             }
 
             self.xz[col * stride + nw + word] |= bit_mask;
             self.phase[col] = false;
+        }
+
+        self.xz[n * stride..2 * n * stride].copy_from_slice(&stab_copy);
+        for (i, p) in stab_phase.into_iter().enumerate() {
+            self.phase[n + i] = p;
         }
     }
 
@@ -1428,18 +1446,6 @@ impl Backend for StabilizerBackend {
                     return self.apply_region(region);
                 }
             }
-        }
-        if self.lazy_destab
-            && matches!(
-                instruction,
-                Instruction::Gate { .. } | Instruction::Conditional { .. }
-            )
-        {
-            // Lazy destabilizer mode is optimized for bulk apply paths.
-            // If callers drive the backend instruction-by-instruction, switch
-            // back to an eager tableau before the first gate to preserve the
-            // standard `apply` semantics.
-            self.ensure_destabilizers();
         }
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets)?,

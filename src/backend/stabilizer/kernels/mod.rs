@@ -75,65 +75,101 @@ impl StabilizerBackend {
         false
     }
 
+    /// Tableau rows a gate must update: the full tableau when eager, the
+    /// stabilizer half plus scratch when destabilizers are deferred.
+    #[inline(always)]
+    fn gate_rows(&mut self) -> (&mut [u64], &mut [bool]) {
+        let start = self.gate_row_start;
+        let stride = 2 * self.num_words;
+        (&mut self.xz[start * stride..], &mut self.phase[start..])
+    }
+
     #[inline(always)]
     fn apply_h(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::h_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::h_all(xz, phase, nw, par, a);
     }
 
     #[inline(always)]
     fn apply_s(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::s_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::s_all(xz, phase, nw, par, a);
     }
 
     #[inline(always)]
     fn apply_sdg(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::sdg_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::sdg_all(xz, phase, nw, par, a);
     }
 
     #[inline(always)]
     fn apply_x(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::x_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::x_all(xz, phase, nw, par, a);
     }
 
     #[inline(always)]
     fn apply_y(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::y_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::y_all(xz, phase, nw, par, a);
     }
 
     #[inline(always)]
     fn apply_z(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::z_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::z_all(xz, phase, nw, par, a);
+    }
+
+    #[inline(always)]
+    fn apply_sx(&mut self, a: usize) {
+        let par = self.par_rows();
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::sx_all(xz, phase, nw, par, a);
+    }
+
+    #[inline(always)]
+    fn apply_sxdg(&mut self, a: usize) {
+        let par = self.par_rows();
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::sxdg_all(xz, phase, nw, par, a);
     }
 
     #[inline(always)]
     fn apply_cx(&mut self, control: usize, target: usize) {
         let par = self.par_rows();
-        rowops::cx_all(
-            &mut self.xz,
-            &mut self.phase,
-            self.num_words,
-            par,
-            control,
-            target,
-        );
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::cx_all(xz, phase, nw, par, control, target);
     }
 
     #[inline(always)]
     fn apply_cz(&mut self, a: usize, b: usize) {
         let par = self.par_rows();
-        rowops::cz_all(&mut self.xz, &mut self.phase, self.num_words, par, a, b);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::cz_all(xz, phase, nw, par, a, b);
     }
 
     #[inline(always)]
     fn apply_swap(&mut self, a: usize, b: usize) {
         let par = self.par_rows();
-        rowops::swap_all(&mut self.xz, &mut self.phase, self.num_words, par, a, b);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::swap_all(xz, phase, nw, par, a, b);
     }
 
     pub(super) fn sgi_enabled(&self) -> bool {
@@ -408,6 +444,7 @@ impl StabilizerBackend {
     }
 
     fn sgi_measure(&mut self, qubit: usize, classical_bit: usize) {
+        self.ensure_destabilizers();
         let n = self.n;
         let word = qubit / 64;
         let bit_mask = 1u64 << (qubit % 64);
@@ -457,7 +494,6 @@ impl StabilizerBackend {
     /// SGI measurement rebuilds the qubit index that every later SGI gate
     /// iterates.
     fn sgi_reset(&mut self, qubit: usize) {
-        self.ensure_destabilizers();
         let scratch = self.classical_bits.len();
         self.classical_bits.push(false);
         self.sgi_measure(qubit, scratch);
@@ -514,7 +550,7 @@ impl StabilizerBackend {
         self.rebuild_qubit_active();
     }
 
-    fn rebuild_qubit_active(&mut self) {
+    pub(super) fn rebuild_qubit_active(&mut self) {
         let n = self.n;
         let stride = self.stride();
         let nw = self.num_words;
@@ -641,18 +677,6 @@ impl StabilizerBackend {
         let outcome: bool = self.rng.random();
         self.phase[p_row] = outcome;
         self.classical_bits[classical_bit] = outcome;
-    }
-
-    #[inline(always)]
-    fn apply_sx(&mut self, a: usize) {
-        let par = self.par_rows();
-        rowops::sx_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
-    }
-
-    #[inline(always)]
-    fn apply_sxdg(&mut self, a: usize) {
-        let par = self.par_rows();
-        rowops::sxdg_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
     }
 
     pub(super) fn apply_instructions_sgi(&mut self, instructions: &[Instruction]) -> Result<()> {

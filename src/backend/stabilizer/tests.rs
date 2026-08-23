@@ -971,6 +971,152 @@ fn test_pcc_random_pairs_matches_gate_by_gate() {
     );
 }
 
+// The per-instruction path must stay lazy across gates, reconstruct on the
+// first measurement, and produce the exact outcome sequence of an eager run:
+// gates update the stabilizer half identically in both modes, so pivot
+// classification and RNG draws align, and deterministic outcomes are unique.
+#[test]
+fn lazy_destab_apply_path_matches_eager_exactly() {
+    for n in [3usize, 5, 8, 16, 80, 300] {
+        for seed in 0..20u64 {
+            let mut circuit = crate::circuits::clifford_heavy_circuit(n, 10, seed);
+            circuit.measure_all();
+
+            let mut eager = StabilizerBackend::new(seed);
+            eager.init(n, n).unwrap();
+            for inst in &circuit.instructions {
+                eager.apply(inst).unwrap();
+            }
+
+            let mut lazy = StabilizerBackend::new(seed);
+            lazy.init(n, n).unwrap();
+            lazy.enable_lazy_destab();
+            let mut seen_lazy_gates = false;
+            for inst in &circuit.instructions {
+                if matches!(inst, Instruction::Measure { .. }) && !seen_lazy_gates {
+                    assert!(
+                        lazy.lazy_destab,
+                        "n={n} seed={seed}: gates materialized the destabilizers"
+                    );
+                    seen_lazy_gates = true;
+                }
+                lazy.apply(inst).unwrap();
+            }
+            assert!(
+                !lazy.lazy_destab,
+                "n={n} seed={seed}: measurement left the tableau lazy"
+            );
+
+            assert_eq!(
+                eager.classical_results(),
+                lazy.classical_results(),
+                "n={n} seed={seed}: outcome sequence diverged"
+            );
+        }
+    }
+}
+
+// A materialization on the bulk route must not re-arm the SGI guard over an
+// index the dense paths do not maintain. The shape needs every ingredient: a
+// CX fan-out from qubit 0 trips the sgi_max_active high-water mark and hands
+// the stream to the word-batch path, the uncompute leaves the actual supports
+// light so a counter rebuild at the measurement would re-arm the guard, the
+// random Bell measurement migrates the pivot row into a destabilizer slot the
+// stale index does not list, and the guarded regions re-enter instruction
+// dispatch where the guard is re-checked. A stale index there breaks Bell
+// correlation.
+#[test]
+fn lazy_destab_bulk_region_after_measurement_keeps_correlation() {
+    use crate::circuit::{ClassicalCondition, GuardedRegion};
+    let n = 300;
+    for seed in 0..40u64 {
+        let mut c = Circuit::new(n, 2);
+        for q in 1..=40 {
+            c.add_gate(Gate::Cx, &[0, q]);
+        }
+        for q in 1..=40 {
+            c.add_gate(Gate::Cx, &[0, q]);
+        }
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.instructions.push(Instruction::Measure {
+            qubit: 0,
+            classical_bit: 0,
+        });
+        for condition in [
+            ClassicalCondition::BitIsZero(0),
+            ClassicalCondition::BitIsOne(0),
+        ] {
+            c.instructions
+                .push(Instruction::Region(Box::new(GuardedRegion::new(
+                    condition,
+                    vec![Instruction::Measure {
+                        qubit: 1,
+                        classical_bit: 1,
+                    }],
+                ))));
+        }
+
+        let mut lazy = StabilizerBackend::new_lazy(seed);
+        lazy.init(n, 2).unwrap();
+        lazy.apply_instructions(&c.instructions).unwrap();
+        let bits = lazy.classical_results();
+        assert_eq!(
+            bits[0], bits[1],
+            "seed={seed}: Bell correlation broken on the lazy bulk route"
+        );
+    }
+}
+
+// Symplectic pairing after Gaussian-elimination reconstruction: destabilizer i
+// anticommutes with stabilizer i and commutes with every other generator.
+#[test]
+fn lazy_destab_reconstruction_restores_symplectic_pairing() {
+    fn anticommutes(b: &StabilizerBackend, row_a: usize, row_b: usize) -> bool {
+        let nw = b.num_words;
+        let stride = 2 * nw;
+        let (a, bb) = (&b.xz[row_a * stride..], &b.xz[row_b * stride..]);
+        let mut acc = 0u32;
+        for w in 0..nw {
+            acc ^= (a[w] & bb[nw + w]).count_ones() ^ (a[nw + w] & bb[w]).count_ones();
+        }
+        acc % 2 == 1
+    }
+
+    for n in [3usize, 5, 8, 16, 80, 300] {
+        let circuit = crate::circuits::clifford_heavy_circuit(n, 10, 42);
+        let mut b = StabilizerBackend::new(42);
+        b.init(n, 0).unwrap();
+        b.enable_lazy_destab();
+        for inst in &circuit.instructions {
+            b.apply(inst).unwrap();
+        }
+        assert!(
+            b.lazy_destab,
+            "n={n}: gate application must not materialize"
+        );
+        b.ensure_destabilizers();
+
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(
+                    anticommutes(&b, i, n + j),
+                    i == j,
+                    "n={n}: destab {i} vs stab {j} pairing broken"
+                );
+                assert!(
+                    !anticommutes(&b, i, j),
+                    "n={n}: destabs {i},{j} must commute"
+                );
+                assert!(
+                    !anticommutes(&b, n + i, n + j),
+                    "n={n}: stabs {i},{j} must commute"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn lazy_destab_matches_eager() {
     for n in [3, 5, 10] {

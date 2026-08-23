@@ -1806,7 +1806,7 @@ impl MpsBackend {
 
         let measured = usize::from(self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0));
         self.classical_bits[classical_bit] = measured == 1;
-        self.project_site_outcome(qubit, measured);
+        self.project_site_outcome(qubit, measured, prob[measured].clamp(0.0, 1.0));
     }
 
     fn site_outcome_probabilities(&self, site: usize) -> [f64; 2] {
@@ -1875,8 +1875,10 @@ impl MpsBackend {
         prob
     }
 
-    fn project_site_outcome(&mut self, site: usize, outcome: usize) -> f64 {
-        let prob = self.site_outcome_probabilities(site)[outcome].clamp(0.0, 1.0);
+    /// Take the Born probability from the caller so the site environments are
+    /// contracted once per measurement rather than twice, the convention
+    /// [`Self::collapse_site_to_zero`] already uses for reset.
+    fn project_site_outcome(&mut self, site: usize, outcome: usize, prob: f64) -> f64 {
         if prob <= NORM_CLAMP_MIN {
             return 0.0;
         }
@@ -1927,7 +1929,9 @@ impl MpsBackend {
     /// requested branch should be discarded by the caller.
     pub(crate) fn project_z_outcome(&mut self, qubit: usize, outcome: bool) -> f64 {
         let site = self.site_for_logical(qubit);
-        self.project_site_outcome(site, usize::from(outcome))
+        let outcome = usize::from(outcome);
+        let prob = self.site_outcome_probabilities(site)[outcome].clamp(0.0, 1.0);
+        self.project_site_outcome(site, outcome, prob)
     }
 
     fn reduced_density_site(&self, site: usize) -> [[Complex64; 2]; 2] {

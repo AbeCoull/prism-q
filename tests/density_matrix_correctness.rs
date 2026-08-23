@@ -812,6 +812,125 @@ fn dm_two_qubit_depolarizing_matches_kraus_sum() {
     }
 }
 
+fn diag_2q_kraus(scale: f64, entries: [Complex64; 4]) -> [[Complex64; 4]; 4] {
+    let mut m = [[c(0.0, 0.0); 4]; 4];
+    for (t, row) in m.iter_mut().enumerate() {
+        row[t] = c(scale, 0.0) * entries[t];
+    }
+    m
+}
+
+fn mat4_mul(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
+    let mut out = [[c(0.0, 0.0); 4]; 4];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, entry) in row.iter_mut().enumerate() {
+            for k in 0..4 {
+                *entry += a[i][k] * b[k][j];
+            }
+        }
+    }
+    out
+}
+
+// (H (x) I) K (H (x) I) per operator, H on the high `t` bit (q0). H is real and
+// self-inverse, so the conjugated channel equals the original sandwiched in H.
+fn h_conjugated_on_q0(kraus: &[[[Complex64; 4]; 4]]) -> Vec<[[Complex64; 4]; 4]> {
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let mut hi = [[c(0.0, 0.0); 4]; 4];
+    for (t, row) in hi.iter_mut().enumerate() {
+        for (tp, entry) in row.iter_mut().enumerate() {
+            if t & 1 == tp & 1 {
+                let sign = if t & 2 != 0 && tp & 2 != 0 { -h } else { h };
+                *entry = c(sign, 0.0);
+            }
+        }
+    }
+    kraus
+        .iter()
+        .map(|k| mat4_mul(&mat4_mul(&hi, k), &hi))
+        .collect()
+}
+
+fn apply_h(backend: &mut DensityMatrixBackend, q: usize) {
+    backend
+        .apply(&prism_q::circuit::Instruction::Gate {
+            gate: Gate::H,
+            targets: [q].into_iter().collect(),
+        })
+        .unwrap();
+}
+
+#[test]
+fn dm_diagonal_2q_kraus_matches_the_conjugated_dense_route() {
+    // An all-diagonal set takes the one-multiply contiguous pass; conjugating
+    // every operator by H on q0 fills the superoperator and forces the dense
+    // sweep, and sum_k K rho K^dag = H (sum_k K' (H rho H) K'^dag) H relates
+    // the two routes exactly. The distinct-phase set has pairwise-distinct
+    // off-diagonal slot factors, so a swapped or transposed bit in the
+    // diagonal key changes some expectation; the zz pair alone is symmetric
+    // under a q0/q1 key swap. The conjugated sets carry order-p off-diagonals,
+    // pinning that near-diagonal sets stay on the dense sweep.
+    let one = c(1.0, 0.0);
+    let phase = |t: f64| c(t.cos(), t.sin());
+    for (n, pairs) in [
+        (3usize, &[(0usize, 1usize), (1, 2)][..]),
+        (5, &[(2, 3)][..]),
+        (PAR_N, &[(0, PAR_N - 1), (2, 5)][..]),
+    ] {
+        let circuit = circuits::random_circuit(n, 4, SEED);
+        let masks = all_pauli_masks(n);
+        for &(q0, q1) in pairs {
+            for p in [0.02f64, 0.3] {
+                let sets = [
+                    vec![
+                        diag_2q_kraus((1.0 - p).sqrt(), [one, one, one, one]),
+                        diag_2q_kraus(p.sqrt(), [one, -one, -one, one]),
+                    ],
+                    vec![
+                        diag_2q_kraus((1.0 - p).sqrt(), [one, one, one, one]),
+                        diag_2q_kraus(p.sqrt(), [phase(0.0), phase(0.1), phase(0.4), phase(1.0)]),
+                    ],
+                ];
+                for (which, set) in sets.iter().enumerate() {
+                    let mut direct = run_dm(&circuit);
+                    direct.apply_2q_kraus(q0, q1, set);
+
+                    let mut conjugated = run_dm(&circuit);
+                    apply_h(&mut conjugated, q0);
+                    conjugated.apply_2q_kraus(q0, q1, &h_conjugated_on_q0(set));
+                    apply_h(&mut conjugated, q0);
+
+                    let got = direct.expectations_pauli(&masks);
+                    let want = conjugated.expectations_pauli(&masks);
+                    for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                        assert!(
+                            (a - b).abs() < DM_EPS,
+                            "n={n} pair=({q0},{q1}) p={p} set {which} pauli {:?}: \
+                             diagonal {a}, dense {b}",
+                            masks[k]
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "distinct targets")]
+fn dm_diagonal_2q_kraus_on_a_repeated_qubit_panics() {
+    // The diagonal dispatch stays behind block_layout's assert, so a repeated
+    // target panics rather than scaling the wrong entries.
+    let one = c(1.0, 0.0);
+    let set = vec![
+        diag_2q_kraus((1.0f64 - 0.02).sqrt(), [one, one, one, one]),
+        diag_2q_kraus(0.02f64.sqrt(), [one, -one, -one, one]),
+    ];
+    let mut backend = DensityMatrixBackend::new(SEED);
+    backend.init(4, 0).unwrap();
+    backend.apply_2q_kraus(2, 2, &set);
+}
+
 #[test]
 fn dm_measure_basis_state_deterministic() {
     let mut c = Circuit::new(2, 2);
@@ -1344,4 +1463,67 @@ fn fused_gate_and_channel_matches_sequential_application() {
             );
         }
     }
+}
+
+// The batched bra pass must preserve list order: CX(0,1) and CX(1,2) do not
+// commute, and the rotation prep keeps every pair state generic so a reorder
+// changes the distribution. Eight qubits put the doubled register above the
+// parallel threshold with four cache tiles, so the tiled parallel arm runs a
+// real multi-tile split.
+#[test]
+fn dm_multi_2q_batched_bra_preserves_gate_order() {
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::Multi2qData;
+
+    let n = 8;
+    let cx = Gate::Cx.matrix_4x4();
+    let swap = Gate::Swap.matrix_4x4();
+    let gates = vec![
+        (0usize, 1usize, cx),
+        (1, 2, cx),
+        (0, 1, swap),
+        (2, 3, cx),
+        (1, 2, cx),
+    ];
+
+    let mut prep = Circuit::new(n, 0);
+    for q in 0..n {
+        prep.add_gate(Gate::Rx(0.3 + 0.2 * q as f64), &[q]);
+        prep.add_gate(Gate::Ry(0.1 + 0.15 * q as f64), &[q]);
+    }
+
+    let mut batched = DensityMatrixBackend::new(SEED);
+    batched.init(n, 0).unwrap();
+    for inst in &prep.instructions {
+        batched.apply(inst).unwrap();
+    }
+    batched
+        .apply(&Instruction::Gate {
+            gate: Gate::Multi2q(Box::new(Multi2qData {
+                gates: gates.clone(),
+            })),
+            targets: prism_q::circuit::smallvec![0, 1, 2, 3],
+        })
+        .unwrap();
+
+    let mut single = DensityMatrixBackend::new(SEED);
+    single.init(n, 0).unwrap();
+    for inst in &prep.instructions {
+        single.apply(inst).unwrap();
+    }
+    for &(q0, q1, mat) in &gates {
+        single
+            .apply(&Instruction::Gate {
+                gate: Gate::Fused2q(Box::new(mat)),
+                targets: prism_q::circuit::smallvec![q0, q1],
+            })
+            .unwrap();
+    }
+
+    assert_probs_close(
+        &batched.probabilities().unwrap(),
+        &single.probabilities().unwrap(),
+        DM_EPS,
+        "batched bra Multi2q vs per-constituent",
+    );
 }

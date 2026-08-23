@@ -1843,3 +1843,14 @@ mod gpu_scaffold {
         assert!(gpu_probs[2].abs() < 1e-12);
     }
 }
+
+// The density-matrix bra half batches only under this predicate, so the
+// boundary pins max_target_for_tile(MULTI_GATE_L2_TILE): moving the tile
+// constant moves the boundary and fails here.
+#[test]
+fn multi_2q_single_tier_boundary_pins_the_l2_tile() {
+    let mat = crate::gates::Gate::Cx.matrix_4x4();
+    assert!(kernels::multi_2q_single_tier(&[(12, 13, mat)]));
+    assert!(!kernels::multi_2q_single_tier(&[(12, 14, mat)]));
+    assert!(!kernels::multi_2q_single_tier(&[(0, 1, mat), (0, 14, mat)]));
+}

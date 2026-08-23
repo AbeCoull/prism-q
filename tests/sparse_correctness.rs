@@ -1,5 +1,5 @@
 //! Cross-backend correctness for `SparseBackend` against the statevector
-//! reference and the unfused apply loop, across eight circuit families at
+//! reference and the unfused apply loop, across nine circuit families at
 //! sizes up to 12q.
 
 mod common;
@@ -125,4 +125,40 @@ fn sparse_cz_chain_12q_fused() {
         "cz_chain 12q d5 fused",
         &circuits::cz_chain_circuit(12, 5, SEED),
     );
+}
+
+// ===== monomial fused 4x4 =====
+
+// Interference layers after the fused block make the final probabilities
+// sensitive to every monomial phase, not just the permutation.
+fn monomial_rich_circuit(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(prism_q::gates::Gate::H, &[q]);
+    }
+    c.add_barrier(&(0..n).collect::<Vec<_>>());
+    for pair in 0..(n / 2) {
+        let a = 2 * pair;
+        let b = a + 1;
+        c.add_gate(prism_q::gates::Gate::S, &[a]);
+        c.add_gate(prism_q::gates::Gate::Cx, &[a, b]);
+        c.add_gate(prism_q::gates::Gate::Z, &[b]);
+        c.add_gate(prism_q::gates::Gate::X, &[a]);
+        c.add_gate(prism_q::gates::Gate::Cx, &[b, a]);
+    }
+    c.add_barrier(&(0..n).collect::<Vec<_>>());
+    for q in 0..n {
+        c.add_gate(prism_q::gates::Gate::H, &[q]);
+    }
+    c
+}
+
+#[test]
+fn sparse_monomial_2q_12q_sv() {
+    check_sv_cross("monomial 2q 12q sv", &monomial_rich_circuit(12));
+}
+
+#[test]
+fn sparse_monomial_2q_12q_fused() {
+    check_fused_vs_unfused("monomial 2q 12q fused", &monomial_rich_circuit(12));
 }

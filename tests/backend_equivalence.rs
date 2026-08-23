@@ -1333,3 +1333,37 @@ fn native_marginals_match_the_dense_route() {
         }
     }
 }
+
+// Explicit fused payloads pin the kernel below the fusion thresholds and in
+// both target orders: iSWAP is a scaled permutation, the CZ compound is
+// diagonal, the XX+YY quarter turn is dense and must stay on the general path,
+// and the phased 3-cycle is asymmetric so a transposed extraction changes the
+// distribution.
+#[test]
+fn sparse_explicit_fused_2q_shapes_sv() {
+    let o = Complex64::new(0.0, 0.0);
+    let l = Complex64::new(1.0, 0.0);
+    let i = Complex64::new(0.0, 1.0);
+    let iswap = [[l, o, o, o], [o, o, i, o], [o, i, o, o], [o, o, o, l]];
+    let cz_s = [[l, o, o, o], [o, i, o, o], [o, o, l, o], [o, o, o, -i]];
+    let h = std::f64::consts::FRAC_1_SQRT_2;
+    let c = Complex64::new(h, 0.0);
+    let ic = Complex64::new(0.0, h);
+    let xxyy = [[l, o, o, o], [o, c, ic, o], [o, ic, c, o], [o, o, o, l]];
+    let cycle3 = [[o, o, o, -i], [o, -l, o, o], [l, o, o, o], [o, o, i, o]];
+
+    let mut circuit = Circuit::new(4, 0);
+    for q in 0..4 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_gate(Gate::Fused2q(Box::new(iswap)), &[0, 1]);
+    circuit.add_gate(Gate::Fused2q(Box::new(iswap)), &[3, 2]);
+    circuit.add_gate(Gate::Fused2q(Box::new(cz_s)), &[1, 2]);
+    circuit.add_gate(Gate::Fused2q(Box::new(xxyy)), &[0, 3]);
+    circuit.add_gate(Gate::Fused2q(Box::new(cycle3)), &[1, 3]);
+    for q in 0..4 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    let mut backend = SparseBackend::new(SEED);
+    common::assert_backend_matches_sv(&mut backend, &circuit, EPS, "explicit fused 2q shapes");
+}

@@ -57,7 +57,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::simd;
-use crate::backend::statevector::{StatevectorBackend, insert_zero_bit};
+use crate::backend::statevector::{StatevectorBackend, insert_zero_bit, kernels};
 use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
@@ -343,9 +343,10 @@ impl DensityMatrixBackend {
     /// order only while the whole list sits in one tier. Fusion guarantees that
     /// against the circuit's own qubit indices, and the `+n` shift onto the ket
     /// register moves gates across the tier bounds, so the ket half applies its
-    /// constituents one at a time. The bra half keeps the circuit's indices and
-    /// so is not at risk; it is applied that way only for symmetry, and batching
-    /// it is the open win recorded against this backend. `MultiFused` entries
+    /// constituents one at a time. The bra half keeps the circuit's indices, so
+    /// it batches through the tiled pass whenever
+    /// [`kernels::multi_2q_single_tier`] holds, and falls back to
+    /// per-constituent application otherwise. `MultiFused` entries
     /// are one per qubit and commute, so its list is order independent; it takes
     /// the same treatment because the one-qubit sandwich is cheaper than the
     /// tiled pass here.
@@ -367,8 +368,17 @@ impl DensityMatrixBackend {
                 for &(q0, q1, ref mat) in data.gates.iter() {
                     self.sv.apply_fused_2q(q0 + n, q1 + n, mat);
                 }
-                for &(q0, q1, ref mat) in data.gates.iter() {
-                    self.sv.apply_fused_2q(q0, q1, &conjugate_4x4(mat));
+                if kernels::multi_2q_single_tier(&data.gates) {
+                    let conjugated: Vec<(usize, usize, [[Complex64; 4]; 4])> = data
+                        .gates
+                        .iter()
+                        .map(|&(q0, q1, ref mat)| (q0, q1, conjugate_4x4(mat)))
+                        .collect();
+                    self.sv.apply_multi_2q(&conjugated);
+                } else {
+                    for &(q0, q1, ref mat) in data.gates.iter() {
+                        self.sv.apply_fused_2q(q0, q1, &conjugate_4x4(mat));
+                    }
                 }
                 return Ok(());
             }

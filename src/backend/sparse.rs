@@ -326,7 +326,69 @@ impl SparseBackend {
         }
     }
 
+    /// Exact structural test for a monomial 4x4: one nonzero per source basis
+    /// state and per destination. Structural zeros only, no tolerance, so a
+    /// matrix product carrying float dust off its pattern stays on the general
+    /// path.
+    fn monomial_4x4(mat: &[[Complex64; 4]; 4]) -> Option<([usize; 4], [Complex64; 4])> {
+        let zero = Complex64::new(0.0, 0.0);
+        let mut dest = [usize::MAX; 4];
+        let mut scale = [zero; 4];
+        let mut used = 0u8;
+        for (col, mat_row) in mat.iter().enumerate() {
+            for (row, &coeff) in mat_row.iter().enumerate() {
+                if coeff != zero {
+                    if dest[row] != usize::MAX {
+                        return None;
+                    }
+                    dest[row] = col;
+                    scale[row] = coeff;
+                }
+            }
+        }
+        for &d in &dest {
+            if d == usize::MAX || used & (1 << d) != 0 {
+                return None;
+            }
+            used |= 1 << d;
+        }
+        Some((dest, scale))
+    }
+
+    /// A monomial 4x4 maps each occupied basis state to exactly one
+    /// destination, so no cancellation can arise, the invariant `apply_cx`
+    /// states. A sub-unit scale (a normalized Kraus branch routed through a
+    /// fused payload) can still shrink amplitudes below epsilon, so only that
+    /// case pays the prune pass, as `apply_diagonal_1q` does.
+    fn apply_monomial_2q(&mut self, q0: usize, q1: usize, dest: [usize; 4], scale: [Complex64; 4]) {
+        if dest == [0, 1, 2, 3] {
+            for (idx, amp) in self.state.iter_mut() {
+                let row = ((*idx >> q0) & 1) * 2 + ((*idx >> q1) & 1);
+                *amp *= scale[row];
+            }
+        } else {
+            let mask0 = 1usize << q0;
+            let mask1 = 1usize << q1;
+            self.swap_buf.clear();
+            self.swap_buf.reserve(self.state.len());
+            self.swap_buf.extend(self.state.drain().map(|(idx, amp)| {
+                let row = ((idx >> q0) & 1) * 2 + ((idx >> q1) & 1);
+                let col = dest[row];
+                let new_idx = idx & !(mask0 | mask1) | (((col >> 1) & 1) << q0) | ((col & 1) << q1);
+                (new_idx, amp * scale[row])
+            }));
+            std::mem::swap(&mut self.state, &mut self.swap_buf);
+        }
+        if scale.iter().any(|c| c.norm_sqr() < 1.0 - 1e-12) {
+            self.prune();
+        }
+    }
+
     fn apply_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) -> Result<()> {
+        if let Some((dest, scale)) = Self::monomial_4x4(mat) {
+            self.apply_monomial_2q(q0, q1, dest, scale);
+            return Ok(());
+        }
         self.check_entry_growth(4)?;
         let mask0 = 1usize << q0;
         let mask1 = 1usize << q1;

@@ -32,7 +32,6 @@
 - [QEC Program Execution](./architecture/qec-programs.md)
 - [Threading, SIMD, and Memory Layout](./architecture/threading-simd.md)
 - [Error Model and Public API](./architecture/api-surface.md)
-- [Performance Decision Log](./architecture/performance-decisions.md)
 
 # Reference
 

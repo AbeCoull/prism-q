@@ -481,19 +481,45 @@ pub(super) fn build_statevector(accel: &Accel, seed: u64) -> StatevectorBackend 
     }
 }
 
-fn build_stabilizer(accel: &Accel, seed: u64) -> StabilizerBackend {
+/// True when no instruction can force destabilizer materialization: gates,
+/// satisfied conditionals, and barriers only. Measurements, resets, and
+/// guarded regions (whose bodies can hold either) all disqualify.
+fn stabilizer_can_run_lazy(circuit: &Circuit) -> bool {
+    circuit.instructions.iter().all(|inst| {
+        matches!(
+            inst,
+            Instruction::Gate { .. }
+                | Instruction::Conditional { .. }
+                | Instruction::Barrier { .. }
+        )
+    })
+}
+
+fn build_stabilizer(accel: &Accel, lazy: bool, seed: u64) -> StabilizerBackend {
+    // Lazy destabilizers: gates touch half the tableau. The plan sets `lazy`
+    // only for circuits that never measure or reset, so the Gaussian
+    // elimination that materialization costs is never paid; on a measuring
+    // circuit the reconstruction can exceed the gate savings (the GHZ
+    // measure-all shape loses outright, since its SGI gate cost is already
+    // near zero). GPU init overrides the flag; the soft-fallback host path
+    // keeps it.
+    let stab = if lazy {
+        StabilizerBackend::new_lazy(seed)
+    } else {
+        StabilizerBackend::new(seed)
+    };
     match accel {
-        Accel::Cpu => StabilizerBackend::new(seed),
+        Accel::Cpu => stab,
         #[cfg(feature = "gpu")]
         Accel::Gpu {
             context,
             soft: true,
-        } => StabilizerBackend::new(seed).with_gpu_auto(context.clone()),
+        } => stab.with_gpu_auto(context.clone()),
         #[cfg(feature = "gpu")]
         Accel::Gpu {
             context,
             soft: false,
-        } => StabilizerBackend::new(seed).with_gpu(context.clone()),
+        } => stab.with_gpu(context.clone()),
     }
 }
 
@@ -513,6 +539,7 @@ pub(super) enum BackendPlan {
     },
     Stabilizer {
         accel: Accel,
+        lazy: bool,
     },
     Statevector {
         accel: Accel,
@@ -551,7 +578,9 @@ impl BackendPlan {
                 Box::new(crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed))
             }
             BackendPlan::Mps { max_bond_dim } => Box::new(MpsBackend::new(seed, *max_bond_dim)),
-            BackendPlan::Stabilizer { accel } => Box::new(build_stabilizer(accel, seed)),
+            BackendPlan::Stabilizer { accel, lazy } => {
+                Box::new(build_stabilizer(accel, *lazy, seed))
+            }
             BackendPlan::Statevector { accel } => Box::new(build_statevector(accel, seed)),
             BackendPlan::DensityMatrix => Box::new(DensityMatrixBackend::new(seed)),
             #[cfg(feature = "distributed")]
@@ -563,7 +592,7 @@ impl BackendPlan {
 
     pub(super) fn is_gpu(&self) -> bool {
         match self {
-            BackendPlan::Stabilizer { accel } | BackendPlan::Statevector { accel } => {
+            BackendPlan::Stabilizer { accel, .. } | BackendPlan::Statevector { accel } => {
                 !matches!(accel, Accel::Cpu)
             }
             _ => false,
@@ -602,7 +631,7 @@ impl BackendPlan {
     #[cfg(test)]
     pub(super) fn accel(&self) -> &Accel {
         match self {
-            BackendPlan::Stabilizer { accel } | BackendPlan::Statevector { accel } => accel,
+            BackendPlan::Stabilizer { accel, .. } | BackendPlan::Statevector { accel } => accel,
             _ => &Accel::Cpu,
         }
     }
@@ -677,6 +706,7 @@ pub(super) fn plan_for_family(
         },
         Family::Stabilizer => BackendPlan::Stabilizer {
             accel: accel_for(kind, Family::Stabilizer, num_qubits),
+            lazy: false,
         },
         Family::Statevector => BackendPlan::Statevector {
             accel: accel_for(kind, Family::Statevector, num_qubits),
@@ -735,7 +765,11 @@ pub(super) fn resolve(
             return ExecutionPlan::Backend(BackendPlan::Distributed(context.clone()));
         }
     };
-    ExecutionPlan::Backend(plan_for_family(kind, family, circuit.num_qubits))
+    let mut plan = plan_for_family(kind, family, circuit.num_qubits);
+    if let BackendPlan::Stabilizer { lazy, .. } = &mut plan {
+        *lazy = stabilizer_can_run_lazy(circuit);
+    }
+    ExecutionPlan::Backend(plan)
 }
 
 /// Backend plan for a run that starts from a caller-supplied state.

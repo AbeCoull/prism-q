@@ -38,3 +38,34 @@ revisit. Newest entries first.
 - **Revisit trigger**: a state layout with split real and imaginary arrays, or
   hardware with a complex FMA instruction, changes the issue ceiling that bounds
   reorganization candidates.
+
+### 2026-08-22 Split real and imaginary state arrays stay out of the crate
+
+- **Context**: the 2026-08-22 entry names a split re/im layout as the revisit trigger
+  on the interleaved-complex issue ceiling. A four-item optimization campaign left the
+  dense two-qubit Kraus sweep as the one clearly compute-bound kernel in the corpus
+  (22 to 24% of FMA peak on the `density_matrix/noisy_channels/kraus_2q_dense` rows);
+  the campaign's other kernels are bit-plane, hash, traversal, or bandwidth bound and
+  gain nothing from an arithmetic-issue change.
+- **Options considered**: migrate the crate's state representation to split re/im
+  arrays; convert per tile inside compute-bound kernels only; keep the interleaved
+  layout.
+- **Decision**: keep the interleaved layout. The measured issue-rate gain is real and
+  large, but the corpus rows that could use it are bandwidth bound at their benched
+  sizes, so a whole-crate migration (every backend kernel, the SIMD helpers, GPU
+  transfer paths, and the Python boundary) buys the gap to the memory floor on one
+  kernel family and noise elsewhere.
+- **Measurement**: a single-thread probe applied the same dense 16x16 block
+  superoperator to one million contiguous 16-amplitude blocks in both layouts on the
+  i7-6700K reference host. Interleaved `Complex64`: 9.6 Gflop/s, 15% of the 64
+  Gflop/s single-core FMA peak. Split re/im with direct AVX2 FMA: 52.9 Gflop/s, a
+  5.5x issue-rate change with results agreeing to 7e-16. The split figure sits at the
+  single-core DRAM bandwidth limit for the 256 MB working set, so at benched sizes
+  the layout moves the kernel from issue bound to bandwidth bound and the row-level
+  gain is the remaining gap to the memory floor, roughly 35 to 40% on the dense
+  Kraus rows, not 5.5x. The full ratio is reachable only for cache-resident states.
+- **Revisit trigger**: a workload class dominated by compute-bound kernels on
+  cache-resident states (density matrices at 10 qubits and below under high shot
+  counts, or repeated small-register sweeps), or a measured per-tile conversion
+  variant whose gain survives the conversion cost, or hardware with a complex FMA
+  instruction.

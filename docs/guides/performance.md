@@ -19,8 +19,7 @@ The levers are ordered, and lever 3 comes with a prior question: can the arithme
 removed rather than issued faster? A kernel whose operations an algebraic identity or an
 operator structure deletes is bounded by its memory floor; vectorizing what remains is
 bounded by the complex-arithmetic issue ceiling, near 23% of FMA peak in the interleaved
-layout. The measured case for that ordering is in the
-[Performance Decision Log](../architecture/performance-decisions.md).
+layout.
 
 ## Threading
 

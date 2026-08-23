@@ -1464,3 +1464,66 @@ fn fused_gate_and_channel_matches_sequential_application() {
         }
     }
 }
+
+// The batched bra pass must preserve list order: CX(0,1) and CX(1,2) do not
+// commute, and the rotation prep keeps every pair state generic so a reorder
+// changes the distribution. Eight qubits put the doubled register above the
+// parallel threshold with four cache tiles, so the tiled parallel arm runs a
+// real multi-tile split.
+#[test]
+fn dm_multi_2q_batched_bra_preserves_gate_order() {
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::Multi2qData;
+
+    let n = 8;
+    let cx = Gate::Cx.matrix_4x4();
+    let swap = Gate::Swap.matrix_4x4();
+    let gates = vec![
+        (0usize, 1usize, cx),
+        (1, 2, cx),
+        (0, 1, swap),
+        (2, 3, cx),
+        (1, 2, cx),
+    ];
+
+    let mut prep = Circuit::new(n, 0);
+    for q in 0..n {
+        prep.add_gate(Gate::Rx(0.3 + 0.2 * q as f64), &[q]);
+        prep.add_gate(Gate::Ry(0.1 + 0.15 * q as f64), &[q]);
+    }
+
+    let mut batched = DensityMatrixBackend::new(SEED);
+    batched.init(n, 0).unwrap();
+    for inst in &prep.instructions {
+        batched.apply(inst).unwrap();
+    }
+    batched
+        .apply(&Instruction::Gate {
+            gate: Gate::Multi2q(Box::new(Multi2qData {
+                gates: gates.clone(),
+            })),
+            targets: prism_q::circuit::smallvec![0, 1, 2, 3],
+        })
+        .unwrap();
+
+    let mut single = DensityMatrixBackend::new(SEED);
+    single.init(n, 0).unwrap();
+    for inst in &prep.instructions {
+        single.apply(inst).unwrap();
+    }
+    for &(q0, q1, mat) in &gates {
+        single
+            .apply(&Instruction::Gate {
+                gate: Gate::Fused2q(Box::new(mat)),
+                targets: prism_q::circuit::smallvec![q0, q1],
+            })
+            .unwrap();
+    }
+
+    assert_probs_close(
+        &batched.probabilities().unwrap(),
+        &single.probabilities().unwrap(),
+        DM_EPS,
+        "batched bra Multi2q vs per-constituent",
+    );
+}

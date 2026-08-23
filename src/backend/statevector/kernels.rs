@@ -40,6 +40,17 @@ const MULTI_GATE_L2_TILE: usize = 16_384;
 const MULTI_GATE_L3_TILE: usize = 131_072;
 const MULTI_GATE_MAX_L2_TARGET: usize = max_target_for_tile(MULTI_GATE_L2_TILE);
 const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
+
+/// True when every gate's high target sits in the L2 tile, so the tiled pass
+/// runs the whole list as one tier and preserves application order. Callers
+/// that need order beyond one tier (the density-matrix bra half) batch only
+/// under this predicate and apply per constituent otherwise.
+pub(crate) fn multi_2q_single_tier(gates: &[(usize, usize, [[Complex64; 4]; 4])]) -> bool {
+    gates
+        .iter()
+        .all(|&(q0, q1, _)| q0.max(q1) <= MULTI_GATE_MAX_L2_TARGET)
+}
+
 /// Targets folded into one shared high-target traversal. `lanes * tile_len` is
 /// fixed at the L2 budget, so each lane's run shrinks as `2^-k` while the
 /// stream count grows; past three the tiles are too short to prefetch.
@@ -3380,7 +3391,7 @@ impl StatevectorBackend {
     /// cache-resident. `PreparedGate2q::apply_full` works on sub-slices because it
     /// uses `1 << (num_qubits - 2)` for iteration, relative to slice length.
     #[inline(always)]
-    pub(super) fn apply_multi_2q(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
+    pub(crate) fn apply_multi_2q(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
         if gates.is_empty() {
             return;
         }

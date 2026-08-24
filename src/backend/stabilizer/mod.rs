@@ -574,7 +574,12 @@ impl StabilizerBackend {
             return;
         }
         let sgi_live = self.sgi_enabled();
-        self.materialize_destabilizers();
+        kernels::rowops::materialize_destabilizers(
+            &mut self.xz,
+            &mut self.phase,
+            self.n,
+            self.num_words,
+        );
         self.lazy_destab = false;
         self.gate_row_start = 0;
         if sgi_live {
@@ -587,144 +592,6 @@ impl StabilizerBackend {
         // heavy. Rebuilding here would re-arm the guard over an index that the
         // dense paths do not maintain, and a later bulk entry would then run
         // SGI against stale supports.
-    }
-
-    /// Rebuild rows 0..n as unit destabilizers via Gaussian elimination and
-    /// replace the stabilizer half with the reduced basis they pair with.
-    /// Row operations preserve the stabilizer group and its phases, so the
-    /// state is unchanged; the write-back is what makes destabilizer i
-    /// anticommute with stabilizer i and commute with every other generator,
-    /// which measurement relies on.
-    fn materialize_destabilizers(&mut self) {
-        let n = self.n;
-        if n == 0 {
-            return;
-        }
-        let nw = self.num_words;
-        let stride = self.stride();
-
-        for i in 0..n {
-            let base = i * stride;
-            for w in 0..stride {
-                self.xz[base + w] = 0;
-            }
-            self.phase[i] = false;
-        }
-
-        let mut stab_copy: Vec<u64> = self.xz[n * stride..2 * n * stride].to_vec();
-        let mut stab_phase: Vec<bool> = self.phase[n..2 * n].to_vec();
-        let mut pivot_row: Vec<u64> = vec![0u64; stride];
-
-        for col in 0..n {
-            let mut pivot = None;
-            for row in col..n {
-                let word = col / 64;
-                let bit = col % 64;
-                if stab_copy[row * stride + word] & (1u64 << bit) != 0 {
-                    pivot = Some(row);
-                    break;
-                }
-            }
-
-            if pivot.is_none() {
-                for row in col..n {
-                    let word = col / 64;
-                    let bit = col % 64;
-                    if stab_copy[row * stride + nw + word] & (1u64 << bit) != 0 {
-                        pivot = Some(row);
-                        break;
-                    }
-                }
-
-                if let Some(p) = pivot {
-                    if p != col {
-                        let col_off = col * stride;
-                        let p_off = p * stride;
-                        for w in 0..stride {
-                            stab_copy.swap(col_off + w, p_off + w);
-                        }
-                        stab_phase.swap(col, p);
-                    }
-
-                    let word = col / 64;
-                    let bit = col % 64;
-                    let bit_mask = 1u64 << bit;
-                    pivot_row.copy_from_slice(&stab_copy[col * stride..(col + 1) * stride]);
-                    let sp = stab_phase[col];
-
-                    for row in 0..n {
-                        if row == col {
-                            continue;
-                        }
-                        if stab_copy[row * stride + nw + word] & bit_mask != 0 {
-                            let dst = &mut stab_copy[row * stride..(row + 1) * stride];
-                            let initial =
-                                if sp { 2u64 } else { 0 } + if stab_phase[row] { 2u64 } else { 0 };
-                            let (dx, dz) = dst.split_at_mut(nw);
-                            let sum = rowmul_words(
-                                dx,
-                                &mut dz[..nw],
-                                &pivot_row[..nw],
-                                &pivot_row[nw..2 * nw],
-                                initial,
-                            );
-                            stab_phase[row] = (sum & 3) >= 2;
-                        }
-                    }
-
-                    self.xz[col * stride + word] |= bit_mask;
-                    self.phase[col] = false;
-                } else {
-                    self.xz[col * stride + col / 64] |= 1u64 << (col % 64);
-                    self.phase[col] = false;
-                }
-                continue;
-            }
-
-            let p = pivot.unwrap();
-            if p != col {
-                let col_off = col * stride;
-                let p_off = p * stride;
-                for w in 0..stride {
-                    stab_copy.swap(col_off + w, p_off + w);
-                }
-                stab_phase.swap(col, p);
-            }
-
-            let word = col / 64;
-            let bit = col % 64;
-            let bit_mask = 1u64 << bit;
-            pivot_row.copy_from_slice(&stab_copy[col * stride..(col + 1) * stride]);
-            let sp = stab_phase[col];
-
-            for row in 0..n {
-                if row == col {
-                    continue;
-                }
-                if stab_copy[row * stride + word] & bit_mask != 0 {
-                    let dst = &mut stab_copy[row * stride..(row + 1) * stride];
-                    let initial =
-                        if sp { 2u64 } else { 0 } + if stab_phase[row] { 2u64 } else { 0 };
-                    let (dx, dz) = dst.split_at_mut(nw);
-                    let sum = rowmul_words(
-                        dx,
-                        &mut dz[..nw],
-                        &pivot_row[..nw],
-                        &pivot_row[nw..2 * nw],
-                        initial,
-                    );
-                    stab_phase[row] = (sum & 3) >= 2;
-                }
-            }
-
-            self.xz[col * stride + nw + word] |= bit_mask;
-            self.phase[col] = false;
-        }
-
-        self.xz[n * stride..2 * n * stride].copy_from_slice(&stab_copy);
-        for (i, p) in stab_phase.into_iter().enumerate() {
-            self.phase[n + i] = p;
-        }
     }
 
     pub fn raw_tableau(&self) -> (&[u64], &[bool]) {

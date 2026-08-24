@@ -629,12 +629,19 @@ impl FactoredStabilizerBackend {
     }
 
     fn try_split(&mut self, sub_idx: usize) -> bool {
-        let sub = self.subs[sub_idx].as_ref().unwrap();
+        let sub = self.subs[sub_idx].as_mut().unwrap();
         let k = sub.n;
         if k <= 1 {
             return false;
         }
 
+        // Stored generators can hide a product structure ({Z0, Z0Z1} spans
+        // both qubits yet generates {Z0, Z1}), so reduce first: afterward
+        // stabilizer row k+q holds the pivot at qubit q and the unit
+        // destabilizer at row q is its partner.
+        rowops::materialize_destabilizers(&mut sub.xz, &mut sub.phase, k, sub.num_words);
+
+        let sub = self.subs[sub_idx].as_ref().unwrap();
         let mut parent: Vec<usize> = (0..k).collect();
         let mut uf_rank = vec![0u8; k];
         let stride = sub.stride();
@@ -657,27 +664,16 @@ impl FactoredStabilizerBackend {
         }
 
         let mut num_components = 0usize;
-        let mut component_root = [usize::MAX; 64];
+        let mut comp_of_root = vec![usize::MAX; k];
         let mut qubit_component = vec![0usize; k];
         #[allow(clippy::needless_range_loop)]
         for q in 0..k {
             let r = uf_find(&mut parent, q);
-            let mut found = false;
-            for c in 0..num_components {
-                if component_root[c] == r {
-                    qubit_component[q] = c;
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                if num_components >= 64 {
-                    return false;
-                }
-                component_root[num_components] = r;
-                qubit_component[q] = num_components;
+            if comp_of_root[r] == usize::MAX {
+                comp_of_root[r] = num_components;
                 num_components += 1;
             }
+            qubit_component[q] = comp_of_root[r];
         }
 
         if num_components <= 1 {
@@ -705,94 +701,12 @@ impl FactoredStabilizerBackend {
                 cqubits.push(sub.qubits[lq]);
             }
 
-            let mut destab_idx = 0usize;
-            let mut stab_idx = 0usize;
-
-            for r in 0..k {
-                let base = r * sub.stride();
-                let mut has_support = false;
-                for &lq in local_qs {
-                    let w = lq / 64;
-                    let bit = 1u64 << (lq % 64);
-                    if (sub.xz[base + w] & bit) != 0
-                        || (sub.xz[base + sub.num_words + w] & bit) != 0
-                    {
-                        has_support = true;
-                        break;
-                    }
-                }
-                if !has_support {
-                    continue;
-                }
-                if destab_idx >= cn {
-                    continue;
-                }
-                let dst_row = destab_idx;
-                for (new_local, &old_local) in local_qs.iter().enumerate() {
-                    let ow = old_local / 64;
-                    let ob = old_local % 64;
-                    let nww = new_local / 64;
-                    let nb = new_local % 64;
-                    if sub.xz[base + ow] & (1u64 << ob) != 0 {
-                        cxz[dst_row * cstride + nww] |= 1u64 << nb;
-                    }
-                    if sub.xz[base + sub.num_words + ow] & (1u64 << ob) != 0 {
-                        cxz[dst_row * cstride + cnw + nww] |= 1u64 << nb;
-                    }
-                }
-                cphase[dst_row] = sub.phase[r];
-                destab_idx += 1;
-            }
-
-            for r in k..2 * k {
-                let base = r * sub.stride();
-                let mut has_support = false;
-                for &lq in local_qs {
-                    let w = lq / 64;
-                    let bit = 1u64 << (lq % 64);
-                    if (sub.xz[base + w] & bit) != 0
-                        || (sub.xz[base + sub.num_words + w] & bit) != 0
-                    {
-                        has_support = true;
-                        break;
-                    }
-                }
-                if !has_support {
-                    continue;
-                }
-                if stab_idx >= cn {
-                    continue;
-                }
-                let dst_row = cn + stab_idx;
-                for (new_local, &old_local) in local_qs.iter().enumerate() {
-                    let ow = old_local / 64;
-                    let ob = old_local % 64;
-                    let nww = new_local / 64;
-                    let nb = new_local % 64;
-                    if sub.xz[base + ow] & (1u64 << ob) != 0 {
-                        cxz[dst_row * cstride + nww] |= 1u64 << nb;
-                    }
-                    if sub.xz[base + sub.num_words + ow] & (1u64 << ob) != 0 {
-                        cxz[dst_row * cstride + cnw + nww] |= 1u64 << nb;
-                    }
-                }
-                cphase[dst_row] = sub.phase[r];
-                stab_idx += 1;
-            }
-
-            while destab_idx < cn {
-                let q = destab_idx;
-                let w = q / 64;
-                let b = q % 64;
-                cxz[destab_idx * cstride + w] |= 1u64 << b;
-                destab_idx += 1;
-            }
-            while stab_idx < cn {
-                let q = stab_idx;
-                let w = q / 64;
-                let b = q % 64;
-                cxz[(cn + stab_idx) * cstride + cnw + w] |= 1u64 << b;
-                stab_idx += 1;
+            // The reduced basis ties destabilizer row lq and stabilizer row
+            // k+lq to qubit lq, so both land in lq's component and the pair
+            // moves to matching local rows ci and cn+ci.
+            for (ci, &lq) in local_qs.iter().enumerate() {
+                copy_component_row(&sub, lq, local_qs, &mut cxz, &mut cphase, cnw, ci);
+                copy_component_row(&sub, k + lq, local_qs, &mut cxz, &mut cphase, cnw, cn + ci);
             }
 
             let new_sub = SubTableau {
@@ -1030,6 +944,35 @@ fn remap_row(
             dst_xz[dst_base + dst_nw + dw] |= 1u64 << db;
         }
     }
+}
+
+/// Copy one row of a reduced parent tableau into a component tableau,
+/// remapping parent-local qubit columns to component-local columns. The row's
+/// support must lie inside `local_qs`; columns outside it are dropped.
+fn copy_component_row(
+    sub: &SubTableau,
+    src_row: usize,
+    local_qs: &[usize],
+    cxz: &mut [u64],
+    cphase: &mut [bool],
+    cnw: usize,
+    dst_row: usize,
+) {
+    let cstride = 2 * cnw;
+    let base = src_row * sub.stride();
+    for (new_local, &old_local) in local_qs.iter().enumerate() {
+        let ow = old_local / 64;
+        let ob = old_local % 64;
+        let nww = new_local / 64;
+        let nb = new_local % 64;
+        if sub.xz[base + ow] & (1u64 << ob) != 0 {
+            cxz[dst_row * cstride + nww] |= 1u64 << nb;
+        }
+        if sub.xz[base + sub.num_words + ow] & (1u64 << ob) != 0 {
+            cxz[dst_row * cstride + cnw + nww] |= 1u64 << nb;
+        }
+    }
+    cphase[dst_row] = sub.phase[src_row];
 }
 
 fn uf_find(parent: &mut [usize], x: usize) -> usize {

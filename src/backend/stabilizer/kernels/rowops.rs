@@ -292,3 +292,135 @@ pub(crate) fn zero_row(xz: &mut [u64], phase: &mut [bool], nw: usize, r: usize) 
     xz[start..start + stride].fill(0);
     phase[r] = false;
 }
+
+/// Rebuild rows 0..n as unit destabilizers via Gaussian elimination and
+/// replace the stabilizer half (rows n..2n) with the reduced basis they pair
+/// with. Row operations preserve the stabilizer group and its phases, so the
+/// state is unchanged; the write-back is what makes destabilizer i
+/// anticommute with stabilizer i and commute with every other generator,
+/// which measurement relies on. After the call, stabilizer row n+q is the
+/// unique generator with a pivot at qubit q, so each generator's support is
+/// confined to one entanglement component of the state.
+pub(crate) fn materialize_destabilizers(xz: &mut [u64], phase: &mut [bool], n: usize, nw: usize) {
+    if n == 0 {
+        return;
+    }
+    let stride = 2 * nw;
+
+    xz[..n * stride].fill(0);
+    phase[..n].fill(false);
+
+    let mut stab_copy: Vec<u64> = xz[n * stride..2 * n * stride].to_vec();
+    let mut stab_phase: Vec<bool> = phase[n..2 * n].to_vec();
+    let mut pivot_row: Vec<u64> = vec![0u64; stride];
+
+    for col in 0..n {
+        let mut pivot = None;
+        for row in col..n {
+            let word = col / 64;
+            let bit = col % 64;
+            if stab_copy[row * stride + word] & (1u64 << bit) != 0 {
+                pivot = Some(row);
+                break;
+            }
+        }
+
+        if pivot.is_none() {
+            for row in col..n {
+                let word = col / 64;
+                let bit = col % 64;
+                if stab_copy[row * stride + nw + word] & (1u64 << bit) != 0 {
+                    pivot = Some(row);
+                    break;
+                }
+            }
+
+            if let Some(p) = pivot {
+                if p != col {
+                    let col_off = col * stride;
+                    let p_off = p * stride;
+                    for w in 0..stride {
+                        stab_copy.swap(col_off + w, p_off + w);
+                    }
+                    stab_phase.swap(col, p);
+                }
+
+                let word = col / 64;
+                let bit = col % 64;
+                let bit_mask = 1u64 << bit;
+                pivot_row.copy_from_slice(&stab_copy[col * stride..(col + 1) * stride]);
+                let sp = stab_phase[col];
+
+                for row in 0..n {
+                    if row == col {
+                        continue;
+                    }
+                    if stab_copy[row * stride + nw + word] & bit_mask != 0 {
+                        let dst = &mut stab_copy[row * stride..(row + 1) * stride];
+                        let initial =
+                            if sp { 2u64 } else { 0 } + if stab_phase[row] { 2u64 } else { 0 };
+                        let (dx, dz) = dst.split_at_mut(nw);
+                        let sum = rowmul_words(
+                            dx,
+                            &mut dz[..nw],
+                            &pivot_row[..nw],
+                            &pivot_row[nw..2 * nw],
+                            initial,
+                        );
+                        stab_phase[row] = (sum & 3) >= 2;
+                    }
+                }
+
+                xz[col * stride + word] |= bit_mask;
+                phase[col] = false;
+            } else {
+                xz[col * stride + col / 64] |= 1u64 << (col % 64);
+                phase[col] = false;
+            }
+            continue;
+        }
+
+        let p = pivot.unwrap();
+        if p != col {
+            let col_off = col * stride;
+            let p_off = p * stride;
+            for w in 0..stride {
+                stab_copy.swap(col_off + w, p_off + w);
+            }
+            stab_phase.swap(col, p);
+        }
+
+        let word = col / 64;
+        let bit = col % 64;
+        let bit_mask = 1u64 << bit;
+        pivot_row.copy_from_slice(&stab_copy[col * stride..(col + 1) * stride]);
+        let sp = stab_phase[col];
+
+        for row in 0..n {
+            if row == col {
+                continue;
+            }
+            if stab_copy[row * stride + word] & bit_mask != 0 {
+                let dst = &mut stab_copy[row * stride..(row + 1) * stride];
+                let initial = if sp { 2u64 } else { 0 } + if stab_phase[row] { 2u64 } else { 0 };
+                let (dx, dz) = dst.split_at_mut(nw);
+                let sum = rowmul_words(
+                    dx,
+                    &mut dz[..nw],
+                    &pivot_row[..nw],
+                    &pivot_row[nw..2 * nw],
+                    initial,
+                );
+                stab_phase[row] = (sum & 3) >= 2;
+            }
+        }
+
+        xz[col * stride + nw + word] |= bit_mask;
+        phase[col] = false;
+    }
+
+    xz[n * stride..2 * n * stride].copy_from_slice(&stab_copy);
+    for (i, p) in stab_phase.into_iter().enumerate() {
+        phase[n + i] = p;
+    }
+}

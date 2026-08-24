@@ -237,6 +237,34 @@ fn split_after_measuring_a_merged_cluster() {
     );
 }
 
+// A collapsed GHZ chain factors into one cluster per qubit, which exceeds
+// the former 64-component ceiling in split detection.
+#[test]
+fn split_into_more_than_64_components() {
+    let n = 100;
+    let mut fact = FactoredStabilizerBackend::new(42);
+    fact.init(n, 1).unwrap();
+
+    let mut c = Circuit::new(n, 1);
+    c.add_gate(Gate::H, &[0]);
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c.add_measure(0, 0);
+
+    for inst in &c.instructions {
+        fact.apply(inst).unwrap();
+    }
+
+    let active_count = fact.subs.iter().filter(|s| s.is_some()).count();
+    assert_eq!(
+        active_count, n,
+        "a measured GHZ chain is a product state and must split per qubit, got {} active \
+         sub-tableaux",
+        active_count
+    );
+}
+
 #[test]
 fn product_state_stays_factored() {
     let mut fact = FactoredStabilizerBackend::new(42);

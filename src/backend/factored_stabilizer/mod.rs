@@ -55,6 +55,9 @@ struct SubTableau {
     xz: Vec<u64>,
     phase: Vec<bool>,
     qubits: SmallVec<[usize; 8]>,
+    /// Destabilizer rows are stale: gates sweep only the stabilizer half and
+    /// set this, and measurement materializes fresh destabilizers on demand.
+    lazy_destab: bool,
 }
 
 impl SubTableau {
@@ -73,6 +76,7 @@ impl SubTableau {
             xz,
             phase,
             qubits: SmallVec::from_elem(global_qubit, 1),
+            lazy_destab: false,
         }
     }
 
@@ -97,66 +101,90 @@ impl SubTableau {
         false
     }
 
+    /// Stabilizer-half row window for gate kernels (rows n..2n+1), skipping
+    /// the destabilizers and marking them stale for the next measurement to
+    /// rebuild.
+    fn gate_rows(&mut self) -> (&mut [u64], &mut [bool]) {
+        self.lazy_destab = true;
+        let start = self.n * self.stride();
+        (&mut self.xz[start..], &mut self.phase[self.n..])
+    }
+
     fn apply_h(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::h_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::h_all(xz, phase, nw, par, a);
     }
 
     fn apply_s(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::s_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::s_all(xz, phase, nw, par, a);
     }
 
     fn apply_sdg(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::sdg_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::sdg_all(xz, phase, nw, par, a);
     }
 
     fn apply_x(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::x_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::x_all(xz, phase, nw, par, a);
     }
 
     fn apply_y(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::y_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::y_all(xz, phase, nw, par, a);
     }
 
     fn apply_z(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::z_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::z_all(xz, phase, nw, par, a);
     }
 
     fn apply_sx(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::sx_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::sx_all(xz, phase, nw, par, a);
     }
 
     fn apply_sxdg(&mut self, a: usize) {
         let par = self.par_rows();
-        rowops::sxdg_all(&mut self.xz, &mut self.phase, self.num_words, par, a);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::sxdg_all(xz, phase, nw, par, a);
     }
 
     fn apply_cx(&mut self, ctrl: usize, tgt: usize) {
         let par = self.par_rows();
-        rowops::cx_all(
-            &mut self.xz,
-            &mut self.phase,
-            self.num_words,
-            par,
-            ctrl,
-            tgt,
-        );
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::cx_all(xz, phase, nw, par, ctrl, tgt);
     }
 
     fn apply_cz(&mut self, a: usize, b: usize) {
         let par = self.par_rows();
-        rowops::cz_all(&mut self.xz, &mut self.phase, self.num_words, par, a, b);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::cz_all(xz, phase, nw, par, a, b);
     }
 
     fn apply_swap(&mut self, a: usize, b: usize) {
         let par = self.par_rows();
-        rowops::swap_all(&mut self.xz, &mut self.phase, self.num_words, par, a, b);
+        let nw = self.num_words;
+        let (xz, phase) = self.gate_rows();
+        rowops::swap_all(xz, phase, nw, par, a, b);
     }
 
     fn dispatch_gate(&mut self, gate: &Gate, local_targets: &[usize]) -> Result<()> {
@@ -196,6 +224,15 @@ impl SubTableau {
     }
 
     fn measure(&mut self, local_q: usize, rng: &mut ChaCha8Rng) -> bool {
+        if self.lazy_destab {
+            rowops::materialize_destabilizers(
+                &mut self.xz,
+                &mut self.phase,
+                self.n,
+                self.num_words,
+            );
+            self.lazy_destab = false;
+        }
         let n = self.n;
         let word = local_q / 64;
         let bit_mask = 1u64 << (local_q % 64);
@@ -557,35 +594,10 @@ impl FactoredStabilizerBackend {
         let mut new_phase = vec![false; total_rows];
 
         let dst_ref = self.subs[dst_idx].as_ref().unwrap();
+        // Destabilizer rows are not copied: a merge only happens on the way
+        // into a cross-cluster gate, which stales them immediately, so the
+        // merged cluster starts lazy and the next measurement rebuilds them.
         #[allow(clippy::needless_range_loop)]
-        for r in 0..a {
-            remap_row(
-                &dst_ref.xz,
-                dst_ref.stride(),
-                r,
-                &dst_positions,
-                dst_ref.num_words,
-                &mut new_xz,
-                new_stride,
-                r,
-                new_nw,
-            );
-            new_phase[r] = dst_ref.phase[r];
-        }
-        for r in 0..b {
-            remap_row(
-                &src.xz,
-                src.stride(),
-                r,
-                &src_positions,
-                src.num_words,
-                &mut new_xz,
-                new_stride,
-                a + r,
-                new_nw,
-            );
-            new_phase[a + r] = src.phase[r];
-        }
         for r in 0..a {
             remap_row(
                 &dst_ref.xz,
@@ -621,6 +633,7 @@ impl FactoredStabilizerBackend {
         d.xz = new_xz;
         d.phase = new_phase;
         d.qubits = merged_qubits;
+        d.lazy_destab = true;
 
         for &q in &src.qubits {
             self.qubit_to_sub[q] = dst_idx;
@@ -640,6 +653,7 @@ impl FactoredStabilizerBackend {
         // stabilizer row k+q holds the pivot at qubit q and the unit
         // destabilizer at row q is its partner.
         rowops::materialize_destabilizers(&mut sub.xz, &mut sub.phase, k, sub.num_words);
+        sub.lazy_destab = false;
 
         let sub = self.subs[sub_idx].as_ref().unwrap();
         let mut parent: Vec<usize> = (0..k).collect();
@@ -715,6 +729,7 @@ impl FactoredStabilizerBackend {
                 xz: cxz,
                 phase: cphase,
                 qubits: cqubits,
+                lazy_destab: false,
             };
 
             let slot = self.find_free_slot();

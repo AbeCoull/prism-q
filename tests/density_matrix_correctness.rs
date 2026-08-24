@@ -4,7 +4,10 @@
 
 mod common;
 
-use common::{SEED, assert_fused_matches_unfused, assert_probs_close};
+use common::{
+    DM_EPS, SEED, all_pauli_masks, assert_fused_matches_unfused, assert_probs_close,
+    depolarizing_2q_kraus,
+};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
@@ -60,8 +63,6 @@ fn phase_damping(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
         [[c(0.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(g, 0.0)]],
     ]
 }
-
-const DM_EPS: f64 = 1e-12;
 
 fn statevector_probs(circuit: &Circuit) -> Vec<f64> {
     let mut backend = StatevectorBackend::new(SEED);
@@ -734,47 +735,6 @@ fn dm_bare_fused_2q_matches_its_unfused_pair() {
     plain.add_gate(Gate::H, &[2]);
 
     assert_probs_close(&dm_probs(&fused), &dm_probs(&plain), DM_EPS, "bare Fused2q");
-}
-
-// The 16 Pauli Kraus operators the twirled closed form replaces, weighted
-// sqrt(1-p) on I(x)I and sqrt(p/15) elsewhere, indexed 2*bit(q0)+bit(q1).
-fn depolarizing_2q_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
-    let paulis: [[[Complex64; 2]; 2]; 4] = [
-        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(1.0, 0.0)]],
-        [[c(0.0, 0.0), c(1.0, 0.0)], [c(1.0, 0.0), c(0.0, 0.0)]],
-        [[c(0.0, 0.0), c(0.0, -1.0)], [c(0.0, 1.0), c(0.0, 0.0)]],
-        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(-1.0, 0.0)]],
-    ];
-    let mut kraus = vec![[[c(0.0, 0.0); 4]; 4]; 16];
-    for a in 0..4 {
-        for b in 0..4 {
-            let w = if a == 0 && b == 0 {
-                (1.0 - p).sqrt()
-            } else {
-                (p / 15.0).sqrt()
-            };
-            let k = &mut kraus[4 * a + b];
-            for (t, row) in k.iter_mut().enumerate() {
-                for (tp, entry) in row.iter_mut().enumerate() {
-                    *entry = c(w, 0.0) * paulis[a][t >> 1][tp >> 1] * paulis[b][t & 1][tp & 1];
-                }
-            }
-        }
-    }
-    kraus
-}
-
-// Every `n`-qubit Pauli as (xmask, zmask, num_y); the 4^n expectations
-// determine rho uniquely.
-fn all_pauli_masks(n: usize) -> Vec<(usize, usize, u32)> {
-    let d = 1usize << n;
-    let mut masks = Vec::with_capacity(d * d);
-    for xmask in 0..d {
-        for zmask in 0..d {
-            masks.push((xmask, zmask, (xmask & zmask).count_ones()));
-        }
-    }
-    masks
 }
 
 #[test]

@@ -265,6 +265,55 @@ fn split_into_more_than_64_components() {
     );
 }
 
+// The deterministic measurement branch reads destabilizer bits, so a
+// measurement on a cluster whose gates ran after the last materialization
+// must rebuild them first. State is |11>, so measuring q1 must read 1; stale
+// destabilizers from the gate-only window read 0.
+#[test]
+fn deterministic_measure_after_gates_rebuilds_destabilizers() {
+    let mut fact = FactoredStabilizerBackend::new(42);
+    fact.init(2, 1).unwrap();
+
+    let mut c = Circuit::new(2, 1);
+    c.add_gate(Gate::X, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_measure(1, 0);
+
+    for inst in &c.instructions {
+        fact.apply(inst).unwrap();
+    }
+
+    assert!(
+        fact.classical_results()[0],
+        "measuring q1 of |11> must read 1"
+    );
+}
+
+// A merge drops the destabilizer rows of both sides, so a deterministic
+// measurement after a cross-cluster gate must rebuild them for the merged
+// tableau.
+#[test]
+fn deterministic_measure_after_merge() {
+    let mut fact = FactoredStabilizerBackend::new(42);
+    fact.init(2, 3).unwrap();
+
+    let mut c = Circuit::new(2, 3);
+    c.add_gate(Gate::X, &[0]);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_measure(1, 2);
+
+    for inst in &c.instructions {
+        fact.apply(inst).unwrap();
+    }
+
+    let bits = fact.classical_results();
+    assert!(bits[0], "measuring q0 of |1> must read 1");
+    assert!(!bits[1], "measuring q1 of |0> must read 0");
+    assert!(bits[2], "after CX(0,1) on |10>, measuring q1 must read 1");
+}
+
 #[test]
 fn product_state_stays_factored() {
     let mut fact = FactoredStabilizerBackend::new(42);

@@ -685,7 +685,9 @@ impl DensityMatrixBackend {
     /// once. Block index `4*tr + tc` orders the two-qubit row value `tr` against
     /// the column value `tc`. An all-diagonal set compiles to a diagonal
     /// superoperator and is applied as one complex multiply per amplitude in a
-    /// contiguous pass instead of the dense sweep.
+    /// contiguous pass instead of the dense sweep. On hosts with detected AVX2
+    /// and FMA the dense sweep issues each row inner product two complex terms
+    /// per FMA through `simd::PreparedKraus2q`.
     ///
     /// # Panics
     ///
@@ -725,9 +727,64 @@ impl DensityMatrixBackend {
             return;
         }
 
+        #[cfg(target_arch = "x86_64")]
+        if simd::has_avx2_fma() && simd::kraus_2q_wide_enabled() {
+            // SAFETY: AVX2 and FMA checked above; AVX2 implies the AVX the
+            // constructor requires.
+            let prepared = unsafe { simd::PreparedKraus2q::new(&s) };
+            self.kraus_2q_sweep_wide(&prepared, &positions, &flats, num_groups);
+            return;
+        }
+
         match positions[0] {
             0 | 1 => self.kraus_2q_sweep::<1>(&s, &positions, &flats, num_groups),
             _ => self.kraus_2q_sweep::<4>(&s, &positions, &flats, num_groups),
+        }
+    }
+
+    /// [`DensityMatrixBackend::kraus_2q_sweep`] with the row inner products
+    /// issued through [`simd::PreparedKraus2q`], one block per iteration
+    /// whatever the qubit pair: the vector axis is the superoperator's 16-wide
+    /// `j` axis, which does not depend on `min(q0, q1)` the way the block-run
+    /// width does.
+    #[cfg(target_arch = "x86_64")]
+    fn kraus_2q_sweep_wide(
+        &mut self,
+        prepared: &simd::PreparedKraus2q,
+        positions: &[usize; 4],
+        flats: &[usize; 16],
+        num_groups: usize,
+    ) {
+        #[cfg(feature = "parallel")]
+        if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::MIN_PAR_ITERS;
+            use crate::backend::statevector::SendPtr;
+            use rayon::prelude::*;
+
+            let ptr = SendPtr(self.sv.state.as_mut_ptr());
+            let positions = *positions;
+            let flats = *flats;
+            (0..num_groups)
+                .into_par_iter()
+                .with_min_len(MIN_PAR_ITERS)
+                .for_each(move |m| {
+                    let base = block_base(m, &positions);
+                    // SAFETY: AVX2 and FMA detected. Inserting a zero bit at
+                    // each of the four block positions is a bijection from
+                    // `m` onto the block bases, so every `base | flats[j]`
+                    // stays under `4^n` and the 16 offsets one iteration
+                    // touches are disjoint from every other iteration's.
+                    unsafe { prepared.apply_block_ptr(ptr.as_f64_ptr(), base, &flats) };
+                });
+            return;
+        }
+
+        let ptr = self.sv.state.as_mut_ptr() as *mut f64;
+        for m in 0..num_groups {
+            let base = block_base(m, positions);
+            // SAFETY: AVX2 and FMA detected. The block bases are disjoint and
+            // in bounds as in the parallel arm, on one thread.
+            unsafe { prepared.apply_block_ptr(ptr, base, flats) };
         }
     }
 
@@ -776,7 +833,10 @@ impl DensityMatrixBackend {
     /// Only `W = 1` and `W = 4` are instantiated. `W = 1` is forced when
     /// `min(q0, q1) == 0`, where one block bit is bit 0 and no run exists, and
     /// it also serves `min(q0, q1) == 1`: a two-block step measured +0.2% and
-    /// +1.9% against one, so it earned no arm of its own.
+    /// +1.9% against one, so it earned no arm of its own. Hosts with detected
+    /// AVX2 and FMA route past this sweep to
+    /// [`DensityMatrixBackend::kraus_2q_sweep_wide`] unless
+    /// `PRISM_NO_AVX2_KRAUS` is set.
     fn kraus_2q_sweep<const W: usize>(
         &mut self,
         s: &[[Complex64; 16]; 16],

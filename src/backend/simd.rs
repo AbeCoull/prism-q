@@ -542,6 +542,19 @@ fn avx2_2q_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("PRISM_NO_AVX2_2Q").is_none())
 }
 
+/// Kill switch for the AVX2 dense two-qubit Kraus kernel.
+///
+/// Reads `PRISM_NO_AVX2_KRAUS` once and caches the result. Set the variable
+/// to route the dense sweep through the blocked scalar path instead, for
+/// single-binary A/B timing and for exercising that path on AVX2 hosts.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(crate) fn kraus_2q_wide_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("PRISM_NO_AVX2_KRAUS").is_none())
+}
+
 /// Precomputed single-qubit gate ready for repeated application.
 ///
 /// Create once per gate via [`PreparedGate1q::new`], then call [`apply`]
@@ -2287,6 +2300,79 @@ impl PreparedGate2q {
     }
 }
 
+/// Precomputed 16x16 block superoperator for the dense two-qubit Kraus sweep,
+/// in 256-bit broadcast form.
+///
+/// Row `r` is stored as eight register pairs covering its 16 coefficients, two
+/// consecutive `j` slots per register: `rr[r][k]` holds
+/// `[re(s[r][2k]); 2, re(s[r][2k + 1]); 2]` and `ii[r][k]` the imaginary
+/// parts. [`PreparedKraus2q::apply_block_ptr`] advances each row inner product
+/// two complex terms per FMA over the always-16-wide `j` axis, so the width
+/// does not depend on the qubit pair the way the block-run sweep's does.
+#[cfg(target_arch = "x86_64")]
+pub(crate) struct PreparedKraus2q {
+    rr: [[__m256d; 8]; 16],
+    ii: [[__m256d; 8]; 16],
+}
+
+#[cfg(target_arch = "x86_64")]
+impl PreparedKraus2q {
+    /// # Safety
+    ///
+    /// Requires AVX, implied by a detected AVX2 feature.
+    #[inline]
+    pub(crate) unsafe fn new(s: &[[Complex64; 16]; 16]) -> Self {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            let mut rr = [[_mm256_setzero_pd(); 8]; 16];
+            let mut ii = [[_mm256_setzero_pd(); 8]; 16];
+            for (r, row) in s.iter().enumerate() {
+                for k in 0..8 {
+                    let (a, b) = (row[2 * k], row[2 * k + 1]);
+                    rr[r][k] = _mm256_setr_pd(a.re, a.re, b.re, b.re);
+                    ii[r][k] = _mm256_setr_pd(a.im, a.im, b.im, b.im);
+                }
+            }
+            Self { rr, ii }
+        }
+    }
+
+    /// Apply the superoperator to the 16-amplitude block at `base | flats[j]`,
+    /// reading all 16 slots before the first store.
+    ///
+    /// # Safety
+    ///
+    /// AVX2 and FMA must be detected, every `base | flats[j]` must be in
+    /// bounds for `state` viewed as interleaved `Complex64`, and no other
+    /// thread may access those 16 slots.
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    pub(crate) unsafe fn apply_block_ptr(&self, state: *mut f64, base: usize, flats: &[usize; 16]) {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            let mut v = [_mm256_setzero_pd(); 8];
+            for (k, pair) in v.iter_mut().enumerate() {
+                let lo = _mm_loadu_pd(state.add((base | flats[2 * k]) * 2));
+                let hi = _mm_loadu_pd(state.add((base | flats[2 * k + 1]) * 2));
+                *pair = _mm256_insertf128_pd(_mm256_castpd128_pd256(lo), hi, 1);
+            }
+            for (r, &out) in flats.iter().enumerate() {
+                let rr = &self.rr[r];
+                let ii = &self.ii[r];
+                let mut accx = _mm256_mul_pd(rr[0], v[0]);
+                let mut accy = _mm256_mul_pd(ii[0], v[0]);
+                for k in 1..8 {
+                    accx = _mm256_fmadd_pd(rr[k], v[k], accx);
+                    accy = _mm256_fmadd_pd(ii[k], v[k], accy);
+                }
+                let acc = _mm256_addsub_pd(accx, _mm256_shuffle_pd(accy, accy, 0b0101));
+                let sum = _mm_add_pd(_mm256_castpd256_pd128(acc), _mm256_extractf128_pd(acc, 1));
+                _mm_storeu_pd(state.add((base | out) * 2), sum);
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 // SAFETY: Mat4x4Broadcast contains only SIMD register values (pure data, no pointers).
 unsafe impl Send for Mat4x4Broadcast {}
@@ -2303,6 +2389,12 @@ unsafe impl Sync for Mat4x4Broadcast {}
 unsafe impl Send for PreparedGate2q {}
 // SAFETY: PreparedGate2q contains immutable SIMD broadcast data and no raw pointers.
 unsafe impl Sync for PreparedGate2q {}
+#[cfg(target_arch = "x86_64")]
+// SAFETY: PreparedKraus2q contains immutable SIMD broadcast data and no raw pointers.
+unsafe impl Send for PreparedKraus2q {}
+#[cfg(target_arch = "x86_64")]
+// SAFETY: PreparedKraus2q contains immutable SIMD broadcast data and no raw pointers.
+unsafe impl Sync for PreparedKraus2q {}
 
 #[cfg(test)]
 #[path = "simd_tests.rs"]

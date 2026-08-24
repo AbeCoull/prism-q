@@ -446,6 +446,54 @@ fn test_prepared_2q_apply_tiled_matches_apply_full() {
     }
 }
 
+// PreparedKraus2q must agree with scalar evaluation of the same 16x16
+// superoperator on scattered block slots, at a contiguous and a strided slot
+// layout. Runs only where AVX2 and FMA are detected; the dispatcher never
+// selects it elsewhere.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn test_prepared_kraus_2q_matches_scalar_reference() {
+    if !has_avx2_fma() {
+        return;
+    }
+    use rand::RngExt;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    let mut s = [[c(0.0, 0.0); 16]; 16];
+    for row in s.iter_mut() {
+        for e in row.iter_mut() {
+            *e = c(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0));
+        }
+    }
+
+    let flats_variants: [[usize; 16]; 2] =
+        [std::array::from_fn(|j| j), std::array::from_fn(|j| 3 * j)];
+    for flats in &flats_variants {
+        let len = flats[15] + 1;
+        let mut buf: Vec<Complex64> = (0..len)
+            .map(|_| c(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0)))
+            .collect();
+        let mut reference = buf.clone();
+
+        let v: [Complex64; 16] = std::array::from_fn(|j| reference[flats[j]]);
+        for (r, row) in s.iter().enumerate() {
+            let mut acc = c(0.0, 0.0);
+            for (coeff, val) in row.iter().zip(v.iter()) {
+                acc += coeff * val;
+            }
+            reference[flats[r]] = acc;
+        }
+
+        // SAFETY: AVX2 and FMA checked above.
+        let prepared = unsafe { PreparedKraus2q::new(&s) };
+        // SAFETY: AVX2 and FMA checked above; every slot index is in bounds
+        // and no other thread touches the buffer.
+        unsafe { prepared.apply_block_ptr(buf.as_mut_ptr() as *mut f64, 0, flats) };
+        assert_state_close(&buf, &reference, &format!("stride {}", flats[1]));
+    }
+}
+
 // Drive every SIMD tier the host supports against the scalar reference. The
 // dispatcher runs only the best tier, so SSE2/FMA never execute on an AVX2 host
 // without forcing them here.
@@ -586,7 +634,7 @@ fn target_feature_kernel_count_is_pinned() {
     let root = env!("CARGO_MANIFEST_DIR");
     // Per-file expected counts; the breakdown makes a drift easy to localise.
     let expected: [(&str, usize); 4] = [
-        ("src/backend/simd.rs", 29),
+        ("src/backend/simd.rs", 30),
         ("src/backend/word_ops.rs", 2),
         ("src/backend/stabilizer/kernels/simd.rs", 3),
         ("src/backend/statevector/kernels.rs", 11),

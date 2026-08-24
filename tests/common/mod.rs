@@ -9,6 +9,7 @@ pub mod conformance;
 pub mod framework;
 pub mod matrix;
 
+use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::{Circuit, Instruction};
@@ -21,8 +22,54 @@ pub const MPS_EPS: f64 = 1e-9;
 pub const TN_EPS: f64 = 1e-10;
 pub const PRODUCT_EPS: f64 = 1e-12;
 pub const FACTORED_EPS: f64 = 1e-10;
+pub const DM_EPS: f64 = 1e-12;
 
 pub const SEED: u64 = 42;
+
+/// The 16 two-qubit Pauli Kraus operators of symmetric depolarizing with
+/// parameter `p`, weighted `sqrt(1-p)` on `I(x)I` and `sqrt(p/15)` elsewhere,
+/// indexed `2*bit(q0) + bit(q1)`. The closed-form
+/// `DensityMatrixBackend::apply_2q_depolarizing` replaces this set, so the
+/// two are independent implementations of the same channel.
+pub fn depolarizing_2q_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
+    let c = Complex64::new;
+    let paulis: [[[Complex64; 2]; 2]; 4] = [
+        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(1.0, 0.0)]],
+        [[c(0.0, 0.0), c(1.0, 0.0)], [c(1.0, 0.0), c(0.0, 0.0)]],
+        [[c(0.0, 0.0), c(0.0, -1.0)], [c(0.0, 1.0), c(0.0, 0.0)]],
+        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(-1.0, 0.0)]],
+    ];
+    let mut kraus = vec![[[c(0.0, 0.0); 4]; 4]; 16];
+    for a in 0..4 {
+        for b in 0..4 {
+            let w = if a == 0 && b == 0 {
+                (1.0 - p).sqrt()
+            } else {
+                (p / 15.0).sqrt()
+            };
+            let k = &mut kraus[4 * a + b];
+            for (t, row) in k.iter_mut().enumerate() {
+                for (tp, entry) in row.iter_mut().enumerate() {
+                    *entry = c(w, 0.0) * paulis[a][t >> 1][tp >> 1] * paulis[b][t & 1][tp & 1];
+                }
+            }
+        }
+    }
+    kraus
+}
+
+/// Every `n`-qubit Pauli as `(xmask, zmask, num_y)`; the `4^n` expectations
+/// determine `rho` uniquely.
+pub fn all_pauli_masks(n: usize) -> Vec<(usize, usize, u32)> {
+    let d = 1usize << n;
+    let mut masks = Vec::with_capacity(d * d);
+    for xmask in 0..d {
+        for zmask in 0..d {
+            masks.push((xmask, zmask, (xmask & zmask).count_ones()));
+        }
+    }
+    masks
+}
 
 /// Statevector probabilities used as the reference for the backend matrices.
 ///

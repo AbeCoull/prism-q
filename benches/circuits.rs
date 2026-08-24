@@ -770,6 +770,16 @@ fn bench_mps_scaling(c: &mut Criterion) {
             });
         });
     }
+
+    // Bond 256 is the Auto-dispatch and Python default. This family peaks at
+    // bond 4, far below either cap, so the row does the same work as the 64-cap
+    // row and guards against the cap entering the cost path.
+    let circuit = circuits::random_circuit(20, 10, SEED);
+    group.bench_with_input(BenchmarkId::new("b256", 20), &circuit, |b, circ| {
+        b.iter(|| {
+            run_with(BackendKind::Mps { max_bond_dim: 256 }, circ, 42).unwrap();
+        });
+    });
     group.finish();
 }
 
@@ -785,6 +795,7 @@ fn bench_mps_linear_chain(c: &mut Criterion) {
             });
         });
     }
+
     group.finish();
 }
 
@@ -816,6 +827,18 @@ fn bench_mps_hotspots(c: &mut Criterion) {
     group.bench_function("measure_reset_32q_r3", |b| {
         b.iter(|| run_mps_apply_only(&meas_reset, 64));
     });
+
+    // Routed long-range pairs sit adjacent after the SWAPs and peak at bond 2,
+    // so this row matches the 64-cap row and guards the routing path against
+    // cap-dependent cost at the bond 256 default.
+    let long_range_256 = mps_long_range_phase_circuit(32, 4);
+    group.bench_with_input(
+        BenchmarkId::new("long_range_cp_r4_b256", 32),
+        &long_range_256,
+        |b, circ| {
+            b.iter(|| run_mps_apply_only(circ, 256));
+        },
+    );
 
     group.finish();
 }
@@ -859,6 +882,7 @@ fn bench_mps_sampling(c: &mut Criterion) {
             });
         });
     }
+
     group.finish();
 }
 

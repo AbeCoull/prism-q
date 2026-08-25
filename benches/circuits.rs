@@ -7,6 +7,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
+use prism_q::backend::tensornetwork::TensorNetworkBackend;
 #[cfg(feature = "bench-internal")]
 use prism_q::backend::tensornetwork::scalar_expectation;
 use prism_q::circuit::fusion::fuse_circuit;
@@ -1086,8 +1087,7 @@ fn bench_tn_scalar_wide_deep(_c: &mut Criterion) {}
 /// `MIN_FAER_GEMM_WORK`; `tn/scalar_depth_20q` reaches it but only at 20 qubits.
 /// Six layers puts 12 contractions over the threshold at 20 qubits and 37 at 50,
 /// so a change to the crossover shows up here as a function of width. Seven
-/// layers would be the natural next row and is left out: its peak intermediate
-/// jumps to 16.8M elements and an iteration costs 3.3 s.
+/// layers lives in `tn/scalar_hea_l7`, where tree quality is the variable.
 #[cfg(feature = "bench-internal")]
 fn bench_tn_scalar_wide_deep(c: &mut Criterion) {
     let mut group = c.benchmark_group("tn/scalar_hea_l6");
@@ -1099,6 +1099,62 @@ fn bench_tn_scalar_wide_deep(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 black_box(scalar_expectation(circ, &observable).unwrap());
+            });
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_scalar_tree_quality(_c: &mut Criterion) {}
+
+/// The rows where contraction tree quality is the variable.
+///
+/// Seven layers is where the greedy planner's tree is on record as
+/// non-monotonic in width: peak intermediate 16.8M elements at 30 and 50
+/// qubits against 1.05M at 40. A planner change moves these rows through the
+/// tree it picks, not through kernel arithmetic, which the depth and width
+/// sweeps above already cover.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_scalar_tree_quality(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/scalar_hea_l7");
+    configure_group(&mut group);
+
+    for &n in &[30, 40, 50] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 7, SEED);
+        let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(scalar_expectation(circ, &observable).unwrap());
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Reduced density matrix on a long chain, past the dense query ceiling.
+///
+/// The query doubles the network against its conjugate and contracts with one
+/// ket and one bra leg open, so the rows exercise tree choice on a doubled
+/// low-treewidth network at widths where `probabilities()` cannot answer.
+/// Depth 4 peaks at 64 elements whatever the width, so those rows weigh
+/// per-contraction overhead; depth 8 at 60 qubits peaks at 1M elements and
+/// weighs the arithmetic.
+fn bench_tn_rdm_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/rdm_chain");
+    configure_group(&mut group);
+
+    for &(n, depth) in &[(40usize, 4usize), (60, 4), (60, 8)] {
+        let circuit = circuits::cz_chain_circuit(n, depth, SEED);
+        let mut tn = TensorNetworkBackend::new(SEED);
+        tn.init(n, 0).unwrap();
+        for inst in &circuit.instructions {
+            tn.apply(inst).unwrap();
+        }
+        let label = format!("{n}_d{depth}");
+        group.bench_with_input(BenchmarkId::from_parameter(label), &tn, |b, backend| {
+            b.iter(|| {
+                black_box(backend.reduced_density_matrix_1q(n / 2).unwrap());
             });
         });
     }
@@ -2866,6 +2922,8 @@ criterion_group! {
     bench_tn_scalar_expectation,
     bench_tn_scalar_depth,
     bench_tn_scalar_wide_deep,
+    bench_tn_scalar_tree_quality,
+    bench_tn_rdm_chain,
     // Auto dispatch
     bench_auto_random,
     bench_auto_qft,

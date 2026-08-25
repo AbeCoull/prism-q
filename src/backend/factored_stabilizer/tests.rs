@@ -694,3 +694,65 @@ fn par_path_128q_all_clifford_gates() {
     let mut b = FactoredStabilizerBackend::new(42);
     crate::sim::run_on(&mut b, &c).unwrap();
 }
+
+// Pins the interleaved-measure bench shape: a linear cluster state on qubits
+// 1..n with qubit 0 re-attached as a leaf each round. The leaf measurement must
+// split off only the leaf, leaving the chain one entangled cluster, so every
+// round's measurement lands on the full cluster with gates applied since the
+// last one.
+#[test]
+fn interleaved_leaf_measure_keeps_chain_entangled() {
+    let n = 12;
+    let rounds = 5;
+    let mut fact = FactoredStabilizerBackend::new(42);
+    fact.init(n, rounds).unwrap();
+
+    let mut init = Circuit::new(n, rounds);
+    for q in 1..n {
+        init.add_gate(Gate::H, &[q]);
+    }
+    for q in 1..n - 1 {
+        init.add_gate(Gate::Cz, &[q, q + 1]);
+    }
+    for inst in &init.instructions {
+        fact.apply(inst).unwrap();
+    }
+
+    for round in 0..rounds {
+        let mut layer = Circuit::new(n, rounds);
+        for q in 0..n {
+            layer.add_gate(Gate::S, &[q]);
+        }
+        layer.add_gate(Gate::H, &[0]);
+        layer.add_gate(Gate::Cz, &[0, 1]);
+        for inst in &layer.instructions {
+            fact.apply(inst).unwrap();
+        }
+
+        let merged_count = fact.subs.iter().filter(|s| s.is_some()).count();
+        assert_eq!(
+            merged_count, 1,
+            "round {}: expected one merged cluster before the measurement, got {}",
+            round, merged_count
+        );
+
+        let mut measure = Circuit::new(n, rounds);
+        measure.add_measure(0, round);
+        fact.apply(&measure.instructions[0]).unwrap();
+
+        let active_count = fact.subs.iter().filter(|s| s.is_some()).count();
+        assert_eq!(
+            active_count, 2,
+            "round {}: the measured leaf must split off alone, got {} active sub-tableaux",
+            round, active_count
+        );
+        let chain = fact.qubit_to_sub[1];
+        assert_eq!(
+            fact.subs[chain].as_ref().unwrap().n,
+            n - 1,
+            "round {}: the chain must stay one cluster of {} qubits",
+            round,
+            n - 1
+        );
+    }
+}

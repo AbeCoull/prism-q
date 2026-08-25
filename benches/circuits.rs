@@ -199,6 +199,39 @@ fn mps_measure_reset_circuit(n_qubits: usize, rounds: usize) -> Circuit {
     circuit
 }
 
+/// Linear cluster state on qubits `1..n` with qubit 0 as a re-attachable leaf.
+/// Each round applies S to the first `sweep_qubits` qubits, re-entangles
+/// qubit 0 via H plus CZ, then measures it. Z-measuring a leaf vertex removes
+/// only that vertex, so the chain stays one entangled cluster and every
+/// measurement pays the destabilizer rebuild. `sweep_qubits` sets the gate
+/// load between measurements: 2 leaves the rebuild dominant, `n_qubits`
+/// prices the shape under a full gate sweep.
+fn interleaved_measure_chain_circuit(
+    n_qubits: usize,
+    rounds: usize,
+    sweep_qubits: usize,
+) -> Circuit {
+    let mut circuit = Circuit::new(n_qubits, rounds);
+
+    for q in 1..n_qubits {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    for q in 1..n_qubits - 1 {
+        circuit.add_gate(Gate::Cz, &[q, q + 1]);
+    }
+
+    for round in 0..rounds {
+        for q in 0..sweep_qubits {
+            circuit.add_gate(Gate::S, &[q]);
+        }
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cz, &[0, 1]);
+        circuit.add_measure(0, round);
+    }
+
+    circuit
+}
+
 fn compiled_filtered_bell_pairs_circuit(n_pairs: usize) -> Circuit {
     let mut circuit = circuits::independent_bell_pairs(n_pairs);
     let n = circuit.num_qubits;
@@ -714,6 +747,30 @@ fn bench_factored_stabilizer_measurement(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("ghz_measure_all", n),
             &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+    }
+
+    for &n in &[50, 100, 500] {
+        let circuit = interleaved_measure_chain_circuit(n, 10, n);
+        group.bench_with_input(
+            BenchmarkId::new("interleaved_chain_r10", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+
+        let lean = interleaved_measure_chain_circuit(n, 10, 2);
+        group.bench_with_input(
+            BenchmarkId::new("interleaved_chain_lean_r10", n),
+            &lean,
             |b, circ| {
                 b.iter(|| {
                     run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();

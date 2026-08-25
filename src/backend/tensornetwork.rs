@@ -32,9 +32,17 @@
 //!
 //! # Contraction strategy
 //!
-//! Greedy min-size heuristic: repeatedly contract the pair of tensors whose
-//! result has the smallest total element count, preferring pairs sharing a leg.
-//! O(T·r·log T) for T tensors of rank at most r.
+//! A metadata-only planner picks the pair order, then the kernel replays it.
+//! The baseline plan is the greedy min-size heuristic: repeatedly contract the
+//! pair of tensors whose result has the smallest total element count,
+//! preferring pairs sharing a leg. O(T·r·log T) for T tensors of rank at most
+//! r. When the greedy plan's peak intermediate reaches
+//! `RESTART_PEAK_THRESHOLD`, the planner reruns with seeded multiplicative
+//! noise on the size key, `PLAN_RESTARTS_PER_TEMPERATURE` passes at each
+//! `PLAN_NOISE_TEMPERATURES` entry, and keeps the tree with the smallest peak
+//! intermediate, the greedy tree included, so the peak never rises. Planning
+//! touches shapes and legs only, so a restart costs a heap walk, not data
+//! movement.
 //!
 //! # Observables contract natively; shots stay on the dense route
 //!
@@ -361,7 +369,72 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     }
 }
 
-fn contraction_result_size(a: &Tensor, b: &Tensor) -> usize {
+/// Shape and legs of a tensor, all the planner reads.
+#[derive(Clone)]
+struct TensorMeta {
+    shape: SmallVec<[usize; 6]>,
+    legs: SmallVec<[LegId; 6]>,
+}
+
+impl TensorMeta {
+    fn of(tensor: &Tensor) -> Self {
+        Self {
+            shape: tensor.shape.clone(),
+            legs: tensor.legs.clone(),
+        }
+    }
+
+    fn num_elements(&self) -> usize {
+        self.shape.iter().product::<usize>().max(1)
+    }
+}
+
+/// Pair order for one contraction, with the two counts plans are ranked by.
+///
+/// `pairs` holds slot indices, inputs first, each result appended at the next
+/// index. `peak` is the largest result element count; `total` sums them and
+/// breaks peak ties.
+struct ContractionPlan {
+    pairs: Vec<(usize, usize)>,
+    peak: usize,
+    total: usize,
+}
+
+/// Noisy passes per temperature once the greedy plan's peak intermediate
+/// reaches [`RESTART_PEAK_THRESHOLD`].
+///
+/// Sized against the temperature sweep on `hardware_efficient_ansatz(n, 7)`
+/// scalar networks: first improvements appeared as late as a temperature's
+/// 23rd pass, and a fully fruitless 32-pass sweep cost 110 ms per
+/// temperature against the multi-second contraction the threshold
+/// guarantees.
+const PLAN_RESTARTS_PER_TEMPERATURE: u64 = 32;
+
+/// Peak intermediate element count at which the noisy restarts run.
+///
+/// Below it the contraction is cheap enough that extra planning passes cost
+/// more than a better tree returns; the depth-swept bench rows peak an order
+/// of magnitude under this and stay on the single greedy pass.
+const RESTART_PEAK_THRESHOLD: usize = 1 << 22;
+
+/// Noise scales for the restart sweep, in doublings of the size key.
+///
+/// Measured on `hardware_efficient_ansatz(n, 7)` scalar networks under the
+/// per-pass seeding: 0.25 and below found nothing at n = 50 in 32 passes,
+/// 2.0 and 4.0 found nothing at either width, and 0.5 and 1.0 carried every
+/// improvement seen.
+const PLAN_NOISE_TEMPERATURES: [f64; 2] = [0.5, 1.0];
+
+/// Fixed base seed for the restart noise, so one network always maps to one
+/// tree.
+///
+/// Planning runs inside `&self` queries that cannot reach the run rng, and
+/// drawing from it would shift the measurement outcome stream relative to the
+/// other backends. Each (temperature, pass) reseeds from this base, so a
+/// pass's noise does not depend on how early the passes before it aborted.
+const PLAN_NOISE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+fn contraction_result_size(a: &TensorMeta, b: &TensorMeta) -> usize {
     let mut a_free_size = 1usize;
     let mut b_free_size = 1usize;
     for (ai, &a_leg) in a.legs.iter().enumerate() {
@@ -379,13 +452,50 @@ fn contraction_result_size(a: &Tensor, b: &Tensor) -> usize {
     a_free_size * b_free_size
 }
 
-/// Contraction candidates ordered by result element count, then by the higher
-/// slot id descending, then the lower.
+/// Compute the free legs of `a` then `b`, in each operand's axis order,
+/// matching the result [`contract`] builds for the same pair.
+fn contract_meta(a: &TensorMeta, b: &TensorMeta) -> TensorMeta {
+    let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
+    let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
+    for (ai, &leg) in a.legs.iter().enumerate() {
+        if !b.legs.contains(&leg) {
+            shape.push(a.shape[ai]);
+            legs.push(leg);
+        }
+    }
+    for (bi, &leg) in b.legs.iter().enumerate() {
+        if !a.legs.contains(&leg) {
+            shape.push(b.shape[bi]);
+            legs.push(leg);
+        }
+    }
+    TensorMeta { shape, legs }
+}
+
+/// Contraction candidates ordered by size key, then by the higher slot id
+/// descending, then the lower.
 ///
-/// Newest-first on ties keeps the contraction on its frontier instead of letting
-/// fresh tensors accumulate legs. Reversing the tie-break raises peak
-/// intermediates 16x on `hardware_efficient_ansatz(50, 3)`.
-type PairQueue = BinaryHeap<Reverse<(usize, Reverse<usize>, Reverse<usize>)>>;
+/// The key is the result element count, scaled by Gumbel noise on a noisy
+/// planning pass. Newest-first on ties keeps the contraction on its frontier
+/// instead of letting fresh tensors accumulate legs. Reversing the tie-break
+/// raises peak intermediates 16x on `hardware_efficient_ansatz(50, 3)`.
+type PairQueue = BinaryHeap<Reverse<(u64, Reverse<usize>, Reverse<usize>)>>;
+
+/// Compute the size key for one candidate pair.
+///
+/// The noisy arm multiplies by `2^(temperature * gumbel)` and compares the
+/// result through its bit pattern, which orders positive floats numerically.
+fn pair_key(cost: usize, noise: Option<(&mut ChaCha8Rng, f64)>) -> u64 {
+    match noise {
+        None => cost as u64,
+        Some((rng, temperature)) => {
+            use rand::RngExt;
+            let uniform: f64 = rng.random::<f64>();
+            let gumbel = -(-uniform.max(f64::MIN_POSITIVE).ln()).ln();
+            ((cost as f64) * (temperature * gumbel).exp2()).to_bits()
+        }
+    }
+}
 
 /// Record `slot` against each of its legs and queue it against every live tensor
 /// already sharing one, pruning contracted slots off the holder lists it walks.
@@ -393,24 +503,30 @@ type PairQueue = BinaryHeap<Reverse<(usize, Reverse<usize>, Reverse<usize>)>>;
 /// A tensor carrying one leg twice would otherwise queue against itself; no
 /// valid circuit produces one.
 fn queue_slot_pairs(
-    slots: &[Option<Tensor>],
+    slots: &[Option<TensorMeta>],
     slot: usize,
     leg_holders: &mut Vec<SmallVec<[usize; 2]>>,
     queue: &mut PairQueue,
+    noise: &mut Option<(&mut ChaCha8Rng, f64)>,
 ) {
-    let tensor = slots[slot].as_ref().expect("slot just filled");
-    for &leg in &tensor.legs {
+    let meta = slots[slot].as_ref().expect("slot just filled");
+    for &leg in &meta.legs {
         if leg >= leg_holders.len() {
             leg_holders.resize(leg + 1, SmallVec::new());
         }
         leg_holders[leg].retain(|held| slots[*held].is_some());
         for &other in leg_holders[leg].iter().filter(|&&held| held != slot) {
             let cost = contraction_result_size(
-                tensor,
+                meta,
                 slots[other].as_ref().expect("holder list pruned above"),
             );
             queue.push(Reverse((
-                cost,
+                pair_key(
+                    cost,
+                    noise
+                        .as_mut()
+                        .map(|(rng, temperature)| (&mut **rng, *temperature)),
+                ),
                 Reverse(other.max(slot)),
                 Reverse(other.min(slot)),
             )));
@@ -422,13 +538,90 @@ fn queue_slot_pairs(
 /// Pop the cheapest queued pair whose members are both still live.
 ///
 /// Returns `None` once no two live tensors share a leg.
-fn pop_live_pair(queue: &mut PairQueue, slots: &[Option<Tensor>]) -> Option<(usize, usize)> {
+fn pop_live_pair(queue: &mut PairQueue, slots: &[Option<TensorMeta>]) -> Option<(usize, usize)> {
     while let Some(Reverse((_, Reverse(j), Reverse(i)))) = queue.pop() {
         if slots[i].is_some() && slots[j].is_some() {
             return Some((i, j));
         }
     }
     None
+}
+
+/// Run one greedy planning pass over the metadata, deterministic when `noise`
+/// is `None` and Gumbel-perturbed otherwise.
+///
+/// Returns `None` as soon as a result exceeds `abort_above` elements: the pass
+/// can no longer beat the plan holding that peak, and abandoning it keeps a
+/// failed restart from paying for a full walk. Peak ties complete, since they
+/// can still win on `total`.
+fn plan_pairs(
+    mut slots: Vec<Option<TensorMeta>>,
+    mut noise: Option<(&mut ChaCha8Rng, f64)>,
+    abort_above: usize,
+) -> Option<ContractionPlan> {
+    let mut leg_holders: Vec<SmallVec<[usize; 2]>> = Vec::new();
+    let mut queue: PairQueue = BinaryHeap::new();
+
+    for slot in 0..slots.len() {
+        queue_slot_pairs(&slots, slot, &mut leg_holders, &mut queue, &mut noise);
+    }
+
+    let mut plan = ContractionPlan {
+        pairs: Vec::new(),
+        peak: 0,
+        total: 0,
+    };
+    while let Some((i, j)) = pop_live_pair(&mut queue, &slots) {
+        let a = slots[i].take().expect("popped pair is live");
+        let b = slots[j].take().expect("popped pair is live");
+        let result = contract_meta(&a, &b);
+        let elements = result.num_elements();
+        if elements > abort_above {
+            return None;
+        }
+        plan.peak = plan.peak.max(elements);
+        plan.total += elements;
+        plan.pairs.push((i, j));
+        slots.push(Some(result));
+        queue_slot_pairs(
+            &slots,
+            slots.len() - 1,
+            &mut leg_holders,
+            &mut queue,
+            &mut noise,
+        );
+    }
+    Some(plan)
+}
+
+/// Plan greedily, then rerun with noise when the greedy peak intermediate
+/// reaches [`RESTART_PEAK_THRESHOLD`], keeping the best plan by peak then
+/// total.
+///
+/// The greedy plan competes, so the peak never rises. The restart arm walks
+/// `tensors` a second time; below the threshold the single pass pays one
+/// metadata copy and no more.
+fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
+    let slots: Vec<Option<TensorMeta>> = tensors.iter().map(|t| Some(TensorMeta::of(t))).collect();
+    let mut plan = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
+    if plan.peak >= RESTART_PEAK_THRESHOLD {
+        let metas: Vec<TensorMeta> = tensors.iter().map(TensorMeta::of).collect();
+        for (temp_index, &temperature) in PLAN_NOISE_TEMPERATURES.iter().enumerate() {
+            for pass in 0..PLAN_RESTARTS_PER_TEMPERATURE {
+                let pass_seed = PLAN_NOISE_SEED ^ (((temp_index as u64) << 32) | pass);
+                let mut rng = ChaCha8Rng::seed_from_u64(pass_seed);
+                let slots: Vec<Option<TensorMeta>> = metas.iter().cloned().map(Some).collect();
+                let Some(candidate) = plan_pairs(slots, Some((&mut rng, temperature)), plan.peak)
+                else {
+                    continue;
+                };
+                if (candidate.peak, candidate.total) < (plan.peak, plan.total) {
+                    plan = candidate;
+                }
+            }
+        }
+    }
+    plan
 }
 
 /// Multiply out the tensors left once no pair shares a leg, smallest first.
@@ -459,26 +652,20 @@ fn join_disjoint(mut slots: Vec<Option<Tensor>>) -> Tensor {
     slots[last].take().expect("queued slots are live")
 }
 
-/// Contract an entire tensor network with the greedy min-size heuristic.
+/// Contract an entire tensor network along a planned pair order.
 ///
-/// Only pairs involving the tensor a contraction produced change cost, so
-/// candidates come off a leg-indexed queue.
+/// Planning walks metadata only; the replay here is where data moves. Pairs
+/// the plan leaves uncontracted share no leg and go to [`join_disjoint`].
 fn greedy_contract(tensors: &mut Vec<Tensor>) -> Tensor {
     debug_assert!(!tensors.is_empty());
 
+    let plan = plan_with_restarts(tensors);
+
     let mut slots: Vec<Option<Tensor>> = std::mem::take(tensors).into_iter().map(Some).collect();
-    let mut leg_holders: Vec<SmallVec<[usize; 2]>> = Vec::new();
-    let mut queue: PairQueue = BinaryHeap::new();
-
-    for slot in 0..slots.len() {
-        queue_slot_pairs(&slots, slot, &mut leg_holders, &mut queue);
-    }
-
-    while let Some((i, j)) = pop_live_pair(&mut queue, &slots) {
-        let a_tensor = slots[i].take().expect("popped pair is live");
-        let b_tensor = slots[j].take().expect("popped pair is live");
+    for &(i, j) in &plan.pairs {
+        let a_tensor = slots[i].take().expect("planned pair is live");
+        let b_tensor = slots[j].take().expect("planned pair is live");
         slots.push(Some(contract(&a_tensor, &b_tensor)));
-        queue_slot_pairs(&slots, slots.len() - 1, &mut leg_holders, &mut queue);
     }
 
     join_disjoint(slots)
@@ -1733,6 +1920,85 @@ mod tests {
             crate::sim::run_expectation_values(&circuit, &[terms.to_vec()], 42).unwrap()[0];
         let actual = expectation_zero_state(&circuit, &terms).unwrap();
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
+    }
+
+    fn scalar_network(circuit: &Circuit, terms: &[PauliTerm]) -> ScalarExpectationNetwork {
+        let mut network = ScalarExpectationNetwork::new(circuit.num_qubits);
+        for instruction in &circuit.instructions {
+            let Instruction::Gate { gate, targets } = instruction else {
+                continue;
+            };
+            network.append_gate(gate, targets).unwrap();
+        }
+        network.append_observable(terms).unwrap();
+        network
+    }
+
+    // hardware_efficient_ansatz(30, 7) is a recorded case of the greedy tree
+    // peaking at 16.8M elements, past RESTART_PEAK_THRESHOLD, so the restart
+    // arm runs. Planning walks metadata only, so no contraction executes here.
+    #[test]
+    fn test_plan_restarts_deterministic_and_never_worse() {
+        let circuit = crate::circuits::hardware_efficient_ansatz(30, 7, 42);
+        let terms = [PauliTerm::z(0), PauliTerm::z(15)];
+        let network = scalar_network(&circuit, &terms);
+        let slots: Vec<Option<TensorMeta>> = network
+            .tensors
+            .iter()
+            .map(|t| Some(TensorMeta::of(t)))
+            .collect();
+
+        let greedy = plan_pairs(slots, None, usize::MAX).unwrap();
+        assert!(
+            greedy.peak >= RESTART_PEAK_THRESHOLD,
+            "fixture no longer reaches the restart arm: greedy peak {}",
+            greedy.peak
+        );
+
+        let best_a = plan_with_restarts(&network.tensors);
+        let best_b = plan_with_restarts(&network.tensors);
+        assert_eq!(best_a.pairs, best_b.pairs);
+        assert!(best_a.peak <= greedy.peak);
+        println!(
+            "greedy peak {} restart peak {} ({} pairs)",
+            greedy.peak,
+            best_a.peak,
+            best_a.pairs.len()
+        );
+    }
+
+    // Every noise stream must land on the same scalar: replay correctness for
+    // arbitrary plan orders is the risk the planner split introduces.
+    #[test]
+    fn test_noisy_plans_execute_to_the_same_scalar() {
+        let circuit = crate::circuits::hardware_efficient_ansatz(8, 3, 42);
+        let terms = [PauliTerm::z(0), PauliTerm::x(4)];
+        let expected = expectation_zero_state(&circuit, &terms).unwrap();
+
+        for seed in 0..5u64 {
+            let network = scalar_network(&circuit, &terms);
+            let slots: Vec<Option<TensorMeta>> = network
+                .tensors
+                .iter()
+                .map(|t| Some(TensorMeta::of(t)))
+                .collect();
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let plan = plan_pairs(slots, Some((&mut rng, 1.0)), usize::MAX).unwrap();
+
+            let mut slots: Vec<Option<Tensor>> = network.tensors.into_iter().map(Some).collect();
+            for &(i, j) in &plan.pairs {
+                let a = slots[i].take().unwrap();
+                let b = slots[j].take().unwrap();
+                slots.push(Some(contract(&a, &b)));
+            }
+            let result = join_disjoint(slots);
+            assert_eq!(result.data.len(), 1);
+            assert!(
+                (result.data[0].re - expected).abs() < EPS,
+                "seed {seed}: {} vs {expected}",
+                result.data[0].re
+            );
+        }
     }
 
     // Two entangled components of unequal size, so join_disjoint merges tensors

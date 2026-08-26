@@ -60,8 +60,10 @@ worth the disk.
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |
 | `tn/scalar_depth_20q` | Same contraction at 20 qubits, 4–7 layers, where intermediates grow large enough to reach the parallel contraction arms (`bench-internal`) |
 | `tn/scalar_hea_l6` | Same contraction at 6 layers, 20–50 qubits, the only rows where qubit count drives how many contractions reach the faer arm (`bench-internal`) |
+| `tn/scalar_hea_l7` | Same contraction at 7 layers, 30–50 qubits, where the greedy tree's peak intermediate is non-monotonic in width; the rows that measure contraction tree quality (`bench-internal`) |
+| `tn/rdm_chain` | Single-qubit reduced density matrix on CZ chains at 40 and 60 qubits, query-shaped rows past the dense ceiling; depth 4 weighs per-contraction overhead, depth 8 the arithmetic |
 
-The two `tn/scalar_*` groups are compiled out unless `bench-internal` is enabled, and
+The `tn/scalar_*` groups are compiled out unless `bench-internal` is enabled, and
 `bench_ab.sh` defaults to `--features parallel`, so a gating run over them needs
 `--features "parallel bench-internal"` or it silently reports zero rows. Cargo
 fingerprints feature sets separately, so the first such run pays a cold build in

@@ -1161,6 +1161,64 @@ fn bench_tn_rdm_chain(c: &mut Criterion) {
     group.finish();
 }
 
+/// Build a CZ-chain circuit with one measurement and one reset at half depth.
+fn mid_measured_chain(n: usize, depth: usize) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let singles = [Gate::H, Gate::S, Gate::T, Gate::X];
+    let mut c = Circuit::new(n, 1);
+    for layer in 0..depth {
+        for q in 0..n {
+            c.add_gate(singles[rng.random_range(0..singles.len())].clone(), &[q]);
+        }
+        let offset = layer % 2;
+        for q in (offset..n - 1).step_by(2) {
+            c.add_gate(Gate::Cz, &[q, q + 1]);
+        }
+        if layer + 1 == depth / 2 {
+            c.add_measure(n / 2, 0);
+            c.add_reset(n / 4);
+        }
+    }
+    c
+}
+
+/// Mid-circuit measurement on a chain, where the measurement path's cost
+/// lands mid-run rather than at the terminal readout.
+fn bench_tn_midmeasure_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/midmeasure_chain");
+    configure_group(&mut group);
+
+    for &n in &[16, 20] {
+        let circuit = mid_measured_chain(n, 4);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Depolarizing trajectories on the chain shape, the priced noisy row.
+///
+/// Terminal measurements dominate the per-shot cost, so this row moves with
+/// the measurement path as much as with the noise machinery.
+fn bench_tn_noisy_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/noisy_chain");
+    configure_group(&mut group);
+
+    let n = 16;
+    let mut circuit = circuits::cz_chain_circuit(n, 4, SEED);
+    circuit.measure_all();
+    let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+        b.iter(|| {
+            run_shots_with_noise(BackendKind::TensorNetwork, circ, &noise, 100, 42).unwrap();
+        });
+    });
+    group.finish();
+}
+
 // ---- Cross-backend comparisons ----
 
 fn bench_compare_clifford(c: &mut Criterion) {
@@ -2924,6 +2982,8 @@ criterion_group! {
     bench_tn_scalar_wide_deep,
     bench_tn_scalar_tree_quality,
     bench_tn_rdm_chain,
+    bench_tn_midmeasure_chain,
+    bench_tn_noisy_chain,
     // Auto dispatch
     bench_auto_random,
     bench_auto_qft,

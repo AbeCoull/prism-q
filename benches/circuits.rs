@@ -1221,10 +1221,10 @@ fn bench_tn_noisy_chain(c: &mut Criterion) {
 
 /// Terminal shot sampling on the measured chain.
 ///
-/// At 16 qubits the dense funnel also answers, so the row is the honest
-/// comparison between routes and may read against the native path there.
-/// 40 qubits is past the dense ceiling, where the row could not exist
-/// before native sampling.
+/// At 16 qubits the sampler answers from the dense distribution, so the row
+/// guards that arm against the routed dense funnel it replaces. At 40 qubits
+/// the conditional sweep is the route, priced against per-shot projector
+/// trajectories.
 fn bench_tn_sample_chain(c: &mut Criterion) {
     let mut group = c.benchmark_group("tn/sample_chain");
     configure_group(&mut group);

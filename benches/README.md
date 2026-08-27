@@ -64,7 +64,7 @@ worth the disk.
 | `tn/rdm_chain` | Single-qubit reduced density matrix on CZ chains at 40 and 60 qubits, query-shaped rows past the dense ceiling; depth 4 weighs per-contraction overhead, depth 8 the arithmetic |
 | `tn/midmeasure_chain` | CZ chain with one measurement and one reset at half depth, 16 and 20 qubits; the row where measurement path cost lands mid-run |
 | `tn/noisy_chain` | Depolarizing trajectories on the measured CZ chain at 16 qubits, 100 shots; moves with the measurement path as much as the noise machinery |
-| `tn/sample_chain` | Terminal shot sampling on measured CZ chains at 16 and 40 qubits, 32 shots; 16 is the honest comparison against the dense funnel, 40 is past the dense ceiling |
+| `tn/sample_chain` | Terminal shot sampling on measured CZ chains at 16 and 40 qubits, 32 shots; 16 guards the dense arm, 40 prices the conditional sweep past the dense ceiling |
 
 The `tn/scalar_*` groups are compiled out unless `bench-internal` is enabled, and
 `bench_ab.sh` defaults to `--features parallel`, so a gating run over them needs

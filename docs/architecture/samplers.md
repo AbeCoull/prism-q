@@ -94,8 +94,14 @@ lives in `mps_conditional_path_probabilities_match_the_dense_vector`
 (`src/backend/mps.rs`), and the corpus-wide comparison is the query matrix in
 `tests/conformance_matrix.rs`.
 
-The tensor network stays on the dense route by decision, not by omission; its
-module docstring records why.
+The tensor network answers below its dense ceiling from one contraction of
+the full distribution, and past it samples qubit by qubit: each bit draws
+from the conditioned single-qubit marginal, contracted on the doubled
+network, and the outcome projector is absorbed before the next qubit's
+marginal. A sweep shot costs one doubled contraction per qubit with peaks set
+by treewidth rather than `2^n`, which is what carries sampling past the
+ceiling; the measured crossover that put the dense arm below it is recorded
+in the backend's module docstring.
 
 ## Weighted observables and commuting-set grouping (`src/sim/observable.rs`)
 

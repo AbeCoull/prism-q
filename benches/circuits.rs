@@ -1219,6 +1219,28 @@ fn bench_tn_noisy_chain(c: &mut Criterion) {
     group.finish();
 }
 
+/// Terminal shot sampling on the measured chain.
+///
+/// At 16 qubits the dense funnel also answers, so the row is the honest
+/// comparison between routes and may read against the native path there.
+/// 40 qubits is past the dense ceiling, where the row could not exist
+/// before native sampling.
+fn bench_tn_sample_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/sample_chain");
+    configure_group(&mut group);
+
+    for &n in &[16usize, 40] {
+        let mut circuit = circuits::cz_chain_circuit(n, 4, SEED);
+        circuit.measure_all();
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_shots_with(BackendKind::TensorNetwork, circ, 32, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
 // ---- Cross-backend comparisons ----
 
 fn bench_compare_clifford(c: &mut Criterion) {
@@ -2984,6 +3006,7 @@ criterion_group! {
     bench_tn_rdm_chain,
     bench_tn_midmeasure_chain,
     bench_tn_noisy_chain,
+    bench_tn_sample_chain,
     // Auto dispatch
     bench_auto_random,
     bench_auto_qft,

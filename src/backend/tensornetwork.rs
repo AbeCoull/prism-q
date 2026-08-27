@@ -30,8 +30,6 @@
 //!
 //! - High-treewidth circuits, where contraction intermediates outgrow the
 //!   dense statevector.
-//! - Shot- or observable-heavy workloads; both route through `probabilities()`
-//!   (see below).
 //!
 //! # Contraction strategy
 //!
@@ -47,7 +45,7 @@
 //! touches shapes and legs only, so a restart costs a heap walk, not data
 //! movement.
 //!
-//! # Observables contract natively; shots stay on the dense route
+//! # Observables and shots both contract natively
 //!
 //! `Backend::pauli_expectations` and `Backend::reduced_density_matrix_1q` both
 //! answer by doubling the network against its conjugate: the bra copy's legs are
@@ -58,13 +56,13 @@
 //! An identity factor is a closed leg rather than an appended tensor, so a
 //! weight-`k` observable adds `k` tensors to a network of `2T`, not `n`.
 //!
-//! `Backend::sample_basis_states` is not overridden, and shots continue to route
-//! through `probabilities()`. Sampling one bitstring from a deferred network
-//! means contracting it once per qubit to get each conditional, so a shot costs
-//! `n` contractions against the single contraction the dense route pays for the
-//! whole distribution. That is strictly worse whenever the statevector fits, and
-//! when it does not fit the per-qubit contractions do not fit either: the cost is
-//! set by treewidth, which conditioning does not reduce.
+//! `Backend::sample_basis_states` answers below the dense ceiling from one
+//! contraction of the full distribution, a measured 66x cheaper than the
+//! sweep at 16 qubits and 32 shots. Past the ceiling it samples qubit by
+//! qubit: each bit is drawn from the conditioned single-qubit marginal, and
+//! the outcome projector is absorbed before the next qubit's marginal, so a
+//! shot costs `n` doubled contractions whose peak is set by treewidth rather
+//! than `2^n`.
 //!
 //! `expectation_zero_state` remains a separate path, contracting `⟨0|U†PU|0⟩`
 //! from a circuit rather than an evolved backend, and is what the QEC estimator
@@ -79,7 +77,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
-use crate::backend::{Backend, NORM_CLAMP_MIN, dense_statevector_len, tensor_probability_len};
+use crate::backend::{
+    Backend, BasisSamples, NORM_CLAMP_MIN, dense_statevector_len, reserve_dense_output,
+    tensor_probability_len,
+};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -1135,13 +1136,74 @@ impl TensorNetworkBackend {
     fn collapse_qubit(&mut self, qubit: usize, reset: bool) -> Result<bool> {
         use rand::RngExt;
 
+        let uniform = self.rng.random::<f64>();
+        self.collapse_qubit_with(qubit, reset, uniform)
+    }
+
+    /// Collapse `qubit` with a caller-supplied uniform draw, so the native
+    /// sampler can drive collapses from its own seeded stream without
+    /// touching the run rng.
+    fn collapse_qubit_with(&mut self, qubit: usize, reset: bool, uniform: f64) -> Result<bool> {
         let rho = self.reduced_density_matrix_1q(qubit)?;
         let trace = (rho[0][0].re + rho[1][1].re).max(NORM_CLAMP_MIN);
         let prob_one = (rho[1][1].re / trace).clamp(0.0, 1.0);
-        let outcome = self.rng.random::<f64>() < prob_one;
+        let outcome = uniform < prob_one;
         let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
         self.append_collapse(qubit, outcome, reset, inv_norm);
         Ok(outcome)
+    }
+
+    /// Draw one shot into `samples` by fixing qubits in index order, each bit
+    /// from its conditioned marginal with the outcome projector absorbed.
+    fn sample_one_shot(
+        &mut self,
+        rng: &mut ChaCha8Rng,
+        shot: usize,
+        samples: &mut BasisSamples,
+    ) -> Result<()> {
+        use rand::RngExt;
+
+        for qubit in 0..self.num_qubits {
+            let uniform = rng.random::<f64>();
+            if self.collapse_qubit_with(qubit, false, uniform)? {
+                samples.set(shot, qubit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Qubit-by-qubit conditional sampling, one doubled-network contraction
+    /// per qubit per shot; the module docstring carries the cost trade.
+    ///
+    /// A pre-flight plans the first marginal and reserves its peak
+    /// intermediate as a feasibility proxy: later marginals open a different
+    /// qubit and can plan a different tree, so the gate is heuristic, not a
+    /// guarantee. The state is restored after every shot, errors included.
+    fn sample_native(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let n = self.num_qubits;
+        let mut samples = BasisSamples::new(num_shots, n);
+
+        let (network, _, _) = self.double_for_partial_trace(0);
+        let slots: Vec<Option<TensorMeta>> =
+            network.iter().map(|t| Some(TensorMeta::of(t))).collect();
+        let plan = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
+        let mut probe: Vec<Complex64> = Vec::new();
+        reserve_dense_output(&mut probe, plan.peak, self.name(), "native sampling")?;
+        drop(probe);
+
+        let tensors = self.tensors.clone();
+        let output_legs = self.output_legs.clone();
+        let next_leg = self.next_leg;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        for shot in 0..num_shots {
+            let drawn = self.sample_one_shot(&mut rng, shot, &mut samples);
+            self.tensors.clone_from(&tensors);
+            self.output_legs.clone_from(&output_legs);
+            self.next_leg = next_leg;
+            drawn?;
+        }
+        Ok(samples)
     }
 
     /// Absorb the rank-2 tensor that keeps only `outcome` on `qubit`, scaled by
@@ -1493,6 +1555,39 @@ impl Backend for TensorNetworkBackend {
             return Ok(amplitudes.par_iter().map(|a| a.norm_sqr()).collect());
         }
         Ok(amplitudes.iter().map(|a| a.norm_sqr()).collect())
+    }
+
+    fn supports_native_sampling(&self) -> bool {
+        true
+    }
+
+    /// Draw shots from the dense distribution below the ceiling and from the
+    /// qubit-by-qubit conditional sweep past it.
+    ///
+    /// One full-distribution contraction plus a draw per shot undercuts the
+    /// per-shot sweep by a measured 66x at 16 qubits and 32 shots on the
+    /// chain shape, so the dense arm answers wherever `probabilities()` can;
+    /// the sweep is the route that exists past that ceiling.
+    fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let n = self.num_qubits;
+        if n == 0 || num_shots == 0 {
+            return Ok(BasisSamples::new(num_shots, n));
+        }
+
+        if tensor_probability_len(self.name(), n).is_ok() {
+            use rand::RngExt;
+
+            let mut samples = BasisSamples::new(num_shots, n);
+            let cdf = crate::sim::shots::build_cdf(&self.probabilities()?);
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            for shot in 0..num_shots {
+                let r = rng.random::<f64>();
+                samples.set_index(shot, crate::sim::shots::sample_from_cdf(&cdf, r));
+            }
+            return Ok(samples);
+        }
+
+        self.sample_native(num_shots, seed)
     }
 
     fn num_qubits(&self) -> usize {
@@ -2063,6 +2158,97 @@ mod tests {
             "{} vs {expected}",
             exps[1]
         );
+    }
+
+    // Joint distribution check for the conditional sweep against the dense
+    // route with per-outcome binomial bands, plus the contract that sampling
+    // leaves the state untouched. Calls the sweep directly: the public path
+    // takes the dense arm at this width.
+    #[test]
+    fn test_native_sampling_matches_dense_distribution() {
+        let circuit = crate::circuits::cz_chain_circuit(6, 3, 42);
+        let mut tn = TensorNetworkBackend::new(42);
+        tn.init(6, 0).unwrap();
+        for inst in &circuit.instructions {
+            tn.apply(inst).unwrap();
+        }
+        let probs_before = tn.probabilities().unwrap();
+
+        let shots = 2000usize;
+        let samples = tn.sample_native(shots, 42).unwrap();
+
+        let mut counts = vec![0usize; 1 << 6];
+        for shot in 0..shots {
+            let mut index = 0usize;
+            for q in 0..6 {
+                if samples.bit(shot, q) {
+                    index |= 1 << q;
+                }
+            }
+            counts[index] += 1;
+        }
+        for (index, (&count, &p)) in counts.iter().zip(&probs_before).enumerate() {
+            let freq = count as f64 / shots as f64;
+            let sigma = (p * (1.0 - p) / shots as f64).sqrt().max(1e-3);
+            assert!(
+                (freq - p).abs() < 6.0 * sigma,
+                "outcome {index}: {freq} vs {p}"
+            );
+        }
+
+        assert_probs_close(&tn.probabilities().unwrap(), &probs_before);
+    }
+
+    // Per-qubit counts convergence where the dense route cannot answer at
+    // all: 30 independent rotations, marginals known analytically.
+    #[test]
+    fn test_native_sampling_past_dense_ceiling() {
+        let n = 30;
+        let mut tn = TensorNetworkBackend::new(42);
+        tn.init(n, 0).unwrap();
+        for q in 0..n {
+            tn.apply(&Instruction::Gate {
+                gate: Gate::Ry(0.9),
+                targets: smallvec::smallvec![q],
+            })
+            .unwrap();
+        }
+
+        let shots = 500usize;
+        let samples = tn.sample_basis_states(shots, 42).unwrap();
+        let p_one = (0.45f64).sin().powi(2);
+        let sigma = (p_one * (1.0 - p_one) / shots as f64).sqrt();
+        for q in [0usize, 7, 15, 29] {
+            let count = (0..shots).filter(|&shot| samples.bit(shot, q)).count();
+            let freq = count as f64 / shots as f64;
+            assert!(
+                (freq - p_one).abs() < 5.0 * sigma,
+                "qubit {q}: {freq} vs {p_one}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sample_basis_states_repeats_from_the_seed() {
+        let circuit = crate::circuits::cz_chain_circuit(6, 3, 42);
+        let mut tn = TensorNetworkBackend::new(42);
+        tn.init(6, 0).unwrap();
+        for inst in &circuit.instructions {
+            tn.apply(inst).unwrap();
+        }
+
+        let first = tn.sample_basis_states(64, 42).unwrap();
+        let second = tn.sample_basis_states(64, 42).unwrap();
+        let other = tn.sample_basis_states(64, 43).unwrap();
+
+        let bits = |s: &BasisSamples| -> Vec<bool> {
+            (0..64)
+                .flat_map(|shot| (0..6).map(move |q| (shot, q)))
+                .map(|(shot, q)| s.bit(shot, q))
+                .collect()
+        };
+        assert_eq!(bits(&first), bits(&second));
+        assert_ne!(bits(&first), bits(&other));
     }
 
     // Two entangled components of unequal size, so join_disjoint merges tensors

@@ -131,9 +131,11 @@ Shots and Pauli expectations answer from the per-qubit states rather than the `2
 
 ## Tensor Network
 
-Deferred contraction with a greedy min-size heuristic. Gates append tensors; contraction happens lazily at measurement or probability extraction. `MAX_PROB_QUBITS = 25` guards against exponential blowup.
+Deferred contraction planned on metadata: a greedy min-size pass picks the pair order, seeded noisy restarts rerun it when the greedy tree's peak intermediate grows large, and the kernel replays the winner. Gates append tensors; contraction happens lazily at probability extraction, where `MAX_PROB_QUBITS = 25` guards against the dense readout.
 
-Two queries stay off the dense route by contracting the network against its conjugate.
+Measurement and reset do not contract to the dense state: the outcome draws from the single-qubit reduced density matrix and the renormalizing projector is absorbed into the tensor holding the measured qubit's output leg, so the network keeps its deferred form, mid-circuit measurement carries no width ceiling, and the tensor count does not grow across measurements.
+
+Two further queries stay off the dense route by contracting the network against its conjugate.
 The bra copy's legs are shifted clear of the ket index space, and each qubit's boundary
 is either closed against its twin, which is a trace, or joined through an operator. A
 one-qubit reduced density matrix leaves that qubit's ket and bra indices open and

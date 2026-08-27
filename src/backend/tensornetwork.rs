@@ -2,14 +2,17 @@
 //!
 //! Represents the quantum state as a network of tensors. Gate application
 //! appends gate tensors to the network (deferred contraction). Contraction
-//! happens lazily when `probabilities()` or measurement is requested.
+//! happens lazily when `probabilities()` or another query is requested.
 //!
 //! # Memory layout
 //!
 //! - Each tensor: contiguous `Vec<Complex64>` plus a shape vector and leg ids
 //!   (up to 6 held inline).
 //! - Gates append tensors, so memory grows with gate count until a query
-//!   contracts the network; measurement leaves one dense rank-n tensor.
+//!   contracts the network. Measurement and reset absorb a projector into the
+//!   tensor holding the measured qubit's output leg and keep the deferred
+//!   form: the outcome marginal contracts the doubled network, so mid-circuit
+//!   measurement carries no dense width ceiling and does not grow the network.
 //!
 //! # Gate support
 //!
@@ -1123,29 +1126,55 @@ impl TensorNetworkBackend {
         id
     }
 
-    fn replace_with_statevector(&mut self, state: Vec<Complex64>) {
-        let n = self.num_qubits;
-        self.tensors.clear();
-        self.next_leg = 0;
-        self.output_legs.clear();
+    /// Draw the outcome for `qubit` from its reduced density matrix and append
+    /// the renormalizing projector, keeping the network in deferred form.
+    ///
+    /// The marginal contracts the doubled network, so no `2^n` vector is built
+    /// and measurement carries no dense width ceiling. One rng draw per call,
+    /// in program order, matching every other backend's outcome stream.
+    fn collapse_qubit(&mut self, qubit: usize, reset: bool) -> Result<bool> {
+        use rand::RngExt;
 
-        for _ in 0..n {
-            let leg = self.fresh_leg();
-            self.output_legs.push(leg);
-        }
+        let rho = self.reduced_density_matrix_1q(qubit)?;
+        let trace = (rho[0][0].re + rho[1][1].re).max(NORM_CLAMP_MIN);
+        let prob_one = (rho[1][1].re / trace).clamp(0.0, 1.0);
+        let outcome = self.rng.random::<f64>() < prob_one;
+        let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
+        self.append_collapse(qubit, outcome, reset, inv_norm);
+        Ok(outcome)
+    }
 
-        let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
-        let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
-        for q in (0..n).rev() {
-            shape.push(2);
-            legs.push(self.output_legs[q]);
-        }
+    /// Absorb the rank-2 tensor that keeps only `outcome` on `qubit`, scaled by
+    /// `inv_norm`, into the tensor holding the qubit's output leg, mapping the
+    /// kept branch to `|0>` when `reset` is set.
+    ///
+    /// Contracting into the owner instead of appending keeps the tensor count
+    /// constant across measurements, so a measure or reset loop costs one
+    /// doubled contraction per event rather than growing the network it
+    /// contracts.
+    fn append_collapse(&mut self, qubit: usize, outcome: bool, reset: bool, inv_norm: f64) {
+        let in_leg = self.output_legs[qubit];
+        let out_leg = self.fresh_leg();
+        let zero = Complex64::new(0.0, 0.0);
+        let scale = Complex64::new(inv_norm, 0.0);
 
-        self.tensors.push(Tensor {
-            data: state,
-            shape,
-            legs,
-        });
+        let in_idx = usize::from(outcome);
+        let out_idx = if reset { 0 } else { in_idx };
+        let mut data = vec![zero; 4];
+        data[out_idx * 2 + in_idx] = scale;
+
+        let projector = Tensor {
+            data,
+            shape: smallvec::smallvec![2, 2],
+            legs: smallvec::smallvec![out_leg, in_leg],
+        };
+        let owner = self
+            .tensors
+            .iter()
+            .position(|t| t.legs.contains(&in_leg))
+            .expect("every output leg has an owner");
+        self.tensors[owner] = contract(&self.tensors[owner], &projector);
+        self.output_legs[qubit] = out_leg;
     }
 
     fn append_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
@@ -1255,28 +1284,7 @@ impl TensorNetworkBackend {
     }
 
     fn apply_reset(&mut self, qubit: usize) -> Result<()> {
-        use rand::RngExt;
-
-        let amplitudes = self.contract_to_statevector()?;
-        let mask = 1usize << qubit;
-
-        let mut prob_one = 0.0f64;
-        for (idx, amp) in amplitudes.iter().enumerate() {
-            if idx & mask != 0 {
-                prob_one += amp.norm_sqr();
-            }
-        }
-        let outcome = self.rng.random::<f64>() < prob_one;
-        let inv_norm = crate::backend::measurement_inv_norm(outcome, prob_one);
-
-        let mut collapsed = vec![Complex64::new(0.0, 0.0); amplitudes.len()];
-        for (idx, amp) in amplitudes.iter().enumerate() {
-            if (idx & mask != 0) == outcome {
-                collapsed[idx & !mask] = amp * inv_norm;
-            }
-        }
-
-        self.replace_with_statevector(collapsed);
+        self.collapse_qubit(qubit, true)?;
         Ok(())
     }
 
@@ -1443,36 +1451,8 @@ impl Backend for TensorNetworkBackend {
                 qubit,
                 classical_bit,
             } => {
-                use rand::RngExt;
-
-                let amplitudes = self.contract_to_statevector()?;
-
-                let mut prob_one = 0.0f64;
-                for (idx, amp) in amplitudes.iter().enumerate() {
-                    if (idx >> qubit) & 1 == 1 {
-                        prob_one += amp.norm_sqr();
-                    }
-                }
-
-                let outcome = self.rng.random::<f64>() < prob_one;
+                let outcome = self.collapse_qubit(*qubit, false)?;
                 self.classical_bits[*classical_bit] = outcome;
-
-                let mut collapsed = amplitudes;
-                let mut norm_sq = 0.0f64;
-                for (idx, amp) in collapsed.iter_mut().enumerate() {
-                    let bit = (idx >> qubit) & 1 == 1;
-                    if bit != outcome {
-                        *amp = Complex64::new(0.0, 0.0);
-                    } else {
-                        norm_sq += amp.norm_sqr();
-                    }
-                }
-                let norm = norm_sq.clamp(NORM_CLAMP_MIN, 1.0).sqrt();
-                for amp in &mut collapsed {
-                    *amp /= norm;
-                }
-
-                self.replace_with_statevector(collapsed);
             }
             Instruction::Reset { qubit } => {
                 self.apply_reset(*qubit)?;
@@ -1999,6 +1979,90 @@ mod tests {
                 result.data[0].re
             );
         }
+    }
+
+    // Mid-circuit measure and reset must agree with the statevector on the
+    // seeded outcome stream, not just on the marginals, and on the final
+    // distribution after further gates.
+    #[test]
+    fn test_mid_circuit_measure_reset_matches_statevector() {
+        let mut c = Circuit::new(5, 2);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Ry(0.7), &[2]);
+        c.add_measure(1, 0);
+        c.add_gate(Gate::Cx, &[1, 2]);
+        c.add_gate(Gate::H, &[1]);
+        c.add_reset(0);
+        c.add_gate(Gate::Cx, &[0, 3]);
+        c.add_measure(2, 1);
+        c.add_gate(Gate::Ry(0.3), &[4]);
+
+        for seed in [42u64, 7, 12345] {
+            let mut sv = StatevectorBackend::new(seed);
+            sv.init(5, 2).unwrap();
+            let mut tn = TensorNetworkBackend::new(seed);
+            tn.init(5, 2).unwrap();
+            for inst in &c.instructions {
+                sv.apply(inst).unwrap();
+                tn.apply(inst).unwrap();
+            }
+            assert_eq!(
+                tn.classical_results(),
+                sv.classical_results(),
+                "seed {seed}"
+            );
+            assert_probs_close(&tn.probabilities().unwrap(), &sv.probabilities().unwrap());
+        }
+    }
+
+    // A measurement past the dense query ceiling must succeed and keep the
+    // deferred form: no rank-n tensor, and the network still answers
+    // expectation queries that never build a 2^n vector.
+    #[test]
+    fn test_measurement_past_dense_ceiling_keeps_network() {
+        let n = 30;
+        let mut tn = TensorNetworkBackend::new(42);
+        tn.init(n, 1).unwrap();
+        tn.apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec::smallvec![0],
+        })
+        .unwrap();
+        tn.apply(&Instruction::Gate {
+            gate: Gate::Cx,
+            targets: smallvec::smallvec![0, 1],
+        })
+        .unwrap();
+        tn.apply(&Instruction::Gate {
+            gate: Gate::Cx,
+            targets: smallvec::smallvec![1, 2],
+        })
+        .unwrap();
+        tn.apply(&Instruction::Measure {
+            qubit: 1,
+            classical_bit: 0,
+        })
+        .unwrap();
+
+        assert!(tn.tensors.len() > 1);
+        assert!(tn.tensors.iter().all(|t| t.rank() < 6));
+
+        let outcome = tn.classical_results()[0];
+        let expected = if outcome { -1.0 } else { 1.0 };
+        let exps = tn
+            .pauli_expectations(&[vec![PauliTerm::z(0)], vec![PauliTerm::z(2)]])
+            .unwrap();
+        assert!(
+            (exps[0] - expected).abs() < EPS,
+            "{} vs {expected}",
+            exps[0]
+        );
+        assert!(
+            (exps[1] - expected).abs() < EPS,
+            "{} vs {expected}",
+            exps[1]
+        );
     }
 
     // Two entangled components of unequal size, so join_disjoint merges tensors

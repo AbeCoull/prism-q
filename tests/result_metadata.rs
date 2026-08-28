@@ -279,3 +279,37 @@ fn per_shot_route_stamps_metadata() {
         Exactness::Approximate { .. }
     ));
 }
+
+// Truncation-enabled SPD marks the route approximate even when the run
+// discarded nothing; epsilon 0 cannot discard and stays exact.
+#[test]
+fn spd_exactness_marks_the_route_not_the_run() {
+    let circuit = entangling_brickwork(3, 1);
+    let observables = vec![vec![PauliTerm::z(0)]];
+
+    let exact_route = simulate(&circuit)
+        .backend(BackendKind::DeterministicPauli {
+            epsilon: 0.0,
+            max_terms: 0,
+        })
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(exact_route.metadata.is_exact());
+
+    // A threshold far below every coefficient discards nothing, and the
+    // route still reports approximate.
+    let approx_route = simulate(&circuit)
+        .backend(BackendKind::DeterministicPauli {
+            epsilon: 1e-300,
+            max_terms: 1 << 16,
+        })
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert!(!approx_route.metadata.is_exact());
+    assert!(
+        (approx_route.values[0] - exact_route.values[0]).abs() < 1e-12,
+        "nothing was discarded, so the values must agree"
+    );
+}

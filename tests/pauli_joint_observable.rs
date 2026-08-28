@@ -6,7 +6,8 @@ use common::SEED;
 use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::{
-    BackendKind, PauliAxis, PauliTerm, run_spd_observable, run_spp_observable, simulate,
+    BackendKind, PauliAxis, PauliTerm, run_spd_observable, run_spd_observable_budgeted,
+    run_spp_observable, simulate,
 };
 
 #[test]
@@ -553,5 +554,100 @@ fn pauli_rot_strings_match_the_statevector() {
             spd.mean
         );
         assert_eq!(spd.t_count, 3, "one branching rotation per Pauli string");
+    }
+}
+
+// The composable 1-norm truncation bound: at every budget, the truncated mean
+// sits within total_discarded of both the exact SPD mean and the statevector.
+#[test]
+fn budgeted_spd_holds_its_error_bound_across_budgets() {
+    let angles: Vec<(f64, f64)> = (0..4).map(|i| (0.08 + 0.01 * i as f64, 0.06)).collect();
+    let circuit = qaoa_circuit(5, &angles);
+    // z(0), z(2) rather than a nearest-neighbor pair: the ring plus a
+    // symmetric observable pairs up equal-magnitude terms, and a tie at the
+    // truncation cut would make the discarded-mass comparison below ride on
+    // hash order.
+    let obs = vec![PauliTerm::z(0), PauliTerm::z(2)];
+
+    let exact = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap();
+    assert_eq!(exact.total_discarded, 0.0);
+    let sv = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .expectation_values(std::slice::from_ref(&obs))
+        .unwrap()[0];
+
+    for budget in [64usize, 32, 16, 8] {
+        let b = run_spd_observable_budgeted(&circuit, &obs, budget).unwrap();
+        assert!(
+            b.peak_terms <= budget,
+            "budget {budget} held {} terms",
+            b.peak_terms
+        );
+        assert!(
+            (b.mean - exact.mean).abs() <= b.total_discarded + 1e-12,
+            "budget {budget}: |{} - {}| > bound {}",
+            b.mean,
+            exact.mean,
+            b.total_discarded
+        );
+        assert!(
+            (b.mean - sv).abs() <= b.total_discarded + 1e-9,
+            "budget {budget}: statevector {sv} outside bound {}",
+            b.total_discarded
+        );
+    }
+
+    // Near-Clifford angles concentrate magnitude in few terms: the tightest
+    // budget must fire, and a moderate one buys most terms back for little
+    // discarded mass.
+    let tight = run_spd_observable_budgeted(&circuit, &obs, 8).unwrap();
+    assert!(tight.total_discarded > 0.0);
+    let moderate = run_spd_observable_budgeted(&circuit, &obs, 32).unwrap();
+    assert!(
+        moderate.total_discarded < tight.total_discarded,
+        "moderate {} vs tight {}",
+        moderate.total_discarded,
+        tight.total_discarded
+    );
+}
+
+// A budget above the peak never fires: same result as the exact run, zero
+// reported bound.
+#[test]
+fn budget_above_the_peak_never_fires() {
+    let mut circuit = Circuit::new(3, 0);
+    for q in 0..3 {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::T, &[q]);
+    }
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+
+    let obs = vec![PauliTerm::z(1), PauliTerm::z(2)];
+    let exact = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap();
+    let budgeted = run_spd_observable_budgeted(&circuit, &obs, 1 << 12).unwrap();
+    assert_eq!(budgeted.total_discarded, 0.0);
+    assert_eq!(budgeted.peak_terms, exact.peak_terms);
+    assert!(
+        (budgeted.mean - exact.mean).abs() < 1e-12,
+        "budgeted {} vs exact {}",
+        budgeted.mean,
+        exact.mean
+    );
+}
+
+#[test]
+fn out_of_range_budgets_are_rejected() {
+    let mut circuit = Circuit::new(1, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    for budget in [0usize, 1 << 21] {
+        let err = run_spd_observable_budgeted(&circuit, &[PauliTerm::z(0)], budget)
+            .expect_err("an out-of-range budget must be rejected");
+        assert!(
+            matches!(err, prism_q::PrismError::InvalidParameter { .. }),
+            "got {err:?}"
+        );
     }
 }

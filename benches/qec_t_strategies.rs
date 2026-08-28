@@ -11,6 +11,8 @@
 //! - `spd_light_cone`: production SPD cone-skip scaling.
 //! - `pauli_engine_qaoa`: weighted MaxCut evaluation on the shared QAOA
 //!   fixture through the deterministic Pauli engine.
+//! - `spd_truncation`: budgeted SPD truncation against the untruncated
+//!   engine, with a Clifford+T control the policy must not touch.
 //!
 //! Reference and internal sweeps are opt-in benchmarks. Enable them with
 //! `--features parallel,bench-internal`.
@@ -27,7 +29,7 @@ use prism_q::qec::observable_reroute::{cone_telemetry, min_cone_z_representative
 use prism_q::{
     BackendKind, Circuit, Gate, PauliObservable, PauliTerm, QecOptions, QecProgram, QecRecordRef,
     QecTStrategy, circuits, run_qec_program_with_strategy, run_spd_observable,
-    run_spd_observable_light_cone, simulate,
+    run_spd_observable_budgeted, run_spd_observable_light_cone, simulate,
 };
 #[cfg(feature = "bench-internal")]
 use std::collections::HashSet;
@@ -637,6 +639,71 @@ fn bench_pauli_engine_qaoa(c: &mut Criterion) {
     group.finish();
 }
 
+/// Hardware-efficient layers at small angles: the near-Clifford shape where
+/// budgeted truncation pays (term count is angle-independent, discarded mass
+/// is not).
+fn near_clifford_hea(n: usize, layers: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    let mut angle = 0.05f64;
+    for _ in 0..layers {
+        for q in 0..n {
+            c.add_gate(Gate::Ry(angle), &[q]);
+            c.add_gate(Gate::Rz(1.3 * angle), &[q]);
+            angle += 0.003;
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    c
+}
+
+/// Budgeted SPD truncation against the untruncated engine: the near-Clifford
+/// shape where the budget pays, and a Clifford+T control sized under the
+/// budget where the policy must not fire.
+fn bench_spd_truncation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("spd_truncation");
+    group
+        .sample_size(10)
+        .warm_up_time(Duration::from_millis(500))
+        .measurement_time(Duration::from_secs(5));
+
+    let hea = near_clifford_hea(10, 3);
+    let hea_obs = [PauliTerm::x(5)];
+    group.bench_function(BenchmarkId::new("exact", "hea_10q_l3"), |b| {
+        b.iter(|| run_spd_observable(&hea, &hea_obs, 0.0, 0).unwrap())
+    });
+    for budget in [4096usize, 256] {
+        group.bench_function(
+            BenchmarkId::new(format!("budget{budget}"), "hea_10q_l3"),
+            |b| b.iter(|| run_spd_observable_budgeted(&hea, &hea_obs, budget).unwrap()),
+        );
+    }
+
+    let mut t_control = Circuit::new(10, 0);
+    for q in 0..10 {
+        t_control.add_gate(Gate::H, &[q]);
+        t_control.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..9 {
+        t_control.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let t_obs = [PauliTerm::x(5)];
+    let exact = run_spd_observable(&t_control, &t_obs, 0.0, 0).unwrap();
+    let budgeted = run_spd_observable_budgeted(&t_control, &t_obs, 4096).unwrap();
+    assert!(exact.peak_terms < 4096, "control must sit under the budget");
+    assert_eq!(budgeted.total_discarded, 0.0);
+
+    group.bench_function(BenchmarkId::new("t_control_exact", "10q"), |b| {
+        b.iter(|| run_spd_observable(&t_control, &t_obs, 0.0, 0).unwrap())
+    });
+    group.bench_function(BenchmarkId::new("t_control_budget4096", "10q"), |b| {
+        b.iter(|| run_spd_observable_budgeted(&t_control, &t_obs, 4096).unwrap())
+    });
+
+    group.finish();
+}
+
 #[cfg(feature = "bench-internal")]
 fn bench_qec_internal_sweeps(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_internal_sweeps");
@@ -823,7 +890,7 @@ criterion_group! {
     name = qec_t_strategy_benches;
     config = common::criterion_config();
     targets = bench_qec_t_strategies, bench_qec_t_scaling, bench_spd_light_cone,
-        bench_pauli_engine_qaoa
+        bench_pauli_engine_qaoa, bench_spd_truncation
 }
 
 #[cfg(feature = "bench-internal")]
@@ -835,6 +902,7 @@ criterion_group! {
         bench_qec_t_scaling,
         bench_spd_light_cone,
         bench_pauli_engine_qaoa,
+        bench_spd_truncation,
         bench_qec_internal_sweeps
 }
 criterion_main!(qec_t_strategy_benches);

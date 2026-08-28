@@ -854,6 +854,31 @@ impl WeightedPauliSum {
         discarded
     }
 
+    /// Drop exactly the smallest-magnitude surplus terms until at most
+    /// `max_terms` remain, returning the 1-norm of what was dropped. Ties at
+    /// the cut fall to map order, so which of two equal-magnitude terms
+    /// survives is not stable across runs; the returned bound holds either
+    /// way.
+    fn truncate_to_budget(&mut self, max_terms: usize) -> f64 {
+        let surplus = self.terms.len().saturating_sub(max_terms);
+        if surplus == 0 {
+            return 0.0;
+        }
+        self.scratch.clear();
+        self.scratch.extend(self.terms.drain());
+        self.scratch.select_nth_unstable_by(surplus - 1, |a, b| {
+            a.1.norm_sqr().total_cmp(&b.1.norm_sqr())
+        });
+        let mut discarded = 0.0;
+        for (_, coeff) in self.scratch.drain(..surplus) {
+            discarded += coeff.norm();
+        }
+        for (pauli, coeff) in self.scratch.drain(..) {
+            self.terms.insert(pauli, coeff);
+        }
+        discarded
+    }
+
     fn diagonal_expectation(&self) -> f64 {
         let mut sum = Complex64::new(0.0, 0.0);
         for (pauli, coeff) in &self.terms {
@@ -878,6 +903,42 @@ pub struct SpdResult {
     pub total_discarded: f64,
 }
 
+/// Truncation policy for one SPD run. Both variants report the same
+/// composable 1-norm error accounting through `total_discarded`.
+enum Truncation {
+    Threshold { epsilon: f64, max_terms: usize },
+    Budget { max_terms: usize },
+}
+
+impl Truncation {
+    /// Mid-run enforcement after one instruction. Discarded mass accumulates
+    /// into `total_discarded` only when a drop fires, so the exact path keeps
+    /// no unconditional float add in the per-instruction loop.
+    fn enforce(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
+        match *self {
+            Truncation::Threshold { epsilon, max_terms } => {
+                if max_terms > 0 && sum.terms.len() > max_terms {
+                    *total_discarded += sum.truncate(epsilon);
+                }
+            }
+            Truncation::Budget { max_terms } => {
+                if sum.terms.len() > max_terms {
+                    *total_discarded += sum.truncate_to_budget(max_terms);
+                }
+            }
+        }
+    }
+
+    /// Terminal sweep after the backward pass.
+    fn final_sweep(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
+        if let Truncation::Threshold { epsilon, .. } = *self {
+            if epsilon > 0.0 {
+                *total_discarded += sum.truncate(epsilon);
+            }
+        }
+    }
+}
+
 /// Deterministic SPD on a joint Pauli observable.
 ///
 /// Starts with the single weighted term `(observable, 1.0)`, backward-
@@ -896,14 +957,52 @@ pub struct SpdResult {
 /// the run is exact and errors once the sum passes an internal ceiling. With
 /// `max_terms > 0`, sub-`epsilon` terms are dropped whenever the sum exceeds
 /// the budget and `total_discarded` bounds the resulting error, per the
-/// 1-norm bound `|error| ≤ Σ |discarded|`. An `epsilon` too small to prune the
-/// growth still reaches the ceiling and errors there: the run never returns a
-/// silently over-truncated value.
+/// composable 1-norm bound `|error| ≤ Σ |discarded|` (each dropped term's
+/// exact continuation is unitary conjugation of a unit-norm operator, so its
+/// terminal contribution is at most its magnitude). An `epsilon` too small to
+/// prune the growth still reaches the ceiling and errors there: the run never
+/// returns a silently over-truncated value. See [`run_spd_observable_budgeted`]
+/// for the policy with no threshold to guess.
 pub fn run_spd_observable(
     circuit: &Circuit,
     observable: &[PauliTerm],
     epsilon: f64,
     max_terms: usize,
+) -> Result<SpdObservableResult> {
+    run_spd_observable_with(
+        circuit,
+        observable,
+        &Truncation::Threshold { epsilon, max_terms },
+    )
+}
+
+/// Deterministic SPD on a joint Pauli observable under a fixed term budget.
+///
+/// Same backward propagation as [`run_spd_observable`], but whenever the sum
+/// exceeds `max_terms` the smallest-magnitude surplus terms are dropped,
+/// exactly enough to return to the budget. No threshold needs guessing, the
+/// run cannot die at the term ceiling on account of growth the budget already
+/// caps, and `total_discarded` is the realized 1-norm error bound for the
+/// term count held. `max_terms` must be at least 1.
+pub fn run_spd_observable_budgeted(
+    circuit: &Circuit,
+    observable: &[PauliTerm],
+    max_terms: usize,
+) -> Result<SpdObservableResult> {
+    if max_terms == 0 || max_terms > SPD_MAX_TERMS_CEILING {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "budgeted SPD needs a term budget between 1 and {SPD_MAX_TERMS_CEILING}"
+            ),
+        });
+    }
+    run_spd_observable_with(circuit, observable, &Truncation::Budget { max_terms })
+}
+
+fn run_spd_observable_with(
+    circuit: &Circuit,
+    observable: &[PauliTerm],
+    truncation: &Truncation,
 ) -> Result<SpdObservableResult> {
     let lowered = validate_and_lower(circuit, "SPD observable")?;
     let circuit = lowered.as_ref();
@@ -920,18 +1019,14 @@ pub fn run_spd_observable(
         if let Instruction::Gate { gate, targets } = inst {
             sum.apply_backward(gate, targets);
         }
-        if max_terms > 0 && sum.terms.len() > max_terms {
-            total_discarded += sum.truncate(epsilon);
-        }
+        truncation.enforce(&mut sum, &mut total_discarded);
         check_spd_term_ceiling(sum.terms.len())?;
         if sum.terms.len() > peak_terms {
             peak_terms = sum.terms.len();
         }
     }
 
-    if epsilon > 0.0 {
-        total_discarded += sum.truncate(epsilon);
-    }
+    truncation.final_sweep(&mut sum, &mut total_discarded);
 
     Ok(SpdObservableResult {
         mean: sum.diagonal_expectation(),

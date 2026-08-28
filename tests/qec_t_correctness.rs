@@ -530,7 +530,7 @@ fn analytical_strategies_handle_postselection() {
 }
 
 #[test]
-fn auto_routes_non_clifford_non_t_gate_to_tensor_network() {
+fn spd_strategy_handles_arbitrary_axis_rotations() {
     let theta = std::f64::consts::FRAC_PI_3;
     let mut program = QecProgram::with_options(1, options(512));
     program.push_gate(Gate::Rx(theta), &[0]).unwrap();
@@ -539,11 +539,50 @@ fn auto_routes_non_clifford_non_t_gate_to_tensor_network() {
         .observable_include(0, &[QecRecordRef::absolute(m0)])
         .unwrap();
 
+    let expected = theta.cos();
+    for strategy in [QecTStrategy::Spd, QecTStrategy::Auto] {
+        let result = run_qec_program_with_strategy(&program, strategy).unwrap();
+        let estimate = result
+            .observable_expectations
+            .as_ref()
+            .expect("analytical strategies must populate expectations")[0];
+        assert!(
+            (estimate.mean - expected).abs() < 1e-10,
+            "{strategy:?} mean {:.12} should match cos(theta) {:.12}",
+            estimate.mean,
+            expected
+        );
+    }
+}
+
+#[test]
+fn auto_routes_non_clifford_non_rotation_gate_to_tensor_network() {
+    // The Rx(pi/3) matrix as a raw fused unitary: same physics as the
+    // rotation, but a gate the Pauli engines cannot branch or lower.
+    let theta = std::f64::consts::FRAC_PI_3;
+    let (sin, cos) = (theta / 2.0).sin_cos();
+    let fused = Gate::Fused(Box::new([
+        [
+            num_complex::Complex64::new(cos, 0.0),
+            num_complex::Complex64::new(0.0, -sin),
+        ],
+        [
+            num_complex::Complex64::new(0.0, -sin),
+            num_complex::Complex64::new(cos, 0.0),
+        ],
+    ]));
+    let mut program = QecProgram::with_options(1, options(512));
+    program.push_gate(fused, &[0]).unwrap();
+    let m0 = program.measure_z(0).unwrap();
+    program
+        .observable_include(0, &[QecRecordRef::absolute(m0)])
+        .unwrap();
+
     let spd_err = run_qec_program_with_strategy(&program, QecTStrategy::Spd)
-        .expect_err("SPD must reject gates outside Clifford+T");
+        .expect_err("SPD must reject gates outside its rotation family");
     let spd_msg = format!("{spd_err:?}");
     assert!(
-        spd_msg.contains("rx"),
+        spd_msg.contains("fused"),
         "unexpected SPD rejection: {spd_msg}"
     );
 

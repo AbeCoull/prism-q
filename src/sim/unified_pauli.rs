@@ -1,14 +1,20 @@
-//! Pauli propagation engines for circuits of Clifford gates and Z-axis
+//! Pauli propagation engines for circuits of Clifford gates and Pauli
 //! rotations: SPP samples backward Heisenberg propagation stochastically, SPD
 //! carries the full weighted Pauli sum with optional truncation. Neither
 //! materializes a state vector.
+//!
+//! Z-axis rotations (`T`, `Tdg`, `Rz`, `P`) and the two-qubit `Rzz` branch
+//! natively; `Rx`, `Ry`, and multi-qubit `PauliRot` strings lower to Clifford
+//! conjugation around one `Rz` before the run.
 
 use num_complex::Complex64;
 use rand::SeedableRng;
 use rand::{Rng, RngExt};
 use rand_chacha::ChaCha8Rng;
 
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use std::borrow::Cow;
+
+use crate::circuit::{Circuit, Instruction, SmallVec, pauli_rotation_lowering};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::{PauliVec, flip_bit, propagate_backward};
@@ -51,19 +57,45 @@ fn z_rotation_angle(gate: &Gate) -> Option<f64> {
     }
 }
 
-fn validate_pauli_unitary(circuit: &Circuit, backend: &'static str) -> Result<()> {
+#[inline]
+fn zz_rotation_angle(gate: &Gate) -> Option<f64> {
+    match gate {
+        Gate::Rzz(theta) => Some(*theta),
+        _ => None,
+    }
+}
+
+/// Validate the circuit and lower arbitrary-axis rotations in one walk.
+///
+/// `Rx`, `Ry`, and multi-qubit `PauliRot` strings expand through the shared
+/// CNOT-ladder lowering into Clifford conjugation around one `Rz`, so the
+/// engines only ever branch on Z-axis rules; `Rzz` stays native and branches
+/// directly on the `Z⊗Z` anticommutation test. The lowering tests sit on the
+/// walk's rejection path, so a circuit needing none pays no second scan and
+/// borrows through unchanged. The lowering emits only supported gates, so the
+/// rebuilt circuit needs no second validation.
+fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result<Cow<'c, Circuit>> {
+    let mut needs_lowering = false;
     for inst in &circuit.instructions {
         match inst {
             Instruction::Gate { gate, .. } => {
-                if !(gate.is_clifford() || z_rotation_angle(gate).is_some()) {
-                    return Err(PrismError::BackendUnsupported {
-                        backend: backend.to_string(),
-                        operation: format!(
-                            "gate `{}` is neither Clifford nor a Z-axis rotation",
-                            gate.name()
-                        ),
-                    });
+                if gate.is_clifford()
+                    || z_rotation_angle(gate).is_some()
+                    || zz_rotation_angle(gate).is_some()
+                {
+                    continue;
                 }
+                if matches!(gate, Gate::Rx(_) | Gate::Ry(_) | Gate::PauliRot(_)) {
+                    needs_lowering = true;
+                    continue;
+                }
+                return Err(PrismError::BackendUnsupported {
+                    backend: backend.to_string(),
+                    operation: format!(
+                        "gate `{}` is neither Clifford nor a supported Pauli rotation",
+                        gate.name()
+                    ),
+                });
             }
             Instruction::Barrier { .. } => {}
             Instruction::Measure { .. }
@@ -79,14 +111,58 @@ fn validate_pauli_unitary(circuit: &Circuit, backend: &'static str) -> Result<()
             }
         }
     }
-    Ok(())
+    if !needs_lowering {
+        return Ok(Cow::Borrowed(circuit));
+    }
+
+    let mut out: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len() * 2);
+    for inst in &circuit.instructions {
+        let (theta, targets, axes): (f64, &[usize], &[PauliAxis]) = match inst {
+            Instruction::Gate {
+                gate: Gate::Rx(theta),
+                targets,
+            } => (*theta, targets, &[PauliAxis::X]),
+            Instruction::Gate {
+                gate: Gate::Ry(theta),
+                targets,
+            } => (*theta, targets, &[PauliAxis::Y]),
+            Instruction::Gate {
+                gate: Gate::PauliRot(data),
+                targets,
+            } => (data.theta(), targets, data.axes()),
+            _ => {
+                out.push(inst.clone());
+                continue;
+            }
+        };
+        pauli_rotation_lowering(theta, targets, axes, |gate, tgts| {
+            out.push(Instruction::Gate {
+                gate,
+                targets: SmallVec::from_slice(tgts),
+            });
+        });
+    }
+    Ok(Cow::Owned(circuit.with_instructions(out)))
 }
 
 // ---- Coalesced circuit representation ----
 
+/// Marks a [`CoalescedOp::ZRot`] with no second qubit.
+const ZROT_SINGLE: u32 = u32::MAX;
+
+/// The ops slice streams through the SPP per-sample loop, so the layout is
+/// deliberate on two counts, both measured on op-heavy rows: the qubits pack
+/// as `u32` to hold the enum at 40 bytes (48 cost +2.6% to +5.8%), and `Rzz`
+/// shares the `ZRot` variant via the `ZROT_SINGLE` sentinel instead of adding
+/// a third variant, which kept an outlined call in the sample loop's match
+/// and cost about the same again.
 enum CoalescedOp {
     SmallCliff(Vec<(Gate, SmallVec<[usize; 4]>)>),
-    ZRot { qubit: usize, branch: RotBranch },
+    ZRot {
+        qubit: u32,
+        pair: u32,
+        branch: RotBranch,
+    },
 }
 
 fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
@@ -98,7 +174,15 @@ fn coalesce_cliffords(circuit: &Circuit) -> Vec<CoalescedOp> {
             if let Some(theta) = z_rotation_angle(gate) {
                 flush_cliff_buf(&mut cliff_buf, &mut ops);
                 ops.push(CoalescedOp::ZRot {
-                    qubit: targets[0],
+                    qubit: targets[0] as u32,
+                    pair: ZROT_SINGLE,
+                    branch: RotBranch::new(theta),
+                });
+            } else if let Some(theta) = zz_rotation_angle(gate) {
+                flush_cliff_buf(&mut cliff_buf, &mut ops);
+                ops.push(CoalescedOp::ZRot {
+                    qubit: targets[0] as u32,
+                    pair: targets[1] as u32,
                     branch: RotBranch::new(theta),
                 });
             } else {
@@ -131,7 +215,8 @@ struct RotBranch {
 }
 
 impl RotBranch {
-    /// Branch probability and importance weights for `Rz(theta)`.
+    /// Branch probability and importance weights for `Rz(theta)`; `Rzz`
+    /// shares them, since its expansion carries the same coefficients.
     ///
     /// Backward conjugation sends an in-support Pauli `P` to
     /// `cos(theta) P + (-i sin(theta)) P Z_q`. PauliVec stores the Y letter as
@@ -150,14 +235,26 @@ impl RotBranch {
     }
 }
 
+/// Stochastic branch for a `Z` or `Z⊗Z` rotation. The branch fires only when
+/// the propagated Pauli anticommutes with the generator: an X or Y letter on
+/// the qubit for `Rz`, exactly one such letter on the pair for `Rzz`. The
+/// flip right-multiplies by the generator, a pure z-bit flip on its support
+/// in the ordered `X^x Z^z` letter convention.
 #[inline(always)]
 fn branch_z_rotation(
     pauli: &mut PauliVec,
-    qubit: usize,
+    qubit: u32,
+    pair: u32,
     branch: &RotBranch,
     rng: &mut impl Rng,
 ) -> Complex64 {
-    if !pauli.has_x_or_y(qubit) {
+    let q = qubit as usize;
+    let anticommutes = if pair == ZROT_SINGLE {
+        pauli.has_x_or_y(q)
+    } else {
+        pauli.has_x_or_y(q) != pauli.has_x_or_y(pair as usize)
+    };
+    if !anticommutes {
         return Complex64::new(1.0, 0.0);
     }
 
@@ -165,7 +262,10 @@ fn branch_z_rotation(
         return Complex64::new(branch.keep_weight, 0.0);
     }
 
-    flip_bit(&mut pauli.z, qubit);
+    flip_bit(&mut pauli.z, q);
+    if pair != ZROT_SINGLE {
+        flip_bit(&mut pauli.z, pair as usize);
+    }
     Complex64::new(0.0, branch.flip_weight_im)
 }
 
@@ -192,8 +292,12 @@ fn backward_propagate_coalesced(
                     propagate_backward(&mut pauli, gate, targets);
                 }
             }
-            CoalescedOp::ZRot { qubit, branch } => {
-                weight *= branch_z_rotation(&mut pauli, *qubit, branch, rng);
+            CoalescedOp::ZRot {
+                qubit,
+                pair,
+                branch,
+            } => {
+                weight *= branch_z_rotation(&mut pauli, *qubit, *pair, branch, rng);
             }
         }
     }
@@ -206,7 +310,9 @@ fn count_branching_gates(circuit: &Circuit) -> usize {
         .instructions
         .iter()
         .filter(|inst| match inst {
-            Instruction::Gate { gate, .. } => z_rotation_angle(gate).is_some(),
+            Instruction::Gate { gate, .. } => {
+                z_rotation_angle(gate).is_some() || zz_rotation_angle(gate).is_some()
+            }
             _ => false,
         })
         .count()
@@ -218,7 +324,7 @@ pub struct SppResult {
     pub std_errors: Vec<f64>,
     /// Samples drawn per qubit, not in total.
     pub num_samples: usize,
-    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, and `P`.
+    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, `P`, and `Rzz`.
     pub t_count: usize,
     /// Fraction of samples whose propagated Pauli was diagonal (contributed a
     /// nonzero value).
@@ -386,14 +492,16 @@ fn pauli_vec_from_terms(
 }
 
 /// Estimate `⟨0^n| U† P U |0^n⟩` for joint Pauli observable `P` on a circuit
-/// `U` of Clifford gates and Z-axis rotations, via stochastic Pauli
+/// `U` of Clifford gates and Pauli rotations, via stochastic Pauli
 /// propagation.
 ///
 /// Each sample backward-propagates the observable through the circuit
-/// (Clifford segments as coalesced gate runs, `Rz(theta)` and its `T` special
-/// case via a stochastic Pauli branch that records a complex weight). The
-/// contribution is `Re(weight)` when the final Pauli is diagonal in
-/// `{I, Z}` (i.e. evaluates trivially on `|0^n⟩`), else zero.
+/// (Clifford segments as coalesced gate runs, `Rz(theta)` and the two-qubit
+/// `Rzz(theta)` via a stochastic Pauli branch that records a complex weight;
+/// `Rx`, `Ry`, and multi-qubit `PauliRot` strings lower to Clifford
+/// conjugation around one `Rz` first). The contribution is `Re(weight)` when
+/// the final Pauli is diagonal in `{I, Z}` (i.e. evaluates trivially on
+/// `|0^n⟩`), else zero.
 ///
 /// Sample variance grows with the product of `|cos θ| + |sin θ|` over the
 /// in-support rotations, so it is largest at `θ = π/4` and vanishes as the
@@ -404,7 +512,8 @@ pub fn run_spp_observable(
     num_samples: usize,
     seed: u64,
 ) -> Result<SppObservableResult> {
-    validate_pauli_unitary(circuit, "SPP observable")?;
+    let lowered = validate_and_lower(circuit, "SPP observable")?;
+    let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
     let ops = coalesce_cliffords(circuit);
@@ -448,7 +557,7 @@ pub fn run_spp_observable(
 }
 
 /// Estimate `⟨Z_q⟩` for every qubit of a unitary circuit of Clifford gates and
-/// Z-axis rotations, via stochastic Pauli propagation.
+/// Pauli rotations, via stochastic Pauli propagation.
 ///
 /// Draws `num_samples` backward propagations per qubit; the cost scales with
 /// samples and gate count, not `2^n`. See [`run_spp_observable`] for a single
@@ -472,7 +581,8 @@ pub fn run_spp_observable(
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
 pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppResult> {
-    validate_pauli_unitary(circuit, "SPP")?;
+    let lowered = validate_and_lower(circuit, "SPP")?;
+    let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_branching_gates(circuit);
@@ -682,6 +792,55 @@ impl WeightedPauliSum {
         }
     }
 
+    /// Two-qubit analogue of [`branch_z_rotation`](Self::branch_z_rotation)
+    /// for `Rzz`: a term splits only when it anticommutes with `Z⊗Z` on the
+    /// pair, i.e. exactly one of the two qubits carries an X or Y letter. The
+    /// flip branch right-multiplies by `Z_a Z_b`, a pure z-bit flip on both
+    /// qubits in the ordered `X^x Z^z` letter convention.
+    fn branch_zz_rotation(&mut self, a: usize, b: usize, sin: f64, cos: f64) {
+        let old_terms: Vec<(PauliVec, Complex64)> = self.terms.drain().collect();
+
+        for (pauli, coeff) in old_terms {
+            if pauli.has_x_or_y(a) == pauli.has_x_or_y(b) {
+                self.insert(pauli, coeff);
+                continue;
+            }
+
+            if cos != 0.0 {
+                self.insert(pauli.clone(), coeff * cos);
+            }
+            if sin != 0.0 {
+                let mut pauli_flip = pauli;
+                flip_bit(&mut pauli_flip.z, a);
+                flip_bit(&mut pauli_flip.z, b);
+                self.insert(pauli_flip, Complex64::new(coeff.im * sin, -coeff.re * sin));
+            }
+        }
+    }
+
+    /// Backward-apply one gate: a single discriminant match, so the Clifford
+    /// path pays no rotation-probe chain per instruction. Angle cases mirror
+    /// [`z_rotation_angle`] and [`zz_rotation_angle`].
+    #[inline(always)]
+    fn apply_backward(&mut self, gate: &Gate, targets: &[usize]) {
+        match gate {
+            Gate::T => self.branch_z_rotation_angle(targets[0], std::f64::consts::FRAC_PI_4),
+            Gate::Tdg => self.branch_z_rotation_angle(targets[0], -std::f64::consts::FRAC_PI_4),
+            Gate::Rz(theta) | Gate::P(theta) => self.branch_z_rotation_angle(targets[0], *theta),
+            Gate::Rzz(theta) => {
+                let (sin, cos) = theta.sin_cos();
+                self.branch_zz_rotation(targets[0], targets[1], sin, cos);
+            }
+            _ => self.conjugate_all_backward_phased(gate, targets),
+        }
+    }
+
+    #[inline(always)]
+    fn branch_z_rotation_angle(&mut self, qubit: usize, theta: f64) {
+        let (sin, cos) = theta.sin_cos();
+        self.branch_z_rotation(qubit, sin, cos);
+    }
+
     fn truncate(&mut self, epsilon: f64) -> f64 {
         let mut discarded = 0.0;
         self.terms.retain(|_, coeff| {
@@ -692,6 +851,31 @@ impl WeightedPauliSum {
                 true
             }
         });
+        discarded
+    }
+
+    /// Drop exactly the smallest-magnitude surplus terms until at most
+    /// `max_terms` remain, returning the 1-norm of what was dropped. Ties at
+    /// the cut fall to map order, so which of two equal-magnitude terms
+    /// survives is not stable across runs; the returned bound holds either
+    /// way.
+    fn truncate_to_budget(&mut self, max_terms: usize) -> f64 {
+        let surplus = self.terms.len().saturating_sub(max_terms);
+        if surplus == 0 {
+            return 0.0;
+        }
+        self.scratch.clear();
+        self.scratch.extend(self.terms.drain());
+        self.scratch.select_nth_unstable_by(surplus - 1, |a, b| {
+            a.1.norm_sqr().total_cmp(&b.1.norm_sqr())
+        });
+        let mut discarded = 0.0;
+        for (_, coeff) in self.scratch.drain(..surplus) {
+            discarded += coeff.norm();
+        }
+        for (pauli, coeff) in self.scratch.drain(..) {
+            self.terms.insert(pauli, coeff);
+        }
         discarded
     }
 
@@ -710,7 +894,7 @@ impl WeightedPauliSum {
 pub struct SpdResult {
     /// `⟨Z_q⟩` per qubit; exact when nothing was truncated.
     pub expectations: Vec<f64>,
-    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, and `P`.
+    /// Branching gates in the circuit: `T`, `Tdg`, `Rz`, `P`, and `Rzz`.
     pub t_count: usize,
     /// Peak size of the weighted Pauli sum across all per-qubit runs, not the
     /// truncation budget passed in.
@@ -719,11 +903,48 @@ pub struct SpdResult {
     pub total_discarded: f64,
 }
 
+/// Truncation policy for one SPD run. Both variants report the same
+/// composable 1-norm error accounting through `total_discarded`.
+enum Truncation {
+    Threshold { epsilon: f64, max_terms: usize },
+    Budget { max_terms: usize },
+}
+
+impl Truncation {
+    /// Mid-run enforcement after one instruction. Discarded mass accumulates
+    /// into `total_discarded` only when a drop fires, so the exact path keeps
+    /// no unconditional float add in the per-instruction loop.
+    fn enforce(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
+        match *self {
+            Truncation::Threshold { epsilon, max_terms } => {
+                if max_terms > 0 && sum.terms.len() > max_terms {
+                    *total_discarded += sum.truncate(epsilon);
+                }
+            }
+            Truncation::Budget { max_terms } => {
+                if sum.terms.len() > max_terms {
+                    *total_discarded += sum.truncate_to_budget(max_terms);
+                }
+            }
+        }
+    }
+
+    /// Terminal sweep after the backward pass.
+    fn final_sweep(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
+        if let Truncation::Threshold { epsilon, .. } = *self {
+            if epsilon > 0.0 {
+                *total_discarded += sum.truncate(epsilon);
+            }
+        }
+    }
+}
+
 /// Deterministic SPD on a joint Pauli observable.
 ///
 /// Starts with the single weighted term `(observable, 1.0)`, backward-
-/// propagates through every gate, splits each in-support term at an `Rz(theta)`
-/// into `cos(theta)` and `-i sin(theta)` branches, and truncates terms whose
+/// propagates through every gate, splits each anticommuting term at an
+/// `Rz(theta)` or `Rzz(theta)` into `cos(theta)` and `-i sin(theta)`
+/// branches, and truncates terms whose
 /// magnitude falls below `epsilon` whenever the sum exceeds `max_terms`.
 /// Returns `⟨0^n| U† P U |0^n⟩` as the sum of remaining diagonal-term
 /// coefficients.
@@ -736,16 +957,55 @@ pub struct SpdResult {
 /// the run is exact and errors once the sum passes an internal ceiling. With
 /// `max_terms > 0`, sub-`epsilon` terms are dropped whenever the sum exceeds
 /// the budget and `total_discarded` bounds the resulting error, per the
-/// 1-norm bound `|error| ≤ Σ |discarded|`. An `epsilon` too small to prune the
-/// growth still reaches the ceiling and errors there: the run never returns a
-/// silently over-truncated value.
+/// composable 1-norm bound `|error| ≤ Σ |discarded|` (each dropped term's
+/// exact continuation is unitary conjugation of a unit-norm operator, so its
+/// terminal contribution is at most its magnitude). An `epsilon` too small to
+/// prune the growth still reaches the ceiling and errors there: the run never
+/// returns a silently over-truncated value. See [`run_spd_observable_budgeted`]
+/// for the policy with no threshold to guess.
 pub fn run_spd_observable(
     circuit: &Circuit,
     observable: &[PauliTerm],
     epsilon: f64,
     max_terms: usize,
 ) -> Result<SpdObservableResult> {
-    validate_pauli_unitary(circuit, "SPD observable")?;
+    run_spd_observable_with(
+        circuit,
+        observable,
+        &Truncation::Threshold { epsilon, max_terms },
+    )
+}
+
+/// Deterministic SPD on a joint Pauli observable under a fixed term budget.
+///
+/// Same backward propagation as [`run_spd_observable`], but whenever the sum
+/// exceeds `max_terms` the smallest-magnitude surplus terms are dropped,
+/// exactly enough to return to the budget. No threshold needs guessing, the
+/// run cannot die at the term ceiling on account of growth the budget already
+/// caps, and `total_discarded` is the realized 1-norm error bound for the
+/// term count held. `max_terms` must be at least 1.
+pub fn run_spd_observable_budgeted(
+    circuit: &Circuit,
+    observable: &[PauliTerm],
+    max_terms: usize,
+) -> Result<SpdObservableResult> {
+    if max_terms == 0 || max_terms > SPD_MAX_TERMS_CEILING {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "budgeted SPD needs a term budget between 1 and {SPD_MAX_TERMS_CEILING}"
+            ),
+        });
+    }
+    run_spd_observable_with(circuit, observable, &Truncation::Budget { max_terms })
+}
+
+fn run_spd_observable_with(
+    circuit: &Circuit,
+    observable: &[PauliTerm],
+    truncation: &Truncation,
+) -> Result<SpdObservableResult> {
+    let lowered = validate_and_lower(circuit, "SPD observable")?;
+    let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
     let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
@@ -757,24 +1017,16 @@ pub fn run_spd_observable(
 
     for inst in circuit.instructions.iter().rev() {
         if let Instruction::Gate { gate, targets } = inst {
-            if let Some((sin, cos)) = z_rotation_angle(gate).map(f64::sin_cos) {
-                sum.branch_z_rotation(targets[0], sin, cos);
-            } else {
-                sum.conjugate_all_backward_phased(gate, targets);
-            }
+            sum.apply_backward(gate, targets);
         }
-        if max_terms > 0 && sum.terms.len() > max_terms {
-            total_discarded += sum.truncate(epsilon);
-        }
+        truncation.enforce(&mut sum, &mut total_discarded);
         check_spd_term_ceiling(sum.terms.len())?;
         if sum.terms.len() > peak_terms {
             peak_terms = sum.terms.len();
         }
     }
 
-    if epsilon > 0.0 {
-        total_discarded += sum.truncate(epsilon);
-    }
+    truncation.final_sweep(&mut sum, &mut total_discarded);
 
     Ok(SpdObservableResult {
         mean: sum.diagonal_expectation(),
@@ -785,7 +1037,7 @@ pub fn run_spd_observable(
 }
 
 /// Compute `⟨Z_q⟩` for every qubit of a unitary circuit of Clifford gates and
-/// Z-axis rotations, via deterministic sparse Pauli dynamics.
+/// Pauli rotations, via deterministic sparse Pauli dynamics.
 ///
 /// Each qubit's `Z_q` propagates backward as a weighted Pauli sum; every
 /// rotation with a non-Clifford angle doubles the in-support terms. When the
@@ -794,7 +1046,8 @@ pub fn run_spd_observable(
 /// stay under a hard term ceiling. See [`run_spd_observable`] for a single
 /// joint observable and for the truncation contract.
 pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdResult> {
-    validate_pauli_unitary(circuit, "SPD")?;
+    let lowered = validate_and_lower(circuit, "SPD")?;
+    let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let num_words = n.div_ceil(64);
     let t_count = count_branching_gates(circuit);
@@ -803,11 +1056,23 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
     let mut peak_terms = 0usize;
     let mut total_discarded = 0.0;
 
-    let rotations: Vec<Option<(f64, f64)>> = circuit
+    enum Rot {
+        Single { sin: f64, cos: f64 },
+        Pair { sin: f64, cos: f64 },
+    }
+    let rotations: Vec<Option<Rot>> = circuit
         .instructions
         .iter()
         .map(|inst| match inst {
-            Instruction::Gate { gate, .. } => z_rotation_angle(gate).map(f64::sin_cos),
+            Instruction::Gate { gate, .. } => {
+                if let Some((sin, cos)) = z_rotation_angle(gate).map(f64::sin_cos) {
+                    Some(Rot::Single { sin, cos })
+                } else {
+                    zz_rotation_angle(gate)
+                        .map(f64::sin_cos)
+                        .map(|(sin, cos)| Rot::Pair { sin, cos })
+                }
+            }
             _ => None,
         })
         .collect();
@@ -818,10 +1083,12 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
 
         for (idx, inst) in circuit.instructions.iter().enumerate().rev() {
             if let Instruction::Gate { gate, targets } = inst {
-                if let Some((sin, cos)) = rotations[idx] {
-                    sum.branch_z_rotation(targets[0], sin, cos);
-                } else {
-                    sum.conjugate_all_backward_phased(gate, targets);
+                match rotations[idx] {
+                    Some(Rot::Single { sin, cos }) => sum.branch_z_rotation(targets[0], sin, cos),
+                    Some(Rot::Pair { sin, cos }) => {
+                        sum.branch_zz_rotation(targets[0], targets[1], sin, cos)
+                    }
+                    None => sum.conjugate_all_backward_phased(gate, targets),
                 }
             }
 
@@ -897,7 +1164,8 @@ pub fn run_spd_observable_light_cone(
     epsilon: f64,
     max_terms: usize,
 ) -> Result<SpdObservableResult> {
-    validate_pauli_unitary(circuit, "light-cone SPD observable")?;
+    let lowered = validate_and_lower(circuit, "light-cone SPD observable")?;
+    let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
     let t_count = count_branching_gates(circuit);
     let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
@@ -913,11 +1181,7 @@ pub fn run_spd_observable_light_cone(
             continue;
         }
         if let Instruction::Gate { gate, targets } = inst {
-            if let Some((sin, cos)) = z_rotation_angle(gate).map(f64::sin_cos) {
-                sum.branch_z_rotation(targets[0], sin, cos);
-            } else {
-                sum.conjugate_all_backward_phased(gate, targets);
-            }
+            sum.apply_backward(gate, targets);
         }
         if max_terms > 0 && sum.terms.len() > max_terms {
             total_discarded += sum.truncate(epsilon);

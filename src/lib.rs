@@ -117,8 +117,8 @@ pub use sim::stabilizer_rank::{
 };
 pub use sim::unified_pauli::{
     PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SppObservableResult, SppResult,
-    inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_light_cone, run_spp,
-    run_spp_observable,
+    inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_budgeted,
+    run_spd_observable_light_cone, run_spp, run_spp_observable,
 };
 pub use sim::{
     BackendKind, CountsResult, Exactness, ExpectationResult, FactoredBlock, MarginalsResult,

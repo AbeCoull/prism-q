@@ -64,11 +64,11 @@ fn test_branch_t_gate_passthrough_iz() {
     let mut rng = ChaCha8Rng::seed_from_u64(42);
 
     let mut pauli_i = PauliVec::new(1);
-    let w = branch_z_rotation(&mut pauli_i, 0, &t_branch(), &mut rng);
+    let w = branch_z_rotation(&mut pauli_i, 0, ZROT_SINGLE, &t_branch(), &mut rng);
     assert!((w - Complex64::new(1.0, 0.0)).norm() < 1e-14);
 
     let mut pauli_z = PauliVec::z_on_qubit(1, 0);
-    let w = branch_z_rotation(&mut pauli_z, 0, &t_branch(), &mut rng);
+    let w = branch_z_rotation(&mut pauli_z, 0, ZROT_SINGLE, &t_branch(), &mut rng);
     assert!((w - Complex64::new(1.0, 0.0)).norm() < 1e-14);
 }
 
@@ -82,7 +82,7 @@ fn test_branch_t_gate_x_branches() {
     for _ in 0..num_samples {
         let mut pauli = PauliVec::new(1);
         pauli.x[0] = 1;
-        let w = branch_z_rotation(&mut pauli, 0, &t_branch(), &mut rng);
+        let w = branch_z_rotation(&mut pauli, 0, ZROT_SINGLE, &t_branch(), &mut rng);
         assert!((w.norm() - SQRT_2).abs() < 1e-14);
         if pauli.z[0] == 0 {
             x_count += 1;
@@ -536,4 +536,11 @@ fn light_cone_spd_matches_on_entangled_observable() {
         full.mean,
         cone.mean
     );
+}
+
+// The ops slice streams through the SPP per-sample loop; a wider enum taxes
+// every circuit (measured +2.6% to +5.8% on op-heavy rows at 48 bytes).
+#[test]
+fn coalesced_op_stays_at_the_one_qubit_variant_size() {
+    assert_eq!(std::mem::size_of::<super::CoalescedOp>(), 40);
 }

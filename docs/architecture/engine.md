@@ -51,8 +51,10 @@ probability extraction failures propagate as errors. `marginals()` requires
 either a direct Pauli marginal route or backend probability output; it returns
 `BackendUnsupported` instead of fabricating uniform marginals when neither path
 is available. Stochastic and deterministic Pauli marginal backends accept only
-unitary circuits of Clifford gates and Z-axis rotations (`T`, `Tdg`, `Rz`, `P`)
-without measurement, reset, or conditional instructions. Automatic dispatch
+unitary circuits of Clifford gates and Pauli rotations without measurement,
+reset, or conditional instructions: `T`, `Tdg`, `Rz`, `P`, and the two-qubit
+`Rzz` branch natively, while `Rx`, `Ry`, and multi-qubit `PauliRot` strings
+lower to Clifford conjugation around one `Rz` before the run. Automatic dispatch
 still routes only Clifford+T circuits to SPD; a circuit carrying arbitrary
 rotation angles reaches the Pauli engines by explicit backend selection.
 

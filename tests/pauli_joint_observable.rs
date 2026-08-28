@@ -157,15 +157,18 @@ fn duplicate_pauli_factors_are_rejected() {
 }
 
 #[test]
-fn spd_rejects_gates_off_the_z_axis() {
-    let mut circuit = Circuit::new(1, 0);
-    circuit.add_gate(Gate::Rx(0.37), &[0]);
+fn spd_rejects_gates_outside_the_rotation_family() {
+    let mut circuit = Circuit::new(2, 0);
+    let phase = num_complex::Complex64::from_polar(1.0, 0.37);
+    let zero = num_complex::Complex64::new(0.0, 0.0);
+    let one = num_complex::Complex64::new(1.0, 0.0);
+    circuit.add_gate(Gate::Cu(Box::new([[one, zero], [zero, phase]])), &[0, 1]);
 
     let err = run_spd_observable(&circuit, &[PauliTerm::z(0)], 0.0, 0)
-        .expect_err("SPD must reject rotations off the Z axis");
+        .expect_err("SPD must reject gates it cannot branch or lower");
     let msg = format!("{err:?}");
     assert!(
-        msg.contains("rx"),
+        msg.contains("cu"),
         "rejection should name the gate, got {msg}"
     );
 
@@ -173,6 +176,20 @@ fn spd_rejects_gates_off_the_z_axis() {
     supported.add_gate(Gate::Rz(0.37), &[0]);
     run_spd_observable(&supported, &[PauliTerm::z(0)], 0.0, 0)
         .expect("SPD must accept a Z-axis rotation");
+}
+
+// Rx and Ry lower to Clifford conjugation around one Rz, so both engines
+// accept them; correctness is pinned by the statevector comparisons below.
+#[test]
+fn engines_accept_arbitrary_axis_rotations() {
+    let mut circuit = Circuit::new(1, 0);
+    circuit.add_gate(Gate::Rx(0.37), &[0]);
+    circuit.add_gate(Gate::Ry(-1.1), &[0]);
+
+    run_spd_observable(&circuit, &[PauliTerm::z(0)], 0.0, 0)
+        .expect("SPD must accept Rx and Ry via lowering");
+    run_spp_observable(&circuit, &[PauliTerm::z(0)], 100, SEED)
+        .expect("SPP must accept Rx and Ry via lowering");
 }
 
 /// The generalized rotation branch must reduce to the T rule exactly, not
@@ -332,10 +349,209 @@ fn zero_angle_rotations_do_not_branch() {
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_gate(Gate::Rz(0.0), &[0]);
     circuit.add_gate(Gate::P(0.0), &[0]);
+    circuit.add_gate(Gate::Rzz(0.0), &[0, 1]);
     circuit.add_gate(Gate::Cx, &[0, 1]);
 
     let spd = run_spd_observable(&circuit, &[PauliTerm::x(0), PauliTerm::x(1)], 0.0, 0).unwrap();
     assert_eq!(spd.peak_terms, 1);
-    assert_eq!(spd.t_count, 2);
+    assert_eq!(spd.t_count, 3);
     assert!((spd.mean - 1.0).abs() < 1e-15, "got {}", spd.mean);
+}
+
+// The two-qubit anticommutation rule: Rzz branches a term only when exactly
+// one of the pair carries an X or Y letter.
+#[test]
+fn rzz_branches_only_on_anticommuting_terms() {
+    let build = || {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::H, &[1]);
+        c.add_gate(Gate::Rzz(0.37), &[0, 1]);
+        c
+    };
+
+    // X on one qubit of the pair anticommutes with Z⊗Z: one branch fires.
+    let anti = run_spd_observable(&build(), &[PauliTerm::x(0)], 0.0, 0).unwrap();
+    assert_eq!(anti.peak_terms, 2);
+    assert!(
+        (anti.mean - 0.37f64.cos()).abs() < 1e-12,
+        "got {}",
+        anti.mean
+    );
+
+    // X⊗X and Z⊗I commute with Z⊗Z: no branch, and the rotation is
+    // transparent to the propagated term.
+    let xx = run_spd_observable(&build(), &[PauliTerm::x(0), PauliTerm::x(1)], 0.0, 0).unwrap();
+    assert_eq!(xx.peak_terms, 1);
+    assert!((xx.mean - 1.0).abs() < 1e-12, "got {}", xx.mean);
+
+    let z = run_spd_observable(&build(), &[PauliTerm::z(0)], 0.0, 0).unwrap();
+    assert_eq!(z.peak_terms, 1);
+    assert!(z.mean.abs() < 1e-12, "got {}", z.mean);
+}
+
+// Native Rzz and its Cx-Rz-Cx lowering take different code paths, so agree to
+// tolerance rather than bitwise (hash-order accumulation shifts the last ulp).
+#[test]
+fn rzz_matches_its_cx_rz_cx_lowering() {
+    let theta = 1.94;
+    let native = {
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::H, &[1]);
+        c.add_gate(Gate::Rzz(theta), &[0, 1]);
+        c.add_gate(Gate::Rzz(-0.62), &[1, 2]);
+        c
+    };
+    let lowered = {
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::H, &[1]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Rz(theta), &[1]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Cx, &[1, 2]);
+        c.add_gate(Gate::Rz(-0.62), &[2]);
+        c.add_gate(Gate::Cx, &[1, 2]);
+        c
+    };
+
+    for obs in [
+        vec![PauliTerm::x(0)],
+        vec![PauliTerm::x(0), PauliTerm::y(1)],
+        vec![PauliTerm::z(0), PauliTerm::z(1), PauliTerm::z(2)],
+    ] {
+        let a = run_spd_observable(&native, &obs, 0.0, 0).unwrap();
+        let b = run_spd_observable(&lowered, &obs, 0.0, 0).unwrap();
+        assert!(
+            (a.mean - b.mean).abs() < 1e-12,
+            "native {:.15} vs lowered {:.15} for {obs:?}",
+            a.mean,
+            b.mean
+        );
+    }
+}
+
+/// QAOA-shaped ansatz: an `Rzz` cost ring plus an `Rx` mixer layer, one
+/// `(gamma, beta)` pair per layer.
+fn qaoa_circuit(n: usize, angles: &[(f64, f64)]) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for &(gamma, beta) in angles {
+        for q in 0..n {
+            c.add_gate(Gate::Rzz(gamma), &[q, (q + 1) % n]);
+        }
+        for q in 0..n {
+            c.add_gate(Gate::Rx(beta), &[q]);
+        }
+    }
+    c
+}
+
+#[test]
+fn spd_qaoa_angle_sweep_matches_the_statevector() {
+    let quarter = std::f64::consts::FRAC_PI_4;
+    for theta in [0.02, 0.4, quarter, 1.1, std::f64::consts::FRAC_PI_2 - 0.02] {
+        let circuit = qaoa_circuit(4, &[(theta, 0.5), (0.8 * theta, 0.3)]);
+        let observables = [
+            vec![PauliTerm::z(0), PauliTerm::z(1)],
+            vec![PauliTerm::x(2)],
+            vec![PauliTerm::y(0), PauliTerm::z(3)],
+        ];
+
+        let exact = simulate(&circuit)
+            .backend(BackendKind::Statevector)
+            .seed(SEED)
+            .expectation_values(&observables)
+            .unwrap();
+
+        for (obs, expected) in observables.iter().zip(exact) {
+            let spd = run_spd_observable(&circuit, obs, 0.0, 0).unwrap();
+            assert!(
+                (spd.mean - expected).abs() < 1e-9,
+                "SPD {:.15} vs statevector {expected:.15} at theta {theta:.3} for {obs:?}",
+                spd.mean
+            );
+        }
+    }
+}
+
+#[test]
+fn spp_variance_peaks_at_the_t_angle_for_rzz() {
+    let quarter = std::f64::consts::FRAC_PI_4;
+    let sweep: Vec<f64> = [0.02, 0.4, quarter, 1.1, std::f64::consts::FRAC_PI_2 - 0.02]
+        .into_iter()
+        .map(|theta| {
+            let circuit = qaoa_circuit(3, &[(theta, 0.0); 4]);
+            run_spp_observable(&circuit, &[PauliTerm::x(0)], 20_000, SEED)
+                .unwrap()
+                .variance
+        })
+        .collect();
+
+    let peak = sweep[2];
+    assert!(
+        sweep.iter().all(|v| *v <= peak),
+        "T angle should hold the maximum variance: {sweep:?}"
+    );
+    for near_clifford in [sweep[0], sweep[4]] {
+        assert!(
+            near_clifford < 0.2 * peak,
+            "near-Clifford variance {near_clifford:.4} should sit far under the peak {peak:.4}"
+        );
+    }
+}
+
+#[test]
+fn light_cone_spd_matches_full_spd_on_rzz_circuits() {
+    let circuit = qaoa_circuit(5, &[(0.37, 0.5), (1.1, 0.3)]);
+    for obs in [
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(1), PauliTerm::x(3)],
+    ] {
+        let full = run_spd_observable(&circuit, &obs, 0.0, 0).unwrap();
+        let cone = prism_q::run_spd_observable_light_cone(&circuit, &obs, 0.0, 0).unwrap();
+        assert!(
+            (full.mean - cone.mean).abs() < 1e-12,
+            "full {:.15} vs cone {:.15} for {obs:?}",
+            full.mean,
+            cone.mean
+        );
+    }
+}
+
+// Multi-qubit arbitrary-axis strings reach the engines through the shared
+// CNOT-ladder lowering.
+#[test]
+fn pauli_rot_strings_match_the_statevector() {
+    let mut circuit = Circuit::new(3, 0);
+    for q in 0..3 {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_pauli_rotation(0.37, &[PauliTerm::x(0), PauliTerm::y(1)]);
+    circuit.add_pauli_rotation(-1.1, &[PauliTerm::y(0), PauliTerm::z(1), PauliTerm::x(2)]);
+    circuit.add_pauli_rotation(1.94, &[PauliTerm::z(1), PauliTerm::z(2)]);
+
+    let observables = [
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(1), PauliTerm::y(2)],
+        vec![PauliTerm::z(0), PauliTerm::z(1), PauliTerm::z(2)],
+    ];
+    let exact = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+
+    for (obs, expected) in observables.iter().zip(exact) {
+        let spd = run_spd_observable(&circuit, obs, 0.0, 0).unwrap();
+        assert!(
+            (spd.mean - expected).abs() < 1e-9,
+            "SPD {:.15} vs statevector {expected:.15} for {obs:?}",
+            spd.mean
+        );
+        assert_eq!(spd.t_count, 3, "one branching rotation per Pauli string");
+    }
 }

@@ -9,6 +9,8 @@
 //! - `qec_t_strategies_scaling`: production T-count scaling for Auto, SPD,
 //!   and CAMPS.
 //! - `spd_light_cone`: production SPD cone-skip scaling.
+//! - `pauli_engine_qaoa`: weighted MaxCut evaluation on the shared QAOA
+//!   fixture through the deterministic Pauli engine.
 //!
 //! Reference and internal sweeps are opt-in benchmarks. Enable them with
 //! `--features parallel,bench-internal`.
@@ -23,8 +25,9 @@ use prism_q::qec::cut_selection::{InteractionGraph, cut_score, min_fill_treewidt
 #[cfg(feature = "bench-internal")]
 use prism_q::qec::observable_reroute::{cone_telemetry, min_cone_z_representative, xor_z_support};
 use prism_q::{
-    Circuit, Gate, PauliTerm, QecOptions, QecProgram, QecRecordRef, QecTStrategy,
-    run_qec_program_with_strategy, run_spd_observable, run_spd_observable_light_cone,
+    BackendKind, Circuit, Gate, PauliObservable, PauliTerm, QecOptions, QecProgram, QecRecordRef,
+    QecTStrategy, circuits, run_qec_program_with_strategy, run_spd_observable,
+    run_spd_observable_light_cone, simulate,
 };
 #[cfg(feature = "bench-internal")]
 use std::collections::HashSet;
@@ -599,6 +602,41 @@ fn bench_spd_light_cone(c: &mut Criterion) {
     group.finish();
 }
 
+/// QAOA capability row: the shared QAOA fixture (native `Rzz` cost chain and
+/// `Rx` mixer) evaluated as the weighted MaxCut sum over its nearest-neighbor
+/// edges through the deterministic Pauli engine.
+fn bench_pauli_engine_qaoa(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pauli_engine_qaoa");
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_millis(500));
+
+    let n = 16usize;
+    let circuit = circuits::qaoa_circuit(n, 2, SEED);
+    let maxcut = PauliObservable::from_terms(
+        (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)])),
+    )
+    .unwrap();
+
+    group.bench_function(
+        BenchmarkId::new("spd_maxcut_chain", format!("{n}q_p2")),
+        |b| {
+            b.iter(|| {
+                simulate(&circuit)
+                    .backend(BackendKind::DeterministicPauli {
+                        epsilon: 0.0,
+                        max_terms: 0,
+                    })
+                    .seed(SEED)
+                    .observable_expectation(&maxcut)
+                    .unwrap()
+            })
+        },
+    );
+
+    group.finish();
+}
+
 #[cfg(feature = "bench-internal")]
 fn bench_qec_internal_sweeps(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_internal_sweeps");
@@ -784,7 +822,8 @@ fn bench_qec_internal_sweeps(c: &mut Criterion) {
 criterion_group! {
     name = qec_t_strategy_benches;
     config = common::criterion_config();
-    targets = bench_qec_t_strategies, bench_qec_t_scaling, bench_spd_light_cone
+    targets = bench_qec_t_strategies, bench_qec_t_scaling, bench_spd_light_cone,
+        bench_pauli_engine_qaoa
 }
 
 #[cfg(feature = "bench-internal")]
@@ -795,6 +834,7 @@ criterion_group! {
         bench_qec_t_strategies,
         bench_qec_t_scaling,
         bench_spd_light_cone,
+        bench_pauli_engine_qaoa,
         bench_qec_internal_sweeps
 }
 criterion_main!(qec_t_strategy_benches);

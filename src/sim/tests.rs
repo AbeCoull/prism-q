@@ -1657,9 +1657,12 @@ fn test_pauli_backends_return_marginals_through_builder() {
 }
 
 #[test]
-fn test_pauli_marginals_reject_gates_off_the_z_axis() {
-    let mut c = Circuit::new(1, 0);
-    c.add_gate(Gate::Rx(0.25), &[0]);
+fn test_pauli_marginals_reject_gates_outside_the_rotation_family() {
+    let mut c = Circuit::new(2, 0);
+    let one = num_complex::Complex64::new(1.0, 0.0);
+    let zero = num_complex::Complex64::new(0.0, 0.0);
+    let phase = num_complex::Complex64::from_polar(1.0, 0.25);
+    c.add_gate(Gate::Cu(Box::new([[one, zero], [zero, phase]])), &[0, 1]);
 
     for err in pauli_marginal_errors(&c) {
         assert!(
@@ -1671,6 +1674,7 @@ fn test_pauli_marginals_reject_gates_off_the_z_axis() {
     let mut supported = Circuit::new(1, 0);
     supported.add_gate(Gate::H, &[0]);
     supported.add_gate(Gate::Rz(0.25), &[0]);
+    supported.add_gate(Gate::Rx(0.25), &[0]);
     assert_eq!(
         simulate(&supported)
             .backend(BackendKind::DeterministicPauli {

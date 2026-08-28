@@ -1742,7 +1742,7 @@ fn supports_pauli_marginal_backend(circuit: &Circuit) -> bool {
 }
 
 /// Gate-set support is left to the engines, which accept Clifford gates and
-/// Z-axis rotations and report the offending gate by name.
+/// Pauli rotations and report the offending gate by name.
 fn validate_pauli_marginal_backend(kind: &BackendKind, circuit: &Circuit) -> Result<()> {
     if has_nonunitary_or_classical_ops(circuit) {
         return Err(PrismError::IncompatibleBackend {

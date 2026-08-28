@@ -232,7 +232,7 @@ pub fn ghz_circuit(n: usize) -> Circuit {
 
 /// Build a QAOA-style circuit: `layers` of nearest-neighbor ZZ interactions + Rx mixer.
 ///
-/// ZZ(theta) is decomposed as CX - Rz(theta) - CX. The mixer applies Rx(beta)
+/// Each ZZ interaction is a native `Rzz(theta)`. The mixer applies Rx(beta)
 /// to every qubit. Angles are drawn randomly from the given seed.
 pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);

@@ -456,6 +456,30 @@ pub fn cz_chain_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
+/// Build a non-Clifford brick-wall circuit: `depth` layers of random Ry/Rz on
+/// every qubit, each layer closed by CZ on alternating adjacent pairs.
+///
+/// No layer resets entanglement, so the Schmidt rank across a cut doubles each
+/// time a CZ crosses it (once per two layers) until it saturates at
+/// `2^min(c, n - c)` for the cut after qubit `c - 1`. The `mps/brickwork_d24`
+/// bench rows rely on that growth to reach their bond caps;
+/// `tests/bench_fixture_routing.rs` pins it through the instruction stream.
+pub fn brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for layer in 0..depth {
+        for q in 0..n {
+            c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        let offset = layer % 2;
+        for q in (offset..n.saturating_sub(1)).step_by(2) {
+            c.add_gate(Gate::Cz, &[q, q + 1]);
+        }
+    }
+    c
+}
+
 /// Append an inverse QFT on `n` qubits starting at index `start`.
 ///
 /// Exact inverse of the forward decomposition in `qft_textbook_steps`: reverse

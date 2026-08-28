@@ -7,8 +7,9 @@
 //! affected rows stayed green, kept reporting, and went non-monotonic in qubit
 //! count. Nothing else in the suite checks the engine a run actually used.
 
+use prism_q::backend::Backend;
 use prism_q::sim::ResolvedBackend;
-use prism_q::{BackendKind, circuits, sim};
+use prism_q::{BackendKind, MpsBackend, circuits, sim};
 
 const SEED: u64 = 0xDEAD_BEEF;
 
@@ -81,6 +82,39 @@ fn diagonal_mixed_rows_reach_their_backend() {
             &circuit,
         );
     }
+}
+
+// The `mps/brickwork_d24` rows price the bond cap, so what needs pinning is
+// entanglement, not routing. The peak is measured through the instruction
+// stream (a saturated cap proves the uncapped peak meets it) rather than
+// trusted from construction: Cx on plus states holds dense_entanglement at
+// bond 1.
+#[test]
+fn brickwork_rows_saturate_the_bond_ladder() {
+    fn stream_peak_saturates(circuit: &prism_q::circuit::Circuit, cap: usize) -> bool {
+        let mut backend = MpsBackend::new(SEED, cap);
+        backend
+            .init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        for instruction in &circuit.instructions {
+            backend.apply(instruction).unwrap();
+            if backend.current_max_bond_dim() >= cap {
+                return true;
+            }
+        }
+        false
+    }
+
+    let circuit = circuits::brickwork_circuit(18, 24, SEED);
+    assert!(
+        stream_peak_saturates(&circuit, 32),
+        "brickwork_d24/18: the bottom ladder rung no longer truncates"
+    );
+    assert!(
+        stream_peak_saturates(&circuit, 512),
+        "brickwork_d24/18: the uncapped peak no longer clears the 256 cap, \
+         so the chi ladder measures allocation and traversal instead of bond"
+    );
 }
 
 #[test]

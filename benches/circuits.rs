@@ -901,6 +901,30 @@ fn bench_mps_hotspots(c: &mut Criterion) {
     group.finish();
 }
 
+// The chi ladder: the one MPS group whose bond growth reaches the caps
+// (uncapped peaks 512 at 18q and 1024 at 20q against corpus peaks of 4
+// elsewhere), so these rows price the cap itself rather than allocation
+// and traversal. Shape pinned in `tests/bench_fixture_routing.rs`.
+fn bench_mps_brickwork(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/brickwork_d24");
+    configure_group(&mut group);
+
+    for &n in &[18, 20] {
+        let circuit = circuits::brickwork_circuit(n, 24, SEED);
+        for &cap in &[32usize, 64, 256] {
+            group.bench_with_input(
+                BenchmarkId::new(format!("b{cap}"), n),
+                &circuit,
+                |b, circ| {
+                    b.iter(|| run_mps_apply_only(circ, cap));
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
 // ---- Native shot sampling on the polynomial-state backends ----
 
 /// Terminal measurements on every qubit, the shape the native samplers serve.
@@ -2992,6 +3016,7 @@ criterion_group! {
     bench_mps_scaling,
     bench_mps_linear_chain,
     bench_mps_hotspots,
+    bench_mps_brickwork,
     bench_mps_sampling,
     // Product state
     bench_product_scaling,

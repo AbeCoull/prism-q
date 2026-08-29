@@ -550,6 +550,27 @@ impl MpsBackend {
         backend
     }
 
+    /// Set the relative singular-value truncation threshold.
+    ///
+    /// Each SVD drops singular values at or below `epsilon` times the largest,
+    /// and the discarded weight reports through [`Self::truncation_discarded`]
+    /// and the run's exactness metadata. The construction default of 1e-12
+    /// keeps every numerically meaningful value, so results stay exact
+    /// wherever the bond cap never bites; a larger threshold trades fidelity
+    /// for lower bond dimension and run time on entangling circuits, and can
+    /// lower the total discarded weight at a fixed cap by cutting low-weight
+    /// Schmidt tails before the cap discards real weight.
+    ///
+    /// # Panics
+    /// Panics unless `0 <= epsilon < 1`.
+    pub fn set_svd_epsilon(&mut self, epsilon: f64) {
+        assert!(
+            (0.0..1.0).contains(&epsilon),
+            "svd epsilon must lie in [0, 1)"
+        );
+        self.svd_epsilon = epsilon;
+    }
+
     /// Zero the cumulative SVD-truncation weight. [`Backend::init`] does this,
     /// so a caller needs it only to scope the total to a sequence shorter than a
     /// run: the CAMPS T-gate path, which must reject silent truncation, brackets
@@ -564,8 +585,9 @@ impl MpsBackend {
     /// [`Backend::init`] or the last [`Self::reset_truncation_tracking`].
     ///
     /// [`Backend::init`]: crate::backend::Backend::init
-    /// Epsilon-threshold truncation contributes negligibly (`~svd_epsilon²`); a
-    /// meaningful value indicates the bond-dimension cap discarded real weight.
+    /// At the default threshold, epsilon truncation contributes negligibly and
+    /// a meaningful value indicates the bond-dimension cap discarded real
+    /// weight; after [`Self::set_svd_epsilon`] both sources contribute.
     pub fn truncation_discarded(&self) -> f64 {
         self.truncation_discarded
     }

@@ -298,6 +298,16 @@ fn run_mps_apply_only(circuit: &Circuit, max_bond_dim: usize) {
     black_box(backend.classical_results());
 }
 
+fn run_mps_apply_only_with_epsilon(circuit: &Circuit, max_bond_dim: usize, epsilon: f64) {
+    let mut backend = MpsBackend::new(SEED, max_bond_dim);
+    backend.set_svd_epsilon(epsilon);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    black_box(backend.classical_results());
+}
+
 // ---- Statevector: qubit-count sweeps ----
 
 fn bench_statevector_random(c: &mut Criterion) {
@@ -921,6 +931,13 @@ fn bench_mps_brickwork(c: &mut Criterion) {
             );
         }
     }
+
+    // Epsilon companion to the b256 rung: the raised threshold cuts the
+    // low-weight Schmidt tail before the cap discards real weight.
+    let circuit = circuits::brickwork_circuit(18, 24, SEED);
+    group.bench_with_input(BenchmarkId::new("b256_e3", 18), &circuit, |b, circ| {
+        b.iter(|| run_mps_apply_only_with_epsilon(circ, 256, 1e-3));
+    });
 
     group.finish();
 }

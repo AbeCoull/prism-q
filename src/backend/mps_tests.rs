@@ -757,3 +757,29 @@ fn raised_epsilon_lowers_bond_and_reports_the_discard() {
         "realized error {realized_err:.3e} against reported discard {discarded:.3e}"
     );
 }
+
+// One scratch pair reused across overlaps of different bond shapes must give
+// the same values as fresh-allocation calls; stale contents from a larger
+// pair must not leak into a smaller one.
+#[test]
+fn inner_product_scratch_reuse_matches_fresh() {
+    let run = |depth: usize, seed: u64| {
+        let circuit = crate::circuits::brickwork_circuit(8, depth, seed);
+        let mut b = MpsBackend::new(42, 64);
+        b.init(8, 0).unwrap();
+        b.apply_instructions(&circuit.instructions).unwrap();
+        b
+    };
+    let big = run(8, 42);
+    let small = run(2, 43);
+
+    let mut tmp = Vec::new();
+    let mut next_env = Vec::new();
+    for (bra, ket) in [(&big, &small), (&small, &small), (&big, &big)] {
+        let reused = bra
+            .inner_product_with_scratch(ket, &mut tmp, &mut next_env)
+            .unwrap();
+        let fresh = bra.inner_product(ket).unwrap();
+        assert_eq!(reused, fresh);
+    }
+}

@@ -832,12 +832,24 @@ fn weighted_mps_norm_sq(branches: &[WeightedMpsBranch]) -> Result<f64> {
         return Ok(0.0);
     }
 
+    // Gram term (i, j) is the conjugate of (j, i), so the upper triangle plus
+    // the diagonal carries the whole sum; the scratch pair is reused across
+    // every overlap in the sweep.
     let mut total = Complex64::new(0.0, 0.0);
-    for left in branches {
+    let mut tmp = Vec::new();
+    let mut next_env = Vec::new();
+    for (i, left) in branches.iter().enumerate() {
         let left_weight = left.weight.conj();
-        for right in branches {
-            let overlap = left.state.inner_product(&right.state)?;
-            total += left_weight * right.weight * overlap;
+        let diag = left
+            .state
+            .inner_product_with_scratch(&left.state, &mut tmp, &mut next_env)?;
+        total += left_weight * left.weight * diag;
+        for right in &branches[i + 1..] {
+            let overlap =
+                left.state
+                    .inner_product_with_scratch(&right.state, &mut tmp, &mut next_env)?;
+            let term = left_weight * right.weight * overlap;
+            total += term + term.conj();
         }
     }
 

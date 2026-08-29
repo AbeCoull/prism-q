@@ -703,3 +703,57 @@ fn test_batch_phase_decomposition() {
     );
     assert_mps_matches_statevector(&c);
 }
+
+#[test]
+fn svd_epsilon_default_is_pinned() {
+    let b = MpsBackend::new(42, 64);
+    assert_eq!(b.svd_epsilon, 1e-12);
+}
+
+#[test]
+#[should_panic(expected = "svd epsilon")]
+fn svd_epsilon_rejects_one() {
+    MpsBackend::new(42, 64).set_svd_epsilon(1.0);
+}
+
+// Uncapped brickwork saturates its width ceiling, so a raised threshold must
+// show as a lower peak bond, a reported discard, and a realized error within
+// a small factor of that discard (the estimate is first order, not a
+// certificate; 10x holds well clear of the ~2.5x measured on deeper runs).
+#[test]
+fn raised_epsilon_lowers_bond_and_reports_the_discard() {
+    let circuit = crate::circuits::brickwork_circuit(14, 20, 42);
+
+    let mut exact = MpsBackend::new(42, 4096);
+    exact.init(14, 0).unwrap();
+    exact.apply_instructions(&circuit.instructions).unwrap();
+    let reference = exact.export_statevector().unwrap();
+    let exact_bond = exact.current_max_bond_dim();
+
+    let mut b = MpsBackend::new(42, 4096);
+    b.set_svd_epsilon(1e-3);
+    b.init(14, 0).unwrap();
+    b.apply_instructions(&circuit.instructions).unwrap();
+
+    assert!(
+        b.current_max_bond_dim() < exact_bond,
+        "raised threshold left the peak bond at {} against {exact_bond}",
+        b.current_max_bond_dim()
+    );
+    let discarded = b.truncation_discarded();
+    assert!(discarded > 0.0, "raised threshold reported no discard");
+    match b.exactness() {
+        crate::sim::Exactness::Approximate {
+            fidelity_lower_bound: Some(bound),
+        } => assert!((bound - (1.0 - discarded)).abs() < 1e-15),
+        other => panic!("expected a reported bound, got {other:?}"),
+    }
+
+    let v = b.export_statevector().unwrap();
+    let inner: Complex64 = reference.iter().zip(&v).map(|(r, x)| r.conj() * x).sum();
+    let realized_err = 1.0 - inner.norm_sqr();
+    assert!(
+        realized_err < 10.0 * discarded,
+        "realized error {realized_err:.3e} against reported discard {discarded:.3e}"
+    );
+}

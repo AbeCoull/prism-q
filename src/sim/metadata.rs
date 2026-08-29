@@ -132,8 +132,16 @@ impl RunMetadata {
         matches!(self.exactness, Exactness::Exact)
     }
 
-    /// Lower bound on the fidelity of the produced state, `None` when the
-    /// result is exact or the engine reports no bound.
+    /// Reported fidelity floor for the produced state, `None` when the result
+    /// is exact or the engine reports none.
+    ///
+    /// For the MPS backend this is 1 minus the summed per-SVD relative
+    /// discarded weights: a first-order truncation estimate, not a
+    /// certificate. Truncation errors compound across SVDs, and realized
+    /// fidelity has measured below the reported value by up to a factor of
+    /// about 2.4 in the implied error on deep truncating runs. The budgeted
+    /// Pauli engines leave this `None` and report their additive observable
+    /// bound on the result types instead.
     pub fn fidelity_lower_bound(&self) -> Option<f64> {
         match self.exactness {
             Exactness::Exact => None,

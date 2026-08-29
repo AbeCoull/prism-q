@@ -562,3 +562,34 @@ fn test_approx_handles_many_t_gates() {
     assert!(result.num_terms <= 32);
     assert_eq!(result.t_count, 10);
 }
+
+// Term (i, j) of the branch Gram is the conjugate of (j, i); the triangle
+// evaluation must match the full B x B sum.
+#[test]
+fn triangle_gram_matches_the_full_sum() {
+    let mut c = Circuit::new(3, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::T, &[2]);
+
+    let branches = build_mps_branches_for_unitary(&c, 42).unwrap();
+    assert!(branches.len() >= 8, "expected a T-branched state");
+
+    let mut full = Complex64::new(0.0, 0.0);
+    for left in &branches {
+        for right in &branches {
+            let overlap = left.state.inner_product(&right.state).unwrap();
+            full += left.weight.conj() * right.weight * overlap;
+        }
+    }
+
+    let triangle = weighted_mps_norm_sq(&branches).unwrap();
+    assert!(
+        (triangle - full.re).abs() < 1e-12,
+        "triangle {triangle} against full Gram {}",
+        full.re
+    );
+}

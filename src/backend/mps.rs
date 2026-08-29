@@ -229,6 +229,16 @@ pub fn svd(a: &[Complex64], m: usize, n: usize) -> SvdResult {
     svd_jacobi(a, m, n)
 }
 
+/// Return a length-`len` window of `buf`, growing it only past its high-water
+/// mark, so a steady-state call allocates and clears nothing. Callers
+/// overwrite every element of the window before reading it.
+fn scratch_slice(buf: &mut Vec<Complex64>, len: usize) -> &mut [Complex64] {
+    if buf.len() < len {
+        buf.resize(len, ZERO);
+    }
+    &mut buf[..len]
+}
+
 fn truncated_svd_rank(singular_values: &[f64], epsilon: f64, max_bond_dim: usize) -> usize {
     let s_max = singular_values.first().copied().unwrap_or(0.0);
     let threshold = epsilon * s_max;
@@ -509,7 +519,6 @@ fn pauli_matrix_entry(axis: Option<MpsPauliAxis>, j: usize, k: usize) -> Complex
 }
 
 /// Matrix Product State backend with bounded bond dimension.
-#[derive(Clone)]
 pub struct MpsBackend {
     num_qubits: usize,
     max_bond_dim: usize,
@@ -524,6 +533,38 @@ pub struct MpsBackend {
     /// construction, so the per-gate check is a field compare rather than an
     /// atomic load.
     workspace_cap: u128,
+    /// Grow-only scratch for [`Self::apply_adjacent_two_qubit`], held across
+    /// calls so the four contraction buffers cost no allocation per gate.
+    /// Every element of each call's window is written by assignment before
+    /// any read, so stale contents never leak between calls.
+    scratch_theta: Vec<Complex64>,
+    scratch_right_t: Vec<Complex64>,
+    scratch_theta_prime: Vec<Complex64>,
+    scratch_mat: Vec<Complex64>,
+}
+
+// Manual so clones start with empty scratch: the buffers are write-before-read
+// and the stabilizer-rank path clones branch states per shot, so copying their
+// contents would be pure memcpy waste.
+impl Clone for MpsBackend {
+    fn clone(&self) -> Self {
+        Self {
+            num_qubits: self.num_qubits,
+            max_bond_dim: self.max_bond_dim,
+            svd_epsilon: self.svd_epsilon,
+            sites: self.sites.clone(),
+            logical_to_site: self.logical_to_site.clone(),
+            site_to_logical: self.site_to_logical.clone(),
+            classical_bits: self.classical_bits.clone(),
+            rng: self.rng.clone(),
+            truncation_discarded: self.truncation_discarded,
+            workspace_cap: self.workspace_cap,
+            scratch_theta: Vec::new(),
+            scratch_right_t: Vec::new(),
+            scratch_theta_prime: Vec::new(),
+            scratch_mat: Vec::new(),
+        }
+    }
 }
 
 impl MpsBackend {
@@ -540,6 +581,10 @@ impl MpsBackend {
             rng: ChaCha8Rng::seed_from_u64(seed),
             truncation_discarded: 0.0,
             workspace_cap: crate::backend::mps_workspace_cap_elements(),
+            scratch_theta: Vec::new(),
+            scratch_right_t: Vec::new(),
+            scratch_theta_prime: Vec::new(),
+            scratch_mat: Vec::new(),
         }
     }
 
@@ -638,6 +683,19 @@ impl MpsBackend {
     /// Contracts left-to-right through the environment tensor in two
     /// passes per site, avoiding the naive four-loop sum.
     pub fn inner_product(&self, other: &Self) -> Result<Complex64> {
+        self.inner_product_with_scratch(other, &mut Vec::new(), &mut Vec::new())
+    }
+
+    /// [`Self::inner_product`] with caller-owned scratch. `tmp` and
+    /// `next_env` are cleared and resized per site, so a caller evaluating
+    /// many overlaps pays one small environment allocation per call instead
+    /// of two per site.
+    pub(crate) fn inner_product_with_scratch(
+        &self,
+        other: &Self,
+        tmp: &mut Vec<Complex64>,
+        next_env: &mut Vec<Complex64>,
+    ) -> Result<Complex64> {
         if self.num_qubits != other.num_qubits {
             return Err(crate::error::PrismError::InvalidParameter {
                 message: format!(
@@ -668,7 +726,8 @@ impl MpsBackend {
             let br_b = b.bond_right;
 
             // Step 1: tmp[β, j, α'] = Σ_α env[α, β] · conj(A[α, j, α'])
-            let mut tmp = vec![ZERO; bl_b * 2 * br_a];
+            tmp.clear();
+            tmp.resize(bl_b * 2 * br_a, ZERO);
             for alpha in 0..bl_a {
                 for j in 0..2 {
                     for alpha_p in 0..br_a {
@@ -684,8 +743,9 @@ impl MpsBackend {
                 }
             }
 
-            // Step 2: new_env[α', β'] = Σ_{β, j} tmp[β, j, α'] · B[β, j, β']
-            let mut new_env = vec![ZERO; br_a * br_b];
+            // Step 2: next_env[α', β'] = Σ_{β, j} tmp[β, j, α'] · B[β, j, β']
+            next_env.clear();
+            next_env.resize(br_a * br_b, ZERO);
             for beta in 0..bl_b {
                 for j in 0..2 {
                     for beta_p in 0..br_b {
@@ -695,13 +755,13 @@ impl MpsBackend {
                         }
                         for alpha_p in 0..br_a {
                             let t = tmp[beta * (2 * br_a) + j * br_a + alpha_p];
-                            new_env[alpha_p * br_b + beta_p] += t * b_val;
+                            next_env[alpha_p * br_b + beta_p] += t * b_val;
                         }
                     }
                 }
             }
 
-            env = new_env;
+            std::mem::swap(&mut env, next_env);
             env_cols = br_b;
         }
 
@@ -933,10 +993,10 @@ impl MpsBackend {
         let left_data = &self.sites[left_site].data;
         let right_data = &self.sites[right_site].data;
         let chunk_size = 2 * 2 * br;
-        let mut theta = vec![ZERO; bl * chunk_size];
+        let theta = scratch_slice(&mut self.scratch_theta, bl * chunk_size);
 
         // Transpose right: (bond_mid, 2, br) → (2, br, bond_mid) for sequential gamma access.
-        let mut right_t = vec![ZERO; bond_mid * 2 * br];
+        let right_t = scratch_slice(&mut self.scratch_right_t, bond_mid * 2 * br);
         for gamma in 0..bond_mid {
             for j in 0..2usize {
                 for beta in 0..br {
@@ -1003,7 +1063,8 @@ impl MpsBackend {
         }
 
         // 2. Apply gate: Θ'[α, i', j', β] = Σ_{i,j} G[i'2+j', i2+j] · Θ[α,i,j,β]
-        let mut theta_prime = vec![ZERO; bl * chunk_size];
+        let theta = &self.scratch_theta[..bl * chunk_size];
+        let theta_prime = scratch_slice(&mut self.scratch_theta_prime, bl * chunk_size);
 
         #[cfg(feature = "parallel")]
         if bl >= MIN_BOND_FOR_PAR {
@@ -1069,7 +1130,8 @@ impl MpsBackend {
         //    M[(α*2+i), (j*br+β)] = Θ'[α, i, j, β]
         let rows = bl * 2;
         let cols = 2 * br;
-        let mut mat = vec![ZERO; rows * cols];
+        let theta_prime = &self.scratch_theta_prime[..bl * chunk_size];
+        let mat = scratch_slice(&mut self.scratch_mat, rows * cols);
         for alpha in 0..bl {
             for i in 0..2 {
                 for j in 0..2 {
@@ -1083,7 +1145,7 @@ impl MpsBackend {
             }
         }
 
-        let svd_result = svd(&mat, rows, cols);
+        let svd_result = svd(mat, rows, cols);
         let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
         self.record_truncation(&svd_result.s, chi_new);
 

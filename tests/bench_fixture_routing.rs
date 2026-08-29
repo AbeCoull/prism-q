@@ -117,6 +117,41 @@ fn brickwork_rows_saturate_the_bond_ladder() {
     );
 }
 
+// The `mps/matched_d12` row prices SWAP routing at real bond, so its two
+// claims are that gates stay non-adjacent and that the bond saturates the
+// cap. The second check is the one that catches a fixed pairing: its gates
+// still count as non-adjacent, but routing parks each pair and drains the
+// chain to bond 2.
+#[test]
+fn matched_rows_route_and_saturate() {
+    let circuit = circuits::matched_brickwork_circuit(16, 12, SEED);
+    let non_adjacent = circuit
+        .instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(instruction, prism_q::Instruction::Gate { targets, .. }
+                if targets.len() == 2 && targets[0].abs_diff(targets[1]) > 1)
+        })
+        .count();
+    assert!(
+        non_adjacent >= 50,
+        "matched_d12/16: only {non_adjacent} non-adjacent gates; the row no \
+         longer prices routing"
+    );
+
+    let mut backend = MpsBackend::new(SEED, 64);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for instruction in &circuit.instructions {
+        backend.apply(instruction).unwrap();
+        if backend.current_max_bond_dim() >= 64 {
+            return;
+        }
+    }
+    panic!("matched_d12/16: the bond never saturated the 64 cap");
+}
+
 #[test]
 fn statevector_corpus_rows_reach_the_statevector() {
     for n in [16usize, 20] {

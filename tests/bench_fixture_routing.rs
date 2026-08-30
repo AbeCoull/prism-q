@@ -152,6 +152,79 @@ fn matched_rows_route_and_saturate() {
     panic!("matched_d12/16: the bond never saturated the 64 cap");
 }
 
+// The sparse walk rows price map-walk kernels at a pinned entry count, and
+// the densify rows trace the load-factor crossover against the dense arm, so
+// the claims are that the register does not split (the decomposed route
+// claimed the family these rows replaced) and that the map holds exactly 2^k
+// entries once the H prefix has run: every later gate scales amplitudes in
+// place or permutes keys one to one. The count is checked through the fused
+// stream the bench executes, so a fusion change that starts branching or
+// draining the map fails here.
+fn sparse_entry_peak_and_final(circuit: &prism_q::circuit::Circuit) -> (usize, usize) {
+    let fused = prism_q::circuit::fusion::fuse_circuit(circuit, true);
+    let mut backend = prism_q::SparseBackend::new(SEED);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    let mut peak = 0;
+    for instruction in &fused.instructions {
+        backend.apply(instruction).unwrap();
+        peak = peak.max(backend.entry_count());
+    }
+    (peak, backend.entry_count())
+}
+
+#[test]
+fn sparse_walk_rows_pin_route_and_entry_count() {
+    for (n, depth) in [(32usize, 5usize), (48, 5), (64, 5), (32, 2), (64, 2)] {
+        let circuit = circuits::sparse_walk_circuit(n, 12, depth, SEED);
+        assert_resolves(
+            &format!("walk_k12 shape {n}/d{depth}"),
+            BackendKind::Sparse,
+            &circuit,
+        );
+        let (peak, last) = sparse_entry_peak_and_final(&circuit);
+        assert_eq!(
+            (peak, last),
+            (1 << 12, 1 << 12),
+            "walk_k12 {n}/d{depth}: the map no longer holds a pinned 4096 entries"
+        );
+    }
+}
+
+#[test]
+fn sparse_densify_rows_pin_entry_ladder() {
+    for k in [8usize, 14, 20] {
+        let circuit = circuits::sparse_walk_circuit(20, k, 2, SEED);
+        let (peak, last) = sparse_entry_peak_and_final(&circuit);
+        assert_eq!(
+            (peak, last),
+            (1 << k, 1 << k),
+            "densify k={k}: the ladder no longer walks the map to 2^k entries"
+        );
+    }
+    // Route is set by the layer stream, which is identical across k.
+    let circuit = circuits::sparse_walk_circuit(20, 8, 2, SEED);
+    assert_resolves("densify/map/8", BackendKind::Sparse, &circuit);
+    assert_resolves("densify/dense/8", BackendKind::Statevector, &circuit);
+}
+
+// `sparse/sampling` prices shot conversion on a near-empty map; the GHZ
+// chain keeps the register connected, unlike the split fixture it replaced.
+#[test]
+fn sparse_sampling_fixture_reaches_the_sparse_backend() {
+    for n in [24usize, 64] {
+        let circuit = circuits::ghz_circuit(n);
+        assert_resolves(&format!("sampling/{n}"), BackendKind::Sparse, &circuit);
+        let (peak, last) = sparse_entry_peak_and_final(&circuit);
+        assert_eq!(
+            (peak, last),
+            (2, 2),
+            "sampling/{n}: the empty-map control stopped being empty"
+        );
+    }
+}
+
 #[test]
 fn statevector_corpus_rows_reach_the_statevector() {
     for n in [16usize, 20] {

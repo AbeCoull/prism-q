@@ -16,9 +16,9 @@ use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{
-    BackendKind, ClassicalCondition, Instruction, MpsBackend, Parameters, PauliObservable,
-    PauliTerm, PreparedCircuit, run_expectation_gradient, run_expectation_gradient_shift,
-    run_expectation_values, run_observable_expectation,
+    BackendKind, ClassicalCondition, Instruction, MpsBackend, Parameters, PauliAxis,
+    PauliObservable, PauliTerm, PreparedCircuit, run_expectation_gradient,
+    run_expectation_gradient_shift, run_expectation_values, run_observable_expectation,
 };
 use rand::RngExt;
 use rand::SeedableRng;
@@ -809,17 +809,61 @@ fn bench_sparse_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_sparse_low_entanglement(c: &mut Criterion) {
-    let mut group = c.benchmark_group("sparse/low_entanglement");
+/// One Z term keeps the readout at one map walk, so the rows price the gate
+/// kernels rather than a dense probability export whose presence would depend
+/// on the host memory cap.
+fn z0_observable() -> Vec<Vec<PauliTerm>> {
+    vec![vec![PauliTerm::new(0, PauliAxis::Z)]]
+}
+
+fn bench_sparse_walk(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse/walk_k12");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 12, 16, 20] {
-        let circuit = sparse_entanglement_circuit(n, 5);
+    let observables = z0_observable();
+    for &n in &[32, 48, 64] {
+        let circuit = circuits::sparse_walk_circuit(n, 12, 5, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_with(BackendKind::Sparse, circ, 42).unwrap();
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Sparse)
+                        .seed(42)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                )
             });
         });
+    }
+    group.finish();
+}
+
+/// Map against dense on one workload as the H prefix widens: entries go
+/// 2^8 to 2^20 on a 20-qubit register while the layer stream stays identical,
+/// so the pair of arms traces the load-factor crossover.
+fn bench_sparse_densify(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse/densify");
+    configure_group(&mut group);
+
+    let observables = z0_observable();
+    for &k in &[8, 12, 14, 16, 18, 20] {
+        let circuit = circuits::sparse_walk_circuit(20, k, 2, SEED);
+        for (arm, kind) in [
+            ("map", BackendKind::Sparse),
+            ("dense", BackendKind::Statevector),
+        ] {
+            group.bench_with_input(BenchmarkId::new(arm, k), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(kind.clone())
+                            .seed(42)
+                            .expectation_values(&observables)
+                            .unwrap(),
+                    )
+                });
+            });
+        }
     }
     group.finish();
 }
@@ -1001,15 +1045,42 @@ fn bench_mps_sampling(c: &mut Criterion) {
     group.finish();
 }
 
+/// Shot count for both sparse sampling groups: sized so the sampling loop is
+/// roughly half of a populated row (measured against the bare run of the same
+/// fixture), and high enough to lift the empty-map rows off the microsecond
+/// scale this host cannot resolve.
+const SPARSE_SAMPLING_SHOTS: usize = 20_000;
+
+/// Two map entries, so the rows price shot conversion, not sampling over a
+/// populated map; `sparse/sampling_k12` holds the populated case.
 fn bench_sparse_sampling(c: &mut Criterion) {
     let mut group = c.benchmark_group("sparse/sampling");
     configure_group(&mut group);
 
     for &n in &SAMPLING_QUBITS {
-        let circuit = measure_all(&sparse_entanglement_circuit(n, 2));
+        let circuit = measure_all(&circuits::ghz_circuit(n));
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                black_box(run_shots_with(BackendKind::Sparse, circ, SAMPLING_SHOTS, SEED).unwrap())
+                black_box(
+                    run_shots_with(BackendKind::Sparse, circ, SPARSE_SAMPLING_SHOTS, SEED).unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_sparse_sampling_populated(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sparse/sampling_k12");
+    configure_group(&mut group);
+
+    for &n in &[32, 64] {
+        let circuit = measure_all(&circuits::sparse_walk_circuit(n, 12, 2, SEED));
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    run_shots_with(BackendKind::Sparse, circ, SPARSE_SAMPLING_SHOTS, SEED).unwrap(),
+                )
             });
         });
     }
@@ -3043,8 +3114,10 @@ criterion_group! {
     bench_factored_stabilizer_measurement,
     // Sparse
     bench_sparse_scaling,
-    bench_sparse_low_entanglement,
+    bench_sparse_walk,
+    bench_sparse_densify,
     bench_sparse_sampling,
+    bench_sparse_sampling_populated,
     // MPS
     bench_mps_scaling,
     bench_mps_linear_chain,

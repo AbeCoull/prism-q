@@ -81,6 +81,12 @@ impl SparseBackend {
         }
     }
 
+    /// Number of nonzero amplitudes currently stored, the `k` in the O(k) cost
+    /// of every gate walk.
+    pub fn entry_count(&self) -> usize {
+        self.state.len()
+    }
+
     #[inline(always)]
     fn prune(&mut self) {
         let eps = self.epsilon;

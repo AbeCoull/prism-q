@@ -510,6 +510,53 @@ pub fn matched_brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
+/// Build a sparse-regime workload: H on the low `k` qubits, then `depth`
+/// layers of seeded diagonal phases (Rz, P, T, Rzz) and basis permutations
+/// (X, brick-layer Cx, Swap) over the whole register.
+///
+/// The prefix puts the amplitude map at exactly `2^k` entries and no later
+/// gate can grow or drain it: diagonals scale amplitudes in place and
+/// permutations remap keys one to one, so the entry count is pinned for the
+/// whole walk while the keys spread over all `n` bits. The brick Cx layers
+/// keep the interaction graph connected at `depth >= 2`, which keeps the
+/// decomposed route from claiming the register.
+/// `tests/bench_fixture_routing.rs` pins both properties.
+///
+/// # Panics
+/// Panics if `k > n` or `n < 2`.
+pub fn sparse_walk_circuit(n: usize, k: usize, depth: usize, seed: u64) -> Circuit {
+    assert!(
+        k <= n && n >= 2,
+        "sparse_walk_circuit needs k <= n and n >= 2"
+    );
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for q in 0..k {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for layer in 0..depth {
+        for q in 0..n {
+            let theta = rng.random::<f64>() * std::f64::consts::TAU;
+            match rng.random_range(0..4) {
+                0 => c.add_gate(Gate::Rz(theta), &[q]),
+                1 => c.add_gate(Gate::P(theta), &[q]),
+                2 => c.add_gate(Gate::T, &[q]),
+                _ => c.add_gate(Gate::X, &[q]),
+            }
+        }
+        let offset = layer % 2;
+        for q in (offset..n - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in (offset..n - 1).step_by(5) {
+            let theta = rng.random::<f64>() * std::f64::consts::TAU;
+            c.add_gate(Gate::Rzz(theta), &[q, q + 1]);
+        }
+        c.add_gate(Gate::Swap, &[layer % (n - 1), layer % (n - 1) + 1]);
+    }
+    c
+}
+
 /// Append an inverse QFT on `n` qubits starting at index `start`.
 ///
 /// Exact inverse of the forward decomposition in `qft_textbook_steps`: reverse

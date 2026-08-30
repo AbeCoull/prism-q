@@ -942,6 +942,22 @@ fn bench_mps_brickwork(c: &mut Criterion) {
     group.finish();
 }
 
+// The routed family: per-layer random matchings keep the entangling gates
+// non-adjacent at real bond, so this row prices SWAP routing where the
+// other MPS rows cannot reach it. Shape pinned in
+// `tests/bench_fixture_routing.rs`.
+fn bench_mps_matched(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/matched_d12");
+    configure_group(&mut group);
+
+    let circuit = circuits::matched_brickwork_circuit(16, 12, SEED);
+    group.bench_with_input(BenchmarkId::new("b64", 16), &circuit, |b, circ| {
+        b.iter(|| run_mps_apply_only(circ, 64));
+    });
+
+    group.finish();
+}
+
 // ---- Native shot sampling on the polynomial-state backends ----
 
 /// Terminal measurements on every qubit, the shape the native samplers serve.
@@ -3034,6 +3050,7 @@ criterion_group! {
     bench_mps_linear_chain,
     bench_mps_hotspots,
     bench_mps_brickwork,
+    bench_mps_matched,
     bench_mps_sampling,
     // Product state
     bench_product_scaling,

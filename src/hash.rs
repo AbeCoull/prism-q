@@ -20,10 +20,12 @@ impl FxHasher {
 impl Hasher for FxHasher {
     /// The multiply-xor step drives entropy toward the high bits while the
     /// table takes its bucket index from the low ones, so structured keys
-    /// cluster. Basis-state indices from a low-entanglement circuit are exactly
+    /// cluster. Basis-state indices from a structured circuit are exactly
     /// that, and the clustering grows with the key count: without this
-    /// finalizer `sparse/low_entanglement` regresses 11.8% at 20 qubits while
-    /// the high-entropy `sparse/random_d10` rows are unaffected.
+    /// finalizer a fixture holding every index of a 20-qubit register in the
+    /// map regressed 11.8% while the high-entropy `sparse/random_d10` rows
+    /// were unaffected. The `sparse/densify` rows sweep the same key-count
+    /// growth.
     #[inline]
     fn finish(&self) -> u64 {
         let mut h = self.hash;

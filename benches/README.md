@@ -109,6 +109,14 @@ All seeded with `0xDEAD_BEEF` for reproducibility.
 - **Clifford-heavy**: H, S, X, Y, Z + CX only.
 - **Sparse entanglement**: H on all qubits + single CX(0, n-1) per layer.
 - **Dense entanglement**: H on all qubits + linear CX chain per layer.
+- **Sparse walk** (`circuits::sparse_walk_circuit`): H on the low k qubits,
+  then layers of seeded diagonal phases and basis permutations over the whole
+  register, holding the amplitude map at exactly 2^k entries. The
+  `sparse/walk_k12` and `sparse/sampling_k12` rows fix k = 12; the
+  `sparse/densify` rows sweep k at 20 qubits against a dense arm on the same
+  workload, tracing the load-factor crossover. The entry count and the routing
+  (the register must not split to the decomposed path) are pinned in
+  `tests/bench_fixture_routing.rs`.
 
 ## Running benchmarks
 
@@ -357,7 +365,7 @@ on them; `bench_ab.sh` lists them under the table on every run.
 
 | Row family | Same-code spread observed |
 | --- | --- |
-| `sparse/low_entanglement/{8,12,16,20}` | -4.4% to +15.5%, no consistent sign |
+| `sparse/densify/map/{8,14}` | map/14 flips +9% to +16% between same-code process instances with tight in-run controls (bimodal, 5.4 to 6.3 ms); map/8 is a 145 us row with control excursions to 9%. Curve points, not gate rows; the other densify rows held 3.4% or better over three runs |
 | `stabilizer/scaling/10`, `factored_stabilizer/scaling/10` | +9% to +13% (L1 resident) |
 | `stabilizer_rank/shots_mid_circuit` | -17.8% to +88% |
 | `gpu_stab_direct/clifford_d10/{2000,5000}` | +118% to +124% (bimodal clock state) |
@@ -369,9 +377,14 @@ on them; `bench_ab.sh` lists them under the table on every run.
 Those last three were measured on a host at roughly 50% background load, so treat
 them as an upper bound rather than an intrinsic property of the row.
 
-Gate sparse work on `sparse/random_d10` and `compare/*/sparse/*`, and the
-stabilizer families on their 50q+ rows, which reproduced consistent signs across
-independent pairs.
+Gate sparse work on `sparse/random_d10`, `sparse/walk_k12`, and
+`compare/*/sparse/*`, and the stabilizer families on their 50q+ rows.
+`sparse/random_d10` and the compare rows reproduced consistent signs across
+independent pairs. The quarantined `sparse/low_entanglement` family this table
+used to carry is removed rather than repaired: its register split, so the rows
+ran the decomposed route at microsecond scale, and on the sparse backend the
+fixture densifies to `2^n` entries, the opposite of the regime the name
+promised. `sparse/walk_k12` replaces it.
 
 ## Reproducibility checklist
 

@@ -340,6 +340,16 @@ impl BasisSamples {
         self.words.len() / self.words_per_shot
     }
 
+    /// Word storage, [`Self::words_per_shot`] consecutive words per shot, so a
+    /// sampler filling shots in parallel can split it into disjoint chunks.
+    pub(crate) fn words_mut(&mut self) -> &mut [u64] {
+        &mut self.words
+    }
+
+    pub(crate) fn words_per_shot(&self) -> usize {
+        self.words_per_shot
+    }
+
     /// Measured outcome for `qubit` in `shot`, `true` for |1⟩.
     #[inline(always)]
     pub fn bit(&self, shot: usize, qubit: usize) -> bool {

@@ -294,3 +294,44 @@ fn compiled_sampler_reproducible_at_fixed_thread_count() {
         "same seed and pool width must reproduce shots"
     );
 }
+
+// The MPS sampler draws each shot from a substream keyed on (seed, shot), so
+// the words are identical at any thread count; the pins are same-seed
+// stability and counts summing to shots, never a fixed bitstring. Ignored
+// under miri like the dense sampling case above.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn mps_terminal_shots_identical_across_thread_counts() {
+    let mut circuit = prism_q::circuits::brickwork_circuit(12, 8, SEED);
+    circuit.measure_all();
+    let kind = BackendKind::Mps { max_bond_dim: 64 };
+
+    let shots = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .backend(kind.clone())
+                .seed(SEED)
+                .shots(SAMPLING_SHOTS)
+                .expect("shots")
+                .shots
+        })
+    };
+    let single = shots(1);
+    assert_eq!(single.len(), SAMPLING_SHOTS);
+    assert_eq!(single, shots(THREADS_HI), "mps terminal shots differ");
+    assert_eq!(single, shots(1), "mps terminal shots not seed stable");
+
+    let counts = in_pool(THREADS_HI, || {
+        simulate(&circuit)
+            .backend(kind.clone())
+            .seed(SEED)
+            .sample_counts(SAMPLING_SHOTS)
+            .expect("counts")
+            .counts
+    });
+    assert_eq!(
+        counts.values().sum::<u64>(),
+        SAMPLING_SHOTS as u64,
+        "mps counts do not sum to the shot count"
+    );
+}

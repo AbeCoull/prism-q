@@ -54,6 +54,10 @@ const MAX_SVD_SWEEPS: usize = 100;
 const SVD_CONVERGENCE: f64 = 1e-14;
 #[cfg(feature = "parallel")]
 const MIN_BOND_FOR_PAR: usize = 32;
+/// Shot count at or above which native sampling splits the shot loop across
+/// the Rayon pool; per-shot substreams keep the output identical either way.
+#[cfg(feature = "parallel")]
+const MIN_SHOTS_FOR_PAR: usize = 32;
 /// Leaves per Rayon task in the dense expansion, as a bit count. The split
 /// depth is chosen to leave at least `2^6` amplitudes under each prefix, so
 /// the gate is per-task work rather than total element count: each element
@@ -2406,6 +2410,12 @@ impl Backend for MpsBackend {
     /// Sequential conditional sampling over the chain: `O(n·χ²)` per shot after
     /// one `O(n·χ³)` sweep for the right environments.
     ///
+    /// Each shot draws from its own ChaCha8 substream keyed on `(seed, shot)`
+    /// (streams 2 and up: 0 is the backend's own draw stream, 1 the
+    /// trajectory noise stream), so the sampled words are identical at any
+    /// thread count and the shot loop parallelizes at or above
+    /// `MIN_SHOTS_FOR_PAR`.
+    ///
     /// Sites are visited left to right and each bit is recorded against the
     /// logical qubit currently hosted there, so a layout permuted by SWAP
     /// routing needs no canonicalization pass.
@@ -2424,34 +2434,60 @@ impl Backend for MpsBackend {
             .max()
             .unwrap_or(1);
 
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let words_per_shot = samples.words_per_shot();
+        let sample_shot =
+            |shot: usize, shot_words: &mut [u64], left: &mut [Complex64], w: &mut [Complex64]| {
+                let mut rng = ChaCha8Rng::seed_from_u64(seed);
+                rng.set_stream(shot as u64 + 2);
+                left[0] = ONE;
+                left[1..].fill(ZERO);
+                for (site, right_env) in right.iter().enumerate() {
+                    let br = self.sites[site].bond_right;
+                    let prob = self.site_conditional_weights(site, left, right_env, w);
+
+                    let total = prob[0] + prob[1];
+                    let prob_one = if total > 0.0 {
+                        (prob[1] / total).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let outcome = usize::from(rng.random::<f64>() < prob_one);
+                    if outcome == 1 {
+                        let qubit = self.logical_for_site(site);
+                        shot_words[qubit / 64] |= 1u64 << (qubit % 64);
+                    }
+
+                    let scale = 1.0 / prob[outcome].max(NORM_CLAMP_MIN).sqrt();
+                    left[..br].copy_from_slice(&w[outcome * br..(outcome + 1) * br]);
+                    for value in &mut left[..br] {
+                        *value *= scale;
+                    }
+                }
+            };
+
+        #[cfg(feature = "parallel")]
+        if num_shots >= MIN_SHOTS_FOR_PAR {
+            samples
+                .words_mut()
+                .par_chunks_mut(words_per_shot)
+                .enumerate()
+                .for_each_init(
+                    || (vec![ZERO; max_bond], vec![ZERO; 2 * max_bond]),
+                    |(left, w), (shot, shot_words)| sample_shot(shot, shot_words, left, w),
+                );
+            return Ok(samples);
+        }
+
         let mut left = vec![ZERO; max_bond];
         let mut w = vec![ZERO; 2 * max_bond];
-
         for shot in 0..num_shots {
-            left[0] = ONE;
-            left[1..].fill(ZERO);
-            for (site, right_env) in right.iter().enumerate() {
-                let br = self.sites[site].bond_right;
-                let prob = self.site_conditional_weights(site, &left, right_env, &mut w);
-
-                let total = prob[0] + prob[1];
-                let prob_one = if total > 0.0 {
-                    (prob[1] / total).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let outcome = usize::from(rng.random::<f64>() < prob_one);
-                if outcome == 1 {
-                    samples.set(shot, self.logical_for_site(site));
-                }
-
-                let scale = 1.0 / prob[outcome].max(NORM_CLAMP_MIN).sqrt();
-                left[..br].copy_from_slice(&w[outcome * br..(outcome + 1) * br]);
-                for value in &mut left[..br] {
-                    *value *= scale;
-                }
-            }
+            let start = shot * words_per_shot;
+            sample_shot(
+                shot,
+                &mut samples.words_mut()[start..start + words_per_shot],
+                &mut left,
+                &mut w,
+            );
         }
         Ok(samples)
     }

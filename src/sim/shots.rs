@@ -195,6 +195,15 @@ pub(crate) fn shots_from_basis_samples(
     meas_map: &[(usize, usize)],
     num_classical_bits: usize,
 ) -> Vec<Vec<bool>> {
+    let dense_identity_map = meas_map.len() == num_classical_bits
+        && meas_map
+            .iter()
+            .enumerate()
+            .all(|(idx, &(qubit, classical_bit))| idx == qubit && idx == classical_bit);
+    if dense_identity_map {
+        return samples.to_shots(num_classical_bits);
+    }
+
     let mut shots = vec![vec![false; num_classical_bits]; samples.num_shots()];
     for (index, shot) in shots.iter_mut().enumerate() {
         for &(qubit, cbit) in meas_map {
@@ -294,6 +303,78 @@ mod tests {
     use super::*;
     use crate::sim::compiled::PackedShots;
     use crate::sim::probability::{FactoredBlock, Probabilities};
+
+    fn basis_samples_fixture(num_shots: usize, num_qubits: usize) -> crate::backend::BasisSamples {
+        let mut samples = crate::backend::BasisSamples::new(num_shots, num_qubits);
+        for shot in 0..num_shots {
+            for qubit in 0..num_qubits {
+                if (shot * 31 + qubit * 7) % 3 == 0 {
+                    samples.set(shot, qubit);
+                }
+            }
+        }
+        samples
+    }
+
+    fn shots_per_bit(
+        samples: &crate::backend::BasisSamples,
+        meas_map: &[(usize, usize)],
+        num_classical_bits: usize,
+    ) -> Vec<Vec<bool>> {
+        let mut shots = vec![vec![false; num_classical_bits]; samples.num_shots()];
+        for (index, shot) in shots.iter_mut().enumerate() {
+            for &(qubit, cbit) in meas_map {
+                shot[cbit] = samples.bit(index, qubit);
+            }
+        }
+        shots
+    }
+
+    #[test]
+    fn basis_sample_fast_path_matches_per_bit_expansion() {
+        for num_qubits in [4usize, 64, 70, 129] {
+            let samples = basis_samples_fixture(17, num_qubits);
+            let meas_map: Vec<(usize, usize)> = (0..num_qubits).map(|q| (q, q)).collect();
+            assert_eq!(
+                shots_from_basis_samples(&samples, &meas_map, num_qubits),
+                shots_per_bit(&samples, &meas_map, num_qubits)
+            );
+        }
+    }
+
+    #[test]
+    fn basis_sample_fast_path_ignores_qubits_above_the_classical_register() {
+        let samples = basis_samples_fixture(9, 70);
+        let meas_map: Vec<(usize, usize)> = (0..5).map(|q| (q, q)).collect();
+        assert_eq!(
+            shots_from_basis_samples(&samples, &meas_map, 5),
+            shots_per_bit(&samples, &meas_map, 5)
+        );
+    }
+
+    // A classical register wider than the qubit register: the straddling word
+    // lies past the last word the samples hold, so nothing may be masked off.
+    #[test]
+    fn basis_sample_unpack_keeps_every_bit_of_a_narrow_register() {
+        let samples = basis_samples_fixture(5, 70);
+        let unpacked = samples.to_shots(130);
+        for (shot, row) in unpacked.iter().enumerate() {
+            for (qubit, &got) in row[..70].iter().enumerate() {
+                assert_eq!(got, samples.bit(shot, qubit), "shot {shot} qubit {qubit}");
+            }
+            assert!(row[70..].iter().all(|b| !b));
+        }
+    }
+
+    #[test]
+    fn basis_sample_permuted_map_takes_the_general_path() {
+        let samples = basis_samples_fixture(6, 8);
+        let meas_map = [(3, 0), (0, 1), (7, 2)];
+        assert_eq!(
+            shots_from_basis_samples(&samples, &meas_map, 3),
+            shots_per_bit(&samples, &meas_map, 3)
+        );
+    }
 
     #[test]
     fn build_cdf_normalizes_last_to_one() {

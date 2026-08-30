@@ -340,11 +340,50 @@ impl BasisSamples {
         self.words.len() / self.words_per_shot
     }
 
+    /// Word storage, [`Self::words_per_shot`] consecutive words per shot, so a
+    /// sampler filling shots in parallel can split it into disjoint chunks.
+    pub(crate) fn words_mut(&mut self) -> &mut [u64] {
+        &mut self.words
+    }
+
+    pub(crate) fn words_per_shot(&self) -> usize {
+        self.words_per_shot
+    }
+
     /// Measured outcome for `qubit` in `shot`, `true` for |1⟩.
     #[inline(always)]
     pub fn bit(&self, shot: usize, qubit: usize) -> bool {
         let word = self.words[shot * self.words_per_shot + qubit / 64];
         (word >> (qubit % 64)) & 1 == 1
+    }
+
+    /// Unpack qubits `0..num_bits` of every shot, one set bit at a time rather
+    /// than one [`Self::bit`] call per qubit. Only correct when classical bit
+    /// `i` carries qubit `i`; callers test that before choosing this path.
+    pub(crate) fn to_shots(&self, num_bits: usize) -> Vec<Vec<bool>> {
+        let mut shots = vec![vec![false; num_bits]; self.num_shots()];
+        let live_words = num_bits.div_ceil(64).min(self.words_per_shot);
+        // Only the word straddling `num_bits` is masked, which is not
+        // necessarily the last live one: a register narrower than the classical
+        // register runs out of words first, and every word it does hold is
+        // wholly in range.
+        let straddling_word = num_bits / 64;
+        let tail = num_bits % 64;
+        for (s, shot) in shots.iter_mut().enumerate() {
+            let row = &self.words[s * self.words_per_shot..(s + 1) * self.words_per_shot];
+            for (w, &word) in row[..live_words].iter().enumerate() {
+                let mut bits = word;
+                if tail != 0 && w == straddling_word {
+                    bits &= (1u64 << tail) - 1;
+                }
+                let base = w * 64;
+                while bits != 0 {
+                    shot[base + bits.trailing_zeros() as usize] = true;
+                    bits &= bits - 1;
+                }
+            }
+        }
+        shots
     }
 }
 

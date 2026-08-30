@@ -480,6 +480,36 @@ pub fn brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
+/// Build a brick-wall circuit whose entangling layer is a fresh random
+/// perfect matching: `depth` layers of random Ry/Rz on every qubit, then CZ
+/// on each pair of a seeded shuffle of the register.
+///
+/// Pair distances average about `n / 3` and change every layer, so gates
+/// stay mostly non-adjacent under any site layout and entanglement grows
+/// across every cut; a fixed pairing would instead let SWAP routing park
+/// each pair adjacent after one layer and hold the chain at bond 2. At odd
+/// `n` one qubit of the shuffle sits out each layer.
+/// `tests/bench_fixture_routing.rs` pins both properties.
+pub fn matched_brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for _ in 0..depth {
+        for q in 0..n {
+            c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = rng.random_range(0..=i);
+            order.swap(i, j);
+        }
+        for pair in order.chunks_exact(2) {
+            c.add_gate(Gate::Cz, &[pair[0], pair[1]]);
+        }
+    }
+    c
+}
+
 /// Append an inverse QFT on `n` qubits starting at index `start`.
 ///
 /// Exact inverse of the forward decomposition in `qft_textbook_steps`: reverse

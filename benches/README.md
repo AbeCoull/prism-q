@@ -365,6 +365,7 @@ on them; `bench_ab.sh` lists them under the table on every run.
 
 | Row family | Same-code spread observed |
 | --- | --- |
+| `sparse/densify/map/{8,14}` | map/14 flips +9% to +16% between same-code process instances with tight in-run controls (bimodal, 5.4 to 6.3 ms); map/8 is a 145 us row with control excursions to 9%. Curve points, not gate rows; the other densify rows held 3.4% or better over three runs |
 | `stabilizer/scaling/10`, `factored_stabilizer/scaling/10` | +9% to +13% (L1 resident) |
 | `stabilizer_rank/shots_mid_circuit` | -17.8% to +88% |
 | `gpu_stab_direct/clifford_d10/{2000,5000}` | +118% to +124% (bimodal clock state) |

@@ -115,7 +115,9 @@ Probability extraction uses coset-based enumeration with GF(2) Gaussian eliminat
 
 ## Sparse
 
-`HashMap<usize, Complex64>` for states with few non-zero amplitudes. O(k) memory. Amplitude pruning (|a|² < 1e-16) after each gate. Best for circuits whose support stays concentrated in computational-basis states at large qubit counts.
+`HashMap<usize, Complex64>` for states with few non-zero amplitudes. O(k) memory. Entries at or below a pruning threshold on |a|² (default 1e-16, settable via `SparseBackend::set_prune_epsilon`; raising it above the default makes the run report `Approximate` with a fidelity bound derived from the dropped weight) are removed after gates that can shrink or cancel amplitudes. Best for circuits whose support stays concentrated in computational-basis states at large qubit counts.
+
+The map's per-entry gate cost is about 16x the statevector's per-amplitude cost on a mixed diagonal and permutation workload (the `sparse/densify` bench rows), so a state that densifies past roughly 1/16 load factor runs slower than a dense vector at the same width would. There is deliberately no mid-run handoff to the statevector: automatic dispatch selects this backend only above the statevector memory cap, where the dense state exceeds the memory budget, and a run that branches past the entry cap rejects the gate rather than degrading silently. An explicitly selected sparse run on a densifying circuit degrades in place, measured at up to 24x the dense cost when fully dense at 20 qubits.
 
 ## MPS (Matrix Product State)
 

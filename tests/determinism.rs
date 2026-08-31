@@ -295,6 +295,62 @@ fn compiled_sampler_reproducible_at_fixed_thread_count() {
     );
 }
 
+// The sparse sampler uses the MPS substream family (streams 2 and up) at
+// shot-block grain; same pins and miri ignore as the MPS case below.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn sparse_terminal_shots_identical_across_thread_counts() {
+    let mut circuit = prism_q::circuits::sparse_walk_circuit(20, 12, 2, SEED);
+    circuit.measure_all();
+    let kind = BackendKind::Sparse;
+
+    let shots = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .backend(kind.clone())
+                .seed(SEED)
+                .shots(SAMPLING_SHOTS)
+                .expect("shots")
+                .shots
+        })
+    };
+    let single = shots(1);
+    assert_eq!(single.len(), SAMPLING_SHOTS);
+    assert_eq!(single, shots(THREADS_HI), "sparse terminal shots differ");
+    assert_eq!(single, shots(1), "sparse terminal shots not seed stable");
+
+    // A shot count off the block grain leaves a partial trailing block.
+    let odd = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .backend(kind.clone())
+                .seed(SEED)
+                .shots(SAMPLING_SHOTS - 37)
+                .expect("shots")
+                .shots
+        })
+    };
+    assert_eq!(
+        odd(1),
+        odd(THREADS_HI),
+        "sparse shots differ at a partial block"
+    );
+
+    let counts = in_pool(THREADS_HI, || {
+        simulate(&circuit)
+            .backend(kind.clone())
+            .seed(SEED)
+            .sample_counts(SAMPLING_SHOTS)
+            .expect("counts")
+            .counts
+    });
+    assert_eq!(
+        counts.values().sum::<u64>(),
+        SAMPLING_SHOTS as u64,
+        "sparse counts do not sum to the shot count"
+    );
+}
+
 // The MPS sampler draws each shot from a substream keyed on (seed, shot), so
 // the words are identical at any thread count; the pins are same-seed
 // stability and counts summing to shots, never a fixed bitstring. Ignored

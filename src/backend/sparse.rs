@@ -48,7 +48,7 @@ use crate::backend::{
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
-use crate::gates::{Gate, diag_entries_phase, is_diagonal_2x2};
+use crate::gates::{Gate, diag_entries_phase, is_antidiagonal_2x2, is_diagonal_2x2};
 use crate::hash::FxHashMap;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -126,6 +126,10 @@ impl SparseBackend {
             self.apply_diagonal_1q(target, mat[0][0], mat[1][1]);
             return Ok(());
         }
+        if is_antidiagonal_2x2(&mat) {
+            self.apply_antidiagonal_1q(target, mat[0][1], mat[1][0]);
+            return Ok(());
+        }
         self.check_entry_growth(2)?;
 
         let mask = 1usize << target;
@@ -155,6 +159,27 @@ impl SparseBackend {
             *amp *= if (*idx >> target) & 1 == 1 { d1 } else { d0 };
         }
         if d0.norm_sqr() < 1.0 - 1e-12 || d1.norm_sqr() < 1.0 - 1e-12 {
+            self.prune();
+        }
+    }
+
+    /// An antidiagonal 2x2 maps each basis state to exactly one partner, the
+    /// 1q case of the invariant `apply_cx` states, so the map is a 1:1 remap
+    /// with no accumulation. A sub-unit scale (a normalized Kraus branch
+    /// routed through a fused payload) can still shrink amplitudes below
+    /// epsilon, so only that case pays the prune pass, as `apply_monomial_2q`
+    /// does.
+    #[inline(always)]
+    fn apply_antidiagonal_1q(&mut self, target: usize, a01: Complex64, a10: Complex64) {
+        let mask = 1usize << target;
+        self.swap_buf.clear();
+        self.swap_buf.reserve(self.state.len());
+        self.swap_buf.extend(self.state.drain().map(|(idx, amp)| {
+            let scale = if idx & mask == 0 { a10 } else { a01 };
+            (idx ^ mask, amp * scale)
+        }));
+        std::mem::swap(&mut self.state, &mut self.swap_buf);
+        if a01.norm_sqr() < 1.0 - 1e-12 || a10.norm_sqr() < 1.0 - 1e-12 {
             self.prune();
         }
     }
@@ -936,6 +961,46 @@ mod tests {
         for (a, b) in p1.iter().zip(p2.iter()) {
             assert!((a - b).abs() < EPS);
         }
+    }
+
+    #[test]
+    fn test_y_gate_amplitude() {
+        let mut c = Circuit::new(1, 0);
+        c.add_gate(Gate::Y, &[0]);
+        let b = run_sparse(&c);
+        assert_eq!(b.state.len(), 1);
+        assert!((b.state[&1] - Complex64::new(0.0, 1.0)).norm() < EPS);
+    }
+
+    // Distinct phases on the two antidiagonal coefficients, so a swapped
+    // a01/a10 assignment fails on amplitudes, not just norms.
+    #[test]
+    fn test_antidiagonal_fused_amplitudes() {
+        let t = Gate::T.matrix_2x2();
+        let zero = Complex64::new(0.0, 0.0);
+        let fused = [[zero, t[1][1]], [t[0][0], zero]];
+
+        let mut c = Circuit::new(1, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Fused(Box::new(fused)), &[0]);
+        let b = run_sparse(&c);
+
+        let h = 1.0 / 2.0_f64.sqrt();
+        assert_eq!(b.state.len(), 2);
+        assert!((b.state[&0] - t[1][1] * h).norm() < EPS);
+        assert!((b.state[&1] - t[0][0] * h).norm() < EPS);
+    }
+
+    #[test]
+    fn test_antidiagonal_subunit_prunes() {
+        let mut b = SparseBackend::new(42);
+        b.init(1, 0).unwrap();
+        b.state.insert(1, Complex64::new(1.5e-8, 0.0));
+        let zero = Complex64::new(0.0, 0.0);
+        let half = Complex64::new(0.5, 0.0);
+        b.apply_1q_matrix(0, &[[zero, half], [half, zero]]).unwrap();
+        assert_eq!(b.state.len(), 1);
+        assert!(b.state.contains_key(&1));
     }
 
     #[test]

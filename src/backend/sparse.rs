@@ -44,6 +44,14 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 const MIN_STATES_FOR_PAR: usize = 4096;
 
+#[cfg(feature = "parallel")]
+const MIN_SHOTS_FOR_PAR: usize = 32;
+
+/// Shots drawn per ChaCha8 substream. One stream per shot block rather than
+/// per shot: cipher setup and the first keystream block cost more than an
+/// entire draw when the CDF is short, so the block grain amortizes them.
+const SHOTS_PER_STREAM: usize = 256;
+
 use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, is_phase_one,
     reserve_dense_output,
@@ -740,9 +748,17 @@ impl Backend for SparseBackend {
 
     /// Samples from a CDF over the `k` stored amplitudes instead of `2^n`.
     ///
-    /// Entries are ordered by basis index, which is the order the dense route
-    /// accumulates its CDF in, so the same seed draws the same basis states
-    /// the dense path would have drawn.
+    /// Entries are sorted by basis index so the draw is a deterministic
+    /// function of the state, not of map iteration order. Each block of
+    /// `SHOTS_PER_STREAM` shots draws sequentially from a ChaCha8
+    /// substream keyed on the seed and the block index (streams 2 and up;
+    /// the MPS sampler keys per shot, the block grain here amortizes cipher
+    /// setup over draws cheaper than the setup). Blocks fill in parallel
+    /// only when the CDF holds `MIN_STATES_FOR_PAR` entries; below that,
+    /// fork-join dispatch costs more than the whole sequential pass. Either
+    /// path walks the same partition, so the words are identical at any
+    /// thread count; the drawn bitstrings differ from the dense route's
+    /// single-stream draws by design.
     fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let mut indices: Vec<usize> = self.state.keys().copied().collect();
         indices.sort_unstable();
@@ -752,11 +768,33 @@ impl Backend for SparseBackend {
             .collect();
         let cdf = crate::sim::shots::build_cdf(&probs);
 
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut samples = BasisSamples::new(num_shots, self.num_qubits);
-        for shot in 0..num_shots {
-            let r: f64 = rng.random();
-            samples.set_index(shot, indices[crate::sim::shots::sample_from_cdf(&cdf, r)]);
+        let words_per_shot = samples.words_per_shot();
+        let sample_block = |block: usize, block_words: &mut [u64]| {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            rng.set_stream(block as u64 + 2);
+            for shot_words in block_words.chunks_mut(words_per_shot) {
+                let r: f64 = rng.random();
+                shot_words[0] = indices[crate::sim::shots::sample_from_cdf(&cdf, r)] as u64;
+            }
+        };
+
+        #[cfg(feature = "parallel")]
+        if num_shots >= MIN_SHOTS_FOR_PAR && cdf.len() >= MIN_STATES_FOR_PAR {
+            samples
+                .words_mut()
+                .par_chunks_mut(SHOTS_PER_STREAM * words_per_shot)
+                .enumerate()
+                .for_each(|(block, block_words)| sample_block(block, block_words));
+            return Ok(samples);
+        }
+
+        for (block, block_words) in samples
+            .words_mut()
+            .chunks_mut(SHOTS_PER_STREAM * words_per_shot)
+            .enumerate()
+        {
+            sample_block(block, block_words);
         }
         Ok(samples)
     }

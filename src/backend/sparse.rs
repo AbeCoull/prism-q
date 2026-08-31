@@ -1,8 +1,10 @@
 //! Sparse state-vector simulation backend.
 //!
 //! Stores only non-zero amplitudes in a map keyed by basis-state index, giving
-//! O(k) memory where k is the number of non-zero basis states. Amplitudes below
-//! a configurable epsilon are pruned after each gate to maintain sparsity.
+//! O(k) memory where k is the number of non-zero basis states. Entries whose
+//! squared amplitude is at or below a pruning threshold (default 1e-16,
+//! raised via [`SparseBackend::set_prune_epsilon`]) are dropped after gates
+//! that can shrink or cancel amplitudes.
 //!
 //! Every gate walks the map, so the map hashes basis-state indices with the
 //! crate's multiply-xor hasher rather than the stdlib default.
@@ -62,6 +64,10 @@ pub struct SparseBackend {
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     epsilon: f64,
+    pruned_weight: f64,
+    /// Whether the threshold has exceeded the default since the last `init`,
+    /// so lowering it mid-run cannot hide weight already discarded.
+    raised: bool,
     /// [`crate::backend::max_sparse_entries`] read once at construction, so the
     /// per-gate growth check is a field compare rather than an atomic load.
     entry_cap: usize,
@@ -77,6 +83,8 @@ impl SparseBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             epsilon: DEFAULT_EPSILON,
+            pruned_weight: 0.0,
+            raised: false,
             entry_cap: crate::backend::max_sparse_entries(),
         }
     }
@@ -87,10 +95,46 @@ impl SparseBackend {
         self.state.len()
     }
 
+    /// Set the pruning threshold on squared amplitude magnitude.
+    ///
+    /// Entries with `norm_sqr` at or below `epsilon` are dropped after gates
+    /// that can shrink or cancel amplitudes; 0 drops exact zeros only. The
+    /// construction default of 1e-16 removes only numerical dust and the run
+    /// reports as exact; a larger threshold trades state weight for a smaller
+    /// map, the run reports `Approximate`, and the dropped weight feeds the
+    /// metadata's `fidelity_lower_bound` as a first-order estimate. Lowering
+    /// the threshold again keeps the run reporting `Approximate` until the
+    /// next [`Backend::init`]; the threshold itself survives `init`, the
+    /// accumulated weight does not. The state is never renormalized after a
+    /// prune: expectations renormalize on read, but probability export and
+    /// shot sampling see the reduced weight, and the sampling CDF folds the
+    /// missing weight into the highest kept basis state.
+    ///
+    /// # Panics
+    /// Panics unless `0 <= epsilon < 1`.
+    pub fn set_prune_epsilon(&mut self, epsilon: f64) {
+        assert!(
+            (0.0..1.0).contains(&epsilon),
+            "prune epsilon must lie in [0, 1)"
+        );
+        self.epsilon = epsilon;
+        self.raised = self.raised || epsilon > DEFAULT_EPSILON;
+    }
+
     #[inline(always)]
     fn prune(&mut self) {
         let eps = self.epsilon;
-        self.state.retain(|_, amp| amp.norm_sqr() >= eps);
+        let mut dropped = 0.0;
+        self.state.retain(|_, amp| {
+            let weight = amp.norm_sqr();
+            if weight > eps {
+                true
+            } else {
+                dropped += weight;
+                false
+            }
+        });
+        self.pruned_weight += dropped;
     }
 
     /// Reject a gate whose worst-case fan-out would grow the map past the
@@ -588,10 +632,26 @@ impl Backend for SparseBackend {
         crate::sim::ResolvedBackend::Sparse
     }
 
+    /// At the default threshold pruning removes only numerical dust and the
+    /// route is exact; a raised threshold can discard real weight, so the
+    /// route reports `Approximate` whether or not this run pruned anything,
+    /// the same convention the MPS backend uses for its bond cap.
+    fn exactness(&self) -> crate::sim::Exactness {
+        if self.raised {
+            crate::sim::Exactness::Approximate {
+                fidelity_lower_bound: Some((1.0 - self.pruned_weight).max(0.0)),
+            }
+        } else {
+            crate::sim::Exactness::Exact
+        }
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         self.state.clear();
         self.state.insert(0, Complex64::new(1.0, 0.0));
+        self.pruned_weight = 0.0;
+        self.raised = self.epsilon > DEFAULT_EPSILON;
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         Ok(())
     }
@@ -961,6 +1021,91 @@ mod tests {
         for (a, b) in p1.iter().zip(p2.iter()) {
             assert!((a - b).abs() < EPS);
         }
+    }
+
+    #[test]
+    fn test_default_epsilon_reports_exact() {
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::H, &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        let b = run_sparse(&c);
+        assert_eq!(b.epsilon, DEFAULT_EPSILON);
+        assert_eq!(b.exactness(), crate::sim::Exactness::Exact);
+    }
+
+    #[test]
+    fn test_zero_epsilon_still_drops_exact_zeros() {
+        let mut b = SparseBackend::new(42);
+        b.set_prune_epsilon(0.0);
+        b.init(1, 0).unwrap();
+        b.state.insert(1, Complex64::new(0.0, 0.0));
+        let zero = Complex64::new(0.0, 0.0);
+        let half = Complex64::new(0.5, 0.0);
+        b.apply_1q_matrix(0, &[[half, zero], [zero, half]]).unwrap();
+        assert_eq!(b.state.len(), 1);
+        assert!(b.state.contains_key(&0));
+    }
+
+    #[test]
+    fn test_lowering_epsilon_keeps_the_approximate_report() {
+        let theta = 2.0 * (0.1_f64).sqrt().asin();
+        let mut b = SparseBackend::new(42);
+        b.set_prune_epsilon(0.2);
+        b.init(1, 0).unwrap();
+        b.apply_1q_matrix(0, &Gate::Ry(theta).matrix_2x2()).unwrap();
+        b.set_prune_epsilon(DEFAULT_EPSILON);
+        match b.exactness() {
+            crate::sim::Exactness::Approximate {
+                fidelity_lower_bound: Some(bound),
+            } => assert!((bound - 0.9).abs() < EPS),
+            other => panic!("lowering the threshold hid discarded weight: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_raised_epsilon_drops_weight_and_reports_bound() {
+        // Ry puts weight 0.1 on |1>; a 0.2 threshold drops it at the prune
+        // after the general-path gate.
+        let theta = 2.0 * (0.1_f64).sqrt().asin();
+        let mut b = SparseBackend::new(42);
+        b.set_prune_epsilon(0.2);
+        b.init(1, 0).unwrap();
+        b.apply(&Instruction::Gate {
+            gate: Gate::Ry(theta),
+            targets: crate::circuit::SmallVec::from_slice(&[0]),
+        })
+        .unwrap();
+        assert_eq!(b.state.len(), 1);
+        assert!(b.state.contains_key(&0));
+        match b.exactness() {
+            crate::sim::Exactness::Approximate {
+                fidelity_lower_bound: Some(bound),
+            } => assert!((bound - 0.9).abs() < EPS),
+            other => panic!("expected a bounded Approximate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_epsilon_survives_init_weight_does_not() {
+        let theta = 2.0 * (0.1_f64).sqrt().asin();
+        let mut b = SparseBackend::new(42);
+        b.set_prune_epsilon(0.2);
+        b.init(1, 0).unwrap();
+        b.apply_1q_matrix(0, &Gate::Ry(theta).matrix_2x2()).unwrap();
+        assert!(b.pruned_weight > 0.0);
+        b.init(1, 0).unwrap();
+        match b.exactness() {
+            crate::sim::Exactness::Approximate {
+                fidelity_lower_bound: Some(bound),
+            } => assert_eq!(bound, 1.0),
+            other => panic!("expected Approximate after init, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "prune epsilon")]
+    fn test_prune_epsilon_rejects_one() {
+        SparseBackend::new(42).set_prune_epsilon(1.0);
     }
 
     #[test]

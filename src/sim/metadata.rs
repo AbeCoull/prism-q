@@ -139,9 +139,12 @@ impl RunMetadata {
     /// discarded weights: a first-order truncation estimate, not a
     /// certificate. Truncation errors compound across SVDs, and realized
     /// fidelity has measured below the reported value by up to a factor of
-    /// about 2.4 in the implied error on deep truncating runs. The budgeted
-    /// Pauli engines leave this `None` and report their additive observable
-    /// bound on the result types instead.
+    /// about 2.4 in the implied error on deep truncating runs. The sparse
+    /// backend at a raised pruning threshold reports 1 minus the absolute
+    /// squared weight it dropped, the same first-order estimate on an
+    /// unrenormalized state. The budgeted Pauli engines leave this `None`
+    /// and report their additive observable bound on the result types
+    /// instead.
     pub fn fidelity_lower_bound(&self) -> Option<f64> {
         match self.exactness {
             Exactness::Exact => None,

@@ -1025,6 +1025,12 @@ pub(crate) fn is_diagonal_2x2(mat: &[[Complex64; 2]; 2]) -> bool {
     mat[0][1].norm() < IDENTITY_EPS && mat[1][0].norm() < IDENTITY_EPS
 }
 
+/// Whether a 2x2 matrix is antidiagonal (both diagonal norms below `IDENTITY_EPS`).
+#[inline]
+pub(crate) fn is_antidiagonal_2x2(mat: &[[Complex64; 2]; 2]) -> bool {
+    mat[0][0].norm() < IDENTITY_EPS && mat[1][1].norm() < IDENTITY_EPS
+}
+
 /// Whether a 4x4 matrix is diagonal (all off-diagonal norms below `IDENTITY_EPS`).
 #[inline]
 pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {

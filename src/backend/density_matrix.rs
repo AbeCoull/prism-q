@@ -36,8 +36,8 @@
 //!
 //! - Exact noise-channel evolution: one run yields the exact mixed state,
 //!   where trajectory averaging converges as `1/sqrt(shots)`. Selecting it
-//!   with a noise model attached routes every `Simulate` terminal to that one
-//!   evolution.
+//!   with a noise model attached routes every `Simulate` terminal except the two
+//!   gradient terminals to that one evolution.
 //! - Mixed-state diagnostics: purity and exact `Tr(rho P)` observables.
 //!
 //! # When NOT to use this backend
@@ -49,6 +49,10 @@
 //! - Noisy circuits with mid-circuit measurement or classical conditioning.
 //!   The mixture holds every branch at once, so per-shot feedback cannot be
 //!   replayed from it and the noisy terminals reject those shapes.
+//! - Gradients under noise. Both gradient terminals decline a noise model, for
+//!   different reasons: the adjoint backpropagates against a pure state and a
+//!   channel has no reverse evolution to walk, while parameter shift is exact
+//!   on a mixture and simply not wired.
 
 use std::borrow::Cow;
 

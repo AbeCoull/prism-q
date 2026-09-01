@@ -176,8 +176,11 @@ Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host a
 CPU-only and explicit-dispatch only; `Auto` never selects it.
 
 Selecting it with a noise model attached is the exact route for every `Simulate`
-terminal: the mixture is evolved once and observables, marginals, probabilities, and
-shots all read that one evolution. See [Noise across the terminals](./engine.md) for
+terminal except the two gradient terminals: the mixture is evolved once and observables,
+marginals, probabilities, and shots all read that one evolution. Gradients are excluded
+for two different reasons: the adjoint backpropagates against a pure state and a channel
+has no reverse evolution to walk, while parameter shift is exact on a mixture and simply
+not wired. See [Noise across the terminals](./engine.md) for
 what that route accepts and what stays on trajectory averaging.
 
 ## What a backend reports about its own result

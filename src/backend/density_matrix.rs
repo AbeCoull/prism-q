@@ -29,7 +29,8 @@
 //! remapped onto the ket register before the left product; the tiled shapes
 //! (`MultiFused`, `Multi2q`) apply their constituent gates one at a time
 //! instead. See [`Backend::supports_fused_gates`] for the ordering contract
-//! that requires it.
+//! that requires it. `Rzz` is the one two-qubit gate that does not take the
+//! two-product route; see [`DensityMatrixBackend::apply_rzz_sandwich`].
 //!
 //! # When to prefer this backend
 //!
@@ -336,7 +337,9 @@ impl DensityMatrixBackend {
     /// conjugating the whole buffer around the gate, which costs two extra
     /// passes.
     ///
-    /// One-qubit gates take [`DensityMatrixBackend::apply_1q_sandwich`].
+    /// One-qubit gates take [`DensityMatrixBackend::apply_1q_sandwich`], and
+    /// `Rzz` takes [`DensityMatrixBackend::apply_rzz_sandwich`], which folds
+    /// both products into one pass rather than taking its conjugate form here.
     ///
     /// `Multi2q` carries a gate list that the statevector kernel partitions by
     /// cache tier and runs one tier at a time, which preserves application
@@ -362,6 +365,10 @@ impl DensityMatrixBackend {
                 for (qubit, mat) in data.gates.iter() {
                     self.apply_1q_sandwich(*qubit, mat)?;
                 }
+                return Ok(());
+            }
+            Gate::Rzz(theta) => {
+                self.apply_rzz_sandwich(targets[0], targets[1], *theta);
                 return Ok(());
             }
             Gate::Multi2q(data) => {
@@ -422,6 +429,33 @@ impl DensityMatrixBackend {
         }
         self.sv.apply_1q_matrix(qubit + n, matrix)?;
         self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
+    }
+
+    /// Evolve `rho -> R rho R^dagger` for `R = Rzz(theta)` in one buffer pass.
+    ///
+    /// Both factors are diagonal, so the entry at `(r, c)` picks up
+    /// `phase(p_r) * conj(phase(p_c))` where `p` is the parity of the target
+    /// pair in that register and `phase` is the statevector kernel's
+    /// `[exp(-i theta/2), exp(+i theta/2)]`. Conjugate phases cancel wherever
+    /// the two registers agree on parity, which is half the sixteen entry
+    /// classes, and the rest carry `exp(-i theta)` or its conjugate. The
+    /// generic route's two register passes therefore collapse onto the single
+    /// contiguous pass [`DensityMatrixBackend::kraus_2q_diagonal_sweep`]
+    /// already runs for a diagonal channel.
+    fn apply_rzz_sandwich(&mut self, q0: usize, q1: usize, theta: f64) {
+        let phase = [
+            Complex64::from_polar(1.0, -theta / 2.0),
+            Complex64::from_polar(1.0, theta / 2.0),
+        ];
+        let mut diag = [Complex64::new(1.0, 0.0); 16];
+        for tr in 0..4usize {
+            for tc in 0..4usize {
+                let pr = ((tr >> 1) ^ tr) & 1;
+                let pc = ((tc >> 1) ^ tc) & 1;
+                diag[4 * tr + tc] = phase[pr] * phase[pc].conj();
+            }
+        }
+        self.kraus_2q_diagonal_sweep(&diag, q0, q1);
     }
 
     /// `P(qubit = |1>) = Tr(P_1 rho)`, the sum of the diagonal `rho` entries
@@ -651,8 +685,12 @@ impl DensityMatrixBackend {
     ///
     /// The four positions must be distinct and inside the register, or the
     /// zero-bit insertion in [`block_base`] stops being a bijection onto the
-    /// block bases and the sweep reads and writes the wrong entries. Both
-    /// callers are public, so this is the choke point that enforces it.
+    /// block bases and the sweep reads and writes the wrong entries. Both channel
+    /// entry points are public and route through here, so this is their choke
+    /// point. It is not the sweep's:
+    /// [`DensityMatrixBackend::apply_rzz_sandwich`] builds its table and calls
+    /// the sweep directly, where equal targets yield the identity table that the
+    /// two register passes it replaced also produced.
     fn block_layout(&self, q0: usize, q1: usize) -> ([usize; 4], [usize; 16], usize) {
         let n = self.num_qubits;
         assert!(

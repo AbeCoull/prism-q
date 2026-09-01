@@ -1487,3 +1487,131 @@ fn dm_multi_2q_batched_bra_preserves_gate_order() {
         "batched bra Multi2q vs per-constituent",
     );
 }
+
+// `Rzz` is diagonal, so it leaves probabilities untouched and the cross-backend
+// probability matrix above cannot see it at all. These two pin it instead: the
+// first against the general channel route over full Pauli tomography, the
+// second against the statevector with H layers making the phase observable.
+#[test]
+fn dm_rzz_sandwich_matches_channel_route() {
+    const N: usize = 5;
+    let base = circuits::random_circuit(N, 4, SEED);
+    let masks = all_pauli_masks(N);
+
+    for &(q0, q1) in &[(0usize, 1usize), (2, 3), (1, 2), (0, N - 1)] {
+        for theta in [0.0, 0.3, 1.0, std::f64::consts::PI, -2.4] {
+            for mixed in [false, true] {
+                let prepare = || {
+                    let mut backend = run_dm(&base);
+                    if mixed {
+                        backend.apply_1q_kraus(N - 2, &amplitude_damping(0.3));
+                    }
+                    backend
+                };
+
+                let mut sandwich = prepare();
+                sandwich
+                    .apply(&prism_q::circuit::Instruction::Gate {
+                        gate: Gate::Rzz(theta),
+                        targets: [q0, q1].into_iter().collect(),
+                    })
+                    .unwrap();
+
+                let mut channel = prepare();
+                channel.apply_2q_kraus(q0, q1, &[Gate::Rzz(theta).matrix_4x4()]);
+
+                let got = sandwich.expectations_pauli(&masks);
+                let want = channel.expectations_pauli(&masks);
+                for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+                    assert!(
+                        (a - b).abs() < DM_EPS,
+                        "pair=({q0},{q1}) theta={theta} mixed={mixed} pauli {:?}: sandwich {a}, channel {b}",
+                        masks[k]
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn dm_rzz_phase_shows_in_probabilities_under_basis_change() {
+    // PAR_N puts the buffer at 2n = 14 qubits, so the sweep takes its rayon arm;
+    // the tomography test above stays small and covers the scalar one.
+    const N: usize = PAR_N;
+    for &(q0, q1) in &[(0usize, 1usize), (1, 2), (0, N - 1)] {
+        let mut circuit = Circuit::new(N, 0);
+        for q in 0..N {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.add_gate(Gate::Rzz(0.9), &[q0, q1]);
+        for q in 0..N {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        assert_matches_statevector(&circuit, &format!("rzz sandwich ({q0}, {q1})"));
+    }
+}
+
+// Probabilities cannot see a global conjugation of rho: a density matrix has a
+// real diagonal, so `conj(rho)` and `rho` give identical probabilities at every
+// width and for every circuit. The channel-route comparison above shares
+// `diag_slot` with the code under test, so it cannot pin the ket and bra sides
+// to their own registers either. Full Pauli tomography against the statevector
+// is independent of both: `conj(Y) = -Y`, so every Y-bearing string flips sign
+// under a conjugation and the comparison fails.
+#[test]
+fn dm_rzz_sandwich_matches_statevector_over_full_tomography() {
+    use prism_q::{BackendKind, PauliTerm};
+
+    const N: usize = 4;
+    let mut circuit = Circuit::new(N, 0);
+    for q in 0..N {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_gate(Gate::T, &[1]);
+    circuit.add_gate(Gate::Rzz(0.7), &[0, 1]);
+    circuit.add_gate(Gate::Rzz(-1.3), &[1, N - 1]);
+    circuit.add_gate(Gate::Ry(0.4), &[2]);
+
+    let masks: Vec<(usize, usize, u32)> = all_pauli_masks(N)
+        .into_iter()
+        .filter(|&(x, z, _)| x != 0 || z != 0)
+        .collect();
+    let observables: Vec<Vec<PauliTerm>> = masks
+        .iter()
+        .map(|&(x, z, _)| {
+            (0..N)
+                .filter_map(|q| match ((x >> q) & 1 == 1, (z >> q) & 1 == 1) {
+                    (true, true) => Some(PauliTerm::y(q)),
+                    (true, false) => Some(PauliTerm::x(q)),
+                    (false, true) => Some(PauliTerm::z(q)),
+                    (false, false) => None,
+                })
+                .collect()
+        })
+        .collect();
+
+    let got = dm_backend(&circuit, SEED).expectations_pauli(&masks);
+    let want = sim::simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+
+    let sensitive = masks
+        .iter()
+        .zip(&want)
+        .filter(|((x, z, _), v)| (x & z) != 0 && v.abs() > 0.1)
+        .count();
+    assert!(
+        sensitive > 0,
+        "fixture is vacuous: no Y-bearing string has a reference value clear of zero"
+    );
+    for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (a - b).abs() < DM_EPS,
+            "pauli {:?}: density matrix {a}, statevector {b}",
+            masks[k]
+        );
+    }
+}

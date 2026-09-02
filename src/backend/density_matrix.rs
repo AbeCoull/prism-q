@@ -30,7 +30,8 @@
 //! (`MultiFused`, `Multi2q`) apply their constituent gates one at a time
 //! instead. See [`Backend::supports_fused_gates`] for the ordering contract
 //! that requires it. `Rzz` is the one two-qubit gate that does not take the
-//! two-product route; see [`DensityMatrixBackend::apply_rzz_sandwich`].
+//! two-product route: both of its factors are diagonal, so the ket and bra
+//! phases combine into a single table and the buffer is swept once.
 //!
 //! # When to prefer this backend
 //!

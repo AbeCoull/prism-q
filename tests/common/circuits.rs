@@ -3,6 +3,7 @@
 use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec, guarded};
 use prism_q::circuits as builtins;
 use prism_q::gates::Gate;
+use prism_q::{CircuitBuilder, PauliAxis, PauliTerm};
 
 use super::SEED;
 
@@ -500,6 +501,116 @@ pub fn measurement_cases() -> [CircuitCase; 6] {
         CircuitCase::new(
             "parity_sibling_regions",
             parity_sibling_regions,
+            CircuitCapabilities::new(),
+        ),
+    ]
+}
+
+// Frontend basis and Pauli-product measurements, each on an eigenstate so the
+// recorded bit is forced. Every case has a closed-form anchor in
+// `tests/golden_small_circuits.rs`; the matrix only checks agreement.
+
+pub fn measure_x_basis_on_plus() -> Circuit {
+    CircuitBuilder::new_with_classical(1, 1)
+        .h(0)
+        .measure_in_basis(0, PauliAxis::X, 0)
+        .build()
+}
+
+pub fn measure_y_basis_on_plus_i() -> Circuit {
+    CircuitBuilder::new_with_classical(1, 1)
+        .h(0)
+        .s(0)
+        .measure_in_basis(0, PauliAxis::Y, 0)
+        .build()
+}
+
+pub fn parity_zz_on_bell() -> Circuit {
+    CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .cx(0, 1)
+        .measure_pauli_product(&[PauliTerm::z(0), PauliTerm::z(1)], 0)
+        .build()
+}
+
+pub fn parity_xx_on_plus_plus() -> Circuit {
+    CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .h(1)
+        .measure_pauli_product(&[PauliTerm::x(0), PauliTerm::x(1)], 0)
+        .build()
+}
+
+pub fn parity_yy_on_bell() -> Circuit {
+    CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .cx(0, 1)
+        .measure_pauli_product(&[PauliTerm::y(0), PauliTerm::y(1)], 0)
+        .build()
+}
+
+pub fn parity_xz_on_plus_one() -> Circuit {
+    CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .x(1)
+        .measure_pauli_product(&[PauliTerm::x(0), PauliTerm::z(1)], 0)
+        .build()
+}
+
+/// Weight-4 product with the scratch on the far side of every term, so the
+/// CX ladder is non-adjacent on a chain layout.
+pub fn parity_xzxz_weight_4() -> Circuit {
+    CircuitBuilder::new_with_classical(4, 1)
+        .h(0)
+        .h(2)
+        .x(3)
+        .measure_pauli_product(
+            &[
+                PauliTerm::x(0),
+                PauliTerm::z(1),
+                PauliTerm::x(2),
+                PauliTerm::z(3),
+            ],
+            0,
+        )
+        .build()
+}
+
+pub fn pauli_measurement_cases() -> [CircuitCase; 7] {
+    [
+        CircuitCase::new(
+            "measure_x_basis_on_plus",
+            measure_x_basis_on_plus,
+            CircuitCapabilities::new().product_separable(),
+        ),
+        CircuitCase::new(
+            "measure_y_basis_on_plus_i",
+            measure_y_basis_on_plus_i,
+            CircuitCapabilities::new().product_separable(),
+        ),
+        CircuitCase::new(
+            "parity_zz_on_bell",
+            parity_zz_on_bell,
+            CircuitCapabilities::new(),
+        ),
+        CircuitCase::new(
+            "parity_xx_on_plus_plus",
+            parity_xx_on_plus_plus,
+            CircuitCapabilities::new(),
+        ),
+        CircuitCase::new(
+            "parity_yy_on_bell",
+            parity_yy_on_bell,
+            CircuitCapabilities::new(),
+        ),
+        CircuitCase::new(
+            "parity_xz_on_plus_one",
+            parity_xz_on_plus_one,
+            CircuitCapabilities::new(),
+        ),
+        CircuitCase::new(
+            "parity_xzxz_weight_4",
+            parity_xzxz_weight_4,
             CircuitCapabilities::new(),
         ),
     ]

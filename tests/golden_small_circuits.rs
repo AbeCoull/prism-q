@@ -19,6 +19,7 @@ use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::Circuit;
 use prism_q::gates::{Gate, McuData};
 use prism_q::sim;
+use prism_q::{PauliAxis, PauliTerm};
 use prism_q::{QecOptions, QecPauli, QecProgram, run_qec_program, run_qec_program_reference};
 
 const EPS: f64 = 1e-12;
@@ -352,6 +353,173 @@ fn reset_of_an_entangled_partner_samples_both_branches() {
 }
 
 // ---- Circuit depth ----
+
+// ---- Frontend basis and Pauli-product measurement ----
+//
+// Each anchor is an eigenstate of the measured operator, so the recorded bit is
+// forced and the post-measurement state is closed-form. The bit and the whole
+// probability vector are both pinned: the matrix in
+// `tests/measurement_matrix.rs` compares the same circuits across backends and
+// cannot tell which side of a disagreement is wrong.
+
+fn run_bits_and_probs(circuit: &Circuit) -> (Vec<bool>, Vec<f64>) {
+    let mut backend = StatevectorBackend::new(common::SEED);
+    let outcome = sim::run_on(&mut backend, circuit).unwrap();
+    (outcome.classical_bits, backend.probabilities().unwrap())
+}
+
+fn dense(num_qubits: usize, entries: &[(usize, f64)]) -> Vec<f64> {
+    let mut probs = vec![0.0; 1 << num_qubits];
+    for &(index, p) in entries {
+        probs[index] = p;
+    }
+    probs
+}
+
+#[test]
+fn x_basis_measurement_of_plus_reads_plus_one_and_leaves_zero() {
+    // X|+> = +|+>, so the bit is false. The lowering rotates X onto Z and does
+    // not rotate back, so the qubit is left in |0>, not |+>.
+    let c = CircuitBuilder::new_with_classical(1, 1)
+        .h(0)
+        .measure_in_basis(0, PauliAxis::X, 0)
+        .build();
+    let (bits, probs) = run_bits_and_probs(&c);
+    assert_eq!(bits, [false]);
+    assert_probs(&probs, &[1.0, 0.0]);
+}
+
+#[test]
+fn y_basis_measurement_of_plus_i_reads_plus_one() {
+    // S H|0> = (|0> + i|1>)/sqrt2 is the +1 eigenstate of Y. A lowering that
+    // used H alone (the X rotation) would read this state as 50/50.
+    let c = CircuitBuilder::new_with_classical(1, 1)
+        .h(0)
+        .s(0)
+        .measure_in_basis(0, PauliAxis::Y, 0)
+        .build();
+    let (bits, probs) = run_bits_and_probs(&c);
+    assert_eq!(bits, [false]);
+    assert_probs(&probs, &[1.0, 0.0]);
+}
+
+#[test]
+fn zz_parity_of_a_bell_pair_reads_plus_one_and_keeps_the_pair() {
+    // ZZ|Phi+> = +|Phi+>. The scratch is qubit 2 and ends in |0>, so the
+    // three-qubit state is (|000> + |011>)/sqrt2.
+    let c = CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .cx(0, 1)
+        .measure_pauli_product(&[PauliTerm::z(0), PauliTerm::z(1)], 0)
+        .build();
+    assert_eq!(c.num_qubits, 3);
+    let (bits, probs) = run_bits_and_probs(&c);
+    assert_eq!(bits, [false]);
+    assert_probs(&probs, &dense(3, &[(0b000, 0.5), (0b011, 0.5)]));
+}
+
+#[test]
+fn xx_parity_of_plus_plus_reads_plus_one_and_restores_both_qubits() {
+    // XX|++> = +|++>. The unrotation after the CX ladder returns both qubits
+    // to |+>, so every scratch-0 index carries 1/4.
+    let c = CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .h(1)
+        .measure_pauli_product(&[PauliTerm::x(0), PauliTerm::x(1)], 0)
+        .build();
+    let (bits, probs) = run_bits_and_probs(&c);
+    assert_eq!(bits, [false]);
+    assert_probs(
+        &probs,
+        &dense(
+            3,
+            &[(0b000, 0.25), (0b001, 0.25), (0b010, 0.25), (0b011, 0.25)],
+        ),
+    );
+}
+
+#[test]
+fn yy_parity_of_a_bell_pair_reads_minus_one() {
+    // Y(x)Y |Phi+> = -|Phi+>: each Y contributes i on |0> -> |1> and -i on
+    // |1> -> |0>, and the two factors multiply to -1 on both branches. The bit
+    // is true and the pair survives with the scratch set.
+    let c = CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .cx(0, 1)
+        .measure_pauli_product(&[PauliTerm::y(0), PauliTerm::y(1)], 0)
+        .build();
+    let (bits, probs) = run_bits_and_probs(&c);
+    assert_eq!(bits, [true]);
+    assert_probs(&probs, &dense(3, &[(0b100, 0.5), (0b111, 0.5)]));
+}
+
+#[test]
+fn xz_parity_of_plus_one_reads_minus_one() {
+    // X0 = +1 on |+> and Z1 = -1 on |1>, product -1, bit true. Post state
+    // |+>|1>|1>.
+    let c = CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .x(1)
+        .measure_pauli_product(&[PauliTerm::x(0), PauliTerm::z(1)], 0)
+        .build();
+    let (bits, probs) = run_bits_and_probs(&c);
+    assert_eq!(bits, [true]);
+    assert_probs(&probs, &dense(3, &[(0b110, 0.5), (0b111, 0.5)]));
+}
+
+#[test]
+fn weight_4_parity_reads_the_product_of_its_factors() {
+    // |+>|0>|+>|1>: X0 = +1, Z1 = +1, X2 = +1, Z3 = -1, product -1, bit true.
+    // Scratch is qubit 4 and ends set; q0 and q2 stay in |+>.
+    let c = CircuitBuilder::new_with_classical(4, 1)
+        .h(0)
+        .h(2)
+        .x(3)
+        .measure_pauli_product(
+            &[
+                PauliTerm::x(0),
+                PauliTerm::z(1),
+                PauliTerm::x(2),
+                PauliTerm::z(3),
+            ],
+            0,
+        )
+        .build();
+    let (bits, probs) = run_bits_and_probs(&c);
+    assert_eq!(bits, [true]);
+    assert_probs(
+        &probs,
+        &dense(
+            5,
+            &[
+                (0b11000, 0.25),
+                (0b11001, 0.25),
+                (0b11100, 0.25),
+                (0b11101, 0.25),
+            ],
+        ),
+    );
+}
+
+#[test]
+fn builder_pauli_product_matches_the_qec_lowering() {
+    // The builder and the QEC runner share one lowering; the Y-tensor-Y anchor
+    // above pins the runner, so the two must agree bit for bit on it.
+    let c = CircuitBuilder::new_with_classical(2, 1)
+        .h(0)
+        .cx(0, 1)
+        .measure_pauli_product(&[PauliTerm::y(0), PauliTerm::y(1)], 0)
+        .build();
+    let (bits, _) = run_bits_and_probs(&c);
+    let mut program = QecProgram::new(2);
+    program.push_gate(Gate::H, &[0]).unwrap();
+    program.push_gate(Gate::Cx, &[0, 1]).unwrap();
+    program
+        .measure_pauli_product(&[QecPauli::y(0), QecPauli::y(1)])
+        .unwrap();
+    let qec = run_qec_program(&program).unwrap().measurements.to_shots();
+    assert_eq!(bits, qec[0]);
+}
 
 #[test]
 fn depth_calculation() {

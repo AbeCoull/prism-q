@@ -2676,6 +2676,36 @@ fn bench_density_matrix_rzz_layers(c: &mut Criterion) {
     group.finish();
 }
 
+/// The same layers through the `Simulate` terminal, the entry point that runs
+/// the fusion pipeline.
+///
+/// `density_matrix/rzz_layers` calls `apply_instructions` directly and receives
+/// bare `Rzz` whatever the fusion floors say, so it cannot see a batching
+/// change. This row is where a layer's commuting `Rzz` gates reach the backend
+/// as one `BatchRzz`. The floors are gated on buffer width, which for this
+/// backend is `2n`, so both widths here clear the diagonal batch floor.
+fn bench_density_matrix_rzz_layers_fused(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/rzz_layers_fused");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        let circuit = circuits::qaoa_circuit(n, 6, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::DensityMatrix)
+                        .seed(SEED)
+                        .run()
+                        .unwrap(),
+                );
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// One bare `Rzz` sandwich in isolation, at two target pairs that pin the route
 /// as position independent.
 ///
@@ -3250,6 +3280,7 @@ criterion_group! {
     // Density matrix (explicit backend)
     bench_density_matrix_unitary_layers,
     bench_density_matrix_rzz_layers,
+    bench_density_matrix_rzz_layers_fused,
     bench_density_matrix_rzz_sandwich,
     bench_density_matrix_fused_layers,
     bench_density_matrix_exact_vs_trajectory,

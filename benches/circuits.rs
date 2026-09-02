@@ -2997,6 +2997,45 @@ fn bench_density_matrix_noisy_shots(c: &mut Criterion) {
     group.finish();
 }
 
+/// The per-shot density-matrix route: a mid-circuit measurement feeding a
+/// conditional keeps the shot loop off the terminal-probabilities shortcut,
+/// so every shot replays the circuit the shot path fused (or did not).
+fn bench_density_matrix_shots_fused(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/shots_fused");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        let mut circuit = circuits::random_circuit(n, 4, SEED);
+        circuit.num_classical_bits = n;
+        let middle = circuit.instructions.len() / 2;
+        circuit.instructions.insert(
+            middle,
+            Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(0),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[1]),
+            },
+        );
+        circuit.instructions.insert(
+            middle,
+            Instruction::Measure {
+                qubit: 0,
+                classical_bit: 0,
+            },
+        );
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(run_shots_with(BackendKind::DensityMatrix, circ, 2, SEED).unwrap());
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Clifford layers over `n` qubits, emitted either as bare instructions or as
 /// one guarded region per layer.
 ///
@@ -3286,6 +3325,7 @@ criterion_group! {
     bench_density_matrix_exact_vs_trajectory,
     bench_density_matrix_noisy_channels,
     bench_density_matrix_noisy_shots,
+    bench_density_matrix_shots_fused,
     bench_density_matrix_neutrality,
     // Dynamic circuits (guard cost, dead-region predicate, per-shot cliff)
     bench_dynamic_guarded_region,

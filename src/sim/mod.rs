@@ -2761,10 +2761,7 @@ fn run_shots_per_shot(
             .map(|((sub, _, _), plan)| {
                 let probe = plan.build(seed);
                 let expanded = expand_for_backend(&*probe, sub);
-                std::borrow::Cow::Owned(
-                    crate::circuit::fusion::fuse_circuit(&expanded, plan.supports_fused())
-                        .into_owned(),
-                )
+                std::borrow::Cow::Owned(fuse_for_backend(&*probe, &expanded).into_owned())
             })
             .collect();
 
@@ -2790,7 +2787,7 @@ fn run_shots_per_shot(
         let plan = resolve_backend(&kind, circuit, has_partial_independence);
         let probe = plan.build(seed);
         let expanded = expand_for_backend(&*probe, circuit);
-        let fused = crate::circuit::fusion::fuse_circuit(&expanded, plan.supports_fused());
+        let fused = fuse_for_backend(&*probe, &expanded);
 
         collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
             let mut backend = plan.build(shot_seed);

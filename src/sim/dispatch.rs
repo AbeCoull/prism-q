@@ -647,18 +647,6 @@ impl BackendPlan {
         }
     }
 
-    /// Whether the fusion pipeline should synthesize fused-matrix gates for
-    /// this plan. Tableau-based families reject non-Clifford fused matrices;
-    /// every dense or factored representation accepts them.
-    pub(super) fn supports_fused(&self) -> bool {
-        !matches!(
-            self,
-            BackendPlan::Stabilizer { .. }
-                | BackendPlan::FactoredStabilizer
-                | BackendPlan::DensityMatrix { .. }
-        )
-    }
-
     #[cfg(test)]
     pub(super) fn family(&self) -> Family {
         match self {
@@ -1517,11 +1505,11 @@ mod dispatch_matrix_tests {
                 );
             }
         }
-        // Explicit selection maps 1:1 onto the density-matrix plan, which skips
-        // fusion.
+        // Explicit selection maps 1:1 onto the density-matrix plan, and the
+        // backend it builds accepts fused payloads on every terminal.
         let plan = resolved(&BackendKind::DensityMatrix, &dense(6), false);
         assert_eq!(plan.family(), Family::DensityMatrix);
-        assert!(!plan.supports_fused(), "density matrix must skip fusion");
+        assert!(plan.build(42).supports_fused_gates());
         assert!(matches!(plan.accel(), Accel::Cpu));
     }
 

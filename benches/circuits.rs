@@ -1694,6 +1694,36 @@ fn bench_gradient(c: &mut Criterion) {
     group.finish();
 }
 
+/// Parameter shift under a noise model: every evaluation evolves the exact
+/// mixture, so two linked slots cost five density-matrix evolutions.
+fn bench_gradient_density_matrix(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gradient/density_matrix");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 1, SEED);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let mut params = Parameters::new(2);
+        params.link(0, 0);
+        params.link(1, 1);
+        let ham = z_chain_hamiltonian(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::DensityMatrix)
+                        .noise(&noise)
+                        .seed(SEED)
+                        .expectation_gradient_shift(&ham, &params)
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_gradient_qaoa(c: &mut Criterion) {
     let mut group = c.benchmark_group("gradient/qaoa_l1");
     configure_group(&mut group);
@@ -3283,6 +3313,7 @@ criterion_group! {
     // Adjoint gradient (adjoint vs finite-difference per parameter)
     bench_gradient,
     bench_gradient_qaoa,
+    bench_gradient_density_matrix,
     bench_gradient_prefix,
     // Variational loop iteration (rebuild vs rebind under simulation cost)
     bench_vqe_loop,

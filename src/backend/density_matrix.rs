@@ -54,10 +54,9 @@
 //! - Noisy circuits with mid-circuit measurement or classical conditioning.
 //!   The mixture holds every branch at once, so per-shot feedback cannot be
 //!   replayed from it and the noisy terminals reject those shapes.
-//! - Gradients under noise. Both gradient terminals decline a noise model, for
-//!   different reasons: the adjoint backpropagates against a pure state and a
-//!   channel has no reverse evolution to walk, while parameter shift is exact
-//!   on a mixture and simply not wired.
+//! - Adjoint gradients under noise. The adjoint backpropagates against a pure
+//!   state and a channel has no reverse evolution to walk; the parameter-shift
+//!   terminal serves the noisy gradient from the mixture instead.
 
 use std::borrow::Cow;
 #[cfg(feature = "gpu")]

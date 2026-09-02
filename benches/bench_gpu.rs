@@ -31,7 +31,8 @@ use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::gpu::GpuContext;
 use prism_q::{
-    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, StabilizerBackend, StatevectorBackend, sim,
+    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, Parameters, PauliTerm, StabilizerBackend,
+    StatevectorBackend, sim,
 };
 
 mod common;
@@ -951,6 +952,42 @@ fn bench_gpu_dm_rzz_layers_fused(c: &mut Criterion) {
     group.finish();
 }
 
+/// The device sibling of `gradient/density_matrix`: five exact evolutions of
+/// the mixture per iteration, each resident on the card.
+fn bench_gpu_dm_gradient(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu_dm/gradient");
+    configure_group(&mut group);
+    let kind = BackendKind::DensityMatrixGpu {
+        context: ctx.clone(),
+    };
+
+    for &n in &[10usize, 12] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 1, SEED);
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let mut params = Parameters::new(2);
+        params.link(0, 0);
+        params.link(1, 1);
+        let ham: Vec<(f64, Vec<PauliTerm>)> = (0..n - 1)
+            .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
+            .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(kind.clone())
+                        .noise(&noise)
+                        .seed(SEED)
+                        .expectation_gradient_shift(&ham, &params)
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -975,6 +1012,7 @@ criterion_group! {
     bench_stab_bts_device_counts_explicit,
     bench_stab_gpu_shots_explicit,
     bench_gpu_dm_noisy_channels,
-    bench_gpu_dm_rzz_layers_fused
+    bench_gpu_dm_rzz_layers_fused,
+    bench_gpu_dm_gradient
 }
 criterion_main!(benches);

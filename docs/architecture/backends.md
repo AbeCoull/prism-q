@@ -163,17 +163,24 @@ Exact mixed-state evolution. Stores the full density operator `rho` for `n` qubi
 `4^n` `Complex64` buffer laid out row-major: index `(r << n) | c` holds `⟨r|rho|c⟩`. That
 layout is isomorphic to a `2n`-qubit statevector whose high `n` qubits index the ket (row)
 and low `n` qubits index the bra (column), so gate application reuses the statevector
-kernels with no new gate math. A unitary `U` on the ket register gives the left product
-`U rho`; the same `U` on the bra register of a conjugated buffer gives the right product
-`rho U^dagger`, so `U rho U^dagger` costs two statevector passes and two conjugations.
+kernels. A unitary `U` on the ket register gives the left product `U rho`; the right
+product `rho U^dagger` takes the gate's conjugate form on the bra register where one
+exists, and otherwise conjugates the buffer around the pass. So `U rho U^dagger` costs
+two statevector passes, plus two conjugations only for the variants with no conjugate
+form. `Rzz` is the exception that carries gate math of its own: both factors are
+diagonal, so the ket and bra phases cancel wherever the two registers agree on the target
+pair's parity, and the sandwich collapses to a single pass over a combined table.
 
 Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host and 15 on
 32 GiB (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). This backend is
 CPU-only and explicit-dispatch only; `Auto` never selects it.
 
 Selecting it with a noise model attached is the exact route for every `Simulate`
-terminal: the mixture is evolved once and observables, marginals, probabilities, and
-shots all read that one evolution. See [Noise across the terminals](./engine.md) for
+terminal except the two gradient terminals: the mixture is evolved once and observables,
+marginals, probabilities, and shots all read that one evolution. Gradients are excluded
+for two different reasons: the adjoint backpropagates against a pure state and a channel
+has no reverse evolution to walk, while parameter shift is exact on a mixture and simply
+not wired. See [Noise across the terminals](./engine.md) for
 what that route accepts and what stays on trajectory averaging.
 
 ## What a backend reports about its own result

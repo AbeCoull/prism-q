@@ -2650,6 +2650,62 @@ fn bench_density_matrix_unitary_layers(c: &mut Criterion) {
     group.finish();
 }
 
+/// The `Rzz` counterpart of `density_matrix/unitary_layers`: the denominator a
+/// change to the `Rzz` sandwich has to move, against a circuit that also runs
+/// `n` one-qubit rotations per layer.
+///
+/// Runs through `apply_instructions` like its sibling, so no fusion pass sees it
+/// and the backend receives bare `Rzz`. `qaoa_circuit` emits `n - 1` `Rzz` and
+/// `n` `Rx` per layer; depth 6 keeps the row's cost near `unitary_layers` at the
+/// same width. Read this row by its absolute delta rather than its percentage:
+/// the iteration builds a fresh backend, so a `4^n` allocation and first touch
+/// sit in the denominator alongside the gates.
+fn bench_density_matrix_rzz_layers(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/rzz_layers");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        let circuit = circuits::qaoa_circuit(n, 6, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_dm_apply_only(circ);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// One bare `Rzz` sandwich in isolation, at two target pairs that pin the route
+/// as position independent.
+///
+/// Both the two-pass register route and the combined single pass sweep the whole
+/// buffer contiguously and branch only on index bits, so neither reads an
+/// amplitude and neither depends on where the targets sit. `(2, 3)` and
+/// `(0, n - 1)` are the extremes of that claim and are expected to agree. A
+/// variant that skipped the entry classes whose combined phase is 1 would break
+/// the agreement, since those classes only fall on whole cache lines once
+/// `min(q0, q1)` is large enough; these rows are where that would show.
+fn bench_density_matrix_rzz_sandwich(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/rzz_sandwich");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        for &(q0, q1, label) in &[(2usize, 3usize, "adjacent"), (0, n - 1, "q0_qtop")] {
+            let instruction = Instruction::Gate {
+                gate: Gate::Rzz(0.7),
+                targets: SmallVec::from_slice(&[q0, q1]),
+            };
+            group.bench_with_input(BenchmarkId::new(label, n), &n, |b, &n| {
+                let mut backend = dm_backend(n);
+                b.iter(|| backend.apply(&instruction).unwrap());
+            });
+        }
+    }
+
+    group.finish();
+}
+
 /// The same layers through the `Simulate` terminal, the only density-matrix
 /// entry point that runs `fuse_circuit`.
 ///
@@ -3193,6 +3249,8 @@ criterion_group! {
     bench_coalesce_baseline,
     // Density matrix (explicit backend)
     bench_density_matrix_unitary_layers,
+    bench_density_matrix_rzz_layers,
+    bench_density_matrix_rzz_sandwich,
     bench_density_matrix_fused_layers,
     bench_density_matrix_exact_vs_trajectory,
     bench_density_matrix_noisy_channels,

@@ -174,9 +174,9 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     /// backend with a per-shot pure state, averaging trajectories.
     /// [`Simulate::run`], [`Simulate::marginals`], and
     /// [`Simulate::expectation_values`] answer from the exact mixture instead,
-    /// which only [`BackendKind::DensityMatrix`] holds, so they require that
-    /// backend. [`Simulate::expectation_gradient`] rejects a noise model on
-    /// every backend.
+    /// which only [`BackendKind::DensityMatrix`] and its device sibling hold,
+    /// so they require one of those. [`Simulate::expectation_gradient`] rejects
+    /// a noise model on every backend.
     #[inline]
     pub fn noise(mut self, model: &'c noise::NoiseModel) -> Self {
         self.noise_model = Some(model);
@@ -282,15 +282,20 @@ impl<'c> Simulate<'c, Seeded> {
         }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "a single run")?;
-            let probabilities =
-                exact_noisy_probabilities(self.circuit, noise_model, self.initial_state, seed)?;
+            let probabilities = exact_noisy_probabilities(
+                &self.kind,
+                self.circuit,
+                noise_model,
+                self.initial_state,
+                seed,
+            )?;
             let classical_bits =
                 sample_exact_noisy_shots(&probabilities, self.circuit, noise_model, 1, seed)
                     .swap_remove(0);
             return Ok(RunOutcome {
                 classical_bits,
                 probabilities: Some(probabilities),
-                metadata: RunMetadata::exact(ResolvedBackend::DensityMatrix),
+                metadata: exact_mixture_metadata(&self.kind),
             });
         }
         if let Some(state) = self.initial_state {
@@ -371,11 +376,16 @@ impl<'c> Simulate<'c, Seeded> {
         }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "marginals")?;
-            let probs =
-                exact_noisy_probabilities(self.circuit, noise_model, self.initial_state, seed)?;
+            let probs = exact_noisy_probabilities(
+                &self.kind,
+                self.circuit,
+                noise_model,
+                self.initial_state,
+                seed,
+            )?;
             return Ok(MarginalsResult {
                 marginals: probs.marginals(),
-                metadata: RunMetadata::exact(ResolvedBackend::DensityMatrix),
+                metadata: exact_mixture_metadata(&self.kind),
             });
         }
         let result = if let Some(state) = self.initial_state {
@@ -419,6 +429,7 @@ impl<'c> Simulate<'c, Seeded> {
             require_exact_mixture(&self.kind, "expectation values")?;
             require_unitary_circuit(&self.kind, self.circuit)?;
             let values = noise::dm_expectation_values(
+                &self.kind,
                 self.circuit,
                 observables,
                 Some(noise_model),
@@ -427,7 +438,7 @@ impl<'c> Simulate<'c, Seeded> {
             )?;
             return Ok(analytic_expectations(
                 values,
-                RunMetadata::exact(ResolvedBackend::DensityMatrix),
+                exact_mixture_metadata(&self.kind),
             ));
         }
         if let Some(state) = self.initial_state {
@@ -466,6 +477,7 @@ impl<'c> Simulate<'c, Seeded> {
             require_exact_mixture(&self.kind, "expectation values")?;
             require_unitary_circuit(&self.kind, self.circuit)?;
             let values = noise::dm_expectation_values(
+                &self.kind,
                 self.circuit,
                 &observable_vecs(observable),
                 Some(noise_model),
@@ -476,7 +488,7 @@ impl<'c> Simulate<'c, Seeded> {
                 observable,
                 &values,
                 None,
-                RunMetadata::exact(ResolvedBackend::DensityMatrix),
+                exact_mixture_metadata(&self.kind),
             ));
         }
         if let Some(state) = self.initial_state {
@@ -623,7 +635,7 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
 /// Gate for the terminals that answer a noise model from the exact mixture,
 /// which only the density matrix holds.
 fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
-    if matches!(kind, BackendKind::DensityMatrix) {
+    if kind.is_density_matrix() {
         return Ok(());
     }
     Err(PrismError::IncompatibleBackend {
@@ -887,16 +899,33 @@ fn require_unitary_circuit(kind: &BackendKind, circuit: &Circuit) -> Result<()> 
     Ok(())
 }
 
+/// Provenance of a result read off the exact mixture: the density matrix,
+/// placed wherever `kind` holds it.
+fn exact_mixture_metadata(kind: &BackendKind) -> RunMetadata {
+    let metadata = RunMetadata::exact(ResolvedBackend::DensityMatrix);
+    #[cfg(feature = "gpu")]
+    if matches!(kind, BackendKind::DensityMatrixGpu { .. }) {
+        let mut on_device = metadata;
+        on_device.placement = Placement::Device;
+        return on_device;
+    }
+    #[cfg(not(feature = "gpu"))]
+    let _ = kind;
+    metadata
+}
+
 /// Exact output distribution of `circuit` under `noise_model`, evolved once on
 /// the density matrix. The mixture carries every measurement branch at once,
 /// so it answers for a whole shot only when the measurements are terminal.
 fn exact_noisy_probabilities(
+    kind: &BackendKind,
     circuit: &Circuit,
     noise_model: &noise::NoiseModel,
     initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<Probabilities> {
     Ok(Probabilities::Dense(noise::density_matrix_probabilities(
+        kind,
         circuit,
         noise_model,
         initial_state,
@@ -2844,13 +2873,13 @@ pub(crate) fn run_shots_with_noise(
         });
     }
 
-    if matches!(kind, BackendKind::DensityMatrix) {
-        let probs = exact_noisy_probabilities(circuit, noise_model, None, seed)?;
+    if kind.is_density_matrix() {
+        let probs = exact_noisy_probabilities(&kind, circuit, noise_model, None, seed)?;
         return Ok(ShotsResult::from_shots(
             sample_exact_noisy_shots(&probs, circuit, noise_model, num_shots, seed),
             circuit.num_classical_bits,
         )
-        .with_metadata(RunMetadata::exact(ResolvedBackend::DensityMatrix)));
+        .with_metadata(exact_mixture_metadata(&kind)));
     }
 
     if !kind.supports_noisy_per_shot() {

@@ -10,8 +10,8 @@ cargo build --release --features "parallel gpu"
 cargo test --features "parallel gpu" --test golden_gpu
 ```
 
-CUDA acceleration covers statevector execution, stabilizer execution, and compiled
-BTS sampling. Six entry points are available:
+CUDA acceleration covers statevector execution, stabilizer execution, density-matrix
+execution, and compiled BTS sampling. Seven entry points are available:
 
 - **`BackendKind::AutoGpu { context }`** (`simulate(circuit).gpu_auto(ctx)`).
   Automatic backend selection with the device opted in. The shape-based decision
@@ -35,6 +35,15 @@ BTS sampling. Six entry points are available:
   diagnostic readbacks from `probabilities()`, `export_tableau()`, and
   `export_statevector()`. Golden tests cover every kernel path, including 500q GHZ
   measure-all.
+- **`BackendKind::DensityMatrixGpu { context }`**. The exact mixture held in device
+  memory. Explicit only: neither `Auto` nor `AutoGpu` selects it, there is no
+  crossover, and there is no host fallback. `init` budgets the `4^n` buffer against
+  the free VRAM and errors before allocating when it does not fit, so an 11 GiB card
+  holds 13 qubits (1 GiB at 13, 4 GiB at 14 plus scratch). The unitary half reuses the
+  dense statevector kernels on the embedded `2n`-qubit buffer, and every channel,
+  measurement, and readout sweep runs as a kernel of its own. The noisy `Simulate`
+  terminals answer from the device mixture exactly as `DensityMatrix` does.
+  `DensityMatrixBackend::new(seed).with_gpu(ctx)` is the direct form.
 - **`StatevectorBackend::new(seed).with_gpu(ctx)`**. Direct statevector GPU opt-in.
   Every instruction routes to CUDA after the context is attached. No crossover or
   subsystem decomposition applies.

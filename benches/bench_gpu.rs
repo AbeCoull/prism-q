@@ -1,4 +1,4 @@
-//! GPU benchmarks for the statevector and stabilizer GPU paths.
+//! GPU benchmarks for the statevector, stabilizer, and density-matrix GPU paths.
 //!
 //! Measures the end-to-end dispatch path (fusion plus independent-subsystem
 //! decomposition plus crossover plus kernel execution) against the same set
@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
+use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::circuit::{Circuit, Instruction};
 use prism_q::circuits;
 use prism_q::gates::Gate;
@@ -826,6 +827,130 @@ fn bench_stab_gpu_shots_explicit(c: &mut Criterion) {
     }
 }
 
+// ---- Density matrix on the device ----
+//
+// `gpu_dm/noisy_channels` mirrors the CPU `density_matrix/noisy_channels` rows
+// at the same widths plus 13, the ceiling this card holds. Each row builds one
+// resident backend and times one kernel per iteration, synchronized so the
+// launch queue does not hide the sweep.
+
+fn dm_sweep_sizes() -> &'static [usize] {
+    if is_fast() { &[10] } else { &[10, 12, 13] }
+}
+
+fn dm_device_backend(ctx: &Arc<GpuContext>, n: usize) -> DensityMatrixBackend {
+    let circuit = circuits::random_circuit(n, 2, SEED);
+    let mut backend = DensityMatrixBackend::new(42).with_gpu(ctx.clone());
+    backend.init(n, 1).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    ctx.synchronize().unwrap();
+    backend
+}
+
+/// Correlated `ZZ` dephasing, which compiles to a diagonal superoperator.
+fn correlated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
+    let zero = Complex64::new(0.0, 0.0);
+    let diag = |scale: f64, signs: [f64; 4]| {
+        let mut m = [[zero; 4]; 4];
+        for (t, sign) in signs.iter().enumerate() {
+            m[t][t] = Complex64::new(scale * sign, 0.0);
+        }
+        m
+    };
+    vec![
+        diag((1.0 - p).sqrt(), [1.0, 1.0, 1.0, 1.0]),
+        diag(p.sqrt(), [1.0, -1.0, -1.0, 1.0]),
+    ]
+}
+
+/// `{sqrt(1-p) I, sqrt(p) X(x)Z}`, which fills the 16x16 superoperator.
+fn h_conjugated_zz_kraus(p: f64) -> Vec<[[Complex64; 4]; 4]> {
+    let zero = Complex64::new(0.0, 0.0);
+    let mut k0 = [[zero; 4]; 4];
+    let mut k1 = [[zero; 4]; 4];
+    for t in 0..4 {
+        k0[t][t] = Complex64::new((1.0 - p).sqrt(), 0.0);
+        let sign = if t & 1 == 0 { 1.0 } else { -1.0 };
+        k1[t][t ^ 2] = Complex64::new(p.sqrt() * sign, 0.0);
+    }
+    vec![k0, k1]
+}
+
+fn bench_gpu_dm_noisy_channels(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu_dm/noisy_channels");
+    configure_group(&mut group);
+
+    for &n in dm_sweep_sizes() {
+        let amp_damp = amplitude_damping_kraus(0.05);
+        group.bench_with_input(BenchmarkId::new("kraus_amp_damp", n), &n, |b, &n| {
+            let mut backend = dm_device_backend(&ctx, n);
+            b.iter(|| {
+                backend.apply_1q_kraus(0, &amp_damp);
+                ctx.synchronize().unwrap();
+            });
+        });
+
+        group.bench_with_input(BenchmarkId::new("depolarizing_2q", n), &n, |b, &n| {
+            let mut backend = dm_device_backend(&ctx, n);
+            b.iter(|| {
+                backend.apply_2q_depolarizing(0, n - 1, 0.02);
+                ctx.synchronize().unwrap();
+            });
+        });
+
+        let zz = correlated_zz_kraus(0.02);
+        group.bench_with_input(BenchmarkId::new("kraus_2q_adjacent", n), &n, |b, &n| {
+            let mut backend = dm_device_backend(&ctx, n);
+            b.iter(|| {
+                backend.apply_2q_kraus(2, 3, &zz);
+                ctx.synchronize().unwrap();
+            });
+        });
+
+        let hzz = h_conjugated_zz_kraus(0.02);
+        group.bench_with_input(BenchmarkId::new("kraus_2q_dense", n), &n, |b, &n| {
+            let mut backend = dm_device_backend(&ctx, n);
+            b.iter(|| {
+                backend.apply_2q_kraus(2, 3, &hzz);
+                ctx.synchronize().unwrap();
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("kraus_2q_dense_q0", n), &n, |b, &n| {
+            let mut backend = dm_device_backend(&ctx, n);
+            b.iter(|| {
+                backend.apply_2q_kraus(0, n - 1, &hzz);
+                ctx.synchronize().unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// The device sibling of `density_matrix/rzz_layers_fused`: a layer's
+/// commuting `Rzz` gates reach the backend as one `BatchRzz`, and the diagonal
+/// sandwich runs as one kernel over the `4^n` buffer.
+fn bench_gpu_dm_rzz_layers_fused(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu_dm/rzz_layers_fused");
+    configure_group(&mut group);
+    let kind = BackendKind::DensityMatrixGpu {
+        context: ctx.clone(),
+    };
+
+    for &n in &[10usize, 12] {
+        let circuit = circuits::qaoa_circuit(n, 6, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(run_with(kind.clone(), circ, SEED).unwrap());
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -848,6 +973,8 @@ criterion_group! {
     bench_stab_bts_packed_cpu_vs_gpu,
     bench_stab_bts_marginals_cpu_vs_gpu,
     bench_stab_bts_device_counts_explicit,
-    bench_stab_gpu_shots_explicit
+    bench_stab_gpu_shots_explicit,
+    bench_gpu_dm_noisy_channels,
+    bench_gpu_dm_rzz_layers_fused
 }
 criterion_main!(benches);

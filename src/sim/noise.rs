@@ -13,10 +13,10 @@ use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
 use crate::gates::Gate;
-use crate::sim::ShotsResult;
 use crate::sim::compiled::{
     PackedShots, batch_propagate_backward, compile_measurements, xor_words,
 };
+use crate::sim::{BackendKind, ShotsResult};
 
 /// A single-qubit (or two-qubit, for `TwoQubitDepolarizing`) noise channel.
 ///
@@ -2680,17 +2680,23 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
 /// density-matrix qubit cap and the noise model is validated before any
 /// allocation.
 fn evolve_density_matrix(
+    kind: &BackendKind,
     circuit: &Circuit,
     noise: Option<&NoiseModel>,
     initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<DensityMatrixBackend> {
-    crate::backend::check_state_allocation(
-        "density_matrix",
-        circuit.num_qubits,
-        crate::backend::max_density_matrix_qubits(),
-        crate::backend::DM_QUBIT_CAP_ENV,
-    )?;
+    use super::dispatch::{Accel, Family, accel_for, build_density_matrix};
+
+    let accel = accel_for(kind, Family::DensityMatrix, circuit.num_qubits);
+    if matches!(accel, Accel::Cpu) {
+        crate::backend::check_state_allocation(
+            "density_matrix",
+            circuit.num_qubits,
+            crate::backend::max_density_matrix_qubits(),
+            crate::backend::DM_QUBIT_CAP_ENV,
+        )?;
+    }
     if !circuit.has_terminal_measurements_only() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: "density_matrix".into(),
@@ -2705,7 +2711,7 @@ fn evolve_density_matrix(
         noise.validate_for(circuit)?;
     }
 
-    let mut dm = DensityMatrixBackend::new(seed);
+    let mut dm = build_density_matrix(&accel, seed);
     match initial_state {
         Some(state) => {
             crate::sim::check_initial_state_len(state, circuit.num_qubits)?;
@@ -2750,12 +2756,13 @@ fn evolve_density_matrix(
 /// the distribution answers for a whole shot only when every measurement is
 /// terminal; callers gate on that shape.
 pub(crate) fn density_matrix_probabilities(
+    kind: &BackendKind,
     circuit: &Circuit,
     noise: &NoiseModel,
     initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    evolve_density_matrix(circuit, Some(noise), initial_state, seed)?.probabilities()
+    evolve_density_matrix(kind, circuit, Some(noise), initial_state, seed)?.probabilities()
 }
 
 /// Exact per-classical-bit measurement marginals under a noise model, evolved
@@ -2768,7 +2775,13 @@ pub(crate) fn dm_noisy_marginals(
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    let dm = evolve_density_matrix(circuit, Some(noise), None, seed)?;
+    let dm = evolve_density_matrix(
+        &BackendKind::DensityMatrix,
+        circuit,
+        Some(noise),
+        None,
+        seed,
+    )?;
     let mut result = vec![0.5f64; circuit.num_classical_bits];
     for inst in &circuit.instructions {
         if let Instruction::Measure {
@@ -2796,20 +2809,28 @@ pub fn density_matrix_expectation_values(
     noise: Option<&NoiseModel>,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    dm_expectation_values(circuit, observables, noise, None, seed)
+    dm_expectation_values(
+        &BackendKind::DensityMatrix,
+        circuit,
+        observables,
+        noise,
+        None,
+        seed,
+    )
 }
 
 /// [`density_matrix_expectation_values`] with a caller-supplied start state,
 /// which `Simulate::expectation_values` carries and the public entry point
 /// leaves at |0...0>.
 pub(crate) fn dm_expectation_values(
+    kind: &BackendKind,
     circuit: &Circuit,
     observables: &[Vec<crate::PauliTerm>],
     noise: Option<&NoiseModel>,
     initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    let dm = evolve_density_matrix(circuit, noise, initial_state, seed)?;
+    let dm = evolve_density_matrix(kind, circuit, noise, initial_state, seed)?;
     let masks = observables
         .iter()
         .map(|obs| crate::sim::pauli_masks(obs, circuit.num_qubits))

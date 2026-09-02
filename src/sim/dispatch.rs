@@ -111,9 +111,9 @@ pub enum BackendKind {
     /// Explicit-dispatch only: [`BackendKind::Auto`] never selects it. Stores
     /// `4^n` `Complex64` amplitudes, so the qubit ceiling is roughly half the
     /// statevector cap (14 on a 16 GiB host); `PRISM_MAX_DM_QUBITS` moves it
-    /// within that bound. Fusion is skipped for this backend: the sandwich
-    /// applies a fused payload as one ket pass plus three bra passes, which no
-    /// benchmark row covers today.
+    /// within that bound. Fused payloads are accepted, with every fusion floor
+    /// gated on the `2n`-qubit buffer the backend sweeps rather than on the
+    /// circuit width.
     ///
     /// Under an attached noise model this is the exact route: the mixture is
     /// evolved once and every terminal reads it, so shot counts carry sampling
@@ -167,6 +167,20 @@ pub enum BackendKind {
     /// against the crossover independently.
     #[cfg(feature = "gpu")]
     StatevectorGpu {
+        context: Arc<GpuContext>,
+    },
+    /// Density matrix held in device memory on the supplied context.
+    ///
+    /// Explicit-dispatch only: neither [`BackendKind::Auto`] nor
+    /// [`BackendKind::AutoGpu`] selects it. There is no crossover and no host
+    /// fallback: every run allocates the `4^n` mixture on the device, after a
+    /// budget check against the free VRAM that errors before allocating. An
+    /// 11 GiB card holds 13 qubits (1 GiB at 13, 4 GiB at 14 plus scratch).
+    /// Every channel, measurement, and readout sweep runs as a kernel; the
+    /// noisy terminals answer from the exact mixture as
+    /// [`BackendKind::DensityMatrix`] does.
+    #[cfg(feature = "gpu")]
+    DensityMatrixGpu {
         context: Arc<GpuContext>,
     },
     /// Stabilizer backend backed by a CUDA GPU tableau.
@@ -225,8 +239,17 @@ impl BackendKind {
             BackendKind::StabilizerRank
                 | BackendKind::StochasticPauli { .. }
                 | BackendKind::DeterministicPauli { .. }
-                | BackendKind::DensityMatrix
-        )
+        ) && !self.is_density_matrix()
+    }
+
+    /// True for the two kinds that hold the exact mixture, host or device.
+    pub(crate) fn is_density_matrix(&self) -> bool {
+        match self {
+            BackendKind::DensityMatrix => true,
+            #[cfg(feature = "gpu")]
+            BackendKind::DensityMatrixGpu { .. } => true,
+            _ => false,
+        }
     }
 
     /// True for kinds that can run non-Pauli channels (damping, thermal
@@ -243,7 +266,9 @@ impl BackendKind {
             | BackendKind::TensorNetwork
             | BackendKind::DensityMatrix => true,
             #[cfg(feature = "gpu")]
-            BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => true,
+            BackendKind::AutoGpu { .. }
+            | BackendKind::StatevectorGpu { .. }
+            | BackendKind::DensityMatrixGpu { .. } => true,
             _ => false,
         }
     }
@@ -267,7 +292,7 @@ impl BackendKind {
     pub(crate) fn general_noise_backend_names() -> &'static str {
         #[cfg(feature = "gpu")]
         {
-            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, Factored, TensorNetwork, or DensityMatrix"
+            "Auto, Statevector, StatevectorGpu, Sparse, Mps, ProductState, Factored, TensorNetwork, DensityMatrix, or DensityMatrixGpu"
         }
         #[cfg(not(feature = "gpu"))]
         {
@@ -378,7 +403,11 @@ struct GpuCapability {
 /// Families with a `gpu_capability` row. Keep in sync with the match below;
 /// a new device family needs an entry in both.
 #[cfg(feature = "gpu")]
-const GPU_CAPABLE_FAMILIES: [Family; 2] = [Family::Statevector, Family::Stabilizer];
+const GPU_CAPABLE_FAMILIES: [Family; 3] = [
+    Family::Statevector,
+    Family::Stabilizer,
+    Family::DensityMatrix,
+];
 
 #[cfg(feature = "gpu")]
 fn gpu_capability(family: Family) -> Option<GpuCapability> {
@@ -391,13 +420,19 @@ fn gpu_capability(family: Family) -> Option<GpuCapability> {
             min_qubits: crate::gpu::stabilizer_min_qubits,
             fits: |ctx, n| ctx.fits_tableau(n).unwrap_or(false),
         }),
+        // Explicit-only: no crossover, and the `Auto` tree never selects the
+        // family, so the soft fit gate is never consulted. The hard path budgets
+        // the `4^n` buffer at `init`.
+        Family::DensityMatrix => Some(GpuCapability {
+            min_qubits: || 0,
+            fits: |ctx, n| ctx.fits_statevector_with_scratch(2 * n).unwrap_or(false),
+        }),
         Family::ProductState
         | Family::Sparse
         | Family::Mps
         | Family::Factored
         | Family::FactoredStabilizer
-        | Family::TensorNetwork
-        | Family::DensityMatrix => None,
+        | Family::TensorNetwork => None,
     }
 }
 
@@ -442,6 +477,9 @@ fn gpu_request(kind: &BackendKind, family: Family) -> Option<(&Arc<GpuContext>, 
         (BackendKind::AutoGpu { context }, _) => Some((context, true)),
         (BackendKind::StatevectorGpu { context }, Family::Statevector) => Some((context, false)),
         (BackendKind::StabilizerGpu { context }, Family::Stabilizer) => Some((context, false)),
+        (BackendKind::DensityMatrixGpu { context }, Family::DensityMatrix) => {
+            Some((context, false))
+        }
         _ => None,
     }
 }
@@ -478,6 +516,14 @@ pub(super) fn build_statevector(accel: &Accel, seed: u64) -> StatevectorBackend 
             context,
             soft: false,
         } => StatevectorBackend::new(seed).with_gpu(context.clone()),
+    }
+}
+
+pub(super) fn build_density_matrix(accel: &Accel, seed: u64) -> DensityMatrixBackend {
+    match accel {
+        Accel::Cpu => DensityMatrixBackend::new(seed),
+        #[cfg(feature = "gpu")]
+        Accel::Gpu { context, .. } => DensityMatrixBackend::new(seed).with_gpu(context.clone()),
     }
 }
 
@@ -544,7 +590,9 @@ pub(super) enum BackendPlan {
     Statevector {
         accel: Accel,
     },
-    DensityMatrix,
+    DensityMatrix {
+        accel: Accel,
+    },
     #[cfg(feature = "distributed")]
     Distributed(Arc<DistributedContext>),
 }
@@ -562,7 +610,7 @@ impl BackendPlan {
             BackendPlan::Mps { .. } => ResolvedBackend::Mps,
             BackendPlan::Stabilizer { .. } => ResolvedBackend::Stabilizer,
             BackendPlan::Statevector { .. } => ResolvedBackend::Statevector,
-            BackendPlan::DensityMatrix => ResolvedBackend::DensityMatrix,
+            BackendPlan::DensityMatrix { .. } => ResolvedBackend::DensityMatrix,
             #[cfg(feature = "distributed")]
             BackendPlan::Distributed(_) => ResolvedBackend::Distributed,
         }
@@ -582,7 +630,7 @@ impl BackendPlan {
                 Box::new(build_stabilizer(accel, *lazy, seed))
             }
             BackendPlan::Statevector { accel } => Box::new(build_statevector(accel, seed)),
-            BackendPlan::DensityMatrix => Box::new(DensityMatrixBackend::new(seed)),
+            BackendPlan::DensityMatrix { accel } => Box::new(build_density_matrix(accel, seed)),
             #[cfg(feature = "distributed")]
             BackendPlan::Distributed(context) => {
                 Box::new(DistributedStatevectorBackend::new(context.clone(), seed))
@@ -592,9 +640,9 @@ impl BackendPlan {
 
     pub(super) fn is_gpu(&self) -> bool {
         match self {
-            BackendPlan::Stabilizer { accel, .. } | BackendPlan::Statevector { accel } => {
-                !matches!(accel, Accel::Cpu)
-            }
+            BackendPlan::Stabilizer { accel, .. }
+            | BackendPlan::Statevector { accel }
+            | BackendPlan::DensityMatrix { accel } => !matches!(accel, Accel::Cpu),
             _ => false,
         }
     }
@@ -607,7 +655,7 @@ impl BackendPlan {
             self,
             BackendPlan::Stabilizer { .. }
                 | BackendPlan::FactoredStabilizer
-                | BackendPlan::DensityMatrix
+                | BackendPlan::DensityMatrix { .. }
         )
     }
 
@@ -622,7 +670,7 @@ impl BackendPlan {
             BackendPlan::Mps { .. } => Family::Mps,
             BackendPlan::Stabilizer { .. } => Family::Stabilizer,
             BackendPlan::Statevector { .. } => Family::Statevector,
-            BackendPlan::DensityMatrix => Family::DensityMatrix,
+            BackendPlan::DensityMatrix { .. } => Family::DensityMatrix,
             #[cfg(feature = "distributed")]
             BackendPlan::Distributed(_) => Family::Statevector,
         }
@@ -631,7 +679,9 @@ impl BackendPlan {
     #[cfg(test)]
     pub(super) fn accel(&self) -> &Accel {
         match self {
-            BackendPlan::Stabilizer { accel, .. } | BackendPlan::Statevector { accel } => accel,
+            BackendPlan::Stabilizer { accel, .. }
+            | BackendPlan::Statevector { accel }
+            | BackendPlan::DensityMatrix { accel } => accel,
             _ => &Accel::Cpu,
         }
     }
@@ -711,7 +761,9 @@ pub(super) fn plan_for_family(
         Family::Statevector => BackendPlan::Statevector {
             accel: accel_for(kind, Family::Statevector, num_qubits),
         },
-        Family::DensityMatrix => BackendPlan::DensityMatrix,
+        Family::DensityMatrix => BackendPlan::DensityMatrix {
+            accel: accel_for(kind, Family::DensityMatrix, num_qubits),
+        },
     }
 }
 
@@ -760,6 +812,8 @@ pub(super) fn resolve(
         BackendKind::StatevectorGpu { .. } => Family::Statevector,
         #[cfg(feature = "gpu")]
         BackendKind::StabilizerGpu { .. } => Family::Stabilizer,
+        #[cfg(feature = "gpu")]
+        BackendKind::DensityMatrixGpu { .. } => Family::DensityMatrix,
         #[cfg(feature = "distributed")]
         BackendKind::StatevectorDistributed { context } => {
             return ExecutionPlan::Backend(BackendPlan::Distributed(context.clone()));
@@ -792,7 +846,11 @@ pub(super) fn initial_state_plan(kind: &BackendKind, num_qubits: usize) -> Resul
         BackendKind::AutoGpu { .. } | BackendKind::StatevectorGpu { .. } => {
             Ok(plan_for_family(kind, Family::Statevector, num_qubits))
         }
-        BackendKind::DensityMatrix => Ok(BackendPlan::DensityMatrix),
+        BackendKind::DensityMatrix => Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits)),
+        #[cfg(feature = "gpu")]
+        BackendKind::DensityMatrixGpu { .. } => {
+            Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits))
+        }
         other => Err(PrismError::IncompatibleBackend {
             backend: format!("{other:?}"),
             reason: "a start state other than |0...0> runs on the statevector or the density \

@@ -251,7 +251,7 @@ Pass an explicit one to override it.
 | `density_matrix()` | Exact mixed states, never chosen by `auto()` |
 | `stochastic_pauli(num_samples=1000)` | Sampled Pauli propagation |
 | `deterministic_pauli(epsilon=0.0, max_terms=65536)` | Truncated Pauli propagation |
-| `auto_gpu(context)`, `statevector_gpu(context)`, `stabilizer_gpu(context)` | CUDA device paths, see [GPU backends](#gpu-backends) |
+| `auto_gpu(context)`, `statevector_gpu(context)`, `stabilizer_gpu(context)`, `density_matrix_gpu(context)` | CUDA device paths, see [GPU backends](#gpu-backends) |
 
 The density-matrix backend stores `4^n` amplitudes, so its qubit ceiling is
 about half the statevector cap; exceeding it raises `PrismError` naming the cap.
@@ -285,6 +285,12 @@ therefore normal, not a failure signal.
 (`PRISM_STABILIZER_GPU_MIN_QUBITS`), so it runs on the host tableau unless that
 override is lowered. The device tableau is correct; the default stays high until
 benchmarks justify lowering it.
+
+`density_matrix_gpu(context)` holds the exact mixed state on the device and is the
+one device kind with no crossover and no host fallback: `auto_gpu` never selects it,
+every noisy terminal that `density_matrix()` serves answers from the device buffer,
+and a width whose `4^n` buffer does not fit in free device memory raises `PrismError`
+before anything is allocated (13 qubits on an 11 GiB card).
 
 The published wheels are built without CUDA, because two of the three wheel
 targets have no CUDA toolkit and macOS has no CUDA at all. In those wheels the

@@ -17,7 +17,15 @@ import os
 import numpy as np
 import pytest
 
-from prism_q import BackendKind, CircuitBuilder, GpuContext, PrismError, circuits, simulate
+from prism_q import (
+    BackendKind,
+    CircuitBuilder,
+    GpuContext,
+    NoiseModel,
+    PrismError,
+    circuits,
+    simulate,
+)
 
 SUPPORTED = GpuContext.is_supported()
 AVAILABLE = GpuContext.is_available()
@@ -40,7 +48,7 @@ def test_prism_require_gpu_is_honoured():
 
 
 def test_gpu_surface_exists_in_every_build():
-    for name in ("statevector_gpu", "stabilizer_gpu", "auto_gpu"):
+    for name in ("statevector_gpu", "stabilizer_gpu", "density_matrix_gpu", "auto_gpu"):
         assert hasattr(BackendKind, name)
 
 
@@ -74,6 +82,22 @@ def test_gpu_statevector_below_the_crossover_matches_host():
     device = simulate(circuit).backend(BackendKind.statevector_gpu(context)).seed(42).run()
     host = simulate(circuit).backend(BackendKind.statevector()).seed(42).run()
     np.testing.assert_allclose(device.probabilities, host.probabilities, atol=1e-12)
+
+
+@requires_device
+def test_gpu_density_matrix_matches_host_mixture():
+    circuit = _entangled_chain(6)
+    model = NoiseModel.uniform_depolarizing(circuit, 0.05)
+    context = GpuContext(0)
+    device = simulate(circuit).backend(BackendKind.density_matrix_gpu(context)).noise(model).seed(42)
+    host = simulate(circuit).backend(BackendKind.density_matrix()).noise(model).seed(42)
+    np.testing.assert_allclose(device.run().probabilities, host.run().probabilities, atol=1e-12)
+    observables = [[(0, "Z")], [(1, "X"), (2, "Z")]]
+    np.testing.assert_allclose(
+        device.expectation_values(observables),
+        host.expectation_values(observables),
+        atol=1e-12,
+    )
 
 
 @requires_device

@@ -132,6 +132,24 @@ impl PyBackendKind {
         }
     }
 
+    /// Exact mixed state held on the supplied device. Explicit only, with no
+    /// host fallback: the `4^n` buffer is budgeted against free device memory
+    /// before allocation and a width that does not fit raises `PrismError`.
+    #[staticmethod]
+    fn density_matrix_gpu(context: &PyGpuContext) -> PyPrismResult<Self> {
+        #[cfg(feature = "gpu")]
+        {
+            Ok(Self(BackendKind::DensityMatrixGpu {
+                context: context.inner.clone(),
+            }))
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = context;
+            Err(crate::gpu::unsupported())
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!("BackendKind({:?})", self.0)
     }

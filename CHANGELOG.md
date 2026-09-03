@@ -2,6 +2,59 @@
 
 All notable changes to PRISM-Q will be documented in this file.
 
+## [0.31.0] - 2026-09-03
+
+### Bug Fixes
+
+- **factored-stabilizer:** Reduce clusters before split detection (#192)([b027b82](https://github.com/AbeCoull/prism-q/commit/b027b82ed96f8546ab98dcd37732a5f14d7939a6))
+- Budget two growth allocations and pin QEC measurement conventions (#181)([530e60e](https://github.com/AbeCoull/prism-q/commit/530e60e65939905a77adf1475a034f04ed43f2db))
+
+### Documentation
+
+- Drop the performance decision log page (#190)([1ef2b6a](https://github.com/AbeCoull/prism-q/commit/1ef2b6a77a58997b5f5352c7e9c5a7cf382b4498))
+
+### Features
+
+- **circuit:** Basis and Pauli-product measurement on the builder (#211)([00054c3](https://github.com/AbeCoull/prism-q/commit/00054c39626f61c430e41ef0cd94646d2d433348))
+- **sparse:** Settable pruning threshold with honest exactness (#207)([e5aba00](https://github.com/AbeCoull/prism-q/commit/e5aba00b32215e44000e468c6a7b1d298b7d4744))
+- **mps:** Settable SVD truncation threshold (#201)([74cd9c8](https://github.com/AbeCoull/prism-q/commit/74cd9c8af31f56b80ce09cff5512b30e1d301925))
+- **sim:** Rzz, arbitrary-axis rotations, and budgeted SPD truncation (#199)([efc7fdd](https://github.com/AbeCoull/prism-q/commit/efc7fddc5b67412e38001a293637b1ed77a28ac0))
+- **tn:** Native qubit-by-qubit shot sampling (#198)([aae4b90](https://github.com/AbeCoull/prism-q/commit/aae4b90d7439a2b27334ea67fadd1985046ed25d))
+- **tn:** Mid-circuit measurement without the dense collapse (#197)([4c6f3ae](https://github.com/AbeCoull/prism-q/commit/4c6f3ae551db835d08a47cc74c331741765af0b9))
+
+### Miscellaneous
+
+- Badge the published artifacts and retarget a crate keyword (#182)([879c510](https://github.com/AbeCoull/prism-q/commit/879c51005eb310725f9ee93e97ea499f933ff825))
+
+### Performance
+
+- **dm:** Gate fusion on buffer width and batch the diagonal sandwich (#210)([cf41a1a](https://github.com/AbeCoull/prism-q/commit/cf41a1ae0aa8a50fe3ffb310b6b374d35d9342de))
+- **dm:** Fold the Rzz sandwich into one buffer pass (#209)([1a40700](https://github.com/AbeCoull/prism-q/commit/1a407003be88a4b8c9864523b467e4733dd06a17))
+- **sparse:** Parallel native shot sampling (#208)([f2c6487](https://github.com/AbeCoull/prism-q/commit/f2c648781a48ef7b6a67c4fef8357dbc513712a9))
+- **sparse:** Antidiagonal fast path for 1q gates (#206)([36b880f](https://github.com/AbeCoull/prism-q/commit/36b880f6f0898df2d6e13be21e95a768f0d15321))
+- **sim:** Parallel MPS shot sampling with whole-word unpack (#204)([5b2e54a](https://github.com/AbeCoull/prism-q/commit/5b2e54a369a428e5017f391fdef10fc600bcf5ef))
+- **mps:** Hold gate scratch across calls and halve the branch Gram (#202)([f68cb68](https://github.com/AbeCoull/prism-q/commit/f68cb687076cf74d1a45f4b8afacd2f3f1dd5df8))
+- **tn:** Plan contraction on metadata with seeded noisy restarts (#196)([dca26cc](https://github.com/AbeCoull/prism-q/commit/dca26cc969e4ed8d77892d1749ddf645400f9e80))
+- **factored-stabilizer:** Lazy destabilizers per cluster (#193)([24391ec](https://github.com/AbeCoull/prism-q/commit/24391eca8aca72ea11a00556f9b13388767e6138))
+- **density-matrix:** AVX2 kernel for the dense 2q Kraus sweep (#191)([71aa91d](https://github.com/AbeCoull/prism-q/commit/71aa91d1314760621d082370e65113a66256621d))
+- **density-matrix:** Diagonal fast path for 2q Kraus channels (#184)([7a85325](https://github.com/AbeCoull/prism-q/commit/7a8532523421865d97bb2f5dee4bda9d6be51769))
+- **stabilizer:** Run lazy destabilizers on the general Clifford route (#187)([95d8458](https://github.com/AbeCoull/prism-q/commit/95d8458cbd68d29a1a720c03e634838f1b80a4c6))
+- **mps:** Contract measurement environments once instead of twice (#188)([5a06cc2](https://github.com/AbeCoull/prism-q/commit/5a06cc257aaddee1c30dfd2a2f73d6e7c022b35c))
+- **sparse:** Monomial fast path for the fused 4x4 kernel (#189)([5ae5cf8](https://github.com/AbeCoull/prism-q/commit/5ae5cf8ada034b4b23a012a9aefe673dafbf31b6))
+- **density-matrix:** Accept fused gates and cut the channel kernels (#183)([84fd66a](https://github.com/AbeCoull/prism-q/commit/84fd66aa794c56a0271a531dbd962229221adbb3))
+
+### Bench
+
+- **sparse:** Replace misrouted fixtures with pinned-entry families (#205)([35c1a4f](https://github.com/AbeCoull/prism-q/commit/35c1a4f9d950b892ddf2b6262dd62b757e0fff1e))
+- **mps:** Routed brick-wall family at real bond (#203)([c8c0408](https://github.com/AbeCoull/prism-q/commit/c8c0408658b4b5e65c37dc823bb31433de2da4f9))
+- **mps:** Brickwork chi ladder with a pinned entangling floor (#200)([8661da2](https://github.com/AbeCoull/prism-q/commit/8661da2ea7654bfbdace9b36accce71c572ccb21))
+- **mps:** Bond-256 guard rows for the default cap (#195)([9fbf6ab](https://github.com/AbeCoull/prism-q/commit/9fbf6ab822e245acc83ba5c4880cbd50767dc311))
+- **factored-stabilizer:** Rows interleaving gates and measurements (#194)([2d430e2](https://github.com/AbeCoull/prism-q/commit/2d430e2707079dd9c22d976cbc2429db00a5e4b8))
+## [py-v0.30.0] - 2026-08-20
+
+### Miscellaneous
+
+- **python:** Release 0.30.0([592781f](https://github.com/AbeCoull/prism-q/commit/592781f76aab00ef0c8c3e294df75a3ab9c4e96a))
 ## [0.30.0] - 2026-08-20
 
 ### Bug Fixes
@@ -35,6 +88,10 @@ All notable changes to PRISM-Q will be documented in this file.
 - **qec:** Derive and export detector error models (#157)([647bcb6](https://github.com/AbeCoull/prism-q/commit/647bcb6a4951f4533571160d120208fa46c3fd86))
 - Report result provenance and close noise-surface holes (#156)([9c767a4](https://github.com/AbeCoull/prism-q/commit/9c767a4060d6c8f20919bfb6d08c8d14c3dfcd5d))
 - **distributed:** Out-of-core tiled statevector prototype (#155)([5a5e018](https://github.com/AbeCoull/prism-q/commit/5a5e01873e60753036942506a3eb6eb828b1a237))
+
+### Miscellaneous
+
+- Release([084727a](https://github.com/AbeCoull/prism-q/commit/084727a58c6de1bb73b5b8f449a7a662415a80c6))
 
 ### Performance
 

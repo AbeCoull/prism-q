@@ -23,7 +23,8 @@ use prism_q::gates::{
 };
 use prism_q::gpu::GpuContext;
 use prism_q::{
-    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, PauliTerm, Placement, circuits, sim,
+    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, Parameters, PauliTerm, Placement, circuits,
+    sim,
 };
 
 const EPS: f64 = 1e-12;
@@ -718,4 +719,35 @@ fn dm_gpu_kind_is_explicit_only() {
         host.counts(),
         "shots drawn from the same distribution"
     );
+}
+
+#[test]
+fn dm_gpu_noisy_shift_gradient_matches_cpu() {
+    let Some(f) = Fixture::try_new() else { return };
+    let circuit = circuits::hardware_efficient_ansatz(8, 1, 7);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    let params = Parameters::all_rotations(&circuit);
+    let hamiltonian: Vec<(f64, Vec<PauliTerm>)> = vec![
+        (0.7, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (-0.3, vec![PauliTerm::x(2)]),
+        (0.5, vec![PauliTerm::y(3), PauliTerm::z(4)]),
+        (0.2, vec![PauliTerm::z(7)]),
+    ];
+    let gradient = |kind: BackendKind| {
+        sim::simulate(&circuit)
+            .backend(kind)
+            .noise(&noise)
+            .seed(42)
+            .expectation_gradient_shift(&hamiltonian, &params)
+            .unwrap()
+    };
+    let device = gradient(f.kind());
+    let host = gradient(BackendKind::DensityMatrix);
+
+    assert!((device.value - host.value).abs() < 1e-10);
+    assert_eq!(device.gradient.len(), host.gradient.len());
+    for (slot, (d, h)) in device.gradient.iter().zip(&host.gradient).enumerate() {
+        assert!((d - h).abs() < 1e-10, "slot {slot}: device {d} vs host {h}");
+    }
+    assert!(host.gradient.iter().any(|g| g.abs() > 1e-3));
 }

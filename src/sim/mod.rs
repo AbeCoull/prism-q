@@ -175,8 +175,9 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     /// [`Simulate::run`], [`Simulate::marginals`], and
     /// [`Simulate::expectation_values`] answer from the exact mixture instead,
     /// which only [`BackendKind::DensityMatrix`] and its device sibling hold,
-    /// so they require one of those. [`Simulate::expectation_gradient`] rejects
-    /// a noise model on every backend.
+    /// so they require one of those, as does
+    /// [`Simulate::expectation_gradient_shift`]. [`Simulate::expectation_gradient`]
+    /// rejects a noise model on every backend.
     #[inline]
     pub fn noise(mut self, model: &'c noise::NoiseModel) -> Self {
         self.noise_model = Some(model);
@@ -535,8 +536,8 @@ impl<'c> Simulate<'c, Seeded> {
             return Err(PrismError::IncompatibleBackend {
                 backend: format!("{:?}", self.kind),
                 reason: "the adjoint method backpropagates through a pure state, so no backend \
-                         has a noisy gradient path; drop the noise model, or differentiate noisy \
-                         `expectation_values` numerically"
+                         has a noisy adjoint path; drop the noise model, or take \
+                         `expectation_gradient_shift` on the density-matrix backend"
                     .into(),
             });
         }
@@ -564,11 +565,14 @@ impl<'c> Simulate<'c, Seeded> {
     ///
     /// Serves the cases [`Simulate::expectation_gradient`] declines: any
     /// backend with a native observable path, circuits containing `QftBlock`,
-    /// and widths past the statevector cap. It differentiates the same gate set
-    /// (`Rx`, `Ry`, `Rz`, `Rzz`, `P`, `PauliRot`) at `1 + 2 * links` circuit evaluations
-    /// against the adjoint's one, so the adjoint stays the better choice where
-    /// it applies. A backend with no native observable path reports
-    /// `BackendUnsupported` naming itself. See
+    /// widths past the statevector cap, and a noise model. It differentiates the
+    /// same gate set (`Rx`, `Ry`, `Rz`, `Rzz`, `P`, `PauliRot`) at `1 + 2 * links`
+    /// circuit evaluations against the adjoint's one, so the adjoint stays the
+    /// better choice where it applies. A backend with no native observable path
+    /// reports `BackendUnsupported` naming itself. Under a noise model every
+    /// evaluation reads the exact mixture, so the backend must be
+    /// [`BackendKind::DensityMatrix`] or its device sibling; the shift stays
+    /// exact because the channels do not depend on the shifted angle. See
     /// [`gradient::run_expectation_gradient_shift`].
     #[inline]
     pub fn expectation_gradient_shift(
@@ -580,11 +584,13 @@ impl<'c> Simulate<'c, Seeded> {
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
         }
-        if self.noise_model.is_some() {
+        if self.noise_model.is_some() && !self.kind.is_density_matrix() {
             return Err(PrismError::IncompatibleBackend {
                 backend: format!("{:?}", self.kind),
-                reason: "noisy parameter-shift gradients are not wired; drop the noise model, or \
-                         differentiate noisy `expectation_values` numerically"
+                reason: "a parameter-shift gradient under a noise model evaluates the exact \
+                         mixed state, which only the density-matrix backend holds; select \
+                         `BackendKind::DensityMatrix` or its device sibling, or drop the noise \
+                         model"
                     .into(),
             });
         }
@@ -593,6 +599,7 @@ impl<'c> Simulate<'c, Seeded> {
             self.circuit,
             hamiltonian,
             params,
+            self.noise_model,
             self.initial_state,
             seed,
         )
@@ -2761,10 +2768,7 @@ fn run_shots_per_shot(
             .map(|((sub, _, _), plan)| {
                 let probe = plan.build(seed);
                 let expanded = expand_for_backend(&*probe, sub);
-                std::borrow::Cow::Owned(
-                    crate::circuit::fusion::fuse_circuit(&expanded, plan.supports_fused())
-                        .into_owned(),
-                )
+                std::borrow::Cow::Owned(fuse_for_backend(&*probe, &expanded).into_owned())
             })
             .collect();
 
@@ -2790,7 +2794,7 @@ fn run_shots_per_shot(
         let plan = resolve_backend(&kind, circuit, has_partial_independence);
         let probe = plan.build(seed);
         let expanded = expand_for_backend(&*probe, circuit);
-        let fused = crate::circuit::fusion::fuse_circuit(&expanded, plan.supports_fused());
+        let fused = fuse_for_backend(&*probe, &expanded);
 
         collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
             let mut backend = plan.build(shot_seed);

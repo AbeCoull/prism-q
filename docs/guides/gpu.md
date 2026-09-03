@@ -68,7 +68,7 @@ currently free VRAM is rejected at `init` with an error naming the requested and
 device memory; `GpuContext::max_qubits_for_statevector` reports the advisory cap from
 free memory.
 
-The three `BackendKind` entry points are also reachable from Python, from a build
+The four `BackendKind` entry points are also reachable from Python, from a build
 carrying the `gpu` feature. See [Python Bindings](python.md#gpu-backends).
 
 ## Module layout (`src/gpu/`)

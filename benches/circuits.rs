@@ -1694,6 +1694,36 @@ fn bench_gradient(c: &mut Criterion) {
     group.finish();
 }
 
+/// Parameter shift under a noise model: every evaluation evolves the exact
+/// mixture, so two linked slots cost five density-matrix evolutions.
+fn bench_gradient_density_matrix(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gradient/density_matrix");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 1, SEED);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        let mut params = Parameters::new(2);
+        params.link(0, 0);
+        params.link(1, 1);
+        let ham = z_chain_hamiltonian(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::DensityMatrix)
+                        .noise(&noise)
+                        .seed(SEED)
+                        .expectation_gradient_shift(&ham, &params)
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_gradient_qaoa(c: &mut Criterion) {
     let mut group = c.benchmark_group("gradient/qaoa_l1");
     configure_group(&mut group);
@@ -2997,6 +3027,45 @@ fn bench_density_matrix_noisy_shots(c: &mut Criterion) {
     group.finish();
 }
 
+/// The per-shot density-matrix route: a mid-circuit measurement feeding a
+/// conditional keeps the shot loop off the terminal-probabilities shortcut,
+/// so every shot replays the circuit the shot path fused (or did not).
+fn bench_density_matrix_shots_fused(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/shots_fused");
+    configure_group(&mut group);
+
+    for &n in &[10, 12] {
+        let mut circuit = circuits::random_circuit(n, 4, SEED);
+        circuit.num_classical_bits = n;
+        let middle = circuit.instructions.len() / 2;
+        circuit.instructions.insert(
+            middle,
+            Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(0),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[1]),
+            },
+        );
+        circuit.instructions.insert(
+            middle,
+            Instruction::Measure {
+                qubit: 0,
+                classical_bit: 0,
+            },
+        );
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(run_shots_with(BackendKind::DensityMatrix, circ, 2, SEED).unwrap());
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Clifford layers over `n` qubits, emitted either as bare instructions or as
 /// one guarded region per layer.
 ///
@@ -3244,6 +3313,7 @@ criterion_group! {
     // Adjoint gradient (adjoint vs finite-difference per parameter)
     bench_gradient,
     bench_gradient_qaoa,
+    bench_gradient_density_matrix,
     bench_gradient_prefix,
     // Variational loop iteration (rebuild vs rebind under simulation cost)
     bench_vqe_loop,
@@ -3286,6 +3356,7 @@ criterion_group! {
     bench_density_matrix_exact_vs_trajectory,
     bench_density_matrix_noisy_channels,
     bench_density_matrix_noisy_shots,
+    bench_density_matrix_shots_fused,
     bench_density_matrix_neutrality,
     // Dynamic circuits (guard cost, dead-region predicate, per-shot cliff)
     bench_dynamic_guarded_region,

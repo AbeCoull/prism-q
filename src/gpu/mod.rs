@@ -12,6 +12,8 @@
 //! - `kernels::dense`: statevector kernels (CUDA C source plus launch helpers)
 //! - `kernels::stabilizer`: stabilizer tableau and measurement kernels
 //! - `kernels::bts`: compiled-sampler BTS kernels
+//! - `kernels::density`: channel and readout sweeps for the density matrix,
+//!   which embeds its `4^n` buffer as a `2n`-qubit statevector
 //!
 //! # Device state layout
 //!
@@ -258,6 +260,19 @@ impl GpuContext {
             Some(bytes) => Ok(bytes <= self.vram_available()?),
             None => Ok(false),
         }
+    }
+
+    /// Block until every kernel queued on this context's stream has finished.
+    ///
+    /// Launches are asynchronous, so a caller timing device work must call
+    /// this before reading the clock; a readback synchronizes on its own.
+    pub fn synchronize(&self) -> Result<()> {
+        self.device.stream()?.synchronize().map_err(|e| {
+            crate::error::PrismError::BackendUnsupported {
+                backend: "gpu".to_string(),
+                operation: format!("synchronize: {e}"),
+            }
+        })
     }
 
     pub(crate) fn device(&self) -> &GpuDevice {

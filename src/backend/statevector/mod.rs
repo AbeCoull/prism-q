@@ -567,6 +567,16 @@ impl StatevectorBackend {
         false
     }
 
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_state(&self) -> Option<&GpuState> {
+        self.gpu_state.as_ref()
+    }
+
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_state_mut(&mut self) -> Option<&mut GpuState> {
+        self.gpu_state.as_mut()
+    }
+
     /// Initialize the backend from a pre-computed state vector.
     ///
     /// Accepts ownership of the amplitude vector, bypassing the default |0...0⟩

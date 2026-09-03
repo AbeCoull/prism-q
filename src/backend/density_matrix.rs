@@ -12,8 +12,11 @@
 //! # Memory layout
 //!
 //! Memory is `16 * 4^n` bytes (`4^n` `Complex64` entries), so the practical
-//! ceiling is about 14 qubits on a 16 GiB host and 15 on a 32 GiB host. CPU only.
-//! This backend is explicit-dispatch only and is never chosen by `Auto`.
+//! ceiling is about 14 qubits on a 16 GiB host and 15 on a 32 GiB host. With a
+//! device attached through [`DensityMatrixBackend::with_gpu`] the buffer lives in
+//! VRAM instead, where an 11 GiB card holds 13 qubits (1 GiB at 13, 4 GiB at 14
+//! plus scratch), and every sweep runs as a kernel over the embedded buffer. This
+//! backend is explicit-dispatch only and is never chosen by `Auto`.
 //!
 //! # Gate support
 //!
@@ -51,12 +54,13 @@
 //! - Noisy circuits with mid-circuit measurement or classical conditioning.
 //!   The mixture holds every branch at once, so per-shot feedback cannot be
 //!   replayed from it and the noisy terminals reject those shapes.
-//! - Gradients under noise. Both gradient terminals decline a noise model, for
-//!   different reasons: the adjoint backpropagates against a pure state and a
-//!   channel has no reverse evolution to walk, while parameter shift is exact
-//!   on a mixture and simply not wired.
+//! - Adjoint gradients under noise. The adjoint backpropagates against a pure
+//!   state and a channel has no reverse evolution to walk; the parameter-shift
+//!   terminal serves the noisy gradient from the mixture instead.
 
 use std::borrow::Cow;
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
 
 use num_complex::Complex64;
 use rand::{RngExt, SeedableRng};
@@ -69,6 +73,8 @@ use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate, McuData, diag_entries_phase, mat_mul_4x4};
+#[cfg(feature = "gpu")]
+use crate::gpu::{GpuContext, GpuState, kernels::density as dk};
 use crate::sim::i_pow;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -281,12 +287,48 @@ fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
     }
 }
 
+/// Reject a mixture the device cannot hold before anything is allocated: the
+/// `4^n` buffer at 16 bytes per entry plus the `2^n` diagonal scratch. A
+/// context that cannot report free memory falls through to the allocation,
+/// whose own error stays authoritative.
+#[cfg(feature = "gpu")]
+fn check_device_budget(context: &GpuContext, num_qubits: usize) -> Result<()> {
+    if 2 * num_qubits >= usize::BITS as usize - 4 {
+        return Ok(());
+    }
+    let Ok(free) = context.vram_available() else {
+        return Ok(());
+    };
+    let needed = (1usize << (2 * num_qubits)) * 16 + (1usize << num_qubits) * 8;
+    if needed > free {
+        return Err(crate::error::PrismError::IncompatibleBackend {
+            backend: "density_matrix-gpu".to_string(),
+            reason: format!(
+                "circuit has {num_qubits} qubits needing {} MiB of device memory for the \
+                 4^n mixture, exceeding the {} MiB free on the GPU",
+                needed >> 20,
+                free >> 20
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The channel entry points are infallible by signature, so a device launch
+/// that fails under one has nowhere to report and stops the run instead.
+#[cfg(feature = "gpu")]
+fn launched<T>(result: Result<T>) -> T {
+    result.unwrap_or_else(|e| panic!("density-matrix device kernel failed: {e}"))
+}
+
 /// Exact density-matrix simulator. See the module docs for the state layout.
 pub struct DensityMatrixBackend {
     num_qubits: usize,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     sv: StatevectorBackend,
+    #[cfg(feature = "gpu")]
+    gpu_context: Option<Arc<GpuContext>>,
 }
 
 impl DensityMatrixBackend {
@@ -297,11 +339,45 @@ impl DensityMatrixBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             sv: StatevectorBackend::new(seed),
+            #[cfg(feature = "gpu")]
+            gpu_context: None,
         }
+    }
+
+    /// Hold the mixture on the device bound to `context`.
+    ///
+    /// [`Backend::init`] then allocates the `4^n` buffer in device memory after a
+    /// budget check against the free VRAM, and every sweep runs as a kernel. A
+    /// device that cannot hold the state is an error at `init`, never a host
+    /// fallback. The channel entry points keep their infallible signatures, so
+    /// a kernel launch that fails under one of them panics.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu(mut self, context: Arc<GpuContext>) -> Self {
+        self.gpu_context = Some(context.clone());
+        self.sv = self.sv.with_gpu(context);
+        self
+    }
+
+    /// The device state with its context, when the mixture is resident there.
+    #[cfg(feature = "gpu")]
+    fn device(&mut self) -> Option<(Arc<GpuContext>, &mut GpuState)> {
+        let gpu = self.sv.gpu_state_mut()?;
+        let ctx = gpu.context().clone();
+        Some((ctx, gpu))
+    }
+
+    /// The full `4^n` buffer, row-major as the module docs lay it out. Reads
+    /// back from the device when the mixture is resident there.
+    pub fn density_matrix(&self) -> Result<Vec<Complex64>> {
+        self.sv.export_statevector()
     }
 
     /// Purity `Tr(rho^2)`, equal to `1` for a pure state and less otherwise.
     pub fn purity(&self) -> f64 {
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.sv.gpu_state() {
+            return launched(dk::norm_sqr(gpu.context(), gpu, self.num_qubits));
+        }
         crate::backend::state_norm_sqr(&self.sv.state)
     }
 
@@ -310,7 +386,14 @@ impl DensityMatrixBackend {
         1usize << self.num_qubits
     }
 
-    fn conjugate_buffer(&mut self) {
+    fn conjugate_buffer(&mut self) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        {
+            let n = self.num_qubits;
+            if let Some((ctx, gpu)) = self.device() {
+                return dk::conjugate(&ctx, gpu, n);
+            }
+        }
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::*;
@@ -319,12 +402,23 @@ impl DensityMatrixBackend {
                     .state
                     .par_iter_mut()
                     .for_each(|amp| *amp = amp.conj());
-                return;
+                return Ok(());
             }
         }
         for amp in self.sv.state.iter_mut() {
             *amp = amp.conj();
         }
+        Ok(())
+    }
+
+    /// A two-qubit matrix on the embedded buffer, on whichever side holds it.
+    fn fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if let Some((ctx, gpu)) = self.device() {
+            return crate::gpu::kernels::dense::launch_apply_fused_2q(&ctx, gpu, q0, q1, mat);
+        }
+        self.sv.apply_fused_2q(q0, q1, mat);
+        Ok(())
     }
 
     /// Apply a compiled one-qubit block superoperator in a single buffer pass.
@@ -334,9 +428,9 @@ impl DensityMatrixBackend {
     /// statevector two-qubit kernel applies `S` directly. That kernel indexes
     /// its matrix as `2 * bit(q0) + bit(q1)`, matching the block index `2a + b`
     /// once the row bit is passed as `q0`.
-    fn apply_block_superoperator(&mut self, qubit: usize, s: &[[Complex64; 4]; 4]) {
+    fn apply_block_superoperator(&mut self, qubit: usize, s: &[[Complex64; 4]; 4]) -> Result<()> {
         let n = self.num_qubits;
-        self.sv.apply_fused_2q(qubit + n, qubit, s);
+        self.fused_2q(qubit + n, qubit, s)
     }
 
     /// Evolve `rho -> U rho U^dagger` for the unitary `gate` on `targets`.
@@ -381,14 +475,13 @@ impl DensityMatrixBackend {
                 return Ok(());
             }
             Gate::Rzz(theta) => {
-                self.apply_rzz_sandwich(targets[0], targets[1], *theta);
-                return Ok(());
+                return self.apply_rzz_sandwich(targets[0], targets[1], *theta);
             }
             Gate::Multi2q(data) => {
                 for &(q0, q1, ref mat) in data.gates.iter() {
-                    self.sv.apply_fused_2q(q0 + n, q1 + n, mat);
+                    self.fused_2q(q0 + n, q1 + n, mat)?;
                 }
-                if kernels::multi_2q_single_tier(&data.gates) {
+                if !self.sv.is_gpu_resident() && kernels::multi_2q_single_tier(&data.gates) {
                     let conjugated: Vec<(usize, usize, [[Complex64; 4]; 4])> = data
                         .gates
                         .iter()
@@ -397,7 +490,7 @@ impl DensityMatrixBackend {
                     self.sv.apply_multi_2q(&conjugated);
                 } else {
                     for &(q0, q1, ref mat) in data.gates.iter() {
-                        self.sv.apply_fused_2q(q0, q1, &conjugate_4x4(mat));
+                        self.fused_2q(q0, q1, &conjugate_4x4(mat))?;
                     }
                 }
                 return Ok(());
@@ -406,8 +499,7 @@ impl DensityMatrixBackend {
         }
 
         if let Some(entries) = diagonal_batch_entries(gate, targets) {
-            self.apply_diagonal_sandwich(&entries);
-            return Ok(());
+            return self.apply_diagonal_sandwich(&entries);
         }
 
         let ket_targets: SmallVec<[usize; 4]> = targets.iter().map(|&t| t + n).collect();
@@ -424,26 +516,24 @@ impl DensityMatrixBackend {
             });
         }
 
-        self.conjugate_buffer();
+        self.conjugate_buffer()?;
         self.sv.apply(&Instruction::Gate {
             gate: gate.clone(),
             targets: bra_targets,
         })?;
-        self.conjugate_buffer();
-        Ok(())
+        self.conjugate_buffer()
     }
 
     /// Evolve `rho -> U rho U^dagger` for a one-qubit `U`.
     ///
-    /// Above the parallel threshold the two products compile to one block
-    /// superoperator and sweep the buffer once; below it the superoperator's
-    /// dense 4x4 block loses to two cheap register passes.
+    /// Above the parallel threshold, and always on the device, the two products
+    /// compile to one block superoperator and sweep the buffer once; below it
+    /// the superoperator's dense 4x4 block loses to two cheap register passes.
     fn apply_1q_sandwich(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
         let n = self.num_qubits;
-        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+        if self.sv.is_gpu_resident() || 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             let s = block_superoperator(&[*matrix]);
-            self.apply_block_superoperator(qubit, &s);
-            return Ok(());
+            return self.apply_block_superoperator(qubit, &s);
         }
         self.sv.apply_1q_matrix(qubit + n, matrix)?;
         self.sv.apply_1q_matrix(qubit, &conjugate_2x2(matrix))
@@ -460,7 +550,7 @@ impl DensityMatrixBackend {
     /// generic route's two register passes therefore collapse onto the single
     /// contiguous pass [`DensityMatrixBackend::kraus_2q_diagonal_sweep`]
     /// already runs for a diagonal channel.
-    fn apply_rzz_sandwich(&mut self, q0: usize, q1: usize, theta: f64) {
+    fn apply_rzz_sandwich(&mut self, q0: usize, q1: usize, theta: f64) -> Result<()> {
         let phase = [
             Complex64::from_polar(1.0, -theta / 2.0),
             Complex64::from_polar(1.0, theta / 2.0),
@@ -473,7 +563,7 @@ impl DensityMatrixBackend {
                 diag[4 * tr + tc] = phase[pr] * phase[pc].conj();
             }
         }
-        self.kraus_2q_diagonal_sweep(&diag, q0, q1);
+        self.kraus_2q_diagonal_sweep(&diag, q0, q1)
     }
 
     /// Evolve `rho -> D rho D^dagger` for a diagonal batch `D` in one buffer
@@ -490,10 +580,16 @@ impl DensityMatrixBackend {
     ///
     /// Entry order does not matter, all of them being diagonal, so the tier
     /// reordering the tiled payloads have to avoid cannot arise here.
-    fn apply_diagonal_sandwich(&mut self, entries: &[DiagEntry]) {
+    fn apply_diagonal_sandwich(&mut self, entries: &[DiagEntry]) -> Result<()> {
         let n = self.num_qubits;
         let d = self.dim();
         let ket: Vec<Complex64> = (0..d).map(|r| diag_entries_phase(r, entries)).collect();
+
+        #[cfg(feature = "gpu")]
+        if let Some((ctx, gpu)) = self.device() {
+            return dk::diagonal_sandwich(&ctx, gpu, n, &ket);
+        }
+
         let bra: Vec<Complex64> = ket.iter().map(|f| f.conj()).collect();
 
         #[cfg(feature = "parallel")]
@@ -509,39 +605,51 @@ impl DensityMatrixBackend {
                 .for_each(|(idx, amp)| {
                     *amp *= ket[idx >> n] * bra[idx & (d - 1)];
                 });
-            return;
+            return Ok(());
         }
 
         for (idx, amp) in self.sv.state.iter_mut().enumerate() {
             *amp *= ket[idx >> n] * bra[idx & (d - 1)];
         }
+        Ok(())
     }
 
     /// `P(qubit = |1>) = Tr(P_1 rho)`, the sum of the diagonal `rho` entries
     /// whose row index has `qubit` set.
-    fn prob_one(&self, qubit: usize) -> f64 {
+    fn prob_one(&self, qubit: usize) -> Result<f64> {
         let d = self.dim();
         let bit = 1usize << qubit;
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.sv.gpu_state() {
+            let diag = dk::diagonal(gpu.context(), gpu, self.num_qubits)?;
+            let p1: f64 = diag
+                .iter()
+                .enumerate()
+                .filter(|(r, _)| r & bit != 0)
+                .map(|(_, p)| p)
+                .sum();
+            return Ok(p1.clamp(0.0, 1.0));
+        }
         let mut p1 = 0.0;
         for r in 0..d {
             if r & bit != 0 {
                 p1 += self.sv.state[r * d + r].re;
             }
         }
-        p1.clamp(0.0, 1.0)
+        Ok(p1.clamp(0.0, 1.0))
     }
 
     /// Sample and project qubit `qubit`, recording the outcome in
     /// `classical_bit`. Collapses `rho -> P_m rho P_m / p_m`, which in the
     /// embedded layout zeroes every entry whose row or column disagrees with
     /// the outcome on `qubit` and rescales the survivors to unit trace.
-    fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
-        let p1 = self.prob_one(qubit);
+    fn apply_measure(&mut self, qubit: usize, classical_bit: usize) -> Result<()> {
+        let p1 = self.prob_one(qubit)?;
         let u: f64 = self.rng.random();
         let outcome = u < p1;
         self.classical_bits[classical_bit] = outcome;
         let p = if outcome { p1 } else { 1.0 - p1 };
-        self.project(qubit, outcome, p);
+        self.project(qubit, outcome, p)
     }
 
     /// Deterministic reset `rho -> |0><0| (x) tr_q rho`: fold the block with
@@ -549,8 +657,12 @@ impl DensityMatrixBackend {
     /// then zero the three sibling entries that still touch `qubit`. The four
     /// entry classes are contiguous runs of the buffer, so the pass walks
     /// `2 * rmask` blocks rather than scattering per block base.
-    fn apply_reset(&mut self, qubit: usize) {
+    fn apply_reset(&mut self, qubit: usize) -> Result<()> {
         let n = self.num_qubits;
+        #[cfg(feature = "gpu")]
+        if let Some((ctx, gpu)) = self.device() {
+            return dk::reset(&ctx, gpu, n, qubit);
+        }
         let rmask = 1usize << (qubit + n);
         let cmask = 1usize << qubit;
         let block_size = rmask << 1;
@@ -569,7 +681,7 @@ impl DensityMatrixBackend {
                         let (r0, r1) = block.split_at_mut(rmask);
                         reset_fold_pair(r0, r1, cmask);
                     });
-                return;
+                return Ok(());
             }
 
             let tile = row_aligned_tile(cmask, rmask);
@@ -579,22 +691,28 @@ impl DensityMatrixBackend {
                     .zip(r1.par_chunks_mut(tile))
                     .for_each(|(t0, t1)| reset_fold_pair(t0, t1, cmask));
             }
-            return;
+            return Ok(());
         }
 
         for block in self.sv.state.chunks_mut(block_size) {
             let (r0, r1) = block.split_at_mut(rmask);
             reset_fold_pair(r0, r1, cmask);
         }
+        Ok(())
     }
 
     /// Project `rho` onto the `outcome` subspace of `qubit` with outcome
     /// probability `p`, renormalizing the survivors to unit trace.
-    fn project(&mut self, qubit: usize, outcome: bool, p: f64) {
+    fn project(&mut self, qubit: usize, outcome: bool, p: f64) -> Result<()> {
         let n = self.num_qubits;
         let rmask = 1usize << (qubit + n);
         let cmask = 1usize << qubit;
         let scale = Complex64::new(1.0 / p.clamp(NORM_CLAMP_MIN, 1.0), 0.0);
+
+        #[cfg(feature = "gpu")]
+        if let Some((ctx, gpu)) = self.device() {
+            return dk::project(&ctx, gpu, n, qubit, outcome, scale.re);
+        }
 
         #[cfg(feature = "parallel")]
         if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
@@ -610,12 +728,13 @@ impl DensityMatrixBackend {
                 .for_each(|(t, chunk)| {
                     project_tile(chunk, t * tile, rmask, cmask, outcome, scale);
                 });
-            return;
+            return Ok(());
         }
 
         for (t, chunk) in self.sv.state.chunks_mut(rmask).enumerate() {
             project_tile(chunk, t * rmask, rmask, cmask, outcome, scale);
         }
+        Ok(())
     }
 
     fn apply_conditional(
@@ -636,7 +755,18 @@ impl DensityMatrixBackend {
     /// buffer is swept once with no per-element allocation.
     pub fn apply_1q_kraus(&mut self, qubit: usize, kraus: &[[[Complex64; 2]; 2]]) {
         let s = block_superoperator(kraus);
-        self.apply_block_superoperator(qubit, &s);
+        self.apply_block_superoperator_infallible(qubit, &s);
+    }
+
+    /// [`DensityMatrixBackend::apply_block_superoperator`] for the entry points
+    /// that carry no error channel: the host path cannot fail and a device
+    /// launch failure stops the run.
+    fn apply_block_superoperator_infallible(&mut self, qubit: usize, s: &[[Complex64; 4]; 4]) {
+        let result = self.apply_block_superoperator(qubit, s);
+        #[cfg(feature = "gpu")]
+        launched(result);
+        #[cfg(not(feature = "gpu"))]
+        result.expect("host block superoperator is infallible");
     }
 
     /// Apply `gate` and then every Kraus set in `channels`, all one-qubit maps
@@ -660,7 +790,7 @@ impl DensityMatrixBackend {
         for kraus in channels {
             s = mat_mul_4x4(&block_superoperator(kraus), &s);
         }
-        self.apply_block_superoperator(qubit, &s);
+        self.apply_block_superoperator_infallible(qubit, &s);
         true
     }
 
@@ -683,6 +813,15 @@ impl DensityMatrixBackend {
         let alpha = 1.0 - 16.0 * p / 15.0;
         let beta = 4.0 * p / 15.0;
         let (positions, flats, num_groups) = self.block_layout(q0, q1);
+
+        #[cfg(feature = "gpu")]
+        {
+            let n = self.num_qubits;
+            if let Some((ctx, gpu)) = self.device() {
+                launched(dk::depolarizing_2q(&ctx, gpu, n, q0, q1, alpha, beta));
+                return;
+            }
+        }
 
         #[cfg(feature = "parallel")]
         if 2 * self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
@@ -820,8 +959,21 @@ impl DensityMatrixBackend {
             .all(|(r, row)| row.iter().enumerate().all(|(c, &e)| r == c || e == zero));
         if diagonal {
             let diag = std::array::from_fn(|i| s[i][i]);
-            self.kraus_2q_diagonal_sweep(&diag, q0, q1);
+            let result = self.kraus_2q_diagonal_sweep(&diag, q0, q1);
+            #[cfg(feature = "gpu")]
+            launched(result);
+            #[cfg(not(feature = "gpu"))]
+            result.expect("host diagonal sweep is infallible");
             return;
+        }
+
+        #[cfg(feature = "gpu")]
+        {
+            let n = self.num_qubits;
+            if let Some((ctx, gpu)) = self.device() {
+                launched(dk::kraus_2q_dense(&ctx, gpu, n, q0, q1, &s));
+                return;
+            }
         }
 
         #[cfg(target_arch = "x86_64")]
@@ -888,8 +1040,18 @@ impl DensityMatrixBackend {
     /// Apply a diagonal block superoperator in one contiguous pass: the
     /// amplitude at `idx` is scaled by `diag[diag_slot(idx, q0, q1, n)]`, one
     /// complex multiply against the dense sweep's 16 multiply-accumulates.
-    fn kraus_2q_diagonal_sweep(&mut self, diag: &[Complex64; 16], q0: usize, q1: usize) {
+    fn kraus_2q_diagonal_sweep(
+        &mut self,
+        diag: &[Complex64; 16],
+        q0: usize,
+        q1: usize,
+    ) -> Result<()> {
         let n = self.num_qubits;
+
+        #[cfg(feature = "gpu")]
+        if let Some((ctx, gpu)) = self.device() {
+            return dk::kraus_2q_diagonal(&ctx, gpu, n, q0, q1, diag);
+        }
 
         #[cfg(feature = "parallel")]
         if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
@@ -905,12 +1067,13 @@ impl DensityMatrixBackend {
                 .for_each(move |(idx, amp)| {
                     *amp *= diag[diag_slot(idx, q0, q1, n)];
                 });
-            return;
+            return Ok(());
         }
 
         for (idx, amp) in self.sv.state.iter_mut().enumerate() {
             *amp *= diag[diag_slot(idx, q0, q1, n)];
         }
+        Ok(())
     }
 
     /// Sweep the buffer applying the compiled 16x16 block superoperator `s`,
@@ -1024,6 +1187,19 @@ impl DensityMatrixBackend {
     /// an observable is unchanged.
     pub fn expectations_pauli(&self, masks: &[(usize, usize, u32)]) -> Vec<f64> {
         let d = self.dim();
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.sv.gpu_state() {
+            let pairs: Vec<(u64, u64)> = masks
+                .iter()
+                .map(|&(x, z, _)| (x as u64, z as u64))
+                .collect();
+            let sums = launched(dk::pauli_sums(gpu.context(), gpu, self.num_qubits, &pairs));
+            return sums
+                .iter()
+                .zip(masks)
+                .map(|(value, &(_, _, num_y))| (value * i_pow(num_y)).re)
+                .collect();
+        }
         let mut acc = vec![Complex64::new(0.0, 0.0); masks.len()];
         for j in 0..d {
             let row = &self.sv.state[j * d..(j + 1) * d];
@@ -1052,7 +1228,25 @@ impl Backend for DensityMatrixBackend {
         crate::sim::ResolvedBackend::DensityMatrix
     }
 
+    fn placement(&self) -> crate::sim::Placement {
+        if self.sv.is_gpu_resident() {
+            crate::sim::Placement::Device
+        } else {
+            crate::sim::Placement::Host
+        }
+    }
+
+    /// With a device attached the host cap does not apply: the mixture is
+    /// budgeted against free VRAM instead, before anything is allocated.
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if let Some(ctx) = &self.gpu_context {
+            check_device_budget(ctx, num_qubits)?;
+            self.num_qubits = num_qubits;
+            self.classical_bits = vec![false; num_classical_bits];
+            return self.sv.init(2 * num_qubits, 0);
+        }
+
         crate::backend::check_state_allocation(
             "density_matrix",
             num_qubits,
@@ -1081,6 +1275,11 @@ impl Backend for DensityMatrixBackend {
         let num_qubits = amplitudes.len().trailing_zeros() as usize;
         self.init(num_qubits, num_classical_bits)?;
 
+        #[cfg(feature = "gpu")]
+        if let Some((ctx, gpu)) = self.device() {
+            return dk::outer_product(&ctx, gpu, num_qubits, &amplitudes);
+        }
+
         let d = amplitudes.len();
         for (row, &amp) in amplitudes.iter().enumerate() {
             let dst = &mut self.sv.state[row * d..(row + 1) * d];
@@ -1098,14 +1297,8 @@ impl Backend for DensityMatrixBackend {
             Instruction::Measure {
                 qubit,
                 classical_bit,
-            } => {
-                self.apply_measure(*qubit, *classical_bit);
-                Ok(())
-            }
-            Instruction::Reset { qubit } => {
-                self.apply_reset(*qubit);
-                Ok(())
-            }
+            } => self.apply_measure(*qubit, *classical_bit),
+            Instruction::Reset { qubit } => self.apply_reset(*qubit),
             Instruction::Conditional {
                 condition,
                 gate,
@@ -1121,6 +1314,14 @@ impl Backend for DensityMatrixBackend {
 
     fn probabilities(&self) -> Result<Vec<f64>> {
         let d = self.dim();
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.sv.gpu_state() {
+            let mut diag = dk::diagonal(gpu.context(), gpu, self.num_qubits)?;
+            for p in &mut diag {
+                *p = p.max(0.0);
+            }
+            return Ok(diag);
+        }
         let mut probs = vec![0.0f64; d];
         for (k, p) in probs.iter_mut().enumerate() {
             *p = self.sv.state[k * d + k].re.max(0.0);
@@ -1146,12 +1347,11 @@ impl Backend for DensityMatrixBackend {
     }
 
     fn qubit_probability(&self, qubit: usize) -> Result<f64> {
-        Ok(self.prob_one(qubit))
+        self.prob_one(qubit)
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {
-        self.apply_reset(qubit);
-        Ok(())
+        self.apply_reset(qubit)
     }
 
     fn supports_pauli_expectation(&self) -> bool {
@@ -1169,10 +1369,23 @@ impl Backend for DensityMatrixBackend {
         Ok(self.expectations_pauli(&masks))
     }
 
+    /// On the device the four entries come from the Pauli sums `T`, `Z`, `X`,
+    /// and `Y` on `qubit`: the diagonal is `(T +- Z) / 2` and the off-diagonal
+    /// pair is `(X +- Y) / 2`, where `Y` carries the row sign and no `i`.
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         let n = self.num_qubits;
         let d = self.dim();
         let bit = 1usize << qubit;
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.sv.gpu_state() {
+            let b = bit as u64;
+            let sums = dk::pauli_sums(gpu.context(), gpu, n, &[(0, 0), (0, b), (b, 0), (b, b)])?;
+            let (t, z, x, y) = (sums[0], sums[1], sums[2], sums[3]);
+            return Ok([
+                [(t + z) * 0.5, (x + y) * 0.5],
+                [(x - y) * 0.5, (t - z) * 0.5],
+            ]);
+        }
         let others = 1usize << (n - 1);
         let mut r00 = Complex64::new(0.0, 0.0);
         let mut r01 = Complex64::new(0.0, 0.0);

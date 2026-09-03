@@ -172,16 +172,22 @@ diagonal, so the ket and bra phases cancel wherever the two registers agree on t
 pair's parity, and the sandwich collapses to a single pass over a combined table.
 
 Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host and 15 on
-32 GiB (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). This backend is
-CPU-only and explicit-dispatch only; `Auto` never selects it.
+32 GiB (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). With a device
+attached (`BackendKind::DensityMatrixGpu`, or `with_gpu` on the backend) the buffer
+lives in VRAM, budgeted against free memory at `init`: an 11 GiB card holds 13 qubits,
+so the device lifts the ceiling by about one qubit and is a throughput arm rather than
+a width arm. On the device the unitary half still runs the dense statevector kernels
+over the embedded buffer, while the channels, projection, reset, and the diagonal and
+Pauli readouts have kernels of their own. Both kinds are explicit-dispatch only;
+`Auto` and `AutoGpu` never select them, and the device kind has no host fallback.
 
 Selecting it with a noise model attached is the exact route for every `Simulate`
-terminal except the two gradient terminals: the mixture is evolved once and observables,
-marginals, probabilities, and shots all read that one evolution. Gradients are excluded
-for two different reasons: the adjoint backpropagates against a pure state and a channel
-has no reverse evolution to walk, while parameter shift is exact on a mixture and simply
-not wired. See [Noise across the terminals](./engine.md) for
-what that route accepts and what stays on trajectory averaging.
+terminal except the adjoint gradient: the mixture is evolved once and observables,
+marginals, probabilities, and shots all read that one evolution, and the parameter-shift
+gradient evaluates the mixture once per shifted angle. The adjoint stays excluded because
+it backpropagates against a pure state and a channel has no reverse evolution to walk.
+See [Noise across the terminals](./engine.md) for what that route accepts and what stays
+on trajectory averaging.
 
 ## What a backend reports about its own result
 

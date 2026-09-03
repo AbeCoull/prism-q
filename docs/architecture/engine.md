@@ -86,9 +86,10 @@ same property that makes the density matrix the mixture oracle rather than a com
 participant in the branching families of `tests/conformance_matrix.rs`.
 
 `expectation_gradient` rejects a noise model on every backend, because the adjoint method
-backpropagates through a pure state. `expectation_gradient_shift` rejects one too, though
-the obstacle there is only that the path is not wired: the shift rule holds under a
-parameter-independent channel, so the density matrix could serve it.
+backpropagates through a pure state. `expectation_gradient_shift` accepts one on the
+density-matrix kinds: the channels do not depend on the shifted angle, so the shift rule
+holds and each of the `1 + 2 * links` evaluations reads the exact mixture. Every other
+backend rejects the pair, naming the density matrix.
 
 ## Result provenance
 

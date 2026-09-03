@@ -711,11 +711,24 @@ fn expand_for_backend<'c>(
     }
 }
 
+/// Fuse `circuit` against what `backend` accepts and how wide a buffer it
+/// sweeps, the two backend facts the pass pipeline is gated on.
+fn fuse_for_backend<'a>(
+    backend: &dyn Backend,
+    circuit: &'a Circuit,
+) -> std::borrow::Cow<'a, Circuit> {
+    crate::circuit::fusion::fuse_circuit_for_width(
+        circuit,
+        backend.supports_fused_gates(),
+        backend.fusion_state_qubits(circuit.num_qubits),
+    )
+}
+
 /// Fuse `circuit` for `backend` and apply it, leaving initialization to the
 /// caller. The start-state analogue of [`execute`], which owns the |0...0⟩ init.
 fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<()> {
     let expanded = expand_for_backend(&*backend, circuit);
-    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    let fused = fuse_for_backend(&*backend, &expanded);
     backend.apply_instructions(&fused.instructions)
 }
 
@@ -774,7 +787,7 @@ fn shots_from_initial_state(
     let plan = initial_state_plan(kind, circuit.num_qubits)?;
     let probe = plan.build(seed);
     let expanded = expand_for_backend(&*probe, circuit);
-    let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
+    let fused = fuse_for_backend(&*probe, &expanded);
 
     collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
         let mut backend = plan.build(shot_seed);
@@ -936,7 +949,7 @@ fn try_backend_probabilities(backend: &dyn Backend) -> Result<Option<Probabiliti
 /// Core execution: fuse, init, apply, extract.
 fn execute(backend: &mut dyn Backend, circuit: &Circuit, opts: &SimOptions) -> Result<RunOutcome> {
     let expanded = expand_for_backend(&*backend, circuit);
-    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    let fused = fuse_for_backend(&*backend, &expanded);
     execute_circuit(backend, &fused, opts)
 }
 
@@ -1380,7 +1393,7 @@ fn try_terminal_statevector_backend(
     let accel = accel_for(kind, Family::Statevector, stripped.num_qubits);
     let mut backend = build_statevector(&accel, seed);
     let expanded = expand_for_backend(&backend, &stripped);
-    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
 
@@ -2066,7 +2079,7 @@ fn grouped_expectation_statevector(
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let mut backend = build_statevector(&accel, seed);
     let expanded = expand_for_backend(&backend, circuit);
-    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
 
@@ -2243,7 +2256,7 @@ fn expectation_values_statevector(
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let mut backend = build_statevector(&accel, seed);
     let expanded = expand_for_backend(&backend, circuit);
-    let fused = crate::circuit::fusion::fuse_circuit(&expanded, backend.supports_fused_gates());
+    let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
 
@@ -2563,7 +2576,7 @@ fn run_shots_distributed(
 
     let probe = DistributedStatevectorBackend::new(context.clone(), seed);
     let expanded = expand_for_backend(&probe, circuit);
-    let fused = crate::circuit::fusion::fuse_circuit(&expanded, probe.supports_fused_gates());
+    let fused = fuse_for_backend(&probe, &expanded);
     let opts = SimOptions::classical_only();
     let mut shots = Vec::with_capacity(num_shots);
     let mut metadata = RunMetadata::exact(ResolvedBackend::Distributed);

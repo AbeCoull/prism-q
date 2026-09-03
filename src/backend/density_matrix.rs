@@ -24,14 +24,15 @@
 //! `apply_2q_depolarizing` taking the twirled closed form instead), and
 //! exact `Tr(rho P)` expectation (`expectation_pauli`, reachable through
 //! `pauli_expectations`). Fused gates are accepted, so `sim` fuses for this
-//! backend. The diagonal batches (`QftBlock`, `BatchPhase`, `BatchRzz`,
-//! `DiagonalBatch`) carry qubit indices outside the instruction targets and are
-//! remapped onto the ket register before the left product; the tiled shapes
-//! (`MultiFused`, `Multi2q`) apply their constituent gates one at a time
-//! instead. See [`Backend::supports_fused_gates`] for the ordering contract
-//! that requires it. `Rzz` is the one two-qubit gate that does not take the
-//! two-product route: both of its factors are diagonal, so the ket and bra
-//! phases combine into a single table and the buffer is swept once.
+//! backend, and at the `2n` width its buffer actually costs rather than at the
+//! circuit width. `QftBlock` carries qubit indices outside the instruction
+//! targets and is remapped onto the ket register before the left product; the
+//! tiled shapes (`MultiFused`, `Multi2q`) apply their constituent gates one at
+//! a time instead. See [`Backend::supports_fused_gates`] for the ordering
+//! contract that requires it. Diagonal gates do not take the two-product route
+//! at all: their two factors combine into one table, so `Rzz` and the diagonal
+//! batches (`BatchPhase`, `BatchRzz`, `DiagonalBatch`) each sweep the buffer
+//! once.
 //!
 //! # When to prefer this backend
 //!
@@ -67,7 +68,7 @@ use crate::backend::statevector::{StatevectorBackend, insert_zero_bit, kernels};
 use crate::backend::{Backend, NORM_CLAMP_MIN};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
-use crate::gates::{DiagEntry, Gate, McuData, mat_mul_4x4};
+use crate::gates::{DiagEntry, Gate, McuData, diag_entries_phase, mat_mul_4x4};
 use crate::sim::i_pow;
 use crate::sim::unified_pauli::PauliTerm;
 
@@ -230,43 +231,48 @@ fn conjugate_gate(gate: &Gate) -> Option<Gate> {
 }
 
 /// The gate with every qubit index stored inside its payload shifted onto the
-/// ket register. Offsetting the instruction targets is not enough for the
-/// diagonal batches, whose application indices live in the payload, nor for
+/// ket register. Offsetting the instruction targets is not enough for
 /// `QftBlock`, whose whole range lives in the variant. Borrows the gate when it
 /// carries no such index.
 ///
 /// `MultiFused` and `Multi2q` are deliberately absent: shifting a `Multi2q`
-/// payload reorders it, so both apply their constituents directly.
+/// payload reorders it, so both apply their constituents directly. The diagonal
+/// batches are absent for a different reason, that
+/// [`DensityMatrixBackend::apply_diagonal_sandwich`] takes them before the
+/// two-product route is reached.
+/// The batch payload as a flat [`DiagEntry`] list, or `None` for a gate that is
+/// not a diagonal batch. `BatchPhase` keeps its shared control in the
+/// instruction targets rather than in the payload, so it arrives separately.
+fn diagonal_batch_entries(gate: &Gate, targets: &[usize]) -> Option<Vec<DiagEntry>> {
+    match gate {
+        Gate::BatchPhase(data) => Some(
+            data.phases
+                .iter()
+                .map(|&(target, phase)| DiagEntry::Phase2q {
+                    q0: targets[0],
+                    q1: target,
+                    phase,
+                })
+                .collect(),
+        ),
+        Gate::BatchRzz(data) => Some(
+            data.edges
+                .iter()
+                .map(|&(q0, q1, theta)| DiagEntry::Parity2q {
+                    q0,
+                    q1,
+                    same: Complex64::from_polar(1.0, -theta / 2.0),
+                    diff: Complex64::from_polar(1.0, theta / 2.0),
+                })
+                .collect(),
+        ),
+        Gate::DiagonalBatch(data) => Some(data.entries.clone()),
+        _ => None,
+    }
+}
+
 fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
     match gate {
-        Gate::BatchPhase(data) => {
-            let mut data = data.clone();
-            for entry in &mut data.phases {
-                entry.0 += n;
-            }
-            Cow::Owned(Gate::BatchPhase(data))
-        }
-        Gate::BatchRzz(data) => {
-            let mut data = data.clone();
-            for entry in &mut data.edges {
-                entry.0 += n;
-                entry.1 += n;
-            }
-            Cow::Owned(Gate::BatchRzz(data))
-        }
-        Gate::DiagonalBatch(data) => {
-            let mut data = data.clone();
-            for entry in &mut data.entries {
-                match entry {
-                    DiagEntry::Phase1q { qubit, .. } => *qubit += n,
-                    DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
-                        *q0 += n;
-                        *q1 += n;
-                    }
-                }
-            }
-            Cow::Owned(Gate::DiagonalBatch(data))
-        }
         Gate::QftBlock { start, num } => Cow::Owned(Gate::QftBlock {
             start: start + n as u8,
             num: *num,
@@ -342,9 +348,11 @@ impl DensityMatrixBackend {
     /// conjugating the whole buffer around the gate, which costs two extra
     /// passes.
     ///
-    /// One-qubit gates take [`DensityMatrixBackend::apply_1q_sandwich`], and
-    /// `Rzz` takes [`DensityMatrixBackend::apply_rzz_sandwich`], which folds
-    /// both products into one pass rather than taking its conjugate form here.
+    /// One-qubit gates take [`DensityMatrixBackend::apply_1q_sandwich`], `Rzz`
+    /// takes [`DensityMatrixBackend::apply_rzz_sandwich`], and the diagonal
+    /// batches take [`DensityMatrixBackend::apply_diagonal_sandwich`]. All
+    /// three fold both products into one pass rather than taking a conjugate
+    /// form here.
     ///
     /// `Multi2q` carries a gate list that the statevector kernel partitions by
     /// cache tier and runs one tier at a time, which preserves application
@@ -395,6 +403,11 @@ impl DensityMatrixBackend {
                 return Ok(());
             }
             _ => {}
+        }
+
+        if let Some(entries) = diagonal_batch_entries(gate, targets) {
+            self.apply_diagonal_sandwich(&entries);
+            return Ok(());
         }
 
         let ket_targets: SmallVec<[usize; 4]> = targets.iter().map(|&t| t + n).collect();
@@ -461,6 +474,47 @@ impl DensityMatrixBackend {
             }
         }
         self.kraus_2q_diagonal_sweep(&diag, q0, q1);
+    }
+
+    /// Evolve `rho -> D rho D^dagger` for a diagonal batch `D` in one buffer
+    /// pass.
+    ///
+    /// A diagonal `D` scales `<r|rho|c>` by `f(r) * conj(f(c))`, where `f` is
+    /// the combined phase the payload puts on a basis index. The embedded
+    /// layout splits the buffer index into exactly those two operands, `r` in
+    /// the high `n` bits and `c` in the low `n`, so one table of `2^n` phases
+    /// serves both registers and the sweep reads it twice per amplitude. The
+    /// table costs `2^n` against the `4^n` buffer it saves three passes on: the
+    /// generic route has no conjugate form for these variants and pays two
+    /// register passes plus two buffer conjugations.
+    ///
+    /// Entry order does not matter, all of them being diagonal, so the tier
+    /// reordering the tiled payloads have to avoid cannot arise here.
+    fn apply_diagonal_sandwich(&mut self, entries: &[DiagEntry]) {
+        let n = self.num_qubits;
+        let d = self.dim();
+        let ket: Vec<Complex64> = (0..d).map(|r| diag_entries_phase(r, entries)).collect();
+        let bra: Vec<Complex64> = ket.iter().map(|f| f.conj()).collect();
+
+        #[cfg(feature = "parallel")]
+        if 2 * n >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use crate::backend::MIN_PAR_ELEMS;
+            use rayon::prelude::*;
+
+            self.sv
+                .state
+                .par_iter_mut()
+                .enumerate()
+                .with_min_len(MIN_PAR_ELEMS)
+                .for_each(|(idx, amp)| {
+                    *amp *= ket[idx >> n] * bra[idx & (d - 1)];
+                });
+            return;
+        }
+
+        for (idx, amp) in self.sv.state.iter_mut().enumerate() {
+            *amp *= ket[idx >> n] * bra[idx & (d - 1)];
+        }
     }
 
     /// `P(qubit = |1>) = Tr(P_1 rho)`, the sum of the diagonal `rho` entries
@@ -1083,6 +1137,12 @@ impl Backend for DensityMatrixBackend {
     /// indices would reorder.
     fn supports_fused_gates(&self) -> bool {
         true
+    }
+
+    /// The mixture is a `2n`-qubit statevector, so every fusion floor is
+    /// reached at half the circuit width the statevector needs.
+    fn fusion_state_qubits(&self, num_qubits: usize) -> usize {
+        2 * num_qubits
     }
 
     fn qubit_probability(&self, qubit: usize) -> Result<f64> {

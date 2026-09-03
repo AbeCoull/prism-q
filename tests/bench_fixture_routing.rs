@@ -72,6 +72,16 @@ fn scalability_sweep_rows_reach_their_backend() {
     }
 }
 
+// `density_matrix/rzz_layers_fused` is the one density-matrix row that runs
+// through `simulate`, so it is the one that can be claimed by the decomposed
+// route instead. 10 qubits alone: the fixture is a line graph at every width,
+// and a 12-qubit mixture costs seconds per run.
+#[test]
+fn density_matrix_fused_row_reaches_its_backend() {
+    let circuit = circuits::qaoa_circuit(10, 6, SEED);
+    assert_resolves("rzz_layers_fused/10", BackendKind::DensityMatrix, &circuit);
+}
+
 #[test]
 fn diagonal_mixed_rows_reach_their_backend() {
     for n in [16usize, 20, 22, 24, 26] {

@@ -663,29 +663,31 @@ fn count_gates(circuit: &Circuit, want: fn(&Gate) -> bool) -> usize {
 
 #[test]
 fn dm_fused_route_matches_unfused_across_fusion_widths() {
-    // 8 is below MIN_QUBITS_FOR_FUSION and fuses nothing, 10 admits one-qubit
-    // fusion, 12 the two-qubit and Multi2q passes. MultiFused needs 14 and the
-    // diagonal batches 16, both past the 4^n ceiling, so neither is reachable
-    // here and neither is covered. The payload assertions are what keep the
-    // widths meaningful: a reorder that dropped 12q to Fused2q-only would still
-    // match probabilities, and Multi2q ordering is the reason this test exists.
-    for (n, want_multi2q, want_fused1q) in [(8usize, 0, 0), (10, 0, 1), (12, 1, 0)] {
+    // The floors are gated on buffer width, and this backend's buffer at `n` is
+    // a `2n`-qubit statevector, so each one is reached at half the circuit width
+    // a statevector needs: 5 for one-qubit fusion, 6 for the two-qubit and
+    // Multi2q passes, 7 for MultiFused, 8 for the diagonal batches. 4 is below
+    // all of them and is the in-group control. The payload assertions are what
+    // keep the widths meaningful: a reorder that dropped 6q to Fused2q-only
+    // would still match probabilities, and Multi2q ordering is the reason this
+    // test exists.
+    for (n, want_multi2q, want_multifused) in [(4usize, 0, 0), (5, 0, 0), (6, 1, 0), (8, 1, 1)] {
         let circuit = circuits::random_circuit(n, 4, SEED);
-        let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+        let fused = dm_fused(&circuit);
         assert!(
             count_gates(&fused, |g| matches!(g, Gate::Multi2q(_))) >= want_multi2q,
-            "expected {want_multi2q} Multi2q at {n}q, got {:?}",
+            "expected {want_multi2q} Multi2q at {n}q, got {}",
             count_gates(&fused, |g| matches!(g, Gate::Multi2q(_)))
         );
         assert!(
-            count_gates(&fused, |g| matches!(g, Gate::Fused(_))) >= want_fused1q,
-            "expected {want_fused1q} fused 1q run at {n}q"
+            count_gates(&fused, |g| matches!(g, Gate::MultiFused(_))) >= want_multifused,
+            "expected {want_multifused} MultiFused at {n}q"
         );
-        if n == 8 {
+        if n == 4 {
             assert_eq!(
                 fused.instructions.len(),
                 circuit.instructions.len(),
-                "8q must fuse nothing, it is the control"
+                "4q must fuse nothing, it is the control"
             );
         }
         assert_fused_matches_unfused(
@@ -695,6 +697,123 @@ fn dm_fused_route_matches_unfused_across_fusion_widths() {
             &format!("density matrix fused vs unfused at {n}q"),
         );
     }
+}
+
+/// `circuit` fused the way `sim` fuses it for this backend, at the `2n` buffer
+/// width rather than the circuit width.
+fn dm_fused(circuit: &Circuit) -> Circuit {
+    prism_q::circuit::fusion::fuse_circuit_for_width(circuit, true, 2 * circuit.num_qubits)
+        .into_owned()
+}
+
+/// Probabilities after `instructions`, read in the Z, X, and Y bases.
+///
+/// A diagonal sandwich scales `<r|rho|c>` by `f(r) * conj(f(c))`, which is 1 on
+/// every diagonal entry, so a Z readout is blind to this arm however wrong it
+/// is. The two rotated readouts are what make its off-diagonal work visible.
+fn dm_probs_in_three_bases(n: usize, instructions: &[prism_q::circuit::Instruction]) -> Vec<f64> {
+    use prism_q::circuit::Instruction;
+
+    let mut out = Vec::new();
+    for basis in [&[][..], &[Gate::H][..], &[Gate::Sdg, Gate::H][..]] {
+        let mut backend = DensityMatrixBackend::new(SEED);
+        backend.init(n, 0).unwrap();
+        backend.apply_instructions(instructions).unwrap();
+        for gate in basis {
+            for q in 0..n {
+                backend
+                    .apply(&Instruction::Gate {
+                        gate: gate.clone(),
+                        targets: [q].into_iter().collect(),
+                    })
+                    .unwrap();
+            }
+        }
+        out.extend(backend.probabilities().unwrap());
+    }
+    out
+}
+
+#[test]
+fn dm_batched_diagonal_layer_matches_the_per_gate_route() {
+    // 8 qubits is where the diagonal batch floor lands for this backend. Both
+    // fixtures are seeded, and both fuse to a batch the per-gate stream has to
+    // reproduce entry for entry.
+    const N: usize = 8;
+    for (label, circuit, want_batch_rzz, want_diagonal_batch) in [
+        ("qaoa", circuits::qaoa_circuit(N, 3, SEED), 1, 0),
+        (
+            "diagonal mixed",
+            circuits::diagonal_mixed_circuit(N, 3, SEED),
+            1,
+            1,
+        ),
+    ] {
+        let fused = dm_fused(&circuit);
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::BatchRzz(_))) >= want_batch_rzz,
+            "{label}: expected a BatchRzz at {N}q"
+        );
+        assert!(
+            count_gates(&fused, |g| matches!(g, Gate::DiagonalBatch(_))) >= want_diagonal_batch,
+            "{label}: expected a DiagonalBatch at {N}q"
+        );
+        assert_probs_close(
+            &dm_probs_in_three_bases(N, &fused.instructions),
+            &dm_probs_in_three_bases(N, &circuit.instructions),
+            DM_EPS,
+            &format!("{label} batched diagonal layer vs the per-gate route"),
+        );
+    }
+}
+
+#[test]
+fn dm_multi_entry_batch_phase_matches_the_per_gate_route() {
+    // No circuit here fuses to a BatchPhase, the controlled-phase runs that
+    // would being claimed by QftBlock first, so the payload is built directly.
+    // Targets carry the shared control alone, which is where the sandwich reads
+    // it from. The preparation has to leave real coherences behind: on a
+    // computational basis state a diagonal gate is a global phase and no
+    // readout can see it.
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::BatchPhaseData;
+
+    const N: usize = 5;
+    let control = 1usize;
+    let phases: Vec<(usize, f64)> = vec![(0, 0.37), (2, 1.94), (4, -0.83)];
+
+    let mut prep = Circuit::new(N, 0);
+    for q in 0..N {
+        prep.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..N - 1 {
+        prep.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..N {
+        prep.add_gate(Gate::Ry(0.3 + 0.2 * q as f64), &[q]);
+    }
+
+    let mut per_gate = prep.clone();
+    for &(target, theta) in &phases {
+        per_gate.add_gate(Gate::cphase(theta), &[control, target]);
+    }
+
+    prep.instructions.push(Instruction::Gate {
+        gate: Gate::BatchPhase(Box::new(BatchPhaseData {
+            phases: phases
+                .iter()
+                .map(|&(target, theta)| (target, Complex64::from_polar(1.0, theta)))
+                .collect(),
+        })),
+        targets: [control].into_iter().collect(),
+    });
+
+    assert_probs_close(
+        &dm_probs_in_three_bases(N, &prep.instructions),
+        &dm_probs_in_three_bases(N, &per_gate.instructions),
+        DM_EPS,
+        "multi-entry batch phase vs the per-gate route",
+    );
 }
 
 #[test]

@@ -42,6 +42,15 @@ const SAMPLING_SHOTS: usize = 4096;
 #[cfg(miri)]
 const SAMPLING_SHOTS: usize = 256;
 
+// The size at which the dense circuit reaches every fused family named in
+// `the_dense_circuit_still_reaches_the_fused_kernel_families`. Native needs 18
+// for the diagonal batch floor; the miri floors all drop to 8, so 10 does it
+// there.
+#[cfg(not(miri))]
+const FUSED_COVERAGE_QUBITS: usize = 18;
+#[cfg(miri)]
+const FUSED_COVERAGE_QUBITS: usize = 10;
+
 const REDUCTION_EPS: f64 = 1e-12;
 
 fn in_pool<T: Send>(threads: usize, op: impl FnOnce() -> T + Send) -> T {
@@ -124,6 +133,41 @@ fn assert_bitwise_equal(base: &[Complex64], other: &[Complex64], label: &str) {
         assert!(
             a.re.to_bits() == b.re.to_bits() && a.im.to_bits() == b.im.to_bits(),
             "{label}: amplitude {idx} differs bitwise: {a} vs {b}"
+        );
+    }
+}
+
+fn count_gates(circuit: &Circuit, want: impl Fn(&Gate) -> bool) -> usize {
+    circuit
+        .instructions
+        .iter()
+        .filter(
+            |inst| matches!(inst, prism_q::circuit::Instruction::Gate { gate, .. } if want(gate)),
+        )
+        .count()
+}
+
+// Everything below asserts bitwise agreement, which unfused kernels satisfy
+// just as well as fused ones, so a fusion floor moving out of reach would drain
+// this file's coverage without turning a single test red. Pin the forms the
+// circuit is built to produce instead. The three named here are the ones that
+// survive both configurations: at the miri sizes the two-qubit runs are all
+// swallowed by Multi2q, and a bare Fused2q appears only at the native width.
+#[test]
+fn the_dense_circuit_still_reaches_the_fused_kernel_families() {
+    let circuit = representative_dense_circuit(FUSED_COVERAGE_QUBITS);
+    let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+    for (label, want) in [
+        (
+            "Fused",
+            &(|g: &Gate| matches!(g, Gate::Fused(_))) as &dyn Fn(&Gate) -> bool,
+        ),
+        ("Multi2q", &|g: &Gate| matches!(g, Gate::Multi2q(_))),
+        ("BatchRzz", &|g: &Gate| matches!(g, Gate::BatchRzz(_))),
+    ] {
+        assert!(
+            count_gates(&fused, want) > 0,
+            "the {FUSED_COVERAGE_QUBITS}q fused stream carries no {label}, so the              parallel kernel it stands for is no longer covered here"
         );
     }
 }

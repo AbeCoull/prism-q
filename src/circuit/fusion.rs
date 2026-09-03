@@ -1358,7 +1358,7 @@ where
 /// The tracer is left alone deliberately: this pass rewrites region payloads in
 /// place, and a region carries no provenance of its own, so the input mapping
 /// still describes the output exactly.
-pub(super) fn fuse_region_bodies<'a>(circuit: &'a Circuit) -> Cow<'a, Circuit> {
+fn fuse_region_bodies<'a>(circuit: &'a Circuit, n: usize) -> Cow<'a, Circuit> {
     let insts = &circuit.instructions;
     let mut out: Option<Vec<Instruction>> = None;
 
@@ -1366,7 +1366,7 @@ pub(super) fn fuse_region_bodies<'a>(circuit: &'a Circuit) -> Cow<'a, Circuit> {
         let fused_region = match inst {
             Instruction::Region(region) => {
                 let body = circuit.with_instructions(region.body().to_vec());
-                match fuse_traced(&body, &mut Tracer::off()) {
+                match fuse_at_width(&body, n, &mut Tracer::off()) {
                     Cow::Owned(fused) => Some(Instruction::Region(Box::new(GuardedRegion::new(
                         region.condition().clone(),
                         fused.instructions,
@@ -1396,17 +1396,39 @@ pub(super) fn fuse_region_bodies<'a>(circuit: &'a Circuit) -> Cow<'a, Circuit> {
 /// Returns `Cow::Borrowed` when no fusion is profitable (zero overhead).
 /// Set `supports_fused` to `false` for backends that cannot handle fused gates
 /// (e.g., stabilizer).
+///
+/// Gates the passes at the circuit's own width. A backend whose buffer is wider
+/// than a `num_qubits` statevector takes
+/// [`fuse_circuit_for_width`] instead.
 pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, Circuit> {
+    fuse_circuit_for_width(circuit, supports_fused, circuit.num_qubits)
+}
+
+/// Fuse for a backend that sweeps a `state_qubits`-wide buffer.
+///
+/// Every floor here is calibrated against the cost of one statevector pass, so
+/// the gate is buffer width rather than circuit width. They coincide for a
+/// statevector and part company for the density matrix, which holds an
+/// `n`-qubit mixture as a `2n`-qubit statevector and so reaches each floor at
+/// half the circuit width.
+pub fn fuse_circuit_for_width<'a>(
+    circuit: &'a Circuit,
+    supports_fused: bool,
+    state_qubits: usize,
+) -> Cow<'a, Circuit> {
     if !supports_fused {
         return Cow::Borrowed(circuit);
     }
-    fuse_traced(circuit, &mut Tracer::off())
+    fuse_at_width(circuit, state_qubits, &mut Tracer::off())
 }
 
-/// The pass pipeline, recording provenance into `t` when it is tracking.
+/// The pass pipeline at the circuit's own width, recording provenance into `t`.
 pub(super) fn fuse_traced<'a>(circuit: &'a Circuit, t: &mut Tracer) -> Cow<'a, Circuit> {
-    let n = circuit.num_qubits;
-    let pass_r = fuse_region_bodies(circuit);
+    fuse_at_width(circuit, circuit.num_qubits, t)
+}
+
+fn fuse_at_width<'a>(circuit: &'a Circuit, n: usize, t: &mut Tracer) -> Cow<'a, Circuit> {
+    let pass_r = fuse_region_bodies(circuit, n);
     let pass0 = apply_pass(pass_r, t, cancel_self_inverse_pairs);
     let pass0r = apply_pass(pass0, t, fuse_rzz);
     let pass0b = gated(pass0r, n, MIN_QUBITS_FOR_DIAG_BATCH, |c| {

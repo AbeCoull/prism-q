@@ -518,6 +518,17 @@ pub trait Backend {
         true
     }
 
+    /// Width in qubits of the buffer this backend sweeps for an `n`-qubit
+    /// circuit.
+    ///
+    /// The fusion floors are calibrated against the cost of one statevector
+    /// pass, so `sim` gates them on this rather than on the circuit width. The
+    /// two coincide everywhere except the density matrix, which holds an
+    /// `n`-qubit mixture as a `2n`-qubit statevector.
+    fn fusion_state_qubits(&self, num_qubits: usize) -> usize {
+        num_qubits
+    }
+
     /// Whether this backend has a native kernel for `Gate::QftBlock`.
     ///
     /// Native support is currently limited to whole-state CPU statevector QFT.

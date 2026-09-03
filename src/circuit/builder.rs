@@ -15,9 +15,12 @@
 use num_complex::Complex64;
 
 use super::parameter::Parameters;
-use super::{Circuit, ClassicalCondition, Instruction, SmallVec, guarded};
+use super::{
+    Circuit, ClassicalCondition, Instruction, SmallVec, append_axis_to_z_rotation,
+    append_parity_rotations, guarded,
+};
 use crate::gates::Gate;
-use crate::sim::unified_pauli::PauliTerm;
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Fluent builder for quantum circuits.
 ///
@@ -47,6 +50,7 @@ use crate::sim::unified_pauli::PauliTerm;
 pub struct CircuitBuilder {
     circuit: Circuit,
     params: Parameters,
+    parity_scratch: Option<usize>,
 }
 
 macro_rules! gate_1q {
@@ -79,10 +83,7 @@ macro_rules! gate_2q {
 impl CircuitBuilder {
     /// Create a builder for a circuit with `num_qubits` qubits and no classical bits.
     pub fn new(num_qubits: usize) -> Self {
-        Self {
-            circuit: Circuit::new(num_qubits, 0),
-            params: Parameters::new(0),
-        }
+        Self::new_with_classical(num_qubits, 0)
     }
 
     /// Create a builder with explicit qubit and classical bit counts.
@@ -90,6 +91,7 @@ impl CircuitBuilder {
         Self {
             circuit: Circuit::new(num_qubits, num_classical_bits),
             params: Parameters::new(0),
+            parity_scratch: None,
         }
     }
 
@@ -199,6 +201,68 @@ impl CircuitBuilder {
         self
     }
 
+    /// Measure `qubit` along `axis`, recording the eigenvalue as a bit (`+1`
+    /// reads false, `-1` reads true).
+    ///
+    /// Lowers to the rotation that maps the axis onto Z followed by a
+    /// computational-basis measurement, and does not rotate back: the qubit is
+    /// left in the Z eigenstate matching the recorded bit rather than in the
+    /// eigenstate of `axis`. Append the inverse rotation to restore it, at the
+    /// cost of the circuit no longer ending in measurements.
+    pub fn measure_in_basis(
+        &mut self,
+        qubit: usize,
+        axis: PauliAxis,
+        classical_bit: usize,
+    ) -> &mut Self {
+        append_axis_to_z_rotation(&mut self.circuit, axis, qubit);
+        self.circuit.add_measure(qubit, classical_bit);
+        self
+    }
+
+    /// Measure the Pauli product over `terms`, recording its eigenvalue as a
+    /// bit (`+1` reads false, `-1` reads true) and leaving every named qubit in
+    /// the post-measurement eigenstate.
+    ///
+    /// The parity is accumulated on one extra qubit, allocated on the first call
+    /// and appended past the declared register, so the built circuit has one
+    /// more qubit than the builder was created with. A second call resets that
+    /// qubit first, which moves the circuit off the compiled sampling route.
+    ///
+    /// # Panics
+    /// Panics if `terms` is empty or names a qubit twice.
+    pub fn measure_pauli_product(
+        &mut self,
+        terms: &[PauliTerm],
+        classical_bit: usize,
+    ) -> &mut Self {
+        assert!(!terms.is_empty(), "Pauli product needs at least one term");
+        for (i, a) in terms.iter().enumerate() {
+            for b in &terms[i + 1..] {
+                assert_ne!(
+                    a.qubit, b.qubit,
+                    "Pauli product has duplicate term on qubit {}",
+                    a.qubit
+                );
+            }
+        }
+        let scratch = match self.parity_scratch {
+            Some(scratch) => {
+                self.circuit.add_reset(scratch);
+                scratch
+            }
+            None => {
+                let scratch = self.circuit.num_qubits;
+                self.circuit.num_qubits += 1;
+                self.parity_scratch = Some(scratch);
+                scratch
+            }
+        };
+        append_parity_rotations(&mut self.circuit, terms, scratch);
+        self.circuit.add_measure(scratch, classical_bit);
+        self
+    }
+
     /// Reset `qubit` to |0⟩.
     pub fn reset(&mut self, qubit: usize) -> &mut Self {
         self.circuit.add_reset(qubit);
@@ -266,12 +330,14 @@ impl CircuitBuilder {
     /// Extract the finished circuit, replacing the builder's internal circuit with an empty one.
     pub fn build(&mut self) -> Circuit {
         self.params = Parameters::new(0);
+        self.parity_scratch = None;
         std::mem::replace(&mut self.circuit, Circuit::new(0, 0))
     }
 
     /// Extract the finished circuit together with the recorded parameters,
     /// resetting the builder.
     pub fn build_parametric(&mut self) -> (Circuit, Parameters) {
+        self.parity_scratch = None;
         let circuit = std::mem::replace(&mut self.circuit, Circuit::new(0, 0));
         let params = std::mem::replace(&mut self.params, Parameters::new(0)).pinned_to(&circuit);
         (circuit, params)
@@ -369,6 +435,61 @@ mod tests {
                 },
             ] if x_targets.as_slice() == [0] && h_targets.as_slice() == [1]
         ));
+    }
+
+    #[test]
+    fn measure_in_basis_rotates_and_does_not_restore() {
+        let c = CircuitBuilder::new_with_classical(1, 1)
+            .measure_in_basis(0, PauliAxis::Y, 0)
+            .build();
+        assert!(matches!(
+            c.instructions.as_slice(),
+            [
+                Instruction::Gate {
+                    gate: Gate::Sdg,
+                    ..
+                },
+                Instruction::Gate { gate: Gate::H, .. },
+                Instruction::Measure {
+                    qubit: 0,
+                    classical_bit: 0
+                },
+            ]
+        ));
+        assert!(c.has_terminal_measurements_only());
+    }
+
+    #[test]
+    fn measure_pauli_product_allocates_one_scratch_and_resets_it_after_the_first() {
+        let c = CircuitBuilder::new_with_classical(2, 2)
+            .h(0)
+            .measure_pauli_product(&[PauliTerm::x(0), PauliTerm::z(1)], 0)
+            .measure_pauli_product(&[PauliTerm::z(0), PauliTerm::z(1)], 1)
+            .build();
+        assert_eq!(c.num_qubits, 3);
+        assert_eq!(c.measurement_map(), [(2, 0), (2, 1)]);
+        let mut hand = Circuit::new(3, 2);
+        hand.add_gate(Gate::H, &[0]);
+        hand.add_gate(Gate::H, &[0]);
+        hand.add_gate(Gate::Cx, &[0, 2]);
+        hand.add_gate(Gate::Cx, &[1, 2]);
+        hand.add_gate(Gate::H, &[0]);
+        hand.add_measure(2, 0);
+        hand.add_reset(2);
+        hand.add_gate(Gate::Cx, &[0, 2]);
+        hand.add_gate(Gate::Cx, &[1, 2]);
+        hand.add_measure(2, 1);
+        assert_eq!(
+            format!("{:?}", c.instructions),
+            format!("{:?}", hand.instructions)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate term")]
+    fn measure_pauli_product_rejects_a_repeated_qubit() {
+        CircuitBuilder::new_with_classical(2, 1)
+            .measure_pauli_product(&[PauliTerm::x(0), PauliTerm::z(0)], 0);
     }
 
     #[test]

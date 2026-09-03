@@ -924,6 +924,46 @@ pub(crate) fn pauli_rotation_gate(
     }
 }
 
+/// Rotate `qubit` so that a Z-basis measurement reads the `axis` eigenvalue:
+/// X appends H, Y appends Sdg then H, Z appends nothing.
+pub(crate) fn append_axis_to_z_rotation(circuit: &mut Circuit, axis: PauliAxis, qubit: usize) {
+    match axis {
+        PauliAxis::X => circuit.add_gate(Gate::H, &[qubit]),
+        PauliAxis::Y => {
+            circuit.add_gate(Gate::Sdg, &[qubit]);
+            circuit.add_gate(Gate::H, &[qubit]);
+        }
+        PauliAxis::Z => {}
+    }
+}
+
+/// Inverse of [`append_axis_to_z_rotation`].
+pub(crate) fn append_z_to_axis_rotation(circuit: &mut Circuit, axis: PauliAxis, qubit: usize) {
+    match axis {
+        PauliAxis::X => circuit.add_gate(Gate::H, &[qubit]),
+        PauliAxis::Y => {
+            circuit.add_gate(Gate::H, &[qubit]);
+            circuit.add_gate(Gate::S, &[qubit]);
+        }
+        PauliAxis::Z => {}
+    }
+}
+
+/// Lower a Pauli-product measurement onto a scratch qubit holding |0>: rotate
+/// each term into the Z basis, accumulate parity on the scratch via CX, then
+/// undo the rotations in reverse order. The caller measures the scratch.
+pub(crate) fn append_parity_rotations(circuit: &mut Circuit, terms: &[PauliTerm], scratch: usize) {
+    for term in terms {
+        append_axis_to_z_rotation(circuit, term.axis, term.qubit);
+    }
+    for term in terms {
+        circuit.add_gate(Gate::Cx, &[term.qubit, scratch]);
+    }
+    for term in terms.iter().rev() {
+        append_z_to_axis_rotation(circuit, term.axis, term.qubit);
+    }
+}
+
 pub fn expand_pauli_rotations(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
     if !any_bare_gate(&circuit.instructions, &mut |gate| {
         matches!(gate, Gate::PauliRot(_))

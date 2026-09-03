@@ -61,10 +61,13 @@ pub use t_sampler::{
     QecObservableReroute, QecTStrategy, run_qec_program_spd_rerouted, run_qec_program_with_strategy,
 };
 
-use crate::circuit::Circuit;
+use crate::circuit::{
+    Circuit, append_axis_to_z_rotation, append_parity_rotations, append_z_to_axis_rotation,
+};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::{PackedShots, PauliVec, get_bit, set_bit};
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Pauli basis used by QEC measurements and Pauli products.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -72,6 +75,16 @@ pub enum QecBasis {
     X,
     Y,
     Z,
+}
+
+impl From<QecBasis> for PauliAxis {
+    fn from(basis: QecBasis) -> Self {
+        match basis {
+            QecBasis::X => PauliAxis::X,
+            QecBasis::Y => PauliAxis::Y,
+            QecBasis::Z => PauliAxis::Z,
+        }
+    }
 }
 
 /// One Pauli term in an MPP-style measurement.
@@ -961,15 +974,10 @@ pub fn compile_qec_program_rows(program: &QecProgram) -> Result<QecCompiledRows>
     })
 }
 
-pub(crate) fn qec_terms_to_pauli(terms: &[QecPauli]) -> Vec<crate::sim::unified_pauli::PauliTerm> {
-    use crate::sim::unified_pauli::PauliTerm;
+pub(crate) fn qec_terms_to_pauli(terms: &[QecPauli]) -> Vec<PauliTerm> {
     terms
         .iter()
-        .map(|t| match t.basis {
-            QecBasis::X => PauliTerm::x(t.qubit),
-            QecBasis::Y => PauliTerm::y(t.qubit),
-            QecBasis::Z => PauliTerm::z(t.qubit),
-        })
+        .map(|t| PauliTerm::new(t.qubit, t.basis.into()))
         .collect()
 }
 
@@ -1098,44 +1106,21 @@ pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()>
 }
 
 pub(super) fn append_basis_to_z_rotation(circuit: &mut Circuit, basis: QecBasis, qubit: usize) {
-    match basis {
-        QecBasis::X => circuit.add_gate(Gate::H, &[qubit]),
-        QecBasis::Y => {
-            circuit.add_gate(Gate::Sdg, &[qubit]);
-            circuit.add_gate(Gate::H, &[qubit]);
-        }
-        QecBasis::Z => {}
-    }
+    append_axis_to_z_rotation(circuit, basis.into(), qubit);
 }
 
 pub(super) fn append_z_to_basis_rotation(circuit: &mut Circuit, basis: QecBasis, qubit: usize) {
-    match basis {
-        QecBasis::X => circuit.add_gate(Gate::H, &[qubit]),
-        QecBasis::Y => {
-            circuit.add_gate(Gate::H, &[qubit]);
-            circuit.add_gate(Gate::S, &[qubit]);
-        }
-        QecBasis::Z => {}
-    }
+    append_z_to_axis_rotation(circuit, basis.into(), qubit);
 }
 
-/// Lower a Pauli-product measurement onto a scratch qubit: rotate each term
-/// into the Z basis, accumulate parity on the scratch via CX, then undo the
-/// rotations in reverse order. The caller measures the scratch afterward.
+/// Lower a Pauli-product measurement onto a scratch qubit holding |0>; the
+/// caller measures the scratch afterward. See [`append_parity_rotations`].
 pub(super) fn append_mpp_parity_rotations(
     circuit: &mut Circuit,
     terms: &[QecPauli],
     scratch: usize,
 ) {
-    for term in terms {
-        append_basis_to_z_rotation(circuit, term.basis, term.qubit);
-    }
-    for term in terms {
-        circuit.add_gate(Gate::Cx, &[term.qubit, scratch]);
-    }
-    for term in terms.iter().rev() {
-        append_z_to_basis_rotation(circuit, term.basis, term.qubit);
-    }
+    append_parity_rotations(circuit, &qec_terms_to_pauli(terms), scratch);
 }
 
 pub(super) fn qec_non_clifford_error(gate: &Gate) -> PrismError {

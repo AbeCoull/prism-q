@@ -23,6 +23,7 @@ use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::{Gate, GeneratorKind, pauli_rot_masks};
 
+use super::noise::NoiseModel;
 use super::unified_pauli::PauliTerm;
 use super::{BackendKind, i_pow, pauli_masks, pauli_sandwich};
 
@@ -312,7 +313,15 @@ pub fn run_expectation_gradient_shift(
     params: &Parameters,
     seed: u64,
 ) -> Result<ExpectationGradient> {
-    shift_gradient(&BackendKind::Auto, circuit, hamiltonian, params, None, seed)
+    shift_gradient(
+        &BackendKind::Auto,
+        circuit,
+        hamiltonian,
+        params,
+        None,
+        None,
+        seed,
+    )
 }
 
 /// Parameter-shift gradient on the backend `kind` selects, optionally from a
@@ -329,28 +338,44 @@ pub fn run_expectation_gradient_shift(
 /// Gates sharing a parameter slot are shifted one at a time and summed. Shifting
 /// them together is a different quantity: two `Rx(θ)` on one qubit under `⟨Z⟩`
 /// give `cos 2θ`, whose joint ±π/2 shift is zero rather than `-2 sin 2θ`.
+///
+/// Under `noise` every forward evaluation reads the exact mixture, so `kind`
+/// must be a density-matrix kind, which the caller checks. The channels do not
+/// depend on the shifted angle, so `⟨H⟩` stays a degree-1 trigonometric
+/// polynomial in it and the shift is still exact.
 pub(crate) fn shift_gradient(
     kind: &BackendKind,
     circuit: &Circuit,
     hamiltonian: &[(f64, Vec<PauliTerm>)],
     params: &Parameters,
+    noise: Option<&NoiseModel>,
     initial_state: Option<&[Complex64]>,
     seed: u64,
 ) -> Result<ExpectationGradient> {
     params.validate(circuit)?;
-    if initial_state.is_some() {
+    if initial_state.is_some() || noise.is_some() {
         super::require_unitary_circuit(kind, circuit)?;
     }
 
     let observables: Vec<Vec<PauliTerm>> =
         hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
     let evaluate = |c: &Circuit| -> Result<f64> {
-        let per_term = match initial_state {
-            Some(state) => {
+        let per_term = match (noise, initial_state) {
+            (Some(noise), _) => super::noise::dm_expectation_values(
+                kind,
+                c,
+                &observables,
+                Some(noise),
+                initial_state,
+                seed,
+            )?,
+            (None, Some(state)) => {
                 super::expectation_values_from_initial_state(kind, c, state, &observables, seed)?
                     .into_values()
             }
-            None => super::run_expectation_values_with(kind.clone(), c, &observables, seed)?,
+            (None, None) => {
+                super::run_expectation_values_with(kind.clone(), c, &observables, seed)?
+            }
         };
         Ok(hamiltonian
             .iter()

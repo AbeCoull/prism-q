@@ -8,6 +8,7 @@
 
 pub(crate) mod bts;
 pub(crate) mod dense;
+pub(crate) mod density;
 pub(crate) mod stabilizer;
 
 use std::sync::Arc;
@@ -79,6 +80,8 @@ pub(crate) struct LauncherScratch {
     pub(crate) i32_b: Option<GpuBuffer<i32>>,
     pub(crate) i32_c: Option<GpuBuffer<i32>>,
     pub(crate) u32_a: Option<GpuBuffer<u32>>,
+    pub(crate) u64_a: Option<GpuBuffer<u64>>,
+    pub(crate) u64_b: Option<GpuBuffer<u64>>,
     /// Per-block partials for [`super::dense::measure_prob_one`]. Sized by the
     /// number of grid blocks at the largest qubit count seen so far.
     pub(crate) measure_partials: Option<GpuBuffer<f64>>,
@@ -87,6 +90,10 @@ pub(crate) struct LauncherScratch {
     /// Four-element output for the reduced-density-matrix finalize reduction.
     /// Separate from `measure_result`: readback length must match the buffer.
     pub(crate) rdm_result: Option<GpuBuffer<f64>>,
+    /// The `2^n` diagonal of a density matrix, sized to the mixture width.
+    pub(crate) dm_diag: Option<GpuBuffer<f64>>,
+    /// Two f64s per Pauli mask for the density-matrix expectation finalize.
+    pub(crate) dm_result: Option<GpuBuffer<f64>>,
 }
 
 /// Ensure `slot` has at least `host.len()` elements allocated, growing if not,
@@ -141,6 +148,8 @@ pub(crate) fn kernel_source() -> String {
     src.push_str(&stabilizer::kernel_source());
     src.push('\n');
     src.push_str(&bts::kernel_source());
+    src.push('\n');
+    src.push_str(density::KERNEL_SOURCE);
     src
 }
 
@@ -192,6 +201,19 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "bts_transpose_meas_to_shot",
     "bts_apply_noise_masks_meas_major",
     "bts_generate_and_apply_noise_meas_major_by_row",
+    // Density-matrix sweeps over the embedded 2n-qubit buffer.
+    "dm_diagonal",
+    "dm_norm_sqr",
+    "dm_project",
+    "dm_reset",
+    "dm_conjugate",
+    "dm_diagonal_sandwich",
+    "dm_kraus_2q_diagonal",
+    "dm_kraus_2q_dense",
+    "dm_depolarizing_2q",
+    "dm_outer_product",
+    "dm_pauli_expect",
+    "dm_pauli_expect_finalize",
 ];
 
 #[cfg(test)]

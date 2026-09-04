@@ -554,7 +554,7 @@ fn bench_statevector_diag_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/diag_mixed_l6");
     configure_group(&mut group);
 
-    for &n in &[16, 20] {
+    for &n in &[16, 20, 22] {
         let circuit = circuits::diagonal_mixed_circuit(n, 6, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {

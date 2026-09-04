@@ -148,12 +148,56 @@ cargo bench -- --baseline my_baseline
 ./scripts/bench_ab.sh -f '^sparse/' --ref-dir /tmp/prism-q-ref   # cache the reference build
 ./scripts/bench_ab.sh --build-only /tmp/ref-circuits             # build a reference to reuse
 ./scripts/bench_ab.sh -f '^sparse/' --ref-exe /tmp/ref-circuits  # skip the reference build
+./scripts/bench_ab.sh -f '^x/affected/' -c '^x/control/'         # controls at 10 samples
 ```
 
 `--build-only` and `--ref-exe` are a pair: the first produces a bench binary through the
 same build path the A/B uses, the second consumes one and skips the reference build
 entirely. Nothing checks that the supplied executable was built from `--ref`, so whatever
 stores it owns that claim; the report records which of the two ways the reference arrived.
+
+### Keeping an A/B affordable
+
+Six passes run, so a row costs six times what one pass of it costs. On this corpus
+that arithmetic is dominated by a handful of slow rows, and those are routinely the
+controls rather than the rows under test: an A/B on 2026-09-04 spent 61% of its wall
+clock on four control rows that all reported noise.
+
+Three levers, in the order worth reaching for them.
+
+**Pick controls by cost.** A control has to read flat, not precisely.
+`density_matrix/rzz_layers_fused/10` runs 86ms where `/12` runs 1.97s, and answers the
+same question about lane drift.
+
+**Measure controls at a lower sample count.** `--control` takes a second regex whose
+rows run at `--control-samples` (default 10, Criterion's floor) instead of the full
+count. The two regexes must be disjoint: a row matched by both is an error rather than
+a silent downgrade to the lower count.
+
+Reduced rows are reported as `control` or `control moved` rather than as faster or
+slower, they do not set the run's reported noise floor, and they do not join the
+unresolvable list. Ten samples resolve whether a control is flat; they do not resolve a
+percentage, and presenting one would dress noise as a result. A control that moves past
+the threshold still fails the run, because that is collateral damage whichever row it
+lands on.
+
+**Triage before gating.** `PRISM_BENCH_SAMPLES=10` over the full row set finds which
+rows moved, then a second run at the default over those rows alone carries the claim.
+The saving is concentrated in the slow rows for the reason in the table above: Criterion
+divides `measurement_time` across the sample count until one iteration no longer fits,
+so a millisecond row costs the same at either count and a multi-second row costs about a
+third.
+
+`--max-row-seconds` (default 240, 0 disables) aborts the run when Criterion projects a
+single row past that many seconds in one pass. The projection is printed before
+collection starts, so the check costs one iteration of the offending row rather than the
+row: the corpus row that provoked the option projected 4200s per pass, seven hours across
+the six, and was caught after one 140s iteration. The first warmup pass also prints the
+projected total, so a long A/B can be abandoned before it is paid for.
+
+Reuse one `--ref-dir` per repository rather than one per experiment. A fresh directory is
+a cold build of the crate and its dependencies; the same directory against a different
+ref rebuilds incrementally.
 
 The script builds the bench binary from the working tree, builds the same target
 from a reference git ref in a separate worktree, verifies the working tree did

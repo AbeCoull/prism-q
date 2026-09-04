@@ -25,9 +25,28 @@
 #   scripts/bench_ab.sh --filter '^factored/noise_kraus/'
 #   scripts/bench_ab.sh -f '^density_matrix/' -r main -b circuits
 #   scripts/bench_ab.sh -f '^sparse/' --ref-dir /tmp/prism-q-ref   # reuse the build
+#   scripts/bench_ab.sh -f '^x/affected/' -c '^x/(control_a|control_b)/'
 #
 # Options:
 #   --filter,   -f  Criterion filter regex, applied to every pass (required)
+#   --control,  -c  second regex whose rows are measured at --control-samples
+#                   rather than at the full count. A control has to read flat,
+#                   not precisely, and on this corpus the controls are routinely
+#                   the expensive rows: an A/B on 2026-09-04 spent 61% of its
+#                   wall clock on four control rows that all reported noise.
+#                   Must not overlap --filter. A row matched by both is an error
+#                   rather than a silent downgrade to the lower count.
+#   --control-samples  sample count for --control rows (default 10, Criterion's
+#                   floor). Standard error is 1.7x the 30-sample interval, which
+#                   is ample to show a control sitting flat.
+#   --max-row-seconds  abort when Criterion projects one row past this many
+#                   seconds in a single pass (default 240, 0 disables). Six
+#                   passes run, so an unnoticed row costs six times the
+#                   projection. The check costs one iteration of that row rather
+#                   than the row, because Criterion prints its projection before
+#                   collecting: the corpus row that provoked this projected
+#                   4200s per pass, seven hours across the six, and was caught
+#                   after one 140s iteration.
 #   --ref,      -r  git ref for the reference build (default: HEAD)
 #   --bench,    -b  bench target (default: circuits)
 #   --features      cargo feature list (default: parallel)
@@ -53,7 +72,9 @@
 #
 # Environment:
 #   REGRESSION_THRESHOLD   regression gate in percent (default: 5.0)
-#   PRISM_BENCH_SAMPLES    samples per row, recorded in the report
+#   PRISM_BENCH_SAMPLES    samples per row, recorded in the report. Set it to 10
+#                          for a triage sweep that finds which rows moved, then
+#                          re-run at the default on those rows alone.
 #   PRISM_BENCH_PLOTS      set to render Criterion HTML (about 58s per row)
 #   PRISM_BENCH_HIGH_QUBITS  set to admit the 28q/30q statevector rows
 #
@@ -70,6 +91,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 FILTER=""
+CONTROL_FILTER=""
+CONTROL_SAMPLES=10
+MAX_ROW_SECONDS=240
+SAMPLES="${PRISM_BENCH_SAMPLES:-30}"
 REF="HEAD"
 BENCH="circuits"
 FEATURES="parallel"
@@ -83,6 +108,9 @@ THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --filter|-f)   FILTER="$2"; shift 2 ;;
+        --control|-c)  CONTROL_FILTER="$2"; shift 2 ;;
+        --control-samples) CONTROL_SAMPLES="$2"; shift 2 ;;
+        --max-row-seconds) MAX_ROW_SECONDS="$2"; shift 2 ;;
         --ref|-r)      REF="$2"; shift 2 ;;
         --bench|-b)    BENCH="$2"; shift 2 ;;
         --features)    FEATURES="$2"; shift 2 ;;
@@ -99,6 +127,13 @@ done
 
 if [[ -z "$FILTER" && -z "$BUILD_ONLY" ]]; then
     echo "Error: --filter is required. Name the rows to compare." >&2
+    exit 1
+fi
+
+# Criterion clamps below 10 without saying so, which would put a count in the
+# report that no row was measured at.
+if (( CONTROL_SAMPLES < 10 )); then
+    echo "Error: --control-samples is $CONTROL_SAMPLES; Criterion's floor is 10." >&2
     exit 1
 fi
 
@@ -205,10 +240,12 @@ build_bench_exe() {
     echo "    $out"
 }
 
-# Extract `full_id<TAB>mean_ns` for every row a pass measured. The mean is the
-# first point estimate in the JSON object, which serde writes before the median.
+# Extract `full_id<TAB>mean_ns<TAB>samples` for every row a pass measured. The
+# mean is the first point estimate in the JSON object, which serde writes before
+# the median. The sample count travels with the row so a report can say which
+# rows were measured at the control count.
 snapshot() {
-    local home="$1" out="$2"
+    local home="$1" out="$2" samples="$3"
 
     find "$home" -path "*/new/estimates.json" -print 2>/dev/null | while IFS= read -r est; do
         local bm="${est%estimates.json}benchmark.json"
@@ -228,24 +265,148 @@ snapshot() {
                 exit
             }' "$est")"
 
-        [[ -n "$id" && -n "$mean" ]] && printf '%s\t%s\n' "$id" "$mean"
+        [[ -n "$id" && -n "$mean" ]] && printf '%s\t%s\t%s\n' "$id" "$mean" "$samples"
     done | sort > "$out"
+}
+
+# The (segment, filter, samples) triples one pass runs, in order. Without
+# --control there is one. With it the controls follow the affected rows, each
+# into its own CRITERION_HOME so the two sample counts stay separable.
+pass_segments() {
+    printf 'main\t%s\t%s\n' "$FILTER" "$SAMPLES"
+    if [[ -n "$CONTROL_FILTER" ]]; then
+        printf 'ctl\t%s\t%s\n' "$CONTROL_FILTER" "$CONTROL_SAMPLES"
+    fi
+}
+
+# The first per-pass projection Criterion has printed that is over budget.
+#
+# Criterion writes the projection before it starts collecting, so this sees a
+# row's cost after one iteration rather than after the row.
+over_budget_row() {
+    awk -v budget="$MAX_ROW_SECONDS" '
+        /Collecting [0-9]+ samples in estimated/ {
+            if (match($0, /estimated [0-9.]+ s/)) {
+                secs = substr($0, RSTART + 10, RLENGTH - 12) + 0
+                if (secs > budget) {
+                    id = $2
+                    sub(/:$/, "", id)
+                    printf "%s projects %.0fs per pass", id, secs
+                    exit
+                }
+            }
+        }
+    ' "$1"
+}
+
+# Total per-pass seconds Criterion projected, for the wall-clock estimate.
+projected_pass_seconds() {
+    cat "$@" 2>/dev/null | awk '
+        /Collecting [0-9]+ samples in estimated/ {
+            if (match($0, /estimated [0-9.]+ s/)) {
+                total += substr($0, RSTART + 10, RLENGTH - 12) + 0
+            }
+        }
+        END { printf "%.0f", total }
+    '
+}
+
+# Run one segment in the background so the projection guard can end it early.
+#
+# `set -e` does not reach a backgrounded child, so the status comes from `wait`
+# and is checked here. Without that a panicking bench binary would read as a
+# pass that measured nothing.
+run_segment() {
+    local exe="$1" home="$2" filter="$3" samples="$4" log="$5" quiet="$6"
+    local pid status over shown total
+
+    mkdir -p "$home"
+    : > "$log"
+    CRITERION_HOME="$(native_path "$home")" PRISM_BENCH_SAMPLES="$samples" \
+        "$exe" --bench "$filter" > "$log" 2>&1 &
+    pid=$!
+
+    over=""
+    shown=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [[ "$quiet" != "quiet" ]]; then
+            total="$(wc -l < "$log" | tr -d '[:space:]')"
+            if (( total > shown )); then
+                sed -n "$((shown + 1)),${total}p" "$log"
+                shown=$total
+            fi
+        fi
+        if (( MAX_ROW_SECONDS > 0 )); then
+            over="$(over_budget_row "$log")"
+            if [[ -n "$over" ]]; then
+                kill "$pid" 2>/dev/null || true
+                break
+            fi
+        fi
+        sleep 2
+    done
+
+    status=0
+    wait "$pid" 2>/dev/null || status=$?
+
+    if [[ -n "$over" ]]; then
+        echo "" >&2
+        echo "Error: $over, past the ${MAX_ROW_SECONDS}s --max-row-seconds budget." >&2
+        echo "  Six passes run, so that row alone costs about six times that." >&2
+        echo "  Narrow --filter, move the row behind --control, lower" >&2
+        echo "  PRISM_BENCH_SAMPLES, or pass --max-row-seconds 0 to measure it anyway." >&2
+        exit 1
+    fi
+    if (( status != 0 )); then
+        [[ "$quiet" == "quiet" ]] && cat "$log" >&2
+        echo "Error: the bench binary exited $status during '$filter'." >&2
+        exit 1
+    fi
+    if [[ "$quiet" != "quiet" ]]; then
+        total="$(wc -l < "$log" | tr -d '[:space:]')"
+        if (( total > shown )); then
+            sed -n "$((shown + 1)),${total}p" "$log"
+        fi
+    fi
+}
+
+# Run every segment of one pass and collect them into one sorted table.
+measure() {
+    local exe="$1" home="$2" out="$3" logbase="$4" quiet="$5"
+    local seg filter samples
+
+    : > "$out"
+    while IFS=$'\t' read -r seg filter samples; do
+        run_segment "$exe" "$home/$seg" "$filter" "$samples" "$logbase-$seg.log" "$quiet"
+        snapshot "$home/$seg" "$WORKDIR/segment.tsv" "$samples"
+        cat "$WORKDIR/segment.tsv" >> "$out"
+    done < <(pass_segments)
+
+    sort -o "$out" "$out"
 }
 
 run_pass() {
     local idx="$1" label="$2" exe="$3"
     local home="$WORKDIR/crit-$idx"
+    local out="$WORKDIR/pass-$idx.tsv"
     mkdir -p "$home"
 
     echo ">>> pass $idx ($label)"
-    CRITERION_HOME="$(native_path "$home")" "$exe" --bench "$FILTER"
+    measure "$exe" "$home" "$out" "$WORKDIR/pass-$idx" "loud"
 
-    snapshot "$home" "$WORKDIR/pass-$idx.tsv"
-    local rows
-    rows="$(wc -l < "$WORKDIR/pass-$idx.tsv" | tr -d '[:space:]')"
+    local rows dupes
+    rows="$(wc -l < "$out" | tr -d '[:space:]')"
     if (( rows == 0 )); then
         echo "Error: pass $idx produced no Criterion estimates under $home." >&2
         echo "  Either --filter '$FILTER' matched nothing, or CRITERION_HOME was ignored." >&2
+        exit 1
+    fi
+    dupes="$(cut -f1 "$out" | uniq -d)"
+    if [[ -n "$dupes" ]]; then
+        echo "Error: --filter and --control both match these rows:" >&2
+        printf '  %s\n' $dupes >&2
+        echo "  A row measured at two sample counts has no single control column." >&2
+        echo "  Make the two regexes disjoint." >&2
         exit 1
     fi
     echo "    pass $idx measured $rows rows"
@@ -266,7 +427,7 @@ warm_up() {
     local home="$WORKDIR/warm-$idx"
     mkdir -p "$home"
     echo ">>> warmup $idx (discarded)"
-    CRITERION_HOME="$(native_path "$home")" "$exe" --bench "$FILTER" > /dev/null
+    measure "$exe" "$home" "$WORKDIR/warm-$idx.tsv" "$WORKDIR/warm-$idx" "quiet"
     echo ""
 }
 
@@ -352,6 +513,17 @@ fi
 echo "=== two discarded warmup passes, then four adjacent passes ==="
 echo ""
 warm_up 1 "$WORKDIR/exe-ref"
+
+# Criterion projected every row during the warmup, so the remaining five passes
+# can be priced before they are spent. Printed rather than enforced: the guard
+# is per row, and a filter can be slow by holding many cheap rows instead.
+PASS_SECONDS="$(projected_pass_seconds "$WORKDIR"/warm-1-*.log)"
+if [[ -n "$PASS_SECONDS" && "$PASS_SECONDS" != "0" ]]; then
+    printf ">>> projected: about %d min for the five passes left, %d min in total\n" \
+        $(( PASS_SECONDS * 5 / 60 )) $(( PASS_SECONDS * 6 / 60 ))
+    echo ""
+fi
+
 warm_up 2 "$WORKDIR/exe-new"
 run_pass 1 "ref" "$WORKDIR/exe-ref"
 run_pass 2 "new" "$WORKDIR/exe-new"
@@ -363,7 +535,7 @@ run_pass 4 "ref" "$WORKDIR/exe-ref"
 MERGED="$WORKDIR/merged.tsv"
 : > "$MERGED"
 for idx in 1 2 3 4; do
-    awk -v p="$idx" 'BEGIN { OFS = "\t" } { print p, $1, $2 }' "$WORKDIR/pass-$idx.tsv" >> "$MERGED"
+    awk -v p="$idx" 'BEGIN { OFS = "\t" } { print p, $1, $2, $3 }' "$WORKDIR/pass-$idx.tsv" >> "$MERGED"
 done
 
 if [[ -z "$OUT" ]]; then
@@ -383,11 +555,15 @@ set +e
     echo "| Setting | Value |"
     echo "| --- | --- |"
     echo "| Filter | \`$FILTER\` |"
+    if [[ -n "$CONTROL_FILTER" ]]; then
+        echo "| Control filter | \`$CONTROL_FILTER\`, measured at $CONTROL_SAMPLES samples |"
+    fi
     echo "| Reference | \`$REF\` ($REF_SHA) |"
     echo "| Reference binary | $REF_PROVENANCE |"
     echo "| Features | \`$FEATURES\` |"
     echo "| Pass order | ref, new discarded, then ref, new, new, ref (adjacent, no rebuild) |"
-    echo "| Samples | ${PRISM_BENCH_SAMPLES:-30} |"
+    echo "| Samples | $SAMPLES |"
+    echo "| Row budget | ${MAX_ROW_SECONDS}s per pass |"
     echo "| High-qubit rows | $HIGH_QUBITS_STATE |"
     echo "| CPU | $(host_cpu) |"
     echo "| OS | $(uname -srm) |"
@@ -396,12 +572,12 @@ set +e
     echo "| Threshold | ${THRESHOLD}% |"
     echo ""
 
-    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" '
+    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" -v full="$SAMPLES" '
         BEGIN { FS = "\t"; SEP = "\x1f" }
 
         {
             mean[$1 SEP $2] = $3
-            if ($1 == 1) { order[++n] = $2 }
+            if ($1 == 1) { order[++n] = $2; samples[$2] = $4 }
         }
 
         function fmt(ns) {
@@ -415,13 +591,17 @@ set +e
         function abs(v) { return v < 0 ? -v : v }
 
         END {
-            print "| Benchmark | Ref | New | Change | Control (ref) | Control (new) | Verdict |"
-            print "| --- | ---: | ---: | ---: | ---: | ---: | --- |"
+            print "| Benchmark | Ref | New | Change | Control (ref) | Control (new) | Samples | Verdict |"
+            print "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
 
             compared = 0
             regressions = 0
             unresolvable = 0
             worst_floor = 0
+            reduced = 0
+            reduced_floor = 0
+            reduced_at = 0
+            moved_controls = 0
 
             for (i = 1; i <= n; i++) {
                 id = order[i]
@@ -435,9 +615,31 @@ set +e
                 ctl_ref = (a2 - a1) * 100 / a1
                 ctl_new = (b2 - b1) * 100 / b1
                 floor = abs(ctl_ref) > abs(ctl_new) ? abs(ctl_ref) : abs(ctl_new)
-                if (floor > worst_floor) { worst_floor = floor }
 
-                if (abs(change) <= floor) {
+                # A row measured at the reduced control count has a wider own-spread by
+                # construction, so it neither sets the host noise floor nor joins the
+                # unresolvable list. It can still fail the gate: a control moving past
+                # its own spread and past the threshold is collateral damage either way.
+                at = samples[id] + 0
+                if (at > 0 && at != full + 0) {
+                    reduced++
+                    reduced_at = at
+                    if (floor > reduced_floor) { reduced_floor = floor }
+                } else if (floor > worst_floor) {
+                    worst_floor = floor
+                }
+
+                # A reduced-count row is named as the control it is rather than given a
+                # direction. Ten samples resolve "flat" but not a percentage, so calling
+                # one faster or slower would dress noise as a result.
+                if (at > 0 && at != full + 0) {
+                    if (abs(change) > threshold) {
+                        verdict = "control moved"
+                        moved_controls++
+                    } else {
+                        verdict = "control"
+                    }
+                } else if (abs(change) <= floor) {
                     verdict = "noise"
                 } else if (change < 0) {
                     verdict = "faster"
@@ -446,15 +648,27 @@ set +e
                 }
 
                 if (change > threshold && change > floor) { regressions++ }
-                if (floor > threshold) { unresolvable++; unresolved[unresolvable] = id }
+                if (floor > threshold && !(at > 0 && at != full + 0)) {
+                    unresolvable++; unresolved[unresolvable] = id
+                }
 
-                printf "| `%s` | %s | %s | %s | %s | %s | %s |\n",
-                    id, fmt(ref), fmt(new), pct(change), pct(ctl_ref), pct(ctl_new), verdict
+                printf "| `%s` | %s | %s | %s | %s | %s | %s | %s |\n",
+                    id, fmt(ref), fmt(new), pct(change), pct(ctl_ref), pct(ctl_new),
+                    samples[id], verdict
                 compared++
             }
 
             print ""
-            printf "%d rows compared. Worst same-code control spread: %.1f%%.\n", compared, worst_floor
+            printf "%d rows compared. Worst same-code control spread: %.1f%%",
+                compared, worst_floor
+            if (reduced > 0) {
+                printf " across the %d row(s) at %d samples.\n", compared - reduced, full
+                printf "%d control row(s) ran at %d samples, widest own-spread %.1f%%. A reduced count\n",
+                    reduced, reduced_at, reduced_floor
+                print "widens that spread by construction, so it is not the host noise floor."
+            } else {
+                print "."
+            }
             print ""
 
             if (compared == 0) {
@@ -475,6 +689,14 @@ set +e
                     regressions, threshold
             } else {
                 printf "**Regression verdict**: PASS at %s%%.\n", threshold
+            }
+
+            if (moved_controls > 0) {
+                print ""
+                printf "%d control row(s) moved beyond %s%%. A control is meant to sit flat, so\n",
+                    moved_controls, threshold
+                print "either the change reached further than intended or the lane drifted. Re-measure"
+                print "the row at the full sample count before reading anything else in this table."
             }
 
             if (unresolvable > 0) {

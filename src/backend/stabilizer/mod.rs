@@ -81,6 +81,10 @@ pub struct StabilizerBackend {
     pub(super) sgi_new_a: Vec<u32>,
     pub(super) sgi_new_b: Vec<u32>,
     pub(super) sgi_max_active: usize,
+    /// Set by every dense path that mutates the tableau without maintaining
+    /// `qubit_active`. The counters `sgi_enabled` reads only describe the rows
+    /// while the index is live, so a bulk entry rebuilds before consulting them.
+    pub(super) sgi_stale: bool,
     pub(super) lazy_destab: bool,
     pub(super) gate_row_start: usize,
     #[cfg(feature = "gpu")]
@@ -125,6 +129,7 @@ impl Clone for StabilizerBackend {
             sgi_new_a: self.sgi_new_a.clone(),
             sgi_new_b: self.sgi_new_b.clone(),
             sgi_max_active: self.sgi_max_active,
+            sgi_stale: self.sgi_stale,
             lazy_destab: self.lazy_destab,
             gate_row_start: self.gate_row_start,
             #[cfg(feature = "gpu")]
@@ -157,6 +162,7 @@ impl StabilizerBackend {
             sgi_new_a: Vec::new(),
             sgi_new_b: Vec::new(),
             sgi_max_active: 0,
+            sgi_stale: false,
             lazy_destab: false,
             gate_row_start: 0,
             #[cfg(feature = "gpu")]
@@ -194,6 +200,7 @@ impl StabilizerBackend {
         self.qubit_active = (0..n).map(|q| vec![q as u32, (n + q) as u32]).collect();
         self.total_weight = 2 * n;
         self.sgi_max_active = 2;
+        self.sgi_stale = false;
 
         let want_lazy = self.lazy_destab;
         self.lazy_destab = false;
@@ -567,6 +574,7 @@ impl StabilizerBackend {
         self.qubit_active = (0..n).map(|q| vec![(n + q) as u32]).collect();
         self.total_weight = n;
         self.sgi_max_active = 1;
+        self.sgi_stale = false;
     }
 
     pub(super) fn ensure_destabilizers(&mut self) {
@@ -585,13 +593,13 @@ impl StabilizerBackend {
         if sgi_live {
             // Materialization replaced the stabilizer half with its reduced
             // basis, so the per-row supports the index tracked no longer
-            // describe the rows.
+            // describe the rows. Rebuild eagerly here: the SGI loop reads the
+            // index on the very next instruction and does not consult
+            // `sgi_stale`.
             self.rebuild_qubit_active();
+        } else {
+            self.sgi_stale = true;
         }
-        // When the SGI guard is off, the index is dead and the counters stay
-        // heavy. Rebuilding here would re-arm the guard over an index that the
-        // dense paths do not maintain, and a later bulk entry would then run
-        // SGI against stale supports.
     }
 
     pub fn raw_tableau(&self) -> (&[u64], &[bool]) {
@@ -640,7 +648,7 @@ impl StabilizerBackend {
             return Ok(());
         }
 
-        if self.sgi_enabled() {
+        if self.sgi_ready() {
             return self.apply_gates_only_sgi(instructions);
         }
 
@@ -683,6 +691,7 @@ impl StabilizerBackend {
         qubit: usize,
         classical_bit: usize,
     ) -> (bool, Vec<usize>) {
+        self.sgi_stale = true;
         let n = self.n;
         let word = qubit / 64;
         let bit_mask = 1u64 << (qubit % 64);
@@ -734,6 +743,7 @@ impl StabilizerBackend {
         &mut self,
         measurements: &[(usize, usize)],
     ) -> (Vec<bool>, Vec<Vec<usize>>, Vec<bool>) {
+        self.sgi_stale = true;
         self.ensure_destabilizers();
         let num_meas = measurements.len();
         let n = self.n;
@@ -1368,7 +1378,7 @@ impl Backend for StabilizerBackend {
             return Ok(());
         }
 
-        if self.sgi_enabled() {
+        if self.sgi_ready() {
             return self.apply_instructions_sgi(instructions);
         }
 

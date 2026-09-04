@@ -740,6 +740,7 @@ impl StabilizerBackend {
         &mut self,
         instructions: &[Instruction],
     ) -> Result<()> {
+        self.sgi_stale = true;
         let nw = self.num_words;
         let mut word_groups: Vec<Vec<BatchGate>> = vec![Vec::new(); nw];
         let mut cross_word: Vec<CrossWordGate> = Vec::new();
@@ -839,6 +840,7 @@ impl StabilizerBackend {
         &mut self,
         instructions: &[Instruction],
     ) -> Result<()> {
+        self.sgi_stale = true;
         let nw = self.num_words;
         let mut word_groups: Vec<Vec<BatchGate>> = vec![Vec::new(); nw];
         let mut cross_word: Vec<CrossWordGate> = Vec::new();

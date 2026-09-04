@@ -600,8 +600,12 @@ impl Gate {
     /// Matrix indices follow the convention: row/col `i*2+j` where `i` indexes
     /// `targets[0]` and `j` indexes `targets[1]`.
     ///
+    /// A [`Gate::PauliRot`] is admitted at weight 2 only, as
+    /// `exp(-i theta/2 * P0 x P1)` with `P0` on `targets[0]`.
+    ///
     /// # Panics
-    /// Panics on gates other than `Cx`, `Cz`, `Swap`, `Cu`, or `Fused2q`.
+    /// Panics on gates other than `Cx`, `Cz`, `Swap`, `Cu`, `Fused2q`, `Rzz`,
+    /// and a weight-2 `PauliRot`.
     pub fn matrix_4x4(&self) -> [[Complex64; 4]; 4] {
         let z = Complex64::new(0.0, 0.0);
         let o = Complex64::new(1.0, 0.0);
@@ -622,6 +626,25 @@ impl Gate {
                 [z, z, mat[1][0], mat[1][1]],
             ],
             Gate::Fused2q(mat) => **mat,
+            Gate::PauliRot(data) if data.axes.len() == 2 => {
+                let half = data.theta / 2.0;
+                let axis = |a: &PauliAxis| match a {
+                    PauliAxis::X => Gate::X.matrix_2x2(),
+                    PauliAxis::Y => Gate::Y.matrix_2x2(),
+                    PauliAxis::Z => Gate::Z.matrix_2x2(),
+                };
+                let p = kron_2x2(&axis(&data.axes[0]), &axis(&data.axes[1]));
+                let cos = Complex64::new(half.cos(), 0.0);
+                let minus_i_sin = Complex64::new(0.0, -half.sin());
+                let mut out = [[z; 4]; 4];
+                for (r, row) in out.iter_mut().enumerate() {
+                    for (c, e) in row.iter_mut().enumerate() {
+                        *e = minus_i_sin * p[r][c];
+                    }
+                    row[r] += cos;
+                }
+                out
+            }
             _ => panic!(
                 "matrix_4x4 called on non-standard-2q gate `{}`",
                 self.name()

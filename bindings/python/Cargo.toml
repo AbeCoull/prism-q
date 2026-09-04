@@ -22,6 +22,12 @@ crate-type = ["cdylib"]
 [features]
 gpu = ["prism-q/gpu"]
 
+# Off by default and never enabled in a wheel job. `mpi-sys` runs bindgen and
+# needs a system MPI at build time, and the extension has to link the same MPI
+# implementation and ABI as mpi4py and as the launcher, so this is a
+# from-source path rather than a wheel.
+distributed-mpi = ["prism-q/distributed-mpi"]
+
 [dependencies]
 prism-q = { path = "../..", default-features = false, features = ["parallel"] }
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py311", "num-complex"] }

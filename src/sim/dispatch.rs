@@ -131,6 +131,22 @@ pub enum BackendKind {
         epsilon: f64,
         max_terms: usize,
     },
+    /// Heisenberg Pauli propagation through a noise model; serves expectation
+    /// values and observable expectations only.
+    ///
+    /// Explicit-dispatch only: [`BackendKind::Auto`] never selects it. Noise
+    /// enters as the channel's action on the Pauli basis, which shrinks
+    /// coefficients while the circuit's rotations grow the term count, so the
+    /// weighted sum stays small exactly when noise outpaces the branching
+    /// rotations. Terms below `epsilon` are dropped once the sum exceeds
+    /// `max_terms` (0 disables truncation and makes the run exact).
+    ///
+    /// A channel with no Pauli-basis form (custom Kraus, two-qubit Kraus,
+    /// readout error) is rejected naming the density matrix.
+    PauliPath {
+        epsilon: f64,
+        max_terms: usize,
+    },
     /// Automatic backend selection with GPU acceleration opted in.
     ///
     /// Makes the same shape-based routing decisions as [`BackendKind::Auto`],
@@ -239,6 +255,7 @@ impl BackendKind {
             BackendKind::StabilizerRank
                 | BackendKind::StochasticPauli { .. }
                 | BackendKind::DeterministicPauli { .. }
+                | BackendKind::PauliPath { .. }
         ) && !self.is_density_matrix()
     }
 
@@ -684,6 +701,7 @@ pub(super) enum ExecutionPlan {
     StabilizerRank,
     StochasticPauli { num_samples: usize },
     DeterministicPauli { epsilon: f64, max_terms: usize },
+    PauliPath,
 }
 
 /// Name the engine `kind` resolves to when that engine can discard state
@@ -704,6 +722,12 @@ pub(super) fn approximate_route_name(
         BackendKind::DeterministicPauli { epsilon, max_terms } => {
             if *epsilon > 0.0 || *max_terms > 0 {
                 return Some("DeterministicPauli");
+            }
+            return None;
+        }
+        BackendKind::PauliPath { epsilon, max_terms } => {
+            if *epsilon > 0.0 || *max_terms > 0 {
+                return Some("PauliPath");
             }
             return None;
         }
@@ -790,6 +814,7 @@ pub(super) fn resolve(
                 num_samples: *num_samples,
             };
         }
+        BackendKind::PauliPath { .. } => return ExecutionPlan::PauliPath,
         BackendKind::DeterministicPauli { epsilon, max_terms } => {
             return ExecutionPlan::DeterministicPauli {
                 epsilon: *epsilon,

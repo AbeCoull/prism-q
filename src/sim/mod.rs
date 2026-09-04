@@ -46,6 +46,7 @@ use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
+use crate::sim::noise::NoiseModel;
 use shots::{packed_shots_to_classical_bits, sample_shots, shots_from_basis_samples};
 use terminal_sampling::{
     sample_counts_from_probs, sample_counts_from_state, sample_shots_from_probs,
@@ -426,6 +427,16 @@ impl<'c> Simulate<'c, Seeded> {
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
         }
+        if let BackendKind::PauliPath { epsilon, max_terms } = self.kind {
+            reject_pauli_path_initial_state(self.initial_state)?;
+            return pauli_path_expectations(
+                self.circuit,
+                self.noise_model,
+                observables,
+                epsilon,
+                max_terms,
+            );
+        }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "expectation values")?;
             require_unitary_circuit(&self.kind, self.circuit)?;
@@ -473,6 +484,23 @@ impl<'c> Simulate<'c, Seeded> {
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if let BackendKind::PauliPath { epsilon, max_terms } = self.kind {
+            reject_pauli_path_initial_state(self.initial_state)?;
+            let result = pauli_path_expectations(
+                self.circuit,
+                self.noise_model,
+                &observable_vecs(observable),
+                epsilon,
+                max_terms,
+            )?;
+            let metadata = result.metadata;
+            return Ok(weighted_observable_result(
+                observable,
+                &result.values,
+                None,
+                metadata,
+            ));
         }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "expectation values")?;
@@ -584,7 +612,10 @@ impl<'c> Simulate<'c, Seeded> {
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
         }
-        if self.noise_model.is_some() && !self.kind.is_density_matrix() {
+        if self.noise_model.is_some()
+            && !self.kind.is_density_matrix()
+            && !matches!(self.kind, BackendKind::PauliPath { .. })
+        {
             return Err(PrismError::IncompatibleBackend {
                 backend: format!("{:?}", self.kind),
                 reason: "a parameter-shift gradient under a noise model evaluates the exact \
@@ -641,6 +672,64 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
 
 /// Gate for the terminals that answer a noise model from the exact mixture,
 /// which only the density matrix holds.
+/// Rejection naming the two terminals the Pauli path engine serves.
+fn reject_pauli_path(terminal: &str) -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: "PauliPath".into(),
+        reason: format!(
+            "{terminal} is not served by Pauli path propagation, which answers \
+             `expectation_values` and `observable_expectation` only"
+        ),
+    }
+}
+
+fn reject_pauli_path_initial_state(state: Option<&[Complex64]>) -> Result<()> {
+    match state {
+        Some(_) => Err(reject_pauli_path("a start state")),
+        None => Ok(()),
+    }
+}
+
+/// One Pauli path evaluation per observable, under `noise` when one is
+/// attached and on the bare circuit otherwise.
+///
+/// The route is exact only when nothing was truncated, so exactness is decided
+/// by the discarded mass the run reports rather than by the parameters it was
+/// given: a budget that never binds still returns an exact value.
+fn pauli_path_expectations(
+    circuit: &Circuit,
+    noise: Option<&NoiseModel>,
+    observables: &[Vec<PauliTerm>],
+    epsilon: f64,
+    max_terms: usize,
+) -> Result<ExpectationResult> {
+    let empty;
+    let noise = match noise {
+        Some(model) => model,
+        None => {
+            empty = NoiseModel {
+                after_gate: vec![Vec::new(); circuit.instructions.len()],
+                readout: vec![None; circuit.num_classical_bits],
+            };
+            &empty
+        }
+    };
+    let mut values = Vec::with_capacity(observables.len());
+    let mut discarded = 0.0f64;
+    for obs in observables {
+        let result =
+            unified_pauli::run_pauli_path_observable(circuit, noise, obs, epsilon, max_terms)?;
+        discarded = discarded.max(result.total_discarded);
+        values.push(result.mean);
+    }
+    let metadata = if discarded > 0.0 {
+        RunMetadata::approximate(ResolvedBackend::PauliPath)
+    } else {
+        RunMetadata::exact(ResolvedBackend::PauliPath)
+    };
+    Ok(analytic_expectations(values, metadata))
+}
+
 fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
     if kind.is_density_matrix() {
         return Ok(());
@@ -1189,6 +1278,7 @@ fn run_with_internal(
                     reason: "DeterministicPauli produces marginals only; use `simulate(...).marginals()`".into(),
                 })
             }
+            ExecutionPlan::PauliPath => Err(reject_pauli_path("a single run")),
         },
     }
 }

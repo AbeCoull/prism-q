@@ -360,6 +360,16 @@ pub(crate) fn shift_gradient(
     let observables: Vec<Vec<PauliTerm>> =
         hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
     let evaluate = |c: &Circuit| -> Result<f64> {
+        if let BackendKind::PauliPath { epsilon, max_terms } = kind {
+            let per_term =
+                super::pauli_path_expectations(c, noise, &observables, *epsilon, *max_terms)?
+                    .into_values();
+            return Ok(hamiltonian
+                .iter()
+                .zip(per_term)
+                .map(|((coeff, _), v)| coeff * v)
+                .sum());
+        }
         let per_term = match (noise, initial_state) {
             (Some(noise), _) => super::noise::dm_expectation_values(
                 kind,

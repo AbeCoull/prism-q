@@ -54,5 +54,52 @@ Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T ga
 run_spd(circuit, epsilon, max_terms) // -> SpdResult
 ```
 
+## Pauli path propagation under noise (`src/sim/unified_pauli.rs`)
+
+The same weighted Pauli sum, carried through a noise model. Select
+`BackendKind::PauliPath { epsilon, max_terms }` and attach a noise model; the engine
+answers `expectation_values` and `observable_expectation`, and nothing else.
+
+```rust
+let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+let values = simulate(&circuit)
+    .backend(BackendKind::PauliPath { epsilon: 1e-8, max_terms: 1 << 16 })
+    .noise(&noise)
+    .expectation_values(&observables)?;
+```
+
+The error model is worth stating plainly, because it has two independent parts and only
+one of them is approximate.
+
+The channels are exact. Each one is applied as its adjoint on the Pauli basis rather than
+as a twirl, so depolarizing, dephasing, thermal relaxation, and amplitude damping all
+reproduce the density matrix to machine precision at `max_terms = 0`. Amplitude damping
+is the case worth naming: it is not unital, and the identity term its adjoint produces
+from `Z` is carried rather than dropped. A channel with no Pauli-basis form (custom
+Kraus, two-qubit Kraus, readout error) is rejected rather than approximated.
+
+The truncation is the approximate part, and it reports its own bound. With
+`max_terms = 0` nothing is dropped and the value is exact. With a budget set, terms whose
+coefficient magnitude falls below `epsilon` are dropped once the sum exceeds the budget,
+and the total dropped magnitude bounds the error in the returned value. That bound is a
+worst case rather than an estimate: it holds because every remaining operation is a
+contraction in the Pauli 1-norm.
+
+What decides whether the engine is usable is the term count, not the qubit count. Every
+non-Clifford rotation in the observable's backward light cone can double the sum; every
+channel shrinks it. Circuits where noise wins stay cheap at widths no dense
+representation reaches, and circuits where it does not will hit the budget and report a
+large discarded mass, which is the signal to use the density matrix or trajectory
+averaging instead.
+
+In practice the observable's weight is what moves that count, ahead of width and depth,
+because the backward light cone opens from every letter it starts with. On a two-layer
+hardware-efficient ansatz under 1% depolarizing, `Z` on one qubit stays at 11 terms
+whether the register is 20 qubits or 100; `Z` on two adjacent qubits fills a
+16384-term budget by 30 qubits; a `Z` on every qubit fills it at 20 and returns a
+discarded mass larger than the observable's own norm, which is the engine saying the
+answer is not usable rather than returning a wrong one quietly. Check the reported
+discarded mass against the precision the caller needs before trusting a truncated run.
+
 You can also build Clifford+T test circuits directly with
 [`clifford_t_circuit`](../reference/builders.md).

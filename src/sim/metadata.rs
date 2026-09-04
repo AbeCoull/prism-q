@@ -43,6 +43,8 @@ pub enum ResolvedBackend {
     StabilizerRank,
     StochasticPauli,
     DeterministicPauli,
+    /// Heisenberg Pauli propagation through a noise model.
+    PauliPath,
     /// The compiled Clifford sampler, which answers from a propagated parity
     /// map rather than from a `Backend`.
     CompiledStabilizer,

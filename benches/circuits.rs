@@ -566,6 +566,127 @@ fn bench_statevector_diag_mixed(c: &mut Criterion) {
     group.finish();
 }
 
+// ---- Hardware two-qubit bases ----
+
+/// One `cx a, b` rewritten into a hardware two-qubit basis, `{a}` and `{b}`
+/// standing for the two qubit indices.
+///
+/// Every transpiled circuit arrives in one of these bases, and each rewrite here
+/// is exact up to a global phase. The `ecr` form inverts the parser's own `ecr`
+/// decomposition. The `rxx` form follows from `rxx = (h (x) h) rzz (h (x) h)`
+/// and `cz = e^{i pi/4} rz(-pi/2) rz(-pi/2) rzz(pi/2)`. `ms(0, 0, 0.25)` is the
+/// same unitary as `rxx(pi/2)`, so those two rows separate the `Fused2q`
+/// lowering from the native Pauli rotation on identical arithmetic.
+const HARDWARE_BASIS_REWRITES: [(&str, &str); 3] = [
+    (
+        "ecr",
+        "rx(-pi/2) q[{a}];\nrz(-pi/4) q[{a}];\necr q[{a}], q[{b}];\nx q[{a}];\n",
+    ),
+    (
+        "rxx",
+        "h q[{a}];\nrxx(pi/2) q[{a}], q[{b}];\nh q[{a}];\nrz(-pi/2) q[{a}];\nrx(-pi/2) q[{b}];\n",
+    ),
+    (
+        "ms",
+        "h q[{a}];\nms(0, 0, 0.25) q[{a}], q[{b}];\nh q[{a}];\nrz(-pi/2) q[{a}];\nrx(-pi/2) q[{b}];\n",
+    ),
+];
+
+fn dense_probabilities(circuit: &Circuit) -> Vec<f64> {
+    run_with(BackendKind::Statevector, circuit, SEED)
+        .unwrap()
+        .probabilities
+        .unwrap()
+        .to_vec()
+}
+
+/// `circuit` with every `cx` replaced by `rewrite`, round-tripped through the
+/// parser so the row measures the lowering the parser actually produces.
+///
+/// The rewrite is checked against the original state before it is benched. A
+/// wrong identity would otherwise be reported as a slow basis.
+fn hardware_basis_circuit(circuit: &Circuit, name: &str, rewrite: &str) -> Circuit {
+    let qasm = prism_q::circuit::qasm_export::to_qasm3(circuit).unwrap();
+    let mut out = String::with_capacity(qasm.len() * 3);
+    for line in qasm.lines() {
+        match line
+            .strip_prefix("cx q[")
+            .and_then(|rest| rest.split_once("], q["))
+        {
+            Some((a, rest)) => {
+                let b = rest.trim_end_matches("];");
+                out.push_str(&rewrite.replace("{a}", a).replace("{b}", b));
+            }
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    let rewritten = prism_q::circuit::openqasm::parse(&out).unwrap();
+    let expected = dense_probabilities(circuit);
+    let got = dense_probabilities(&rewritten);
+    assert!(
+        got.len() == expected.len() && got.iter().zip(&expected).all(|(g, e)| (g - e).abs() < 1e-9),
+        "the {name} rewrite is not the circuit it claims to re-express"
+    );
+    rewritten
+}
+
+// `random_d10/20` in each hardware two-qubit basis against the `cx` original.
+// The rows differ only by the single-qubit gates the rewrite adds, so what they
+// measure is how much of that fusion absorbs.
+fn bench_statevector_hardware_basis(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/hardware_basis");
+    configure_group(&mut group);
+
+    let base = circuits::random_circuit(20, 10, SEED);
+    group.bench_with_input(BenchmarkId::new("cx", 20), &base, |b, circ| {
+        b.iter(|| {
+            run_with(BackendKind::Statevector, circ, 42).unwrap();
+        });
+    });
+    for (name, rewrite) in HARDWARE_BASIS_REWRITES {
+        let circuit = hardware_basis_circuit(&base, name, rewrite);
+        group.bench_with_input(BenchmarkId::new(name, 20), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// The density-matrix half of the same question, at the width where its `2n`
+// buffer clears the fusion floors.
+fn bench_density_matrix_hardware_basis(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/hardware_basis");
+    configure_group(&mut group);
+
+    let base = circuits::random_circuit(12, 10, SEED);
+    let run = |circ: &Circuit| {
+        black_box(
+            sim::simulate(circ)
+                .backend(BackendKind::DensityMatrix)
+                .seed(SEED)
+                .run()
+                .unwrap(),
+        );
+    };
+    group.bench_with_input(BenchmarkId::new("cx", 12), &base, |b, circ| {
+        b.iter(|| run(circ));
+    });
+    for (name, rewrite) in HARDWARE_BASIS_REWRITES {
+        let circuit = hardware_basis_circuit(&base, name, rewrite);
+        group.bench_with_input(BenchmarkId::new(name, 12), &circuit, |b, circ| {
+            b.iter(|| run(circ));
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_statevector_qv(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qv");
     configure_group(&mut group);
@@ -3254,6 +3375,7 @@ criterion_group! {
     bench_statevector_qaoa,
     bench_statevector_trotter,
     bench_statevector_diag_mixed,
+    bench_statevector_hardware_basis,
     bench_statevector_qv,
     bench_statevector_w_state,
     bench_statevector_clifford,
@@ -3351,6 +3473,7 @@ criterion_group! {
     bench_density_matrix_unitary_layers,
     bench_density_matrix_rzz_layers,
     bench_density_matrix_rzz_layers_fused,
+    bench_density_matrix_hardware_basis,
     bench_density_matrix_rzz_sandwich,
     bench_density_matrix_fused_layers,
     bench_density_matrix_exact_vs_trajectory,

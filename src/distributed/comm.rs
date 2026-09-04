@@ -127,7 +127,10 @@ fn as_f64_mut(slice: &mut [Complex64]) -> &mut [f64] {
 /// launcher.
 #[cfg(feature = "distributed-mpi")]
 pub struct MpiComm {
-    _universe: mpi::environment::Universe,
+    /// Held only by a comm that ran `MPI_Init` itself, because dropping a
+    /// `Universe` runs `MPI_Finalize`. A comm attached to an MPI another
+    /// component owns leaves that lifetime alone.
+    _universe: Option<mpi::environment::Universe>,
     world: mpi::topology::SimpleCommunicator,
     rank: usize,
     size: usize,
@@ -147,19 +150,47 @@ impl std::fmt::Debug for MpiComm {
 impl MpiComm {
     /// Initialize MPI and capture the world communicator.
     ///
-    /// Returns `None` when MPI initialization fails.
+    /// Returns `None` when MPI initialization fails, which includes MPI already
+    /// being initialized: `mpi::initialize` declines rather than attaching. Use
+    /// [`MpiComm::attach_world`] in a process where something else owns MPI.
     pub fn world() -> Option<Self> {
-        use mpi::traits::Communicator;
         let universe = mpi::initialize()?;
         let world = universe.world();
+        Some(Self::from_parts(Some(universe), world))
+    }
+
+    /// Attach to an MPI another component has already initialized.
+    ///
+    /// The returned comm holds no `Universe`, so dropping it does not call
+    /// `MPI_Finalize`. That is the point of the constructor: in an interpreter
+    /// where mpi4py calls `MPI_Init_thread` at import and registers
+    /// `MPI_Finalize` at exit, finalizing from a dropped handle would make
+    /// every later MPI call in the process erroneous.
+    ///
+    /// Returns `None` when MPI is not initialized.
+    pub fn attach_world() -> Option<Self> {
+        if !mpi::environment::is_initialized() {
+            return None;
+        }
+        Some(Self::from_parts(
+            None,
+            mpi::topology::SimpleCommunicator::world(),
+        ))
+    }
+
+    fn from_parts(
+        universe: Option<mpi::environment::Universe>,
+        world: mpi::topology::SimpleCommunicator,
+    ) -> Self {
+        use mpi::traits::Communicator;
         let rank = world.rank() as usize;
         let size = world.size() as usize;
-        Some(Self {
+        Self {
             _universe: universe,
             world,
             rank,
             size,
-        })
+        }
     }
 }
 

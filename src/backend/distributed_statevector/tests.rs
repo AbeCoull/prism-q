@@ -1461,6 +1461,37 @@ fn mismatched_rank_configuration_is_rejected_at_init() {
     }
 }
 
+// Two ranks can agree on width, seed, and every knob and still be handed
+// different gate streams, which the configuration check cannot see. Both
+// circuits below are 4 qubits with one classical bit, so only the instruction
+// fingerprint separates them.
+#[test]
+fn mismatched_rank_circuit_is_rejected() {
+    relax_min_local_qubits();
+    let mut a = CircuitBuilder::new_with_classical(4, 1);
+    a.h(0).cx(0, 3).measure(3, 0);
+    let first = a.build();
+    let mut b = CircuitBuilder::new_with_classical(4, 1);
+    b.h(1).cx(1, 3).measure(3, 0);
+    let second = b.build();
+
+    let errors = run_ranks(2, |ctx| {
+        let circuit = if ctx.rank() == 1 { &second } else { &first };
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        run_on(&mut backend, circuit).map(|_| ()).unwrap_err()
+    });
+
+    for err in &errors {
+        match err {
+            crate::error::PrismError::BackendUnsupported { operation, .. } => assert!(
+                operation.contains("must run the same circuit"),
+                "expected a circuit mismatch, got {operation}"
+            ),
+            other => panic!("expected a circuit mismatch, got {other:?}"),
+        }
+    }
+}
+
 // The override has to reproduce the route `apply_gate` takes for a one-qubit gate
 // at every position of the local/global split, including the diagonal shortcut.
 // The third matrix is a non-unitary jump branch, which is what the trajectory

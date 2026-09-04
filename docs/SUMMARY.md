@@ -1,6 +1,6 @@
 # Summary
 
-[PRISM-Q](./overview.md)
+[Overview](./overview.md)
 
 # Getting Started
 

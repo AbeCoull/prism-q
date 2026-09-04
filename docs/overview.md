@@ -7,7 +7,7 @@
 </div>
 
 PRISM-Q runs quantum circuits fast by matching each one to the right simulation strategy.
-It dispatches across eight CPU backends plus an optional CUDA path, optimizes circuits
+It dispatches across nine CPU backends plus optional CUDA and MPI paths, optimizes circuits
 through a multi-pass fusion pipeline, and uses AVX2, FMA, and BMI2 SIMD in the inner loop.
 Input is OpenQASM 3.0, with backward-compatible 2.0 syntax. The same library handles a
 two-qubit Bell pair and a thousand-qubit Clifford circuit.

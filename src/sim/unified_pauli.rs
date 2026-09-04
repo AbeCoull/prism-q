@@ -1,7 +1,8 @@
 //! Pauli propagation engines for circuits of Clifford gates and Pauli
 //! rotations: SPP samples backward Heisenberg propagation stochastically, SPD
-//! carries the full weighted Pauli sum with optional truncation. Neither
-//! materializes a state vector.
+//! carries the full weighted Pauli sum with optional truncation, and the Pauli
+//! path engine carries the same sum through a noise model. None materializes a
+//! state vector.
 //!
 //! Z-axis rotations (`T`, `Tdg`, `Rz`, `P`) and the two-qubit `Rzz` branch
 //! natively; `Rx`, `Ry`, and multi-qubit `PauliRot` strings lower to Clifford
@@ -17,7 +18,8 @@ use std::borrow::Cow;
 use crate::circuit::{Circuit, Instruction, SmallVec, pauli_rotation_lowering};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
-use crate::sim::compiled::{PauliVec, flip_bit, propagate_backward};
+use crate::sim::compiled::{PauliVec, flip_bit, get_bit, propagate_backward};
+use crate::sim::noise::{NoiseChannel, NoiseModel, thermal_relaxation_rates};
 
 /// Absolute ceiling on the weighted-Pauli term count, enforced even in exact
 /// mode (`max_terms == 0`). Without a per-step truncation budget the term set
@@ -28,10 +30,10 @@ use crate::sim::compiled::{PauliVec, flip_bit, propagate_backward};
 const SPD_MAX_TERMS_CEILING: usize = 1 << 20;
 
 #[inline]
-fn check_spd_term_ceiling(len: usize) -> Result<()> {
+fn check_spd_term_ceiling(len: usize, backend: &str) -> Result<()> {
     if len > SPD_MAX_TERMS_CEILING {
         return Err(PrismError::BackendUnsupported {
-            backend: "SPD".into(),
+            backend: backend.into(),
             operation: format!(
                 "weighted-Pauli sum exceeded {SPD_MAX_TERMS_CEILING} terms; pass a nonzero \
                  max_terms for bounded approximate truncation"
@@ -1020,7 +1022,7 @@ fn run_spd_observable_with(
             sum.apply_backward(gate, targets);
         }
         truncation.enforce(&mut sum, &mut total_discarded);
-        check_spd_term_ceiling(sum.terms.len())?;
+        check_spd_term_ceiling(sum.terms.len(), "SPD")?;
         if sum.terms.len() > peak_terms {
             peak_terms = sum.terms.len();
         }
@@ -1095,7 +1097,7 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
             if max_terms > 0 && sum.terms.len() > max_terms {
                 total_discarded += sum.truncate(epsilon);
             }
-            check_spd_term_ceiling(sum.terms.len())?;
+            check_spd_term_ceiling(sum.terms.len(), "SPD")?;
 
             if sum.terms.len() > peak_terms {
                 peak_terms = sum.terms.len();
@@ -1186,7 +1188,7 @@ pub fn run_spd_observable_light_cone(
         if max_terms > 0 && sum.terms.len() > max_terms {
             total_discarded += sum.truncate(epsilon);
         }
-        check_spd_term_ceiling(sum.terms.len())?;
+        check_spd_term_ceiling(sum.terms.len(), "SPD")?;
         if sum.terms.len() > peak_terms {
             peak_terms = sum.terms.len();
         }
@@ -1199,6 +1201,299 @@ pub fn run_spd_observable_light_cone(
     Ok(SpdObservableResult {
         mean: sum.diagonal_expectation(),
         t_count,
+        peak_terms,
+        total_discarded,
+    })
+}
+
+// ---- Pauli path engine (noisy Heisenberg propagation) ----
+
+/// Backward action of one noise channel on a weighted Pauli sum.
+///
+/// A unital Pauli channel scales each letter by its own Pauli eigenvalue.
+/// Amplitude damping is not unital: its adjoint sends `Z` to
+/// `(1 - gamma) Z + gamma I`, and the sum carries that identity branch as a
+/// second term rather than dropping it, so the engine stays exact on the
+/// channel rather than on its unital part.
+#[derive(Clone, Copy)]
+enum ChannelAction {
+    /// Eigenvalues for `X`, `Y`, `Z` on one qubit, plus the identity weight the
+    /// `Z` letter picks up.
+    Local {
+        lambda: [f64; 3],
+        z_to_identity: f64,
+    },
+    /// One eigenvalue for every restriction to the pair that is not `I (x) I`.
+    Depolarizing2q { lambda: f64 },
+}
+
+/// The backward action of `channel`, or `None` for a channel with no
+/// Pauli-basis form.
+fn channel_action(channel: &NoiseChannel) -> Option<ChannelAction> {
+    let damping = |gamma: f64| {
+        let keep = (1.0 - gamma).max(0.0);
+        ChannelAction::Local {
+            lambda: [keep.sqrt(), keep.sqrt(), keep],
+            z_to_identity: gamma,
+        }
+    };
+    match channel {
+        NoiseChannel::Pauli { px, py, pz } => {
+            let pi = 1.0 - px - py - pz;
+            Some(ChannelAction::Local {
+                lambda: [pi + px - py - pz, pi + py - px - pz, pi + pz - px - py],
+                z_to_identity: 0.0,
+            })
+        }
+        NoiseChannel::Depolarizing { p } => {
+            let lambda = 1.0 - 4.0 * p / 3.0;
+            Some(ChannelAction::Local {
+                lambda: [lambda; 3],
+                z_to_identity: 0.0,
+            })
+        }
+        NoiseChannel::PhaseDamping { gamma } => {
+            let keep = (1.0 - gamma).max(0.0).sqrt();
+            Some(ChannelAction::Local {
+                lambda: [keep, keep, 1.0],
+                z_to_identity: 0.0,
+            })
+        }
+        NoiseChannel::AmplitudeDamping { gamma } => Some(damping(*gamma)),
+        NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
+            let (gad, gpd) = thermal_relaxation_rates(*t1, *t2, *gate_time);
+            let dephase = (1.0 - gpd).max(0.0).sqrt();
+            let ChannelAction::Local { lambda, .. } = damping(gad) else {
+                unreachable!("amplitude damping is a local action")
+            };
+            Some(ChannelAction::Local {
+                lambda: [lambda[0] * dephase, lambda[1] * dephase, lambda[2]],
+                z_to_identity: gad,
+            })
+        }
+        NoiseChannel::TwoQubitDepolarizing { p } => Some(ChannelAction::Depolarizing2q {
+            lambda: 1.0 - 16.0 * p / 15.0,
+        }),
+        NoiseChannel::Custom { .. } | NoiseChannel::Kraus2q { .. } => None,
+    }
+}
+
+/// Index into [`ChannelAction::Local`]'s eigenvalue triple for the letter on
+/// `qubit`, or `None` for the identity letter.
+#[inline]
+fn pauli_letter(pauli: &PauliVec, qubit: usize) -> Option<usize> {
+    match (get_bit(&pauli.x, qubit), get_bit(&pauli.z, qubit)) {
+        (false, false) => None,
+        (true, false) => Some(0),
+        (true, true) => Some(1),
+        (false, true) => Some(2),
+    }
+}
+
+impl WeightedPauliSum {
+    /// Backward-apply one noise channel.
+    ///
+    /// The unital part scales coefficients in place. The amplitude-damping
+    /// identity branch adds a term, and that term can collide with one already
+    /// present, so the non-unital case drains and re-accumulates instead.
+    fn apply_backward_channel(&mut self, action: &ChannelAction, qubits: &[usize]) {
+        match *action {
+            ChannelAction::Local {
+                lambda,
+                z_to_identity,
+            } => {
+                let q = qubits[0];
+                if z_to_identity == 0.0 {
+                    for (pauli, coeff) in self.terms.iter_mut() {
+                        if let Some(letter) = pauli_letter(pauli, q) {
+                            *coeff *= lambda[letter];
+                        }
+                    }
+                    return;
+                }
+                // The identity branch can land on a key already present, so the
+                // pass accumulates through `insert` rather than writing the map
+                // directly. `scratch` moves out for the walk because `insert`
+                // needs the whole struct back.
+                let mut scratch = std::mem::take(&mut self.scratch);
+                scratch.clear();
+                scratch.extend(self.terms.drain());
+                for (pauli, coeff) in scratch.drain(..) {
+                    match pauli_letter(&pauli, q) {
+                        None => self.insert(pauli, coeff),
+                        Some(2) => {
+                            let mut identity = pauli.clone();
+                            flip_bit(&mut identity.z, q);
+                            self.insert(pauli, coeff * lambda[2]);
+                            self.insert(identity, coeff * z_to_identity);
+                        }
+                        Some(letter) => self.insert(pauli, coeff * lambda[letter]),
+                    }
+                }
+                self.scratch = scratch;
+            }
+            ChannelAction::Depolarizing2q { lambda } => {
+                let (a, b) = (qubits[0], qubits[1]);
+                for (pauli, coeff) in self.terms.iter_mut() {
+                    if pauli_letter(pauli, a).is_some() || pauli_letter(pauli, b).is_some() {
+                        *coeff *= lambda;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One step of the backward walk: a gate to conjugate through, or a channel to
+/// apply.
+enum PathOp {
+    Gate(Gate, SmallVec<[usize; 4]>),
+    Channel(ChannelAction, SmallVec<[usize; 2]>),
+}
+
+/// Flatten `circuit` and `noise` into the ordered step list the backward walk
+/// consumes.
+///
+/// Lowering `Rx`, `Ry`, and `PauliRot` rewrites one instruction into several, so
+/// the noise events cannot stay indexed by circuit position. Emitting a
+/// gate's own channels directly after it sidesteps the remapping.
+fn pauli_path_ops(circuit: &Circuit, noise: &NoiseModel, backend: &str) -> Result<Vec<PathOp>> {
+    if noise.readout.iter().any(|r| r.is_some()) {
+        return Err(PrismError::IncompatibleBackend {
+            backend: backend.to_string(),
+            reason: "readout error has no Pauli-basis form on an expectation value; use \
+                     BackendKind::DensityMatrix"
+                .to_string(),
+        });
+    }
+    let mut ops = Vec::with_capacity(circuit.instructions.len() * 2);
+    for (index, inst) in circuit.instructions.iter().enumerate() {
+        match inst {
+            Instruction::Gate { gate, targets } => {
+                if gate.is_clifford()
+                    || z_rotation_angle(gate).is_some()
+                    || zz_rotation_angle(gate).is_some()
+                {
+                    ops.push(PathOp::Gate(gate.clone(), SmallVec::from_slice(targets)));
+                } else {
+                    let axes: &[crate::PauliAxis] = match gate {
+                        Gate::Rx(_) => &[crate::PauliAxis::X],
+                        Gate::Ry(_) => &[crate::PauliAxis::Y],
+                        Gate::PauliRot(data) => data.axes(),
+                        other => {
+                            return Err(PrismError::BackendUnsupported {
+                                backend: backend.to_string(),
+                                operation: format!(
+                                    "gate `{}` is neither Clifford nor a supported Pauli rotation",
+                                    other.name()
+                                ),
+                            });
+                        }
+                    };
+                    let theta = match gate {
+                        Gate::Rx(theta) | Gate::Ry(theta) => *theta,
+                        Gate::PauliRot(data) => data.theta(),
+                        _ => unreachable!("axes were resolved above"),
+                    };
+                    pauli_rotation_lowering(theta, targets, axes, |g, tgts| {
+                        ops.push(PathOp::Gate(g, SmallVec::from_slice(tgts)));
+                    });
+                }
+            }
+            Instruction::Barrier { .. } => {}
+            Instruction::Measure { .. }
+            | Instruction::Reset { .. }
+            | Instruction::Conditional { .. }
+            | Instruction::Region(_) => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: backend.to_string(),
+                    reason: "Pauli propagation requires a unitary circuit without measurements, \
+                             resets, or conditionals"
+                        .to_string(),
+                });
+            }
+        }
+        for event in noise.after_gate.get(index).into_iter().flatten() {
+            let Some(action) = channel_action(&event.channel) else {
+                return Err(PrismError::BackendUnsupported {
+                    backend: backend.to_string(),
+                    operation: format!(
+                        "channel `{:?}` has no Pauli-basis form; use BackendKind::DensityMatrix",
+                        event.channel
+                    ),
+                });
+            };
+            ops.push(PathOp::Channel(action, event.qubits.clone()));
+        }
+    }
+    Ok(ops)
+}
+
+/// Result of one Pauli path evaluation.
+#[derive(Debug, Clone)]
+pub struct PauliPathResult {
+    /// `Tr(rho P)` on the noisy evolution; exact when nothing was truncated.
+    pub mean: f64,
+    /// Peak size of the weighted Pauli sum during propagation.
+    pub peak_terms: usize,
+    /// Total coefficient magnitude discarded by truncation (0 for exact runs).
+    pub total_discarded: f64,
+}
+
+/// `Tr(rho P)` for a joint Pauli observable on a noisy circuit, by backward
+/// Pauli propagation with coefficient truncation.
+///
+/// The observable propagates back through the circuit as a weighted Pauli sum:
+/// Clifford gates conjugate it, `Rz` and `Rzz` split each anticommuting term in
+/// two, and every noise channel scales the terms by the channel's Pauli
+/// eigenvalues. Noise shrinks coefficients while rotations grow the term count,
+/// so the sum stays small whenever noise outpaces the branching rotations, which
+/// is the regime this engine exists for.
+///
+/// # Truncation
+///
+/// With `max_terms == 0` the run is exact and errors at the shared term
+/// ceiling. With `max_terms > 0`, terms below `epsilon` are dropped once the sum
+/// exceeds the budget and `total_discarded` bounds the error: every channel and
+/// every Clifford conjugation is a contraction in the Pauli 1-norm, so a dropped
+/// term's remaining contribution is at most its magnitude.
+///
+/// # Errors
+///
+/// Rejects a circuit carrying measurements, resets, or conditionals, a gate that
+/// is neither Clifford nor a Pauli rotation, and a noise channel with no
+/// Pauli-basis form (custom Kraus, two-qubit Kraus, readout error), naming the
+/// density matrix as the route that serves those.
+pub fn run_pauli_path_observable(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    observable: &[PauliTerm],
+    epsilon: f64,
+    max_terms: usize,
+) -> Result<PauliPathResult> {
+    let ops = pauli_path_ops(circuit, noise, "PauliPath")?;
+    let (obs, obs_coeff) = pauli_vec_from_terms(circuit.num_qubits, observable)?;
+    let truncation = Truncation::Threshold { epsilon, max_terms };
+
+    let mut sum = WeightedPauliSum::new();
+    sum.insert(obs, obs_coeff);
+    let mut peak_terms = sum.terms.len();
+    let mut total_discarded = 0.0;
+
+    for op in ops.iter().rev() {
+        match op {
+            PathOp::Gate(gate, targets) => sum.apply_backward(gate, targets),
+            PathOp::Channel(action, qubits) => sum.apply_backward_channel(action, qubits),
+        }
+        truncation.enforce(&mut sum, &mut total_discarded);
+        check_spd_term_ceiling(sum.terms.len(), "PauliPath")?;
+        peak_terms = peak_terms.max(sum.terms.len());
+    }
+
+    truncation.final_sweep(&mut sum, &mut total_discarded);
+
+    Ok(PauliPathResult {
+        mean: sum.diagonal_expectation(),
         peak_terms,
         total_discarded,
     })

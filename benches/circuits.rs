@@ -554,7 +554,7 @@ fn bench_statevector_diag_mixed(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/diag_mixed_l6");
     configure_group(&mut group);
 
-    for &n in &[16, 20] {
+    for &n in &[16, 20, 22] {
         let circuit = circuits::diagonal_mixed_circuit(n, 6, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -562,6 +562,253 @@ fn bench_statevector_diag_mixed(c: &mut Criterion) {
             });
         });
     }
+
+    group.finish();
+}
+
+// ---- Hardware two-qubit bases ----
+
+/// One `cx a, b` rewritten into a hardware two-qubit basis, `{a}` and `{b}`
+/// standing for the two qubit indices.
+///
+/// Every transpiled circuit arrives in one of these bases, and each rewrite here
+/// is exact up to a global phase. The `ecr` form inverts the parser's own `ecr`
+/// decomposition. The `rxx` form follows from `rxx = (h (x) h) rzz (h (x) h)`
+/// and `cz = e^{i pi/4} rz(-pi/2) rz(-pi/2) rzz(pi/2)`. `ms(0, 0, 0.25)` is the
+/// same unitary as `rxx(pi/2)`, so those two rows separate the `Fused2q`
+/// lowering from the native Pauli rotation on identical arithmetic.
+const HARDWARE_BASIS_REWRITES: [(&str, &str); 3] = [
+    (
+        "ecr",
+        "rx(-pi/2) q[{a}];\nrz(-pi/4) q[{a}];\necr q[{a}], q[{b}];\nx q[{a}];\n",
+    ),
+    (
+        "rxx",
+        "h q[{a}];\nrxx(pi/2) q[{a}], q[{b}];\nh q[{a}];\nrz(-pi/2) q[{a}];\nrx(-pi/2) q[{b}];\n",
+    ),
+    (
+        "ms",
+        "h q[{a}];\nms(0, 0, 0.25) q[{a}], q[{b}];\nh q[{a}];\nrz(-pi/2) q[{a}];\nrx(-pi/2) q[{b}];\n",
+    ),
+];
+
+fn dense_probabilities(circuit: &Circuit) -> Vec<f64> {
+    run_with(BackendKind::Statevector, circuit, SEED)
+        .unwrap()
+        .probabilities
+        .unwrap()
+        .to_vec()
+}
+
+/// `circuit` with every `cx` replaced by `rewrite`, round-tripped through the
+/// parser so the row measures the lowering the parser actually produces.
+///
+/// The rewrite is checked against the original state before it is benched. A
+/// wrong identity would otherwise be reported as a slow basis.
+fn hardware_basis_circuit(circuit: &Circuit, name: &str, rewrite: &str) -> Circuit {
+    let qasm = prism_q::circuit::qasm_export::to_qasm3(circuit).unwrap();
+    let mut out = String::with_capacity(qasm.len() * 3);
+    for line in qasm.lines() {
+        match line
+            .strip_prefix("cx q[")
+            .and_then(|rest| rest.split_once("], q["))
+        {
+            Some((a, rest)) => {
+                let b = rest.trim_end_matches("];");
+                out.push_str(&rewrite.replace("{a}", a).replace("{b}", b));
+            }
+            None => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    let rewritten = prism_q::circuit::openqasm::parse(&out).unwrap();
+    let expected = dense_probabilities(circuit);
+    let got = dense_probabilities(&rewritten);
+    assert!(
+        got.len() == expected.len() && got.iter().zip(&expected).all(|(g, e)| (g - e).abs() < 1e-9),
+        "the {name} rewrite is not the circuit it claims to re-express"
+    );
+    rewritten
+}
+
+// `random_d10/20` in each hardware two-qubit basis against the `cx` original.
+// The rows differ only by the single-qubit gates the rewrite adds, so what they
+// measure is how much of that fusion absorbs.
+fn bench_statevector_hardware_basis(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/hardware_basis");
+    configure_group(&mut group);
+
+    let base = circuits::random_circuit(20, 10, SEED);
+    group.bench_with_input(BenchmarkId::new("cx", 20), &base, |b, circ| {
+        b.iter(|| {
+            run_with(BackendKind::Statevector, circ, 42).unwrap();
+        });
+    });
+    for (name, rewrite) in HARDWARE_BASIS_REWRITES {
+        let circuit = hardware_basis_circuit(&base, name, rewrite);
+        group.bench_with_input(BenchmarkId::new(name, 20), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// The density-matrix half of the same question, at the width where its `2n`
+// buffer clears the fusion floors.
+fn bench_density_matrix_hardware_basis(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/hardware_basis");
+    configure_group(&mut group);
+
+    let base = circuits::random_circuit(12, 10, SEED);
+    let run = |circ: &Circuit| {
+        black_box(
+            sim::simulate(circ)
+                .backend(BackendKind::DensityMatrix)
+                .seed(SEED)
+                .run()
+                .unwrap(),
+        );
+    };
+    group.bench_with_input(BenchmarkId::new("cx", 12), &base, |b, circ| {
+        b.iter(|| run(circ));
+    });
+    for (name, rewrite) in HARDWARE_BASIS_REWRITES {
+        let circuit = hardware_basis_circuit(&base, name, rewrite);
+        group.bench_with_input(BenchmarkId::new(name, 12), &circuit, |b, circ| {
+            b.iter(|| run(circ));
+        });
+    }
+
+    group.finish();
+}
+
+// ---- Pauli path engine ----
+
+/// Depolarizing rate the crossover group runs at, and the shot count its
+/// trajectory arm draws.
+const PAULI_PATH_NOISE: f64 = 0.01;
+const PAULI_PATH_SHOTS: usize = 1000;
+
+/// Truncation the path arm runs at. The construction below refuses a width whose
+/// reported discarded mass exceeds the trajectory arm's own standard error, so
+/// the two arms are compared at equal target error rather than at equal effort.
+const PAULI_PATH_EPSILON: f64 = 1e-3;
+const PAULI_PATH_MAX_TERMS: usize = 1 << 14;
+
+/// The observable both arms answer: `Z` on qubit 0.
+///
+/// Weight, not width, is what decides whether the path arm is in its polynomial
+/// regime. At this weight the sum holds 11 terms from 20 qubits to 100; at weight
+/// 2 on the same circuit it reaches the budget by 30 qubits and reports a
+/// discarded mass far above the trajectory arm's standard error, which is what
+/// `term_count_is_width_independent_at_unit_weight` pins.
+fn single_z() -> Vec<PauliTerm> {
+    vec![PauliTerm::z(0)]
+}
+
+/// `circuit` with a classical register and one terminal measurement per qubit, so
+/// the trajectory arm can read the observable off measured bits.
+fn measured_copy(circuit: &Circuit) -> Circuit {
+    let mut measured = circuit.clone();
+    measured.num_classical_bits = measured.num_qubits;
+    measured.measure_all();
+    measured
+}
+
+/// Mean of `(-1)^bit0` over noisy shots, the trajectory estimate of `Z` on qubit
+/// 0.
+fn trajectory_single_z(circuit: &Circuit, noise: &prism_q::NoiseModel, shots: usize) -> f64 {
+    let result =
+        run_shots_with_noise(BackendKind::Statevector, circuit, noise, shots, SEED).unwrap();
+    let total: f64 = result
+        .shots
+        .iter()
+        .map(|bits| if bits[0] { -1.0 } else { 1.0 })
+        .sum();
+    total / shots as f64
+}
+
+// The Pauli path engine against the route a caller takes today.
+//
+// Both arms answer the same number, `Z` on qubit 0 of a two-layer
+// hardware-efficient ansatz under 1% depolarizing: the path arm propagates the
+// observable back through the channels, the trajectory arm averages measured bits
+// over 1000 noisy shots, and the density matrix evaluates the mixture exactly at
+// the one width that fits it. The trajectory arm stops at 16 qubits because each
+// sample runs 1000 full statevector evolutions and 20 costs about 140 seconds a
+// sample; the path arm continues to 100, which is the crossover this group exists
+// to locate.
+fn bench_pauli_path_noisy_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pauli_path/noisy_expectation");
+    configure_group(&mut group);
+
+    for &n in &[20usize, 30, 50, 100] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, PAULI_PATH_NOISE);
+        let observables = vec![single_z()];
+        let probe = prism_q::sim::unified_pauli::run_pauli_path_observable(
+            &circuit,
+            &noise,
+            &observables[0],
+            PAULI_PATH_EPSILON,
+            PAULI_PATH_MAX_TERMS,
+        )
+        .unwrap();
+        let shot_error = 1.0 / (PAULI_PATH_SHOTS as f64).sqrt();
+        assert!(
+            probe.total_discarded <= shot_error,
+            "at {n} qubits the path arm discarded {} against a {shot_error} shot error, so the \
+             two arms are not at equal target error",
+            probe.total_discarded
+        );
+        group.bench_with_input(BenchmarkId::new("path", n), &n, |b, _| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(&circuit)
+                        .backend(BackendKind::PauliPath {
+                            epsilon: PAULI_PATH_EPSILON,
+                            max_terms: PAULI_PATH_MAX_TERMS,
+                        })
+                        .noise(&noise)
+                        .seed(SEED)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                );
+            });
+        });
+    }
+
+    for &n in &[12usize, 16] {
+        let circuit = measured_copy(&circuits::hardware_efficient_ansatz(n, 2, SEED));
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, PAULI_PATH_NOISE);
+        group.bench_with_input(BenchmarkId::new("trajectory", n), &n, |b, _| {
+            b.iter(|| {
+                black_box(trajectory_single_z(&circuit, &noise, PAULI_PATH_SHOTS));
+            });
+        });
+    }
+
+    let n = 12;
+    let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+    let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, PAULI_PATH_NOISE);
+    let observables = vec![single_z()];
+    group.bench_with_input(BenchmarkId::new("density_matrix", n), &n, |b, _| {
+        b.iter(|| {
+            black_box(
+                sim::simulate(&circuit)
+                    .backend(BackendKind::DensityMatrix)
+                    .noise(&noise)
+                    .seed(SEED)
+                    .expectation_values(&observables)
+                    .unwrap(),
+            );
+        });
+    });
 
     group.finish();
 }
@@ -3254,6 +3501,8 @@ criterion_group! {
     bench_statevector_qaoa,
     bench_statevector_trotter,
     bench_statevector_diag_mixed,
+    bench_statevector_hardware_basis,
+    bench_pauli_path_noisy_expectation,
     bench_statevector_qv,
     bench_statevector_w_state,
     bench_statevector_clifford,
@@ -3351,6 +3600,7 @@ criterion_group! {
     bench_density_matrix_unitary_layers,
     bench_density_matrix_rzz_layers,
     bench_density_matrix_rzz_layers_fused,
+    bench_density_matrix_hardware_basis,
     bench_density_matrix_rzz_sandwich,
     bench_density_matrix_fused_layers,
     bench_density_matrix_exact_vs_trajectory,

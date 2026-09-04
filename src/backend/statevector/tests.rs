@@ -1854,3 +1854,39 @@ fn multi_2q_single_tier_boundary_pins_the_l2_tile() {
     assert!(!kernels::multi_2q_single_tier(&[(12, 14, mat)]));
     assert!(!kernels::multi_2q_single_tier(&[(0, 1, mat), (0, 14, mat)]));
 }
+
+// Pair-aware grouping keeps every benched `diag_mixed_l6` batch on the LUT path. The
+// batch counts are asserted alongside the fallback counts because a fusion change that
+// stopped emitting `DiagonalBatch` would otherwise satisfy this test by emptying it.
+#[test]
+fn diagonal_mixed_batches_avoid_the_per_amplitude_fallback() {
+    use crate::backend::statevector::kernels::build_diagonal_batch_tables;
+    use crate::circuit::fusion::fuse_circuit;
+    use crate::circuits::diagonal_mixed_circuit;
+
+    for (n, expected_batches) in [(16usize, 9usize), (20, 10), (22, 10), (26, 15)] {
+        let circuit = diagonal_mixed_circuit(n, 6, 0xDEAD_BEEF);
+        let fused = fuse_circuit(&circuit, true);
+        let batches: Vec<_> = fused
+            .instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                Instruction::Gate {
+                    gate: Gate::DiagonalBatch(data),
+                    ..
+                } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            batches.len(),
+            expected_batches,
+            "diag_mixed_l6/{n} no longer emits the batches this test counts"
+        );
+        let fallbacks = batches
+            .iter()
+            .filter(|data| build_diagonal_batch_tables(&data.entries).is_none())
+            .count();
+        assert_eq!(fallbacks, 0, "diag_mixed_l6/{n} fell back to per-amplitude");
+    }
+}

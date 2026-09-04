@@ -251,3 +251,4 @@ All `BackendKind` variants:
 | `StabilizerRank` | Weighted stabilizer sum | Explicit |
 | `StochasticPauli { num_samples }` | SPP | Explicit |
 | `DeterministicPauli { epsilon, max_terms }` | SPD | Explicit |
+| `PauliPath { epsilon, max_terms }` | Noisy Heisenberg Pauli sum | Explicit |

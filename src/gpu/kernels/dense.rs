@@ -1748,12 +1748,16 @@ pub(crate) fn launch_apply_diagonal_batch(
     }
 
     let num_groups = built.num_groups;
-    // Per-group shift arrays: unique_qubits is already flat and ordered (group 0 fills
-    // positions [0..MAX), group 1 fills [MAX..2*MAX), etc.), so the group/pos decomposition
-    // simplifies to a direct index.
+    // unique_qubits holds the groups concatenated in order, and a group can be shorter than
+    // the stride the kernel indexes by, so the shift array is filled group by group.
     let mut shifts_flat: Vec<i32> = vec![0i32; num_groups * cpu_k::DIAG_BATCH_MAX_QUBITS_PER_GROUP];
-    for (idx, &q) in built.unique_qubits.iter().enumerate() {
-        shifts_flat[idx] = q as i32;
+    let mut flat = 0;
+    for (g, &size) in built.group_sizes.iter().enumerate().take(num_groups) {
+        let base = g * cpu_k::DIAG_BATCH_MAX_QUBITS_PER_GROUP;
+        for (j, &q) in built.unique_qubits[flat..flat + size].iter().enumerate() {
+            shifts_flat[base + j] = q as i32;
+        }
+        flat += size;
     }
 
     let mut tables_flat: Vec<f64> =

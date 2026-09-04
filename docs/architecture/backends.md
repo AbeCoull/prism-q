@@ -189,6 +189,44 @@ it backpropagates against a pure state and a channel has no reverse evolution to
 See [Noise across the terminals](./engine.md) for what that route accepts and what stays
 on trajectory averaging.
 
+## Pauli Path
+
+Heisenberg propagation of an observable through a noisy circuit, as a weighted sum of
+Pauli strings. It holds no state of any kind, so it is not a `Backend`: like SPP and SPD
+it is an engine the dispatcher reaches directly, and it serves `expectation_values` and
+`observable_expectation` (and the parameter-shift gradient built on them) and nothing
+else. `run`, `shots`, `marginals`, and `probabilities` are rejected naming the two
+terminals it does serve.
+
+The observable starts as one term and propagates backward. Clifford gates conjugate it
+one term at a time. `Rz` and `Rzz` split every anticommuting term into a `cos` branch and
+a `-i sin` branch, which is what grows the sum. A noise channel scales each term by the
+channel's action on the Pauli letters it touches, which is what shrinks it. The engine is
+polynomial exactly where the shrinking wins, so the useful regime is a circuit whose
+noise rate outpaces its density of non-Clifford rotations, and the term count at a given
+width is the thing to watch rather than the width itself.
+
+Observable weight dominates that term count, ahead of both width and depth. On a
+two-layer hardware-efficient ansatz under 1% depolarizing, `Z` on one qubit holds the
+sum at 11 terms from 20 qubits to 100, while `Z` on two adjacent qubits reaches a
+16384-term budget by 30 qubits and a full-width `Z` chain reaches it at every width.
+`term_count_is_width_independent_at_unit_weight` pins both halves.
+
+Channels enter through their adjoint on the Pauli basis, not through a twirl, so nothing
+is approximated at the channel. A unital Pauli channel (`Pauli`, `Depolarizing`,
+`PhaseDamping`, `TwoQubitDepolarizing`) scales each letter by one eigenvalue.
+`AmplitudeDamping` and `ThermalRelaxation` are not unital: their adjoint sends `Z` to
+`(1 - gamma) Z + gamma I`, and the sum carries that identity branch as a second term.
+`Custom` Kraus, `Kraus2q`, and readout error have no Pauli-basis form and are rejected
+naming the density matrix.
+
+With `max_terms = 0` the run is exact and errors at the shared term ceiling rather than
+truncating silently. With a budget set, terms below `epsilon` are dropped once the sum
+exceeds it, and the discarded coefficient mass bounds the error: every channel and every
+Clifford conjugation is a contraction in the Pauli 1-norm, so a dropped term contributes
+at most its own magnitude to the terminal value. A run that truncated nothing reports
+itself exact whatever budget it was given.
+
 ## What a backend reports about its own result
 
 Three `Backend` methods carry provenance onto every result: `resolved` names the

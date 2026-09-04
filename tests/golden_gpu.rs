@@ -579,6 +579,38 @@ fn diagonal_batch_14q_mixed_entries_matches_cpu() {
 }
 
 #[test]
+fn diagonal_batch_14q_short_groups_matches_cpu() {
+    // Two six-qubit chains cannot share a group and neither fills one, so the
+    // device shift array is packed from group sizes rather than at a fixed stride.
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 14;
+    let mut insts = vec![];
+    for q in 0..n {
+        insts.push(g(Gate::H, &[q]));
+    }
+    let mut entries = vec![];
+    for (chain, phase) in [(0usize, 0.4), (6usize, -0.9)] {
+        for q in chain..chain + 5 {
+            entries.push(DiagEntry::Phase2q {
+                q0: q,
+                q1: q + 1,
+                phase: Complex64::from_polar(1.0, phase + q as f64 * 0.11),
+            });
+        }
+        entries.push(DiagEntry::Phase1q {
+            qubit: chain + 2,
+            d0: Complex64::from_polar(1.0, phase),
+            d1: Complex64::from_polar(1.0, -phase),
+        });
+    }
+    insts.push(g(
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
+        &(0..12).collect::<Vec<_>>(),
+    ));
+    f.compare(n, &insts);
+}
+
+#[test]
 fn batch_rzz_14q_qaoa_matches_cpu() {
     // QAOA emits `Gate::BatchRzz` once fusion groups consecutive Rzz gates. At 14q
     // (the MIN_QUBITS_FOR_BATCH_RZZ threshold), the batched GPU kernel must match the

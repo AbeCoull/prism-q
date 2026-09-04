@@ -668,7 +668,7 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
                 t.note(&mut srcs[q], i, Place::Plain);
             }
             Instruction::Gate {
-                gate: gate @ (Gate::Cx | Gate::Cz),
+                gate: gate @ (Gate::Cx | Gate::Cz | Gate::Fused2q(_)),
                 targets,
             } => {
                 let q0 = targets[0];

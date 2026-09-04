@@ -114,107 +114,25 @@ fn bench_two_qubit_gate_kernels(c: &mut Criterion) {
     configure_group(&mut group);
 
     for &n_qubits in &[12, 16, 20, 22] {
-        let mut cx_lt_adj = Circuit::new(n_qubits, 0);
-        cx_lt_adj.add_gate(Gate::Cx, &[0, 1]);
-        group.bench_function(BenchmarkId::new("cx_ctrl_lt_adjacent", n_qubits), |b| {
-            b.iter_batched(
-                || {
-                    let mut backend = StatevectorBackend::new(42);
-                    backend.init(n_qubits, 0).unwrap();
-                    backend
-                },
-                |mut backend| {
-                    backend.apply(&cx_lt_adj.instructions[0]).unwrap();
-                    black_box(backend.state_vector());
-                },
-                BatchSize::SmallInput,
-            );
-        });
-
-        let mut cx_gt_adj = Circuit::new(n_qubits, 0);
-        cx_gt_adj.add_gate(Gate::Cx, &[1, 0]);
-        group.bench_function(BenchmarkId::new("cx_ctrl_gt_adjacent", n_qubits), |b| {
-            b.iter_batched(
-                || {
-                    let mut backend = StatevectorBackend::new(42);
-                    backend.init(n_qubits, 0).unwrap();
-                    backend
-                },
-                |mut backend| {
-                    backend.apply(&cx_gt_adj.instructions[0]).unwrap();
-                    black_box(backend.state_vector());
-                },
-                BatchSize::SmallInput,
-            );
-        });
-
-        let mut cx_lt_high = Circuit::new(n_qubits, 0);
-        cx_lt_high.add_gate(Gate::Cx, &[0, n_qubits - 1]);
-        group.bench_function(BenchmarkId::new("cx_ctrl_lt_high", n_qubits), |b| {
-            b.iter_batched(
-                || {
-                    let mut backend = StatevectorBackend::new(42);
-                    backend.init(n_qubits, 0).unwrap();
-                    backend
-                },
-                |mut backend| {
-                    backend.apply(&cx_lt_high.instructions[0]).unwrap();
-                    black_box(backend.state_vector());
-                },
-                BatchSize::SmallInput,
-            );
-        });
-
-        let mut cx_gt_high = Circuit::new(n_qubits, 0);
-        cx_gt_high.add_gate(Gate::Cx, &[n_qubits - 1, 0]);
-        group.bench_function(BenchmarkId::new("cx_ctrl_gt_high", n_qubits), |b| {
-            b.iter_batched(
-                || {
-                    let mut backend = StatevectorBackend::new(42);
-                    backend.init(n_qubits, 0).unwrap();
-                    backend
-                },
-                |mut backend| {
-                    backend.apply(&cx_gt_high.instructions[0]).unwrap();
-                    black_box(backend.state_vector());
-                },
-                BatchSize::SmallInput,
-            );
-        });
-
-        let mut cz_adj = Circuit::new(n_qubits, 0);
-        cz_adj.add_gate(Gate::Cz, &[0, 1]);
-        group.bench_function(BenchmarkId::new("cz_adjacent", n_qubits), |b| {
-            b.iter_batched(
-                || {
-                    let mut backend = StatevectorBackend::new(42);
-                    backend.init(n_qubits, 0).unwrap();
-                    backend
-                },
-                |mut backend| {
-                    backend.apply(&cz_adj.instructions[0]).unwrap();
-                    black_box(backend.state_vector());
-                },
-                BatchSize::SmallInput,
-            );
-        });
-
-        let mut cz_high = Circuit::new(n_qubits, 0);
-        cz_high.add_gate(Gate::Cz, &[0, n_qubits - 1]);
-        group.bench_function(BenchmarkId::new("cz_high", n_qubits), |b| {
-            b.iter_batched(
-                || {
-                    let mut backend = StatevectorBackend::new(42);
-                    backend.init(n_qubits, 0).unwrap();
-                    backend
-                },
-                |mut backend| {
-                    backend.apply(&cz_high.instructions[0]).unwrap();
-                    black_box(backend.state_vector());
-                },
-                BatchSize::SmallInput,
-            );
-        });
+        let hi = n_qubits - 1;
+        bench_kernel_row(
+            &mut group,
+            "cx_ctrl_lt_adjacent",
+            n_qubits,
+            Gate::Cx,
+            &[0, 1],
+        );
+        bench_kernel_row(
+            &mut group,
+            "cx_ctrl_gt_adjacent",
+            n_qubits,
+            Gate::Cx,
+            &[1, 0],
+        );
+        bench_kernel_row(&mut group, "cx_ctrl_lt_high", n_qubits, Gate::Cx, &[0, hi]);
+        bench_kernel_row(&mut group, "cx_ctrl_gt_high", n_qubits, Gate::Cx, &[hi, 0]);
+        bench_kernel_row(&mut group, "cz_adjacent", n_qubits, Gate::Cz, &[0, 1]);
+        bench_kernel_row(&mut group, "cz_high", n_qubits, Gate::Cz, &[0, hi]);
     }
 
     group.finish();
@@ -224,9 +142,14 @@ fn bench_measurement(c: &mut Criterion) {
     let mut group = c.benchmark_group("measurement");
     configure_group(&mut group);
 
+    // End-to-end route, not a measure kernel: `simulate()` resolves a backend,
+    // allocates, applies and builds an outcome, and an H on one qubit of a wide
+    // register decomposes into independent subsystems before the statevector
+    // backend is reached. The direct-backend measure rows are `measure_q*_n20`
+    // below.
     for &n_qubits in &QUBIT_COUNTS {
         group.bench_with_input(
-            BenchmarkId::new("measure_superposition", n_qubits),
+            BenchmarkId::new("simulate_h_measure", n_qubits),
             &n_qubits,
             |b, &n| {
                 let mut circuit = Circuit::new(n, 1);

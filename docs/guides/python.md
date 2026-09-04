@@ -316,6 +316,76 @@ The package adds it on import when `CUDA_PATH` is set, which the toolkit
 installer does; without it the import fails with `DLL load failed while
 importing _prism_q`.
 
+## Distributed backend
+
+The distributed statevector shards the dense state across MPI ranks. It is
+reachable from Python through a `DistributedContext`, which attaches to an MPI
+that is already running. This extension never calls `MPI_Init` or
+`MPI_Finalize`: mpi4py does both, at its own import and at interpreter exit, and
+a handle whose refcount drop finalized MPI would make every later MPI call in
+the process erroneous.
+
+```python
+from mpi4py import MPI  # starts MPI; import before touching the context
+from prism_q import BackendKind, DistributedContext, circuits, simulate
+
+context = DistributedContext()
+outcome = (
+    simulate(circuits.qft(24))
+    .backend(BackendKind.statevector_distributed(context))
+    .seed(42)
+    .run()
+)
+print(context.rank, context.size, outcome.probabilities[:4])
+```
+
+Run it with `mpiexec -n 4 python script.py`. The rank count must be a power of
+two, and every rank needs enough local qubits after the shard bits are taken
+(`PRISM_DIST_MIN_LOCAL_QUBITS`).
+
+The contract is SPMD, and it is enforced rather than assumed. Four ranks are
+four interpreters running the same source, and every collective inside the
+backend is entered by all of them, so a script that branches before the call
+
+```python
+if comm.rank == 0:
+    result = simulate(circuit).backend(...).run()   # deadlocks
+```
+
+hangs the job: rank 0 blocks in a collective the others never enter. Every rank
+calls `run` with the same circuit and seed; only what you do with the returned
+value may branch on rank. Two cross-checks turn the common violations into
+errors instead of hangs, each costing one collective at run entry: ranks
+disagreeing about the register shape, the seed, or the tuning knobs are rejected,
+and so are ranks handed different circuits.
+
+Two surfaces are deliberately loud rather than convenient.
+
+A world of one rank raises. MPI-2 and later make a singleton `MPI_Init` succeed,
+so a script launched without `mpiexec` would otherwise get a correct answer from
+one rank at single-host speed with no signal that nothing was distributed. Pass
+`allow_single_rank=True` when that is what you meant.
+
+Constructing the context without MPI running raises rather than starting MPI, so
+a forgotten `from mpi4py import MPI` is reported at the point it happened.
+
+The published wheels have no MPI support: `mpi-sys` runs bindgen and needs a
+system MPI at build time, and the extension has to link the same MPI
+implementation and ABI as mpi4py and as the launcher. Mixing two implementations
+in one process corrupts rather than failing loudly, which is why this is a
+from-source path:
+
+```bash
+maturin develop --manifest-path bindings/python/Cargo.toml --features distributed-mpi
+```
+
+`DistributedContext.is_supported()` says whether a build has MPI support, the
+same way `GpuContext.is_supported()` does for CUDA.
+
+Sub-communicators, per-rank device placement, and any distributed path other
+than the statevector backend are out of scope: the context is the world
+communicator and nothing else.
+
 ## Noise
 
 Build a `NoiseModel` from a circuit, then attach it. A model is sized to the

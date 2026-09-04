@@ -8,6 +8,7 @@ use pyo3::prelude::*;
 
 mod backend;
 mod circuit;
+mod distributed;
 mod error;
 mod gate;
 mod gpu;
@@ -44,6 +45,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyParameters>()?;
     m.add_class::<PyPreparedCircuit>()?;
     m.add_class::<PyGpuContext>()?;
+    m.add_class::<crate::distributed::PyDistributedContext>()?;
     m.add_class::<PyNoiseChannel>()?;
     m.add_class::<PyNoiseModel>()?;
     m.add_class::<PySimulation>()?;

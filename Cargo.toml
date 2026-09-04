@@ -4,13 +4,13 @@ version = "0.31.0"
 edition = "2024"
 rust-version = "1.87.0"
 authors = ["A. Coull"]
-description = "PRISM-Q: Performance Rust Interoperable Simulator for Quantum"
+description = "Fast Rust quantum circuit simulator. OpenQASM 3.0, multiple backends, AVX2 SIMD kernels, optional CUDA and MPI, QEC tooling, Python bindings."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 documentation = "https://docs.rs/prism-q"
 repository = "https://github.com/AbeCoull/prism-q"
-homepage = "https://github.com/AbeCoull/prism-q"
-keywords = ["quantum", "quantum-computing", "openqasm", "stabilizer", "qec"]
+homepage = "https://abecoull.github.io/prism-q/"
+keywords = ["quantum", "quantum-computing", "simulator", "openqasm", "qec"]
 categories = ["science", "science::quantum-computing", "simulation", "mathematics"]
 
 [workspace]

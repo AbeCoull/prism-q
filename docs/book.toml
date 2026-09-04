@@ -1,6 +1,6 @@
 [book]
-title = "PRISM-Q"
-description = "A Rust quantum circuit simulator built for speed."
+title = "PRISM-Q: Rust quantum circuit simulator"
+description = "Performance-first Rust quantum circuit simulator. OpenQASM 3.0 input, nine CPU backends, SIMD kernels, optional CUDA and MPI paths, Python bindings."
 authors = ["A. Coull"]
 language = "en"
 src = "."

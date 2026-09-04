@@ -1,6 +1,7 @@
-//! PRISM-Q: Performance Rust Interoperable Simulator for Quantum
+//! PRISM-Q, a fast Rust quantum circuit simulator.
 //!
-//! A performance-first quantum circuit simulator with pluggable backends.
+//! OpenQASM 3.0 input, nine CPU backends selected at dispatch, AVX2 SIMD kernels, an
+//! optional CUDA path, an optional MPI path, QEC tooling, and Python bindings.
 //!
 //! # Quick start
 //!

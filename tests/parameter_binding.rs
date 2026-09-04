@@ -220,6 +220,51 @@ fn n_bindings_match_n_independent_circuits_on_statevector() {
     }
 }
 
+// A weight-2 `PauliRot` anchors a `Fused2q`, so its angle now reaches the state
+// through the `Mat4` recipe rather than as a gate the plan carries unfused. The
+// recipe reads the bound gate through `matrix_4x4`, and a missing arm there
+// would replay the template's angle instead of the new one, silently.
+#[test]
+fn rxx_angles_rebind_through_a_fused_template() {
+    let n = 16;
+    let mut template = Circuit::new(n, 0);
+    for q in 0..n {
+        template.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        template.add_gate(Gate::Rz(0.31 + 0.02 * q as f64), &[q]);
+        template.add_pauli_rotation(
+            0.19 + 0.01 * q as f64,
+            &[PauliTerm::x(q), PauliTerm::x(q + 1)],
+        );
+        template.add_gate(Gate::Ry(0.23), &[q + 1]);
+    }
+
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    for point in 0..5 {
+        let values = angles(params.num_slots(), 4000 + point);
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = statevector(&independent);
+        let bound = prepared.bind_fused(&values).unwrap();
+        assert!(
+            bound.instructions.iter().any(|i| matches!(
+                i,
+                Instruction::Gate {
+                    gate: Gate::Fused2q(_) | Gate::Multi2q(_),
+                    ..
+                }
+            )),
+            "point {point}: no anchored block in the bound stream, so the Mat4              recipe is not the path under test"
+        );
+        assert_states_match(
+            &statevector(bound),
+            &expected,
+            &format!("rxx point {point}"),
+        );
+    }
+}
+
 #[test]
 fn plan_is_captured_for_the_ansatz_bench_shapes() {
     for (name, template) in ansatz_cases() {

@@ -38,26 +38,31 @@ fn state_of(backend: &mut StatevectorBackend, circuit: &Circuit) -> Vec<Complex6
 // Native route pin, per the QftBlock lesson: the fused stream the statevector
 // executes must still contain the native gate, not just produce matching
 // amplitudes.
+//
+// Weight 2 is the one width fusion may take, as the anchor of a `Fused2q`, and
+// only when the rotation has a neighbouring 1q gate to absorb. Both weight-3
+// terms survive on width alone. So does `x(1) x(3)`, whose qubits the two
+// weight-3 terms ahead of it already flushed, leaving it nothing to absorb; the
+// two rotations reaching an untouched qubit are the ones that anchor.
 #[test]
 fn fusion_keeps_the_native_gate() {
     let circuit = trotter_like_circuit(16);
     let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
-    let native_count = fused
+    let native_widths: Vec<usize> = fused
         .instructions
         .iter()
-        .filter(|inst| {
-            matches!(
-                inst,
-                Instruction::Gate {
-                    gate: Gate::PauliRot(_),
-                    ..
-                }
-            )
+        .filter_map(|inst| match inst {
+            Instruction::Gate {
+                gate: Gate::PauliRot(data),
+                ..
+            } => Some(data.axes().len()),
+            _ => None,
         })
-        .count();
+        .collect();
     assert_eq!(
-        native_count, 5,
-        "fusion must pass PauliRot through untouched"
+        native_widths,
+        vec![3, 3, 2],
+        "fusion took a rotation it has no anchor for, or left one unabsorbed"
     );
     assert!(StatevectorBackend::new(SEED).supports_pauli_rotation());
 }

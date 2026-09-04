@@ -626,9 +626,8 @@ fn matrix_2x2_still_fuses(mat: &[[Complex64; 2]; 2], diagonal: bool) -> bool {
 }
 
 /// Necessary condition for [`Gate::recognize_matrix`] to match: every candidate
-/// it scans has `|m[0][0]|^2` in {0, 1/2, 1}, and the scan compares up to a
-/// global phase, so that magnitude is invariant. A generic binding fails this
-/// and skips the scan.
+/// it scans has `|m[0][0]|^2` in {0, 1/2, 1}. A generic binding fails this and
+/// skips the scan.
 #[inline]
 fn could_be_named(mat: &[[Complex64; 2]; 2]) -> bool {
     const EPS: f64 = 1e-8;

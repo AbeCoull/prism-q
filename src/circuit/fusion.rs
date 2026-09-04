@@ -668,9 +668,9 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
                 t.note(&mut srcs[q], i, Place::Plain);
             }
             Instruction::Gate {
-                gate: gate @ (Gate::Cx | Gate::Cz | Gate::Fused2q(_)),
+                gate: gate @ (Gate::Cx | Gate::Cz | Gate::Fused2q(_) | Gate::PauliRot(_)),
                 targets,
-            } => {
+            } if gate.num_qubits() == 2 => {
                 let q0 = targets[0];
                 let q1 = targets[1];
                 let pre0 = pending_1q[q0].take();

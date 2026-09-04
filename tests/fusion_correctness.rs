@@ -911,13 +911,6 @@ fn fusion_diag_mixed_batches_and_matches_unfused() {
 // Seeded sweep over the gate mix that exposed both batching reorder bugs. The
 // deterministic cases above pin the two known shapes; this covers the class,
 // which stayed hidden because the generated bench circuits never produce it.
-//
-// Compares probabilities, not amplitudes. Collapsing a run of three 1q gates
-// such as `S, SX, H` into one matrix drops a global phase, which is a separate
-// and older gap: it predates the batching fixes, reproduces at
-// `MIN_QUBITS_FOR_FUSION` with no batching gate present, and is unobservable
-// in the probabilities. The amplitude-level bar is held by the deterministic
-// QFT and phase-estimation cases above.
 #[test]
 fn fusion_seeded_sweep_matches_unfused() {
     let mut state = common::SEED;
@@ -959,7 +952,7 @@ fn fusion_seeded_sweep_matches_unfused() {
                 _ => c.add_gate(Gate::H, &[q0]),
             }
         }
-        assert_fusion_preserves_correctness(&c);
+        assert_fusion_preserves_state(&c);
     }
 }
 
@@ -1200,6 +1193,79 @@ fn fusion_multi_1q_high_targets_match_unfused() {
             EPS,
         );
     }
+}
+
+// `rxx` lowers to `PauliRot`, which the two-qubit anchor set now admits at
+// weight 2 alongside `Cx`, `Cz` and `Fused2q`. Before that a transpiled `rxx`
+// chain carried every conjugating gate as its own pass, where the `cx` original
+// absorbed them.
+#[test]
+fn parser_built_rxx_absorbs_neighbouring_1q_gates() {
+    let n = 12;
+    // The prelude uses `ry`, not `h`: an `h` would cancel against the first
+    // pair's conjugating `h` and leave that rotation with nothing to absorb,
+    // which is a fixture artifact rather than a fusion result.
+    let mut qasm = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[{n}] q;\n");
+    for q in 0..n {
+        qasm.push_str(&format!("ry(0.3) q[{q}];\n"));
+    }
+    for q in 0..n - 1 {
+        qasm.push_str(&format!(
+            "h q[{q}];\nh q[{}];\nrxx(pi/2) q[{q}], q[{}];\ns q[{q}];\ns q[{}];\n",
+            q + 1,
+            q + 1,
+            q + 1
+        ));
+    }
+    let circuit = prism_q::circuit::openqasm::parse(&qasm).unwrap();
+    let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+
+    let two_qubit = |c: &Circuit| {
+        c.instructions
+            .iter()
+            .filter(|i| matches!(i, Instruction::Gate { gate, .. } if gate.num_qubits() == 2))
+            .count()
+    };
+    assert_eq!(
+        two_qubit(&circuit),
+        n - 1,
+        "the fixture should carry one two-qubit gate per adjacent pair"
+    );
+    assert!(
+        fused.instructions.len() < circuit.instructions.len() / 2,
+        "fusion left {} of {} instructions, so the conjugating gates were not absorbed",
+        fused.instructions.len(),
+        circuit.instructions.len()
+    );
+
+    // The property the anchor adds: no weight-2 rotation reaches the backend
+    // as its own pass. Each one anchors a `Fused2q` block instead.
+    let unanchored = fused
+        .instructions
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Instruction::Gate {
+                    gate: Gate::PauliRot(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        unanchored,
+        0,
+        "{unanchored} of {} rotations stayed unanchored",
+        n - 1
+    );
+
+    assert_probs_close_labeled(
+        &run_unfused(&circuit),
+        &run_fused(&circuit),
+        EPS,
+        "rxx-basis chain",
+    );
 }
 
 // A `Fused2q` the parser built (`ms`, `syc`, `sqrt_iswap`, and the rest of the

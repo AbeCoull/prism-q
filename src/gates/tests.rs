@@ -512,13 +512,20 @@ fn test_recognize_non_clifford_returns_none() {
     assert_eq!(Gate::recognize_matrix(&ry), None);
 }
 
+// A named gate carries no scalar, so a phased match has to fail: emitting `H`
+// for `e^{i0.42}·H` would drop the factor. `T·X·T` is the product a fusion run
+// actually builds, and it is `e^{iπ/4}·X`.
 #[test]
-fn test_recognize_global_phase_invariance() {
+fn test_recognize_rejects_a_global_phase() {
     let phase = Complex64::from_polar(1.0, 0.42);
     let h = Gate::H.matrix_2x2();
     let phased = [
         [h[0][0] * phase, h[0][1] * phase],
         [h[1][0] * phase, h[1][1] * phase],
     ];
-    assert_eq!(Gate::recognize_matrix(&phased), Some(Gate::H));
+    assert_eq!(Gate::recognize_matrix(&phased), None);
+
+    let t = Gate::T.matrix_2x2();
+    let txt = mat_mul_2x2(&t, &mat_mul_2x2(&Gate::X.matrix_2x2(), &t));
+    assert_eq!(Gate::recognize_matrix(&txt), None);
 }

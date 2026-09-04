@@ -1201,3 +1201,50 @@ fn fusion_multi_1q_high_targets_match_unfused() {
         );
     }
 }
+
+// A `Fused2q` the parser built (`ms`, `syc`, `sqrt_iswap`, and the rest of the
+// hardware two-qubit bases) absorbs its neighbouring single-qubit gates the way
+// `Cx` does. Before this it did not, and a circuit transpiled into one of those
+// bases carried every conjugating gate as a separate pass.
+#[test]
+fn parser_built_fused_2q_absorbs_neighbouring_1q_gates() {
+    let n = 12;
+    let mut qasm = format!("OPENQASM 3.0;\ninclude \"stdgates.inc\";\nqubit[{n}] q;\n");
+    for q in 0..n {
+        qasm.push_str(&format!("h q[{q}];\n"));
+    }
+    for q in 0..n - 1 {
+        qasm.push_str(&format!(
+            "h q[{q}];\nh q[{}];\nms(0, 0, pi/4) q[{q}], q[{}];\ns q[{q}];\ns q[{}];\n",
+            q + 1,
+            q + 1,
+            q + 1
+        ));
+    }
+    let circuit = prism_q::circuit::openqasm::parse(&qasm).unwrap();
+    let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+
+    let two_qubit = |c: &Circuit| {
+        c.instructions
+            .iter()
+            .filter(|i| matches!(i, Instruction::Gate { gate, .. } if gate.num_qubits() == 2))
+            .count()
+    };
+    assert_eq!(
+        two_qubit(&circuit),
+        n - 1,
+        "the fixture should carry one two-qubit gate per adjacent pair"
+    );
+    assert!(
+        fused.instructions.len() < circuit.instructions.len() / 2,
+        "fusion left {} of {} instructions, so the conjugating gates were not absorbed",
+        fused.instructions.len(),
+        circuit.instructions.len()
+    );
+    assert_probs_close_labeled(
+        &run_unfused(&circuit),
+        &run_fused(&circuit),
+        EPS,
+        "ms-basis chain",
+    );
+}

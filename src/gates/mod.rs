@@ -955,18 +955,21 @@ impl Gate {
         }
     }
 
-    /// Try to recognize a 2x2 unitary matrix as a named gate (up to global phase).
+    /// Try to recognize a 2x2 unitary matrix as a named gate.
     ///
     /// Used by the fusion pass to emit named gate variants instead of opaque
-    /// `Gate::Fused` matrices, enabling downstream passes (e.g. `clifford_prefix_split`)
-    /// to identify Clifford gates that arose from fusion (e.g. T·T → S).
+    /// `Gate::Fused` matrices, so downstream passes (`clifford_prefix_split`)
+    /// see the Clifford gates that arose from fusion (T·T → S).
+    ///
+    /// The match is exact, not up to a global phase. A named gate carries no
+    /// scalar, so recognizing `e^{iπ/4}·X` as `X` would silently drop the factor
+    /// and leave the fused run disagreeing with the unfused one in amplitude.
+    /// Such a product stays a [`Gate::Fused`].
     pub fn recognize_matrix(mat: &[[Complex64; 2]; 2]) -> Option<Gate> {
         const EPS: f64 = 1e-10;
 
-        // Check each candidate gate. For each, compute the global phase ratio
-        // mat[i][j] / ref[i][j] using the first non-zero entry, then verify
-        // all other entries match under that same phase.
         let candidates: &[Gate] = &[
+            Gate::Id,
             Gate::H,
             Gate::X,
             Gate::Y,
@@ -979,23 +982,10 @@ impl Gate {
             Gate::SXdg,
         ];
 
-        for candidate in candidates {
-            let ref_mat = candidate.matrix_2x2();
-            if matrices_equal_up_to_phase(mat, &ref_mat, EPS) {
-                return Some(candidate.clone());
-            }
-        }
-
-        // Identity check: all off-diagonal zero, diagonal entries equal
-        if mat[0][1].norm_sqr() < EPS
-            && mat[1][0].norm_sqr() < EPS
-            && (mat[0][0] - mat[1][1]).norm_sqr() < EPS
-            && mat[0][0].norm_sqr() > EPS
-        {
-            return Some(Gate::Id);
-        }
-
-        None
+        candidates
+            .iter()
+            .find(|candidate| matrices_equal(mat, &candidate.matrix_2x2(), EPS))
+            .cloned()
     }
 
     /// True if this gate is a Clifford gate (relevant for stabilizer backend).
@@ -1044,39 +1034,8 @@ pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
     true
 }
 
-fn matrices_equal_up_to_phase(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) -> bool {
-    // Find the first non-zero entry in b to determine the phase ratio
-    let mut phase = None;
-    for i in 0..2 {
-        for j in 0..2 {
-            if b[i][j].norm_sqr() > eps {
-                if a[i][j].norm_sqr() < eps {
-                    return false;
-                }
-                phase = Some(a[i][j] / b[i][j]);
-                break;
-            }
-        }
-        if phase.is_some() {
-            break;
-        }
-    }
-
-    let phase = match phase {
-        Some(p) => p,
-        None => return true, // Both are zero matrices
-    };
-
-    // Verify all entries match under the same phase
-    for i in 0..2 {
-        for j in 0..2 {
-            let expected = phase * b[i][j];
-            if (a[i][j] - expected).norm_sqr() > eps {
-                return false;
-            }
-        }
-    }
-    true
+fn matrices_equal(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) -> bool {
+    (0..2).all(|i| (0..2).all(|j| (a[i][j] - b[i][j]).norm_sqr() <= eps))
 }
 
 fn format_angle(theta: f64) -> String {

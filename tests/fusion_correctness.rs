@@ -911,13 +911,6 @@ fn fusion_diag_mixed_batches_and_matches_unfused() {
 // Seeded sweep over the gate mix that exposed both batching reorder bugs. The
 // deterministic cases above pin the two known shapes; this covers the class,
 // which stayed hidden because the generated bench circuits never produce it.
-//
-// Compares probabilities, not amplitudes. Collapsing a run of three 1q gates
-// such as `S, SX, H` into one matrix drops a global phase, which is a separate
-// and older gap: it predates the batching fixes, reproduces at
-// `MIN_QUBITS_FOR_FUSION` with no batching gate present, and is unobservable
-// in the probabilities. The amplitude-level bar is held by the deterministic
-// QFT and phase-estimation cases above.
 #[test]
 fn fusion_seeded_sweep_matches_unfused() {
     let mut state = common::SEED;
@@ -959,7 +952,7 @@ fn fusion_seeded_sweep_matches_unfused() {
                 _ => c.add_gate(Gate::H, &[q0]),
             }
         }
-        assert_fusion_preserves_correctness(&c);
+        assert_fusion_preserves_state(&c);
     }
 }
 

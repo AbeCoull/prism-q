@@ -159,6 +159,16 @@ impl DistributedContext {
         MpiComm::world().map(|c| Self::from_comm(Arc::new(c)))
     }
 
+    /// Attach to an MPI another component has already initialized, taking no
+    /// ownership of its lifetime. See [`MpiComm::attach_world`] for why an
+    /// embedding interpreter needs this rather than [`DistributedContext::world`].
+    ///
+    /// Returns `None` when MPI is not initialized.
+    #[cfg(feature = "distributed-mpi")]
+    pub fn attached_world() -> Option<Arc<Self>> {
+        MpiComm::attach_world().map(|c| Self::from_comm(Arc::new(c)))
+    }
+
     /// Index of the calling rank.
     pub fn rank(&self) -> usize {
         self.comm.rank()

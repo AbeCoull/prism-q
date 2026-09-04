@@ -271,6 +271,9 @@ pub struct DistributedStatevectorBackend {
     tick: u64,
     /// Send-side packing buffer for the half-slice relabel exchange.
     pack: Vec<Complex64>,
+    /// Armed by `init`, spent by the first instruction batch, which is where the
+    /// circuit fingerprint is cross-checked.
+    circuit_check_pending: bool,
 }
 
 impl DistributedStatevectorBackend {
@@ -294,6 +297,7 @@ impl DistributedStatevectorBackend {
             last_used: Vec::new(),
             tick: 0,
             pack: Vec::new(),
+            circuit_check_pending: true,
         }
     }
 
@@ -654,6 +658,56 @@ impl DistributedStatevectorBackend {
         )
             .hash(&mut hasher);
         hasher.finish() >> 11
+    }
+
+    /// Fold the instruction stream into the value ranks compare.
+    ///
+    /// Hashes the `Debug` rendering rather than walking the structure. `Gate`
+    /// has variants carrying dense matrices and no fingerprint of its own, and
+    /// `f64`'s `Debug` round-trips, so ranks differing in any field of any
+    /// instruction hash differently and a new variant is covered without being
+    /// listed here. Runs once per multi-rank run, not per gate.
+    fn circuit_fingerprint(instructions: &[Instruction]) -> u64 {
+        use std::fmt::Write as _;
+        use std::hash::Hasher;
+
+        struct HashSink<'a>(&'a mut std::hash::DefaultHasher);
+        impl std::fmt::Write for HashSink<'_> {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                self.0.write(s.as_bytes());
+                Ok(())
+            }
+        }
+
+        let mut hasher = std::hash::DefaultHasher::new();
+        let _ = write!(HashSink(&mut hasher), "{instructions:?}");
+        hasher.finish() >> 11
+    }
+
+    /// Reject a run whose ranks were handed different circuits.
+    ///
+    /// [`Self::check_config_agreement`] compares seed, register shape, and the
+    /// tuning knobs, all of which two ranks can agree on while still executing
+    /// different gate streams. That desynchronizes the exchange sequence and
+    /// hangs the job at the first collective the two streams disagree about.
+    ///
+    /// One collective, on the first instruction batch of a run. It cannot catch
+    /// a rank that never reaches the run at all: that one hangs in this
+    /// allgather instead of a later one.
+    fn check_circuit_agreement(&self, instructions: &[Instruction]) -> Result<()> {
+        let local = Self::circuit_fingerprint(instructions) as f64;
+        let all = self.context.comm().allgather_f64(&[local]);
+        match all.iter().position(|&other| other != local) {
+            None => Ok(()),
+            Some(other) => Err(PrismError::BackendUnsupported {
+                backend: BACKEND_NAME.to_string(),
+                operation: format!(
+                    "the circuit on rank {} differs from rank {other}: every rank enters every \
+                     collective, so every rank must run the same circuit",
+                    self.context.rank()
+                ),
+            }),
+        }
     }
 
     /// Reject a run whose ranks disagree about anything the collective sequence
@@ -1597,6 +1651,16 @@ impl Backend for DistributedStatevectorBackend {
         self.is_single_rank() && self.inner.supports_pauli_rotation()
     }
 
+    fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        if std::mem::take(&mut self.circuit_check_pending) && self.context.size() > 1 {
+            self.check_circuit_agreement(instructions)?;
+        }
+        for instruction in instructions {
+            self.apply(instruction)?;
+        }
+        Ok(())
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         let size = self.context.size();
         // Before the local validations: those read `num_qubits`, so ranks given
@@ -1605,6 +1669,7 @@ impl Backend for DistributedStatevectorBackend {
         if size > 1 {
             self.check_config_agreement(num_qubits, num_classical_bits)?;
         }
+        self.circuit_check_pending = true;
         if !size.is_power_of_two() {
             return Err(PrismError::BackendUnsupported {
                 backend: BACKEND_NAME.to_string(),

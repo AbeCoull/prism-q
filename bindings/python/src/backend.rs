@@ -1,12 +1,14 @@
 //! `BackendKind` wrapper with ergonomic static constructors.
 //!
-//! The GPU constructors exist in every build and take a [`PyGpuContext`], which
-//! is what fails when the `gpu` feature is absent. The distributed variant has
-//! no constructor: nothing here owns `MPI_Init`.
+//! The GPU and distributed constructors exist in every build and take a
+//! context object, which is what fails when the matching feature is absent.
+//! Nothing here owns `MPI_Init`: the distributed context attaches to an MPI
+//! mpi4py already started.
 
 use prism_q::BackendKind;
 use pyo3::prelude::*;
 
+use crate::distributed::PyDistributedContext;
 use crate::error::PyPrismResult;
 use crate::gpu::PyGpuContext;
 
@@ -94,6 +96,47 @@ impl PyBackendKind {
         {
             let _ = context;
             Err(crate::gpu::unsupported())
+        }
+    }
+
+    /// Distributed statevector sharded across the ranks of `context`.
+    ///
+    /// A world of one rank raises. MPI-2 and later make a singleton `MPI_Init`
+    /// succeed, so a script launched without `mpiexec` would otherwise get a
+    /// correct answer from one rank at single-host speed and no signal that
+    /// nothing was distributed. Pass `allow_single_rank=True` when that is
+    /// deliberate.
+    ///
+    /// Every rank must reach this call with the same circuit and seed;
+    /// disagreement is reported as an error on every rank rather than left to
+    /// hang in a collective.
+    #[staticmethod]
+    #[pyo3(signature = (context, allow_single_rank = false))]
+    fn statevector_distributed(
+        context: &PyDistributedContext,
+        allow_single_rank: bool,
+    ) -> PyPrismResult<Self> {
+        #[cfg(feature = "distributed-mpi")]
+        {
+            if context.inner.size() == 1 && !allow_single_rank {
+                return Err(crate::error::PyPrismError(
+                    prism_q::PrismError::IncompatibleBackend {
+                        backend: "StatevectorDistributed".into(),
+                        reason: "the MPI world has one rank, so this run would be identical to \
+                                 statevector() and communicate with nobody; launch under \
+                                 mpiexec, or pass allow_single_rank=True"
+                            .into(),
+                    },
+                ));
+            }
+            Ok(Self(BackendKind::StatevectorDistributed {
+                context: context.inner.clone(),
+            }))
+        }
+        #[cfg(not(feature = "distributed-mpi"))]
+        {
+            let _ = (context, allow_single_rank);
+            Err(crate::distributed::unsupported())
         }
     }
 

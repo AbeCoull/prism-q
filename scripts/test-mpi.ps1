@@ -90,4 +90,25 @@ if ($LASTEXITCODE -eq 0) {
 }
 Write-Host "Rejected as expected (exit $LASTEXITCODE)."
 
+# The Python surface is gated with the Rust one so the two cannot drift. The
+# bindings are a separate crate and a separate build, and the check skips rather
+# than fails when mpi4py is absent, which is what an interpreter without it
+# reports.
+Write-Host "`n== Python distributed checks =="
+$py = & python -c "import mpi4py; print(mpi4py.__version__)" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "mpi4py is not installed; skipping the Python checks."
+} else {
+    Write-Host "mpi4py $py"
+    & python -m maturin develop --manifest-path bindings/python/Cargo.toml --features distributed-mpi
+    if ($LASTEXITCODE -ne 0) { throw "python extension build failed" }
+    & python -m pytest bindings/python/tests/test_distributed.py -q
+    if ($LASTEXITCODE -ne 0) { throw "python distributed tests failed at one rank" }
+    foreach ($n in $RankCounts) {
+        Write-Host "`n== mpiexec -n $n pytest test_distributed.py =="
+        & $mpiexec -n $n -env PRISM_DIST_MIN_LOCAL_QUBITS 1 python -m pytest bindings/python/tests/test_distributed.py -q
+        if ($LASTEXITCODE -ne 0) { throw "python distributed tests failed at $n ranks" }
+    }
+}
+
 Write-Host "`nAll distributed MPI checks passed."

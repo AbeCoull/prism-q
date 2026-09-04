@@ -946,6 +946,88 @@ fn test_sgi_reset_leaves_index_consistent() {
     }
 }
 
+// Per-instruction `apply` never maintains `qubit_active`, and the init-time
+// counters stay light, so a later bulk entry re-checks `sgi_enabled`, sees light
+// counters, and runs SGI against an index that no longer describes the rows. A
+// guarded region is the in-repo path that reaches `apply_instructions` after a
+// per-instruction prefix.
+//
+// The region opens with gates rather than a measurement: `sgi_measure_random`
+// rebuilds the index on its way out, so a random measurement would repair the
+// staleness before anything else could read it. An SGI gate iterates
+// `qubit_active[q]` and updates only the rows it lists, which is where a stale
+// index silently drops the rest.
+//
+// The reference drives the same circuit entirely per instruction, so it never
+// reaches a bulk entry and never takes the SGI path at all.
+#[test]
+fn test_sgi_per_instruction_prefix_then_region_matches_gate_by_gate() {
+    use crate::circuit::{ClassicalCondition, GuardedRegion};
+
+    let n = 300;
+    let partner = 137;
+
+    let mut prefix = Circuit::new(n, 2);
+    prefix.add_gate(Gate::H, &[0]);
+    for q in 1..n {
+        prefix.add_gate(Gate::Cx, &[0, q]);
+    }
+
+    let body = vec![
+        Instruction::Gate {
+            gate: Gate::H,
+            targets: smallvec::smallvec![0],
+        },
+        Instruction::Gate {
+            gate: Gate::S,
+            targets: smallvec::smallvec![partner],
+        },
+        Instruction::Gate {
+            gate: Gate::Cx,
+            targets: smallvec::smallvec![0, partner],
+        },
+        Instruction::Measure {
+            qubit: 0,
+            classical_bit: 0,
+        },
+        Instruction::Measure {
+            qubit: partner,
+            classical_bit: 1,
+        },
+    ];
+    let region = Instruction::Region(Box::new(GuardedRegion::new(
+        ClassicalCondition::BitIsZero(0),
+        body.clone(),
+    )));
+
+    let mut broken = Vec::new();
+    for seed in 0..40u64 {
+        let mut bulk = StabilizerBackend::new(seed);
+        bulk.init(n, 2).unwrap();
+        for instr in &prefix.instructions {
+            bulk.apply(instr).unwrap();
+        }
+        bulk.apply(&region).unwrap();
+
+        let mut dense = StabilizerBackend::new(seed);
+        dense.init(n, 2).unwrap();
+        for instr in prefix.instructions.iter().chain(body.iter()) {
+            dense.apply(instr).unwrap();
+        }
+
+        if bulk.classical_results() != dense.classical_results() {
+            broken.push(seed);
+        }
+    }
+
+    assert!(
+        broken.is_empty(),
+        "the region disagreed with gate-by-gate driving on {} of 40 seeds: {:?}",
+        broken.len(),
+        broken
+    );
+}
+
 #[test]
 fn test_pcc_random_pairs_matches_gate_by_gate() {
     use crate::circuits;

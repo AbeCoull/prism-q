@@ -172,6 +172,25 @@ impl StabilizerBackend {
         rowops::swap_all(xz, phase, nw, par, a, b);
     }
 
+    /// Whether the sparse-generator route applies, rebuilding the index first if
+    /// a dense path mutated the tableau behind it. Bulk entry points call this;
+    /// the SGI loops call [`Self::sgi_enabled`] directly, since they maintain the
+    /// index as they go.
+    ///
+    /// A stale verdict of "off" needs no rebuild: dense mutation never lowers the
+    /// recorded weights, so the frozen counters can only understate how sparse
+    /// the rows are, which costs an optimization rather than correctness.
+    pub(super) fn sgi_ready(&mut self) -> bool {
+        if !self.sgi_enabled() {
+            return false;
+        }
+        if self.sgi_stale {
+            self.rebuild_qubit_active();
+            return self.sgi_enabled();
+        }
+        true
+    }
+
     pub(super) fn sgi_enabled(&self) -> bool {
         let n = self.n;
         if n < 256 {
@@ -577,6 +596,7 @@ impl StabilizerBackend {
             }
         }
         self.sgi_max_active = self.qubit_active.iter().map(|a| a.len()).max().unwrap_or(0);
+        self.sgi_stale = false;
     }
 
     /// Random-outcome measurement: rowmul anti-commuting rows against the pivot,
@@ -726,6 +746,7 @@ impl StabilizerBackend {
     }
 
     pub(super) fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
+        self.sgi_stale = true;
         match gate {
             Gate::Id => {}
             Gate::X => self.apply_x(targets[0]),

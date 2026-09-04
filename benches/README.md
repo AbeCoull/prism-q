@@ -42,7 +42,8 @@ worth the disk.
 |-------|-----------------|
 | `single_qubit_gates` | H, Rx, T gate kernels across qubit counts (4–20) |
 | `two_qubit_gates` | CX, CZ, SWAP kernels across qubit counts (4–20) |
-| `measurement` | Measure-after-superposition across qubit counts |
+| `two_qubit_gate_kernels` | CX and CZ kernels by control/target order and separation (12–22) |
+| `measurement` | Probability read, 1q reduced density matrix, measure, and reset on a 20-qubit register, plus one end-to-end `simulate()` row |
 | `e2e_qasm` | Full parse + simulate from OpenQASM string |
 
 ### Macrobenchmarks (circuits)

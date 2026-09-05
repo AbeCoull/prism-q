@@ -92,13 +92,6 @@ pub fn run_expectation_gradient(
 
     params.validate(circuit)?;
 
-    // Validate and reduce observables before the 2^n simulation.
-    let mut masked = Vec::with_capacity(hamiltonian.len());
-    for (coeff, terms) in hamiltonian {
-        let (xmask, zmask, num_y) = pauli_masks(terms, circuit.num_qubits)?;
-        masked.push((*coeff, xmask, zmask, num_y));
-    }
-
     if circuit.num_qubits > max_statevector_qubits() {
         return Err(PrismError::IncompatibleBackend {
             backend: "Statevector".into(),
@@ -108,6 +101,13 @@ pub fn run_expectation_gradient(
                 max_statevector_qubits()
             ),
         });
+    }
+
+    // Validate and reduce observables before the 2^n simulation.
+    let mut masked = Vec::with_capacity(hamiltonian.len());
+    for (coeff, terms) in hamiltonian {
+        let (xmask, zmask, num_y) = pauli_masks(terms, circuit.num_qubits)?;
+        masked.push((*coeff, xmask, zmask, num_y));
     }
 
     // Forward pass, unfused, to keep a 1:1 gate-to-generator correspondence.

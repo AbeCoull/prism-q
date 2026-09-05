@@ -42,6 +42,7 @@ use std::collections::HashMap;
 
 use num_complex::Complex64;
 
+use crate::backend::sparse::MAX_SPARSE_INDEX_QUBITS;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction};
@@ -2196,17 +2197,22 @@ fn grouped_expectation_statevector(
     seed: u64,
 ) -> Result<ObservableExpectation> {
     let terms = observable.terms();
-    // Validate before the 2^n simulation so bad observables fail cheaply.
-    let masks = terms
-        .iter()
-        .map(|(_, factors)| pauli_masks(factors, circuit.num_qubits))
-        .collect::<Result<Vec<_>>>()?;
+    // Validate before the 2^n simulation so bad observables fail cheaply. The
+    // mask reduction shifts by qubit index, so it follows the `init` that
+    // rejects a width no mask can address.
+    for (_, factors) in terms {
+        validate_observable(factors, circuit.num_qubits)?;
+    }
 
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let mut backend = build_statevector(&accel, seed);
     let expanded = expand_for_backend(&backend, circuit);
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    let masks = terms
+        .iter()
+        .map(|(_, factors)| pauli_masks(factors, circuit.num_qubits))
+        .collect::<Result<Vec<_>>>()?;
     backend.apply_instructions(&fused.instructions)?;
 
     let exported;
@@ -2373,17 +2379,22 @@ fn expectation_values_statevector(
     observables: &[Vec<PauliTerm>],
     seed: u64,
 ) -> Result<ExpectationResult> {
-    // Validate before the 2^n simulation so bad observables fail cheaply.
-    let masks = observables
-        .iter()
-        .map(|obs| pauli_masks(obs, circuit.num_qubits))
-        .collect::<Result<Vec<_>>>()?;
+    // Validate before the 2^n simulation so bad observables fail cheaply. The
+    // mask reduction shifts by qubit index, so it follows the `init` that
+    // rejects a width no mask can address.
+    for obs in observables {
+        validate_observable(obs, circuit.num_qubits)?;
+    }
 
     let accel = accel_for(kind, Family::Statevector, circuit.num_qubits);
     let mut backend = build_statevector(&accel, seed);
     let expanded = expand_for_backend(&backend, circuit);
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    let masks = observables
+        .iter()
+        .map(|obs| pauli_masks(obs, circuit.num_qubits))
+        .collect::<Result<Vec<_>>>()?;
     backend.apply_instructions(&fused.instructions)?;
 
     let exported;
@@ -2926,7 +2937,7 @@ fn general_noise_plan(kind: &BackendKind, circuit: &Circuit) -> BackendPlan {
     let family = if !circuit.has_entangling_gates() {
         Family::ProductState
     } else if circuit.num_qubits > max_statevector_qubits() {
-        if circuit.is_sparse_friendly() {
+        if circuit.is_sparse_friendly() && circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS {
             Family::Sparse
         } else {
             Family::Mps

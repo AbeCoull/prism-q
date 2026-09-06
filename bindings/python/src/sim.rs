@@ -68,7 +68,9 @@ impl PySimulation {
     ///
     /// `.shots()` and `.sample_counts()` average trajectories. `.run()`,
     /// `.marginals()`, and `.expectation_values()` answer from the exact
-    /// mixture, which requires `BackendKind.density_matrix()`.
+    /// mixture, which requires `BackendKind.density_matrix()`. Readout error
+    /// is not part of that mixture, so `.marginals()` rejects a model carrying
+    /// it and `.sample_counts()` is the terminal that applies it.
     fn noise(mut slf: PyRefMut<'_, Self>, model: Py<PyNoiseModel>) -> PyRefMut<'_, Self> {
         slf.noise = Some(model);
         slf

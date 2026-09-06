@@ -6,7 +6,7 @@
 use crate::backend::density_matrix::DensityMatrixBackend;
 use crate::backend::mps::MpsBackend;
 use crate::backend::product::ProductStateBackend;
-use crate::backend::sparse::SparseBackend;
+use crate::backend::sparse::{MAX_SPARSE_INDEX_QUBITS, SparseBackend};
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
@@ -372,7 +372,7 @@ fn select_auto_backend_choice(circuit: &Circuit, has_partial_independence: bool)
     } else if circuit.is_clifford_only() {
         Family::Stabilizer
     } else if circuit.num_qubits > max_statevector_qubits() {
-        if circuit.is_sparse_friendly() {
+        if circuit.is_sparse_friendly() && circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS {
             Family::Sparse
         } else {
             Family::Mps

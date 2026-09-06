@@ -783,3 +783,55 @@ fn inner_product_scratch_reuse_matches_fresh() {
         assert_eq!(reused, fresh);
     }
 }
+
+// The cap ladder, which the epsilon test above does not reach: that one holds
+// cap 4096 and varies the SVD threshold instead. Error is read off the
+// normalized state, since an unnormalized overlap would count the same
+// discarded weight twice, once as lost norm and once as direction error. Both
+// halves stay inside the reported discard, at 0.69 and 0.72 of it by cap 64,
+// and both go vacuous at cap 4, whose discard has passed 1. Monotonicity holds
+// for this fixture rather than by construction: no canonical gauge is kept, so
+// the subspace one cap keeps does not nest inside the next.
+#[test]
+fn tighter_caps_lose_more_and_report_it() {
+    let circuit = crate::circuits::brickwork_circuit(14, 20, 42);
+
+    let mut exact = MpsBackend::new(42, 4096);
+    exact.init(14, 0).unwrap();
+    exact.apply_instructions(&circuit.instructions).unwrap();
+    let reference = exact.export_statevector().unwrap();
+    assert!(exact.truncation_discarded() < 1e-20);
+
+    // 2^7 bounds the Schmidt rank of any 14-qubit chain, so the 256 default
+    // cannot truncate at this width and the ladder below is the coverage.
+    let exact_bond = exact.current_max_bond_dim();
+    assert!(exact_bond > 64, "caps under {exact_bond} have to truncate");
+
+    let mut tighter_error = f64::INFINITY;
+    for cap in [4usize, 16, 64] {
+        let mut b = MpsBackend::new(42, cap);
+        b.init(14, 0).unwrap();
+        b.apply_instructions(&circuit.instructions).unwrap();
+
+        let v = b.export_statevector().unwrap();
+        let kept: f64 = v.iter().map(|a| a.norm_sqr()).sum();
+        let inner: Complex64 = reference.iter().zip(&v).map(|(r, x)| r.conj() * x).sum();
+        let realized = 1.0 - inner.norm_sqr() / kept;
+        let discarded = b.truncation_discarded();
+
+        assert!(
+            realized <= tighter_error,
+            "cap {cap} realized {realized:.3e}, no better than {tighter_error:.3e} at the cap below it"
+        );
+        tighter_error = realized;
+
+        assert!(
+            realized < 1.5 * discarded,
+            "cap {cap} realized {realized:.3e} against reported discard {discarded:.3e}"
+        );
+        assert!(
+            1.0 - kept < 1.5 * discarded,
+            "cap {cap} kept only {kept:.3e} of the weight against reported discard {discarded:.3e}"
+        );
+    }
+}

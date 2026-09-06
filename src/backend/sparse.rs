@@ -32,6 +32,8 @@
 //!
 //! - After a layer of Hadamard gates (state becomes maximally dense).
 //! - Small qubit counts where dense statevector is faster due to HashMap overhead.
+//! - Circuits wider than `usize::BITS` qubits, which the basis index cannot
+//!   address. [`Backend::init`] rejects them and `Auto` routes them to MPS.
 
 use num_complex::Complex64;
 use rand::RngExt;
@@ -63,6 +65,12 @@ use crate::hash::FxHashMap;
 use crate::sim::unified_pauli::PauliTerm;
 
 const DEFAULT_EPSILON: f64 = 1e-16;
+
+/// Widest circuit the basis-index representation addresses.
+///
+/// Every gate kernel masks the global basis index with `1usize << qubit`, so a
+/// qubit index must stay below `usize::BITS`.
+pub(crate) const MAX_SPARSE_INDEX_QUBITS: usize = usize::BITS as usize;
 
 /// Sparse state-vector backend, O(k) where k is the number of non-zero amplitudes.
 pub struct SparseBackend {
@@ -655,6 +663,15 @@ impl Backend for SparseBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
+        if num_qubits > MAX_SPARSE_INDEX_QUBITS {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "sparse".to_string(),
+                reason: format!(
+                    "a {num_qubits}-qubit circuit exceeds the {MAX_SPARSE_INDEX_QUBITS}-qubit \
+                     basis-index width of the sparse backend"
+                ),
+            });
+        }
         self.num_qubits = num_qubits;
         self.state.clear();
         self.state.insert(0, Complex64::new(1.0, 0.0));

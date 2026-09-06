@@ -540,3 +540,17 @@ fn out_of_range_link_is_rejected() {
     let obs = vec![(1.0, vec![PauliTerm::z(0)])];
     assert!(run_expectation_gradient(&c, &obs, &params, SEED).is_err());
 }
+
+// The observable reduction masks with `1 << qubit`, which wraps past the index
+// width, so the cap has to reject before the reduction runs.
+#[test]
+fn wide_adjoint_gradient_rejects_before_reducing_the_observable() {
+    let n = 70;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.2), &[q]);
+    }
+    let params = Parameters::all_rotations(&circuit);
+    let hamiltonian = vec![(1.0, vec![PauliTerm::z(n - 1)])];
+    assert!(run_expectation_gradient(&circuit, &hamiltonian, &params, SEED).is_err());
+}

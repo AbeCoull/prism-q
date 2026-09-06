@@ -322,6 +322,22 @@ pub struct StabRankResult {
     pub t_count: usize,
     /// Number of terms pruned during approximate simulation (0 for exact).
     pub pruned_count: usize,
+    /// Summed 1-norm of the coefficients pruning discarded, 0 for an exact
+    /// run. Four times this bounds the summed absolute difference from the
+    /// exact distribution; see [`run_stabilizer_rank_approx`].
+    pub discarded_weight: f64,
+}
+
+impl StabRankResult {
+    /// Certified lower bound on the fidelity with the exact state.
+    ///
+    /// Squares the `1 - 2 * d * d` floor that the state distance in
+    /// [`run_stabilizer_rank_approx`] puts on the overlap. Returns 1.0 for a
+    /// run that pruned nothing.
+    pub fn fidelity_bound(&self) -> f64 {
+        let d = self.discarded_weight;
+        (1.0 - 2.0 * d * d).max(0.0).powi(2)
+    }
 }
 
 #[cfg(feature = "parallel")]
@@ -364,6 +380,7 @@ pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResul
         num_terms: branches.len(),
         t_count,
         pruned_count: 0,
+        discarded_weight: 0.0,
     })
 }
 
@@ -481,9 +498,15 @@ fn expand_t(branches: &mut Vec<WeightedBranch>, qubit: usize, is_dagger: bool) -
 
 /// Approximate stabilizer rank simulation with bounded term count.
 ///
-/// Like [`run_stabilizer_rank`] but prunes low-weight terms after each T gate
-/// to keep term count ≤ `max_terms`. Russian roulette: below-threshold terms
-/// are killed (probability 1 - w/w_max) or promoted (w → w_max).
+/// Like [`run_stabilizer_rank`], but after each T gate the smallest-magnitude
+/// surplus terms are dropped, exactly enough to return to `max_terms`.
+///
+/// The returned probabilities are renormalized. `discarded_weight` is the
+/// realized error bound: writing it as `d`, the branch states are normalized,
+/// so the dropped part of the state has norm at most `d` and rescaling to unit
+/// norm costs at most `d` again. The summed absolute difference from the exact
+/// distribution is therefore at most `4 * d`. A run that prunes nothing
+/// returns 0 and is exact.
 pub fn run_stabilizer_rank_approx(
     circuit: &Circuit,
     max_terms: usize,
@@ -493,10 +516,10 @@ pub fn run_stabilizer_rank_approx(
     let (mut backend, mut branches) = stabilizer_rank_setup(circuit, seed)?;
 
     let max_terms = max_terms.max(2);
-    let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     let mut t_count = 0usize;
     let mut pruned_total = 0usize;
+    let mut discarded_weight = 0.0;
 
     for inst in &circuit.instructions {
         match inst {
@@ -504,12 +527,16 @@ pub fn run_stabilizer_rank_approx(
                 Gate::T => {
                     t_count += 1;
                     expand_t_unbounded(&mut branches, targets[0], false);
-                    pruned_total += prune_terms(&mut branches, max_terms, &mut rng);
+                    let (pruned, dropped) = prune_terms(&mut branches, max_terms);
+                    pruned_total += pruned;
+                    discarded_weight += dropped;
                 }
                 Gate::Tdg => {
                     t_count += 1;
                     expand_t_unbounded(&mut branches, targets[0], true);
-                    pruned_total += prune_terms(&mut branches, max_terms, &mut rng);
+                    let (pruned, dropped) = prune_terms(&mut branches, max_terms);
+                    pruned_total += pruned;
+                    discarded_weight += dropped;
                 }
                 _ => {
                     backend.apply(inst)?;
@@ -522,11 +549,20 @@ pub fn run_stabilizer_rank_approx(
         }
     }
 
-    accumulate_probabilities(&backend, &branches, n).map(|probabilities| StabRankResult {
-        probabilities,
-        num_terms: branches.len(),
-        t_count,
-        pruned_count: pruned_total,
+    accumulate_probabilities(&backend, &branches, n).map(|mut probabilities| {
+        let kept: f64 = probabilities.iter().sum();
+        if kept > 0.0 {
+            for p in probabilities.iter_mut() {
+                *p /= kept;
+            }
+        }
+        StabRankResult {
+            probabilities,
+            num_terms: branches.len(),
+            t_count,
+            pruned_count: pruned_total,
+            discarded_weight,
+        }
     })
 }
 
@@ -553,26 +589,30 @@ fn expand_t_unbounded(branches: &mut Vec<WeightedBranch>, qubit: usize, is_dagge
     branches.extend(new_branches);
 }
 
-/// Prune branches by descending weight magnitude.
-fn prune_terms(
-    branches: &mut Vec<WeightedBranch>,
-    max_terms: usize,
-    _rng: &mut ChaCha8Rng,
-) -> usize {
-    if branches.len() <= max_terms {
-        return 0;
+/// Drop the smallest-magnitude surplus terms to return to `max_terms`,
+/// returning how many went and the 1-norm of their coefficients.
+///
+/// The branch states are normalized but not orthogonal, so the discarded
+/// 1-norm is what bounds the state error by the triangle inequality; a sum of
+/// squares would not. Selection is unstable, so which of several branches of
+/// equal magnitude survives a cut through them is unspecified. The discarded
+/// magnitudes, and so the returned bound, are the same whichever way it falls.
+fn prune_terms(branches: &mut Vec<WeightedBranch>, max_terms: usize) -> (usize, f64) {
+    let surplus = branches.len().saturating_sub(max_terms);
+    if surplus == 0 {
+        return (0, 0.0);
     }
 
-    branches.sort_by(|a, b| {
-        b.weight
-            .norm_sqr()
-            .partial_cmp(&a.weight.norm_sqr())
-            .unwrap_or(std::cmp::Ordering::Equal)
+    branches.select_nth_unstable_by(max_terms, |a, b| {
+        b.weight.norm_sqr().total_cmp(&a.weight.norm_sqr())
     });
 
-    let pruned = branches.len() - max_terms;
+    let discarded = branches[max_terms..]
+        .iter()
+        .map(|branch| branch.weight.norm_sqr().sqrt())
+        .sum();
     branches.truncate(max_terms);
-    pruned
+    (surplus, discarded)
 }
 
 /// Stabilizer inner product |⟨φ₁|φ₂⟩|² via combined stabilizer group method.

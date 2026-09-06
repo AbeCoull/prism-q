@@ -275,8 +275,10 @@ impl<'c> Simulate<'c, Seeded> {
     ///
     /// With a noise model attached the probabilities are the exact noisy
     /// distribution rather than one trajectory, so the run needs the
-    /// density-matrix backend; the classical bits are one draw from that
-    /// distribution, matching `shots(1)`.
+    /// density-matrix backend; the classical bits are one draw, matching
+    /// `shots(1)`. Readout error reaches the draw and not the state, so under
+    /// a model carrying it the two fields answer different questions: the
+    /// distribution is the state's, the bits are the record's.
     #[inline]
     pub fn run(self) -> Result<RunOutcome> {
         let seed = self.seed_value();
@@ -370,7 +372,8 @@ impl<'c> Simulate<'c, Seeded> {
     /// Per-qubit marginal probabilities as `(P(0), P(1))` pairs. Rejects
     /// backends without probability output, and with a noise model attached
     /// answers exactly from the mixture, which needs the density-matrix
-    /// backend.
+    /// backend, and rejects a model carrying readout error, since
+    /// `sample_counts` is the terminal that applies it.
     #[inline]
     pub fn marginals(self) -> Result<MarginalsResult> {
         let seed = self.seed_value();
@@ -379,6 +382,7 @@ impl<'c> Simulate<'c, Seeded> {
         }
         if let Some(noise_model) = self.noise_model {
             require_exact_mixture(&self.kind, "marginals")?;
+            reject_readout_at_marginals(self.circuit, noise_model)?;
             let probs = exact_noisy_probabilities(
                 &self.kind,
                 self.circuit,
@@ -742,6 +746,33 @@ fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
              density-matrix backend holds; select it, or average trajectories through `shots` \
              or `sample_counts`"
         ),
+    })
+}
+
+/// Gate for the marginals terminal, which answers from the mixed state.
+///
+/// The condition is the one under which a draw would actually differ. Entries
+/// past the circuit's bit count never apply, matching what
+/// `sample_exact_noisy_shots` consumes, so a model built for a wider circuit is
+/// not rejected on bits this one does not have, and a zero-rate entry flips
+/// nothing, so a sweep that starts at zero is not rejected at its first point.
+fn reject_readout_at_marginals(circuit: &Circuit, noise_model: &noise::NoiseModel) -> Result<()> {
+    let inert = noise_model
+        .readout
+        .iter()
+        .take(circuit.num_classical_bits)
+        .all(|entry| match entry {
+            None => true,
+            Some(readout) => readout.p01 == 0.0 && readout.p10 == 0.0,
+        });
+    if inert {
+        return Ok(());
+    }
+    Err(PrismError::InvalidParameter {
+        message: "marginals answers from the mixed state, which readout error is not part \
+                  of: it acts on the measurement record and is indexed by classical bit, \
+                  not qubit. Drop it from the model, or use `sample_counts`, which applies it"
+            .to_string(),
     })
 }
 

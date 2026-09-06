@@ -496,3 +496,85 @@ fn factored_block_probabilities_expand_to_the_merged_vector() {
         ));
     }
 }
+
+// A batched diagonal gate is assembled without an independence check, so its
+// qubit union spans blocks its entries never connect. Merging that union once
+// per batch collapses the factorization for the rest of the run, which no value
+// assertion can see because the amplitudes stay correct either way.
+//
+// The layers are ordered to reach both batched families: the Cz and cphase
+// layers fuse to one `DiagonalBatch` over all eight pairs, and the Rzz layer to
+// one `BatchRzz` over the same eight. A fixture carrying only `Rzz` exercises
+// half the fix.
+#[test]
+fn batched_diagonal_gates_keep_independent_blocks_apart() {
+    use prism_q::backend::Backend;
+    use prism_q::sim::Probabilities;
+
+    // A fully merged state holds one block, and one block has no per-block
+    // form, so `None` counts as one rather than as a missing capability.
+    fn block_count(backend: &FactoredBackend) -> usize {
+        match backend.block_probabilities() {
+            Some(Probabilities::Factored { blocks, .. }) => blocks.len(),
+            Some(Probabilities::Dense(_)) => panic!("expected the factored variant"),
+            None => 1,
+        }
+    }
+
+    let n = 16;
+    let pairs = n / 2;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3 + 0.01 * q as f64), &[q]);
+    }
+    for p in 0..pairs {
+        circuit.add_gate(Gate::Cz, &[2 * p, 2 * p + 1]);
+    }
+    for p in 0..pairs {
+        circuit.add_gate(Gate::cphase(0.4 + 0.01 * p as f64), &[2 * p, 2 * p + 1]);
+    }
+    for p in 0..pairs {
+        circuit.add_gate(Gate::Rzz(0.2 + 0.01 * p as f64), &[2 * p, 2 * p + 1]);
+    }
+
+    let fused_stream = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+    let mut saw_diagonal_batch = false;
+    let mut saw_batch_rzz = false;
+    for inst in &fused_stream.instructions {
+        if let Instruction::Gate { gate, targets } = inst {
+            match gate {
+                Gate::DiagonalBatch(_) => {
+                    saw_diagonal_batch = true;
+                    assert_eq!(targets.len(), n, "the batch must span every pair");
+                }
+                Gate::BatchRzz(_) => {
+                    saw_batch_rzz = true;
+                    assert_eq!(targets.len(), n, "the batch must span every pair");
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        saw_diagonal_batch && saw_batch_rzz,
+        "the fixture must reach both batched families or it tests half the fix"
+    );
+
+    let mut unfused = FactoredBackend::new(SEED);
+    unfused.init(n, 0).unwrap();
+    unfused.apply_instructions(&circuit.instructions).unwrap();
+
+    let mut fused = FactoredBackend::new(SEED);
+    prism_q::sim::run_on(&mut fused, &circuit).unwrap();
+
+    assert_eq!(
+        block_count(&unfused),
+        pairs,
+        "the unfused stream must leave one block per disjoint pair"
+    );
+    assert_eq!(
+        block_count(&fused),
+        block_count(&unfused),
+        "fusing a batch must not merge blocks its entries never connect"
+    );
+}

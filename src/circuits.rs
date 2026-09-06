@@ -250,6 +250,42 @@ pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
     c
 }
 
+/// Disjoint `k`-qubit blocks under `Rx` layers, with an `Rzz` ring inside each
+/// block and no gate between blocks.
+///
+/// The diagonal batch passes collect every ring into one gate whose target list
+/// is the whole register, so a backend that merges that list holds one block of
+/// `n` qubits where the circuit only ever needs `n / k` blocks of `k`.
+///
+/// Block width sets the post-collapse cost: pairs leave blocks of four
+/// amplitudes, which lands the row in the microsecond band this host cannot
+/// resolve, so callers pricing the difference pass a `k` that keeps the split
+/// state large enough to time.
+///
+/// # Panics
+/// Panics unless `k` is at least 2 and divides `n`, and `n / k` is at least 2.
+pub fn disjoint_block_layers_circuit(n: usize, k: usize, layers: usize, seed: u64) -> Circuit {
+    assert!(
+        k >= 2 && n.is_multiple_of(k) && n / k >= 2,
+        "disjoint_block_layers_circuit needs at least two blocks of at least two qubits"
+    );
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for _ in 0..layers {
+        for q in 0..n {
+            c.add_gate(Gate::Rx(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        for block in 0..n / k {
+            let base = block * k;
+            for i in 0..k {
+                let theta = rng.random::<f64>() * std::f64::consts::TAU;
+                c.add_gate(Gate::Rzz(theta), &[base + i, base + (i + 1) % k]);
+            }
+        }
+    }
+    c
+}
+
 /// Build a mixed diagonal-phase circuit: one H layer, then `layers` of random
 /// 1q diagonals (Rz, T, P) plus long-range CZ/CPhase/Rzz pairs at a per-layer
 /// stride. The long-range strides keep the pairs out of the same-pair 2q fusion

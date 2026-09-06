@@ -265,3 +265,53 @@ fn statevector_corpus_rows_reach_the_statevector() {
         );
     }
 }
+
+// The `factored/disjoint_blocks` rows price the collapse a batched diagonal
+// gate causes when it merges its whole target list. Two properties carry that,
+// and neither is visible in a timing: the fused stream must hold a batch whose
+// targets span the register, and the run must end with one block per ring.
+// Raising the diagonal-batch floor past these widths would leave plain `Rzz`
+// rows measuring nothing, still green.
+#[test]
+fn disjoint_block_rows_pin_the_batch_and_the_block_count() {
+    use prism_q::backend::Backend;
+    use prism_q::backend::factored::FactoredBackend;
+    use prism_q::circuit::Instruction;
+    use prism_q::gates::Gate;
+    use prism_q::sim::Probabilities;
+
+    for n in [20usize, 24] {
+        let circuit = circuits::disjoint_block_layers_circuit(n, n / 2, 4, SEED);
+        let fused = prism_q::circuit::fusion::fuse_circuit(&circuit, true);
+
+        let spanning_batches = fused
+            .instructions
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::BatchRzz(_) | Gate::DiagonalBatch(_),
+                        targets,
+                    } if targets.len() == n
+                )
+            })
+            .count();
+        assert!(
+            spanning_batches > 0,
+            "disjoint_blocks/{n}: no batched diagonal gate spans the register, \
+             so the row prices nothing"
+        );
+
+        let mut backend = FactoredBackend::new(SEED);
+        prism_q::sim::run_on(&mut backend, &circuit).unwrap();
+        match backend.block_probabilities() {
+            Some(Probabilities::Factored { blocks, .. }) => assert_eq!(
+                blocks.len(),
+                2,
+                "disjoint_blocks/{n}: the two rings must stay separate blocks"
+            ),
+            _ => panic!("disjoint_blocks/{n}: the run collapsed to a single block"),
+        }
+    }
+}

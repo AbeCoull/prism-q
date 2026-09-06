@@ -92,8 +92,21 @@ Backends without an observable path return `BackendUnsupported` naming
 themselves, so a rejected request says which engine could not serve it rather
 than blaming the route that selected it.
 
-`simulate(...).marginals()` is dense everywhere except the distributed backend,
-where it is per-qubit Z expectations and therefore also uncapped.
+`simulate(...).marginals()` reads per-qubit Z expectations rather than a
+distribution when the resolved backend has an observable path and the circuit
+routes straight to it. Sparse, MPS, product state, factored, tensor network,
+distributed, and the density matrix all have one, and the dense output cap does
+not apply on that route. It falls back to the dense distribution on backends
+without an observable path, on a circuit that splits into independent blocks
+unless those blocks run as product states, and under a noise model, where the
+mixture is read densely and the density-matrix memory limit applies instead.
+
+Under a noise model `marginals()` answers from the exact mixture, so it rejects
+a model carrying readout error instead of serving one: readout acts on the
+measurement record rather than the state, and it is indexed by classical bit
+where a marginal is indexed by qubit. `sample_counts` is the terminal that
+applies it.
+
 `simulate(...).run()` is the one terminal that needs the whole distribution, so
 on the distributed backend it rejects a register past the dense cap up front
 rather than running first and answering with no distribution.
@@ -115,6 +128,13 @@ weight, where the state lived, and the shot count for a sampled result.
 circuit that never fills a bond truncates nothing and still reports
 `Approximate`, with a bound of 1.0: the variant answers whether the answer could
 have been approximated, the bound answers whether it was.
+
+The bound describes the normalized state, and a truncating MPS does not
+renormalize. Expectation values and shot sampling rescale on read, but the
+probability vector comes back carrying the reduced weight: `brickwork_circuit(14,
+20, 42)` at bond 16 returns probabilities summing to 0.64, and at bond 4 to 0.04.
+Rescale before reading them as a distribution, and do not mistake the missing
+weight for the error the bound reports.
 
 `Auto` sends a circuit past the statevector cap to an MPS at a bounded bond
 dimension, which is the only route those circuits have. It is taken by default

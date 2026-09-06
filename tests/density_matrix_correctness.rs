@@ -556,6 +556,65 @@ fn dm_noisy_readout_error_flips_sampled_bits() {
     );
 }
 
+// marginals reads the mixture and sample_counts reads the record, so a model
+// carrying readout is rejected here rather than answered with a quantity that
+// is neither. Dropping readout leaves the two terminals agreeing, which is what
+// makes readout the whole of the disagreement.
+#[test]
+fn dm_marginals_reject_readout_and_otherwise_match_the_draw() {
+    use prism_q::{BackendKind, NoiseModel, PrismError};
+    // Distinct, non-half marginals, so the comparison below fails on a swapped
+    // index or a symmetric readout fold rather than passing on 0.5 either way.
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Ry(0.8), &[0]);
+    circuit.add_gate(Gate::Ry(2.0), &[1]);
+    circuit.measure_all();
+
+    let mut with_readout = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    with_readout.with_readout_error(0.3, 0.0);
+    match sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&with_readout)
+        .seed(SEED)
+        .marginals()
+    {
+        Err(PrismError::InvalidParameter { message }) => {
+            assert!(
+                message.contains("sample_counts"),
+                "the rejection must name the terminal that applies it, got {message}"
+            );
+        }
+        other => panic!("expected a rejection naming the terminal that applies it: {other:?}"),
+    }
+
+    let clean = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let marginals = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(SEED)
+        .marginals()
+        .unwrap();
+    let shots = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(SEED)
+        .shots(100_000)
+        .unwrap();
+    assert!(
+        (marginals.marginals[0].1 - marginals.marginals[1].1).abs() > 0.3,
+        "the fixture has to separate the two qubits: {:?}",
+        marginals.marginals
+    );
+    for bit in 0..2 {
+        let drawn = shots.shots.iter().filter(|s| s[bit]).count() as f64 / 100_000.0;
+        assert!(
+            (marginals.marginals[bit].1 - drawn).abs() < 0.01,
+            "bit {bit}: marginal {:?} against draw {drawn}",
+            marginals.marginals[bit]
+        );
+    }
+}
+
 #[test]
 fn dm_amplitude_damping_analytic() {
     let gamma = 0.3;

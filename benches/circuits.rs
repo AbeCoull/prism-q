@@ -2452,6 +2452,62 @@ fn bench_factored_noise_kraus(c: &mut Criterion) {
     group.finish();
 }
 
+/// Disjoint blocks under a batched diagonal fusion, the shape whose
+/// factorization the batch passes can collapse.
+///
+/// Blocks are `n / 2` qubits wide rather than pairs. Pairs leave a post-split
+/// state of four amplitudes and an 11 us row, inside the band this host reads
+/// at -45.5% to +49.7%; halves leave 2^10 and 2^12 and a row that can be timed.
+/// The batch still spans the whole register either way, which is what makes the
+/// collapse fire.
+///
+/// Both arms time `init` plus `apply_instructions` over a stream fused once
+/// outside the loop, rather than a full `run_on`. `run_on` asks for
+/// probabilities, and the two backends answer that terminal with wildly
+/// different work: the factored arm returns a lazy per-block form while the
+/// statevector arm materializes `2^n` f64, which is 134 MB at 24 qubits and
+/// would dominate the row it is meant to control. That also makes this group
+/// incomparable to the sibling `factored/*` groups, which time a full run.
+///
+/// Dispatch is bypassed for a second reason: this fixture's interaction graph
+/// is `n / 2` components, so a routed run would decompose and measure the sim
+/// layer instead of either backend. Driving the backend directly also fixes
+/// the engine per row by construction, which is what
+/// `tests/bench_fixture_routing.rs` pins for the dispatched rows.
+///
+/// The statevector arm controls for confinement, not for lane noise: the diff
+/// cannot reach it, so a move there is layout or host drift rather than an
+/// effect. It is also the expensive half of the group, so drive an A/B with the
+/// factored rows filtered and the statevector rows as reduced-sample controls.
+fn bench_factored_disjoint_blocks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored/disjoint_blocks");
+    configure_group(&mut group);
+
+    for &n in &[20, 24] {
+        let circuit = circuits::disjoint_block_layers_circuit(n, n / 2, 4, SEED);
+        let fused = fuse_circuit(&circuit, true).into_owned();
+
+        group.bench_with_input(BenchmarkId::new("statevector", n), &fused, |b, circ| {
+            b.iter(|| {
+                let mut sv = prism_q::StatevectorBackend::new(42);
+                sv.init(circ.num_qubits, circ.num_classical_bits).unwrap();
+                sv.apply_instructions(&circ.instructions).unwrap();
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("factored", n), &fused, |b, circ| {
+            b.iter(|| {
+                let mut factored = prism_q::FactoredBackend::new(42);
+                factored
+                    .init(circ.num_qubits, circ.num_classical_bits)
+                    .unwrap();
+                factored.apply_instructions(&circ.instructions).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_factored_dense(c: &mut Criterion) {
     let mut group = c.benchmark_group("factored/dense");
     configure_group(&mut group);
@@ -3580,6 +3636,7 @@ criterion_group! {
     bench_factored_partial_independence,
     bench_factored_dense,
     bench_factored_noise_kraus,
+    bench_factored_disjoint_blocks,
     // Clifford+T (SPD/SPP)
     bench_clifford_t,
     // Stabilizer rank

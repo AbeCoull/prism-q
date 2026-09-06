@@ -228,6 +228,18 @@ impl FactoredBackend {
             }
             return Ok(());
         }
+        if let Gate::BatchRzz(data) = gate {
+            for &(q0, q1, theta) in &data.edges {
+                self.apply_rzz_edge(q0, q1, theta)?;
+            }
+            return Ok(());
+        }
+        if let Gate::DiagonalBatch(data) = gate {
+            for entry in &data.entries {
+                self.apply_diag_entry(entry)?;
+            }
+            return Ok(());
+        }
         // All other gates require targets in the same sub-state.
         // BatchPhase carries phase target qubits inside its data, not in the
         // instruction-level `targets` list, so the merge must include them.
@@ -378,66 +390,6 @@ impl FactoredBackend {
                     par_apply_batch_phase(&mut sub.state, local_ctrl, &local_phases)
                 );
             }
-            Gate::BatchRzz(data) => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                for &(q0, q1, theta) in &data.edges {
-                    let lq0 = Self::local_qubit(sub, q0);
-                    let lq1 = Self::local_qubit(sub, q1);
-                    seq_or_par!(
-                        apply_rzz_seq(&mut sub.state, lq0, lq1, theta),
-                        par_apply_rzz(&mut sub.state, lq0, lq1, theta)
-                    );
-                }
-            }
-            Gate::DiagonalBatch(data) => {
-                let sub = self.substates[ss_idx].as_mut().unwrap();
-                for entry in &data.entries {
-                    match entry {
-                        DiagEntry::Phase1q { qubit, d0, d1 } => {
-                            let lq = Self::local_qubit(sub, *qubit);
-                            let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
-                            seq_or_par!(
-                                simd::apply_diagonal_sequential(
-                                    &mut sub.state,
-                                    lq,
-                                    *d0,
-                                    *d1,
-                                    skip_lo,
-                                ),
-                                par_apply_diagonal(&mut sub.state, lq, *d0, *d1, skip_lo)
-                            );
-                        }
-                        DiagEntry::Phase2q { q0, q1, phase } => {
-                            let lq0 = Self::local_qubit(sub, *q0);
-                            let lq1 = Self::local_qubit(sub, *q1);
-                            seq_or_par!(
-                                apply_cu_phase_seq(
-                                    &mut sub.state,
-                                    sub.qubits.len(),
-                                    lq0,
-                                    lq1,
-                                    *phase,
-                                ),
-                                par_apply_cu_phase(
-                                    &mut sub.state,
-                                    sub.qubits.len(),
-                                    lq0,
-                                    lq1,
-                                    *phase,
-                                )
-                            );
-                        }
-                        DiagEntry::Parity2q { q0, q1, same, diff } => {
-                            let lq0 = Self::local_qubit(sub, *q0);
-                            let lq1 = Self::local_qubit(sub, *q1);
-                            seq_or_par!(
-                                apply_parity2q_seq(&mut sub.state, lq0, lq1, *same, *diff),
-                                par_apply_parity2q(&mut sub.state, lq0, lq1, *same, *diff)
-                            );
-                        }
-                    }
-                }
-            }
             Gate::Fused2q(mat) => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
@@ -452,7 +404,9 @@ impl FactoredBackend {
                     par_apply_fused2q(&mut sub.state, sub.qubits.len(), q0, q1, mat)
                 );
             }
-            Gate::MultiFused(_) | Gate::Multi2q(_) => unreachable!(),
+            Gate::MultiFused(_) | Gate::Multi2q(_) | Gate::BatchRzz(_) | Gate::DiagonalBatch(_) => {
+                unreachable!()
+            }
             _ => {
                 let mat = gate.matrix_2x2();
                 let sub = self.substates[ss_idx].as_mut().unwrap();
@@ -476,6 +430,80 @@ impl FactoredBackend {
                         apply_single_gate_par(&mut sub.state, local, &mat)
                     );
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply one batched `Rzz` edge, merging only the pair it acts on.
+    ///
+    /// A batch is built without regard to independence, so merging its whole
+    /// qubit union would collapse blocks the edges never connect.
+    fn apply_rzz_edge(&mut self, q0: usize, q1: usize, theta: f64) -> Result<()> {
+        let ss_idx = self.ensure_same_substate(&[q0, q1])?;
+        let sub = self.substates[ss_idx].as_mut().unwrap();
+        let lq0 = Self::local_qubit(sub, q0);
+        let lq1 = Self::local_qubit(sub, q1);
+        #[cfg(feature = "parallel")]
+        if sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS {
+            par_apply_rzz(&mut sub.state, lq0, lq1, theta);
+            return Ok(());
+        }
+        apply_rzz_seq(&mut sub.state, lq0, lq1, theta);
+        Ok(())
+    }
+
+    /// Apply one batched diagonal entry, merging only the qubits it acts on.
+    ///
+    /// Same independence contract as [`Self::apply_rzz_edge`].
+    fn apply_diag_entry(&mut self, entry: &DiagEntry) -> Result<()> {
+        let ss_idx = match entry {
+            DiagEntry::Phase1q { qubit, .. } => self.ensure_same_substate(&[*qubit])?,
+            DiagEntry::Phase2q { q0, q1, .. } | DiagEntry::Parity2q { q0, q1, .. } => {
+                self.ensure_same_substate(&[*q0, *q1])?
+            }
+        };
+        let sub = self.substates[ss_idx].as_mut().unwrap();
+        #[cfg(feature = "parallel")]
+        let par = sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS;
+
+        macro_rules! seq_or_par {
+            ($seq:expr, $par:expr) => {{
+                #[cfg(feature = "parallel")]
+                if par {
+                    $par
+                } else {
+                    $seq
+                }
+                #[cfg(not(feature = "parallel"))]
+                $seq
+            }};
+        }
+
+        match entry {
+            DiagEntry::Phase1q { qubit, d0, d1 } => {
+                let lq = Self::local_qubit(sub, *qubit);
+                let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
+                seq_or_par!(
+                    simd::apply_diagonal_sequential(&mut sub.state, lq, *d0, *d1, skip_lo),
+                    par_apply_diagonal(&mut sub.state, lq, *d0, *d1, skip_lo)
+                );
+            }
+            DiagEntry::Phase2q { q0, q1, phase } => {
+                let lq0 = Self::local_qubit(sub, *q0);
+                let lq1 = Self::local_qubit(sub, *q1);
+                seq_or_par!(
+                    apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase),
+                    par_apply_cu_phase(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase)
+                );
+            }
+            DiagEntry::Parity2q { q0, q1, same, diff } => {
+                let lq0 = Self::local_qubit(sub, *q0);
+                let lq1 = Self::local_qubit(sub, *q1);
+                seq_or_par!(
+                    apply_parity2q_seq(&mut sub.state, lq0, lq1, *same, *diff),
+                    par_apply_parity2q(&mut sub.state, lq0, lq1, *same, *diff)
+                );
             }
         }
         Ok(())

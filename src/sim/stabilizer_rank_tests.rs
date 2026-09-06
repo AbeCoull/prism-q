@@ -533,21 +533,73 @@ fn test_approx_small_circuit_exact() {
     }
 }
 
-#[test]
-fn test_approx_prunes_terms() {
+fn eight_t_circuit() -> Circuit {
     let mut c = Circuit::new(4, 0);
     for q in 0..4 {
         c.add_gate(Gate::H, &[q]);
         c.add_gate(Gate::T, &[q]);
     }
-    // 4 T gates → 16 terms exact. Budget of 8 should prune.
-    let result = run_stabilizer_rank_approx(&c, 8, 42).unwrap();
-    assert!(result.num_terms <= 8);
-    assert!(result.pruned_count > 0);
+    for q in 0..3 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..4 {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    c
+}
 
-    let total: f64 = result.probabilities.iter().sum();
-    // Approximate, so not exactly 1.0, but should be in a reasonable range
-    assert!(total > 0.5 && total < 2.0, "total = {total}");
+#[test]
+fn pruned_runs_stay_inside_the_reported_error_bound() {
+    let c = eight_t_circuit();
+    let exact = run_stabilizer_rank(&c, 42).unwrap();
+    assert_eq!(exact.num_terms, 256);
+
+    for budget in [64usize, 160, 224] {
+        let approx = run_stabilizer_rank_approx(&c, budget, 42).unwrap();
+        assert!(approx.num_terms <= budget);
+        assert!(approx.pruned_count > 0);
+
+        let total: f64 = approx.probabilities.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "budget {budget} summed to {total}"
+        );
+
+        let deviation: f64 = exact
+            .probabilities
+            .iter()
+            .zip(&approx.probabilities)
+            .map(|(e, a)| (e - a).abs())
+            .sum();
+        let bound = 4.0 * approx.discarded_weight;
+        assert!(
+            deviation <= bound + 1e-9,
+            "budget {budget} deviated {deviation} past its bound {bound}"
+        );
+    }
+
+    let whole = run_stabilizer_rank_approx(&c, 256, 42).unwrap();
+    assert_eq!(whole.pruned_count, 0);
+    assert_eq!(whole.discarded_weight, 0.0);
+}
+
+// The 1-norm bound is worst case over constructive interference between
+// non-orthogonal branches, so it certifies nothing at the budgets worth
+// taking. Both budgets here straddle a class of equal-magnitude branches, so
+// the assertions read the discarded magnitudes, which the tie-break cannot
+// move, rather than the distribution, which it can.
+#[test]
+fn the_error_bound_certifies_only_a_generous_budget() {
+    let c = eight_t_circuit();
+
+    let tight = run_stabilizer_rank_approx(&c, 64, 42).unwrap();
+    assert!(tight.pruned_count > 0);
+    assert_eq!(tight.fidelity_bound(), 0.0);
+
+    let generous = run_stabilizer_rank_approx(&c, 224, 42).unwrap();
+    assert!(generous.pruned_count > 0);
+    assert!(generous.fidelity_bound() > 0.97);
 }
 
 #[test]

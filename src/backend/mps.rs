@@ -637,6 +637,14 @@ impl MpsBackend {
     /// At the default threshold, epsilon truncation contributes negligibly and
     /// a meaningful value indicates the bond-dimension cap discarded real
     /// weight; after [`Self::set_svd_epsilon`] both sources contribute.
+    ///
+    /// The total sums one relative discard per SVD rather than measuring the
+    /// final state, so a chain that truncates heavily can carry it past 1,
+    /// where the fidelity it implies clamps to zero and certifies nothing.
+    ///
+    /// Truncation does not renormalize the chain. Expectation values and shot
+    /// sampling rescale on read, while the probability terminal and
+    /// [`Self::export_statevector`] return the reduced weight as it stands.
     pub fn truncation_discarded(&self) -> f64 {
         self.truncation_discarded
     }

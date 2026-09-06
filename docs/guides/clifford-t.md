@@ -34,9 +34,18 @@ exact probabilities.
 | Function | Use |
 |----------|-----|
 | `run_stabilizer_rank` | Exact probabilities (t ≤ 20, n ≤ 25) |
-| `run_stabilizer_rank_approx` | Approximate with Monte Carlo (higher t counts) |
+| `run_stabilizer_rank_approx` | Approximate under a term budget (higher t counts) |
 | `run_stabilizer_rank_shots` | Shot-based sampling with no fixed qubit cap |
 | `stabilizer_overlap_sq` | Inner product between stabilizer states |
+
+`run_stabilizer_rank_approx` truncates deterministically. After each `T` it
+drops the smallest-magnitude terms in excess of the budget, renormalizes the
+probabilities it returns, and reports the summed 1-norm of what it dropped as
+`discarded_weight`. Writing that as `d`, the returned distribution differs
+from the exact one by at most `4 * d`, and `StabRankResult::fidelity_bound`
+converts `d` to a fidelity floor. The bound assumes worst-case interference
+between the non-orthogonal branch states, so an aggressive budget drives it
+to zero.
 
 ## Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
 

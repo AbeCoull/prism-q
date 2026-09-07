@@ -569,6 +569,24 @@ impl StatevectorBackend {
         false
     }
 
+    /// `sum_j conj(psi[j ^ xmask]) psi[j] (-1)^{popcount(j & zmask)}` per mask
+    /// pair, reduced on the device; `None` when the state lives on the host.
+    /// Normalization is applied, so an appended `(0, 0)` mask returns `<psi|psi>`.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn gpu_pauli_sums(&self, masks: &[(u64, u64)]) -> Option<Result<Vec<Complex64>>> {
+        let gpu = self.gpu_state.as_ref()?;
+        Some(crate::gpu::kernels::dense::pauli_sums(
+            gpu.context(),
+            gpu,
+            masks,
+        ))
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    pub(crate) fn gpu_pauli_sums(&self, _masks: &[(u64, u64)]) -> Option<Result<Vec<Complex64>>> {
+        None
+    }
+
     #[cfg(feature = "gpu")]
     pub(crate) fn gpu_state(&self) -> Option<&GpuState> {
         self.gpu_state.as_ref()

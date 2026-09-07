@@ -2281,15 +2281,6 @@ fn grouped_expectation_statevector(
         .map(|(_, factors)| pauli_masks(factors, circuit.num_qubits))
         .collect::<Result<Vec<_>>>()?;
     backend.apply_instructions(&fused.instructions)?;
-
-    let exported;
-    let state: &[Complex64] = if backend.is_gpu_resident() {
-        exported = backend.export_statevector()?;
-        &exported
-    } else {
-        backend.state_vector()
-    };
-    let norm = crate::backend::state_norm_sqr(state);
     let metadata = backend_metadata(&backend);
 
     let grouping = observable.grouping();
@@ -2322,7 +2313,17 @@ fn grouped_expectation_statevector(
         pair_blocks.push((gi, first_mask, pair_coefficients));
     }
 
-    let values = pauli_expectations_from_masks(state, &combined, norm);
+    // A device-resident state reduces every mask on the card; the host keeps
+    // its state and norm for the moments pass below.
+    let (values, host) = match pauli_expectations_on_device(&backend, &combined) {
+        Some(values) => (values?, None),
+        None => {
+            let state = backend.state_vector();
+            let norm = crate::backend::state_norm_sqr(state);
+            let values = pauli_expectations_from_masks(state, &combined, norm);
+            (values, Some((state, norm)))
+        }
+    };
 
     let mean: f64 = terms.iter().zip(&values).map(|((c, _), v)| c * v).sum();
     let mut group_variances = vec![0.0; grouping.groups.len()];
@@ -2347,27 +2348,44 @@ fn grouped_expectation_statevector(
         group_variances[*gi] = (square_diag + square_cross - m1 * m1).max(0.0);
     }
 
-    let mut scratch: Option<StatevectorBackend> = None;
-    for &gi in &deferred {
-        let group = &grouping.groups[gi];
-        let coefficients: Vec<f64> = group.term_indices.iter().map(|&i| terms[i].0).collect();
-        let (m1, m2) = if group.is_z_only() {
-            let zmasks: Vec<usize> = group.term_indices.iter().map(|&i| masks[i].1).collect();
-            observable::weighted_group_moments(state, &zmasks, &coefficients, norm)
-        } else {
-            let zmasks: Vec<usize> = group
-                .term_indices
-                .iter()
-                .map(|&i| masks[i].0 | masks[i].1)
-                .collect();
-            let rotation_circuit = group.basis_rotation_circuit(circuit.num_qubits);
-            let rotation = crate::circuit::fusion::fuse_circuit(&rotation_circuit, true);
-            let rotated = scratch.get_or_insert_with(|| StatevectorBackend::new(seed));
-            rotated.init_from_amplitudes(state.to_vec(), 0)?;
-            rotated.apply_instructions(&rotation.instructions)?;
-            observable::weighted_group_moments(rotated.state_vector(), &zmasks, &coefficients, norm)
+    // The moments pass runs on the host, so a device-resident state is
+    // exported here and only when a group needs it.
+    if !deferred.is_empty() {
+        let exported;
+        let (state, norm): (&[Complex64], f64) = match host {
+            Some(host) => host,
+            None => {
+                exported = backend.export_statevector()?;
+                (&exported, crate::backend::state_norm_sqr(&exported))
+            }
         };
-        group_variances[gi] = (m2 - m1 * m1).max(0.0);
+        let mut scratch: Option<StatevectorBackend> = None;
+        for &gi in &deferred {
+            let group = &grouping.groups[gi];
+            let coefficients: Vec<f64> = group.term_indices.iter().map(|&i| terms[i].0).collect();
+            let (m1, m2) = if group.is_z_only() {
+                let zmasks: Vec<usize> = group.term_indices.iter().map(|&i| masks[i].1).collect();
+                observable::weighted_group_moments(state, &zmasks, &coefficients, norm)
+            } else {
+                let zmasks: Vec<usize> = group
+                    .term_indices
+                    .iter()
+                    .map(|&i| masks[i].0 | masks[i].1)
+                    .collect();
+                let rotation_circuit = group.basis_rotation_circuit(circuit.num_qubits);
+                let rotation = crate::circuit::fusion::fuse_circuit(&rotation_circuit, true);
+                let rotated = scratch.get_or_insert_with(|| StatevectorBackend::new(seed));
+                rotated.init_from_amplitudes(state.to_vec(), 0)?;
+                rotated.apply_instructions(&rotation.instructions)?;
+                observable::weighted_group_moments(
+                    rotated.state_vector(),
+                    &zmasks,
+                    &coefficients,
+                    norm,
+                )
+            };
+            group_variances[gi] = (m2 - m1 * m1).max(0.0);
+        }
     }
 
     let variance = group_variances.iter().sum();
@@ -2464,17 +2482,47 @@ fn expectation_values_statevector(
         .collect::<Result<Vec<_>>>()?;
     backend.apply_instructions(&fused.instructions)?;
 
-    let exported;
-    let state: &[Complex64] = if backend.is_gpu_resident() {
-        exported = backend.export_statevector()?;
-        &exported
-    } else {
-        backend.state_vector()
+    let values = match pauli_expectations_on_device(&backend, &masks) {
+        Some(values) => values?,
+        None => {
+            let state = backend.state_vector();
+            let norm = crate::backend::state_norm_sqr(state);
+            pauli_expectations_from_masks(state, &masks, norm)
+        }
     };
-    let norm = crate::backend::state_norm_sqr(state);
-    let values = pauli_expectations_from_masks(state, &masks, norm);
     let metadata = backend_metadata(&backend);
     Ok(analytic_expectations(values, metadata))
+}
+
+/// [`pauli_expectations_from_masks`] evaluated on a device-resident state:
+/// one reduction launch over every mask plus an appended identity mask that
+/// supplies the norm, so nothing but `16 * (masks.len() + 1)` bytes leaves the
+/// card. `None` when the state lives on the host.
+fn pauli_expectations_on_device(
+    backend: &StatevectorBackend,
+    masks: &[(usize, usize, u32)],
+) -> Option<Result<Vec<f64>>> {
+    if !backend.is_gpu_resident() {
+        return None;
+    }
+    let request: Vec<(u64, u64)> = masks
+        .iter()
+        .map(|&(xmask, zmask, _)| (xmask as u64, zmask as u64))
+        .chain(std::iter::once((0, 0)))
+        .collect();
+    let sums = match backend.gpu_pauli_sums(&request)? {
+        Ok(sums) => sums,
+        Err(e) => return Some(Err(e)),
+    };
+    let norm = sums[masks.len()].re;
+    if norm == 0.0 {
+        return Some(Ok(vec![0.0; masks.len()]));
+    }
+    Some(Ok(masks
+        .iter()
+        .zip(&sums)
+        .map(|(&(_, _, num_y), sum)| (sum * i_pow(num_y)).re / norm)
+        .collect()))
 }
 
 /// Reject out-of-range qubits and duplicate factors in a joint Pauli

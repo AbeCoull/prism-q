@@ -77,6 +77,18 @@ The `tn/scalar_*` groups are compiled out unless `bench-internal` is enabled, an
 fingerprints feature sets separately, so the first such run pays a cold build in
 both the working tree and the reference worktree.
 
+### GPU benchmarks (bench_gpu)
+
+Built with `--features "parallel gpu"` and skipped when no device answers. The
+groups mirror the CPU sweeps above on the device path; the rows below have no
+CPU twin.
+
+| Group | What it measures |
+|-------|-----------------|
+| `gpu/pauli_expect` | Sixteen two-qubit Pauli strings evaluated on the device state after a depth-2 random circuit, 20, 22, and 24 qubits; the per-evaluation cost a shift-rule gradient multiplies by `2P` |
+| `gpu/export/{22,24}` | `export_statevector` on a prepared uniform superposition: one device-to-host copy of `2^n` amplitudes landing in the returned vector, deferred norm at one |
+| `gpu/export/scaled/{22,24}` | The same readback after one measurement, so the in-place `pending_norm` pass runs on top of the copy |
+
 ### Shot and QEC benchmarks (bench_shots_perf)
 
 | Group | What it measures |

@@ -90,8 +90,9 @@ pub(crate) struct LauncherScratch {
     pub(crate) rdm_result: Option<GpuBuffer<f64>>,
     /// The `2^n` diagonal of a density matrix, sized to the mixture width.
     pub(crate) dm_diag: Option<GpuBuffer<f64>>,
-    /// Two f64s per Pauli mask for the density-matrix expectation finalize.
-    pub(crate) dm_result: Option<GpuBuffer<f64>>,
+    /// Two f64s per Pauli mask for the Pauli expectation finalize, pure or
+    /// mixed state. Exact length: the readback covers the whole buffer.
+    pub(crate) pauli_result: Option<GpuBuffer<f64>>,
     /// One upload per gate for what does not fit parameter space; see [`stage_blob`].
     pub(crate) blob: BlobScratch,
 }
@@ -217,6 +218,20 @@ pub(crate) fn ensure_capacity<'a, T: DeviceRepr + ValidAsZeroBits>(
     Ok(slot.as_mut().unwrap())
 }
 
+/// A device buffer of exactly `len` elements in `slot`, reallocated on any size
+/// change so a readback of its full length matches the request.
+pub(crate) fn ensure_exact<'a>(
+    slot: &'a mut Option<GpuBuffer<f64>>,
+    device: &GpuDevice,
+    len: usize,
+) -> Result<&'a mut GpuBuffer<f64>> {
+    let len = len.max(1);
+    if slot.as_ref().is_none_or(|buf| buf.len() != len) {
+        *slot = Some(GpuBuffer::<f64>::alloc_zeros(device, len)?);
+    }
+    Ok(slot.as_mut().unwrap())
+}
+
 /// Combined CUDA C source for the GPU PTX module.
 ///
 /// Concatenates each backend's kernel source. Any new backend that adds its own
@@ -256,6 +271,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "measure_prob_one_finalize",
     "rdm_qubit",
     "rdm_qubit_finalize",
+    "sv_pauli_expect",
     "measure_collapse",
     "compute_probabilities",
     "apply_multi_fused_diagonal",

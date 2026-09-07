@@ -2405,6 +2405,146 @@ fn gpu_expectation_values_match_cpu() {
 }
 
 // ============================================================================
+// Device-side Pauli reduction
+// ============================================================================
+
+// Every mask family the device reduction serves: x == 0, x != 0 with zero to
+// three Y factors, and strings spanning up to five qubits.
+fn mixed_pauli_strings() -> Vec<Vec<prism_q::PauliTerm>> {
+    use prism_q::PauliTerm;
+    vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(3)],
+        vec![PauliTerm::y(5)],
+        vec![PauliTerm::z(2), PauliTerm::z(9)],
+        vec![PauliTerm::x(1), PauliTerm::x(4)],
+        vec![PauliTerm::y(6), PauliTerm::y(7)],
+        vec![PauliTerm::y(0), PauliTerm::y(1), PauliTerm::y(2)],
+        vec![PauliTerm::x(8), PauliTerm::y(10), PauliTerm::z(12)],
+        vec![
+            PauliTerm::y(3),
+            PauliTerm::x(5),
+            PauliTerm::y(11),
+            PauliTerm::z(13),
+        ],
+        vec![
+            PauliTerm::x(0),
+            PauliTerm::y(4),
+            PauliTerm::z(6),
+            PauliTerm::y(9),
+            PauliTerm::x(13),
+        ],
+    ]
+}
+
+#[test]
+fn gpu_expectation_values_mixed_strings_match_cpu_statevector() {
+    use prism_q::{BackendKind, Placement, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let circuit = prism_q::circuits::random_circuit(14, 10, common::SEED);
+    let obs = mixed_pauli_strings();
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .expectation_values_reported(&obs)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu(f.ctx.clone())
+        .seed(42)
+        .expectation_values_reported(&obs)
+        .unwrap();
+
+    assert_eq!(cpu.metadata.placement, Placement::Host);
+    assert_eq!(gpu.metadata.placement, Placement::Device);
+    assert_eq!(cpu.values.len(), obs.len());
+    for (i, (c, g)) in cpu.values.iter().zip(&gpu.values).enumerate() {
+        assert!(
+            (c - g).abs() < EPS,
+            "obs {i}: cpu={c}, gpu={g}, diff={}",
+            (c - g).abs()
+        );
+    }
+}
+
+// Three commuting groups, one per host branch of the grouped evaluation: six
+// members expand into 15 pair masks inline, eight Z-only members take the
+// moments pass on the state as run, seven mixed members take it on a
+// basis-rotated copy.
+fn three_branch_observable() -> prism_q::PauliObservable {
+    use prism_q::{PauliObservable, PauliTerm};
+    let mut obs = PauliObservable::new();
+    obs.add_term(0.7, vec![PauliTerm::x(0)]).unwrap();
+    obs.add_term(-0.4, vec![PauliTerm::x(0), PauliTerm::y(1)])
+        .unwrap();
+    obs.add_term(0.25, vec![PauliTerm::x(0), PauliTerm::z(2)])
+        .unwrap();
+    obs.add_term(0.6, vec![PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)])
+        .unwrap();
+    obs.add_term(-0.35, vec![PauliTerm::y(1), PauliTerm::z(3)])
+        .unwrap();
+    obs.add_term(0.15, vec![PauliTerm::z(9)]).unwrap();
+    for q in 1..8 {
+        obs.add_term(
+            0.1 * q as f64 + 0.05,
+            vec![PauliTerm::z(0), PauliTerm::z(q)],
+        )
+        .unwrap();
+    }
+    obs.add_term(0.3, vec![PauliTerm::z(0)]).unwrap();
+    obs.add_term(-0.2, vec![PauliTerm::y(0)]).unwrap();
+    for q in 1..7 {
+        obs.add_term(
+            0.08 * q as f64 - 0.3,
+            vec![PauliTerm::y(0), PauliTerm::x(q)],
+        )
+        .unwrap();
+    }
+    assert_eq!(obs.num_groups(), 3);
+    obs
+}
+
+#[test]
+fn gpu_observable_expectation_matches_cpu_statevector() {
+    use prism_q::{BackendKind, Placement, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let circuit = prism_q::circuits::random_circuit(14, 10, common::SEED);
+    let obs = three_branch_observable();
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .observable_expectation(&obs)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu(f.ctx.clone())
+        .seed(42)
+        .observable_expectation(&obs)
+        .unwrap();
+
+    assert_eq!(cpu.metadata.placement, Placement::Host);
+    assert_eq!(gpu.metadata.placement, Placement::Device);
+    assert!(
+        (cpu.mean - gpu.mean).abs() < EPS,
+        "mean: cpu={}, gpu={}",
+        cpu.mean,
+        gpu.mean
+    );
+    let (cv, gv) = (cpu.variance.unwrap(), gpu.variance.unwrap());
+    assert!((cv - gv).abs() < EPS, "variance: cpu={cv}, gpu={gv}");
+    let cpu_groups = cpu.group_variances.unwrap();
+    let gpu_groups = gpu.group_variances.unwrap();
+    assert_eq!(cpu_groups.len(), 3);
+    for (gi, (c, g)) in cpu_groups.iter().zip(&gpu_groups).enumerate() {
+        assert!((c - g).abs() < EPS, "group {gi} variance: cpu={c}, gpu={g}");
+    }
+}
+
+// ============================================================================
 // Temporal-Clifford GPU tail
 // ============================================================================
 
@@ -2504,6 +2644,43 @@ fn init_from_state_gpu_round_trip() {
     for (i, (e, s)) in exported.iter().zip(&state).enumerate() {
         let diff = (e - s).norm();
         assert!(diff < 1e-12, "amp {i}: uploaded={s:?}, exported={e:?}");
+    }
+}
+
+// A measurement on a uniform superposition leaves the device amplitudes at
+// half weight with `pending_norm = sqrt(2)` deferred; the export must fold it
+// in. 16 qubits reaches the parallel scale path.
+#[test]
+fn export_after_measurement_applies_pending_norm() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 16;
+    let mut insts: Vec<Instruction> = (0..n).map(|q| g(Gate::H, &[q])).collect();
+    insts.push(Instruction::Measure {
+        qubit: 3,
+        classical_bit: 0,
+    });
+
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(n, 1).unwrap();
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(n, 1).unwrap();
+    for inst in &insts {
+        cpu.apply(inst).unwrap();
+        gpu.apply(inst).unwrap();
+    }
+    assert_eq!(cpu.classical_results(), gpu.classical_results());
+
+    let gpu_sv = gpu.export_statevector().unwrap();
+    let norm_sqr: f64 = gpu_sv.iter().map(|a| a.norm_sqr()).sum();
+    assert!(
+        (norm_sqr - 1.0).abs() < EPS,
+        "exported state is not normalized: |psi|^2 = {norm_sqr}"
+    );
+    let cpu_sv = cpu.export_statevector().unwrap();
+    assert_eq!(cpu_sv.len(), gpu_sv.len());
+    for (i, (c, g)) in cpu_sv.iter().zip(&gpu_sv).enumerate() {
+        let diff = (c - g).norm();
+        assert!(diff < EPS, "amp {i}: cpu={c:?}, gpu={g:?}, |diff|={diff}");
     }
 }
 

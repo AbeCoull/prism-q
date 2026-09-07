@@ -1109,7 +1109,6 @@ pub(crate) struct NoiseMaskApply<'a> {
 /// event-major launch pays on rows touched by many events. `row_event_offsets`
 /// is length `num_meas + 1`; each `row_event_entries` entry is
 /// `event << 2 | flag` (bit 0 = X, bit 1 = Z).
-#[cfg(feature = "gpu")]
 pub(crate) struct NoiseDeviceGenApplyByRow<'a> {
     pub meas_major: &'a mut GpuBuffer<u64>,
     pub num_meas: usize,

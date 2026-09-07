@@ -1368,6 +1368,8 @@ pub(super) fn compute_reference_bits(
     }
 
     let mut ref_bits = vec![false; m];
+    let mut p_data = vec![0u64; stride];
+    let mut scratch = vec![0u64; stride];
 
     for (meas_idx, (pauli, _, _)) in measurement_rows.iter().enumerate() {
         let mut anti_idx = None;
@@ -1385,7 +1387,7 @@ pub(super) fn compute_reference_bits(
 
         match anti_idx {
             Some(p) => {
-                let p_data: Vec<u64> = xz[p * stride..(p + 1) * stride].to_vec();
+                p_data.copy_from_slice(&xz[p * stride..(p + 1) * stride]);
                 let p_phase = phase[p];
 
                 for r in 0..2 * n {
@@ -1417,7 +1419,7 @@ pub(super) fn compute_reference_bits(
                 ref_bits[meas_idx] = false;
             }
             None => {
-                let mut scratch = vec![0u64; stride];
+                scratch.fill(0);
                 let mut scratch_phase = false;
 
                 for g in 0..n {

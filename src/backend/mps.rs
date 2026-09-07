@@ -115,36 +115,6 @@ impl SiteTensor {
     }
 }
 
-fn cx_matrix_4x4() -> [[Complex64; 4]; 4] {
-    let z = ZERO;
-    let o = ONE;
-    [[o, z, z, z], [z, o, z, z], [z, z, z, o], [z, z, o, z]]
-}
-
-fn cz_matrix_4x4() -> [[Complex64; 4]; 4] {
-    let z = ZERO;
-    let o = ONE;
-    let m = Complex64::new(-1.0, 0.0);
-    [[o, z, z, z], [z, o, z, z], [z, z, o, z], [z, z, z, m]]
-}
-
-fn swap_matrix_4x4() -> [[Complex64; 4]; 4] {
-    let z = ZERO;
-    let o = ONE;
-    [[o, z, z, z], [z, z, o, z], [z, o, z, z], [z, z, z, o]]
-}
-
-fn cu_matrix_4x4(mat: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
-    let z = ZERO;
-    let o = ONE;
-    [
-        [o, z, z, z],
-        [z, o, z, z],
-        [z, z, mat[0][0], mat[0][1]],
-        [z, z, mat[1][0], mat[1][1]],
-    ]
-}
-
 /// CU-phase followed by SWAP: applies controlled-phase then exchanges qubits.
 /// Invariant under qubit reorder (symmetric since phase acts on |11⟩ only).
 fn cu_phase_swap_matrix(phase: Complex64) -> [[Complex64; 4]; 4] {
@@ -668,16 +638,11 @@ impl MpsBackend {
         self.sites.iter().map(|s| s.bond_right).max().unwrap_or(1)
     }
 
-    /// Configured bond-dimension cap. SVD truncation engages when a bond
-    /// would exceed this value.
-    pub fn max_bond_dim_cap(&self) -> usize {
-        self.max_bond_dim
-    }
-
     /// Restore the internal MPS site order to logical qubit order without
     /// changing the represented logical state.
-    pub fn canonicalize_logical_order(&mut self) -> Result<()> {
-        let swap_mat = swap_matrix_4x4();
+    #[cfg(test)]
+    pub(crate) fn canonicalize_logical_order(&mut self) -> Result<()> {
+        let swap_mat = Gate::Swap.matrix_4x4();
         for target_site in 0..self.num_qubits {
             while self.site_to_logical[target_site] != target_site {
                 let logical = target_site;
@@ -1198,7 +1163,7 @@ impl MpsBackend {
         if m - k == 1 {
             self.apply_adjacent_two_qubit(gate, k, left_is_first)?;
         } else {
-            let swap_mat = swap_matrix_4x4();
+            let swap_mat = Gate::Swap.matrix_4x4();
             for s in (k + 1..m).rev() {
                 self.apply_virtual_swap(s, &swap_mat)?;
             }
@@ -1221,7 +1186,7 @@ impl MpsBackend {
         if phases.len() == 1 {
             let (target, phase) = phases[0];
             let mat = [[ONE, ZERO], [ZERO, phase]];
-            let g = cu_matrix_4x4(&mat);
+            let g = crate::gates::cu_matrix_4x4(&mat);
             return self.apply_two_qubit_gate(&g, control, target);
         }
 
@@ -1237,7 +1202,7 @@ impl MpsBackend {
         right.sort_by_key(|&(t, _)| t);
         left.sort_by_key(|&(t, _)| std::cmp::Reverse(t));
 
-        let swap_mat = swap_matrix_4x4();
+        let swap_mat = Gate::Swap.matrix_4x4();
 
         // Right sweep: bubble control rightward
         if !right.is_empty() {
@@ -1254,7 +1219,7 @@ impl MpsBackend {
                     cur_pos += 1;
                 } else {
                     let mat = [[ONE, ZERO], [ZERO, phase]];
-                    let g = cu_matrix_4x4(&mat);
+                    let g = crate::gates::cu_matrix_4x4(&mat);
                     self.apply_adjacent_two_qubit(&g, cur_pos, true)?;
                 }
             }
@@ -1279,7 +1244,7 @@ impl MpsBackend {
                     cur_pos -= 1;
                 } else {
                     let mat = [[ONE, ZERO], [ZERO, phase]];
-                    let g = cu_matrix_4x4(&mat);
+                    let g = crate::gates::cu_matrix_4x4(&mat);
                     self.apply_adjacent_two_qubit(&g, cur_pos - 1, false)?;
                 }
             }
@@ -1619,7 +1584,7 @@ impl MpsBackend {
             let reordered_gate = Self::reorder_n_gate(gate, dim, &qubit_order, n);
             self.apply_adjacent_n_qubit(&reordered_gate, dim, start)?;
         } else {
-            let swap_mat = swap_matrix_4x4();
+            let swap_mat = Gate::Swap.matrix_4x4();
             let mut current_positions = sorted_positions;
             let mut swap_log: Vec<usize> = Vec::new();
 
@@ -2252,19 +2217,19 @@ impl MpsBackend {
                 self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Cx => {
-                let g = cx_matrix_4x4();
+                let g = gate.matrix_4x4();
                 self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Cz => {
-                let g = cz_matrix_4x4();
+                let g = gate.matrix_4x4();
                 self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Swap => {
-                let g = swap_matrix_4x4();
+                let g = Gate::Swap.matrix_4x4();
                 self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
-            Gate::Cu(mat) => {
-                let g = cu_matrix_4x4(mat);
+            Gate::Cu(_) => {
+                let g = gate.matrix_4x4();
                 self.apply_two_qubit_gate(&g, targets[0], targets[1])?;
             }
             Gate::Mcu(data) => {

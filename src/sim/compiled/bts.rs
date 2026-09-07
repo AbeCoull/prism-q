@@ -2,6 +2,8 @@
 //! 64-shot batch and forms each measurement row as the XOR of its parity
 //! columns' words, emitting measurement-major packed shots.
 
+#[cfg(feature = "parallel")]
+use super::SendPtrU64;
 use super::parity::{SparseParity, XorDag};
 use super::rng::Xoshiro256PlusPlus;
 #[cfg(target_arch = "aarch64")]
@@ -11,28 +13,6 @@ use super::rng::Xoshiro256PlusPlusX4;
 use super::shot_tail_mask;
 
 pub(super) const BTS_BATCH_SHOTS: usize = 65536;
-
-#[cfg(feature = "parallel")]
-#[derive(Clone, Copy)]
-struct SendPtrU64(*mut u64);
-#[cfg(feature = "parallel")]
-// SAFETY: SendPtrU64 is used only for packed shot buffers partitioned by
-// disjoint word ranges before entering parallel workers.
-unsafe impl Send for SendPtrU64 {}
-#[cfg(feature = "parallel")]
-// SAFETY: The raw pointer wrapper is shared, but each worker writes only its
-// assigned non-overlapping range.
-unsafe impl Sync for SendPtrU64 {}
-#[cfg(feature = "parallel")]
-impl SendPtrU64 {
-    #[inline(always)]
-    unsafe fn write_slice(self, offset: usize, src: *const u64, len: usize) {
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe {
-            std::ptr::copy_nonoverlapping(src, self.0.add(offset), len);
-        }
-    }
-}
 
 #[inline(always)]
 fn xor_reduce_scalar(cols: &[u32], random_bits: &[u64]) -> u64 {

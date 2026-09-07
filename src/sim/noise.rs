@@ -590,8 +590,10 @@ fn geometric_sample(rng: &mut ChaCha8Rng, ln_1mp: f64) -> usize {
     (u.ln() / ln_1mp) as usize
 }
 
-#[cfg(feature = "gpu")]
-fn geometric_sample_xoshiro(
+/// [`geometric_sample`] on the sampler's own generator. `ln_1mp` is `(1 - p).ln()`,
+/// precomputed by the caller.
+#[inline(always)]
+pub(crate) fn geometric_sample_xoshiro(
     rng: &mut crate::sim::compiled::rng::Xoshiro256PlusPlus,
     ln_1mp: f64,
 ) -> usize {
@@ -2198,27 +2200,25 @@ fn run_shots_noisy_frame(
 
     let ref_info = reference_simulation(circuit, seed)?;
 
-    let classical_bit_order: Vec<usize> = circuit
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
-            Instruction::Measure { classical_bit, .. } => Some(*classical_bit),
-            _ => None,
-        })
-        .collect();
+    let classical_bit_order = circuit.classical_bit_order();
     let num_measurements = classical_bit_order.len();
     let m_words = num_measurements.div_ceil(64);
 
     let mut all_packed = vec![0u64; num_shots * m_words];
     let mut rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xFAAB_E001));
 
+    let max_bw = FRAME_BATCH_SIZE.div_ceil(64);
+    let mut x_frame: Vec<Vec<u64>> = vec![vec![0u64; max_bw]; n];
+    let mut z_frame: Vec<Vec<u64>> = vec![vec![0u64; max_bw]; n];
+
     for batch_start in (0..num_shots).step_by(FRAME_BATCH_SIZE) {
         let batch_end = (batch_start + FRAME_BATCH_SIZE).min(num_shots);
         let batch_n = batch_end - batch_start;
         let bw = batch_n.div_ceil(64);
 
-        let mut x_frame: Vec<Vec<u64>> = vec![vec![0u64; bw]; n];
-        let mut z_frame: Vec<Vec<u64>> = vec![vec![0u64; bw]; n];
+        for row in x_frame.iter_mut().chain(z_frame.iter_mut()) {
+            row[..bw].fill(0);
+        }
 
         let mut meas_idx = 0usize;
 
@@ -2411,14 +2411,7 @@ fn finish_noisy_compiled_run(
     circuit: &Circuit,
     num_shots: usize,
 ) -> Result<ShotsResult> {
-    let classical_bit_order: Vec<usize> = circuit
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
-            Instruction::Measure { classical_bit, .. } => Some(*classical_bit),
-            _ => None,
-        })
-        .collect();
+    let classical_bit_order = circuit.classical_bit_order();
     let num_classical = circuit.num_classical_bits;
 
     let packed = sampler.try_sample_bulk_packed(num_shots)?;

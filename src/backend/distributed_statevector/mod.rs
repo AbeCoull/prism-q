@@ -338,6 +338,13 @@ impl DistributedStatevectorBackend {
     }
 
     #[inline]
+    fn ensure_recv(&mut self, len: usize) {
+        if self.recv.len() != len {
+            self.recv.resize(len, Complex64::new(0.0, 0.0));
+        }
+    }
+
+    #[inline]
     fn local_qubits(&self) -> usize {
         self.num_qubits - self.global_qubits
     }
@@ -439,9 +446,7 @@ impl DistributedStatevectorBackend {
         if self.pack.len() != chunk {
             self.pack.resize(chunk, Complex64::new(0.0, 0.0));
         }
-        if self.recv.len() != chunk {
-            self.recv.resize(chunk, Complex64::new(0.0, 0.0));
-        }
+        self.ensure_recv(chunk);
         let index_of =
             |flat: usize| ((flat >> local_pos) << (local_pos + 1)) | fixed | (flat & (stride - 1));
         let mut off = 0;
@@ -503,9 +508,7 @@ impl DistributedStatevectorBackend {
                 let partner = rank ^ ((1usize << ga) | (1usize << gb));
                 let len = self.inner.state.len();
                 let chunk = self.exchange_chunk.min(len).max(1);
-                if self.recv.len() != chunk {
-                    self.recv.resize(chunk, Complex64::new(0.0, 0.0));
-                }
+                self.ensure_recv(chunk);
                 let mut off = 0;
                 while off < len {
                     let end = (off + chunk).min(len);
@@ -777,9 +780,7 @@ impl DistributedStatevectorBackend {
         };
         let len = self.inner.state.len();
         let chunk = self.exchange_chunk.min(len).max(1);
-        if self.recv.len() != chunk {
-            self.recv.resize(chunk, Complex64::new(0.0, 0.0));
-        }
+        self.ensure_recv(chunk);
         let mut off = 0;
         while off < len {
             let end = (off + chunk).min(len);
@@ -866,9 +867,7 @@ impl DistributedStatevectorBackend {
         if self.pack.len() != chunk {
             self.pack.resize(chunk, Complex64::new(0.0, 0.0));
         }
-        if self.recv.len() != chunk {
-            self.recv.resize(chunk, Complex64::new(0.0, 0.0));
-        }
+        self.ensure_recv(chunk);
         let mut off = 0;
         while off < moving {
             let count = (off + chunk).min(moving) - off;
@@ -1067,9 +1066,7 @@ impl DistributedStatevectorBackend {
                     ^ (1usize << self.global_bit(a))
                     ^ (1usize << self.global_bit(b));
                 let len = self.inner.state.len();
-                if self.recv.len() != len {
-                    self.recv.resize(len, Complex64::new(0.0, 0.0));
-                }
+                self.ensure_recv(len);
                 self.count_exchange(len);
                 self.context
                     .comm()
@@ -1099,12 +1096,7 @@ impl DistributedStatevectorBackend {
 
     /// Apply a fully local 4x4 gate through the inner backend's tiled kernel.
     fn apply_local_fused_2q(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
-        self.inner
-            .apply(&Instruction::Gate {
-                gate: Gate::Fused2q(Box::new(*mat)),
-                targets: smallvec![q0, q1],
-            })
-            .expect("local fused 2q");
+        self.inner.apply_fused_2q(q0, q1, mat);
     }
 
     /// One qubit is local and one is global. Exchange with the partner rank,
@@ -1118,9 +1110,7 @@ impl DistributedStatevectorBackend {
         };
         let partner = self.context.rank() ^ (1usize << self.global_bit(global_q));
         let len = self.inner.state.len();
-        if self.recv.len() != len {
-            self.recv.resize(len, Complex64::new(0.0, 0.0));
-        }
+        self.ensure_recv(len);
         self.count_exchange(len);
         self.context
             .comm()
@@ -1165,9 +1155,7 @@ impl DistributedStatevectorBackend {
     ) {
         let partner = self.context.rank() ^ (1usize << self.global_bit(global_q));
         let len = self.inner.state.len();
-        if self.recv.len() != len {
-            self.recv.resize(len, Complex64::new(0.0, 0.0));
-        }
+        self.ensure_recv(len);
         self.count_exchange(len);
         self.context
             .comm()
@@ -1230,34 +1218,26 @@ impl DistributedStatevectorBackend {
         let rank_basis = (g0 << 1) | g1;
 
         let len = self.inner.state.len();
-        // Gather only partner slices. The local term reads from `inner.state`.
-        let mut partners: [Option<Vec<Complex64>>; 4] = [None, None, None, None];
-        for (c, slot) in partners.iter_mut().enumerate() {
+        // Accumulate into a fresh buffer so every exchange still sends the
+        // original amplitudes; partner slices arrive one at a time in `recv`.
+        let self_coeff = mat[rank_basis][rank_basis];
+        let mut out: Vec<Complex64> = Vec::with_capacity(len);
+        out.extend(self.inner.state.iter().map(|&amp| self_coeff * amp));
+        self.ensure_recv(len);
+        for (c, &coeff) in mat[rank_basis].iter().enumerate() {
             if c == rank_basis {
                 continue;
             }
             let c0 = (c >> 1) & 1;
             let c1 = c & 1;
             let partner = (rank & !(1 << b0) & !(1 << b1)) | (c0 << b0) | (c1 << b1);
-            let mut buf = vec![Complex64::new(0.0, 0.0); len];
-            self.exchange_messages += 1;
-            self.exchange_amplitudes += len as u64;
+            self.count_exchange(len);
             self.context
                 .comm()
-                .sendrecv_c64(partner, &self.inner.state, &mut buf);
-            *slot = Some(buf);
-        }
-        // Write into a fresh buffer so local reads see the old amplitudes.
-        let mut out = vec![Complex64::new(0.0, 0.0); len];
-        let self_coeff = mat[rank_basis][rank_basis];
-        for i in 0..len {
-            let mut acc = self_coeff * self.inner.state[i];
-            for (c, slot) in partners.iter().enumerate() {
-                if let Some(slice) = slot {
-                    acc += mat[rank_basis][c] * slice[i];
-                }
+                .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
+            for (acc, &remote) in out.iter_mut().zip(&self.recv) {
+                *acc += coeff * remote;
             }
-            out[i] = acc;
         }
         self.inner.state = out;
     }

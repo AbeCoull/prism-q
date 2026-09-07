@@ -2,10 +2,15 @@
 
 ## Framework
 
-Criterion.rs. Two benchmark binaries:
+Criterion.rs. The two binaries most rows live in:
 
 - **bench_driver**: Microbenchmarks for individual gate kernels, measurement, and end-to-end QASM.
 - **circuits**: Macrobenchmarks for circuit family sweeps across qubit counts and depths.
+
+Five more targets cover narrower surfaces: `bench_shots_perf` (shot and count
+sampling), `svd_bench` (the MPS decomposition kernels), `qec_t_strategies` and
+`qec_decoder` (the QEC runner), and the feature-gated `bench_gpu` and
+`bench_distributed`. List a target's rows with `cargo bench --bench <name> -- --list`.
 
 ### Run configuration
 
@@ -50,14 +55,13 @@ worth the disk.
 
 | Group | What it measures |
 |-------|-----------------|
-| `qubit_sweep/random_d10` | Seeded random circuits, depth 10, 4–20 qubits |
-| `qubit_sweep/qft_like` | QFT-structured circuits, 4–16 qubits |
-| `qubit_sweep/hea_l5` | Hardware-efficient ansatz, 5 layers, 4–20 qubits |
-| `qubit_sweep/clifford_d10` | Clifford-heavy circuits, depth 10, 4–20 qubits |
-| `depth_sweep/12q_random` | 12-qubit random circuits, depth 5–100 |
-| `entanglement_structure` | Sparse vs dense entanglement, 16 qubits |
-| `stabilizer_rank/shots_terminal` | Clifford+T shot sampling with terminal measurements, including 1000q chi2 |
-| `stabilizer_rank/shots_mid_circuit` | Clifford+T shot sampling with measurement, reset, and conditional gates |
+| `statevector/random_d10` | Seeded random circuits, depth 10, 4–20 qubits |
+| `statevector/qft_like` | QFT-structured circuits, 4–16 qubits |
+| `statevector/hea_l5` | Hardware-efficient ansatz, 5 layers, 4–20 qubits |
+| `statevector/clifford_d10` | Clifford-heavy circuits, depth 10, 4–20 qubits |
+| `statevector/depth_sweep_12q` | 12-qubit random circuits, depth 5–100 |
+| `statevector/entanglement_16q_d10` | Sparse vs dense entanglement, 16 qubits |
+| `stabilizer_rank` | Clifford+T shot sampling: terminal rows (including 1000q chi2) and mid-circuit rows with measurement, reset, and conditional gates |
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |
 | `tn/scalar_depth_20q` | Same contraction at 20 qubits, 4–7 layers, where intermediates grow large enough to reach the parallel contraction arms (`bench-internal`) |
 | `tn/scalar_hea_l6` | Same contraction at 6 layers, 20–50 qubits, the only rows where qubit count drives how many contractions reach the faer arm (`bench-internal`) |
@@ -321,7 +325,8 @@ REGRESSION_THRESHOLD=10 ./scripts/bench_compare.sh
 
 `scripts/bench_check.sh` (`save`, `compare`, `table`, `list`) reads
 `target/criterion/` and writes to `bench_results/baselines/`. It requires `jq`
-and `bc`, so it runs in CI but not on the Windows reference host.
+and `bc`, so it does not run on the Windows reference host. CI gates on
+`bench_ab.sh` alone; `bench_check` is a local workflow.
 
 ## CI regression gate
 

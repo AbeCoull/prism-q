@@ -28,10 +28,10 @@ use dispatch::{
     AUTO_APPROX_MAX_TERMS, AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family,
     MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
     MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO, TemporalCliffordPlan, accel_for, approximate_route_name,
-    auto_selects_cpu_statevector, build_statevector, has_temporal_clifford_opportunity,
-    initial_state_plan, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
-    run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
+    MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name, auto_selects_cpu_statevector,
+    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, plan_for_family,
+    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
+    stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use metadata::{Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
 pub use observable::{ObservableExpectation, PauliObservable};
@@ -1245,7 +1245,20 @@ fn run_with_internal(
         }
         return execute(&mut *backend, circuit, &opts);
     }
-    match plan_probability_route(&kind, circuit) {
+    let route = plan_probability_route(&kind, circuit);
+    run_route(&kind, circuit, seed, opts, &route)
+}
+
+/// Execute one seed of a planned probability route. Shot loops plan once and
+/// call this per seed.
+fn run_route(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    opts: SimOptions,
+    route: &ProbabilityRoute,
+) -> Result<RunOutcome> {
+    match route {
         ProbabilityRoute::FactoredStabilizer => {
             let mut backend =
                 crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed);
@@ -1259,10 +1272,10 @@ fn run_with_internal(
             execute(&mut backend, circuit, &fs_opts)
         }
         ProbabilityRoute::Decomposed(components) => {
-            run_decomposed(&kind, &components, circuit, seed, &opts)
+            run_decomposed(kind, components, circuit, seed, &opts)
         }
         ProbabilityRoute::StabilizerRank { t_count } => {
-            let exact = t_count <= MAX_AUTO_T_COUNT_EXACT;
+            let exact = *t_count <= MAX_AUTO_T_COUNT_EXACT;
             let sr = if exact {
                 stabilizer_rank::run_stabilizer_rank(circuit, seed)?
             } else {
@@ -1275,12 +1288,26 @@ fn run_with_internal(
             };
             Ok(probs_only_result(sr.probabilities, metadata))
         }
-        ProbabilityRoute::TemporalClifford(tc) => {
-            run_temporal_clifford(&tc, seed, opts.probabilities)
-        }
+        ProbabilityRoute::TemporalClifford {
+            has_partial_independence,
+        } => match plan_temporal_clifford(kind, circuit) {
+            Some(tc) => run_temporal_clifford(&tc, seed, opts.probabilities),
+            None => run_direct(kind, circuit, seed, opts, *has_partial_independence),
+        },
         ProbabilityRoute::Direct {
             has_partial_independence,
-        } => match resolve(&kind, circuit, has_partial_independence) {
+        } => run_direct(kind, circuit, seed, opts, *has_partial_independence),
+    }
+}
+
+fn run_direct(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    opts: SimOptions,
+    has_partial_independence: bool,
+) -> Result<RunOutcome> {
+    match resolve(kind, circuit, has_partial_independence) {
             ExecutionPlan::Backend(plan) => {
                 let mut backend = plan.build(seed);
                 execute(&mut *backend, circuit, &opts)
@@ -1311,7 +1338,6 @@ fn run_with_internal(
                 })
             }
             ExecutionPlan::PauliPath => Err(reject_pauli_path("a single run")),
-        },
     }
 }
 
@@ -1472,9 +1498,17 @@ pub(super) fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> O
 enum ProbabilityRoute {
     FactoredStabilizer,
     Decomposed(Vec<Vec<usize>>),
-    StabilizerRank { t_count: usize },
-    TemporalClifford(TemporalCliffordPlan),
-    Direct { has_partial_independence: bool },
+    StabilizerRank {
+        t_count: usize,
+    },
+    /// The temporal-Clifford predicate holds; `run_route` builds the plan and
+    /// falls back to direct resolution should the split come back empty.
+    TemporalClifford {
+        has_partial_independence: bool,
+    },
+    Direct {
+        has_partial_independence: bool,
+    },
 }
 
 fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityRoute {
@@ -1498,8 +1532,10 @@ fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityR
             return ProbabilityRoute::StabilizerRank { t_count };
         }
     }
-    if let Some(tc) = plan_temporal_clifford(kind, circuit) {
-        return ProbabilityRoute::TemporalClifford(tc);
+    if has_temporal_clifford_opportunity(kind, circuit) {
+        return ProbabilityRoute::TemporalClifford {
+            has_partial_independence,
+        };
     }
     ProbabilityRoute::Direct {
         has_partial_independence,
@@ -2875,8 +2911,9 @@ fn run_shots_per_shot(
         // would otherwise split.
         let opts = SimOptions::classical_only();
         let route = resolve_backend(&kind, circuit, has_partial_independence).resolved();
+        let plan = plan_probability_route(&kind, circuit);
         return collect_shots(circuit, num_shots, seed, route, |shot_seed| {
-            let outcome = run_with_internal(kind.clone(), circuit, shot_seed, opts)?;
+            let outcome = run_route(&kind, circuit, shot_seed, opts, &plan)?;
             Ok((outcome.classical_bits, outcome.metadata))
         });
     }

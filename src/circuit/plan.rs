@@ -11,6 +11,7 @@ use std::ops::Range;
 use num_complex::Complex64;
 
 use super::fusion::is_identity;
+use super::parameter::angle_of;
 use super::{Circuit, Instruction};
 use crate::gates::{Gate, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4};
 
@@ -428,7 +429,7 @@ impl FusionPlan {
                     }
                 }
                 Recipe::Angle(src) => {
-                    let theta = gate_angle(&bound.instructions[*src as usize]);
+                    let theta = angle_of(&bound.instructions[*src as usize]);
                     if !write_angle(inst, site.entry as usize, theta) {
                         return false;
                     }
@@ -501,20 +502,6 @@ fn gate_4x4(circuit: &Circuit, src: u32) -> [[Complex64; 4]; 4] {
     match &circuit.instructions[src as usize] {
         Instruction::Gate { gate, .. } => gate.matrix_4x4(),
         _ => unreachable!("recipe step names a gate instruction"),
-    }
-}
-
-fn gate_angle(inst: &Instruction) -> f64 {
-    match inst {
-        Instruction::Gate {
-            gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
-            ..
-        } => *t,
-        Instruction::Gate {
-            gate: Gate::PauliRot(data),
-            ..
-        } => data.theta(),
-        _ => unreachable!("angle recipe names a gate carrying an angle"),
     }
 }
 
@@ -691,7 +678,7 @@ fn write_4x4(
     }
 }
 
-fn write_angle(inst: &mut Instruction, entry: usize, theta: f64) -> bool {
+pub(super) fn write_angle(inst: &mut Instruction, entry: usize, theta: f64) -> bool {
     let Instruction::Gate { gate, .. } = inst else {
         return false;
     };

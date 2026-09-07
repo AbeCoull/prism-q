@@ -606,10 +606,6 @@ impl StabilizerBackend {
         (&self.xz, &self.phase)
     }
 
-    pub fn into_tableau(self) -> (Vec<u64>, Vec<bool>, usize, usize) {
-        (self.xz, self.phase, self.n, self.num_words)
-    }
-
     /// Apply gate and satisfied-conditional instructions, skipping
     /// measurements, resets, and barriers. Routes through the SGI or
     /// word-batch bulk paths at the same thresholds as

@@ -104,12 +104,14 @@ impl SubTableau {
     /// Stabilizer-half row window for gate kernels (rows n..2n+1), skipping
     /// the destabilizers and marking them stale for the next measurement to
     /// rebuild.
+    #[inline(always)]
     fn gate_rows(&mut self) -> (&mut [u64], &mut [bool]) {
         self.lazy_destab = true;
         let start = self.n * self.stride();
         (&mut self.xz[start..], &mut self.phase[self.n..])
     }
 
+    #[inline(always)]
     fn apply_h(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -117,6 +119,7 @@ impl SubTableau {
         rowops::h_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_s(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -124,6 +127,7 @@ impl SubTableau {
         rowops::s_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_sdg(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -131,6 +135,7 @@ impl SubTableau {
         rowops::sdg_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_x(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -138,6 +143,7 @@ impl SubTableau {
         rowops::x_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_y(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -145,6 +151,7 @@ impl SubTableau {
         rowops::y_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_z(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -152,6 +159,7 @@ impl SubTableau {
         rowops::z_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_sx(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -159,6 +167,7 @@ impl SubTableau {
         rowops::sx_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_sxdg(&mut self, a: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -166,6 +175,7 @@ impl SubTableau {
         rowops::sxdg_all(xz, phase, nw, par, a);
     }
 
+    #[inline(always)]
     fn apply_cx(&mut self, ctrl: usize, tgt: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -173,6 +183,7 @@ impl SubTableau {
         rowops::cx_all(xz, phase, nw, par, ctrl, tgt);
     }
 
+    #[inline(always)]
     fn apply_cz(&mut self, a: usize, b: usize) {
         let par = self.par_rows();
         let nw = self.num_words;
@@ -180,6 +191,7 @@ impl SubTableau {
         rowops::cz_all(xz, phase, nw, par, a, b);
     }
 
+    #[inline(always)]
     fn apply_swap(&mut self, a: usize, b: usize) {
         let par = self.par_rows();
         let nw = self.num_words;

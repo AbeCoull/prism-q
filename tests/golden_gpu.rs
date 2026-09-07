@@ -2647,6 +2647,43 @@ fn init_from_state_gpu_round_trip() {
     }
 }
 
+// A measurement on a uniform superposition leaves the device amplitudes at
+// half weight with `pending_norm = sqrt(2)` deferred; the export must fold it
+// in. 16 qubits reaches the parallel scale path.
+#[test]
+fn export_after_measurement_applies_pending_norm() {
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 16;
+    let mut insts: Vec<Instruction> = (0..n).map(|q| g(Gate::H, &[q])).collect();
+    insts.push(Instruction::Measure {
+        qubit: 3,
+        classical_bit: 0,
+    });
+
+    let mut cpu = StatevectorBackend::new(42);
+    cpu.init(n, 1).unwrap();
+    let mut gpu = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
+    gpu.init(n, 1).unwrap();
+    for inst in &insts {
+        cpu.apply(inst).unwrap();
+        gpu.apply(inst).unwrap();
+    }
+    assert_eq!(cpu.classical_results(), gpu.classical_results());
+
+    let gpu_sv = gpu.export_statevector().unwrap();
+    let norm_sqr: f64 = gpu_sv.iter().map(|a| a.norm_sqr()).sum();
+    assert!(
+        (norm_sqr - 1.0).abs() < EPS,
+        "exported state is not normalized: |psi|^2 = {norm_sqr}"
+    );
+    let cpu_sv = cpu.export_statevector().unwrap();
+    assert_eq!(cpu_sv.len(), gpu_sv.len());
+    for (i, (c, g)) in cpu_sv.iter().zip(&gpu_sv).enumerate() {
+        let diff = (c - g).norm();
+        assert!(diff < EPS, "amp {i}: cpu={c:?}, gpu={g:?}, |diff|={diff}");
+    }
+}
+
 // ============================================================================
 // AutoGpu noisy trajectories
 // ============================================================================

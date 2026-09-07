@@ -373,22 +373,15 @@ impl GpuState {
         self.pending_norm
     }
 
-    /// Read the raw (unnormalised) amplitude buffer back to host, as interleaved f64 pairs.
-    pub fn copy_to_host_raw(&self) -> Result<Vec<f64>> {
-        let mut host = vec![0.0_f64; self.buffer.len()];
-        self.buffer.copy_to_host(self.context.device(), &mut host)?;
-        Ok(host)
-    }
-
     /// Read the amplitude buffer as `Vec<Complex64>` with the deferred `pending_norm`
-    /// already applied.
+    /// already applied. The device copy lands in the returned vector's own storage.
     pub fn export_statevector(&self) -> Result<Vec<Complex64>> {
-        let raw = self.copy_to_host_raw()?;
-        let norm = self.pending_norm;
-        let out = raw
-            .chunks_exact(2)
-            .map(|p| Complex64::new(p[0] * norm, p[1] * norm))
-            .collect();
+        let mut raw = vec![0.0_f64; self.buffer.len()];
+        self.buffer.copy_to_host(self.context.device(), &mut raw)?;
+        let mut out = interleaved_into_complex(raw);
+        if self.pending_norm != 1.0 {
+            scale_in_place(&mut out, self.pending_norm, self.num_qubits);
+        }
         Ok(out)
     }
 
@@ -419,6 +412,37 @@ impl GpuState {
     pub(crate) fn probs_scratch(&self) -> std::cell::RefMut<'_, Option<GpuBuffer<f64>>> {
         self.probs_scratch.borrow_mut()
     }
+}
+
+/// Reinterpret an interleaved `[re, im, re, im, ...]` vector as complex amplitudes
+/// without copying. `raw.len()` must be even.
+fn interleaved_into_complex(raw: Vec<f64>) -> Vec<Complex64> {
+    let len = raw.len() / 2;
+    assert_eq!(raw.len(), 2 * len, "interleaved buffer has an odd length");
+    let ptr = Box::into_raw(raw.into_boxed_slice()) as *mut f64;
+    // SAFETY: `Complex64` is `repr(C)` of two `f64`, so `len` of them occupy exactly the
+    // `2 * len` f64s behind `ptr` at the same 8-byte alignment, and every pair is an
+    // initialized value. The boxed slice has length equal to its capacity, so the vector
+    // built here owns an allocation whose layout (`16 * len` bytes, align 8) matches the
+    // one it will free, and the box was consumed by `into_raw` so nothing else frees it.
+    unsafe { Vec::from_raw_parts(ptr.cast::<Complex64>(), len, len) }
+}
+
+/// Multiply every amplitude by the real `factor`, in parallel above the statevector
+/// threshold so a 27 qubit export does not serialize a 2 GiB pass.
+fn scale_in_place(amps: &mut [Complex64], factor: f64, num_qubits: usize) {
+    use crate::backend::simd;
+    let factor = Complex64::new(factor, 0.0);
+    #[cfg(feature = "parallel")]
+    if num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+        use rayon::prelude::*;
+        amps.par_chunks_mut(crate::backend::MIN_PAR_ELEMS)
+            .for_each(|chunk| simd::scale_complex_slice(chunk, factor));
+        return;
+    }
+    #[cfg(not(feature = "parallel"))]
+    let _ = num_qubits;
+    simd::scale_complex_slice(amps, factor);
 }
 
 /// Per-simulation device-resident stabilizer tableau.

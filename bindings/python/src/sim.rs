@@ -81,7 +81,8 @@ impl PySimulation {
     /// Takes any sequence of complex numbers, including a `complex128` NumPy
     /// array, indexed with qubit 0 in the least significant bit. The length must
     /// be `2 ** num_qubits` and the vector must be normalized. A start state
-    /// runs on the statevector or density-matrix backend only. `.shots()` and
+    /// runs on the statevector (dense, GPU, or distributed) or density-matrix
+    /// backend only. `.shots()` and
     /// `.sample_counts()` reject one with a noise model attached, and
     /// `.expectation_gradient()` and `.density_matrix_expectation_values()`
     /// reject one outright.

@@ -5,8 +5,9 @@ use crate::circuit::Circuit;
 use crate::circuit::builder::CircuitBuilder;
 use crate::distributed::DistributedContext;
 use crate::distributed::loopback::{run_ranks, run_ranks_max_gather};
-use crate::sim::run_on;
+use crate::error::PrismError;
 use crate::sim::unified_pauli::PauliTerm;
+use crate::sim::{ResolvedBackend, run_on, run_on_state, simulate};
 use num_complex::Complex64;
 
 const SEED: u64 = 42;
@@ -1869,6 +1870,156 @@ fn loopback_wide_shards_match_statevector_on_every_direct_path() {
                 (e - a).abs() < TOL,
                 "size {size}: prob[{i}] expected {e}, got {a}"
             );
+        }
+    }
+}
+
+/// Random normalized `n` qubit state, fixed by `seed`.
+fn random_state(n: usize, seed: u64) -> Vec<Complex64> {
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut state: Vec<Complex64> = (0..1usize << n)
+        .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+        .collect();
+    let norm = crate::backend::state_norm_sqr(&state).sqrt();
+    for amp in &mut state {
+        *amp /= norm;
+    }
+    state
+}
+
+// Twelve qubits so the two top qubits are rank bits at four ranks and the
+// default local qubit floor holds. Gates land on local qubits, on rank bits,
+// and across the two, so the injected shard feeds every exchange path.
+fn injected_state_circuit() -> Circuit {
+    let n = 12;
+    let (s, t) = (n - 2, n - 1);
+    let mut b = CircuitBuilder::new(n);
+    b.h(0).ry(0.4, 1).rz(0.9, 2);
+    b.h(t).rx(0.3, s);
+    b.cx(0, t).cz(s, 1).rzz(0.5, s, t);
+    b.swap(1, t).ry(0.7, s).h(t);
+    b.cx(t, 2).rx(1.1, t);
+    b.build()
+}
+
+fn assert_amplitudes_match(expected: &[Complex64], actual: &[Complex64], label: &str) {
+    assert_eq!(expected.len(), actual.len(), "{label}: length");
+    for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-12,
+            "{label}: amp[{i}] expected {e}, got {a}"
+        );
+    }
+}
+
+fn injected_state_matches_statevector(relabel: bool) {
+    let circuit = injected_state_circuit();
+    let state = random_state(circuit.num_qubits, SEED);
+
+    let mut sv = StatevectorBackend::new(SEED);
+    run_on_state(&mut sv, &circuit, &state).unwrap();
+    let expected = sv.export_statevector().unwrap();
+
+    for size in [2usize, 4] {
+        let results = run_ranks(size, |ctx| {
+            let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+            backend.set_relabel(relabel);
+            assert!(backend.supports_initial_state());
+            run_on_state(&mut backend, &circuit, &state).unwrap();
+            backend.export_statevector().unwrap()
+        });
+        for actual in &results {
+            assert_amplitudes_match(&expected, actual, &format!("size {size} relabel {relabel}"));
+        }
+    }
+}
+
+#[test]
+fn loopback_injected_state_matches_statevector_direct() {
+    injected_state_matches_statevector(false);
+}
+
+#[test]
+fn loopback_injected_state_matches_statevector_relabeled() {
+    injected_state_matches_statevector(true);
+}
+
+// A relabeled run leaves the qubit map permuted. Injecting into that backend
+// must rebuild the identity layout, not write the slice into the old one.
+#[test]
+fn loopback_injection_resets_a_relabeled_layout() {
+    let circuit = injected_state_circuit();
+    let state = random_state(circuit.num_qubits, SEED + 1);
+
+    let mut sv = StatevectorBackend::new(SEED);
+    run_on_state(&mut sv, &circuit, &state).unwrap();
+    let expected = sv.export_statevector().unwrap();
+
+    let results = run_ranks(4, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_relabel(true);
+        run_on(&mut backend, &circuit).unwrap();
+        run_on_state(&mut backend, &circuit, &state).unwrap();
+        backend.export_statevector().unwrap()
+    });
+    for actual in &results {
+        assert_amplitudes_match(&expected, actual, "reused backend");
+    }
+}
+
+#[test]
+fn loopback_injected_state_of_the_wrong_length_is_rejected() {
+    let bad = vec![Complex64::new(0.5, 0.0); 6];
+    let mut sv = StatevectorBackend::new(SEED);
+    let expected = sv
+        .init_from_amplitudes(bad.clone(), 0)
+        .unwrap_err()
+        .to_string();
+
+    let errors = run_ranks(2, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        let err = backend.init_from_amplitudes(bad.clone(), 0).unwrap_err();
+        (
+            matches!(err, PrismError::InvalidParameter { .. }),
+            err.to_string(),
+        )
+    });
+    for (is_invalid_parameter, message) in errors {
+        assert!(is_invalid_parameter, "{message}");
+        assert_eq!(message, expected);
+    }
+}
+
+#[test]
+fn loopback_simulate_starts_the_distributed_backend_from_a_state() {
+    let circuit = injected_state_circuit();
+    let state = random_state(circuit.num_qubits, SEED + 2);
+
+    let expected = simulate(&circuit)
+        .initial_state(&state)
+        .seed(SEED)
+        .run()
+        .unwrap()
+        .probabilities
+        .unwrap()
+        .to_vec();
+
+    let results = run_ranks(2, |ctx| {
+        let outcome = simulate(&circuit)
+            .distributed(ctx)
+            .initial_state(&state)
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert_eq!(outcome.metadata.backend, ResolvedBackend::Distributed);
+        outcome.probabilities.unwrap().to_vec()
+    });
+    for probs in &results {
+        assert_eq!(expected.len(), probs.len());
+        for (i, (e, a)) in expected.iter().zip(probs.iter()).enumerate() {
+            assert!((e - a).abs() < 1e-12, "prob[{i}] expected {e}, got {a}");
         }
     }
 }

@@ -135,10 +135,12 @@ state and the subsystem split assume an unentangled input, and the Pauli engines
 propagate observables back to |0...0>. Picking one of them for an arbitrary
 start state returns a wrong answer rather than an error, so `initial_state_plan`
 in `src/sim/dispatch.rs` constrains the route instead of consulting it: `Auto`
-resolves to the statevector, `DensityMatrix` is the only other backend that
-accepts one (as the pure mixture `|psi><psi|`), and every other kind returns
-`IncompatibleBackend`. Auto needs no memory check on that path, since a caller
-holding `2^n` amplitudes can already afford the dense state.
+resolves to the statevector, `StatevectorDistributed` starts the sharded
+statevector from it (every rank receives the full vector and keeps the slice its
+rank bits select), `DensityMatrix` accepts one as the pure mixture `|psi><psi|`,
+and every other kind returns `IncompatibleBackend`. Auto needs no memory check on
+that path, since a caller holding `2^n` amplitudes can already afford the dense
+state.
 
 The amplitude vector is validated before the run: `2^n` entries for the
 circuit's `n` qubits, every component finite, and unit norm to 1e-9. An

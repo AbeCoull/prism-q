@@ -195,8 +195,9 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     /// A start state also constrains the route, because shape-based dispatch
     /// reads the circuit alone and its shortcuts hold only from |0...0⟩:
     /// [`BackendKind::Auto`] resolves to the statevector, and every backend
-    /// other than the statevector and [`BackendKind::DensityMatrix`] reports
-    /// `IncompatibleBackend`. [`Simulate::expectation_gradient`] declines a start
+    /// other than the statevector (dense, device, or distributed) and
+    /// [`BackendKind::DensityMatrix`] reports `IncompatibleBackend`.
+    /// [`Simulate::expectation_gradient`] declines a start
     /// state, as do [`Simulate::shots`] and [`Simulate::sample_counts`] with a
     /// noise model attached, since trajectory replay has no start-state path.
     #[inline]

@@ -16,20 +16,69 @@ struct LoopbackShared {
     size: usize,
     state: Mutex<LoopbackState>,
     cv: Condvar,
+    /// Point to point mailboxes indexed by `sender * size + receiver`, each
+    /// under its own lock so exchanges between disjoint pairs never contend
+    /// with each other or with a collective in flight.
+    mailboxes: Vec<Mailbox>,
 }
 
+/// Collective state: every rank's contribution plus the barrier counter.
 struct LoopbackState {
     generation: u64,
     arrived: usize,
     cslots: Vec<Vec<Complex64>>,
-    fslots: Vec<f64>,
+    fslots: Vec<Vec<f64>>,
+    scalars: Vec<f64>,
     reduce: Vec<f64>,
     /// Largest block one rank passed to an allgather. Shot sampling tests
     /// assert this stays at one element, proving no dense gather happened.
     max_gather_block: usize,
-    /// Mailboxes indexed by `sender * size + receiver`. FIFO order matches MPI
-    /// sendrecv order and stays separate from collective barriers.
-    mailbox: Vec<VecDeque<Vec<Complex64>>>,
+}
+
+struct Mailbox {
+    queue: Mutex<MailboxQueue>,
+    cv: Condvar,
+}
+
+/// Pending messages in FIFO order, matching MPI sendrecv order, plus the
+/// buffers of delivered messages. Steady-state traffic reuses those instead
+/// of allocating per message, so the transport stays at memcpy cost.
+struct MailboxQueue {
+    pending: VecDeque<Vec<Complex64>>,
+    spare: Vec<Vec<Complex64>>,
+}
+
+impl Mailbox {
+    fn new() -> Self {
+        Self {
+            queue: Mutex::new(MailboxQueue {
+                pending: VecDeque::new(),
+                spare: Vec::new(),
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn send(&self, msg: &[Complex64]) {
+        let mut q = self.queue.lock().unwrap();
+        let mut buf = q.spare.pop().unwrap_or_default();
+        buf.clear();
+        buf.extend_from_slice(msg);
+        q.pending.push_back(buf);
+        self.cv.notify_one();
+    }
+
+    fn recv(&self, out: &mut [Complex64]) {
+        let mut q = self.queue.lock().unwrap();
+        loop {
+            if let Some(buf) = q.pending.pop_front() {
+                out.copy_from_slice(&buf);
+                q.spare.push(buf);
+                return;
+            }
+            q = self.cv.wait(q).unwrap();
+        }
+    }
 }
 
 impl LoopbackShared {
@@ -40,12 +89,13 @@ impl LoopbackShared {
                 generation: 0,
                 arrived: 0,
                 cslots: vec![Vec::new(); size],
-                fslots: vec![0.0; size],
+                fslots: vec![Vec::new(); size],
+                scalars: vec![0.0; size],
                 reduce: Vec::new(),
                 max_gather_block: 0,
-                mailbox: (0..size * size).map(|_| VecDeque::new()).collect(),
             }),
             cv: Condvar::new(),
+            mailboxes: (0..size * size).map(|_| Mailbox::new()).collect(),
         })
     }
 
@@ -93,32 +143,37 @@ impl RankComm for LoopbackComm {
         {
             let mut st = self.shared.state.lock().unwrap();
             st.max_gather_block = st.max_gather_block.max(local.len());
-            st.cslots[self.rank] = local.to_vec();
+            let slot = &mut st.cslots[self.rank];
+            slot.clear();
+            slot.extend_from_slice(local);
         }
         self.shared.barrier();
-        let out = {
-            let st = self.shared.state.lock().unwrap();
-            st.cslots.iter().flat_map(|s| s.iter().copied()).collect()
-        };
+        let out = self.shared.state.lock().unwrap().cslots.concat();
         self.shared.barrier();
         out
     }
 
     fn allgather_f64(&self, local: &[f64]) -> Vec<f64> {
-        let as_c: Vec<Complex64> = local.iter().map(|&v| Complex64::new(v, 0.0)).collect();
-        self.allgather_c64(&as_c).iter().map(|c| c.re).collect()
+        {
+            let mut st = self.shared.state.lock().unwrap();
+            st.max_gather_block = st.max_gather_block.max(local.len());
+            let slot = &mut st.fslots[self.rank];
+            slot.clear();
+            slot.extend_from_slice(local);
+        }
+        self.shared.barrier();
+        let out = self.shared.state.lock().unwrap().fslots.concat();
+        self.shared.barrier();
+        out
     }
 
     fn allreduce_sum_f64(&self, value: f64) -> f64 {
         {
             let mut st = self.shared.state.lock().unwrap();
-            st.fslots[self.rank] = value;
+            st.scalars[self.rank] = value;
         }
         self.shared.barrier();
-        let sum = {
-            let st = self.shared.state.lock().unwrap();
-            st.fslots.iter().sum()
-        };
+        let sum = self.shared.state.lock().unwrap().scalars.iter().sum();
         self.shared.barrier();
         sum
     }
@@ -149,19 +204,10 @@ impl RankComm for LoopbackComm {
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
         debug_assert_eq!(send.len(), recv.len());
         let size = self.shared.size;
-        let mut st = self.shared.state.lock().unwrap();
         // Send to partner, then wait for partner to send back. Ranks that skip
         // an exchange do not block because their partner skips it too.
-        st.mailbox[self.rank * size + partner].push_back(send.to_vec());
-        self.shared.cv.notify_all();
-        let inbox = partner * size + self.rank;
-        loop {
-            if let Some(msg) = st.mailbox[inbox].pop_front() {
-                recv.copy_from_slice(&msg);
-                return;
-            }
-            st = self.shared.cv.wait(st).unwrap();
-        }
+        self.shared.mailboxes[self.rank * size + partner].send(send);
+        self.shared.mailboxes[partner * size + self.rank].recv(recv);
     }
 
     fn barrier(&self) {

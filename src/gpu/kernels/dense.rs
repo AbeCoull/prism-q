@@ -66,15 +66,17 @@ struct DiagListArg {
 unsafe impl cudarc::driver::DeviceRepr for DiagListArg {}
 
 /// Tiled `MultiFused` sub-gates, `v[8g..8g + 8]` the row-major 2x2 matrix as re/im
-/// pairs and four bits of `targets` per gate; mirrors `struct TileGates`.
+/// pairs, the ten tile qubits at six bits each in `qubits` (sorted ascending), and each
+/// gate's target as a four-bit position in that list; mirrors `struct TileGates`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TileGatesArg {
     v: [f64; 8 * MULTI_FUSED_TILE_Q],
+    qubits: u64,
     targets: u64,
 }
 
-// SAFETY: a plain `repr(C)` f64 array and a u64 with the layout the kernel declares.
+// SAFETY: a plain `repr(C)` f64 array and two u64s with the layout the kernel declares.
 unsafe impl cudarc::driver::DeviceRepr for TileGatesArg {}
 
 /// Packed `meta` argument of the three LUT kernels: the per-group index lists, then
@@ -123,7 +125,7 @@ const KERNEL_SOURCE_TEMPLATE: &str = r#"
 struct FusedMat { double v[32]; };
 struct QubitList { int q[PARAM_QUBITS]; };
 struct DiagList { double d[4 * PARAM_QUBITS]; int t[PARAM_QUBITS]; };
-struct TileGates { double v[8 * TILE_Q]; unsigned long long targets; };
+struct TileGates { double v[8 * TILE_Q]; unsigned long long qubits; unsigned long long targets; };
 
 // ============================================================================
 // Shared device helpers
@@ -580,13 +582,29 @@ extern "C" __global__ void compute_probabilities(
 // memory reads. Pairs (i0, i1) for a given gate stay within the tile because the target
 // bit is a low bit of the global index; the high bits (> TILE_Q) are the block id.
 //
-// Gate data rides in parameter space: four bits of `gates.targets` per gate (every
-// target is below TILE_Q) and gates.v[8g .. 8g+8] the row-major matrix as re/im pairs.
+// Gate data rides in parameter space: six bits of `gates.qubits` per tile qubit, four
+// bits of `gates.targets` per gate (a position in the tile qubit list), and
+// gates.v[8g .. 8g+8] the row-major matrix as re/im pairs.
 //
 // TILE_Q = 10, TILE_SIZE = 1024, block_size = 512 threads, each thread handles one pair.
 // Shared memory usage: 1024 × 16 bytes = 16 KB. Pascal-friendly.
 // (TILE_Q / TILE_SIZE are defined in the template header at the top of the file.)
 
+// Scatter the TILE_Q bits of `j` onto the qubit positions `q`.
+__device__ __forceinline__ unsigned long long deposit_tile_bits(int j, const int *q)
+{
+    unsigned long long idx = 0;
+    #pragma unroll
+    for (int k = 0; k < TILE_Q; ++k) {
+        idx |= (unsigned long long)((j >> k) & 1) << q[k];
+    }
+    return idx;
+}
+
+// The tile is the 2^TILE_Q amplitudes spanned by the tile qubits (sorted ascending),
+// with every other bit fixed per block. Tile-local index j maps to the global index
+// block_base | deposit(j); the five lowest qubits are always in the tile, so a warp's 32
+// consecutive j hit 32 consecutive amplitudes and the loads stay coalesced.
 extern "C" __global__ void apply_multi_fused_tiled(
     double2 *state, unsigned long long dim,
     TileGates gates,
@@ -594,15 +612,27 @@ extern "C" __global__ void apply_multi_fused_tiled(
 {
     __shared__ double2 tile[TILE_SIZE];
 
-    unsigned long long block_base = (unsigned long long)blockIdx.x * (unsigned long long)TILE_SIZE;
-    if (block_base >= dim) return;
+    unsigned long long tiles = dim >> TILE_Q;
+    if (blockIdx.x >= tiles) return;
+
+    int q[TILE_Q];
+    #pragma unroll
+    for (int k = 0; k < TILE_Q; ++k) q[k] = (int)((gates.qubits >> (6 * k)) & 63ULL);
+    unsigned long long block_base = blockIdx.x;
+    #pragma unroll
+    for (int k = 0; k < TILE_Q; ++k) {
+        unsigned long long lo = block_base & ((1ULL << q[k]) - 1ULL);
+        block_base = ((block_base >> q[k]) << (q[k] + 1)) | lo;
+    }
 
     int tid = (int)threadIdx.x;
     // Load the tile cooperatively, two amplitudes per thread (block_dim = TILE_SIZE/2).
     int a_off = tid;
     int b_off = tid + (TILE_SIZE / 2);
-    tile[a_off] = state[block_base + a_off];
-    tile[b_off] = state[block_base + b_off];
+    unsigned long long a_idx = block_base | deposit_tile_bits(a_off, q);
+    unsigned long long b_idx = block_base | deposit_tile_bits(b_off, q);
+    tile[a_off] = state[a_idx];
+    tile[b_off] = state[b_idx];
     __syncthreads();
 
     // Each thread owns one pair per gate. k is the compressed pair index (0 .. TILE_SIZE/2).
@@ -630,8 +660,8 @@ extern "C" __global__ void apply_multi_fused_tiled(
     }
 
     // Store tile back to global memory.
-    state[block_base + a_off] = tile[a_off];
-    state[block_base + b_off] = tile[b_off];
+    state[a_idx] = tile[a_off];
+    state[b_idx] = tile[b_off];
 }
 
 // apply_diagonal_batch: applies a mixed batch of diagonal entries (1q / 2q / parity-2q)
@@ -1909,23 +1939,34 @@ pub(crate) fn launch_apply_diagonal_batch(
     Ok(())
 }
 
-/// Matches the `TILE_Q` / `TILE_SIZE` in the PTX source. Targets `< TILE_Q` are processed
-/// in shared memory by `apply_multi_fused_tiled`; targets `>= TILE_Q` fall back to
-/// per-gate launches of `apply_gate_1q` because their pairs would span multiple tiles.
+/// Matches the `TILE_Q` / `TILE_SIZE` in the PTX source: a tile spans `2^TILE_Q`
+/// amplitudes over a chosen set of `TILE_Q` qubits.
 const MULTI_FUSED_TILE_Q: usize = 10;
 const MULTI_FUSED_TILE_SIZE: u64 = 1 << MULTI_FUSED_TILE_Q;
 const MULTI_FUSED_BLOCK_SIZE: u32 = (MULTI_FUSED_TILE_SIZE as u32) / 2;
 
-/// The tiled kernel has fixed shared-memory load/store overhead; for MultiFused groups
-/// with fewer than this many tile-local gates, per-gate launches of `apply_gate_1q` are
-/// cheaper. Value chosen empirically on a GTX 1080 Ti (Pascal, compute_61); launch
-/// overhead, shared-memory bandwidth, and L2 behavior shift the crossover on newer
-/// architectures, so re-tune per device generation.
+/// Qubits every tile carries so a warp's 32 consecutive tile indices are 32
+/// consecutive amplitudes. The remaining `TILE_Q - ANCHOR_Q` tile qubits are chosen
+/// per pass from the gates' targets.
+const MULTI_FUSED_ANCHOR_Q: usize = 5;
+
+/// The tiled kernel has fixed shared-memory load/store overhead; for a pass with fewer
+/// than this many gates, per-gate launches of `apply_gate_1q` are cheaper. Value chosen
+/// empirically on a GTX 1080 Ti (Pascal, compute_61); launch overhead, shared-memory
+/// bandwidth, and L2 behavior shift the crossover on newer architectures, so re-tune
+/// per device generation.
 const MULTI_FUSED_TILE_MIN_GATES: usize = 3;
 
-/// Apply a non-diagonal `MultiFused` via a shared-memory tiled kernel for sub-gates with
-/// low targets, plus per-gate launches for sub-gates whose target bit lies outside the
-/// tile. Replaces the previous pure per sub-gate decomposition.
+/// Widest register the GPU statevector admits, from the `GpuState::new` bound.
+const MAX_GPU_QUBITS: usize = usize::BITS as usize - 4;
+
+/// Apply a non-diagonal `MultiFused` as a sequence of shared-memory tiled passes.
+///
+/// Each pass owns a tile of `TILE_Q` qubits: the `ANCHOR_Q` lowest qubits plus up to
+/// `TILE_Q - ANCHOR_Q` of the gates' higher targets, so a `MultiFused` over `n` qubits
+/// costs about `(n - ANCHOR_Q) / (TILE_Q - ANCHOR_Q)` passes instead of one pass per
+/// high target. Gates on distinct qubits commute, so the pass order is free. A pass
+/// with fewer than `TILE_MIN_GATES` gates falls back to per-gate launches.
 pub(crate) fn launch_apply_multi_fused_nondiag(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1936,13 +1977,14 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
     }
     let n = state.num_qubits();
     // For n <= TILE_Q the tile is the full state; only one block runs and the kernel
-    // collapses to the per-gate path. Fall back to the simple per-gate loop below.
+    // collapses to the per-gate path.
     if n <= MULTI_FUSED_TILE_Q {
         for &(target, mat) in gates {
             launch_apply_gate_1q(ctx, state, target, mat)?;
         }
         return Ok(());
     }
+    let mut is_target = [false; MAX_GPU_QUBITS];
     for &(target, _) in gates {
         if target >= n {
             return Err(PrismError::InvalidQubit {
@@ -1950,67 +1992,98 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
                 register_size: n,
             });
         }
+        is_target[target] = true;
     }
 
-    // First pass: count tile-local sub-gates to pick the hot path without speculative
-    // allocation.
-    let tile_local_count = gates
-        .iter()
-        .filter(|(target, _)| *target < MULTI_FUSED_TILE_Q)
-        .count();
+    let per_pass = MULTI_FUSED_TILE_Q - MULTI_FUSED_ANCHOR_Q;
+    let low: Vec<usize> = (0..gates.len())
+        .filter(|&g| gates[g].0 < MULTI_FUSED_ANCHOR_Q)
+        .collect();
+    let high: Vec<usize> = (0..gates.len())
+        .filter(|&g| gates[g].0 >= MULTI_FUSED_ANCHOR_Q)
+        .collect();
+    let passes = high.len().div_ceil(per_pass).max(1);
 
-    // Below the threshold, the tile's shared-memory load/store overhead outweighs the
-    // savings from avoiding launches. Fall through to per-gate dispatch for the whole list.
-    // Above TILE_Q gates the targets cannot be distinct, which the kernel assumes.
-    if !(MULTI_FUSED_TILE_MIN_GATES..=MULTI_FUSED_TILE_Q).contains(&tile_local_count) {
-        for &(target, mat) in gates {
-            launch_apply_gate_1q(ctx, state, target, mat)?;
-        }
-        return Ok(());
-    }
-
-    // Second pass: pack the tile-local sub-gates into the parameter struct. External
-    // (target >= TILE_Q) gates are dispatched directly in a third pass below.
-    let mut arg = TileGatesArg {
-        v: [0.0; 8 * MULTI_FUSED_TILE_Q],
-        targets: 0,
-    };
-    let mut g = 0;
-    for &(target, mat) in gates {
-        if target < MULTI_FUSED_TILE_Q {
-            arg.targets |= (target as u64) << (4 * g);
-            for (slot, entry) in arg.v[8 * g..8 * g + 8]
-                .chunks_exact_mut(2)
-                .zip(mat.iter().flatten())
-            {
-                slot[0] = entry.re;
-                slot[1] = entry.im;
+    for pass in 0..passes {
+        let chunk =
+            &high[(pass * per_pass).min(high.len())..((pass + 1) * per_pass).min(high.len())];
+        let pass_gates: Vec<usize> = if pass == 0 {
+            low.iter().chain(chunk).copied().collect()
+        } else {
+            chunk.to_vec()
+        };
+        if pass_gates.len() < MULTI_FUSED_TILE_MIN_GATES {
+            for &g in &pass_gates {
+                let (target, mat) = gates[g];
+                launch_apply_gate_1q(ctx, state, target, mat)?;
             }
-            g += 1;
+            continue;
         }
-    }
 
-    let dim: u64 = 1u64 << n;
-    let num_tiles = dim / MULTI_FUSED_TILE_SIZE;
-    let (stream, func) = stream_and_fn(ctx, "apply_multi_fused_tiled")?;
-    let cfg = linear_cfg(MULTI_FUSED_BLOCK_SIZE, num_tiles as u32);
-    let num_gates_i = tile_local_count as i32;
-    let mut builder = stream.launch_builder(&func);
-    let buffer = state.buffer_mut().raw_mut();
-    builder.arg(buffer).arg(&dim).arg(&arg).arg(&num_gates_i);
-    // SAFETY: signature matches; num_tiles * TILE_SIZE = dim; the gate list rides in
-    // parameter space with num_gates entries filled and every target below TILE_Q.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| launch_err("apply_multi_fused_tiled", e))?;
-    }
+        // Tile qubits: the anchor, this chunk's targets, then untargeted filler until
+        // the tile is full. Sorted ascending, as the kernel's bit insertion requires.
+        let mut tile = [0usize; MULTI_FUSED_TILE_Q];
+        let mut in_tile = [false; MAX_GPU_QUBITS];
+        for (slot, q) in tile.iter_mut().zip(0..MULTI_FUSED_ANCHOR_Q) {
+            *slot = q;
+        }
+        in_tile[..MULTI_FUSED_ANCHOR_Q].fill(true);
+        let mut filled = MULTI_FUSED_ANCHOR_Q;
+        for &g in chunk {
+            let q = gates[g].0;
+            tile[filled] = q;
+            in_tile[q] = true;
+            filled += 1;
+        }
+        for untargeted_only in [true, false] {
+            for q in MULTI_FUSED_ANCHOR_Q..n {
+                if filled == MULTI_FUSED_TILE_Q {
+                    break;
+                }
+                if in_tile[q] || (untargeted_only && is_target[q]) {
+                    continue;
+                }
+                tile[filled] = q;
+                in_tile[q] = true;
+                filled += 1;
+            }
+        }
+        tile.sort_unstable();
+        let position = |q: usize| tile.iter().position(|&t| t == q).unwrap() as i32;
 
-    // Third pass: launch per-gate kernels for the external (target >= TILE_Q) sub-gates
-    // whose pairs span tiles. Order matters; these must run after the tiled kernel.
-    for &(target, mat) in gates {
-        if target >= MULTI_FUSED_TILE_Q {
-            launch_apply_gate_1q(ctx, state, target, mat)?;
+        let dim: u64 = 1u64 << n;
+        let num_tiles = dim / MULTI_FUSED_TILE_SIZE;
+        let (stream, func) = stream_and_fn(ctx, "apply_multi_fused_tiled")?;
+        let cfg = linear_cfg(MULTI_FUSED_BLOCK_SIZE, num_tiles as u32);
+        let num_gates_i = pass_gates.len() as i32;
+        let mut arg = TileGatesArg {
+            v: [0.0; 8 * MULTI_FUSED_TILE_Q],
+            qubits: 0,
+            targets: 0,
+        };
+        for (k, &q) in tile.iter().enumerate() {
+            arg.qubits |= (q as u64) << (6 * k);
+        }
+        for (slot, &g) in pass_gates.iter().enumerate() {
+            arg.targets |= (position(gates[g].0) as u64) << (4 * slot);
+            for (d, entry) in arg.v[8 * slot..8 * slot + 8]
+                .chunks_exact_mut(2)
+                .zip(gates[g].1.iter().flatten())
+            {
+                d[0] = entry.re;
+                d[1] = entry.im;
+            }
+        }
+        let mut builder = stream.launch_builder(&func);
+        let buffer = state.buffer_mut().raw_mut();
+        builder.arg(buffer).arg(&dim).arg(&arg).arg(&num_gates_i);
+        // SAFETY: signature matches; num_tiles * TILE_SIZE = dim; the tile holds TILE_Q
+        // distinct qubits below n, every target position is inside it, and the gate list
+        // rides in parameter space with num_gates entries filled.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| launch_err("apply_multi_fused_tiled", e))?;
         }
     }
     Ok(())

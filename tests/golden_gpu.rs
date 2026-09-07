@@ -658,6 +658,77 @@ fn qft_block_native_and_expanded_match_cpu() {
 }
 
 #[test]
+fn multi_fused_all_high_targets_matches_cpu() {
+    // Every target above the anchor qubits: the tile is the anchor plus these targets
+    // plus filler, so the gather path runs with no low-qubit gate at all.
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 14;
+    let mat_ry = [
+        [Complex64::new(0.8, 0.0), Complex64::new(-0.6, 0.0)],
+        [Complex64::new(0.6, 0.0), Complex64::new(0.8, 0.0)],
+    ];
+    let mat_u = [
+        [
+            Complex64::new(0.6, 0.3),
+            Complex64::new(0.0, 0.741_619_848_709_566),
+        ],
+        [
+            Complex64::new(0.0, 0.741_619_848_709_566),
+            Complex64::new(0.6, -0.3),
+        ],
+    ];
+    let gates = vec![(10, mat_ry), (11, mat_u), (12, mat_ry), (13, mat_u)];
+    let mut insts = vec![];
+    for q in 0..n {
+        insts.push(g(Gate::H, &[q]));
+        insts.push(g(Gate::Rz(0.1 * q as f64), &[q]));
+    }
+    insts.push(g(
+        Gate::MultiFused(Box::new(MultiFusedData {
+            gates,
+            all_diagonal: false,
+        })),
+        &[10, 11, 12, 13],
+    ));
+    f.compare(n, &insts);
+}
+
+#[test]
+fn multi_fused_every_qubit_16q_matches_cpu() {
+    // Sixteen targets need three tiled passes (anchor plus five high targets each, the
+    // last pass short and falling to per-gate launches).
+    let Some(f) = Fixture::try_new() else { return };
+    let n = 16;
+    let gates: Vec<(usize, [[Complex64; 2]; 2])> = (0..n)
+        .map(|q| {
+            let (s, c) = (0.05 * (q + 1) as f64).sin_cos();
+            (
+                q,
+                [
+                    [Complex64::new(c, 0.0), Complex64::new(-s, 0.0)],
+                    [Complex64::new(s, 0.0), Complex64::new(c, 0.0)],
+                ],
+            )
+        })
+        .collect();
+    let mut insts = vec![];
+    for q in 0..n {
+        insts.push(g(Gate::H, &[q]));
+    }
+    for q in 0..n - 1 {
+        insts.push(g(Gate::Cx, &[q, q + 1]));
+    }
+    insts.push(g(
+        Gate::MultiFused(Box::new(MultiFusedData {
+            gates,
+            all_diagonal: false,
+        })),
+        &(0..n).collect::<Vec<_>>(),
+    ));
+    f.compare(n, &insts);
+}
+
+#[test]
 fn multi_fused_nondiag_tiled_matches_cpu() {
     // Exercise the tiled non-diagonal MultiFused kernel with a mix of low-target gates
     // (go through shared memory) and high-target gates (fall back to per-gate launches).

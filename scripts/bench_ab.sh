@@ -21,11 +21,18 @@
 # so every row carries its own noise floor. A change smaller than that floor is
 # reported as noise, not as a win.
 #
+# --light trades that precision for wall clock: three measured passes (ref, new,
+# ref), Criterion's per-row warm-up and measurement windows cut from 3s and 5s
+# to 0.5s and 1.5s, and 10 samples. A row costs about a fifth of the full tier.
+# The report names the tier and the verdict is triage, not a gate result: the
+# new binary is measured once, so only the reference side carries a control.
+#
 # Usage:
 #   scripts/bench_ab.sh --filter '^factored/noise_kraus/'
 #   scripts/bench_ab.sh -f '^density_matrix/' -r main -b circuits
 #   scripts/bench_ab.sh -f '^sparse/' --ref-dir /tmp/prism-q-ref   # reuse the build
 #   scripts/bench_ab.sh -f '^x/affected/' -c '^x/(control_a|control_b)/'
+#   scripts/bench_ab.sh -f '^statevector/' --light                  # triage in a fifth of the time
 #
 # Options:
 #   --filter,   -f  Criterion filter regex, applied to every pass (required)
@@ -39,6 +46,13 @@
 #   --control-samples  sample count for --control rows (default 10, Criterion's
 #                   floor). Standard error is 1.7x the 30-sample interval, which
 #                   is ample to show a control sitting flat.
+#   --light         triage tier: passes ref, new, ref with Criterion windows of
+#                   0.5s warm-up and 1.5s measurement and 10 samples (the sample
+#                   count still yields to PRISM_BENCH_SAMPLES). Cuts a row to
+#                   about a fifth of the full tier. Groups that pin their own
+#                   measurement_time keep it, so those rows shrink less. The
+#                   verdict line names the tier; carry a gate claim on the full
+#                   tier only.
 #   --max-row-seconds  abort when Criterion projects one row past this many
 #                   seconds in a single pass (default 240, 0 disables). Six
 #                   passes run, so an unnoticed row costs six times the
@@ -65,8 +79,8 @@
 #                   the build runs through the same code path as the A/B's own
 #                   build, so a binary cached by one is what the other expects.
 #                   --filter is not required in this mode.
-#   --min-rows      fail when fewer than this many rows appear in all four
-#                   passes, catching a filter that stopped matching a renamed
+#   --min-rows      fail when fewer than this many rows appear in every measured
+#                   pass, catching a filter that stopped matching a renamed
 #                   benchmark id. Default: 1.
 #   --out           markdown output path (default: bench_results/ab-<stamp>.md)
 #
@@ -95,6 +109,7 @@ CONTROL_FILTER=""
 CONTROL_SAMPLES=10
 MAX_ROW_SECONDS=240
 SAMPLES="${PRISM_BENCH_SAMPLES:-30}"
+LIGHT=""
 REF="HEAD"
 BENCH="circuits"
 FEATURES="parallel"
@@ -111,6 +126,7 @@ while [[ $# -gt 0 ]]; do
         --control|-c)  CONTROL_FILTER="$2"; shift 2 ;;
         --control-samples) CONTROL_SAMPLES="$2"; shift 2 ;;
         --max-row-seconds) MAX_ROW_SECONDS="$2"; shift 2 ;;
+        --light)       LIGHT=1; shift ;;
         --ref|-r)      REF="$2"; shift 2 ;;
         --bench|-b)    BENCH="$2"; shift 2 ;;
         --features)    FEATURES="$2"; shift 2 ;;
@@ -129,6 +145,23 @@ if [[ -z "$FILTER" && -z "$BUILD_ONLY" ]]; then
     echo "Error: --filter is required. Name the rows to compare." >&2
     exit 1
 fi
+
+# Everything the tier changes, in one place. The full tier leaves Criterion's
+# windows at their defaults (3s warm-up, 5s measurement) and takes the pass
+# sequence the header describes.
+if [[ -n "$LIGHT" ]]; then
+    TIER="light (triage)"
+    SAMPLES="${PRISM_BENCH_SAMPLES:-10}"
+    CRITERION_ARGS=(--warm-up-time 0.5 --measurement-time 1.5)
+    PASS_LABELS=(ref new ref)
+else
+    TIER="full"
+    CRITERION_ARGS=()
+    PASS_LABELS=(ref new new ref)
+fi
+PASS_COUNT="${#PASS_LABELS[@]}"
+PASS_ORDER="$(IFS=,; echo "${PASS_LABELS[*]}")"
+PASS_ORDER="${PASS_ORDER//,/, }"
 
 # Criterion clamps below 10 without saying so, which would put a count in the
 # report that no row was measured at.
@@ -323,7 +356,7 @@ run_segment() {
     mkdir -p "$home"
     : > "$log"
     CRITERION_HOME="$(native_path "$home")" PRISM_BENCH_SAMPLES="$samples" \
-        "$exe" --bench "$filter" > "$log" 2>&1 &
+        "$exe" --bench ${CRITERION_ARGS[@]+"${CRITERION_ARGS[@]}"} "$filter" > "$log" 2>&1 &
     pid=$!
 
     over=""
@@ -352,8 +385,8 @@ run_segment() {
     if [[ -n "$over" ]]; then
         echo "" >&2
         echo "Error: $over, past the ${MAX_ROW_SECONDS}s --max-row-seconds budget." >&2
-        echo "  Six passes run, so that row alone costs about six times that." >&2
-        echo "  Narrow --filter, move the row behind --control, lower" >&2
+        echo "  $(( PASS_COUNT + 2 )) passes run, so that row alone costs about that many times as much." >&2
+        echo "  Narrow --filter, move the row behind --control, pass --light, lower" >&2
         echo "  PRISM_BENCH_SAMPLES, or pass --max-row-seconds 0 to measure it anyway." >&2
         exit 1
     fi
@@ -510,31 +543,32 @@ fi
 
 # --- Measure ---
 
-echo "=== two discarded warmup passes, then four adjacent passes ==="
+echo "=== $TIER tier: two discarded warmup passes, then $PASS_COUNT adjacent passes ($PASS_ORDER) ==="
 echo ""
 warm_up 1 "$WORKDIR/exe-ref"
 
-# Criterion projected every row during the warmup, so the remaining five passes
-# can be priced before they are spent. Printed rather than enforced: the guard
-# is per row, and a filter can be slow by holding many cheap rows instead.
+# Criterion projected every row during the warmup, so the remaining passes can
+# be priced before they are spent. Printed rather than enforced: the guard is
+# per row, and a filter can be slow by holding many cheap rows instead.
 PASS_SECONDS="$(projected_pass_seconds "$WORKDIR"/warm-1-*.log)"
 if [[ -n "$PASS_SECONDS" && "$PASS_SECONDS" != "0" ]]; then
-    printf ">>> projected: about %d min for the five passes left, %d min in total\n" \
-        $(( PASS_SECONDS * 5 / 60 )) $(( PASS_SECONDS * 6 / 60 ))
+    printf ">>> projected: about %d min for the %d passes left, %d min in total\n" \
+        $(( PASS_SECONDS * (PASS_COUNT + 1) / 60 )) $(( PASS_COUNT + 1 )) \
+        $(( PASS_SECONDS * (PASS_COUNT + 2) / 60 ))
     echo ""
 fi
 
 warm_up 2 "$WORKDIR/exe-new"
-run_pass 1 "ref" "$WORKDIR/exe-ref"
-run_pass 2 "new" "$WORKDIR/exe-new"
-run_pass 3 "new" "$WORKDIR/exe-new"
-run_pass 4 "ref" "$WORKDIR/exe-ref"
+for idx in $(seq 1 "$PASS_COUNT"); do
+    label="${PASS_LABELS[idx - 1]}"
+    run_pass "$idx" "$label" "$WORKDIR/exe-$label"
+done
 
 # --- Report ---
 
 MERGED="$WORKDIR/merged.tsv"
 : > "$MERGED"
-for idx in 1 2 3 4; do
+for idx in $(seq 1 "$PASS_COUNT"); do
     awk -v p="$idx" 'BEGIN { OFS = "\t" } { print p, $1, $2, $3 }' "$WORKDIR/pass-$idx.tsv" >> "$MERGED"
 done
 
@@ -561,7 +595,11 @@ set +e
     echo "| Reference | \`$REF\` ($REF_SHA) |"
     echo "| Reference binary | $REF_PROVENANCE |"
     echo "| Features | \`$FEATURES\` |"
-    echo "| Pass order | ref, new discarded, then ref, new, new, ref (adjacent, no rebuild) |"
+    echo "| Tier | $TIER |"
+    echo "| Pass order | ref, new discarded, then $PASS_ORDER (adjacent, no rebuild) |"
+    if [[ -n "$LIGHT" ]]; then
+        echo "| Criterion windows | 0.5s warm-up, 1.5s measurement (groups that pin their own keep it) |"
+    fi
     echo "| Samples | $SAMPLES |"
     echo "| Row budget | ${MAX_ROW_SECONDS}s per pass |"
     echo "| High-qubit rows | $HIGH_QUBITS_STATE |"
@@ -572,7 +610,8 @@ set +e
     echo "| Threshold | ${THRESHOLD}% |"
     echo ""
 
-    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" -v full="$SAMPLES" '
+    awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" -v full="$SAMPLES" \
+        -v light="${LIGHT:-0}" -v passes="$PASS_COUNT" '
         BEGIN { FS = "\t"; SEP = "\x1f" }
 
         {
@@ -605,15 +644,26 @@ set +e
 
             for (i = 1; i <= n; i++) {
                 id = order[i]
-                a1 = mean[1 SEP id]; b1 = mean[2 SEP id]
-                b2 = mean[3 SEP id]; a2 = mean[4 SEP id]
-                if (a1 == "" || b1 == "" || b2 == "" || a2 == "") { continue }
+                # Light tier passes are ref, new, ref: the new binary is measured once
+                # and has no control of its own, so the row floor is the ref spread.
+                if (light) {
+                    a1 = mean[1 SEP id]; b1 = mean[2 SEP id]; a2 = mean[3 SEP id]
+                    if (a1 == "" || b1 == "" || a2 == "") { continue }
+                    new = b1
+                    ctl_new = 0
+                    ctl_new_text = "n/a"
+                } else {
+                    a1 = mean[1 SEP id]; b1 = mean[2 SEP id]
+                    b2 = mean[3 SEP id]; a2 = mean[4 SEP id]
+                    if (a1 == "" || b1 == "" || b2 == "" || a2 == "") { continue }
+                    new = (b1 + b2) / 2
+                    ctl_new = (b2 - b1) * 100 / b1
+                    ctl_new_text = pct(ctl_new)
+                }
 
                 ref = (a1 + a2) / 2
-                new = (b1 + b2) / 2
                 change = (new - ref) * 100 / ref
                 ctl_ref = (a2 - a1) * 100 / a1
-                ctl_new = (b2 - b1) * 100 / b1
                 floor = abs(ctl_ref) > abs(ctl_new) ? abs(ctl_ref) : abs(ctl_new)
 
                 # A row measured at the reduced control count has a wider own-spread by
@@ -653,7 +703,7 @@ set +e
                 }
 
                 printf "| `%s` | %s | %s | %s | %s | %s | %s | %s |\n",
-                    id, fmt(ref), fmt(new), pct(change), pct(ctl_ref), pct(ctl_new),
+                    id, fmt(ref), fmt(new), pct(change), pct(ctl_ref), ctl_new_text,
                     samples[id], verdict
                 compared++
             }
@@ -672,23 +722,29 @@ set +e
             print ""
 
             if (compared == 0) {
-                print "**Regression verdict**: NO DATA. No row appeared in all four passes."
+                printf "**Regression verdict**: NO DATA. No row appeared in all %d passes.\n", passes
                 exit 1
             }
 
             if (compared < min_rows) {
-                printf "**Regression verdict**: NO DATA. %d row(s) appeared in all four passes, expected at least %d. The filter no longer matches every benchmark id it names.\n",
-                    compared, min_rows
+                printf "**Regression verdict**: NO DATA. %d row(s) appeared in all %d passes, expected at least %d. The filter no longer matches every benchmark id it names.\n",
+                    compared, passes, min_rows
                 exit 1
             }
 
+            # The light tier names itself on the verdict line so the table cannot be
+            # pasted into a PR as a gate result.
+            tier_note = ""
+            if (light) {
+                tier_note = " Light tier, triage only: re-run the rows that moved on the full tier before claiming a number."
+            }
             status = 0
             if (regressions > 0) {
                 status = 1
-                printf "**Regression verdict**: FAIL. %d row(s) regressed beyond %s%% and beyond their own control spread.\n",
-                    regressions, threshold
+                printf "**Regression verdict**: FAIL. %d row(s) regressed beyond %s%% and beyond their own control spread.%s\n",
+                    regressions, threshold, tier_note
             } else {
-                printf "**Regression verdict**: PASS at %s%%.\n", threshold
+                printf "**Regression verdict**: PASS at %s%%.%s\n", threshold, tier_note
             }
 
             if (moved_controls > 0) {

@@ -152,11 +152,10 @@ impl DistributedContext {
         Self::from_comm(Arc::new(SerialComm))
     }
 
-    /// Initialize MPI and capture the world communicator.
-    ///
-    /// Returns `None` when MPI cannot be initialized.
+    /// Initialize MPI and capture the world communicator. See [`MpiComm::world`]
+    /// for the thread level requested and the failure conditions.
     #[cfg(feature = "distributed-mpi")]
-    pub fn world() -> Option<Arc<Self>> {
+    pub fn world() -> crate::error::Result<Arc<Self>> {
         MpiComm::world().map(|c| Self::from_comm(Arc::new(c)))
     }
 
@@ -164,10 +163,11 @@ impl DistributedContext {
     /// ownership of its lifetime. See [`MpiComm::attach_world`] for why an
     /// embedding interpreter needs this rather than [`DistributedContext::world`].
     ///
-    /// Returns `None` when MPI is not initialized.
+    /// Returns `Ok(None)` when MPI is not initialized, and an error when it
+    /// runs below the thread level [`MpiComm`] requires.
     #[cfg(feature = "distributed-mpi")]
-    pub fn attached_world() -> Option<Arc<Self>> {
-        MpiComm::attach_world().map(|c| Self::from_comm(Arc::new(c)))
+    pub fn attached_world() -> crate::error::Result<Option<Arc<Self>>> {
+        Ok(MpiComm::attach_world()?.map(|c| Self::from_comm(Arc::new(c))))
     }
 
     /// Index of the calling rank.

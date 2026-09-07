@@ -49,14 +49,15 @@ pub struct PyDistributedContext {
 impl PyDistributedContext {
     /// Attach to the world communicator of an MPI that is already running.
     ///
-    /// Raises when this build has no MPI support, and when MPI has not been
-    /// initialized. Import `mpi4py.MPI` first: it calls `MPI_Init_thread` at
-    /// import and registers `MPI_Finalize` at interpreter exit.
+    /// Raises when this build has no MPI support, when MPI has not been
+    /// initialized, and when mpi4py started MPI below `MPI_THREAD_FUNNELED`.
+    /// Import `mpi4py.MPI` first: it calls `MPI_Init_thread` at import and
+    /// registers `MPI_Finalize` at interpreter exit.
     #[new]
     fn new() -> PyPrismResult<Self> {
         #[cfg(feature = "distributed-mpi")]
         {
-            let inner = prism_q::distributed::DistributedContext::attached_world()
+            let inner = prism_q::distributed::DistributedContext::attached_world()?
                 .ok_or_else(not_initialized)?;
             Ok(Self { inner })
         }

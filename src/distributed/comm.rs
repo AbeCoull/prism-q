@@ -8,6 +8,11 @@
 
 use num_complex::Complex64;
 
+#[cfg(feature = "distributed-mpi")]
+use crate::error::{PrismError, Result};
+#[cfg(feature = "distributed-mpi")]
+use mpi::environment::Threading;
+
 /// Collective and peer operations across a rank set.
 ///
 /// The amplitude exchange routines treat `Complex64` as two contiguous `f64`
@@ -118,10 +123,33 @@ fn as_f64_mut(slice: &mut [Complex64]) -> &mut [f64] {
     unsafe { std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut f64, slice.len() * 2) }
 }
 
+/// Thread level requested from `MPI_Init_thread`. Rayon workers touch only
+/// memory; every MPI call is made from the thread that constructed the comm.
+#[cfg(feature = "distributed-mpi")]
+const REQUIRED_THREADING: Threading = Threading::Funneled;
+
+/// Reject an MPI whose provided thread level is below [`REQUIRED_THREADING`].
+#[cfg(feature = "distributed-mpi")]
+fn check_threading(provided: Threading) -> Result<()> {
+    if provided >= REQUIRED_THREADING {
+        return Ok(());
+    }
+    Err(PrismError::IncompatibleBackend {
+        backend: "distributed".into(),
+        reason: format!(
+            "MPI thread level {provided:?} is below {REQUIRED_THREADING:?}, the minimum for \
+             running Rayon workers beside MPI"
+        ),
+    })
+}
+
 /// MPI transport over `rsmpi`.
 ///
 /// Requires the `distributed-mpi` feature, a system MPI install, and an MPI
-/// launcher.
+/// launcher. MPI must run at `MPI_THREAD_FUNNELED` or higher: [`MpiComm::world`]
+/// requests that level and both constructors return an error when the provided
+/// level is lower. Keep every MPI call, including dropping the comm, on the
+/// thread that constructed it.
 #[cfg(feature = "distributed-mpi")]
 pub struct MpiComm {
     /// Held only by a comm that ran `MPI_Init` itself, because dropping a
@@ -145,15 +173,24 @@ impl std::fmt::Debug for MpiComm {
 
 #[cfg(feature = "distributed-mpi")]
 impl MpiComm {
-    /// Initialize MPI and capture the world communicator.
+    /// Initialize MPI at `MPI_THREAD_FUNNELED` and capture the world communicator.
     ///
-    /// Returns `None` when MPI initialization fails, which includes MPI already
-    /// being initialized: `mpi::initialize` declines rather than attaching. Use
-    /// [`MpiComm::attach_world`] in a process where something else owns MPI.
-    pub fn world() -> Option<Self> {
-        let universe = mpi::initialize()?;
+    /// # Errors
+    ///
+    /// Fails when MPI is already initialized (`mpi::initialize_with_threading`
+    /// declines rather than attaching; use [`MpiComm::attach_world`] in a
+    /// process where something else owns MPI) and when the provided thread
+    /// level is below the requested one.
+    pub fn world() -> Result<Self> {
+        let (universe, provided) = mpi::environment::initialize_with_threading(REQUIRED_THREADING)
+            .ok_or_else(|| PrismError::IncompatibleBackend {
+                backend: "distributed".into(),
+                reason: "MPI is already initialized; attach to it with `MpiComm::attach_world`"
+                    .into(),
+            })?;
+        check_threading(provided)?;
         let world = universe.world();
-        Some(Self::from_parts(Some(universe), world))
+        Ok(Self::from_parts(Some(universe), world))
     }
 
     /// Attach to an MPI another component has already initialized.
@@ -164,15 +201,17 @@ impl MpiComm {
     /// `MPI_Finalize` at exit, finalizing from a dropped handle would make
     /// every later MPI call in the process erroneous.
     ///
-    /// Returns `None` when MPI is not initialized.
-    pub fn attach_world() -> Option<Self> {
+    /// Returns `Ok(None)` when MPI is not initialized, and an error when the
+    /// owner initialized it below `MPI_THREAD_FUNNELED`.
+    pub fn attach_world() -> Result<Option<Self>> {
         if !mpi::environment::is_initialized() {
-            return None;
+            return Ok(None);
         }
-        Some(Self::from_parts(
+        check_threading(mpi::environment::threading_support())?;
+        Ok(Some(Self::from_parts(
             None,
             mpi::topology::SimpleCommunicator::world(),
-        ))
+        )))
     }
 
     fn from_parts(
@@ -252,5 +291,27 @@ impl RankComm for MpiComm {
     fn barrier(&self) {
         use mpi::traits::CommunicatorCollectives;
         self.world.barrier();
+    }
+}
+
+#[cfg(all(test, feature = "distributed-mpi"))]
+mod threading_tests {
+    use super::*;
+
+    // The check leans on the crate's `Ord`, which compares the raw MPI constants,
+    // so the ordering the MPI standard guarantees is pinned alongside it.
+    #[test]
+    fn thread_level_check_rejects_only_single() {
+        assert!(Threading::Single < Threading::Funneled);
+        assert!(Threading::Funneled < Threading::Serialized);
+        assert!(Threading::Serialized < Threading::Multiple);
+        assert!(check_threading(Threading::Single).is_err());
+        for level in [
+            Threading::Funneled,
+            Threading::Serialized,
+            Threading::Multiple,
+        ] {
+            assert!(check_threading(level).is_ok(), "{level:?}");
+        }
     }
 }

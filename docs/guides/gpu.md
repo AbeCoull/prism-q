@@ -7,7 +7,7 @@ toolkit (12.x or newer) and a CUDA-capable device.
 
 ```bash
 cargo build --release --features "parallel gpu"
-cargo test --features "parallel gpu" --test golden_gpu
+cargo nextest run --features "parallel gpu" --test golden_gpu --test golden_gpu_density_matrix
 ```
 
 CUDA acceleration covers statevector execution, stabilizer execution, density-matrix
@@ -103,9 +103,12 @@ the Rust constants in `src/backend/statevector/kernels.rs`, keeping CPU and GPU 
 
 ## Correctness
 
-`tests/golden_gpu.rs` drives 20 cross-checks comparing GPU amplitudes
-against the CPU statevector within 1e-10. Covers every gate variant, fusion paths, and
-the `BackendKind::StatevectorGpu` public dispatch path at the crossover boundary.
+`tests/golden_gpu.rs` compares GPU amplitudes against the CPU statevector within
+1e-12 for every gate variant, the fusion paths, and the `BackendKind::StatevectorGpu`
+public dispatch path at the crossover boundary; `tests/golden_gpu_density_matrix.rs`
+does the same for the full density matrix buffer. Both suites skip when no device
+opens, and no CI job opens one. `scripts/test-gpu.ps1` runs them with
+`PRISM_REQUIRE_GPU=1` so a missing or unusable device fails the run.
 
 ### Shot reproducibility
 

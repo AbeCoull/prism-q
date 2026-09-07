@@ -43,8 +43,12 @@ requires an MPI installation (the `mpi` crate probes for one in its build script
 Use `cargo test --all-features` when `cargo-nextest` is not installed. Keep doctests on
 `cargo test --doc` until nextest doctest support is no longer experimental.
 
-GPU golden tests run under `cargo test --features "parallel gpu" --test golden_gpu` and
-skip automatically when no CUDA device is present.
+GPU golden tests run under `cargo nextest run --features "parallel gpu" --test golden_gpu
+--test golden_gpu_density_matrix` and skip automatically when no CUDA device is present,
+so a green run on a host without a card means "not tested". No CI job opens a device.
+Before merging a change to `src/gpu/`, the gate set, the fusion pipeline, or a kernel
+table shape, run `scripts/test-gpu.ps1` on a host with a card: it sets
+`PRISM_REQUIRE_GPU=1` so a missing device fails the run instead of skipping.
 
 ## Coverage
 
@@ -159,7 +163,9 @@ workflow will not reach it on its own.
 
 PRs run formatting, clippy, nextest, doctests, doc build, coverage, the release
 bump-level check, aarch64 cross-compile, macOS ARM64 tests, and `cargo-deny`
-(security advisories plus license audit).
+(security advisories plus license audit). The GPU job compiles the `gpu` feature against
+the CUDA toolkit and runs the device-free kernel name registry test; nothing in CI opens
+a device, so `scripts/test-gpu.ps1` covers the device suites on a host with a card.
 
 ## Hot-path rules
 

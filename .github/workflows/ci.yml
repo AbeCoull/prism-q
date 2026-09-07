@@ -475,7 +475,10 @@ jobs:
   # compiles and runs the device-free KERNEL_NAMES test (nothing opens a device),
   # enforcing the exhaustive GPU dispatch matches and the golden_gpu registry at
   # compile time. Pinned to ubuntu-22.04: CUDA 12.4 (matching cudarc's cuda-12040
-  # bindings) has no package for the ubuntu2404 repo on ubuntu-latest.
+  # bindings) has no package for the ubuntu2404 repo on ubuntu-latest. The device
+  # suites (tests/golden_gpu.rs, tests/golden_gpu_density_matrix.rs) skip without a
+  # card and are not run anywhere in CI; scripts/test-gpu.ps1 runs them on a host
+  # with a device under PRISM_REQUIRE_GPU=1.
   gpu-check:
     name: GPU compile-check (no device)
     runs-on: ubuntu-22.04

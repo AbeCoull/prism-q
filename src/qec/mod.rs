@@ -361,10 +361,6 @@ impl QecMeasurementRow {
         }
         terms
     }
-
-    pub fn packed_bytes(&self) -> usize {
-        (self.pauli.x.len() + self.pauli.z.len()) * std::mem::size_of::<u64>()
-    }
 }
 
 /// Compiled QEC record rows ready for sampler lowering.

@@ -255,7 +255,7 @@ pub(crate) fn init_thread_pool() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         if std::env::var("RAYON_NUM_THREADS").is_err() {
-            let threads = num_cpus::get();
+            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
             rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
                 .build_global()
@@ -273,7 +273,7 @@ mod thread_pool_tests {
     fn init_thread_pool_sizes_the_global_pool() {
         let expected: usize = match std::env::var("RAYON_NUM_THREADS") {
             Ok(requested) => requested.parse().expect("RAYON_NUM_THREADS is a count"),
-            Err(_) => num_cpus::get(),
+            Err(_) => std::thread::available_parallelism().map_or(1, |n| n.get()),
         };
 
         super::init_thread_pool();

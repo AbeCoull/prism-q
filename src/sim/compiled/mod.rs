@@ -250,7 +250,7 @@ fn pack_bools(bools: &[bool]) -> Vec<u64> {
 
 #[cfg(feature = "parallel")]
 #[derive(Clone, Copy)]
-struct SendPtrU64(*mut u64);
+pub(super) struct SendPtrU64(pub(super) *mut u64);
 #[cfg(feature = "parallel")]
 // SAFETY: SendPtrU64 is used only for packed shot buffers partitioned by
 // disjoint word ranges before entering parallel workers.
@@ -264,8 +264,14 @@ impl SendPtrU64 {
     #[inline(always)]
     unsafe fn copy_from_slice(self, dst_offset: usize, src: &[u64]) {
         // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe { self.write_slice(dst_offset, src.as_ptr(), src.len()) }
+    }
+
+    #[inline(always)]
+    pub(super) unsafe fn write_slice(self, offset: usize, src: *const u64, len: usize) {
+        // SAFETY: same contract as the enclosing unsafe fn.
         unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), self.0.add(dst_offset), src.len());
+            std::ptr::copy_nonoverlapping(src, self.0.add(offset), len);
         }
     }
 }
@@ -1428,7 +1434,7 @@ impl CompiledSampler {
 
     /// Analytic per-measurement probabilities: 0.5 for any measurement that
     /// depends on a random bit, otherwise the deterministic reference bit.
-    pub fn marginal_probabilities(&self) -> Vec<f64> {
+    pub(crate) fn marginal_probabilities(&self) -> Vec<f64> {
         let mut probs = vec![0.5f64; self.num_measurements];
         if let Some(sparse) = &self.sparse {
             for (m, p) in probs.iter_mut().enumerate() {

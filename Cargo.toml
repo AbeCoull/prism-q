@@ -25,7 +25,6 @@ rand_chacha = "0.10"
 smallvec = "1"
 thiserror = "2"
 rayon = { version = "1.12", optional = true }
-num_cpus = { version = "1", optional = true }
 faer = { version = "0.24", optional = true, default-features = false, features = ["std", "rayon", "linalg"] }
 cudarc = { version = "0.19", optional = true, default-features = false, features = ["cuda-12040", "dynamic-linking", "driver", "nvrtc", "std"] }
 mpi = { version = "0.8", optional = true }
@@ -35,7 +34,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 
 [features]
 default = ["parallel"]
-parallel = ["rayon", "num_cpus", "faer"]
+parallel = ["rayon", "faer"]
 gpu = ["dep:cudarc"]
 distributed = []
 distributed-mpi = ["distributed", "dep:mpi"]
@@ -129,6 +128,10 @@ required-features = ["distributed", "bench-internal"]
 [[example]]
 name = "dist_mpi_check"
 required-features = ["distributed-mpi"]
+
+[[example]]
+name = "bench_gpu_dispatch"
+required-features = ["gpu"]
 
 [[bench]]
 name = "qec_t_strategies"

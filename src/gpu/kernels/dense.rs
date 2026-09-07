@@ -547,6 +547,52 @@ extern "C" __global__ void rdm_qubit_finalize(
     }
 }
 
+// sv_pauli_expect: per-block complex partials of
+// sum_j conj(state[j ^ x]) * state[j] * (-1)^{popcount(j & z)} for mask
+// k = blockIdx.y, two amplitudes per thread; the same product order as the
+// host reduction, so an x == 0 mask lands exactly on |amp|^2 with a zero
+// imaginary part. Partials are laid out [k][block][re, im] and reduced by
+// dm_pauli_expect_finalize.
+extern "C" __global__ void sv_pauli_expect(
+    const double2 *state, unsigned long long dim,
+    const unsigned long long *xmasks, const unsigned long long *zmasks, double *out_partials)
+{
+    extern __shared__ double sdata[];
+    double *sr = sdata;
+    double *si = sdata + blockDim.x;
+    unsigned long long tid = threadIdx.x;
+    unsigned int k = blockIdx.y;
+    unsigned long long x = xmasks[k];
+    unsigned long long z = zmasks[k];
+    double re = 0.0, im = 0.0;
+    unsigned long long j = (unsigned long long)blockIdx.x * (blockDim.x * 2) + tid;
+    for (int rep = 0; rep < 2; ++rep) {
+        if (j < dim) {
+            double2 a = state[j];
+            double2 p = state[j ^ x];
+            double sign = (__popcll(j & z) & 1) ? -1.0 : 1.0;
+            re += sign * (p.x * a.x + p.y * a.y);
+            im += sign * (p.x * a.y - p.y * a.x);
+        }
+        j += blockDim.x;
+    }
+    sr[tid] = re;
+    si[tid] = im;
+    __syncthreads();
+    for (unsigned long long stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sr[tid] += sr[tid + stride];
+            si[tid] += si[tid + stride];
+        }
+        __syncthreads();
+    }
+    if (tid == 0) {
+        unsigned long long slot = ((unsigned long long)k * gridDim.x + blockIdx.x) * 2ULL;
+        out_partials[slot] = sr[0];
+        out_partials[slot + 1] = si[0];
+    }
+}
+
 // measure_collapse: zero amplitudes where qubit bit != outcome.
 // Launch over 2^n threads, block size BLOCK_SIZE.
 
@@ -1559,6 +1605,93 @@ pub(crate) fn reduced_density_matrix_1q(
         [Complex64::new(p0, 0.0), r.conj()],
         [r, Complex64::new(p1, 0.0)],
     ])
+}
+
+/// `sum_j conj(psi[j ^ xmask]) psi[j] (-1)^{popcount(j & zmask)}` per
+/// `(xmask, zmask)` pair with `pending_norm²` applied: the complex accumulator
+/// behind `<P>` before the `i^{num_y}` factor and the norm. Two launches and a
+/// `16 * masks.len()` byte readback replace a full-state export.
+pub(crate) fn pauli_sums(
+    ctx: &GpuContext,
+    state: &GpuState,
+    masks: &[(u64, u64)],
+) -> Result<Vec<Complex64>> {
+    if masks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dim: u64 = 1u64 << state.num_qubits();
+    let elems_per_block = 2u64 * BLOCK_SIZE as u64;
+    let blocks_per_mask = dim.div_ceil(elems_per_block).max(1) as u32;
+    let num_masks = super::require_u32("sv_pauli_expect", "masks", masks.len())?;
+    let device = ctx.device();
+    let stream = device.stream()?;
+    let stage1 = device.function("sv_pauli_expect")?;
+    let stage2 = device.function("dm_pauli_expect_finalize")?;
+    let xmasks: Vec<u64> = masks.iter().map(|m| m.0).collect();
+    let zmasks: Vec<u64> = masks.iter().map(|m| m.1).collect();
+    let shared_bytes = 2 * BLOCK_SIZE * std::mem::size_of::<f64>() as u32;
+
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    let partial_len = 2 * masks.len() * blocks_per_mask as usize;
+    super::ensure_capacity(&mut scratch.measure_partials, device, partial_len)?;
+    super::ensure_scratch(&mut scratch.u64_a, device, &xmasks)?;
+    super::ensure_scratch(&mut scratch.u64_b, device, &zmasks)?;
+    super::ensure_exact(&mut scratch.pauli_result, device, 2 * masks.len())?;
+    let partials = scratch.measure_partials.as_mut().unwrap();
+    {
+        let cfg = LaunchConfig {
+            grid_dim: (blocks_per_mask, num_masks, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        let mut builder = stream.launch_builder(&stage1);
+        builder
+            .arg(state.buffer().raw())
+            .arg(&dim)
+            .arg(scratch.u64_a.as_ref().unwrap().raw())
+            .arg(scratch.u64_b.as_ref().unwrap().raw())
+            .arg(partials.raw_mut());
+        // SAFETY: signature matches the kernel. `blocks_per_mask` blocks of two
+        // amplitudes per thread cover the `dim` amplitudes of each of the
+        // `num_masks` masks, every partner read `j ^ x` stays below `dim`
+        // because `x < dim` (masks are built from validated qubit indices), and
+        // `partials` holds two f64s per (mask, block). All buffers are held by
+        // the scratch guard.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| launch_err("sv_pauli_expect", e))?;
+        }
+    }
+    let result = scratch.pauli_result.as_mut().unwrap();
+    {
+        let cfg = LaunchConfig {
+            grid_dim: (num_masks, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: shared_bytes,
+        };
+        let mut builder = stream.launch_builder(&stage2);
+        builder
+            .arg(scratch.measure_partials.as_ref().unwrap().raw())
+            .arg(&blocks_per_mask)
+            .arg(result.raw_mut());
+        // SAFETY: signature matches the kernel; one block per mask strides over
+        // that mask's `blocks_per_mask` partial pairs, and `result` holds two
+        // f64s per mask. Both buffers are held by the scratch guard.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| launch_err("dm_pauli_expect_finalize", e))?;
+        }
+    }
+    let mut host = vec![0.0_f64; 2 * masks.len()];
+    result.copy_to_host(device, &mut host)?;
+    let norm_sq = state.pending_norm() * state.pending_norm();
+    Ok(host
+        .chunks_exact(2)
+        .map(|pair| Complex64::new(pair[0], pair[1]) * norm_sq)
+        .collect())
 }
 
 /// Zeroes the losing branch only; renormalization is deferred to the caller

@@ -11,8 +11,8 @@ use num_complex::Complex64;
 
 use crate::error::{PrismError, Result};
 
-use super::super::{GpuBuffer, GpuContext, GpuState};
-use super::{ensure_scratch, launch_err, linear_cfg, stream_and_fn};
+use super::super::{GpuContext, GpuState};
+use super::{ensure_exact, ensure_scratch, launch_err, linear_cfg, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -321,20 +321,6 @@ fn buffer_len(state: &GpuState, n: usize) -> u64 {
         "device buffer is not the 2n-qubit embedding"
     );
     1u64 << (2 * n)
-}
-
-/// A device buffer of exactly `len` elements in `slot`, reallocated on any size
-/// change so a readback of its full length matches the request.
-fn ensure_exact<'a>(
-    slot: &'a mut Option<GpuBuffer<f64>>,
-    device: &super::super::GpuDevice,
-    len: usize,
-) -> Result<&'a mut GpuBuffer<f64>> {
-    let len = len.max(1);
-    if slot.as_ref().is_none_or(|buf| buf.len() != len) {
-        *slot = Some(GpuBuffer::<f64>::alloc_zeros(device, len)?);
-    }
-    Ok(slot.as_mut().unwrap())
 }
 
 fn flatten(values: &[Complex64]) -> Vec<f64> {
@@ -705,7 +691,7 @@ pub(crate) fn pauli_sums(
     super::ensure_capacity(&mut scratch.measure_partials, device, partial_len)?;
     ensure_scratch(&mut scratch.u64_a, device, &xmasks)?;
     ensure_scratch(&mut scratch.u64_b, device, &zmasks)?;
-    ensure_exact(&mut scratch.dm_result, device, 2 * masks.len())?;
+    ensure_exact(&mut scratch.pauli_result, device, 2 * masks.len())?;
     let partials = scratch.measure_partials.as_mut().unwrap();
     {
         let cfg = LaunchConfig {
@@ -730,7 +716,7 @@ pub(crate) fn pauli_sums(
                 .map_err(|e| launch_err("dm_pauli_expect", e))?;
         }
     }
-    let result = scratch.dm_result.as_mut().unwrap();
+    let result = scratch.pauli_result.as_mut().unwrap();
     {
         let cfg = LaunchConfig {
             grid_dim: (num_masks, 1, 1),

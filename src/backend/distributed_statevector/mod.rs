@@ -123,17 +123,249 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::simd;
+#[cfg(feature = "parallel")]
+use crate::backend::statevector::SendPtr;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, measurement_inv_norm,
+};
+#[cfg(feature = "parallel")]
+use crate::backend::{
+    MIN_PAR_ELEMS, MIN_PAR_REDUCE_ELEMS, PARALLEL_THRESHOLD_QUBITS, chunk_min_len,
 };
 use crate::circuit::{Instruction, SmallVec, smallvec};
 use crate::distributed::DistributedContext;
 use crate::error::{PrismError, Result};
 use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
 use crate::sim::unified_pauli::PauliTerm;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 const BACKEND_NAME: &str = "distributed_statevector";
+
+/// Shard length at which the combine loops below fan out to Rayon: the same
+/// `2^14` amplitudes the inner backend uses for its own kernels.
+#[cfg(feature = "parallel")]
+const PAR_SHARD_LEN: usize = 1 << PARALLEL_THRESHOLD_QUBITS;
+
+fn scale_shard(state: &mut [Complex64], factor: Complex64) {
+    #[cfg(feature = "parallel")]
+    if state.len() >= PAR_SHARD_LEN {
+        state
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .for_each(|tile| simd::scale_complex_slice(tile, factor));
+        return;
+    }
+    simd::scale_complex_slice(state, factor);
+}
+
+/// Scale the amplitudes whose index has every bit of `mask` set.
+fn scale_shard_masked(state: &mut [Complex64], mask: usize, factor: Complex64) {
+    let tile = |base: usize, tile: &mut [Complex64]| {
+        for (k, amp) in tile.iter_mut().enumerate() {
+            if (base + k) & mask == mask {
+                *amp *= factor;
+            }
+        }
+    };
+    #[cfg(feature = "parallel")]
+    if state.len() >= PAR_SHARD_LEN {
+        state
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(t, chunk)| tile(t * MIN_PAR_ELEMS, chunk));
+        return;
+    }
+    tile(0, state);
+}
+
+fn zero_shard(state: &mut [Complex64]) {
+    #[cfg(feature = "parallel")]
+    if state.len() >= PAR_SHARD_LEN {
+        state
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .for_each(simd::zero_slice);
+        return;
+    }
+    simd::zero_slice(state);
+}
+
+/// `dst[i] = c_self * dst[i] + c_remote * remote[i]` over a received block.
+fn combine_shard(
+    dst: &mut [Complex64],
+    remote: &[Complex64],
+    c_self: Complex64,
+    c_remote: Complex64,
+) {
+    #[cfg(feature = "parallel")]
+    if dst.len() >= PAR_SHARD_LEN {
+        dst.par_chunks_mut(MIN_PAR_ELEMS)
+            .zip(remote.par_chunks(MIN_PAR_ELEMS))
+            .for_each(|(d, r)| simd::combine_global_half(d, r, c_self, c_remote));
+        return;
+    }
+    simd::combine_global_half(dst, remote, c_self, c_remote);
+}
+
+/// `pack[k] = state[index_of(k)]` for every `k`.
+fn gather_indexed(
+    pack: &mut [Complex64],
+    state: &[Complex64],
+    index_of: impl Fn(usize) -> usize + Sync,
+) {
+    #[cfg(feature = "parallel")]
+    if pack.len() >= PAR_SHARD_LEN {
+        pack.par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(t, tile)| {
+                let base = t * MIN_PAR_ELEMS;
+                for (k, slot) in tile.iter_mut().enumerate() {
+                    *slot = state[index_of(base + k)];
+                }
+            });
+        return;
+    }
+    for (k, slot) in pack.iter_mut().enumerate() {
+        *slot = state[index_of(k)];
+    }
+}
+
+/// `state[index_of(k)] = f(state[index_of(k)], recv[k])` for every `k`.
+/// `index_of` must be injective on `0..recv.len()`: the parallel arm relies on
+/// it to keep the tasks' writes disjoint.
+fn scatter_indexed(
+    state: &mut [Complex64],
+    recv: &[Complex64],
+    index_of: impl Fn(usize) -> usize + Sync,
+    f: impl Fn(Complex64, Complex64) -> Complex64 + Sync,
+) {
+    #[cfg(feature = "parallel")]
+    if recv.len() >= PAR_SHARD_LEN {
+        let ptr = SendPtr(state.as_mut_ptr());
+        recv.par_chunks(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(t, tile)| {
+                let base = t * MIN_PAR_ELEMS;
+                for (k, &r) in tile.iter().enumerate() {
+                    let i = index_of(base + k);
+                    // SAFETY: `index_of` is injective and maps into `state`, so
+                    // each index is read and written by exactly one task and no
+                    // two tasks touch the same amplitude.
+                    unsafe { ptr.store(i, f(ptr.load(i), r)) };
+                }
+            });
+        return;
+    }
+    for (k, &r) in recv.iter().enumerate() {
+        let i = index_of(k);
+        state[i] = f(state[i], r);
+    }
+}
+
+/// Visit the `(lo, hi)` halves of every `2^(local_q + 1)` block of `state`
+/// together with the same halves of `recv`, as four equal-length tiles whose
+/// `k`-th elements share a basis index apart from the `local_q` bit.
+fn for_each_pair_tile<F>(state: &mut [Complex64], recv: &mut [Complex64], local_q: usize, f: F)
+where
+    F: Fn(&mut [Complex64], &mut [Complex64], &mut [Complex64], &mut [Complex64]) + Sync,
+{
+    let half = 1usize << local_q;
+    let block = half << 1;
+    #[cfg(feature = "parallel")]
+    if state.len() >= PAR_SHARD_LEN {
+        if state.len() / block >= 4 {
+            state
+                .par_chunks_mut(block)
+                .zip(recv.par_chunks_mut(block))
+                .with_min_len(chunk_min_len(block))
+                .for_each(|(s, r)| {
+                    let (lo, hi) = s.split_at_mut(half);
+                    let (rlo, rhi) = r.split_at_mut(half);
+                    f(lo, hi, rlo, rhi);
+                });
+        } else {
+            for (s, r) in state.chunks_mut(block).zip(recv.chunks_mut(block)) {
+                let (lo, hi) = s.split_at_mut(half);
+                let (rlo, rhi) = r.split_at_mut(half);
+                lo.par_chunks_mut(MIN_PAR_ELEMS)
+                    .zip(hi.par_chunks_mut(MIN_PAR_ELEMS))
+                    .zip(rlo.par_chunks_mut(MIN_PAR_ELEMS))
+                    .zip(rhi.par_chunks_mut(MIN_PAR_ELEMS))
+                    .for_each(|(((lo, hi), rlo), rhi)| f(lo, hi, rlo, rhi));
+            }
+        }
+        return;
+    }
+    for (s, r) in state.chunks_mut(block).zip(recv.chunks_mut(block)) {
+        let (lo, hi) = s.split_at_mut(half);
+        let (rlo, rhi) = r.split_at_mut(half);
+        f(lo, hi, rlo, rhi);
+    }
+}
+
+/// `state[i] = self_coeff * state[i] + sum(coeff * slice[i])` over `terms`,
+/// summed in the order given.
+fn combine_gathered(
+    state: &mut [Complex64],
+    self_coeff: Complex64,
+    terms: &[(Complex64, &[Complex64])],
+) {
+    let tile = |base: usize, tile: &mut [Complex64]| {
+        for (k, amp) in tile.iter_mut().enumerate() {
+            let mut acc = self_coeff * *amp;
+            for &(coeff, slice) in terms {
+                acc += coeff * slice[base + k];
+            }
+            *amp = acc;
+        }
+    };
+    #[cfg(feature = "parallel")]
+    if state.len() >= PAR_SHARD_LEN {
+        state
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .for_each(|(t, chunk)| tile(t * MIN_PAR_ELEMS, chunk));
+        return;
+    }
+    tile(0, state);
+}
+
+/// `sum |a|^2` over the `qubit == outcome` half of every block of a shard,
+/// parallel above `MIN_PAR_REDUCE_ELEMS` like `state_norm_sqr`.
+fn half_norm_sqr(state: &[Complex64], qubit: usize, outcome: bool) -> f64 {
+    fn select(block: &[Complex64], half: usize, outcome: bool) -> &[Complex64] {
+        if outcome {
+            &block[half..]
+        } else {
+            &block[..half]
+        }
+    }
+    let half = 1usize << qubit;
+    let block = half << 1;
+    #[cfg(feature = "parallel")]
+    if state.len() >= MIN_PAR_REDUCE_ELEMS {
+        if state.len() / block >= 4 {
+            return state
+                .par_chunks(block)
+                .with_min_len(chunk_min_len(block))
+                .map(|b| simd::norm_sqr_sum(select(b, half, outcome)))
+                .sum();
+        }
+        return state
+            .chunks(block)
+            .map(|b| {
+                select(b, half, outcome)
+                    .par_chunks(MIN_PAR_ELEMS)
+                    .map(simd::norm_sqr_sum)
+                    .sum::<f64>()
+            })
+            .sum();
+    }
+    state
+        .chunks(block)
+        .map(|b| simd::norm_sqr_sum(select(b, half, outcome)))
+        .sum()
+}
 
 /// Visit every circuit qubit an instruction touches: the instruction targets
 /// plus qubit indices stored inside batched gate data. Indices may repeat.
@@ -452,16 +684,19 @@ impl DistributedStatevectorBackend {
         let mut off = 0;
         while off < moving {
             let count = (off + chunk).min(moving) - off;
-            for (k, slot) in self.pack[..count].iter_mut().enumerate() {
-                *slot = self.inner.state[index_of(off + k)];
-            }
+            gather_indexed(&mut self.pack[..count], &self.inner.state, |k| {
+                index_of(off + k)
+            });
             self.count_exchange(count);
             self.context
                 .comm()
                 .sendrecv_c64(partner, &self.pack[..count], &mut self.recv[..count]);
-            for (k, &amp) in self.recv[..count].iter().enumerate() {
-                self.inner.state[index_of(off + k)] = amp;
-            }
+            scatter_indexed(
+                &mut self.inner.state,
+                &self.recv[..count],
+                |k| index_of(off + k),
+                |_, remote| remote,
+            );
             off += count;
         }
     }
@@ -789,7 +1024,7 @@ impl DistributedStatevectorBackend {
             self.context
                 .comm()
                 .sendrecv_c64(partner, &self.inner.state[off..end], recv);
-            simd::combine_global_half(&mut self.inner.state[off..end], recv, c_self, c_remote);
+            combine_shard(&mut self.inner.state[off..end], recv, c_self, c_remote);
             off = end;
         }
     }
@@ -800,7 +1035,7 @@ impl DistributedStatevectorBackend {
     /// slice by `d0` or `d1`.
     fn apply_global_diagonal_1q(&mut self, target: usize, d0: Complex64, d1: Complex64) {
         let factor = if self.rank_bit_set(target) { d1 } else { d0 };
-        simd::scale_complex_slice(&mut self.inner.state, factor);
+        scale_shard(&mut self.inner.state, factor);
     }
 
     /// Apply a 2x2 matrix to a local target qubit, gated by a set of local
@@ -871,17 +1106,19 @@ impl DistributedStatevectorBackend {
         let mut off = 0;
         while off < moving {
             let count = (off + chunk).min(moving) - off;
-            for (k, slot) in self.pack[..count].iter_mut().enumerate() {
-                *slot = self.inner.state[index_of(off + k)];
-            }
+            gather_indexed(&mut self.pack[..count], &self.inner.state, |k| {
+                index_of(off + k)
+            });
             self.count_exchange(count);
             self.context
                 .comm()
                 .sendrecv_c64(partner, &self.pack[..count], &mut self.recv[..count]);
-            for (k, &remote) in self.recv[..count].iter().enumerate() {
-                let i = index_of(off + k);
-                self.inner.state[i] = c_self * self.inner.state[i] + c_remote * remote;
-            }
+            scatter_indexed(
+                &mut self.inner.state,
+                &self.recv[..count],
+                |k| index_of(off + k),
+                |own, remote| c_self * own + c_remote * remote,
+            );
             off += count;
         }
     }
@@ -917,15 +1154,11 @@ impl DistributedStatevectorBackend {
                 mat[0][0]
             };
             if local_controls.is_empty() {
-                simd::scale_complex_slice(&mut self.inner.state, d);
+                scale_shard(&mut self.inner.state, d);
                 return;
             }
             let ctrl_mask: usize = local_controls.iter().map(|&c| 1usize << c).sum();
-            for (i, amp) in self.inner.state.iter_mut().enumerate() {
-                if i & ctrl_mask == ctrl_mask {
-                    *amp *= d;
-                }
-            }
+            scale_shard_masked(&mut self.inner.state, ctrl_mask, d);
         } else {
             self.apply_global_controlled_1q(&local_controls, target, mat);
         }
@@ -957,7 +1190,7 @@ impl DistributedStatevectorBackend {
         let z = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
         match local_qubits.len() {
-            0 => simd::scale_complex_slice(&mut self.inner.state, phase),
+            0 => scale_shard(&mut self.inner.state, phase),
             1 => self
                 .inner
                 .apply_1q_matrix(local_qubits[0], &[[one, z], [z, phase]])
@@ -1023,7 +1256,7 @@ impl DistributedStatevectorBackend {
                 let parity =
                     ((self.rank_bit_set(q0) as usize) ^ (self.rank_bit_set(q1) as usize)) & 1;
                 let factor = [phase_same, phase_diff][parity];
-                simd::scale_complex_slice(&mut self.inner.state, factor);
+                scale_shard(&mut self.inner.state, factor);
             }
             (true, false) | (false, true) => {
                 // One global qubit is fixed on this rank. The residual is a
@@ -1117,7 +1350,6 @@ impl DistributedStatevectorBackend {
             .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
 
         let g = self.rank_bit_set(global_q) as usize;
-        let half = 1usize << local_q;
         // Basis index in `mat` is `2*b_q0 + b_q1`.
         let basis = |gbit: usize, lbit: usize| -> usize {
             if global_is_q0 {
@@ -1126,19 +1358,25 @@ impl DistributedStatevectorBackend {
                 (lbit << 1) | gbit
             }
         };
-        // Output depends on both local bit siblings, so snapshot first.
-        let local_snapshot = self.inner.state.clone();
-        for i in 0..len {
-            let l = (i >> local_q) & 1;
-            let row = basis(g, l);
-            let sib0 = i & !half; // local bit 0 sibling index
-            let sib1 = i | half; // local bit 1 sibling index
-            let mut acc = mat[row][basis(g, 0)] * local_snapshot[sib0];
-            acc += mat[row][basis(g, 1)] * local_snapshot[sib1];
-            acc += mat[row][basis(1 - g, 0)] * self.recv[sib0];
-            acc += mat[row][basis(1 - g, 1)] * self.recv[sib1];
-            self.inner.state[i] = acc;
-        }
+        // Columns in input order: own lo, own hi, partner lo, partner hi.
+        let cols = [basis(g, 0), basis(g, 1), basis(1 - g, 0), basis(1 - g, 1)];
+        let coeffs = |row: usize| cols.map(|c| mat[row][c]);
+        let (m_lo, m_hi) = (coeffs(basis(g, 0)), coeffs(basis(g, 1)));
+        // Both outputs of a pair read both inputs, so each pair is finished
+        // before either slot is written.
+        for_each_pair_tile(
+            &mut self.inner.state,
+            &mut self.recv[..len],
+            local_q,
+            |lo, hi, rlo, rhi| {
+                for (((s0, s1), &r0), &r1) in lo.iter_mut().zip(hi).zip(rlo.iter()).zip(rhi.iter())
+                {
+                    let (own0, own1) = (*s0, *s1);
+                    *s0 = m_lo[0] * own0 + m_lo[1] * own1 + m_lo[2] * r0 + m_lo[3] * r1;
+                    *s1 = m_hi[0] * own0 + m_hi[1] * own1 + m_hi[2] * r0 + m_hi[3] * r1;
+                }
+            },
+        );
     }
 
     /// Apply a run of two qubit gates that all pair a local qubit with the same
@@ -1162,15 +1400,12 @@ impl DistributedStatevectorBackend {
             .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
 
         let g = self.rank_bit_set(global_q) as usize;
-        let state = &mut self.inner.state;
-        let recv = &mut self.recv[..len];
         for &(q0, q1, ref mat) in entries {
             let (local_q, global_is_q0) = if q0 == global_q {
                 (q1, true)
             } else {
                 (q0, false)
             };
-            let half = 1usize << local_q;
             let basis = |gbit: usize, lbit: usize| -> usize {
                 if global_is_q0 {
                     (gbit << 1) | lbit
@@ -1178,31 +1413,33 @@ impl DistributedStatevectorBackend {
                     (lbit << 1) | gbit
                 }
             };
-            // Slot order: state[i0], state[i1], recv[i0], recv[i1].
+            // Slot order: state lo, state hi, recv lo, recv hi.
             let slots = [basis(g, 0), basis(g, 1), basis(1 - g, 0), basis(1 - g, 1)];
             let zero = Complex64::new(0.0, 0.0);
-            let mut base = 0;
-            while base < len {
-                for i0 in base..base + half {
-                    let i1 = i0 | half;
-                    let mut by_col = [zero; 4];
-                    by_col[slots[0]] = state[i0];
-                    by_col[slots[1]] = state[i1];
-                    by_col[slots[2]] = recv[i0];
-                    by_col[slots[3]] = recv[i1];
-                    let mut outs = [zero; 4];
-                    for (out, &row) in outs.iter_mut().zip(slots.iter()) {
-                        for (c, &amp) in by_col.iter().enumerate() {
-                            *out += mat[row][c] * amp;
+            for_each_pair_tile(
+                &mut self.inner.state,
+                &mut self.recv[..len],
+                local_q,
+                |lo, hi, rlo, rhi| {
+                    for (((s0, s1), r0), r1) in lo.iter_mut().zip(hi).zip(rlo).zip(rhi) {
+                        let mut by_col = [zero; 4];
+                        by_col[slots[0]] = *s0;
+                        by_col[slots[1]] = *s1;
+                        by_col[slots[2]] = *r0;
+                        by_col[slots[3]] = *r1;
+                        let mut outs = [zero; 4];
+                        for (out, &row) in outs.iter_mut().zip(slots.iter()) {
+                            for (c, &amp) in by_col.iter().enumerate() {
+                                *out += mat[row][c] * amp;
+                            }
                         }
+                        *s0 = outs[0];
+                        *s1 = outs[1];
+                        *r0 = outs[2];
+                        *r1 = outs[3];
                     }
-                    state[i0] = outs[0];
-                    state[i1] = outs[1];
-                    recv[i0] = outs[2];
-                    recv[i1] = outs[3];
-                }
-                base += half << 1;
-            }
+                },
+            );
         }
     }
 
@@ -1218,28 +1455,28 @@ impl DistributedStatevectorBackend {
         let rank_basis = (g0 << 1) | g1;
 
         let len = self.inner.state.len();
-        // Accumulate into a fresh buffer so every exchange still sends the
-        // original amplitudes; partner slices arrive one at a time in `recv`.
-        let self_coeff = mat[rank_basis][rank_basis];
-        let mut out: Vec<Complex64> = Vec::with_capacity(len);
-        out.extend(self.inner.state.iter().map(|&amp| self_coeff * amp));
-        self.ensure_recv(len);
-        for (c, &coeff) in mat[rank_basis].iter().enumerate() {
+        // Gather only partner slices. The local term reads from `inner.state`.
+        let mut partners: [Option<Vec<Complex64>>; 4] = [None, None, None, None];
+        for (c, slot) in partners.iter_mut().enumerate() {
             if c == rank_basis {
                 continue;
             }
             let c0 = (c >> 1) & 1;
             let c1 = c & 1;
             let partner = (rank & !(1 << b0) & !(1 << b1)) | (c0 << b0) | (c1 << b1);
+            let mut buf = vec![Complex64::new(0.0, 0.0); len];
             self.count_exchange(len);
             self.context
                 .comm()
-                .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
-            for (acc, &remote) in out.iter_mut().zip(&self.recv) {
-                *acc += coeff * remote;
-            }
+                .sendrecv_c64(partner, &self.inner.state, &mut buf);
+            *slot = Some(buf);
         }
-        self.inner.state = out;
+        let terms: SmallVec<[(Complex64, &[Complex64]); 3]> = partners
+            .iter()
+            .enumerate()
+            .filter_map(|(c, slot)| slot.as_deref().map(|slice| (mat[rank_basis][c], slice)))
+            .collect();
+        combine_gathered(&mut self.inner.state, mat[rank_basis][rank_basis], &terms);
     }
 
     /// Dispatch a gate that spans at least one global qubit.
@@ -1394,16 +1631,9 @@ impl DistributedStatevectorBackend {
     fn prob_outcome_global(&self, qubit: usize, outcome: bool) -> f64 {
         let norm_sq = self.inner.pending_norm * self.inner.pending_norm;
         let local_prob = if qubit < self.local_qubits() {
-            let half = 1usize << qubit;
-            let block_size = half << 1;
-            let mut acc = 0.0f64;
-            for block in self.inner.state.chunks(block_size) {
-                let (lo, hi) = block.split_at(half);
-                acc += simd::norm_sqr_sum(if outcome { hi } else { lo });
-            }
-            acc
+            half_norm_sqr(&self.inner.state, qubit, outcome)
         } else if self.rank_bit_set(qubit) == outcome {
-            simd::norm_sqr_sum(&self.inner.state)
+            crate::backend::state_norm_sqr(&self.inner.state)
         } else {
             0.0
         };
@@ -1519,23 +1749,36 @@ impl DistributedStatevectorBackend {
 
     /// Zero the amplitudes inconsistent with `qubit == outcome`.
     fn collapse(&mut self, qubit: usize, outcome: bool) {
-        let zero = Complex64::new(0.0, 0.0);
         if qubit < self.local_qubits() {
+            fn dropped(block: &mut [Complex64], half: usize, outcome: bool) -> &mut [Complex64] {
+                let (lo, hi) = block.split_at_mut(half);
+                if outcome { lo } else { hi }
+            }
             let half = 1usize << qubit;
             let block_size = half << 1;
-            for block in self.inner.state.chunks_mut(block_size) {
-                let (lo, hi) = block.split_at_mut(half);
-                if outcome {
-                    simd::zero_slice(lo);
+            #[cfg(feature = "parallel")]
+            if self.inner.state.len() >= PAR_SHARD_LEN {
+                if self.inner.state.len() / block_size >= 4 {
+                    self.inner
+                        .state
+                        .par_chunks_mut(block_size)
+                        .with_min_len(chunk_min_len(block_size))
+                        .for_each(|block| simd::zero_slice(dropped(block, half, outcome)));
                 } else {
-                    simd::zero_slice(hi);
+                    for block in self.inner.state.chunks_mut(block_size) {
+                        dropped(block, half, outcome)
+                            .par_chunks_mut(MIN_PAR_ELEMS)
+                            .for_each(simd::zero_slice);
+                    }
                 }
+                return;
+            }
+            for block in self.inner.state.chunks_mut(block_size) {
+                simd::zero_slice(dropped(block, half, outcome));
             }
         } else if self.rank_bit_set(qubit) != outcome {
             // This rank holds the eliminated branch entirely.
-            for amp in self.inner.state.iter_mut() {
-                *amp = zero;
-            }
+            zero_shard(&mut self.inner.state);
         }
     }
 

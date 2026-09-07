@@ -21,11 +21,11 @@ mod common;
 use common::{SEED, configure_group, is_fast};
 
 fn steady_sizes() -> &'static [usize] {
-    if is_fast() { &[12] } else { &[16] }
+    if is_fast() { &[12] } else { &[16, 20] }
 }
 
 fn direct_sizes() -> &'static [usize] {
-    if is_fast() { &[14] } else { &[18] }
+    if is_fast() { &[14] } else { &[18, 20] }
 }
 
 /// Fused QAOA behind one SWAP, so the qubit map is non-identity for every
@@ -67,6 +67,39 @@ fn bench_boundary_swap_direct(c: &mut Criterion) {
         circuit.add_gate(Gate::X, &[0]);
         for _ in 0..8 {
             circuit.add_gate(Gate::Swap, &[0, n - 1]);
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                let amplitudes = run_ranks(2, |ctx| {
+                    let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                    backend.set_relabel(false);
+                    backend
+                        .init(circ.num_qubits, circ.num_classical_bits)
+                        .unwrap();
+                    backend.apply_instructions(&circ.instructions).unwrap();
+                    backend.exchange_amplitudes()
+                });
+                std::hint::black_box(amplitudes);
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// A wall of non-diagonal one qubit gates on the global qubit in
+/// direct-exchange mode: every gate exchanges the full slice and combines the
+/// received half with its own.
+fn bench_global_1q_wall(c: &mut Criterion) {
+    let mut group = c.benchmark_group("distributed/global_1q_wall");
+    configure_group(&mut group);
+
+    for &n in direct_sizes() {
+        let top = n - 1;
+        let mut circuit = Circuit::new(n, 0);
+        for _ in 0..8 {
+            circuit.add_gate(Gate::H, &[top]);
+            circuit.add_gate(Gate::Rx(0.3), &[top]);
         }
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -154,6 +187,7 @@ criterion_group! {
     targets =
         bench_steady_state_batched,
     bench_boundary_swap_direct,
+    bench_global_1q_wall,
     bench_controlled_star_direct
 }
 criterion_main!(benches);

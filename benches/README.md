@@ -96,13 +96,17 @@ both the working tree and the reference worktree.
 
 Requires `--features "parallel distributed bench-internal"`. Rank pairs run on the
 thread loopback transport, so exchanges move at memcpy speed: the rows resolve
-packing, copying, and per-gate dispatch cost, not network latency.
+packing, copying, and per-gate dispatch cost, not network latency. Outside
+`bench-fast` each group runs at two register widths; the larger one puts the
+per-rank shard above the Rayon threshold so the combine loops after an exchange
+fan out.
 
 | Group | What it measures |
 |-------|-----------------|
-| `distributed/steady_state_batched` | Fused QAOA behind one SWAP: batched-payload dispatch with a non-identity qubit map |
-| `distributed/boundary_swap_direct` | Repeated boundary SWAPs with relabeling off: the half-slice pack path |
-| `distributed/controlled_star_direct` | Controlled gates and a Multi2q star onto one global qubit with relabeling off |
+| `distributed/steady_state_batched` | Fused QAOA behind one SWAP at 16 and 20 qubits: batched-payload dispatch with a non-identity qubit map |
+| `distributed/boundary_swap_direct` | Repeated boundary SWAPs at 18 and 20 qubits with relabeling off: the half-slice pack path |
+| `distributed/global_1q_wall` | H and Rx repeated on the global qubit at 18 and 20 qubits with relabeling off: the full-slice exchange and combine path |
+| `distributed/controlled_star_direct` | Controlled gates and a Multi2q star onto one global qubit at 18 and 20 qubits with relabeling off |
 
 ## Circuit families
 

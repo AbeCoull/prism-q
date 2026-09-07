@@ -1552,3 +1552,79 @@ fn loopback_apply_1q_matrix_all_qubit_splits() {
         }
     }
 }
+
+// Two ranks at 18 qubits hold 2^17 amplitudes per shard and four ranks hold
+// 2^16, above both Rayon thresholds of the shard loops (gate combine at 2^14,
+// norm reduction at 2^16), so every direct exchange path below runs its
+// parallel arm. Instructions are applied unfused so each gate reaches the path
+// its qubit split names. The measurement stream is shared with the dense
+// backend, so outcomes must agree exactly.
+#[test]
+fn loopback_wide_shards_match_statevector_on_every_direct_path() {
+    use crate::gates::{Gate, Multi2qData};
+    let n = 18;
+    let (s, t) = (n - 2, n - 1);
+    let c64 = |re: f64| Complex64::new(re, 0.0);
+    let z = c64(0.0);
+    let cry = |theta: f64| {
+        let (sin, cos) = (theta / 2.0).sin_cos();
+        [
+            [c64(1.0), z, z, z],
+            [z, c64(1.0), z, z],
+            [z, z, c64(cos), c64(-sin)],
+            [z, z, c64(sin), c64(cos)],
+        ]
+    };
+    let cx_mat = [
+        [c64(1.0), z, z, z],
+        [z, c64(1.0), z, z],
+        [z, z, z, c64(1.0)],
+        [z, z, c64(1.0), z],
+    ];
+    let diag = [[Complex64::cis(0.3), z], [z, Complex64::cis(0.7)]];
+
+    let mut circuit = Circuit::new(n, 2);
+    for q in [0, 1, 2, s, t] {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_gate(Gate::Rx(0.3), &[t]);
+    circuit.add_gate(Gate::Rz(0.5), &[t]);
+    circuit.add_gate(Gate::Cx, &[0, t]);
+    circuit.add_gate(Gate::cu(diag), &[1, t]);
+    circuit.add_gate(Gate::Rzz(0.4), &[s, t]);
+    circuit.add_gate(Gate::Cz, &[s, t]);
+    circuit.add_gate(Gate::Swap, &[2, t]);
+    circuit.add_gate(Gate::Fused2q(Box::new(cry(0.6))), &[1, t]);
+    circuit.add_gate(Gate::Fused2q(Box::new(cry(0.8))), &[t, 2]);
+    circuit.add_gate(Gate::Fused2q(Box::new(cry(0.7))), &[s, t]);
+    let gates = vec![(0, t, cx_mat), (1, t, cry(0.3))];
+    circuit.add_gate(Gate::Multi2q(Box::new(Multi2qData { gates })), &[0, 1, t]);
+    circuit.add_measure(t, 0);
+    circuit.add_measure(0, 1);
+
+    let mut sv = StatevectorBackend::new(SEED);
+    sv.init(n, 2).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let expected = sv.probabilities().unwrap();
+    let expected_bits = sv.classical_results().to_vec();
+
+    for size in [2usize, 4] {
+        let (probs, bits) = run_ranks(size, |ctx| {
+            let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+            backend.set_relabel(false);
+            backend.init(n, 2).unwrap();
+            backend.apply_instructions(&circuit.instructions).unwrap();
+            let probs = backend.probabilities().unwrap();
+            (probs, backend.classical_results().to_vec())
+        })
+        .swap_remove(0);
+        assert_eq!(expected_bits, bits, "size {size}: measurement outcomes");
+        assert_eq!(expected.len(), probs.len());
+        for (i, (e, a)) in expected.iter().zip(probs.iter()).enumerate() {
+            assert!(
+                (e - a).abs() < TOL,
+                "size {size}: prob[{i}] expected {e}, got {a}"
+            );
+        }
+    }
+}

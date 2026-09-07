@@ -2,9 +2,10 @@
 //! launcher functions.
 //!
 //! The PTX module is composed by concatenating each backend's CUDA C source (dense for
-//! the statevector path, stabilizer for the stabilizer path). NVRTC compiles the
-//! combined source once per `GpuContext`; `KERNEL_NAMES` lists every entry point from
-//! every backend so `GpuDevice::new` can pre-resolve them all.
+//! the statevector path, stabilizer for the stabilizer path). `GpuDevice::new` compiles
+//! the combined source through NVRTC once per source change per host and caches the
+//! PTX; `KERNEL_NAMES` lists every entry point from every backend so it can pre-resolve
+//! them all.
 
 pub(crate) mod bts;
 pub(crate) mod dense;

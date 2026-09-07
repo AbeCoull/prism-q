@@ -164,7 +164,8 @@ extern "C" __global__ void dm_kraus_2q_diagonal(
 // Dense 16x16 block superoperator `s` (row-major, 256 complex entries), one
 // block of 16 amplitudes per thread.
 extern "C" __global__ void dm_kraus_2q_dense(
-    double2 *state, unsigned long long groups, int q0, int q1, int n, const double2 *s)
+    double2 * __restrict__ state, unsigned long long groups, int q0, int q1, int n,
+    const double2 * __restrict__ s)
 {
     unsigned long long m = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (m >= groups) return;
@@ -177,6 +178,7 @@ extern "C" __global__ void dm_kraus_2q_dense(
     }
     for (int row = 0; row < 16; ++row) {
         double re = 0.0, im = 0.0;
+        #pragma unroll
         for (int col = 0; col < 16; ++col) {
             double2 c = s[row * 16 + col];
             re += c.x * v[col].x - c.y * v[col].y;
@@ -513,13 +515,13 @@ pub(crate) fn diagonal_sandwich(
     let (stream, func) = stream_and_fn(ctx, "dm_diagonal_sandwich")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
     let mut scratch = ctx.launcher_scratch();
-    let table_buf = ensure_scratch(&mut scratch.f64_a, device, &flatten(table))?;
+    let table_buf = super::stage_complex(&mut scratch.blob, device, table)?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
         .arg(&len)
         .arg(&n_i)
-        .arg(table_buf.raw());
+        .arg(&table_buf.f64s);
     // SAFETY: signature matches the kernel; the grid covers `len`, every table
     // read is below `2^n`, and the table is held by the scratch guard.
     unsafe {
@@ -547,7 +549,7 @@ pub(crate) fn kraus_2q_diagonal(
     let (stream, func) = stream_and_fn(ctx, "dm_kraus_2q_diagonal")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
     let mut scratch = ctx.launcher_scratch();
-    let diag_buf = ensure_scratch(&mut scratch.f64_a, device, &flatten(diag))?;
+    let diag_buf = super::stage_complex(&mut scratch.blob, device, diag)?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -555,7 +557,7 @@ pub(crate) fn kraus_2q_diagonal(
         .arg(&q0_i)
         .arg(&q1_i)
         .arg(&n_i)
-        .arg(diag_buf.raw());
+        .arg(&diag_buf.f64s);
     // SAFETY: signature matches the kernel; the grid covers `len` and the slot
     // index is four bits, inside the 16-entry table the scratch guard holds.
     unsafe {
@@ -581,9 +583,13 @@ pub(crate) fn kraus_2q_dense(
     let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "dm_kraus_2q_dense")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups));
-    let flat: Vec<Complex64> = s.iter().flat_map(|row| row.iter().copied()).collect();
     let mut scratch = ctx.launcher_scratch();
-    let s_buf = ensure_scratch(&mut scratch.f64_a, device, &flatten(&flat))?;
+    let s_buf = super::stage_blob(&mut scratch.blob, device, std::iter::empty(), 512, |dst| {
+        for (d, c) in dst.chunks_exact_mut(2).zip(s.iter().flatten()) {
+            d[0] = c.re;
+            d[1] = c.im;
+        }
+    })?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -591,7 +597,7 @@ pub(crate) fn kraus_2q_dense(
         .arg(&q0_i)
         .arg(&q1_i)
         .arg(&n_i)
-        .arg(s_buf.raw());
+        .arg(&s_buf.f64s);
     // SAFETY: signature matches the kernel. Inserting a zero bit at each of the
     // four block positions is a bijection from the compacted index onto the
     // block bases, so the 16 amplitudes one thread touches are disjoint from

@@ -136,7 +136,7 @@ fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error:
     let Ok(free) = context.vram_available() else {
         return Ok(());
     };
-    let needed = (1usize << num_qubits) * 16;
+    let needed = (1usize << num_qubits) * crate::gpu::STATEVECTOR_BYTES_PER_AMPLITUDE;
     if needed > free {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: "statevector-gpu".to_string(),

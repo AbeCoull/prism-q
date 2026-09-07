@@ -42,14 +42,15 @@ pub fn min_local_qubits() -> usize {
     })
 }
 
-/// Maximum number of amplitudes exchanged per message for a global one qubit
-/// gate. Chunking bounds the receive buffer to this value.
+/// Maximum number of amplitudes exchanged per message on the direct exchange
+/// paths of the distributed backend. Chunking bounds the transfer buffers to
+/// this value.
 ///
 /// Tunable via `PRISM_DIST_EXCHANGE_CHUNK`. The default (`usize::MAX`) keeps the
 /// original one message behavior, so there is no change unless set.
 pub const EXCHANGE_CHUNK_DEFAULT: usize = usize::MAX;
 
-/// Chunk size in amplitudes for tiled global one qubit exchange.
+/// Chunk size in amplitudes for the tiled rank exchanges.
 ///
 /// An unparseable or out-of-range value warns on stderr and uses the default.
 pub fn exchange_chunk() -> usize {

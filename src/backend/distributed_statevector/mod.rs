@@ -21,7 +21,8 @@
 //! Fusion runs in every mode. Local fused gates dispatch to the inner SIMD
 //! kernels. Fused or batched gates that span rank bits are decomposed into the
 //! paths above. A general two qubit gate over one global qubit needs one
-//! pairwise exchange; over two global qubits it gathers a group of four ranks.
+//! pairwise exchange; over two global qubits it runs a two step butterfly
+//! across the group of four ranks that share the other rank bits.
 //!
 //! Once a rank resolves its global qubit bits, the remaining gate is local and
 //! dispatches to the inner backend. The only manual amplitude loops combine the
@@ -89,8 +90,8 @@
 //! global qubit costs a half-slice relabel exchange that also makes later gates
 //! on that qubit local. On the direct paths, a global one qubit gate, or a two
 //! qubit gate over one global qubit, costs one pairwise exchange of the local
-//! slice; a two qubit gate over two global qubits gathers four ranks. Both the
-//! direct one qubit exchange and the relabel exchange are tiled by
+//! slice; a two qubit gate over two global qubits costs two, one per rank bit.
+//! Every direct exchange and the relabel exchange are tiled by
 //! [`crate::distributed::exchange_chunk`], which bounds the transfer buffers.
 //!
 //! [`DistributedStatevectorBackend::exchange_messages`] and
@@ -303,31 +304,50 @@ where
     }
 }
 
-/// `state[i] = self_coeff * state[i] + sum(coeff * slice[i])` over `terms`,
-/// summed in the order given.
-fn combine_gathered(
+/// Butterfly step over a received block: `pack[i] = forward[0] * state[i] +
+/// forward[1] * remote[i]` is the partial sum forwarded to the next partner,
+/// then `state[i] = keep[0] * state[i] + keep[1] * remote[i]`.
+fn butterfly_shard(
     state: &mut [Complex64],
-    self_coeff: Complex64,
-    terms: &[(Complex64, &[Complex64])],
+    remote: &[Complex64],
+    pack: &mut [Complex64],
+    keep: [Complex64; 2],
+    forward: [Complex64; 2],
 ) {
-    let tile = |base: usize, tile: &mut [Complex64]| {
-        for (k, amp) in tile.iter_mut().enumerate() {
-            let mut acc = self_coeff * *amp;
-            for &(coeff, slice) in terms {
-                acc += coeff * slice[base + k];
-            }
-            *amp = acc;
+    let tile = |state: &mut [Complex64], remote: &[Complex64], pack: &mut [Complex64]| {
+        for ((s, &r), p) in state.iter_mut().zip(remote).zip(pack.iter_mut()) {
+            let own = *s;
+            *p = forward[0] * own + forward[1] * r;
+            *s = keep[0] * own + keep[1] * r;
         }
     };
     #[cfg(feature = "parallel")]
     if state.len() >= PAR_SHARD_LEN {
         state
             .par_chunks_mut(MIN_PAR_ELEMS)
-            .enumerate()
-            .for_each(|(t, chunk)| tile(t * MIN_PAR_ELEMS, chunk));
+            .zip(remote.par_chunks(MIN_PAR_ELEMS))
+            .zip(pack.par_chunks_mut(MIN_PAR_ELEMS))
+            .for_each(|((s, r), p)| tile(s, r, p));
         return;
     }
-    tile(0, state);
+    tile(state, remote, pack);
+}
+
+/// `dst[i] += src[i]` over a received block.
+fn add_shard(dst: &mut [Complex64], src: &[Complex64]) {
+    let tile = |dst: &mut [Complex64], src: &[Complex64]| {
+        for (d, &s) in dst.iter_mut().zip(src) {
+            *d += s;
+        }
+    };
+    #[cfg(feature = "parallel")]
+    if dst.len() >= PAR_SHARD_LEN {
+        dst.par_chunks_mut(MIN_PAR_ELEMS)
+            .zip(src.par_chunks(MIN_PAR_ELEMS))
+            .for_each(|(d, s)| tile(d, s));
+        return;
+    }
+    tile(dst, src);
 }
 
 /// `sum |a|^2` over the `qubit == outcome` half of every block of a shard,
@@ -472,10 +492,13 @@ pub struct DistributedStatevectorBackend {
     inner: StatevectorBackend,
     num_qubits: usize,
     global_qubits: usize,
+    /// Receive buffer for the direct exchange paths. Grows to the largest tile
+    /// requested and never shrinks; callers take a `[..len]` view.
     recv: Vec<Complex64>,
     seed: u64,
-    /// Max amplitudes exchanged per message for a global one qubit gate.
-    /// Tiling the exchange bounds the receive buffer to `exchange_chunk`.
+    /// Max amplitudes exchanged per message on the direct exchange paths.
+    /// Tiling bounds `recv` and `pack` to one tile; the two qubit paths round
+    /// the tile down to whole pair blocks.
     exchange_chunk: usize,
     /// Count of `sendrecv` messages issued by this rank, and the total
     /// amplitudes exchanged. Reorder and routing passes should minimize these
@@ -501,7 +524,8 @@ pub struct DistributedStatevectorBackend {
     /// Drives least recently used eviction for relabel victims.
     last_used: Vec<u64>,
     tick: u64,
-    /// Send-side packing buffer for the half-slice relabel exchange.
+    /// Send-side buffer for the indexed exchanges and the forwarded partial of
+    /// the two global butterfly. Grow-only like `recv`.
     pack: Vec<Complex64>,
     /// Armed by `init`, spent by the first instruction batch, which is where the
     /// circuit fingerprint is cross-checked.
@@ -569,11 +593,30 @@ impl DistributedStatevectorBackend {
         self.exchange_amplitudes += amplitudes as u64;
     }
 
+    /// Grow `recv` to at least `len` amplitudes. Never shrinks, so paths that
+    /// alternate between chunk and slice lengths reuse one allocation and skip
+    /// the refill.
     #[inline]
     fn ensure_recv(&mut self, len: usize) {
-        if self.recv.len() != len {
+        if self.recv.len() < len {
             self.recv.resize(len, Complex64::new(0.0, 0.0));
         }
+    }
+
+    /// `pack` counterpart of [`Self::ensure_recv`].
+    #[inline]
+    fn ensure_pack(&mut self, len: usize) {
+        if self.pack.len() < len {
+            self.pack.resize(len, Complex64::new(0.0, 0.0));
+        }
+    }
+
+    /// Exchange chunk rounded down to whole `2^block_bits` blocks, at least one
+    /// block and at most `len`, so a tile holds complete pair blocks.
+    #[inline]
+    fn block_chunk(&self, block_bits: usize, len: usize) -> usize {
+        let block = 1usize << block_bits;
+        ((self.exchange_chunk / block).max(1) * block).min(len)
     }
 
     #[inline]
@@ -675,9 +718,7 @@ impl DistributedStatevectorBackend {
         let fixed = if gbit { 0 } else { stride };
         let moving = self.inner.state.len() / 2;
         let chunk = self.exchange_chunk.min(moving).max(1);
-        if self.pack.len() != chunk {
-            self.pack.resize(chunk, Complex64::new(0.0, 0.0));
-        }
+        self.ensure_pack(chunk);
         self.ensure_recv(chunk);
         let index_of =
             |flat: usize| ((flat >> local_pos) << (local_pos + 1)) | fixed | (flat & (stride - 1));
@@ -736,26 +777,7 @@ impl DistributedStatevectorBackend {
             self.relabel_swap(a, b);
             return;
         } else {
-            let ga = self.global_bit(a);
-            let gb = self.global_bit(b);
-            let rank = self.context.rank();
-            if ((rank >> ga) ^ (rank >> gb)) & 1 == 1 {
-                let partner = rank ^ ((1usize << ga) | (1usize << gb));
-                let len = self.inner.state.len();
-                let chunk = self.exchange_chunk.min(len).max(1);
-                self.ensure_recv(chunk);
-                let mut off = 0;
-                while off < len {
-                    let end = (off + chunk).min(len);
-                    self.count_exchange(end - off);
-                    let recv = &mut self.recv[..end - off];
-                    self.context
-                        .comm()
-                        .sendrecv_c64(partner, &self.inner.state[off..end], recv);
-                    self.inner.state[off..end].copy_from_slice(recv);
-                    off = end;
-                }
-            }
+            self.swap_global_slices(a, b);
         }
         let qa = self.phys_map[a];
         let qb = self.phys_map[b];
@@ -881,8 +903,7 @@ impl DistributedStatevectorBackend {
     }
 
     /// Fingerprint of every setting the collective sequence assumes is shared.
-    /// Rank id and rank count are excluded; they legitimately differ. Folded to
-    /// 53 bits so it survives the `f64` collectives exactly.
+    /// Rank id and rank count are excluded; they legitimately differ.
     fn config_fingerprint(&self, num_qubits: usize, num_classical_bits: usize) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::hash::DefaultHasher::new();
@@ -895,7 +916,7 @@ impl DistributedStatevectorBackend {
             num_classical_bits,
         )
             .hash(&mut hasher);
-        hasher.finish() >> 11
+        hasher.finish()
     }
 
     /// Fold the instruction stream into the value ranks compare.
@@ -919,7 +940,7 @@ impl DistributedStatevectorBackend {
 
         let mut hasher = std::hash::DefaultHasher::new();
         let _ = write!(HashSink(&mut hasher), "{instructions:?}");
-        hasher.finish() >> 11
+        hasher.finish()
     }
 
     /// Reject a run whose ranks were handed different circuits.
@@ -933,8 +954,8 @@ impl DistributedStatevectorBackend {
     /// a rank that never reaches the run at all: that one hangs in this
     /// allgather instead of a later one.
     fn check_circuit_agreement(&self, instructions: &[Instruction]) -> Result<()> {
-        let local = Self::circuit_fingerprint(instructions) as f64;
-        let all = self.context.comm().allgather_f64(&[local]);
+        let local = Self::circuit_fingerprint(instructions);
+        let all = self.context.comm().allgather_u64(&[local]);
         match all.iter().position(|&other| other != local) {
             None => Ok(()),
             Some(other) => Err(PrismError::BackendUnsupported {
@@ -955,8 +976,8 @@ impl DistributedStatevectorBackend {
     /// order) or as silently wrong amplitudes (measurement branches drawn from
     /// different seeds), both far from the setting that caused them.
     fn check_config_agreement(&self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
-        let local = self.config_fingerprint(num_qubits, num_classical_bits) as f64;
-        let all = self.context.comm().allgather_f64(&[local]);
+        let local = self.config_fingerprint(num_qubits, num_classical_bits);
+        let all = self.context.comm().allgather_u64(&[local]);
         match all.iter().position(|&other| other != local) {
             None => Ok(()),
             Some(other) => Err(PrismError::BackendUnsupported {
@@ -1099,9 +1120,7 @@ impl DistributedStatevectorBackend {
         };
         let moving = self.inner.state.len() >> ctrl_pos.len();
         let chunk = self.exchange_chunk.min(moving).max(1);
-        if self.pack.len() != chunk {
-            self.pack.resize(chunk, Complex64::new(0.0, 0.0));
-        }
+        self.ensure_pack(chunk);
         self.ensure_recv(chunk);
         let mut off = 0;
         while off < moving {
@@ -1289,27 +1308,37 @@ impl DistributedStatevectorBackend {
                     })
                     .expect("local swap");
             }
-            (false, false) => {
-                // Both are global. Ranks that differ in these two bits swap
-                // slices. Equal bits stay in place.
-                if self.rank_bit_set(a) == self.rank_bit_set(b) {
-                    return;
-                }
-                let partner = self.context.rank()
-                    ^ (1usize << self.global_bit(a))
-                    ^ (1usize << self.global_bit(b));
-                let len = self.inner.state.len();
-                self.ensure_recv(len);
-                self.count_exchange(len);
-                self.context
-                    .comm()
-                    .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
-                self.inner.state.copy_from_slice(&self.recv);
-            }
+            (false, false) => self.swap_global_slices(a, b),
             (true, false) | (false, true) => {
                 let (local_q, global_q) = if a < local { (a, b) } else { (b, a) };
                 self.half_slice_swap(local_q, global_q);
             }
+        }
+    }
+
+    /// Exchange whole slices between the rank pairs whose bits at global
+    /// positions `a` and `b` differ; a rank with equal bits holds fixed points
+    /// of the SWAP and skips. The copy is elementwise, so the exchange streams
+    /// in `exchange_chunk` tiles.
+    fn swap_global_slices(&mut self, a: usize, b: usize) {
+        if self.rank_bit_set(a) == self.rank_bit_set(b) {
+            return;
+        }
+        let partner =
+            self.context.rank() ^ (1usize << self.global_bit(a)) ^ (1usize << self.global_bit(b));
+        let len = self.inner.state.len();
+        let chunk = self.exchange_chunk.min(len).max(1);
+        self.ensure_recv(chunk);
+        let mut off = 0;
+        while off < len {
+            let end = (off + chunk).min(len);
+            self.count_exchange(end - off);
+            let recv = &mut self.recv[..end - off];
+            self.context
+                .comm()
+                .sendrecv_c64(partner, &self.inner.state[off..end], recv);
+            self.inner.state[off..end].copy_from_slice(recv);
+            off = end;
         }
     }
 
@@ -1334,6 +1363,8 @@ impl DistributedStatevectorBackend {
 
     /// One qubit is local and one is global. Exchange with the partner rank,
     /// then recompute each amplitude from the four inputs of the 2x2 block.
+    /// Each pair block of `2^(local_q + 1)` amplitudes is self-contained, so the
+    /// exchange streams in tiles of whole blocks.
     fn apply_2q_one_global(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
         let local = self.local_qubits();
         let (local_q, global_q, global_is_q0) = if q0 < local {
@@ -1343,11 +1374,8 @@ impl DistributedStatevectorBackend {
         };
         let partner = self.context.rank() ^ (1usize << self.global_bit(global_q));
         let len = self.inner.state.len();
-        self.ensure_recv(len);
-        self.count_exchange(len);
-        self.context
-            .comm()
-            .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
+        let chunk = self.block_chunk(local_q + 1, len);
+        self.ensure_recv(chunk);
 
         let g = self.rank_bit_set(global_q) as usize;
         // Basis index in `mat` is `2*b_q0 + b_q1`.
@@ -1362,21 +1390,32 @@ impl DistributedStatevectorBackend {
         let cols = [basis(g, 0), basis(g, 1), basis(1 - g, 0), basis(1 - g, 1)];
         let coeffs = |row: usize| cols.map(|c| mat[row][c]);
         let (m_lo, m_hi) = (coeffs(basis(g, 0)), coeffs(basis(g, 1)));
-        // Both outputs of a pair read both inputs, so each pair is finished
-        // before either slot is written.
-        for_each_pair_tile(
-            &mut self.inner.state,
-            &mut self.recv[..len],
-            local_q,
-            |lo, hi, rlo, rhi| {
-                for (((s0, s1), &r0), &r1) in lo.iter_mut().zip(hi).zip(rlo.iter()).zip(rhi.iter())
-                {
-                    let (own0, own1) = (*s0, *s1);
-                    *s0 = m_lo[0] * own0 + m_lo[1] * own1 + m_lo[2] * r0 + m_lo[3] * r1;
-                    *s1 = m_hi[0] * own0 + m_hi[1] * own1 + m_hi[2] * r0 + m_hi[3] * r1;
-                }
-            },
-        );
+        let mut off = 0;
+        while off < len {
+            let end = (off + chunk).min(len);
+            self.count_exchange(end - off);
+            let recv = &mut self.recv[..end - off];
+            self.context
+                .comm()
+                .sendrecv_c64(partner, &self.inner.state[off..end], recv);
+            // Both outputs of a pair read both inputs, so each pair is finished
+            // before either slot is written.
+            for_each_pair_tile(
+                &mut self.inner.state[off..end],
+                recv,
+                local_q,
+                |lo, hi, rlo, rhi| {
+                    for (((s0, s1), &r0), &r1) in
+                        lo.iter_mut().zip(hi).zip(rlo.iter()).zip(rhi.iter())
+                    {
+                        let (own0, own1) = (*s0, *s1);
+                        *s0 = m_lo[0] * own0 + m_lo[1] * own1 + m_lo[2] * r0 + m_lo[3] * r1;
+                        *s1 = m_hi[0] * own0 + m_hi[1] * own1 + m_hi[2] * r0 + m_hi[3] * r1;
+                    }
+                },
+            );
+            off = end;
+        }
     }
 
     /// Apply a run of two qubit gates that all pair a local qubit with the same
@@ -1385,98 +1424,138 @@ impl DistributedStatevectorBackend {
     /// and the mirrored partner copy together, exactly as the partner does with
     /// the roles flipped. Sums run in canonical basis order so both ranks
     /// produce bit-identical copies and stay in lockstep without further
-    /// communication.
+    /// communication. Every entry's pair block fits inside a tile of whole
+    /// blocks of the widest entry, so the exchange streams in such tiles and
+    /// the run is applied tile by tile.
     fn apply_2q_run_one_global(
         &mut self,
         global_q: usize,
         entries: &[(usize, usize, [[Complex64; 4]; 4])],
     ) {
         let partner = self.context.rank() ^ (1usize << self.global_bit(global_q));
+        let local_of = |q0: usize, q1: usize| if q0 == global_q { q1 } else { q0 };
+        let widest = entries
+            .iter()
+            .map(|&(q0, q1, _)| local_of(q0, q1))
+            .max()
+            .expect("a run has at least one entry");
         let len = self.inner.state.len();
-        self.ensure_recv(len);
-        self.count_exchange(len);
-        self.context
-            .comm()
-            .sendrecv_c64(partner, &self.inner.state, &mut self.recv);
+        let chunk = self.block_chunk(widest + 1, len);
+        self.ensure_recv(chunk);
 
         let g = self.rank_bit_set(global_q) as usize;
-        for &(q0, q1, ref mat) in entries {
-            let (local_q, global_is_q0) = if q0 == global_q {
-                (q1, true)
-            } else {
-                (q0, false)
-            };
-            let basis = |gbit: usize, lbit: usize| -> usize {
-                if global_is_q0 {
-                    (gbit << 1) | lbit
-                } else {
-                    (lbit << 1) | gbit
-                }
-            };
-            // Slot order: state lo, state hi, recv lo, recv hi.
-            let slots = [basis(g, 0), basis(g, 1), basis(1 - g, 0), basis(1 - g, 1)];
-            let zero = Complex64::new(0.0, 0.0);
-            for_each_pair_tile(
-                &mut self.inner.state,
-                &mut self.recv[..len],
-                local_q,
-                |lo, hi, rlo, rhi| {
-                    for (((s0, s1), r0), r1) in lo.iter_mut().zip(hi).zip(rlo).zip(rhi) {
-                        let mut by_col = [zero; 4];
-                        by_col[slots[0]] = *s0;
-                        by_col[slots[1]] = *s1;
-                        by_col[slots[2]] = *r0;
-                        by_col[slots[3]] = *r1;
-                        let mut outs = [zero; 4];
-                        for (out, &row) in outs.iter_mut().zip(slots.iter()) {
-                            for (c, &amp) in by_col.iter().enumerate() {
-                                *out += mat[row][c] * amp;
-                            }
-                        }
-                        *s0 = outs[0];
-                        *s1 = outs[1];
-                        *r0 = outs[2];
-                        *r1 = outs[3];
+        let zero = Complex64::new(0.0, 0.0);
+        let mut off = 0;
+        while off < len {
+            let end = (off + chunk).min(len);
+            self.count_exchange(end - off);
+            let recv = &mut self.recv[..end - off];
+            self.context
+                .comm()
+                .sendrecv_c64(partner, &self.inner.state[off..end], recv);
+            for &(q0, q1, ref mat) in entries {
+                let (local_q, global_is_q0) = (local_of(q0, q1), q0 == global_q);
+                let basis = |gbit: usize, lbit: usize| -> usize {
+                    if global_is_q0 {
+                        (gbit << 1) | lbit
+                    } else {
+                        (lbit << 1) | gbit
                     }
-                },
-            );
+                };
+                // Slot order: state lo, state hi, recv lo, recv hi.
+                let slots = [basis(g, 0), basis(g, 1), basis(1 - g, 0), basis(1 - g, 1)];
+                for_each_pair_tile(
+                    &mut self.inner.state[off..end],
+                    recv,
+                    local_q,
+                    |lo, hi, rlo, rhi| {
+                        for (((s0, s1), r0), r1) in lo.iter_mut().zip(hi).zip(rlo).zip(rhi) {
+                            let mut by_col = [zero; 4];
+                            by_col[slots[0]] = *s0;
+                            by_col[slots[1]] = *s1;
+                            by_col[slots[2]] = *r0;
+                            by_col[slots[3]] = *r1;
+                            let mut outs = [zero; 4];
+                            for (out, &row) in outs.iter_mut().zip(slots.iter()) {
+                                for (c, &amp) in by_col.iter().enumerate() {
+                                    *out += mat[row][c] * amp;
+                                }
+                            }
+                            *s0 = outs[0];
+                            *s1 = outs[1];
+                            *r0 = outs[2];
+                            *r1 = outs[3];
+                        }
+                    },
+                );
+            }
+            off = end;
         }
     }
 
-    /// Both qubits global. The four `(q0, q1)` combinations live on four ranks
-    /// that share every other rank bit. Gather the other three slices, then each
-    /// rank computes its output row of `mat` from the four gathered slices.
+    /// Both qubits global. The four `(q0, q1)` slices live on four ranks that
+    /// share every other rank bit. Two pairwise exchanges of one slice each
+    /// replace a gather of the other three. Write `a(c0, c1)` for the slice on
+    /// the rank whose bits are `(c0, c1)`, `b(c0, c1) = 2 c0 + c1` for the basis
+    /// index, `m = mat[b(g0, g1)]` for this rank's row, and `m' = mat[b(g0, 1 - g1)]`
+    /// for the row of the partner across `q1`:
+    ///
+    /// 1. Exchange with `rank ^ bit(q0)`: send `a(g0, g1)`, receive `a(1 - g0, g1)`.
+    ///    Form in place `p = m[b(g0, g1)] a(g0, g1) + m[b(1 - g0, g1)] a(1 - g0, g1)`
+    ///    and, into the pack buffer, the partial the `q1` partner needs,
+    ///    `u = m'[b(g0, g1)] a(g0, g1) + m'[b(1 - g0, g1)] a(1 - g0, g1)`.
+    /// 2. Exchange with `rank ^ bit(q1)`: send `u`, receive the mirrored partial
+    ///    `t = m[b(g0, 1 - g1)] a(g0, 1 - g1) + m[b(1 - g0, 1 - g1)] a(1 - g0, 1 - g1)`.
+    ///    The output row is `p + t`.
+    ///
+    /// Both steps are elementwise, so each `exchange_chunk` tile runs through
+    /// both exchanges before the next tile starts; the transient buffers are
+    /// two tiles rather than three slices. Volume is `2 len` amplitudes per rank
+    /// against `3 len` for the gather. The association `(own + q0 partner) +
+    /// (q1 partner + diagonal partner)` differs from the gather's left to right
+    /// sum by rounding only.
     fn apply_2q_two_global(&mut self, q0: usize, q1: usize, mat: &[[Complex64; 4]; 4]) {
-        let b0 = self.global_bit(q0);
-        let b1 = self.global_bit(q1);
         let rank = self.context.rank();
-        let g0 = (rank >> b0) & 1;
-        let g1 = (rank >> b1) & 1;
-        let rank_basis = (g0 << 1) | g1;
+        let bit0 = 1usize << self.global_bit(q0);
+        let bit1 = 1usize << self.global_bit(q1);
+        let g0 = (rank & bit0 != 0) as usize;
+        let g1 = (rank & bit1 != 0) as usize;
+        let basis = |c0: usize, c1: usize| (c0 << 1) | c1;
+        let (row, forward_row) = (basis(g0, g1), basis(g0, 1 - g1));
+        let (own, across) = (basis(g0, g1), basis(1 - g0, g1));
+        let keep = [mat[row][own], mat[row][across]];
+        let forward = [mat[forward_row][own], mat[forward_row][across]];
 
         let len = self.inner.state.len();
-        // Gather only partner slices. The local term reads from `inner.state`.
-        let mut partners: [Option<Vec<Complex64>>; 4] = [None, None, None, None];
-        for (c, slot) in partners.iter_mut().enumerate() {
-            if c == rank_basis {
-                continue;
-            }
-            let c0 = (c >> 1) & 1;
-            let c1 = c & 1;
-            let partner = (rank & !(1 << b0) & !(1 << b1)) | (c0 << b0) | (c1 << b1);
-            let mut buf = vec![Complex64::new(0.0, 0.0); len];
-            self.count_exchange(len);
-            self.context
-                .comm()
-                .sendrecv_c64(partner, &self.inner.state, &mut buf);
-            *slot = Some(buf);
+        let chunk = self.exchange_chunk.min(len).max(1);
+        self.ensure_recv(chunk);
+        self.ensure_pack(chunk);
+        let mut off = 0;
+        while off < len {
+            let end = (off + chunk).min(len);
+            let count = end - off;
+            self.count_exchange(count);
+            self.context.comm().sendrecv_c64(
+                rank ^ bit0,
+                &self.inner.state[off..end],
+                &mut self.recv[..count],
+            );
+            butterfly_shard(
+                &mut self.inner.state[off..end],
+                &self.recv[..count],
+                &mut self.pack[..count],
+                keep,
+                forward,
+            );
+            self.count_exchange(count);
+            self.context.comm().sendrecv_c64(
+                rank ^ bit1,
+                &self.pack[..count],
+                &mut self.recv[..count],
+            );
+            add_shard(&mut self.inner.state[off..end], &self.recv[..count]);
+            off = end;
         }
-        let terms: SmallVec<[(Complex64, &[Complex64]); 3]> = partners
-            .iter()
-            .enumerate()
-            .filter_map(|(c, slot)| slot.as_deref().map(|slice| (mat[rank_basis][c], slice)))
-            .collect();
-        combine_gathered(&mut self.inner.state, mat[rank_basis][rank_basis], &terms);
     }
 
     /// Dispatch a gate that spans at least one global qubit.
@@ -1676,10 +1755,12 @@ impl DistributedStatevectorBackend {
     /// bounded exchanges, so each rank owns a contiguous slice in circuit
     /// order. Each rank then builds a cumulative distribution for its local
     /// slice. One gather shares a single mass value from each rank. Every rank
-    /// assigns each shot to an owning rank from the same seeded draw stream,
-    /// the owner samples its local distribution, and a tiled sum reduction
-    /// distributes the sampled indices. Buffers scale with the rank count and
-    /// shot count, not the global state size.
+    /// assigns each shot to an owning rank from the same seeded draw stream, so
+    /// every rank knows the owner sequence. Each owner samples its local
+    /// distribution for its shots, one variable-count gather concatenates the
+    /// owned indices in rank order, and each rank scatters them back into shot
+    /// order. Buffers scale with the rank count and shot count, not the global
+    /// state size.
     ///
     /// Collective: every rank must call this with identical `num_shots` and
     /// `seed`. The result is identical on every rank and reproduces the dense
@@ -1687,11 +1768,6 @@ impl DistributedStatevectorBackend {
     /// when accumulated rounding differences move a draw across an interval
     /// edge in the cumulative distribution.
     pub fn sample_state_indices(&mut self, num_shots: usize, seed: u64) -> Result<Vec<u64>> {
-        if self.num_qubits > 53 {
-            return Err(self.unsupported(
-                "shot sampling above 53 qubits: index transport is exact only below 2^53",
-            ));
-        }
         if num_shots == 0 {
             return Ok(Vec::new());
         }
@@ -1719,15 +1795,20 @@ impl DistributedStatevectorBackend {
         }
 
         let rank = self.context.rank();
+        let size = self.context.size();
         let local_qubits = self.local_qubits();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let mut indices = vec![0.0f64; num_shots];
-        for slot in indices.iter_mut() {
+        let mut owners = Vec::with_capacity(num_shots);
+        let mut counts = vec![0usize; size];
+        let mut owned = Vec::new();
+        for _ in 0..num_shots {
             let r: f64 = rng.random();
             // First rank whose cumulative mass reaches r. The strict
             // comparison matches the dense binary search at exact boundary
             // hits and never selects an empty interval.
             let owner = rank_cdf.partition_point(|&c| c < r);
+            owners.push(owner);
+            counts[owner] += 1;
             if owner != rank {
                 continue;
             }
@@ -1737,14 +1818,23 @@ impl DistributedStatevectorBackend {
                 r - rank_cdf[owner - 1]
             };
             let local_idx = crate::sim::shots::sample_from_cdf(&local_cdf, residual);
-            *slot = (((rank as u64) << local_qubits) | local_idx as u64) as f64;
+            owned.push(((rank as u64) << local_qubits) | local_idx as u64);
         }
 
-        const REDUCE_CHUNK: usize = 1 << 20;
-        for chunk in indices.chunks_mut(REDUCE_CHUNK) {
-            self.context.comm().allreduce_sum_f64_slice(chunk);
+        let gathered = self.context.comm().allgatherv_u64(&owned, &counts);
+        let mut next = vec![0usize; size];
+        for r in 1..size {
+            next[r] = next[r - 1] + counts[r - 1];
         }
-        Ok(indices.into_iter().map(|v| v as u64).collect())
+        let indices = owners
+            .iter()
+            .map(|&owner| {
+                let i = next[owner];
+                next[owner] += 1;
+                gathered[i]
+            })
+            .collect();
+        Ok(indices)
     }
 
     /// Zero the amplitudes inconsistent with `qubit == outcome`.

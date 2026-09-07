@@ -89,9 +89,12 @@ Every variant in the `Gate` enum has a dedicated kernel. Batched
 variants (`BatchPhase`, `BatchRzz`, `DiagonalBatch`, `MultiFused { all_diagonal: true }`)
 use LUT kernels that consume the same host table builders as the CPU path.
 Non-diagonal `MultiFused` uses a shared memory tiled kernel (`apply_multi_fused_tiled`,
-`TILE_Q = 10`, `TILE_SIZE = 1024`). Sub-gates whose target bit is inside the tile apply in
-shared memory. Sub-gates whose target bit is outside the tile fall back to per gate
-launches. `Multi2q` still launches once per sub-gate; rare in practice.
+`TILE_Q = 10`, `TILE_SIZE = 1024`) over a chosen set of ten qubits per pass: the five
+lowest qubits, which keep a warp's loads contiguous, plus up to five of the sub-gates'
+higher targets. A `MultiFused` over `n` qubits therefore takes about `(n - 5) / 5` passes,
+each applying its sub-gates in shared memory. A pass with fewer than three sub-gates
+falls back to per gate launches. `Multi2q` still launches once per sub-gate; rare in
+practice.
 
 **PTX template substitution:** the CUDA C source is held as a template string
 (`KERNEL_SOURCE_TEMPLATE`) with placeholders such as `{{BP_TABLE_SIZE}}` and

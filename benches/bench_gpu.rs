@@ -988,6 +988,37 @@ fn bench_gpu_dm_gradient(c: &mut Criterion) {
     group.finish();
 }
 
+/// Sixteen fixed Pauli strings evaluated on the device state after a depth-2
+/// random circuit: the shape of one evaluation in a shift-rule gradient.
+fn bench_gpu_pauli_expect(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/pauli_expect");
+    configure_group(&mut group);
+    let kind = gpu_kind(&ctx);
+    let sizes: &[usize] = if is_fast() { &[20] } else { &[20, 22, 24] };
+    let observables: Vec<Vec<PauliTerm>> = (0..8)
+        .map(|q| vec![PauliTerm::z(q), PauliTerm::z(q + 1)])
+        .chain((0..8).map(|q| vec![PauliTerm::x(2 * q), PauliTerm::y(2 * q + 1)]))
+        .collect();
+
+    for &n in sizes {
+        let circuit = circuits::random_circuit(n, 2, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(kind.clone())
+                        .seed(SEED)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -999,6 +1030,7 @@ criterion_group! {
     bench_gpu_decomposed,
     bench_gpu_direct_kernel,
     bench_gpu_measurement,
+    bench_gpu_pauli_expect,
     bench_gpu_noisy_kraus,
     bench_cpu_noisy_kraus,
     bench_stab_cpu_clifford_d10,

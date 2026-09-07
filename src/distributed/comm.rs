@@ -28,26 +28,21 @@ pub trait RankComm: std::fmt::Debug + Send + Sync {
     /// `f64` version of [`allgather_c64`](RankComm::allgather_c64).
     fn allgather_f64(&self, local: &[f64]) -> Vec<f64>;
 
+    /// Concatenate blocks of differing length in ascending rank order.
+    ///
+    /// `counts[r]` is the length of rank `r`'s block, so `counts[rank()]`
+    /// equals `local.len()` and every rank passes the same `counts`. The
+    /// returned vector has length `counts.iter().sum()` and is identical on
+    /// every rank.
+    fn allgatherv_u64(&self, local: &[u64], counts: &[usize]) -> Vec<u64>;
+
+    /// `u64` version of [`allgather_c64`](RankComm::allgather_c64).
+    fn allgather_u64(&self, local: &[u64]) -> Vec<u64> {
+        self.allgatherv_u64(local, &vec![local.len(); self.size()])
+    }
+
     /// Sum a scalar across all ranks; every rank receives the total.
     fn allreduce_sum_f64(&self, value: f64) -> f64;
-
-    /// Elementwise sum of `values` across all ranks, in place. Every rank
-    /// receives the same per-element totals.
-    ///
-    /// The default gathers every rank's block and sums elementwise, which
-    /// costs `size * len` transfer. Override with a native reduction when the
-    /// transport has one.
-    fn allreduce_sum_f64_slice(&self, values: &mut [f64]) {
-        let n = values.len();
-        if n == 0 {
-            return;
-        }
-        let gathered = self.allgather_f64(values);
-        values.fill(0.0);
-        for (i, &v) in gathered.iter().enumerate() {
-            values[i % n] += v;
-        }
-    }
 
     /// Exchange equal length amplitude blocks with `partner`.
     ///
@@ -85,12 +80,14 @@ impl RankComm for SerialComm {
     }
 
     #[inline]
-    fn allreduce_sum_f64(&self, value: f64) -> f64 {
-        value
+    fn allgatherv_u64(&self, local: &[u64], _counts: &[usize]) -> Vec<u64> {
+        local.to_vec()
     }
 
     #[inline]
-    fn allreduce_sum_f64_slice(&self, _values: &mut [f64]) {}
+    fn allreduce_sum_f64(&self, value: f64) -> f64 {
+        value
+    }
 
     #[inline]
     fn sendrecv_c64(&self, _partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
@@ -219,19 +216,29 @@ impl RankComm for MpiComm {
         out
     }
 
+    fn allgatherv_u64(&self, local: &[u64], counts: &[usize]) -> Vec<u64> {
+        use mpi::datatype::PartitionMut;
+        use mpi::traits::CommunicatorCollectives;
+        debug_assert_eq!(counts[self.rank], local.len());
+        let counts: Vec<mpi::Count> = counts.iter().map(|&c| c as mpi::Count).collect();
+        let mut displs = Vec::with_capacity(counts.len());
+        let mut total: mpi::Count = 0;
+        for &c in &counts {
+            displs.push(total);
+            total += c;
+        }
+        let mut out = vec![0_u64; total as usize];
+        self.world
+            .all_gather_varcount_into(local, &mut PartitionMut::new(&mut out[..], counts, displs));
+        out
+    }
+
     fn allreduce_sum_f64(&self, value: f64) -> f64 {
         use mpi::traits::CommunicatorCollectives;
         let mut out = 0.0_f64;
         self.world
             .all_reduce_into(&value, &mut out, mpi::collective::SystemOperation::sum());
         out
-    }
-
-    fn allreduce_sum_f64_slice(&self, values: &mut [f64]) {
-        use mpi::traits::CommunicatorCollectives;
-        let send = values.to_vec();
-        self.world
-            .all_reduce_into(&send[..], values, mpi::collective::SystemOperation::sum());
     }
 
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {

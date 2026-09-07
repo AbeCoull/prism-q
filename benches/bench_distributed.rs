@@ -28,6 +28,10 @@ fn direct_sizes() -> &'static [usize] {
     if is_fast() { &[14] } else { &[18, 20] }
 }
 
+fn sample_sizes() -> &'static [usize] {
+    if is_fast() { &[12] } else { &[20] }
+}
+
 /// Fused QAOA behind one SWAP, so the qubit map is non-identity for every
 /// batched payload: the steady state the permuted-map dispatch pays for.
 fn bench_steady_state_batched(c: &mut Criterion) {
@@ -235,6 +239,41 @@ fn bench_fused_2q_two_global(c: &mut Criterion) {
     group.finish();
 }
 
+/// Terminal shot sampling of a uniform state at two and four ranks: the
+/// per-rank cumulative distribution, the owner draws, and the gather that
+/// carries the sampled indices back to every rank.
+fn bench_sample_indices(c: &mut Criterion) {
+    let mut group = c.benchmark_group("distributed/sample_indices");
+    configure_group(&mut group);
+
+    const SHOTS: usize = 4096;
+    for &n in sample_sizes() {
+        let mut circuit = Circuit::new(n, 0);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for ranks in [2usize, 4] {
+            let id = BenchmarkId::new(n.to_string(), format!("{ranks}ranks"));
+            group.bench_with_input(id, &circuit, |b, circ| {
+                b.iter(|| {
+                    let indices = run_ranks(ranks, |ctx| {
+                        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                        backend.set_relabel(false);
+                        backend
+                            .init(circ.num_qubits, circ.num_classical_bits)
+                            .unwrap();
+                        backend.apply_instructions(&circ.instructions).unwrap();
+                        backend.sample_state_indices(SHOTS, SEED).unwrap()
+                    });
+                    std::hint::black_box(indices);
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -243,6 +282,7 @@ criterion_group! {
     bench_boundary_swap_direct,
     bench_global_1q_wall,
     bench_controlled_star_direct,
-    bench_fused_2q_two_global
+    bench_fused_2q_two_global,
+    bench_sample_indices
 }
 criterion_main!(benches);

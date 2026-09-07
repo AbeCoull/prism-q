@@ -13,7 +13,9 @@ pub(crate) mod stabilizer;
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaStream, DeviceRepr, LaunchConfig, ValidAsZeroBits};
+use cudarc::driver::{
+    CudaFunction, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, ValidAsZeroBits,
+};
 
 use crate::error::{PrismError, Result};
 use crate::gpu::GpuContext;
@@ -76,10 +78,6 @@ pub(super) fn div_ceil_grid(op: &str, name: &str, value: usize, block: u32) -> R
 #[derive(Default)]
 pub(crate) struct LauncherScratch {
     pub(crate) f64_a: Option<GpuBuffer<f64>>,
-    pub(crate) i32_a: Option<GpuBuffer<i32>>,
-    pub(crate) i32_b: Option<GpuBuffer<i32>>,
-    pub(crate) i32_c: Option<GpuBuffer<i32>>,
-    pub(crate) u32_a: Option<GpuBuffer<u32>>,
     pub(crate) u64_a: Option<GpuBuffer<u64>>,
     pub(crate) u64_b: Option<GpuBuffer<u64>>,
     /// Per-block partials for [`super::dense::measure_prob_one`]. Sized by the
@@ -94,6 +92,88 @@ pub(crate) struct LauncherScratch {
     pub(crate) dm_diag: Option<GpuBuffer<f64>>,
     /// Two f64s per Pauli mask for the density-matrix expectation finalize.
     pub(crate) dm_result: Option<GpuBuffer<f64>>,
+    /// One upload per gate for what does not fit parameter space; see [`stage_blob`].
+    pub(crate) blob: BlobScratch,
+}
+
+const BLOB_ALIGN: usize = 16;
+
+/// Device addresses of one staged blob: the `int` list at the start and the `double`
+/// block at a 16-byte-aligned offset behind it.
+#[derive(Clone, Copy)]
+pub(crate) struct Staged {
+    pub(crate) ints: u64,
+    pub(crate) f64s: u64,
+}
+
+/// Host and device halves of the per-gate upload behind [`stage_blob`].
+#[derive(Default)]
+pub(crate) struct BlobScratch {
+    host: Vec<u64>,
+    device: Option<GpuBuffer<u64>>,
+}
+
+/// Pack `ints` and `f64_len` doubles written through `fill` into one upload and return
+/// the device addresses of both halves.
+///
+/// Everything a kernel can take by value goes in parameter space instead; this is for
+/// the lookup tables and metadata of the batched diagonal gates and the density-matrix
+/// tables, which exceed the 4 KB parameter limit. The copy is synchronous from pageable
+/// memory, so it costs one stream drain per gate, and the buffer is reused as soon as
+/// the copy returns because that drain has already retired the kernel that read it.
+pub(crate) fn stage_blob(
+    scratch: &mut BlobScratch,
+    device: &GpuDevice,
+    ints: impl ExactSizeIterator<Item = i32>,
+    f64_len: usize,
+    fill: impl FnOnce(&mut [f64]),
+) -> Result<Staged> {
+    let int_len = ints.len();
+    let f64_off = (int_len * size_of::<i32>()).next_multiple_of(BLOB_ALIGN);
+    let words = (f64_off + f64_len * size_of::<f64>()) / size_of::<u64>();
+    let host = &mut scratch.host;
+    if host.len() < words {
+        host.resize(words, 0);
+    }
+    // SAFETY: `host` holds at least `words` u64s, so both views lie inside it; the int
+    // view ends at `f64_off`, where the f64 view starts, so they are disjoint; and a u64
+    // buffer is aligned for both element types.
+    unsafe {
+        let base = host.as_mut_ptr().cast::<u8>();
+        let int_dst = std::slice::from_raw_parts_mut(base.cast::<i32>(), int_len);
+        for (d, v) in int_dst.iter_mut().zip(ints) {
+            *d = v;
+        }
+        let f64_dst = std::slice::from_raw_parts_mut(base.add(f64_off).cast::<f64>(), f64_len);
+        fill(f64_dst);
+    }
+    let buf = ensure_scratch(&mut scratch.device, device, &host[..words])?;
+    let stream = device.stream()?;
+    let (base, _sync) = buf.raw().device_ptr(stream);
+    Ok(Staged {
+        ints: base,
+        f64s: base + f64_off as u64,
+    })
+}
+
+/// Stage complex values as interleaved re/im f64 pairs.
+pub(crate) fn stage_complex(
+    scratch: &mut BlobScratch,
+    device: &GpuDevice,
+    values: &[num_complex::Complex64],
+) -> Result<Staged> {
+    stage_blob(
+        scratch,
+        device,
+        std::iter::empty(),
+        2 * values.len(),
+        |dst| {
+            for (pair, v) in dst.chunks_exact_mut(2).zip(values) {
+                pair[0] = v.re;
+                pair[1] = v.im;
+            }
+        },
+    )
 }
 
 /// Ensure `slot` has at least `host.len()` elements allocated, growing if not,

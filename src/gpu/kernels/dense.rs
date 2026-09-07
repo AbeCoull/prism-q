@@ -21,12 +21,82 @@
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
+use crate::backend::statevector::kernels as cpu_k;
 use crate::error::{PrismError, Result};
 
 use super::super::{GpuContext, GpuState};
 use super::{launch_err, linear_cfg, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 256;
+
+/// The fused 2q matrix as a by-value kernel parameter, row-major re/im pairs. Mirrors
+/// `struct FusedMat` in the CUDA template byte for byte.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct FusedMatArg {
+    v: [f64; 32],
+}
+
+// SAFETY: a plain `repr(C)` array of f64 with the layout the kernel declares.
+unsafe impl cudarc::driver::DeviceRepr for FusedMatArg {}
+
+/// Widest qubit list a by-value kernel parameter carries; `1 << n` bounds `n` below it.
+const MAX_PARAM_QUBITS: usize = 64;
+
+/// Sorted MCU qubit list; mirrors `struct QubitList`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct QubitListArg {
+    q: [i32; MAX_PARAM_QUBITS],
+}
+
+// SAFETY: a plain `repr(C)` array of i32 with the layout the kernel declares.
+unsafe impl cudarc::driver::DeviceRepr for QubitListArg {}
+
+/// Diagonal `MultiFused` sub-gates, `d[4g..4g + 4]` = (d0, d1) re/im pairs and `t[g]`
+/// the target; mirrors `struct DiagList`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DiagListArg {
+    d: [f64; 4 * MAX_PARAM_QUBITS],
+    t: [i32; MAX_PARAM_QUBITS],
+}
+
+// SAFETY: plain `repr(C)` arrays of f64 then i32 with the layout the kernel declares.
+unsafe impl cudarc::driver::DeviceRepr for DiagListArg {}
+
+/// Tiled `MultiFused` sub-gates, `v[8g..8g + 8]` the row-major 2x2 matrix as re/im
+/// pairs and four bits of `targets` per gate; mirrors `struct TileGates`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TileGatesArg {
+    v: [f64; 8 * MULTI_FUSED_TILE_Q],
+    targets: u64,
+}
+
+// SAFETY: a plain `repr(C)` f64 array and a u64 with the layout the kernel declares.
+unsafe impl cudarc::driver::DeviceRepr for TileGatesArg {}
+
+/// Packed `meta` argument of the three LUT kernels: the per-group index lists, then
+/// one length and one table offset per group.
+const BATCH_PHASE_META_LEN: usize = cpu_k::MAX_BATCH_PHASE_GROUPS * cpu_k::BATCH_PHASE_GROUP_SIZE
+    + 2 * cpu_k::MAX_BATCH_PHASE_GROUPS;
+const BATCH_RZZ_META_LEN: usize =
+    2 * cpu_k::MAX_BATCH_RZZ_GROUPS * cpu_k::BATCH_RZZ_GROUP_SIZE + 2 * cpu_k::MAX_BATCH_RZZ_GROUPS;
+const DIAG_BATCH_META_LEN: usize = cpu_k::MAX_DIAG_BATCH_GROUPS
+    * cpu_k::DIAG_BATCH_MAX_QUBITS_PER_GROUP
+    + 2 * cpu_k::MAX_DIAG_BATCH_GROUPS;
+
+/// The sorted MCU qubit list as a kernel parameter.
+fn qubit_list(sorted: &[u32]) -> QubitListArg {
+    let mut arg = QubitListArg {
+        q: [0; MAX_PARAM_QUBITS],
+    };
+    for (d, &q) in arg.q.iter_mut().zip(sorted) {
+        *d = q as i32;
+    }
+    arg
+}
 
 /// PTX source template. Placeholders like `{{BP_TABLE_SIZE}}` are substituted when the
 /// device is constructed (see [`kernel_source`]) so the kernel's compile-time constants
@@ -42,6 +112,18 @@ const KERNEL_SOURCE_TEMPLATE: &str = r#"
 #define BR_GROUP_SIZE   {{BR_GROUP_SIZE}}
 #define DB_TABLE_SIZE   {{DB_TABLE_SIZE}}
 #define DB_MAX_QUBITS   {{DB_MAX_QUBITS}}
+#define BP_MAX_GROUPS   {{BP_MAX_GROUPS}}
+#define PARAM_QUBITS    {{PARAM_QUBITS}}
+#define BR_MAX_GROUPS   {{BR_MAX_GROUPS}}
+#define DB_MAX_GROUPS   {{DB_MAX_GROUPS}}
+
+// The fused 2q matrix travels in kernel parameter space: a pageable host to device
+// copy synchronizes the stream before it starts, so uploading 32 doubles per gate
+// serialized the host against every queued kernel. Layout mirrors `FusedMatArg`.
+struct FusedMat { double v[32]; };
+struct QubitList { int q[PARAM_QUBITS]; };
+struct DiagList { double d[4 * PARAM_QUBITS]; int t[PARAM_QUBITS]; };
+struct TileGates { double v[8 * TILE_Q]; unsigned long long targets; };
 
 // ============================================================================
 // Shared device helpers
@@ -238,7 +320,7 @@ extern "C" __global__ void apply_cu_phase(
 
 extern "C" __global__ void apply_mcu(
     double2 *state, unsigned long long iter_count,
-    const unsigned int *sorted, int num_sorted,
+    QubitList sorted, int num_sorted,
     unsigned long long ctrl_mask, unsigned long long tgt_mask,
     double m00r, double m00i, double m01r, double m01i,
     double m10r, double m10i, double m11r, double m11i)
@@ -247,7 +329,7 @@ extern "C" __global__ void apply_mcu(
     if (k >= iter_count) return;
     unsigned long long idx = k;
     for (int i = 0; i < num_sorted; ++i) {
-        int bit = (int)sorted[i];
+        int bit = sorted.q[i];
         unsigned long long mask_lo = (1ULL << bit) - 1;
         unsigned long long lo = idx & mask_lo;
         unsigned long long hi = idx >> bit;
@@ -261,7 +343,7 @@ extern "C" __global__ void apply_mcu(
 
 extern "C" __global__ void apply_mcu_phase(
     double2 *state, unsigned long long iter_count,
-    const unsigned int *sorted, int num_sorted,
+    QubitList sorted, int num_sorted,
     unsigned long long all_mask,
     double pr, double pi)
 {
@@ -269,7 +351,7 @@ extern "C" __global__ void apply_mcu_phase(
     if (k >= iter_count) return;
     unsigned long long idx = k;
     for (int i = 0; i < num_sorted; ++i) {
-        int bit = (int)sorted[i];
+        int bit = sorted.q[i];
         unsigned long long mask_lo = (1ULL << bit) - 1;
         unsigned long long lo = idx & mask_lo;
         unsigned long long hi = idx >> bit;
@@ -286,7 +368,7 @@ extern "C" __global__ void apply_mcu_phase(
 
 extern "C" __global__ void apply_fused_2q(
     double2 *state, unsigned long long pair_count, int q0, int q1,
-    const double *mat)
+    FusedMat mat)
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= pair_count) return;
@@ -305,12 +387,14 @@ extern "C" __global__ void apply_fused_2q(
     double2 in[4] = {state[i00], state[i01], state[i10], state[i11]};
     unsigned long long indices[4] = {i00, i01, i10, i11};
 
+    #pragma unroll
     for (int row = 0; row < 4; ++row) {
         double rr = 0.0, ri = 0.0;
+        #pragma unroll
         for (int col = 0; col < 4; ++col) {
-            // mat row-major: 32 f64s, row r col c → mat[2*(r*4+c)]=re, mat[2*(r*4+c)+1]=im
-            double mr = mat[2*(row*4 + col)];
-            double mi = mat[2*(row*4 + col) + 1];
+            // mat row-major: 32 f64s, row r col c → mat.v[2*(r*4+c)]=re, mat.v[2*(r*4+c)+1]=im
+            double mr = mat.v[2*(row*4 + col)];
+            double mi = mat.v[2*(row*4 + col) + 1];
             rr += mr*in[col].x - mi*in[col].y;
             ri += mr*in[col].y + mi*in[col].x;
         }
@@ -496,9 +580,8 @@ extern "C" __global__ void compute_probabilities(
 // memory reads. Pairs (i0, i1) for a given gate stay within the tile because the target
 // bit is a low bit of the global index; the high bits (> TILE_Q) are the block id.
 //
-// Data layout on device (uploaded per batch):
-//   targets[g] : int, gate g's target qubit. All targets here satisfy target < TILE_Q.
-//   matrices[g*4 .. g*4+4] : four double2 entries (m00, m01, m10, m11) for gate g.
+// Gate data rides in parameter space: four bits of `gates.targets` per gate (every
+// target is below TILE_Q) and gates.v[8g .. 8g+8] the row-major matrix as re/im pairs.
 //
 // TILE_Q = 10, TILE_SIZE = 1024, block_size = 512 threads, each thread handles one pair.
 // Shared memory usage: 1024 × 16 bytes = 16 KB. Pascal-friendly.
@@ -506,8 +589,7 @@ extern "C" __global__ void compute_probabilities(
 
 extern "C" __global__ void apply_multi_fused_tiled(
     double2 *state, unsigned long long dim,
-    const int *targets,
-    const double2 *matrices,
+    TileGates gates,
     int num_gates)
 {
     __shared__ double2 tile[TILE_SIZE];
@@ -527,15 +609,16 @@ extern "C" __global__ void apply_multi_fused_tiled(
     int k = tid;
 
     for (int g = 0; g < num_gates; ++g) {
-        int t = targets[g];
+        int t = (int)((gates.targets >> (4 * g)) & 15ULL);
         int mask = (1 << t) - 1;
         int i0 = ((k & ~mask) << 1) | (k & mask);
         int i1 = i0 | (1 << t);
 
-        double2 m00 = matrices[g * 4 + 0];
-        double2 m01 = matrices[g * 4 + 1];
-        double2 m10 = matrices[g * 4 + 2];
-        double2 m11 = matrices[g * 4 + 3];
+        const double *m = gates.v + 8 * g;
+        double2 m00 = make_double2(m[0], m[1]);
+        double2 m01 = make_double2(m[2], m[3]);
+        double2 m10 = make_double2(m[4], m[5]);
+        double2 m11 = make_double2(m[6], m[7]);
 
         // No sync needed between read and write here: each thread owns an
         // exclusive (i0, i1) pair within a single gate iteration (the compressed-
@@ -555,19 +638,22 @@ extern "C" __global__ void apply_multi_fused_tiled(
 // via precomputed per-group LUTs (built on the host by build_diagonal_batch_tables).
 // Replaces per-entry dispatch. Launches 2^n threads; each thread folds all group phases.
 //
-// Table layout:
-//   group_tables[g * DB_TABLE_SIZE + bits] = combined phase for bit pattern `bits` in group g
-//   group_shifts[g * DB_MAX_QUBITS + j]    = qubit index of the j-th bit in group g
+// Table layout: group g owns `1 << group_lens[g]` entries starting at
+// group_tables[group_offsets[g]], indexed by the bit pattern `bits`. `meta` packs
+// group_shifts[DB_MAX_GROUPS * DB_MAX_QUBITS] (qubit index of the j-th bit in group g),
+// then group_lens[DB_MAX_GROUPS], then group_offsets[DB_MAX_GROUPS].
 
 extern "C" __global__ void apply_diagonal_batch(
     double2 *state, unsigned long long dim,
-    const double2 *group_tables,
-    const int *group_shifts,
-    const int *group_lens,
+    const double2 * __restrict__ group_tables,
+    const int * __restrict__ meta,
     int num_groups)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= dim) return;
+    const int *group_shifts = meta;
+    const int *group_lens = meta + DB_MAX_GROUPS * DB_MAX_QUBITS;
+    const int *group_offsets = group_lens + DB_MAX_GROUPS;
 
     double cr = 1.0, ci = 0.0;
     for (int g = 0; g < num_groups; ++g) {
@@ -577,7 +663,7 @@ extern "C" __global__ void apply_diagonal_batch(
         for (int j = 0; j < len; ++j) {
             bits |= (int)(((i >> shifts[j]) & 1ULL) << j);
         }
-        double2 ph = group_tables[g * DB_TABLE_SIZE + bits];
+        double2 ph = group_tables[group_offsets[g] + bits];
         double nr = cr * ph.x - ci * ph.y;
         double ni = cr * ph.y + ci * ph.x;
         cr = nr;
@@ -592,21 +678,24 @@ extern "C" __global__ void apply_diagonal_batch(
 // Launches 2^n threads across the full state; each thread computes parity bits per edge
 // per group, indexes the 256-entry LUT, chains multiplies.
 //
-// Table layout (row-major per group):
-//   group_tables[g * BR_TABLE_SIZE + bits]        = combined phase for parity pattern `bits`
-//   group_q0s[g * BR_GROUP_SIZE + k],
-//   group_q1s[g * BR_GROUP_SIZE + k]               = qubit pair for the k-th edge in group g
+// Table layout: group g owns `1 << group_lens[g]` entries starting at
+// group_tables[group_offsets[g]], indexed by the parity pattern `bits`. `meta` packs
+// group_q0s[BR_MAX_GROUPS * BR_GROUP_SIZE] and group_q1s[BR_MAX_GROUPS * BR_GROUP_SIZE]
+// (qubit pair of the k-th edge in group g), then group_lens[BR_MAX_GROUPS], then
+// group_offsets[BR_MAX_GROUPS].
 
 extern "C" __global__ void apply_batch_rzz(
     double2 *state, unsigned long long dim,
-    const double2 *group_tables,
-    const int *group_q0s,
-    const int *group_q1s,
-    const int *group_lens,
+    const double2 * __restrict__ group_tables,
+    const int * __restrict__ meta,
     int num_groups)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= dim) return;
+    const int *group_q0s = meta;
+    const int *group_q1s = meta + BR_MAX_GROUPS * BR_GROUP_SIZE;
+    const int *group_lens = group_q1s + BR_MAX_GROUPS * BR_GROUP_SIZE;
+    const int *group_offsets = group_lens + BR_MAX_GROUPS;
 
     double cr = 1.0, ci = 0.0;
     for (int g = 0; g < num_groups; ++g) {
@@ -617,7 +706,7 @@ extern "C" __global__ void apply_batch_rzz(
         for (int k = 0; k < len; ++k) {
             bits |= (int)((((i >> q0s[k]) ^ (i >> q1s[k])) & 1ULL) << k);
         }
-        double2 ph = group_tables[g * BR_TABLE_SIZE + bits];
+        double2 ph = group_tables[group_offsets[g] + bits];
         double nr = cr * ph.x - ci * ph.y;
         double ni = cr * ph.y + ci * ph.x;
         cr = nr;
@@ -631,20 +720,23 @@ extern "C" __global__ void apply_batch_rzz(
 // precomputed LUTs (built on the host by build_batch_phase_tables). Replaces per-phase
 // launches of apply_cu_phase. One DRAM read/write per amplitude in the ctrl=1 subspace.
 //
-// Table layout (row-major per group, length MAX_BATCH_PHASE_GROUPS * BP_TABLE_SIZE):
-//   group_tables[g * BP_TABLE_SIZE + bits] = combined phase for bit pattern `bits` in group g
-//   group_shifts[g * BP_GROUP_SIZE + j]    = qubit index of the j-th bit in group g
+// Table layout: group g owns `1 << group_lens[g]` entries starting at
+// group_tables[group_offsets[g]], indexed by the bit pattern `bits`. `meta` packs
+// group_shifts[BP_MAX_GROUPS * BP_GROUP_SIZE] (qubit index of the j-th bit in group g),
+// then group_lens[BP_MAX_GROUPS], then group_offsets[BP_MAX_GROUPS].
 
 extern "C" __global__ void apply_batch_phase(
     double2 *state, unsigned long long half_count,
     int control,
-    const double2 *group_tables,
-    const int *group_shifts,
-    const int *group_lens,
+    const double2 * __restrict__ group_tables,
+    const int * __restrict__ meta,
     int num_groups)
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= half_count) return;
+    const int *group_shifts = meta;
+    const int *group_lens = meta + BP_MAX_GROUPS * BP_GROUP_SIZE;
+    const int *group_offsets = group_lens + BP_MAX_GROUPS;
     unsigned long long ctrl_mask = 1ULL << control;
     unsigned long long mask = ctrl_mask - 1ULL;
     unsigned long long idx = ((k & ~mask) << 1) | (k & mask) | ctrl_mask;
@@ -657,7 +749,7 @@ extern "C" __global__ void apply_batch_phase(
         for (int j = 0; j < len; ++j) {
             bits |= (int)(((idx >> shifts[j]) & 1ULL) << j);
         }
-        double2 ph = group_tables[g * BP_TABLE_SIZE + bits];
+        double2 ph = group_tables[group_offsets[g] + bits];
         double nr = cr * ph.x - ci * ph.y;
         double ni = cr * ph.y + ci * ph.x;
         cr = nr;
@@ -674,21 +766,22 @@ extern "C" __global__ void apply_batch_phase(
 // based on the bit pattern of its own index. One DRAM read + one DRAM write per thread;
 // compute = num_gates complex multiplies (typically 1-10).
 //
-// Args: targets[g] (int); diags[2*g + 0] = d0 (double2), diags[2*g + 1] = d1 (double2).
+// Gate data rides in parameter space: gates.t[g] the target, gates.d[4g .. 4g+4] the
+// (d0, d1) re/im pairs. Both entries are loaded uniformly and selected per thread.
 
 extern "C" __global__ void apply_multi_fused_diagonal(
     double2 *state, unsigned long long dim,
-    const int *targets,
-    const double2 *diags,
+    DiagList gates,
     int num_gates)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= dim) return;
     double2 a = state[i];
     for (int g = 0; g < num_gates; ++g) {
-        int t = targets[g];
+        int t = gates.t[g];
         int bit = (int)((i >> t) & 1ULL);
-        double2 p = diags[2 * g + bit];
+        const double *e = gates.d + 4 * g;
+        double2 p = bit ? make_double2(e[2], e[3]) : make_double2(e[0], e[1]);
         double nx = p.x * a.x - p.y * a.y;
         double ny = p.x * a.y + p.y * a.x;
         a.x = nx;
@@ -706,7 +799,6 @@ extern "C" __global__ void apply_multi_fused_diagonal(
 /// Adding a kernel that depends on a new host constant: add a `{{PLACEHOLDER}}` to
 /// the template header, add a matching `.replace(...)` call below, done.
 pub(crate) fn kernel_source() -> String {
-    use crate::backend::statevector::kernels as cpu_k;
     KERNEL_SOURCE_TEMPLATE
         .replace("{{TILE_Q}}", &MULTI_FUSED_TILE_Q.to_string())
         .replace("{{TILE_SIZE}}", &MULTI_FUSED_TILE_SIZE.to_string())
@@ -733,6 +825,19 @@ pub(crate) fn kernel_source() -> String {
         .replace(
             "{{DB_MAX_QUBITS}}",
             &cpu_k::DIAG_BATCH_MAX_QUBITS_PER_GROUP.to_string(),
+        )
+        .replace(
+            "{{BP_MAX_GROUPS}}",
+            &cpu_k::MAX_BATCH_PHASE_GROUPS.to_string(),
+        )
+        .replace("{{PARAM_QUBITS}}", &MAX_PARAM_QUBITS.to_string())
+        .replace(
+            "{{BR_MAX_GROUPS}}",
+            &cpu_k::MAX_BATCH_RZZ_GROUPS.to_string(),
+        )
+        .replace(
+            "{{DB_MAX_GROUPS}}",
+            &cpu_k::MAX_DIAG_BATCH_GROUPS.to_string(),
         )
 }
 
@@ -1131,11 +1236,9 @@ pub(crate) fn launch_apply_mcu(
     }
     let tgt_mask: u64 = 1u64 << target;
 
-    let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_mcu")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count));
-    let mut scratch = ctx.launcher_scratch();
-    let sorted_buf = super::ensure_scratch(&mut scratch.u32_a, device, &sorted)?;
+    let sorted_arg = qubit_list(&sorted);
     let m00r = matrix[0][0].re;
     let m00i = matrix[0][0].im;
     let m01r = matrix[0][1].re;
@@ -1149,7 +1252,7 @@ pub(crate) fn launch_apply_mcu(
     builder
         .arg(buffer)
         .arg(&iter_count)
-        .arg(sorted_buf.raw())
+        .arg(&sorted_arg)
         .arg(&num_sorted)
         .arg(&ctrl_mask)
         .arg(&tgt_mask)
@@ -1161,8 +1264,8 @@ pub(crate) fn launch_apply_mcu(
         .arg(&m10i)
         .arg(&m11r)
         .arg(&m11i);
-    // SAFETY: signature matches; sorted_buf lives in the launcher scratch and is held by
-    // the mutex guard until after the launch is queued on the stream.
+    // SAFETY: signature matches; the qubit list rides in parameter space and the grid
+    // covers iter_count.
     unsafe {
         builder
             .launch(cfg)
@@ -1187,11 +1290,9 @@ pub(crate) fn launch_apply_mcu_phase(
         all_mask |= 1u64 << c;
     }
 
-    let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_mcu_phase")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(iter_count));
-    let mut scratch = ctx.launcher_scratch();
-    let sorted_buf = super::ensure_scratch(&mut scratch.u32_a, device, &sorted)?;
+    let sorted_arg = qubit_list(&sorted);
     let pr = phase.re;
     let pi = phase.im;
     let mut builder = stream.launch_builder(&func);
@@ -1199,12 +1300,13 @@ pub(crate) fn launch_apply_mcu_phase(
     builder
         .arg(buffer)
         .arg(&iter_count)
-        .arg(sorted_buf.raw())
+        .arg(&sorted_arg)
         .arg(&num_sorted)
         .arg(&all_mask)
         .arg(&pr)
         .arg(&pi);
-    // SAFETY: signature matches; sorted_buf is held by the launcher scratch guard.
+    // SAFETY: signature matches; the qubit list rides in parameter space and the grid
+    // covers iter_count.
     unsafe {
         builder
             .launch(cfg)
@@ -1213,7 +1315,7 @@ pub(crate) fn launch_apply_mcu_phase(
     Ok(())
 }
 
-/// The matrix is flattened row-major and uploaded through the launcher scratch.
+/// The matrix is flattened row-major into a by-value kernel parameter.
 pub(crate) fn launch_apply_fused_2q(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1229,18 +1331,13 @@ pub(crate) fn launch_apply_fused_2q(
         });
     }
     let pair_count: u64 = 1u64 << (n - 2);
-    let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_fused_2q")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
-    let mut flat = [0.0_f64; 32];
-    for row in 0..4 {
-        for col in 0..4 {
-            flat[2 * (row * 4 + col)] = matrix[row][col].re;
-            flat[2 * (row * 4 + col) + 1] = matrix[row][col].im;
-        }
+    let mut mat = FusedMatArg { v: [0.0; 32] };
+    for (slot, entry) in mat.v.chunks_exact_mut(2).zip(matrix.iter().flatten()) {
+        slot[0] = entry.re;
+        slot[1] = entry.im;
     }
-    let mut scratch = ctx.launcher_scratch();
-    let mat_buf = super::ensure_scratch(&mut scratch.f64_a, device, &flat)?;
     let q0_i = q0 as i32;
     let q1_i = q1 as i32;
     let mut builder = stream.launch_builder(&func);
@@ -1250,8 +1347,8 @@ pub(crate) fn launch_apply_fused_2q(
         .arg(&pair_count)
         .arg(&q0_i)
         .arg(&q1_i)
-        .arg(mat_buf.raw());
-    // SAFETY: signature matches; mat_buf is held by the launcher scratch guard.
+        .arg(&mat);
+    // SAFETY: signature matches; the matrix is copied into parameter space at launch.
     unsafe {
         builder
             .launch(cfg)
@@ -1484,41 +1581,36 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
         }
     }
 
-    // Flatten to two device buffers: targets[i32; num_gates] and a packed `double2`
-    // stream where [2*g + 0] = d0 = mat[0][0], [2*g + 1] = d1 = mat[1][1]. One allocation
-    // per array, so two host-to-device copies per launch instead of five.
     let num_gates = gates.len();
-    let mut targets: Vec<i32> = Vec::with_capacity(num_gates);
-    let mut diags: Vec<f64> = Vec::with_capacity(num_gates * 4);
-    for &(target, mat) in gates {
-        targets.push(target as i32);
-        diags.push(mat[0][0].re);
-        diags.push(mat[0][0].im);
-        diags.push(mat[1][1].re);
-        diags.push(mat[1][1].im);
+    if num_gates > MAX_PARAM_QUBITS {
+        for &(target, mat) in gates {
+            launch_apply_diagonal_1q(ctx, state, target, mat[0][0], mat[1][1])?;
+        }
+        return Ok(());
+    }
+    let mut arg = DiagListArg {
+        d: [0.0; 4 * MAX_PARAM_QUBITS],
+        t: [0; MAX_PARAM_QUBITS],
+    };
+    for (g, &(target, mat)) in gates.iter().enumerate() {
+        arg.t[g] = target as i32;
+        arg.d[4 * g..4 * g + 4].copy_from_slice(&[
+            mat[0][0].re,
+            mat[0][0].im,
+            mat[1][1].re,
+            mat[1][1].im,
+        ]);
     }
 
     let dim: u64 = 1u64 << n;
-    let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_multi_fused_diagonal")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
-
-    let mut scratch = ctx.launcher_scratch();
-    let scratch = &mut *scratch;
-    let targets_buf = super::ensure_scratch(&mut scratch.i32_a, device, &targets)?;
-    let diags_buf = super::ensure_scratch(&mut scratch.f64_a, device, &diags)?;
-
     let num_gates_i = num_gates as i32;
     let mut builder = stream.launch_builder(&func);
     let buffer = state.buffer_mut().raw_mut();
-    builder
-        .arg(buffer)
-        .arg(&dim)
-        .arg(targets_buf.raw())
-        .arg(diags_buf.raw())
-        .arg(&num_gates_i);
-    // SAFETY: signature matches; targets has num_gates i32s; diags has 2*num_gates double2s
-    // (= 4*num_gates f64s); grid covers dim. Buffers held by the scratch guard.
+    builder.arg(buffer).arg(&dim).arg(&arg).arg(&num_gates_i);
+    // SAFETY: signature matches; the gate list rides in parameter space with num_gates
+    // entries filled; grid covers dim.
     unsafe {
         builder
             .launch(cfg)
@@ -1533,7 +1625,6 @@ pub(crate) fn launch_apply_batch_phase(
     control: usize,
     phases: &[(usize, Complex64)],
 ) -> Result<()> {
-    use crate::backend::statevector::kernels as cpu_k;
     if phases.is_empty() {
         return Ok(());
     }
@@ -1567,26 +1658,20 @@ pub(crate) fn launch_apply_batch_phase(
     }; cpu_k::MAX_BATCH_PHASE_GROUPS];
     let num_groups = cpu_k::build_batch_phase_tables(phases, &mut groups);
 
-    // Flatten to device-friendly arrays.
-    let mut tables_flat: Vec<f64> =
-        Vec::with_capacity(num_groups * cpu_k::BATCH_PHASE_TABLE_SIZE * 2);
-    for group in groups.iter().take(num_groups) {
-        for entry in &group.table {
-            tables_flat.push(entry.re);
-            tables_flat.push(entry.im);
+    // Each group ships only the `1 << len` table entries it indexes, at the offset the
+    // packed metadata names.
+    let mut meta = [0i32; BATCH_PHASE_META_LEN];
+    let lens_at = cpu_k::MAX_BATCH_PHASE_GROUPS * cpu_k::BATCH_PHASE_GROUP_SIZE;
+    let offsets_at = lens_at + cpu_k::MAX_BATCH_PHASE_GROUPS;
+    let mut total = 0usize;
+    for (g, group) in groups.iter().take(num_groups).enumerate() {
+        for (j, &s) in group.shifts.iter().enumerate() {
+            meta[g * cpu_k::BATCH_PHASE_GROUP_SIZE + j] = s as i32;
         }
+        meta[lens_at + g] = group.len as i32;
+        meta[offsets_at + g] = total as i32;
+        total += 1 << group.len;
     }
-    let mut shifts_flat: Vec<i32> = Vec::with_capacity(num_groups * cpu_k::BATCH_PHASE_GROUP_SIZE);
-    for group in groups.iter().take(num_groups) {
-        for &s in &group.shifts {
-            shifts_flat.push(s as i32);
-        }
-    }
-    let lens: Vec<i32> = groups
-        .iter()
-        .take(num_groups)
-        .map(|g| g.len as i32)
-        .collect();
 
     let half_count: u64 = 1u64 << (n - 1);
     let device = ctx.device();
@@ -1595,9 +1680,22 @@ pub(crate) fn launch_apply_batch_phase(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let tables_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tables_flat)?;
-    let shifts_buf = super::ensure_scratch(&mut scratch.i32_a, device, &shifts_flat)?;
-    let lens_buf = super::ensure_scratch(&mut scratch.i32_b, device, &lens)?;
+    let staged = super::stage_blob(
+        &mut scratch.blob,
+        device,
+        meta.iter().copied(),
+        2 * total,
+        |dst| {
+            let mut at = 0;
+            for group in groups.iter().take(num_groups) {
+                for entry in &group.table[..1 << group.len] {
+                    dst[at] = entry.re;
+                    dst[at + 1] = entry.im;
+                    at += 2;
+                }
+            }
+        },
+    )?;
 
     let control_i = control as i32;
     let num_groups_i = num_groups as i32;
@@ -1607,12 +1705,11 @@ pub(crate) fn launch_apply_batch_phase(
         .arg(buffer)
         .arg(&half_count)
         .arg(&control_i)
-        .arg(tables_buf.raw())
-        .arg(shifts_buf.raw())
-        .arg(lens_buf.raw())
+        .arg(&staged.f64s)
+        .arg(&staged.ints)
         .arg(&num_groups_i);
-    // SAFETY: signature matches kernel; device slices sized for num_groups; grid covers half.
-    // Scratch guard keeps all three buffers alive.
+    // SAFETY: signature matches kernel; every table read is below the staged length by
+    // construction of the offsets; grid covers half. The scratch guard holds the upload.
     unsafe {
         builder
             .launch(cfg)
@@ -1626,7 +1723,6 @@ pub(crate) fn launch_apply_batch_rzz(
     state: &mut GpuState,
     edges: &[(usize, usize, f64)],
 ) -> Result<()> {
-    use crate::backend::statevector::kernels as cpu_k;
     if edges.is_empty() {
         return Ok(());
     }
@@ -1649,27 +1745,20 @@ pub(crate) fn launch_apply_batch_rzz(
     }; cpu_k::MAX_BATCH_RZZ_GROUPS];
     let num_groups = cpu_k::build_batch_rzz_tables(edges, &mut groups);
 
-    let mut tables_flat: Vec<f64> =
-        Vec::with_capacity(num_groups * cpu_k::BATCH_RZZ_TABLE_SIZE * 2);
-    for group in groups.iter().take(num_groups) {
-        for entry in &group.table {
-            tables_flat.push(entry.re);
-            tables_flat.push(entry.im);
-        }
-    }
-    let mut q0s_flat: Vec<i32> = Vec::with_capacity(num_groups * cpu_k::BATCH_RZZ_GROUP_SIZE);
-    let mut q1s_flat: Vec<i32> = Vec::with_capacity(num_groups * cpu_k::BATCH_RZZ_GROUP_SIZE);
-    for group in groups.iter().take(num_groups) {
+    let mut meta = [0i32; BATCH_RZZ_META_LEN];
+    let q1s_at = cpu_k::MAX_BATCH_RZZ_GROUPS * cpu_k::BATCH_RZZ_GROUP_SIZE;
+    let lens_at = 2 * q1s_at;
+    let offsets_at = lens_at + cpu_k::MAX_BATCH_RZZ_GROUPS;
+    let mut total = 0usize;
+    for (g, group) in groups.iter().take(num_groups).enumerate() {
         for k in 0..cpu_k::BATCH_RZZ_GROUP_SIZE {
-            q0s_flat.push(group.q0s[k] as i32);
-            q1s_flat.push(group.q1s[k] as i32);
+            meta[g * cpu_k::BATCH_RZZ_GROUP_SIZE + k] = group.q0s[k] as i32;
+            meta[q1s_at + g * cpu_k::BATCH_RZZ_GROUP_SIZE + k] = group.q1s[k] as i32;
         }
+        meta[lens_at + g] = group.len as i32;
+        meta[offsets_at + g] = total as i32;
+        total += 1 << group.len;
     }
-    let lens: Vec<i32> = groups
-        .iter()
-        .take(num_groups)
-        .map(|g| g.len as i32)
-        .collect();
 
     let dim: u64 = 1u64 << n;
     let device = ctx.device();
@@ -1678,10 +1767,22 @@ pub(crate) fn launch_apply_batch_rzz(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let tables_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tables_flat)?;
-    let q0s_buf = super::ensure_scratch(&mut scratch.i32_a, device, &q0s_flat)?;
-    let q1s_buf = super::ensure_scratch(&mut scratch.i32_b, device, &q1s_flat)?;
-    let lens_buf = super::ensure_scratch(&mut scratch.i32_c, device, &lens)?;
+    let staged = super::stage_blob(
+        &mut scratch.blob,
+        device,
+        meta.iter().copied(),
+        2 * total,
+        |dst| {
+            let mut at = 0;
+            for group in groups.iter().take(num_groups) {
+                for entry in &group.table[..1 << group.len] {
+                    dst[at] = entry.re;
+                    dst[at + 1] = entry.im;
+                    at += 2;
+                }
+            }
+        },
+    )?;
 
     let num_groups_i = num_groups as i32;
     let mut builder = stream.launch_builder(&func);
@@ -1689,13 +1790,11 @@ pub(crate) fn launch_apply_batch_rzz(
     builder
         .arg(buffer)
         .arg(&dim)
-        .arg(tables_buf.raw())
-        .arg(q0s_buf.raw())
-        .arg(q1s_buf.raw())
-        .arg(lens_buf.raw())
+        .arg(&staged.f64s)
+        .arg(&staged.ints)
         .arg(&num_groups_i);
-    // SAFETY: signature matches kernel; device slices sized for num_groups; grid covers dim.
-    // Scratch guard keeps all four buffers alive.
+    // SAFETY: signature matches kernel; every table read is below the staged length by
+    // construction of the offsets; grid covers dim. The scratch guard holds the upload.
     unsafe {
         builder
             .launch(cfg)
@@ -1712,7 +1811,6 @@ pub(crate) fn launch_apply_diagonal_batch(
     state: &mut GpuState,
     entries: &[crate::gates::DiagEntry],
 ) -> Result<()> {
-    use crate::backend::statevector::kernels as cpu_k;
     use crate::gates::DiagEntry;
 
     if entries.is_empty() {
@@ -1749,31 +1847,22 @@ pub(crate) fn launch_apply_diagonal_batch(
 
     let num_groups = built.num_groups;
     // unique_qubits holds the groups concatenated in order, and a group can be shorter than
-    // the stride the kernel indexes by, so the shift array is filled group by group.
-    let mut shifts_flat: Vec<i32> = vec![0i32; num_groups * cpu_k::DIAG_BATCH_MAX_QUBITS_PER_GROUP];
+    // the stride the kernel indexes by, so the shift block is filled group by group.
+    let mut meta = [0i32; DIAG_BATCH_META_LEN];
+    let lens_at = cpu_k::MAX_DIAG_BATCH_GROUPS * cpu_k::DIAG_BATCH_MAX_QUBITS_PER_GROUP;
+    let offsets_at = lens_at + cpu_k::MAX_DIAG_BATCH_GROUPS;
     let mut flat = 0;
+    let mut total = 0usize;
     for (g, &size) in built.group_sizes.iter().enumerate().take(num_groups) {
         let base = g * cpu_k::DIAG_BATCH_MAX_QUBITS_PER_GROUP;
         for (j, &q) in built.unique_qubits[flat..flat + size].iter().enumerate() {
-            shifts_flat[base + j] = q as i32;
+            meta[base + j] = q as i32;
         }
         flat += size;
+        meta[lens_at + g] = size as i32;
+        meta[offsets_at + g] = total as i32;
+        total += 1 << size;
     }
-
-    let mut tables_flat: Vec<f64> =
-        Vec::with_capacity(num_groups * cpu_k::DIAG_BATCH_TABLE_SIZE * 2);
-    for group_table in built.tables.iter().take(num_groups) {
-        for entry in group_table {
-            tables_flat.push(entry.re);
-            tables_flat.push(entry.im);
-        }
-    }
-    let lens: Vec<i32> = built
-        .group_sizes
-        .iter()
-        .take(num_groups)
-        .map(|&s| s as i32)
-        .collect();
 
     let n = state.num_qubits();
     let dim: u64 = 1u64 << n;
@@ -1783,9 +1872,23 @@ pub(crate) fn launch_apply_diagonal_batch(
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
-    let tables_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tables_flat)?;
-    let shifts_buf = super::ensure_scratch(&mut scratch.i32_a, device, &shifts_flat)?;
-    let lens_buf = super::ensure_scratch(&mut scratch.i32_b, device, &lens)?;
+    let staged = super::stage_blob(
+        &mut scratch.blob,
+        device,
+        meta.iter().copied(),
+        2 * total,
+        |dst| {
+            let mut at = 0;
+            for (group_table, &size) in built.tables.iter().zip(&built.group_sizes).take(num_groups)
+            {
+                for entry in &group_table[..1 << size] {
+                    dst[at] = entry.re;
+                    dst[at + 1] = entry.im;
+                    at += 2;
+                }
+            }
+        },
+    )?;
 
     let num_groups_i = num_groups as i32;
     let mut builder = stream.launch_builder(&func);
@@ -1793,12 +1896,11 @@ pub(crate) fn launch_apply_diagonal_batch(
     builder
         .arg(buffer)
         .arg(&dim)
-        .arg(tables_buf.raw())
-        .arg(shifts_buf.raw())
-        .arg(lens_buf.raw())
+        .arg(&staged.f64s)
+        .arg(&staged.ints)
         .arg(&num_groups_i);
-    // SAFETY: signature matches kernel; device slices sized for num_groups; grid covers dim.
-    // Scratch guard keeps all three buffers alive.
+    // SAFETY: signature matches kernel; every table read is below the staged length by
+    // construction of the offsets; grid covers dim. The scratch guard holds the upload.
     unsafe {
         builder
             .launch(cfg)
@@ -1859,65 +1961,53 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
 
     // Below the threshold, the tile's shared-memory load/store overhead outweighs the
     // savings from avoiding launches. Fall through to per-gate dispatch for the whole list.
-    if tile_local_count < MULTI_FUSED_TILE_MIN_GATES {
+    // Above TILE_Q gates the targets cannot be distinct, which the kernel assumes.
+    if !(MULTI_FUSED_TILE_MIN_GATES..=MULTI_FUSED_TILE_Q).contains(&tile_local_count) {
         for &(target, mat) in gates {
             launch_apply_gate_1q(ctx, state, target, mat)?;
         }
         return Ok(());
     }
 
-    // Second pass: flatten tile-local gate params into upload-ready arrays. External
-    // (target >= TILE_Q) gates are dispatched directly in a third pass below, with no
-    // intermediate Vec.
-    let mut tile_targets: Vec<i32> = Vec::with_capacity(tile_local_count);
-    let mut tile_matrices: Vec<f64> = Vec::with_capacity(tile_local_count * 8);
+    // Second pass: pack the tile-local sub-gates into the parameter struct. External
+    // (target >= TILE_Q) gates are dispatched directly in a third pass below.
+    let mut arg = TileGatesArg {
+        v: [0.0; 8 * MULTI_FUSED_TILE_Q],
+        targets: 0,
+    };
+    let mut g = 0;
     for &(target, mat) in gates {
         if target < MULTI_FUSED_TILE_Q {
-            tile_targets.push(target as i32);
-            for row in mat.iter() {
-                for entry in row.iter() {
-                    tile_matrices.push(entry.re);
-                    tile_matrices.push(entry.im);
-                }
+            arg.targets |= (target as u64) << (4 * g);
+            for (slot, entry) in arg.v[8 * g..8 * g + 8]
+                .chunks_exact_mut(2)
+                .zip(mat.iter().flatten())
+            {
+                slot[0] = entry.re;
+                slot[1] = entry.im;
             }
+            g += 1;
         }
     }
 
     let dim: u64 = 1u64 << n;
     let num_tiles = dim / MULTI_FUSED_TILE_SIZE;
-    let device = ctx.device();
     let (stream, func) = stream_and_fn(ctx, "apply_multi_fused_tiled")?;
     let cfg = linear_cfg(MULTI_FUSED_BLOCK_SIZE, num_tiles as u32);
-
-    let num_gates_i = tile_targets.len() as i32;
-    {
-        let mut scratch = ctx.launcher_scratch();
-        let scratch = &mut *scratch;
-        let targets_buf = super::ensure_scratch(&mut scratch.i32_a, device, &tile_targets)?;
-        let matrices_buf = super::ensure_scratch(&mut scratch.f64_a, device, &tile_matrices)?;
-
-        let mut builder = stream.launch_builder(&func);
-        let buffer = state.buffer_mut().raw_mut();
+    let num_gates_i = tile_local_count as i32;
+    let mut builder = stream.launch_builder(&func);
+    let buffer = state.buffer_mut().raw_mut();
+    builder.arg(buffer).arg(&dim).arg(&arg).arg(&num_gates_i);
+    // SAFETY: signature matches; num_tiles * TILE_SIZE = dim; the gate list rides in
+    // parameter space with num_gates entries filled and every target below TILE_Q.
+    unsafe {
         builder
-            .arg(buffer)
-            .arg(&dim)
-            .arg(targets_buf.raw())
-            .arg(matrices_buf.raw())
-            .arg(&num_gates_i);
-        // SAFETY: signature matches; num_tiles * TILE_SIZE = dim; device slices sized for
-        // num_gates; all targets checked < MULTI_FUSED_TILE_Q above. Scratch guard holds
-        // both buffers alive.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| launch_err("apply_multi_fused_tiled", e))?;
-        }
+            .launch(cfg)
+            .map_err(|e| launch_err("apply_multi_fused_tiled", e))?;
     }
 
     // Third pass: launch per-gate kernels for the external (target >= TILE_Q) sub-gates
     // whose pairs span tiles. Order matters; these must run after the tiled kernel.
-    // The scratch guard from the tiled launch is dropped before re-acquiring it inside
-    // each per-gate launcher, avoiding deadlock.
     for &(target, mat) in gates {
         if target >= MULTI_FUSED_TILE_Q {
             launch_apply_gate_1q(ctx, state, target, mat)?;

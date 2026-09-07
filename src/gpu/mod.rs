@@ -145,6 +145,12 @@ pub fn stabilizer_min_qubits() -> usize {
     })
 }
 
+/// Device bytes a GPU statevector needs per amplitude: 16 for the interleaved
+/// complex buffer, 8 for the probabilities scratch, 1 of margin for the measurement
+/// partials and launcher metadata. The soft `Auto` gate and the hard explicit gate
+/// both budget with it.
+pub(crate) const STATEVECTOR_BYTES_PER_AMPLITUDE: usize = 25;
+
 /// Shared GPU execution context.
 ///
 /// Holds the device handle and compiled kernel module. Cheap to clone via `Arc`. Pass by
@@ -235,11 +241,11 @@ impl GpuContext {
         if num_qubits >= usize::BITS as usize - 5 {
             return Ok(false);
         }
-        let bytes = (1usize << num_qubits).checked_mul(25).ok_or_else(|| {
-            crate::error::PrismError::InvalidParameter {
+        let bytes = (1usize << num_qubits)
+            .checked_mul(STATEVECTOR_BYTES_PER_AMPLITUDE)
+            .ok_or_else(|| crate::error::PrismError::InvalidParameter {
                 message: format!("num_qubits={num_qubits} overflows usize"),
-            }
-        })?;
+            })?;
         Ok(bytes <= self.vram_available()?)
     }
 

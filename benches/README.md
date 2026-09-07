@@ -121,6 +121,7 @@ fan out.
 | `distributed/controlled_star_direct` | Controlled gates and a Multi2q star onto one global qubit at 18 and 20 qubits with relabeling off |
 | `distributed/fused_2q_two_global` | Dense Fused2q repeated on both rank bits at 18 and 20 qubits across four ranks with relabeling off: the two step butterfly exchange for a two qubit gate over two global qubits |
 | `distributed/sample_indices` | 4096 terminal shots of a 20 qubit uniform state at two and four ranks with relabeling off: the per-rank cumulative distribution, owner draws, and the index gather |
+| `distributed/cyclic_wall/ranks{2,4}` | Three layers of a seeded Rx or Ry on every qubit and a nearest neighbour CX ring at 20 and 22 qubits across two and four ranks with relabeling on: the cyclic scan whose working set exceeds the local positions, so eviction choice sets the exchange count |
 
 ## Circuit families
 

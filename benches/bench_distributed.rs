@@ -16,6 +16,8 @@ use prism_q::circuit::{Circuit, fusion::fuse_circuit};
 use prism_q::circuits;
 use prism_q::distributed::loopback::run_ranks;
 use prism_q::gates::{Gate, Multi2qData};
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 mod common;
 use common::{SEED, configure_group, is_fast};
@@ -30,6 +32,33 @@ fn direct_sizes() -> &'static [usize] {
 
 fn sample_sizes() -> &'static [usize] {
     if is_fast() { &[12] } else { &[20] }
+}
+
+fn wall_sizes() -> &'static [usize] {
+    if is_fast() { &[16] } else { &[20, 22] }
+}
+
+/// `layers` rounds of a seeded Rx or Ry on every qubit followed by a nearest
+/// neighbour CX ring. Every layer visits every qubit in index order, so the
+/// working set cycles through the whole register.
+fn cyclic_wall(n: usize, layers: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n, 0);
+    for _ in 0..layers {
+        for q in 0..n {
+            let theta = rng.random_range(0.0..std::f64::consts::TAU);
+            let gate = if rng.random_bool(0.5) {
+                Gate::Rx(theta)
+            } else {
+                Gate::Ry(theta)
+            };
+            circuit.add_gate(gate, &[q]);
+        }
+        for q in 0..n {
+            circuit.add_gate(Gate::Cx, &[q, (q + 1) % n]);
+        }
+    }
+    circuit
 }
 
 /// Fused QAOA behind one SWAP, so the qubit map is non-identity for every
@@ -274,6 +303,37 @@ fn bench_sample_indices(c: &mut Criterion) {
     group.finish();
 }
 
+/// The cyclic wall with relabeling on at two and four ranks: each layer scans
+/// every qubit, so a gate on a rank bit position relabels the qubit in and the
+/// eviction it forces is needed again within the same layer.
+fn bench_cyclic_wall(c: &mut Criterion) {
+    let mut group = c.benchmark_group("distributed/cyclic_wall");
+    configure_group(&mut group);
+
+    for &n in wall_sizes() {
+        let circuit = cyclic_wall(n, 3, SEED);
+        for ranks in [2usize, 4] {
+            let id = BenchmarkId::new(format!("ranks{ranks}"), n);
+            group.bench_with_input(id, &circuit, |b, circ| {
+                b.iter(|| {
+                    let amplitudes = run_ranks(ranks, |ctx| {
+                        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+                        backend.set_relabel(true);
+                        backend
+                            .init(circ.num_qubits, circ.num_classical_bits)
+                            .unwrap();
+                        backend.apply_instructions(&circ.instructions).unwrap();
+                        backend.exchange_amplitudes()
+                    });
+                    std::hint::black_box(amplitudes);
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -283,6 +343,7 @@ criterion_group! {
     bench_global_1q_wall,
     bench_controlled_star_direct,
     bench_fused_2q_two_global,
-    bench_sample_indices
+    bench_sample_indices,
+    bench_cyclic_wall
 }
 criterion_main!(benches);

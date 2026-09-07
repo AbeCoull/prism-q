@@ -1019,6 +1019,42 @@ fn bench_gpu_pauli_expect(c: &mut Criterion) {
     group.finish();
 }
 
+/// Device-to-host readback of a prepared state through `export_statevector`.
+/// The plain rows leave the deferred norm at one; the `scaled` rows measure
+/// one qubit of the uniform superposition first so the in-place norm pass
+/// is timed as well. State preparation stays outside the timed region.
+fn bench_gpu_export(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/export");
+    configure_group(&mut group);
+    let sizes: &[usize] = if is_fast() { &[22] } else { &[22, 24] };
+
+    for &n in sizes {
+        let mut circuit = Circuit::new(n, 1);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());
+        backend.init(n, 1).unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+        let _ = backend.export_statevector().unwrap();
+        group.bench_function(BenchmarkId::from_parameter(n), |b| {
+            b.iter(|| black_box(backend.export_statevector().unwrap()));
+        });
+
+        circuit.add_measure(0, 0);
+        let mut backend = StatevectorBackend::new(42).with_gpu(ctx.clone());
+        backend.init(n, 1).unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+        let _ = backend.export_statevector().unwrap();
+        group.bench_function(BenchmarkId::new("scaled", n), |b| {
+            b.iter(|| black_box(backend.export_statevector().unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
@@ -1031,6 +1067,7 @@ criterion_group! {
     bench_gpu_direct_kernel,
     bench_gpu_measurement,
     bench_gpu_pauli_expect,
+    bench_gpu_export,
     bench_gpu_noisy_kraus,
     bench_cpu_noisy_kraus,
     bench_stab_cpu_clifford_d10,

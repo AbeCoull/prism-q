@@ -2,10 +2,12 @@
 //! by replacing this file.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream};
-use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
+use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 
 use crate::error::{PrismError, Result};
 
@@ -34,28 +36,19 @@ enum DeviceInner {
 }
 
 impl GpuDevice {
-    /// Open the device with the given ordinal and compile the kernel module.
+    /// Open the device with the given ordinal and load the kernel module.
     ///
     /// PTX is compiled targeting the newest supported arch at or below the device's
     /// compute capability so the running NVIDIA driver can load it regardless of the
     /// toolkit NVRTC version. A capability below 6.0 is rejected rather than targeted.
+    /// The compiled PTX is shared by every device opened in the process and cached on
+    /// disk in `prism-q-ptx` under the user cache dir (`XDG_CACHE_HOME`, `LOCALAPPDATA`,
+    /// or `HOME/.cache`), so NVRTC runs once per source change per user and host.
     pub fn new(device_id: usize) -> Result<Self> {
         let context = CudaContext::new(device_id).map_err(|e| Self::driver_err("init", e))?;
         let stream = context.default_stream();
         let arch = detect_arch(&context)?;
-        let opts = CompileOptions {
-            arch: Some(arch),
-            ..Default::default()
-        };
-        let source = kernel_source();
-        let ptx =
-            compile_ptx_with_opts(&source, opts).map_err(|e| PrismError::BackendUnsupported {
-                backend: "gpu".to_string(),
-                operation: format!("PTX compilation (arch={arch}): {e}"),
-            })?;
-        let module = context
-            .load_module(ptx)
-            .map_err(|e| Self::driver_err("load_module", e))?;
+        let module = load_kernel_module(&context, arch)?;
         // Pre-resolve every kernel once, to amortise driver lookups away from the gate
         // dispatch hot path.
         let mut functions = HashMap::with_capacity(KERNEL_NAMES.len());
@@ -171,6 +164,89 @@ impl GpuDevice {
     }
 }
 
+/// Compiled PTX per target arch, shared by every device opened in this process.
+static PTX_BY_ARCH: LazyLock<Mutex<HashMap<&'static str, Arc<Ptx>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn load_kernel_module(context: &Arc<CudaContext>, arch: &'static str) -> Result<Arc<CudaModule>> {
+    let mut cache = PTX_BY_ARCH.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(ptx) = cache.get(arch) {
+        return context
+            .load_module(Ptx::clone(ptx))
+            .map_err(|e| GpuDevice::driver_err("load_module", e));
+    }
+    let (ptx, module) = load_or_compile(context, arch, &ptx_cache_dir())?;
+    cache.insert(arch, ptx);
+    Ok(module)
+}
+
+/// Load the module from the PTX cached in `cache_dir`, or compile through NVRTC when
+/// the file is missing or the driver rejects its contents. The file name binds arch,
+/// NVRTC options, crate version, and a hash of the source text, so a changed kernel
+/// never resolves to stale PTX. A fresh compile is written back atomically; a write
+/// failure is ignored, the module is already loaded.
+fn load_or_compile(
+    context: &Arc<CudaContext>,
+    arch: &'static str,
+    cache_dir: &Path,
+) -> Result<(Arc<Ptx>, Arc<CudaModule>)> {
+    let opts = CompileOptions {
+        arch: Some(arch),
+        ..Default::default()
+    };
+    let source = kernel_source();
+    let path = cache_dir.join(ptx_cache_file_name(arch, &opts, &source));
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let ptx = Ptx::from_src(text);
+        if let Ok(module) = context.load_module(ptx.clone()) {
+            return Ok((Arc::new(ptx), module));
+        }
+    }
+    let ptx = compile_ptx_with_opts(&source, opts).map_err(|e| PrismError::BackendUnsupported {
+        backend: "gpu".to_string(),
+        operation: format!("PTX compilation (arch={arch}): {e}"),
+    })?;
+    let module = context
+        .load_module(ptx.clone())
+        .map_err(|e| GpuDevice::driver_err("load_module", e))?;
+    write_ptx_cache(&path, &ptx.to_src());
+    Ok((Arc::new(ptx), module))
+}
+
+/// Per-user cache location: `XDG_CACHE_HOME`, `LOCALAPPDATA`, or `HOME/.cache`, falling
+/// back to the OS temp dir. A shared temp dir is avoided where a user dir exists so
+/// that no other local user can seed the file another process will load.
+fn ptx_cache_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("prism-q-ptx")
+}
+
+fn ptx_cache_file_name(arch: &str, opts: &CompileOptions, source: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    opts.hash(&mut hasher);
+    source.hash(&mut hasher);
+    format!(
+        "{}-{arch}-{:016x}.ptx",
+        env!("CARGO_PKG_VERSION"),
+        hasher.finish()
+    )
+}
+
+fn write_ptx_cache(path: &Path, ptx_src: &str) {
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, ptx_src).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 /// Virtual architectures NVRTC is asked to target, ascending by capability.
 ///
 /// The ceiling tracks the newest arch the pinned `cudarc` NVRTC binding
@@ -257,5 +333,51 @@ mod tests {
     fn arch_rejects_capabilities_below_the_floor() {
         assert_eq!(arch_for_capability((5, 2)), None);
         assert_eq!(arch_for_capability((3, 5)), None);
+    }
+
+    // Skips without a usable GPU, matching the golden suites.
+    #[test]
+    fn second_device_reuses_the_process_cached_ptx() {
+        let Ok(context) = CudaContext::new(0) else {
+            eprintln!("SKIP: no usable GPU");
+            return;
+        };
+        let arch = detect_arch(&context).unwrap();
+        let _first = GpuDevice::new(0).unwrap();
+        let before = Arc::clone(&PTX_BY_ARCH.lock().unwrap()[arch]);
+        let _second = GpuDevice::new(0).unwrap();
+        let after = Arc::clone(&PTX_BY_ARCH.lock().unwrap()[arch]);
+        assert!(Arc::ptr_eq(&before, &after));
+    }
+
+    // A corrupt cache file is overwritten by a recompile; the valid file is then
+    // loaded without a rewrite (the miss path always writes, so an unchanged mtime
+    // is the hit).
+    #[test]
+    fn corrupt_disk_cache_falls_back_to_a_recompile() {
+        let Ok(context) = CudaContext::new(0) else {
+            eprintln!("SKIP: no usable GPU");
+            return;
+        };
+        let arch = detect_arch(&context).unwrap();
+        let dir = std::env::temp_dir().join(format!("prism-q-ptx-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let opts = CompileOptions {
+            arch: Some(arch),
+            ..Default::default()
+        };
+        let path = dir.join(ptx_cache_file_name(arch, &opts, &kernel_source()));
+        std::fs::write(&path, "not ptx").unwrap();
+
+        let (ptx, _module) = load_or_compile(&context, arch, &dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ptx.to_src());
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let (_ptx, _module) = load_or_compile(&context, arch, &dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            written
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

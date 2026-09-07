@@ -10,6 +10,14 @@ cargo build --release --features "parallel gpu"
 cargo test --features "parallel gpu" --test golden_gpu
 ```
 
+Constructing a `GpuContext` compiles the CUDA kernels through NVRTC, one to three seconds on a
+GTX 1080 Ti. The PTX is shared by every context in the process and cached on disk in
+`prism-q-ptx` under the user cache directory (`XDG_CACHE_HOME`, else `LOCALAPPDATA`,
+else `HOME/.cache`, else the OS temp directory), keyed by device arch, crate version,
+and a hash of the kernel source, so later processes skip the compile. A missing,
+unreadable, or corrupt cache file only costs a recompile; delete the directory to force
+one.
+
 CUDA acceleration covers statevector execution, stabilizer execution, density-matrix
 execution, and compiled BTS sampling. Seven entry points are available:
 

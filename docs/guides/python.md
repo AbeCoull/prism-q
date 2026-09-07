@@ -223,8 +223,9 @@ A start state also narrows the route. Auto dispatch reads circuit structure, and
 its shortcuts (tableau, product state, subsystem decomposition, Pauli
 propagation) are only valid from |0...0>: a Clifford circuit produces a
 stabilizer state only when its input is one. So `auto()` resolves to the
-statevector, `density_matrix()` is the only other backend that accepts one, and
-every other choice raises `PrismError` naming itself. `run()`, `shots()`,
+statevector, the GPU and distributed statevectors and `density_matrix()` are the
+only other backends that accept one, and every other choice raises `PrismError`
+naming itself. `run()`, `shots()`,
 `sample_counts()`, `marginals()`, `expectation_values()`, and `state_vector()`
 carry it; `expectation_gradient()` and `density_matrix_expectation_values()`
 reject it, as do `shots()` and `sample_counts()` with a noise model attached,

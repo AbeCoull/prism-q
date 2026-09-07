@@ -992,6 +992,50 @@ impl DistributedStatevectorBackend {
         }
     }
 
+    /// Shared prologue of `init` and `init_from_amplitudes`: agree the register
+    /// shape across ranks, check the rank count against it, and reset the qubit
+    /// map to the identity. Returns the local qubit count for the shard the
+    /// caller loads next.
+    fn prepare_shard(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<usize> {
+        let size = self.context.size();
+        // Before the local validations: those read `num_qubits`, so ranks given
+        // different circuits could disagree about whether to reject and leave
+        // one side alone at the next collective.
+        if size > 1 {
+            self.check_config_agreement(num_qubits, num_classical_bits)?;
+        }
+        self.circuit_check_pending = true;
+        if !size.is_power_of_two() {
+            return Err(PrismError::BackendUnsupported {
+                backend: BACKEND_NAME.to_string(),
+                operation: format!("rank count {size} is not a power of two"),
+            });
+        }
+        let p = size.trailing_zeros() as usize;
+        let min_local = crate::distributed::min_local_qubits();
+        if size > 1 && num_qubits < p + min_local {
+            return Err(PrismError::BackendUnsupported {
+                backend: BACKEND_NAME.to_string(),
+                operation: format!(
+                    "{num_qubits} qubits across {size} ranks leaves fewer than \
+                     {min_local} local qubits per rank"
+                ),
+            });
+        }
+
+        self.num_qubits = num_qubits;
+        self.global_qubits = p;
+        self.meas_rng = ChaCha8Rng::seed_from_u64(self.seed);
+        self.exchange_messages = 0;
+        self.exchange_amplitudes = 0;
+        self.qubit_map = (0..num_qubits).collect();
+        self.phys_map = (0..num_qubits).collect();
+        self.map_identity = true;
+        self.last_used = vec![0; num_qubits];
+        self.tick = 0;
+        Ok(num_qubits - p)
+    }
+
     /// Translate a circuit-qubit bit mask into physical positions.
     fn to_physical_mask(&self, mask: usize) -> usize {
         if self.map_identity {
@@ -1975,43 +2019,7 @@ impl Backend for DistributedStatevectorBackend {
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
-        let size = self.context.size();
-        // Before the local validations: those read `num_qubits`, so ranks given
-        // different circuits could disagree about whether to reject and leave
-        // one side alone at the next collective.
-        if size > 1 {
-            self.check_config_agreement(num_qubits, num_classical_bits)?;
-        }
-        self.circuit_check_pending = true;
-        if !size.is_power_of_two() {
-            return Err(PrismError::BackendUnsupported {
-                backend: BACKEND_NAME.to_string(),
-                operation: format!("rank count {size} is not a power of two"),
-            });
-        }
-        let p = size.trailing_zeros() as usize;
-        let min_local = crate::distributed::min_local_qubits();
-        if size > 1 && num_qubits < p + min_local {
-            return Err(PrismError::BackendUnsupported {
-                backend: BACKEND_NAME.to_string(),
-                operation: format!(
-                    "{num_qubits} qubits across {size} ranks leaves fewer than \
-                     {min_local} local qubits per rank"
-                ),
-            });
-        }
-
-        self.num_qubits = num_qubits;
-        self.global_qubits = p;
-        self.meas_rng = ChaCha8Rng::seed_from_u64(self.seed);
-        self.exchange_messages = 0;
-        self.exchange_amplitudes = 0;
-        self.qubit_map = (0..num_qubits).collect();
-        self.phys_map = (0..num_qubits).collect();
-        self.map_identity = true;
-        self.last_used = vec![0; num_qubits];
-        self.tick = 0;
-        let local_qubits = num_qubits - p;
+        let local_qubits = self.prepare_shard(num_qubits, num_classical_bits)?;
         self.inner.init(local_qubits, num_classical_bits)?;
 
         // inner.init seeds index 0 on every rank; only rank 0 owns |0...0>.
@@ -2020,6 +2028,36 @@ impl Backend for DistributedStatevectorBackend {
                 *amp = Complex64::new(0.0, 0.0);
             }
         }
+        Ok(())
+    }
+
+    fn supports_initial_state(&self) -> bool {
+        true
+    }
+
+    /// Load this rank's shard from the full `2^n` vector.
+    ///
+    /// Every rank receives the whole vector and keeps the `2^(n - p)` amplitudes
+    /// from `rank * 2^(n - p)`, the identity layout `init` establishes; a map
+    /// left permuted by an earlier relabeled run is reset, not written into.
+    /// Collective: every rank must call it with an identical vector.
+    fn init_from_amplitudes(
+        &mut self,
+        amplitudes: Vec<Complex64>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        crate::backend::validate_initial_amplitudes(&amplitudes)?;
+        let num_qubits = amplitudes.len().trailing_zeros() as usize;
+        let local_qubits = self.prepare_shard(num_qubits, num_classical_bits)?;
+        if self.is_single_rank() {
+            return self.inner.init_from_state(amplitudes, num_classical_bits);
+        }
+        self.inner.init(local_qubits, num_classical_bits)?;
+        let len = 1usize << local_qubits;
+        let start = self.context.rank() * len;
+        self.inner
+            .state
+            .copy_from_slice(&amplitudes[start..start + len]);
         Ok(())
     }
 

@@ -30,7 +30,7 @@
 //! | `reduced_density_matrix_2q` | Everything except Statevector | Feeds the branch weights of a correlated two-qubit Kraus channel, which needs the joint state of the pair. A tableau, a product state, and a factored register hold no joint amplitude for an arbitrary pair; MPS and sparse could answer but do not yet. `Backend::supports_two_qubit_kraus` reports the coverage, and `run_shots_with_noise` rejects on it before allocating state. |
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
-//! | `init_from_amplitudes` | Everything except Statevector and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. |
+//! | `init_from_amplitudes` | Everything except Statevector, DistributedStatevector, and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. The distributed statevector takes the full vector on every rank and keeps its own slice. |
 //!
 //! [`Backend::reduced_density_matrix_1q`] and [`Backend::apply_1q_matrix`] are
 //! two halves of one capability, sampling a non-Pauli branch and applying the

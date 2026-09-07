@@ -60,7 +60,9 @@ Notes:
 - **Distributed** covers the optional `distributed` and `distributed-mpi` features.
   The statevector backend splits the state across MPI ranks with exact results,
   including gates, measurement, reset, and multi-shot sampling without gathering
-  the dense state. Use `simulate(&circuit).distributed(context)`.
+  the dense state. Use `simulate(&circuit).distributed(context)`. A run can start
+  from an injected amplitude vector through `.initial_state(...)`: every rank
+  receives the full `2^n` vector and keeps only its own slice.
 
 ## Shot and observable queries above the dense cap
 

@@ -847,7 +847,9 @@ pub(super) fn resolve(
 /// is one, a product state and a subsystem split assume unentangled inputs, and
 /// the Pauli engines propagate observables back to |0...0⟩. Selecting one of
 /// them for an arbitrary start state is a wrong answer rather than an error, so
-/// only the two representations that can hold an arbitrary state are reachable.
+/// only the representations that can hold an arbitrary state are reachable: the
+/// statevector, on the host, on a device, or sharded across ranks, and the
+/// density matrix.
 /// `Auto` lands on the statevector unconditionally: the caller already holds
 /// `2^n` amplitudes, so the dense state is affordable by construction.
 pub(super) fn initial_state_plan(kind: &BackendKind, num_qubits: usize) -> Result<BackendPlan> {
@@ -863,6 +865,10 @@ pub(super) fn initial_state_plan(kind: &BackendKind, num_qubits: usize) -> Resul
         #[cfg(feature = "gpu")]
         BackendKind::DensityMatrixGpu { .. } => {
             Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits))
+        }
+        #[cfg(feature = "distributed")]
+        BackendKind::StatevectorDistributed { context } => {
+            Ok(BackendPlan::Distributed(context.clone()))
         }
         other => Err(PrismError::IncompatibleBackend {
             backend: format!("{other:?}"),

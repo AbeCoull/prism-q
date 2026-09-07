@@ -3,10 +3,12 @@
 # Usage:   powershell -ExecutionPolicy Bypass -File scripts\test-mpi.ps1 [-Ranks 4]
 #
 # Sets up the MPI build environment, builds the lib tests and the mpiexec check
-# binary, then launches it across N ranks under three configurations (default,
-# tiled exchange, relabeling off). Rank 0 asserts the gathered result matches
-# the one process statevector reference and exits nonzero on mismatch. A final
-# three rank run asserts the power of two requirement is rejected.
+# binary with Rayon enabled (the shipped combination: workers beside MPI, which
+# must grant MPI_THREAD_FUNNELED at init), then launches it across N ranks under
+# three configurations (default, tiled exchange, relabeling off). Rank 0 asserts
+# the gathered result matches the one process statevector reference and exits
+# nonzero on mismatch. A final three rank run asserts the power of two
+# requirement is rejected.
 
 param(
     [int[]] $RankCounts = @(1, 2, 4)
@@ -18,15 +20,15 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir 'mpi-env.ps1')
 
 Write-Host "`n== Building lib tests (distributed-mpi) =="
-cargo test --features distributed-mpi --lib distributed --no-run
+cargo test --features "parallel distributed-mpi" --lib distributed --no-run
 if ($LASTEXITCODE -ne 0) { throw "lib test build failed" }
 
 Write-Host "`n== Running SerialComm lib tests =="
-cargo test --features distributed-mpi --lib distributed
+cargo test --features "parallel distributed-mpi" --lib distributed
 if ($LASTEXITCODE -ne 0) { throw "lib tests failed" }
 
 Write-Host "`n== Building mpiexec check binary =="
-cargo build --example dist_mpi_check --features distributed-mpi
+cargo build --example dist_mpi_check --features "parallel distributed-mpi"
 if ($LASTEXITCODE -ne 0) { throw "example build failed" }
 
 $exe = Join-Path $scriptDir '..\target\debug\examples\dist_mpi_check.exe'

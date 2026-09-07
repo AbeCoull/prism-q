@@ -369,6 +369,13 @@ one rank at single-host speed with no signal that nothing was distributed. Pass
 Constructing the context without MPI running raises rather than starting MPI, so
 a forgotten `from mpi4py import MPI` is reported at the point it happened.
 
+The thread level mpi4py negotiated must be at least `MPI_THREAD_FUNNELED`: Rayon
+workers run beside MPI in the same process, and every MPI call stays on the thread
+that constructed the context. mpi4py requests `MPI_THREAD_MULTIPLE` by default; a
+script that lowers it (`mpi4py.rc.thread_level = 'single'` or
+`mpi4py.rc.threads = False`) gets an error from the constructor rather than a run
+that mixes threads with a single-threaded MPI.
+
 The published wheels have no MPI support: `mpi-sys` runs bindgen and needs a
 system MPI at build time, and the extension has to link the same MPI
 implementation and ABI as mpi4py and as the launcher. Mixing two implementations

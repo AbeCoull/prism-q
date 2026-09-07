@@ -1052,6 +1052,155 @@ fn multi2q_star_shares_one_exchange_per_run() {
     assert_loopback_matches(&circuit, &[2, 4]);
 }
 
+#[test]
+fn two_global_fused_2q_exchanges_two_slices() {
+    use crate::gates::Gate;
+    relax_min_local_qubits();
+    // Qubits 3 and 4 are the two rank bits at 4 ranks; the slice is 8
+    // amplitudes. The butterfly exchanges one slice per rank bit instead of
+    // gathering three, and every rank pays the same.
+    let mut circuit = Circuit::new(5, 0);
+    circuit.add_gate(Gate::Fused2q(Box::new(dense_2q())), &[3, 4]);
+    for stats in loopback_exchange_stats_all(&circuit, 4, usize::MAX, false) {
+        assert_eq!(stats, (2, 16), "one slice per rank bit");
+    }
+    let tiled = loopback_exchange_stats(&circuit, 4, 3, false);
+    assert_eq!(
+        tiled,
+        (6, 16),
+        "8 amplitudes in tiles of 3 is three messages per step"
+    );
+
+    // Against the dense reference at 4 ranks, and at 8 ranks where the group of
+    // four shares a third rank bit; tiles of 1, 3, and 4 cover the boundaries.
+    let n = 6;
+    let mut b = CircuitBuilder::new(n);
+    for q in 0..n {
+        b.h(q);
+    }
+    b.ry(0.4, n - 2).rz(0.9, n - 1).cx(0, n - 1);
+    let mut circuit = b.build();
+    circuit.add_gate(Gate::Fused2q(Box::new(dense_2q())), &[n - 2, n - 1]);
+    assert_loopback_matches(&circuit, &[4, 8]);
+    let expected = reference_probs(&circuit);
+    for chunk in [1usize, 3, 4] {
+        let actual = loopback_probs_with(&circuit, 4, chunk, false);
+        for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+            assert!(
+                (e - a).abs() < TOL,
+                "chunk {chunk}: prob[{i}] expected {e}, got {a}"
+            );
+        }
+    }
+}
+
+#[test]
+fn tiled_exchange_covers_two_qubit_and_swap_arms() {
+    use crate::gates::{Gate, Multi2qData};
+    relax_min_local_qubits();
+
+    // Both-global SWAP at 4 ranks: rank 0 (bits 00) is a fixed point; rank 1
+    // (bits 01) swaps its 8-amplitude slice with rank 2.
+    let mut swap = Circuit::new(5, 0);
+    swap.add_gate(Gate::X, &[0]);
+    swap.add_gate(Gate::Swap, &[3, 4]);
+    let full = loopback_exchange_stats_all(&swap, 4, usize::MAX, false);
+    assert_eq!(full[0], (0, 0), "equal rank bits hold fixed points");
+    assert_eq!(full[1], (1, 8), "differing rank bits swap the slice once");
+    let tiled = loopback_exchange_stats_all(&swap, 4, 3, false);
+    assert_eq!(
+        tiled[1],
+        (3, 8),
+        "8 amplitudes in tiles of 3 is three messages"
+    );
+    assert_eq!(
+        loopback_state_with(&swap, 4, usize::MAX, false),
+        loopback_state_with(&swap, 4, 3, false),
+        "tiling a swap is a pure copy"
+    );
+
+    // One global qubit at 2 ranks: the slice is 16 amplitudes and a tile holds
+    // whole pair blocks of the local qubit, so the chunk rounds down to the
+    // block and never below it.
+    let one_global = |q0: usize, q1: usize| {
+        let mut c = Circuit::new(5, 0);
+        for q in 0..3 {
+            c.add_gate(Gate::H, &[q]);
+        }
+        c.add_gate(Gate::Fused2q(Box::new(dense_2q())), &[q0, q1]);
+        c
+    };
+    let low = one_global(0, 4);
+    assert_eq!(loopback_exchange_stats(&low, 2, usize::MAX, false), (1, 16));
+    assert_eq!(
+        loopback_exchange_stats(&low, 2, 4, false),
+        (4, 16),
+        "blocks of 2 tile evenly into chunks of 4"
+    );
+    assert_eq!(
+        loopback_exchange_stats(&low, 2, 3, false),
+        (8, 16),
+        "a chunk of 3 rounds down to one block of 2"
+    );
+    assert_eq!(
+        loopback_exchange_stats(&low, 2, 1, false),
+        (8, 16),
+        "a chunk below the block is raised to one block"
+    );
+    let high = one_global(4, 2);
+    assert_eq!(
+        loopback_exchange_stats(&high, 2, 4, false),
+        (2, 16),
+        "blocks of 8 raise a chunk of 4 to one block"
+    );
+
+    // A same-partner run tiles by the widest entry's block.
+    let mut run = Circuit::new(5, 0);
+    for q in 0..3 {
+        run.add_gate(Gate::H, &[q]);
+    }
+    let gates = vec![(0, 4, dense_2q()), (2, 4, dense_2q())];
+    run.add_gate(Gate::Multi2q(Box::new(Multi2qData { gates })), &[0, 2, 4]);
+    assert_eq!(loopback_exchange_stats(&run, 2, usize::MAX, false), (1, 16));
+    assert_eq!(
+        loopback_exchange_stats(&run, 2, 4, false),
+        (2, 16),
+        "the widest block of 8 sets the tile"
+    );
+
+    // Tiling changes the message shape only: the amplitudes are bit-identical
+    // and match the dense reference.
+    for circuit in [&low, &high, &run] {
+        let whole = loopback_state_with(circuit, 2, usize::MAX, false);
+        for chunk in [1usize, 3, 4] {
+            assert_eq!(whole, loopback_state_with(circuit, 2, chunk, false));
+        }
+        assert_loopback_matches(circuit, &[2, 4]);
+    }
+}
+
+/// Kronecker product of `Ry(0.3)` and `Rx(0.7)`: a unitary whose sixteen
+/// entries are all nonzero, so every coefficient of a 2q path is exercised.
+fn dense_2q() -> [[Complex64; 4]; 4] {
+    let (s, c) = (0.15f64).sin_cos();
+    let ry = [
+        [Complex64::new(c, 0.0), Complex64::new(-s, 0.0)],
+        [Complex64::new(s, 0.0), Complex64::new(c, 0.0)],
+    ];
+    let (s, c) = (0.35f64).sin_cos();
+    let rx = [
+        [Complex64::new(c, 0.0), Complex64::new(0.0, -s)],
+        [Complex64::new(0.0, -s), Complex64::new(c, 0.0)],
+    ];
+    let mut mat = [[Complex64::new(0.0, 0.0); 4]; 4];
+    for (r, row) in mat.iter_mut().enumerate() {
+        for (col, entry) in row.iter_mut().enumerate() {
+            *entry = ry[r >> 1][col >> 1] * rx[r & 1][col & 1];
+        }
+    }
+    mat
+}
+
 fn inst_h(q: usize) -> crate::circuit::Instruction {
     crate::circuit::Instruction::Gate {
         gate: crate::gates::Gate::H,
@@ -1067,6 +1216,16 @@ fn loopback_exchange_stats(
     chunk: usize,
     relabel: bool,
 ) -> (u64, u64) {
+    loopback_exchange_stats_all(circuit, size, chunk, relabel).swap_remove(0)
+}
+
+/// [`loopback_exchange_stats`] for every rank, in rank order.
+fn loopback_exchange_stats_all(
+    circuit: &Circuit,
+    size: usize,
+    chunk: usize,
+    relabel: bool,
+) -> Vec<(u64, u64)> {
     run_ranks(size, |ctx| {
         let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
         backend.set_exchange_chunk(chunk);
@@ -1076,6 +1235,26 @@ fn loopback_exchange_stats(
             .unwrap();
         backend.apply_instructions(&circuit.instructions).unwrap();
         (backend.exchange_messages(), backend.exchange_amplitudes())
+    })
+}
+
+/// Run `circuit` without fusion across `size` ranks and return rank 0's
+/// gathered amplitudes, for bit-level comparisons between exchange shapes.
+fn loopback_state_with(
+    circuit: &Circuit,
+    size: usize,
+    chunk: usize,
+    relabel: bool,
+) -> Vec<Complex64> {
+    run_ranks(size, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_exchange_chunk(chunk);
+        backend.set_relabel(relabel);
+        backend
+            .init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+        backend.export_statevector().unwrap()
     })
     .swap_remove(0)
 }

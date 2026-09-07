@@ -903,8 +903,7 @@ impl DistributedStatevectorBackend {
     }
 
     /// Fingerprint of every setting the collective sequence assumes is shared.
-    /// Rank id and rank count are excluded; they legitimately differ. Folded to
-    /// 53 bits so it survives the `f64` collectives exactly.
+    /// Rank id and rank count are excluded; they legitimately differ.
     fn config_fingerprint(&self, num_qubits: usize, num_classical_bits: usize) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::hash::DefaultHasher::new();
@@ -917,7 +916,7 @@ impl DistributedStatevectorBackend {
             num_classical_bits,
         )
             .hash(&mut hasher);
-        hasher.finish() >> 11
+        hasher.finish()
     }
 
     /// Fold the instruction stream into the value ranks compare.
@@ -941,7 +940,7 @@ impl DistributedStatevectorBackend {
 
         let mut hasher = std::hash::DefaultHasher::new();
         let _ = write!(HashSink(&mut hasher), "{instructions:?}");
-        hasher.finish() >> 11
+        hasher.finish()
     }
 
     /// Reject a run whose ranks were handed different circuits.
@@ -955,8 +954,8 @@ impl DistributedStatevectorBackend {
     /// a rank that never reaches the run at all: that one hangs in this
     /// allgather instead of a later one.
     fn check_circuit_agreement(&self, instructions: &[Instruction]) -> Result<()> {
-        let local = Self::circuit_fingerprint(instructions) as f64;
-        let all = self.context.comm().allgather_f64(&[local]);
+        let local = Self::circuit_fingerprint(instructions);
+        let all = self.context.comm().allgather_u64(&[local]);
         match all.iter().position(|&other| other != local) {
             None => Ok(()),
             Some(other) => Err(PrismError::BackendUnsupported {
@@ -977,8 +976,8 @@ impl DistributedStatevectorBackend {
     /// order) or as silently wrong amplitudes (measurement branches drawn from
     /// different seeds), both far from the setting that caused them.
     fn check_config_agreement(&self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
-        let local = self.config_fingerprint(num_qubits, num_classical_bits) as f64;
-        let all = self.context.comm().allgather_f64(&[local]);
+        let local = self.config_fingerprint(num_qubits, num_classical_bits);
+        let all = self.context.comm().allgather_u64(&[local]);
         match all.iter().position(|&other| other != local) {
             None => Ok(()),
             Some(other) => Err(PrismError::BackendUnsupported {
@@ -1756,10 +1755,12 @@ impl DistributedStatevectorBackend {
     /// bounded exchanges, so each rank owns a contiguous slice in circuit
     /// order. Each rank then builds a cumulative distribution for its local
     /// slice. One gather shares a single mass value from each rank. Every rank
-    /// assigns each shot to an owning rank from the same seeded draw stream,
-    /// the owner samples its local distribution, and a tiled sum reduction
-    /// distributes the sampled indices. Buffers scale with the rank count and
-    /// shot count, not the global state size.
+    /// assigns each shot to an owning rank from the same seeded draw stream, so
+    /// every rank knows the owner sequence. Each owner samples its local
+    /// distribution for its shots, one variable-count gather concatenates the
+    /// owned indices in rank order, and each rank scatters them back into shot
+    /// order. Buffers scale with the rank count and shot count, not the global
+    /// state size.
     ///
     /// Collective: every rank must call this with identical `num_shots` and
     /// `seed`. The result is identical on every rank and reproduces the dense
@@ -1767,11 +1768,6 @@ impl DistributedStatevectorBackend {
     /// when accumulated rounding differences move a draw across an interval
     /// edge in the cumulative distribution.
     pub fn sample_state_indices(&mut self, num_shots: usize, seed: u64) -> Result<Vec<u64>> {
-        if self.num_qubits > 53 {
-            return Err(self.unsupported(
-                "shot sampling above 53 qubits: index transport is exact only below 2^53",
-            ));
-        }
         if num_shots == 0 {
             return Ok(Vec::new());
         }
@@ -1799,15 +1795,20 @@ impl DistributedStatevectorBackend {
         }
 
         let rank = self.context.rank();
+        let size = self.context.size();
         let local_qubits = self.local_qubits();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
-        let mut indices = vec![0.0f64; num_shots];
-        for slot in indices.iter_mut() {
+        let mut owners = Vec::with_capacity(num_shots);
+        let mut counts = vec![0usize; size];
+        let mut owned = Vec::new();
+        for _ in 0..num_shots {
             let r: f64 = rng.random();
             // First rank whose cumulative mass reaches r. The strict
             // comparison matches the dense binary search at exact boundary
             // hits and never selects an empty interval.
             let owner = rank_cdf.partition_point(|&c| c < r);
+            owners.push(owner);
+            counts[owner] += 1;
             if owner != rank {
                 continue;
             }
@@ -1817,14 +1818,23 @@ impl DistributedStatevectorBackend {
                 r - rank_cdf[owner - 1]
             };
             let local_idx = crate::sim::shots::sample_from_cdf(&local_cdf, residual);
-            *slot = (((rank as u64) << local_qubits) | local_idx as u64) as f64;
+            owned.push(((rank as u64) << local_qubits) | local_idx as u64);
         }
 
-        const REDUCE_CHUNK: usize = 1 << 20;
-        for chunk in indices.chunks_mut(REDUCE_CHUNK) {
-            self.context.comm().allreduce_sum_f64_slice(chunk);
+        let gathered = self.context.comm().allgatherv_u64(&owned, &counts);
+        let mut next = vec![0usize; size];
+        for r in 1..size {
+            next[r] = next[r - 1] + counts[r - 1];
         }
-        Ok(indices.into_iter().map(|v| v as u64).collect())
+        let indices = owners
+            .iter()
+            .map(|&owner| {
+                let i = next[owner];
+                next[owner] += 1;
+                gathered[i]
+            })
+            .collect();
+        Ok(indices)
     }
 
     /// Zero the amplitudes inconsistent with `qubit == outcome`.

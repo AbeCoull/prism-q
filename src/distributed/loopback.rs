@@ -28,10 +28,12 @@ struct LoopbackState {
     arrived: usize,
     cslots: Vec<Vec<Complex64>>,
     fslots: Vec<Vec<f64>>,
+    uslots: Vec<Vec<u64>>,
     scalars: Vec<f64>,
-    reduce: Vec<f64>,
-    /// Largest block one rank passed to an allgather. Shot sampling tests
-    /// assert this stays at one element, proving no dense gather happened.
+    /// Largest block one rank passed to an `f64` or `c64` allgather. Shot
+    /// sampling tests assert this stays at one element, proving no dense
+    /// gather happened. The `u64` gather carries fingerprints and sampled
+    /// indices, whose size is set by the shot count, and is not counted.
     max_gather_block: usize,
 }
 
@@ -90,8 +92,8 @@ impl LoopbackShared {
                 arrived: 0,
                 cslots: vec![Vec::new(); size],
                 fslots: vec![Vec::new(); size],
+                uslots: vec![Vec::new(); size],
                 scalars: vec![0.0; size],
-                reduce: Vec::new(),
                 max_gather_block: 0,
             }),
             cv: Condvar::new(),
@@ -167,6 +169,20 @@ impl RankComm for LoopbackComm {
         out
     }
 
+    fn allgatherv_u64(&self, local: &[u64], counts: &[usize]) -> Vec<u64> {
+        debug_assert_eq!(counts[self.rank], local.len());
+        {
+            let mut st = self.shared.state.lock().unwrap();
+            let slot = &mut st.uslots[self.rank];
+            slot.clear();
+            slot.extend_from_slice(local);
+        }
+        self.shared.barrier();
+        let out = self.shared.state.lock().unwrap().uslots.concat();
+        self.shared.barrier();
+        out
+    }
+
     fn allreduce_sum_f64(&self, value: f64) -> f64 {
         {
             let mut st = self.shared.state.lock().unwrap();
@@ -176,29 +192,6 @@ impl RankComm for LoopbackComm {
         let sum = self.shared.state.lock().unwrap().scalars.iter().sum();
         self.shared.barrier();
         sum
-    }
-
-    fn allreduce_sum_f64_slice(&self, values: &mut [f64]) {
-        {
-            let mut st = self.shared.state.lock().unwrap();
-            if st.reduce.len() != values.len() {
-                st.reduce = vec![0.0; values.len()];
-            }
-            for (acc, &v) in st.reduce.iter_mut().zip(values.iter()) {
-                *acc += v;
-            }
-        }
-        self.shared.barrier();
-        {
-            let st = self.shared.state.lock().unwrap();
-            values.copy_from_slice(&st.reduce);
-        }
-        self.shared.barrier();
-        if self.rank == 0 {
-            let mut st = self.shared.state.lock().unwrap();
-            st.reduce.clear();
-        }
-        self.shared.barrier();
     }
 
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {

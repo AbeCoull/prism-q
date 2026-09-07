@@ -1387,6 +1387,71 @@ fn shots_sample_without_dense_gather() {
 }
 
 #[test]
+fn shots_indices_match_dense_draws_at_four_ranks() {
+    relax_min_local_qubits();
+    let n = 6;
+    let shots = 200;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(crate::gates::Gate::H, &[q]);
+    }
+    circuit.add_gate(crate::gates::Gate::Cx, &[0, n - 1]);
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    let stripped = circuit.without_measurements();
+    let expected: Vec<u64> = dense_reference_shots(&circuit, shots)
+        .iter()
+        .map(|bits| {
+            bits.iter()
+                .enumerate()
+                .fold(0u64, |acc, (q, &b)| acc | ((b as u64) << q))
+        })
+        .collect();
+
+    let (per_rank, max_gather) = run_ranks_max_gather(4, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend
+            .init(stripped.num_qubits, stripped.num_classical_bits)
+            .expect("init");
+        backend
+            .apply_instructions(&stripped.instructions)
+            .expect("apply");
+        backend
+            .sample_state_indices(shots, SEED)
+            .expect("sample indices")
+    });
+    for indices in &per_rank {
+        assert_eq!(indices, &expected);
+    }
+    assert!(
+        max_gather <= 1,
+        "index transport must not gather a dense block"
+    );
+}
+
+// A state above 53 qubits cannot be allocated in a test, so the transport is
+// checked directly: indices with the top bit set round trip exactly through
+// uneven blocks, which the previous f64 reduction could not carry.
+#[test]
+fn loopback_allgatherv_u64_round_trips_uneven_wide_blocks() {
+    let size = 4;
+    let counts: Vec<usize> = (1..=size).collect();
+    let block = |rank: usize| -> Vec<u64> {
+        (0..counts[rank])
+            .map(|i| (1u64 << 63) | (1u64 << 53) | ((rank as u64) << 8) | i as u64)
+            .collect()
+    };
+    let expected: Vec<u64> = (0..size).flat_map(block).collect();
+    let per_rank = run_ranks(size, |ctx| {
+        ctx.comm().allgatherv_u64(&block(ctx.rank()), &counts)
+    });
+    for gathered in &per_rank {
+        assert_eq!(gathered, &expected);
+    }
+}
+
+#[test]
 fn shots_mid_circuit_match_across_rank_counts() {
     relax_min_local_qubits();
     let mut circuit = Circuit::new(4, 2);

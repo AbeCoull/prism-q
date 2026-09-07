@@ -325,7 +325,7 @@ impl Parameters {
 }
 
 /// Angle of a gate already validated as bindable.
-fn angle_of(instruction: &Instruction) -> f64 {
+pub(crate) fn angle_of(instruction: &Instruction) -> f64 {
     match instruction {
         Instruction::Gate {
             gate: Gate::Rx(t) | Gate::Ry(t) | Gate::Rz(t) | Gate::Rzz(t) | Gate::P(t),
@@ -460,5 +460,55 @@ mod tests {
         let p = Parameters::all_rotations(&template);
         let bound = p.bind(&template, &[0.3, 0.4]).unwrap();
         assert_eq!(p.values(&bound).unwrap(), vec![0.3, 0.4]);
+    }
+
+    // `pauli_generator` decides which gates bind, and `angle_of`, `angle_mut`,
+    // and the replay recipe's `write_angle` each match the same variants by
+    // hand. A new angle-carrying variant fails here until all four agree.
+    // `BatchRzz` is the one deliberate exception: replay writes its edges
+    // although the fused gate itself is not bindable.
+    #[test]
+    fn angle_sites_agree_on_every_gate() {
+        use crate::circuit::plan::write_angle;
+        use crate::gates::PauliRotData;
+        use crate::sim::unified_pauli::PauliAxis;
+
+        let h = Gate::H.matrix_2x2();
+        let gates = [
+            Gate::Rx(0.1),
+            Gate::Ry(0.2),
+            Gate::Rz(0.3),
+            Gate::P(0.4),
+            Gate::Rzz(0.5),
+            Gate::PauliRot(Box::new(PauliRotData {
+                theta: 0.6,
+                axes: vec![PauliAxis::X, PauliAxis::Z],
+            })),
+            Gate::Id,
+            Gate::H,
+            Gate::T,
+            Gate::SX,
+            Gate::Cx,
+            Gate::Cz,
+            Gate::Swap,
+            Gate::Cu(Box::new(h)),
+            Gate::Fused(Box::new(h)),
+            Gate::Fused2q(Box::new(Gate::Cx.matrix_4x4())),
+            Gate::QftBlock { start: 0, num: 2 },
+        ];
+        for gate in gates {
+            let targets: SmallVec<[usize; 4]> = (0..gate.num_qubits()).collect();
+            let mut inst = Instruction::Gate {
+                gate: gate.clone(),
+                targets,
+            };
+            let bindable = gate.pauli_generator().is_some();
+            assert_eq!(write_angle(&mut inst, 0, 1.25), bindable, "{gate}");
+            if bindable {
+                assert_eq!(angle_of(&inst), 1.25, "{gate}");
+                *angle_mut(&mut inst) = 2.5;
+                assert_eq!(angle_of(&inst), 2.5, "{gate}");
+            }
+        }
     }
 }

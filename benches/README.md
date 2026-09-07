@@ -2,10 +2,15 @@
 
 ## Framework
 
-Criterion.rs. Two benchmark binaries:
+Criterion.rs. The two binaries most rows live in:
 
 - **bench_driver**: Microbenchmarks for individual gate kernels, measurement, and end-to-end QASM.
 - **circuits**: Macrobenchmarks for circuit family sweeps across qubit counts and depths.
+
+Five more targets cover narrower surfaces: `bench_shots_perf` (shot and count
+sampling), `svd_bench` (the MPS decomposition kernels), `qec_t_strategies` and
+`qec_decoder` (the QEC runner), and the feature-gated `bench_gpu` and
+`bench_distributed`. List a target's rows with `cargo bench --bench <name> -- --list`.
 
 ### Run configuration
 
@@ -50,14 +55,13 @@ worth the disk.
 
 | Group | What it measures |
 |-------|-----------------|
-| `qubit_sweep/random_d10` | Seeded random circuits, depth 10, 4–20 qubits |
-| `qubit_sweep/qft_like` | QFT-structured circuits, 4–16 qubits |
-| `qubit_sweep/hea_l5` | Hardware-efficient ansatz, 5 layers, 4–20 qubits |
-| `qubit_sweep/clifford_d10` | Clifford-heavy circuits, depth 10, 4–20 qubits |
-| `depth_sweep/12q_random` | 12-qubit random circuits, depth 5–100 |
-| `entanglement_structure` | Sparse vs dense entanglement, 16 qubits |
-| `stabilizer_rank/shots_terminal` | Clifford+T shot sampling with terminal measurements, including 1000q chi2 |
-| `stabilizer_rank/shots_mid_circuit` | Clifford+T shot sampling with measurement, reset, and conditional gates |
+| `statevector/random_d10` | Seeded random circuits, depth 10, 4–20 qubits |
+| `statevector/qft_like` | QFT-structured circuits, 4–16 qubits |
+| `statevector/hea_l5` | Hardware-efficient ansatz, 5 layers, 4–20 qubits |
+| `statevector/clifford_d10` | Clifford-heavy circuits, depth 10, 4–20 qubits |
+| `statevector/depth_sweep_12q` | 12-qubit random circuits, depth 5–100 |
+| `statevector/entanglement_16q_d10` | Sparse vs dense entanglement, 16 qubits |
+| `stabilizer_rank` | Clifford+T shot sampling: terminal rows (including 1000q chi2) and mid-circuit rows with measurement, reset, and conditional gates |
 | `tn/scalar_hea_l2` | Tensor-network scalar contraction, hardware-efficient ansatz, 2 layers, 20–50 qubits (`bench-internal`) |
 | `tn/scalar_depth_20q` | Same contraction at 20 qubits, 4–7 layers, where intermediates grow large enough to reach the parallel contraction arms (`bench-internal`) |
 | `tn/scalar_hea_l6` | Same contraction at 6 layers, 20–50 qubits, the only rows where qubit count drives how many contractions reach the faer arm (`bench-internal`) |
@@ -150,6 +154,7 @@ cargo bench -- --baseline my_baseline
 ./scripts/bench_ab.sh --build-only /tmp/ref-circuits             # build a reference to reuse
 ./scripts/bench_ab.sh -f '^sparse/' --ref-exe /tmp/ref-circuits  # skip the reference build
 ./scripts/bench_ab.sh -f '^x/affected/' -c '^x/control/'         # controls at 10 samples
+./scripts/bench_ab.sh -f '^statevector/' --light                 # triage tier, about a fifth of the time
 ```
 
 `--build-only` and `--ref-exe` are a pair: the first produces a bench binary through the
@@ -159,12 +164,24 @@ stores it owns that claim; the report records which of the two ways the referenc
 
 ### Keeping an A/B affordable
 
-Six passes run, so a row costs six times what one pass of it costs. On this corpus
-that arithmetic is dominated by a handful of slow rows, and those are routinely the
-controls rather than the rows under test: an A/B on 2026-09-04 spent 61% of its wall
-clock on four control rows that all reported noise.
+Six passes run, so a row costs six times what one pass of it costs, and one pass of a
+row is mostly Criterion's fixed windows: 3s of warm-up and 5s of measurement whatever
+the row's iteration time, so 24 millisecond-scale rows cost about 19 minutes of
+measurement before any slow row is counted. On this corpus the remainder is dominated
+by a handful of slow rows, and those are routinely the controls rather than the rows
+under test: an A/B on 2026-09-04 spent 61% of its wall clock on four control rows that
+all reported noise.
 
-Three levers, in the order worth reaching for them.
+Four levers, in the order worth reaching for them.
+
+**Run the light tier first.** `--light` runs three measured passes (ref, new, ref)
+instead of four, shrinks the Criterion windows to 0.5s warm-up and 1.5s measurement,
+and takes 10 samples. A row costs about a fifth of the full tier, so a 24-row sweep
+finishes in about four minutes of measurement. The report names the tier in its header
+and on the verdict line, and the new binary's control column reads `n/a` because it is
+measured once: the tier says which rows moved and roughly by how much, and a gate claim
+still needs the full tier on those rows. Groups that pin their own `measurement_time`
+(the shots groups pin 3s) keep it, so their rows shrink less.
 
 **Pick controls by cost.** A control has to read flat, not precisely.
 `density_matrix/rzz_layers_fused/10` runs 86ms where `/12` runs 1.97s, and answers the
@@ -182,12 +199,11 @@ percentage, and presenting one would dress noise as a result. A control that mov
 the threshold still fails the run, because that is collateral damage whichever row it
 lands on.
 
-**Triage before gating.** `PRISM_BENCH_SAMPLES=10` over the full row set finds which
-rows moved, then a second run at the default over those rows alone carries the claim.
-The saving is concentrated in the slow rows for the reason in the table above: Criterion
-divides `measurement_time` across the sample count until one iteration no longer fits,
-so a millisecond row costs the same at either count and a multi-second row costs about a
-third.
+**Lower the sample count on slow rows.** `PRISM_BENCH_SAMPLES=10` saves nothing on a
+millisecond row and about two thirds on a multi-second one, for the reason in the table
+above: Criterion divides `measurement_time` across the sample count until one iteration
+no longer fits. It is the lever for a sweep that `--light` does not shrink enough because
+its rows are seconds each, and it stacks with `--light`.
 
 `--max-row-seconds` (default 240, 0 disables) aborts the run when Criterion projects a
 single row past that many seconds in one pass. The projection is printed before
@@ -321,7 +337,8 @@ REGRESSION_THRESHOLD=10 ./scripts/bench_compare.sh
 
 `scripts/bench_check.sh` (`save`, `compare`, `table`, `list`) reads
 `target/criterion/` and writes to `bench_results/baselines/`. It requires `jq`
-and `bc`, so it runs in CI but not on the Windows reference host.
+and `bc`, so it does not run on the Windows reference host. CI gates on
+`bench_ab.sh` alone; `bench_check` is a local workflow.
 
 ## CI regression gate
 

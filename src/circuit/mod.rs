@@ -227,28 +227,6 @@ impl Circuit {
         any_gate(&self.instructions, &mut |gate| gate.num_qubits() >= 2)
     }
 
-    /// Herfindahl-Hirschman index of the qubit interaction graph partition.
-    ///
-    /// Returns Σ(sᵢ/n)² where sᵢ is the size of each connected component.
-    /// Ranges from 1/n (all singletons) to 1.0 (one component).
-    /// Low values indicate many independent subsystems where factored
-    /// backends amortize cost; 1.0 means fully connected (no benefit).
-    pub fn connectivity_hhi(&self) -> f64 {
-        let n = self.num_qubits;
-        if n == 0 {
-            return 1.0;
-        }
-        let components = self.independent_subsystems();
-        let nf = n as f64;
-        components
-            .iter()
-            .map(|c| {
-                let s = c.len() as f64;
-                (s * s) / (nf * nf)
-            })
-            .sum()
-    }
-
     /// True if no gate or conditional appears after any measurement.
     pub fn has_terminal_measurements_only(&self) -> bool {
         let mut seen_measurement = false;
@@ -309,6 +287,16 @@ impl Circuit {
         let mut out = Vec::new();
         for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
             out.push((qubit, classical_bit))
+        });
+        out
+    }
+
+    /// Classical bit each measurement writes, in record order; the bit half of
+    /// [`Circuit::measurement_map`], with the same region descent.
+    pub(crate) fn classical_bit_order(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        for_each_measure(&self.instructions, &mut |_, classical_bit| {
+            out.push(classical_bit)
         });
         out
     }
@@ -419,7 +407,10 @@ impl Circuit {
     /// - `sub_circuit` has remapped qubit/classical indices starting from 0
     /// - `qubit_map[local] = original` qubit index
     /// - `classical_map[local] = original` classical bit index
-    pub fn extract_subcircuit(&self, qubit_set: &[usize]) -> (Circuit, Vec<usize>, Vec<usize>) {
+    pub(crate) fn extract_subcircuit(
+        &self,
+        qubit_set: &[usize],
+    ) -> (Circuit, Vec<usize>, Vec<usize>) {
         let mut old_to_new_qubit: Vec<Option<usize>> = vec![None; self.num_qubits];
         for (new_idx, &old_idx) in qubit_set.iter().enumerate() {
             old_to_new_qubit[old_idx] = Some(new_idx);
@@ -510,7 +501,7 @@ impl Circuit {
     /// Replaces K calls to `extract_subcircuit` (each scanning the full instruction
     /// stream) with two O(N) passes: one for classical bit discovery, one for
     /// instruction routing.
-    pub fn partition_subcircuits(
+    pub(crate) fn partition_subcircuits(
         &self,
         components: &[Vec<usize>],
     ) -> Vec<(Circuit, Vec<usize>, Vec<usize>)> {
@@ -635,7 +626,7 @@ impl Circuit {
     ///
     /// Returns `None` if the circuit has no Clifford prefix (first gate is
     /// non-Clifford) or is entirely Clifford.
-    pub fn clifford_prefix_split(&self) -> Option<(Circuit, Circuit)> {
+    pub(crate) fn clifford_prefix_split(&self) -> Option<(Circuit, Circuit)> {
         let mut split_at = 0;
 
         for (i, inst) in self.instructions.iter().enumerate() {

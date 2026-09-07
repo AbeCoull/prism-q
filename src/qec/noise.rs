@@ -12,7 +12,7 @@ use crate::sim::compiled::{
     CompiledSampler, PackedShots, batch_propagate_backward, compile_measurements,
     rng::Xoshiro256PlusPlus, xor_words,
 };
-use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
+use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, geometric_sample_xoshiro};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -724,12 +724,12 @@ fn apply_qec_single_noise_event(
         py: pxy_frac - px_frac,
         p_event: 1.0,
     };
-    let mut shot = qec_geometric_sample(rng, ln_1mp);
+    let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
     while shot < num_shots {
         let r = rng.next_f64();
         let base = shot * m_words;
         apply_qec_single_noise_branch(&mut data[base..base + m_words], conditional_event, r);
-        shot += 1 + qec_geometric_sample(rng, ln_1mp);
+        shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
     }
 }
 
@@ -770,10 +770,10 @@ fn apply_qec_pair_noise_event(
     }
 
     let ln_1mp = (1.0 - p).ln();
-    let mut shot = qec_geometric_sample(rng, ln_1mp);
+    let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
     while shot < num_shots {
         apply_qec_pair_noise_branch(data, shot, m_words, branch_flips, rng);
-        shot += 1 + qec_geometric_sample(rng, ln_1mp);
+        shot += 1 + geometric_sample_xoshiro(rng, ln_1mp);
     }
 }
 
@@ -811,16 +811,6 @@ pub(super) fn append_qec_pauli_noise_effect(
         }
         _ => xor_words(branch, x_flip),
     }
-}
-
-/// Inverse-CDF sample from `Geometric(p)` (number of failures before the
-/// first success). `ln_1mp` is `(1 - p).ln()` precomputed by the caller so
-/// hot-path loops avoid recomputing it. Used to skip ahead to the next shot
-/// where a Pauli-noise event fires when `p` is small.
-#[inline(always)]
-fn qec_geometric_sample(rng: &mut Xoshiro256PlusPlus, ln_1mp: f64) -> usize {
-    let u: f64 = 1.0 - rng.next_f64();
-    (u.ln() / ln_1mp) as usize
 }
 
 #[inline(always)]

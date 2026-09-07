@@ -17,6 +17,7 @@ use crate::gates::Gate;
 #[cfg(feature = "bench-internal")]
 use crate::sim::compiled::CompiledDetectorSampler;
 use crate::sim::compiled::{PackedShots, ShotLayout, compile_detector_sampler};
+use crate::sim::unified_pauli::Welford;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -505,8 +506,7 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
     // Record indices are shot-invariant, so the guarded regions are built once
     // rather than per shot inside the loop below.
     let feedforward_regions = build_feedforward_regions(program, backend_qubits)?;
-    let mut exp_val_sums = vec![0.0f64; exp_val_masks.len()];
-    let mut exp_val_sq_sums = vec![0.0f64; exp_val_masks.len()];
+    let mut exp_val_stats = vec![Welford::default(); exp_val_masks.len()];
     let mut exp_val_accepted = 0usize;
 
     for shot in 0..shots {
@@ -581,8 +581,7 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                         * crate::sim::pauli_expectation_from_masks(
                             state, xmask, zmask, num_y, norm,
                         );
-                    exp_val_sums[slot] += value;
-                    exp_val_sq_sums[slot] += value * value;
+                    exp_val_stats[slot].push(value);
                 }
             }
         }
@@ -593,29 +592,12 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
     if exp_val_masks.is_empty() {
         return Ok(result);
     }
-    let n = exp_val_accepted;
-    let estimates = exp_val_sums
+    let estimates = exp_val_stats
         .iter()
-        .zip(&exp_val_sq_sums)
-        .map(|(&sum, &sum_sq)| {
-            if n == 0 {
-                return QecObservableEstimate {
-                    mean: 0.0,
-                    variance: 0.0,
-                    num_shots: 0,
-                };
-            }
-            let mean = sum / n as f64;
-            let variance = if n >= 2 {
-                ((sum_sq - n as f64 * mean * mean) / (n as f64 - 1.0)).max(0.0)
-            } else {
-                0.0
-            };
-            QecObservableEstimate {
-                mean,
-                variance,
-                num_shots: n,
-            }
+        .map(|stats| QecObservableEstimate {
+            mean: stats.mean(),
+            variance: stats.variance(),
+            num_shots: exp_val_accepted,
         })
         .collect();
     Ok(result.with_expectation_values(estimates))

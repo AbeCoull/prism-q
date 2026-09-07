@@ -111,7 +111,7 @@ impl InteractionGraph {
 
     /// Connected components of `G - excluded`. Returns one `Vec<usize>` per
     /// component, in increasing-min-vertex order.
-    pub fn components_excluding(&self, excluded: &HashSet<usize>) -> Vec<Vec<usize>> {
+    pub(crate) fn components_excluding(&self, excluded: &HashSet<usize>) -> Vec<Vec<usize>> {
         let mut visited: HashSet<usize> = (0..self.num_qubits)
             .filter(|v| excluded.contains(v))
             .collect();
@@ -244,72 +244,6 @@ pub fn cut_score(graph: &InteractionGraph, cut: &HashSet<usize>, c: f64) -> f64 
     }
 }
 
-/// Find the best single-qubit cut by exhaustive search.
-///
-/// Used as a baseline and for small interaction graphs (n <= ~30). Returns
-/// the cut qubit and its score, or `None` if no cut improves on the
-/// uncut score `exp(c * w(G))`.
-pub fn best_single_cut(graph: &InteractionGraph, c: f64) -> Option<(usize, f64)> {
-    let uncut = cut_score(graph, &HashSet::new(), c);
-    let mut best: Option<(usize, f64)> = None;
-    for v in 0..graph.num_qubits {
-        let mut s = HashSet::new();
-        s.insert(v);
-        let score = cut_score(graph, &s, c);
-        if score < uncut && best.is_none_or(|(_, sb)| score < sb) {
-            best = Some((v, score));
-        }
-    }
-    best
-}
-
-/// Nested-dissection cut sequence on a path or grid-like graph.
-///
-/// Recursively cuts at the vertex (or pair of vertices) whose removal
-/// produces the most-balanced split. Returns the sequence of cut sets, in
-/// the order they should be applied. Each successive cut operates on one
-/// component of the previous step.
-///
-/// For a `1 x n` path this returns roughly `log_2(n)` single-vertex cuts at
-/// midpoints. For a `d x d` grid this returns `O(d)` linear separators.
-pub fn nested_dissection_cuts(graph: &InteractionGraph, max_component: usize) -> Vec<Vec<usize>> {
-    let mut cuts = Vec::new();
-    let mut work: Vec<Vec<usize>> = vec![(0..graph.num_qubits).collect()];
-
-    while let Some(component) = work.pop() {
-        if component.len() <= max_component {
-            continue;
-        }
-        let mut best: Option<(usize, isize)> = None;
-        for &v in &component {
-            let mut excl: HashSet<usize> = (0..graph.num_qubits)
-                .filter(|u| !component.contains(u))
-                .collect();
-            excl.insert(v);
-            let sub_comps = graph.components_excluding(&excl);
-            if sub_comps.len() < 2 {
-                continue;
-            }
-            let max_part = sub_comps.iter().map(|c| c.len()).max().unwrap();
-            let balance = -(max_part as isize);
-            if best.is_none_or(|(_, b)| balance > b) {
-                best = Some((v, balance));
-            }
-        }
-        let Some((v, _)) = best else { continue };
-        cuts.push(vec![v]);
-        let mut excl: HashSet<usize> = (0..graph.num_qubits)
-            .filter(|u| !component.contains(u))
-            .collect();
-        excl.insert(v);
-        let new_comps = graph.components_excluding(&excl);
-        for sub in new_comps {
-            work.push(sub);
-        }
-    }
-    cuts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,40 +357,6 @@ mod tests {
         assert!(
             separated < uncut,
             "4-qubit separator on 4x4 grid should beat uncut (got separated={separated}, uncut={uncut})"
-        );
-    }
-
-    #[test]
-    fn nested_dissection_path_recurses() {
-        let g = InteractionGraph::from_circuit(&path_circuit(8));
-        let cuts = nested_dissection_cuts(&g, 2);
-        assert!(!cuts.is_empty());
-        assert!(cuts.iter().all(|c| c.len() == 1));
-    }
-
-    #[test]
-    fn best_single_cut_no_help_on_minimal_width_path() {
-        let g = InteractionGraph::from_circuit(&path_circuit(7));
-        let result = best_single_cut(&g, 1.0);
-        assert!(
-            result.is_none(),
-            "paths already have width 2; branch cost 2 cannot improve"
-        );
-    }
-
-    #[test]
-    fn best_single_cut_helps_on_complete_graph() {
-        let mut c = Circuit::new(5, 0);
-        for i in 0..5 {
-            for j in (i + 1)..5 {
-                c.add_gate(Gate::Cx, &[i, j]);
-            }
-        }
-        let g = InteractionGraph::from_circuit(&c);
-        let result = best_single_cut(&g, 1.0);
-        assert!(
-            result.is_some(),
-            "K_5 has width 5; cutting one vertex gives width 4, saves exp(1) versus branch cost 2"
         );
     }
 }

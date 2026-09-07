@@ -290,7 +290,7 @@ pub enum DiagEntry {
 impl DiagEntry {
     /// Return the qubit and dense 2×2 matrix for a [`DiagEntry::Phase1q`]
     /// entry, or `None` for two-qubit entries.
-    pub fn as_1q_matrix(&self) -> Option<(usize, [[Complex64; 2]; 2])> {
+    pub(crate) fn as_1q_matrix(&self) -> Option<(usize, [[Complex64; 2]; 2])> {
         match *self {
             DiagEntry::Phase1q { qubit, d0, d1 } => {
                 let z = Complex64::new(0.0, 0.0);
@@ -302,7 +302,7 @@ impl DiagEntry {
 
     /// Return the qubit pair and dense 4×4 matrix for a [`DiagEntry::Phase2q`]
     /// or [`DiagEntry::Parity2q`] entry, or `None` for single-qubit entries.
-    pub fn as_2q_matrix(&self) -> Option<(usize, usize, [[Complex64; 4]; 4])> {
+    pub(crate) fn as_2q_matrix(&self) -> Option<(usize, usize, [[Complex64; 4]; 4])> {
         let z = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
         match *self {
@@ -360,6 +360,19 @@ pub struct MultiFusedData {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Multi2qData {
     pub gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
+}
+
+/// Controlled `mat` as a 4x4 with the control on the high bit of the basis index.
+#[inline]
+pub(crate) fn cu_matrix_4x4(mat: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {
+    let z = Complex64::new(0.0, 0.0);
+    let o = Complex64::new(1.0, 0.0);
+    [
+        [o, z, z, z],
+        [z, o, z, z],
+        [z, z, mat[0][0], mat[0][1]],
+        [z, z, mat[1][0], mat[1][1]],
+    ]
 }
 
 /// Kronecker product of two 2×2 matrices: A ⊗ B → 4×4.
@@ -619,12 +632,7 @@ impl Gate {
             Gate::Cx => [[o, z, z, z], [z, o, z, z], [z, z, z, o], [z, z, o, z]],
             Gate::Cz => [[o, z, z, z], [z, o, z, z], [z, z, o, z], [z, z, z, m]],
             Gate::Swap => [[o, z, z, z], [z, z, o, z], [z, o, z, z], [z, z, z, o]],
-            Gate::Cu(mat) => [
-                [o, z, z, z],
-                [z, o, z, z],
-                [z, z, mat[0][0], mat[0][1]],
-                [z, z, mat[1][0], mat[1][1]],
-            ],
+            Gate::Cu(mat) => cu_matrix_4x4(mat),
             Gate::Fused2q(mat) => **mat,
             Gate::PauliRot(data) if data.axes.len() == 2 => {
                 let half = data.theta / 2.0;
@@ -796,7 +804,7 @@ impl Gate {
     ///
     /// Returns the gate raised to the `k`-th power. Negative `k` inverts first.
     /// Only valid for single-qubit gates.
-    pub fn matrix_power(&self, k: i64) -> Gate {
+    pub(crate) fn matrix_power(&self, k: i64) -> Gate {
         debug_assert_eq!(
             self.num_qubits(),
             1,
@@ -940,7 +948,7 @@ impl Gate {
 
     /// True if this is a self-inverse two-qubit gate (applying it twice = identity).
     #[inline]
-    pub fn is_self_inverse_2q(&self) -> bool {
+    pub(crate) fn is_self_inverse_2q(&self) -> bool {
         matches!(self, Gate::Cx | Gate::Cz | Gate::Swap)
     }
 
@@ -951,7 +959,7 @@ impl Gate {
     /// Includes diagonal gates (Z, S, T, Rz, P, CZ) and permutation gates
     /// (X, Y, CX, SWAP). Excludes superposition-creating gates (H, Rx, Ry, SX).
     #[inline]
-    pub fn preserves_sparsity(&self) -> bool {
+    pub(crate) fn preserves_sparsity(&self) -> bool {
         match self {
             Gate::Id | Gate::X | Gate::Y | Gate::Z => true,
             Gate::S | Gate::Sdg | Gate::T | Gate::Tdg => true,
@@ -988,7 +996,7 @@ impl Gate {
     /// scalar, so recognizing `e^{iπ/4}·X` as `X` would silently drop the factor
     /// and leave the fused run disagreeing with the unfused one in amplitude.
     /// Such a product stays a [`Gate::Fused`].
-    pub fn recognize_matrix(mat: &[[Complex64; 2]; 2]) -> Option<Gate> {
+    pub(crate) fn recognize_matrix(mat: &[[Complex64; 2]; 2]) -> Option<Gate> {
         const EPS: f64 = 1e-10;
 
         let candidates: &[Gate] = &[

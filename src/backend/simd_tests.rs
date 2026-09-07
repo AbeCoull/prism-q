@@ -637,7 +637,7 @@ fn target_feature_kernel_count_is_pinned() {
         ("src/backend/simd.rs", 30),
         ("src/backend/word_ops.rs", 2),
         ("src/backend/stabilizer/kernels/simd.rs", 3),
-        ("src/backend/statevector/kernels.rs", 11),
+        ("src/backend/statevector/kernels.rs", 9),
     ];
     for (file, want) in expected {
         let path = format!("{root}/{file}");

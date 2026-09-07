@@ -333,6 +333,42 @@ pub struct SppResult {
     pub nonzero_fraction: f64,
 }
 
+/// Running mean and unbiased sample variance by Welford's update, so the variance
+/// does not cancel catastrophically when the mean sits near the sample values.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Welford {
+    mean: f64,
+    m2: f64,
+    count: usize,
+}
+
+impl Welford {
+    #[inline]
+    pub(crate) fn push(&mut self, val: f64) {
+        self.count += 1;
+        let delta = val - self.mean;
+        self.mean += delta / self.count as f64;
+        self.m2 += delta * (val - self.mean);
+    }
+
+    pub(crate) fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    /// Sample variance with the `n - 1` denominator; zero below two samples.
+    pub(crate) fn variance(&self) -> f64 {
+        if self.count > 1 {
+            self.m2 / (self.count - 1) as f64
+        } else {
+            0.0
+        }
+    }
+
+    pub(crate) fn std_error(&self) -> f64 {
+        (self.variance() / self.count.max(1) as f64).sqrt()
+    }
+}
+
 fn estimate_qubit_expectation(
     ops: &[CoalescedOp],
     qubit: usize,
@@ -343,11 +379,10 @@ fn estimate_qubit_expectation(
     let obs = PauliVec::z_on_qubit(num_words, qubit);
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-    let mut mean = 0.0f64;
-    let mut m2 = 0.0f64;
+    let mut stats = Welford::default();
     let mut nonzero = 0usize;
 
-    for i in 0..num_samples {
+    for _ in 0..num_samples {
         let (pauli, weight) = backward_propagate_coalesced(ops, &obs, &mut rng);
         let val = if pauli.is_diagonal() {
             nonzero += 1;
@@ -355,20 +390,10 @@ fn estimate_qubit_expectation(
         } else {
             0.0
         };
-
-        let delta = val - mean;
-        mean += delta / (i + 1) as f64;
-        let delta2 = val - mean;
-        m2 += delta * delta2;
+        stats.push(val);
     }
 
-    let variance = if num_samples > 1 {
-        m2 / (num_samples - 1) as f64
-    } else {
-        0.0
-    };
-    let std_error = (variance / num_samples as f64).sqrt();
-    (mean, std_error, nonzero)
+    (stats.mean(), stats.std_error(), nonzero)
 }
 
 /// Pauli axis for a joint-observable term. Identity factors are omitted
@@ -522,11 +547,10 @@ pub fn run_spp_observable(
     let (obs, obs_coeff) = pauli_vec_from_terms(n, observable)?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut mean = 0.0f64;
-    let mut m2 = 0.0f64;
+    let mut stats = Welford::default();
     let mut nonzero = 0usize;
 
-    for i in 0..num_samples {
+    for _ in 0..num_samples {
         let (pauli, weight) = backward_propagate_coalesced(&ops, &obs, &mut rng);
         let val = if pauli.is_diagonal() {
             nonzero += 1;
@@ -534,24 +558,15 @@ pub fn run_spp_observable(
         } else {
             0.0
         };
-        let delta = val - mean;
-        mean += delta / (i + 1) as f64;
-        let delta2 = val - mean;
-        m2 += delta * delta2;
+        stats.push(val);
     }
 
-    let variance = if num_samples > 1 {
-        m2 / (num_samples - 1) as f64
-    } else {
-        0.0
-    };
-    let std_error = (variance / num_samples.max(1) as f64).sqrt();
     let nonzero_fraction = nonzero as f64 / num_samples.max(1) as f64;
 
     Ok(SppObservableResult {
-        mean,
-        std_error,
-        variance,
+        mean: stats.mean(),
+        std_error: stats.std_error(),
+        variance: stats.variance(),
         num_samples,
         nonzero_fraction,
         t_count,

@@ -215,6 +215,7 @@ pub struct StatevectorBackend {
     pub(crate) classical_bits: Vec<bool>,
     pub(crate) rng: ChaCha8Rng,
     pub(crate) pending_norm: f64,
+    pub(crate) batch_tables: kernels::BatchTableScratch,
     #[cfg(feature = "gpu")]
     gpu_context: Option<Arc<GpuContext>>,
     #[cfg(feature = "gpu")]
@@ -242,6 +243,7 @@ impl StatevectorBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             pending_norm: 1.0,
+            batch_tables: kernels::BatchTableScratch::default(),
             #[cfg(feature = "gpu")]
             gpu_context: None,
             #[cfg(feature = "gpu")]

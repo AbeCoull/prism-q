@@ -434,33 +434,11 @@ fn build_batch_rzz_bmi2_tables(
             }
             group.table[c] = Complex64::from_polar(1.0, angle);
         }
-        for c in table_size..BATCH_RZZ_BMI2_TABLE_SIZE {
-            group.table[c] = Complex64::new(1.0, 0.0);
-        }
     }
     Some(num_groups)
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi2,fma")]
-unsafe fn apply_batch_rzz_bmi2(
-    state: &mut [Complex64],
-    groups: &[BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS],
-    num_groups: usize,
-) {
-    use std::arch::x86_64::_pext_u64;
-    let one = Complex64::new(1.0, 0.0);
-    for (i, amp) in state.iter_mut().enumerate() {
-        let mut combined = one;
-        for group in groups.iter().take(num_groups) {
-            let bits = _pext_u64(i as u64, group.pext_mask) as usize;
-            combined *= group.table[bits];
-        }
-        *amp *= combined;
-    }
-}
-
-#[cfg(all(target_arch = "x86_64", feature = "parallel"))]
 #[target_feature(enable = "bmi2,fma")]
 unsafe fn batch_rzz_tile_bmi2(
     tile: &mut [Complex64],
@@ -487,6 +465,71 @@ pub(crate) struct BatchPhaseGroup {
     pub(crate) shifts: [usize; BATCH_PHASE_GROUP_SIZE],
     pub(crate) len: usize,
     pub(crate) pext_mask: u64,
+}
+
+const ONE: Complex64 = Complex64::new(1.0, 0.0);
+
+impl BatchRzzGroup {
+    const EMPTY: Self = Self {
+        table: [ONE; BATCH_RZZ_TABLE_SIZE],
+        q0s: [0; BATCH_RZZ_GROUP_SIZE],
+        q1s: [0; BATCH_RZZ_GROUP_SIZE],
+        len: 0,
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+impl BatchRzzBmi2Group {
+    const EMPTY: Self = Self {
+        table: [ONE; BATCH_RZZ_BMI2_TABLE_SIZE],
+        pext_mask: 0,
+    };
+}
+
+impl BatchPhaseGroup {
+    const EMPTY: Self = Self {
+        table: [ONE; BATCH_PHASE_TABLE_SIZE],
+        shifts: [0; BATCH_PHASE_GROUP_SIZE],
+        len: 0,
+        pext_mask: 0,
+    };
+}
+
+/// Lookup tables the batched diagonal kernels fill per gate.
+///
+/// Heap-resident and reused across gates, so a gate rewrites only the table prefix its
+/// groups index instead of initialising a 64 KB array on the stack. Each table allocates
+/// on the first gate of its kind.
+#[derive(Default)]
+pub(crate) struct BatchTableScratch {
+    rzz: Option<Box<[BatchRzzGroup; MAX_BATCH_RZZ_GROUPS]>>,
+    #[cfg(target_arch = "x86_64")]
+    rzz_bmi2: Option<Box<[BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS]>>,
+    phase: Option<Box<[BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS]>>,
+    diag: Option<Box<DiagBatchTables>>,
+}
+
+impl BatchTableScratch {
+    fn rzz(&mut self) -> &mut [BatchRzzGroup; MAX_BATCH_RZZ_GROUPS] {
+        self.rzz
+            .get_or_insert_with(|| Box::new([BatchRzzGroup::EMPTY; MAX_BATCH_RZZ_GROUPS]))
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn rzz_bmi2(&mut self) -> &mut [BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS] {
+        self.rzz_bmi2
+            .get_or_insert_with(|| Box::new([BatchRzzBmi2Group::EMPTY; MAX_BATCH_RZZ_GROUPS]))
+    }
+
+    fn phase(&mut self) -> &mut [BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS] {
+        self.phase
+            .get_or_insert_with(|| Box::new([BatchPhaseGroup::EMPTY; MAX_BATCH_PHASE_GROUPS]))
+    }
+
+    fn diag(&mut self) -> &mut DiagBatchTables {
+        self.diag
+            .get_or_insert_with(|| Box::new(DiagBatchTables::empty()))
+    }
 }
 
 /// Build lookup tables for batched controlled-phase application.
@@ -565,6 +608,18 @@ pub(crate) struct DiagBatchTables {
     pub(crate) num_groups: usize,
 }
 
+impl DiagBatchTables {
+    fn empty() -> Self {
+        Self {
+            tables: [[ONE; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
+            unique_qubits: SmallVec::new(),
+            group_sizes: [0; MAX_DIAG_BATCH_GROUPS],
+            group_pext_masks: [0; MAX_DIAG_BATCH_GROUPS],
+            num_groups: 0,
+        }
+    }
+}
+
 /// Root of `x` in the qubit-affinity forest, with path halving.
 fn find_root(parent: &mut [u8; 64], mut x: u8) -> u8 {
     while parent[x as usize] != x {
@@ -583,7 +638,16 @@ fn find_root(parent: &mut [u8; 64], mut x: u8) -> u8 {
 /// Returns `None` when a component is wider than `DIAG_BATCH_MAX_QUBITS_PER_GROUP` or the
 /// packing needs more than `MAX_DIAG_BATCH_GROUPS` groups. Both cases need the per-element
 /// fallback path. Returns `Some` with `num_groups == 0` when `entries` is empty (no-op).
+#[cfg(any(test, feature = "gpu"))]
 pub(crate) fn build_diagonal_batch_tables(entries: &[DiagEntry]) -> Option<DiagBatchTables> {
+    let mut out = DiagBatchTables::empty();
+    fill_diagonal_batch_tables(entries, &mut out).then_some(out)
+}
+
+/// [`build_diagonal_batch_tables`] into a reused `out`, touching only the table prefix
+/// each group indexes. Returns false when the entries are not groupable; `out` is then
+/// stale and the caller takes the per-element fallback.
+fn fill_diagonal_batch_tables(entries: &[DiagEntry], out: &mut DiagBatchTables) -> bool {
     let mut unique_qubits = SmallVec::<[usize; 32]>::new();
     let add_qubit = |q: usize, uq: &mut SmallVec<[usize; 32]>| {
         if !uq.contains(&q) {
@@ -602,17 +666,12 @@ pub(crate) fn build_diagonal_batch_tables(entries: &[DiagEntry]) -> Option<DiagB
     unique_qubits.sort_unstable();
     let num_unique = unique_qubits.len();
 
-    let one = Complex64::new(1.0, 0.0);
-    let empty_tables = [[one; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS];
-
     if num_unique == 0 {
-        return Some(DiagBatchTables {
-            tables: empty_tables,
-            unique_qubits,
-            group_sizes: [0; MAX_DIAG_BATCH_GROUPS],
-            group_pext_masks: [0; MAX_DIAG_BATCH_GROUPS],
-            num_groups: 0,
-        });
+        out.unique_qubits.clear();
+        out.group_sizes = [0; MAX_DIAG_BATCH_GROUPS];
+        out.group_pext_masks = [0; MAX_DIAG_BATCH_GROUPS];
+        out.num_groups = 0;
+        return true;
     }
 
     let mut dense = [0u8; 64];
@@ -649,9 +708,12 @@ pub(crate) fn build_diagonal_batch_tables(entries: &[DiagEntry]) -> Option<DiagB
     let mut group_sizes = [0usize; MAX_DIAG_BATCH_GROUPS];
     for &c in &order {
         let len = comp_len[c as usize];
-        let g = group_sizes
+        let Some(g) = group_sizes
             .iter()
-            .position(|&used| used + len <= DIAG_BATCH_MAX_QUBITS_PER_GROUP)?;
+            .position(|&used| used + len <= DIAG_BATCH_MAX_QUBITS_PER_GROUP)
+        else {
+            return false;
+        };
         group_of_comp[c as usize] = g as u8;
         group_sizes[g] += len;
     }
@@ -673,7 +735,10 @@ pub(crate) fn build_diagonal_batch_tables(entries: &[DiagEntry]) -> Option<DiagB
         }
     }
 
-    let mut tables = empty_tables;
+    let tables = &mut out.tables;
+    for (table, &k) in tables.iter_mut().zip(&group_sizes).take(num_groups) {
+        table[..1 << k].fill(ONE);
+    }
 
     for e in entries {
         match e {
@@ -715,13 +780,11 @@ pub(crate) fn build_diagonal_batch_tables(entries: &[DiagEntry]) -> Option<DiagB
         }
     }
 
-    Some(DiagBatchTables {
-        tables,
-        unique_qubits,
-        group_sizes,
-        group_pext_masks,
-        num_groups,
-    })
+    out.unique_qubits = unique_qubits;
+    out.group_sizes = group_sizes;
+    out.group_pext_masks = group_pext_masks;
+    out.num_groups = num_groups;
+    true
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2202,29 +2265,19 @@ impl StatevectorBackend {
 
         #[cfg(target_arch = "x86_64")]
         if simd::has_bmi2() && simd::has_fma() {
-            let one = Complex64::new(1.0, 0.0);
-            let mut bmi2_groups = [BatchRzzBmi2Group {
-                table: [one; BATCH_RZZ_BMI2_TABLE_SIZE],
-                pext_mask: 0,
-            }; MAX_BATCH_RZZ_GROUPS];
-            if let Some(num_groups) = build_batch_rzz_bmi2_tables(edges, &mut bmi2_groups) {
+            let bmi2_groups = self.batch_tables.rzz_bmi2();
+            if let Some(num_groups) = build_batch_rzz_bmi2_tables(edges, bmi2_groups) {
                 // SAFETY: has_bmi2() && has_fma() verified above
-                unsafe { apply_batch_rzz_bmi2(&mut self.state, &bmi2_groups, num_groups) };
+                unsafe { batch_rzz_tile_bmi2(&mut self.state, 0, bmi2_groups, num_groups) };
                 return;
             }
         }
 
-        let one = Complex64::new(1.0, 0.0);
-        let mut groups = [BatchRzzGroup {
-            table: [one; BATCH_RZZ_TABLE_SIZE],
-            q0s: [0; BATCH_RZZ_GROUP_SIZE],
-            q1s: [0; BATCH_RZZ_GROUP_SIZE],
-            len: 0,
-        }; MAX_BATCH_RZZ_GROUPS];
-        let num_groups = build_batch_rzz_tables(edges, &mut groups);
+        let groups = self.batch_tables.rzz();
+        let num_groups = build_batch_rzz_tables(edges, groups);
 
         for (i, amp) in self.state.iter_mut().enumerate() {
-            let mut combined = one;
+            let mut combined = ONE;
             for group in groups.iter().take(num_groups) {
                 let bits = extract_rzz_bits(i, group);
                 combined *= group.table[bits];
@@ -2238,12 +2291,9 @@ impl StatevectorBackend {
     fn apply_batch_rzz_par(&mut self, edges: &[(usize, usize, f64)]) {
         #[cfg(target_arch = "x86_64")]
         if simd::has_bmi2() && simd::has_fma() {
-            let one = Complex64::new(1.0, 0.0);
-            let mut bmi2_groups = [BatchRzzBmi2Group {
-                table: [one; BATCH_RZZ_BMI2_TABLE_SIZE],
-                pext_mask: 0,
-            }; MAX_BATCH_RZZ_GROUPS];
-            if let Some(num_groups) = build_batch_rzz_bmi2_tables(edges, &mut bmi2_groups) {
+            let bmi2_groups = self.batch_tables.rzz_bmi2();
+            if let Some(num_groups) = build_batch_rzz_bmi2_tables(edges, bmi2_groups) {
+                let bmi2_groups = &*bmi2_groups;
                 self.state
                     .par_chunks_mut(MIN_PAR_ELEMS)
                     .enumerate()
@@ -2251,21 +2301,16 @@ impl StatevectorBackend {
                         let base = chunk_idx * MIN_PAR_ELEMS;
                         // SAFETY: has_bmi2() && has_fma() verified above
                         unsafe {
-                            batch_rzz_tile_bmi2(chunk, base, &bmi2_groups, num_groups);
+                            batch_rzz_tile_bmi2(chunk, base, bmi2_groups, num_groups);
                         }
                     });
                 return;
             }
         }
 
-        let one = Complex64::new(1.0, 0.0);
-        let mut groups = [BatchRzzGroup {
-            table: [one; BATCH_RZZ_TABLE_SIZE],
-            q0s: [0; BATCH_RZZ_GROUP_SIZE],
-            q1s: [0; BATCH_RZZ_GROUP_SIZE],
-            len: 0,
-        }; MAX_BATCH_RZZ_GROUPS];
-        let num_groups = build_batch_rzz_tables(edges, &mut groups);
+        let groups = self.batch_tables.rzz();
+        let num_groups = build_batch_rzz_tables(edges, groups);
+        let groups = &*groups;
 
         self.state
             .par_chunks_mut(MIN_PAR_ELEMS)
@@ -2764,21 +2809,14 @@ impl StatevectorBackend {
             return;
         }
 
-        let one = Complex64::new(1.0, 0.0);
-
-        let mut groups = [BatchPhaseGroup {
-            table: [one; BATCH_PHASE_TABLE_SIZE],
-            shifts: [0; BATCH_PHASE_GROUP_SIZE],
-            len: 0,
-            pext_mask: 0,
-        }; MAX_BATCH_PHASE_GROUPS];
-        let num_groups = build_batch_phase_tables(phases, &mut groups);
+        let groups = self.batch_tables.phase();
+        let num_groups = build_batch_phase_tables(phases, groups);
 
         #[cfg(target_arch = "x86_64")]
         if simd::has_bmi2() && simd::has_fma() {
             // SAFETY: BMI2+FMA availability verified above.
             unsafe {
-                apply_batch_phase_bmi2(&mut self.state, control, &groups, num_groups);
+                apply_batch_phase_bmi2(&mut self.state, control, groups, num_groups);
             }
             return;
         }
@@ -2787,7 +2825,7 @@ impl StatevectorBackend {
         let half = 1usize << (self.num_qubits - 1);
         for k in 0..half {
             let i = insert_zero_bit(k, control) | ctrl_mask;
-            let mut combined = one;
+            let mut combined = ONE;
             for group in groups.iter().take(num_groups) {
                 let bits = extract_bits(i, &group.shifts, group.len);
                 combined *= group.table[bits];
@@ -2799,15 +2837,9 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_batch_phase_par(&mut self, control: usize, phases: &[(usize, Complex64)]) {
-        let one = Complex64::new(1.0, 0.0);
-
-        let mut groups = [BatchPhaseGroup {
-            table: [one; BATCH_PHASE_TABLE_SIZE],
-            shifts: [0; BATCH_PHASE_GROUP_SIZE],
-            len: 0,
-            pext_mask: 0,
-        }; MAX_BATCH_PHASE_GROUPS];
-        let num_groups = build_batch_phase_tables(phases, &mut groups);
+        let groups = self.batch_tables.phase();
+        let num_groups = build_batch_phase_tables(phases, groups);
+        let groups = &*groups;
 
         #[cfg(target_arch = "x86_64")]
         let use_bmi2 = simd::has_bmi2() && simd::has_fma();
@@ -2822,7 +2854,7 @@ impl StatevectorBackend {
                 if use_bmi2 {
                     // SAFETY: BMI2+FMA availability verified above.
                     unsafe {
-                        batch_phase_tile_bmi2(tile, base, control, &groups, num_groups);
+                        batch_phase_tile_bmi2(tile, base, control, groups, num_groups);
                     }
                     return;
                 }
@@ -2835,7 +2867,7 @@ impl StatevectorBackend {
                     }
                     for (j, amp) in tile.iter_mut().enumerate() {
                         let i = base + j;
-                        let mut combined = one;
+                        let mut combined = ONE;
                         for group in groups.iter().take(num_groups) {
                             let bits = extract_bits(i, &group.shifts, group.len);
                             combined *= group.table[bits];
@@ -2847,7 +2879,7 @@ impl StatevectorBackend {
                     for k in 0..half {
                         let j = insert_zero_bit(k, control) | ctrl_mask;
                         let i = base + j;
-                        let mut combined = one;
+                        let mut combined = ONE;
                         for group in groups.iter().take(num_groups) {
                             let bits = extract_bits(i, &group.shifts, group.len);
                             combined *= group.table[bits];
@@ -3605,10 +3637,11 @@ impl StatevectorBackend {
             return;
         }
 
-        let Some(built) = build_diagonal_batch_tables(entries) else {
+        if !fill_diagonal_batch_tables(entries, self.batch_tables.diag()) {
             self.apply_diagonal_batch_fallback(entries);
             return;
-        };
+        }
+        let built = &*self.batch_tables.diag();
         if built.num_groups == 0 {
             return;
         }
@@ -3617,8 +3650,9 @@ impl StatevectorBackend {
         if simd::has_bmi2() && simd::has_fma() {
             // SAFETY: has_bmi2() + has_fma() confirmed above
             unsafe {
-                apply_diagonal_batch_bmi2(
+                diagonal_batch_tile_bmi2(
                     &mut self.state,
+                    0,
                     &built.tables,
                     &built.group_pext_masks,
                     built.num_groups,
@@ -3638,7 +3672,7 @@ impl StatevectorBackend {
 
     #[cfg(feature = "parallel")]
     fn apply_diagonal_batch_par(&mut self, entries: &[DiagEntry]) {
-        let Some(built) = build_diagonal_batch_tables(entries) else {
+        if !fill_diagonal_batch_tables(entries, self.batch_tables.diag()) {
             self.state
                 .par_chunks_mut(MIN_PAR_ELEMS)
                 .enumerate()
@@ -3649,7 +3683,8 @@ impl StatevectorBackend {
                     }
                 });
             return;
-        };
+        }
+        let built = &*self.batch_tables.diag();
         if built.num_groups == 0 {
             return;
         }
@@ -3699,26 +3734,6 @@ impl StatevectorBackend {
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "bmi2,fma")]
-unsafe fn apply_diagonal_batch_bmi2(
-    state: &mut [Complex64],
-    tables: &[[Complex64; DIAG_BATCH_TABLE_SIZE]; MAX_DIAG_BATCH_GROUPS],
-    pext_masks: &[u64; MAX_DIAG_BATCH_GROUPS],
-    num_groups: usize,
-) {
-    use std::arch::x86_64::_pext_u64;
-    let one = Complex64::new(1.0, 0.0);
-    for (i, amp) in state.iter_mut().enumerate() {
-        let mut combined = one;
-        for g in 0..num_groups {
-            let bits = _pext_u64(i as u64, pext_masks[g]) as usize;
-            combined *= tables[g][bits];
-        }
-        *amp *= combined;
-    }
-}
-
-#[cfg(all(target_arch = "x86_64", feature = "parallel"))]
 #[target_feature(enable = "bmi2,fma")]
 unsafe fn diagonal_batch_tile_bmi2(
     tile: &mut [Complex64],
@@ -3910,8 +3925,9 @@ mod pext_agreement_tests {
         );
         // SAFETY: BMI2 and FMA checked above.
         unsafe {
-            apply_diagonal_batch_bmi2(
+            diagonal_batch_tile_bmi2(
                 &mut pext,
+                0,
                 &built.tables,
                 &built.group_pext_masks,
                 built.num_groups,

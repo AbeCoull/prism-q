@@ -205,7 +205,7 @@ extern "C" __global__ void apply_diagonal_1q(
 // All take `pair_count = 2^(n-2)` threads. Each thread computes a compressed index
 // and expands via chained insert_zero_bit (q0, q1 sorted).
 
-__device__ inline unsigned long long expand_2q(unsigned long long k, int lo_q, int hi_q) {
+__device__ __forceinline__ unsigned long long expand_2q(unsigned long long k, int lo_q, int hi_q) {
     unsigned long long lo_mask = (1ULL << lo_q) - 1;
     unsigned long long lo = k & lo_mask;
     unsigned long long mid_hi = k >> lo_q;

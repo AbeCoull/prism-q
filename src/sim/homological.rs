@@ -184,8 +184,8 @@ pub struct HomologicalSampler {
     compiled: crate::sim::compiled::CompiledSampler,
     /// Syndrome rank = dim(im(E))
     syndrome_rank: usize,
-    /// 2^r class probabilities (for diagnostics)
-    #[allow(dead_code)]
+    /// 2^r class probabilities before normalization, kept for the sum-to-one test.
+    #[cfg(test)]
     class_probs: Vec<f64>,
     /// 2^r cumulative probabilities for sampling
     class_cdf: Vec<f64>,
@@ -530,6 +530,7 @@ impl HomologicalSampler {
             return Ok(Self {
                 compiled,
                 syndrome_rank: 0,
+                #[cfg(test)]
                 class_probs: vec![1.0],
                 class_cdf: vec![1.0],
                 class_detections: vec![vec![0u64; m.div_ceil(64)]],
@@ -643,6 +644,7 @@ impl HomologicalSampler {
         Ok(Self {
             compiled,
             syndrome_rank: r,
+            #[cfg(test)]
             class_probs,
             class_cdf,
             class_detections,
@@ -767,14 +769,7 @@ pub(crate) fn run_shots_homological_inner(
     circuit: &Circuit,
     num_shots: usize,
 ) -> Result<ShotsResult> {
-    let classical_bit_order: Vec<usize> = circuit
-        .instructions
-        .iter()
-        .filter_map(|inst| match inst {
-            Instruction::Measure { classical_bit, .. } => Some(*classical_bit),
-            _ => None,
-        })
-        .collect();
+    let classical_bit_order = circuit.classical_bit_order();
     let num_classical = circuit.num_classical_bits;
 
     let raw_shots = sampler.sample_bulk(num_shots);

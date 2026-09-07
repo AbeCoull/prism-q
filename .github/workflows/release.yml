@@ -32,7 +32,7 @@ jobs:
           cache-bin: false
 
       - name: Install tools
-        run: cargo install git-cliff cargo-release
+        run: cargo install --locked git-cliff cargo-release
 
       - name: Verify the bump level mapping
         run: bash scripts/release_bump_level_test.sh

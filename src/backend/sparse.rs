@@ -545,13 +545,14 @@ impl SparseBackend {
             return;
         }
 
-        let folded: Vec<(usize, Complex64)> = self
-            .state
-            .drain()
-            .filter(|(idx, _)| idx & mask != 0)
-            .map(|(idx, amp)| (idx ^ mask, amp * inv_norm))
-            .collect();
-        self.state.extend(folded);
+        self.swap_buf.clear();
+        self.swap_buf.extend(
+            self.state
+                .drain()
+                .filter(|(idx, _)| idx & mask != 0)
+                .map(|(idx, amp)| (idx ^ mask, amp * inv_norm)),
+        );
+        std::mem::swap(&mut self.state, &mut self.swap_buf);
     }
 
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {

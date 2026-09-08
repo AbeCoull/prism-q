@@ -837,3 +837,154 @@ fn tighter_caps_lose_more_and_report_it() {
         );
     }
 }
+
+fn mps_after(circuit: &Circuit, cap: usize) -> MpsBackend {
+    let mut b = MpsBackend::new(42, cap);
+    b.init(circuit.num_qubits, 0).unwrap();
+    b.apply_instructions(&circuit.instructions).unwrap();
+    b
+}
+
+fn bell_pairs(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in (0..n).step_by(2) {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c
+}
+
+fn interior_bonds(b: &MpsBackend) -> Vec<usize> {
+    b.sites[..b.sites.len() - 1]
+        .iter()
+        .map(|t| t.bond_right)
+        .collect()
+}
+
+// A sweep to the far end is a canonicalization: it factorizes every site it
+// crosses whatever gauge that site was in. The shapes cover a saturated chain,
+// an odd width, a truncated chain, interior bonds of 1, and a product state.
+#[test]
+fn move_center_makes_every_other_site_an_isometry() {
+    for (label, circuit, cap, bond_range) in [
+        (
+            "brickwork_8",
+            crate::circuits::brickwork_circuit(8, 6, 42),
+            4096,
+            (2, 8),
+        ),
+        (
+            "brickwork_7",
+            crate::circuits::brickwork_circuit(7, 6, 43),
+            4096,
+            (2, 8),
+        ),
+        (
+            "brickwork_8_cap4",
+            crate::circuits::brickwork_circuit(8, 6, 42),
+            4,
+            (2, 4),
+        ),
+        ("bell_pairs_6", bell_pairs(6), 4096, (1, 2)),
+        ("product_5", Circuit::new(5, 0), 4096, (1, 1)),
+    ] {
+        let n = circuit.num_qubits;
+        let mut b = mps_after(&circuit, cap);
+        b.move_center(n - 1);
+        b.assert_gauge(n - 1);
+
+        let bonds = interior_bonds(&b);
+        assert_eq!(
+            (*bonds.iter().min().unwrap(), *bonds.iter().max().unwrap()),
+            bond_range,
+            "{label} bond profile {bonds:?}"
+        );
+
+        for target in (0..n).rev() {
+            b.move_center(target);
+            b.assert_gauge(target);
+        }
+        for target in 0..n {
+            b.move_center(target);
+            b.assert_gauge(target);
+        }
+    }
+}
+
+// Every ordered pair of positions, so a move that loses a singular value or
+// mismatches a reshape shows up as a changed amplitude or a changed norm.
+#[test]
+fn moving_the_center_between_any_two_sites_preserves_the_state() {
+    let n = 6;
+    let mut base = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4096);
+    base.move_center(n - 1);
+    let reference = base.export_statevector().unwrap();
+    let reference_norm = base.pauli_expectation(&[]).unwrap().re;
+
+    for from in 0..n {
+        for to in 0..n {
+            let mut b = base.clone();
+            b.move_center(from);
+            b.move_center(to);
+            b.assert_gauge(to);
+
+            let norm = b.pauli_expectation(&[]).unwrap().re;
+            assert!(
+                (norm - reference_norm).abs() < 1e-12,
+                "norm {norm} after {from} -> {to}, expected {reference_norm}"
+            );
+            let v = b.export_statevector().unwrap();
+            for (i, (r, x)) in reference.iter().zip(&v).enumerate() {
+                assert!(
+                    (r - x).norm() < 1e-12,
+                    "amplitude {i} moved to {x} from {r} after {from} -> {to}"
+                );
+            }
+        }
+    }
+}
+
+// Drift: each step refactorizes the site it leaves, so the isometry error is
+// that factorization's own and must not accumulate over a long walk. The
+// fixture reaches bond 16 under a cap of 32, so no step truncates.
+#[test]
+fn repeated_center_moves_do_not_degrade_the_isometry() {
+    let n = 8;
+    let mut b = mps_after(&crate::circuits::brickwork_circuit(n, 8, 42), 32);
+    b.move_center(n - 1);
+    let reference = b.export_statevector().unwrap();
+    let bonds = interior_bonds(&b);
+    let first = b.gauge_deviation(n - 1);
+
+    let mut worst = first;
+    let mut steps = 0usize;
+    for _ in 0..30 {
+        for target in (0..n).rev() {
+            b.move_center(target);
+            worst = worst.max(b.gauge_deviation(target));
+        }
+        for target in 0..n {
+            b.move_center(target);
+            worst = worst.max(b.gauge_deviation(target));
+        }
+        steps += 2 * (n - 1);
+    }
+    assert_eq!(steps, 420);
+
+    assert!(
+        worst <= GAUGE_TOLERANCE,
+        "gauge deviation reached {worst:.3e} over {steps} steps, from {first:.3e}"
+    );
+    assert_eq!(
+        interior_bonds(&b),
+        bonds,
+        "a walk that truncates nothing must leave the bond profile alone"
+    );
+    let v = b.export_statevector().unwrap();
+    for (i, (r, x)) in reference.iter().zip(&v).enumerate() {
+        assert!(
+            (r - x).norm() < 1e-12,
+            "amplitude {i} moved to {x} from {r} over {steps} steps"
+        );
+    }
+}

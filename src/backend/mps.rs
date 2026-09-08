@@ -213,6 +213,105 @@ fn scratch_slice(buf: &mut Vec<Complex64>, len: usize) -> &mut [Complex64] {
     &mut buf[..len]
 }
 
+/// Orthogonalization passes a column gets before it is accepted or dropped.
+#[cfg(test)]
+const QR_MAX_PASSES: usize = 3;
+/// A pass leaving the residual above this fraction of its norm before the
+/// pass has cancelled nothing significant, so the direction has settled.
+#[cfg(test)]
+const QR_PASS_RETAIN: f64 = 0.5;
+/// Relative floor below which a column adds no direction to `Q`: what is left
+/// of it is the rounding noise of the columns before it, and a normalized
+/// noise vector is not orthogonal to them.
+#[cfg(test)]
+const QR_RANK_REL_TOL: f64 = 1e-14;
+
+/// Isometry deviation [`MpsBackend::assert_gauge`] admits. A move refactorizes
+/// the site it leaves, so the deviation is that factorization's own and does
+/// not accumulate: 420 moves over the eight-site fixture in `mps_tests.rs`
+/// take the worst site from 4.4e-16 to 1.1e-15.
+#[cfg(test)]
+const GAUGE_TOLERANCE: f64 = 1e-14;
+
+/// Thin QR factorization: `q` holds `rank` orthonormal columns of length
+/// `rows` in column-major order, `r` is `rank` by `cols` in row-major order,
+/// and `q · r` reproduces the input.
+#[cfg(test)]
+struct ThinQr {
+    q: Vec<Complex64>,
+    r: Vec<Complex64>,
+    rank: usize,
+}
+
+#[cfg(test)]
+fn l2_norm(v: &[Complex64]) -> f64 {
+    v.iter().map(|x| x.norm_sqr()).sum::<f64>().sqrt()
+}
+
+/// Factorize a column-major `rows` by `cols` matrix by classical Gram-Schmidt,
+/// reorthogonalizing a column until a pass stops shrinking it.
+///
+/// A gauge move wants the isometry rather than the spectrum, and this holds
+/// orthogonality at rounding however wide the spectrum is. [`svd`] does not
+/// below its faer threshold: [`svd_jacobi`] ends its sweep on a criterion
+/// absolute in the Frobenius norm, so the columns of `U` that belong to small
+/// singular values come out non-orthogonal, by 6.5e-8 on the eight-site
+/// fixture in `mps_tests.rs`.
+#[cfg(test)]
+fn thin_qr(a: &[Complex64], rows: usize, cols: usize) -> ThinQr {
+    let rank_cap = rows.min(cols);
+    let mut q = vec![ZERO; rows * rank_cap];
+    let mut r = vec![ZERO; rank_cap * cols];
+    let mut v = vec![ZERO; rows];
+    let mut rank = 0usize;
+
+    for j in 0..cols {
+        v.copy_from_slice(&a[j * rows..j * rows + rows]);
+        let column_norm = l2_norm(&v);
+        let mut previous = column_norm;
+        let mut residual = column_norm;
+        for _ in 0..QR_MAX_PASSES {
+            for i in 0..rank {
+                let basis = &q[i * rows..i * rows + rows];
+                let mut dot = ZERO;
+                for (b, x) in basis.iter().zip(v.iter()) {
+                    dot += b.conj() * x;
+                }
+                for (b, x) in basis.iter().zip(v.iter_mut()) {
+                    *x -= dot * b;
+                }
+                r[i * cols + j] += dot;
+            }
+            residual = l2_norm(&v);
+            if residual > QR_PASS_RETAIN * previous {
+                break;
+            }
+            previous = residual;
+        }
+
+        if rank < rank_cap && residual > QR_RANK_REL_TOL * column_norm {
+            let inv = 1.0 / residual;
+            for (out, x) in q[rank * rows..rank * rows + rows].iter_mut().zip(v.iter()) {
+                *out = x * inv;
+            }
+            r[rank * cols + j] = Complex64::new(residual, 0.0);
+            rank += 1;
+        }
+    }
+
+    if rank == 0 {
+        // A numerically zero matrix offers no direction to keep. The basis
+        // column keeps `q` an isometry and leaves `r` zero, so the product is
+        // still zero.
+        q[0] = ONE;
+        rank = 1;
+    }
+
+    q.truncate(rows * rank);
+    r.truncate(rank * cols);
+    ThinQr { q, r, rank }
+}
+
 fn truncated_svd_rank(singular_values: &[f64], epsilon: f64, max_bond_dim: usize) -> usize {
     let s_max = singular_values.first().copied().unwrap_or(0.0);
     let threshold = epsilon * s_max;
@@ -224,18 +323,29 @@ fn truncated_svd_rank(singular_values: &[f64], epsilon: f64, max_bond_dim: usize
         .min(max_bond_dim)
 }
 
-fn svd_left_site_data(svd_result: &SvdResult, bond_left: usize, chi: usize) -> Vec<Complex64> {
-    let mut left_data = vec![ZERO; bond_left * 2 * chi];
+/// Reshape `chi` orthonormal columns of length `stride` into a site of shape
+/// `(bond_left, 2, chi)`, whose row index packs `alpha * 2 + i` and whose
+/// column index is the site's right bond.
+fn isometry_site_data(
+    columns: &[Complex64],
+    stride: usize,
+    bond_left: usize,
+    chi: usize,
+) -> Vec<Complex64> {
+    let mut data = vec![ZERO; bond_left * 2 * chi];
     for alpha in 0..bond_left {
         for i in 0..2 {
+            let r = alpha * 2 + i;
             for gamma in 0..chi {
-                let r = alpha * 2 + i;
-                left_data[alpha * (2 * chi) + i * chi + gamma] =
-                    svd_result.u[gamma * svd_result.u_rows + r];
+                data[alpha * (2 * chi) + i * chi + gamma] = columns[gamma * stride + r];
             }
         }
     }
-    left_data
+    data
+}
+
+fn svd_left_site_data(svd_result: &SvdResult, bond_left: usize, chi: usize) -> Vec<Complex64> {
+    isometry_site_data(&svd_result.u, svd_result.u_rows, bond_left, chi)
 }
 
 fn fill_scaled_vt_data(
@@ -503,6 +613,10 @@ pub struct MpsBackend {
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
     truncation_discarded: f64,
+    /// Site the orthogonality center is recorded at, where `move_center`
+    /// starts. A product state is canonical about every cut, so `init` records
+    /// site 0. Only the walk maintains this; the gate paths do not update it.
+    center: usize,
     /// [`crate::backend::mps_workspace_cap_elements`] read once at
     /// construction, so the per-gate check is a field compare rather than an
     /// atomic load.
@@ -532,6 +646,7 @@ impl Clone for MpsBackend {
             classical_bits: self.classical_bits.clone(),
             rng: self.rng.clone(),
             truncation_discarded: self.truncation_discarded,
+            center: self.center,
             workspace_cap: self.workspace_cap,
             scratch_theta: Vec::new(),
             scratch_right_t: Vec::new(),
@@ -554,6 +669,7 @@ impl MpsBackend {
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
             truncation_discarded: 0.0,
+            center: 0,
             workspace_cap: crate::backend::mps_workspace_cap_elements(),
             scratch_theta: Vec::new(),
             scratch_right_t: Vec::new(),
@@ -935,6 +1051,182 @@ impl MpsBackend {
             let (lo, hi) = t.data[base..base + 2 * br].split_at_mut(br);
             prepared.apply_slice_pairs(lo, hi);
         }
+    }
+
+    /// Walk the orthogonality center to `to`, one site at a time.
+    ///
+    /// Each step refactorizes the site being left and absorbs the triangular
+    /// factor into the neighbour it moves toward, so the walk is exact: it
+    /// consults neither `svd_epsilon` nor the bond cap and books nothing
+    /// through [`Self::truncation_discarded`]. Every site it crosses comes out
+    /// an isometry whether or not it was one, and sites beyond `to` keep the
+    /// gauge they had, so a chain canonical about [`Self::center`] comes out
+    /// canonical about `to`. Bonds never grow: a step caps the bond it
+    /// rewrites at the rank of the site it factorizes.
+    ///
+    /// # Panics
+    /// Panics unless `to` indexes a site.
+    #[cfg(test)]
+    fn move_center(&mut self, to: usize) {
+        assert!(
+            to < self.sites.len(),
+            "orthogonality center {to} is outside a chain of {} sites",
+            self.sites.len()
+        );
+        while self.center < to {
+            self.shift_center_right();
+            self.center += 1;
+        }
+        while self.center > to {
+            self.shift_center_left();
+            self.center -= 1;
+        }
+    }
+
+    /// One rightward step of [`Self::move_center`]: the center site keeps `Q`
+    /// across its right bond and `R` multiplies into the site to its right.
+    #[cfg(test)]
+    fn shift_center_right(&mut self) {
+        let site = self.center;
+        let bl = self.sites[site].bond_left;
+        let bond = self.sites[site].bond_right;
+        let rows = bl * 2;
+
+        let data = &self.sites[site].data;
+        let mat = scratch_slice(&mut self.scratch_mat, rows * bond);
+        for alpha in 0..bl {
+            for i in 0..2 {
+                for gamma in 0..bond {
+                    mat[gamma * rows + alpha * 2 + i] = data[alpha * (2 * bond) + i * bond + gamma];
+                }
+            }
+        }
+
+        let qr = thin_qr(mat, rows, bond);
+        let chi = qr.rank;
+        let left_data = isometry_site_data(&qr.q, rows, bl, chi);
+
+        let next = &self.sites[site + 1];
+        let br = next.bond_right;
+        let mut next_data = vec![ZERO; chi * 2 * br];
+        for gamma in 0..chi {
+            for delta in 0..bond {
+                let weight = qr.r[gamma * bond + delta];
+                for j in 0..2 {
+                    for beta in 0..br {
+                        next_data[gamma * (2 * br) + j * br + beta] +=
+                            weight * next.data[delta * (2 * br) + j * br + beta];
+                    }
+                }
+            }
+        }
+
+        self.sites[site] = SiteTensor {
+            bond_left: bl,
+            bond_right: chi,
+            data: left_data,
+        };
+        self.sites[site + 1] = SiteTensor {
+            bond_left: chi,
+            bond_right: br,
+            data: next_data,
+        };
+    }
+
+    /// One leftward step of [`Self::move_center`], the same factorization on
+    /// the conjugate transpose: the center site keeps the rows of `Q†` across
+    /// its left bond and `R†` multiplies into the site to its left.
+    #[cfg(test)]
+    fn shift_center_left(&mut self) {
+        let site = self.center;
+        let bond = self.sites[site].bond_left;
+        let br = self.sites[site].bond_right;
+        let rows = 2 * br;
+
+        let data = &self.sites[site].data;
+        let mat = scratch_slice(&mut self.scratch_mat, rows * bond);
+        for (out, x) in mat.iter_mut().zip(data.iter()) {
+            *out = x.conj();
+        }
+
+        let qr = thin_qr(mat, rows, bond);
+        let chi = qr.rank;
+        let right_data: Vec<Complex64> = qr.q.iter().map(|x| x.conj()).collect();
+
+        let prev = &self.sites[site - 1];
+        let bl = prev.bond_left;
+        let mut prev_data = vec![ZERO; bl * 2 * chi];
+        for alpha in 0..bl {
+            for i in 0..2 {
+                for beta in 0..bond {
+                    let amp = prev.data[alpha * (2 * bond) + i * bond + beta];
+                    for gamma in 0..chi {
+                        prev_data[alpha * (2 * chi) + i * chi + gamma] +=
+                            amp * qr.r[gamma * bond + beta].conj();
+                    }
+                }
+            }
+        }
+
+        self.sites[site - 1] = SiteTensor {
+            bond_left: bl,
+            bond_right: chi,
+            data: prev_data,
+        };
+        self.sites[site] = SiteTensor {
+            bond_left: chi,
+            bond_right: br,
+            data: right_data,
+        };
+    }
+
+    /// Largest deviation from the orthogonality condition over the sites away
+    /// from `center`: a site left of it owes `A† A = I` summed over its left
+    /// bond and physical index, a site right of it owes `A A† = I` summed over
+    /// its physical index and right bond.
+    #[cfg(test)]
+    fn gauge_deviation(&self, center: usize) -> f64 {
+        let mut worst = 0.0f64;
+        for (site, t) in self.sites.iter().enumerate() {
+            if site < center {
+                for g in 0..t.bond_right {
+                    for h in 0..t.bond_right {
+                        let mut sum = ZERO;
+                        for alpha in 0..t.bond_left {
+                            for i in 0..2 {
+                                sum +=
+                                    t.data[t.idx(alpha, i, g)].conj() * t.data[t.idx(alpha, i, h)];
+                            }
+                        }
+                        let target = if g == h { ONE } else { ZERO };
+                        worst = worst.max((sum - target).norm());
+                    }
+                }
+            } else if site > center {
+                for a in 0..t.bond_left {
+                    for b in 0..t.bond_left {
+                        let mut sum = ZERO;
+                        for i in 0..2 {
+                            for beta in 0..t.bond_right {
+                                sum += t.data[t.idx(a, i, beta)] * t.data[t.idx(b, i, beta)].conj();
+                            }
+                        }
+                        let target = if a == b { ONE } else { ZERO };
+                        worst = worst.max((sum - target).norm());
+                    }
+                }
+            }
+        }
+        worst
+    }
+
+    #[cfg(test)]
+    fn assert_gauge(&self, center: usize) {
+        let worst = self.gauge_deviation(center);
+        assert!(
+            worst <= GAUGE_TOLERANCE,
+            "gauge deviation {worst:.3e} about center {center} exceeds {GAUGE_TOLERANCE:.0e}"
+        );
     }
 
     fn apply_adjacent_two_qubit(
@@ -2327,6 +2619,7 @@ impl Backend for MpsBackend {
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         self.truncation_discarded = 0.0;
+        self.center = 0;
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         self.sites = (0..num_qubits)
             .map(|_| SiteTensor::new_zero_state())

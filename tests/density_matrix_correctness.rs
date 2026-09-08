@@ -615,6 +615,63 @@ fn dm_marginals_reject_readout_and_otherwise_match_the_draw() {
     }
 }
 
+// run pairs the mixture's distribution with one draw from the record, and only
+// the draw would carry readout, so the model is rejected the way marginals
+// rejects it. Sampling terminals return the record alone and keep accepting it.
+#[test]
+fn dm_run_rejects_readout_and_the_sampling_terminals_keep_it() {
+    use prism_q::{BackendKind, NoiseModel, PrismError};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Ry(0.8), &[0]);
+    circuit.add_gate(Gate::Ry(2.0), &[1]);
+    circuit.measure_all();
+
+    let mut with_readout = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    with_readout.with_readout_error(0.3, 0.0);
+    let noisy = || {
+        sim::simulate(&circuit)
+            .backend(BackendKind::DensityMatrix)
+            .noise(&with_readout)
+            .seed(SEED)
+    };
+    match noisy().run() {
+        Err(PrismError::InvalidParameter { message }) => assert!(
+            message.contains("sample_counts"),
+            "the rejection must name a terminal that applies it, got {message}"
+        ),
+        other => panic!("expected run to reject readout error: {other:?}"),
+    }
+    assert!(
+        noisy().marginals().is_err(),
+        "marginals and run accept the same models"
+    );
+    let shots = noisy().shots(200).unwrap();
+    assert_eq!(shots.shots.len(), 200);
+    assert_eq!(noisy().sample_counts(200).unwrap().num_classical_bits, 2);
+
+    let clean = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    let outcome = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(outcome.classical_bits.len(), 2);
+    assert!((outcome.probabilities.unwrap().to_vec().iter().sum::<f64>() - 1.0).abs() < DM_EPS);
+
+    let mut inert = NoiseModel::uniform_depolarizing(&circuit, DEPOLARIZING_P);
+    inert.with_readout_error(0.0, 0.0);
+    assert!(
+        sim::simulate(&circuit)
+            .backend(BackendKind::DensityMatrix)
+            .noise(&inert)
+            .seed(SEED)
+            .run()
+            .is_ok(),
+        "a zero-rate readout entry changes no draw and is not rejected"
+    );
+}
+
 #[test]
 fn dm_amplitude_damping_analytic() {
     let gamma = 0.3;

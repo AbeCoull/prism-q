@@ -74,8 +74,8 @@ from the resulting distribution. Every terminal reads that one evolution: `run` 
 `marginals` return the exact noisy distribution, `expectation_values` returns the exact
 `Tr(rho P)`, and `shots` and `sample_counts` carry sampling noise but no trajectory
 variance. Readout error is applied to the drawn outcomes rather than to the state, on an
-RNG stream of its own, which is why `marginals` rejects a model carrying it rather than
-returning a state marginal that the sampled terminals would contradict.
+RNG stream of its own, which is why `run` and `marginals` reject a model carrying it
+rather than returning a state distribution that the sampled terminals would contradict.
 
 The mixture holds every measurement branch at once, which is what makes it exact and also
 what it cannot undo. A circuit with mid-circuit measurement or classical conditioning is

@@ -1083,9 +1083,10 @@ fn sample_exact_noisy_shots(
     let bits = circuit.num_classical_bits;
     let mut shots = sample_shots(probs, &circuit.measurement_map(), bits, num_shots, seed);
     if noise_model.readout.iter().any(Option::is_some) {
+        let readout = trajectory::written_readout(circuit, &noise_model.readout);
         let mut rng = trajectory::noise_rng(seed);
         for shot in &mut shots {
-            trajectory::apply_readout_errors(shot, &noise_model.readout, &mut rng);
+            trajectory::apply_readout_errors(shot, &readout, &mut rng);
         }
     }
     shots

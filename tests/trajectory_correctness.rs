@@ -163,6 +163,22 @@ fn readout_error_through_public_api() {
     );
 }
 
+// A bit no measurement writes holds no outcome, so readout error cannot reach
+// it: bits 1 and 2 stay at their unwritten zero while bit 0 flips every shot.
+#[test]
+fn readout_error_skips_unmeasured_bits() {
+    let mut circuit = Circuit::new(1, 3);
+    circuit.add_measure(0, 0);
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.with_readout_error(1.0, 0.0);
+
+    let result = run_shots_with_noise(BackendKind::Statevector, &circuit, &noise, 500, 42).unwrap();
+    for shot in &result.shots {
+        assert_eq!(shot, &vec![true, false, false]);
+    }
+}
+
 #[test]
 fn two_qubit_depolarizing_through_public_api() {
     let mut circuit = Circuit::new(2, 2);

@@ -83,6 +83,11 @@ fn run() {
     assert!(size.is_power_of_two(), "rank count must be a power of two");
     let p = size.trailing_zeros() as usize;
 
+    if let Some(reps) = timed_reps() {
+        timed_check(ctx, reps);
+        return;
+    }
+
     // 16 qubits crosses every fusion threshold (1q, 2q, multi, diagonal batch), so
     // the run exercises fused and batched gates spanning the global qubits.
     let num_qubits = 16;
@@ -125,6 +130,77 @@ fn run() {
     // Shot sampling: terminal measurements sample basis indices without
     // gathering the dense state on any rank.
     shots_check(ctx, num_qubits);
+}
+
+/// Repetition count of the timed arm, from `PRISM_DIST_TIMED_REPS`. Unset runs
+/// the correctness checks instead.
+#[cfg(feature = "distributed-mpi")]
+fn timed_reps() -> Option<usize> {
+    let raw = std::env::var("PRISM_DIST_TIMED_REPS").ok()?;
+    Some(
+        raw.trim()
+            .parse()
+            .expect("PRISM_DIST_TIMED_REPS must be a count"),
+    )
+}
+
+/// Time `reps` applications of a global 1q wall and a boundary SWAP wall at 20
+/// and 22 qubits in direct exchange mode. Every rank prints one `TIMED:` line
+/// per circuit and width, after a warmup pass that grows the staging buffers.
+/// Set `PRISM_DIST_EXCHANGE_CHUNK` to tile and pipeline the exchange.
+#[cfg(feature = "distributed-mpi")]
+fn timed_check(ctx: std::sync::Arc<prism_q::distributed::DistributedContext>, reps: usize) {
+    use prism_q::backend::Backend;
+    use prism_q::backend::distributed_statevector::DistributedStatevectorBackend;
+    use prism_q::circuit::Circuit;
+    use prism_q::gates::Gate;
+    use std::time::Instant;
+
+    const SEED: u64 = 42;
+
+    let rank = ctx.rank();
+    let size = ctx.size();
+    let chunk = prism_q::distributed::exchange_chunk();
+    for n in [20usize, 22] {
+        let top = n - 1;
+        let mut wall_1q = Circuit::new(n, 0);
+        for _ in 0..8 {
+            wall_1q.add_gate(Gate::H, &[top]);
+            wall_1q.add_gate(Gate::Rx(0.3), &[top]);
+        }
+        let mut wall_swap = Circuit::new(n, 0);
+        wall_swap.add_gate(Gate::X, &[0]);
+        for _ in 0..8 {
+            wall_swap.add_gate(Gate::Swap, &[0, top]);
+        }
+        for (label, circuit) in [
+            ("global_1q_wall", &wall_1q),
+            ("boundary_swap_wall", &wall_swap),
+        ] {
+            let mut backend = DistributedStatevectorBackend::new(ctx.clone(), SEED);
+            backend.set_relabel(false);
+            backend.init(n, 0).expect("init");
+            backend
+                .apply_instructions(&circuit.instructions)
+                .expect("warmup");
+            // The marginal is one Allreduce, so it lines the ranks up before
+            // the clock starts.
+            backend.qubit_probability(0).expect("sync");
+            let start = Instant::now();
+            for _ in 0..reps {
+                backend
+                    .apply_instructions(&circuit.instructions)
+                    .expect("timed run");
+            }
+            let wall_ms = start.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "TIMED: ranks={size} rank={rank} circuit={label} qubits={n} reps={reps} \
+                 chunk={chunk} messages={} wall_ms={wall_ms:.3} per_rep_ms={:.3}",
+                backend.exchange_messages(),
+                wall_ms / reps as f64
+            );
+        }
+    }
 }
 
 #[cfg(feature = "distributed-mpi")]

@@ -1253,7 +1253,7 @@ fn rz_quarter_pi_spelling_routes_like_t() {
         assert_eq!(circuit.t_count(), 1);
         assert!(matches!(
             plan_probability_route(&BackendKind::Auto, &circuit),
-            ProbabilityRoute::StabilizerRank { t_count: 1 }
+            ProbabilityRoute::StabilizerRank
         ));
         let auto = run_with(BackendKind::Auto, &circuit, 42).unwrap();
         assert_eq!(auto.metadata.backend, ResolvedBackend::StabilizerRank);

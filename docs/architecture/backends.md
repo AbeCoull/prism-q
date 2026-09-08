@@ -186,8 +186,8 @@ Selecting it with a noise model attached is the exact route for every `Simulate`
 terminal except the adjoint gradient: the mixture is evolved once and observables,
 marginals, probabilities, and shots all read that one evolution, and the parameter-shift
 gradient evaluates the mixture once per shifted angle. Readout error is the one part of a
-model that no evolution holds, so `marginals` rejects a model carrying it and points at
-`sample_counts`. The adjoint stays excluded because
+model that no evolution holds, so `run` and `marginals` reject a model carrying it and
+point at `sample_counts`. The adjoint stays excluded because
 it backpropagates against a pure state and a channel has no reverse evolution to walk.
 See [Noise across the terminals](./engine.md) for what that route accepts and what stays
 on trajectory averaging.

@@ -7,6 +7,9 @@
 //! coordinates so no derivation sits inside the row loop.
 
 use super::simd::rowmul_words;
+use crate::error::{PrismError, Result};
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+use std::borrow::Cow;
 
 #[derive(Clone, Copy)]
 pub(crate) struct QubitBit {
@@ -423,4 +426,107 @@ pub(crate) fn materialize_destabilizers(xz: &mut [u64], phase: &mut [bool], n: u
     for (i, p) in stab_phase.into_iter().enumerate() {
         phase[n + i] = p;
     }
+}
+
+/// True when the Pauli string `(term_x, term_z)` anticommutes with the tableau
+/// row `row` (`2 * nw` words, X then Z).
+#[inline(always)]
+fn anticommutes(row: &[u64], nw: usize, term_x: &[u64], term_z: &[u64]) -> bool {
+    let (row_x, row_z) = row.split_at(nw);
+    let mut parity = 0u32;
+    for w in 0..nw {
+        parity ^= (term_x[w] & row_z[w]).count_ones() ^ (term_z[w] & row_x[w]).count_ones();
+    }
+    parity & 1 == 1
+}
+
+/// Tableau rows with current destabilizers for a read-only query, borrowed
+/// when the backend's own rows qualify and owned when they had to be rebuilt.
+pub(crate) type TableauRows<'a> = (Cow<'a, [u64]>, Cow<'a, [bool]>);
+
+/// Expectation of the Pauli string `term` (one row: `nw` X words then `nw` Z
+/// words) on the state the tableau stabilizes: 0 when the string anticommutes
+/// with a generator, otherwise the sign (+1 or -1) that puts it in the
+/// stabilizer group.
+///
+/// Destabilizer rows must be current: destabilizer `j` anticommutes with the
+/// string exactly when generator `j` is a factor of it, so the sign comes from
+/// multiplying those generators into the scratch row `acc` with the `rowmul`
+/// phase rule. Cost is `O(n * nw)` words per string.
+pub(crate) fn pauli_expectation(
+    xz: &[u64],
+    phase: &[bool],
+    n: usize,
+    nw: usize,
+    term: &[u64],
+    acc: &mut [u64],
+) -> f64 {
+    let stride = 2 * nw;
+    let (term_x, term_z) = term.split_at(nw);
+    let (acc_x, acc_z) = acc.split_at_mut(nw);
+    for r in n..2 * n {
+        if anticommutes(&xz[r * stride..(r + 1) * stride], nw, term_x, term_z) {
+            return 0.0;
+        }
+    }
+
+    acc_x.fill(0);
+    acc_z.fill(0);
+    let mut acc_phase = false;
+    for j in 0..n {
+        if anticommutes(&xz[j * stride..(j + 1) * stride], nw, term_x, term_z) {
+            let g = (n + j) * stride;
+            let initial = if phase[n + j] { 2u64 } else { 0 } + if acc_phase { 2u64 } else { 0 };
+            let sum = rowmul_words(
+                acc_x,
+                acc_z,
+                &xz[g..g + nw],
+                &xz[g + nw..g + stride],
+                initial,
+            );
+            acc_phase = (sum & 3) >= 2;
+        }
+    }
+    debug_assert_eq!(acc_x, term_x);
+    debug_assert_eq!(acc_z, term_z);
+    if acc_phase { -1.0 } else { 1.0 }
+}
+
+/// Pack a joint Pauli observable into one tableau row over `n` qubits (`nw` X
+/// words then `nw` Z words). Rejects a factor past `n` and a duplicate factor,
+/// which the set bits detect without a separate table.
+pub(crate) fn pack_pauli_string(
+    observable: &[PauliTerm],
+    n: usize,
+    nw: usize,
+    term: &mut [u64],
+) -> Result<()> {
+    term.fill(0);
+    let (term_x, term_z) = term.split_at_mut(nw);
+    for factor in observable {
+        if factor.qubit >= n {
+            return Err(PrismError::InvalidQubit {
+                index: factor.qubit,
+                register_size: n,
+            });
+        }
+        let q = QubitBit::of(factor.qubit);
+        if (term_x[q.word] | term_z[q.word]) & q.mask != 0 {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "joint Pauli observable has duplicate factor on qubit {}",
+                    factor.qubit
+                ),
+            });
+        }
+        match factor.axis {
+            PauliAxis::X => term_x[q.word] |= q.mask,
+            PauliAxis::Z => term_z[q.word] |= q.mask,
+            PauliAxis::Y => {
+                term_x[q.word] |= q.mask;
+                term_z[q.word] |= q.mask;
+            }
+        }
+    }
+    Ok(())
 }

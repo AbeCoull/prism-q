@@ -1359,3 +1359,264 @@ mod gpu_scaffold {
         assert_eq!(cloned.phase, backend.phase);
     }
 }
+
+fn statevector_expectations(
+    prefix: &Circuit,
+    project: Option<(usize, bool)>,
+    suffix: &[Instruction],
+    observables: &[Vec<crate::sim::unified_pauli::PauliTerm>],
+) -> Vec<f64> {
+    use crate::backend::statevector::StatevectorBackend;
+    let mut sv = StatevectorBackend::new(42);
+    sv.init(prefix.num_qubits, prefix.num_classical_bits)
+        .unwrap();
+    for inst in &prefix.instructions {
+        sv.apply(inst).unwrap();
+    }
+    if let Some((qubit, outcome)) = project {
+        let one = Complex64::new(1.0, 0.0);
+        let zero = Complex64::new(0.0, 0.0);
+        let projector = if outcome {
+            [[zero, zero], [zero, one]]
+        } else {
+            [[one, zero], [zero, zero]]
+        };
+        sv.apply_1q_matrix(qubit, &projector).unwrap();
+    }
+    for inst in suffix {
+        sv.apply(inst).unwrap();
+    }
+    let masks: Vec<_> = observables
+        .iter()
+        .map(|o| crate::sim::pauli_masks(o, prefix.num_qubits).unwrap())
+        .collect();
+    let norm: f64 = sv.state_vector().iter().map(|a| a.norm_sqr()).sum();
+    crate::sim::pauli_expectations_from_masks(sv.state_vector(), &masks, norm)
+}
+
+fn tableau_expectations(
+    backend: &mut StabilizerBackend,
+    circuit: &Circuit,
+    observables: &[Vec<crate::sim::unified_pauli::PauliTerm>],
+) -> Vec<f64> {
+    sim::run_on(backend, circuit).unwrap();
+    backend.pauli_expectations(observables).unwrap()
+}
+
+/// Pauli strings read off the stabilizer half of an eager tableau: each
+/// generator, then the product of each adjacent pair. Every one is in the
+/// group, so its expectation is +1 or -1.
+fn group_strings(backend: &StabilizerBackend) -> Vec<Vec<crate::sim::unified_pauli::PauliTerm>> {
+    let n = backend.num_qubits();
+    let nw = n.div_ceil(64);
+    let (xz, _) = backend.raw_tableau();
+    let string_of = |rows: &[usize]| -> Vec<crate::sim::unified_pauli::PauliTerm> {
+        (0..n)
+            .filter_map(|q| {
+                let bit =
+                    |r: usize, half: usize| (xz[r * 2 * nw + half * nw + q / 64] >> (q % 64)) & 1;
+                let x = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 0)) == 1;
+                let z = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 1)) == 1;
+                match (x, z) {
+                    (true, false) => Some(crate::sim::unified_pauli::PauliTerm::x(q)),
+                    (false, true) => Some(crate::sim::unified_pauli::PauliTerm::z(q)),
+                    (true, true) => Some(crate::sim::unified_pauli::PauliTerm::y(q)),
+                    (false, false) => None,
+                }
+            })
+            .collect()
+    };
+    let mut strings: Vec<Vec<crate::sim::unified_pauli::PauliTerm>> =
+        (n..2 * n).map(|r| string_of(&[r])).collect();
+    strings.extend((n..2 * n - 1).map(|r| string_of(&[r, r + 1])));
+    strings
+}
+
+fn assert_expectations_close(got: &[f64], want: &[f64], label: &str) {
+    assert_eq!(got.len(), want.len(), "{label}");
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        assert!((g - w).abs() < 1e-12, "{label} term {i}: got {g}, want {w}");
+    }
+}
+
+#[test]
+fn pauli_expectations_on_basis_and_ghz_states_match_statevector() {
+    use crate::sim::unified_pauli::PauliTerm;
+    let zero = Circuit::new(2, 0);
+    let mut plus = Circuit::new(2, 0);
+    plus.add_gate(Gate::H, &[0]);
+    plus.add_gate(Gate::H, &[1]);
+    plus.add_gate(Gate::S, &[1]);
+    let ghz = crate::circuits::ghz_circuit(4);
+
+    let observables = vec![
+        vec![],
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(0)],
+        vec![PauliTerm::y(0)],
+        vec![PauliTerm::y(1)],
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::x(0), PauliTerm::x(1)],
+        vec![PauliTerm::y(0), PauliTerm::y(1)],
+        vec![PauliTerm::x(0), PauliTerm::y(1)],
+    ];
+    for (circuit, label) in [(&zero, "zero"), (&plus, "plus")] {
+        let want = statevector_expectations(circuit, None, &[], &observables);
+        let got = tableau_expectations(&mut StabilizerBackend::new(42), circuit, &observables);
+        assert_expectations_close(&got, &want, label);
+    }
+
+    let ghz_observables = vec![
+        vec![],
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(0), PauliTerm::z(3)],
+        vec![PauliTerm::z(0), PauliTerm::z(1), PauliTerm::z(2)],
+        vec![
+            PauliTerm::x(0),
+            PauliTerm::x(1),
+            PauliTerm::x(2),
+            PauliTerm::x(3),
+        ],
+        vec![
+            PauliTerm::y(0),
+            PauliTerm::y(1),
+            PauliTerm::x(2),
+            PauliTerm::x(3),
+        ],
+        vec![
+            PauliTerm::y(0),
+            PauliTerm::y(1),
+            PauliTerm::y(2),
+            PauliTerm::y(3),
+        ],
+        vec![PauliTerm::x(0), PauliTerm::x(1)],
+    ];
+    let want = statevector_expectations(&ghz, None, &[], &ghz_observables);
+    assert_eq!(want[5], -1.0);
+    let got = tableau_expectations(&mut StabilizerBackend::new(42), &ghz, &ghz_observables);
+    assert_expectations_close(&got, &want, "ghz");
+    let lazy = tableau_expectations(&mut StabilizerBackend::new_lazy(42), &ghz, &ghz_observables);
+    assert_expectations_close(&lazy, &want, "ghz lazy");
+}
+
+#[test]
+fn pauli_expectations_on_random_clifford_match_statevector() {
+    use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+    use rand::RngExt;
+    let n = 10;
+    let circuit = crate::circuits::clifford_random_pairs(n, 6, 0xDEAD_BEEF);
+    let mut rng = ChaCha8Rng::seed_from_u64(7);
+    let axes = [PauliAxis::X, PauliAxis::Y, PauliAxis::Z];
+    let observables: Vec<Vec<PauliTerm>> = (0..40)
+        .map(|_| {
+            (0..n)
+                .filter_map(|q| {
+                    axes.get(rng.random_range(0..4))
+                        .map(|&axis| PauliTerm::new(q, axis))
+                })
+                .collect()
+        })
+        .collect();
+    let mut eager = StabilizerBackend::new(42);
+    sim::run_on(&mut eager, &circuit).unwrap();
+    let mut observables = observables;
+    observables.extend(group_strings(&eager));
+    let want = statevector_expectations(&circuit, None, &[], &observables);
+    assert!(want[40..].iter().all(|w| w.abs() == 1.0));
+    assert!(want[..40].contains(&0.0));
+    assert!(want[40..].contains(&-1.0));
+    let got = eager.pauli_expectations(&observables).unwrap();
+    assert_expectations_close(&got, &want, "eager");
+    let lazy = tableau_expectations(&mut StabilizerBackend::new_lazy(42), &circuit, &observables);
+    assert_expectations_close(&lazy, &want, "lazy");
+}
+
+#[test]
+fn pauli_expectation_of_a_term_anticommuting_with_a_generator_is_zero() {
+    use crate::sim::unified_pauli::PauliTerm;
+    let mut plus = Circuit::new(1, 0);
+    plus.add_gate(Gate::H, &[0]);
+    let got = tableau_expectations(
+        &mut StabilizerBackend::new(42),
+        &plus,
+        &[vec![PauliTerm::z(0)], vec![PauliTerm::y(0)]],
+    );
+    assert_eq!(got, vec![0.0, 0.0]);
+
+    let ghz = crate::circuits::ghz_circuit(3);
+    let got = tableau_expectations(
+        &mut StabilizerBackend::new(42),
+        &ghz,
+        &[
+            vec![PauliTerm::x(0)],
+            vec![PauliTerm::z(1), PauliTerm::y(2)],
+        ],
+    );
+    assert_eq!(got, vec![0.0, 0.0]);
+}
+
+#[test]
+fn pauli_expectations_after_mid_circuit_measurement_match_statevector() {
+    use crate::sim::unified_pauli::PauliTerm;
+    let prefix = crate::circuits::ghz_circuit(3);
+    let mut circuit = Circuit::new(3, 1);
+    for inst in &prefix.instructions {
+        circuit.instructions.push(inst.clone());
+    }
+    circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    let suffix = circuit.instructions[prefix.instructions.len() + 1..].to_vec();
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(1)],
+        vec![PauliTerm::x(1)],
+        vec![PauliTerm::x(1), PauliTerm::x(2)],
+        vec![PauliTerm::z(1), PauliTerm::z(2)],
+        vec![PauliTerm::z(0), PauliTerm::x(1), PauliTerm::x(2)],
+    ];
+    let mut stab = StabilizerBackend::new(42);
+    let got = tableau_expectations(&mut stab, &circuit, &observables);
+    let outcome = stab.classical_results()[0];
+    let want = statevector_expectations(&prefix, Some((0, outcome)), &suffix, &observables);
+    assert_expectations_close(&got, &want, "post-measurement");
+    assert_eq!(got[0], if outcome { -1.0 } else { 1.0 });
+}
+
+#[test]
+fn pauli_expectations_span_words_on_a_wide_register() {
+    use crate::sim::unified_pauli::PauliTerm;
+    let n = 130;
+    let ghz = crate::circuits::ghz_circuit(n);
+    let mut y_pair: Vec<PauliTerm> = (2..n).map(PauliTerm::x).collect();
+    y_pair.push(PauliTerm::y(0));
+    y_pair.push(PauliTerm::y(1));
+    let observables = vec![
+        vec![PauliTerm::z(0), PauliTerm::z(n - 1)],
+        (0..n).map(PauliTerm::x).collect(),
+        y_pair,
+        vec![PauliTerm::z(64)],
+        vec![PauliTerm::z(0), PauliTerm::z(65), PauliTerm::z(129)],
+    ];
+    let got = tableau_expectations(&mut StabilizerBackend::new(42), &ghz, &observables);
+    assert_eq!(got, vec![1.0, 1.0, -1.0, 0.0, 0.0]);
+}
+
+#[test]
+fn pauli_expectations_reject_out_of_range_and_duplicate_factors() {
+    use crate::sim::unified_pauli::PauliTerm;
+    let mut b = StabilizerBackend::new(42);
+    b.init(3, 0).unwrap();
+    assert!(matches!(
+        b.pauli_expectations(&[vec![PauliTerm::z(3)]]),
+        Err(PrismError::InvalidQubit {
+            index: 3,
+            register_size: 3
+        })
+    ));
+    assert!(matches!(
+        b.pauli_expectations(&[vec![PauliTerm::z(1), PauliTerm::x(1)]]),
+        Err(PrismError::InvalidParameter { .. })
+    ));
+}

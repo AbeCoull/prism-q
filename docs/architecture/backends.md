@@ -51,12 +51,13 @@ through dispatch.
 | Sparse entry count | `PRISM_MAX_SPARSE_QUBITS` (the map holds at most `2^q` entries) | Same budget at 64 bytes per entry across the double-buffered maps |
 | Factored merged-block width | `PRISM_MAX_FACTORED_MERGE_QUBITS` | Same budget over `Complex64` |
 | MPS gate workspace | `PRISM_MAX_MPS_WORKSPACE_QUBITS` (at most `2^q` amplitudes of live contraction buffers) | Same budget over `Complex64` |
+| Tensor-network peak intermediate | `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate) | Same budget over `Complex64` |
 | Factored stabilizer merged-cluster width | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | Widest joint tableau fitting the same budget, counted as `2n + 1` rows of `2 * ceil(n / 64)` words and halved to cover the peak while both source tableaux are still live |
 
-The four growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
-factored, MPS, and factored stabilizer backends exist to run above the statevector cap,
-so lowering that cap to steer routing must not shrink what they may hold. Their defaults
-come from the same detected-memory budget.
+The five growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
+factored, MPS, tensor network, and factored stabilizer backends exist to run above the
+statevector cap, so lowering that cap to steer routing must not shrink what they may
+hold. Their defaults come from the same detected-memory budget.
 
 The factored stabilizer cap is the one that is not a `2^n` amplitude count. A stabilizer
 cluster costs `O(n^2 / 64)` words, so a dense cap is the wrong scale here: it would hold
@@ -133,7 +134,7 @@ Shots and Pauli expectations answer from the per-qubit states rather than the `2
 
 ## Tensor Network
 
-Deferred contraction planned on metadata: a greedy min-size pass picks the pair order, seeded noisy restarts rerun it when the greedy tree's peak intermediate grows large, and the kernel replays the winner. Gates append tensors; contraction happens lazily at probability extraction, where `MAX_PROB_QUBITS = 25` guards against the dense readout.
+Deferred contraction planned on metadata: a greedy min-size pass picks the pair order, seeded noisy restarts rerun it when the greedy tree's peak intermediate grows large, and the kernel replays the winner. Gates append tensors; contraction happens lazily at probability extraction, where the `PRISM_MAX_PROB_QUBITS` cap guards the dense readout and an explicit run past it errors naming the cap rather than reporting `probabilities: None`. Every contraction, dense or doubled, checks its planned peak intermediate against `PRISM_MAX_TN_PEAK_QUBITS` before allocating.
 
 Measurement and reset do not contract to the dense state: the outcome draws from the single-qubit reduced density matrix and the renormalizing projector is absorbed into the tensor holding the measured qubit's output leg, so the network keeps its deferred form, mid-circuit measurement carries no width ceiling, and the tensor count does not grow across measurements.
 

@@ -43,7 +43,9 @@
 //! `PLAN_NOISE_TEMPERATURES` entry, and keeps the tree with the smallest peak
 //! intermediate, the greedy tree included, so the peak never rises. Planning
 //! touches shapes and legs only, so a restart costs a heap walk, not data
-//! movement.
+//! movement. The winning plan's peak is held to `PRISM_MAX_TN_PEAK_QUBITS`
+//! (a memory-derived `2^q` elements by default) before the replay allocates
+//! anything, so a contraction the host cannot hold errors instead of aborting.
 //!
 //! # Observables and shots both contract natively
 //!
@@ -78,8 +80,8 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::{
-    Backend, BasisSamples, NORM_CLAMP_MIN, dense_statevector_len, reserve_dense_output,
-    tensor_probability_len,
+    Backend, BasisSamples, NORM_CLAMP_MIN, check_tensor_peak, dense_statevector_len,
+    reserve_dense_output, tensor_probability_len,
 };
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
@@ -660,10 +662,14 @@ fn join_disjoint(mut slots: Vec<Option<Tensor>>) -> Tensor {
 ///
 /// Planning walks metadata only; the replay here is where data moves. Pairs
 /// the plan leaves uncontracted share no leg and go to [`join_disjoint`].
-fn greedy_contract(tensors: &mut Vec<Tensor>) -> Tensor {
+/// Every contraction passes through here, so this is where the planned peak
+/// is held to the tensor-network peak cap before any intermediate allocates;
+/// `backend` and `operation` name the rejected query.
+fn greedy_contract(tensors: &mut Vec<Tensor>, backend: &str, operation: &str) -> Result<Tensor> {
     debug_assert!(!tensors.is_empty());
 
     let plan = plan_with_restarts(tensors);
+    check_tensor_peak(backend, operation, plan.peak)?;
 
     let mut slots: Vec<Option<Tensor>> = std::mem::take(tensors).into_iter().map(Some).collect();
     for &(i, j) in &plan.pairs {
@@ -672,7 +678,7 @@ fn greedy_contract(tensors: &mut Vec<Tensor>) -> Tensor {
         slots.push(Some(contract(&a_tensor, &b_tensor)));
     }
 
-    join_disjoint(slots)
+    Ok(join_disjoint(slots))
 }
 
 struct ScalarExpectationNetwork {
@@ -932,7 +938,11 @@ impl ScalarExpectationNetwork {
         if self.tensors.is_empty() {
             return Ok(1.0);
         }
-        let result = greedy_contract(&mut self.tensors);
+        let result = greedy_contract(
+            &mut self.tensors,
+            "tensor_network_scalar",
+            "scalar expectation",
+        )?;
         if result.data.len() != 1 || !result.legs.is_empty() {
             return Err(PrismError::InvalidParameter {
                 message: format!(
@@ -1396,7 +1406,7 @@ impl TensorNetworkBackend {
     /// Qubits the observable omits carry identity, and an identity factor is a
     /// leg closed directly against its twin rather than a tensor appended, which
     /// keeps `n - k` tensors out of the network for a weight-`k` observable.
-    fn contract_pauli_sandwich(&self, axes: &[Option<PauliAxis>]) -> f64 {
+    fn contract_pauli_sandwich(&self, axes: &[Option<PauliAxis>]) -> Result<f64> {
         let mut bra_legs = self.bra_leg_map();
         for (q, axis) in axes.iter().enumerate() {
             if axis.is_none() {
@@ -1425,9 +1435,9 @@ impl TensorNetworkBackend {
             });
         }
 
-        let result = greedy_contract(&mut network);
+        let result = greedy_contract(&mut network, self.name(), "pauli expectation")?;
         debug_assert!(result.legs.is_empty(), "sandwich leaves every leg paired");
-        result.data[0].re
+        Ok(result.data[0].re)
     }
 
     /// Contract the full network and return the amplitude vector in
@@ -1436,7 +1446,7 @@ impl TensorNetworkBackend {
         dense_statevector_len(self.name(), "contraction", self.num_qubits)?;
 
         let mut tensors = self.tensors.clone();
-        let result = greedy_contract(&mut tensors);
+        let result = greedy_contract(&mut tensors, self.name(), "contraction")?;
 
         // The result tensor's legs should be exactly the output_legs.
         // PRISM-Q convention: q[0] = LSB of state index. In row-major
@@ -1603,7 +1613,7 @@ impl Backend for TensorNetworkBackend {
     /// If `qubit` is outside the register.
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         let (mut network, ket_leg, bra_leg) = self.double_for_partial_trace(qubit);
-        let rho = greedy_contract(&mut network);
+        let rho = greedy_contract(&mut network, self.name(), "reduced density matrix")?;
 
         let axis = |leg: LegId| {
             rho.legs
@@ -1634,7 +1644,7 @@ impl Backend for TensorNetworkBackend {
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         let mut axes: Vec<Option<PauliAxis>> = vec![None; self.num_qubits];
         let mut expectations = Vec::with_capacity(observables.len());
-        let norm_sq = self.contract_pauli_sandwich(&axes);
+        let norm_sq = self.contract_pauli_sandwich(&axes)?;
 
         for observable in observables {
             axes.iter_mut().for_each(|axis| *axis = None);
@@ -1655,7 +1665,7 @@ impl Backend for TensorNetworkBackend {
                 }
                 axes[term.qubit] = Some(term.axis);
             }
-            expectations.push(self.contract_pauli_sandwich(&axes) / norm_sq);
+            expectations.push(self.contract_pauli_sandwich(&axes)? / norm_sq);
         }
 
         Ok(expectations)

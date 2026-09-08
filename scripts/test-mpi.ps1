@@ -1,6 +1,7 @@
 # Build and run the distributed backend rank correctness check.
 #
 # Usage:   powershell -ExecutionPolicy Bypass -File scripts\test-mpi.ps1 [-Ranks 4]
+#          powershell -ExecutionPolicy Bypass -File scripts\test-mpi.ps1 -Timed
 #
 # Sets up the MPI build environment, builds the lib tests and the mpiexec check
 # binary with Rayon enabled (the shipped combination: workers beside MPI, which
@@ -9,15 +10,41 @@
 # the gathered result matches the one process statevector reference and exits
 # nonzero on mismatch. A final three rank run asserts the power of two
 # requirement is rejected.
+#
+# -Timed skips the sweep and runs only the timed arm of the check binary, built
+# in release, at 2 and 4 ranks with the exchange tiled to -TimedChunk
+# amplitudes. It prints one TIMED: line per rank, circuit, and width. Run it on
+# two builds to compare exchange pipelines; the loopback benches cannot show a
+# difference because their ranks share one memory system.
 
 param(
-    [int[]] $RankCounts = @(1, 2, 4)
+    [int[]] $RankCounts = @(1, 2, 4),
+    [switch] $Timed,
+    [int] $TimedReps = 5,
+    [int] $TimedChunk = 65536
 )
 
 $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 . (Join-Path $scriptDir 'mpi-env.ps1')
+
+$mpiexec = "C:\Program Files\Microsoft MPI\Bin\mpiexec.exe"
+if (-not (Test-Path $mpiexec)) { $mpiexec = "mpiexec" }
+
+if ($Timed) {
+    Write-Host "`n== Building mpiexec check binary (release) =="
+    cargo build --release --example dist_mpi_check --features "parallel distributed-mpi"
+    if ($LASTEXITCODE -ne 0) { throw "example build failed" }
+    $exe = Join-Path $scriptDir '..\target\release\examples\dist_mpi_check.exe'
+    foreach ($n in @(2, 4)) {
+        Write-Host "`n== mpiexec -n $n dist_mpi_check [timed, chunk $TimedChunk, reps $TimedReps] =="
+        $out = & $mpiexec -n $n -env PRISM_DIST_TIMED_REPS $TimedReps -env PRISM_DIST_EXCHANGE_CHUNK $TimedChunk $exe
+        if ($LASTEXITCODE -ne 0) { throw "timed arm failed at $n ranks" }
+        $out | Where-Object { $_ -match '^TIMED:' } | Sort-Object | ForEach-Object { Write-Host $_ }
+    }
+    return
+}
 
 Write-Host "`n== Building lib tests (distributed-mpi) =="
 cargo test --features "parallel distributed-mpi" --lib distributed --no-run
@@ -32,8 +59,6 @@ cargo build --example dist_mpi_check --features "parallel distributed-mpi"
 if ($LASTEXITCODE -ne 0) { throw "example build failed" }
 
 $exe = Join-Path $scriptDir '..\target\debug\examples\dist_mpi_check.exe'
-$mpiexec = "C:\Program Files\Microsoft MPI\Bin\mpiexec.exe"
-if (-not (Test-Path $mpiexec)) { $mpiexec = "mpiexec" }
 
 # Each configuration is run at every rank count. Results must not depend on
 # either axis: tiling only splits a transfer into more messages, and relabeling
@@ -97,7 +122,9 @@ Write-Host "Rejected as expected (exit $LASTEXITCODE)."
 # than fails when mpi4py is absent, which is what an interpreter without it
 # reports.
 Write-Host "`n== Python distributed checks =="
-$py = & python -c "import mpi4py; print(mpi4py.__version__)" 2>$null
+# Probed through cmd: redirecting a native command's stderr in PowerShell 5.1
+# turns the import traceback into a terminating error under Stop.
+$py = cmd /c "python -c ""import mpi4py; print(mpi4py.__version__)"" 2>nul"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "mpi4py is not installed; skipping the Python checks."
 } else {

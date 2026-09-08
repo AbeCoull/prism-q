@@ -77,11 +77,15 @@
 //!
 //! Relabeling wins whenever gate activity has qubit locality: SWAP networks,
 //! repeated gates on the same qubits, and working sets that fit the local
-//! positions. The known adverse pattern is a cyclic scan, a gate wall over
-//! more hot qubits than local positions repeated layer after layer, which
-//! defeats least recently used eviction and can exceed direct exchange volume.
-//! Lookahead epoch planning addresses that case; until then
-//! `PRISM_DIST_RELABEL=0` restores direct exchange.
+//! positions. A cyclic scan, a gate wall over more hot qubits than local
+//! positions repeated layer after layer, defeats least recently used eviction,
+//! so `apply_instructions` plans ahead: it cuts the stream into windows whose
+//! non-diagonal targets fit the local positions, relabels each window's
+//! global targets before its first gate, and evicts the local qubits whose
+//! next required use is furthest away. Gates inside a window then dispatch
+//! locally. A gate applied on its own through `apply` keeps the per-gate
+//! relabel with least recently used eviction. `PRISM_DIST_RELABEL=0` restores
+//! direct exchange.
 //!
 //! # Communication cost
 //!
@@ -107,10 +111,8 @@
 //! [`DistributedStatevectorBackend::sample_state_indices`] for the algorithm,
 //! which [`Backend::sample_basis_states`] exposes at the trait level. Circuits
 //! with mid-circuit measurements fall back to one lockstep run per shot.
-//!
-//! Not implemented yet: lookahead epoch planning that batches several relabels
-//! into one exchange.
 
+mod plan;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, feature = "bench-internal"))]
@@ -689,7 +691,9 @@ impl DistributedStatevectorBackend {
 
     /// Bring each requested circuit qubit into a local position. Best effort:
     /// stops when no eviction victim remains, leaving the rest to the direct
-    /// exchange paths. Each relabel costs one half-slice exchange.
+    /// exchange paths. Each relabel costs one half-slice exchange. Inside a
+    /// planned window every requested qubit is already local and this returns
+    /// without work.
     fn make_local(&mut self, req: &[usize]) {
         for &q in req {
             let pos = self.qubit_map[q];
@@ -2011,6 +2015,9 @@ impl Backend for DistributedStatevectorBackend {
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
         if std::mem::take(&mut self.circuit_check_pending) && self.context.size() > 1 {
             self.check_circuit_agreement(instructions)?;
+        }
+        if self.relabel && self.global_qubits > 0 {
+            return self.apply_planned(instructions);
         }
         for instruction in instructions {
             self.apply(instruction)?;

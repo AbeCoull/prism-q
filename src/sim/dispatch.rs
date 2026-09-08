@@ -35,13 +35,9 @@ pub(super) const AUTO_MPS_BOND_DIM: usize = 256;
 
 pub(super) const MAX_AUTO_T_COUNT_EXACT: usize = 18;
 
-pub(super) const MAX_AUTO_T_COUNT_APPROX: usize = 28;
-
 pub(super) const MAX_AUTO_T_COUNT_SHOTS: usize = 40;
 
 pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 25;
-
-pub(super) const AUTO_APPROX_MAX_TERMS: usize = 8192;
 
 pub(super) const MIN_QUBITS_FOR_SPD_AUTO: usize = 12;
 
@@ -71,9 +67,11 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 /// `Auto` resolves per call from circuit shape. Two routes run before the
 /// family tree: circuits that decompose into independent blocks run per block
 /// (Clifford-only circuits at 128 qubits and above with a 16+ qubit block use
-/// FactoredStabilizer), and Clifford+T circuits up to 25 qubits route through
-/// StabilizerRank (exact to 18 T gates, sparse approximation to 28, shot
-/// paths to 40; the `MAX_AUTO_T_COUNT_*` constants above); marginal queries
+/// FactoredStabilizer), and Clifford+T circuits up to 25 qubits whose T count
+/// fits the size-derived stabilizer-rank budget run the exact StabilizerRank
+/// expansion (shot paths to 40 T gates; `MAX_AUTO_T_COUNT_EXACT` and
+/// `MAX_AUTO_T_COUNT_SHOTS` above). The pruned expansion is reachable only
+/// through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
 /// on Clifford+T circuits at 12 qubits and above answer via Sparse Pauli
 /// Dynamics. The remaining tree:
 ///
@@ -84,6 +82,8 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 ///    b. Otherwise               → MPS (bounded bond dimension)
 /// 4. Partial independence       → Factored (per-group dense sub-states)
 /// 5. Otherwise                  → Statevector (exact, general-purpose)
+///
+/// [`run_stabilizer_rank_approx`]: crate::run_stabilizer_rank_approx
 #[derive(Debug, Clone)]
 pub enum BackendKind {
     Auto,
@@ -735,15 +735,6 @@ pub(super) fn approximate_route_name(
     }
     if !kind.is_auto() {
         return None;
-    }
-    // Sparse stabilizer-rank approximation is chosen ahead of the family tree,
-    // so the tree below never sees it.
-    if circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
-        && !crate::sim::has_nonunitary_or_classical_ops(circuit)
-        && crate::sim::auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_APPROX)
-            .is_some_and(|t_count| t_count > MAX_AUTO_T_COUNT_EXACT)
-    {
-        return Some("StabilizerRank");
     }
     let (_, has_partial_independence) = crate::sim::analyze_independence(circuit);
     match select_auto_backend_choice(circuit, has_partial_independence) {
@@ -1586,5 +1577,21 @@ mod dispatch_matrix_tests {
         assert_eq!(plan.family(), Family::Stabilizer);
         assert!(matches!(plan.accel(), Accel::Gpu { soft: false, .. }));
         assert_cpu_family(&stab_kind, &clifford(8), false, Family::Stabilizer);
+    }
+
+    // The auto probability route runs the exact stabilizer-rank expansion and
+    // nothing else: at every width it admits, the size-derived budget sits at
+    // or below the exact ceiling, so a T count that fits the budget fits the
+    // ceiling. A budget change that breaks this re-opens the question of a
+    // pruned route under Auto.
+    #[test]
+    fn auto_stabilizer_rank_budget_stays_inside_the_exact_ceiling() {
+        for n in 1..=MAX_STABILIZER_RANK_QUBITS {
+            let budget = stabilizer_rank_budget(n);
+            assert!(
+                budget <= MAX_AUTO_T_COUNT_EXACT,
+                "width {n}: budget {budget} exceeds the exact ceiling {MAX_AUTO_T_COUNT_EXACT}"
+            );
+        }
     }
 }

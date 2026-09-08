@@ -57,7 +57,10 @@ probabilities it returns, and reports the summed 1-norm of what it dropped as
 from the exact one by at most `4 * d`, and `StabRankResult::fidelity_bound`
 converts `d` to a fidelity floor. The bound assumes worst-case interference
 between the non-orthogonal branch states, so an aggressive budget drives it
-to zero.
+to zero. `Auto` never selects this function: the automatic probability route
+runs the exact expansion when the T count fits the size-derived budget and
+falls through to the dispatch tree otherwise, so the pruned expansion is
+reached only by calling it directly.
 
 ## Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
 

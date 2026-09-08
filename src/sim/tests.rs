@@ -38,7 +38,7 @@ fn probability_route_precedence_is_pinned() {
     clifford_t.add_gate(Gate::T, &[1]);
     assert!(matches!(
         plan_probability_route(&BackendKind::Auto, &clifford_t),
-        ProbabilityRoute::StabilizerRank { t_count: 1 }
+        ProbabilityRoute::StabilizerRank
     ));
 
     let mut general = Circuit::new(4, 0);

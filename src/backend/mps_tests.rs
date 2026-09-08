@@ -785,9 +785,10 @@ fn inner_product_scratch_reuse_matches_fresh() {
 }
 
 // The cap ladder, which the epsilon test above does not reach: that one holds
-// cap 4096 and varies the SVD threshold instead. Error is read off the
-// normalized state, since an unnormalized overlap would count the same
-// discarded weight twice, once as lost norm and once as direction error. Both
+// cap 4096 and varies the SVD threshold instead. The export is normalized, so
+// the overlap reads direction error alone, and lost norm is read off the chain
+// itself; an unnormalized overlap would count the same discarded weight twice,
+// once as lost norm and once as direction error. Both
 // halves stay inside the reported discard, at 0.69 and 0.72 of it by cap 64,
 // and both go vacuous at cap 4, whose discard has passed 1. Monotonicity holds
 // for this fixture rather than by construction: no canonical gauge is kept, so
@@ -814,9 +815,9 @@ fn tighter_caps_lose_more_and_report_it() {
         b.apply_instructions(&circuit.instructions).unwrap();
 
         let v = b.export_statevector().unwrap();
-        let kept: f64 = v.iter().map(|a| a.norm_sqr()).sum();
+        let kept = b.pauli_expectation(&[]).unwrap().re;
         let inner: Complex64 = reference.iter().zip(&v).map(|(r, x)| r.conj() * x).sum();
-        let realized = 1.0 - inner.norm_sqr() / kept;
+        let realized = 1.0 - inner.norm_sqr();
         let discarded = b.truncation_discarded();
 
         assert!(

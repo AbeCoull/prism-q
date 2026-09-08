@@ -3,8 +3,9 @@
 //! Stores only non-zero amplitudes in a map keyed by basis-state index, giving
 //! O(k) memory where k is the number of non-zero basis states. Entries whose
 //! squared amplitude is at or below a pruning threshold (default 1e-16,
-//! raised via [`SparseBackend::set_prune_epsilon`]) are dropped after gates
-//! that can shrink or cancel amplitudes.
+//! raised via `SparseBackend::set_prune_epsilon`) are dropped after gates
+//! that can shrink or cancel amplitudes, and the kept entries are rescaled
+//! so the state keeps its norm.
 //!
 //! Every gate walks the map, so the map hashes basis-state indices with the
 //! crate's multiply-xor hasher rather than the stdlib default.
@@ -121,14 +122,15 @@ impl SparseBackend {
     /// metadata's `fidelity_lower_bound` as a first-order estimate. Lowering
     /// the threshold again keeps the run reporting `Approximate` until the
     /// next [`Backend::init`]; the threshold itself survives `init`, the
-    /// accumulated weight does not. The state is never renormalized after a
-    /// prune: expectations renormalize on read, but probability export and
-    /// shot sampling see the reduced weight, and the sampling CDF folds the
-    /// missing weight into the highest kept basis state.
+    /// accumulated weight does not. Every prune that discards weight rescales
+    /// the kept entries to the norm the state had before it, so probabilities,
+    /// samples, and expectations all see a unit total and the discarded mass
+    /// shows up only in the bound.
     ///
     /// # Panics
     /// Panics unless `0 <= epsilon < 1`.
-    pub fn set_prune_epsilon(&mut self, epsilon: f64) {
+    #[cfg(test)]
+    pub(crate) fn set_prune_epsilon(&mut self, epsilon: f64) {
         assert!(
             (0.0..1.0).contains(&epsilon),
             "prune epsilon must lie in [0, 1)"
@@ -137,13 +139,17 @@ impl SparseBackend {
         self.raised = self.raised || epsilon > DEFAULT_EPSILON;
     }
 
+    /// The rescale pass runs only when the dropped mass moves the scale off
+    /// 1.0 in f64, so the default threshold's dust never pays for it.
     #[inline(always)]
     fn prune(&mut self) {
         let eps = self.epsilon;
         let mut dropped = 0.0;
+        let mut kept = 0.0;
         self.state.retain(|_, amp| {
             let weight = amp.norm_sqr();
             if weight > eps {
+                kept += weight;
                 true
             } else {
                 dropped += weight;
@@ -151,6 +157,14 @@ impl SparseBackend {
             }
         });
         self.pruned_weight += dropped;
+        if dropped > 0.0 && kept > 0.0 {
+            let scale = ((kept + dropped) / kept).sqrt();
+            if scale != 1.0 {
+                for amp in self.state.values_mut() {
+                    *amp *= scale;
+                }
+            }
+        }
     }
 
     /// Reject a gate whose worst-case fan-out would grow the map past the
@@ -1133,6 +1147,38 @@ mod tests {
         .unwrap();
         assert_eq!(b.state.len(), 1);
         assert!(b.state.contains_key(&0));
+        match b.exactness() {
+            crate::sim::Exactness::Approximate {
+                fidelity_lower_bound: Some(bound),
+            } => assert!((bound - 0.9).abs() < EPS),
+            other => panic!("expected a bounded Approximate, got {other:?}"),
+        }
+    }
+
+    // H puts 0.5 on each of |00>, |01>; Ry on q1 then splits each into
+    // 0.45 and 0.05. A 0.06 threshold drops both 0.05 entries, and the two
+    // kept entries must come back to 0.5 each rather than 0.45, which a
+    // unit-total CDF fold would otherwise hand to the highest kept state.
+    #[test]
+    fn test_prune_renormalizes_kept_entries() {
+        let theta = 2.0 * (0.1_f64).sqrt().asin();
+        let mut b = SparseBackend::new(42);
+        b.set_prune_epsilon(0.06);
+        b.init(2, 0).unwrap();
+        b.apply_1q_matrix(0, &Gate::H.matrix_2x2()).unwrap();
+        b.apply_1q_matrix(1, &Gate::Ry(theta).matrix_2x2()).unwrap();
+        assert_eq!(b.state.len(), 2);
+
+        let probs = b.probabilities().unwrap();
+        let total: f64 = probs.iter().sum();
+        assert!((total - 1.0).abs() < EPS, "probabilities sum to {total}");
+        assert!((probs[0] - 0.5).abs() < EPS);
+        assert!((probs[1] - 0.5).abs() < EPS);
+        assert_eq!(probs[2], 0.0);
+        assert_eq!(probs[3], 0.0);
+
+        let z1 = b.pauli_expectations(&[vec![PauliTerm::z(1)]]).unwrap();
+        assert!((z1[0] - 1.0).abs() < EPS);
         match b.exactness() {
             crate::sim::Exactness::Approximate {
                 fidelity_lower_bound: Some(bound),

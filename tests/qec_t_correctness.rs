@@ -557,22 +557,23 @@ fn spd_strategy_handles_arbitrary_axis_rotations() {
 
 #[test]
 fn auto_routes_non_clifford_non_rotation_gate_to_tensor_network() {
-    // The Rx(pi/3) matrix as a raw fused unitary: same physics as the
-    // rotation, but a gate the Pauli engines cannot branch or lower.
+    // The Rx(pi/3) matrix as a raw two-qubit fused unitary on an idle
+    // partner: same physics as the rotation, but a gate the Pauli engines
+    // cannot branch or lower (a one-qubit `Fused` would lower to its Euler
+    // triple).
     let theta = std::f64::consts::FRAC_PI_3;
     let (sin, cos) = (theta / 2.0).sin_cos();
-    let fused = Gate::Fused(Box::new([
-        [
-            num_complex::Complex64::new(cos, 0.0),
-            num_complex::Complex64::new(0.0, -sin),
-        ],
-        [
-            num_complex::Complex64::new(0.0, -sin),
-            num_complex::Complex64::new(cos, 0.0),
-        ],
+    let c = num_complex::Complex64::new(cos, 0.0);
+    let s = num_complex::Complex64::new(0.0, -sin);
+    let z = num_complex::Complex64::new(0.0, 0.0);
+    let fused = Gate::Fused2q(Box::new([
+        [c, z, s, z],
+        [z, c, z, s],
+        [s, z, c, z],
+        [z, s, z, c],
     ]));
-    let mut program = QecProgram::with_options(1, options(512));
-    program.push_gate(fused, &[0]).unwrap();
+    let mut program = QecProgram::with_options(2, options(512));
+    program.push_gate(fused, &[0, 1]).unwrap();
     let m0 = program.measure_z(0).unwrap();
     program
         .observable_include(0, &[QecRecordRef::absolute(m0)])

@@ -529,3 +529,35 @@ fn test_recognize_rejects_a_global_phase() {
     let txt = mat_mul_2x2(&t, &mat_mul_2x2(&Gate::X.matrix_2x2(), &t));
     assert_eq!(Gate::recognize_matrix(&txt), None);
 }
+
+#[test]
+fn test_recognize_up_to_phase_returns_the_scalar() {
+    let phase = Complex64::from_polar(1.0, 0.42);
+    for gate in [
+        Gate::H,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+        Gate::S,
+        Gate::T,
+        Gate::SX,
+    ] {
+        let m = gate.matrix_2x2();
+        let phased = [
+            [m[0][0] * phase, m[0][1] * phase],
+            [m[1][0] * phase, m[1][1] * phase],
+        ];
+        let (named, scalar) = Gate::recognize_matrix_up_to_phase(&phased).unwrap();
+        assert_eq!(named, gate);
+        assert!((scalar - phase).norm() < 1e-9, "{gate:?}: {scalar}");
+    }
+
+    let (rz, scalar) = Gate::recognize_matrix_up_to_phase(&Gate::P(0.3).matrix_2x2()).unwrap();
+    assert!(matches!(rz, Gate::Rz(theta) if (theta - 0.3).abs() < 1e-12));
+    assert!((scalar - Complex64::from_polar(1.0, 0.15)).norm() < 1e-12);
+
+    assert_eq!(
+        Gate::recognize_matrix_up_to_phase(&Gate::Rx(0.7).matrix_2x2()),
+        None
+    );
+}

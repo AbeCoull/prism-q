@@ -17,6 +17,8 @@
 //!
 //! Clifford gates only: H, S, Sdg, SX, SXdg, X, Y, Z, Id, CX, CZ, SWAP.
 //! Non-Clifford gates (T, Rx, Ry, Rz, Fused) return `BackendUnsupported`.
+//! Pauli expectations are answered on the tableau (each string is +1, -1, or
+//! 0), so marginals and observables run at any width.
 //!
 //! # When to prefer this backend
 //!
@@ -42,9 +44,11 @@ use crate::circuit::Instruction;
 use crate::error::PrismError;
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::sim::unified_pauli::PauliTerm;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
+use std::borrow::Cow;
 #[cfg(feature = "gpu")]
 use std::sync::Arc;
 
@@ -604,6 +608,24 @@ impl StabilizerBackend {
 
     pub fn raw_tableau(&self) -> (&[u64], &[bool]) {
         (&self.xz, &self.phase)
+    }
+
+    /// Tableau rows with current destabilizers, for a read-only query: the
+    /// host rows as they stand, a materialized copy under lazy destabilizers,
+    /// or the device tableau brought back with its queued gates applied.
+    fn rows_with_destabilizers(&self) -> Result<kernels::rowops::TableauRows<'_>> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            let (xz, phase) = self.copy_device_tableau_with_pending()?;
+            return Ok((Cow::Owned(xz), Cow::Owned(phase)));
+        }
+        if self.lazy_destab {
+            let mut xz = self.xz.clone();
+            let mut phase = self.phase.clone();
+            kernels::rowops::materialize_destabilizers(&mut xz, &mut phase, self.n, self.num_words);
+            return Ok((Cow::Owned(xz), Cow::Owned(phase)));
+        }
+        Ok((Cow::Borrowed(&self.xz), Cow::Borrowed(&self.phase)))
     }
 
     /// Apply gate and satisfied-conditional instructions, skipping
@@ -1400,6 +1422,29 @@ impl Backend for StabilizerBackend {
 
     fn supports_fused_gates(&self) -> bool {
         false
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// Zero when the string anticommutes with a generator, otherwise the sign
+    /// that puts it in the stabilizer group. One pass over the rows per string,
+    /// with both scratch rows allocated once for the whole request.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let (xz, phase) = self.rows_with_destabilizers()?;
+        let nw = self.num_words;
+        let mut scratch = vec![0u64; 4 * nw];
+        let (term, acc) = scratch.split_at_mut(2 * nw);
+        observables
+            .iter()
+            .map(|observable| {
+                kernels::rowops::pack_pauli_string(observable, self.n, nw, term)?;
+                Ok(kernels::rowops::pauli_expectation(
+                    &xz, &phase, self.n, nw, term, acc,
+                ))
+            })
+            .collect()
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {

@@ -97,11 +97,13 @@ than blaming the route that selected it.
 `simulate(...).marginals()` reads per-qubit Z expectations rather than a
 distribution when the resolved backend has an observable path and the circuit
 routes straight to it. Sparse, MPS, product state, factored, tensor network,
-distributed, and the density matrix all have one, and the dense output cap does
-not apply on that route. It falls back to the dense distribution on backends
-without an observable path, on a circuit that splits into independent blocks
-unless those blocks run as product states, and under a noise model, where the
-mixture is read densely and the density-matrix memory limit applies instead.
+distributed, the density matrix, and both stabilizer backends have one, and the
+dense output cap does not apply on that route; a Clifford circuit with
+measurements reads its marginals off the tableau at any width. It falls back to
+the dense distribution on backends without an observable path, on a circuit
+that splits into independent blocks unless those blocks run as product states,
+and under a noise model, where the mixture is read densely and the
+density-matrix memory limit applies instead.
 
 Under a noise model `run()` and `marginals()` answer from the exact mixture, so
 both reject a model carrying readout error instead of serving one: readout acts

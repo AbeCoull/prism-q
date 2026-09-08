@@ -17,7 +17,8 @@
 //!
 //! Clifford gates only: H, S, Sdg, SX, SXdg, X, Y, Z, Id, CX, CZ, SWAP.
 //! Non-Clifford gates return `BackendUnsupported`, and fusion is skipped
-//! (`supports_fused_gates` is false).
+//! (`supports_fused_gates` is false). Pauli expectations are answered per
+//! cluster and multiplied, so marginals and observables run at any width.
 //!
 //! # When to prefer this backend
 //!
@@ -42,6 +43,8 @@ use crate::backend::{Backend, dense_probability_len, dense_statevector_len, rese
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+use std::borrow::Cow;
 
 #[cfg(feature = "parallel")]
 use crate::backend::{MIN_ANTI_ROWS_FOR_PAR, MIN_QUBITS_FOR_PAR_GATES};
@@ -385,6 +388,18 @@ impl SubTableau {
             self.apply_x(local_q);
         }
         Ok(())
+    }
+
+    /// Rows with current destabilizers for a read-only query: borrowed when
+    /// they are live, a materialized copy when gates have left them stale.
+    fn rows_with_destabilizers(&self) -> rowops::TableauRows<'_> {
+        if !self.lazy_destab {
+            return (Cow::Borrowed(&self.xz), Cow::Borrowed(&self.phase));
+        }
+        let mut xz = self.xz.clone();
+        let mut phase = self.phase.clone();
+        rowops::materialize_destabilizers(&mut xz, &mut phase, self.n, self.num_words);
+        (Cow::Owned(xz), Cow::Owned(phase))
     }
 
     fn compute_probabilities(&self) -> Result<Vec<f64>> {
@@ -893,6 +908,85 @@ impl Backend for FactoredStabilizerBackend {
 
     fn supports_fused_gates(&self) -> bool {
         false
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// Clusters are mutually unentangled, so a joint string factors into one
+    /// string per cluster it touches and the value is the product of the
+    /// cluster expectations. Every cluster's packed string lives in one scratch
+    /// buffer, so a request packs its factors in a single pass and allocates
+    /// nothing per string.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        for observable in observables {
+            crate::sim::validate_observable(observable, self.num_qubits)?;
+        }
+
+        let mut rows = Vec::with_capacity(self.subs.len());
+        let mut offsets = Vec::with_capacity(self.subs.len());
+        let mut total = 0;
+        let mut max_nw = 0;
+        for sub in &self.subs {
+            offsets.push(total);
+            rows.push(sub.as_ref().map(|sub| {
+                total += 2 * sub.num_words;
+                max_nw = max_nw.max(sub.num_words);
+                sub.rows_with_destabilizers()
+            }));
+        }
+        let mut scratch = vec![0u64; total + 2 * max_nw];
+        let (terms, acc) = scratch.split_at_mut(total);
+        let mut marked = vec![false; self.subs.len()];
+        let mut touched: SmallVec<[usize; 8]> = SmallVec::new();
+
+        observables
+            .iter()
+            .map(|observable| {
+                for term in observable {
+                    let s = self.qubit_to_sub[term.qubit];
+                    let sub = self.subs[s].as_ref().unwrap();
+                    let nw = sub.num_words;
+                    let region = &mut terms[offsets[s]..offsets[s] + 2 * nw];
+                    if !marked[s] {
+                        marked[s] = true;
+                        touched.push(s);
+                        region.fill(0);
+                    }
+                    let q = rowops::QubitBit::of(sub.local_qubit(term.qubit));
+                    match term.axis {
+                        PauliAxis::X => region[q.word] |= q.mask,
+                        PauliAxis::Z => region[nw + q.word] |= q.mask,
+                        PauliAxis::Y => {
+                            region[q.word] |= q.mask;
+                            region[nw + q.word] |= q.mask;
+                        }
+                    }
+                }
+
+                let mut product = 1.0f64;
+                for &s in &touched {
+                    marked[s] = false;
+                    if product == 0.0 {
+                        continue;
+                    }
+                    let sub = self.subs[s].as_ref().unwrap();
+                    let (xz, phase) = rows[s].as_ref().unwrap();
+                    let nw = sub.num_words;
+                    product *= rowops::pauli_expectation(
+                        xz,
+                        phase,
+                        sub.n,
+                        nw,
+                        &terms[offsets[s]..offsets[s] + 2 * nw],
+                        &mut acc[..2 * nw],
+                    );
+                }
+                touched.clear();
+                Ok(product)
+            })
+            .collect()
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

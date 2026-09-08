@@ -1293,7 +1293,16 @@ fn native_marginals_match_the_dense_route() {
     product.add_gate(Gate::T, &[2]);
     product.add_gate(Gate::Rx(1.1), &[3]);
 
-    let cases: [(prism_q::BackendKind, &Circuit, &str); 5] = [
+    let mut clifford = Circuit::new(4, 0);
+    clifford.add_gate(Gate::H, &[0]);
+    clifford.add_gate(Gate::Cx, &[0, 1]);
+    clifford.add_gate(Gate::X, &[2]);
+    clifford.add_gate(Gate::S, &[1]);
+    clifford.add_gate(Gate::Cz, &[1, 2]);
+    clifford.add_gate(Gate::H, &[3]);
+    clifford.add_gate(Gate::Cx, &[3, 2]);
+
+    let cases: [(prism_q::BackendKind, &Circuit, &str); 7] = [
         (prism_q::BackendKind::Sparse, &entangled, "sparse"),
         (
             prism_q::BackendKind::Mps { max_bond_dim: 64 },
@@ -1307,6 +1316,12 @@ fn native_marginals_match_the_dense_route() {
             "density_matrix",
         ),
         (prism_q::BackendKind::ProductState, &product, "product"),
+        (prism_q::BackendKind::Stabilizer, &clifford, "stabilizer"),
+        (
+            prism_q::BackendKind::FactoredStabilizer,
+            &clifford,
+            "factored_stabilizer",
+        ),
     ];
 
     for (kind, circuit, label) in cases {

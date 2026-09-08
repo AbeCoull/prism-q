@@ -3,6 +3,7 @@ use crate::backend::factored_stabilizer::FactoredStabilizerBackend;
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::Circuit;
 use crate::gates::Gate;
+use crate::sim::unified_pauli::PauliTerm;
 
 fn run_both(circuit: &Circuit, seed: u64) -> (Vec<f64>, Vec<f64>) {
     let mut mono = StabilizerBackend::new(seed);
@@ -755,4 +756,134 @@ fn interleaved_leaf_measure_keeps_chain_entangled() {
             n - 1
         );
     }
+}
+
+fn expectations_on(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+) -> Vec<f64> {
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for inst in &circuit.instructions {
+        backend.apply(inst).unwrap();
+    }
+    backend.pauli_expectations(observables).unwrap()
+}
+
+/// Pauli strings read off the stabilizer half of an eager tableau: each
+/// generator, then the product of each adjacent pair. Every one is in the
+/// group, so its expectation is +1 or -1.
+fn group_strings(backend: &StabilizerBackend) -> Vec<Vec<PauliTerm>> {
+    let n = backend.num_qubits();
+    let nw = n.div_ceil(64);
+    let (xz, _) = backend.raw_tableau();
+    let string_of = |rows: &[usize]| -> Vec<PauliTerm> {
+        (0..n)
+            .filter_map(|q| {
+                let bit =
+                    |r: usize, half: usize| (xz[r * 2 * nw + half * nw + q / 64] >> (q % 64)) & 1;
+                let x = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 0)) == 1;
+                let z = rows.iter().fold(0, |acc, &r| acc ^ bit(r, 1)) == 1;
+                match (x, z) {
+                    (true, false) => Some(PauliTerm::x(q)),
+                    (false, true) => Some(PauliTerm::z(q)),
+                    (true, true) => Some(PauliTerm::y(q)),
+                    (false, false) => None,
+                }
+            })
+            .collect()
+    };
+    let mut strings: Vec<Vec<PauliTerm>> = (n..2 * n).map(|r| string_of(&[r])).collect();
+    strings.extend((n..2 * n - 1).map(|r| string_of(&[r, r + 1])));
+    strings
+}
+
+#[test]
+fn pauli_expectations_multiply_across_clusters() {
+    let circ = crate::circuits::independent_bell_pairs(2);
+    let observables = vec![
+        vec![],
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::z(0), PauliTerm::z(2)],
+        vec![
+            PauliTerm::z(0),
+            PauliTerm::z(1),
+            PauliTerm::z(2),
+            PauliTerm::z(3),
+        ],
+        vec![
+            PauliTerm::x(0),
+            PauliTerm::x(1),
+            PauliTerm::y(2),
+            PauliTerm::y(3),
+        ],
+        vec![
+            PauliTerm::y(0),
+            PauliTerm::x(1),
+            PauliTerm::x(2),
+            PauliTerm::x(3),
+        ],
+    ];
+    let got = expectations_on(&mut FactoredStabilizerBackend::new(42), &circ, &observables);
+    assert_eq!(got, vec![1.0, 0.0, 1.0, 0.0, 1.0, -1.0, 0.0]);
+    let mono = expectations_on(&mut StabilizerBackend::new(42), &circ, &observables);
+    assert_eq!(got, mono);
+}
+
+#[test]
+fn pauli_expectations_match_the_monolithic_tableau_after_merges() {
+    use crate::sim::unified_pauli::PauliAxis;
+    use rand::{RngExt, SeedableRng};
+    let n = 10;
+    let circ = crate::circuits::clifford_heavy_circuit(n, 6, 0xDEAD_BEEF);
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(9);
+    let axes = [PauliAxis::X, PauliAxis::Y, PauliAxis::Z];
+    let observables: Vec<Vec<PauliTerm>> = (0..40)
+        .map(|_| {
+            (0..n)
+                .filter_map(|q| {
+                    axes.get(rng.random_range(0..4))
+                        .map(|&axis| PauliTerm::new(q, axis))
+                })
+                .collect()
+        })
+        .collect();
+    let mut mono_backend = StabilizerBackend::new(42);
+    expectations_on(&mut mono_backend, &circ, &[]);
+    let mut observables = observables;
+    observables.extend(group_strings(&mono_backend));
+    let mono = mono_backend.pauli_expectations(&observables).unwrap();
+    let fact = expectations_on(&mut FactoredStabilizerBackend::new(42), &circ, &observables);
+    assert!(mono[40..].iter().all(|v| v.abs() == 1.0));
+    assert!(mono[40..].contains(&-1.0));
+    assert!(mono[..40].contains(&0.0));
+    assert_eq!(fact, mono);
+}
+
+#[test]
+fn pauli_expectations_follow_a_measurement_split() {
+    let mut circ = Circuit::new(3, 1);
+    circ.add_gate(Gate::H, &[0]);
+    circ.add_gate(Gate::Cx, &[0, 1]);
+    circ.add_gate(Gate::Cx, &[1, 2]);
+    circ.add_measure(0, 0);
+    circ.add_gate(Gate::H, &[2]);
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::z(1)],
+        vec![PauliTerm::x(2)],
+        vec![PauliTerm::z(0), PauliTerm::z(1), PauliTerm::x(2)],
+        vec![PauliTerm::z(2)],
+    ];
+    let mut fact = FactoredStabilizerBackend::new(42);
+    let got = expectations_on(&mut fact, &circ, &observables);
+    let sign = if fact.classical_results()[0] {
+        -1.0
+    } else {
+        1.0
+    };
+    assert_eq!(got, vec![sign, sign, sign, sign, 0.0]);
 }

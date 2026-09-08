@@ -328,14 +328,56 @@ pub(crate) fn dense_statevector_len(
     )
 }
 
+/// Width check for the tensor-network dense probability terminal.
+///
+/// Raises `IncompatibleBackend` rather than `BackendUnsupported`: the dispatch
+/// layer reads `BackendUnsupported` from a probability query as "no dense
+/// terminal" and reports `None`, which would hide a width ceiling as absent
+/// data.
 pub(crate) fn tensor_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
-    dense_output_len(
-        backend,
-        "probabilities",
-        num_qubits,
-        size_of::<Complex64>() + size_of::<f64>(),
-        max_tensor_probability_qubits(),
-    )
+    let cap = max_tensor_probability_qubits().min(usize::BITS as usize - 1);
+    if num_qubits > cap {
+        return Err(PrismError::IncompatibleBackend {
+            backend: backend.to_string(),
+            reason: format!(
+                "probabilities for {num_qubits} qubits exceed the cap of {cap} on this machine \
+                 (set PRISM_MAX_PROB_QUBITS to override)"
+            ),
+        });
+    }
+    Ok(1usize << num_qubits)
+}
+
+/// Peak-intermediate cap for tensor-network contraction, as `2^q` `Complex64`
+/// elements. Independent of the statevector override for the same reason as
+/// the MPS workspace cap: the backend exists to run above that cap.
+fn max_tensor_peak_qubits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        configured_or_detected_dense_qubits(
+            "PRISM_MAX_TN_PEAK_QUBITS",
+            size_of::<Complex64>(),
+            "tensor-network peak cap",
+        )
+    })
+}
+
+/// Reject a planned contraction whose peak intermediate of `peak` elements
+/// exceeds the tensor-network peak budget, before the replay allocates it.
+pub(crate) fn check_tensor_peak(backend: &str, operation: &str, peak: usize) -> Result<()> {
+    let cap = max_tensor_peak_qubits();
+    if cap < usize::BITS as usize && peak > 1usize << cap {
+        return Err(PrismError::IncompatibleBackend {
+            backend: backend.to_string(),
+            reason: format!(
+                "{operation} plans a peak intermediate of {peak} elements ({} bytes), exceeding \
+                 the cap of 2^{cap} elements on this machine \
+                 (set PRISM_MAX_TN_PEAK_QUBITS to override)",
+                peak.saturating_mul(size_of::<Complex64>())
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn dense_output_len(

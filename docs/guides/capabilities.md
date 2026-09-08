@@ -103,11 +103,11 @@ without an observable path, on a circuit that splits into independent blocks
 unless those blocks run as product states, and under a noise model, where the
 mixture is read densely and the density-matrix memory limit applies instead.
 
-Under a noise model `marginals()` answers from the exact mixture, so it rejects
-a model carrying readout error instead of serving one: readout acts on the
-measurement record rather than the state, and it is indexed by classical bit
-where a marginal is indexed by qubit. `sample_counts` is the terminal that
-applies it.
+Under a noise model `run()` and `marginals()` answer from the exact mixture, so
+both reject a model carrying readout error instead of serving one: readout acts
+on the measurement record rather than the state, and it is indexed by classical
+bit where a marginal is indexed by qubit. `shots` and `sample_counts` are the
+terminals that apply it.
 
 `simulate(...).run()` is the one terminal that needs the whole distribution, so
 on the distributed backend it rejects a register past the dense cap up front

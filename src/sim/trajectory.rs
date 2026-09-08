@@ -11,7 +11,7 @@ use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use crate::gates::Gate;
 use crate::sim::ShotsResult;
-use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
+use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -415,9 +415,26 @@ fn apply_noise_event(
     }
 }
 
+/// Readout error restricted to the classical bits a measurement in `circuit`
+/// writes. A bit no measurement reaches holds no outcome, so it is outside the
+/// readout channel and stays an unwritten zero rather than a noisy one.
+pub(crate) fn written_readout(
+    circuit: &Circuit,
+    readout: &[Option<ReadoutError>],
+) -> Vec<Option<ReadoutError>> {
+    let mut masked = vec![None; readout.len()];
+    for bit in circuit.classical_bit_order() {
+        if let Some(err) = readout.get(bit) {
+            masked[bit] = err.clone();
+        }
+    }
+    masked
+}
+
+/// `readout` is the output of [`written_readout`], so an unmeasured bit is `None`.
 pub(crate) fn apply_readout_errors(
     results: &mut [bool],
-    readout: &[Option<crate::sim::noise::ReadoutError>],
+    readout: &[Option<ReadoutError>],
     rng: &mut ChaCha8Rng,
 ) {
     for (bit, ro) in results.iter_mut().zip(readout.iter()) {
@@ -438,10 +455,13 @@ pub(crate) fn apply_readout_errors(
     }
 }
 
+/// `readout` is the output of [`written_readout`] for `circuit` and `noise`,
+/// computed once by the caller rather than per shot.
 pub(crate) fn run_trajectory_shot(
     backend: &mut dyn Backend,
     circuit: &Circuit,
     noise: &NoiseModel,
+    readout: &[Option<ReadoutError>],
     rng: &mut ChaCha8Rng,
 ) -> Result<Vec<bool>> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
@@ -454,7 +474,7 @@ pub(crate) fn run_trajectory_shot(
     }
 
     let mut results = backend.classical_results().to_vec();
-    apply_readout_errors(&mut results, &noise.readout, rng);
+    apply_readout_errors(&mut results, readout, rng);
     Ok(results)
 }
 
@@ -494,13 +514,14 @@ pub(crate) fn run_trajectories(
         }
     }
 
+    let readout = written_readout(circuit, &noise.readout);
     let mut shots = Vec::with_capacity(num_shots);
     let mut metadata = crate::sim::RunMetadata::exact(route);
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
         let mut rng = noise_rng(shot_seed);
         let mut backend = backend_factory(shot_seed);
-        let result = run_trajectory_shot(backend.as_mut(), circuit, noise, &mut rng)?;
+        let result = run_trajectory_shot(backend.as_mut(), circuit, noise, &readout, &mut rng)?;
         let shot_metadata = crate::sim::backend_metadata(backend.as_ref());
         if i == 0 {
             metadata = shot_metadata;
@@ -522,13 +543,14 @@ fn run_trajectories_par(
     seed: u64,
     route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
+    let readout = written_readout(circuit, &noise.readout);
     let results: Result<Vec<(Vec<bool>, crate::sim::RunMetadata)>> = (0..num_shots)
         .into_par_iter()
         .map(|i| {
             let shot_seed = seed.wrapping_add(i as u64);
             let mut rng = noise_rng(shot_seed);
             let mut backend = backend_factory(shot_seed);
-            let bits = run_trajectory_shot(backend.as_mut(), circuit, noise, &mut rng)?;
+            let bits = run_trajectory_shot(backend.as_mut(), circuit, noise, &readout, &mut rng)?;
             Ok((bits, crate::sim::backend_metadata(backend.as_ref())))
         })
         .collect();

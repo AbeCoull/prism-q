@@ -1,6 +1,6 @@
 //! Cross-backend correctness for `TensorNetworkBackend` against the
 //! statevector reference at sizes up to 16q, below the backend's
-//! `MAX_PROB_QUBITS = 25` cap.
+//! memory-derived dense probability cap (`PRISM_MAX_PROB_QUBITS`).
 
 mod common;
 

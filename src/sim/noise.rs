@@ -303,7 +303,8 @@ pub struct NoiseModel {
     /// Events fired after each instruction, indexed by instruction position;
     /// length must equal the circuit's instruction count.
     pub after_gate: Vec<Vec<NoiseEvent>>,
-    /// Per-classical-bit readout error; `None` means ideal readout.
+    /// Per-classical-bit readout error; `None` means ideal readout. A bit no
+    /// measurement writes is never flipped.
     pub readout: Vec<Option<ReadoutError>>,
 }
 

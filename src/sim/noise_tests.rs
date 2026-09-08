@@ -329,9 +329,10 @@ fn trajectory_expectations_converge_to_density_matrix_within_5_sigma() {
     let mut sums = vec![0.0f64; observables.len()];
     let mut sq_sums = vec![0.0f64; observables.len()];
     let mut backend = StatevectorBackend::new(42);
+    let readout = crate::sim::trajectory::written_readout(&circuit, &noise.readout);
     for i in 0..shots {
         let mut shot_rng = ChaCha8Rng::seed_from_u64(42u64.wrapping_add(i as u64));
-        run_trajectory_shot(&mut backend, &circuit, &noise, &mut shot_rng).unwrap();
+        run_trajectory_shot(&mut backend, &circuit, &noise, &readout, &mut shot_rng).unwrap();
         let state = backend.state_vector();
         let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
         for (k, &(x, z, y)) in masks.iter().enumerate() {

@@ -25,13 +25,12 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    AUTO_APPROX_MAX_TERMS, AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family,
-    MAX_AUTO_T_COUNT_APPROX, MAX_AUTO_T_COUNT_EXACT, MAX_AUTO_T_COUNT_SHOTS,
-    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name, auto_selects_cpu_statevector,
-    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, plan_for_family,
-    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
-    stabilizer_rank_budget, validate_explicit_backend,
+    AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_EXACT,
+    MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB,
+    MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name,
+    auto_selects_cpu_statevector, build_statevector, has_temporal_clifford_opportunity,
+    initial_state_plan, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
+    run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use metadata::{Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
 pub use observable::{ObservableExpectation, PauliObservable};
@@ -1283,18 +1282,9 @@ fn run_route(
         ProbabilityRoute::Decomposed(components) => {
             run_decomposed(kind, components, circuit, seed, &opts)
         }
-        ProbabilityRoute::StabilizerRank { t_count } => {
-            let exact = *t_count <= MAX_AUTO_T_COUNT_EXACT;
-            let sr = if exact {
-                stabilizer_rank::run_stabilizer_rank(circuit, seed)?
-            } else {
-                stabilizer_rank::run_stabilizer_rank_approx(circuit, AUTO_APPROX_MAX_TERMS, seed)?
-            };
-            let metadata = if exact {
-                RunMetadata::exact(ResolvedBackend::StabilizerRank)
-            } else {
-                RunMetadata::approximate(ResolvedBackend::StabilizerRank)
-            };
+        ProbabilityRoute::StabilizerRank => {
+            let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
+            let metadata = RunMetadata::exact(ResolvedBackend::StabilizerRank);
             Ok(probs_only_result(sr.probabilities, metadata))
         }
         ProbabilityRoute::TemporalClifford {
@@ -1507,9 +1497,7 @@ pub(super) fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> O
 enum ProbabilityRoute {
     FactoredStabilizer,
     Decomposed(Vec<Vec<usize>>),
-    StabilizerRank {
-        t_count: usize,
-    },
+    StabilizerRank,
     /// The temporal-Clifford predicate holds; `run_route` builds the plan and
     /// falls back to direct resolution should the split come back empty.
     TemporalClifford {
@@ -1536,10 +1524,9 @@ fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityR
     if kind.is_auto()
         && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
         && !has_nonunitary_or_classical_ops(circuit)
+        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_EXACT).is_some()
     {
-        if let Some(t_count) = auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_APPROX) {
-            return ProbabilityRoute::StabilizerRank { t_count };
-        }
+        return ProbabilityRoute::StabilizerRank;
     }
     if has_temporal_clifford_opportunity(kind, circuit) {
         return ProbabilityRoute::TemporalClifford {

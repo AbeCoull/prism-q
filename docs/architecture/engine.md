@@ -251,7 +251,7 @@ All `BackendKind` variants:
 | `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
 | `TensorNetwork` | Deferred contraction | Explicit |
 | `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
-| `StabilizerRank` | Weighted stabilizer sum | Explicit |
+| `StabilizerRank` | Weighted stabilizer sum | Explicit or auto (Clifford+T inside the size-derived T budget; the exact expansion only) |
 | `StochasticPauli { num_samples }` | SPP | Explicit |
 | `DeterministicPauli { epsilon, max_terms }` | SPD | Explicit |
 | `PauliPath { epsilon, max_terms }` | Noisy Heisenberg Pauli sum | Explicit |

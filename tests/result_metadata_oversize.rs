@@ -68,34 +68,3 @@ fn require_exact_rejects_the_approximate_route() {
     // The same builder without the requirement answers.
     assert!(simulate(&circuit).seed(SEED).marginals().is_ok());
 }
-
-// Sparse stabilizer-rank approximation is chosen ahead of the family tree, so
-// the tree never sees it and the route check has to cover it separately.
-#[test]
-fn require_exact_rejects_the_approximate_stabilizer_rank_route() {
-    set_cap();
-    let mut circuit = Circuit::new(6, 0);
-    for q in 0..6 {
-        circuit.add_gate(Gate::H, &[q]);
-    }
-    for q in 0..5 {
-        circuit.add_gate(Gate::Cx, &[q, q + 1]);
-    }
-    for _ in 0..4 {
-        for q in 0..6 {
-            circuit.add_gate(Gate::T, &[q]);
-        }
-    }
-
-    let err = simulate(&circuit)
-        .seed(SEED)
-        .require_exact()
-        .run()
-        .unwrap_err();
-    assert!(
-        matches!(&err, PrismError::IncompatibleBackend { backend, .. }
-            if backend == "StabilizerRank" || backend == "Mps"),
-        "{err:?}"
-    );
-    assert!(simulate(&circuit).seed(SEED).run().is_ok());
-}

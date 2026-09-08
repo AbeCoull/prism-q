@@ -6,7 +6,9 @@
 //!
 //! Z-axis rotations (`T`, `Tdg`, `Rz`, `P`) and the two-qubit `Rzz` branch
 //! natively; `Rx`, `Ry`, and multi-qubit `PauliRot` strings lower to Clifford
-//! conjugation around one `Rz` before the run.
+//! conjugation around one `Rz` before the run, a `Fused` matrix lowers to the
+//! named gate it equals up to phase or to its ZYZ Euler triple, and a `Cu` with
+//! a diagonal or Pauli target lowers to Z rotations and Cliffords.
 
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -15,7 +17,8 @@ use rand_chacha::ChaCha8Rng;
 
 use std::borrow::Cow;
 
-use crate::circuit::{Circuit, Instruction, SmallVec, pauli_rotation_lowering};
+use crate::circuit::clifford_t::{is_pauli_native, lower_to_pauli_forms};
+use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::compiled::{PauliVec, flip_bit, get_bit, propagate_backward};
@@ -67,37 +70,29 @@ fn zz_rotation_angle(gate: &Gate) -> Option<f64> {
     }
 }
 
-/// Validate the circuit and lower arbitrary-axis rotations in one walk.
+/// Validate the circuit and lower every non-native gate in one walk.
 ///
 /// `Rx`, `Ry`, and multi-qubit `PauliRot` strings expand through the shared
-/// CNOT-ladder lowering into Clifford conjugation around one `Rz`, so the
-/// engines only ever branch on Z-axis rules; `Rzz` stays native and branches
-/// directly on the `Z⊗Z` anticommutation test. The lowering tests sit on the
-/// walk's rejection path, so a circuit needing none pays no second scan and
-/// borrows through unchanged. The lowering emits only supported gates, so the
-/// rebuilt circuit needs no second validation.
+/// CNOT-ladder lowering into Clifford conjugation around one `Rz`, and `Fused`
+/// matrices and `Cu` gates take the forms `lower_to_pauli_forms` documents, so
+/// the engines only ever branch on Z-axis rules; `Rzz` stays native and
+/// branches directly on the `Z⊗Z` anticommutation test. The lowering tests sit
+/// on the walk's rejection path, so a circuit needing none pays no second scan
+/// and borrows through unchanged.
 fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result<Cow<'c, Circuit>> {
+    let reject = |operation: String| PrismError::BackendUnsupported {
+        backend: backend.to_string(),
+        operation,
+    };
     let mut needs_lowering = false;
     for inst in &circuit.instructions {
         match inst {
-            Instruction::Gate { gate, .. } => {
-                if gate.is_clifford()
-                    || z_rotation_angle(gate).is_some()
-                    || zz_rotation_angle(gate).is_some()
-                {
+            Instruction::Gate { gate, targets } => {
+                if is_pauli_native(gate) {
                     continue;
                 }
-                if matches!(gate, Gate::Rx(_) | Gate::Ry(_) | Gate::PauliRot(_)) {
-                    needs_lowering = true;
-                    continue;
-                }
-                return Err(PrismError::BackendUnsupported {
-                    backend: backend.to_string(),
-                    operation: format!(
-                        "gate `{}` is neither Clifford nor a supported Pauli rotation",
-                        gate.name()
-                    ),
-                });
+                lower_to_pauli_forms(gate, targets, &mut |_, _| {}).map_err(reject)?;
+                needs_lowering = true;
             }
             Instruction::Barrier { .. } => {}
             Instruction::Measure { .. }
@@ -119,30 +114,17 @@ fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result
 
     let mut out: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len() * 2);
     for inst in &circuit.instructions {
-        let (theta, targets, axes): (f64, &[usize], &[PauliAxis]) = match inst {
-            Instruction::Gate {
-                gate: Gate::Rx(theta),
-                targets,
-            } => (*theta, targets, &[PauliAxis::X]),
-            Instruction::Gate {
-                gate: Gate::Ry(theta),
-                targets,
-            } => (*theta, targets, &[PauliAxis::Y]),
-            Instruction::Gate {
-                gate: Gate::PauliRot(data),
-                targets,
-            } => (data.theta(), targets, data.axes()),
-            _ => {
-                out.push(inst.clone());
-                continue;
-            }
+        let Instruction::Gate { gate, targets } = inst else {
+            out.push(inst.clone());
+            continue;
         };
-        pauli_rotation_lowering(theta, targets, axes, |gate, tgts| {
+        lower_to_pauli_forms(gate, targets, &mut |gate, tgts| {
             out.push(Instruction::Gate {
                 gate,
                 targets: SmallVec::from_slice(tgts),
             });
-        });
+        })
+        .map_err(reject)?;
     }
     Ok(Cow::Owned(circuit.with_instructions(out)))
 }
@@ -1385,35 +1367,13 @@ fn pauli_path_ops(circuit: &Circuit, noise: &NoiseModel, backend: &str) -> Resul
     for (index, inst) in circuit.instructions.iter().enumerate() {
         match inst {
             Instruction::Gate { gate, targets } => {
-                if gate.is_clifford()
-                    || z_rotation_angle(gate).is_some()
-                    || zz_rotation_angle(gate).is_some()
-                {
-                    ops.push(PathOp::Gate(gate.clone(), SmallVec::from_slice(targets)));
-                } else {
-                    let axes: &[crate::PauliAxis] = match gate {
-                        Gate::Rx(_) => &[crate::PauliAxis::X],
-                        Gate::Ry(_) => &[crate::PauliAxis::Y],
-                        Gate::PauliRot(data) => data.axes(),
-                        other => {
-                            return Err(PrismError::BackendUnsupported {
-                                backend: backend.to_string(),
-                                operation: format!(
-                                    "gate `{}` is neither Clifford nor a supported Pauli rotation",
-                                    other.name()
-                                ),
-                            });
-                        }
-                    };
-                    let theta = match gate {
-                        Gate::Rx(theta) | Gate::Ry(theta) => *theta,
-                        Gate::PauliRot(data) => data.theta(),
-                        _ => unreachable!("axes were resolved above"),
-                    };
-                    pauli_rotation_lowering(theta, targets, axes, |g, tgts| {
-                        ops.push(PathOp::Gate(g, SmallVec::from_slice(tgts)));
-                    });
-                }
+                lower_to_pauli_forms(gate, targets, &mut |g, tgts| {
+                    ops.push(PathOp::Gate(g, SmallVec::from_slice(tgts)));
+                })
+                .map_err(|operation| PrismError::BackendUnsupported {
+                    backend: backend.to_string(),
+                    operation,
+                })?;
             }
             Instruction::Barrier { .. } => {}
             Instruction::Measure { .. }

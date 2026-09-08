@@ -54,8 +54,11 @@ is available. Stochastic and deterministic Pauli marginal backends accept only
 unitary circuits of Clifford gates and Pauli rotations without measurement,
 reset, or conditional instructions: `T`, `Tdg`, `Rz`, `P`, and the two-qubit
 `Rzz` branch natively, while `Rx`, `Ry`, and multi-qubit `PauliRot` strings
-lower to Clifford conjugation around one `Rz` before the run. Automatic dispatch
-still routes only Clifford+T circuits to SPD; a circuit carrying arbitrary
+lower to Clifford conjugation around one `Rz` before the run, `Fused` matrices
+lower to the named gate they equal up to phase or to an Euler triple, and a `Cu`
+with a diagonal or Pauli target lowers to Z rotations and Cliffords. Automatic
+dispatch still routes only Clifford+T circuits to SPD, with rotations at
+multiples of pi/4 counted as Clifford or T; a circuit carrying arbitrary
 rotation angles reaches the Pauli engines by explicit backend selection.
 
 ## Noise across the terminals

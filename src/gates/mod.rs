@@ -997,26 +997,52 @@ impl Gate {
     /// and leave the fused run disagreeing with the unfused one in amplitude.
     /// Such a product stays a [`Gate::Fused`].
     pub(crate) fn recognize_matrix(mat: &[[Complex64; 2]; 2]) -> Option<Gate> {
-        const EPS: f64 = 1e-10;
-
-        let candidates: &[Gate] = &[
-            Gate::Id,
-            Gate::H,
-            Gate::X,
-            Gate::Y,
-            Gate::Z,
-            Gate::S,
-            Gate::Sdg,
-            Gate::T,
-            Gate::Tdg,
-            Gate::SX,
-            Gate::SXdg,
-        ];
-
-        candidates
+        NAMED_1Q_CANDIDATES
             .iter()
-            .find(|candidate| matrices_equal(mat, &candidate.matrix_2x2(), EPS))
+            .find(|candidate| matrices_equal(mat, &candidate.matrix_2x2(), RECOGNIZE_EPS))
             .cloned()
+    }
+
+    /// Recognize a 2x2 unitary as a named gate or an `Rz`, up to a global phase.
+    ///
+    /// Returns the gate and the scalar `c` with `mat = c * gate.matrix_2x2()`.
+    /// Diagonal matrices outside the named set come back as `Rz(theta)` with
+    /// `theta` the argument of `mat[1][1] / mat[0][0]`.
+    ///
+    /// The phase is dropped on purpose here and nowhere else: fusion keeps the
+    /// exact rule above because dense backends export amplitudes, while the
+    /// Pauli engines and the stabilizer-rank expansion only ever return
+    /// expectation values, probabilities, and samples, all of which are
+    /// invariant under a global phase on an uncontrolled gate. A controlled use
+    /// restores `c` as a phase rotation on the control.
+    pub(crate) fn recognize_matrix_up_to_phase(
+        mat: &[[Complex64; 2]; 2],
+    ) -> Option<(Gate, Complex64)> {
+        for candidate in NAMED_1Q_CANDIDATES {
+            let named = candidate.matrix_2x2();
+            let (r, c) = if named[0][0].norm_sqr() > 0.25 {
+                (0, 0)
+            } else {
+                (1, 0)
+            };
+            let phase = mat[r][c] / named[r][c];
+            if (phase.norm_sqr() - 1.0).abs() > RECOGNIZE_EPS {
+                continue;
+            }
+            let scaled = [
+                [named[0][0] * phase, named[0][1] * phase],
+                [named[1][0] * phase, named[1][1] * phase],
+            ];
+            if matrices_equal(mat, &scaled, RECOGNIZE_EPS) {
+                return Some((candidate.clone(), phase));
+            }
+        }
+        if is_diagonal_2x2(mat) {
+            let theta = (mat[1][1] * mat[0][0].conj()).arg();
+            let phase = mat[0][0] * Complex64::from_polar(1.0, theta / 2.0);
+            return Some((Gate::Rz(theta), phase));
+        }
+        None
     }
 
     /// True if this gate is a Clifford gate (relevant for stabilizer backend).
@@ -1064,6 +1090,24 @@ pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
     }
     true
 }
+
+/// Entry tolerance (on `norm_sqr`) for the matrix recognizers.
+const RECOGNIZE_EPS: f64 = 1e-10;
+
+/// Named single-qubit gates the matrix recognizers try, in order.
+const NAMED_1Q_CANDIDATES: &[Gate] = &[
+    Gate::Id,
+    Gate::H,
+    Gate::X,
+    Gate::Y,
+    Gate::Z,
+    Gate::S,
+    Gate::Sdg,
+    Gate::T,
+    Gate::Tdg,
+    Gate::SX,
+    Gate::SXdg,
+];
 
 fn matrices_equal(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) -> bool {
     (0..2).all(|i| (0..2).all(|j| (a[i][j] - b[i][j]).norm_sqr() <= eps))

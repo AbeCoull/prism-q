@@ -157,13 +157,12 @@ fn duplicate_pauli_factors_are_rejected() {
     }
 }
 
+// A controlled phase lowers to Z rotations and an `Rzz`; a controlled
+// Hadamard has no Pauli-rotation form and is the rejection.
 #[test]
 fn spd_rejects_gates_outside_the_rotation_family() {
     let mut circuit = Circuit::new(2, 0);
-    let phase = num_complex::Complex64::from_polar(1.0, 0.37);
-    let zero = num_complex::Complex64::new(0.0, 0.0);
-    let one = num_complex::Complex64::new(1.0, 0.0);
-    circuit.add_gate(Gate::Cu(Box::new([[one, zero], [zero, phase]])), &[0, 1]);
+    circuit.add_gate(Gate::cu(Gate::H.matrix_2x2()), &[0, 1]);
 
     let err = run_spd_observable(&circuit, &[PauliTerm::z(0)], 0.0, 0)
         .expect_err("SPD must reject gates it cannot branch or lower");
@@ -173,10 +172,11 @@ fn spd_rejects_gates_outside_the_rotation_family() {
         "rejection should name the gate, got {msg}"
     );
 
-    let mut supported = Circuit::new(1, 0);
+    let mut supported = Circuit::new(2, 0);
     supported.add_gate(Gate::Rz(0.37), &[0]);
+    supported.add_gate(Gate::cphase(0.37), &[0, 1]);
     run_spd_observable(&supported, &[PauliTerm::z(0)], 0.0, 0)
-        .expect("SPD must accept a Z-axis rotation");
+        .expect("SPD must accept a Z-axis rotation and a controlled phase");
 }
 
 // Rx and Ry lower to Clifford conjugation around one Rz, so both engines

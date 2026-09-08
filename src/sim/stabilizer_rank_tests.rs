@@ -645,3 +645,130 @@ fn triangle_gram_matches_the_full_sum() {
         full.re
     );
 }
+
+fn phased(gate: Gate, angle: f64) -> Gate {
+    let phase = Complex64::from_polar(1.0, angle);
+    let m = gate.matrix_2x2();
+    Gate::Fused(Box::new([
+        [m[0][0] * phase, m[0][1] * phase],
+        [m[1][0] * phase, m[1][1] * phase],
+    ]))
+}
+
+fn assert_matches_statevector(circuit: &Circuit, tol: f64) -> StabRankResult {
+    let sr = run_stabilizer_rank(circuit, 42).unwrap();
+    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, circuit, 42).unwrap();
+    let sv_probs = sv.probabilities.unwrap().to_vec();
+    for (i, (sr_p, sv_p)) in sr.probabilities.iter().zip(sv_probs.iter()).enumerate() {
+        assert!(
+            (sr_p - sv_p).abs() < tol,
+            "prob[{i}]: stab_rank={sr_p}, statevector={sv_p}"
+        );
+    }
+    sr
+}
+
+#[test]
+fn fused_cliffords_with_a_global_phase_match_statevector() {
+    let mut c = Circuit::new(3, 0);
+    c.add_gate(phased(Gate::H, 0.3), &[0]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(phased(Gate::S, -0.7), &[1]);
+    c.add_gate(phased(Gate::H, 1.9), &[2]);
+    c.add_gate(phased(Gate::Tdg, 0.25), &[2]);
+    c.add_gate(Gate::Cx, &[2, 1]);
+    c.add_gate(phased(Gate::X, 2.0), &[1]);
+    c.add_gate(phased(Gate::SXdg, -2.4), &[0]);
+
+    let sr = assert_matches_statevector(&c, 1e-12);
+    assert_eq!(sr.t_count, 2);
+}
+
+#[test]
+fn rotations_on_the_pi_4_grid_expand_like_t() {
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Rz(FRAC_PI_4), &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::P(3.0 * FRAC_PI_4), &[1]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Rzz(-FRAC_PI_4), &[0, 1]);
+    c.add_gate(Gate::Rz(FRAC_PI_2), &[0]);
+    c.add_gate(Gate::Rx(FRAC_PI_4), &[1]);
+    c.add_gate(Gate::H, &[0]);
+
+    let sr = assert_matches_statevector(&c, 1e-12);
+    assert_eq!(sr.t_count, 4);
+    assert_eq!(c.t_count(), 4);
+    assert!(c.is_clifford_plus_t());
+}
+
+#[test]
+fn off_grid_rotations_are_rejected_by_gate_form() {
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Rz(0.3), &[0]);
+    let msg = format!("{:?}", run_stabilizer_rank(&c, 42).unwrap_err());
+    assert!(msg.contains("rz") && msg.contains("pi/4"), "{msg}");
+    assert!(!c.is_clifford_plus_t());
+
+    let mut c = Circuit::new(1, 0);
+    c.add_gate(
+        Gate::Fused(Box::new(crate::circuit::openqasm::Parser::u_matrix(
+            0.3, 0.7, -1.1,
+        ))),
+        &[0],
+    );
+    let msg = format!("{:?}", run_stabilizer_rank(&c, 42).unwrap_err());
+    assert!(msg.contains("fused"), "{msg}");
+}
+
+#[test]
+fn controlled_pauli_targets_lower_and_a_controlled_h_is_rejected() {
+    let mut c = Circuit::new(3, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::T, &[0]);
+    c.add_gate(Gate::cu(Gate::X.matrix_2x2()), &[0, 1]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(
+        Gate::cu(phased(Gate::Y, std::f64::consts::FRAC_PI_2).matrix_2x2()),
+        &[1, 2],
+    );
+    c.add_gate(Gate::cu(Gate::Z.matrix_2x2()), &[2, 0]);
+    c.add_gate(Gate::cu(Gate::S.matrix_2x2()), &[0, 2]);
+    let sr = assert_matches_statevector(&c, 1e-12);
+    assert_eq!(sr.t_count, 4);
+
+    let mut ch = Circuit::new(2, 0);
+    ch.add_gate(Gate::T, &[0]);
+    ch.add_gate(Gate::cu(Gate::H.matrix_2x2()), &[0, 1]);
+    let msg = format!("{:?}", run_stabilizer_rank(&ch, 42).unwrap_err());
+    assert!(msg.contains("cu"), "{msg}");
+}
+
+#[test]
+fn shots_lower_fused_and_guarded_gates() {
+    let mut c = Circuit::new(2, 2);
+    c.add_gate(phased(Gate::H, 0.3), &[0]);
+    c.add_gate(Gate::Rz(std::f64::consts::FRAC_PI_4), &[0]);
+    c.add_gate(phased(Gate::H, -1.2), &[0]);
+    c.add_measure(0, 0);
+    c.instructions.push(Instruction::Conditional {
+        condition: crate::circuit::ClassicalCondition::BitIsOne(0),
+        gate: phased(Gate::X, 2.0),
+        targets: SmallVec::from_slice(&[1]),
+    });
+    c.add_measure(1, 1);
+
+    let num_shots = 20_000;
+    let result = run_stabilizer_rank_shots(&c, num_shots, 42).unwrap();
+    assert!(result.shots.iter().all(|s| s[0] == s[1]));
+    let p0 = result.shots.iter().filter(|s| !s[0]).count() as f64 / num_shots as f64;
+    let expected = (std::f64::consts::FRAC_PI_8).cos().powi(2);
+    assert!(
+        (p0 - expected).abs() < 0.02,
+        "P(0) = {p0}, expected {expected}"
+    );
+}

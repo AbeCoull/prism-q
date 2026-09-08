@@ -11,6 +11,7 @@
 //!   cancellation) operate on the instruction stream via [`fusion::fuse_circuit`].
 
 pub mod builder;
+pub(crate) mod clifford_t;
 mod draw;
 pub use draw::TextOptions;
 mod svg;
@@ -179,21 +180,22 @@ impl Circuit {
         count
     }
 
-    /// Count T and Tdg gates in the circuit.
+    /// Count of T gates after Clifford+T lowering: `T` and `Tdg`, plus one per
+    /// rotation at an odd multiple of pi/4 among the `Rz`, `P`, `Rzz`, `Rx`,
+    /// `Ry`, `PauliRot`, `Fused`, and `Cu` forms that lower into the set. Gates
+    /// outside the set count zero.
     pub fn t_count(&self) -> usize {
         let mut count = 0;
         for_each_gate(&self.instructions, &mut |gate| {
-            if matches!(gate, Gate::T | Gate::Tdg) {
-                count += 1;
-            }
+            count += clifford_t::clifford_t_count(gate).unwrap_or(0);
         });
         count
     }
 
-    /// Returns true if the circuit contains any T or Tdg gates.
+    /// True if any gate lowers to a `T` (see [`Self::t_count`]).
     pub fn has_t_gates(&self) -> bool {
         any_gate(&self.instructions, &mut |gate| {
-            matches!(gate, Gate::T | Gate::Tdg)
+            clifford_t::clifford_t_count(gate).is_some_and(|t| t > 0)
         })
     }
 
@@ -205,10 +207,12 @@ impl Circuit {
         !any_gate(&self.instructions, &mut |gate| !gate.is_clifford())
     }
 
-    /// True if every gate is Clifford or T/Tdg.
+    /// True if every gate is Clifford or lowers to Clifford+T: `T`, `Tdg`, and
+    /// the rotation, `Fused`, and `Cu` forms whose angles sit on the pi/4 grid
+    /// up to a global phase (see [`Self::t_count`]).
     pub fn is_clifford_plus_t(&self) -> bool {
         !any_gate(&self.instructions, &mut |gate| {
-            !(gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg))
+            clifford_t::clifford_t_count(gate).is_none()
         })
     }
 

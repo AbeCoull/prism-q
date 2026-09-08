@@ -23,12 +23,14 @@ use num_complex::Complex64;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+use std::borrow::Cow;
 use std::f64::consts::FRAC_PI_4;
 
 use crate::backend::Backend;
 use crate::backend::mps::MpsBackend;
 use crate::backend::stabilizer::StabilizerBackend;
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use crate::circuit::clifford_t::lower_to_clifford_t;
+use crate::circuit::{Circuit, GuardedRegion, Instruction, SmallVec, any_gate};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
@@ -255,17 +257,12 @@ impl SignedPauli {
 const MAX_STATEVECTOR_QUBITS: usize = 25;
 const MAX_TERMS: usize = 1 << 20; // 1M terms safety limit
 
-fn validate_stabilizer_rank_circuit(circuit: &Circuit) -> Result<()> {
+/// Reject the instruction kinds the probability path cannot take, then lower
+/// the gates to Clifford plus `T`/`Tdg`.
+fn lower_probability_circuit(circuit: &Circuit) -> Result<Cow<'_, Circuit>> {
     for inst in &circuit.instructions {
         match inst {
-            Instruction::Gate { gate, .. } => {
-                if !(gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg)) {
-                    return Err(PrismError::BackendUnsupported {
-                        backend: "stabilizer_rank".into(),
-                        operation: format!("non-Clifford+T gate `{}`", gate.name()),
-                    });
-                }
-            }
+            Instruction::Gate { .. } | Instruction::Barrier { .. } => {}
             Instruction::Measure { .. } | Instruction::Reset { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "stabilizer_rank".into(),
@@ -282,7 +279,69 @@ fn validate_stabilizer_rank_circuit(circuit: &Circuit) -> Result<()> {
                             .to_string(),
                 });
             }
-            Instruction::Barrier { .. } => {}
+        }
+    }
+    lower_clifford_t_circuit(circuit)
+}
+
+fn is_clifford_t_literal(gate: &Gate) -> bool {
+    gate.is_clifford() || matches!(gate, Gate::T | Gate::Tdg)
+}
+
+/// Lower every gate, guarded gates and region bodies included, to Clifford
+/// plus `T`/`Tdg`; borrows through when the circuit already is one. `Rz`, `P`,
+/// and `Rzz` must sit on the pi/4 grid, `Fused` and `Cu` take the forms
+/// `lower_to_clifford_t` documents, and anything else is rejected by name.
+fn lower_clifford_t_circuit(circuit: &Circuit) -> Result<Cow<'_, Circuit>> {
+    if !any_gate(&circuit.instructions, &mut |gate| {
+        !is_clifford_t_literal(gate)
+    }) {
+        return Ok(Cow::Borrowed(circuit));
+    }
+    let mut out = Vec::with_capacity(circuit.instructions.len() * 2);
+    lower_instructions(&circuit.instructions, &mut out)?;
+    Ok(Cow::Owned(circuit.with_instructions(out)))
+}
+
+fn lower_instructions(instructions: &[Instruction], out: &mut Vec<Instruction>) -> Result<()> {
+    let reject = |operation: String| PrismError::BackendUnsupported {
+        backend: "stabilizer_rank".into(),
+        operation,
+    };
+    for inst in instructions {
+        match inst {
+            Instruction::Gate { gate, targets } if !is_clifford_t_literal(gate) => {
+                lower_to_clifford_t(gate, targets, &mut |gate, tgts| {
+                    out.push(Instruction::Gate {
+                        gate,
+                        targets: SmallVec::from_slice(tgts),
+                    });
+                })
+                .map_err(reject)?;
+            }
+            Instruction::Conditional {
+                condition,
+                gate,
+                targets,
+            } if !is_clifford_t_literal(gate) => {
+                lower_to_clifford_t(gate, targets, &mut |gate, tgts| {
+                    out.push(Instruction::Conditional {
+                        condition: condition.clone(),
+                        gate,
+                        targets: SmallVec::from_slice(tgts),
+                    });
+                })
+                .map_err(reject)?;
+            }
+            Instruction::Region(region) => {
+                let mut body = Vec::with_capacity(region.body().len());
+                lower_instructions(region.body(), &mut body)?;
+                out.push(Instruction::Region(Box::new(GuardedRegion::new(
+                    region.condition().clone(),
+                    body,
+                ))));
+            }
+            other => out.push(other.clone()),
         }
     }
     Ok(())
@@ -349,7 +408,8 @@ const MIN_TERMS_FOR_PAR: usize = 16;
 /// via T = α·I + β·Z decomposition. n ≤ 25, total terms ≤ 2²⁰.
 pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResult> {
     let n = circuit.num_qubits;
-    let (mut backend, mut branches) = stabilizer_rank_setup(circuit, seed)?;
+    let circuit = lower_probability_circuit(circuit)?;
+    let (mut backend, mut branches) = stabilizer_rank_setup(&circuit, seed)?;
 
     let mut t_count = 0usize;
 
@@ -384,7 +444,8 @@ pub fn run_stabilizer_rank(circuit: &Circuit, seed: u64) -> Result<StabRankResul
     })
 }
 
-/// Shared entry validation and initial state for the exact and approximate runners.
+/// Shared qubit-cap check and initial state for the exact and approximate
+/// runners, on a circuit `lower_probability_circuit` has already taken.
 fn stabilizer_rank_setup(
     circuit: &Circuit,
     seed: u64,
@@ -399,8 +460,6 @@ fn stabilizer_rank_setup(
             ),
         });
     }
-    validate_stabilizer_rank_circuit(circuit)?;
-
     let mut backend = StabilizerBackend::new(seed);
     backend.init(n, circuit.num_classical_bits)?;
 
@@ -513,7 +572,8 @@ pub fn run_stabilizer_rank_approx(
     seed: u64,
 ) -> Result<StabRankResult> {
     let n = circuit.num_qubits;
-    let (mut backend, mut branches) = stabilizer_rank_setup(circuit, seed)?;
+    let circuit = lower_probability_circuit(circuit)?;
+    let (mut backend, mut branches) = stabilizer_rank_setup(&circuit, seed)?;
 
     let max_terms = max_terms.max(2);
 
@@ -1114,11 +1174,11 @@ pub fn run_stabilizer_rank_shots(
     num_shots: usize,
     seed: u64,
 ) -> Result<super::ShotsResult> {
+    let lowered = lower_clifford_t_circuit(circuit)?;
+    let circuit = &*lowered;
     if !circuit.has_t_gates() {
         return super::run_shots_with(super::BackendKind::Stabilizer, circuit, num_shots, seed);
     }
-
-    validate_stabilizer_rank_shot_circuit(circuit)?;
 
     if circuit.has_terminal_measurements_only() && !circuit.has_resets() {
         let stripped = circuit.without_measurements();

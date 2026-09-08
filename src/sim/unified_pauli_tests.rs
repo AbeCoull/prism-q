@@ -544,3 +544,81 @@ fn light_cone_spd_matches_on_entangled_observable() {
 fn coalesced_op_stays_at_the_one_qubit_variant_size() {
     assert_eq!(std::mem::size_of::<super::CoalescedOp>(), 40);
 }
+
+fn u3(theta: f64, phi: f64, lam: f64) -> Gate {
+    Gate::Fused(Box::new(crate::circuit::openqasm::Parser::u_matrix(
+        theta, phi, lam,
+    )))
+}
+
+fn assert_spd_matches_statevector(circuit: &Circuit, tol: f64) {
+    let sv = crate::sim::run_with(crate::sim::BackendKind::Statevector, circuit, 42).unwrap();
+    let sv_probs = sv.probabilities.unwrap().to_vec();
+    let spd = run_spd(circuit, 0.0, 0).unwrap();
+    for q in 0..circuit.num_qubits {
+        let exact_ez = 2.0 * marginal_p0(&sv_probs, circuit.num_qubits, q) - 1.0;
+        assert!(
+            (spd.expectations[q] - exact_ez).abs() < tol,
+            "qubit {q}: spd={}, exact={exact_ez}",
+            spd.expectations[q]
+        );
+    }
+}
+
+// The parser spells `u3` as a `Fused` matrix and `rzz` is not a stdgate, so a
+// transpiled QAOA arrives as `u3` plus `cx` with `Rz` as `u3(0, 0, gamma)`.
+#[test]
+fn spd_takes_the_u3_cx_spelling_of_qaoa() {
+    let named = crate::circuits::qaoa_circuit(6, 2, 0xDEAD_BEEF);
+    let mut qasm = String::from("OPENQASM 3.0;\nqubit[6] q;\n");
+    for inst in &named.instructions {
+        let Instruction::Gate { gate, targets } = inst else {
+            unreachable!()
+        };
+        match gate {
+            Gate::Rzz(gamma) => {
+                let (a, b) = (targets[0], targets[1]);
+                qasm.push_str(&format!(
+                    "cx q[{a}], q[{b}];\nu3(0, 0, {gamma:.17}) q[{b}];\ncx q[{a}], q[{b}];\n"
+                ));
+            }
+            Gate::Rx(beta) => {
+                qasm.push_str(&format!("u3({beta:.17}, -pi/2, pi/2) q[{}];\n", targets[0]))
+            }
+            other => unreachable!("{other:?}"),
+        }
+    }
+    let respelled = crate::circuit::openqasm::parse(&qasm).unwrap();
+    assert!(respelled.instructions.iter().any(|inst| matches!(
+        inst,
+        Instruction::Gate {
+            gate: Gate::Fused(_),
+            ..
+        }
+    )));
+
+    let reference = run_spd(&named, 0.0, 0).unwrap();
+    let lowered = run_spd(&respelled, 0.0, 0).unwrap();
+    for (q, (a, b)) in reference
+        .expectations
+        .iter()
+        .zip(&lowered.expectations)
+        .enumerate()
+    {
+        assert!((a - b).abs() < 1e-9, "qubit {q}: named={a}, u3={b}");
+    }
+}
+
+#[test]
+fn spd_lowers_general_matrices_and_controlled_targets() {
+    let mut circuit = Circuit::new(3, 0);
+    circuit.add_gate(u3(0.3, 0.7, -1.1), &[0]);
+    circuit.add_gate(Gate::H, &[1]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(u3(2.2, 0.0, 0.4), &[1]);
+    circuit.add_gate(Gate::cu(Gate::Y.matrix_2x2()), &[1, 2]);
+    circuit.add_gate(Gate::cphase(0.9), &[0, 2]);
+    circuit.add_gate(u3(std::f64::consts::PI, 0.5, 0.25), &[2]);
+    circuit.add_gate(Gate::cu(Gate::Rz(1.3).matrix_2x2()), &[2, 0]);
+    assert_spd_matches_statevector(&circuit, 1e-10);
+}

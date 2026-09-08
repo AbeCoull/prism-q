@@ -1224,6 +1224,57 @@ fn test_stabilizer_rank_dispatch() {
     }
 }
 
+// The grid spellings of T reach the stabilizer-rank route the way `T` does,
+// and an angle off the grid keeps the direct route.
+#[test]
+fn rz_quarter_pi_spelling_routes_like_t() {
+    use std::f64::consts::FRAC_PI_4;
+    let mut named = Circuit::new(16, 0);
+    named.add_gate(Gate::H, &[0]);
+    for i in 0..15 {
+        named.add_gate(Gate::Cx, &[i, i + 1]);
+    }
+    let spell = |gate: Gate| {
+        let mut c = named.clone();
+        c.add_gate(gate, &[1]);
+        c
+    };
+    let reference = run_with(BackendKind::Statevector, &spell(Gate::T), 42).unwrap();
+    let sv_probs = reference.probabilities.unwrap().to_vec();
+
+    for circuit in [
+        spell(Gate::T),
+        spell(Gate::Rz(FRAC_PI_4)),
+        spell(Gate::P(FRAC_PI_4)),
+        spell(Gate::Rz(FRAC_PI_4 + std::f64::consts::TAU)),
+    ] {
+        assert!(circuit.is_clifford_plus_t());
+        assert!(circuit.has_t_gates());
+        assert_eq!(circuit.t_count(), 1);
+        assert!(matches!(
+            plan_probability_route(&BackendKind::Auto, &circuit),
+            ProbabilityRoute::StabilizerRank { t_count: 1 }
+        ));
+        let auto = run_with(BackendKind::Auto, &circuit, 42).unwrap();
+        assert_eq!(auto.metadata.backend, ResolvedBackend::StabilizerRank);
+        let probs = auto.probabilities.unwrap().to_vec();
+        for (i, (a, s)) in probs.iter().zip(&sv_probs).enumerate() {
+            assert!(
+                (a - s).abs() < 1e-10,
+                "prob[{i}]: auto={a}, statevector={s}"
+            );
+        }
+    }
+
+    let off_grid = spell(Gate::Rz(0.3));
+    assert!(!off_grid.is_clifford_plus_t());
+    assert!(!off_grid.has_t_gates());
+    assert!(matches!(
+        plan_probability_route(&BackendKind::Auto, &off_grid),
+        ProbabilityRoute::Direct { .. }
+    ));
+}
+
 #[test]
 fn test_stabilizer_rank_rejects_no_t() {
     let circuit = make_clifford_circuit();
@@ -1656,13 +1707,12 @@ fn test_pauli_backends_return_marginals_through_builder() {
     );
 }
 
+// A controlled phase lowers to Z rotations, so the rejection case is a
+// controlled Hadamard.
 #[test]
 fn test_pauli_marginals_reject_gates_outside_the_rotation_family() {
     let mut c = Circuit::new(2, 0);
-    let one = num_complex::Complex64::new(1.0, 0.0);
-    let zero = num_complex::Complex64::new(0.0, 0.0);
-    let phase = num_complex::Complex64::from_polar(1.0, 0.25);
-    c.add_gate(Gate::Cu(Box::new([[one, zero], [zero, phase]])), &[0, 1]);
+    c.add_gate(Gate::cu(Gate::H.matrix_2x2()), &[0, 1]);
 
     for err in pauli_marginal_errors(&c) {
         assert!(

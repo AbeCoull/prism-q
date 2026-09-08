@@ -612,9 +612,9 @@ impl MpsBackend {
     /// final state, so a chain that truncates heavily can carry it past 1,
     /// where the fidelity it implies clamps to zero and certifies nothing.
     ///
-    /// Truncation does not renormalize the chain. Expectation values and shot
-    /// sampling rescale on read, while the probability terminal and
-    /// [`Self::export_statevector`] return the reduced weight as it stands.
+    /// Truncation does not renormalize the chain. Every read rescales instead:
+    /// expectation values, shot sampling, the probability terminal and
+    /// [`Self::export_statevector`] all describe the normalized state.
     pub fn truncation_discarded(&self) -> f64 {
         self.truncation_discarded
     }
@@ -2142,10 +2142,12 @@ impl MpsBackend {
         scratch
     }
 
-    /// Every `(basis prefix, left-bond vector)` pair at `depth`, in DFS order.
+    /// Every `(basis prefix, left-bond vector)` pair at `depth`, in DFS order,
+    /// grown from `root`.
     #[cfg(feature = "parallel")]
-    fn expansion_prefixes(&self, depth: usize) -> Vec<(usize, Vec<Complex64>)> {
+    fn expansion_prefixes(&self, depth: usize, root: Complex64) -> Vec<(usize, Vec<Complex64>)> {
         let mut scratch = self.expansion_scratch();
+        scratch[0][0] = root;
         let mut out = Vec::with_capacity(1 << depth);
         self.collect_prefixes(0, depth, 0, &mut scratch, &mut out);
         out
@@ -2180,7 +2182,11 @@ impl MpsBackend {
     /// allocates once per site, so a dense fill costs `2^n * sum_k bl_k*br_k`
     /// against `sum_k 2^(k+1)*bl_k*br_k` here. The parallel split fixes the top
     /// `m` sites, whose basis-bit sets are disjoint across prefixes.
+    ///
+    /// The root vector carries `1/sqrt(⟨ψ|ψ⟩)`, so a truncated chain expands to
+    /// the normalized state at no cost per leaf.
     fn expand_dense<T: Copy + Send>(&self, out: &mut [T], convert: impl Fn(Complex64) -> T + Sync) {
+        let root = self.normalized_root();
         #[cfg(feature = "parallel")]
         {
             let split = self
@@ -2189,7 +2195,7 @@ impl MpsBackend {
                 .min(MAX_SPLIT_BITS);
             if split > 0 {
                 let ptr = DenseOutPtr(out.as_mut_ptr());
-                self.expansion_prefixes(split)
+                self.expansion_prefixes(split, root)
                     .into_par_iter()
                     .for_each(|(basis, vector)| {
                         let mut scratch = self.expansion_scratch();
@@ -2207,7 +2213,19 @@ impl MpsBackend {
         }
 
         let mut scratch = self.expansion_scratch();
+        scratch[0][0] = root;
         self.expand_subtree(0, 0, &mut scratch, &mut |idx, amp| out[idx] = convert(amp));
+    }
+
+    /// A zero-norm chain keeps the unit root, the same guard
+    /// [`Backend::pauli_expectations`] applies.
+    fn normalized_root(&self) -> Complex64 {
+        let norm = self.pauli_env_prefixes()[self.num_qubits][0].re;
+        if norm > 0.0 {
+            Complex64::new(1.0 / norm.sqrt(), 0.0)
+        } else {
+            ONE
+        }
     }
 
     fn dispatch_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {

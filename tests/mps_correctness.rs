@@ -220,3 +220,53 @@ fn mps_dense_expansion_survives_swap_routing() {
         );
     }
 }
+
+// ===== truncation =====
+
+// The chain is never renormalized, so a cap that discards weight leaves
+// probabilities and amplitudes to rescale on read. 6 qubits take the serial
+// expansion and 14 the parallel split, and each cap must truncate for the
+// case to test anything. Agreement with the statevector is loose by
+// construction: the state is approximate, the sum is not. The saturating caps
+// sit near the 0.6 distance of two unrelated random states, so the sum is the
+// content there and cap 16, measured at 0.28, is where the agreement bites.
+#[test]
+fn mps_truncated_probabilities_are_normalized() {
+    use prism_q::backend::Backend;
+    use prism_q::sim;
+
+    for (n, cap, tvd_bound) in [(6usize, 2usize, 0.7f64), (14, 4, 0.7), (14, 16, 0.4)] {
+        let circuit = circuits::brickwork_circuit(n, 20, SEED);
+        let expected = common::sv_reference_probs(&circuit);
+        let mut backend = MpsBackend::new(SEED, cap);
+        sim::run_on(&mut backend, &circuit).unwrap();
+        assert!(
+            backend.truncation_discarded() > 0.0,
+            "{n}q at cap {cap} truncated nothing"
+        );
+
+        let probs = backend.probabilities().unwrap();
+        let total: f64 = probs.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "{n}q at cap {cap}: probabilities sum to {total}"
+        );
+        let amplitudes = backend.export_statevector().unwrap();
+        let norm: f64 = amplitudes.iter().map(|a| a.norm_sqr()).sum();
+        assert!(
+            (norm - 1.0).abs() < 1e-12,
+            "{n}q at cap {cap}: exported state has norm {norm}"
+        );
+
+        let tvd: f64 = probs
+            .iter()
+            .zip(&expected)
+            .map(|(p, e)| (p - e).abs())
+            .sum::<f64>()
+            / 2.0;
+        assert!(
+            tvd < tvd_bound,
+            "{n}q at cap {cap}: total variation {tvd} against the statevector"
+        );
+    }
+}

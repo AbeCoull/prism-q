@@ -131,12 +131,11 @@ circuit that never fills a bond truncates nothing and still reports
 `Approximate`, with a bound of 1.0: the variant answers whether the answer could
 have been approximated, the bound answers whether it was.
 
-The bound describes the normalized state, and a truncating MPS does not
-renormalize. Expectation values and shot sampling rescale on read, but the
-probability vector comes back carrying the reduced weight: `brickwork_circuit(14,
-20, 42)` at bond 16 returns probabilities summing to 0.64, and at bond 4 to 0.04.
-Rescale before reading them as a distribution, and do not mistake the missing
-weight for the error the bound reports.
+The bound describes the normalized state, which is what every read returns: a
+truncating MPS does not renormalize its chain, but expectation values, shot
+sampling, the probability vector and the exported statevector all rescale on
+read, so the probabilities sum to 1 at any bond cap. The discarded weight the
+bound reports is error in that state, not weight missing from it.
 
 `Auto` sends a circuit past the statevector cap to an MPS at a bounded bond
 dimension, which is the only route those circuits have. It is taken by default

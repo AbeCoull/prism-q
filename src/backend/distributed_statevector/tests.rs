@@ -1260,6 +1260,187 @@ fn loopback_state_with(
     .swap_remove(0)
 }
 
+/// The `distributed/cyclic_wall` bench circuit: `layers` rounds of a seeded Rx
+/// or Ry on every qubit followed by a nearest neighbour CX ring, so each layer
+/// scans the whole register in index order.
+fn cyclic_wall(n: usize, layers: usize, seed: u64) -> Circuit {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n, 0);
+    for _ in 0..layers {
+        for q in 0..n {
+            let theta = rng.random_range(0.0..std::f64::consts::TAU);
+            let gate = if rng.random_bool(0.5) {
+                crate::gates::Gate::Rx(theta)
+            } else {
+                crate::gates::Gate::Ry(theta)
+            };
+            circuit.add_gate(gate, &[q]);
+        }
+        for q in 0..n {
+            circuit.add_gate(crate::gates::Gate::Cx, &[q, (q + 1) % n]);
+        }
+    }
+    circuit
+}
+
+/// How the wall reaches the backend: `Direct` disables relabeling, `PerGate`
+/// feeds one instruction at a time through `apply` (the least recently used
+/// relabel path), `Planned` hands `apply_instructions` the whole slice.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WallMode {
+    Direct,
+    PerGate,
+    Planned,
+}
+
+/// Run `circuit` across `size` ranks in the given mode and return every rank's
+/// `(message_count, amplitude_count)` in rank order.
+fn wall_exchange_stats_all(circuit: &Circuit, size: usize, mode: WallMode) -> Vec<(u64, u64)> {
+    run_ranks(size, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_relabel(mode != WallMode::Direct);
+        backend
+            .init(circuit.num_qubits, circuit.num_classical_bits)
+            .unwrap();
+        match mode {
+            WallMode::PerGate => {
+                for instruction in &circuit.instructions {
+                    backend.apply(instruction).unwrap();
+                }
+            }
+            WallMode::Direct | WallMode::Planned => {
+                backend.apply_instructions(&circuit.instructions).unwrap();
+            }
+        }
+        (backend.exchange_messages(), backend.exchange_amplitudes())
+    })
+}
+
+/// Rank 0's `(message_count, amplitude_count)` for the three layer cyclic wall
+/// at 16 qubits across 4 ranks: 14 local positions against a 16 qubit working
+/// set, the adverse case for eviction by last use. Relabel exchanges are
+/// symmetric, so every rank reports the same pair in the relabel modes.
+fn cyclic_wall_exchange_stats(mode: WallMode) -> (u64, u64) {
+    let circuit = cyclic_wall(16, 3, 0xDEAD_BEEF);
+    let stats = wall_exchange_stats_all(&circuit, 4, mode);
+    if mode != WallMode::Direct {
+        assert!(
+            stats.iter().all(|&s| s == stats[0]),
+            "{mode:?}: relabel exchanges differ across ranks: {stats:?}"
+        );
+    }
+    stats[0]
+}
+
+#[test]
+fn cyclic_wall_pins_the_exchange_counters_per_mode() {
+    relax_min_local_qubits();
+    // Direct exchange on rank 0: per layer, a full slice for each of the two
+    // rank bit rotations and the control half of the slice for the one CX
+    // whose target is a rank bit and whose control is local. Per-gate relabel
+    // evicts the qubit the ring reaches next, so it pays far more.
+    assert_eq!(
+        cyclic_wall_exchange_stats(WallMode::Direct),
+        (9, 122880),
+        "direct exchange"
+    );
+    assert_eq!(
+        cyclic_wall_exchange_stats(WallMode::PerGate),
+        (80, 655360),
+        "per-gate relabel with least recently used eviction"
+    );
+    // Planned windows relabel at most the two rank bit positions per window
+    // and evict by furthest next use.
+    let planned = cyclic_wall_exchange_stats(WallMode::Planned);
+    assert_eq!(planned, (12, 98304), "planned relabel");
+}
+
+/// The `distributed/steady_state_batched` bench circuit: fused QAOA behind a
+/// SWAP that parks circuit qubit 0 on the rank bit, so every fused Rx layer
+/// spans one more qubit than there are local positions.
+fn steady_state_circuits(n: usize) -> (Circuit, Circuit) {
+    let fused =
+        crate::circuit::fusion::fuse_circuit(&crate::circuits::qaoa_circuit(n, 3, SEED), true)
+            .into_owned();
+    let mut prefix = Circuit::new(n, 0);
+    prefix.add_gate(crate::gates::Gate::Swap, &[0, n - 1]);
+    (prefix, fused)
+}
+
+/// Rank 0's `(message_count, amplitude_count)` and amplitudes for the steady
+/// state circuit at `n` qubits across 2 ranks in the given relabel mode.
+fn steady_state_run(n: usize, mode: WallMode) -> ((u64, u64), Vec<Complex64>) {
+    let (prefix, fused) = steady_state_circuits(n);
+    run_ranks(2, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_relabel(mode != WallMode::Direct);
+        backend
+            .init(fused.num_qubits, fused.num_classical_bits)
+            .unwrap();
+        match mode {
+            WallMode::PerGate => {
+                for instruction in prefix.instructions.iter().chain(&fused.instructions) {
+                    backend.apply(instruction).unwrap();
+                }
+            }
+            WallMode::Direct | WallMode::Planned => {
+                backend.apply_instructions(&prefix.instructions).unwrap();
+                backend.apply_instructions(&fused.instructions).unwrap();
+            }
+        }
+        let stats = (backend.exchange_messages(), backend.exchange_amplitudes());
+        (stats, backend.export_statevector().unwrap())
+    })
+    .swap_remove(0)
+}
+
+#[test]
+fn steady_state_overflowing_layers_do_not_relabel() {
+    // At 20 qubits every Rx layer fuses into one MultiFused that needs all 20
+    // qubits local against 19 local positions, so exactly one target stays on
+    // the rank bit whatever the map: one full slice exchange per layer, and a
+    // relabel would only add a half slice on top. Planned and per-gate relabel
+    // must therefore agree. (At 16 qubits the first two layers stay single Rx
+    // gates and both modes relabel twice per layer instead.)
+    let (per_gate, per_gate_state) = steady_state_run(20, WallMode::PerGate);
+    let (planned, planned_state) = steady_state_run(20, WallMode::Planned);
+    assert_eq!(per_gate, (3, 3 << 19), "per-gate relabel");
+    assert_eq!(planned, per_gate, "planned relabel");
+    let (_, direct_state) = steady_state_run(20, WallMode::Direct);
+    let (prefix, fused) = steady_state_circuits(20);
+    let mut sv = StatevectorBackend::new(SEED);
+    sv.init(20, 0).unwrap();
+    sv.apply_instructions(&prefix.instructions).unwrap();
+    sv.apply_instructions(&fused.instructions).unwrap();
+    let dense = sv.export_statevector().unwrap();
+    for (label, state) in [
+        ("planned", &planned_state),
+        ("per-gate", &per_gate_state),
+        ("direct", &direct_state),
+    ] {
+        assert_eq!(state.len(), dense.len(), "{label}");
+        for (i, (a, b)) in state.iter().zip(&dense).enumerate() {
+            assert!((a - b).norm() < 1e-12, "{label}: amplitude {i}: {a} vs {b}");
+        }
+    }
+}
+
+#[test]
+fn cyclic_wall_planned_amplitudes_match_direct_and_dense() {
+    relax_min_local_qubits();
+    let circuit = cyclic_wall(16, 3, 0xDEAD_BEEF);
+    let planned = loopback_state_with(&circuit, 4, usize::MAX, true);
+    let direct = loopback_state_with(&circuit, 4, usize::MAX, false);
+    let mut sv = StatevectorBackend::new(SEED);
+    sv.init(16, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let dense = sv.export_statevector().unwrap();
+    assert_eq!(planned.len(), dense.len());
+    assert_eq!(planned, direct, "planned vs direct exchange");
+    assert_eq!(planned, dense, "planned vs single-rank statevector");
+}
+
 #[test]
 fn reports_global_qubit_count_for_single_rank() {
     let ctx = DistributedContext::serial();

@@ -556,6 +556,27 @@ fn dm_noisy_readout_error_flips_sampled_bits() {
     );
 }
 
+// Same masking as the trajectory path: the exact draw leaves an unmeasured bit
+// unwritten, and readout error has nothing to act on there.
+#[test]
+fn dm_noisy_readout_error_skips_unmeasured_bits() {
+    use prism_q::{BackendKind, NoiseModel};
+    let mut circuit = Circuit::new(1, 3);
+    circuit.add_measure(0, 0);
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.with_readout_error(1.0, 0.0);
+
+    let shots = sim::simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(500)
+        .unwrap();
+    for shot in &shots.shots {
+        assert_eq!(shot, &vec![true, false, false]);
+    }
+}
+
 // marginals reads the mixture and sample_counts reads the record, so a model
 // carrying readout is rejected here rather than answered with a quantity that
 // is neither. Dropping readout leaves the two terminals agreeing, which is what

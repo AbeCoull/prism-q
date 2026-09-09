@@ -369,6 +369,57 @@ fn fill_scaled_vt_data(
     }
 }
 
+/// Which site of an adjacent pair carries the singular weight after a
+/// two-site update. The partner comes out an isometry, so the weight site is
+/// the orthogonality center the update leaves behind.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WeightSide {
+    #[cfg_attr(not(test), allow(dead_code))]
+    Left,
+    Right,
+}
+
+/// Write `U · diag(S)` into a site of shape `(bond_left, 2, chi)`, the mirror
+/// of [`fill_scaled_vt_data`].
+fn fill_scaled_u_site_data(
+    out: &mut Vec<Complex64>,
+    svd_result: &SvdResult,
+    bond_left: usize,
+    chi: usize,
+) {
+    out.clear();
+    out.resize(bond_left * 2 * chi, ZERO);
+    for alpha in 0..bond_left {
+        for i in 0..2 {
+            let r = alpha * 2 + i;
+            for gamma in 0..chi {
+                out[alpha * (2 * chi) + i * chi + gamma] =
+                    svd_result.u[gamma * svd_result.u_rows + r] * svd_result.s[gamma];
+            }
+        }
+    }
+}
+
+/// Write the first `chi` rows of V† into a site of shape
+/// `(chi, physical_dim, bond_right)`. The rows are orthonormal, so the site
+/// carries no weight, the mirror of [`svd_left_site_data`].
+fn fill_vt_site_data(
+    out: &mut Vec<Complex64>,
+    svd_result: &SvdResult,
+    chi: usize,
+    physical_dim: usize,
+    bond_right: usize,
+) {
+    let row_len = physical_dim * bond_right;
+    out.clear();
+    out.resize(chi * row_len, ZERO);
+    for gamma in 0..chi {
+        let src = gamma * svd_result.vt_cols;
+        out[gamma * row_len..gamma * row_len + row_len]
+            .copy_from_slice(&svd_result.vt[src..src + row_len]);
+    }
+}
+
 /// Compute thin SVD using Jacobi one-sided rotations (column-major storage).
 ///
 /// Returns U (m×k), S (k), V† (k×n) where k = min(m, n),
@@ -1035,7 +1086,7 @@ impl MpsBackend {
         left_site: usize,
         swap_mat: &[[Complex64; 4]; 4],
     ) -> Result<()> {
-        self.apply_adjacent_two_qubit(swap_mat, left_site, true)?;
+        self.apply_adjacent_two_qubit(swap_mat, left_site, true, WeightSide::Right)?;
         self.swap_layout_labels(left_site);
         Ok(())
     }
@@ -1234,6 +1285,7 @@ impl MpsBackend {
         gate: &[[Complex64; 4]; 4],
         left_site: usize,
         left_is_first_qubit: bool,
+        weight: WeightSide,
     ) -> Result<()> {
         let right_site = left_site + 1;
         let bl = self.sites[left_site].bond_left;
@@ -1418,14 +1470,24 @@ impl MpsBackend {
         let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
         self.record_truncation(&svd_result.s, chi_new);
 
-        // A[k] from U: shape (bl, 2, chi_new)
-        // U is column-major: U[col * rows + row]
-        let left_data = svd_left_site_data(&svd_result, bl, chi_new);
-
-        // A[k+1] from S·V†: shape (chi_new, 2, br)
-        // V† is row-major: Vt[row * cols + col]
-        let mut right_data = Vec::new();
-        fill_scaled_vt_data(&mut right_data, &svd_result, chi_new, 2, br);
+        // A[k] has shape (bl, 2, chi_new) and A[k+1] shape (chi_new, 2, br).
+        // U is column-major, U[col * rows + row]; V† is row-major,
+        // Vt[row * cols + col]. Whichever side takes diag(S) carries the
+        // weight, and the other comes out an isometry.
+        let (left_data, right_data) = match weight {
+            WeightSide::Right => {
+                let mut right_data = Vec::new();
+                fill_scaled_vt_data(&mut right_data, &svd_result, chi_new, 2, br);
+                (svd_left_site_data(&svd_result, bl, chi_new), right_data)
+            }
+            WeightSide::Left => {
+                let mut left_data = Vec::new();
+                let mut right_data = Vec::new();
+                fill_scaled_u_site_data(&mut left_data, &svd_result, bl, chi_new);
+                fill_vt_site_data(&mut right_data, &svd_result, chi_new, 2, br);
+                (left_data, right_data)
+            }
+        };
 
         self.sites[left_site] = SiteTensor {
             bond_left: bl,
@@ -1453,13 +1515,13 @@ impl MpsBackend {
         let left_is_first = p0 < p1;
 
         if m - k == 1 {
-            self.apply_adjacent_two_qubit(gate, k, left_is_first)?;
+            self.apply_adjacent_two_qubit(gate, k, left_is_first, WeightSide::Right)?;
         } else {
             let swap_mat = Gate::Swap.matrix_4x4();
             for s in (k + 1..m).rev() {
                 self.apply_virtual_swap(s, &swap_mat)?;
             }
-            self.apply_adjacent_two_qubit(gate, k, left_is_first)?;
+            self.apply_adjacent_two_qubit(gate, k, left_is_first, WeightSide::Right)?;
         }
         Ok(())
     }
@@ -1502,22 +1564,22 @@ impl MpsBackend {
             let last_idx = right.len() - 1;
             for (idx, &(target, phase)) in right.iter().enumerate() {
                 while cur_pos + 1 < target {
-                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
+                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true, WeightSide::Right)?;
                     cur_pos += 1;
                 }
                 if idx < last_idx {
                     let combined = cu_phase_swap_matrix(phase);
-                    self.apply_adjacent_two_qubit(&combined, cur_pos, true)?;
+                    self.apply_adjacent_two_qubit(&combined, cur_pos, true, WeightSide::Right)?;
                     cur_pos += 1;
                 } else {
                     let mat = [[ONE, ZERO], [ZERO, phase]];
                     let g = crate::gates::cu_matrix_4x4(&mat);
-                    self.apply_adjacent_two_qubit(&g, cur_pos, true)?;
+                    self.apply_adjacent_two_qubit(&g, cur_pos, true, WeightSide::Right)?;
                 }
             }
             while cur_pos > control {
                 cur_pos -= 1;
-                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
+                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true, WeightSide::Right)?;
             }
         }
 
@@ -1528,20 +1590,20 @@ impl MpsBackend {
             for (idx, &(target, phase)) in left.iter().enumerate() {
                 while cur_pos > target + 1 {
                     cur_pos -= 1;
-                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
+                    self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true, WeightSide::Right)?;
                 }
                 if idx < last_idx {
                     let combined = cu_phase_swap_matrix(phase);
-                    self.apply_adjacent_two_qubit(&combined, cur_pos - 1, true)?;
+                    self.apply_adjacent_two_qubit(&combined, cur_pos - 1, true, WeightSide::Right)?;
                     cur_pos -= 1;
                 } else {
                     let mat = [[ONE, ZERO], [ZERO, phase]];
                     let g = crate::gates::cu_matrix_4x4(&mat);
-                    self.apply_adjacent_two_qubit(&g, cur_pos - 1, false)?;
+                    self.apply_adjacent_two_qubit(&g, cur_pos - 1, false, WeightSide::Right)?;
                 }
             }
             while cur_pos < control {
-                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true)?;
+                self.apply_adjacent_two_qubit(&swap_mat, cur_pos, true, WeightSide::Right)?;
                 cur_pos += 1;
             }
         }
@@ -1884,7 +1946,7 @@ impl MpsBackend {
                 let target_pos = start + i;
                 while current_positions[i] > target_pos {
                     let s = current_positions[i] - 1;
-                    self.apply_adjacent_two_qubit(&swap_mat, s, true)?;
+                    self.apply_adjacent_two_qubit(&swap_mat, s, true, WeightSide::Right)?;
                     swap_log.push(s);
                     // Update any tracked qubit that was displaced
                     for cp in &mut current_positions[(i + 1)..n] {
@@ -1901,7 +1963,7 @@ impl MpsBackend {
             self.apply_adjacent_n_qubit(&reordered_gate, dim, start)?;
 
             for &s in swap_log.iter().rev() {
-                self.apply_adjacent_two_qubit(&swap_mat, s, true)?;
+                self.apply_adjacent_two_qubit(&swap_mat, s, true, WeightSide::Right)?;
             }
         }
         Ok(())

@@ -988,3 +988,55 @@ fn repeated_center_moves_do_not_degrade_the_isometry() {
         );
     }
 }
+
+// The two write conventions differ only in which site keeps diag(S), so they
+// leave the same state under a different gauge: the weight site is the center
+// each one establishes.
+#[test]
+fn a_two_site_update_weights_the_side_the_caller_names() {
+    let n = 6;
+    let left_site = 2;
+    let gate = Gate::Cx.matrix_4x4();
+
+    let mut base = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4096);
+    base.move_center(n - 1);
+    base.move_center(left_site);
+
+    let mut weighted_right = base.clone();
+    weighted_right
+        .apply_adjacent_two_qubit(&gate, left_site, true, WeightSide::Right)
+        .unwrap();
+
+    let mut weighted_left = base.clone();
+    weighted_left
+        .apply_adjacent_two_qubit(&gate, left_site, true, WeightSide::Left)
+        .unwrap();
+
+    // The kernel factorizes with `svd`, whose isometry is looser than the one a
+    // center move writes: the U side reads 5.1e-14 on this fixture against
+    // 1.6e-15 for the V dagger side, so both are held to a bound the SVD
+    // meets rather than to the move's 1e-14.
+    for (center, deviation) in [
+        (left_site + 1, weighted_right.gauge_deviation(left_site + 1)),
+        (left_site, weighted_left.gauge_deviation(left_site)),
+    ] {
+        assert!(
+            deviation < 1e-12,
+            "site {center} carries a gauge deviation of {deviation:.3e}"
+        );
+    }
+
+    assert_ne!(
+        weighted_right.sites[left_site].data, weighted_left.sites[left_site].data,
+        "both directions wrote the same left site, so the parameter did nothing"
+    );
+
+    let expected = weighted_right.export_statevector().unwrap();
+    let actual = weighted_left.export_statevector().unwrap();
+    for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-12,
+            "amplitude {i} reads {a} weighting left against {e} weighting right"
+        );
+    }
+}

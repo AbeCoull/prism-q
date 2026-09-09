@@ -274,6 +274,24 @@ fn thermal_noise_model(circuit: &Circuit) -> prism_q::NoiseModel {
     model
 }
 
+/// Uniform depolarizing at `p_single`, plus a two-qubit depolarizing event at
+/// `p_pair` on every two-qubit gate, on top of the single-qubit events that
+/// gate's targets already carry.
+fn pair_depolarizing_noise(circuit: &Circuit, p_single: f64, p_pair: f64) -> prism_q::NoiseModel {
+    let mut model = prism_q::NoiseModel::uniform_depolarizing(circuit, p_single);
+    for (events, instruction) in model.after_gate.iter_mut().zip(&circuit.instructions) {
+        if let Instruction::Gate { targets, .. } = instruction {
+            if targets.len() == 2 {
+                events.push(prism_q::NoiseEvent {
+                    channel: prism_q::NoiseChannel::TwoQubitDepolarizing { p: p_pair },
+                    qubits: targets.iter().copied().collect(),
+                });
+            }
+        }
+    }
+    model
+}
+
 fn non_clifford_noise_circuit(n_qubits: usize, depth: usize) -> Circuit {
     let mut circuit = Circuit::new(n_qubits, 0);
     for layer in 0..depth {
@@ -915,6 +933,28 @@ fn bench_stabilizer_scaling(c: &mut Criterion) {
 
     for &n in &[10, 50, 100, 500, 1000, 5000] {
         let circuit = random_clifford_circuit(n, 10, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
+// Long-range Clifford pairs, where the two halves of a CX land in different
+// tableau words. Every entangling gate in `stabilizer/scaling` is
+// nearest-neighbour, so the batched cross-word kernel runs there only on the
+// pairs that happen to straddle a word boundary. 5000 is left out: at depth 10
+// the sparse gate index carries that width to the end of the circuit and the
+// cross-word kernel never runs, and the depth that hands the run over costs a
+// second per iteration.
+fn bench_stabilizer_random_pairs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stabilizer/random_pairs");
+    configure_group(&mut group);
+
+    for &n in &[500, 1000] {
+        let circuit = circuits::clifford_random_pairs(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(BackendKind::Stabilizer, circ, 42).unwrap();
@@ -2777,6 +2817,39 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         },
     );
 
+    // The same circuit and shot count as `compiled_pauli`, with a pair event on
+    // every CX. Each firing shot draws one of the 15 non-identity products and
+    // XORs the four propagated rows the pair contributes, a second pass over
+    // the record on top of the single-qubit rows. The homological sampler
+    // refuses a live pair outright, where the model above reaches its compile
+    // step before being turned away.
+    let pair_noise = pair_depolarizing_noise(&clifford, 0.001, 0.01);
+    group.bench_function(
+        BenchmarkId::new("compiled_pair", "clifford_100q_10k"),
+        |b| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::Auto, &clifford, &pair_noise, 10_000, SEED)
+                    .unwrap();
+            });
+        },
+    );
+
+    // Readout error on every record, applied to the packed record after the
+    // reference outcomes are folded in. The rates are asymmetric and below
+    // 0.5, which is the thinned geometric-skip path rather than the per-shot
+    // draw a rate at or above 0.5 takes.
+    let mut readout_noise = prism_q::NoiseModel::uniform_depolarizing(&clifford, 0.001);
+    readout_noise.with_readout_error(0.02, 0.05);
+    group.bench_function(
+        BenchmarkId::new("compiled_readout", "clifford_100q_10k"),
+        |b| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::Auto, &clifford, &readout_noise, 10_000, SEED)
+                    .unwrap();
+            });
+        },
+    );
+
     let non_clifford = non_clifford_noise_circuit(12, 4);
     let non_clifford_noise = prism_q::NoiseModel::uniform_depolarizing(&non_clifford, 0.001);
     group.bench_function(
@@ -3567,6 +3640,7 @@ criterion_group! {
     bench_statevector_scalability,
     // Stabilizer
     bench_stabilizer_scaling,
+    bench_stabilizer_random_pairs,
     bench_stabilizer_measurement,
     // Factored stabilizer
     bench_factored_stabilizer_scaling,

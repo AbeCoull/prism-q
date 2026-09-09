@@ -9,7 +9,7 @@
 
 use prism_q::backend::Backend;
 use prism_q::sim::ResolvedBackend;
-use prism_q::{BackendKind, MpsBackend, circuits, sim};
+use prism_q::{BackendKind, MpsBackend, NoiseChannel, NoiseEvent, NoiseModel, circuits, sim};
 
 const SEED: u64 = 0xDEAD_BEEF;
 
@@ -313,5 +313,111 @@ fn disjoint_block_rows_pin_the_batch_and_the_block_count() {
             ),
             _ => panic!("disjoint_blocks/{n}: the run collapsed to a single block"),
         }
+    }
+}
+
+// `stabilizer/random_pairs` prices the batched cross-word kernel, whose buffer
+// takes only pairs split across two tableau words and runs the batched form
+// once four of them are held. That the fixture feeds it is what an external
+// test can see. Which widths reach the route the kernel lives on is set by the
+// sparse gate index and pinned in the crate's own stabilizer tests, where that
+// predicate is in scope.
+fn peak_buffered_cross_word(circuit: &prism_q::circuit::Circuit) -> usize {
+    let mut held = vec![false; circuit.num_qubits];
+    let mut buffered = 0usize;
+    let mut peak = 0usize;
+
+    for instruction in &circuit.instructions {
+        let prism_q::Instruction::Gate { targets, .. } = instruction else {
+            peak = peak.max(buffered);
+            buffered = 0;
+            held.fill(false);
+            continue;
+        };
+        if targets.iter().any(|&q| held[q]) {
+            peak = peak.max(buffered);
+            buffered = 0;
+            held.fill(false);
+        }
+        if targets.len() == 2 && targets[0] / 64 != targets[1] / 64 {
+            buffered += 1;
+            for &q in targets {
+                held[q] = true;
+            }
+        }
+    }
+    peak.max(buffered)
+}
+
+#[test]
+fn random_pairs_rows_buffer_cross_word_gates() {
+    for n in [500usize, 1000] {
+        let circuit = circuits::clifford_random_pairs(n, 10, SEED);
+        assert_resolves(
+            &format!("random_pairs/{n}"),
+            BackendKind::Stabilizer,
+            &circuit,
+        );
+
+        let peak = peak_buffered_cross_word(&circuit);
+        assert!(
+            peak >= 4,
+            "random_pairs/{n}: a flush holds at most {peak} cross-word gates, \
+             under the four the batched kernel takes over at"
+        );
+    }
+}
+
+// A model the Clifford samplers refuse is not an error: it runs on the
+// trajectory engine or on per-shot replay, one state per shot, and returns
+// shots either way, so a demoted row keeps reporting while measuring an engine
+// it does not name. Four routes stamp `CompiledStabilizer`, so this pins only
+// that the three `noisy_sampling/compiled_*` models stay off the per-shot
+// engines. Which of the four they take is pinned in the crate's own noise
+// tests, where the routing predicates are in scope.
+#[test]
+fn noisy_sampling_rows_stay_off_the_per_shot_engines() {
+    let mut circuit = circuits::clifford_heavy_circuit(100, 10, SEED);
+    circuit.num_classical_bits = circuit.num_qubits;
+    for q in 0..circuit.num_qubits {
+        circuit.add_measure(q, q);
+    }
+
+    let pauli = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+
+    let mut pair = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    for (events, instruction) in pair.after_gate.iter_mut().zip(&circuit.instructions) {
+        if let prism_q::Instruction::Gate { targets, .. } = instruction {
+            if targets.len() == 2 {
+                events.push(NoiseEvent {
+                    channel: NoiseChannel::TwoQubitDepolarizing { p: 0.01 },
+                    qubits: targets.iter().copied().collect(),
+                });
+            }
+        }
+    }
+
+    let mut readout = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    readout.with_readout_error(0.02, 0.05);
+
+    // 10_000 shots, as the rows run: the homological sampler is tried above
+    // 1000 and a smaller count would pin a route the rows never take.
+    for (label, model) in [
+        ("compiled_pauli", &pauli),
+        ("compiled_pair", &pair),
+        ("compiled_readout", &readout),
+    ] {
+        let result = sim::simulate(&circuit)
+            .noise(model)
+            .seed(SEED)
+            .shots(10_000)
+            .unwrap();
+        assert_eq!(
+            result.metadata.backend,
+            ResolvedBackend::CompiledStabilizer,
+            "{label}: the model ran on {:?}, an engine that evolves one state \
+             per shot, rather than on a Clifford sampler",
+            result.metadata.backend
+        );
     }
 }

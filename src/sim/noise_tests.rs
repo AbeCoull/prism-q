@@ -1242,3 +1242,44 @@ fn the_filtered_compile_carries_an_in_block_pair() {
         );
     }
 }
+
+// The `noisy_sampling/compiled_*` bench rows share one fixture and name the
+// compiled sampler. Four routes stamp `CompiledStabilizer`, so no result
+// separates them and an external test cannot tell which one ran. The fixture is
+// pinned here instead, where the two predicates that pick the route are in
+// scope: a pair channel and a readout entry each block the homological sampler,
+// and the depth ratio keeps all three models off the frame sampler.
+#[test]
+fn the_noisy_sampling_bench_fixture_takes_the_compiled_route() {
+    let mut circuit = circuits::clifford_heavy_circuit(100, 10, 0xDEAD_BEEF);
+    circuit.measure_all();
+
+    assert!(crate::sim::supports_compiled_measurement_sampling(&circuit));
+    assert!(!use_frame_sampler(&circuit));
+
+    let pauli = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+
+    let mut pair = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    for (events, instruction) in pair.after_gate.iter_mut().zip(&circuit.instructions) {
+        if let Instruction::Gate { targets, .. } = instruction {
+            if targets.len() == 2 {
+                events.push(pair_event([targets[0], targets[1]], 0.01));
+            }
+        }
+    }
+
+    let mut readout = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+    readout.with_readout_error(0.02, 0.05);
+
+    for (label, model) in [
+        ("compiled_pauli", &pauli),
+        ("compiled_pair", &pair),
+        ("compiled_readout", &readout),
+    ] {
+        assert!(
+            crate::sim::homological::HomologicalSampler::compile(&circuit, model, 42).is_err(),
+            "{label}: the homological sampler claims the fixture, so the row \
+             prices syndrome classes rather than the compiled sampler"
+        );
+    }
+}

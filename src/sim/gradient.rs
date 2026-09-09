@@ -204,8 +204,88 @@ fn observable_light_cone(circuit: &Circuit, hamiltonian: &[(f64, Vec<PauliTerm>)
     super::unified_pauli::inverse_light_cone(circuit, &union)
 }
 
+/// Hamiltonian terms sharing one X mask. The gather reads `phi[i ^ xmask]`
+/// once per group; each `(Zmask, factor)` pair then contributes its own sign to
+/// that one amplitude.
+struct TermGroup {
+    xmask: usize,
+    terms: Vec<(usize, Complex64)>,
+}
+
+/// Group masked terms by X mask, ascending, so the diagonal terms (X mask 0)
+/// lead and the gather's first read is the sequential stream.
+fn group_terms_by_xmask(masked: &[(f64, usize, usize, u32)]) -> Vec<TermGroup> {
+    let mut flat: Vec<(usize, usize, Complex64)> = masked
+        .iter()
+        .map(|&(coeff, xmask, zmask, num_y)| {
+            (xmask, zmask, Complex64::new(coeff, 0.0) * i_pow(num_y))
+        })
+        .collect();
+    flat.sort_by_key(|&(xmask, _, _)| xmask);
+
+    let mut groups: Vec<TermGroup> = Vec::with_capacity(flat.len());
+    for (xmask, zmask, factor) in flat {
+        match groups.last_mut() {
+            Some(group) if group.xmask == xmask => group.terms.push((zmask, factor)),
+            _ => groups.push(TermGroup {
+                xmask,
+                terms: vec![(zmask, factor)],
+            }),
+        }
+    }
+    groups
+}
+
+/// Gather `|λ⟩ = Σ c_k P_k|φ⟩` over `out`, the slice of `λ` starting at `base`,
+/// and return that slice's share of `Re⟨φ|λ⟩`.
+///
+/// Each output element is written once, from
+/// `Σ_k factor_k · (-1)^popcount((i ⊕ Xmask_k) & Zmask_k) · phi[i ⊕ Xmask_k]`, so
+/// the terms batch into one pass over the register instead of one scattering
+/// pass each.
+#[inline(always)]
+fn gather_lambda_chunk(
+    groups: &[TermGroup],
+    phi: &[Complex64],
+    base: usize,
+    out: &mut [Complex64],
+) -> f64 {
+    let mut value = 0.0;
+    for (offset, slot) in out.iter_mut().enumerate() {
+        let i = base + offset;
+        let mut acc = Complex64::new(0.0, 0.0);
+        for group in groups {
+            let j = i ^ group.xmask;
+            let mut weight = Complex64::new(0.0, 0.0);
+            for &(zmask, factor) in &group.terms {
+                let sign = if (j & zmask).count_ones() & 1 == 1 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                weight += factor * sign;
+            }
+            // SAFETY: callers pass `out` as a chunk of a buffer of `phi`'s
+            // length starting at `base`, so `i < phi.len()`, and every X mask
+            // below the power-of-two `phi.len()`, so `i ^ xmask` stays in range.
+            // `build_lambda_and_value` asserts both before it fans out.
+            let amp = unsafe { *phi.get_unchecked(j) };
+            acc += weight * amp;
+        }
+        // SAFETY: same range argument with an X mask of zero.
+        let p = unsafe { *phi.get_unchecked(i) };
+        value += p.re * acc.re + p.im * acc.im;
+        *slot = acc;
+    }
+    value
+}
+
 /// Build `|λ⟩ = Σ c_k P_k|φ⟩` into a fresh buffer and return `(⟨H⟩, |λ⟩)`,
 /// where `⟨H⟩ = Re⟨φ|λ⟩`.
+///
+/// # Panics
+///
+/// If `phi`'s length is not a power of two or a term's X mask indexes past it.
 fn build_lambda_and_value(
     phi: &[Complex64],
     masked: &[(f64, usize, usize, u32)],
@@ -220,23 +300,26 @@ fn build_lambda_and_value(
     )?;
     lambda.resize(dim, Complex64::new(0.0, 0.0));
 
-    for &(coeff, xmask, zmask, num_y) in masked {
-        let factor = Complex64::new(coeff, 0.0) * i_pow(num_y);
-        for (j, &amp) in phi.iter().enumerate() {
-            let sign = if (j & zmask).count_ones() & 1 == 1 {
-                -1.0
-            } else {
-                1.0
-            };
-            lambda[j ^ xmask] += factor * sign * amp;
-        }
+    let groups = group_terms_by_xmask(masked);
+    assert!(
+        dim.is_power_of_two() && groups.iter().all(|g| g.xmask < dim),
+        "observable masks must index the state dimension"
+    );
+
+    #[cfg(feature = "parallel")]
+    if dim >= (1 << crate::backend::PARALLEL_THRESHOLD_QUBITS) {
+        use crate::backend::MIN_PAR_ELEMS;
+        use rayon::prelude::*;
+
+        let value = lambda
+            .par_chunks_mut(MIN_PAR_ELEMS)
+            .enumerate()
+            .map(|(chunk, out)| gather_lambda_chunk(&groups, phi, chunk * MIN_PAR_ELEMS, out))
+            .sum();
+        return Ok((value, lambda));
     }
 
-    let value: f64 = phi
-        .iter()
-        .zip(&lambda)
-        .map(|(p, l)| (p.conj() * l).re)
-        .sum();
+    let value = gather_lambda_chunk(&groups, phi, 0, &mut lambda);
     Ok((value, lambda))
 }
 
@@ -509,5 +592,134 @@ mod tests {
         c.add_gate(Gate::Rx(0.3), &[0]);
         c.add_measure(0, 0);
         assert!(run_expectation_gradient(&c, &z_obs(0), &Parameters::new(0), 42).is_err());
+    }
+
+    #[test]
+    fn single_term_hamiltonian_matches_analytic() {
+        // Ry(theta)|0>, <X> = sin theta, d/dtheta = cos theta.
+        let theta = 0.6;
+        let mut c = Circuit::new(1, 0);
+        c.add_gate(Gate::Ry(theta), &[0]);
+        let params = Parameters::all_rotations(&c);
+
+        let obs = vec![(1.0, vec![PauliTerm::x(0)])];
+        let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
+        assert!((g.value - theta.sin()).abs() < 1e-12);
+        assert!((g.gradient[0] - theta.cos()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn diagonal_hamiltonian_matches_analytic() {
+        // Two independent Ry rotations under Z0, Z1 and Z0Z1: every term is
+        // diagonal, so nothing moves an amplitude.
+        let (a, b) = (0.4, 1.1);
+        let mut c = Circuit::new(2, 0);
+        c.add_gate(Gate::Ry(a), &[0]);
+        c.add_gate(Gate::Ry(b), &[1]);
+        let params = Parameters::all_rotations(&c);
+
+        let obs = vec![
+            (1.0, vec![PauliTerm::z(0)]),
+            (0.5, vec![PauliTerm::z(1)]),
+            (0.25, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        ];
+        let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
+        let value = a.cos() + 0.5 * b.cos() + 0.25 * a.cos() * b.cos();
+        assert!((g.value - value).abs() < 1e-12);
+        assert!((g.gradient[0] - (-a.sin() - 0.25 * a.sin() * b.cos())).abs() < 1e-12);
+        assert!((g.gradient[1] - (-0.5 * b.sin() - 0.25 * a.cos() * b.sin())).abs() < 1e-12);
+    }
+
+    #[test]
+    fn grouped_x_mask_terms_match_parameter_shift() {
+        // X0, Y0, X0Z1 and Y0Z2 all carry the X mask of qubit 0, four terms
+        // reading the same amplitude.
+        let mut c = Circuit::new(3, 0);
+        c.add_gate(Gate::Ry(0.4), &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Rx(0.9), &[1]);
+        c.add_gate(Gate::Cx, &[1, 2]);
+        c.add_gate(Gate::Rz(0.3), &[2]);
+        let params = Parameters::all_rotations(&c);
+
+        let obs = vec![
+            (1.0, vec![PauliTerm::x(0)]),
+            (-0.5, vec![PauliTerm::y(0)]),
+            (0.75, vec![PauliTerm::x(0), PauliTerm::z(1)]),
+            (0.25, vec![PauliTerm::y(0), PauliTerm::z(2)]),
+        ];
+        let adjoint = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
+        let shift = run_expectation_gradient_shift(&c, &obs, &params, 42).unwrap();
+        assert!((adjoint.value - shift.value).abs() < 1e-12);
+        for (slot, (&got, &want)) in adjoint.gradient.iter().zip(&shift.gradient).enumerate() {
+            assert!((got - want).abs() < 1e-12, "slot {slot}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn parallel_threshold_width_matches_parameter_shift() {
+        // 2^14 amplitudes, the width at which the gather fans out to Rayon.
+        let mut c = Circuit::new(14, 0);
+        c.add_gate(Gate::Ry(0.3), &[0]);
+        c.add_gate(Gate::Cx, &[0, 7]);
+        c.add_gate(Gate::Rx(0.8), &[7]);
+        c.add_gate(Gate::Cx, &[7, 13]);
+        c.add_gate(Gate::Rz(0.5), &[13]);
+        let params = Parameters::all_rotations(&c);
+
+        let obs = vec![
+            (1.0, vec![PauliTerm::z(0)]),
+            (0.5, vec![PauliTerm::x(7)]),
+            (-0.25, vec![PauliTerm::y(7), PauliTerm::z(13)]),
+            (0.75, vec![PauliTerm::x(7), PauliTerm::z(0)]),
+        ];
+        let adjoint = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
+        let shift = run_expectation_gradient_shift(&c, &obs, &params, 42).unwrap();
+        assert!((adjoint.value - shift.value).abs() < 1e-12);
+        for (slot, (&got, &want)) in adjoint.gradient.iter().zip(&shift.gradient).enumerate() {
+            assert!((got - want).abs() < 1e-12, "slot {slot}: {got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn the_gather_matches_a_term_by_term_reference() {
+        // Sum the terms one at a time, the shape the gather replaces, and
+        // compare on one register. Split across two chunks so the gather's base
+        // arithmetic is covered as well.
+        let dim = 1usize << 6;
+        let phi: Vec<Complex64> = (0..dim)
+            .map(|i| Complex64::new((i as f64 * 0.37).sin(), (i as f64 * 0.11).cos()))
+            .collect();
+        let masked = vec![
+            (1.0, 0usize, 0b101usize, 0u32),
+            (-0.5, 0b010, 0b100, 1),
+            (0.75, 0b010, 0b001, 0),
+            (0.25, 0b110, 0b011, 2),
+        ];
+
+        let mut want = vec![Complex64::new(0.0, 0.0); dim];
+        for &(coeff, xmask, zmask, num_y) in &masked {
+            let factor = Complex64::new(coeff, 0.0) * i_pow(num_y);
+            for (j, &amp) in phi.iter().enumerate() {
+                let sign = if (j & zmask).count_ones() & 1 == 1 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                want[j ^ xmask] += factor * sign * amp;
+            }
+        }
+        let want_value: f64 = phi.iter().zip(&want).map(|(p, l)| (p.conj() * l).re).sum();
+
+        let groups = group_terms_by_xmask(&masked);
+        let mut got = vec![Complex64::new(0.0, 0.0); dim];
+        let (lo, hi) = got.split_at_mut(dim / 2);
+        let got_value = gather_lambda_chunk(&groups, &phi, 0, lo)
+            + gather_lambda_chunk(&groups, &phi, dim / 2, hi);
+
+        assert!((want_value - got_value).abs() < 1e-12);
+        for (i, (w, g)) in want.iter().zip(&got).enumerate() {
+            assert!((w - g).norm() < 1e-12, "slot {i}: {w} vs {g}");
+        }
     }
 }

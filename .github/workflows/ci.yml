@@ -226,7 +226,8 @@ jobs:
   # matches the gate's `head`, which costs nothing and keeps the two builds
   # differing only in code. It is not claimed to fix anything: on this project's
   # Windows host the build directory was measured not to change `.text` at all,
-  # and the ELF case that could differ is untested.
+  # and the ELF case that could differ is what `.github/workflows/elf-layout-probe.yml`
+  # measures.
   benchmark-reference:
     name: Benchmark Reference Build
     runs-on: ubuntu-latest

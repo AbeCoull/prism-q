@@ -1,0 +1,50 @@
+name: ELF layout probe
+
+# Answers the question the comment above `benchmark-reference` in ci.yml leaves
+# open: whether the build directory moves `.text` on ELF, where line tables live
+# in the binary rather than in a side file. Two worktrees of one commit at paths
+# 125 characters apart, one toolchain, one feature set, `.text` hashed from each.
+# See scripts/elf_layout_probe.sh, which is runnable by hand on any Linux box.
+#
+# Reporting only. A mismatch says the gate should build differently, not that the
+# commit under test is broken, so the job never fails a run and must not be
+# promoted to a required check.
+#
+# Its own workflow rather than a job in ci.yml, so that dispatching it does not
+# also run the standing suite. Re-run it when the toolchain or `[profile.bench]`
+# changes; the answer does not move per push, and each run is two full
+# `lto = "fat"` builds at temporary paths no cache key can name.
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Mirrors CI_BENCH_FEATURES in ci.yml; keep the two in step.
+  CI_BENCH_FEATURES: parallel,bench-fast
+
+jobs:
+  elf-layout-probe:
+    name: ELF layout probe (manual)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      # No rust-cache: a restored target directory would warm one of the two
+      # builds and not the other, which is the one difference this must not have.
+      - name: Compare `.text` across two build paths
+        run: |
+          bash scripts/elf_layout_probe.sh
+          cat bench_results/elf-layout-probe.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the probe report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: elf-layout-probe
+          if-no-files-found: ignore
+          path: bench_results/elf-layout-probe.md

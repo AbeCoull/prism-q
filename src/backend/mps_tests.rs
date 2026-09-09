@@ -1040,3 +1040,51 @@ fn a_two_site_update_weights_the_side_the_caller_names() {
         );
     }
 }
+
+#[test]
+fn thin_qr_drops_a_dependent_column_and_keeps_the_product() {
+    // Column 2 is three times column 0, so the factorization has rank 2 and
+    // still has to reproduce all three columns.
+    let (rows, cols) = (4usize, 3usize);
+    let c0 = [1.0, 2.0, -1.0, 0.5];
+    let c1 = [0.0, 1.0, 1.0, -2.0];
+    let mut a = vec![ZERO; rows * cols];
+    for i in 0..rows {
+        a[i] = Complex64::new(c0[i], 0.0);
+        a[rows + i] = Complex64::new(c1[i], 0.0);
+        a[2 * rows + i] = Complex64::new(3.0 * c0[i], 0.0);
+    }
+
+    let qr = thin_qr(&a, rows, cols);
+    assert_eq!(qr.rank, 2);
+    for i in 0..qr.rank {
+        for j in 0..qr.rank {
+            let dot: Complex64 = (0..rows)
+                .map(|k| qr.q[i * rows + k].conj() * qr.q[j * rows + k])
+                .sum();
+            let want = if i == j { ONE } else { ZERO };
+            assert!((dot - want).norm() < 1e-14, "column {i} against {j}: {dot}");
+        }
+    }
+    for j in 0..cols {
+        for k in 0..rows {
+            let got: Complex64 = (0..qr.rank)
+                .map(|i| qr.q[i * rows + k] * qr.r[i * cols + j])
+                .sum();
+            assert!(
+                (got - a[j * rows + k]).norm() < 1e-13,
+                "column {j} row {k}: {got} against {}",
+                a[j * rows + k]
+            );
+        }
+    }
+}
+
+#[test]
+fn thin_qr_of_a_zero_matrix_is_still_an_isometry() {
+    let (rows, cols) = (3usize, 2usize);
+    let qr = thin_qr(&vec![ZERO; rows * cols], rows, cols);
+    assert_eq!(qr.rank, 1);
+    assert!((l2_norm(&qr.q) - 1.0).abs() < 1e-15);
+    assert!(qr.r.iter().all(|x| x.norm() == 0.0));
+}

@@ -21,9 +21,10 @@ use crate::sim::{BackendKind, ShotsResult};
 /// A single-qubit (or two-qubit, for `TwoQubitDepolarizing`) noise channel.
 ///
 /// Channels are applied by the trajectory engine after each gate whose
-/// `NoiseModel::after_gate` entry contains a matching `NoiseEvent`. For
-/// Pauli-only noise on Clifford circuits, the compiled stabilizer sampler
-/// is used instead, see [`NoiseModel::is_pauli_only`].
+/// `NoiseModel::after_gate` entry contains a matching `NoiseEvent`. Channels
+/// that sample as a Pauli frame draw take the compiled stabilizer sampler
+/// instead on a Clifford circuit, see [`NoiseChannel::is_pauli`] and
+/// [`NoiseChannel::TwoQubitDepolarizing`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum NoiseChannel {
     /// Independent Pauli X/Y/Z error with given per-branch probabilities.
@@ -109,12 +110,44 @@ impl NoiseChannel {
         }
     }
 
+    /// Total error probability of a two-qubit Pauli channel, `None` for every
+    /// other channel. The 15 non-identity products share it equally.
+    pub fn pauli_pair_rate(&self) -> Option<f64> {
+        match self {
+            NoiseChannel::TwoQubitDepolarizing { p } => Some(*p),
+            _ => None,
+        }
+    }
+
+    /// True when no branch of the channel can fire, so it moves no state and
+    /// decides no route, the reading [`ReadoutError::is_inert`] gives a
+    /// zero-rate readout entry. Only the Pauli family is considered: a damping
+    /// or Kraus channel stays outside the Pauli frame whatever its parameters.
+    pub(crate) fn is_inert(&self) -> bool {
+        match self {
+            NoiseChannel::Pauli { px, py, pz } => *px == 0.0 && *py == 0.0 && *pz == 0.0,
+            NoiseChannel::Depolarizing { p } | NoiseChannel::TwoQubitDepolarizing { p } => {
+                *p == 0.0
+            }
+            _ => false,
+        }
+    }
+
     /// True for the Pauli and Depolarizing channels.
     pub fn is_pauli(&self) -> bool {
         matches!(
             self,
             NoiseChannel::Pauli { .. } | NoiseChannel::Depolarizing { .. }
         )
+    }
+
+    /// True for the channels a Pauli frame can carry, which is
+    /// [`NoiseChannel::is_pauli`] plus
+    /// [`NoiseChannel::TwoQubitDepolarizing`]. The pair channel needs a joint
+    /// draw over its 15 branches rather than one per qubit, so the samplers
+    /// hold it apart from the single-qubit rows.
+    pub(crate) fn is_pauli_frame(&self) -> bool {
+        self.is_pauli() || self.pauli_pair_rate().is_some()
     }
 
     /// Return true when the trajectory engine can sample this channel exactly.
@@ -263,11 +296,21 @@ impl NoiseEvent {
     ///
     /// Panics if the channel is not Pauli or Depolarizing. Callers on the
     /// compiled stabilizer sampler path must guard with
-    /// [`NoiseModel::ensure_pauli_only`] before invoking this method.
+    /// [`NoiseModel::ensure_pauli_only`] before invoking this method, and read
+    /// a two-qubit channel through [`NoiseEvent::pauli_pair`] instead.
     pub fn pauli_probs(&self) -> (f64, f64, f64) {
         self.channel
             .as_pauli()
             .expect("pauli_probs called on non-Pauli channel; caller must use ensure_pauli_only")
+    }
+
+    /// Both targets and the total rate of a two-qubit Pauli channel, `None`
+    /// when the channel names one qubit. An event answers this or
+    /// [`NoiseEvent::pauli_probs`], never both.
+    pub fn pauli_pair(&self) -> Option<(usize, usize, f64)> {
+        self.channel
+            .pauli_pair_rate()
+            .map(|p| (self.qubits[0], self.qubits[1], p))
     }
 }
 
@@ -399,22 +442,28 @@ impl NoiseModel {
         self
     }
 
-    /// True when every channel is Pauli or Depolarizing and no readout entry
-    /// can flip a bit, the precondition for the homological sampler, which
-    /// folds noise into syndrome classes computed before any shot is drawn.
+    /// True when every channel is a single-qubit Pauli or Depolarizing channel
+    /// and nothing else can flip a bit, the precondition for the homological
+    /// sampler, which folds noise into syndrome classes computed before any
+    /// shot is drawn. A live two-qubit channel answers `false` here and still
+    /// runs on the Clifford samplers; an inert one blocks nothing.
     pub fn is_pauli_only(&self) -> bool {
-        self.has_only_pauli_channels() && self.readout.iter().flatten().all(ReadoutError::is_inert)
+        self.after_gate
+            .iter()
+            .flat_map(|events| events.iter())
+            .all(|e| e.channel.is_pauli() || e.channel.is_inert())
+            && self.readout.iter().flatten().all(ReadoutError::is_inert)
     }
 
-    /// True when every channel is Pauli or Depolarizing, whatever the readout
-    /// entries hold. Readout acts on the measurement record after sampling, so
-    /// the Clifford samplers apply it themselves and only the channels decide
-    /// whether a model can take that route.
+    /// True when every channel samples as a Pauli frame draw, whatever the
+    /// readout entries hold. Readout acts on the measurement record after
+    /// sampling, so the Clifford samplers apply it themselves and only the
+    /// channels decide whether a model can take that route.
     pub(crate) fn has_only_pauli_channels(&self) -> bool {
         self.after_gate
             .iter()
             .flat_map(|events| events.iter())
-            .all(|e| e.channel.is_pauli())
+            .all(|e| e.channel.is_pauli_frame())
     }
 
     /// True when any event carries a [`NoiseChannel::Kraus2q`], the one channel
@@ -440,9 +489,10 @@ impl NoiseModel {
             return Err(crate::error::PrismError::IncompatibleBackend {
                 backend: "homological sampler".into(),
                 reason: "non-Pauli noise channels (amplitude damping, phase damping, \
-                         thermal relaxation, custom Kraus) carry no Pauli frame, and \
-                         readout error is drawn per shot rather than folded into a \
-                         syndrome class; sample through `run_shots_noisy`"
+                         thermal relaxation, custom Kraus) carry no Pauli frame, a \
+                         two-qubit channel spans two error columns where the complex \
+                         holds one, and readout error is drawn per shot rather than \
+                         folded into a syndrome class; sample through `run_shots_noisy`"
                     .into(),
             });
         }
@@ -573,10 +623,21 @@ impl NoiseModel {
     }
 }
 
+/// Rows a two-qubit event stores: the propagated X and Z components of each
+/// of its two targets, in the order `x0, z0, x1, z1`. The 15 branches are
+/// drawn jointly at sample time and read these four rows, rather than being
+/// precomputed as 15 rows of their own.
+const PAIR_ROWS: usize = 4;
+
 struct FlatNoiseSensitivity {
     x_data: Vec<u64>,
     z_data: Vec<u64>,
     probs: Vec<[f64; 3]>,
+    /// [`PAIR_ROWS`] rows of `m_words` per two-qubit event. Kept apart from
+    /// the single-qubit rows, which the LUT build, the device CSR transpose
+    /// and the threshold table all index positionally.
+    pair_data: Vec<u64>,
+    pair_probs: Vec<f64>,
     m_words: usize,
 }
 
@@ -586,6 +647,8 @@ impl FlatNoiseSensitivity {
             x_data: Vec::with_capacity(capacity * m_words),
             z_data: Vec::with_capacity(capacity * m_words),
             probs: Vec::with_capacity(capacity),
+            pair_data: Vec::new(),
+            pair_probs: Vec::new(),
             m_words,
         }
     }
@@ -594,6 +657,29 @@ impl FlatNoiseSensitivity {
         self.x_data.extend_from_slice(x_flip);
         self.z_data.extend_from_slice(z_flip);
         self.probs.push([px, py, pz]);
+    }
+
+    fn push_pair(&mut self, x0: &[u64], z0: &[u64], x1: &[u64], z1: &[u64], p: f64) {
+        for row in [x0, z0, x1, z1] {
+            self.pair_data.extend_from_slice(row);
+        }
+        self.pair_probs.push(p);
+    }
+
+    /// The device noise kernel derives each thread's bit from
+    /// `(seed, event, batch)` for the one measurement row it owns, so a branch
+    /// drawn there would decorrelate the two qubits. A non-empty pair table
+    /// therefore keeps noise application on the host.
+    #[inline(always)]
+    fn has_pairs(&self) -> bool {
+        !self.pair_probs.is_empty()
+    }
+
+    /// One row of pair event `idx`, indexed as [`PAIR_ROWS`] describes.
+    #[inline(always)]
+    fn pair_row(&self, idx: usize, row: usize) -> &[u64] {
+        let off = (idx * PAIR_ROWS + row) * self.m_words;
+        &self.pair_data[off..off + self.m_words]
     }
 
     #[inline(always)]
@@ -617,6 +703,41 @@ impl FlatNoiseSensitivity {
         let off = idx * self.m_words;
         &self.z_data[off..off + self.m_words]
     }
+}
+
+/// XOR the measurements one Pauli letter flips into `shot`. An X error
+/// anticommutes with the propagated Z component, a Z error with the X
+/// component, and a Y error with both.
+#[inline(always)]
+fn xor_pair_letter(shot: &mut [u64], x_row: &[u64], z_row: &[u64], letter: usize) {
+    match letter {
+        1 => xor_words(shot, z_row),
+        2 => {
+            xor_words(shot, x_row);
+            xor_words(shot, z_row);
+        }
+        3 => xor_words(shot, x_row),
+        _ => {}
+    }
+}
+
+/// `u` is uniform on `[0, 1)` conditioned on the event having fired.
+#[inline(always)]
+fn xor_pair_branch(events: &FlatNoiseSensitivity, idx: usize, u: f64, shot: &mut [u64]) {
+    let (l0, l1) = pair_branch(u);
+    xor_pair_letter(shot, events.pair_row(idx, 0), events.pair_row(idx, 1), l0);
+    xor_pair_letter(shot, events.pair_row(idx, 2), events.pair_row(idx, 3), l1);
+}
+
+/// The Pauli letter on each target of one uniformly drawn two-qubit branch,
+/// as 0 for identity through 3 for Z, from a uniform draw on `[0, 1)`.
+///
+/// The identity product is not a branch: a firing shot picks one of the 15
+/// others, so the index runs 1 through 15 and every firing shot moves.
+#[inline(always)]
+fn pair_branch(u: f64) -> (usize, usize) {
+    let idx = 1 + ((u * 15.0) as usize).min(14);
+    (idx >> 2, idx & 3)
 }
 
 #[inline(always)]
@@ -1523,7 +1644,10 @@ impl NoisyCompiledSampler {
 
     #[cfg(feature = "gpu")]
     fn try_sample_marginals_gpu(&mut self, total_shots: usize) -> Option<Result<Vec<f64>>> {
-        if !self.readout.is_empty() || !self.noiseless.should_use_gpu_bts(total_shots) {
+        if !self.readout.is_empty()
+            || self.events.has_pairs()
+            || !self.noiseless.should_use_gpu_bts(total_shots)
+        {
             return None;
         }
 
@@ -1542,7 +1666,10 @@ impl NoisyCompiledSampler {
         &mut self,
         total_shots: usize,
     ) -> Option<Result<std::collections::HashMap<Vec<u64>, u64>>> {
-        if !self.readout.is_empty() || !self.noiseless.should_use_gpu_bts(total_shots) {
+        if !self.readout.is_empty()
+            || self.events.has_pairs()
+            || !self.noiseless.should_use_gpu_bts(total_shots)
+        {
             return None;
         }
 
@@ -1726,21 +1853,26 @@ impl NoisyCompiledSampler {
     }
 
     fn apply_noise_bulk(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
-        if self.events.is_empty() {
-            return;
+        if !self.events.is_empty() {
+            if self.z_lut.is_some() {
+                self.apply_noise_bulk_grouped(accum, num_shots, m_words);
+            } else {
+                self.apply_noise_bulk_scalar(accum, num_shots, m_words);
+            }
         }
 
-        if self.z_lut.is_some() {
-            self.apply_noise_bulk_grouped(accum, num_shots, m_words);
-        } else {
-            self.apply_noise_bulk_scalar(accum, num_shots, m_words);
+        // Two-qubit events run as a second pass over their own table, so the
+        // single-qubit pass above keeps the row order the LUT and the device
+        // buffers were built against.
+        if self.events.has_pairs() {
+            self.apply_pair_noise_bulk(accum, num_shots, m_words);
         }
     }
 
     fn apply_noise_bulk_scalar(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
         #[cfg(feature = "parallel")]
         if num_shots >= 4096 {
-            self.apply_noise_bulk_scalar_par(accum, num_shots, m_words);
+            self.apply_range_par(accum, num_shots, m_words, Self::apply_noise_range);
             return;
         }
 
@@ -1751,8 +1883,24 @@ impl NoisyCompiledSampler {
         Self::apply_noise_range(&self.events, accum, 0, num_shots, m_words, &mut self.rng);
     }
 
+    fn apply_pair_noise_bulk(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
+        #[cfg(feature = "parallel")]
+        if num_shots >= 4096 {
+            self.apply_range_par(accum, num_shots, m_words, Self::apply_pair_noise_range);
+            return;
+        }
+
+        Self::apply_pair_noise_range(&self.events, accum, 0, num_shots, m_words, &mut self.rng);
+    }
+
     #[cfg(feature = "parallel")]
-    fn apply_noise_bulk_scalar_par(&mut self, accum: &mut [u64], num_shots: usize, m_words: usize) {
+    fn apply_range_par(
+        &mut self,
+        accum: &mut [u64],
+        num_shots: usize,
+        m_words: usize,
+        apply: fn(&FlatNoiseSensitivity, &mut [u64], usize, usize, usize, &mut ChaCha8Rng),
+    ) {
         use rayon::prelude::*;
 
         let num_threads = rayon::current_num_threads().max(1);
@@ -1773,7 +1921,7 @@ impl NoisyCompiledSampler {
                     return;
                 }
                 let mut rng = ChaCha8Rng::seed_from_u64(seeds[tid]);
-                Self::apply_noise_range(events, chunk, 0, chunk_shots, m_words, &mut rng);
+                apply(events, chunk, 0, chunk_shots, m_words, &mut rng);
             });
     }
 
@@ -1827,6 +1975,46 @@ impl NoisyCompiledSampler {
                     } else {
                         xor_words(&mut accum[b..b + m_words], events.x_flip(i));
                     }
+                    pos += 1 + geometric_sample(rng, ln_1mp);
+                }
+            }
+        }
+    }
+
+    /// Draw the two-qubit events over `[start, end)`. One branch of 15 per
+    /// firing shot, thinned exactly as the single-qubit pass thins its own
+    /// events.
+    fn apply_pair_noise_range(
+        events: &FlatNoiseSensitivity,
+        accum: &mut [u64],
+        start: usize,
+        end: usize,
+        m_words: usize,
+        rng: &mut ChaCha8Rng,
+    ) {
+        let num_shots = end - start;
+
+        for i in 0..events.pair_probs.len() {
+            let p = events.pair_probs[i];
+            if p == 0.0 {
+                continue;
+            }
+
+            if p >= 0.5 || num_shots < 32 {
+                for s in start..end {
+                    let r: f64 = rand::RngExt::random(rng);
+                    if r < p {
+                        let b = s * m_words;
+                        xor_pair_branch(events, i, r / p, &mut accum[b..b + m_words]);
+                    }
+                }
+            } else {
+                let ln_1mp = (1.0 - p).ln();
+                let mut pos = start + geometric_sample(rng, ln_1mp);
+                while pos < end {
+                    let r: f64 = rand::RngExt::random(rng);
+                    let b = pos * m_words;
+                    xor_pair_branch(events, i, r, &mut accum[b..b + m_words]);
                     pos += 1 + geometric_sample(rng, ln_1mp);
                 }
             }
@@ -1917,13 +2105,72 @@ pub fn compile_noisy(
         let blocks = circuit.independent_subsystems();
         if blocks.len() > 1 {
             let max_block = blocks.iter().map(|b| b.len()).max().unwrap_or(0);
-            if max_block < circuit.num_qubits {
+            if max_block < circuit.num_qubits && pairs_stay_in_one_block(circuit, noise, &blocks) {
                 return compile_noisy_filtered(circuit, noise, &blocks, seed);
             }
         }
     }
 
     compile_noisy_monolithic(circuit, noise, seed)
+}
+
+/// True when any measurement is still sensitive to a Pauli on `q` at this
+/// point in the backward sweep.
+fn sensitive(x_packed: &[Vec<u64>], z_packed: &[Vec<u64>], q: usize) -> bool {
+    x_packed[q].iter().any(|&w| w != 0) || z_packed[q].iter().any(|&w| w != 0)
+}
+
+/// Scatter a block-local measurement mask into the global measurement order,
+/// which is what the sensitivity table is indexed by.
+fn scatter_to_global(local: &[u64], bm_list: &[usize], out: &mut [u64]) {
+    out.fill(0);
+    for (local_mi, &global_mi) in bm_list.iter().enumerate() {
+        if (local[local_mi / 64] >> (local_mi % 64)) & 1 != 0 {
+            out[global_mi / 64] |= 1u64 << (global_mi % 64);
+        }
+    }
+}
+
+/// True when every two-qubit event lands inside the subsystem block holding
+/// the gate it follows.
+///
+/// The filtered compile sweeps one block at a time and holds only that
+/// block's propagated masks, so a pair reaching across blocks has nowhere to
+/// read its second qubit from and would silently run at the rate of its first
+/// qubit alone. Such models take the monolithic compile, which propagates the
+/// whole register at once. A zero-rate pair stores no row and constrains
+/// nothing.
+fn pairs_stay_in_one_block(circuit: &Circuit, noise: &NoiseModel, blocks: &[Vec<usize>]) -> bool {
+    let mut qubit_to_block = vec![usize::MAX; circuit.num_qubits];
+    for (bi, block) in blocks.iter().enumerate() {
+        for &q in block {
+            qubit_to_block[q] = bi;
+        }
+    }
+
+    for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+        let mut pairs = events
+            .iter()
+            .filter_map(NoiseEvent::pauli_pair)
+            .filter(|&(_, _, p)| p > 0.0)
+            .peekable();
+        if pairs.peek().is_none() {
+            continue;
+        }
+
+        let targets = match inst {
+            Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
+            _ => return false,
+        };
+        let Some(&first) = targets.first() else {
+            return false;
+        };
+        let block = qubit_to_block[first];
+        if !pairs.all(|(q0, q1, _)| qubit_to_block[q0] == block && qubit_to_block[q1] == block) {
+            return false;
+        }
+    }
+    true
 }
 
 fn compile_noisy_filtered(
@@ -1977,6 +2224,8 @@ fn compile_noisy_filtered(
     let mut events = FlatNoiseSensitivity::new(m_words, total_noise_events);
     let mut global_x_buf = vec![0u64; m_words];
     let mut global_z_buf = vec![0u64; m_words];
+    let mut pair_x_buf = vec![0u64; m_words];
+    let mut pair_z_buf = vec![0u64; m_words];
 
     for (bi, block) in blocks.iter().enumerate() {
         let bm_list = &block_meas[bi];
@@ -2029,12 +2278,28 @@ fn compile_noisy_filtered(
             let noise_ops = &noise.after_gate[*instr_idx];
             if !noise_ops.is_empty() {
                 for event in noise_ops {
+                    if let Some((q0, q1, p)) = event.pauli_pair() {
+                        if p == 0.0 {
+                            continue;
+                        }
+                        let (l0, l1) = (qubit_to_local[q0], qubit_to_local[q1]);
+                        if !sensitive(&x_packed, &z_packed, l0)
+                            && !sensitive(&x_packed, &z_packed, l1)
+                        {
+                            continue;
+                        }
+                        scatter_to_global(&x_packed[l0], bm_list, &mut global_x_buf);
+                        scatter_to_global(&z_packed[l0], bm_list, &mut global_z_buf);
+                        scatter_to_global(&x_packed[l1], bm_list, &mut pair_x_buf);
+                        scatter_to_global(&z_packed[l1], bm_list, &mut pair_z_buf);
+                        events.push_pair(&global_x_buf, &global_z_buf, &pair_x_buf, &pair_z_buf, p);
+                        continue;
+                    }
+
                     let (px, py, pz) = event.pauli_probs();
                     let local_q = qubit_to_local[event.qubit()];
 
-                    let has_any = x_packed[local_q].iter().any(|&w| w != 0)
-                        || z_packed[local_q].iter().any(|&w| w != 0);
-                    if has_any {
+                    if sensitive(&x_packed, &z_packed, local_q) {
                         global_x_buf.fill(0);
                         global_z_buf.fill(0);
                         for (local_mi, &global_mi) in bm_list.iter().enumerate() {
@@ -2136,12 +2401,26 @@ fn compile_noisy_monolithic(
         let noise_ops = &noise.after_gate[instr_idx];
         if !noise_ops.is_empty() {
             for event in noise_ops {
+                if let Some((q0, q1, p)) = event.pauli_pair() {
+                    if p == 0.0 {
+                        continue;
+                    }
+                    if sensitive(&x_packed, &z_packed, q0) || sensitive(&x_packed, &z_packed, q1) {
+                        events.push_pair(
+                            &x_packed[q0],
+                            &z_packed[q0],
+                            &x_packed[q1],
+                            &z_packed[q1],
+                            p,
+                        );
+                    }
+                    continue;
+                }
+
                 let (px, py, pz) = event.pauli_probs();
                 let q = event.qubit();
 
-                let has_any =
-                    x_packed[q].iter().any(|&w| w != 0) || z_packed[q].iter().any(|&w| w != 0);
-                if has_any {
+                if sensitive(&x_packed, &z_packed, q) {
                     events.push(&x_packed[q], &z_packed[q], px, py, pz);
                 }
             }
@@ -2346,6 +2625,27 @@ fn apply_gate_to_frame(
     }
 }
 
+#[inline(always)]
+fn flip_frame_letter(
+    x_frame: &mut [Vec<u64>],
+    z_frame: &mut [Vec<u64>],
+    q: usize,
+    pos: usize,
+    letter: usize,
+) {
+    let w = pos / 64;
+    let bit = 1u64 << (pos % 64);
+    match letter {
+        1 => x_frame[q][w] ^= bit,
+        2 => {
+            x_frame[q][w] ^= bit;
+            z_frame[q][w] ^= bit;
+        }
+        3 => z_frame[q][w] ^= bit,
+        _ => {}
+    }
+}
+
 fn run_shots_noisy_frame(
     circuit: &Circuit,
     noise: &NoiseModel,
@@ -2387,6 +2687,33 @@ fn run_shots_noisy_frame(
                     apply_gate_to_frame(gate, targets.as_slice(), &mut x_frame, &mut z_frame, bw);
 
                     for event in &noise.after_gate[idx] {
+                        if let Some((q0, q1, p)) = event.pauli_pair() {
+                            if p == 0.0 {
+                                continue;
+                            }
+                            if p < 0.5 && batch_n >= 32 {
+                                let ln_1mp = (1.0 - p).ln();
+                                let mut pos = geometric_sample(&mut rng, ln_1mp);
+                                while pos < batch_n {
+                                    let r: f64 = rand::RngExt::random(&mut rng);
+                                    let (l0, l1) = pair_branch(r);
+                                    flip_frame_letter(&mut x_frame, &mut z_frame, q0, pos, l0);
+                                    flip_frame_letter(&mut x_frame, &mut z_frame, q1, pos, l1);
+                                    pos += 1 + geometric_sample(&mut rng, ln_1mp);
+                                }
+                            } else {
+                                for s in 0..batch_n {
+                                    let r: f64 = rand::RngExt::random(&mut rng);
+                                    if r < p {
+                                        let (l0, l1) = pair_branch(r / p);
+                                        flip_frame_letter(&mut x_frame, &mut z_frame, q0, s, l0);
+                                        flip_frame_letter(&mut x_frame, &mut z_frame, q1, s, l1);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
                         let (px, py, pz) = event.pauli_probs();
                         let q = event.qubit();
                         let p_event = px + py + pz;
@@ -2644,6 +2971,15 @@ pub(crate) fn run_shots_noisy_brute_with(
 
             let noise_events = &noise.after_gate[idx];
             for event in noise_events {
+                if let Some((q0, q1, p)) = event.pauli_pair() {
+                    let r: f64 = rand::RngExt::random(&mut rng);
+                    if r < p {
+                        let (l0, l1) = pair_branch(r / p);
+                        apply_pauli_letter(backend.as_mut(), q0, l0)?;
+                        apply_pauli_letter(backend.as_mut(), q1, l1)?;
+                    }
+                    continue;
+                }
                 let (px, py, pz) = event.pauli_probs();
                 let q = event.qubit();
                 let r: f64 = rand::RngExt::random(&mut rng);
@@ -2678,6 +3014,21 @@ pub(crate) fn run_shots_noisy_brute_with(
     }
 
     Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
+}
+
+/// Apply one letter of a two-qubit branch, indexed as [`pair_branch`] returns
+/// it. Identity applies nothing.
+fn apply_pauli_letter(backend: &mut dyn Backend, qubit: usize, letter: usize) -> Result<()> {
+    let gate = match letter {
+        1 => Gate::X,
+        2 => Gate::Y,
+        3 => Gate::Z,
+        _ => return Ok(()),
+    };
+    backend.apply(&Instruction::Gate {
+        gate,
+        targets: SmallVec::from_elem(qubit, 1),
+    })
 }
 
 fn amplitude_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {

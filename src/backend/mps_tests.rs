@@ -719,7 +719,8 @@ fn svd_epsilon_rejects_one() {
 // Uncapped brickwork saturates its width ceiling, so a raised threshold must
 // show as a lower peak bond, a reported discard, and a realized error within
 // a small factor of that discard (the estimate is first order, not a
-// certificate; 10x holds well clear of the ~2.5x measured on deeper runs).
+// certificate, and the factor it understates by grows with the number of
+// truncating SVDs; 10x is headroom, not a measured ratio).
 #[test]
 fn raised_epsilon_lowers_bond_and_reports_the_discard() {
     let circuit = crate::circuits::brickwork_circuit(14, 20, 42);

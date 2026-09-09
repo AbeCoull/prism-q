@@ -155,8 +155,10 @@ Backward Pauli propagation through circuit + noise sensitivity analysis. Each no
 
 `NoiseModel`: per-instruction noise events. Pauli and depolarizing channels are
 supported by every noisy engine. Amplitude damping, phase damping, thermal
-relaxation, two-qubit depolarizing, one- and two-qubit custom Kraus operators,
-and readout error require the trajectory engine.
+relaxation, two-qubit depolarizing, and one- and two-qubit custom Kraus
+operators require the trajectory engine. Readout error is separate: it acts on
+the measurement record rather than the state, so the route is chosen on the
+channels alone and each engine applies readout itself.
 
 `NoiseBuilder` (`src/sim/noise_builder.rs`) compiles declarative rules into that
 same per-instruction vector: per-gate-type and per-qubit rates, idle
@@ -189,21 +191,31 @@ engine per call:
 | Engine | Selected when | Limitations |
 |---|---|---|
 | Brute-force replay (`run_shots_noisy_brute_with`) | Resets, classical conditionals, or mid-circuit measurements | Per-shot tableau replay, O(shots) simulations; non-Clifford circuits error here (the public entry point routes them to the trajectory engine instead) |
-| Homological (`src/sim/homological.rs`) | >= 1000 shots and the error complex compiles (syndrome rank <= 20) | Falls through to frame/compiled above rank 20 |
+| Homological (`src/sim/homological.rs`) | >= 1000 shots, ideal readout, and the error complex compiles (syndrome rank <= 20) | Falls through to frame/compiled above rank 20, or when the model carries readout error, which has no syndrome class to fold into |
 | Pauli frame | Shallow circuits: gate count / qubits < 3, or < 5 at >= 200 qubits | Clifford, terminal measurements only |
 | Compiled Pauli (`NoisyCompiledSampler`) | Remaining Clifford + terminal-measurement circuits | Clifford, terminal measurements only |
 
 The trajectory engine (`src/sim/trajectory.rs`) covers everything the compiled
-family rejects: non-Pauli channels, readout error, mid-circuit measurement,
-reset, classical conditionals, and non-Clifford gates, at per-shot state
-evolution cost. Distributed backends reject noisy sampling entirely; per-shot
-trajectories cannot keep rank collectives in lockstep.
+family rejects: non-Pauli channels, mid-circuit measurement, reset, classical
+conditionals, and non-Clifford gates, at per-shot state evolution cost.
+Distributed backends reject noisy sampling entirely; per-shot trajectories
+cannot keep rank collectives in lockstep.
 
-Every noisy entry point calls `NoiseModel::validate_for` against the circuit
-before allocating state: one event slot per instruction, channel parameters in
-range, distinct targets on a two-qubit channel, and every target inside the
-register. Bounds cannot be checked from the model alone, and a target outside
-the register reaches kernels that index amplitudes without one.
+The frame and compiled samplers apply readout error to the packed measurement
+record, after the reference outcomes are folded in so that a set bit is a
+measured one. Records are walked one at a time and thinned at `max(p01, p10)`,
+then a candidate is accepted at the rate its live bit selects, which is what
+asymmetric rates cost over a single flip mask. Brute-force replay instead
+flips the unpacked record of each shot on that shot's own stream, as the
+trajectory engine does.
+
+Every entry point that draws shots calls `NoiseModel::validate_for` against
+the circuit before allocating state: one event slot per instruction, channel
+parameters in range, distinct targets on a two-qubit channel, and every target
+inside the register. Bounds cannot be checked from the model alone, and a
+target outside the register reaches kernels that index amplitudes without one.
+The analytic `noisy_marginals_analytical` is the exception, having no per-shot
+state to allocate.
 
 A guarded region (`Instruction::Region`) is rejected whenever the model carries
 at least one quantum event: slots are indexed per top-level instruction, so a

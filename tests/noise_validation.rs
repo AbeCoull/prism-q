@@ -175,6 +175,27 @@ fn ensure_pauli_only_rejects_readout() {
     assert!(!noise.is_pauli_only());
 }
 
+// A zero-rate entry flips nothing, so it must not cost a model the samplers
+// that fold noise in ahead of the draw. This is the reading `reject_readout_at`
+// already uses for the mixed-state terminals: inert, not absent.
+#[test]
+fn zero_rate_readout_stays_pauli_only() {
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    noise.with_readout_error(0.0, 0.0);
+    assert!(noise.is_pauli_only());
+    assert!(noise.ensure_pauli_only().is_ok());
+    assert!(prism_q::noisy_marginals_analytical(&circuit, &noise, 42).is_ok());
+    assert!(prism_q::run_shots_homological(&circuit, &noise, 100, 42).is_ok());
+
+    noise.set_bit_readout_error(0, 0.0, 0.02);
+    assert!(!noise.is_pauli_only());
+    assert!(prism_q::run_shots_homological(&circuit, &noise, 100, 42).is_err());
+}
+
 #[test]
 fn readout_p01_out_of_range_rejected() {
     let circuit = one_gate_circuit();

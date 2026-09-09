@@ -637,6 +637,139 @@ fn filtered_noisy_bell_pairs_matches_monolithic() {
     );
 }
 
+// The frame and compiled routes answer from the same distribution and stamp the
+// same resolved backend, so nothing in a result separates them. The route is
+// pinned here through `use_frame_sampler`, in the same test that reads the
+// rates.
+fn readout_route_circuit(pad: usize) -> Circuit {
+    let mut circuit = Circuit::new(3, 3);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_gate(Gate::X, &[1]);
+    for _ in 0..pad {
+        circuit.add_gate(Gate::Z, &[2]);
+    }
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    circuit.add_measure(2, 2);
+    circuit
+}
+
+fn bit_rate(shots: &[Vec<bool>], bit: usize, want: bool) -> f64 {
+    shots.iter().filter(|s| s[bit] == want).count() as f64 / shots.len() as f64
+}
+
+// Rates far apart in both directions: applied before the reference bits are
+// folded in, bit 0 would read p01 = 0.40 where p10 = 0.05 belongs. The bound is
+// five sigma on a rate estimated from 20k draws, rounded up.
+fn assert_asymmetric_readout_rates(circuit: &Circuit) {
+    let mut noise = NoiseModel::uniform_depolarizing(circuit, 0.0);
+    noise.set_bit_readout_error(0, 0.40, 0.05);
+    noise.set_bit_readout_error(2, 0.20, 0.60);
+
+    let result = crate::sim::simulate(circuit)
+        .noise(&noise)
+        .seed(42)
+        .shots(20_000)
+        .unwrap();
+
+    let flipped_one = bit_rate(&result.shots, 0, false);
+    assert!(
+        (flipped_one - 0.05).abs() < 0.02,
+        "bit 0 measures 1 and takes p10 = 0.05, got {flipped_one}"
+    );
+    let flipped_zero = bit_rate(&result.shots, 2, true);
+    assert!(
+        (flipped_zero - 0.20).abs() < 0.02,
+        "bit 2 measures 0 and takes p01 = 0.20, got {flipped_zero}"
+    );
+    assert!(
+        result.shots.iter().all(|s| s[1]),
+        "bit 1 carries no readout entry and must keep its noiseless value"
+    );
+}
+
+#[test]
+fn readout_rates_hold_on_the_frame_route() {
+    let circuit = readout_route_circuit(0);
+    assert!(use_frame_sampler(&circuit));
+    assert_asymmetric_readout_rates(&circuit);
+}
+
+#[test]
+fn readout_rates_hold_on_the_compiled_route() {
+    let circuit = readout_route_circuit(10);
+    assert!(!use_frame_sampler(&circuit));
+    assert_asymmetric_readout_rates(&circuit);
+}
+
+fn entangled_route_circuit(pad: usize) -> Circuit {
+    let mut circuit = Circuit::new(3, 3);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    for _ in 0..pad {
+        circuit.add_gate(Gate::Z, &[2]);
+    }
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    circuit.add_measure(2, 2);
+    circuit
+}
+
+// The trajectory engine draws readout per shot against the unpacked record,
+// which shares no code with the packed walk. Per-bit sigma is at most 0.0035 at
+// 20k draws and the difference of two such estimates at most 0.005, so 0.03 is
+// six sigma on the difference.
+fn assert_matches_trajectory_engine(circuit: &Circuit) {
+    let mut noise = NoiseModel::uniform_depolarizing(circuit, 0.02);
+    noise.set_bit_readout_error(0, 0.10, 0.30);
+    noise.set_bit_readout_error(1, 0.25, 0.05);
+    noise.set_bit_readout_error(2, 0.40, 0.10);
+
+    let clifford = crate::sim::simulate(circuit)
+        .noise(&noise)
+        .seed(42)
+        .shots(20_000)
+        .unwrap();
+    assert_eq!(
+        clifford.metadata.backend,
+        crate::sim::ResolvedBackend::CompiledStabilizer
+    );
+    let trajectory = crate::sim::simulate(circuit)
+        .backend(BackendKind::Statevector)
+        .noise(&noise)
+        .seed(42)
+        .shots(20_000)
+        .unwrap();
+    assert_eq!(
+        trajectory.metadata.backend,
+        crate::sim::ResolvedBackend::Statevector
+    );
+
+    for bit in 0..3 {
+        let c = bit_rate(&clifford.shots, bit, true);
+        let t = bit_rate(&trajectory.shots, bit, true);
+        assert!(
+            (c - t).abs() < 0.03,
+            "bit {bit}: clifford {c:.4} vs trajectory {t:.4}"
+        );
+    }
+}
+
+#[test]
+fn readout_matches_the_trajectory_engine_on_the_frame_route() {
+    let circuit = entangled_route_circuit(0);
+    assert!(use_frame_sampler(&circuit));
+    assert_matches_trajectory_engine(&circuit);
+}
+
+#[test]
+fn readout_matches_the_trajectory_engine_on_the_compiled_route() {
+    let circuit = entangled_route_circuit(7);
+    assert!(!use_frame_sampler(&circuit));
+    assert_matches_trajectory_engine(&circuit);
+}
+
 #[cfg(feature = "gpu")]
 #[test]
 fn noisy_gpu_test_circuit_routes_to_gpu_bts() {

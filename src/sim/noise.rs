@@ -280,6 +280,14 @@ pub struct ReadoutError {
     pub p10: f64,
 }
 
+impl ReadoutError {
+    /// True when neither rate can flip a bit, so the entry changes no draw and
+    /// a sweep that starts at zero is not a readout model yet.
+    pub(crate) fn is_inert(&self) -> bool {
+        self.p01 == 0.0 && self.p10 == 0.0
+    }
+}
+
 /// Per-instruction noise attached to a specific circuit.
 ///
 /// # Examples
@@ -391,14 +399,22 @@ impl NoiseModel {
         self
     }
 
-    /// True when every channel is Pauli or Depolarizing and readout is ideal,
-    /// the precondition for the compiled stabilizer sampling paths.
+    /// True when every channel is Pauli or Depolarizing and no readout entry
+    /// can flip a bit, the precondition for the homological sampler, which
+    /// folds noise into syndrome classes computed before any shot is drawn.
     pub fn is_pauli_only(&self) -> bool {
+        self.has_only_pauli_channels() && self.readout.iter().flatten().all(ReadoutError::is_inert)
+    }
+
+    /// True when every channel is Pauli or Depolarizing, whatever the readout
+    /// entries hold. Readout acts on the measurement record after sampling, so
+    /// the Clifford samplers apply it themselves and only the channels decide
+    /// whether a model can take that route.
+    pub(crate) fn has_only_pauli_channels(&self) -> bool {
         self.after_gate
             .iter()
             .flat_map(|events| events.iter())
             .all(|e| e.channel.is_pauli())
-            && self.readout.iter().all(|r| r.is_none())
     }
 
     /// True when any event carries a [`NoiseChannel::Kraus2q`], the one channel
@@ -416,16 +432,34 @@ impl NoiseModel {
     }
 
     /// Return an error if the noise model contains any non-Pauli channels
-    /// or readout errors. Used as a precondition check by the compiled
-    /// sampler path, which can only handle Pauli noise on Clifford circuits.
+    /// or readout errors. Precondition of the samplers that fold noise into
+    /// the measurement record ahead of sampling, which readout error, drawn
+    /// per shot against the record itself, is not part of.
     pub fn ensure_pauli_only(&self) -> Result<()> {
         if !self.is_pauli_only() {
             return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "homological sampler".into(),
+                reason: "non-Pauli noise channels (amplitude damping, phase damping, \
+                         thermal relaxation, custom Kraus) carry no Pauli frame, and \
+                         readout error is drawn per shot rather than folded into a \
+                         syndrome class; sample through `run_shots_noisy`"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Return an error if any channel is non-Pauli, the precondition of the
+    /// Clifford samplers. Readout error is allowed: they apply it to the
+    /// measurement record after the reference bits are folded in.
+    pub(crate) fn ensure_only_pauli_channels(&self) -> Result<()> {
+        if !self.has_only_pauli_channels() {
+            return Err(crate::error::PrismError::IncompatibleBackend {
                 backend: "compiled stabilizer sampler".into(),
                 reason: "non-Pauli noise channels (amplitude damping, phase damping, \
-                         thermal relaxation, custom Kraus) or readout errors require \
-                         the trajectory engine; use a non-stabilizer backend or a \
-                         Pauli-only noise model"
+                         thermal relaxation, custom Kraus) require the trajectory \
+                         engine; use a non-stabilizer backend or a Pauli-only noise \
+                         model"
                     .into(),
             });
         }
@@ -771,6 +805,84 @@ fn unpack_and_remap_packed(
     (0..packed.num_shots())
         .map(|s| unpack_one_packed(packed, s, classical_bit_order, num_classical))
         .collect()
+}
+
+/// Readout error on one measurement record, the index the packed shot buffers
+/// carry. Only records carrying an entry that can flip a bit appear.
+struct RecordReadout {
+    record: usize,
+    p01: f64,
+    p10: f64,
+}
+
+fn record_readout(circuit: &Circuit, noise: &NoiseModel) -> Vec<RecordReadout> {
+    circuit
+        .classical_bit_order()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(record, cbit)| {
+            let err = noise.readout.get(cbit)?.as_ref()?;
+            (!err.is_inert()).then_some(RecordReadout {
+                record,
+                p01: err.p01,
+                p10: err.p10,
+            })
+        })
+        .collect()
+}
+
+/// Flip readout errors into a shot-major packed record, in place.
+///
+/// Runs after the reference bits are folded in, so a set bit is a measured one
+/// and takes `p10`. Asymmetric rates rule out a single flip mask: candidates
+/// are thinned at `max(p01, p10)`, then accepted at the rate the live bit
+/// selects. A record with no readout entry draws nothing.
+fn apply_readout_packed(
+    accum: &mut [u64],
+    num_shots: usize,
+    m_words: usize,
+    readout: &[RecordReadout],
+    rng: &mut ChaCha8Rng,
+) {
+    for entry in readout {
+        let p_max = entry.p01.max(entry.p10);
+        let word = entry.record / 64;
+        let bit = 1u64 << (entry.record % 64);
+
+        if p_max >= 0.5 || num_shots < 32 {
+            for s in 0..num_shots {
+                let slot = &mut accum[s * m_words + word];
+                let p = if *slot & bit != 0 {
+                    entry.p10
+                } else {
+                    entry.p01
+                };
+                let r: f64 = rand::RngExt::random(rng);
+                if r < p {
+                    *slot ^= bit;
+                }
+            }
+            continue;
+        }
+
+        let ln_1mp = (1.0 - p_max).ln();
+        let accept_set = entry.p10 / p_max;
+        let accept_clear = entry.p01 / p_max;
+        let mut pos = geometric_sample(rng, ln_1mp);
+        while pos < num_shots {
+            let slot = &mut accum[pos * m_words + word];
+            let accept = if *slot & bit != 0 {
+                accept_set
+            } else {
+                accept_clear
+            };
+            let r: f64 = rand::RngExt::random(rng);
+            if r < accept {
+                *slot ^= bit;
+            }
+            pos += 1 + geometric_sample(rng, ln_1mp);
+        }
+    }
 }
 
 struct NoiseFlipLut {
@@ -1132,6 +1244,10 @@ impl GpuNoiseCache {
 pub struct NoisyCompiledSampler {
     noiseless: crate::sim::compiled::CompiledSampler,
     events: FlatNoiseSensitivity,
+    /// Readout error per measurement record, applied on the host once the
+    /// reference bits are folded in. A non-empty table keeps sampling off the
+    /// device reductions, which read the record before readout exists.
+    readout: Vec<RecordReadout>,
     num_measurements: usize,
     rng: ChaCha8Rng,
     z_lut: Option<NoiseFlipLut>,
@@ -1182,6 +1298,8 @@ impl NoisyCompiledSampler {
             let shot_base = s * m_words;
             xor_words(&mut accum[shot_base..shot_base + m_words], ref_bits_packed);
         }
+
+        apply_readout_packed(&mut accum, num_shots, m_words, &self.readout, &mut self.rng);
 
         (accum, m_words)
     }
@@ -1405,7 +1523,7 @@ impl NoisyCompiledSampler {
 
     #[cfg(feature = "gpu")]
     fn try_sample_marginals_gpu(&mut self, total_shots: usize) -> Option<Result<Vec<f64>>> {
-        if !self.noiseless.should_use_gpu_bts(total_shots) {
+        if !self.readout.is_empty() || !self.noiseless.should_use_gpu_bts(total_shots) {
             return None;
         }
 
@@ -1424,7 +1542,7 @@ impl NoisyCompiledSampler {
         &mut self,
         total_shots: usize,
     ) -> Option<Result<std::collections::HashMap<Vec<u64>, u64>>> {
-        if !self.noiseless.should_use_gpu_bts(total_shots) {
+        if !self.readout.is_empty() || !self.noiseless.should_use_gpu_bts(total_shots) {
             return None;
         }
 
@@ -1453,7 +1571,7 @@ impl NoisyCompiledSampler {
 
     pub fn try_sample_bulk_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
         #[cfg(feature = "gpu")]
-        if self.noiseless.has_gpu_context() {
+        if self.noiseless.has_gpu_context() && self.readout.is_empty() {
             return self.try_sample_bulk_packed_with_gpu_context(num_shots);
         }
 
@@ -1499,6 +1617,7 @@ impl NoisyCompiledSampler {
     ) {
         #[cfg(feature = "gpu")]
         if self.noiseless.has_gpu_context()
+            && self.readout.is_empty()
             && self
                 .noiseless
                 .should_use_gpu_bts(total_shots.min(chunk_size.max(1)))
@@ -1531,6 +1650,14 @@ impl NoisyCompiledSampler {
                 this_batch,
                 m_words,
                 &ref_bits_packed,
+            );
+
+            apply_readout_packed(
+                &mut accum_buf,
+                this_batch,
+                m_words,
+                &self.readout,
+                &mut self.rng,
             );
 
             let data = std::mem::take(&mut accum_buf);
@@ -1785,7 +1912,7 @@ pub fn compile_noisy(
     seed: u64,
 ) -> Result<NoisyCompiledSampler> {
     noise.validate_for(circuit)?;
-    noise.ensure_pauli_only()?;
+    noise.ensure_only_pauli_channels()?;
     if circuit.num_qubits >= 4 {
         let blocks = circuit.independent_subsystems();
         if blocks.len() > 1 {
@@ -1822,7 +1949,7 @@ fn compile_noisy_filtered(
         return Ok(NoisyCompiledSampler {
             noiseless,
             events: FlatNoiseSensitivity::new(1, 0),
-
+            readout: Vec::new(),
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
@@ -1939,7 +2066,7 @@ fn compile_noisy_filtered(
     Ok(NoisyCompiledSampler {
         noiseless,
         events,
-
+        readout: record_readout(circuit, noise),
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,
@@ -1984,7 +2111,7 @@ fn compile_noisy_monolithic(
         return Ok(NoisyCompiledSampler {
             noiseless,
             events: FlatNoiseSensitivity::new(m_words, 0),
-
+            readout: Vec::new(),
             num_measurements: 0,
             rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xA01CE)),
             z_lut: None,
@@ -2035,7 +2162,7 @@ fn compile_noisy_monolithic(
     Ok(NoisyCompiledSampler {
         noiseless,
         events,
-
+        readout: record_readout(circuit, noise),
         num_measurements,
         rng: ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xCAFE_BABE)),
         z_lut,
@@ -2046,6 +2173,35 @@ fn compile_noisy_monolithic(
 }
 
 const FRAME_BATCH_SIZE: usize = 256;
+
+/// Gate count per qubit below which the Pauli frame sampler beats the compiled
+/// sensitivity map, whose build cost amortizes only over deeper circuits. Wide
+/// circuits carry a higher cutoff: the frame walks one word per qubit per gate,
+/// so its per-gate cost grows with the register while the map's does not.
+const FRAME_DEPTH_RATIO: f64 = 3.0;
+const WIDE_FRAME_QUBITS: usize = 200;
+const WIDE_FRAME_DEPTH_RATIO: f64 = 5.0;
+
+/// True when [`run_shots_noisy`] takes the Pauli frame sampler rather than the
+/// compiled one. Both answer from the same distribution and stamp the same
+/// resolved backend, so a result carries nothing that separates them.
+fn use_frame_sampler(circuit: &Circuit) -> bool {
+    let n = circuit.num_qubits;
+    let gate_count = circuit
+        .instructions
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Instruction::Gate { .. } | Instruction::Conditional { .. }
+            )
+        })
+        .count();
+
+    let depth_ratio = gate_count as f64 / n.max(1) as f64;
+    depth_ratio < FRAME_DEPTH_RATIO
+        || (n >= WIDE_FRAME_QUBITS && depth_ratio < WIDE_FRAME_DEPTH_RATIO)
+}
 
 struct ReferenceInfo {
     outcomes: Vec<bool>,
@@ -2206,6 +2362,7 @@ fn run_shots_noisy_frame(
     let m_words = num_measurements.div_ceil(64);
 
     let mut all_packed = vec![0u64; num_shots * m_words];
+    let readout = record_readout(circuit, noise);
     let mut rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(0xFAAB_E001));
 
     let max_bw = FRAME_BATCH_SIZE.div_ceil(64);
@@ -2327,6 +2484,8 @@ fn run_shots_noisy_frame(
         }
     }
 
+    apply_readout_packed(&mut all_packed, num_shots, m_words, &readout, &mut rng);
+
     let shots = unpack_and_remap(
         &all_packed,
         m_words,
@@ -2356,7 +2515,7 @@ pub fn run_shots_noisy(
     seed: u64,
 ) -> Result<ShotsResult> {
     noise.validate_for(circuit)?;
-    noise.ensure_pauli_only()?;
+    noise.ensure_only_pauli_channels()?;
     if !circuit.is_clifford_only() {
         return run_shots_noisy_brute_with(
             |s| Box::new(StabilizerBackend::new(s)),
@@ -2385,22 +2544,7 @@ pub fn run_shots_noisy(
         }
     }
 
-    let n = circuit.num_qubits;
-    let gate_count = circuit
-        .instructions
-        .iter()
-        .filter(|i| {
-            matches!(
-                i,
-                Instruction::Gate { .. } | Instruction::Conditional { .. }
-            )
-        })
-        .count();
-
-    let depth_ratio = gate_count as f64 / n.max(1) as f64;
-    let use_frame = depth_ratio < 3.0 || (n >= 200 && depth_ratio < 5.0);
-
-    if use_frame {
+    if use_frame_sampler(circuit) {
         run_shots_noisy_frame(circuit, noise, num_shots, seed)
     } else {
         run_shots_noisy_compiled(circuit, noise, num_shots, seed)
@@ -2443,7 +2587,7 @@ pub(crate) fn run_shots_noisy_with_gpu(
     seed: u64,
     context: std::sync::Arc<crate::gpu::GpuContext>,
 ) -> Result<ShotsResult> {
-    noise.ensure_pauli_only()?;
+    noise.ensure_only_pauli_channels()?;
     if !circuit.is_clifford_only() {
         return run_shots_noisy_brute_with(
             |s| Box::new(StabilizerBackend::new(s)),
@@ -2470,21 +2614,7 @@ pub(crate) fn run_shots_noisy_with_gpu(
         }
     }
 
-    let n = circuit.num_qubits;
-    let gate_count = circuit
-        .instructions
-        .iter()
-        .filter(|i| {
-            matches!(
-                i,
-                Instruction::Gate { .. } | Instruction::Conditional { .. }
-            )
-        })
-        .count();
-
-    let depth_ratio = gate_count as f64 / n.max(1) as f64;
-    let use_frame = depth_ratio < 3.0 || (n >= 200 && depth_ratio < 5.0);
-    if use_frame {
+    if use_frame_sampler(circuit) {
         return run_shots_noisy_frame(circuit, noise, num_shots, seed);
     }
 
@@ -2501,6 +2631,7 @@ pub(crate) fn run_shots_noisy_brute_with(
 ) -> Result<ShotsResult> {
     let mut shots = Vec::with_capacity(num_shots);
     let mut metadata = crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::Stabilizer);
+    let readout = crate::sim::trajectory::written_readout(circuit, &noise.readout);
 
     for i in 0..num_shots {
         let shot_seed = seed.wrapping_add(i as u64);
@@ -2541,7 +2672,9 @@ pub(crate) fn run_shots_noisy_brute_with(
         } else {
             metadata.weaken_with(&shot_metadata);
         }
-        shots.push(backend.classical_results().to_vec());
+        let mut results = backend.classical_results().to_vec();
+        crate::sim::trajectory::apply_readout_errors(&mut results, &readout, &mut rng);
+        shots.push(results);
     }
 
     Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))

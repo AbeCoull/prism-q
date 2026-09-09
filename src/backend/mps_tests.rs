@@ -854,6 +854,17 @@ fn bell_pairs(n: usize) -> Circuit {
     c
 }
 
+// A chain of CX gates off one flipped qubit: every gate runs the two-qubit
+// path and no cut carries more than one singular value.
+fn classical_cascade(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    c.add_gate(Gate::X, &[0]);
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c
+}
+
 fn interior_bonds(b: &MpsBackend) -> Vec<usize> {
     b.sites[..b.sites.len() - 1]
         .iter()
@@ -890,7 +901,7 @@ fn move_center_makes_every_other_site_an_isometry() {
     ] {
         let n = circuit.num_qubits;
         let mut b = mps_after(&circuit, cap);
-        b.move_center(n - 1);
+        b.establish_center(n - 1);
         b.assert_gauge(n - 1);
 
         let bonds = interior_bonds(&b);
@@ -917,7 +928,7 @@ fn move_center_makes_every_other_site_an_isometry() {
 fn moving_the_center_between_any_two_sites_preserves_the_state() {
     let n = 6;
     let mut base = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4096);
-    base.move_center(n - 1);
+    base.establish_center(n - 1);
     let reference = base.export_statevector().unwrap();
     let reference_norm = base.pauli_expectation(&[]).unwrap().re;
 
@@ -951,7 +962,7 @@ fn moving_the_center_between_any_two_sites_preserves_the_state() {
 fn repeated_center_moves_do_not_degrade_the_isometry() {
     let n = 8;
     let mut b = mps_after(&crate::circuits::brickwork_circuit(n, 8, 42), 32);
-    b.move_center(n - 1);
+    b.establish_center(n - 1);
     let reference = b.export_statevector().unwrap();
     let bonds = interior_bonds(&b);
     let first = b.gauge_deviation(n - 1);
@@ -991,26 +1002,29 @@ fn repeated_center_moves_do_not_degrade_the_isometry() {
 
 // The two write conventions differ only in which site keeps diag(S), so they
 // leave the same state under a different gauge: the weight site is the center
-// each one establishes.
+// the update leaves behind, and the update picks it from the side the center
+// arrives on.
 #[test]
-fn a_two_site_update_weights_the_side_the_caller_names() {
+fn a_two_site_update_weights_the_side_the_center_travels_toward() {
     let n = 6;
     let left_site = 2;
     let gate = Gate::Cx.matrix_4x4();
 
     let mut base = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4096);
-    base.move_center(n - 1);
-    base.move_center(left_site);
+    base.establish_center(left_site);
 
     let mut weighted_right = base.clone();
     weighted_right
-        .apply_adjacent_two_qubit(&gate, left_site, true, WeightSide::Right)
+        .apply_adjacent_two_qubit(&gate, left_site, true)
         .unwrap();
+    assert_eq!(weighted_right.center, Some(left_site + 1));
 
     let mut weighted_left = base.clone();
+    weighted_left.move_center(left_site + 1);
     weighted_left
-        .apply_adjacent_two_qubit(&gate, left_site, true, WeightSide::Left)
+        .apply_adjacent_two_qubit(&gate, left_site, true)
         .unwrap();
+    assert_eq!(weighted_left.center, Some(left_site));
 
     // The kernel factorizes with `svd`, whose isometry is looser than the one a
     // center move writes: the U side reads 5.1e-14 on this fixture against
@@ -1028,7 +1042,7 @@ fn a_two_site_update_weights_the_side_the_caller_names() {
 
     assert_ne!(
         weighted_right.sites[left_site].data, weighted_left.sites[left_site].data,
-        "both directions wrote the same left site, so the parameter did nothing"
+        "both directions wrote the same left site, so the convention did nothing"
     );
 
     let expected = weighted_right.export_statevector().unwrap();
@@ -1055,7 +1069,8 @@ fn thin_qr_drops_a_dependent_column_and_keeps_the_product() {
         a[2 * rows + i] = Complex64::new(3.0 * c0[i], 0.0);
     }
 
-    let qr = thin_qr(&a, rows, cols);
+    let mut qr = ThinQr::default();
+    qr.factorize(&a, rows, cols);
     assert_eq!(qr.rank, 2);
     for i in 0..qr.rank {
         for j in 0..qr.rank {
@@ -1082,9 +1097,505 @@ fn thin_qr_drops_a_dependent_column_and_keeps_the_product() {
 
 #[test]
 fn thin_qr_of_a_zero_matrix_is_still_an_isometry() {
-    let (rows, cols) = (3usize, 2usize);
-    let qr = thin_qr(&vec![ZERO; rows * cols], rows, cols);
+    let (rows, cols) = (4usize, 2usize);
+    let mut qr = ThinQr::default();
+
+    // On buffers a dense factorization has already filled, since that is how
+    // the walk reaches this: the kept column reads a norm of 1.4 if the zero
+    // case takes what it finds there.
+    let dense: Vec<Complex64> = (0..rows * cols)
+        .map(|i| Complex64::new(i as f64 + 1.0, 0.5))
+        .collect();
+    qr.factorize(&dense, rows, cols);
+    assert_eq!(qr.rank, 2);
+
+    qr.factorize(&vec![ZERO; rows * cols], rows, cols);
     assert_eq!(qr.rank, 1);
-    assert!((l2_norm(&qr.q) - 1.0).abs() < 1e-15);
-    assert!(qr.r.iter().all(|x| x.norm() == 0.0));
+    assert!((l2_norm(&qr.q[..rows]) - 1.0).abs() < 1e-15);
+    assert!(qr.r[..cols].iter().all(|x| x.norm() == 0.0));
+}
+
+// Squared 2-norm distance between two chains over one site layout, taken on
+// the stored tensors: a truncated chain is not normalized and every read
+// rescales, which would hide the very weight under test.
+fn squared_distance(a: &MpsBackend, b: &MpsBackend) -> f64 {
+    a.pauli_expectation(&[]).unwrap().re - 2.0 * a.inner_product(b).unwrap().re
+        + b.pauli_expectation(&[]).unwrap().re
+}
+
+// Apply `gate` to `base` twice, once with room for every singular value and
+// once under `cap`, and return what the capped run booked against the distance
+// it moved the state.
+//
+// The booked figure is the fraction of the cut's weight that went, so on a
+// chain whose norm a projection or a Kraus branch has already taken below one
+// it is that fraction of the norm that the distance can be compared against.
+fn one_cut(base: &MpsBackend, cap: usize, gate: impl Fn(&mut MpsBackend)) -> (f64, f64) {
+    let mut kept = base.clone();
+    kept.max_bond_dim = usize::MAX;
+    kept.svd_epsilon = 0.0;
+    kept.reset_truncation_tracking();
+    gate(&mut kept);
+    assert!(
+        kept.truncation_discarded() < 1e-30,
+        "the reference run lost {:.3e}",
+        kept.truncation_discarded()
+    );
+
+    let mut cut = base.clone();
+    cut.max_bond_dim = cap;
+    cut.reset_truncation_tracking();
+    gate(&mut cut);
+
+    let norm = base.pauli_expectation(&[]).unwrap().re;
+    (
+        cut.truncation_discarded() * norm,
+        squared_distance(&kept, &cut),
+    )
+}
+
+fn cx_at(left_site: usize) -> impl Fn(&mut MpsBackend) {
+    move |b: &mut MpsBackend| {
+        b.apply_adjacent_two_qubit(&Gate::Cx.matrix_4x4(), left_site, true)
+            .unwrap();
+    }
+}
+
+// The property the center exists for: against an orthonormal environment the
+// weight a cut drops is the squared 2-norm distance it moves the state, so the
+// number the cut books is the error it made rather than a bound on it. Held per
+// cut, since the strict bound over a sequence is the square of the summed
+// square roots and a whole-circuit version would test that looser claim
+// instead. Without the center, cap 3 here books 0.28 against a realized 0.13.
+#[test]
+fn a_capped_cut_books_the_error_it_makes() {
+    let base = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    for cap in [2usize, 3, 5] {
+        let (booked, realized) = one_cut(&base, cap, cx_at(3));
+        assert!(booked > 1e-3, "cap {cap} truncated nothing to check");
+        assert!(
+            (realized - booked).abs() < 1e-14,
+            "cap {cap} booked {booked:.15e} and moved the state {realized:.15e}"
+        );
+    }
+}
+
+// The gate predicate is the rank of the cut against the cap: a pair yields
+// `2 * bl.min(br)` singular values, so a chain whose bonds keep that under the
+// cap can lose nothing and takes the path it took before, untouched.
+#[test]
+fn a_chain_under_the_cap_stays_off_the_walk() {
+    for (label, circuit, cap, peak) in [
+        ("cascade_6", classical_cascade(6), 32, 1),
+        ("bell_pairs_6", bell_pairs(6), 32, 2),
+        (
+            "brickwork_10_d4",
+            crate::circuits::brickwork_circuit(10, 4, 42),
+            256,
+            4,
+        ),
+    ] {
+        let b = mps_after(&circuit, cap);
+        assert_eq!(b.current_max_bond_dim(), peak, "{label} bond peak");
+        assert_eq!(
+            b.center, None,
+            "{label} recorded a center under a cap of {cap}"
+        );
+        assert_eq!(
+            b.center_steps, 0,
+            "{label} walked the chain under a cap of {cap}"
+        );
+    }
+
+    // The boundary, so the assertion above is a predicate and not an accident:
+    // a rank-4 cut clears a cap of 4 and does not clear a cap of 3.
+    let circuit = crate::circuits::brickwork_circuit(10, 2, 42);
+    assert_eq!(mps_after(&circuit, 4).current_max_bond_dim(), 2);
+    assert_eq!(mps_after(&circuit, 4).center, None);
+    assert!(mps_after(&circuit, 3).center.is_some());
+}
+
+// A center that claims more than the chain has is worse than none: a move
+// repairs the span it walks and leaves the rest wrong. Check every step of a
+// run rather than the end of one.
+#[test]
+fn the_gauge_holds_through_a_circuit_that_drives_the_policy() {
+    let n = 8;
+    let circuit = crate::circuits::brickwork_circuit(n, 10, 42);
+    let mut b = MpsBackend::new(42, 8);
+    b.init(n, 0).unwrap();
+
+    let mut checked = 0usize;
+    for instruction in &circuit.instructions {
+        b.apply(instruction).unwrap();
+        if let Some(center) = b.center {
+            // The kernel factorizes with `svd`, whose isometry is looser than
+            // the walk's QR, so this is the bound the SVD meets rather than the
+            // 1e-14 a move is held to.
+            let worst = b.gauge_deviation(center);
+            assert!(
+                worst < 1e-12,
+                "gauge deviation {worst:.3e} about center {center}"
+            );
+            checked += 1;
+        }
+    }
+
+    assert!(
+        checked > 50,
+        "the policy engaged for {checked} of {} instructions",
+        circuit.instructions.len()
+    );
+    assert!(b.truncation_discarded() > 0.0, "the cap never bit");
+}
+
+fn chain_with_center(center: usize) -> MpsBackend {
+    let mut b = MpsBackend::new(42, 4096);
+    b.init(6, 1).unwrap();
+    b.apply_instructions(&crate::circuits::brickwork_circuit(6, 6, 42).instructions)
+        .unwrap();
+    b.establish_center(center);
+    b
+}
+
+// A write that is not an isometry breaks the gauge on a site the record claims
+// one for, and a later move would repair the span it walks and leave that site
+// wrong. Drop the record instead, so the next cut rebuilds.
+#[test]
+fn a_non_unitary_write_off_the_center_drops_it() {
+    let center = 2;
+    let damping = [[ONE, ZERO], [ZERO, Complex64::new(0.5, 0.0)]];
+
+    let mut kraus = chain_with_center(center);
+    kraus.apply_1q_matrix(center + 1, &damping).unwrap();
+    assert_eq!(kraus.center, None, "a Kraus branch kept the record");
+
+    let mut measured = chain_with_center(center);
+    measured
+        .apply(&Instruction::Measure {
+            qubit: center + 1,
+            classical_bit: 0,
+        })
+        .unwrap();
+    assert_eq!(measured.center, None, "a measurement kept the record");
+
+    let mut reset = chain_with_center(center);
+    reset.reset(center + 1).unwrap();
+    assert_eq!(reset.center, None, "a reset kept the record");
+
+    // What dropping it buys: the cut after a Kraus branch still books the error
+    // it makes, because it rebuilds rather than trusting a stale record.
+    let (booked, realized) = one_cut(&kraus, 3, cx_at(3));
+    assert!(booked > 1e-3, "the cut truncated nothing to check");
+    assert!(
+        (realized - booked).abs() < 1e-14,
+        "after a Kraus branch the cut booked {booked:.15e} and moved the state {realized:.15e}"
+    );
+}
+
+// The center site is under no isometry claim, so a projection there leaves
+// every other site exactly as canonical as it was.
+#[test]
+fn a_projection_on_the_center_keeps_it() {
+    let center = 2;
+    let mut b = chain_with_center(center);
+    b.apply(&Instruction::Measure {
+        qubit: center,
+        classical_bit: 0,
+    })
+    .unwrap();
+
+    assert_eq!(b.center, Some(center));
+    b.assert_gauge(center);
+}
+
+// End to end: a chain of Schmidt rank 2 under a cap of 3 drives the policy on
+// every pair away from the ends, while the state itself never loses a singular
+// value, which leaves the comparison exact rather than tolerant of truncation.
+#[test]
+fn a_policy_driven_circuit_matches_the_statevector() {
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    circuit.add_gate(Gate::Ry(0.7), &[0]);
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Rz(0.3 + q as f64), &[q]);
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+
+    let b = mps_after(&circuit, 3);
+    assert!(b.center.is_some(), "the fixture never drove the policy");
+    assert_eq!(b.current_max_bond_dim(), 2);
+    // The walk is exact and books nothing, which the CAMPS T-gate path reads
+    // as a hard error when it is not so.
+    assert!(b.center_steps > 0, "the walk never moved the center");
+    assert_eq!(b.truncation_discarded(), 0.0);
+
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(n, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+
+    let expected = sv.export_statevector().unwrap();
+    let actual = b.export_statevector().unwrap();
+    for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-15,
+            "amplitude {i} reads {a} against {e}"
+        );
+    }
+}
+
+// The parking rule is what makes the policy affordable: the update leaves the
+// center on the far side of the pair in the direction of travel, so a run of
+// adjacent gates carries it along without a factorization of its own.
+#[test]
+fn a_run_of_adjacent_gates_carries_the_center_along() {
+    let n = 10;
+    let mut b = MpsBackend::new(42, 4);
+    b.init(n, 0).unwrap();
+    b.apply_instructions(&crate::circuits::brickwork_circuit(n, 6, 42).instructions)
+        .unwrap();
+    assert!(b.center.is_some(), "the fixture never drove the policy");
+
+    // Rightward: the run pays the reach to the first pair and one step to turn
+    // the center around, after which each pair already has it on its left.
+    let mark = b.center_steps;
+    for q in 0..n - 1 {
+        b.dispatch_gate(&Gate::Cx, &[q, q + 1]).unwrap();
+    }
+    assert_eq!(
+        b.center_steps - mark,
+        n - 2,
+        "rightward run of {} gates",
+        n - 1
+    );
+
+    // Leftward: the pair the center already sits on takes the weight on its
+    // left instead, which turns the run around for nothing.
+    let mark = b.center_steps;
+    for q in (0..n - 1).rev() {
+        b.dispatch_gate(&Gate::Cx, &[q, q + 1]).unwrap();
+    }
+    assert_eq!(b.center_steps - mark, 0, "leftward run of {} gates", n - 1);
+
+    // A routed hop is monotone as well: the swaps march the pair together from
+    // the far end inward, so the center pays the jump to the first swap and
+    // nothing after it.
+    assert_eq!(b.center, Some(0));
+    let mark = b.center_steps;
+    b.dispatch_gate(&Gate::Cx, &[1, 7]).unwrap();
+    assert_eq!(b.center_steps - mark, 7, "hop from site 1 to site 7");
+}
+
+// A block gate decomposes left to right and leaves the weight on the last site
+// of the block, so the center ends there and the walk owes only the distance
+// into the block.
+#[test]
+fn a_block_gate_leaves_the_center_at_the_block_end() {
+    use crate::gates::McuData;
+
+    let n = 10;
+    let mut b = MpsBackend::new(42, 4);
+    b.init(n, 0).unwrap();
+    b.apply_instructions(&crate::circuits::brickwork_circuit(n, 6, 42).instructions)
+        .unwrap();
+    // From the left of the block, so the walk into it and the re-point after
+    // it land on different sites: a center left at the near edge reads a gauge
+    // deviation of 9.6e-1 there.
+    b.move_center(1);
+
+    let mark = b.center_steps;
+    let mat = [[ZERO, ONE], [ONE, ZERO]];
+    b.dispatch_gate(
+        &Gate::Mcu(Box::new(McuData {
+            num_controls: 2,
+            mat,
+        })),
+        &[3, 4, 5],
+    )
+    .unwrap();
+
+    let center = b.center.expect("the block gate dropped the center");
+    assert_eq!(center, 5);
+    assert_eq!(b.center_steps - mark, 2, "the walk stops at the near edge");
+    let worst = b.gauge_deviation(center);
+    assert!(
+        worst < 1e-13,
+        "gauge deviation {worst:.3e} after a block gate"
+    );
+}
+
+// Bubble routing makes its own kernel calls rather than going through the
+// two-qubit entry point, so the policy has to reach it there.
+#[test]
+fn bubble_routing_keeps_the_center() {
+    use crate::gates::BatchPhaseData;
+
+    let n = 8;
+    let mut b = MpsBackend::new(42, 4);
+    b.init(n, 0).unwrap();
+    b.apply_instructions(&crate::circuits::brickwork_circuit(n, 6, 42).instructions)
+        .unwrap();
+    assert!(b.center.is_some(), "the fixture never drove the policy");
+
+    b.dispatch_gate(
+        &Gate::BatchPhase(Box::new(BatchPhaseData {
+            phases: smallvec::smallvec![
+                (1, Complex64::from_polar(1.0, 0.5)),
+                (5, Complex64::from_polar(1.0, 1.2)),
+                (6, Complex64::from_polar(1.0, 2.1)),
+            ],
+        })),
+        &[3],
+    )
+    .unwrap();
+
+    let center = b.center.expect("bubble routing dropped the center");
+    let worst = b.gauge_deviation(center);
+    assert!(
+        worst < 1e-13,
+        "gauge deviation {worst:.3e} about center {center}"
+    );
+}
+
+fn mcu_at(control_pair: [usize; 3]) -> impl Fn(&mut MpsBackend) {
+    use crate::gates::McuData;
+
+    let gate = Gate::Mcu(Box::new(McuData {
+        num_controls: 2,
+        mat: [[ZERO, ONE], [ONE, ZERO]],
+    }));
+    move |b: &mut MpsBackend| {
+        b.dispatch_gate(&gate, &control_pair).unwrap();
+    }
+}
+
+// The gauge is not bookkeeping. A cut against a non-orthogonal environment
+// keeps a different subspace, so it lands further from the state the uncapped
+// run holds: 2.0x, 1.5x and 4.8x further on the three caps below, and 1.8x on
+// the block gate. A center claimed but not held is the only way left to reach
+// such a cut, which is why the invalidation rules exist.
+#[test]
+fn a_centered_cut_lands_closer_than_one_in_the_wrong_gauge() {
+    let base = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    let mut stale = base.clone();
+    stale.center = Some(3);
+
+    for cap in [2usize, 3, 5] {
+        let (_, centered) = one_cut(&base, cap, cx_at(3));
+        let (_, ungauged) = one_cut(&stale, cap, cx_at(3));
+        assert!(
+            centered < 0.9 * ungauged,
+            "cap {cap} moved the state {centered:.6e} centered against {ungauged:.6e} ungauged"
+        );
+    }
+
+    let (_, centered) = one_cut(&base, 3, mcu_at([3, 4, 5]));
+    let (_, ungauged) = one_cut(&stale, 3, mcu_at([3, 4, 5]));
+    assert!(
+        centered < 0.9 * ungauged,
+        "the block gate moved the state {centered:.6e} centered against {ungauged:.6e} ungauged"
+    );
+}
+
+// A raised threshold cuts real weight on a chain whose bonds never approach
+// the cap, so the cap alone does not decide whether the gauge matters. At 0.2
+// this cut books 1.700606e-2 and moves the state by the same, where an
+// ungauged one books 6.900e-3 against a realized 9.587e-3, understating by
+// 28% the error it made.
+#[test]
+fn a_raised_epsilon_gauges_a_chain_under_the_cap() {
+    let mut base = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    base.set_svd_epsilon(0.2);
+
+    let (booked, realized) = one_cut(&base, 4096, cx_at(3));
+    assert!(booked > 1e-3, "the raised threshold cut nothing to check");
+    assert!(
+        (realized - booked).abs() < 1e-14,
+        "booked {booked:.15e} against a realized {realized:.15e}"
+    );
+
+    // The construction default sheds at most rank * epsilon^2, which is under
+    // rounding, so it leaves the chain on the unchanged path.
+    let default = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    assert_eq!(default.center, None);
+    assert_eq!(default.center_steps, 0);
+}
+
+// The block decomposition truncates at every one of its cuts, so it needs a
+// trigger of its own rather than only inheriting a center the two-qubit path
+// left behind.
+#[test]
+fn a_block_gate_establishes_a_center_of_its_own() {
+    let base = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    assert_eq!(base.center, None);
+
+    let (booked, realized) = one_cut(&base, 3, mcu_at([3, 4, 5]));
+
+    let mut cut = base.clone();
+    cut.max_bond_dim = 3;
+    mcu_at([3, 4, 5])(&mut cut);
+    assert_eq!(cut.center, Some(5));
+    assert!(cut.center_steps > 0, "the block gate never walked");
+
+    // Three sites decompose in two cuts and the total sums both, so it answers
+    // for the accumulation rather than for one cut: 1.514759e-1 booked against
+    // a realized 1.457433e-1, over rather than under.
+    assert!(
+        booked >= realized && booked < 1.1 * realized,
+        "the block booked {booked:.6e} against a realized {realized:.6e}"
+    );
+}
+
+// End to end, which is what a caller sees: the error the whole run carries
+// against the untruncated chain, and how close the reported total lands to it.
+// The ungauged path read an infidelity of 3.566e-2 here against a booked
+// 5.463e-2, so the state is 258 times further out than this one and the figure
+// describing it misses by 53%.
+#[test]
+fn a_capped_run_lands_where_it_says_it_does() {
+    let circuit = crate::circuits::brickwork_circuit(14, 24, 0xDEAD_BEEF);
+    let n = circuit.num_qubits;
+
+    let mut exact = MpsBackend::new(42, 1 << 20);
+    exact.init(n, 0).unwrap();
+    exact.apply_instructions(&circuit.instructions).unwrap();
+    assert!(
+        exact.truncation_discarded() < 1e-20,
+        "the reference truncated"
+    );
+
+    let mut capped = MpsBackend::new(42, 64);
+    capped.init(n, 0).unwrap();
+    capped.apply_instructions(&circuit.instructions).unwrap();
+
+    let overlap = exact.inner_product(&capped).unwrap().norm_sqr();
+    let infidelity = 1.0
+        - overlap
+            / (exact.pauli_expectation(&[]).unwrap().re
+                * capped.pauli_expectation(&[]).unwrap().re);
+    assert!(
+        infidelity < 1e-3,
+        "the capped run sits {infidelity:.6e} from the untruncated one"
+    );
+
+    // The total sums one figure per cut, so it answers for the accumulation
+    // and is not owed exactness here, only the right size.
+    let booked = capped.truncation_discarded();
+    assert!(
+        (infidelity - booked).abs() < 0.1 * booked,
+        "booked {booked:.6e} against a realized {infidelity:.6e}"
+    );
+}
+
+// The middle bond binds where the pair bonds do not: a chain carrying a bond
+// wider than the rank feeding it cannot lose weight the wider bond suggests.
+#[test]
+fn the_middle_bond_caps_the_rank_a_two_site_cut_carries() {
+    assert_eq!(cut_rank(20, 2, 20), 8);
+    assert_eq!(cut_rank(20, 64, 20), 40);
+    assert_eq!(cut_rank(1, 64, 64), 2);
+    assert_eq!(cut_rank(64, 16, 8), 16);
 }

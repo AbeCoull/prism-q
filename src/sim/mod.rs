@@ -416,7 +416,10 @@ impl<'c> Simulate<'c, Seeded> {
     /// `BackendUnsupported` naming itself.
     ///
     /// With a noise model attached the value is the exact `Tr(rho P)` on the
-    /// evolved mixture, which needs the density-matrix backend.
+    /// evolved mixture, which needs the density-matrix backend. A model
+    /// carrying readout error is rejected: readout acts on the measurement
+    /// record, which no observable sees, and `shots` on the same model would
+    /// disagree by the readout rate.
     #[inline]
     pub fn expectation_values(self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         self.expectation_values_reported(observables)
@@ -432,6 +435,9 @@ impl<'c> Simulate<'c, Seeded> {
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if let Some(noise_model) = self.noise_model {
+            reject_readout_at(self.circuit, noise_model, "expectation values")?;
         }
         if let BackendKind::PauliPath { epsilon, max_terms } = self.kind {
             reject_pauli_path_initial_state(self.initial_state)?;
@@ -482,7 +488,8 @@ impl<'c> Simulate<'c, Seeded> {
     /// for what the number means. Every other route, including runs with a
     /// noise model or start state attached, evaluates term by term through
     /// [`Simulate::expectation_values`] semantics and reports the weighted
-    /// mean with no variance.
+    /// mean with no variance. A noise model carrying readout error is rejected
+    /// for the same reason as there.
     pub fn observable_expectation(
         self,
         observable: &PauliObservable,
@@ -490,6 +497,9 @@ impl<'c> Simulate<'c, Seeded> {
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if let Some(noise_model) = self.noise_model {
+            reject_readout_at(self.circuit, noise_model, "observable expectation")?;
         }
         if let BackendKind::PauliPath { epsilon, max_terms } = self.kind {
             reject_pauli_path_initial_state(self.initial_state)?;
@@ -750,8 +760,8 @@ fn require_exact_mixture(kind: &BackendKind, terminal: &str) -> Result<()> {
     })
 }
 
-/// Gate for the terminals that answer from the mixed state, which readout
-/// error is not part of.
+/// Gate for the terminals that answer from the state, mixed or pure, which
+/// readout error is not part of.
 ///
 /// The condition is the one under which a draw would actually differ. Entries
 /// past the circuit's bit count never apply, matching what

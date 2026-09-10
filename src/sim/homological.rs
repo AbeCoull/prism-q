@@ -795,7 +795,8 @@ pub(crate) fn run_shots_homological_inner(
 
     Ok(
         ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
-            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer),
+            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer)
+                .with_engine(crate::sim::Engine::HomologicalSampler),
         ),
     )
 }

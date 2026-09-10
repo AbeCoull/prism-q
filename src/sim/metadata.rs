@@ -57,6 +57,24 @@ pub enum ResolvedBackend {
     Other(&'static str),
 }
 
+/// Sampler behind a result whose [`ResolvedBackend`] covers more than one.
+///
+/// [`ResolvedBackend::CompiledStabilizer`] is stamped by four samplers: the
+/// noiseless compiled sampler, and three that the noisy shot entry point picks
+/// between at run time on the shot count and the depth ratio. The backend alone
+/// does not say which ran; each variant names the sampler that did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    /// `CompiledSampler`: the noiseless parity map.
+    CompiledSampler,
+    /// `NoisyCompiledSampler`: the parity map with the flip tables folded in.
+    NoisyCompiledSampler,
+    /// The Pauli frame sampler, which replays a reference record per batch.
+    FrameSampler,
+    /// `HomologicalSampler`: syndrome classes precomputed, O(1) per shot.
+    HomologicalSampler,
+}
+
 /// Whether a result is exact for the circuit as given.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Exactness {
@@ -90,6 +108,10 @@ pub enum Placement {
 #[derive(Debug, Clone)]
 pub struct RunMetadata {
     pub backend: ResolvedBackend,
+    /// Which sampler ran, when `backend` is a label several share. `None`
+    /// when the backend is the whole answer, which is every backend other than
+    /// [`ResolvedBackend::CompiledStabilizer`].
+    pub engine: Option<Engine>,
     pub exactness: Exactness,
     pub placement: Placement,
     /// Shots drawn, for a result estimated by sampling. `None` for an analytic
@@ -105,6 +127,7 @@ impl RunMetadata {
     ) -> Self {
         Self {
             backend,
+            engine: None,
             exactness,
             placement,
             shots: None,
@@ -127,6 +150,11 @@ impl RunMetadata {
 
     pub(crate) fn with_shots(mut self, shots: usize) -> Self {
         self.shots = Some(shots);
+        self
+    }
+
+    pub(crate) fn with_engine(mut self, engine: Engine) -> Self {
+        self.engine = Some(engine);
         self
     }
 

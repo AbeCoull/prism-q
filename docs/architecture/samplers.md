@@ -195,6 +195,11 @@ engine per call:
 | Pauli frame | Shallow circuits: gate count / qubits < 3, or < 5 at >= 200 qubits | Clifford, terminal measurements only |
 | Compiled Pauli (`NoisyCompiledSampler`) | Remaining Clifford + terminal-measurement circuits | Clifford, terminal measurements only |
 
+The last three, and the noiseless compiled sampler, all resolve to
+`ResolvedBackend::CompiledStabilizer`. `RunMetadata::engine` names which one
+ran, so a test pins a route off the result rather than off the predicates that
+picked it.
+
 The trajectory engine (`src/sim/trajectory.rs`) covers everything the compiled
 family rejects: non-Pauli channels, mid-circuit measurement, reset, classical
 conditionals, and non-Clifford gates, at per-shot state evolution cost.

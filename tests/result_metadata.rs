@@ -5,8 +5,8 @@ mod common;
 
 use common::SEED;
 use prism_q::{
-    BackendKind, Circuit, CircuitBuilder, Exactness, Gate, PauliTerm, Placement, ResolvedBackend,
-    simulate,
+    BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
+    Placement, ResolvedBackend, run_shots_compiled, simulate,
 };
 
 fn bell() -> Circuit {
@@ -278,6 +278,83 @@ fn per_shot_route_stamps_metadata() {
         shots.metadata.exactness,
         Exactness::Approximate { .. }
     ));
+}
+
+/// A GHZ ladder on three qubits, all measured, with `pad` Z gates on the last
+/// qubit. No Z-basis outcome sees the pad; it only raises the gate count per
+/// qubit past the ratio of 3 that sends a noisy model to the frame sampler.
+fn ghz_ladder(pad: usize) -> Circuit {
+    let mut circuit = Circuit::new(3, 3);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
+    for _ in 0..pad {
+        circuit.add_gate(Gate::Z, &[2]);
+    }
+    circuit.measure_all();
+    circuit
+}
+
+// Four samplers resolve to `CompiledStabilizer`, and the noisy entry point
+// picks between three of them at run time. Each test below drives one route
+// through the public terminal by the condition that selects it and reads the
+// route off the result, so a stamp removed upstream fails the one assertion
+// that reads it and no other.
+#[test]
+fn noiseless_shots_name_the_compiled_sampler() {
+    let circuit = ghz_ladder(0);
+    let shots = simulate(&circuit).seed(SEED).shots(8).unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(shots.metadata.engine, Some(Engine::CompiledSampler));
+
+    let direct = run_shots_compiled(&circuit, 8, SEED).unwrap();
+    assert_eq!(direct.metadata.engine, Some(Engine::CompiledSampler));
+}
+
+#[test]
+fn a_thousand_noisy_shots_name_the_homological_sampler() {
+    let circuit = ghz_ladder(0);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    let shots = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(1000)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(shots.metadata.engine, Some(Engine::HomologicalSampler));
+}
+
+#[test]
+fn fewer_noisy_shots_on_a_shallow_circuit_name_the_frame_sampler() {
+    let circuit = ghz_ladder(0);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    let shots = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(999)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(shots.metadata.engine, Some(Engine::FrameSampler));
+}
+
+#[test]
+fn fewer_noisy_shots_on_a_deep_circuit_name_the_noisy_compiled_sampler() {
+    let circuit = ghz_ladder(7);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+    let shots = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(999)
+        .unwrap();
+    assert_eq!(shots.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(shots.metadata.engine, Some(Engine::NoisyCompiledSampler));
+}
+
+// A backend that is the whole answer leaves the finer field empty.
+#[test]
+fn a_single_engine_backend_leaves_engine_empty() {
+    let outcome = simulate(&bell()).seed(SEED).run().unwrap();
+    assert_eq!(outcome.metadata.engine, None);
 }
 
 // Truncation-enabled SPD marks the route approximate even when the run

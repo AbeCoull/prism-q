@@ -122,10 +122,10 @@ pub use sim::unified_pauli::{
     run_spd_observable_light_cone, run_spp, run_spp_observable,
 };
 pub use sim::{
-    BackendKind, CountsResult, Exactness, ExpectationResult, FactoredBlock, MarginalsResult,
-    ObservableExpectation, PauliObservable, Placement, Probabilities, ResolvedBackend, RunMetadata,
-    RunOutcome, Seeded, ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values,
-    run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
+    BackendKind, CountsResult, Engine, Exactness, ExpectationResult, FactoredBlock,
+    MarginalsResult, ObservableExpectation, PauliObservable, Placement, Probabilities,
+    ResolvedBackend, RunMetadata, RunOutcome, Seeded, ShotsResult, Simulate, Unseeded, bitstring,
+    run_expectation_values, run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
 };
 #[cfg(feature = "parallel")]
 pub use threading::ThreadPool;

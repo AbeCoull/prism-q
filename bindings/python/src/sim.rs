@@ -495,6 +495,14 @@ impl PyRunMetadata {
         format!("{:?}", self.inner.backend)
     }
 
+    /// Which sampler ran when `backend` is a label several share, for example
+    /// `"FrameSampler"` under `"CompiledStabilizer"`. `None` when the backend
+    /// is the whole answer.
+    #[getter]
+    fn engine(&self) -> Option<String> {
+        self.inner.engine.map(|engine| format!("{engine:?}"))
+    }
+
     /// False when the engine that ran can discard state weight or estimate by
     /// sampling. Marks the route rather than the run; `fidelity_lower_bound`
     /// reports what this run discarded.
@@ -534,8 +542,12 @@ impl PyRunMetadata {
             } => format!("approximate(fidelity>={bound:.6})"),
             Exactness::Approximate { .. } => "approximate".to_string(),
         };
+        let engine = self
+            .engine()
+            .map(|engine| format!(", engine={engine}"))
+            .unwrap_or_default();
         format!(
-            "RunMetadata(backend={}, {exact}, placement={})",
+            "RunMetadata(backend={}{engine}, {exact}, placement={})",
             self.backend(),
             self.placement()
         )

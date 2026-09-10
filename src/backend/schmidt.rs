@@ -12,9 +12,8 @@ use crate::error::{PrismError, Result};
 /// this floor carries under `1e-27` nats.
 const SCHMIDT_VALUE_FLOOR: f64 = 1e-14;
 
-/// Reject a subsystem that is empty, the whole register, out of range, or
-/// names a qubit twice, so a cut always has two non-empty sides.
-pub(crate) fn validate_subsystem(subsystem: &[usize], num_qubits: usize) -> Result<()> {
+/// Reject a subsystem that is empty, out of range, or names a qubit twice.
+pub(crate) fn validate_qubit_set(subsystem: &[usize], num_qubits: usize) -> Result<()> {
     let mut seen = vec![false; num_qubits];
     for &qubit in subsystem {
         if qubit >= num_qubits {
@@ -30,7 +29,19 @@ pub(crate) fn validate_subsystem(subsystem: &[usize], num_qubits: usize) -> Resu
         }
         seen[qubit] = true;
     }
-    if subsystem.is_empty() || subsystem.len() == num_qubits {
+    if subsystem.is_empty() {
+        return Err(PrismError::InvalidParameter {
+            message: "subsystem must name at least one qubit".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// [`validate_qubit_set`], and reject the whole register too, so a cut always
+/// has two non-empty sides.
+pub(crate) fn validate_subsystem(subsystem: &[usize], num_qubits: usize) -> Result<()> {
+    validate_qubit_set(subsystem, num_qubits)?;
+    if subsystem.len() == num_qubits {
         return Err(PrismError::InvalidParameter {
             message: format!(
                 "subsystem must leave both sides of the cut non-empty, got {} of {num_qubits} \
@@ -181,14 +192,13 @@ pub(crate) fn check_schmidt_side(backend: &str, what: &str, side: usize) -> Resu
     }
     let width = 2 * side;
     if width > export_cap() {
-        super::dense_statevector_len(
+        return Err(export_cap_exceeded(
             backend,
-            &format!(
+            format!(
                 "{what} with {side} qubits on the smaller side, whose reduced density matrix \
-                 is the size of a statevector"
+                 is the size of a statevector for {width} qubits"
             ),
-            width,
-        )?;
+        ));
     }
     Ok(())
 }
@@ -200,20 +210,34 @@ pub(crate) fn check_schmidt_side(backend: &str, what: &str, side: usize) -> Resu
 fn check_dense_schmidt_width(backend: &str, num_qubits: usize) -> Result<()> {
     let width = num_qubits + 1;
     if width > export_cap() {
-        super::dense_statevector_len(
+        return Err(export_cap_exceeded(
             backend,
-            "Schmidt values across a cut, whose gathered copy and thin factor together are \
-             the size of a statevector",
-            width,
-        )?;
+            format!(
+                "Schmidt values across a cut, whose gathered copy and thin factor together are \
+                 the size of a statevector for {width} qubits"
+            ),
+        ));
     }
     Ok(())
 }
 
 /// The dense export cap as `dense_statevector_len` applies it, so a check
 /// against it formats no message on the path that passes.
-fn export_cap() -> usize {
+pub(crate) fn export_cap() -> usize {
     super::memory::max_dense_statevector_qubits().min(usize::BITS as usize - 1)
+}
+
+/// The error a diagnostic raises past the dense export cap: the same variant a
+/// statevector export raises there, so nothing reads it as a missing terminal,
+/// with `what` naming the allocation that was priced.
+pub(crate) fn export_cap_exceeded(backend: &str, what: String) -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: backend.to_string(),
+        reason: format!(
+            "{what} (max {} on this machine, set PRISM_MAX_EXPORT_QUBITS to override)",
+            export_cap()
+        ),
+    }
 }
 
 /// Schmidt values of a dense `2^num_qubits` amplitude vector across

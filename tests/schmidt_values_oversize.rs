@@ -24,9 +24,9 @@ fn assert_ghz_spectrum(values: &[f64]) {
 fn assert_declines_past_the_cap(backend: &mut dyn Backend, subsystem: &[usize], route: &str) {
     let name = backend.name();
     match backend.schmidt_values(subsystem).unwrap_err() {
-        PrismError::BackendUnsupported { backend, operation } => {
+        PrismError::IncompatibleBackend { backend, reason } => {
             assert_eq!(backend, name);
-            assert!(operation.starts_with(route), "{operation}");
+            assert!(reason.starts_with(route), "{reason}");
         }
         other => panic!("unexpected error {other:?}"),
     }

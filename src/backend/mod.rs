@@ -31,6 +31,7 @@
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
 //! | `init_from_amplitudes` | Everything except Statevector, DistributedStatevector, and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. The distributed statevector takes the full vector on every rank and keeps its own slice. |
+//! | `reduced_density_matrix` | Mps, TensorNetwork, Stabilizer, FactoredStabilizer, DistributedStatevector | Each holds the state in a form a partial trace has to be contracted out of, an environment sweep for the chain, a doubled network, a projector over the generators inside the subsystem, or a slice exchange across rank qubits, and none of those kernels exists yet. |
 //! | `schmidt_values` | Everything except Statevector, Mps, and ProductState | A mixture has no Schmidt decomposition, and a tableau's spectrum is flat, so its entropy is a rank and not a list. Sparse, factored, tensor-network and distributed states could answer through a reduced density matrix but do not yet. `entanglement_entropy` follows, since its default reads the spectrum. |
 //!
 //! [`Backend::reduced_density_matrix_1q`] and [`Backend::apply_1q_matrix`] are
@@ -51,6 +52,7 @@ pub mod factored_stabilizer;
 pub(crate) mod memory;
 pub mod mps;
 pub mod product;
+pub(crate) mod reduced_density;
 pub(crate) mod schmidt;
 pub(crate) mod simd;
 pub mod sparse;
@@ -715,6 +717,27 @@ pub trait Backend {
     fn entanglement_entropy(&mut self, subsystem: &[usize]) -> Result<f64> {
         let values = self.schmidt_values(subsystem)?;
         Ok(schmidt::entropy_of_schmidt_values(&values))
+    }
+
+    /// Reduced density matrix of `subsystem`, row major with side `2^k` for
+    /// `k` qubits: `rho[t * 2^k + t']` is `<t|rho|t'>`, where bit `i` of `t`
+    /// is the state of `subsystem[i]`, so `subsystem[0]` is the lowest bit as
+    /// `q[0]` is in a basis index. Trace one whatever norm the representation
+    /// carries; Hermitian to rounding.
+    ///
+    /// `subsystem` must be non-empty and name no qubit twice
+    /// (`schmidt::validate_qubit_set`); the whole register is allowed, and on a
+    /// mixture returns the state itself. The `4^k` entries are priced as a
+    /// `2k`-qubit statevector against the dense export cap
+    /// (`reduced_density::reduced_density_side`). Takes `&mut self` as
+    /// [`Backend::schmidt_values`] does. The default reports that the
+    /// representation offers no partial trace; see the module docs for what
+    /// declines it.
+    fn reduced_density_matrix(&mut self, _subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "reduced density matrix".to_string(),
+        })
     }
 
     /// Apply a 2×2 matrix to a single qubit without allocating.

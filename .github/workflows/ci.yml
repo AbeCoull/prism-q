@@ -497,8 +497,9 @@ jobs:
         run: |
           stub=$(find "$CUDA_PATH" -path '*stubs*' -name libcuda.so | head -1)
           test -n "$stub"
-          ln -sf "$stub" "$(dirname "$stub")/libcuda.so.1"
-          echo "LD_LIBRARY_PATH=$(dirname "$stub")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/cuda-stub"
+          ln -sf "$stub" "$RUNNER_TEMP/cuda-stub/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

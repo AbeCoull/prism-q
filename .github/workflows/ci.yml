@@ -488,6 +488,18 @@ jobs:
         with:
           cuda: '12.4.0'
           method: network
+      # cudarc links the driver rather than loading it on demand, so a test binary
+      # that reaches a driver symbol needs libcuda.so.1 present just to start, and
+      # nextest starts every binary to enumerate its tests. Whether the toolkit
+      # install drags a real driver in has changed upstream, so rely on the stub
+      # it ships instead: it satisfies the loader, and nothing here calls into it.
+      - name: Point the loader at the driver stub
+        run: |
+          stub=$(find "$CUDA_PATH" -path '*stubs*' -name libcuda.so | head -1)
+          test -n "$stub"
+          mkdir -p "$RUNNER_TEMP/cuda-stub"
+          ln -sf "$stub" "$RUNNER_TEMP/cuda-stub/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cuda-stub${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

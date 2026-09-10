@@ -78,6 +78,13 @@ use crate::gates::Gate;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::collections::HashMap;
 
+fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
+    PrismError::Parse {
+        line,
+        message: message.into(),
+    }
+}
+
 /// Parse an OpenQASM 3.0 string into a PRISM-Q [`Circuit`].
 ///
 /// This is the primary input entrypoint. The entire parse happens in-memory
@@ -377,21 +384,18 @@ fn strip_leading_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
 /// Split a leading `{ ... }` off `s`, returning the body and what follows it.
 fn split_braced_body<'a>(s: &'a str, line_num: usize, what: &str) -> Result<(&'a str, &'a str)> {
     let s = s.trim_start();
-    let open = s.find('{').ok_or_else(|| PrismError::Parse {
-        line: line_num,
-        message: format!("expected `{{` in `{what}` body"),
-    })?;
+    let open = s
+        .find('{')
+        .ok_or_else(|| parse_error(line_num, format!("expected `{{` in `{what}` body")))?;
     if !s[..open].trim().is_empty() {
-        return Err(PrismError::Parse {
-            line: line_num,
-            message: format!("unexpected `{}` before `{what}` body", s[..open].trim()),
-        });
+        return Err(parse_error(
+            line_num,
+            format!("unexpected `{}` before `{what}` body", s[..open].trim()),
+        ));
     }
     let after = &s[open + 1..];
-    let close = find_matching_close_brace(after).ok_or_else(|| PrismError::Parse {
-        line: line_num,
-        message: format!("unmatched `{{` in `{what}` body"),
-    })?;
+    let close = find_matching_close_brace(after)
+        .ok_or_else(|| parse_error(line_num, format!("unmatched `{{` in `{what}` body")))?;
     Ok((&after[..close], &after[close + 1..]))
 }
 
@@ -407,10 +411,9 @@ fn split_switch_arms<'a>(src: &'a str, line_num: usize) -> Result<Vec<SwitchArm<
     let mut rest = src.trim();
     while !rest.is_empty() {
         if let Some(after) = strip_leading_keyword(rest, "case") {
-            let open = after.find('{').ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "expected `{` after `switch` case labels".to_string(),
-            })?;
+            let open = after
+                .find('{')
+                .ok_or_else(|| parse_error(line_num, "expected `{` after `switch` case labels"))?;
             let (body, tail) = split_braced_body(&after[open..], line_num, "case")?;
             out.push(SwitchArm {
                 labels_src: Some(&after[..open]),
@@ -429,10 +432,10 @@ fn split_switch_arms<'a>(src: &'a str, line_num: usize) -> Result<Vec<SwitchArm<
                 .split(|c: char| c.is_whitespace() || c == '(' || c == '{')
                 .next()
                 .unwrap_or(rest);
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("expected `case` or `default` in `switch` body, got `{word}`"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("expected `case` or `default` in `switch` body, got `{word}`"),
+            ));
         }
     }
     Ok(out)
@@ -451,14 +454,14 @@ fn nest_default_arm(
     // The nesting the default costs is on top of wherever the `switch` sits, so
     // the bound is the sum rather than the label count alone.
     if region_depth + labels.len() > MAX_REGION_DEPTH {
-        return Err(PrismError::Parse {
-            line: line_num,
-            message: format!(
+        return Err(parse_error(
+            line_num,
+            format!(
                 "`switch` with a `default` nests one region per case label and would \
                  pass the depth bound of {MAX_REGION_DEPTH} at {} labels",
                 labels.len()
             ),
-        });
+        ));
     }
     let mut current = body;
     for &value in labels.iter().rev() {
@@ -513,21 +516,24 @@ fn find_keyword(haystack: &str, needle: &str) -> Option<usize> {
 
 fn parse_for_var(lhs: &str, line_num: usize) -> Result<String> {
     let mut tokens = lhs.split_whitespace();
-    let first = tokens.next().ok_or_else(|| PrismError::Parse {
-        line: line_num,
-        message: "missing loop variable in for header".to_string(),
-    })?;
+    let first = tokens
+        .next()
+        .ok_or_else(|| parse_error(line_num, "missing loop variable in for header"))?;
 
     let var = if matches!(first, "int" | "uint") {
-        let next = tokens.next().ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "missing loop variable name after type in for header".to_string(),
+        let next = tokens.next().ok_or_else(|| {
+            parse_error(
+                line_num,
+                "missing loop variable name after type in for header",
+            )
         })?;
         next.trim_end_matches(',').to_string()
     } else if first.starts_with("int[") || first.starts_with("uint[") {
-        let next = tokens.next().ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "missing loop variable name after type in for header".to_string(),
+        let next = tokens.next().ok_or_else(|| {
+            parse_error(
+                line_num,
+                "missing loop variable name after type in for header",
+            )
         })?;
         next.trim_end_matches(',').to_string()
     } else {
@@ -535,20 +541,20 @@ fn parse_for_var(lhs: &str, line_num: usize) -> Result<String> {
     };
 
     if tokens.next().is_some() {
-        return Err(PrismError::Parse {
-            line: line_num,
-            message: format!("unexpected tokens in for loop variable spec: `{lhs}`"),
-        });
+        return Err(parse_error(
+            line_num,
+            format!("unexpected tokens in for loop variable spec: `{lhs}`"),
+        ));
     }
 
     if var.is_empty()
         || !var.chars().next().unwrap().is_ascii_alphabetic()
         || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
-        return Err(PrismError::Parse {
-            line: line_num,
-            message: format!("invalid loop variable name: `{var}`"),
-        });
+        return Err(parse_error(
+            line_num,
+            format!("invalid loop variable name: `{var}`"),
+        ));
     }
 
     Ok(var)
@@ -562,16 +568,16 @@ fn eval_int_expr(s: &str, line_num: usize, vars: Option<&HashMap<String, i64>>) 
     });
     let val = eval_expr(s, line_num, float_vars.as_ref())?;
     if val.fract() != 0.0 || !val.is_finite() {
-        return Err(PrismError::Parse {
-            line: line_num,
-            message: format!("expected integer expression, got `{s}` = {val}"),
-        });
+        return Err(parse_error(
+            line_num,
+            format!("expected integer expression, got `{s}` = {val}"),
+        ));
     }
     if val > i64::MAX as f64 || val < i64::MIN as f64 {
-        return Err(PrismError::Parse {
-            line: line_num,
-            message: format!("integer expression `{s}` out of range"),
-        });
+        return Err(parse_error(
+            line_num,
+            format!("integer expression `{s}` out of range"),
+        ));
     }
     Ok(val as i64)
 }
@@ -596,17 +602,17 @@ fn parse_for_range(
                 eval_int_expr(parts[2].trim(), line_num, int_vars)?,
             ),
             _ => {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!("malformed range `[{inner}]` in for loop"),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("malformed range `[{inner}]` in for loop"),
+                ));
             }
         };
         if step == 0 {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "for loop range step must be non-zero".to_string(),
-            });
+            return Err(parse_error(
+                line_num,
+                "for loop range step must be non-zero",
+            ));
         }
         let mut values = Vec::new();
         let mut i = start;
@@ -614,10 +620,10 @@ fn parse_for_range(
             while i <= stop {
                 values.push(i);
                 if values.len() as i64 > MAX_FOR_ITERATIONS {
-                    return Err(PrismError::Parse {
-                        line: line_num,
-                        message: format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
-                    });
+                    return Err(parse_error(
+                        line_num,
+                        format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
+                    ));
                 }
                 i += step;
             }
@@ -625,10 +631,10 @@ fn parse_for_range(
             while i >= stop {
                 values.push(i);
                 if values.len() as i64 > MAX_FOR_ITERATIONS {
-                    return Err(PrismError::Parse {
-                        line: line_num,
-                        message: format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
-                    });
+                    return Err(parse_error(
+                        line_num,
+                        format!("for loop iterates more than {MAX_FOR_ITERATIONS} times"),
+                    ));
                 }
                 i += step;
             }
@@ -777,13 +783,13 @@ impl<'a> Parser<'a> {
         }
 
         if let Some(state) = block {
-            return Err(PrismError::Parse {
-                line: state.start_line,
-                message: format!(
+            return Err(parse_error(
+                state.start_line,
+                format!(
                     "unterminated `{}` block (missing `}}`)",
                     block_kind_name(state.kind)
                 ),
-            });
+            ));
         }
 
         Ok(instructions)
@@ -817,10 +823,10 @@ impl<'a> Parser<'a> {
                 _ => unreachable!(),
             };
             if !line.contains('{') {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!("expected `{{` in `{}` block", first_word),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("expected `{{` in `{}` block", first_word),
+                ));
             }
             *block = Some(BlockState {
                 kind,
@@ -950,10 +956,10 @@ impl<'a> Parser<'a> {
             });
         }
         if self.inputs.contains_key(&name) {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("input `{name}` declared twice"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("input `{name}` declared twice"),
+            ));
         }
         self.inputs.insert(name.clone(), self.input_names.len());
         self.input_names.push(name);
@@ -981,18 +987,18 @@ impl<'a> Parser<'a> {
         keyword: &str,
         line_num: usize,
     ) -> Result<(&'s str, String)> {
-        let split = rest
-            .rfind(|c: char| c.is_whitespace())
-            .ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: format!("expected `{keyword} <type> <name>`, got `{keyword} {rest}`"),
-            })?;
+        let split = rest.rfind(|c: char| c.is_whitespace()).ok_or_else(|| {
+            parse_error(
+                line_num,
+                format!("expected `{keyword} <type> <name>`, got `{keyword} {rest}`"),
+            )
+        })?;
         let (ty, name) = (rest[..split].trim(), rest[split..].trim());
         if ty.is_empty() || name.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("expected `{keyword} <type> <name>`, got `{keyword} {rest}`"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("expected `{keyword} <type> <name>`, got `{keyword} {rest}`"),
+            ));
         }
         Ok((ty, name.to_string()))
     }
@@ -1046,37 +1052,38 @@ impl<'a> Parser<'a> {
         let kind_name = kind.name();
 
         if rest.trim_start().starts_with('[') {
-            let bracket_content = Self::extract_bracket(rest).ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: format!("missing `]` in {kind_name} declaration"),
+            let bracket_content = Self::extract_bracket(rest).ok_or_else(|| {
+                parse_error(line_num, format!("missing `]` in {kind_name} declaration"))
             })?;
-            let size: usize = bracket_content.parse().map_err(|_| PrismError::Parse {
-                line: line_num,
-                message: format!("invalid {kind_name} count: `{bracket_content}`"),
+            let size: usize = bracket_content.parse().map_err(|_| {
+                parse_error(
+                    line_num,
+                    format!("invalid {kind_name} count: `{bracket_content}`"),
+                )
             })?;
             if size == 0 {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!("{kind_name} count must be > 0"),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("{kind_name} count must be > 0"),
+                ));
             }
             let end = rest.find(']').unwrap(); // safe: extract_bracket succeeded
             let name = rest[end + 1..].trim().to_string();
             if name.is_empty() {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!("{kind_name} declaration missing name"),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("{kind_name} declaration missing name"),
+                ));
             }
             return Ok((name, size));
         }
 
         let name = rest.trim().to_string();
         if name.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("{kind_name} declaration missing name"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("{kind_name} declaration missing name"),
+            ));
         }
         Ok((name, 1))
     }
@@ -1109,31 +1116,28 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_legacy_register_decl(s: &str, line_num: usize) -> Result<(String, usize)> {
-        let bracket_start = s.find('[').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: format!("expected `[` in register declaration: `{s}`"),
+        let bracket_start = s.find('[').ok_or_else(|| {
+            parse_error(
+                line_num,
+                format!("expected `[` in register declaration: `{s}`"),
+            )
         })?;
-        let bracket_end = s.find(']').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: format!("expected `]` in register declaration: `{s}`"),
+        let bracket_end = s.find(']').ok_or_else(|| {
+            parse_error(
+                line_num,
+                format!("expected `]` in register declaration: `{s}`"),
+            )
         })?;
         let name = s[..bracket_start].trim().to_string();
         if name.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "register name is empty".to_string(),
-            });
+            return Err(parse_error(line_num, "register name is empty"));
         }
         let size_str = s[bracket_start + 1..bracket_end].trim();
-        let size: usize = size_str.parse().map_err(|_| PrismError::Parse {
-            line: line_num,
-            message: format!("invalid register size: `{size_str}`"),
-        })?;
+        let size: usize = size_str
+            .parse()
+            .map_err(|_| parse_error(line_num, format!("invalid register size: `{size_str}`")))?;
         if size == 0 {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "register size must be > 0".to_string(),
-            });
+            return Err(parse_error(line_num, "register size must be > 0"));
         }
         Ok((name, size))
     }
@@ -1196,27 +1200,24 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_indexed_ref<'b>(&self, token: &'b str, line_num: usize) -> Result<(&'b str, usize)> {
-        let bracket = token.find('[').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: format!("expected indexed reference (e.g. `q[0]`), got: `{token}`"),
+        let bracket = token.find('[').ok_or_else(|| {
+            parse_error(
+                line_num,
+                format!("expected indexed reference (e.g. `q[0]`), got: `{token}`"),
+            )
         })?;
-        let end = token.find(']').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: format!("expected `]` in reference: `{token}`"),
+        let end = token.find(']').ok_or_else(|| {
+            parse_error(line_num, format!("expected `]` in reference: `{token}`"))
         })?;
         let name = token[..bracket].trim();
         let idx_str = token[bracket + 1..end].trim();
-        let idx_val = eval_int_expr(idx_str, line_num, self.int_vars.as_ref()).map_err(|_| {
-            PrismError::Parse {
-                line: line_num,
-                message: format!("invalid index in `{token}`"),
-            }
-        })?;
+        let idx_val = eval_int_expr(idx_str, line_num, self.int_vars.as_ref())
+            .map_err(|_| parse_error(line_num, format!("invalid index in `{token}`")))?;
         if idx_val < 0 {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("negative index in `{token}`"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("negative index in `{token}`"),
+            ));
         }
         Ok((name, idx_val as usize))
     }
@@ -1226,10 +1227,7 @@ impl<'a> Parser<'a> {
         let rest = line.strip_prefix("measure").unwrap().trim();
         let parts: Vec<&str> = rest.split("->").collect();
         if parts.len() != 2 {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "expected `measure qubit -> cbit`".to_string(),
-            });
+            return Err(parse_error(line_num, "expected `measure qubit -> cbit`"));
         }
         let qubits = self.resolve_qubit_arg(parts[0].trim(), line_num)?;
         let cbits = self.resolve_cbit_arg(parts[1].trim(), line_num)?;
@@ -1240,19 +1238,13 @@ impl<'a> Parser<'a> {
     fn parse_measure_assign(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
         let parts: Vec<&str> = line.splitn(2, '=').collect();
         if parts.len() != 2 {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "expected `cbit = measure qubit`".to_string(),
-            });
+            return Err(parse_error(line_num, "expected `cbit = measure qubit`"));
         }
         let cbit_token = parts[0].trim();
         let measure_part = parts[1].trim();
         let qubit_token = measure_part
             .strip_prefix("measure")
-            .ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "expected `measure` after `=`".to_string(),
-            })?
+            .ok_or_else(|| parse_error(line_num, "expected `measure` after `=`"))?
             .trim();
 
         let cbits = self.resolve_cbit_arg(cbit_token, line_num)?;
@@ -1266,14 +1258,14 @@ impl<'a> Parser<'a> {
         line_num: usize,
     ) -> Result<Vec<Instruction>> {
         if qubits.len() != cbits.len() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!(
+            return Err(parse_error(
+                line_num,
+                format!(
                     "register size mismatch in measure: {} qubits vs {} classical bits",
                     qubits.len(),
                     cbits.len()
                 ),
-            });
+            ));
         }
         Ok(qubits
             .into_iter()
@@ -1291,23 +1283,20 @@ impl<'a> Parser<'a> {
     fn parse_gate_def(&mut self, line: &str, line_num: usize) -> Result<()> {
         let rest = line.strip_prefix("gate").unwrap().trim();
 
-        let brace_open = rest.find('{').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `{` in gate definition".to_string(),
-        })?;
-        let brace_close = rest.rfind('}').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `}` in gate definition".to_string(),
-        })?;
+        let brace_open = rest
+            .find('{')
+            .ok_or_else(|| parse_error(line_num, "expected `{` in gate definition"))?;
+        let brace_close = rest
+            .rfind('}')
+            .ok_or_else(|| parse_error(line_num, "expected `}` in gate definition"))?;
 
         let header = rest[..brace_open].trim();
         let body_str = rest[brace_open + 1..brace_close].trim();
 
         let (name, params, qubit_names) = if let Some(paren_open) = header.find('(') {
-            let paren_close = header.find(')').ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "expected `)` in gate parameters".to_string(),
-            })?;
+            let paren_close = header
+                .find(')')
+                .ok_or_else(|| parse_error(line_num, "expected `)` in gate parameters"))?;
             let name = header[..paren_open].trim().to_string();
             let params: Vec<String> = header[paren_open + 1..paren_close]
                 .split(',')
@@ -1323,10 +1312,7 @@ impl<'a> Parser<'a> {
         } else {
             let parts: Vec<&str> = header.split_whitespace().collect();
             let Some(name_tok) = parts.first() else {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: "gate definition is missing a name".to_string(),
-                });
+                return Err(parse_error(line_num, "gate definition is missing a name"));
             };
             let name = name_tok.to_string();
             let qubit_names: Vec<String> = parts[1..]
@@ -1345,10 +1331,10 @@ impl<'a> Parser<'a> {
             .collect();
 
         if body.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("gate '{}' has an empty body", name),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("gate '{}' has an empty body", name),
+            ));
         }
 
         self.gate_defs.insert(
@@ -1370,10 +1356,8 @@ impl<'a> Parser<'a> {
     fn parse_def_block(&mut self, buf: &str, line_num: usize) -> Result<()> {
         let rest = buf.trim_start().strip_prefix("def").unwrap().trim();
 
-        let (open, close) = extract_top_braced_body(rest).ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `{ ... }` body in def".to_string(),
-        })?;
+        let (open, close) = extract_top_braced_body(rest)
+            .ok_or_else(|| parse_error(line_num, "expected `{ ... }` body in def"))?;
         let header = rest[..open].trim();
         let body_str = rest[open + 1..close].trim();
 
@@ -1384,24 +1368,17 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let paren_open = header.find('(').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `(` in def parameter list".to_string(),
-        })?;
+        let paren_open = header
+            .find('(')
+            .ok_or_else(|| parse_error(line_num, "expected `(` in def parameter list"))?;
         let name = header[..paren_open].trim().to_string();
         if name.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "missing name in def".to_string(),
-            });
+            return Err(parse_error(line_num, "missing name in def"));
         }
 
         let after_open = &header[paren_open + 1..];
-        let close_paren =
-            find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "unmatched `(` in def parameter list".to_string(),
-            })?;
+        let close_paren = find_matching_close_paren(after_open)
+            .ok_or_else(|| parse_error(line_num, "unmatched `(` in def parameter list"))?;
         let params_str = &after_open[..close_paren];
         let trailing = after_open[close_paren + 1..].trim();
         if !trailing.is_empty() {
@@ -1417,19 +1394,19 @@ impl<'a> Parser<'a> {
             if p.is_empty() {
                 continue;
             }
-            let last_ws = p
-                .rfind(char::is_whitespace)
-                .ok_or_else(|| PrismError::Parse {
-                    line: line_num,
-                    message: format!("malformed def parameter: `{p}` (expected `<type> <name>`)"),
-                })?;
+            let last_ws = p.rfind(char::is_whitespace).ok_or_else(|| {
+                parse_error(
+                    line_num,
+                    format!("malformed def parameter: `{p}` (expected `<type> <name>`)"),
+                )
+            })?;
             let ty = p[..last_ws].trim();
             let arg_name = p[last_ws..].trim().to_string();
             if arg_name.is_empty() {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!("missing name in def parameter: `{p}`"),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("missing name in def parameter: `{p}`"),
+                ));
             }
             let base_ty = ty.split('[').next().unwrap().trim();
             match base_ty {
@@ -1463,10 +1440,10 @@ impl<'a> Parser<'a> {
 
         let body = split_body_into_lines(body_str);
         if body.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("def `{name}` has an empty body"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("def `{name}` has an empty body"),
+            ));
         }
         for stmt in &body {
             let first = stmt
@@ -1501,28 +1478,22 @@ impl<'a> Parser<'a> {
     fn expand_for_block(&mut self, buf: &str, line_num: usize) -> Result<Vec<Instruction>> {
         let rest = buf.trim_start().strip_prefix("for").unwrap().trim();
 
-        let in_pos = find_keyword(rest, "in").ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `in` keyword in for loop".to_string(),
-        })?;
+        let in_pos = find_keyword(rest, "in")
+            .ok_or_else(|| parse_error(line_num, "expected `in` keyword in for loop"))?;
         let lhs = rest[..in_pos].trim();
         let after_in = rest[in_pos + 2..].trim_start();
 
         let (range_str, after_range) = if let Some(remainder) = after_in.strip_prefix('[') {
-            let close = remainder.find(']').ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "expected `]` in for loop range".to_string(),
-            })?;
+            let close = remainder
+                .find(']')
+                .ok_or_else(|| parse_error(line_num, "expected `]` in for loop range"))?;
             (
                 format!("[{}]", &remainder[..close]),
                 remainder[close + 1..].trim_start(),
             )
         } else if let Some(set_inner_start) = after_in.strip_prefix('{') {
-            let close_offset =
-                find_matching_close_brace(set_inner_start).ok_or_else(|| PrismError::Parse {
-                    line: line_num,
-                    message: "unmatched `{` in for loop set".to_string(),
-                })?;
+            let close_offset = find_matching_close_brace(set_inner_start)
+                .ok_or_else(|| parse_error(line_num, "unmatched `{` in for loop set"))?;
             (
                 format!("{{{}}}", &set_inner_start[..close_offset]),
                 set_inner_start[close_offset + 1..].trim_start(),
@@ -1534,36 +1505,32 @@ impl<'a> Parser<'a> {
             });
         };
 
-        let body_open = after_range.find('{').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `{` opening for loop body".to_string(),
-        })?;
+        let body_open = after_range
+            .find('{')
+            .ok_or_else(|| parse_error(line_num, "expected `{` opening for loop body"))?;
         let after_body_open = &after_range[body_open + 1..];
-        let body_close =
-            find_matching_close_brace(after_body_open).ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "unmatched `{` in for loop body".to_string(),
-            })?;
+        let body_close = find_matching_close_brace(after_body_open)
+            .ok_or_else(|| parse_error(line_num, "unmatched `{` in for loop body"))?;
         let body_str = after_body_open[..body_close].trim();
         let trailing = after_body_open[body_close + 1..].trim();
         if !trailing.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("unexpected tokens after for loop body: `{trailing}`"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("unexpected tokens after for loop body: `{trailing}`"),
+            ));
         }
 
         let var_name = parse_for_var(lhs, line_num)?;
         let values = parse_for_range(&range_str, line_num, self.int_vars.as_ref())?;
 
         if values.len() as i64 > MAX_FOR_ITERATIONS {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!(
+            return Err(parse_error(
+                line_num,
+                format!(
                     "for loop iterates {} times (max {MAX_FOR_ITERATIONS})",
                     values.len()
                 ),
-            });
+            ));
         }
 
         let body_lines = split_body_into_lines(body_str);
@@ -1605,10 +1572,10 @@ impl<'a> Parser<'a> {
     fn parse_reset(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
         let rest = line.strip_prefix("reset").unwrap().trim();
         if rest.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "expected qubit argument after `reset`".to_string(),
-            });
+            return Err(parse_error(
+                line_num,
+                "expected qubit argument after `reset`",
+            ));
         }
         let mut out = Vec::new();
         for token in rest.split(',') {
@@ -1667,29 +1634,28 @@ impl<'a> Parser<'a> {
         line_num: usize,
     ) -> Result<Vec<Instruction>> {
         if crate::circuit::body_writes_condition_bits(&then_body, &condition) {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "`else` needs a condition the `if` body does not overwrite; \
-                          this body measures into a bit the condition reads"
-                    .to_string(),
-            });
+            return Err(parse_error(
+                line_num,
+                "`else` needs a condition the `if` body does not overwrite; \
+                          this body measures into a bit the condition reads",
+            ));
         }
 
         if after_else.trim().is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "expected a statement or block after `else`".to_string(),
-            });
+            return Err(parse_error(
+                line_num,
+                "expected a statement or block after `else`",
+            ));
         }
         let else_body = if let Some(nested) = strip_leading_keyword(after_else, "if") {
             self.parse_nested_else_if(nested, line_num)?
         } else if after_else.starts_with('{') {
             let (else_src, trailing) = split_braced_body(after_else, line_num, "else")?;
             if !trailing.trim().is_empty() {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!("unexpected `{}` after `else` body", trailing.trim()),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("unexpected `{}` after `else` body", trailing.trim()),
+                ));
             }
             self.parse_region_body(else_src, line_num)?
         } else {
@@ -1728,10 +1694,10 @@ impl<'a> Parser<'a> {
 
     fn enter_region(&mut self, line_num: usize) -> Result<()> {
         if self.region_depth >= MAX_REGION_DEPTH {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("`if` blocks nest deeper than {MAX_REGION_DEPTH}"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("`if` blocks nest deeper than {MAX_REGION_DEPTH}"),
+            ));
         }
         self.region_depth += 1;
         Ok(())
@@ -1746,23 +1712,20 @@ impl<'a> Parser<'a> {
     /// condition language.
     fn parse_switch_block(&mut self, buf: &str, line_num: usize) -> Result<Vec<Instruction>> {
         let rest = buf.trim_start().strip_prefix("switch").unwrap().trim();
-        let open = rest.find('(').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `(` after `switch`".to_string(),
-        })?;
+        let open = rest
+            .find('(')
+            .ok_or_else(|| parse_error(line_num, "expected `(` after `switch`"))?;
         let after_open = &rest[open + 1..];
-        let close = find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `)` in `switch` operand".to_string(),
-        })?;
+        let close = find_matching_close_paren(after_open)
+            .ok_or_else(|| parse_error(line_num, "expected `)` in `switch` operand"))?;
         let (offset, size) = self.resolve_switch_operand(after_open[..close].trim(), line_num)?;
         let (arms_src, trailing) =
             split_braced_body(after_open[close + 1..].trim(), line_num, "switch")?;
         if !trailing.trim().is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("unexpected `{}` after `switch` body", trailing.trim()),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("unexpected `{}` after `switch` body", trailing.trim()),
+            ));
         }
 
         let arms = split_switch_arms(arms_src, line_num)?;
@@ -1773,10 +1736,10 @@ impl<'a> Parser<'a> {
             let body = self.parse_region_body(arm.body, line_num)?;
             let Some(labels_src) = arm.labels_src else {
                 if default.replace(body).is_some() {
-                    return Err(PrismError::Parse {
-                        line: line_num,
-                        message: "`switch` has more than one `default` arm".to_string(),
-                    });
+                    return Err(parse_error(
+                        line_num,
+                        "`switch` has more than one `default` arm",
+                    ));
                 }
                 continue;
             };
@@ -1784,10 +1747,10 @@ impl<'a> Parser<'a> {
             for token in labels_src.split(',') {
                 let value = self.parse_switch_label(token, line_num)?;
                 if labels.contains(&value) {
-                    return Err(PrismError::Parse {
-                        line: line_num,
-                        message: format!("`switch` case label {value} appears twice"),
-                    });
+                    return Err(parse_error(
+                        line_num,
+                        format!("`switch` case label {value} appears twice"),
+                    ));
                 }
                 labels.push(value);
                 arm_labels.push(value);
@@ -1806,12 +1769,11 @@ impl<'a> Parser<'a> {
             .chain(default.iter())
             .any(|body| crate::circuit::body_writes_condition_bits(body, &probe));
         if writes_operand {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "`switch` needs an operand no arm overwrites; \
-                          an arm here measures into the switched register"
-                    .to_string(),
-            });
+            return Err(parse_error(
+                line_num,
+                "`switch` needs an operand no arm overwrites; \
+                          an arm here measures into the switched register",
+            ));
         }
 
         let mut out = Vec::new();
@@ -1840,12 +1802,14 @@ impl<'a> Parser<'a> {
 
     fn parse_switch_label(&self, token: &str, line_num: usize) -> Result<u64> {
         let value = eval_int_expr(token.trim(), line_num, self.int_vars.as_ref())?;
-        u64::try_from(value).map_err(|_| PrismError::Parse {
-            line: line_num,
-            message: format!(
-                "`switch` case label must be non-negative, got `{}`",
-                token.trim()
-            ),
+        u64::try_from(value).map_err(|_| {
+            parse_error(
+                line_num,
+                format!(
+                    "`switch` case label must be non-negative, got `{}`",
+                    token.trim()
+                ),
+            )
         })
     }
 
@@ -1873,16 +1837,12 @@ impl<'a> Parser<'a> {
         line_num: usize,
     ) -> Result<(ClassicalCondition, &'s str)> {
         let rest = line.trim_start().strip_prefix("if").unwrap().trim();
-        let open = rest.find('(').ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: "expected `(` after `if`".to_string(),
-        })?;
+        let open = rest
+            .find('(')
+            .ok_or_else(|| parse_error(line_num, "expected `(` after `if`"))?;
         let after_open = &rest[open + 1..];
-        let close_offset =
-            find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "expected `)` in `if` condition".to_string(),
-            })?;
+        let close_offset = find_matching_close_paren(after_open)
+            .ok_or_else(|| parse_error(line_num, "expected `)` in `if` condition"))?;
         let condition =
             self.parse_classical_condition(after_open[..close_offset].trim(), line_num)?;
         Ok((condition, after_open[close_offset + 1..].trim()))
@@ -1892,10 +1852,10 @@ impl<'a> Parser<'a> {
     fn parse_if_statement(&self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
         let (condition, body_str) = self.split_if_header(line, line_num)?;
         if body_str.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: "expected gate after `if(...)` condition".to_string(),
-            });
+            return Err(parse_error(
+                line_num,
+                "expected gate after `if(...)` condition",
+            ));
         }
         let (body, input_slot) = self.parse_gate_application(body_str, line_num)?;
         if input_slot.is_some() {
@@ -1919,9 +1879,11 @@ impl<'a> Parser<'a> {
         if !cond_str.contains('^') {
             return Ok(None);
         }
-        let malformed = || PrismError::Parse {
-            line: line_num,
-            message: format!("expected `a ^ b` or `(a ^ b) == 0/1`, got: `{cond_str}`"),
+        let malformed = || {
+            parse_error(
+                line_num,
+                format!("expected `a ^ b` or `(a ^ b) == 0/1`, got: `{cond_str}`"),
+            )
         };
         let (inner, expected) = match cond_str.strip_prefix('(') {
             None => (cond_str, true),
@@ -1985,10 +1947,10 @@ impl<'a> Parser<'a> {
         if let Some(rest) = cond_str.strip_prefix('!') {
             let inner = rest.trim();
             if !inner.contains('[') {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!("expected `!c[i]` form in `if` condition, got: `{cond_str}`"),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("expected `!c[i]` form in `if` condition, got: `{cond_str}`"),
+                ));
             }
             let bit = self.resolve_cbit(inner, line_num)?;
             return Ok(ClassicalCondition::BitIsZero(bit));
@@ -2007,12 +1969,10 @@ impl<'a> Parser<'a> {
             let rhs = cond_str[pos + op_len..].trim();
             let value = eval_int_expr(rhs, line_num, self.int_vars.as_ref())?;
             if value < 0 {
-                return Err(PrismError::Parse {
-                    line: line_num,
-                    message: format!(
-                        "negative integer in `if` condition is not supported: `{rhs}`"
-                    ),
-                });
+                return Err(parse_error(
+                    line_num,
+                    format!("negative integer in `if` condition is not supported: `{rhs}`"),
+                ));
             }
             let value = value as u64;
 
@@ -2024,12 +1984,10 @@ impl<'a> Parser<'a> {
                     (1, false) => ClassicalCondition::BitIsOne(bit),
                     (1, true) => ClassicalCondition::BitIsZero(bit),
                     (other, _) => {
-                        return Err(PrismError::Parse {
-                            line: line_num,
-                            message: format!(
-                                "bit comparison must be against 0 or 1, got `{other}`"
-                            ),
-                        });
+                        return Err(parse_error(
+                            line_num,
+                            format!("bit comparison must be against 0 or 1, got `{other}`"),
+                        ));
                     }
                 });
             }
@@ -2061,12 +2019,12 @@ impl<'a> Parser<'a> {
             return Ok(ClassicalCondition::BitIsOne(bit));
         }
 
-        Err(PrismError::Parse {
-            line: line_num,
-            message: format!(
+        Err(parse_error(
+            line_num,
+            format!(
                 "expected `creg==value`, `creg!=value`, `c[i]`, `!c[i]`, or `c[i]==0/1` in `if` condition, got: `{cond_str}`"
             ),
-        })
+        ))
     }
 
     /// Parse one gate application, reporting the `input` slot every instruction
@@ -2104,7 +2062,7 @@ impl<'a> Parser<'a> {
             .map(|t| self.resolve_qubit_arg(t, line_num))
             .collect::<Result<Vec<_>>>()?;
 
-        let broadcast_len = self.broadcast_length(&resolved, &gate_name, line_num)?;
+        let broadcast_len = self.broadcast_length(&resolved, gate_name, line_num)?;
 
         let mut all_instrs = Vec::with_capacity(broadcast_len);
         for i in 0..broadcast_len {
@@ -2114,7 +2072,7 @@ impl<'a> Parser<'a> {
                 .collect();
 
             all_instrs.append(&mut self.resolve_gate_application_once(
-                &gate_name,
+                gate_name,
                 &params,
                 &modifiers,
                 &qubits,
@@ -2124,7 +2082,7 @@ impl<'a> Parser<'a> {
         }
 
         if input_slot.is_some() {
-            Self::check_every_instruction_is_bindable(&all_instrs, &gate_name, line_num)?;
+            Self::check_every_instruction_is_bindable(&all_instrs, gate_name, line_num)?;
         }
         Ok((all_instrs, input_slot))
     }
@@ -2156,10 +2114,10 @@ impl<'a> Parser<'a> {
         let mut seen: SmallVec<[usize; 4]> = qubits.clone();
         seen.sort_unstable();
         if let Some(pair) = seen.windows(2).find(|pair| pair[0] == pair[1]) {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("Pauli rotation `{gate_name}` names qubit {} twice", pair[0]),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("Pauli rotation `{gate_name}` names qubit {} twice", pair[0]),
+            ));
         }
         let factors: Vec<PauliTerm> = qubits
             .iter()
@@ -2269,14 +2227,14 @@ impl<'a> Parser<'a> {
                 if broadcast_len == 1 {
                     broadcast_len = arg.len();
                 } else if arg.len() != broadcast_len {
-                    return Err(PrismError::Parse {
-                        line: line_num,
-                        message: format!(
+                    return Err(parse_error(
+                        line_num,
+                        format!(
                             "register size mismatch in `{gate_name}`: \
                              expected {broadcast_len} qubits but got {}",
                             arg.len()
                         ),
-                    });
+                    ));
                 }
             }
         }
@@ -2293,13 +2251,13 @@ impl<'a> Parser<'a> {
         line_num: usize,
     ) -> Result<Option<Vec<Instruction>>> {
         if self.gate_expansion_depth >= MAX_GATE_EXPANSION_DEPTH {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!(
+            return Err(parse_error(
+                line_num,
+                format!(
                     "gate expansion depth exceeds maximum ({MAX_GATE_EXPANSION_DEPTH}); \
                      possible recursive gate definition for `{name}`"
                 ),
-            });
+            ));
         }
 
         let def = match self.gate_defs.get(name) {
@@ -2308,14 +2266,14 @@ impl<'a> Parser<'a> {
         };
 
         if call_params.len() != def.params.len() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!(
+            return Err(parse_error(
+                line_num,
+                format!(
                     "gate `{name}` expects {} parameters, got {}",
                     def.params.len(),
                     call_params.len()
                 ),
-            });
+            ));
         }
         if call_qubits.len() != def.qubits.len() {
             return Err(PrismError::GateArity {
@@ -2445,28 +2403,26 @@ impl<'a> Parser<'a> {
         };
 
         if self.gate_expansion_depth >= MAX_GATE_EXPANSION_DEPTH {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!(
+            return Err(parse_error(
+                line_num,
+                format!(
                     "def expansion depth exceeds maximum ({MAX_GATE_EXPANSION_DEPTH}); \
                      possible recursive call to `{name}`"
                 ),
-            });
+            ));
         }
 
         let after_open = &line[paren_open + 1..];
-        let close = find_matching_close_paren(after_open).ok_or_else(|| PrismError::Parse {
-            line: line_num,
-            message: format!("unmatched `(` in def call `{name}`"),
-        })?;
+        let close = find_matching_close_paren(after_open)
+            .ok_or_else(|| parse_error(line_num, format!("unmatched `(` in def call `{name}`")))?;
         let args_str = &after_open[..close];
         let trailing = after_open[close + 1..].trim();
         let trailing = trailing.strip_suffix(';').unwrap_or(trailing).trim();
         if !trailing.is_empty() {
-            return Err(PrismError::Parse {
-                line: line_num,
-                message: format!("unexpected tokens after def call `{name}(...)`: `{trailing}`"),
-            });
+            return Err(parse_error(
+                line_num,
+                format!("unexpected tokens after def call `{name}(...)`: `{trailing}`"),
+            ));
         }
 
         let raw_args: Vec<&str> = split_top_level_commas(args_str)
@@ -2508,12 +2464,12 @@ impl<'a> Parser<'a> {
                 DefArg::Qubit(param_name) => {
                     let resolved = self.resolve_qubit_arg(arg, line_num)?;
                     if resolved.len() != 1 {
-                        return Err(PrismError::Parse {
-                            line: line_num,
-                            message: format!(
+                        return Err(parse_error(
+                            line_num,
+                            format!(
                                 "def `{name}` qubit parameter `{param_name}` requires a single qubit, got register `{arg}`"
                             ),
-                        });
+                        ));
                     }
                     qubit_substs.push((param_name.clone(), resolved[0]));
                 }
@@ -2626,9 +2582,11 @@ impl<'a> Parser<'a> {
             } else if token == "ctrl" {
                 modifiers.push(Modifier::Ctrl);
             } else if let Some(rest) = token.strip_prefix("pow(") {
-                let rest = rest.strip_suffix(')').ok_or_else(|| PrismError::Parse {
-                    line: line_num,
-                    message: format!("unmatched `(` in pow modifier: `{token}`"),
+                let rest = rest.strip_suffix(')').ok_or_else(|| {
+                    parse_error(
+                        line_num,
+                        format!("unmatched `(` in pow modifier: `{token}`"),
+                    )
                 })?;
                 let k: i64 = rest
                     .trim()
@@ -2710,11 +2668,11 @@ impl<'a> Parser<'a> {
         Gate::cu(mat)
     }
 
-    fn split_gate_line(
+    fn split_gate_line<'s>(
         &self,
-        line: &str,
+        line: &'s str,
         line_num: usize,
-    ) -> Result<(String, Vec<f64>, Option<usize>, String)> {
+    ) -> Result<(&'s str, Vec<f64>, Option<usize>, &'s str)> {
         if let Some(paren_start) = line.find('(') {
             let mut depth = 0usize;
             let mut paren_end = None;
@@ -2731,24 +2689,19 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
             }
-            let paren_end = paren_end.ok_or_else(|| PrismError::Parse {
-                line: line_num,
-                message: "unmatched `(` in gate application".to_string(),
-            })?;
-            let gate_name = line[..paren_start].trim().to_string();
+            let paren_end = paren_end
+                .ok_or_else(|| parse_error(line_num, "unmatched `(` in gate application"))?;
+            let gate_name = line[..paren_start].trim();
             let params_str = &line[paren_start + 1..paren_end];
             let (params, input_slot) = self.parse_params(params_str, line_num)?;
-            let args_str = line[paren_end + 1..].trim().to_string();
+            let args_str = line[paren_end + 1..].trim();
             Ok((gate_name, params, input_slot, args_str))
         } else {
-            let first_space = line
-                .find(char::is_whitespace)
-                .ok_or_else(|| PrismError::Parse {
-                    line: line_num,
-                    message: format!("cannot parse instruction: `{line}`"),
-                })?;
-            let gate_name = line[..first_space].trim().to_string();
-            let args_str = line[first_space..].trim().to_string();
+            let first_space = line.find(char::is_whitespace).ok_or_else(|| {
+                parse_error(line_num, format!("cannot parse instruction: `{line}`"))
+            })?;
+            let gate_name = line[..first_space].trim();
+            let args_str = line[first_space..].trim();
             Ok((gate_name, vec![], None, args_str))
         }
     }

@@ -246,6 +246,11 @@ impl ErrorChainComplex {
                 Instruction::Gate { gate, targets } => {
                     let noise_events = &noise.after_gate[instr_idx];
                     for event in noise_events {
+                        // An inert channel contributes no column, and passes
+                        // `ensure_pauli_only` whatever its variant.
+                        if event.channel.is_inert() {
+                            continue;
+                        }
                         let (px, py, pz) = event.pauli_probs();
                         let q = event.qubit();
                         let p_total = px + py + pz;

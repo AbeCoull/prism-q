@@ -154,9 +154,9 @@ pair expansion, which scales with group size rather than group count.
 Backward Pauli propagation through circuit + noise sensitivity analysis. Each noise location gets an X-flip and Z-flip sensitivity row. During sampling, Bernoulli coin flips determine which noise channels fire, then XOR the sensitivity rows into the sample.
 
 `NoiseModel`: per-instruction noise events. Pauli and depolarizing channels are
-supported by every noisy engine. Amplitude damping, phase damping, thermal
-relaxation, two-qubit depolarizing, and one- and two-qubit custom Kraus
-operators require the trajectory engine. Readout error is separate: it acts on
+supported by every noisy engine, and two-qubit depolarizing by every one but
+the homological sampler. Amplitude damping, phase damping, thermal relaxation,
+and one- and two-qubit custom Kraus operators require the trajectory engine. Readout error is separate: it acts on
 the measurement record rather than the state, so the route is chosen on the
 channels alone and each engine applies readout itself.
 
@@ -191,7 +191,7 @@ engine per call:
 | Engine | Selected when | Limitations |
 |---|---|---|
 | Brute-force replay (`run_shots_noisy_brute_with`) | Resets, classical conditionals, or mid-circuit measurements | Per-shot tableau replay, O(shots) simulations; non-Clifford circuits error here (the public entry point routes them to the trajectory engine instead) |
-| Homological (`src/sim/homological.rs`) | >= 1000 shots, ideal readout, and the error complex compiles (syndrome rank <= 20) | Falls through to frame/compiled above rank 20, or when the model carries readout error, which has no syndrome class to fold into |
+| Homological (`src/sim/homological.rs`) | >= 1000 shots, single-qubit channels, ideal readout, and the error complex compiles (syndrome rank <= 20) | Falls through to frame/compiled above rank 20, or when the model carries readout error or a two-qubit channel, neither of which has a syndrome class to fold into |
 | Pauli frame | Shallow circuits: gate count / qubits < 3, or < 5 at >= 200 qubits | Clifford, terminal measurements only |
 | Compiled Pauli (`NoisyCompiledSampler`) | Remaining Clifford + terminal-measurement circuits | Clifford, terminal measurements only |
 
@@ -200,6 +200,24 @@ family rejects: non-Pauli channels, mid-circuit measurement, reset, classical
 conditionals, and non-Clifford gates, at per-shot state evolution cost.
 Distributed backends reject noisy sampling entirely; per-shot trajectories
 cannot keep rank collectives in lockstep.
+
+A two-qubit channel is sampled as one joint draw over its 15 non-identity
+Pauli products, never as two single-qubit draws: the true probability that both
+letters move is `0.6p`, where independent draws give `(0.8p)^2`. The compiled
+sampler stores the propagated X and Z components of both targets, four rows to
+an event, in a table parallel to the single-qubit one, and runs them as a
+second pass so the single-qubit rows keep the positions the flip LUT and the
+device buffers were built against. Component rows over precomputed branches is
+a storage decision: 15 rows an event against 4. A pair whose targets fall in
+different subsystem blocks takes the monolithic compile, since the
+block-filtered one holds only one block's propagated masks at a time.
+
+A non-empty pair table keeps noise application on the host: the device noise
+kernel derives each thread's bit from `(seed, event, batch)` for the one
+measurement row it owns and would draw the two qubits independently. The
+noiseless parity sample and the bit transpose still run on the device, so what
+the pair table costs is the fused device noise kernel and the counts and
+marginals reductions that sit behind it, not GPU sampling as a whole.
 
 The frame and compiled samplers apply readout error to the packed measurement
 record, after the reference outcomes are folded in so that a set bit is a

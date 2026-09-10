@@ -212,6 +212,23 @@ fn readout_p10_out_of_range_rejected() {
     assert!(noise.validate().is_err());
 }
 
+// `pauli_probs` panics on anything it cannot return as a triple, so the pair
+// case gets its own accessor rather than a widened return.
+#[test]
+fn a_two_qubit_channel_reads_through_the_pair_accessor() {
+    let pair = NoiseEvent {
+        channel: NoiseChannel::TwoQubitDepolarizing { p: 0.02 },
+        qubits: smallvec![3, 1],
+    };
+    assert_eq!(pair.pauli_pair(), Some((3, 1, 0.02)));
+    assert!(pair.channel.as_pauli().is_none());
+
+    let single = NoiseEvent::pauli(0, 0.01, 0.0, 0.0);
+    assert!(single.pauli_pair().is_none());
+    assert_eq!(single.pauli_probs(), (0.01, 0.0, 0.0));
+    assert!(single.channel.pauli_pair_rate().is_none());
+}
+
 #[test]
 fn validate_rejects_wrong_qubit_count() {
     let circuit = one_gate_circuit();

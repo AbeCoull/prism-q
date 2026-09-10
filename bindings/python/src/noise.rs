@@ -145,7 +145,9 @@ impl PyNoiseModel {
         Ok(())
     }
 
-    /// Whether the model contains only Pauli/depolarizing channels and no readout error.
+    /// Whether the model holds only single-qubit Pauli channels and nothing
+    /// else that can flip a bit. A live `two_qubit_depolarizing` or readout
+    /// entry answers False and still runs on the stabilizer samplers.
     fn is_pauli_only(&self) -> bool {
         self.inner.is_pauli_only()
     }

@@ -69,7 +69,7 @@ use smallvec::SmallVec;
 
 use crate::backend::simd;
 use crate::backend::statevector::{StatevectorBackend, insert_zero_bit, kernels};
-use crate::backend::{Backend, NORM_CLAMP_MIN};
+use crate::backend::{Backend, NORM_CLAMP_MIN, reduced_density, schmidt};
 use crate::circuit::{ClassicalCondition, Instruction};
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate, McuData, diag_entries_phase, mat_mul_4x4};
@@ -384,6 +384,71 @@ impl DensityMatrixBackend {
     #[inline]
     fn dim(&self) -> usize {
         1usize << self.num_qubits
+    }
+
+    /// `rho_A[t * dim + t'] = sum_e rho[idx(t, e)][idx(t', e)]` over the
+    /// `2^(n - k)` traced indices `e`, `buffer` being the `4^n` mixture in the
+    /// module's layout. Once the buffer is the size of a statevector past the
+    /// parallel threshold the work is split either as stripes of result rows,
+    /// which repeat only the `k` bit insertions of each traced index, or as a
+    /// fold over the traced index whose jobs each zero and merge a
+    /// `dim * dim` accumulator; the stripe wins once the insertions cost less
+    /// than that.
+    fn partial_trace(&self, buffer: &[Complex64], subsystem: &[usize]) -> Vec<Complex64> {
+        let d = self.dim();
+        let k = subsystem.len();
+        let dim = 1usize << k;
+        let offsets = reduced_density::row_offsets(subsystem);
+        let mut ascending = subsystem.to_vec();
+        ascending.sort_unstable();
+        let groups = d >> k;
+
+        let accumulate_rows = |rows: &mut [Complex64], first: usize, base: usize| {
+            for (r, out) in rows.chunks_exact_mut(dim).enumerate() {
+                let row = (base | offsets[first + r]) * d + base;
+                for (entry, &off) in out.iter_mut().zip(&offsets) {
+                    *entry += buffer[row | off];
+                }
+            }
+        };
+        let zero = Complex64::new(0.0, 0.0);
+        #[cfg(feature = "parallel")]
+        if self.sv.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+            use rayon::prelude::*;
+            if groups * k < 2 * dim * dim {
+                let rows = reduced_density::stripe_rows(dim);
+                let mut rho = vec![zero; dim * dim];
+                rho.par_chunks_mut(rows * dim)
+                    .enumerate()
+                    .for_each(|(stripe, out)| {
+                        for e in 0..groups {
+                            let base = reduced_density::traced_base(e, &ascending);
+                            accumulate_rows(out, stripe * rows, base);
+                        }
+                    });
+                return rho;
+            }
+            let fresh = || vec![zero; dim * dim];
+            let add = |mut a: Vec<Complex64>, b: Vec<Complex64>| {
+                for (x, y) in a.iter_mut().zip(&b) {
+                    *x += y;
+                }
+                a
+            };
+            return (0..groups)
+                .into_par_iter()
+                .with_min_len(reduced_density::fold_min_len(groups, dim * dim))
+                .fold(fresh, |mut acc, e| {
+                    accumulate_rows(&mut acc, 0, reduced_density::traced_base(e, &ascending));
+                    acc
+                })
+                .reduce(fresh, add);
+        }
+        let mut rho = vec![zero; dim * dim];
+        for e in 0..groups {
+            accumulate_rows(&mut rho, 0, reduced_density::traced_base(e, &ascending));
+        }
+        rho
     }
 
     fn conjugate_buffer(&mut self) -> Result<()> {
@@ -1233,6 +1298,26 @@ impl Backend for DensityMatrixBackend {
             backend: self.name().to_string(),
             operation: "Schmidt values of a mixed state".to_string(),
         })
+    }
+
+    /// Partial trace of the `4^n` buffer, `2^(n + k)` reads. At `k = n` the
+    /// buffer itself comes back, its rows and columns in `subsystem` order.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        #[cfg(feature = "gpu")]
+        let readback = self
+            .sv
+            .gpu_state()
+            .map(|_| self.sv.export_statevector())
+            .transpose()?;
+        #[cfg(feature = "gpu")]
+        let buffer = readback.as_deref().unwrap_or(self.sv.state.as_slice());
+        #[cfg(not(feature = "gpu"))]
+        let buffer = self.sv.state.as_slice();
+        let mut rho = self.partial_trace(buffer, subsystem);
+        reduced_density::normalize_trace(&mut rho, dim);
+        Ok(rho)
     }
 
     fn placement(&self) -> crate::sim::Placement {

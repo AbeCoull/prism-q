@@ -40,11 +40,11 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::{SmallVec, smallvec};
 
 use crate::backend::memory::{dense_probability_len, dense_statevector_len};
-use crate::backend::simd;
 use crate::backend::statevector::insert_zero_bit;
 use crate::backend::{
     Backend, BasisSamples, MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits,
 };
+use crate::backend::{reduced_density, schmidt, simd};
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::gates::{DiagEntry, Gate, is_diagonal_2x2};
@@ -730,6 +730,48 @@ impl Backend for FactoredBackend {
             [Complex64::new(p0, 0.0), r.conj()],
             [r, Complex64::new(p1, 0.0)],
         ])
+    }
+
+    /// Blocks are exactly unentangled, so the answer is the product of one
+    /// partial trace per block that meets `subsystem`, each over
+    /// `2^(n_b + k_b)` amplitudes, multiplied in through the bits of the row
+    /// and column index that block's qubits occupy, then scaled to trace one.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let mut rho = vec![Complex64::new(1.0, 0.0); dim * dim];
+        for (ss_idx, sub) in self.substates.iter().enumerate() {
+            let Some(sub) = sub else { continue };
+            let positions: Vec<usize> = (0..subsystem.len())
+                .filter(|&i| self.qubit_to_substate[subsystem[i]] == ss_idx)
+                .collect();
+            if positions.is_empty() {
+                continue;
+            }
+            let local: Vec<usize> = positions
+                .iter()
+                .map(|&i| Self::local_qubit(sub, subsystem[i]))
+                .collect();
+            let factor =
+                reduced_density::dense_reduced_density(&sub.state, sub.qubits.len(), &local);
+            let side = 1usize << local.len();
+            let gather: Vec<usize> = (0..dim)
+                .map(|t| {
+                    positions
+                        .iter()
+                        .enumerate()
+                        .fold(0, |s, (j, &i)| s | (((t >> i) & 1) << j))
+                })
+                .collect();
+            for (t, &row) in gather.iter().enumerate() {
+                let out = &mut rho[t * dim..(t + 1) * dim];
+                for (entry, &col) in out.iter_mut().zip(&gather) {
+                    *entry *= factor[row * side + col];
+                }
+            }
+        }
+        reduced_density::normalize_trace(&mut rho, dim);
+        Ok(rho)
     }
 
     /// Apply a Kraus branch to one qubit without boxing a `Gate::Fused`.

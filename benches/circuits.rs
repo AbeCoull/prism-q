@@ -7,6 +7,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
+use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 #[cfg(feature = "bench-internal")]
 use prism_q::backend::tensornetwork::scalar_expectation;
@@ -919,6 +920,28 @@ fn bench_statevector_scalability(c: &mut Criterion) {
             b.iter(|| {
                 run_with(BackendKind::Statevector, circ, 42).unwrap();
             });
+        });
+    }
+
+    group.finish();
+}
+
+// Diagnostic row: the state is built once, so each row prices one partial
+// trace over the complement of `k` qubits spread across the register, the
+// threaded reduce included.
+fn bench_statevector_rdm(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/rdm");
+    configure_group(&mut group);
+
+    let n = 20;
+    let circuit = circuits::brickwork_circuit(n, 10, SEED);
+    let mut backend = StatevectorBackend::new(SEED);
+    backend.init(n, 0).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    for k in [1usize, 4, 8] {
+        let subsystem: Vec<usize> = (0..k).map(|i| i * n / k).collect();
+        group.bench_function(format!("{n}_k{k}"), |b| {
+            b.iter(|| black_box(backend.reduced_density_matrix(&subsystem).unwrap()));
         });
     }
 
@@ -3658,6 +3681,7 @@ criterion_group! {
     bench_statevector_depth_sweep,
     bench_statevector_entanglement,
     bench_statevector_scalability,
+    bench_statevector_rdm,
     // Stabilizer
     bench_stabilizer_scaling,
     bench_stabilizer_random_pairs,

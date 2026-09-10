@@ -12,9 +12,8 @@ use crate::error::{PrismError, Result};
 /// this floor carries under `1e-27` nats.
 const SCHMIDT_VALUE_FLOOR: f64 = 1e-14;
 
-/// Reject a subsystem that is empty, the whole register, out of range, or
-/// names a qubit twice, so a cut always has two non-empty sides.
-pub(crate) fn validate_subsystem(subsystem: &[usize], num_qubits: usize) -> Result<()> {
+/// Reject a subsystem that is empty, out of range, or names a qubit twice.
+pub(crate) fn validate_qubit_set(subsystem: &[usize], num_qubits: usize) -> Result<()> {
     let mut seen = vec![false; num_qubits];
     for &qubit in subsystem {
         if qubit >= num_qubits {
@@ -30,7 +29,19 @@ pub(crate) fn validate_subsystem(subsystem: &[usize], num_qubits: usize) -> Resu
         }
         seen[qubit] = true;
     }
-    if subsystem.is_empty() || subsystem.len() == num_qubits {
+    if subsystem.is_empty() {
+        return Err(PrismError::InvalidParameter {
+            message: "subsystem must name at least one qubit".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// [`validate_qubit_set`], and reject the whole register too, so a cut always
+/// has two non-empty sides.
+pub(crate) fn validate_subsystem(subsystem: &[usize], num_qubits: usize) -> Result<()> {
+    validate_qubit_set(subsystem, num_qubits)?;
+    if subsystem.len() == num_qubits {
         return Err(PrismError::InvalidParameter {
             message: format!(
                 "subsystem must leave both sides of the cut non-empty, got {} of {num_qubits} \
@@ -212,7 +223,7 @@ fn check_dense_schmidt_width(backend: &str, num_qubits: usize) -> Result<()> {
 
 /// The dense export cap as `dense_statevector_len` applies it, so a check
 /// against it formats no message on the path that passes.
-fn export_cap() -> usize {
+pub(crate) fn export_cap() -> usize {
     super::memory::max_dense_statevector_qubits().min(usize::BITS as usize - 1)
 }
 

@@ -57,7 +57,7 @@ const SHOTS_PER_STREAM: usize = 256;
 
 use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, is_phase_one,
-    reserve_dense_output,
+    reduced_density, reserve_dense_output, schmidt,
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
@@ -753,6 +753,39 @@ impl Backend for SparseBackend {
             [Complex64::new(p0, 0.0), r.conj()],
             [r, Complex64::new(p1, 0.0)],
         ])
+    }
+
+    /// Nonzeros sorted by their traced index, then an outer product within
+    /// each run: `O(nnz log nnz)` for the sort plus `O(nnz * g)` products,
+    /// `g` the largest run. The sort fixes the summation order, so the answer
+    /// does not depend on map iteration order. Scaled to trace one.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let named = subsystem.iter().fold(0usize, |mask, &q| mask | (1 << q));
+        let mut entries: Vec<(usize, usize, Complex64)> = self
+            .state
+            .iter()
+            .map(|(&idx, &amp)| {
+                let t = subsystem
+                    .iter()
+                    .enumerate()
+                    .fold(0, |t, (i, &q)| t | (((idx >> q) & 1) << i));
+                (idx & !named, t, amp)
+            })
+            .collect();
+        entries.sort_unstable_by_key(|&(e, t, _)| (e, t));
+
+        let mut rho = vec![Complex64::new(0.0, 0.0); dim * dim];
+        for run in entries.chunk_by(|a, b| a.0 == b.0) {
+            for &(_, t, a) in run {
+                for &(_, tp, b) in run {
+                    rho[t * dim + tp] += a * b.conj();
+                }
+            }
+        }
+        reduced_density::normalize_trace(&mut rho, dim);
+        Ok(rho)
     }
 
     fn classical_results(&self) -> &[bool] {

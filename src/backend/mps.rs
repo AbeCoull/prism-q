@@ -1733,6 +1733,123 @@ impl MpsBackend {
         Ok(())
     }
 
+    /// Apply `instructions` in order, except that a run of two-qubit gates on
+    /// adjacent, disjoint site pairs with increasing left sites enters from
+    /// whichever end the recorded center is nearer. The gates of such a run
+    /// commute, and the walk crosses the run once from either end, so the
+    /// choice moves the entry cost and nothing else: on a brick layer that is
+    /// one step against the width of the chain. A run is counted in gate
+    /// entries by [`pair_entries`], so it spans instruction boundaries and
+    /// reaches into `Multi2q` and `BatchRzz` lists, which is how fusion
+    /// delivers a brick layer; an instruction without entries, a measurement
+    /// or a barrier included, ends the run where it stands.
+    fn apply_by_center(&mut self, instructions: &[Instruction]) -> Result<()> {
+        let (mut i, mut k) = (0, 0);
+        while i < instructions.len() {
+            if pair_entries(&instructions[i]) == 0 {
+                self.apply(&instructions[i])?;
+                i += 1;
+                continue;
+            }
+            let (mut ri, mut rk) = (i, k);
+            let mut len = 0;
+            let (mut first, mut last) = (0, 0);
+            'scan: while ri < instructions.len() {
+                let entries = pair_entries(&instructions[ri]);
+                if entries == 0 {
+                    break;
+                }
+                while rk < entries {
+                    let (q0, q1) = pair_entry(&instructions[ri], rk);
+                    let p0 = self.site_for_logical(q0);
+                    let p1 = self.site_for_logical(q1);
+                    let left = p0.min(p1);
+                    if p0.abs_diff(p1) != 1 || (len > 0 && left < last + 2) {
+                        break 'scan;
+                    }
+                    if len == 0 {
+                        first = left;
+                    }
+                    last = left;
+                    len += 1;
+                    rk += 1;
+                }
+                ri += 1;
+                rk = 0;
+            }
+            if len == 0 {
+                self.apply_pair_entry(&instructions[i], k)?;
+                k += 1;
+                if k == pair_entries(&instructions[i]) {
+                    i += 1;
+                    k = 0;
+                }
+                continue;
+            }
+            if len > 1 && self.entry_steps(last) < self.entry_steps(first) {
+                let (mut ii, mut kk) = (ri, rk);
+                while (ii, kk) != (i, k) {
+                    if kk == 0 {
+                        ii -= 1;
+                        kk = pair_entries(&instructions[ii]);
+                    }
+                    kk -= 1;
+                    self.apply_pair_entry(&instructions[ii], kk)?;
+                }
+            } else {
+                let (mut ii, mut kk) = (i, k);
+                while (ii, kk) != (ri, rk) {
+                    self.apply_pair_entry(&instructions[ii], kk)?;
+                    kk += 1;
+                    if kk == pair_entries(&instructions[ii]) {
+                        ii += 1;
+                        kk = 0;
+                    }
+                }
+            }
+            i = ri;
+            k = rk;
+        }
+        Ok(())
+    }
+
+    /// Apply entry `k` of `instruction`, one of the [`pair_entries`] it owes.
+    fn apply_pair_entry(&mut self, instruction: &Instruction, k: usize) -> Result<()> {
+        match instruction {
+            Instruction::Gate {
+                gate: Gate::Multi2q(data),
+                ..
+            } => {
+                let (q0, q1, mat) = &data.gates[k];
+                self.apply_two_qubit_gate(mat, *q0, *q1)
+            }
+            Instruction::Gate {
+                gate: Gate::BatchRzz(data),
+                ..
+            } => {
+                let (q0, q1, theta) = data.edges[k];
+                self.apply_two_qubit_gate(&Gate::Rzz(theta).matrix_4x4(), q0, q1)
+            }
+            Instruction::Gate {
+                gate: Gate::Fused2q(mat),
+                targets,
+            } => self.apply_two_qubit_gate(mat, targets[0], targets[1]),
+            Instruction::Gate { gate, targets } => {
+                self.apply_two_qubit_gate(&gate.matrix_4x4(), targets[0], targets[1])
+            }
+            _ => unreachable!("an instruction without pair entries"),
+        }
+    }
+
+    /// Steps [`Self::prepare_center`] walks to reach the pair at `left_site`.
+    fn entry_steps(&self, left_site: usize) -> usize {
+        match self.center {
+            Some(at) if at <= left_site => left_site - at,
+            Some(at) => at - left_site - 1,
+            None => 0,
+        }
+    }
+
     /// Apply BatchPhase via bubble routing: sweep control toward targets,
     /// applying each CU-phase+SWAP as a single 2-site operation. O(k) tensor
     /// ops instead of O(k²) for k non-adjacent phases.
@@ -2894,6 +3011,44 @@ impl MpsBackend {
     }
 }
 
+/// Two-qubit gate entries `instruction` contributes to a run of
+/// [`MpsBackend::apply_by_center`]: one for a gate the adjacent kernel takes
+/// whole, one per entry of a `Multi2q` or `BatchRzz`, none for anything else.
+fn pair_entries(instruction: &Instruction) -> usize {
+    match instruction {
+        Instruction::Gate { gate, .. } => match gate {
+            Gate::Rzz(_) | Gate::Cx | Gate::Cz | Gate::Swap | Gate::Cu(_) | Gate::Fused2q(_) => 1,
+            Gate::Multi2q(data) => data.gates.len(),
+            Gate::BatchRzz(data) => data.edges.len(),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Logical qubits of entry `k` of `instruction`, one of the
+/// [`pair_entries`] it owes.
+fn pair_entry(instruction: &Instruction, k: usize) -> (usize, usize) {
+    match instruction {
+        Instruction::Gate {
+            gate: Gate::Multi2q(data),
+            ..
+        } => {
+            let (q0, q1, _) = &data.gates[k];
+            (*q0, *q1)
+        }
+        Instruction::Gate {
+            gate: Gate::BatchRzz(data),
+            ..
+        } => {
+            let (q0, q1, _) = data.edges[k];
+            (q0, q1)
+        }
+        Instruction::Gate { targets, .. } => (targets[0], targets[1]),
+        _ => unreachable!("an instruction without pair entries"),
+    }
+}
+
 impl Backend for MpsBackend {
     fn name(&self) -> &'static str {
         "mps"
@@ -2924,7 +3079,14 @@ impl Backend for MpsBackend {
 
     fn apply(&mut self, instruction: &Instruction) -> Result<()> {
         match instruction {
-            Instruction::Gate { gate, targets } => self.dispatch_gate(gate, targets)?,
+            Instruction::Gate { gate, targets } => {
+                let list = matches!(gate, Gate::Multi2q(_) | Gate::BatchRzz(_));
+                if list && pair_entries(instruction) > 0 {
+                    self.apply_by_center(std::slice::from_ref(instruction))?;
+                } else {
+                    self.dispatch_gate(gate, targets)?;
+                }
+            }
             Instruction::Measure {
                 qubit,
                 classical_bit,
@@ -2947,6 +3109,10 @@ impl Backend for MpsBackend {
             Instruction::Region(region) => self.apply_region(region)?,
         }
         Ok(())
+    }
+
+    fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        self.apply_by_center(instructions)
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

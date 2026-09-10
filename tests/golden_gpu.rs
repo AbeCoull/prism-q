@@ -1729,6 +1729,16 @@ fn bts_min_shots_env() -> usize {
         .unwrap_or(prism_q::gpu::BTS_MIN_SHOTS_DEFAULT)
 }
 
+// The GPU sampler is the compiled sampler with device BTS, so its results
+// report the compiled engine.
+fn assert_reports_compiled_engine(result: &prism_q::ShotsResult) {
+    assert_eq!(
+        result.metadata.engine,
+        Some(prism_q::Engine::CompiledSampler),
+        "the GPU sampler reports the compiled engine"
+    );
+}
+
 // BTS sampling routes through the GPU when the circuit compiles to a flat
 // sparse parity. Bell pair correlation is deterministic, so any bit error in
 // the GPU path surfaces.
@@ -1749,6 +1759,7 @@ fn run_shots_compiled_with_gpu_bell_pairs_are_correlated() {
     circuit.measure_all();
 
     let result = run_shots_compiled_with_gpu(&circuit, num_shots, 42, f.ctx.clone()).unwrap();
+    assert_reports_compiled_engine(&result);
     assert_eq!(result.shots.len(), num_shots);
     for (s, shot) in result.shots.iter().enumerate() {
         assert_eq!(shot.len(), n, "shot {s} has wrong bit count");
@@ -1784,6 +1795,7 @@ fn run_shots_compiled_with_gpu_distribution_matches_cpu() {
 
     let cpu = run_shots_compiled(&circuit, num_shots, 42).unwrap();
     let gpu = run_shots_compiled_with_gpu(&circuit, num_shots, 42, f.ctx.clone()).unwrap();
+    assert_reports_compiled_engine(&gpu);
 
     assert_eq!(cpu.shots.len(), gpu.shots.len());
     let cpu_marginals: Vec<f64> = (0..n)
@@ -1825,6 +1837,7 @@ fn builder_stabilizer_gpu_shots_match_compiled_gpu_sampling() {
     circuit.measure_all();
 
     let compiled = run_shots_compiled_with_gpu(&circuit, num_shots, 42, f.ctx.clone()).unwrap();
+    assert_reports_compiled_engine(&compiled);
     let explicit = simulate(&circuit)
         .backend(BackendKind::StabilizerGpu {
             context: f.ctx.clone(),

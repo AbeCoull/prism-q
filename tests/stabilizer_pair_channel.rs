@@ -1,15 +1,13 @@
 //! The two-qubit depolarizing channel through the public entry points of the
 //! Clifford samplers: the auto route, the compiled aggregates, the
 //! block-filtered compile, and the per-shot replay fallback. Route-sensitive
-//! coverage lives in the crate's own noise tests, which can pin the frame and
-//! compiled selection; both engines stamp `CompiledStabilizer`, so a result
-//! carries nothing that separates them.
+//! coverage lives in the crate's own noise tests.
 
 use prism_q::circuit::{Circuit, Instruction};
 use prism_q::gates::Gate;
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
 use prism_q::{
-    BackendKind, PauliTerm, ResolvedBackend, compile_noisy, density_matrix_expectation_values,
+    BackendKind, Engine, PauliTerm, compile_noisy, density_matrix_expectation_values,
     noisy_marginals_analytical, run_shots_homological, run_shots_noisy, simulate,
 };
 
@@ -102,7 +100,7 @@ fn chain_correlators_match_the_density_matrix() {
         .seed(SEED)
         .shots(SHOTS)
         .unwrap();
-    assert_eq!(result.metadata.backend, ResolvedBackend::CompiledStabilizer);
+    assert_eq!(result.metadata.engine, Some(Engine::NoisyCompiledSampler));
 
     let want =
         density_matrix_expectation_values(&circuit, &z_observables(n), Some(&noise), SEED).unwrap();

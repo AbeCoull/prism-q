@@ -8,7 +8,7 @@
 //! count. Nothing else in the suite checks the engine a run actually used.
 
 use prism_q::backend::Backend;
-use prism_q::sim::ResolvedBackend;
+use prism_q::sim::{Engine, ResolvedBackend};
 use prism_q::{BackendKind, MpsBackend, NoiseChannel, NoiseEvent, NoiseModel, circuits, sim};
 
 const SEED: u64 = 0xDEAD_BEEF;
@@ -371,12 +371,14 @@ fn random_pairs_rows_buffer_cross_word_gates() {
 // A model the Clifford samplers refuse is not an error: it runs on the
 // trajectory engine or on per-shot replay, one state per shot, and returns
 // shots either way, so a demoted row keeps reporting while measuring an engine
-// it does not name. Four routes stamp `CompiledStabilizer`, so this pins only
-// that the three `noisy_sampling/compiled_*` models stay off the per-shot
-// engines. Which of the four they take is pinned in the crate's own noise
-// tests, where the routing predicates are in scope.
+// it does not name. The three `noisy_sampling/compiled_*` models must also
+// stay off the homological sampler, which would price syndrome classes rather
+// than the compiled sampler the rows name: the fixture's syndrome rank exceeds
+// the sampler's cap of 20, which turns `compiled_pauli` away at its compile
+// step, a pair channel and a readout entry each block it outright, and the
+// depth ratio keeps all three off the frame sampler.
 #[test]
-fn noisy_sampling_rows_stay_off_the_per_shot_engines() {
+fn noisy_sampling_rows_take_the_compiled_sampler() {
     let mut circuit = circuits::clifford_heavy_circuit(100, 10, SEED);
     circuit.num_classical_bits = circuit.num_qubits;
     for q in 0..circuit.num_qubits {
@@ -413,10 +415,9 @@ fn noisy_sampling_rows_stay_off_the_per_shot_engines() {
             .shots(10_000)
             .unwrap();
         assert_eq!(
-            result.metadata.backend,
-            ResolvedBackend::CompiledStabilizer,
-            "{label}: the model ran on {:?}, an engine that evolves one state \
-             per shot, rather than on a Clifford sampler",
+            result.metadata.engine,
+            Some(Engine::NoisyCompiledSampler),
+            "{label}: the model ran on {:?}, not on the compiled sampler",
             result.metadata.backend
         );
     }

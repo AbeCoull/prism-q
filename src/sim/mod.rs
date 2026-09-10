@@ -32,7 +32,7 @@ use dispatch::{
     initial_state_plan, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
     run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
-pub use metadata::{Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
+pub use metadata::{Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
 pub use observable::{ObservableExpectation, PauliObservable};
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{ShotsResult, bitstring};
@@ -1709,9 +1709,10 @@ impl ShotSource {
     /// per-shot route, which builds one backend per shot and stamps its own.
     fn metadata(&self) -> Option<RunMetadata> {
         match self {
-            ShotSource::Compiled { .. } => {
-                Some(RunMetadata::exact(ResolvedBackend::CompiledStabilizer))
-            }
+            ShotSource::Compiled { .. } => Some(
+                RunMetadata::exact(ResolvedBackend::CompiledStabilizer)
+                    .with_engine(Engine::CompiledSampler),
+            ),
             ShotSource::TerminalStatevector { backend, .. } => Some(backend_metadata(&**backend)),
             ShotSource::Native { backend, .. } => Some(backend_metadata(&**backend)),
             ShotSource::TerminalProbabilities { metadata, .. } => Some(metadata.clone()),

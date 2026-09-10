@@ -177,6 +177,7 @@ describing how the result was produced.
 ```python
 result = simulate(circuit).seed(42).run()
 print(result.metadata.backend)               # 'Statevector'
+print(result.metadata.engine)                # None unless samplers share the backend
 print(result.metadata.is_exact)              # True
 print(result.metadata.fidelity_lower_bound)  # None when exact
 print(result.metadata.placement)             # 'host' or 'device'

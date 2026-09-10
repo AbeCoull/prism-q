@@ -1599,3 +1599,465 @@ fn the_middle_bond_caps_the_rank_a_two_site_cut_carries() {
     assert_eq!(cut_rank(1, 64, 64), 2);
     assert_eq!(cut_rank(64, 16, 8), 16);
 }
+
+// Eight sites at a cap nothing reaches, so the walk is on every pair once a
+// center is recorded and no cut discards more than rounding, which leaves
+// two gate orders agreeing to rounding rather than to the truncation error.
+fn chain_with_center_at_the_right_end() -> MpsBackend {
+    let n = 8;
+    let mut b = MpsBackend::new(42, 4096);
+    b.init(n, 1).unwrap();
+    b.apply_instructions(&crate::circuits::brickwork_circuit(n, 6, 42).instructions)
+        .unwrap();
+    b.establish_center(n - 1);
+    assert!(b.truncation_discarded() < 1e-30);
+    b
+}
+
+// Brick layers with fixed angles: rotations on every qubit, then an
+// entangling gate on each pair of the parity the layer index sets, written
+// left to right or, on `snaked` layers, right to left.
+fn brick_layers(
+    n: usize,
+    depth: usize,
+    entangler: impl Fn(usize) -> Gate,
+    snaked: impl Fn(usize) -> bool,
+) -> Circuit {
+    let mut c = Circuit::new(n, 1);
+    for layer in 0..depth {
+        for q in 0..n {
+            let angle = 0.1 + 0.37 * (layer * n + q) as f64;
+            c.add_gate(Gate::Ry(angle), &[q]);
+            c.add_gate(Gate::Rz(angle * 0.5), &[q]);
+        }
+        let mut pairs: Vec<usize> = (layer % 2..n - 1).step_by(2).collect();
+        if snaked(layer) {
+            pairs.reverse();
+        }
+        for q in pairs {
+            c.add_gate(entangler(q), &[q, q + 1]);
+        }
+    }
+    c
+}
+
+fn applied_one_at_a_time(mut b: MpsBackend, circuit: &Circuit) -> MpsBackend {
+    for instruction in &circuit.instructions {
+        b.apply(instruction).unwrap();
+    }
+    b
+}
+
+fn applied_as_a_batch(mut b: MpsBackend, circuit: &Circuit) -> MpsBackend {
+    b.apply_instructions(&circuit.instructions).unwrap();
+    b
+}
+
+fn assert_chains_identical(a: &MpsBackend, b: &MpsBackend, label: &str) {
+    assert_eq!(a.center, b.center, "{label}: center");
+    assert_eq!(a.center_steps, b.center_steps, "{label}: center steps");
+    for (site, (x, y)) in a.sites.iter().zip(&b.sites).enumerate() {
+        assert_eq!(
+            (x.bond_left, x.bond_right),
+            (y.bond_left, y.bond_right),
+            "{label}: site {site} shape"
+        );
+        assert!(x.data == y.data, "{label}: site {site} data differs");
+    }
+}
+
+// The snake: with the center at the right end, the even layers here start
+// from their last pair and the odd ones from their first, so each layer costs
+// its interior steps and nothing to reach it. The batch must produce exactly
+// the run that the snaked circuit produces gate by gate, and the state the
+// written order produces up to rounding.
+#[test]
+fn a_brick_layer_enters_from_the_end_the_center_is_at() {
+    let warm = chain_with_center_at_the_right_end();
+    let n = warm.num_qubits;
+    let written = brick_layers(n, 4, |_| Gate::Cz, |_| false);
+    let snaked = brick_layers(n, 4, |_| Gate::Cz, |layer| layer % 2 == 0);
+
+    let reordered = applied_as_a_batch(warm.clone(), &written);
+    let reference = applied_one_at_a_time(warm.clone(), &snaked);
+    let plain = applied_one_at_a_time(warm.clone(), &written);
+
+    // Four layers of three interior steps, plus one on the third: it starts
+    // with the center on the left site of its last pair, so the update parks
+    // the weight on the right and the walk steps back across it. Written
+    // order pays the width of the chain back to the first pair on every
+    // layer.
+    assert_eq!(reference.center_steps - warm.center_steps, 13);
+    assert_eq!(plain.center_steps - warm.center_steps, 35);
+    assert_chains_identical(&reordered, &reference, "batch against snaked");
+
+    let expected = plain.export_statevector().unwrap();
+    let actual = reordered.export_statevector().unwrap();
+    for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-13,
+            "amplitude {i} reads {a} against {e}"
+        );
+    }
+}
+
+// Anything that is not such a gate ends a run where it stands, so a divider
+// inside a layer that the walk would otherwise enter from the far end leaves
+// the layer applied as written on both sides of it.
+#[test]
+fn a_run_does_not_cross_a_barrier() {
+    use crate::circuit::{ClassicalCondition, SmallVec};
+
+    let warm = chain_with_center_at_the_right_end();
+    let n = warm.num_qubits;
+    let layer = |divider: Option<Instruction>| {
+        let mut c = Circuit::new(n, 1);
+        c.add_gate(Gate::Cz, &[0, 1]);
+        if let Some(divider) = divider {
+            c.instructions.push(divider);
+        }
+        for q in (2..n - 1).step_by(2) {
+            c.add_gate(Gate::Cz, &[q, q + 1]);
+        }
+        c
+    };
+
+    let whole = layer(None);
+    assert_eq!(
+        applied_as_a_batch(warm.clone(), &whole).center_steps - warm.center_steps,
+        3,
+        "the undivided layer is the fixture the reorder fires on"
+    );
+    assert_eq!(
+        applied_one_at_a_time(warm.clone(), &whole).center_steps - warm.center_steps,
+        10
+    );
+
+    let dividers: Vec<(&str, Instruction)> = vec![
+        (
+            "barrier",
+            Instruction::Barrier {
+                qubits: SmallVec::from_slice(&[0, 1]),
+            },
+        ),
+        (
+            "measure",
+            Instruction::Measure {
+                qubit: 0,
+                classical_bit: 0,
+            },
+        ),
+        ("reset", Instruction::Reset { qubit: 0 }),
+        (
+            "conditional",
+            Instruction::Conditional {
+                condition: ClassicalCondition::BitIsOne(0),
+                gate: Gate::X,
+                targets: SmallVec::from_slice(&[0]),
+            },
+        ),
+        (
+            "region",
+            crate::circuit::guarded(
+                ClassicalCondition::BitIsOne(0),
+                vec![
+                    Instruction::Gate {
+                        gate: Gate::X,
+                        targets: SmallVec::from_slice(&[0]),
+                    },
+                    Instruction::Reset { qubit: 0 },
+                ],
+            )
+            .unwrap(),
+        ),
+        (
+            "rotation",
+            Instruction::Gate {
+                gate: Gate::Ry(0.3),
+                targets: SmallVec::from_slice(&[n - 1]),
+            },
+        ),
+        (
+            "routed pair",
+            Instruction::Gate {
+                gate: Gate::Cz,
+                targets: SmallVec::from_slice(&[0, n - 1]),
+            },
+        ),
+    ];
+    for (label, divider) in dividers {
+        let divided = layer(Some(divider));
+        let batch = applied_as_a_batch(warm.clone(), &divided);
+        let one_at_a_time = applied_one_at_a_time(warm.clone(), &divided);
+        assert_chains_identical(&batch, &one_at_a_time, label);
+        assert!(
+            batch.center_steps - warm.center_steps >= 6,
+            "{label}: the run crossed the divider"
+        );
+    }
+}
+
+// A sequence that is not a run of disjoint adjacent pairs with increasing
+// left sites is applied as written: overlapping pairs, pairs written right to
+// left, and pairs that need routing.
+#[test]
+fn a_sequence_that_is_not_a_brick_layer_is_applied_as_written() {
+    let warm = chain_with_center_at_the_right_end();
+    let n = warm.num_qubits;
+
+    let mut ladder = Circuit::new(n, 1);
+    for q in 0..n - 1 {
+        ladder.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let mut leftward = Circuit::new(n, 1);
+    for q in (0..n - 1).rev().step_by(2) {
+        leftward.add_gate(Gate::Cz, &[q, q + 1]);
+    }
+    let mut hop_first = Circuit::new(n, 1);
+    hop_first.add_gate(Gate::Cz, &[0, 5]);
+    for q in (2..n - 1).step_by(2) {
+        hop_first.add_gate(Gate::Cz, &[q, q + 1]);
+    }
+    let matched = crate::circuits::matched_brickwork_circuit(n, 4, 42);
+
+    for (label, circuit) in [
+        ("ladder", &ladder),
+        ("leftward", &leftward),
+        ("hop first", &hop_first),
+        ("matched", &matched),
+    ] {
+        let batch = applied_as_a_batch(warm.clone(), circuit);
+        let one_at_a_time = applied_one_at_a_time(warm.clone(), circuit);
+        assert_chains_identical(&batch, &one_at_a_time, label);
+    }
+}
+
+// The fused forms carry the same layers as lists inside one gate, so they
+// take the same walk and land on the same bits as the written gates.
+#[test]
+fn fused_pair_lists_take_the_same_walk() {
+    use crate::circuit::SmallVec;
+    use crate::gates::{BatchRzzData, Multi2qData};
+
+    let warm = chain_with_center_at_the_right_end();
+    let n = warm.num_qubits;
+    let angle = |q: usize| 0.2 + 0.11 * q as f64;
+    let written = brick_layers(n, 4, |q| Gate::Rzz(angle(q)), |_| false);
+
+    let mut multi = Circuit::new(n, 1);
+    let mut batched = Circuit::new(n, 1);
+    let mut gates = Vec::new();
+    let mut edges = Vec::new();
+    let mut qubits: SmallVec<[usize; 4]> = SmallVec::new();
+    let flush = |gates: &mut Vec<_>, edges: &mut Vec<_>, qubits: &mut SmallVec<[usize; 4]>| {
+        let mut out = Vec::new();
+        if !gates.is_empty() {
+            let data = Multi2qData {
+                gates: std::mem::take(gates),
+            };
+            out.push(Instruction::Gate {
+                gate: Gate::Multi2q(Box::new(data)),
+                targets: qubits.clone(),
+            });
+            let data = BatchRzzData {
+                edges: std::mem::take(edges),
+            };
+            out.push(Instruction::Gate {
+                gate: Gate::BatchRzz(Box::new(data)),
+                targets: std::mem::take(qubits),
+            });
+        }
+        out
+    };
+    for instruction in &written.instructions {
+        match instruction {
+            Instruction::Gate {
+                gate: Gate::Rzz(theta),
+                targets,
+            } => {
+                gates.push((targets[0], targets[1], Gate::Rzz(*theta).matrix_4x4()));
+                edges.push((targets[0], targets[1], *theta));
+                qubits.extend_from_slice(targets);
+            }
+            other => {
+                if let [m, b] = flush(&mut gates, &mut edges, &mut qubits).as_slice() {
+                    multi.instructions.push(m.clone());
+                    batched.instructions.push(b.clone());
+                }
+                multi.instructions.push(other.clone());
+                batched.instructions.push(other.clone());
+            }
+        }
+    }
+    if let [m, b] = flush(&mut gates, &mut edges, &mut qubits).as_slice() {
+        multi.instructions.push(m.clone());
+        batched.instructions.push(b.clone());
+    }
+
+    let reordered = applied_as_a_batch(warm.clone(), &written);
+    assert_eq!(reordered.center_steps - warm.center_steps, 13);
+    let multi = applied_as_a_batch(warm.clone(), &multi);
+    assert_chains_identical(&multi, &reordered, "multi2q");
+    let batched = applied_as_a_batch(warm.clone(), &batched);
+    assert_chains_identical(&batched, &reordered, "batch rzz");
+}
+
+// An overlapping pair list inside a fused payload is applied as written as
+// well: the scan inside the arm stops at the second pair, so the list lands
+// on the same bits as the gates applied one at a time.
+#[test]
+fn an_overlapping_pair_list_in_a_fused_payload_is_applied_as_written() {
+    use crate::circuit::SmallVec;
+    use crate::gates::{BatchRzzData, Multi2qData};
+
+    let warm = chain_with_center_at_the_right_end();
+    let n = warm.num_qubits;
+    let qubits: SmallVec<[usize; 4]> = (0..n).collect();
+
+    let mut ladder = Circuit::new(n, 1);
+    let mut gates = Vec::new();
+    for q in 0..n - 1 {
+        ladder.add_gate(Gate::Cx, &[q, q + 1]);
+        gates.push((q, q + 1, Gate::Cx.matrix_4x4()));
+    }
+    let mut multi = warm.clone();
+    multi
+        .apply(&Instruction::Gate {
+            gate: Gate::Multi2q(Box::new(Multi2qData { gates })),
+            targets: qubits.clone(),
+        })
+        .unwrap();
+    assert_chains_identical(
+        &multi,
+        &applied_one_at_a_time(warm.clone(), &ladder),
+        "multi2q",
+    );
+
+    let mut rzz_ladder = Circuit::new(n, 1);
+    let mut edges = Vec::new();
+    for q in 0..n - 1 {
+        let theta = 0.3 + 0.2 * q as f64;
+        rzz_ladder.add_gate(Gate::Rzz(theta), &[q, q + 1]);
+        edges.push((q, q + 1, theta));
+    }
+    let mut batched = warm.clone();
+    batched
+        .apply(&Instruction::Gate {
+            gate: Gate::BatchRzz(Box::new(BatchRzzData { edges })),
+            targets: qubits,
+        })
+        .unwrap();
+    assert_chains_identical(
+        &batched,
+        &applied_one_at_a_time(warm.clone(), &rzz_ladder),
+        "batch rzz",
+    );
+}
+
+// The snake changes which cuts truncate against which environment, so the
+// realized error of a capped run must land where the written order lands it,
+// not merely where the booked total says.
+#[test]
+fn the_snake_loses_no_more_than_the_written_order() {
+    let circuit = crate::circuits::brickwork_circuit(18, 24, 0xDEAD_BEEF);
+    let n = circuit.num_qubits;
+
+    let mut exact = MpsBackend::new(42, 1 << 20);
+    exact.init(n, 0).unwrap();
+    exact.apply_instructions(&circuit.instructions).unwrap();
+    assert!(
+        exact.truncation_discarded() < 1e-20,
+        "the reference truncated"
+    );
+    let exact_norm = exact.pauli_expectation(&[]).unwrap().re;
+
+    let infidelity = |capped: &MpsBackend| {
+        let overlap = exact.inner_product(capped).unwrap().norm_sqr();
+        1.0 - overlap / (exact_norm * capped.pauli_expectation(&[]).unwrap().re)
+    };
+
+    let mut snake = MpsBackend::new(42, 64);
+    snake.init(n, 0).unwrap();
+    snake.apply_instructions(&circuit.instructions).unwrap();
+    let mut written = MpsBackend::new(42, 64);
+    written.init(n, 0).unwrap();
+    for instruction in &circuit.instructions {
+        written.apply(instruction).unwrap();
+    }
+    assert!(
+        snake.center_steps < written.center_steps,
+        "the snake never fired"
+    );
+
+    let snake_error = infidelity(&snake);
+    let written_error = infidelity(&written);
+    assert!(
+        snake_error <= 1.05 * written_error,
+        "the snake sits {snake_error:.6e} from the reference against {written_error:.6e}"
+    );
+}
+
+// Fusion hands a brick layer over in pieces, a `Multi2q` with the leftover
+// pairs as `Fused2q` gates or a second list, so a run has to be counted in
+// gate entries across the instructions rather than in instructions.
+#[test]
+fn a_brick_layer_split_across_fused_instructions_still_enters_from_the_near_end() {
+    use crate::circuit::SmallVec;
+    use crate::gates::Multi2qData;
+
+    let warm = chain_with_center_at_the_right_end();
+    let n = warm.num_qubits;
+    let written = brick_layers(n, 4, |_| Gate::Cz, |_| false);
+
+    let mut split = Circuit::new(n, 1);
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    let mut layer = 0;
+    let list = |pairs: &[(usize, usize)]| Instruction::Gate {
+        gate: Gate::Multi2q(Box::new(Multi2qData {
+            gates: pairs
+                .iter()
+                .map(|&(q0, q1)| (q0, q1, Gate::Cz.matrix_4x4()))
+                .collect(),
+        })),
+        targets: pairs.iter().flat_map(|&(q0, q1)| [q0, q1]).collect(),
+    };
+    let fused = |(q0, q1): (usize, usize)| Instruction::Gate {
+        gate: Gate::Fused2q(Box::new(Gate::Cz.matrix_4x4())),
+        targets: SmallVec::from_slice(&[q0, q1]),
+    };
+    let flush = |pairs: &mut Vec<(usize, usize)>, layer: &mut usize, out: &mut Circuit| {
+        if pairs.is_empty() {
+            return;
+        }
+        let m = pairs.len();
+        if layer.is_multiple_of(2) {
+            out.instructions.push(list(&pairs[..m - 2]));
+            out.instructions.push(fused(pairs[m - 2]));
+            out.instructions.push(fused(pairs[m - 1]));
+        } else {
+            out.instructions.push(list(&pairs[..m - 1]));
+            out.instructions.push(list(&pairs[m - 1..]));
+        }
+        pairs.clear();
+        *layer += 1;
+    };
+    for instruction in &written.instructions {
+        match instruction {
+            Instruction::Gate {
+                gate: Gate::Cz,
+                targets,
+            } => pairs.push((targets[0], targets[1])),
+            other => {
+                flush(&mut pairs, &mut layer, &mut split);
+                split.instructions.push(other.clone());
+            }
+        }
+    }
+    flush(&mut pairs, &mut layer, &mut split);
+    assert_eq!(layer, 4);
+
+    let reordered = applied_as_a_batch(warm.clone(), &written);
+    assert_eq!(reordered.center_steps - warm.center_steps, 13);
+    let from_pieces = applied_as_a_batch(warm.clone(), &split);
+    assert_chains_identical(&from_pieces, &reordered, "split layers");
+}

@@ -88,6 +88,18 @@ strip = "none"
 inherits = "release"
 panic = "unwind"
 
+# Release-like test profile for the CI lane that runs the conformance and golden
+# binaries with debug assertions off. A silent wrong answer that a `debug_assert!`
+# happens to catch is invisible to `[profile.test]`, which keeps assertions on.
+# LTO stays off and codegen units stay parallel so the lane costs minutes, not
+# the fat-LTO relink.
+[profile.ci-release]
+inherits = "release"
+lto = false
+codegen-units = 16
+panic = "unwind"
+strip = "none"
+
 [package.metadata.release]
 pre-release-hook = ["git-cliff", "-o", "CHANGELOG.md", "--tag", "v{{version}}"]
 sign-commit = false

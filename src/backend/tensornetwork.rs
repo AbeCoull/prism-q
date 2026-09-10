@@ -64,7 +64,8 @@
 //! qubit: each bit is drawn from the conditioned single-qubit marginal, and
 //! the outcome projector is absorbed before the next qubit's marginal, so a
 //! shot costs `n` doubled contractions whose peak is set by treewidth rather
-//! than `2^n`.
+//! than `2^n`, each planned on the first shot and replayed from a per-call
+//! cache on the rest.
 //!
 //! `expectation_zero_state` remains a separate path, contracting `⟨0|U†PU|0⟩`
 //! from a circuit rather than an evolved backend, and is what the QEC estimator
@@ -608,6 +609,8 @@ fn plan_pairs(
 /// `tensors` a second time; below the threshold the single pass pays one
 /// metadata copy and no more.
 fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
+    #[cfg(test)]
+    PLANNER_CALLS.with(|calls| calls.set(calls.get() + 1));
     let slots: Vec<Option<TensorMeta>> = tensors.iter().map(|t| Some(TensorMeta::of(t))).collect();
     let mut plan = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
     if plan.peak >= RESTART_PEAK_THRESHOLD {
@@ -660,25 +663,88 @@ fn join_disjoint(mut slots: Vec<Option<Tensor>>) -> Tensor {
 
 /// Contract an entire tensor network along a planned pair order.
 ///
-/// Planning walks metadata only; the replay here is where data moves. Pairs
-/// the plan leaves uncontracted share no leg and go to [`join_disjoint`].
-/// Every contraction passes through here, so this is where the planned peak
-/// is held to the tensor-network peak cap before any intermediate allocates;
-/// `backend` and `operation` name the rejected query.
+/// Planning walks metadata only; the replay in [`contract_planned`] is where
+/// data moves.
 fn greedy_contract(tensors: &mut Vec<Tensor>, backend: &str, operation: &str) -> Result<Tensor> {
     debug_assert!(!tensors.is_empty());
 
     let plan = plan_with_restarts(tensors);
+    contract_planned(tensors, &plan, backend, operation)
+}
+
+/// Replay `plan` over `tensors`. Pairs the plan leaves uncontracted share no
+/// leg and go to [`join_disjoint`].
+///
+/// Every contraction passes through here, so this is where the planned peak
+/// is held to the tensor-network peak cap before any intermediate allocates;
+/// `backend` and `operation` name the rejected query.
+fn contract_planned(
+    tensors: &mut Vec<Tensor>,
+    plan: &ContractionPlan,
+    backend: &str,
+    operation: &str,
+) -> Result<Tensor> {
     check_tensor_peak(backend, operation, plan.peak)?;
 
     let mut slots: Vec<Option<Tensor>> = std::mem::take(tensors).into_iter().map(Some).collect();
     for &(i, j) in &plan.pairs {
         let a_tensor = slots[i].take().expect("planned pair is live");
         let b_tensor = slots[j].take().expect("planned pair is live");
+        debug_assert!(
+            a_tensor.legs.iter().any(|leg| b_tensor.legs.contains(leg)),
+            "planned pair shares a leg"
+        );
         slots.push(Some(contract(&a_tensor, &b_tensor)));
     }
 
     Ok(join_disjoint(slots))
+}
+
+/// One sweep position's plan, with the fingerprint of the metadata it was
+/// planned from.
+struct CachedPlan {
+    fingerprint: u64,
+    plan: ContractionPlan,
+}
+
+/// FNV-1a fold of the tensor count, then each tensor's rank, shape, and leg
+/// ids in order: everything the planner reads.
+fn metadata_fingerprint(tensors: &[Tensor]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let fold = |hash: u64, word: usize| (hash ^ word as u64).wrapping_mul(PRIME);
+    let mut hash = fold(OFFSET, tensors.len());
+    for tensor in tensors {
+        hash = fold(hash, tensor.rank());
+        for &dim in &tensor.shape {
+            hash = fold(hash, dim);
+        }
+        for &leg in &tensor.legs {
+            hash = fold(hash, leg);
+        }
+    }
+    hash
+}
+
+/// The plan in `slot` when its fingerprint matches `tensors`; otherwise plan
+/// afresh, overwrite the slot, and return that.
+fn cached_plan<'s>(tensors: &[Tensor], slot: &'s mut Option<CachedPlan>) -> &'s ContractionPlan {
+    let fingerprint = metadata_fingerprint(tensors);
+    if slot
+        .as_ref()
+        .is_none_or(|cached| cached.fingerprint != fingerprint)
+    {
+        *slot = Some(CachedPlan {
+            fingerprint,
+            plan: plan_with_restarts(tensors),
+        });
+    }
+    &slot.as_ref().expect("slot filled above").plan
+}
+
+#[cfg(test)]
+thread_local! {
+    static PLANNER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 struct ScalarExpectationNetwork {
@@ -1147,14 +1213,21 @@ impl TensorNetworkBackend {
         use rand::RngExt;
 
         let uniform = self.rng.random::<f64>();
-        self.collapse_qubit_with(qubit, reset, uniform)
+        self.collapse_qubit_with(qubit, reset, uniform, None)
     }
 
     /// Collapse `qubit` with a caller-supplied uniform draw, so the native
     /// sampler can drive collapses from its own seeded stream without
-    /// touching the run rng.
-    fn collapse_qubit_with(&mut self, qubit: usize, reset: bool, uniform: f64) -> Result<bool> {
-        let rho = self.reduced_density_matrix_1q(qubit)?;
+    /// touching the run rng. `plan` is the sampler's cache slot for this
+    /// position; `None` plans the marginal afresh.
+    fn collapse_qubit_with(
+        &mut self,
+        qubit: usize,
+        reset: bool,
+        uniform: f64,
+        plan: Option<&mut Option<CachedPlan>>,
+    ) -> Result<bool> {
+        let rho = self.marginal_1q(qubit, plan)?;
         let trace = (rho[0][0].re + rho[1][1].re).max(NORM_CLAMP_MIN);
         let prob_one = (rho[1][1].re / trace).clamp(0.0, 1.0);
         let outcome = uniform < prob_one;
@@ -1170,12 +1243,14 @@ impl TensorNetworkBackend {
         rng: &mut ChaCha8Rng,
         shot: usize,
         samples: &mut BasisSamples,
+        mut plans: Option<&mut [Option<CachedPlan>]>,
     ) -> Result<()> {
         use rand::RngExt;
 
         for qubit in 0..self.num_qubits {
             let uniform = rng.random::<f64>();
-            if self.collapse_qubit_with(qubit, false, uniform)? {
+            let plan = plans.as_deref_mut().map(|plans| &mut plans[qubit]);
+            if self.collapse_qubit_with(qubit, false, uniform, plan)? {
                 samples.set(shot, qubit);
             }
         }
@@ -1185,11 +1260,31 @@ impl TensorNetworkBackend {
     /// Qubit-by-qubit conditional sampling, one doubled-network contraction
     /// per qubit per shot; the module docstring carries the cost trade.
     ///
+    /// Each position's contraction is planned on the first shot and replayed
+    /// on the rest: the projector is absorbed into its owner and leg ids
+    /// restart with the state, so the doubled network at a position carries
+    /// the same metadata in every shot. The cache lives for this call only,
+    /// and a fingerprint of that metadata guards every replay.
+    fn sample_native(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+        let mut plans: Vec<Option<CachedPlan>> = std::iter::repeat_with(|| None)
+            .take(self.num_qubits)
+            .collect();
+        self.sample_sweep(num_shots, seed, Some(&mut plans))
+    }
+
+    /// The sweep behind [`Self::sample_native`], with the plan cache as a
+    /// parameter so a reference run can go without one.
+    ///
     /// A pre-flight plans the first marginal and reserves its peak
     /// intermediate as a feasibility proxy: later marginals open a different
     /// qubit and can plan a different tree, so the gate is heuristic, not a
     /// guarantee. The state is restored after every shot, errors included.
-    fn sample_native(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
+    fn sample_sweep(
+        &mut self,
+        num_shots: usize,
+        seed: u64,
+        mut plans: Option<&mut [Option<CachedPlan>]>,
+    ) -> Result<BasisSamples> {
         let n = self.num_qubits;
         let mut samples = BasisSamples::new(num_shots, n);
 
@@ -1207,7 +1302,7 @@ impl TensorNetworkBackend {
 
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         for shot in 0..num_shots {
-            let drawn = self.sample_one_shot(&mut rng, shot, &mut samples);
+            let drawn = self.sample_one_shot(&mut rng, shot, &mut samples, plans.as_deref_mut());
             self.tensors.clone_from(&tensors);
             self.output_legs.clone_from(&output_legs);
             self.next_leg = next_leg;
@@ -1399,6 +1494,38 @@ impl TensorNetworkBackend {
 
         let network = self.double_through(&bra_legs);
         (network, ket_leg, ket_leg + self.next_leg)
+    }
+
+    /// Contract `tr_{q != qubit} |psi><psi|` to its four entries, replaying
+    /// or filling `plan` when the caller holds a cache slot.
+    fn marginal_1q(
+        &self,
+        qubit: usize,
+        plan: Option<&mut Option<CachedPlan>>,
+    ) -> Result<[[Complex64; 2]; 2]> {
+        let (mut network, ket_leg, bra_leg) = self.double_for_partial_trace(qubit);
+        let operation = "reduced density matrix";
+        let rho = match plan {
+            Some(slot) => {
+                let plan = cached_plan(&network, slot);
+                contract_planned(&mut network, plan, self.name(), operation)?
+            }
+            None => greedy_contract(&mut network, self.name(), operation)?,
+        };
+
+        let axis = |leg: LegId| {
+            rho.legs
+                .iter()
+                .position(|&l| l == leg)
+                .expect("partial trace leaves both open legs on the result")
+        };
+        let ket_stride = if axis(ket_leg) == 0 { 2 } else { 1 };
+        let bra_stride = if axis(bra_leg) == 0 { 2 } else { 1 };
+
+        Ok([
+            [rho.data[0], rho.data[bra_stride]],
+            [rho.data[ket_stride], rho.data[ket_stride + bra_stride]],
+        ])
     }
 
     /// Contract `<psi|P|psi>` for one joint Pauli observable, unnormalized.
@@ -1612,22 +1739,7 @@ impl Backend for TensorNetworkBackend {
     ///
     /// If `qubit` is outside the register.
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
-        let (mut network, ket_leg, bra_leg) = self.double_for_partial_trace(qubit);
-        let rho = greedy_contract(&mut network, self.name(), "reduced density matrix")?;
-
-        let axis = |leg: LegId| {
-            rho.legs
-                .iter()
-                .position(|&l| l == leg)
-                .expect("partial trace leaves both open legs on the result")
-        };
-        let ket_stride = if axis(ket_leg) == 0 { 2 } else { 1 };
-        let bra_stride = if axis(bra_leg) == 0 { 2 } else { 1 };
-
-        Ok([
-            [rho.data[0], rho.data[bra_stride]],
-            [rho.data[ket_stride], rho.data[ket_stride + bra_stride]],
-        ])
+        self.marginal_1q(qubit, None)
     }
 
     fn supports_pauli_expectation(&self) -> bool {
@@ -2236,6 +2348,85 @@ mod tests {
                 "qubit {q}: {freq} vs {p_one}"
             );
         }
+    }
+
+    fn loaded_backend(circuit: &Circuit) -> TensorNetworkBackend {
+        let mut tn = TensorNetworkBackend::new(42);
+        tn.init(circuit.num_qubits, 0).unwrap();
+        for inst in &circuit.instructions {
+            tn.apply(inst).unwrap();
+        }
+        tn
+    }
+
+    fn planner_calls() -> usize {
+        PLANNER_CALLS.with(|calls| calls.get())
+    }
+
+    fn assert_plan_cache_transparent(circuit: &Circuit, shots: usize) {
+        let mut tn = loaded_backend(circuit);
+        let cached = tn.sample_native(shots, 42).unwrap();
+        let uncached = tn.sample_sweep(shots, 42, None).unwrap();
+        assert_eq!(cached.words, uncached.words);
+    }
+
+    #[test]
+    fn test_plan_cache_shots_match_uncached_sweep_on_chain() {
+        assert_plan_cache_transparent(&crate::circuits::cz_chain_circuit(12, 4, 42), 8);
+    }
+
+    #[test]
+    fn test_plan_cache_shots_match_uncached_sweep_on_random_circuit() {
+        assert_plan_cache_transparent(&crate::circuits::random_circuit(8, 5, 42), 8);
+    }
+
+    #[test]
+    fn test_plan_cache_recomputes_on_fingerprint_mismatch() {
+        let circuit = crate::circuits::cz_chain_circuit(8, 3, 42);
+        let mut tn = loaded_backend(&circuit);
+        let mut plans: Vec<Option<CachedPlan>> = std::iter::repeat_with(|| None).take(8).collect();
+        tn.sample_sweep(1, 42, Some(&mut plans)).unwrap();
+        let genuine = plans[3].as_ref().unwrap().fingerprint;
+        plans[3].as_mut().unwrap().fingerprint = !genuine;
+
+        let before = planner_calls();
+        tn.sample_sweep(1, 42, Some(&mut plans)).unwrap();
+        assert_eq!(planner_calls() - before, 1);
+        assert_eq!(plans[3].as_ref().unwrap().fingerprint, genuine);
+    }
+
+    fn leg_network(legs: &[[LegId; 2]]) -> Vec<Tensor> {
+        legs.iter()
+            .map(|pair| Tensor {
+                data: vec![Complex64::new(1.0, 0.0); 4],
+                shape: smallvec::smallvec![2, 2],
+                legs: pair.iter().copied().collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_cached_plan_replans_when_only_leg_ids_differ() {
+        let first = leg_network(&[[0, 1], [1, 2]]);
+        let second = leg_network(&[[0, 1], [1, 3]]);
+        let mut slot = None;
+        let before = planner_calls();
+        cached_plan(&first, &mut slot);
+        let stored = slot.as_ref().unwrap().fingerprint;
+        cached_plan(&first, &mut slot);
+        assert_eq!(planner_calls() - before, 1);
+        cached_plan(&second, &mut slot);
+        assert_eq!(planner_calls() - before, 2);
+        assert_ne!(slot.as_ref().unwrap().fingerprint, stored);
+    }
+
+    #[test]
+    fn test_plan_cache_plans_each_position_once() {
+        let n = 12;
+        let mut tn = loaded_backend(&crate::circuits::cz_chain_circuit(n, 4, 42));
+        let before = planner_calls();
+        tn.sample_native(8, 42).unwrap();
+        assert_eq!(planner_calls() - before, n);
     }
 
     #[test]

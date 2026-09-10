@@ -837,3 +837,254 @@ fn tighter_caps_lose_more_and_report_it() {
         );
     }
 }
+
+fn mps_after(circuit: &Circuit, cap: usize) -> MpsBackend {
+    let mut b = MpsBackend::new(42, cap);
+    b.init(circuit.num_qubits, 0).unwrap();
+    b.apply_instructions(&circuit.instructions).unwrap();
+    b
+}
+
+fn bell_pairs(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in (0..n).step_by(2) {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c
+}
+
+fn interior_bonds(b: &MpsBackend) -> Vec<usize> {
+    b.sites[..b.sites.len() - 1]
+        .iter()
+        .map(|t| t.bond_right)
+        .collect()
+}
+
+// A sweep to the far end is a canonicalization: it factorizes every site it
+// crosses whatever gauge that site was in. The shapes cover a saturated chain,
+// an odd width, a truncated chain, interior bonds of 1, and a product state.
+#[test]
+fn move_center_makes_every_other_site_an_isometry() {
+    for (label, circuit, cap, bond_range) in [
+        (
+            "brickwork_8",
+            crate::circuits::brickwork_circuit(8, 6, 42),
+            4096,
+            (2, 8),
+        ),
+        (
+            "brickwork_7",
+            crate::circuits::brickwork_circuit(7, 6, 43),
+            4096,
+            (2, 8),
+        ),
+        (
+            "brickwork_8_cap4",
+            crate::circuits::brickwork_circuit(8, 6, 42),
+            4,
+            (2, 4),
+        ),
+        ("bell_pairs_6", bell_pairs(6), 4096, (1, 2)),
+        ("product_5", Circuit::new(5, 0), 4096, (1, 1)),
+    ] {
+        let n = circuit.num_qubits;
+        let mut b = mps_after(&circuit, cap);
+        b.move_center(n - 1);
+        b.assert_gauge(n - 1);
+
+        let bonds = interior_bonds(&b);
+        assert_eq!(
+            (*bonds.iter().min().unwrap(), *bonds.iter().max().unwrap()),
+            bond_range,
+            "{label} bond profile {bonds:?}"
+        );
+
+        for target in (0..n).rev() {
+            b.move_center(target);
+            b.assert_gauge(target);
+        }
+        for target in 0..n {
+            b.move_center(target);
+            b.assert_gauge(target);
+        }
+    }
+}
+
+// Every ordered pair of positions, so a move that loses a singular value or
+// mismatches a reshape shows up as a changed amplitude or a changed norm.
+#[test]
+fn moving_the_center_between_any_two_sites_preserves_the_state() {
+    let n = 6;
+    let mut base = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4096);
+    base.move_center(n - 1);
+    let reference = base.export_statevector().unwrap();
+    let reference_norm = base.pauli_expectation(&[]).unwrap().re;
+
+    for from in 0..n {
+        for to in 0..n {
+            let mut b = base.clone();
+            b.move_center(from);
+            b.move_center(to);
+            b.assert_gauge(to);
+
+            let norm = b.pauli_expectation(&[]).unwrap().re;
+            assert!(
+                (norm - reference_norm).abs() < 1e-12,
+                "norm {norm} after {from} -> {to}, expected {reference_norm}"
+            );
+            let v = b.export_statevector().unwrap();
+            for (i, (r, x)) in reference.iter().zip(&v).enumerate() {
+                assert!(
+                    (r - x).norm() < 1e-12,
+                    "amplitude {i} moved to {x} from {r} after {from} -> {to}"
+                );
+            }
+        }
+    }
+}
+
+// Drift: each step refactorizes the site it leaves, so the isometry error is
+// that factorization's own and must not accumulate over a long walk. The
+// fixture reaches bond 16 under a cap of 32, so no step truncates.
+#[test]
+fn repeated_center_moves_do_not_degrade_the_isometry() {
+    let n = 8;
+    let mut b = mps_after(&crate::circuits::brickwork_circuit(n, 8, 42), 32);
+    b.move_center(n - 1);
+    let reference = b.export_statevector().unwrap();
+    let bonds = interior_bonds(&b);
+    let first = b.gauge_deviation(n - 1);
+
+    let mut worst = first;
+    let mut steps = 0usize;
+    for _ in 0..30 {
+        for target in (0..n).rev() {
+            b.move_center(target);
+            worst = worst.max(b.gauge_deviation(target));
+        }
+        for target in 0..n {
+            b.move_center(target);
+            worst = worst.max(b.gauge_deviation(target));
+        }
+        steps += 2 * (n - 1);
+    }
+    assert_eq!(steps, 420);
+
+    assert!(
+        worst <= GAUGE_TOLERANCE,
+        "gauge deviation reached {worst:.3e} over {steps} steps, from {first:.3e}"
+    );
+    assert_eq!(
+        interior_bonds(&b),
+        bonds,
+        "a walk that truncates nothing must leave the bond profile alone"
+    );
+    let v = b.export_statevector().unwrap();
+    for (i, (r, x)) in reference.iter().zip(&v).enumerate() {
+        assert!(
+            (r - x).norm() < 1e-12,
+            "amplitude {i} moved to {x} from {r} over {steps} steps"
+        );
+    }
+}
+
+// The two write conventions differ only in which site keeps diag(S), so they
+// leave the same state under a different gauge: the weight site is the center
+// each one establishes.
+#[test]
+fn a_two_site_update_weights_the_side_the_caller_names() {
+    let n = 6;
+    let left_site = 2;
+    let gate = Gate::Cx.matrix_4x4();
+
+    let mut base = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4096);
+    base.move_center(n - 1);
+    base.move_center(left_site);
+
+    let mut weighted_right = base.clone();
+    weighted_right
+        .apply_adjacent_two_qubit(&gate, left_site, true, WeightSide::Right)
+        .unwrap();
+
+    let mut weighted_left = base.clone();
+    weighted_left
+        .apply_adjacent_two_qubit(&gate, left_site, true, WeightSide::Left)
+        .unwrap();
+
+    // The kernel factorizes with `svd`, whose isometry is looser than the one a
+    // center move writes: the U side reads 5.1e-14 on this fixture against
+    // 1.6e-15 for the V dagger side, so both are held to a bound the SVD
+    // meets rather than to the move's 1e-14.
+    for (center, deviation) in [
+        (left_site + 1, weighted_right.gauge_deviation(left_site + 1)),
+        (left_site, weighted_left.gauge_deviation(left_site)),
+    ] {
+        assert!(
+            deviation < 1e-12,
+            "site {center} carries a gauge deviation of {deviation:.3e}"
+        );
+    }
+
+    assert_ne!(
+        weighted_right.sites[left_site].data, weighted_left.sites[left_site].data,
+        "both directions wrote the same left site, so the parameter did nothing"
+    );
+
+    let expected = weighted_right.export_statevector().unwrap();
+    let actual = weighted_left.export_statevector().unwrap();
+    for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-12,
+            "amplitude {i} reads {a} weighting left against {e} weighting right"
+        );
+    }
+}
+
+#[test]
+fn thin_qr_drops_a_dependent_column_and_keeps_the_product() {
+    // Column 2 is three times column 0, so the factorization has rank 2 and
+    // still has to reproduce all three columns.
+    let (rows, cols) = (4usize, 3usize);
+    let c0 = [1.0, 2.0, -1.0, 0.5];
+    let c1 = [0.0, 1.0, 1.0, -2.0];
+    let mut a = vec![ZERO; rows * cols];
+    for i in 0..rows {
+        a[i] = Complex64::new(c0[i], 0.0);
+        a[rows + i] = Complex64::new(c1[i], 0.0);
+        a[2 * rows + i] = Complex64::new(3.0 * c0[i], 0.0);
+    }
+
+    let qr = thin_qr(&a, rows, cols);
+    assert_eq!(qr.rank, 2);
+    for i in 0..qr.rank {
+        for j in 0..qr.rank {
+            let dot: Complex64 = (0..rows)
+                .map(|k| qr.q[i * rows + k].conj() * qr.q[j * rows + k])
+                .sum();
+            let want = if i == j { ONE } else { ZERO };
+            assert!((dot - want).norm() < 1e-14, "column {i} against {j}: {dot}");
+        }
+    }
+    for j in 0..cols {
+        for k in 0..rows {
+            let got: Complex64 = (0..qr.rank)
+                .map(|i| qr.q[i * rows + k] * qr.r[i * cols + j])
+                .sum();
+            assert!(
+                (got - a[j * rows + k]).norm() < 1e-13,
+                "column {j} row {k}: {got} against {}",
+                a[j * rows + k]
+            );
+        }
+    }
+}
+
+#[test]
+fn thin_qr_of_a_zero_matrix_is_still_an_isometry() {
+    let (rows, cols) = (3usize, 2usize);
+    let qr = thin_qr(&vec![ZERO; rows * cols], rows, cols);
+    assert_eq!(qr.rank, 1);
+    assert!((l2_norm(&qr.q) - 1.0).abs() < 1e-15);
+    assert!(qr.r.iter().all(|x| x.norm() == 0.0));
+}

@@ -7,7 +7,8 @@
 use num_complex::Complex64;
 use rand::RngExt;
 use smallvec::SmallVec;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use super::StatevectorBackend;
 use super::insert_zero_bit;
@@ -163,28 +164,34 @@ type QftTwiddleTable = Arc<[Complex64]>;
 
 struct CachedQftTwiddles {
     table: QftTwiddleTable,
-    last_used: u64,
+    last_used: AtomicU64,
 }
 
+// Hits take the read lock only: the LRU stamp and the tick are atomics so a
+// lookup never needs exclusive access. Misses build the table outside any lock
+// and take the write lock to insert and evict. Relaxed suffices on the atomics
+// because the write guard excludes every reader: the guard's release/acquire
+// pair orders each stamp before the eviction scan that reads it.
 struct QftTwiddleCache {
     entries: Vec<Option<CachedQftTwiddles>>,
     bytes: usize,
-    tick: u64,
+    limit_bytes: usize,
+    tick: AtomicU64,
 }
 
 impl QftTwiddleCache {
-    fn new() -> Self {
+    fn new(limit_bytes: usize) -> Self {
         Self {
             entries: Vec::new(),
             bytes: 0,
-            tick: 0,
+            limit_bytes,
+            tick: AtomicU64::new(0),
         }
     }
 
     #[inline]
-    fn next_tick(&mut self) -> u64 {
-        self.tick = self.tick.wrapping_add(1);
-        self.tick
+    fn next_tick(&self) -> u64 {
+        self.tick.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
     }
 }
 
@@ -195,15 +202,12 @@ const QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 // sample. Set the environment value to 0 to disable caching.
 #[inline]
 fn qft_twiddle_cache_limit_bytes() -> usize {
-    static LIMIT: OnceLock<usize> = OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        std::env::var("PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .map_or(QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES, |mb| {
-                mb.saturating_mul(1024 * 1024)
-            })
-    })
+    std::env::var("PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map_or(QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES, |mb| {
+            mb.saturating_mul(1024 * 1024)
+        })
 }
 
 #[inline(always)]
@@ -212,17 +216,23 @@ fn qft_twiddle_table_bytes(table_len: usize) -> usize {
 }
 
 fn qft_twiddles_scaled(n: usize) -> QftTwiddleTable {
-    static CACHE: OnceLock<Mutex<QftTwiddleCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(QftTwiddleCache::new()));
+    static CACHE: OnceLock<RwLock<QftTwiddleCache>> = OnceLock::new();
+    let cache =
+        CACHE.get_or_init(|| RwLock::new(QftTwiddleCache::new(qft_twiddle_cache_limit_bytes())));
+    cached_qft_twiddles(cache, n)
+}
 
-    {
-        let mut guard = cache.lock().unwrap();
-        let tick = guard.next_tick();
-        if let Some(Some(entry)) = guard.entries.get_mut(n) {
-            entry.last_used = tick;
+fn cached_qft_twiddles(cache: &RwLock<QftTwiddleCache>, n: usize) -> QftTwiddleTable {
+    let cache_limit = {
+        let guard = cache.read().unwrap();
+        if let Some(Some(entry)) = guard.entries.get(n) {
+            entry
+                .last_used
+                .fetch_max(guard.next_tick(), Ordering::Relaxed);
             return Arc::clone(&entry.table);
         }
-    }
+        guard.limit_bytes
+    };
 
     let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
     let qft_size = 1usize << n;
@@ -233,18 +243,17 @@ fn qft_twiddles_scaled(n: usize) -> QftTwiddleTable {
     }
     let twiddles: Arc<[Complex64]> = twiddles.into();
     let table_bytes = qft_twiddle_table_bytes(twiddles.len());
-    let cache_limit = qft_twiddle_cache_limit_bytes();
     if cache_limit == 0 {
         return twiddles;
     }
 
-    let mut guard = cache.lock().unwrap();
+    let mut guard = cache.write().unwrap();
     let tick = guard.next_tick();
     if guard.entries.len() <= n {
         guard.entries.resize_with(n + 1, || None);
     }
-    if let Some(existing) = &mut guard.entries[n] {
-        existing.last_used = tick;
+    if let Some(existing) = &guard.entries[n] {
+        existing.last_used.fetch_max(tick, Ordering::Relaxed);
         return Arc::clone(&existing.table);
     }
 
@@ -253,7 +262,11 @@ fn qft_twiddles_scaled(n: usize) -> QftTwiddleTable {
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(idx, entry)| entry.as_ref().map(|entry| (idx, entry.last_used)))
+            .filter_map(|(idx, entry)| {
+                entry
+                    .as_ref()
+                    .map(|entry| (idx, entry.last_used.load(Ordering::Relaxed)))
+            })
             .min_by_key(|&(_, last_used)| last_used)
         else {
             break;
@@ -267,7 +280,7 @@ fn qft_twiddles_scaled(n: usize) -> QftTwiddleTable {
 
     guard.entries[n] = Some(CachedQftTwiddles {
         table: Arc::clone(&twiddles),
-        last_used: tick,
+        last_used: AtomicU64::new(tick),
     });
     guard.bytes = guard.bytes.saturating_add(table_bytes);
     twiddles
@@ -3994,5 +4007,59 @@ mod pext_agreement_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod qft_twiddle_cache_tests {
+    use super::*;
+
+    fn cached_sizes(cache: &RwLock<QftTwiddleCache>) -> Vec<usize> {
+        let guard = cache.read().unwrap();
+        (0..guard.entries.len())
+            .filter(|&n| guard.entries[n].is_some())
+            .collect()
+    }
+
+    // A table for size n holds 2^(n-1) entries, so 2^(n+3) bytes: n=1 is 16,
+    // n=2 is 32, n=3 is 64, n=5 is 256.
+    #[test]
+    fn evicts_least_recently_used_over_the_cap() {
+        let cache = RwLock::new(QftTwiddleCache::new(96));
+        cached_qft_twiddles(&cache, 2);
+        cached_qft_twiddles(&cache, 3);
+        assert_eq!(cached_sizes(&cache), vec![2, 3]);
+        cached_qft_twiddles(&cache, 2);
+        cached_qft_twiddles(&cache, 1);
+        assert_eq!(cached_sizes(&cache), vec![1, 2]);
+        assert_eq!(cache.read().unwrap().bytes, 48);
+    }
+
+    #[test]
+    fn oversized_table_sits_alone_until_the_next_insert() {
+        let cache = RwLock::new(QftTwiddleCache::new(96));
+        cached_qft_twiddles(&cache, 2);
+        cached_qft_twiddles(&cache, 5);
+        assert_eq!(cached_sizes(&cache), vec![5]);
+        assert_eq!(cache.read().unwrap().bytes, 256);
+        cached_qft_twiddles(&cache, 1);
+        assert_eq!(cached_sizes(&cache), vec![1]);
+        assert_eq!(cache.read().unwrap().bytes, 16);
+    }
+
+    #[test]
+    fn concurrent_misses_share_one_table() {
+        let cache = RwLock::new(QftTwiddleCache::new(QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES));
+        let tables: Vec<QftTwiddleTable> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| cached_qft_twiddles(&cache, 6)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(cached_sizes(&cache), vec![6]);
+        let guard = cache.read().unwrap();
+        let cached = &guard.entries[6].as_ref().unwrap().table;
+        assert!(tables.iter().all(|t| Arc::ptr_eq(t, cached)));
+        assert_eq!(guard.bytes, qft_twiddle_table_bytes(cached.len()));
     }
 }

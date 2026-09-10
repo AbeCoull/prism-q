@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -63,6 +62,29 @@ jobs:
         run: cargo doc --no-deps --features "$CI_DOC_FEATURES"
         env:
           RUSTDOCFLAGS: -D warnings
+
+  check-release-profile:
+    name: Test (release profile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: ci-release
+      - uses: taiki-e/install-action@cargo-nextest
+
+      # `[profile.test]` keeps debug assertions on, so a wrong answer that only a
+      # `debug_assert!` notices never reaches a test. This lane runs the unit
+      # tests and the conformance and golden binaries with assertions off.
+      - name: Tests with debug assertions off
+        run: >-
+          cargo nextest run --cargo-profile ci-release --features "$CI_FEATURES"
+          --lib
+          --test conformance_matrix --test backend_matrix --test measurement_matrix
+          --test golden_small_circuits --test openqasm_goldens
+          --test density_matrix_correctness --test backend_equivalence
 
   check-no-default-features:
     name: Lint & Test (no default features)

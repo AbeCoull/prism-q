@@ -385,17 +385,20 @@ pub fn clifford_t_circuit(n: usize, depth: usize, t_fraction: f64, seed: u64) ->
 /// Build a W-state preparation circuit.
 ///
 /// Produces the n-qubit W state: (|100...0⟩ + |010...0⟩ + ... + |000...1⟩) / √n.
-/// Uses a cascade of controlled rotations and CX gates.
+/// A cascade of controlled rotations, each lowered to two `Ry` and two `Cx`,
+/// hands the excitation from qubit `i` to `i + 1` with the weight that leaves
+/// `1/n` behind.
 pub fn w_state_circuit(n: usize) -> Circuit {
     let mut c = Circuit::new(n, 0);
     c.add_gate(Gate::X, &[0]);
     for i in 0..n - 1 {
         let remaining = (n - i) as f64;
         let theta = 2.0 * (1.0 / remaining).sqrt().acos();
-        c.add_gate(Gate::Ry(theta), &[i + 1]);
-        c.add_gate(Gate::Cx, &[i + 1, i]);
-        c.add_gate(Gate::Ry(-theta), &[i + 1]);
+        c.add_gate(Gate::Ry(theta / 2.0), &[i + 1]);
         c.add_gate(Gate::Cx, &[i, i + 1]);
+        c.add_gate(Gate::Ry(-theta / 2.0), &[i + 1]);
+        c.add_gate(Gate::Cx, &[i, i + 1]);
+        c.add_gate(Gate::Cx, &[i + 1, i]);
     }
     c
 }

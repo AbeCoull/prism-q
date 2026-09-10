@@ -17,6 +17,7 @@ use prism_q::backend::product::ProductStateBackend;
 use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::Circuit;
+use prism_q::circuits;
 use prism_q::gates::{Gate, McuData};
 use prism_q::sim;
 use prism_q::{PauliAxis, PauliTerm};
@@ -1425,4 +1426,21 @@ fn y_tensor_y_on_a_bell_pair_measures_minus_one() {
         expected,
         "reference runner disagrees with the hand-computed -1 eigenvalue"
     );
+}
+
+// ---- Built-in circuits ----
+
+// A W state puts weight 1/n on each one-hot basis state and nothing anywhere
+// else; every existing caller of the constructor is a cross-backend or
+// fused-vs-unfused check that any state would pass.
+#[test]
+fn w_state_circuit_prepares_the_w_state() {
+    for n in [2, 3, 4, 6] {
+        let probs = run_and_probs(&circuits::w_state_circuit(n));
+        let mut expected = vec![0.0; 1 << n];
+        for q in 0..n {
+            expected[1 << q] = 1.0 / n as f64;
+        }
+        assert_probs_close(&probs, &expected, EPS, &format!("w_state({n})"));
+    }
 }

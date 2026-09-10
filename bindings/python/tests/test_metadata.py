@@ -73,7 +73,18 @@ def test_require_exact_leaves_an_exact_route_alone():
     assert result.metadata.is_exact
 
 
+# Four samplers resolve to CompiledStabilizer; engine names the one that ran,
+# and is None where the backend is the whole answer.
+def test_engine_names_the_sampler_under_a_shared_backend():
+    shots = simulate(bell()).seed(42).shots(64)
+    assert shots.metadata.backend == "CompiledStabilizer"
+    assert shots.metadata.engine == "CompiledSampler"
+    assert simulate(bell()).seed(42).run().metadata.engine is None
+
+
 def test_metadata_repr():
     text = repr(simulate(bell()).seed(42).run().metadata)
     assert "RunMetadata(" in text
     assert "exact" in text
+    assert "engine=" not in text
+    assert "engine=CompiledSampler" in repr(simulate(bell()).seed(42).shots(64).metadata)

@@ -1,5 +1,6 @@
 use super::*;
 use crate::circuits;
+use crate::sim::Engine;
 
 type EngineFn = fn(&Circuit, &NoiseModel, usize, u64) -> Result<ShotsResult>;
 
@@ -637,10 +638,8 @@ fn filtered_noisy_bell_pairs_matches_monolithic() {
     );
 }
 
-// The frame and compiled routes answer from the same distribution and stamp the
-// same resolved backend, so nothing in a result separates them. The route is
-// pinned here through `use_frame_sampler`, in the same test that reads the
-// rates.
+// The frame and compiled routes answer from the same distribution, so each is
+// pinned off the result in the same test that reads the rates.
 fn readout_route_circuit(pad: usize) -> Circuit {
     let mut circuit = Circuit::new(3, 3);
     circuit.add_gate(Gate::X, &[0]);
@@ -661,7 +660,7 @@ fn bit_rate(shots: &[Vec<bool>], bit: usize, want: bool) -> f64 {
 // Rates far apart in both directions: applied before the reference bits are
 // folded in, bit 0 would read p01 = 0.40 where p10 = 0.05 belongs. The bound is
 // five sigma on a rate estimated from 20k draws, rounded up.
-fn assert_asymmetric_readout_rates(circuit: &Circuit) {
+fn assert_asymmetric_readout_rates(circuit: &Circuit, engine: Engine) {
     let mut noise = NoiseModel::uniform_depolarizing(circuit, 0.0);
     noise.set_bit_readout_error(0, 0.40, 0.05);
     noise.set_bit_readout_error(2, 0.20, 0.60);
@@ -671,6 +670,7 @@ fn assert_asymmetric_readout_rates(circuit: &Circuit) {
         .seed(42)
         .shots(20_000)
         .unwrap();
+    assert_eq!(result.metadata.engine, Some(engine));
 
     let flipped_one = bit_rate(&result.shots, 0, false);
     assert!(
@@ -690,16 +690,12 @@ fn assert_asymmetric_readout_rates(circuit: &Circuit) {
 
 #[test]
 fn readout_rates_hold_on_the_frame_route() {
-    let circuit = readout_route_circuit(0);
-    assert!(use_frame_sampler(&circuit));
-    assert_asymmetric_readout_rates(&circuit);
+    assert_asymmetric_readout_rates(&readout_route_circuit(0), Engine::FrameSampler);
 }
 
 #[test]
 fn readout_rates_hold_on_the_compiled_route() {
-    let circuit = readout_route_circuit(10);
-    assert!(!use_frame_sampler(&circuit));
-    assert_asymmetric_readout_rates(&circuit);
+    assert_asymmetric_readout_rates(&readout_route_circuit(10), Engine::NoisyCompiledSampler);
 }
 
 fn entangled_route_circuit(pad: usize) -> Circuit {
@@ -720,7 +716,7 @@ fn entangled_route_circuit(pad: usize) -> Circuit {
 // which shares no code with the packed walk. Per-bit sigma is at most 0.0035 at
 // 20k draws and the difference of two such estimates at most 0.005, so 0.03 is
 // six sigma on the difference.
-fn assert_matches_trajectory_engine(circuit: &Circuit) {
+fn assert_matches_trajectory_engine(circuit: &Circuit, engine: Engine) {
     let mut noise = NoiseModel::uniform_depolarizing(circuit, 0.02);
     noise.set_bit_readout_error(0, 0.10, 0.30);
     noise.set_bit_readout_error(1, 0.25, 0.05);
@@ -731,10 +727,7 @@ fn assert_matches_trajectory_engine(circuit: &Circuit) {
         .seed(42)
         .shots(20_000)
         .unwrap();
-    assert_eq!(
-        clifford.metadata.backend,
-        crate::sim::ResolvedBackend::CompiledStabilizer
-    );
+    assert_eq!(clifford.metadata.engine, Some(engine));
     let trajectory = crate::sim::simulate(circuit)
         .backend(BackendKind::Statevector)
         .noise(&noise)
@@ -758,16 +751,12 @@ fn assert_matches_trajectory_engine(circuit: &Circuit) {
 
 #[test]
 fn readout_matches_the_trajectory_engine_on_the_frame_route() {
-    let circuit = entangled_route_circuit(0);
-    assert!(use_frame_sampler(&circuit));
-    assert_matches_trajectory_engine(&circuit);
+    assert_matches_trajectory_engine(&entangled_route_circuit(0), Engine::FrameSampler);
 }
 
 #[test]
 fn readout_matches_the_trajectory_engine_on_the_compiled_route() {
-    let circuit = entangled_route_circuit(7);
-    assert!(!use_frame_sampler(&circuit));
-    assert_matches_trajectory_engine(&circuit);
+    assert_matches_trajectory_engine(&entangled_route_circuit(7), Engine::NoisyCompiledSampler);
 }
 
 #[cfg(feature = "gpu")]
@@ -925,12 +914,18 @@ fn sampled_chain_expectations(shots: &[Vec<bool>], n: usize) -> Vec<f64> {
 /// variance, rounded up.
 const CHAIN_BAND: f64 = 0.036;
 
-fn assert_chain_matches_density_matrix(circuit: &Circuit, noise: &NoiseModel, n: usize) {
+fn assert_chain_matches_density_matrix(
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    n: usize,
+    engine: Engine,
+) {
     let result = crate::sim::simulate(circuit)
         .noise(noise)
         .seed(42)
         .shots(20_000)
         .unwrap();
+    assert_eq!(result.metadata.engine, Some(engine));
     let want =
         density_matrix_expectation_values(circuit, &chain_observables(n), Some(noise), 42).unwrap();
 
@@ -954,15 +949,23 @@ fn assert_chain_matches_density_matrix(circuit: &Circuit, noise: &NoiseModel, n:
 #[test]
 fn pair_channel_matches_the_density_matrix_on_the_frame_route() {
     let circuit = pair_chain_circuit(8, 0);
-    assert!(use_frame_sampler(&circuit));
-    assert_chain_matches_density_matrix(&circuit, &pair_after_every_cx(&circuit, 0.05), 8);
+    assert_chain_matches_density_matrix(
+        &circuit,
+        &pair_after_every_cx(&circuit, 0.05),
+        8,
+        Engine::FrameSampler,
+    );
 }
 
 #[test]
 fn pair_channel_matches_the_density_matrix_on_the_compiled_route() {
     let circuit = pair_chain_circuit(8, 18);
-    assert!(!use_frame_sampler(&circuit));
-    assert_chain_matches_density_matrix(&circuit, &pair_after_every_cx(&circuit, 0.05), 8);
+    assert_chain_matches_density_matrix(
+        &circuit,
+        &pair_after_every_cx(&circuit, 0.05),
+        8,
+        Engine::NoisyCompiledSampler,
+    );
 }
 
 // The grouped route XORs the single-qubit rows through a flip lookup table
@@ -972,7 +975,6 @@ fn pair_channel_matches_the_density_matrix_on_the_compiled_route() {
 fn a_mixed_model_runs_the_flip_table_and_the_pair_pass() {
     let n = 9;
     let circuit = pair_chain_circuit(n, 18);
-    assert!(!use_frame_sampler(&circuit));
 
     let mut noise = pair_after_every_cx(&circuit, 0.02);
     for (slot, inst) in noise.after_gate.iter_mut().zip(&circuit.instructions) {
@@ -992,7 +994,7 @@ fn a_mixed_model_runs_the_flip_table_and_the_pair_pass() {
     assert!(sampler.z_lut.is_some(), "the flip table must be built");
     assert!(sampler.events.has_pairs());
 
-    assert_chain_matches_density_matrix(&circuit, &noise, n);
+    assert_chain_matches_density_matrix(&circuit, &noise, n, Engine::NoisyCompiledSampler);
 }
 
 /// `|++>` under one two-qubit channel, read back in the X basis. `pad` is an
@@ -1023,13 +1025,14 @@ fn x_basis_pair_model(circuit: &Circuit, pad: usize, p: f64) -> NoiseModel {
 // branch index 0 through 15 instead of 1 through 15 swaps identity in for ZZ
 // and swaps those two rates. No Z-basis statistic can see that swap, because
 // identity and ZZ flip the same measurements, namely none.
-fn assert_identity_is_not_a_branch(circuit: &Circuit, pad: usize) {
+fn assert_identity_is_not_a_branch(circuit: &Circuit, pad: usize, engine: Engine) {
     let noise = x_basis_pair_model(circuit, pad, 1.0);
     let result = crate::sim::simulate(circuit)
         .noise(&noise)
         .seed(42)
         .shots(20_000)
         .unwrap();
+    assert_eq!(result.metadata.engine, Some(engine));
 
     let total = result.shots.len() as f64;
     let both_zero = result.shots.iter().filter(|s| !s[0] && !s[1]).count() as f64 / total;
@@ -1046,16 +1049,12 @@ fn assert_identity_is_not_a_branch(circuit: &Circuit, pad: usize) {
 
 #[test]
 fn identity_is_not_a_branch_on_the_frame_route() {
-    let circuit = pair_x_basis_circuit(0);
-    assert!(use_frame_sampler(&circuit));
-    assert_identity_is_not_a_branch(&circuit, 0);
+    assert_identity_is_not_a_branch(&pair_x_basis_circuit(0), 0, Engine::FrameSampler);
 }
 
 #[test]
 fn identity_is_not_a_branch_on_the_compiled_route() {
-    let circuit = pair_x_basis_circuit(4);
-    assert!(!use_frame_sampler(&circuit));
-    assert_identity_is_not_a_branch(&circuit, 4);
+    assert_identity_is_not_a_branch(&pair_x_basis_circuit(4), 4, Engine::NoisyCompiledSampler);
 }
 
 // One branch of 15 decides both letters, so each of the three outcomes that
@@ -1063,7 +1062,7 @@ fn identity_is_not_a_branch_on_the_compiled_route() {
 // matching the per-qubit rate of `8p/15` would put `(8p/15)^2 = 0.071` on the
 // corner where both bits move, which is the whole difference between a
 // correlated channel and two uncorrelated ones.
-fn assert_the_two_letters_are_drawn_jointly(circuit: &Circuit) {
+fn assert_the_two_letters_are_drawn_jointly(circuit: &Circuit, engine: Engine) {
     let p = 0.5;
     let mut noise = bare_model(circuit);
     noise.after_gate[1] = vec![pair_event([0, 1], p)];
@@ -1073,6 +1072,7 @@ fn assert_the_two_letters_are_drawn_jointly(circuit: &Circuit) {
         .seed(42)
         .shots(20_000)
         .unwrap();
+    assert_eq!(result.metadata.engine, Some(engine));
     let total = result.shots.len() as f64;
     let rate = |want: [bool; 2]| {
         result
@@ -1100,16 +1100,15 @@ fn assert_the_two_letters_are_drawn_jointly(circuit: &Circuit) {
 
 #[test]
 fn the_two_letters_are_drawn_jointly_on_the_frame_route() {
-    let circuit = pair_chain_circuit(2, 0);
-    assert!(use_frame_sampler(&circuit));
-    assert_the_two_letters_are_drawn_jointly(&circuit);
+    assert_the_two_letters_are_drawn_jointly(&pair_chain_circuit(2, 0), Engine::FrameSampler);
 }
 
 #[test]
 fn the_two_letters_are_drawn_jointly_on_the_compiled_route() {
-    let circuit = pair_chain_circuit(2, 6);
-    assert!(!use_frame_sampler(&circuit));
-    assert_the_two_letters_are_drawn_jointly(&circuit);
+    assert_the_two_letters_are_drawn_jointly(
+        &pair_chain_circuit(2, 6),
+        Engine::NoisyCompiledSampler,
+    );
 }
 
 // A zero-rate pair flips nothing, so it must not cost the model the device
@@ -1133,9 +1132,12 @@ fn a_zero_rate_pair_channel_is_inert() {
     assert!(!live.is_pauli_only());
 }
 
-// The inert entry must also draw nothing, which only a circuit with a random
-// outcome and a live channel alongside it can show: the two runs share one
-// stream and diverge on the first extra draw.
+// The inert entry must also draw nothing. A pass that draws and never fires
+// leaves the record alone, so the draw shows only in what the stream feeds
+// next: the readout entry, drawn from the same generator after the pair pass.
+// The two runs share one seed and diverge on the first extra draw. The shot
+// count sits under the homological threshold so both models run the noisy
+// compiled sampler; above it only the pair-free model would.
 #[test]
 fn a_zero_rate_pair_channel_consumes_no_randomness() {
     let mut circuit = Circuit::new(2, 2);
@@ -1146,14 +1148,17 @@ fn a_zero_rate_pair_channel_consumes_no_randomness() {
     }
     circuit.add_measure(0, 0);
     circuit.add_measure(1, 1);
-    assert!(!use_frame_sampler(&circuit));
 
-    let singles = NoiseModel::uniform_depolarizing(&circuit, 0.08);
+    let mut singles = NoiseModel::uniform_depolarizing(&circuit, 0.08);
+    singles.set_bit_readout_error(0, 0.3, 0.3);
     let mut with_inert_pair = NoiseModel::uniform_depolarizing(&circuit, 0.08);
+    with_inert_pair.set_bit_readout_error(0, 0.3, 0.3);
     with_inert_pair.after_gate[1].push(pair_event([0, 1], 0.0));
 
-    let baseline = run_shots_noisy(&circuit, &singles, 4000, 42).unwrap();
-    let inert = run_shots_noisy(&circuit, &with_inert_pair, 4000, 42).unwrap();
+    let baseline = run_shots_noisy(&circuit, &singles, 999, 42).unwrap();
+    let inert = run_shots_noisy(&circuit, &with_inert_pair, 999, 42).unwrap();
+    assert_eq!(baseline.metadata.engine, Some(Engine::NoisyCompiledSampler));
+    assert_eq!(inert.metadata.engine, Some(Engine::NoisyCompiledSampler));
     assert!(
         baseline.shots.iter().any(|s| s[0]) && baseline.shots.iter().any(|s| !s[0]),
         "the fixture must carry a random outcome for the comparison to mean anything"
@@ -1239,47 +1244,6 @@ fn the_filtered_compile_carries_an_in_block_pair() {
         assert!(
             (g - w).abs() < CHAIN_BAND,
             "observable {i}: sampled {g:.4} against density matrix {w:.4}"
-        );
-    }
-}
-
-// The `noisy_sampling/compiled_*` bench rows share one fixture and name the
-// compiled sampler. Four routes stamp `CompiledStabilizer`, so no result
-// separates them and an external test cannot tell which one ran. The fixture is
-// pinned here instead, where the two predicates that pick the route are in
-// scope: a pair channel and a readout entry each block the homological sampler,
-// and the depth ratio keeps all three models off the frame sampler.
-#[test]
-fn the_noisy_sampling_bench_fixture_takes_the_compiled_route() {
-    let mut circuit = circuits::clifford_heavy_circuit(100, 10, 0xDEAD_BEEF);
-    circuit.measure_all();
-
-    assert!(crate::sim::supports_compiled_measurement_sampling(&circuit));
-    assert!(!use_frame_sampler(&circuit));
-
-    let pauli = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-
-    let mut pair = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-    for (events, instruction) in pair.after_gate.iter_mut().zip(&circuit.instructions) {
-        if let Instruction::Gate { targets, .. } = instruction {
-            if targets.len() == 2 {
-                events.push(pair_event([targets[0], targets[1]], 0.01));
-            }
-        }
-    }
-
-    let mut readout = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-    readout.with_readout_error(0.02, 0.05);
-
-    for (label, model) in [
-        ("compiled_pauli", &pauli),
-        ("compiled_pair", &pair),
-        ("compiled_readout", &readout),
-    ] {
-        assert!(
-            crate::sim::homological::HomologicalSampler::compile(&circuit, model, 42).is_err(),
-            "{label}: the homological sampler claims the fixture, so the row \
-             prices syndrome classes rather than the compiled sampler"
         );
     }
 }

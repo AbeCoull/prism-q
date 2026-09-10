@@ -835,7 +835,16 @@ impl Gate {
     }
 
     /// Create a multi-controlled unitary gate with `num_controls` control qubits.
+    ///
+    /// # Panics
+    /// Panics if `num_controls` is zero. A control-free `Mcu` is a plain
+    /// single-qubit gate the kernels would not apply, so it is rejected here
+    /// rather than dropped; use `Gate::Fused(Box::new(mat))` for that.
     pub fn mcu(mat: [[Complex64; 2]; 2], num_controls: u8) -> Gate {
+        assert!(
+            num_controls > 0,
+            "Gate::mcu needs at least one control qubit"
+        );
         Gate::Mcu(Box::new(McuData { mat, num_controls }))
     }
 

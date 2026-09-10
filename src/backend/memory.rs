@@ -304,6 +304,13 @@ pub(crate) fn check_state_allocation(
     Ok(())
 }
 
+/// Width check for the dense probability terminal of a backend that exists to
+/// run past the dense cap (sparse, MPS, stabilizer, factored, product).
+///
+/// Raises `BackendUnsupported`, which the dispatch layer reads from a
+/// probability query as "no dense terminal" and reports as `None`: a wide
+/// register on these backends is the normal case, and `run` still answers
+/// with the classical bits.
 pub(crate) fn dense_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
     dense_output_len(
         backend,
@@ -314,34 +321,63 @@ pub(crate) fn dense_probability_len(backend: &str, num_qubits: usize) -> Result<
     )
 }
 
+/// Width check for the statevector's dense probability terminal.
+///
+/// The register already fits the state, so a width past `PRISM_MAX_PROB_QUBITS`
+/// is a cap to name rather than a terminal that does not exist: raises
+/// `IncompatibleBackend`, which the dispatch layer's `None` arm does not absorb.
+pub(crate) fn statevector_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
+    capped_output_len(
+        backend,
+        "probabilities",
+        num_qubits,
+        max_dense_probability_qubits(),
+        "PRISM_MAX_PROB_QUBITS",
+    )
+}
+
+/// Width check for a statevector export. Every backend exports through it, and
+/// nothing absorbs the error, so the cap surfaces naming itself.
 pub(crate) fn dense_statevector_len(
     backend: &str,
     operation: &str,
     num_qubits: usize,
 ) -> Result<usize> {
-    dense_output_len(
+    capped_output_len(
         backend,
         operation,
         num_qubits,
-        size_of::<Complex64>(),
         max_dense_statevector_qubits(),
+        "PRISM_MAX_EXPORT_QUBITS",
     )
 }
 
-/// Width check for the tensor-network dense probability terminal.
-///
-/// Raises `IncompatibleBackend` rather than `BackendUnsupported`: the dispatch
-/// layer reads `BackendUnsupported` from a probability query as "no dense
-/// terminal" and reports `None`, which would hide a width ceiling as absent
-/// data.
+/// Width check for the tensor-network dense probability terminal, raising
+/// `IncompatibleBackend` for the same reason as [`statevector_probability_len`].
 pub(crate) fn tensor_probability_len(backend: &str, num_qubits: usize) -> Result<usize> {
-    let cap = max_tensor_probability_qubits().min(usize::BITS as usize - 1);
+    capped_output_len(
+        backend,
+        "probabilities",
+        num_qubits,
+        max_tensor_probability_qubits(),
+        "PRISM_MAX_PROB_QUBITS",
+    )
+}
+
+fn capped_output_len(
+    backend: &str,
+    operation: &str,
+    num_qubits: usize,
+    cap: usize,
+    env_var: &str,
+) -> Result<usize> {
+    let cap = cap.min(usize::BITS as usize - 1);
     if num_qubits > cap {
         return Err(PrismError::IncompatibleBackend {
             backend: backend.to_string(),
             reason: format!(
-                "probabilities for {num_qubits} qubits exceed the cap of {cap} on this machine \
-                 (set PRISM_MAX_PROB_QUBITS to override)"
+                "{num_qubits} qubits exceed the {operation} cap of {cap} on this machine \
+                 (set {env_var} to override)"
             ),
         });
     }
@@ -529,6 +565,22 @@ mod tests {
         match err {
             PrismError::BackendUnsupported { operation, .. } => {
                 assert!(operation.contains("exceeds addressable memory"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capped_output_past_the_cap_names_it() {
+        let err =
+            capped_output_len("test", "probabilities", 5, 4, "PRISM_MAX_PROB_QUBITS").unwrap_err();
+        match err {
+            PrismError::IncompatibleBackend { reason, .. } => {
+                assert!(
+                    reason.contains("5 qubits") && reason.contains("cap of 4"),
+                    "{reason}"
+                );
+                assert!(reason.contains("PRISM_MAX_PROB_QUBITS"), "{reason}");
             }
             other => panic!("unexpected error: {other:?}"),
         }

@@ -175,6 +175,27 @@ fn ensure_pauli_only_rejects_readout() {
     assert!(!noise.is_pauli_only());
 }
 
+// A zero-rate entry flips nothing, so it must not cost a model the samplers
+// that fold noise in ahead of the draw. This is the reading `reject_readout_at`
+// already uses for the mixed-state terminals: inert, not absent.
+#[test]
+fn zero_rate_readout_stays_pauli_only() {
+    let mut circuit = Circuit::new(1, 1);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_measure(0, 0);
+
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    noise.with_readout_error(0.0, 0.0);
+    assert!(noise.is_pauli_only());
+    assert!(noise.ensure_pauli_only().is_ok());
+    assert!(prism_q::noisy_marginals_analytical(&circuit, &noise, 42).is_ok());
+    assert!(prism_q::run_shots_homological(&circuit, &noise, 100, 42).is_ok());
+
+    noise.set_bit_readout_error(0, 0.0, 0.02);
+    assert!(!noise.is_pauli_only());
+    assert!(prism_q::run_shots_homological(&circuit, &noise, 100, 42).is_err());
+}
+
 #[test]
 fn readout_p01_out_of_range_rejected() {
     let circuit = one_gate_circuit();
@@ -189,6 +210,23 @@ fn readout_p10_out_of_range_rejected() {
     let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
     noise.with_readout_error(0.0, f64::NAN);
     assert!(noise.validate().is_err());
+}
+
+// `pauli_probs` panics on anything it cannot return as a triple, so the pair
+// case gets its own accessor rather than a widened return.
+#[test]
+fn a_two_qubit_channel_reads_through_the_pair_accessor() {
+    let pair = NoiseEvent {
+        channel: NoiseChannel::TwoQubitDepolarizing { p: 0.02 },
+        qubits: smallvec![3, 1],
+    };
+    assert_eq!(pair.pauli_pair(), Some((3, 1, 0.02)));
+    assert!(pair.channel.as_pauli().is_none());
+
+    let single = NoiseEvent::pauli(0, 0.01, 0.0, 0.0);
+    assert!(single.pauli_pair().is_none());
+    assert_eq!(single.pauli_probs(), (0.01, 0.0, 0.0));
+    assert!(single.channel.pauli_pair_rate().is_none());
 }
 
 #[test]

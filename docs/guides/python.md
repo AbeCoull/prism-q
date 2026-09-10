@@ -424,7 +424,11 @@ Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,
 `phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time)`,
 `two_qubit_depolarizing(p)`, and `custom(kraus)` for an explicit list of 2x2
 Kraus operators. `validate()` checks probabilities and Kraus completeness;
-`is_pauli_only()` reports whether the model can run on a stabilizer backend.
+`is_pauli_only()` reports whether the model holds only single-qubit Pauli
+channels and no readout error. A model carrying readout error or
+`two_qubit_depolarizing` answers `False` there and still runs on the stabilizer
+samplers, which apply readout to the measurement record and sample the pair
+channel as one joint draw over its 15 branches.
 
 ## Expectation values
 

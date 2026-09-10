@@ -767,10 +767,7 @@ fn reject_readout_at(
         .readout
         .iter()
         .take(circuit.num_classical_bits)
-        .all(|entry| match entry {
-            None => true,
-            Some(readout) => readout.p01 == 0.0 && readout.p10 == 0.0,
-        });
+        .all(|entry| entry.as_ref().is_none_or(|readout| readout.is_inert()));
     if inert {
         return Ok(());
     }
@@ -3111,17 +3108,17 @@ pub(crate) fn run_shots_with_noise(
 
     let is_stabilizer_kind = kind.is_stabilizer_family();
 
-    if is_stabilizer_kind && !noise_model.is_pauli_only() {
+    if is_stabilizer_kind && !noise_model.has_only_pauli_channels() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),
             reason: format!(
-                "stabilizer backends only support Pauli/depolarizing noise; use {} for amplitude damping, phase damping, thermal relaxation, custom Kraus, or readout errors",
+                "stabilizer backends only support Pauli/depolarizing noise; use {} for amplitude damping, phase damping, thermal relaxation, or custom Kraus",
                 BackendKind::general_noise_backend_names()
             ),
         });
     }
 
-    if !noise_model.is_pauli_only() && !kind.supports_general_noise() {
+    if !noise_model.has_only_pauli_channels() && !kind.supports_general_noise() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{kind:?}"),
             reason: format!(
@@ -3142,7 +3139,7 @@ pub(crate) fn run_shots_with_noise(
         validate_explicit_backend(&kind, circuit)?;
     }
 
-    if noise_model.is_pauli_only() {
+    if noise_model.has_only_pauli_channels() {
         let use_compiled = (kind.is_auto()
             || matches!(
                 kind,
@@ -3176,7 +3173,7 @@ pub(crate) fn run_shots_with_noise(
         }
     }
 
-    let plan = if kind.is_auto() && !noise_model.is_pauli_only() {
+    let plan = if kind.is_auto() && !noise_model.has_only_pauli_channels() {
         general_noise_plan(&kind, circuit)
     } else {
         resolve_backend(&kind, circuit, false)

@@ -1620,3 +1620,36 @@ fn pauli_expectations_reject_out_of_range_and_duplicate_factors() {
         Err(PrismError::InvalidParameter { .. })
     ));
 }
+
+// `stabilizer/random_pairs` prices the batched cross-word kernel, which lives
+// on the word-batch route. The sparse gate index covers a run while the rows
+// stay light and hands the rest of the circuit over once they do not, so which
+// widths reach that kernel is set by this predicate and by nothing a result
+// carries. The bench sweep stops at 1000 for the same reason, and the wider
+// widths are checked here so the omission does not rest on an untested claim.
+#[test]
+fn random_pairs_bench_widths_split_on_the_sparse_gate_index() {
+    // Lazy destabilizers, as the plan picks for a circuit that never measures.
+    fn index_covers(n: usize) -> bool {
+        let circuit = crate::circuits::clifford_random_pairs(n, 10, 0xDEAD_BEEF);
+        let mut backend = StabilizerBackend::new_lazy(42);
+        backend.init(n, 0).unwrap();
+        backend.apply_instructions(&circuit.instructions).unwrap();
+        backend.sgi_ready()
+    }
+
+    for n in [500usize, 1000] {
+        assert!(
+            !index_covers(n),
+            "random_pairs/{n}: the sparse gate index still covers the run at \
+             its last gate, so the row never reaches the word-batch route"
+        );
+    }
+    for n in [2000usize, 5000] {
+        assert!(
+            index_covers(n),
+            "random_pairs/{n}: the index now yields at this width, so the row \
+             the bench sweep omits would reach the cross-word kernel after all"
+        );
+    }
+}

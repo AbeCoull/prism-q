@@ -246,6 +246,11 @@ impl ErrorChainComplex {
                 Instruction::Gate { gate, targets } => {
                     let noise_events = &noise.after_gate[instr_idx];
                     for event in noise_events {
+                        // An inert channel contributes no column, and passes
+                        // `ensure_pauli_only` whatever its variant.
+                        if event.channel.is_inert() {
+                            continue;
+                        }
                         let (px, py, pz) = event.pauli_probs();
                         let q = event.qubit();
                         let p_total = px + py + pz;
@@ -515,12 +520,15 @@ impl HomologicalSampler {
     /// Computes the E-matrix (error-to-measurement propagation), finds a basis
     /// for im(E), and precomputes 2^r syndrome class probabilities where
     /// r = rank(E), rejecting circuits with r above `MAX_SYNDROME_RANK`.
-    /// Also builds a compiled sampler for quantum randomness.
+    /// Also builds a compiled sampler for quantum randomness. Readout error is
+    /// rejected with the non-Pauli channels: it is drawn per shot against the
+    /// record and has no syndrome class to fold into.
     ///
     /// Total per-shot cost: O(r_quantum + 1) where r_quantum is the stabilizer
     /// rank (number of random measurements), versus O(p) for brute-force
     /// where p is the number of error locations.
     pub fn compile(circuit: &Circuit, noise: &NoiseModel, seed: u64) -> Result<Self> {
+        noise.ensure_pauli_only()?;
         let ecc = ErrorChainComplex::build(circuit, noise, seed)?;
         let m = ecc.num_measurements;
         let p = ecc.num_errors;
@@ -802,6 +810,7 @@ pub fn noisy_marginals_analytical(
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<Vec<f64>> {
+    noise.ensure_pauli_only()?;
     let ecc = ErrorChainComplex::build(circuit, noise, seed)?;
     let compiled = crate::sim::compiled::compile_measurements(circuit, seed)?;
     let noiseless = compiled.marginal_probabilities();

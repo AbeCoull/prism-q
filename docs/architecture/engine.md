@@ -44,15 +44,18 @@ Orchestration layer in `src/sim/mod.rs`.
 | `run_on(backend, circuit)` | Pre-constructed backend |
 | `run_qasm(qasm, seed)` | Parse + simulate |
 
-`RunOutcome::probabilities` is `None` only when the selected backend cannot
-expose a dense probability distribution for the requested circuit, such as
-factored stabilizer or decomposed runs above the dense output cap. Other
-probability extraction failures propagate as errors. `marginals()` requires
-either a direct Pauli marginal route or backend probability output; it returns
-`BackendUnsupported` instead of fabricating uniform marginals when neither path
-is available. Stochastic and deterministic Pauli marginal backends accept only
-unitary circuits of Clifford gates and Pauli rotations without measurement,
-reset, or conditional instructions: `T`, `Tdg`, `Rz`, `P`, and the two-qubit
+`RunOutcome::probabilities` is `None` only when the selected backend has no
+dense probability terminal for the requested circuit: the backends built to
+run past the dense cap (sparse, MPS, stabilizer, factored, product) above
+`PRISM_MAX_PROB_QUBITS`, or a register too wide to index. A statevector or
+tensor-network run above that cap is an error naming it, since the register
+already fits the state, and other probability extraction failures propagate
+as errors too. `marginals()` requires either a direct Pauli marginal route or
+backend probability output; it returns `BackendUnsupported` instead of
+fabricating uniform marginals when neither path is available. Stochastic and
+deterministic Pauli marginal backends accept only unitary circuits of Clifford
+gates and Pauli rotations without measurement, reset, or conditional
+instructions: `T`, `Tdg`, `Rz`, `P`, and the two-qubit
 `Rzz` branch natively, while `Rx`, `Ry`, and multi-qubit `PauliRot` strings
 lower to Clifford conjugation around one `Rz` before the run, `Fused` matrices
 lower to the named gate they equal up to phase or to an Euler triple, and a `Cu`

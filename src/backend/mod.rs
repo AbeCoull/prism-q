@@ -206,7 +206,8 @@ pub(crate) use memory::{
     dense_statevector_len, max_dense_outcome_bits, max_density_matrix_qubits,
     max_factored_merge_qubits, max_sparse_entries, max_stabilizer_cluster_qubits,
     max_statevector_qubits, mps_workspace_cap_elements, reserve_dense_output,
-    stabilizer_cluster_error, tensor_probability_len, workspace_allocation_error,
+    stabilizer_cluster_error, statevector_probability_len, tensor_probability_len,
+    workspace_allocation_error,
 };
 
 /// Whether `phase` equals `1+0i` within [`PHASE_IS_ONE_EPS`].

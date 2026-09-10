@@ -561,3 +561,9 @@ fn test_recognize_up_to_phase_returns_the_scalar() {
         None
     );
 }
+
+#[test]
+#[should_panic(expected = "at least one control qubit")]
+fn mcu_with_zero_controls_panics() {
+    let _ = Gate::mcu(Gate::X.matrix_2x2(), 0);
+}

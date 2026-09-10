@@ -821,3 +821,70 @@ fn initial_state_route_returns_the_weighted_mean() {
     assert!((result.mean - 2.0 * theta.cos()).abs() < TOL);
     assert!(result.variance.is_none());
 }
+
+// Readout error acts on the measurement record, which an observable never
+// sees, so a model carrying it is rejected the way `run` and `marginals`
+// reject it rather than answered with a value `shots` would disagree with.
+fn readout_fixture() -> (Circuit, NoiseModel, NoiseModel) {
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::Ry(0.8), &[0]);
+    circuit.add_gate(Gate::Ry(2.0), &[1]);
+    let clean = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let mut with_readout = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    with_readout.with_readout_error(0.3, 0.0);
+    (circuit, clean, with_readout)
+}
+
+#[test]
+fn expectation_values_reject_readout_error() {
+    use prism_q::PrismError;
+    let (circuit, clean, with_readout) = readout_fixture();
+    let observables = [vec![PauliTerm::z(0)], vec![PauliTerm::z(1)]];
+    match simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&with_readout)
+        .seed(42)
+        .expectation_values(&observables)
+    {
+        Err(PrismError::InvalidParameter { message }) => assert!(
+            message.starts_with("expectation values") && message.contains("shots"),
+            "the rejection names the terminal and one that applies readout, got {message}"
+        ),
+        other => panic!("expected expectation values to reject readout error: {other:?}"),
+    }
+    let values = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    assert_eq!(values.len(), 2);
+}
+
+#[test]
+fn observable_expectation_rejects_readout_error() {
+    use prism_q::PrismError;
+    let (circuit, clean, with_readout) = readout_fixture();
+    let observable =
+        PauliObservable::from_terms([(0.5, vec![PauliTerm::z(0)]), (1.5, vec![PauliTerm::z(1)])])
+            .unwrap();
+    match simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&with_readout)
+        .seed(42)
+        .observable_expectation(&observable)
+    {
+        Err(PrismError::InvalidParameter { message }) => assert!(
+            message.starts_with("observable expectation") && message.contains("shots"),
+            "the rejection names the terminal and one that applies readout, got {message}"
+        ),
+        other => panic!("expected observable expectation to reject readout error: {other:?}"),
+    }
+    let result = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&clean)
+        .seed(42)
+        .observable_expectation(&observable)
+        .unwrap();
+    assert!(result.mean.is_finite());
+}

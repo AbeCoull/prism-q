@@ -203,6 +203,11 @@ impl Backend for ProductStateBackend {
         ])
     }
 
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        crate::backend::schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        Ok(vec![1.0])
+    }
+
     fn classical_results(&self) -> &[bool] {
         &self.classical_bits
     }

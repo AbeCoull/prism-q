@@ -1721,21 +1721,19 @@ struct Mat4x4Broadcast256 {
 
 #[cfg(target_arch = "x86_64")]
 impl Mat4x4Broadcast256 {
-    #[inline(always)]
+    #[inline]
+    #[target_feature(enable = "avx")]
     unsafe fn from_matrix(mat: &[[Complex64; 4]; 4]) -> Self {
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe {
-            let mut rr = [_mm256_setzero_pd(); 16];
-            let mut ii = [_mm256_setzero_pd(); 16];
-            for (r, row) in mat.iter().enumerate() {
-                for (c, elem) in row.iter().enumerate() {
-                    let idx = r * 4 + c;
-                    rr[idx] = _mm256_set1_pd(elem.re);
-                    ii[idx] = _mm256_set1_pd(elem.im);
-                }
+        let mut rr = [_mm256_setzero_pd(); 16];
+        let mut ii = [_mm256_setzero_pd(); 16];
+        for (r, row) in mat.iter().enumerate() {
+            for (c, elem) in row.iter().enumerate() {
+                let idx = r * 4 + c;
+                rr[idx] = _mm256_set1_pd(elem.re);
+                ii[idx] = _mm256_set1_pd(elem.im);
             }
-            Self { rr, ii }
         }
+        Self { rr, ii }
     }
 }
 
@@ -2321,20 +2319,18 @@ impl PreparedKraus2q {
     ///
     /// Requires AVX, implied by a detected AVX2 feature.
     #[inline]
+    #[target_feature(enable = "avx")]
     pub(crate) unsafe fn new(s: &[[Complex64; 16]; 16]) -> Self {
-        // SAFETY: same contract as the enclosing unsafe fn.
-        unsafe {
-            let mut rr = [[_mm256_setzero_pd(); 8]; 16];
-            let mut ii = [[_mm256_setzero_pd(); 8]; 16];
-            for (r, row) in s.iter().enumerate() {
-                for k in 0..8 {
-                    let (a, b) = (row[2 * k], row[2 * k + 1]);
-                    rr[r][k] = _mm256_setr_pd(a.re, a.re, b.re, b.re);
-                    ii[r][k] = _mm256_setr_pd(a.im, a.im, b.im, b.im);
-                }
+        let mut rr = [[_mm256_setzero_pd(); 8]; 16];
+        let mut ii = [[_mm256_setzero_pd(); 8]; 16];
+        for (r, row) in s.iter().enumerate() {
+            for k in 0..8 {
+                let (a, b) = (row[2 * k], row[2 * k + 1]);
+                rr[r][k] = _mm256_setr_pd(a.re, a.re, b.re, b.re);
+                ii[r][k] = _mm256_setr_pd(a.im, a.im, b.im, b.im);
             }
-            Self { rr, ii }
         }
+        Self { rr, ii }
     }
 
     /// Apply the superoperator to the 16-amplitude block at `base | flats[j]`,

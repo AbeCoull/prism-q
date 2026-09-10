@@ -1332,6 +1332,26 @@ fn bench_mps_sampling(c: &mut Criterion) {
     group.finish();
 }
 
+// Diagnostic row: the chain is built once, so the row prices one SVD of the
+// center site at the middle cut, the walk having settled there on the first
+// call.
+fn bench_mps_entropy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/entropy");
+    configure_group(&mut group);
+
+    let n = 18;
+    let circuit = circuits::brickwork_circuit(n, 24, SEED);
+    let mut backend = MpsBackend::new(SEED, 64);
+    backend.init(n, 0).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    let subsystem: Vec<usize> = (0..n / 2).collect();
+    group.bench_function("brickwork_d24_18", |b| {
+        b.iter(|| black_box(backend.entanglement_entropy(&subsystem).unwrap()));
+    });
+
+    group.finish();
+}
+
 /// Shot count for both sparse sampling groups: sized so the sampling loop is
 /// roughly half of a populated row (measured against the bare run of the same
 /// fixture), and high enough to lift the empty-map rows off the microsecond
@@ -3659,6 +3679,7 @@ criterion_group! {
     bench_mps_brickwork,
     bench_mps_matched,
     bench_mps_sampling,
+    bench_mps_entropy,
     // Product state
     bench_product_scaling,
     bench_product_sampling,

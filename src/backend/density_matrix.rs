@@ -1228,6 +1228,13 @@ impl Backend for DensityMatrixBackend {
         crate::sim::ResolvedBackend::DensityMatrix
     }
 
+    fn schmidt_values(&mut self, _subsystem: &[usize]) -> Result<Vec<f64>> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "Schmidt values of a mixed state".to_string(),
+        })
+    }
+
     fn placement(&self) -> crate::sim::Placement {
         if self.sv.is_gpu_resident() {
             crate::sim::Placement::Device

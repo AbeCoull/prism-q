@@ -31,6 +31,7 @@
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
 //! | `init_from_amplitudes` | Everything except Statevector, DistributedStatevector, and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. The distributed statevector takes the full vector on every rank and keeps its own slice. |
+//! | `schmidt_values` | Everything except Statevector, Mps, and ProductState | A mixture has no Schmidt decomposition, and a tableau's spectrum is flat, so its entropy is a rank and not a list. Sparse, factored, tensor-network and distributed states could answer through a reduced density matrix but do not yet. `entanglement_entropy` follows, since its default reads the spectrum. |
 //!
 //! [`Backend::reduced_density_matrix_1q`] and [`Backend::apply_1q_matrix`] are
 //! two halves of one capability, sampling a non-Pauli branch and applying the
@@ -50,6 +51,7 @@ pub mod factored_stabilizer;
 pub(crate) mod memory;
 pub mod mps;
 pub mod product;
+pub(crate) mod schmidt;
 pub(crate) mod simd;
 pub mod sparse;
 pub mod stabilizer;
@@ -683,6 +685,35 @@ pub trait Backend {
             backend: self.name().to_string(),
             operation: "Pauli expectation values".to_string(),
         })
+    }
+
+    /// Schmidt values of the state across the cut between `subsystem` and its
+    /// complement: descending, numerically zero values dropped, squares summing
+    /// to 1 whatever norm the representation carries.
+    ///
+    /// `subsystem` must be non-empty, leave its complement non-empty, and name
+    /// no qubit twice (`schmidt::validate_subsystem`); its order is irrelevant.
+    /// Takes `&mut self` because the MPS answer walks its orthogonality center
+    /// to the cut. The represented state is unchanged. The one-SVD and
+    /// statevector routes resolve values down to the `1e-14` floor; the
+    /// reduced-density route, which an MPS takes for a subsystem that is not
+    /// contiguous in chain order, works from the squared spectrum and resolves
+    /// them down to about `1e-7` of the largest. The default reports that the
+    /// representation offers no spectrum; see the module docs for what
+    /// declines it.
+    fn schmidt_values(&mut self, _subsystem: &[usize]) -> Result<Vec<f64>> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "Schmidt values".to_string(),
+        })
+    }
+
+    /// Entanglement entropy of `subsystem` in nats: `-sum p ln p` over
+    /// `p = s^2 / sum s^2` for the [`Backend::schmidt_values`] `s`, which is
+    /// where the default reads it from.
+    fn entanglement_entropy(&mut self, subsystem: &[usize]) -> Result<f64> {
+        let values = self.schmidt_values(subsystem)?;
+        Ok(schmidt::entropy_of_schmidt_values(&values))
     }
 
     /// Apply a 2×2 matrix to a single qubit without allocating.

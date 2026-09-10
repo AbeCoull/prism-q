@@ -70,8 +70,8 @@ use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "gpu")]
 use std::sync::Arc;
 
-use crate::backend::simd;
 use crate::backend::{Backend, dense_probability_len, dense_statevector_len};
+use crate::backend::{schmidt, simd};
 use crate::circuit::Instruction;
 #[cfg(feature = "gpu")]
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
@@ -936,6 +936,16 @@ impl Backend for StatevectorBackend {
             });
         }
         Ok(self.reduced_density_matrix_two(q0, q1))
+    }
+
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            let state = gpu.export_statevector()?;
+            return schmidt::dense_schmidt_values(self.name(), &state, self.num_qubits, subsystem);
+        }
+        schmidt::dense_schmidt_values(self.name(), &self.state, self.num_qubits, subsystem)
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

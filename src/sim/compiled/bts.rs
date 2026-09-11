@@ -701,18 +701,6 @@ unsafe fn xor_reduce_avx2(
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[allow(dead_code)]
-unsafe fn sample_bts_meas_major_avx2(
-    _sparse: &SparseParity,
-    _num_shots: usize,
-    _ref_bits: &[u64],
-    _rng: &mut Xoshiro256PlusPlus,
-    _rank: usize,
-) -> Vec<u64> {
-    unreachable!()
-}
-
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn sample_bts_meas_major_dag_avx2(
@@ -802,19 +790,6 @@ unsafe fn sample_bts_meas_major_dag_avx2(
         apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
         meas_major
     }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[allow(dead_code)]
-unsafe fn sample_bts_meas_major_dag_avx2(
-    _sparse: &SparseParity,
-    _dag: &XorDag,
-    _num_shots: usize,
-    _ref_bits: &[u64],
-    _rng: &mut Xoshiro256PlusPlus,
-    _rank: usize,
-) -> Vec<u64> {
-    unreachable!()
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -927,7 +902,7 @@ unsafe fn sample_bts_meas_major_neon(
                 pair_start += tile;
             }
 
-            bts_neon_remainder(
+            bts_neon_per_pair(
                 sparse,
                 &mut meas_major,
                 &mut vrng,
@@ -952,80 +927,6 @@ unsafe fn sample_bts_meas_major_neon(
 
         apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
         meas_major
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[allow(clippy::too_many_arguments)]
-unsafe fn bts_neon_remainder(
-    sparse: &SparseParity,
-    meas_major: &mut [u64],
-    vrng: &mut Xoshiro256PlusPlusX2,
-    rank: usize,
-    s_words: usize,
-    s_pairs: usize,
-    pair_start: usize,
-    rem: usize,
-) {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        use std::arch::aarch64::*;
-
-        let mut random_neon: Vec<uint64x2_t> = vec![vdupq_n_u64(0); rank];
-
-        for pair in pair_start..s_pairs {
-            let base_sw = pair * 2;
-            let words_this_pair = (s_words - base_sw).min(2);
-
-            for nval in random_neon.iter_mut().take(rank) {
-                *nval = vrng.next_uint64x2();
-            }
-
-            if pair == s_pairs - 1 && rem != 0 {
-                let full_words = rem / 64;
-                let tail_bits = rem % 64;
-                let mut mask_buf = [!0u64; 2];
-                for val in mask_buf
-                    .iter_mut()
-                    .skip(full_words + usize::from(tail_bits > 0))
-                {
-                    *val = 0;
-                }
-                if tail_bits > 0 {
-                    mask_buf[full_words] = (1u64 << tail_bits) - 1;
-                }
-                let mask_vec = vld1q_u64(mask_buf.as_ptr());
-                for nval in random_neon.iter_mut().take(rank) {
-                    *nval = vandq_u64(*nval, mask_vec);
-                }
-            }
-
-            for &m in &sparse.non_det_rows {
-                let m = m as usize;
-                let cols = sparse.row_cols(m);
-                let acc = match cols.len() {
-                    0 => unreachable!(),
-                    1 => random_neon[cols[0] as usize],
-                    2 => veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                    3 => veorq_u64(
-                        veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                        random_neon[cols[2] as usize],
-                    ),
-                    4 => veorq_u64(
-                        veorq_u64(random_neon[cols[0] as usize], random_neon[cols[1] as usize]),
-                        veorq_u64(random_neon[cols[2] as usize], random_neon[cols[3] as usize]),
-                    ),
-                    _ => xor_reduce_neon(cols, &random_neon),
-                };
-
-                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
-                if words_this_pair == 2 {
-                    vst1q_u64(out_ptr, acc);
-                } else {
-                    *out_ptr = vgetq_lane_u64(acc, 0);
-                }
-            }
-        }
     }
 }
 
@@ -1163,18 +1064,6 @@ unsafe fn xor_reduce_neon(
         }
         acc
     }
-}
-
-#[cfg(not(target_arch = "aarch64"))]
-#[allow(dead_code)]
-unsafe fn sample_bts_meas_major_neon(
-    _sparse: &SparseParity,
-    _num_shots: usize,
-    _ref_bits: &[u64],
-    _rng: &mut Xoshiro256PlusPlus,
-    _rank: usize,
-) -> Vec<u64> {
-    unreachable!()
 }
 
 #[cfg(test)]

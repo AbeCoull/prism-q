@@ -1,7 +1,7 @@
 use super::*;
 use crate::gates::Gate;
 
-fn rx_cx_chain(circuit: &mut Circuit, qubits: std::ops::Range<usize>) {
+pub(super) fn rx_cx_chain(circuit: &mut Circuit, qubits: std::ops::Range<usize>) {
     for q in qubits.clone() {
         circuit.add_gate(Gate::Rx(0.3), &[q]);
     }

@@ -24,9 +24,10 @@
 //! Every single-qubit gate is absorbed into its site tensor. Adjacent
 //! two-qubit gates (`Cx`, `Cz`, `Swap`, `Rzz`, `Cu`, `Fused2q`) go through the
 //! SVD kernel, and non-adjacent pairs route via SWAP chains. `Mcu` expands to
-//! a dense matrix over the gathered sites, and the fused families (`Multi2q`,
-//! `BatchRzz`, `BatchPhase`, `DiagonalBatch`, `MultiFused`) decompose into the
-//! single-site and adjacent-pair kernels.
+//! a dense matrix over the gathered sites, `BatchPhase` sweeps its control
+//! toward each target (a single phase reduces to the pair kernel), and the
+//! other fused families (`Multi2q`, `BatchRzz`, `DiagonalBatch`, `MultiFused`)
+//! decompose into the single-site and adjacent-pair kernels.
 //!
 //! # When to prefer this backend
 //!

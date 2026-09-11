@@ -1263,7 +1263,7 @@ fn factored_stabilizer_export_statevector_two_clusters_matches() {
 
 // One entangled cluster, so both stabilizer backends run the same generator
 // projection. `S` after `H` makes a Y-type generator (the i-factor branch), the
-// CX chain makes Z-only generators (the sign-zeroing branch), and the 3-4 pair
+// CX chain makes Z-only generators (the sign-zeroing branch), and the 2-3 pair
 // makes an X-type one (the partner walk).
 #[test]
 fn stabilizer_exports_match_statevector_amplitudes() {

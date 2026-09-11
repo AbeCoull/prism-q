@@ -4,12 +4,12 @@
 //! rejection is decided before the backend reserves anything, so no test
 //! allocates an oversize state.
 
-use std::sync::Once;
+mod common;
 
+use common::caps;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
-use prism_q::gates::Gate;
-use prism_q::{BackendKind, Circuit, PrismError, StatevectorBackend, run_on, simulate};
+use prism_q::{BackendKind, PrismError, StatevectorBackend, circuits, run_on, simulate};
 
 /// A density matrix of `n` qubits is a `2n`-qubit statevector, so the effective
 /// density-matrix cap is half the statevector cap. `PRISM_MAX_DM_QUBITS` is set
@@ -20,40 +20,7 @@ const DM_CAP: usize = SV_CAP / 2;
 const DM_OVERRIDE: usize = DM_CAP + 2;
 
 fn small_caps() {
-    static SET: Once = Once::new();
-    SET.call_once(|| {
-        // SAFETY: set exactly once, and every reader in this binary is gated
-        // behind this `Once`, so no thread queries a cap while it is written.
-        unsafe {
-            std::env::set_var("PRISM_MAX_SV_QUBITS", "8");
-            std::env::set_var("PRISM_MAX_DM_QUBITS", "6");
-        }
-    });
-}
-
-fn entangling_circuit(n: usize) -> Circuit {
-    let mut c = Circuit::new(n, 0);
-    c.add_gate(Gate::H, &[0]);
-    for q in 1..n {
-        c.add_gate(Gate::Cx, &[q - 1, q]);
-    }
-    c
-}
-
-fn assert_cap_error(err: PrismError, backend: &str) {
-    match err {
-        PrismError::IncompatibleBackend {
-            backend: named,
-            reason,
-        } => {
-            assert_eq!(named, backend, "wrong backend named: {reason}");
-            assert!(
-                reason.contains("exceeding the cap"),
-                "expected a cap rejection, got {reason}"
-            );
-        }
-        other => panic!("expected a clean cap error, got {other:?}"),
-    }
+    caps::set_once(&[("PRISM_MAX_SV_QUBITS", "8"), ("PRISM_MAX_DM_QUBITS", "6")]);
 }
 
 // The path a caller reaches by driving a backend directly instead of through
@@ -63,8 +30,8 @@ fn assert_cap_error(err: PrismError, backend: &str) {
 fn statevector_init_over_cap_returns_clean_error() {
     small_caps();
     let mut backend = StatevectorBackend::new(42);
-    let err = run_on(&mut backend, &entangling_circuit(SV_CAP + 2)).unwrap_err();
-    assert_cap_error(err, "statevector");
+    let err = run_on(&mut backend, &circuits::ghz_circuit(SV_CAP + 2)).unwrap_err();
+    caps::assert_cap_rejection(err, "statevector");
 }
 
 #[test]
@@ -72,14 +39,15 @@ fn density_matrix_init_over_cap_returns_clean_error() {
     small_caps();
     let mut backend = DensityMatrixBackend::new(42);
     let err = backend.init(DM_CAP + 2, 0).unwrap_err();
-    assert_cap_error(err, "density_matrix");
+    caps::assert_cap_rejection(err, "density_matrix");
 }
 
 #[test]
 fn statevector_init_at_the_cap_still_runs() {
     small_caps();
     let mut backend = StatevectorBackend::new(42);
-    run_on(&mut backend, &entangling_circuit(SV_CAP)).expect("a circuit at the cap must still run");
+    run_on(&mut backend, &circuits::ghz_circuit(SV_CAP))
+        .expect("a circuit at the cap must still run");
     let probs = backend.probabilities().unwrap();
     assert_eq!(probs.len(), 1 << SV_CAP);
     assert!(
@@ -104,7 +72,7 @@ fn density_matrix_init_at_the_cap_still_runs() {
 fn density_matrix_override_above_the_clamp_is_rejected_identically_at_both_gates() {
     small_caps();
     for width in [DM_CAP + 1, DM_OVERRIDE + 1] {
-        let dispatched = simulate(&entangling_circuit(width))
+        let dispatched = simulate(&circuits::ghz_circuit(width))
             .backend(BackendKind::DensityMatrix)
             .seed(42)
             .run()

@@ -184,22 +184,28 @@ stores it owns that claim; the report records which of the two ways the referenc
 ### Keeping an A/B affordable
 
 Six passes run, so a row costs six times what one pass of it costs, and one pass of a
-row is mostly Criterion's fixed windows: 3s of warm-up and 5s of measurement whatever
-the row's iteration time, so 24 millisecond-scale rows cost about 19 minutes of
-measurement before any slow row is counted. On this corpus the remainder is dominated
-by a handful of slow rows, and those are routinely the controls rather than the rows
-under test: an A/B on 2026-09-04 spent 61% of its wall clock on four control rows that
-all reported noise.
+row is mostly Criterion's fixed windows whatever the row's iteration time. The full
+tier runs them at 1s of warm-up and 3s of measurement: a microsecond row collects
+thousands of iterations per sample inside 3s, and a row whose one iteration outlasts
+the window is priced by its sample count instead. The two discarded warmup passes run
+at 10 samples, since they warm the binary and price the rows and neither depends on
+the count. Rows the first warmup projects past `--slow-row-seconds` (default 30) in one
+pass at the full count run at `--slow-samples` (default 15) instead; they keep their
+verdict and set the noise floor, and the report names them and their count. A 25-row
+MPS sweep with three rows over a second each cost 43 minutes per run before these
+three changes, of which the windows were about 20 minutes and the slow rows about 19.
 
 Four levers, in the order worth reaching for them.
 
 **Run the light tier first.** `--light` runs three measured passes (ref, new, ref)
 instead of four, shrinks the Criterion windows to 0.5s warm-up and 1.5s measurement,
-and takes 10 samples. A row costs about a fifth of the full tier, so a 24-row sweep
+and takes 10 samples. A row costs about a third of the full tier, so a 24-row sweep
 finishes in about four minutes of measurement. The report names the tier in its header
 and on the verdict line, and the new binary's control column reads `n/a` because it is
 measured once: the tier says which rows moved and roughly by how much, and a gate claim
-still needs the full tier on those rows. Groups that pin their own `measurement_time`
+still needs the full tier on those rows. Run it on the exact rows the full tier will
+run, before the full tier: a change whose cost the light tier shows is not worth the
+full tier until the change is settled. Groups that pin their own `measurement_time`
 (the shots groups pin 3s) keep it, so their rows shrink less.
 
 **Pick controls by cost.** A control has to read flat, not precisely.
@@ -218,11 +224,12 @@ percentage, and presenting one would dress noise as a result. A control that mov
 the threshold still fails the run, because that is collateral damage whichever row it
 lands on.
 
-**Lower the sample count on slow rows.** `PRISM_BENCH_SAMPLES=10` saves nothing on a
-millisecond row and about two thirds on a multi-second one, for the reason in the table
-above: Criterion divides `measurement_time` across the sample count until one iteration
-no longer fits. It is the lever for a sweep that `--light` does not shrink enough because
-its rows are seconds each, and it stacks with `--light`.
+**Lower the sample count on slow rows.** The full tier does this on its own for rows
+projected past `--slow-row-seconds` per pass; `--slow-samples` sets the count and
+`--slow-row-seconds 0` turns it off. `PRISM_BENCH_SAMPLES=10` lowers every row instead:
+it saves nothing on a millisecond row and about two thirds on a multi-second one, for
+the reason in the table above: Criterion divides `measurement_time` across the sample
+count until one iteration no longer fits. It stacks with `--light`.
 
 `--max-row-seconds` (default 240, 0 disables) aborts the run when Criterion projects a
 single row past that many seconds in one pass. The projection is printed before
@@ -238,7 +245,7 @@ ref rebuilds incrementally.
 The script builds the bench binary from the working tree, builds the same target
 from a reference git ref in a separate worktree, verifies the working tree did
 not change between the two builds, then runs the two executables adjacent with no
-build and no source edit in between. One discarded warmup pass per binary, then
+build and no source edit in between. One discarded warmup pass per binary at 10 samples, then
 four measured passes in the order ref, new, new, ref: both means are centred on
 the same point in time so linear drift cancels, and each binary is measured twice
 so every row reports a same-code control alongside its change.

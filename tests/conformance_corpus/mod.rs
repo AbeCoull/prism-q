@@ -351,7 +351,7 @@ impl GeneratedCase {
         .unwrap();
         writeln!(
             out,
-            "  rebuild: common::conformance::generated_cases()[{}]",
+            "  rebuild: conformance_corpus::generated_cases()[{}]",
             self.index
         )
         .unwrap();

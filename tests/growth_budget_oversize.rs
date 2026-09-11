@@ -3,13 +3,13 @@
 //! cache per process. Every rejection is decided before the growth allocation,
 //! so no test allocates an oversize state.
 
-use std::sync::Once;
+mod common;
 
+use common::caps;
 use num_complex::Complex64;
 use prism_q::gates::Gate;
 use prism_q::{
-    Circuit, FactoredBackend, FactoredStabilizerBackend, MpsBackend, PrismError, SparseBackend,
-    run_on,
+    Circuit, FactoredBackend, FactoredStabilizerBackend, MpsBackend, SparseBackend, run_on,
 };
 
 // Merge cap 8: a factored merge past 8 qubits rejects, and so does a stabilizer
@@ -20,33 +20,12 @@ const MERGE_CAP: usize = 8;
 const SPARSE_ENTRY_CAP: usize = 1 << 6;
 
 fn small_caps() {
-    static SET: Once = Once::new();
-    SET.call_once(|| {
-        // SAFETY: set exactly once, and every reader in this binary is gated
-        // behind this `Once`, so no thread queries a cap while it is written.
-        unsafe {
-            std::env::set_var("PRISM_MAX_FACTORED_MERGE_QUBITS", "8");
-            std::env::set_var("PRISM_MAX_MPS_WORKSPACE_QUBITS", "8");
-            std::env::set_var("PRISM_MAX_SPARSE_QUBITS", "6");
-            std::env::set_var("PRISM_MAX_STABILIZER_CLUSTER_QUBITS", "8");
-        }
-    });
-}
-
-fn assert_cap_error(err: PrismError, backend: &str) {
-    match err {
-        PrismError::IncompatibleBackend {
-            backend: named,
-            reason,
-        } => {
-            assert_eq!(named, backend, "wrong backend named: {reason}");
-            assert!(
-                reason.contains("exceeding the cap"),
-                "expected a cap rejection, got {reason}"
-            );
-        }
-        other => panic!("expected a clean cap error, got {other:?}"),
-    }
+    caps::set_once(&[
+        ("PRISM_MAX_FACTORED_MERGE_QUBITS", "8"),
+        ("PRISM_MAX_MPS_WORKSPACE_QUBITS", "8"),
+        ("PRISM_MAX_SPARSE_QUBITS", "6"),
+        ("PRISM_MAX_STABILIZER_CLUSTER_QUBITS", "8"),
+    ]);
 }
 
 // Two independent blocks built by CX chains, then one bridging CX whose merge
@@ -96,7 +75,7 @@ fn factored_merge_over_the_cap_is_rejected() {
     let circuit = bridged_blocks(5, 5);
     let mut backend = FactoredBackend::new(42);
     let err = run_on(&mut backend, &circuit).unwrap_err();
-    assert_cap_error(err, "factored");
+    caps::assert_cap_rejection(err, "factored");
 }
 
 #[test]
@@ -114,7 +93,7 @@ fn sparse_densifying_circuit_is_rejected() {
     let circuit = h_wall(8, 7);
     let mut backend = SparseBackend::new(42);
     let err = run_on(&mut backend, &circuit).unwrap_err();
-    assert_cap_error(err, "sparse");
+    caps::assert_cap_rejection(err, "sparse");
 }
 
 #[test]
@@ -137,7 +116,7 @@ fn mps_workspace_over_the_cap_is_rejected() {
     let circuit = dense_entangler(8, 6);
     let mut backend = MpsBackend::new(42, 1 << 20);
     let err = run_on(&mut backend, &circuit).unwrap_err();
-    assert_cap_error(err, "mps");
+    caps::assert_cap_rejection(err, "mps");
 }
 
 // The N-site path holds the assembled 4^n gate matrix and its reordered copy
@@ -160,7 +139,7 @@ fn mps_mcu_gate_matrix_over_the_cap_is_rejected() {
     let circuit = wide_mcu(8, 4);
     let mut backend = MpsBackend::new(42, 1 << 20);
     let err = run_on(&mut backend, &circuit).unwrap_err();
-    assert_cap_error(err, "mps");
+    caps::assert_cap_rejection(err, "mps");
 }
 
 #[test]
@@ -177,7 +156,7 @@ fn stabilizer_cluster_merge_over_the_cap_is_rejected() {
     let circuit = bridged_blocks(5, 5);
     let mut backend = FactoredStabilizerBackend::new(42);
     let err = run_on(&mut backend, &circuit).unwrap_err();
-    assert_cap_error(err, "factored-stabilizer");
+    caps::assert_cap_rejection(err, "factored-stabilizer");
 }
 
 #[test]

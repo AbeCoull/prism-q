@@ -1,3 +1,7 @@
+//! Noisy QEC programs: per-channel marginal and detector rates against their
+//! closed forms, and the compiled runner against the reference runner at the
+//! statistical shot count.
+
 #[cfg(feature = "bench-internal")]
 use prism_q::compile_qec_profiled_sampler;
 use prism_q::{

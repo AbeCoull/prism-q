@@ -1,3 +1,7 @@
+//! Observable rerouting for the stabilizer-decomposition estimator: which
+//! coset representative the search picks, and that a rerouted light cone
+//! carries the same expectation as the unrestricted one.
+
 use prism_q::qec::observable_reroute::{
     ObservableRerouteResult, min_cone_z_representative, xor_z_support,
 };

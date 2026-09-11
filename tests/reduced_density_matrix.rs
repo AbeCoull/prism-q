@@ -1,7 +1,7 @@
 //! `Backend::reduced_density_matrix`: closed forms, agreement with the
 //! statevector over the shared small-circuit corpus, the row-index
 //! convention, the trajectory routines at one and two qubits, and the
-//! declines. The cap is pinned in `reduced_density_matrix_oversize.rs`.
+//! declines. The cap is pinned in `export_cap_oversize.rs`.
 
 mod common;
 

@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::SEED;
+use common::{SEED, count_gates};
 use num_complex::Complex64;
 use prism_q::circuits::qft_circuit;
 use prism_q::{
@@ -135,16 +135,6 @@ fn assert_bitwise_equal(base: &[Complex64], other: &[Complex64], label: &str) {
             "{label}: amplitude {idx} differs bitwise: {a} vs {b}"
         );
     }
-}
-
-fn count_gates(circuit: &Circuit, want: impl Fn(&Gate) -> bool) -> usize {
-    circuit
-        .instructions
-        .iter()
-        .filter(
-            |inst| matches!(inst, prism_q::circuit::Instruction::Gate { gate, .. } if want(gate)),
-        )
-        .count()
 }
 
 // Everything below asserts bitwise agreement, which unfused kernels satisfy

@@ -13,7 +13,7 @@
 #      worktree and copy it aside.
 #   3. Verify the working tree did not change between the two builds.
 #   4. Run the two binaries adjacent, no build in between: one discarded warmup
-#      pass each, then four measured passes.
+#      pass each at 10 samples, then four measured passes.
 #   5. Emit a markdown table with a same-code control column per row.
 #
 # The measured pass order is ref, new, new, ref. Both means are centred on the
@@ -21,18 +21,26 @@
 # so every row carries its own noise floor. A change smaller than that floor is
 # reported as noise, not as a win.
 #
-# --light trades that precision for wall clock: three measured passes (ref, new,
-# ref), Criterion's per-row warm-up and measurement windows cut from 3s and 5s
-# to 0.5s and 1.5s, and 10 samples. A row costs about a fifth of the full tier.
-# The report names the tier and the verdict is triage, not a gate result: the
-# new binary is measured once, so only the reference side carries a control.
+# The full tier runs Criterion's per-row windows at 1s warm-up and 3s
+# measurement rather than the 3s and 5s defaults: a microsecond row collects
+# thousands of iterations per sample either way, and a row whose one iteration
+# outlasts the window is priced by its sample count, not the window. Rows the
+# warmup pass projects past --slow-row-seconds in one pass at the full count
+# run at --slow-samples instead, with a verdict of their own; the report names
+# them and their count.
+#
+# --light trades precision for wall clock: three measured passes (ref, new,
+# ref), windows of 0.5s and 1.5s, and 10 samples. A row costs about a third of
+# the full tier. The report names the tier and the verdict is triage, not a
+# gate result: the new binary is measured once, so only the reference side
+# carries a control.
 #
 # Usage:
 #   scripts/bench_ab.sh --filter '^factored/noise_kraus/'
 #   scripts/bench_ab.sh -f '^density_matrix/' -r main -b circuits
 #   scripts/bench_ab.sh -f '^sparse/' --ref-dir /tmp/prism-q-ref   # reuse the build
 #   scripts/bench_ab.sh -f '^x/affected/' -c '^x/(control_a|control_b)/'
-#   scripts/bench_ab.sh -f '^statevector/' --light                  # triage in a fifth of the time
+#   scripts/bench_ab.sh -f '^statevector/' --light                  # triage in a third of the time
 #
 # Options:
 #   --filter,   -f  Criterion filter regex, applied to every pass (required)
@@ -53,6 +61,16 @@
 #                   measurement_time keep it, so those rows shrink less. The
 #                   verdict line names the tier; carry a gate claim on the full
 #                   tier only.
+#   --slow-row-seconds  a row the warmup pass projects past this many seconds
+#                   in one pass at the full sample count runs at --slow-samples
+#                   instead (default 30, 0 disables). On this corpus three rows
+#                   over a second each were 45% of a 25-row run at 30 samples.
+#   --slow-samples  sample count for those rows (default 15, floor 10). Their
+#                   standard error is 1.4x the full count's, and each sample
+#                   already averages a whole circuit run.
+#   --warm-samples  sample count for the two discarded warmup passes (default
+#                   10, floor 10). They warm the binary and price every row;
+#                   the count they run at changes neither.
 #   --max-row-seconds  abort when Criterion projects one row past this many
 #                   seconds in a single pass (default 240, 0 disables). Six
 #                   passes run, so an unnoticed row costs six times the
@@ -107,6 +125,9 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 FILTER=""
 CONTROL_FILTER=""
 CONTROL_SAMPLES=10
+SLOW_ROW_SECONDS=30
+SLOW_SAMPLES=15
+WARM_SAMPLES=10
 MAX_ROW_SECONDS=240
 SAMPLES="${PRISM_BENCH_SAMPLES:-30}"
 LIGHT=""
@@ -126,6 +147,9 @@ while [[ $# -gt 0 ]]; do
         --control|-c)  CONTROL_FILTER="$2"; shift 2 ;;
         --control-samples) CONTROL_SAMPLES="$2"; shift 2 ;;
         --max-row-seconds) MAX_ROW_SECONDS="$2"; shift 2 ;;
+        --slow-row-seconds) SLOW_ROW_SECONDS="$2"; shift 2 ;;
+        --slow-samples) SLOW_SAMPLES="$2"; shift 2 ;;
+        --warm-samples) WARM_SAMPLES="$2"; shift 2 ;;
         --light)       LIGHT=1; shift ;;
         --ref|-r)      REF="$2"; shift 2 ;;
         --bench|-b)    BENCH="$2"; shift 2 ;;
@@ -146,17 +170,18 @@ if [[ -z "$FILTER" && -z "$BUILD_ONLY" ]]; then
     exit 1
 fi
 
-# Everything the tier changes, in one place. The full tier leaves Criterion's
-# windows at their defaults (3s warm-up, 5s measurement) and takes the pass
-# sequence the header describes.
+# Everything the tier changes, in one place. Both tiers set Criterion's windows
+# and take the pass sequence the header describes.
 if [[ -n "$LIGHT" ]]; then
     TIER="light (triage)"
     SAMPLES="${PRISM_BENCH_SAMPLES:-10}"
     CRITERION_ARGS=(--warm-up-time 0.5 --measurement-time 1.5)
+    WINDOWS="0.5s warm-up, 1.5s measurement"
     PASS_LABELS=(ref new ref)
 else
     TIER="full"
-    CRITERION_ARGS=()
+    CRITERION_ARGS=(--warm-up-time 1 --measurement-time 3)
+    WINDOWS="1s warm-up, 3s measurement"
     PASS_LABELS=(ref new new ref)
 fi
 PASS_COUNT="${#PASS_LABELS[@]}"
@@ -167,6 +192,14 @@ PASS_ORDER="${PASS_ORDER//,/, }"
 # report that no row was measured at.
 if (( CONTROL_SAMPLES < 10 )); then
     echo "Error: --control-samples is $CONTROL_SAMPLES; Criterion's floor is 10." >&2
+    exit 1
+fi
+if (( SLOW_SAMPLES < 10 )); then
+    echo "Error: --slow-samples is $SLOW_SAMPLES; Criterion's floor is 10." >&2
+    exit 1
+fi
+if (( WARM_SAMPLES < 10 )); then
+    echo "Error: --warm-samples is $WARM_SAMPLES; Criterion's floor is 10." >&2
     exit 1
 fi
 
@@ -302,13 +335,72 @@ snapshot() {
     done | sort > "$out"
 }
 
-# The (segment, filter, samples) triples one pass runs, in order. Without
-# --control there is one. With it the controls follow the affected rows, each
-# into its own CRITERION_HOME so the two sample counts stay separable.
+# The (segment, filter, samples) triples one pass runs, in order. A warmup pass
+# runs the whole filter at the warmup count. A measured pass runs the rows the
+# warmup priced under --slow-row-seconds at the full count and the rest at
+# --slow-samples, then the controls, each segment into its own CRITERION_HOME
+# so the sample counts stay separable.
+FAST_FILTER=""
+SLOW_FILTER=""
+SLOW_IDS=""
 pass_segments() {
-    printf 'main\t%s\t%s\n' "$FILTER" "$SAMPLES"
+    if [[ -n "${WARMING:-}" ]]; then
+        printf 'main\t%s\t%s\n' "$FILTER" "$WARM_SAMPLES"
+    elif [[ -n "$SLOW_FILTER" ]]; then
+        printf 'main\t%s\t%s\n' "$FAST_FILTER" "$SAMPLES"
+        printf 'slow\t%s\t%s\n' "$SLOW_FILTER" "$SLOW_SAMPLES"
+    else
+        printf 'main\t%s\t%s\n' "$FILTER" "$SAMPLES"
+    fi
     if [[ -n "$CONTROL_FILTER" ]]; then
         printf 'ctl\t%s\t%s\n' "$CONTROL_FILTER" "$CONTROL_SAMPLES"
+    fi
+}
+
+# Anchor a list of benchmark ids as one Criterion filter, one id per line in.
+ids_to_filter() {
+    awk '
+        { gsub(/[][\\.^$*+?(){}|]/, "\\\\&"); ids = ids (ids == "" ? "" : "|") $0 }
+        END { if (ids != "") printf "^(%s)$", ids }
+    '
+}
+
+# Split the rows the first warmup pass ran into fast and slow by what each
+# would cost per pass at the full count: Criterion prints its projection and
+# the iteration count before collecting, so one iteration prices the row. The
+# main segment then carries the fast rows and a slow segment the rest.
+split_slow_rows() {
+    local log="$1"
+    local fast slow
+    awk -v full="$SAMPLES" -v budget="$SLOW_ROW_SECONDS" '
+        /Collecting [0-9]+ samples in estimated/ {
+            id = $2
+            sub(/:$/, "", id)
+            if (match($0, /estimated [0-9.]+ s/)) {
+                secs = substr($0, RSTART + 10, RLENGTH - 12) + 0
+            } else { next }
+            iters = 0
+            if (match($0, /\([0-9]+ iterations\)/)) {
+                iters = substr($0, RSTART + 1, RLENGTH - 13) + 0
+            }
+            if (iters > 0 && secs / iters * full > budget) {
+                print "slow\t" id
+            } else {
+                print "fast\t" id
+            }
+        }
+    ' "$log" > "$WORKDIR/rows.tsv"
+    fast="$(awk -F'\t' '$1 == "fast" { print $2 }' "$WORKDIR/rows.tsv" | ids_to_filter)"
+    slow="$(awk -F'\t' '$1 == "slow" { print $2 }' "$WORKDIR/rows.tsv" | ids_to_filter)"
+    if [[ -n "$slow" && -n "$fast" ]]; then
+        FAST_FILTER="$fast"
+        SLOW_FILTER="$slow"
+        SLOW_IDS="$(awk -F'\t' '$1 == "slow" { print $2 }' "$WORKDIR/rows.tsv")"
+    elif [[ -n "$slow" ]]; then
+        # Every row is slow: one segment at the reduced count, still named.
+        SLOW_FILTER=""
+        SLOW_IDS="$(awk -F'\t' '$1 == "slow" { print $2 }' "$WORKDIR/rows.tsv")"
+        SAMPLES="$SLOW_SAMPLES"
     fi
 }
 
@@ -317,10 +409,14 @@ pass_segments() {
 # Criterion writes the projection before it starts collecting, so this sees a
 # row's cost after one iteration rather than after the row.
 over_budget_row() {
-    awk -v budget="$MAX_ROW_SECONDS" '
+    awk -v budget="$MAX_ROW_SECONDS" -v scale="${2:-1}" '
         /Collecting [0-9]+ samples in estimated/ {
             if (match($0, /estimated [0-9.]+ s/)) {
                 secs = substr($0, RSTART + 10, RLENGTH - 12) + 0
+                if (scale > 1 && match($0, /\([0-9]+ iterations\)/)) {
+                    iters = substr($0, RSTART + 1, RLENGTH - 13) + 0
+                    if (iters > 0 && secs / iters * scale > secs) { secs = secs / iters * scale }
+                }
                 if (secs > budget) {
                     id = $2
                     sub(/:$/, "", id)
@@ -332,13 +428,25 @@ over_budget_row() {
     ' "$1"
 }
 
-# Total per-pass seconds Criterion projected, for the wall-clock estimate.
+# Total seconds one measured pass will take, from the warmup projections: a row
+# whose iterations fit the window costs the window, and a row that outlasts it
+# costs one iteration times the count it will run at.
 projected_pass_seconds() {
-    cat "$@" 2>/dev/null | awk '
+    cat "$@" 2>/dev/null | awk -v full="$SAMPLES" -v budget="$SLOW_ROW_SECONDS" \
+        -v slow="$SLOW_SAMPLES" '
         /Collecting [0-9]+ samples in estimated/ {
-            if (match($0, /estimated [0-9.]+ s/)) {
-                total += substr($0, RSTART + 10, RLENGTH - 12) + 0
+            if (!match($0, /estimated [0-9.]+ s/)) { next }
+            secs = substr($0, RSTART + 10, RLENGTH - 12) + 0
+            iters = 0
+            if (match($0, /\([0-9]+ iterations\)/)) {
+                iters = substr($0, RSTART + 1, RLENGTH - 13) + 0
             }
+            if (iters > 0) {
+                at_full = secs / iters * full
+                if (budget > 0 && at_full > budget) { at_full = secs / iters * slow }
+                if (at_full > secs) { secs = at_full }
+            }
+            total += secs
         }
         END { printf "%.0f", total }
     '
@@ -351,7 +459,13 @@ projected_pass_seconds() {
 # pass that measured nothing.
 run_segment() {
     local exe="$1" home="$2" filter="$3" samples="$4" log="$5" quiet="$6"
-    local pid status over shown total
+    local pid status over shown total scale
+    # A warmup pass runs fewer samples than the measured passes will, so its
+    # projection is scaled up to the full count before it meets the budget.
+    scale=1
+    if [[ -n "${WARMING:-}" ]]; then
+        scale=$(( SAMPLES > samples ? SAMPLES / samples : 1 ))
+    fi
 
     mkdir -p "$home"
     : > "$log"
@@ -370,7 +484,7 @@ run_segment() {
             fi
         fi
         if (( MAX_ROW_SECONDS > 0 )); then
-            over="$(over_budget_row "$log")"
+            over="$(over_budget_row "$log" "$scale")"
             if [[ -n "$over" ]]; then
                 kill "$pid" 2>/dev/null || true
                 break
@@ -436,7 +550,7 @@ run_pass() {
     fi
     dupes="$(cut -f1 "$out" | uniq -d)"
     if [[ -n "$dupes" ]]; then
-        echo "Error: --filter and --control both match these rows:" >&2
+        echo "Error: two segments both measured these rows:" >&2
         printf '  %s\n' $dupes >&2
         echo "  A row measured at two sample counts has no single control column." >&2
         echo "  Make the two regexes disjoint." >&2
@@ -459,8 +573,8 @@ warm_up() {
     local idx="$1" exe="$2"
     local home="$WORKDIR/warm-$idx"
     mkdir -p "$home"
-    echo ">>> warmup $idx (discarded)"
-    measure "$exe" "$home" "$WORKDIR/warm-$idx.tsv" "$WORKDIR/warm-$idx" "quiet"
+    echo ">>> warmup $idx (discarded, $WARM_SAMPLES samples)"
+    WARMING=1 measure "$exe" "$home" "$WORKDIR/warm-$idx.tsv" "$WORKDIR/warm-$idx" "quiet"
     echo ""
 }
 
@@ -547,14 +661,22 @@ echo "=== $TIER tier: two discarded warmup passes, then $PASS_COUNT adjacent pas
 echo ""
 warm_up 1 "$WORKDIR/exe-ref"
 
-# Criterion projected every row during the warmup, so the remaining passes can
-# be priced before they are spent. Printed rather than enforced: the guard is
-# per row, and a filter can be slow by holding many cheap rows instead.
+# Criterion projected every row during the warmup, so the slow rows can be
+# named and the remaining passes priced before they are spent. The price is
+# printed rather than enforced: the guard is per row, and a filter can be slow
+# by holding many cheap rows instead.
+if (( SLOW_ROW_SECONDS > 0 )); then
+    split_slow_rows "$WORKDIR/warm-1-main.log"
+    if [[ -n "$SLOW_IDS" ]]; then
+        echo ">>> rows projected past ${SLOW_ROW_SECONDS}s per pass at $SAMPLES samples, run at $SLOW_SAMPLES:"
+        printf '    %s\n' $SLOW_IDS
+        echo ""
+    fi
+fi
 PASS_SECONDS="$(projected_pass_seconds "$WORKDIR"/warm-1-*.log)"
 if [[ -n "$PASS_SECONDS" && "$PASS_SECONDS" != "0" ]]; then
-    printf ">>> projected: about %d min for the %d passes left, %d min in total\n" \
-        $(( PASS_SECONDS * (PASS_COUNT + 1) / 60 )) $(( PASS_COUNT + 1 )) \
-        $(( PASS_SECONDS * (PASS_COUNT + 2) / 60 ))
+    printf ">>> projected: about %d min for the %d measured passes\n" \
+        $(( PASS_SECONDS * PASS_COUNT / 60 )) "$PASS_COUNT"
     echo ""
 fi
 
@@ -596,11 +718,12 @@ set +e
     echo "| Reference binary | $REF_PROVENANCE |"
     echo "| Features | \`$FEATURES\` |"
     echo "| Tier | $TIER |"
-    echo "| Pass order | ref, new discarded, then $PASS_ORDER (adjacent, no rebuild) |"
-    if [[ -n "$LIGHT" ]]; then
-        echo "| Criterion windows | 0.5s warm-up, 1.5s measurement (groups that pin their own keep it) |"
-    fi
+    echo "| Pass order | ref, new discarded at $WARM_SAMPLES samples, then $PASS_ORDER (adjacent, no rebuild) |"
+    echo "| Criterion windows | $WINDOWS (groups that pin their own keep it) |"
     echo "| Samples | $SAMPLES |"
+    if (( SLOW_ROW_SECONDS > 0 )); then
+        echo "| Slow rows | over ${SLOW_ROW_SECONDS}s per pass at $SAMPLES samples run at $SLOW_SAMPLES |"
+    fi
     echo "| Row budget | ${MAX_ROW_SECONDS}s per pass |"
     echo "| High-qubit rows | $HIGH_QUBITS_STATE |"
     echo "| CPU | $(host_cpu) |"
@@ -611,8 +734,13 @@ set +e
     echo ""
 
     awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" -v full="$SAMPLES" \
-        -v light="${LIGHT:-0}" -v passes="$PASS_COUNT" '
-        BEGIN { FS = "\t"; SEP = "\x1f" }
+        -v light="${LIGHT:-0}" -v passes="$PASS_COUNT" -v slow_ids="$SLOW_IDS" \
+        -v slow_at="$SLOW_SAMPLES" '
+        BEGIN {
+            FS = "\t"; SEP = "\x1f"
+            slow_n = split(slow_ids, slow_list, "\n")
+            for (k = 1; k <= slow_n; k++) { if (slow_list[k] != "") { is_slow[slow_list[k]] = 1 } }
+        }
 
         {
             mean[$1 SEP $2] = $3
@@ -641,6 +769,7 @@ set +e
             reduced_floor = 0
             reduced_at = 0
             moved_controls = 0
+            slowed = 0
 
             for (i = 1; i <= n; i++) {
                 id = order[i]
@@ -670,8 +799,12 @@ set +e
                 # construction, so it neither sets the host noise floor nor joins the
                 # unresolvable list. It can still fail the gate: a control moving past
                 # its own spread and past the threshold is collateral damage either way.
+                # A slow row runs at its own reduced count but is a row under test:
+                # it keeps its verdict, sets the floor, and is counted on its own line.
                 at = samples[id] + 0
-                if (at > 0 && at != full + 0) {
+                control_row = (at > 0 && at != full + 0 && !(id in is_slow))
+                if (id in is_slow) { slowed++ }
+                if (control_row) {
                     reduced++
                     reduced_at = at
                     if (floor > reduced_floor) { reduced_floor = floor }
@@ -682,7 +815,7 @@ set +e
                 # A reduced-count row is named as the control it is rather than given a
                 # direction. Ten samples resolve "flat" but not a percentage, so calling
                 # one faster or slower would dress noise as a result.
-                if (at > 0 && at != full + 0) {
+                if (control_row) {
                     if (abs(change) > threshold) {
                         verdict = "control moved"
                         moved_controls++
@@ -698,7 +831,7 @@ set +e
                 }
 
                 if (change > threshold && change > floor) { regressions++ }
-                if (floor > threshold && !(at > 0 && at != full + 0)) {
+                if (floor > threshold && !control_row) {
                     unresolvable++; unresolved[unresolvable] = id
                 }
 
@@ -711,6 +844,9 @@ set +e
             print ""
             printf "%d rows compared. Worst same-code control spread: %.1f%%",
                 compared, worst_floor
+            if (slowed > 0) {
+                printf ", with %d slow row(s) at %d samples", slowed, slow_at
+            }
             if (reduced > 0) {
                 printf " across the %d row(s) at %d samples.\n", compared - reduced, full
                 printf "%d control row(s) ran at %d samples, widest own-spread %.1f%%. A reduced count\n",

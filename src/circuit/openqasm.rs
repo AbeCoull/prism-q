@@ -16,7 +16,7 @@
 //! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase, crx, cry, crz, csx, swap, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
 //! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases |
 //! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
-//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) for direct gates; `inv @` and `pow(k) @` also apply to a user `gate` or `def` call, reversing or repeating its expanded body |
+//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) for direct gates; `inv @` and `pow(k) @` also apply to a user `gate`, a `def` call and a gate that lowers to a sequence, reversing or repeating the expanded body |
 //! | Measurement (OQ3) | `c[0] = measure q[0];` | Assignment syntax (primary) |
 //! | Measurement (OQ2) | `measure q[0] -> c[0];` | Arrow syntax (compat) |
 //! | Register broadcast | `h q;` / `cx q, r;` | Applies gate to all qubits in register |
@@ -45,10 +45,9 @@
 //!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
 //! - `def` declarations with a return type
 //! - `ctrl @ swap` modifier form (use `cswap` or `fredkin` keyword instead)
-//! - `ctrl @` on a user `gate` or a `def` call: an expanded body carries no
-//!   controlled form
-//! - any modifier on a gate that lowers to a sequence at parse time (`u`, `u1`
-//!   to `u3`, `iswap`, `ecr`, `dcx`, `cswap`, `rccx`, `rc3x`, `mcx`)
+//! - `ctrl @` on a user `gate`, a `def` call, or a gate that lowers to a
+//!   sequence at parse time (`u`, `u1` to `u3`, `iswap`, `ecr`, `dcx`, `cswap`,
+//!   `rccx`, `rc3x`, `mcx`): an expanded body carries no controlled form
 //! - `pow(k) @` with non-integer k (fractional powers)
 //! - Bit literal comparisons against integers other than `0` / `1`
 //! - Negative integer literals in `if` register comparisons
@@ -2164,6 +2163,14 @@ impl<'a> Parser<'a> {
         has_input: bool,
         line_num: usize,
     ) -> Result<Vec<Instruction>> {
+        // The arity a `ctrl @` call spells includes the control qubits, so the
+        // rejection has to precede the expanded body's own arity check.
+        if modifiers.iter().any(|m| matches!(m, Modifier::Ctrl))
+            && (Self::lowers_to_sequence(gate_name) || self.gate_defs.contains_key(gate_name))
+        {
+            return Err(Self::ctrl_on_expansion_error(gate_name, line_num));
+        }
+
         if let Some(instrs) = Self::resolve_decomposed_gate(gate_name, params, qubits, line_num)? {
             // A lowering folds the angle into its own arithmetic, so binding a
             // slot afterwards would write the raw value over a derived one.
@@ -2173,21 +2180,7 @@ impl<'a> Parser<'a> {
                     line: line_num,
                 });
             }
-            if !modifiers.is_empty() {
-                return Err(PrismError::UnsupportedConstruct {
-                    construct: format!("modifier on decomposed gate `{gate_name}`"),
-                    line: line_num,
-                });
-            }
-            return Ok(instrs);
-        }
-
-        // The arity a `ctrl @` call spells includes the control qubits, so the
-        // rejection has to precede the body's own arity check.
-        if self.gate_defs.contains_key(gate_name)
-            && modifiers.iter().any(|m| matches!(m, Modifier::Ctrl))
-        {
-            return Err(Self::ctrl_on_expansion_error(gate_name, line_num));
+            return Self::modify_expansion(instrs, modifiers, gate_name, line_num);
         }
 
         if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
@@ -2917,6 +2910,27 @@ impl<'a> Parser<'a> {
             gate,
             targets: SmallVec::from_slice(targets),
         }
+    }
+
+    /// Whether [`Parser::resolve_decomposed_gate`] lowers this name.
+    fn lowers_to_sequence(name: &str) -> bool {
+        matches!(
+            name,
+            "mcx"
+                | "rccx"
+                | "rc3x"
+                | "rcccx"
+                | "cswap"
+                | "fredkin"
+                | "ecr"
+                | "iswap"
+                | "dcx"
+                | "u1"
+                | "u2"
+                | "u3"
+                | "u"
+                | "U"
+        )
     }
 
     /// Handle gates that decompose into multiple instructions at parse time.

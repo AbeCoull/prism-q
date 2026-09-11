@@ -624,6 +624,63 @@ fn modifier_inv_pow_user_gate_applies_innermost_first() {
 }
 
 #[test]
+fn modifier_inv_lowered_u3_returns_to_ground() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        u3(0.3, 0.4, 0.5) q[0];
+        inv @ u3(0.3, 0.4, 0.5) q[0];
+    "#;
+    let circuit = openqasm::parse(qasm).unwrap();
+    let mut backend = StatevectorBackend::new(42);
+    let result = sim::run_on(&mut backend, &circuit).unwrap();
+    assert_probs(&result.probabilities.unwrap().to_vec(), &[1.0, 0.0], 1e-12);
+}
+
+#[test]
+fn modifier_inv_lowered_ecr_round_trips() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        h q[0];
+        ecr q[0], q[1];
+        inv @ ecr q[0], q[1];
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];";
+    assert_same_state(qasm, plain, "inv @ lowered ecr");
+}
+
+#[test]
+fn modifier_pow_lowered_u3_repeats_lowering() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        pow(2) @ u3(0.3, 0.4, 0.5) q[0];
+    "#;
+    let plain = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        u3(0.3, 0.4, 0.5) q[0];
+        u3(0.3, 0.4, 0.5) q[0];
+    "#;
+    assert_same_state(qasm, plain, "pow(2) @ lowered u3");
+}
+
+#[test]
+fn modifier_ctrl_lowered_u3_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        ctrl @ u3(0.3, 0.4, 0.5) q[0], q[1];
+    "#;
+    let err = format!("{}", openqasm::parse(qasm).unwrap_err());
+    assert!(
+        err.contains("unsupported") && err.contains("ctrl @"),
+        "expected a ctrl-specific unsupported error, got: {err}"
+    );
+}
+
+#[test]
 fn modifier_ctrl_user_gate_rejected() {
     let qasm = r#"
         OPENQASM 3.0;

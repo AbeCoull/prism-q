@@ -1795,6 +1795,9 @@ impl NoisyCompiledSampler {
     }
 
     /// Sample noisy outcomes and return exact packed counts.
+    ///
+    /// A GPU failure falls back to the CPU sampler; [`Self::try_sample_counts`]
+    /// surfaces it instead.
     pub fn sample_counts(
         &mut self,
         total_shots: usize,

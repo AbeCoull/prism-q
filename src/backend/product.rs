@@ -55,7 +55,6 @@ pub struct ProductStateBackend {
 }
 
 impl ProductStateBackend {
-    /// Create a new product-state backend with the given RNG seed.
     pub fn new(seed: u64) -> Self {
         Self {
             num_qubits: 0,

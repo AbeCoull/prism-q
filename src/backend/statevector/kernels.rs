@@ -871,8 +871,6 @@ unsafe fn batch_phase_tile_bmi2(
     }
 }
 
-/// Run a single FFT stage in parallel.
-///
 /// Run one FFT stage in parallel.
 ///
 /// Large group counts split by group. High-stride stages split inside each

@@ -1103,6 +1103,9 @@ impl CompiledSampler {
     /// Histogram of `total_shots` outcomes keyed by packed measurement words.
     /// Ranks small relative to the shot count use a closed-form multinomial
     /// draw with no per-shot work.
+    ///
+    /// A GPU failure falls back to the CPU sampler; [`Self::try_sample_counts`]
+    /// surfaces it instead.
     pub fn sample_counts(
         &mut self,
         total_shots: usize,

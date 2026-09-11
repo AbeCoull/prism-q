@@ -981,7 +981,7 @@ fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<
 /// so that gates of the same `Tier2q` are grouped together. Disjoint-support
 /// 2q gates commute, so reordering is identity-preserving.
 ///
-/// Random pair circuits (notably Quantum Volume) emit `Fused2q` streams whose
+/// Random pair circuits such as Quantum Volume emit `Fused2q` streams whose
 /// tiers are interleaved. The downstream `fuse_multi_2q_gates` only batches
 /// consecutive same-tier gates, so without this pass tier transitions break
 /// the run after every one or two gates.

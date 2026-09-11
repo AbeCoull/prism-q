@@ -4,15 +4,19 @@
 
 #![allow(dead_code)]
 
+pub mod caps;
 pub mod circuits;
-pub mod conformance;
 pub mod framework;
+pub mod gate_fixtures;
 pub mod matrix;
 
 use num_complex::Complex64;
+use prism_q::Parameters;
 use prism_q::backend::Backend;
+use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::{Circuit, Instruction};
+use prism_q::gates::Gate;
 use prism_q::sim;
 
 pub const SV_EPS: f64 = 1e-10;
@@ -184,6 +188,20 @@ pub fn run_fused_probs<B: Backend>(backend: &mut B, circuit: &Circuit) -> Vec<f6
     backend.probabilities().unwrap()
 }
 
+pub fn run_and_probs(circuit: &Circuit) -> Vec<f64> {
+    run_fused_probs(&mut StatevectorBackend::new(SEED), circuit)
+}
+
+pub fn run_and_state(circuit: &Circuit) -> Vec<Complex64> {
+    let mut backend = StatevectorBackend::new(SEED);
+    sim::run_on(&mut backend, circuit).unwrap();
+    backend.state_vector().to_vec()
+}
+
+pub fn run_stabilizer_probs(circuit: &Circuit) -> Vec<f64> {
+    run_fused_probs(&mut StabilizerBackend::new(SEED), circuit)
+}
+
 pub fn assert_fused_matches_unfused<B: Backend, F: Fn() -> B>(
     new_backend: F,
     circuit: &Circuit,
@@ -222,4 +240,50 @@ fn is_clifford_body(instructions: &[Instruction]) -> bool {
     let mut probe = Circuit::new(1, 0);
     probe.instructions = instructions.to_vec();
     is_clifford(&probe)
+}
+
+pub fn count_gates(circuit: &Circuit, want: impl Fn(&Gate) -> bool) -> usize {
+    circuit
+        .instructions
+        .iter()
+        .filter(|inst| matches!(inst, Instruction::Gate { gate, .. } if want(gate)))
+        .count()
+}
+
+/// The two Kraus operators of amplitude damping at rate `gamma`.
+pub fn amplitude_damping(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
+    let c = Complex64::new;
+    let zero = c(0.0, 0.0);
+    vec![
+        [[c(1.0, 0.0), zero], [zero, c((1.0 - gamma).sqrt(), 0.0)]],
+        [[zero, c(gamma.sqrt(), 0.0)], [zero, zero]],
+    ]
+}
+
+/// A copy of `circuit` with `delta` added to the angle of every gate bound to
+/// parameter `slot`.
+pub fn shift_slot(circuit: &Circuit, params: &Parameters, slot: usize, delta: f64) -> Circuit {
+    let mut out = circuit.clone();
+    for link in params.links().iter().filter(|l| l.slot == slot) {
+        if let Instruction::Gate { gate, .. } = &mut out.instructions[link.instruction] {
+            *gate = shifted_gate(gate, delta);
+        }
+    }
+    out
+}
+
+fn shifted_gate(gate: &Gate, delta: f64) -> Gate {
+    match gate {
+        Gate::Rx(t) => Gate::Rx(t + delta),
+        Gate::Ry(t) => Gate::Ry(t + delta),
+        Gate::Rz(t) => Gate::Rz(t + delta),
+        Gate::Rzz(t) => Gate::Rzz(t + delta),
+        Gate::P(t) => Gate::P(t + delta),
+        Gate::PauliRot(data) => {
+            let mut shifted = data.clone();
+            shifted.set_theta(data.theta() + delta);
+            Gate::PauliRot(shifted)
+        }
+        other => panic!("gate {} is not differentiable", other.name()),
+    }
 }

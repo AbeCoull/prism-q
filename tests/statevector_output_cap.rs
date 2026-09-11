@@ -3,36 +3,25 @@
 //! which the cap helpers cache per process. Every rejection is decided before
 //! the output allocates, so no test builds an oversize vector.
 
-use std::sync::Once;
+mod common;
 
+use common::{SEED, caps};
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuits;
 use prism_q::{BackendKind, PrismError, simulate};
 
-const SEED: u64 = 42;
 const CAP: usize = 4;
 
 fn small_caps() {
-    static SET: Once = Once::new();
-    SET.call_once(|| {
-        // SAFETY: set exactly once, and every reader in this binary is gated
-        // behind this `Once`, so no thread queries a cap while it is written.
-        unsafe {
-            std::env::set_var("PRISM_MAX_PROB_QUBITS", "4");
-            std::env::set_var("PRISM_MAX_EXPORT_QUBITS", "4");
-        }
-    });
+    caps::set_once(&[
+        ("PRISM_MAX_PROB_QUBITS", "4"),
+        ("PRISM_MAX_EXPORT_QUBITS", "4"),
+    ]);
 }
 
 fn incompatible_reason(err: PrismError) -> String {
-    match err {
-        PrismError::IncompatibleBackend { backend, reason } => {
-            assert_eq!(backend, "statevector");
-            reason
-        }
-        other => panic!("expected IncompatibleBackend, got {other:?}"),
-    }
+    caps::incompatible_reason(err, "statevector")
 }
 
 // The dispatch layer reads `BackendUnsupported` from a probability query as

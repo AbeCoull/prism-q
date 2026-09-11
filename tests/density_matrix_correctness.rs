@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    DM_EPS, SEED, all_pauli_masks, assert_fused_matches_unfused, assert_probs_close,
-    depolarizing_2q_kraus,
+    DM_EPS, SEED, all_pauli_masks, amplitude_damping, assert_fused_matches_unfused,
+    assert_probs_close, count_gates, depolarizing_2q_kraus,
 };
 use num_complex::Complex64;
 use prism_q::backend::Backend;
@@ -44,15 +44,6 @@ fn dm_after_channel(
     let rho = backend.reduced_density_matrix_1q(0).unwrap();
     let trace = rho[0][0].re + rho[1][1].re;
     (rho, trace)
-}
-
-fn amplitude_damping(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
-    let s = (1.0 - gamma).sqrt();
-    let g = gamma.sqrt();
-    vec![
-        [[c(1.0, 0.0), c(0.0, 0.0)], [c(0.0, 0.0), c(s, 0.0)]],
-        [[c(0.0, 0.0), c(g, 0.0)], [c(0.0, 0.0), c(0.0, 0.0)]],
-    ]
 }
 
 fn phase_damping(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
@@ -786,16 +777,6 @@ fn dm_two_qubit_depolarizing_bell_analytic() {
     assert!((probs[2] - off_bell).abs() < DM_EPS, "p10: {probs:?}");
     let total: f64 = probs.iter().sum();
     assert!((total - 1.0).abs() < DM_EPS, "trace preserved: {total}");
-}
-
-fn count_gates(circuit: &Circuit, want: fn(&Gate) -> bool) -> usize {
-    circuit
-        .instructions
-        .iter()
-        .filter(
-            |inst| matches!(inst, prism_q::circuit::Instruction::Gate { gate, .. } if want(gate)),
-        )
-        .count()
 }
 
 #[test]

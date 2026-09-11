@@ -1,18 +1,17 @@
 //! QEC feed-forward: a record-conditioned correction consuming the
 //! guarded-region contract, and the routes that reject it.
 
+mod qec_common;
+
 use prism_q::{
     Gate, QecBasis, QecOp, QecOptions, QecPauli, QecProgram, QecRecordRef, run_qec_program,
     run_qec_program_reference,
 };
 
+// An unset `chunk_size` resolves to the shot count, so passing `shots` keeps
+// these cases on the single batch they have always run as.
 fn options(shots: usize) -> QecOptions {
-    QecOptions {
-        shots,
-        seed: 42,
-        keep_measurements: true,
-        ..QecOptions::default()
-    }
+    qec_common::qec_options(shots, shots, true)
 }
 
 /// Teleportation-style correction: measure a qubit prepared in |1>, then flip a
@@ -219,8 +218,8 @@ fn feedforward_after_an_expectation_value_breaks_terminality() {
     assert!(format!("{err}").contains("FEEDFORWARD"), "{err}");
 }
 
-/// A conditional reset in the X basis: the body runs, so q1 lands in |+> and a
-/// following X-basis measurement reads 0 every shot.
+// A conditional reset in the X basis: the body runs, so q1 lands in |+> and a
+// following X-basis measurement reads 0 every shot.
 #[test]
 fn feedforward_body_carries_a_basis_reset() {
     let mut program = QecProgram::with_options(2, options(16));

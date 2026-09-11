@@ -1,17 +1,17 @@
 //! Cross-backend differential conformance over a seeded circuit corpus.
 //!
 //! The generator, capability matrix, and comparison engine live in
-//! `tests/common/conformance.rs`; that module's docs carry the oracle policy,
+//! `tests/conformance_corpus/mod.rs`; that module's docs carry the oracle policy,
 //! the comparison regimes, and the skip contract. This file is the entry point
 //! and the place where the fired skip rules are pinned.
 
-mod common;
+mod conformance_corpus;
 
 use std::collections::BTreeMap;
 
-use common::conformance::{
-    self, Anchor, AnchorPolicy, CONFORMANCE_SEED, Family, MIN_CONSENSUS_PARTICIPANTS, Regime,
-    SkipReason, assert_amplitudes, assert_deterministic_case, assert_exact_mixture_case,
+use conformance_corpus::{
+    Anchor, AnchorPolicy, CONFORMANCE_SEED, Family, MIN_CONSENSUS_PARTICIPANTS, Regime, SkipReason,
+    assert_amplitudes, assert_deterministic_case, assert_exact_mixture_case,
     assert_expectation_values, assert_native_sampling, assert_sampled_mixture_case, cases_in,
     generated_cases, participants,
 };
@@ -214,8 +214,8 @@ fn conformance_generator_is_reproducible_from_the_seed() {
     assert_eq!(first.len(), second.len());
     for (a, b) in first.iter().zip(&second) {
         assert_eq!(
-            conformance::describe(&a.circuit),
-            conformance::describe(&b.circuit),
+            conformance_corpus::describe(&a.circuit),
+            conformance_corpus::describe(&b.circuit),
             "case {} is not reproducible from seed {CONFORMANCE_SEED}",
             a.name()
         );
@@ -269,7 +269,7 @@ fn conformance_corpus_covers_every_declared_shape() {
 
 #[test]
 fn conformance_skip_rules_are_explicit_and_pinned() {
-    let ledger = conformance::skip_ledger();
+    let ledger = conformance_corpus::skip_ledger();
     let fired: Vec<SkipReason> = ledger.keys().copied().collect();
     let expected: Vec<SkipReason> = {
         let mut sorted = EXPECTED_FIRING.to_vec();
@@ -280,7 +280,7 @@ fn conformance_skip_rules_are_explicit_and_pinned() {
         fired,
         expected,
         "the set of fired skip rules moved.\nledger: {ledger:?}\nmatrix:\n{}",
-        conformance::matrix_report()
+        conformance_corpus::matrix_report()
     );
 
     let dormant: BTreeMap<SkipReason, &str> = EXPECTED_DORMANT.iter().copied().collect();

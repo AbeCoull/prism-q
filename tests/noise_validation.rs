@@ -1,6 +1,10 @@
+//! Argument validation on the noise channels and the readout table: which
+//! rates a constructor rejects, and which models survive `ensure_pauli_only`.
+//! Channel semantics are anchored in `tests/golden_small_circuits.rs`.
+
 use num_complex::Complex64;
 use prism_q::circuit::{Circuit, ClassicalCondition, Instruction};
-use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, ReadoutError};
+use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
 use prism_q::{
     BackendKind, CircuitBuilder, Gate, PauliTerm, PrismError, density_matrix_expectation_values,
     simulate,
@@ -396,16 +400,4 @@ fn noise_event_helpers() {
     assert!((px - 0.01).abs() < 1e-15);
     assert!((py - 0.01).abs() < 1e-15);
     assert!((pz - 0.01).abs() < 1e-15);
-}
-
-#[test]
-fn readout_error_clone_debug() {
-    let r = ReadoutError {
-        p01: 0.02,
-        p10: 0.03,
-    };
-    let cloned = r.clone();
-    assert_eq!(cloned.p01, 0.02);
-    assert_eq!(cloned.p10, 0.03);
-    let _ = format!("{:?}", r);
 }

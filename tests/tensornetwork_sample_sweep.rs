@@ -3,23 +3,18 @@
 //! sweep and its per-call plan cache. Isolated in its own test binary: it
 //! overrides `PRISM_MAX_PROB_QUBITS`, which the cap helper caches per process.
 
-use std::sync::Once;
+mod common;
 
+use common::{SEED, caps};
 use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuits;
 
-const SEED: u64 = 42;
 const PROB_CAP: usize = 4;
 
 fn small_prob_cap() {
-    static SET: Once = Once::new();
-    SET.call_once(|| {
-        // SAFETY: set exactly once, and every reader in this binary is gated
-        // behind this `Once`, so no thread queries the cap while it is written.
-        unsafe { std::env::set_var("PRISM_MAX_PROB_QUBITS", "4") };
-    });
+    caps::set_once(&[("PRISM_MAX_PROB_QUBITS", "4")]);
 }
 
 // A random 6-qubit circuit two qubits over the pinned cap, so the public

@@ -4,8 +4,9 @@
 //! helpers cache per process. Every rejection is decided before the backend
 //! contracts anything, so no test allocates an oversize tensor.
 
-use std::sync::Once;
+mod common;
 
+use common::{SEED, caps};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
@@ -13,32 +14,20 @@ use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::{BackendKind, Circuit, PauliTerm, PrismError, simulate};
 
-const SEED: u64 = 42;
 const PROB_CAP: usize = 4;
 /// Peak cap of `2^8` elements: a 4-qubit dense readout peaks at 16 elements
 /// and stays under it, while a single 6-qubit MCU tensor already holds 4096.
 const PEAK_CAP: usize = 8;
 
 fn small_caps() {
-    static SET: Once = Once::new();
-    SET.call_once(|| {
-        // SAFETY: set exactly once, and every reader in this binary is gated
-        // behind this `Once`, so no thread queries a cap while it is written.
-        unsafe {
-            std::env::set_var("PRISM_MAX_PROB_QUBITS", "4");
-            std::env::set_var("PRISM_MAX_TN_PEAK_QUBITS", "8");
-        }
-    });
+    caps::set_once(&[
+        ("PRISM_MAX_PROB_QUBITS", "4"),
+        ("PRISM_MAX_TN_PEAK_QUBITS", "8"),
+    ]);
 }
 
 fn incompatible_reason(err: PrismError) -> String {
-    match err {
-        PrismError::IncompatibleBackend { backend, reason } => {
-            assert_eq!(backend, "tensornetwork");
-            reason
-        }
-        other => panic!("expected IncompatibleBackend, got {other:?}"),
-    }
+    caps::incompatible_reason(err, "tensornetwork")
 }
 
 // The dispatch layer reads `BackendUnsupported` from a probability query as

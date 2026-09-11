@@ -8,7 +8,10 @@
 
 mod common;
 
-use common::{SEED, TN_EPS, assert_probs_close, run_fused_probs};
+use common::{
+    SEED, TN_EPS, assert_probs_close, run_and_probs, run_and_state, run_fused_probs,
+    run_stabilizer_probs,
+};
 use num_complex::Complex64;
 use prism_q::Instruction;
 use prism_q::PauliTerm;
@@ -16,7 +19,6 @@ use prism_q::backend::Backend;
 use prism_q::backend::mps::MpsBackend;
 use prism_q::backend::product::ProductStateBackend;
 use prism_q::backend::sparse::SparseBackend;
-use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
@@ -40,20 +42,6 @@ fn run_with(
     seed: u64,
 ) -> prism_q::Result<prism_q::RunOutcome> {
     sim::simulate(circuit).backend(kind).seed(seed).run()
-}
-
-fn run_and_probs(circuit: &Circuit) -> Vec<f64> {
-    run_fused_probs(&mut StatevectorBackend::new(SEED), circuit)
-}
-
-fn run_and_state(circuit: &Circuit) -> Vec<Complex64> {
-    let mut backend = StatevectorBackend::new(SEED);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.state_vector().to_vec()
-}
-
-fn run_stabilizer_probs(circuit: &Circuit) -> Vec<f64> {
-    run_fused_probs(&mut StabilizerBackend::new(SEED), circuit)
 }
 
 fn run_sparse_probs(circuit: &Circuit) -> Vec<f64> {

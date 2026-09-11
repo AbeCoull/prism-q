@@ -2,23 +2,18 @@
 //! test binary: it overrides `PRISM_MAX_PROB_QUBITS`, which the cap helper
 //! caches per process.
 
-use std::sync::Once;
+mod common;
 
+use common::{SEED, caps};
 use prism_q::gates::Gate;
-use prism_q::{BackendKind, Circuit, simulate};
+use prism_q::{BackendKind, Circuit, circuits, simulate};
 
-const SEED: u64 = 42;
 const PROB_CAP: usize = 4;
 const N: usize = PROB_CAP + 2;
 const EPS: f64 = 1e-12;
 
 fn small_prob_cap() {
-    static SET: Once = Once::new();
-    SET.call_once(|| {
-        // SAFETY: set exactly once, and every reader in this binary is gated
-        // behind this `Once`, so no thread queries the cap while it is written.
-        unsafe { std::env::set_var("PRISM_MAX_PROB_QUBITS", "4") };
-    });
+    caps::set_once(&[("PRISM_MAX_PROB_QUBITS", "4")]);
 }
 
 fn assert_marginals(kind: BackendKind, circuit: &Circuit, want: &[(f64, f64)], label: &str) {
@@ -43,11 +38,7 @@ fn assert_marginals(kind: BackendKind, circuit: &Circuit, want: &[(f64, f64)], l
 #[test]
 fn direct_route_marginals_answer_past_the_dense_cap() {
     small_prob_cap();
-    let mut circuit = Circuit::new(N, 0);
-    circuit.add_gate(Gate::H, &[0]);
-    for q in 1..N {
-        circuit.add_gate(Gate::Cx, &[q - 1, q]);
-    }
+    let circuit = circuits::ghz_circuit(N);
 
     let want = vec![(0.5, 0.5); N];
     assert_marginals(BackendKind::Sparse, &circuit, &want, "sparse");
@@ -94,7 +85,7 @@ fn stabilizer_marginals_answer_past_the_dense_cap() {
     const TAIL: usize = 8;
     const WIDE: usize = BLOCK * BLOCKS + TAIL;
 
-    let block = prism_q::circuits::clifford_random_pairs(BLOCK, 6, 0xDEAD_BEEF);
+    let block = prism_q::circuits::clifford_random_pairs(BLOCK, 6, SEED);
     let mut sv = StatevectorBackend::new(SEED);
     sv.init(BLOCK, 0).unwrap();
     for inst in &block.instructions {

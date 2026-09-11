@@ -265,6 +265,60 @@ fn rxx_angles_rebind_through_a_fused_template() {
     }
 }
 
+// Fusion folds a weight-2 `PauliRot` with pending 1q neighbours into a dense
+// 4x4, so the plan has to rebuild that block from the bound angle. The
+// neighbours are generic rotations rather than named gates, which would bail
+// capture and hide the replay path behind the fallback.
+#[test]
+fn an_absorbed_pauli_rotation_rebinds_through_the_plan() {
+    let n = 12;
+    let mut template = Circuit::new(n, 0);
+    for q in 0..n {
+        template.add_gate(Gate::Ry(0.11 + 0.02 * q as f64), &[q]);
+        template.add_gate(Gate::Rz(0.29 + 0.03 * q as f64), &[q]);
+    }
+    for q in (0..n - 1).step_by(2) {
+        template.add_pauli_rotation(
+            0.37 + 0.01 * q as f64,
+            &[PauliTerm::x(q), PauliTerm::y(q + 1)],
+        );
+    }
+    for q in 0..n {
+        template.add_gate(Gate::Ry(0.19 + 0.02 * q as f64), &[q]);
+    }
+
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    assert!(prepared.reuses_fusion_plan(), "no fusion plan captured");
+    assert!(
+        prepared
+            .bind_fused(&params.values(&template).unwrap())
+            .unwrap()
+            .instructions
+            .iter()
+            .all(|i| !matches!(
+                i,
+                Instruction::Gate {
+                    gate: Gate::PauliRot(_),
+                    ..
+                }
+            )),
+        "a rotation survived fusion unabsorbed, so the replay path is not under test"
+    );
+
+    for point in 0..4 {
+        let values = angles(params.num_slots(), 5000 + point);
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = statevector(&independent);
+        let bound = prepared.bind_fused(&values).unwrap();
+        assert_states_match(
+            &statevector(bound),
+            &expected,
+            &format!("absorbed pauli_rot point {point}"),
+        );
+    }
+}
+
 #[test]
 fn plan_is_captured_for_the_ansatz_bench_shapes() {
     for (name, template) in ansatz_cases() {

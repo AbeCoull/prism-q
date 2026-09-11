@@ -19,6 +19,15 @@
 //!   takes it, and automatic dispatch passes 256.
 //! - SVD truncation uses relative tolerance (default 1e-12) AND bond dim cap.
 //!
+//! # Gate support
+//!
+//! Every single-qubit gate is absorbed into its site tensor. Adjacent
+//! two-qubit gates (`Cx`, `Cz`, `Swap`, `Rzz`, `Cu`, `Fused2q`) go through the
+//! SVD kernel, and non-adjacent pairs route via SWAP chains. `Mcu` expands to
+//! a dense matrix over the gathered sites, and the fused families (`Multi2q`,
+//! `BatchRzz`, `BatchPhase`, `DiagonalBatch`, `MultiFused`) decompose into the
+//! single-site and adjacent-pair kernels.
+//!
 //! # When to prefer this backend
 //!
 //! - 1D circuits with limited entanglement growth.
@@ -336,7 +345,6 @@ impl Clone for MpsBackend {
 }
 
 impl MpsBackend {
-    /// Create a new MPS backend with the given RNG seed and maximum bond dimension.
     pub fn new(seed: u64, max_bond_dim: usize) -> Self {
         Self {
             num_qubits: 0,
@@ -414,7 +422,7 @@ impl MpsBackend {
     /// that can reach the bond cap, every threshold cut once the chain's bonds
     /// have reached `GAUGE_RANK`, and under that a two-site threshold cut
     /// that would drop a value above `SVD_RESOLUTION` of its largest. The
-    /// center is parked by [`svd`] rather than by the exact walk, so the
+    /// center is parked by [`svd()`] rather than by the exact walk, so the
     /// environment is orthonormal to that factorization's isometry. A chain
     /// under both marks is left ungauged, and what its cuts shed at rounding
     /// is not measured this way.

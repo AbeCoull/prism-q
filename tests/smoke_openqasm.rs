@@ -480,6 +480,188 @@ fn modifier_ctrl_swap_rejected() {
     );
 }
 
+fn assert_same_state(actual: &str, expected: &str, label: &str) {
+    let lhs = openqasm::parse(actual).unwrap();
+    let rhs = openqasm::parse(expected).unwrap();
+    let mut lhs_backend = StatevectorBackend::new(42);
+    sim::run_on(&mut lhs_backend, &lhs).unwrap();
+    let mut rhs_backend = StatevectorBackend::new(42);
+    sim::run_on(&mut rhs_backend, &rhs).unwrap();
+    let lhs_sv = lhs_backend.state_vector();
+    let rhs_sv = rhs_backend.state_vector();
+    for (a, b) in lhs_sv.iter().zip(rhs_sv) {
+        assert!((a - b).norm() < 1e-12, "{label}: {a} vs {b}");
+    }
+}
+
+#[test]
+fn modifier_inv_user_gate_undoes_body() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate st a { s a; t a; }
+        h q[0];
+        st q[0];
+        inv @ st q[0];
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[1] q;\nh q[0];";
+    assert_same_state(qasm, plain, "inv @ user gate");
+}
+
+#[test]
+fn modifier_inv_user_gate_with_params_and_two_qubits() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        gate myrot(a) p, r { rz(a) p; cx p, r; ry(a) r; }
+        h q[0];
+        h q[1];
+        myrot(0.7) q[0], q[1];
+        inv @ myrot(0.7) q[0], q[1];
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nh q[1];";
+    assert_same_state(qasm, plain, "inv @ parametric user gate");
+}
+
+#[test]
+fn modifier_inv_user_gate_body_uses_inv() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate mg a { inv @ t a; s a; }
+        h q[0];
+        mg q[0];
+        inv @ mg q[0];
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[1] q;\nh q[0];";
+    assert_same_state(qasm, plain, "inv @ user gate with inv body");
+}
+
+#[test]
+fn modifier_inv_user_gate_broadcasts() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        gate st a { s a; t a; }
+        h q[0];
+        h q[1];
+        st q;
+        inv @ st q;
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nh q[1];";
+    assert_same_state(qasm, plain, "inv @ broadcast user gate");
+}
+
+#[test]
+fn modifier_pow_user_gate_repeats_body() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate st a { s a; t a; }
+        h q[0];
+        pow(2) @ st q[0];
+    "#;
+    let plain = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        h q[0];
+        s q[0];
+        t q[0];
+        s q[0];
+        t q[0];
+    "#;
+    assert_same_state(qasm, plain, "pow(2) @ user gate");
+}
+
+#[test]
+fn modifier_pow_zero_user_gate_emits_nothing() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate st a { s a; t a; }
+        h q[0];
+        pow(0) @ st q[0];
+    "#;
+    let circuit = openqasm::parse(qasm).unwrap();
+    assert_eq!(circuit.gate_count(), 1);
+}
+
+#[test]
+fn modifier_pow_negative_user_gate_inverts_body() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate st a { s a; t a; }
+        h q[0];
+        st q[0];
+        pow(-1) @ st q[0];
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[1] q;\nh q[0];";
+    assert_same_state(qasm, plain, "pow(-1) @ user gate");
+}
+
+// The modifier nearest the gate applies first, so this is the adjoint of the
+// squared body, not the square of the adjoint applied in body order.
+#[test]
+fn modifier_inv_pow_user_gate_applies_innermost_first() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        gate st a { s a; t a; }
+        h q[0];
+        inv @ pow(2) @ st q[0];
+    "#;
+    let plain = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        h q[0];
+        tdg q[0];
+        sdg q[0];
+        tdg q[0];
+        sdg q[0];
+    "#;
+    assert_same_state(qasm, plain, "inv @ pow(2) @ user gate");
+}
+
+#[test]
+fn modifier_ctrl_user_gate_rejected() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        gate st a { s a; t a; }
+        ctrl @ st q[0], q[1];
+    "#;
+    let err = openqasm::parse(qasm).unwrap_err();
+    assert!(
+        format!("{err}").contains("unsupported"),
+        "expected unsupported, got: {err}"
+    );
+}
+
+#[test]
+fn modifier_inv_def_call_undoes_body() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[1] q;
+        def st(qubit a) {
+            s a;
+            t a;
+        }
+        h q[0];
+        st(q[0]);
+        inv @ st(q[0]);
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[1] q;\nh q[0];";
+    assert_same_state(qasm, plain, "inv @ def call");
+}
+
+#[test]
+fn modifier_separator_tolerates_extra_padding() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\nh q[0];\ninv @  t q[0];";
+    let plain = "OPENQASM 3.0;\nqubit[1] q;\nh q[0];\ntdg q[0];";
+    assert_same_state(qasm, plain, "padded modifier separator");
+}
+
 #[test]
 fn oq2_backward_compat() {
     let qasm = r#"

@@ -16,7 +16,7 @@
 //! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase, crx, cry, crz, csx, swap, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
 //! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases |
 //! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
-//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) for direct gates |
+//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) for direct gates; `inv @` and `pow(k) @` also apply to a user `gate` or `def` call, reversing or repeating its expanded body |
 //! | Measurement (OQ3) | `c[0] = measure q[0];` | Assignment syntax (primary) |
 //! | Measurement (OQ2) | `measure q[0] -> c[0];` | Arrow syntax (compat) |
 //! | Register broadcast | `h q;` / `cx q, r;` | Applies gate to all qubits in register |
@@ -45,6 +45,10 @@
 //!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
 //! - `def` declarations with a return type
 //! - `ctrl @ swap` modifier form (use `cswap` or `fredkin` keyword instead)
+//! - `ctrl @` on a user `gate` or a `def` call: an expanded body carries no
+//!   controlled form
+//! - any modifier on a gate that lowers to a sequence at parse time (`u`, `u1`
+//!   to `u3`, `iswap`, `ecr`, `dcx`, `cswap`, `rccx`, `rc3x`, `mcx`)
 //! - `pow(k) @` with non-integer k (fractional powers)
 //! - Bit literal comparisons against integers other than `0` / `1`
 //! - Negative integer literals in `if` register comparisons
@@ -2037,10 +2041,12 @@ impl<'a> Parser<'a> {
     ) -> Result<(Vec<Instruction>, Option<usize>)> {
         let (modifiers, gate_line) = Self::strip_modifiers(line, line_num)?;
 
-        if modifiers.is_empty() {
-            if let Some(instrs) = self.try_expand_def_call(gate_line, line_num)? {
-                return Ok((instrs, None));
-            }
+        if let Some(instrs) = self.try_expand_def_call(gate_line, line_num)? {
+            let name = gate_line.split('(').next().unwrap_or(gate_line).trim();
+            return Ok((
+                Self::modify_expansion(instrs, &modifiers, name, line_num)?,
+                None,
+            ));
         }
 
         let (gate_name, params, input_slot, args_str) =
@@ -2176,6 +2182,14 @@ impl<'a> Parser<'a> {
             return Ok(instrs);
         }
 
+        // The arity a `ctrl @` call spells includes the control qubits, so the
+        // rejection has to precede the body's own arity check.
+        if self.gate_defs.contains_key(gate_name)
+            && modifiers.iter().any(|m| matches!(m, Modifier::Ctrl))
+        {
+            return Err(Self::ctrl_on_expansion_error(gate_name, line_num));
+        }
+
         if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
             // Expansion substitutes the numeric value into the body, so a body
             // writing `rx(2 * a)` would take a bound angle whole.
@@ -2185,7 +2199,7 @@ impl<'a> Parser<'a> {
                     line: line_num,
                 });
             }
-            return Ok(instrs);
+            return Self::modify_expansion(instrs, modifiers, gate_name, line_num);
         }
 
         if let Some(axes) = pauli_rotation_axes(gate_name) {
@@ -2573,7 +2587,7 @@ impl<'a> Parser<'a> {
             return Ok((vec![], line));
         }
         let parts: Vec<&str> = line.split(" @ ").collect();
-        let gate_line = parts[parts.len() - 1];
+        let gate_line = parts[parts.len() - 1].trim_start();
         let mut modifiers = Vec::with_capacity(parts.len() - 1);
         for part in &parts[..parts.len() - 1] {
             let token = part.trim();
@@ -2604,6 +2618,65 @@ impl<'a> Parser<'a> {
             }
         }
         Ok((modifiers, gate_line))
+    }
+
+    fn ctrl_on_expansion_error(name: &str, line_num: usize) -> PrismError {
+        PrismError::UnsupportedConstruct {
+            construct: format!("ctrl @ `{name}`, which expands to a gate sequence"),
+            line: line_num,
+        }
+    }
+
+    /// Apply modifiers to the instruction sequence a `gate` or `def` body
+    /// expanded to, innermost modifier first.
+    fn modify_expansion(
+        instrs: Vec<Instruction>,
+        modifiers: &[Modifier],
+        name: &str,
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        let mut instrs = instrs;
+        for modifier in modifiers.iter().rev() {
+            instrs = match modifier {
+                Modifier::Inv => Self::invert_expansion(instrs, name, line_num)?,
+                Modifier::Pow(k) => {
+                    let base = if *k < 0 {
+                        Self::invert_expansion(instrs, name, line_num)?
+                    } else {
+                        instrs
+                    };
+                    let repeats = k.unsigned_abs() as usize;
+                    let mut powered = Vec::with_capacity(base.len() * repeats);
+                    for _ in 0..repeats {
+                        powered.extend(base.iter().cloned());
+                    }
+                    powered
+                }
+                Modifier::Ctrl => return Err(Self::ctrl_on_expansion_error(name, line_num)),
+            };
+        }
+        Ok(instrs)
+    }
+
+    fn invert_expansion(
+        instrs: Vec<Instruction>,
+        name: &str,
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        instrs
+            .into_iter()
+            .rev()
+            .map(|instr| match instr {
+                Instruction::Gate { gate, targets } => Ok(Instruction::Gate {
+                    gate: gate.inverse(),
+                    targets,
+                }),
+                _ => Err(PrismError::UnsupportedConstruct {
+                    construct: format!("inv @ `{name}`, whose body is not a gate sequence"),
+                    line: line_num,
+                }),
+            })
+            .collect()
     }
 
     fn apply_modifier(gate: Gate, modifier: &Modifier, line_num: usize) -> Result<Gate> {

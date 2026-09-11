@@ -33,6 +33,13 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 `run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
 `ObservableExpectation`, `bitstring`
 
+**State diagnostics:** `Simulate::reduced_density_matrix` returns a
+`ReducedDensityMatrix` (row major, side `2^k`, `qubits[0]` the lowest bit of the row
+index) with a `purity` method for `Tr(rho^2)`; `Simulate::entanglement_entropy` returns
+an `EntropyResult` carrying the von Neumann entropy in nats and, where the backend
+produced one, the descending Schmidt spectrum. Which backends answer each is tabulated
+in [Backends](./backends.md).
+
 **Gradients:**
 `run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`
 
@@ -64,8 +71,9 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 **Types:**
 `Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `SvgOptions`,
 `TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
-`MarginalsResult`, `Probabilities`, `FactoredBlock`, `ShotsResult`, `PrismError`,
-`Result`, `MultiFusedData`, `BatchPhaseData`, `McuData`, `Multi2qData`
+`MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
+`FactoredBlock`, `ShotsResult`, `PrismError`, `Result`, `MultiFusedData`,
+`BatchPhaseData`, `McuData`, `Multi2qData`
 
 **Backends:**
 `StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`,

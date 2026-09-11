@@ -29,14 +29,16 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
 pub(crate) unsafe fn xor_words_ptr(dst: *mut u64, src: *const u64, len: usize) {
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
-        // SAFETY: AVX2 detected; same contract as the enclosing unsafe fn.
+        // SAFETY: AVX2 detected; the caller guarantees both pointers are valid
+        // for len u64 values.
         unsafe { xor_words_avx2(dst, src, len) };
         return;
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: NEON is baseline on aarch64; same contract as the enclosing unsafe fn.
+        // SAFETY: NEON is baseline on aarch64; the caller guarantees both pointers
+        // are valid for len u64 values.
         unsafe { xor_words_neon(dst, src, len) };
         return;
     }
@@ -57,6 +59,7 @@ unsafe fn xor_words_avx2(dst: *mut u64, src: *const u64, len: usize) {
     for i in 0..chunks {
         let off = i * 4;
         // SAFETY: same contract as the enclosing unsafe fn.
+        // Unaligned loads and stores serve arbitrary slice alignment.
         unsafe {
             let d = _mm256_loadu_si256(dst.add(off) as *const __m256i);
             let s = _mm256_loadu_si256(src.add(off) as *const __m256i);

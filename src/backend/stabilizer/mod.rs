@@ -28,9 +28,11 @@
 //!
 //! # When NOT to use this backend
 //!
-//! - Circuits carrying T, Rx, Ry, Rz or fused gates, which return
-//!   `BackendUnsupported` and need a statevector or Clifford+T route.
-//! - Amplitude output at width, since the dense export costs O(2^n * n).
+//! - Any non-Clifford gate: automatic dispatch never routes here, and a
+//!   hand-picked stabilizer backend fails at the first such gate. A small
+//!   T count goes to the stabilizer-rank and Pauli-propagation engines.
+//! - Amplitude or statevector output past about 20 qubits: the export is
+//!   dense in 2^n even though the tableau is not.
 //!
 //! # Performance characteristics
 //!

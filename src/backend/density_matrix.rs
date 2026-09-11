@@ -21,21 +21,20 @@
 //! # Gate support
 //!
 //! Supported: exact unitary evolution, basis-state probabilities, the one-qubit
-//! reduced density matrix, projective measurement with stochastic collapse,
-//! reset, classically-conditioned gates, exact one-qubit Kraus channels
+//! reduced density matrix, projective measurement with stochastic collapse, reset,
+//! classically-conditioned gates, exact one-qubit Kraus channels
 //! (`apply_1q_kraus`), exact two-qubit Kraus channels (`apply_2q_kraus`, with
-//! `apply_2q_depolarizing` taking the twirled closed form instead), and
-//! exact `Tr(rho P)` expectation (`expectations_pauli`, which backs
-//! [`Backend::pauli_expectations`]). Fused gates are accepted, so `sim` fuses
-//! for this backend, and at the `2n` width its buffer actually costs rather
-//! than at the circuit width. `QftBlock` carries qubit indices outside the instruction
+//! `apply_2q_depolarizing` taking the twirled closed form instead), and exact
+//! `Tr(rho P)` expectation (`expectations_pauli`, which backs
+//! [`Backend::pauli_expectations`]). Fused gates are accepted, so `sim` fuses for
+//! this backend, and at the `2n` width its buffer actually costs rather than at
+//! the circuit width. `QftBlock` carries qubit indices outside the instruction
 //! targets and is remapped onto the ket register before the left product; the
-//! tiled shapes (`MultiFused`, `Multi2q`) apply their constituent gates one at
-//! a time instead. See [`Backend::supports_fused_gates`] for the ordering
-//! contract that requires it. Diagonal gates do not take the two-product route
-//! at all: their two factors combine into one table, so `Rzz` and the diagonal
-//! batches (`BatchPhase`, `BatchRzz`, `DiagonalBatch`) each sweep the buffer
-//! once.
+//! tiled shapes (`MultiFused`, `Multi2q`) apply their constituent gates one at a
+//! time instead. See [`Backend::supports_fused_gates`] for the ordering contract
+//! that requires it. Diagonal gates do not take the two-product route at all:
+//! their two factors combine into one table, so `Rzz` and the diagonal batches
+//! (`BatchPhase`, `BatchRzz`, `DiagonalBatch`) each sweep the buffer once.
 //!
 //! # When to prefer this backend
 //!

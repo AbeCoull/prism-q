@@ -274,31 +274,8 @@ impl SubTableau {
 
             #[cfg(feature = "parallel")]
             if n >= MIN_QUBITS_FOR_PAR_GATES && anti_rows.len() >= MIN_ANTI_ROWS_FOR_PAR {
+                use crate::backend::stabilizer::kernels::{SendBoolPtr, SendU64Ptr};
                 use rayon::prelude::*;
-
-                struct SendU64Ptr(*mut u64);
-                impl SendU64Ptr {
-                    #[inline(always)]
-                    fn ptr(&self) -> *mut u64 {
-                        self.0
-                    }
-                }
-                // SAFETY: Each parallel task accesses non-overlapping row regions.
-                unsafe impl Send for SendU64Ptr {}
-                // SAFETY: The pointer itself is read-only; mutation goes through derived slices.
-                unsafe impl Sync for SendU64Ptr {}
-
-                struct SendBoolPtr(*mut bool);
-                impl SendBoolPtr {
-                    #[inline(always)]
-                    fn ptr(&self) -> *mut bool {
-                        self.0
-                    }
-                }
-                // SAFETY: Each parallel task accesses a distinct phase element.
-                unsafe impl Send for SendBoolPtr {}
-                // SAFETY: The pointer itself is read-only; mutation goes through distinct indices.
-                unsafe impl Sync for SendBoolPtr {}
 
                 let xz_ptr = SendU64Ptr(self.xz.as_mut_ptr());
                 let phase_ptr = SendBoolPtr(self.phase.as_mut_ptr());

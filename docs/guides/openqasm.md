@@ -116,7 +116,10 @@ reason rather than binding something the source did not mean.
 
 ## Other supported constructs
 
-- Gate modifiers: `ctrl @`, `inv @`, `pow(k) @`.
+- Gate modifiers: `ctrl @`, `inv @`, `pow(k) @`. `inv @` and `pow(k) @` also apply
+  to a user `gate`, a `def` call, and a gate that lowers to a sequence (`u3`,
+  `ecr`, `iswap`, and peers), reversing or repeating the expanded body. `ctrl @`
+  on those is an error, since an expanded body has no controlled form.
 - User-defined `gate` blocks.
 - Classical `if` conditionals, guarding either a single statement or a braced
   body. A braced body admits any supported statement, `measure` and `reset`

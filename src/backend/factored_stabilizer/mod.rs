@@ -39,6 +39,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::stabilizer::kernels::{rowmul_words, rowops};
+use crate::backend::stabilizer::project_generators;
 use crate::backend::{Backend, dense_probability_len, dense_statevector_len, reserve_dense_output};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
@@ -435,84 +436,24 @@ impl SubTableau {
         let (k, col_map) = gauss_eliminate_x(&mut work_xz, &mut work_phase, n, nw, stride);
         let seed = solve_diagonal_seed(&work_xz, &work_phase, n, nw, stride, &col_map, k);
 
-        let zero = Complex64::new(0.0, 0.0);
         let mut sv = Vec::new();
         reserve_dense_output(&mut sv, dim, "factored-stabilizer", "statevector")?;
-        sv.resize(dim, zero);
+        sv.resize(dim, Complex64::new(0.0, 0.0));
         sv[seed] = Complex64::new(1.0, 0.0);
-
-        let powers_of_i = [
-            Complex64::new(1.0, 0.0),
-            Complex64::new(0.0, 1.0),
-            Complex64::new(-1.0, 0.0),
-            Complex64::new(0.0, -1.0),
-        ];
 
         let mut visited_gen = Vec::new();
         reserve_dense_output(&mut visited_gen, dim, "factored-stabilizer", "statevector")?;
         visited_gen.resize(dim, 0u32);
-        let mut current_gen = 0u32;
-        for i in 0..n {
-            let row = (i + n) * stride;
-            let mut x_bits = 0usize;
-            let mut z_bits = 0usize;
-            for w in 0..nw {
-                let shift = w * 64;
-                if shift < usize::BITS as usize {
-                    x_bits |= (self.xz[row + w] as usize) << shift;
-                    z_bits |= (self.xz[row + nw + w] as usize) << shift;
-                }
-            }
-            let r = self.phase[i + n];
-            let m = (x_bits & z_bits).count_ones() as usize;
-            let i_factor = powers_of_i[m & 3];
-            let base_sign = if r { -1.0 } else { 1.0 };
 
-            if x_bits == 0 {
-                for (y, s) in sv.iter_mut().enumerate() {
-                    let dot_parity = (z_bits & y).count_ones() & 1;
-                    let phase_val = if dot_parity == 0 {
-                        base_sign
-                    } else {
-                        -base_sign
-                    };
-                    if phase_val < 0.0 {
-                        *s = zero;
-                    }
-                }
-            } else {
-                current_gen += 1;
-                for y in 0..dim {
-                    if visited_gen[y] == current_gen {
-                        continue;
-                    }
-                    let partner = y ^ x_bits;
-                    visited_gen[partner] = current_gen;
-
-                    let a = sv[y];
-                    let b = sv[partner];
-
-                    let dot_y = (z_bits & y).count_ones() & 1;
-                    let real_y = if dot_y == 0 { base_sign } else { -base_sign };
-                    let gy_phase = i_factor * real_y;
-
-                    let dot_p = (z_bits & partner).count_ones() & 1;
-                    let real_p = if dot_p == 0 { base_sign } else { -base_sign };
-                    let gp_phase = i_factor * real_p;
-
-                    sv[y] = (a + b * gp_phase) * 0.5;
-                    sv[partner] = (b + a * gy_phase) * 0.5;
-                }
-            }
-        }
-
-        let norm_sq: f64 = sv.iter().map(Complex64::norm_sqr).sum();
-        if norm_sq > 1e-30 {
-            let inv_norm = 1.0 / norm_sq.sqrt();
-            for amp in &mut sv {
-                *amp *= inv_norm;
-            }
-        }
+        project_generators(
+            &mut sv,
+            &mut visited_gen,
+            &self.xz,
+            &self.phase,
+            n,
+            nw,
+            stride,
+        );
 
         Ok(sv)
     }

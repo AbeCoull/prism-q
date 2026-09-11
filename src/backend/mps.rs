@@ -50,6 +50,17 @@ use rayon::prelude::*;
 const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
 const DEFAULT_SVD_EPSILON: f64 = 1e-12;
+/// Bond dimension at or above which a threshold cut takes the orthogonality
+/// center whatever it drops. The environment of an ungauged chain amplifies
+/// what a cut sheds by its own conditioning, which grows with the bonds:
+/// brickwork chains at bonds to 128 read 1e-15 from the statevector at every
+/// threshold to 1e-12, while at bond 256 a 16-qubit chain read 2.8e-7 from
+/// values dropped at 8.6e-16 of the largest, under [`SVD_RESOLUTION`], and
+/// another seed read 1.0e-8 with nothing dropped at all.
+const GAUGE_RANK: usize = 16;
+/// Relative size under which a value dropped by a cut on a chain under
+/// [`GAUGE_RANK`] is taken as the factorization's own rounding.
+const SVD_RESOLUTION: f64 = 4.0 * f64::EPSILON;
 const MAX_SVD_SWEEPS: usize = 100;
 /// Relative pair threshold of the one-sided Jacobi sweep: a pair rotates while
 /// `|a_p^H a_q|` exceeds this times `|a_p| |a_q|`. Judged against the pair's
@@ -228,13 +239,6 @@ const QR_PASS_RETAIN: f64 = 0.5;
 /// noise vector is not orthogonal to them.
 const QR_RANK_REL_TOL: f64 = 1e-14;
 
-/// Relative singular-value threshold below which the epsilon cut cannot
-/// discard more than the arithmetic already loses. A cut drops values at or
-/// under `epsilon` times the largest, so it sheds at most `rank * epsilon^2`
-/// of the weight, and `1e-16` is `f64::EPSILON`. Above this the gauge decides
-/// what such a cut costs, as it does for one that reaches the bond cap.
-const GAUGE_FREE_SVD_EPSILON: f64 = 1e-8;
-
 /// Isometry deviation [`MpsBackend::assert_gauge`] admits. A move refactorizes
 /// the site it leaves, so the deviation is that factorization's own and does
 /// not accumulate: 420 moves over the eight-site fixture in `mps_tests.rs`
@@ -348,6 +352,15 @@ fn widest_block_cut(bond_left: usize, bond_right: usize, n: usize) -> u128 {
         .map(|k| ((bond_left as u128) << (k + 1)).min((bond_right as u128) << (n - 1 - k)))
         .max()
         .unwrap_or(0)
+}
+
+/// Whether keeping `chi` of `singular_values` drops one above
+/// [`SVD_RESOLUTION`] of the largest.
+fn discards_resolvable_weight(singular_values: &[f64], chi: usize) -> bool {
+    match (singular_values.first(), singular_values.get(chi)) {
+        (Some(&s_max), Some(&next)) => next > SVD_RESOLUTION * s_max,
+        _ => false,
+    }
 }
 
 fn truncated_svd_rank(singular_values: &[f64], epsilon: f64, max_bond_dim: usize) -> usize {
@@ -701,6 +714,11 @@ pub struct MpsBackend {
     /// path establishes it where a cut is going to happen and maintains it
     /// from there; a write that cannot hold the claim clears it.
     center: Option<usize>,
+    /// Widest bond any cut has written since [`Backend::init`], which decides
+    /// with [`GAUGE_RANK`] whether a threshold cut takes the center. Read as a
+    /// high-water mark so the decision costs a compare per gate rather than a
+    /// scan of the chain.
+    bond_high_water: usize,
     /// [`crate::backend::mps_workspace_cap_elements`] read once at
     /// construction, so the per-gate check is a field compare rather than an
     /// atomic load.
@@ -741,6 +759,7 @@ impl Clone for MpsBackend {
             rng: self.rng.clone(),
             truncation_discarded: self.truncation_discarded,
             center: self.center,
+            bond_high_water: self.bond_high_water,
             #[cfg(test)]
             center_steps: self.center_steps,
             workspace_cap: self.workspace_cap,
@@ -768,6 +787,7 @@ impl MpsBackend {
             rng: ChaCha8Rng::seed_from_u64(seed),
             truncation_discarded: 0.0,
             center: None,
+            bond_high_water: 1,
             #[cfg(test)]
             center_steps: 0,
             workspace_cap: crate::backend::mps_workspace_cap_elements(),
@@ -826,15 +846,16 @@ impl MpsBackend {
     /// a meaningful value indicates the bond-dimension cap discarded real
     /// weight; after [`Self::set_svd_epsilon`] both sources contribute.
     ///
-    /// A cut that can lose weight, by reaching the bond cap or under an
-    /// `svd_epsilon` raised past the rounding floor, takes the orthogonality
-    /// center onto its own sites first, so what it books is the relative
-    /// 2-norm error it made rather than a figure against a non-orthogonal
-    /// environment. Two things bound that. The center is parked by [`svd`]
-    /// rather than by the exact walk, so the environment is orthonormal to
-    /// that factorization's isometry. And a cut that can lose nothing past
-    /// rounding is left ungauged, so the sliver the construction default
-    /// shaves off such a chain is not measured this way.
+    /// A cut that can lose weight takes the orthogonality center onto its own
+    /// sites first, so what it books is the relative 2-norm error it made
+    /// rather than a figure against a non-orthogonal environment: every cut
+    /// that can reach the bond cap, every threshold cut once the chain's bonds
+    /// have reached `GAUGE_RANK`, and under that a two-site threshold cut
+    /// that would drop a value above `SVD_RESOLUTION` of its largest. The
+    /// center is parked by [`svd`] rather than by the exact walk, so the
+    /// environment is orthonormal to that factorization's isometry. A chain
+    /// under both marks is left ungauged, and what its cuts shed at rounding
+    /// is not measured this way.
     ///
     /// The total sums one relative discard per SVD rather than measuring the
     /// final state, so a chain that truncates heavily can carry it past 1,
@@ -1247,11 +1268,14 @@ impl MpsBackend {
         }
     }
 
-    /// Whether a cut of `rank` singular values can discard weight worth
-    /// gauging. The bond cap bites above the cap, and `svd_epsilon` bites at
-    /// any rank once it is raised past [`GAUGE_FREE_SVD_EPSILON`].
+    /// Whether a cut of `rank` singular values takes the center before it is
+    /// made: it can reach the bond cap, or a threshold is set and the chain's
+    /// bonds have reached [`GAUGE_RANK`]. Under that a threshold cut is judged
+    /// from its spectrum by [`discards_resolvable_weight`].
     fn cut_can_lose(&self, rank: u128) -> bool {
-        rank > self.max_bond_dim as u128 || self.svd_epsilon > GAUGE_FREE_SVD_EPSILON
+        rank > self.max_bond_dim as u128
+            || (self.svd_epsilon > 0.0
+                && (rank >= GAUGE_RANK as u128 || self.bond_high_water >= GAUGE_RANK))
     }
 
     /// Drop the recorded center unless the write lands on it.
@@ -1454,18 +1478,35 @@ impl MpsBackend {
     ///
     /// The cut this makes is exact in the 2-norm only against an orthonormal
     /// environment, so the pair takes the orthogonality center first wherever
-    /// the cut can lose anything, which [`Self::cut_can_lose`] decides from
-    /// the rank below. A pair whose rank keeps it under the cap, at a
-    /// threshold that cannot shed more than rounding, stays off the walk
-    /// entirely. Maintaining a center already recorded costs one to three
-    /// steps, well under rebuilding it, so a chain that has one keeps it on
-    /// every pair.
+    /// the cut can lose anything: before the factorization when
+    /// [`Self::cut_can_lose`] says so from the rank and the chain's bonds, and
+    /// after it when the spectrum shows a threshold cut dropping a resolvable
+    /// value, in which case the pair is cut again in gauge. A pair under both
+    /// marks stays off the walk entirely. Maintaining a center already
+    /// recorded costs one to three steps, well under rebuilding it, so a chain
+    /// that has one keeps it on every pair.
     fn apply_adjacent_two_qubit(
         &mut self,
         gate: &[[Complex64; 4]; 4],
         left_site: usize,
         left_is_first_qubit: bool,
     ) -> Result<()> {
+        if !self.cut_adjacent_pair(gate, left_site, left_is_first_qubit)? {
+            self.establish_center(left_site);
+            self.cut_adjacent_pair(gate, left_site, left_is_first_qubit)?;
+        }
+        Ok(())
+    }
+
+    /// One attempt at [`Self::apply_adjacent_two_qubit`]. Returns `false`,
+    /// having written nothing, when the chain has no center and the cut would
+    /// drop a value the factorization resolves.
+    fn cut_adjacent_pair(
+        &mut self,
+        gate: &[[Complex64; 4]; 4],
+        left_site: usize,
+        left_is_first_qubit: bool,
+    ) -> Result<bool> {
         let right_site = left_site + 1;
         let bl = self.sites[left_site].bond_left;
         let bond_mid = self.sites[left_site].bond_right;
@@ -1660,6 +1701,9 @@ impl MpsBackend {
 
         let svd_result = svd(mat, rows, cols);
         let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
+        if !maintained && discards_resolvable_weight(&svd_result.s, chi_new) {
+            return Ok(false);
+        }
         self.record_truncation(&svd_result.s, chi_new);
 
         // A[k] has shape (bl, 2, chi_new) and A[k+1] shape (chi_new, 2, br).
@@ -1697,13 +1741,14 @@ impl MpsBackend {
             bond_right: br,
             data: right_data,
         };
+        self.bond_high_water = self.bond_high_water.max(chi_new);
         if maintained {
             self.center = Some(match weight {
                 WeightSide::Right => right_site,
                 WeightSide::Left => left_site,
             });
         }
-        Ok(())
+        Ok(true)
     }
 
     fn apply_two_qubit_gate(
@@ -2139,6 +2184,7 @@ impl MpsBackend {
             let svd_result = svd(&mat, rows, cols);
             let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
             self.record_truncation(&svd_result.s, chi_new);
+            self.bond_high_water = self.bond_high_water.max(chi_new);
 
             // Extract left site from U: shape (cur_bl, 2, chi_new)
             let mut left_data = std::mem::take(&mut self.sites[start + k].data);
@@ -2227,7 +2273,9 @@ impl MpsBackend {
         // The block decomposition sweeps left to right and leaves the weight
         // on its last site, so a center anywhere in the block ends there. One
         // outside it would leave the sites between non-orthogonal, and the
-        // block's own cuts would be the ones paying for it.
+        // block's own cuts would be the ones paying for it. The decomposition
+        // makes its cuts in one sweep, so there is no spectrum retry here: a
+        // block under both gauge marks cuts ungauged.
         let maintained = self.center.is_some() || self.cut_can_lose(widest_block_cut(bl, br, n));
         if maintained {
             match self.center {
@@ -3197,6 +3245,7 @@ impl Backend for MpsBackend {
         self.num_qubits = num_qubits;
         self.truncation_discarded = 0.0;
         self.center = None;
+        self.bond_high_water = 1;
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
         self.sites = (0..num_qubits)
             .map(|_| SiteTensor::new_zero_state())

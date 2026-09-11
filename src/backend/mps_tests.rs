@@ -935,6 +935,16 @@ fn mps_after(circuit: &Circuit, cap: usize) -> MpsBackend {
     b
 }
 
+// At a threshold of zero only the cap can make a cut lose, so a chain under
+// the cap is the one path that never records a center.
+fn exact_mps_after(circuit: &Circuit, cap: usize) -> MpsBackend {
+    let mut b = MpsBackend::new(42, cap);
+    b.set_svd_epsilon(0.0);
+    b.init(circuit.num_qubits, 0).unwrap();
+    b.apply_instructions(&circuit.instructions).unwrap();
+    b
+}
+
 fn bell_pairs(n: usize) -> Circuit {
     let mut c = Circuit::new(n, 0);
     for q in (0..n).step_by(2) {
@@ -1270,9 +1280,8 @@ fn a_capped_cut_books_the_error_it_makes() {
     }
 }
 
-// The gate predicate is the rank of the cut against the cap: a pair yields
-// `2 * bl.min(br)` singular values, so a chain whose bonds keep that under the
-// cap can lose nothing and takes the path it took before, untouched.
+// Under the cap and under the gauge rank, a chain whose cuts drop nothing the
+// factorization resolves takes the path it took before, untouched.
 #[test]
 fn a_chain_under_the_cap_stays_off_the_walk() {
     for (label, circuit, cap, peak) in [
@@ -1303,6 +1312,55 @@ fn a_chain_under_the_cap_stays_off_the_walk() {
     assert_eq!(mps_after(&circuit, 4).current_max_bond_dim(), 2);
     assert_eq!(mps_after(&circuit, 4).center, None);
     assert!(mps_after(&circuit, 3).center.is_some());
+}
+
+// Under the gauge rank a threshold cut is judged by what it drops: a value
+// the factorization resolves takes the center before it is cut, one at the
+// factorization's own rounding does not. `Rzz` on `|++>` leaves the pair with
+// Schmidt values `cos(t/2)` and `sin(t/2)`, so the angle places the second
+// value on either side of the resolution while both sit under the default
+// threshold.
+#[test]
+fn a_cut_gauges_when_it_drops_what_the_factorization_resolves() {
+    for (angle, gauged) in [(2e-13, true), (2e-17, false)] {
+        let mut circuit = Circuit::new(6, 0);
+        for q in 0..6 {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.add_gate(Gate::Rzz(angle), &[2, 3]);
+        let b = mps_after(&circuit, 64);
+        assert_eq!(b.current_max_bond_dim(), 1, "angle {angle:e}");
+        assert_eq!(b.center.is_some(), gauged, "angle {angle:e}");
+        if gauged {
+            assert!(
+                b.truncation_discarded() > 1e-27,
+                "angle {angle:e} booked nothing"
+            );
+        } else {
+            assert_eq!(b.center_steps, 0);
+        }
+    }
+}
+
+// At the gauge rank the threshold alone takes the center, whatever the cuts
+// drop, and the mark outlives the bonds that set it.
+#[test]
+fn a_chain_whose_bonds_reach_the_gauge_rank_takes_the_center() {
+    let circuit = crate::circuits::brickwork_circuit(12, 8, 42);
+    let b = mps_after(&circuit, 4096);
+    assert_eq!(b.current_max_bond_dim(), GAUGE_RANK);
+    assert!(b.center.is_some(), "no center at the gauge rank");
+    assert_eq!(b.bond_high_water, GAUGE_RANK);
+
+    let mut b = exact_mps_after(&circuit, 4096);
+    assert_eq!(b.center, None, "a threshold of zero took the center");
+    assert!(b.bond_high_water >= GAUGE_RANK);
+    b.set_svd_epsilon(1e-12);
+    cx_at(0)(&mut b);
+    assert!(
+        b.center.is_some(),
+        "the high-water mark did not take the center"
+    );
 }
 
 // A center that claims more than the chain has is worse than none: a move
@@ -1448,6 +1506,7 @@ fn a_run_of_adjacent_gates_carries_the_center_along() {
     b.apply_instructions(&crate::circuits::brickwork_circuit(n, 6, 42).instructions)
         .unwrap();
     assert!(b.center.is_some(), "the fixture never drove the policy");
+    b.move_center(n - 2);
 
     // Rightward: the run pays the reach to the first pair and one step to turn
     // the center around, after which each pair already has it on its left.
@@ -1607,11 +1666,11 @@ fn a_raised_epsilon_gauges_a_chain_under_the_cap() {
         "booked {booked:.15e} against a realized {realized:.15e}"
     );
 
-    // The construction default sheds at most rank * epsilon^2, which is under
-    // rounding, so it leaves the chain on the unchanged path.
-    let default = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
-    assert_eq!(default.center, None);
-    assert_eq!(default.center_steps, 0);
+    // A threshold of zero cuts nothing, so it leaves the chain on the
+    // unchanged path.
+    let exact = exact_mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    assert_eq!(exact.center, None);
+    assert_eq!(exact.center_steps, 0);
 }
 
 // The block decomposition truncates at every one of its cuts, so it needs a
@@ -1619,7 +1678,7 @@ fn a_raised_epsilon_gauges_a_chain_under_the_cap() {
 // left behind.
 #[test]
 fn a_block_gate_establishes_a_center_of_its_own() {
-    let base = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    let base = exact_mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
     assert_eq!(base.center, None);
 
     let (booked, realized) = one_cut(&base, 3, mcu_at([3, 4, 5]));
@@ -1678,6 +1737,42 @@ fn a_capped_run_lands_where_it_says_it_does() {
         (infidelity - booked).abs() < 0.1 * booked,
         "booked {booked:.6e} against a realized {infidelity:.6e}"
     );
+}
+
+// The construction default cuts at 1e-12 of the largest value, and what such
+// a cut books is what it loses only against an orthonormal environment. At
+// 12 qubits an ungauged cut of that size still lands at rounding, which is
+// what made a threshold below which the gauge could be skipped look right;
+// at 18 qubits the ungauged bond-512 environment turns the same cut into an
+// infidelity of 4.1e-8 booked as 6.9e-26. The floor is the rounding of two
+// f64 runs of a thousand gates, which the booked figure cannot answer for.
+#[test]
+fn a_default_epsilon_cut_books_what_it_loses_at_width() {
+    // The 18-qubit arm runs every cut through the in-crate sweep without
+    // `parallel` and takes minutes there, so that arm is measured with faer.
+    let widths: &[usize] = if cfg!(feature = "parallel") {
+        &[12, 16, 18]
+    } else {
+        &[12, 16]
+    };
+    for &n in widths {
+        let circuit = crate::circuits::brickwork_circuit(n, 24, 0xDEAD_BEEF);
+
+        let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+        sv.init(n, 0).unwrap();
+        sv.apply_instructions(&circuit.instructions).unwrap();
+        let reference = sv.export_statevector().unwrap();
+
+        let b = mps_after(&circuit, 1 << 20);
+        let v = b.export_statevector().unwrap();
+        let inner: Complex64 = reference.iter().zip(&v).map(|(r, x)| r.conj() * x).sum();
+        let infidelity = 1.0 - inner.norm_sqr();
+        let booked = b.truncation_discarded();
+        assert!(
+            infidelity <= 10.0 * booked + 1e-13,
+            "{n} qubits: realized {infidelity:.3e} against a booked {booked:.3e}"
+        );
+    }
 }
 
 // The middle bond binds where the pair bonds do not: a chain carrying a bond
@@ -2184,15 +2279,18 @@ fn assert_center_at_bond(b: &MpsBackend, bond: usize) {
 }
 
 // Every cut of a chain whose ranks run 2, 4, 8, 16 against the dense
-// spectrum. The run leaves no center under this cap, so the first cut
-// establishes one at site 0 for n - 1 steps, and the sweep that follows pays
-// one step per cut; the entropy call at the same cut pays nothing.
+// spectrum. The run reaches the gauge rank and leaves a center right of the
+// first bond, so the first cut walks it to site 1, the second reads the same
+// site for nothing, and each cut after that pays one step; the entropy call
+// at the same cut pays nothing.
 #[test]
 fn schmidt_values_match_the_statevector_across_every_cut() {
     let n = 12;
     let circuit = crate::circuits::brickwork_circuit(n, 8, 42);
     let mut b = mps_after(&circuit, 4096);
-    assert_eq!(b.center, None, "the fixture recorded a center");
+    let rest = b
+        .center
+        .expect("the run reached the gauge rank without a center");
     let discarded = b.truncation_discarded();
     let mark = b.center_steps;
 
@@ -2226,7 +2324,8 @@ fn schmidt_values_match_the_statevector_across_every_cut() {
     }
 
     assert_eq!(b.truncation_discarded(), discarded);
-    assert_eq!(b.center_steps - mark, (n - 1) + (n - 2));
+    assert!(rest >= 1, "the run left the center at site 0");
+    assert_eq!(b.center_steps - mark, (rest - 1) + (n - 3));
 }
 
 // The two routes read the same bond: the one-SVD route from the center site,

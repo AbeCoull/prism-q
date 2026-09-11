@@ -110,40 +110,42 @@ pub fn run_expectation_gradient(
         masked.push((*coeff, xmask, zmask, num_y));
     }
 
-    // Forward pass, unfused, to keep a 1:1 gate-to-generator correspondence.
+    // A gate outside the Hamiltonian's inverse light cone conjugates the
+    // back-propagated observable trivially, so ⟨H⟩ and every gradient entry
+    // are unchanged when it is dropped. Both passes walk the in-cone gates
+    // only, unfused, to keep a 1:1 gate-to-generator correspondence.
+    let in_cone = observable_light_cone(circuit, hamiltonian);
+    let kept: Vec<usize> = (0..circuit.instructions.len())
+        .filter(|&i| in_cone[i])
+        .collect();
+
     let mut phi = StatevectorBackend::new(seed);
     phi.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    phi.apply_instructions(&circuit.instructions)?;
+    for &i in &kept {
+        phi.apply(&circuit.instructions[i])?;
+    }
 
     let (value, lambda_state) = build_lambda_and_value(phi.state_vector(), &masked)?;
 
-    let num_params = params.num_slots();
-    let mut gradient = vec![0.0; num_params];
-    if params.is_empty() {
-        return Ok(ExpectationGradient { value, gradient });
-    }
+    let mut gradient = vec![0.0; params.num_slots()];
 
-    // Inverse light cone of the Hamiltonian: a trainable gate outside it has a
-    // provably zero gradient (its generator commutes through the back-evolved
-    // observable), so its sandwich is skipped.
-    let in_cone = observable_light_cone(circuit, hamiltonian);
-
-    // Links sorted by descending instruction index, matching the reverse sweep.
-    // A cursor walks this list so the per-instruction lookup stays O(params),
-    // not O(instructions).
-    let mut links = params.links().to_vec();
-    links.sort_unstable_by_key(|l| std::cmp::Reverse(l.instruction));
-
-    // Stop the backward sweep at the earliest in-cone trainable gate: nothing
-    // before it contributes, so a non-trainable (or out-of-cone) prefix costs
-    // no inverse applications. If no trainable gate reaches the observable, the
-    // gradient is zero everywhere.
-    let earliest = links
+    // In-cone links sorted by descending instruction index, matching the
+    // reverse sweep. A cursor walks this list so the per-instruction lookup
+    // stays O(params), not O(instructions). An out-of-cone trainable gate has
+    // a provably zero gradient, so its links carry nothing to accumulate.
+    let mut links: Vec<_> = params
+        .links()
         .iter()
         .filter(|l| in_cone[l.instruction])
-        .map(|l| l.instruction)
-        .min();
-    let Some(earliest) = earliest else {
+        .copied()
+        .collect();
+    links.sort_unstable_by_key(|l| std::cmp::Reverse(l.instruction));
+
+    // The sweep stops at the earliest in-cone trainable gate: nothing before
+    // it contributes, so a non-trainable prefix costs no inverse applications.
+    // If no trainable gate reaches the observable, the gradient is zero
+    // everywhere.
+    let Some(earliest) = links.last().map(|l| l.instruction) else {
         return Ok(ExpectationGradient { value, gradient });
     };
 
@@ -151,30 +153,23 @@ pub fn run_expectation_gradient(
     lambda.init_from_state(lambda_state, circuit.num_classical_bits)?;
 
     let mut cursor = 0;
-    for i in (earliest..circuit.instructions.len()).rev() {
-        let (gate, targets) = match &circuit.instructions[i] {
-            Instruction::Gate { gate, targets } => (gate, targets),
-            Instruction::Barrier { .. } => continue,
-            _ => unreachable!("non-unitary instructions rejected above"),
+    for &i in kept.iter().rev() {
+        if i < earliest {
+            break;
+        }
+        let Instruction::Gate { gate, targets } = &circuit.instructions[i] else {
+            unreachable!("the light cone keeps gate instructions only")
         };
 
         if cursor < links.len() && links[cursor].instruction == i {
-            if in_cone[i] {
-                let kind = gate
-                    .pauli_generator()
-                    .expect("trainable instruction validated as differentiable");
-                let contrib =
-                    gradient_contribution(kind, targets, lambda.state_vector(), phi.state_vector());
-                while cursor < links.len() && links[cursor].instruction == i {
-                    gradient[links[cursor].slot] += contrib;
-                    cursor += 1;
-                }
-            } else {
-                // Out of the light cone: contribution is zero, but the cursor
-                // still advances past this instruction's links.
-                while cursor < links.len() && links[cursor].instruction == i {
-                    cursor += 1;
-                }
+            let kind = gate
+                .pauli_generator()
+                .expect("trainable instruction validated as differentiable");
+            let contrib =
+                gradient_contribution(kind, targets, lambda.state_vector(), phi.state_vector());
+            while cursor < links.len() && links[cursor].instruction == i {
+                gradient[links[cursor].slot] += contrib;
+                cursor += 1;
             }
         }
 

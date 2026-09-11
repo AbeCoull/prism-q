@@ -256,6 +256,45 @@ fn nontrainable_prefix_is_skipped_correctly() {
 }
 
 #[test]
+fn out_of_cone_gates_inside_the_sweep_are_dropped_exactly() {
+    // Observable Z0 + 0.5 Z1. The Ry on qubit 2 and the Rx on qubit 3 sit
+    // between in-cone trainable gates in program order and the H/CX prefix is
+    // only partly in the cone, so the adjoint drops gates mid-circuit as well
+    // as at the front. Parameter shift is exact and walks the whole circuit.
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rx(0.3), &[0]);
+    c.add_gate(Gate::Ry(0.8), &[2]);
+    c.add_gate(Gate::Rzz(0.5), &[0, 1]);
+    c.add_gate(Gate::Rx(1.1), &[3]);
+    c.add_gate(Gate::Cx, &[1, 0]);
+    c.add_gate(Gate::Rz(0.7), &[0]);
+    let params = Parameters::all_rotations(&c);
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)]), (0.5, vec![PauliTerm::z(1)])];
+
+    let cone = prism_q::inverse_light_cone(&c, &[PauliTerm::z(0), PauliTerm::z(1)]);
+    assert_eq!(
+        cone,
+        [
+            true, false, false, true, true, false, true, false, true, true
+        ]
+    );
+
+    let adjoint = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    let shift = run_expectation_gradient_shift(&c, &obs, &params, SEED).unwrap();
+    assert!((adjoint.value - shift.value).abs() < 1e-10);
+    for (slot, (got, want)) in adjoint.gradient.iter().zip(&shift.gradient).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-10,
+            "slot {slot}: adjoint {got} vs shift {want}"
+        );
+    }
+}
+
+#[test]
 fn shift_matches_adjoint_on_statevector() {
     let c = circuits::hardware_efficient_ansatz(4, 2, SEED);
     let params = Parameters::all_rotations(&c);

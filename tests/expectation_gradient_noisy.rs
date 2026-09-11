@@ -4,11 +4,9 @@
 
 mod common;
 
-use common::SEED;
+use common::{SEED, shift_slot};
 use prism_q::circuits;
-use prism_q::{
-    BackendKind, Circuit, Gate, Instruction, NoiseModel, Parameters, PauliTerm, simulate,
-};
+use prism_q::{BackendKind, Circuit, Instruction, NoiseModel, Parameters, PauliTerm, simulate};
 
 type Hamiltonian = Vec<(f64, Vec<PauliTerm>)>;
 
@@ -38,20 +36,6 @@ fn noisy_expval(circuit: &Circuit, noise: &NoiseModel, hamiltonian: &Hamiltonian
         .zip(per_term)
         .map(|((c, _), v)| c * v)
         .sum()
-}
-
-fn shift_slot(circuit: &Circuit, params: &Parameters, slot: usize, delta: f64) -> Circuit {
-    let mut out = circuit.clone();
-    for link in params.links().iter().filter(|l| l.slot == slot) {
-        if let Instruction::Gate { gate, .. } = &mut out.instructions[link.instruction] {
-            *gate = match gate {
-                Gate::Ry(t) => Gate::Ry(*t + delta),
-                Gate::Rz(t) => Gate::Rz(*t + delta),
-                other => panic!("fixture carries only Ry and Rz rotations, found {other:?}"),
-            };
-        }
-    }
-    out
 }
 
 #[test]

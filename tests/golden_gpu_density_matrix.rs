@@ -11,12 +11,13 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{SEED, all_pauli_masks, assert_probs_close};
+use common::gate_fixtures::{g, pauli_rot_sample, sample_2x2, sample_4x4};
+use common::{SEED, all_pauli_masks, amplitude_damping, assert_probs_close, count_gates};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::circuit::fusion::fuse_circuit_for_width;
-use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec, smallvec};
+use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, smallvec};
 use prism_q::gates::{
     BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Gate, McuData, Multi2qData,
     MultiFusedData,
@@ -93,22 +94,8 @@ fn assert_same_mixture(cpu: &DensityMatrixBackend, gpu: &DensityMatrixBackend, l
     }
 }
 
-fn g(gate: Gate, targets: &[usize]) -> Instruction {
-    let mut tv: SmallVec<[usize; 4]> = smallvec![];
-    tv.extend_from_slice(targets);
-    Instruction::Gate { gate, targets: tv }
-}
-
 fn c(re: f64) -> Complex64 {
     Complex64::new(re, 0.0)
-}
-
-fn amplitude_damping(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
-    let zero = c(0.0);
-    vec![
-        [[c(1.0), zero], [zero, c((1.0 - gamma).sqrt())]],
-        [[zero, c(gamma.sqrt())], [zero, zero]],
-    ]
 }
 
 fn depolarizing_1q(p: f64) -> Vec<[[Complex64; 2]; 2]> {
@@ -150,32 +137,6 @@ fn h_conjugated_zz(p: f64) -> Vec<[[Complex64; 4]; 4]> {
         k1[t][t ^ 2] = c(p.sqrt() * sign);
     }
     vec![k0, k1]
-}
-
-fn sample_2x2() -> [[Complex64; 2]; 2] {
-    [
-        [Complex64::new(0.6, -0.1), Complex64::new(-0.3, 0.2)],
-        [Complex64::new(0.2, 0.4), Complex64::new(0.7, -0.2)],
-    ]
-}
-
-fn sample_4x4() -> [[Complex64; 4]; 4] {
-    let mut mat = [[c(0.0); 4]; 4];
-    for (r, row) in mat.iter_mut().enumerate() {
-        for (col, entry) in row.iter_mut().enumerate() {
-            *entry = Complex64::new(0.1 * (r as f64 + 1.0), 0.07 * (col as f64 + 1.0));
-        }
-    }
-    mat
-}
-
-fn pauli_rot_sample() -> Gate {
-    let mut circuit = Circuit::new(3, 0);
-    circuit.add_pauli_rotation(0.53, &[PauliTerm::x(0), PauliTerm::y(1), PauliTerm::z(2)]);
-    match &circuit.instructions[0] {
-        Instruction::Gate { gate, .. } => gate.clone(),
-        _ => unreachable!("add_pauli_rotation appends a gate"),
-    }
 }
 
 /// One instruction per `Gate` variant on a six-qubit register.
@@ -509,14 +470,6 @@ fn dm_gpu_measure_reset_and_conditional_match_cpu() {
         cpu.classical_results().iter().any(|&b| b),
         "the fixture must record at least one 1 outcome"
     );
-}
-
-fn count_gates(circuit: &Circuit, want: impl Fn(&Gate) -> bool) -> usize {
-    circuit
-        .instructions
-        .iter()
-        .filter(|inst| matches!(inst, Instruction::Gate { gate, .. } if want(gate)))
-        .count()
 }
 
 #[test]

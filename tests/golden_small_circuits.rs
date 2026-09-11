@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{assert_probs_close, run_fused_probs};
+use common::{assert_probs_close, run_and_probs, run_and_state, run_stabilizer_probs};
 use num_complex::Complex64;
 use prism_q::CircuitBuilder;
 use prism_q::Instruction;
@@ -15,7 +15,6 @@ use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::backend::mps::MpsBackend;
 use prism_q::backend::product::ProductStateBackend;
-use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::Circuit;
 use prism_q::circuits;
@@ -25,20 +24,6 @@ use prism_q::{PauliAxis, PauliTerm};
 use prism_q::{QecOptions, QecPauli, QecProgram, run_qec_program, run_qec_program_reference};
 
 const EPS: f64 = 1e-12;
-
-fn run_and_probs(circuit: &Circuit) -> Vec<f64> {
-    run_fused_probs(&mut StatevectorBackend::new(common::SEED), circuit)
-}
-
-fn run_and_state(circuit: &Circuit) -> Vec<Complex64> {
-    let mut backend = StatevectorBackend::new(common::SEED);
-    sim::run_on(&mut backend, circuit).unwrap();
-    backend.state_vector().to_vec()
-}
-
-fn run_stabilizer_probs(circuit: &Circuit) -> Vec<f64> {
-    run_fused_probs(&mut StabilizerBackend::new(common::SEED), circuit)
-}
 
 fn assert_probs(actual: &[f64], expected: &[f64]) {
     assert_probs_close(actual, expected, EPS, "golden");

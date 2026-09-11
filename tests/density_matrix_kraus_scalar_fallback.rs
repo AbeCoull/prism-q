@@ -4,14 +4,13 @@
 
 mod common;
 
-use common::{DM_EPS, SEED, all_pauli_masks, depolarizing_2q_kraus};
+use common::{DM_EPS, SEED, all_pauli_masks, caps, depolarizing_2q_kraus};
 use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::{circuits, sim};
 
 #[test]
 fn dense_scalar_sweep_matches_closed_form_depolarizing() {
-    // SAFETY: no other thread touches the environment at this point.
-    unsafe { std::env::set_var("PRISM_NO_AVX2_KRAUS", "1") };
+    caps::set_once(&[("PRISM_NO_AVX2_KRAUS", "1")]);
     let p = 0.3;
     let kraus = depolarizing_2q_kraus(p);
     // (3,0,1) and (5,2,3) run the serial arm at W = 1 and W = 4; the 7-qubit

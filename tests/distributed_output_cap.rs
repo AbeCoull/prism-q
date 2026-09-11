@@ -3,23 +3,18 @@
 //! helper caches per process.
 #![cfg(feature = "distributed")]
 
-use std::sync::Once;
+mod common;
 
+use common::{SEED, caps};
 use prism_q::distributed::DistributedContext;
 use prism_q::gates::Gate;
 use prism_q::{Circuit, PrismError, simulate};
 
-const SEED: u64 = 42;
 const PROB_CAP: usize = 4;
 const N: usize = PROB_CAP + 2;
 
 fn small_prob_cap() {
-    static SET: Once = Once::new();
-    SET.call_once(|| {
-        // SAFETY: set exactly once, and every reader in this binary is gated
-        // behind this `Once`, so no thread queries the cap while it is written.
-        unsafe { std::env::set_var("PRISM_MAX_PROB_QUBITS", "4") };
-    });
+    caps::set_once(&[("PRISM_MAX_PROB_QUBITS", "4")]);
 }
 
 /// Qubit 0 held at |1>, the rest in an even superposition, so every marginal is

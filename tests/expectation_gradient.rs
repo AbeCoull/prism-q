@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::SEED;
+use common::{SEED, shift_slot};
 use num_complex::Complex64;
 use prism_q::circuits;
 use prism_q::{
@@ -23,34 +23,6 @@ fn expval(circuit: &Circuit, hamiltonian: &Hamiltonian) -> f64 {
         .zip(per_term)
         .map(|((c, _), v)| c * v)
         .sum()
-}
-
-/// Return a copy of `circuit` with `delta` added to the angle of every gate
-/// bound to parameter `slot`.
-fn shift_slot(circuit: &Circuit, params: &Parameters, slot: usize, delta: f64) -> Circuit {
-    let mut out = circuit.clone();
-    for link in params.links().iter().filter(|l| l.slot == slot) {
-        if let Instruction::Gate { gate, .. } = &mut out.instructions[link.instruction] {
-            *gate = shifted_gate(gate, delta);
-        }
-    }
-    out
-}
-
-fn shifted_gate(gate: &Gate, delta: f64) -> Gate {
-    match gate {
-        Gate::Rx(t) => Gate::Rx(t + delta),
-        Gate::Ry(t) => Gate::Ry(t + delta),
-        Gate::Rz(t) => Gate::Rz(t + delta),
-        Gate::Rzz(t) => Gate::Rzz(t + delta),
-        Gate::P(t) => Gate::P(t + delta),
-        Gate::PauliRot(data) => {
-            let mut shifted = data.clone();
-            shifted.set_theta(data.theta() + delta);
-            Gate::PauliRot(shifted)
-        }
-        other => panic!("gate {} is not differentiable", other.name()),
-    }
 }
 
 /// Central finite-difference gradient of `⟨H⟩` for one slot.

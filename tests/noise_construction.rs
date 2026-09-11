@@ -6,6 +6,7 @@
 
 mod common;
 
+use common::SEED;
 use num_complex::Complex64;
 use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, guarded};
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
@@ -14,8 +15,6 @@ use prism_q::{
     density_matrix_expectation_values, simulate,
 };
 use smallvec::smallvec;
-
-const SEED: u64 = 42;
 
 fn mixed_circuit() -> Circuit {
     let mut c = Circuit::new(3, 3);

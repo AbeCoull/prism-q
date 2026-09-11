@@ -4,15 +4,15 @@
 //! `max_density_matrix_qubits()` caches per process, so it must not share a
 //! process with tests that expect the real memory-derived cap.
 
+mod common;
 mod qec_common;
 
+use common::caps;
 use prism_q::{Gate, QecNoise, QecPauli, QecProgram};
 
 #[test]
 fn noisy_exp_val_beyond_the_density_matrix_cap_keeps_the_reference_path() {
-    // SAFETY: single test in this binary; the variable is set before any cap
-    // query and no other thread is running.
-    unsafe { std::env::set_var("PRISM_MAX_DM_QUBITS", "1") };
+    caps::set_once(&[("PRISM_MAX_DM_QUBITS", "1")]);
 
     let mut program = QecProgram::with_options(2, qec_common::qec_options(512, 2048, false));
     program.push_gate(Gate::H, &[0]).unwrap();

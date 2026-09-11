@@ -1,3 +1,7 @@
+//! The native QEC program IR: record-referencing construction, the parsed text
+//! form, the sample-result accessors, and agreement between the compiled and
+//! reference runners on Clifford programs.
+
 use prism_q::circuit::openqasm;
 use prism_q::{
     Gate, PackedShots, PrismError, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram,

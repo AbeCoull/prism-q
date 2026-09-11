@@ -769,6 +769,31 @@ fn test_batch_phase_decomposition() {
     assert_mps_matches_statevector(&c);
 }
 
+// Dispatch resolves sites before the bubble, and the one-phase case goes
+// through the logical entry point instead, so a routed layout is what tells a
+// mapping done once from one done twice.
+#[test]
+fn a_one_phase_batch_follows_the_routed_layout() {
+    use crate::gates::BatchPhaseData;
+
+    let n = 8;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_gate(Gate::Cz, &[0, 5]);
+    c.add_gate(
+        Gate::BatchPhase(Box::new(BatchPhaseData {
+            phases: smallvec::smallvec![(2, Complex64::from_polar(1.0, 0.9))],
+        })),
+        &[5, 2],
+    );
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    assert_mps_matches_statevector(&c);
+}
+
 #[test]
 fn svd_epsilon_default_is_pinned() {
     let b = MpsBackend::new(42, 64);

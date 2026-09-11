@@ -1858,12 +1858,6 @@ impl MpsBackend {
         if phases.is_empty() {
             return Ok(());
         }
-        if phases.len() == 1 {
-            let (target, phase) = phases[0];
-            let mat = [[ONE, ZERO], [ZERO, phase]];
-            let g = crate::gates::cu_matrix_4x4(&mat);
-            return self.apply_two_qubit_gate(&g, control, target);
-        }
 
         let mut right: Vec<(usize, Complex64)> = Vec::new();
         let mut left: Vec<(usize, Complex64)> = Vec::new();
@@ -3096,13 +3090,18 @@ impl MpsBackend {
                 self.apply_n_qubit_gate(&gate_mat, dim, &all_qubits)?;
             }
             Gate::BatchPhase(data) => {
-                let control = self.site_for_logical(targets[0]);
-                let phases: Vec<(usize, Complex64)> = data
-                    .phases
-                    .iter()
-                    .map(|&(qubit, phase)| (self.site_for_logical(qubit), phase))
-                    .collect();
-                self.apply_batch_phase_bubble(control, &phases)?;
+                if let [(target, phase)] = data.phases[..] {
+                    let g = crate::gates::cu_matrix_4x4(&[[ONE, ZERO], [ZERO, phase]]);
+                    self.apply_two_qubit_gate(&g, targets[0], target)?;
+                } else {
+                    let control = self.site_for_logical(targets[0]);
+                    let phases: Vec<(usize, Complex64)> = data
+                        .phases
+                        .iter()
+                        .map(|&(qubit, phase)| (self.site_for_logical(qubit), phase))
+                        .collect();
+                    self.apply_batch_phase_bubble(control, &phases)?;
+                }
             }
             Gate::BatchRzz(data) => {
                 for &(q0, q1, theta) in &data.edges {

@@ -20,6 +20,7 @@ use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::{Gate, McuData};
 use prism_q::sim;
+use prism_q::{BackendKind, EntropyResult, ReducedDensityMatrix, simulate};
 use prism_q::{PauliAxis, PauliTerm};
 use prism_q::{QecOptions, QecPauli, QecProgram, run_qec_program, run_qec_program_reference};
 
@@ -1542,5 +1543,165 @@ fn ghz_chain_has_ln_2_across_every_cut() {
                 "{label}: entropy {entropy}"
             );
         }
+    }
+}
+
+// ---- The diagnostic terminals ----
+
+fn entropy_through(kind: BackendKind, circuit: &Circuit, subsystem: &[usize]) -> EntropyResult {
+    simulate(circuit)
+        .backend(kind)
+        .seed(common::SEED)
+        .entanglement_entropy(subsystem)
+        .unwrap()
+}
+
+fn rdm_through(kind: BackendKind, circuit: &Circuit, qubits: &[usize]) -> ReducedDensityMatrix {
+    simulate(circuit)
+        .backend(kind)
+        .seed(common::SEED)
+        .reduced_density_matrix(qubits)
+        .unwrap()
+}
+
+fn assert_entries(actual: &[Complex64], expected: &[Complex64], label: &str) {
+    assert_eq!(actual.len(), expected.len(), "{label}: length");
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (a - e).norm() < EPS,
+            "{label}: entry {i} reads {a} against {e}"
+        );
+    }
+}
+
+fn bell_circuit() -> Circuit {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit
+}
+
+// Rotations on every qubit and nothing across them: entropy 0 and the single
+// Schmidt value 1 on each of the 14 proper cuts of four qubits. `Auto` lands
+// on the product backend here, which answers the spectrum in closed form.
+#[test]
+fn the_entropy_terminal_reads_zero_on_a_product_state() {
+    let mut circuit = Circuit::new(4, 0);
+    for q in 0..4 {
+        circuit.add_gate(Gate::Ry(0.3 + q as f64), &[q]);
+        circuit.add_gate(Gate::Rz(1.1 * q as f64), &[q]);
+    }
+    for mask in 1usize..15 {
+        let subsystem: Vec<usize> = (0..4).filter(|q| mask >> q & 1 == 1).collect();
+        let label = format!("subsystem {subsystem:?}");
+        for kind in [
+            BackendKind::Auto,
+            BackendKind::Statevector,
+            BackendKind::Mps { max_bond_dim: 64 },
+        ] {
+            let result = entropy_through(kind, &circuit, &subsystem);
+            assert!(
+                result.entropy.abs() < EPS,
+                "{label}: entropy {}",
+                result.entropy
+            );
+            assert_spectrum(result.schmidt_values.as_deref().unwrap(), &[1.0], &label);
+        }
+    }
+}
+
+// (|00> + |11>) / sqrt 2: entropy ln 2 with two Schmidt values of 1 / sqrt 2,
+// a one-qubit marginal of I / 2, and purity Tr((I / 2)^2) = 1 / 2.
+#[test]
+fn the_terminals_read_a_bell_pair_as_a_maximally_mixed_marginal() {
+    let circuit = bell_circuit();
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    let c = |re: f64| Complex64::new(re, 0.0);
+    for qubit in 0..2 {
+        for kind in [
+            BackendKind::Statevector,
+            BackendKind::Mps { max_bond_dim: 64 },
+        ] {
+            let result = entropy_through(kind, &circuit, &[qubit]);
+            assert!(
+                (result.entropy - std::f64::consts::LN_2).abs() < EPS,
+                "qubit {qubit}: entropy {}",
+                result.entropy
+            );
+            assert_spectrum(
+                result.schmidt_values.as_deref().unwrap(),
+                &[half, half],
+                "bell",
+            );
+        }
+        let rho = rdm_through(BackendKind::Statevector, &circuit, &[qubit]);
+        assert_eq!(rho.qubits, vec![qubit]);
+        assert_entries(
+            &rho.data,
+            &[c(0.5), c(0.0), c(0.0), c(0.5)],
+            "bell marginal",
+        );
+        assert!((rho.purity() - 0.5).abs() < EPS, "purity {}", rho.purity());
+    }
+}
+
+// (|00000> + |11111>) / sqrt 2 splits as two equal branches across any
+// bipartition: every cut reads ln 2, and any k qubits read
+// (|0^k><0^k| + |1^k><1^k|) / 2, the two corners and nothing between them.
+#[test]
+fn the_terminals_read_ghz_5_as_two_equal_branches() {
+    let circuit = circuits::ghz_circuit(5);
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    for cut in 1..5 {
+        let subsystem: Vec<usize> = (0..cut).collect();
+        let result = entropy_through(BackendKind::Statevector, &circuit, &subsystem);
+        assert!(
+            (result.entropy - std::f64::consts::LN_2).abs() < EPS,
+            "cut {cut}: entropy {}",
+            result.entropy
+        );
+        assert_spectrum(
+            result.schmidt_values.as_deref().unwrap(),
+            &[half, half],
+            &format!("cut {cut}"),
+        );
+    }
+    for qubits in [vec![2usize], vec![4, 1], vec![0, 3, 2]] {
+        let dim = 1usize << qubits.len();
+        let mut expected = vec![Complex64::new(0.0, 0.0); dim * dim];
+        expected[0] = Complex64::new(0.5, 0.0);
+        expected[dim * dim - 1] = Complex64::new(0.5, 0.0);
+        let rho = rdm_through(BackendKind::Statevector, &circuit, &qubits);
+        assert_entries(&rho.data, &expected, &format!("ghz_5 on {qubits:?}"));
+        assert!((rho.purity() - 0.5).abs() < EPS, "purity {}", rho.purity());
+    }
+}
+
+// W on four qubits, (|0001> + |0010> + |0100> + |1000>) / 2. One qubit is
+// diag(3 / 4, 1 / 4), so its entropy is -(1 / 4) ln(1 / 4) - (3 / 4) ln(3 / 4)
+// and its purity (3 / 4)^2 + (1 / 4)^2 = 5 / 8.
+#[test]
+fn the_terminals_read_the_w_state_one_qubit_marginal() {
+    let circuit = circuits::w_state_circuit(4);
+    let expected = -0.25 * 0.25f64.ln() - 0.75 * 0.75f64.ln();
+    let c = |re: f64| Complex64::new(re, 0.0);
+    for qubit in 0..4 {
+        let result = entropy_through(BackendKind::Statevector, &circuit, &[qubit]);
+        assert!(
+            (result.entropy - expected).abs() < EPS,
+            "qubit {qubit}: entropy {} against {expected}",
+            result.entropy
+        );
+        let rho = rdm_through(BackendKind::Statevector, &circuit, &[qubit]);
+        assert_entries(
+            &rho.data,
+            &[c(0.75), c(0.0), c(0.0), c(0.25)],
+            &format!("w_state_4 qubit {qubit}"),
+        );
+        assert!(
+            (rho.purity() - 0.625).abs() < EPS,
+            "purity {}",
+            rho.purity()
+        );
     }
 }

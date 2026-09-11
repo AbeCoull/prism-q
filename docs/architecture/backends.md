@@ -230,6 +230,34 @@ Clifford conjugation is a contraction in the Pauli 1-norm, so a dropped term con
 at most its own magnitude to the terminal value. A run that truncated nothing reports
 itself exact whatever budget it was given.
 
+## State diagnostics
+
+`Simulate::reduced_density_matrix` and `Simulate::entanglement_entropy` read the output
+state once the circuit has been applied. Both resolve to a single backend, as the native
+expectation path does, and both ask that backend for the answer in its own
+representation; a backend that has no kernel for one of them reports
+`BackendUnsupported` naming itself and the diagnostic rather than falling back to a
+dense export.
+
+| Backend | Reduced density matrix | Entanglement entropy |
+| --- | --- | --- |
+| Statevector (host or device) | Partial trace over the complement | One thin SVD of the reshaped amplitudes, with the Schmidt spectrum |
+| Sparse | Grouped over the traced index | Declines |
+| Factored | Kronecker of the per-block traces | Declines |
+| Product state | Kronecker of the per-qubit factors | `0`, with the single Schmidt value `1` |
+| Density matrix | Partial trace of the mixture | Declines: a mixture has no Schmidt decomposition |
+| MPS | Declines | One SVD at the cut, or the eigenvalues of the reduced density matrix when the subsystem is not contiguous in chain order |
+| Tensor network | Declines | Declines |
+| Stabilizer, factored-stabilizer | Declines | Declines |
+| Distributed statevector | Declines | Declines |
+
+The entropy is the von Neumann entropy in nats, so a Bell pair reads `ln 2`, and the
+Schmidt values come back descending with their squares summing to one whatever norm the
+representation carried. The reduced density matrix is row major with side `2^k` and
+trace one, and its `4^k` entries are priced as a `2k`-qubit statevector against the dense
+export cap. A noise model sends either terminal to the density matrix, which answers the
+marginal of the exact mixture and declines the entropy.
+
 ## What a backend reports about its own result
 
 Three `Backend` methods carry provenance onto every result: `resolved` names the

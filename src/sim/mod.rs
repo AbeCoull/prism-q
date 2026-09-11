@@ -123,6 +123,39 @@ impl MarginalsResult {
     }
 }
 
+/// Reduced density matrix of a qubit subset, returned by
+/// [`Simulate::reduced_density_matrix`].
+#[derive(Debug, Clone)]
+pub struct ReducedDensityMatrix {
+    /// The subsystem as it was requested, which fixes the index order below.
+    pub qubits: Vec<usize>,
+    /// Row major with side `2^k` over `k = qubits.len()`: `data[t * 2^k + t']`
+    /// is `<t|rho|t'>`, where bit `i` of `t` is the state of `qubits[i]`, so
+    /// `qubits[0]` is the lowest bit as `q[0]` is in a basis index. Trace one,
+    /// Hermitian to rounding.
+    pub data: Vec<Complex64>,
+    pub metadata: RunMetadata,
+}
+
+impl ReducedDensityMatrix {
+    /// `Tr(rho^2)`: 1 for a pure marginal, `2^-k` for the maximally mixed one.
+    pub fn purity(&self) -> f64 {
+        self.data.iter().map(|entry| entry.norm_sqr()).sum()
+    }
+}
+
+/// Entanglement entropy of a subsystem, returned by
+/// [`Simulate::entanglement_entropy`].
+#[derive(Debug, Clone)]
+pub struct EntropyResult {
+    /// Von Neumann entropy of the subsystem in nats: a Bell pair reads `ln 2`.
+    pub entropy: f64,
+    /// Schmidt values across the cut, descending, with squares summing to 1.
+    /// `None` where the backend answers the entropy without a spectrum.
+    pub schmidt_values: Option<Vec<f64>>,
+    pub metadata: RunMetadata,
+}
+
 /// Typestate marker: [`Simulate`] builder with no seed chosen yet.
 #[derive(Debug, Clone, Copy)]
 pub struct Unseeded;
@@ -556,6 +589,97 @@ impl<'c> Simulate<'c, Seeded> {
             run_observable_expectation_reported(self.kind, self.circuit, observable, seed)?;
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
+    }
+
+    /// Reduced density matrix of `qubits` on the circuit's output state,
+    /// honoring the selected backend.
+    ///
+    /// Row major with side `2^k`; [`ReducedDensityMatrix::data`] states the
+    /// index order. The subsystem is named once and may be the whole register.
+    /// A backend holding no partial trace reports `BackendUnsupported` naming
+    /// itself; with a noise model attached the answer is the marginal of the
+    /// exact mixture, which needs the density-matrix backend.
+    pub fn reduced_density_matrix(self, qubits: &[usize]) -> Result<ReducedDensityMatrix> {
+        let seed = self.seed_value();
+        let terminal = "a reduced density matrix";
+        crate::backend::schmidt::validate_qubit_set(qubits, self.circuit.num_qubits)?;
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if let Some(noise_model) = self.noise_model {
+            reject_readout_at(self.circuit, noise_model, terminal)?;
+            require_exact_mixture(&self.kind, terminal)?;
+            let mut mixture = noise::evolve_density_matrix(
+                &self.kind,
+                self.circuit,
+                Some(noise_model),
+                self.initial_state,
+                seed,
+            )?;
+            return Ok(ReducedDensityMatrix {
+                qubits: qubits.to_vec(),
+                data: mixture.reduced_density_matrix(qubits)?,
+                metadata: exact_mixture_metadata(&self.kind),
+            });
+        }
+        let mut backend =
+            diagnostic_backend(&self.kind, self.circuit, self.initial_state, seed, terminal)?;
+        let metadata = backend_metadata(&*backend);
+        ensure_exact_result(self.require_exact, &metadata)?;
+        Ok(ReducedDensityMatrix {
+            qubits: qubits.to_vec(),
+            data: backend.reduced_density_matrix(qubits)?,
+            metadata,
+        })
+    }
+
+    /// Entanglement entropy of `subsystem` across its cut with the rest of the
+    /// register, in nats, honoring the selected backend.
+    ///
+    /// `subsystem` must leave both sides of the cut non-empty. The Schmidt
+    /// values come back with it when the backend produced a spectrum. A
+    /// backend offering neither reports `BackendUnsupported` naming itself,
+    /// which a noise model implies: it sends the run to the density matrix,
+    /// whose mixed state has no Schmidt decomposition.
+    pub fn entanglement_entropy(self, subsystem: &[usize]) -> Result<EntropyResult> {
+        let seed = self.seed_value();
+        let terminal = "entanglement entropy";
+        crate::backend::schmidt::validate_subsystem(subsystem, self.circuit.num_qubits)?;
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if let Some(noise_model) = self.noise_model {
+            reject_readout_at(self.circuit, noise_model, terminal)?;
+            require_exact_mixture(&self.kind, terminal)?;
+            let mut mixture = noise::evolve_density_matrix(
+                &self.kind,
+                self.circuit,
+                Some(noise_model),
+                self.initial_state,
+                seed,
+            )?;
+            return Ok(EntropyResult {
+                entropy: mixture.entanglement_entropy(subsystem)?,
+                schmidt_values: None,
+                metadata: exact_mixture_metadata(&self.kind),
+            });
+        }
+        let mut backend =
+            diagnostic_backend(&self.kind, self.circuit, self.initial_state, seed, terminal)?;
+        let metadata = backend_metadata(&*backend);
+        ensure_exact_result(self.require_exact, &metadata)?;
+        let (entropy, schmidt_values) = match backend.schmidt_values(subsystem) {
+            Ok(values) => (
+                crate::backend::schmidt::entropy_of_schmidt_values(&values),
+                Some(values),
+            ),
+            Err(_) => (backend.entanglement_entropy(subsystem)?, None),
+        };
+        Ok(EntropyResult {
+            entropy,
+            schmidt_values,
+            metadata,
+        })
     }
 
     /// Compute `⟨H⟩` and its exact gradient with respect to the bound
@@ -2419,6 +2543,44 @@ fn analytic_expectations(values: Vec<f64>, metadata: RunMetadata) -> Expectation
     }
 }
 
+/// Build the backend `kind` resolves to, run `circuit` on it, and hand it back
+/// for one terminal read of its state.
+///
+/// Resolution goes straight to a single backend, as the native expectation
+/// path does: a diagnostic is read off one state, and the decomposed route
+/// holds one per independent block. The routes that propagate an observable
+/// instead of holding a state are named by `terminal` rather than by the
+/// dispatch that picked them.
+fn diagnostic_backend(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    initial_state: Option<&[Complex64]>,
+    seed: u64,
+    terminal: &str,
+) -> Result<Box<dyn Backend>> {
+    if let Some(state) = initial_state {
+        let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
+        apply_fused_circuit(&mut *backend, circuit)?;
+        return Ok(backend);
+    }
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, circuit)?;
+    }
+    let (_, has_partial_independence) = analyze_independence(circuit);
+    let ExecutionPlan::Backend(plan) = resolve(kind, circuit, has_partial_independence) else {
+        return Err(PrismError::IncompatibleBackend {
+            backend: format!("{kind:?}"),
+            reason: format!(
+                "{terminal} needs a backend that holds a state; the stabilizer-rank \
+                 route returns probabilities only"
+            ),
+        });
+    };
+    let mut backend: Box<dyn Backend> = plan.build(seed);
+    execute(&mut *backend, circuit, &SimOptions::classical_only())?;
+    Ok(backend)
+}
+
 /// Evaluate `observables` on the backend `kind` resolves to, using that
 /// backend's own representation.
 ///
@@ -3244,3 +3406,6 @@ mod gpu_stub_tests;
 
 #[cfg(test)]
 mod terminal_candidate_matrix_tests;
+
+#[cfg(test)]
+mod diagnostic_terminal_tests;

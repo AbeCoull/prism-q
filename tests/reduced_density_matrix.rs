@@ -1,7 +1,7 @@
-//! `Backend::reduced_density_matrix`: closed forms, agreement with the
-//! statevector over the shared small-circuit corpus, the row-index
-//! convention, the trajectory routines at one and two qubits, and the
-//! declines. The cap is pinned in `export_cap_oversize.rs`.
+//! `Backend::reduced_density_matrix` and the `Simulate` terminal over it:
+//! closed forms, agreement with the statevector over the shared small-circuit
+//! corpus, the row-index convention, the trajectory routines at one and two
+//! qubits, and the declines. The cap is pinned in `export_cap_oversize.rs`.
 
 mod common;
 
@@ -23,6 +23,7 @@ use prism_q::circuit::Circuit;
 use prism_q::circuits::{brickwork_circuit, ghz_circuit, random_circuit};
 use prism_q::gates::Gate;
 use prism_q::sim;
+use prism_q::{BackendKind, GateFilter, NoiseBuilder, NoiseChannel, simulate};
 
 const EPS: f64 = 1e-12;
 
@@ -565,4 +566,110 @@ fn a_subsystem_is_a_non_empty_set_of_distinct_qubits_up_to_the_whole_register() 
         let rho = backend.reduced_density_matrix(&[0, 1, 2, 3]).unwrap();
         assert_density(&rho, 4, name);
     }
+}
+
+/// The terminal's matrix for one explicit backend kind, with the subsystem it
+/// echoes back checked on the way through.
+fn terminal_rdm(kind: BackendKind, circuit: &Circuit, qubits: &[usize]) -> Vec<Complex64> {
+    let result = simulate(circuit)
+        .backend(kind)
+        .seed(SEED)
+        .reduced_density_matrix(qubits)
+        .unwrap();
+    assert_eq!(
+        result.qubits, qubits,
+        "the terminal echoed a different subsystem"
+    );
+    result.data
+}
+
+/// The terminal on each backend it can route to, against the statevector
+/// kernel, which the naive sums above pin in turn.
+fn assert_terminal_matches_statevector(rows: &[(BackendKind, f64)], cases: &[CircuitCase]) {
+    for case in cases {
+        let circuit = case.circuit();
+        let mut sv = StatevectorBackend::new(SEED);
+        sim::run_on(&mut sv, &circuit).unwrap();
+        for subsystem in subsystems(circuit.num_qubits) {
+            let expected = sv.reduced_density_matrix(&subsystem).unwrap();
+            for (kind, eps) in rows {
+                let label = format!("{kind:?} {} on {subsystem:?}", case.name);
+                let rho = terminal_rdm(kind.clone(), &circuit, &subsystem);
+                assert_density(&rho, subsystem.len(), &label);
+                assert_matrix_close(&rho, &expected, *eps, &label);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_terminal_matches_the_statevector_on_the_small_corpus() {
+    assert_terminal_matches_statevector(
+        &[
+            (BackendKind::Statevector, SV_EPS),
+            (BackendKind::Sparse, SPARSE_EPS),
+            (BackendKind::Factored, FACTORED_EPS),
+            (BackendKind::DensityMatrix, DM_EPS),
+        ],
+        &exact_small_cases(),
+    );
+}
+
+#[test]
+fn the_terminal_matches_the_statevector_on_the_separable_corpus() {
+    assert_terminal_matches_statevector(
+        &[(BackendKind::ProductState, PRODUCT_EPS)],
+        &product_separable_cases(),
+    );
+}
+
+// A backend without a partial trace is named by the terminal, not by the
+// route that selected it.
+#[test]
+fn the_terminal_names_the_backend_that_declines() {
+    let circuit = ghz_circuit(4);
+    for (kind, name) in [
+        (BackendKind::Mps { max_bond_dim: 64 }, "mps"),
+        (BackendKind::TensorNetwork, "tensornetwork"),
+        (BackendKind::Stabilizer, "stabilizer"),
+        (BackendKind::FactoredStabilizer, "factored-stabilizer"),
+    ] {
+        assert_eq!(
+            simulate(&circuit)
+                .backend(kind)
+                .seed(SEED)
+                .reduced_density_matrix(&[0, 2])
+                .unwrap_err(),
+            PrismError::BackendUnsupported {
+                backend: name.to_string(),
+                operation: "reduced density matrix".to_string(),
+            }
+        );
+    }
+}
+
+// Depolarizing noise on a Bell pair leaves the pair mixed, so the two-qubit
+// marginal of the exact mixture has purity below the pure state's 1 while
+// still reading trace one.
+#[test]
+fn the_terminal_reads_the_exact_mixture_under_a_noise_model() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let noise = NoiseBuilder::new()
+        .after_gates(GateFilter::all(), NoiseChannel::Depolarizing { p: 0.05 })
+        .build(&circuit)
+        .unwrap();
+    let result = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise)
+        .seed(SEED)
+        .reduced_density_matrix(&[0, 1])
+        .unwrap();
+    assert_density(&result.data, 2, "density matrix under noise");
+    let purity = result.purity();
+    assert!(
+        (0.5..1.0).contains(&purity),
+        "purity {purity} of a lightly depolarized Bell pair"
+    );
 }

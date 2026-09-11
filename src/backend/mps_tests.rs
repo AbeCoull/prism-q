@@ -247,6 +247,71 @@ fn test_svd_identity() {
 }
 
 #[test]
+fn svd_jacobi_keeps_the_singular_vectors_orthonormal_across_six_decades() {
+    // `U0 diag(s) V0^H` with `U0` and `V0` orthonormalized by Gram-Schmidt
+    // has spectrum `s` to rounding, and the factors must come back orthonormal
+    // at every scale, not only on the leading values.
+    let n = 8;
+    let unitary = |seed: u64| {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let mut q: Vec<Complex64> = (0..n * n).map(|_| Complex64::new(next(), next())).collect();
+        for j in 0..n {
+            for _pass in 0..2 {
+                for i in 0..j {
+                    let dot: Complex64 = (0..n).map(|r| q[i * n + r].conj() * q[j * n + r]).sum();
+                    for r in 0..n {
+                        let qi = q[i * n + r];
+                        q[j * n + r] -= dot * qi;
+                    }
+                }
+            }
+            let norm = l2_norm(&q[j * n..(j + 1) * n]);
+            for r in 0..n {
+                q[j * n + r] /= norm;
+            }
+        }
+        q
+    };
+    let u0 = unitary(1);
+    let v0 = unitary(2);
+    let s: Vec<f64> = (0..n).map(|k| 10f64.powf(-6.0 * k as f64 / 7.0)).collect();
+    let mut a = vec![ZERO; n * n];
+    for c in 0..n {
+        for r in 0..n {
+            for k in 0..n {
+                a[c * n + r] += u0[k * n + r] * s[k] * v0[k * n + c].conj();
+            }
+        }
+    }
+
+    // The construction itself carries rounding of order `eps * s[0] / s[k]`
+    // into the tail, so the spectrum is held to an absolute figure.
+    let res = svd_jacobi(&a, n, n);
+    for (k, (got, want)) in res.s.iter().zip(&s).enumerate() {
+        assert!((got - want).abs() < 1e-12, "s[{k}] = {got} expected {want}");
+    }
+    for j in 0..n {
+        for k in 0..n {
+            let u: Complex64 = (0..n)
+                .map(|r| res.u[j * res.u_rows + r].conj() * res.u[k * res.u_rows + r])
+                .sum();
+            let v: Complex64 = (0..n)
+                .map(|c| res.vt[j * res.vt_cols + c] * res.vt[k * res.vt_cols + c].conj())
+                .sum();
+            let delta = if j == k { ONE } else { ZERO };
+            assert!((u - delta).norm() < 1e-13, "u[{j}].u[{k}] = {u}");
+            assert!((v - delta).norm() < 1e-13, "vt[{j}].vt[{k}] = {v}");
+        }
+    }
+}
+
+#[test]
 fn test_svd_wide_matrix() {
     let a = vec![
         Complex64::new(1.0, 0.0),
@@ -2060,4 +2125,173 @@ fn a_brick_layer_split_across_fused_instructions_still_enters_from_the_near_end(
     assert_eq!(reordered.center_steps - warm.center_steps, 13);
     let from_pieces = applied_as_a_batch(warm.clone(), &split);
     assert_chains_identical(&from_pieces, &reordered, "split layers");
+}
+
+// ---- Schmidt values ----
+
+fn statevector_schmidt_values(circuit: &Circuit, subsystem: &[usize]) -> Vec<f64> {
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(circuit.num_qubits, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    sv.schmidt_values(subsystem).unwrap()
+}
+
+// Spectra of different lengths differ only in a tail of dropped values, so
+// the shorter one is read as padded with zeros.
+fn assert_spectra_close(actual: &[f64], expected: &[f64], eps: f64, label: &str) {
+    for i in 0..actual.len().max(expected.len()) {
+        let a = actual.get(i).copied().unwrap_or(0.0);
+        let e = expected.get(i).copied().unwrap_or(0.0);
+        assert!(
+            (a - e).abs() < eps,
+            "{label}: value {i} reads {a} against {e} ({actual:?} against {expected:?})"
+        );
+    }
+}
+
+fn assert_center_at_bond(b: &MpsBackend, bond: usize) {
+    let center = b.center.expect("the cut recorded a center");
+    assert!(
+        center == bond || center == bond + 1,
+        "center {center} is not on bond {bond}"
+    );
+    b.assert_gauge(center);
+}
+
+// Every cut of a chain whose ranks run 2, 4, 8, 16 against the dense
+// spectrum. The run leaves no center under this cap, so the first cut
+// establishes one at site 0 for n - 1 steps, and the sweep that follows pays
+// one step per cut; the entropy call at the same cut pays nothing.
+#[test]
+fn schmidt_values_match_the_statevector_across_every_cut() {
+    let n = 12;
+    let circuit = crate::circuits::brickwork_circuit(n, 8, 42);
+    let mut b = mps_after(&circuit, 4096);
+    assert_eq!(b.center, None, "the fixture recorded a center");
+    let discarded = b.truncation_discarded();
+    let mark = b.center_steps;
+
+    for cut in 1..n {
+        let subsystem: Vec<usize> = (0..cut).collect();
+        let values = b.schmidt_values(&subsystem).unwrap();
+        let expected = statevector_schmidt_values(&circuit, &subsystem);
+        assert_eq!(
+            values.len(),
+            1 << cut.min(n - cut).min(4),
+            "rank at cut {cut}"
+        );
+        assert!(
+            values.windows(2).all(|w| w[0] >= w[1]),
+            "cut {cut} is not descending: {values:?}"
+        );
+        assert_spectra_close(&values, &expected, 1e-10, &format!("cut {cut}"));
+        assert_center_at_bond(&b, cut - 1);
+
+        let squares: f64 = values.iter().map(|s| s * s).sum();
+        assert!(
+            (squares - 1.0).abs() < 1e-12,
+            "cut {cut} squares sum to {squares}"
+        );
+        let entropy = b.entanglement_entropy(&subsystem).unwrap();
+        let expected: f64 = -values.iter().map(|s| s * s * (s * s).ln()).sum::<f64>();
+        assert!(
+            (entropy - expected).abs() < 1e-12,
+            "cut {cut} entropy {entropy}"
+        );
+    }
+
+    assert_eq!(b.truncation_discarded(), discarded);
+    assert_eq!(b.center_steps - mark, (n - 1) + (n - 2));
+}
+
+// The two routes read the same bond: the one-SVD route from the center site,
+// the reduced-density route from the eigenvalues over the smaller side.
+#[test]
+fn the_one_svd_route_matches_the_reduced_density_route_at_the_same_cut() {
+    let mut b = chain_with_center_at_the_right_end();
+    let n = b.num_qubits;
+    for cut in 1..n {
+        let one_svd = b.schmidt_values_at_bond(cut - 1);
+        let side: Vec<usize> = if 2 * cut <= n {
+            (0..cut).collect()
+        } else {
+            (cut..n).collect()
+        };
+        let by_rdm = b.schmidt_values_by_reduced_density(&side).unwrap();
+        assert_spectra_close(&by_rdm, &one_svd, 1e-9, &format!("cut {cut}"));
+        assert_center_at_bond(&b, cut - 1);
+    }
+}
+
+// A gate on a far pair routes by swaps that stay, so the chain order differs
+// from the logical order afterwards: a logically contiguous subsystem can
+// take the reduced-density route and a logically scattered one the one-SVD
+// route. Both answer the logical question.
+#[test]
+fn a_cut_that_is_not_contiguous_in_chain_order_matches_the_statevector() {
+    let n = 8;
+    let mut circuit = crate::circuits::brickwork_circuit(n, 6, 42);
+    circuit.add_gate(Gate::Cx, &[0, 5]);
+    circuit.add_gate(Gate::Ry(0.4), &[5]);
+    circuit.add_gate(Gate::Cx, &[7, 2]);
+    let mut b = mps_after(&circuit, 4096);
+    assert_ne!(b.logical_to_site, (0..n).collect::<Vec<_>>());
+    let booked = b.truncation_discarded();
+
+    for subsystem in [
+        vec![0],
+        vec![0, 1],
+        vec![1, 2, 3, 4],
+        vec![0, 2],
+        vec![1, 3, 5],
+        vec![2, 3, 4],
+        vec![0, 1, 2, 4, 5, 6, 7],
+        vec![5, 7],
+    ] {
+        let values = b.schmidt_values(&subsystem).unwrap();
+        let expected = statevector_schmidt_values(&circuit, &subsystem);
+        assert_spectra_close(&values, &expected, 1e-9, &format!("{subsystem:?}"));
+        b.assert_gauge(b.center.expect("the cut recorded a center"));
+        assert_eq!(b.truncation_discarded(), booked);
+    }
+}
+
+// A truncated chain books weight during the run. The walk to a cut is exact,
+// so the figure stays, the state stays, and the center lands on the cut.
+#[test]
+fn the_schmidt_walk_books_nothing_and_leaves_the_center_at_the_cut() {
+    let n = 8;
+    let mut b = mps_after(&crate::circuits::brickwork_circuit(n, 6, 42), 4);
+    let booked = b.truncation_discarded();
+    assert!(booked > 0.0, "the fixture never truncated");
+    let before = b.export_statevector().unwrap();
+
+    for bond in [5usize, 1, 6, 0, 3, 4] {
+        let subsystem: Vec<usize> = (0..=bond).collect();
+        let values = b.schmidt_values(&subsystem).unwrap();
+        let squares: f64 = values.iter().map(|s| s * s).sum();
+        assert!(
+            (squares - 1.0).abs() < 1e-12,
+            "bond {bond} squares sum to {squares}"
+        );
+        assert!(
+            values.len() <= 4,
+            "bond {bond} holds {} values under a cap of 4",
+            values.len()
+        );
+        assert_center_at_bond(&b, bond);
+        assert_eq!(
+            b.truncation_discarded(),
+            booked,
+            "bond {bond} booked weight"
+        );
+    }
+
+    let after = b.export_statevector().unwrap();
+    for (i, (x, y)) in before.iter().zip(&after).enumerate() {
+        assert!(
+            (x - y).norm() < 1e-13,
+            "amplitude {i} moved from {x} to {y}"
+        );
+    }
 }

@@ -70,8 +70,8 @@ use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "gpu")]
 use std::sync::Arc;
 
-use crate::backend::simd;
 use crate::backend::{Backend, dense_statevector_len, statevector_probability_len};
+use crate::backend::{reduced_density, schmidt, simd};
 use crate::circuit::Instruction;
 #[cfg(feature = "gpu")]
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
@@ -936,6 +936,37 @@ impl Backend for StatevectorBackend {
             });
         }
         Ok(self.reduced_density_matrix_two(q0, q1))
+    }
+
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            let state = gpu.export_statevector()?;
+            return schmidt::dense_schmidt_values(self.name(), &state, self.num_qubits, subsystem);
+        }
+        schmidt::dense_schmidt_values(self.name(), &self.state, self.num_qubits, subsystem)
+    }
+
+    /// Partial trace over the complement at `2^(n + k)` multiply-adds, scaled
+    /// to trace one afterwards, which covers the `pending_norm` too. A
+    /// device-resident state is read back first.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        #[cfg(feature = "gpu")]
+        let readback = self
+            .gpu_state
+            .as_ref()
+            .map(|gpu| gpu.export_statevector())
+            .transpose()?;
+        #[cfg(feature = "gpu")]
+        let state = readback.as_deref().unwrap_or(self.state.as_slice());
+        #[cfg(not(feature = "gpu"))]
+        let state = self.state.as_slice();
+        let mut rho = reduced_density::dense_reduced_density(state, self.num_qubits, subsystem);
+        reduced_density::normalize_trace(&mut rho, dim);
+        Ok(rho)
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

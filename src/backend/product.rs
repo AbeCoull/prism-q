@@ -203,6 +203,41 @@ impl Backend for ProductStateBackend {
         ])
     }
 
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        crate::backend::schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        Ok(vec![1.0])
+    }
+
+    /// Kronecker product of the per-qubit `2 x 2` factors, each qubit of
+    /// `subsystem` taken as the next higher bit, `4^k` multiplies in all,
+    /// scaled to trace one.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        crate::backend::schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let side =
+            crate::backend::reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let mut rho = vec![Complex64::new(1.0, 0.0)];
+        let mut dim = 1usize;
+        for &qubit in subsystem {
+            let amp = self.qubits[qubit];
+            let mut next = vec![Complex64::new(0.0, 0.0); 4 * dim * dim];
+            for (b, &a) in amp.iter().enumerate() {
+                for (bp, &ap) in amp.iter().enumerate() {
+                    let factor = a * ap.conj();
+                    for r in 0..dim {
+                        let out = &mut next[(b * dim + r) * 2 * dim + bp * dim..][..dim];
+                        for (entry, &old) in out.iter_mut().zip(&rho[r * dim..(r + 1) * dim]) {
+                            *entry = factor * old;
+                        }
+                    }
+                }
+            }
+            rho = next;
+            dim *= 2;
+        }
+        crate::backend::reduced_density::normalize_trace(&mut rho, side);
+        Ok(rho)
+    }
+
     fn classical_results(&self) -> &[bool] {
         &self.classical_bits
     }

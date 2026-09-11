@@ -1677,6 +1677,27 @@ fn noisy_shots_rejected_on_distributed_kind() {
 }
 
 #[test]
+fn reduced_density_matrix_is_declined_on_every_rank() {
+    relax_min_local_qubits();
+    let circuit = crate::circuits::ghz_circuit(4);
+    let declined = run_ranks(2, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        run_on(&mut backend, &circuit).expect("distributed run");
+        let name = backend.name().to_string();
+        (name, backend.reduced_density_matrix(&[0, 2]).unwrap_err())
+    });
+    for (name, err) in declined {
+        assert_eq!(
+            err,
+            PrismError::BackendUnsupported {
+                backend: name,
+                operation: "reduced density matrix".to_string(),
+            }
+        );
+    }
+}
+
+#[test]
 fn shots_without_measurements_still_validate_configuration() {
     relax_min_local_qubits();
     // Three ranks is not a power of two; the error must surface even though a

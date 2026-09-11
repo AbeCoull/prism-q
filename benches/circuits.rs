@@ -7,6 +7,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use num_complex::Complex64;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
+use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 #[cfg(feature = "bench-internal")]
 use prism_q::backend::tensornetwork::scalar_expectation;
@@ -925,6 +926,28 @@ fn bench_statevector_scalability(c: &mut Criterion) {
     group.finish();
 }
 
+// Diagnostic row: the state is built once, so each row prices one partial
+// trace over the complement of `k` qubits spread across the register, the
+// threaded reduce included.
+fn bench_statevector_rdm(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/rdm");
+    configure_group(&mut group);
+
+    let n = 20;
+    let circuit = circuits::brickwork_circuit(n, 10, SEED);
+    let mut backend = StatevectorBackend::new(SEED);
+    backend.init(n, 0).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    for k in [1usize, 4, 8] {
+        let subsystem: Vec<usize> = (0..k).map(|i| i * n / k).collect();
+        group.bench_function(format!("{n}_k{k}"), |b| {
+            b.iter(|| black_box(backend.reduced_density_matrix(&subsystem).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
 // ---- Stabilizer backend ----
 
 fn bench_stabilizer_scaling(c: &mut Criterion) {
@@ -1328,6 +1351,26 @@ fn bench_mps_sampling(c: &mut Criterion) {
             });
         });
     }
+
+    group.finish();
+}
+
+// Diagnostic row: the chain is built once, so the row prices one SVD of the
+// center site at the middle cut, the walk having settled there on the first
+// call.
+fn bench_mps_entropy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mps/entropy");
+    configure_group(&mut group);
+
+    let n = 18;
+    let circuit = circuits::brickwork_circuit(n, 24, SEED);
+    let mut backend = MpsBackend::new(SEED, 64);
+    backend.init(n, 0).unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+    let subsystem: Vec<usize> = (0..n / 2).collect();
+    group.bench_function("brickwork_d24_18", |b| {
+        b.iter(|| black_box(backend.entanglement_entropy(&subsystem).unwrap()));
+    });
 
     group.finish();
 }
@@ -3638,6 +3681,7 @@ criterion_group! {
     bench_statevector_depth_sweep,
     bench_statevector_entanglement,
     bench_statevector_scalability,
+    bench_statevector_rdm,
     // Stabilizer
     bench_stabilizer_scaling,
     bench_stabilizer_random_pairs,
@@ -3659,6 +3703,7 @@ criterion_group! {
     bench_mps_brickwork,
     bench_mps_matched,
     bench_mps_sampling,
+    bench_mps_entropy,
     // Product state
     bench_product_scaling,
     bench_product_sampling,

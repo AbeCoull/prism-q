@@ -13,6 +13,7 @@ use prism_q::CircuitBuilder;
 use prism_q::Instruction;
 use prism_q::backend::Backend;
 use prism_q::backend::density_matrix::DensityMatrixBackend;
+use prism_q::backend::mps::MpsBackend;
 use prism_q::backend::product::ProductStateBackend;
 use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
@@ -1442,5 +1443,119 @@ fn w_state_circuit_prepares_the_w_state() {
             expected[1 << q] = 1.0 / n as f64;
         }
         assert_probs_close(&probs, &expected, EPS, &format!("w_state({n})"));
+    }
+}
+
+// ---- Schmidt values and entanglement entropy ----
+
+fn spectrum_on<B: Backend>(
+    backend: &mut B,
+    circuit: &Circuit,
+    subsystem: &[usize],
+) -> (Vec<f64>, f64) {
+    sim::run_on(backend, circuit).unwrap();
+    (
+        backend.schmidt_values(subsystem).unwrap(),
+        backend.entanglement_entropy(subsystem).unwrap(),
+    )
+}
+
+fn assert_spectrum(actual: &[f64], expected: &[f64], label: &str) {
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{label}: {actual:?} against {expected:?}"
+    );
+    for (i, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (a - e).abs() < EPS,
+            "{label}: value {i} reads {a} against {e}"
+        );
+    }
+}
+
+// Rotations on every qubit and nothing across them: one Schmidt value of 1 on
+// each of the 14 proper cuts of four qubits, entropy 0.
+#[test]
+fn product_state_has_zero_entropy_on_every_cut() {
+    let mut circuit = Circuit::new(4, 0);
+    for q in 0..4 {
+        circuit.add_gate(Gate::Ry(0.3 + q as f64), &[q]);
+        circuit.add_gate(Gate::Rz(1.1 * q as f64), &[q]);
+    }
+    for mask in 1usize..15 {
+        let subsystem: Vec<usize> = (0..4).filter(|q| mask >> q & 1 == 1).collect();
+        let label = format!("subsystem {subsystem:?}");
+        for (values, entropy) in [
+            spectrum_on(
+                &mut ProductStateBackend::new(common::SEED),
+                &circuit,
+                &subsystem,
+            ),
+            spectrum_on(
+                &mut StatevectorBackend::new(common::SEED),
+                &circuit,
+                &subsystem,
+            ),
+            spectrum_on(&mut MpsBackend::new(common::SEED, 64), &circuit, &subsystem),
+        ] {
+            assert_spectrum(&values, &[1.0], &label);
+            assert!(entropy.abs() < EPS, "{label}: entropy {entropy}");
+        }
+    }
+}
+
+// (|00> + |11>) / sqrt 2: two equal Schmidt values 1 / sqrt 2, entropy ln 2
+// whichever qubit names the subsystem.
+#[test]
+fn bell_pair_has_ln_2_entropy() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    for subsystem in [[0usize], [1]] {
+        for (values, entropy) in [
+            spectrum_on(
+                &mut StatevectorBackend::new(common::SEED),
+                &circuit,
+                &subsystem,
+            ),
+            spectrum_on(&mut MpsBackend::new(common::SEED, 64), &circuit, &subsystem),
+        ] {
+            assert_spectrum(&values, &[half, half], "bell");
+            assert!(
+                (entropy - std::f64::consts::LN_2).abs() < EPS,
+                "entropy {entropy}"
+            );
+        }
+    }
+}
+
+// (|00000> + |11111>) / sqrt 2 splits as two equal branches across any
+// bipartition, so every cut reads ln 2: the four contiguous ones on both
+// backends, and a scattered one, which the MPS answers through the reduced
+// density matrix.
+#[test]
+fn ghz_chain_has_ln_2_across_every_cut() {
+    let circuit = prism_q::circuits::ghz_circuit(5);
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    let mut cuts: Vec<Vec<usize>> = (1..5).map(|cut| (0..cut).collect()).collect();
+    cuts.push(vec![0, 2, 4]);
+    for subsystem in cuts {
+        let label = format!("subsystem {subsystem:?}");
+        for (values, entropy) in [
+            spectrum_on(
+                &mut StatevectorBackend::new(common::SEED),
+                &circuit,
+                &subsystem,
+            ),
+            spectrum_on(&mut MpsBackend::new(common::SEED, 64), &circuit, &subsystem),
+        ] {
+            assert_spectrum(&values, &[half, half], &label);
+            assert!(
+                (entropy - std::f64::consts::LN_2).abs() < EPS,
+                "{label}: entropy {entropy}"
+            );
+        }
     }
 }

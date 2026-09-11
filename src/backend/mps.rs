@@ -37,7 +37,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::backend::{
     Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len,
-    reserve_dense_output, simd,
+    reserve_dense_output, schmidt, simd,
 };
 use crate::circuit::Instruction;
 use crate::error::Result;
@@ -51,7 +51,12 @@ const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
 const DEFAULT_SVD_EPSILON: f64 = 1e-12;
 const MAX_SVD_SWEEPS: usize = 100;
-const SVD_CONVERGENCE: f64 = 1e-14;
+/// Relative pair threshold of the one-sided Jacobi sweep: a pair rotates while
+/// `|a_p^H a_q|` exceeds this times `|a_p| |a_q|`. Judged against the pair's
+/// own norms rather than the whole matrix, so the columns of `U` come out
+/// orthogonal on the small singular values too; an absolute residual left
+/// them 0.56 apart on an 8x8 whose values span six decades.
+const JACOBI_REL_TOL: f64 = 1e-15;
 #[cfg(feature = "parallel")]
 const MIN_BOND_FOR_PAR: usize = 32;
 /// Shot count at or above which native sampling splits the shot loop across
@@ -259,12 +264,9 @@ impl ThinQr {
     /// Gram-Schmidt, reorthogonalizing a column until a pass stops shrinking
     /// it.
     ///
-    /// A gauge move wants the isometry rather than the spectrum, and this
-    /// holds orthogonality at rounding however wide the spectrum is. [`svd`]
-    /// does not below its faer threshold: [`svd_jacobi`] ends its sweep on a
-    /// criterion absolute in the Frobenius norm, so the columns of `U` that
-    /// belong to small singular values come out non-orthogonal, by 6.5e-8 on
-    /// the eight-site fixture in `mps_tests.rs`.
+    /// A gauge move wants the isometry rather than the spectrum, and one
+    /// Gram-Schmidt pass with reorthogonalization reaches it at rounding where
+    /// [`svd`] sweeps to convergence.
     fn factorize(&mut self, a: &[Complex64], rows: usize, cols: usize) {
         let rank_cap = rows.min(cols);
         let q = scratch_slice(&mut self.q, rows * rank_cap);
@@ -479,11 +481,8 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
         v[i * work_n + i] = ONE;
     }
 
-    let frob_sq: f64 = work.iter().map(|x| x.norm_sqr()).sum();
-    let tol = SVD_CONVERGENCE * frob_sq;
-
     for _sweep in 0..MAX_SVD_SWEEPS {
-        let mut off_diag = 0.0f64;
+        let mut rotated = false;
 
         for p in 0..work_n {
             for q in (p + 1)..work_n {
@@ -499,11 +498,10 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
                     g_pq += ap.conj() * aq;
                 }
 
-                off_diag += g_pq.norm_sqr();
-
-                if g_pq.norm_sqr() < NORM_CLAMP_MIN {
+                if g_pq.norm_sqr() <= JACOBI_REL_TOL * JACOBI_REL_TOL * g_pp * g_qq {
                     continue;
                 }
+                rotated = true;
 
                 let beta_norm = g_pq.norm();
                 let phase = g_pq / beta_norm;
@@ -538,7 +536,7 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
             }
         }
 
-        if off_diag < tol {
+        if !rotated {
             break;
         }
     }
@@ -834,8 +832,7 @@ impl MpsBackend {
     /// 2-norm error it made rather than a figure against a non-orthogonal
     /// environment. Two things bound that. The center is parked by [`svd`]
     /// rather than by the exact walk, so the environment is orthonormal to
-    /// that factorization's isometry, which under the faer threshold is
-    /// [`svd_jacobi`]'s and looser. And a cut that can lose nothing past
+    /// that factorization's isometry. And a cut that can lose nothing past
     /// rounding is left ungauged, so the sliver the construction default
     /// shaves off such a chain is not measured this way.
     ///
@@ -2735,6 +2732,139 @@ impl MpsBackend {
         rho
     }
 
+    /// Schmidt values across the bond between sites `bond` and `bond + 1`.
+    ///
+    /// With the center on either site of the bond, every other site is an
+    /// isometry, so the singular values of the center site read as a matrix
+    /// across that bond are the spectrum of the whole state. The site's data
+    /// is already that matrix transposed in column-major order, and the
+    /// transpose has the same singular values, so nothing is reshaped. The
+    /// center walks to whichever site of the bond is nearer, or is
+    /// established at the one nearer its end of the chain when none is
+    /// recorded; the walk is exact and books nothing.
+    fn schmidt_values_at_bond(&mut self, bond: usize) -> Vec<f64> {
+        let last = self.sites.len() - 1;
+        let site = match self.center {
+            Some(at) if at > bond => bond + 1,
+            Some(_) => bond,
+            None if 2 * bond < last => bond,
+            None => bond + 1,
+        };
+        match self.center {
+            Some(_) => self.move_center(site),
+            None => self.establish_center(site),
+        }
+        let t = &self.sites[site];
+        let (rows, cols) = if site == bond {
+            (t.bond_right, 2 * t.bond_left)
+        } else {
+            (2 * t.bond_right, t.bond_left)
+        };
+        schmidt::finish_schmidt_values(svd(&t.data, rows, cols).s)
+    }
+
+    /// Schmidt values from the eigenvalues of the reduced density matrix over
+    /// the chain sites `sites`, ascending and at most half the chain. The
+    /// center moves to the nearest site of the span so both environments are
+    /// identities.
+    fn schmidt_values_by_reduced_density(&mut self, sites: &[usize]) -> Result<Vec<f64>> {
+        let what = "Schmidt values across a cut that is not contiguous in chain order";
+        let k = sites.len();
+        schmidt::check_schmidt_side(self.name(), what, k)?;
+        let (first, last) = (sites[0], sites[k - 1]);
+        let chi = self.sites[first..=last]
+            .iter()
+            .fold(1usize, |chi, t| chi.max(t.bond_left).max(t.bond_right));
+        // The transfer object, its half-contracted form, and its successor at
+        // the widest bond of the span, each over `4^k` open index pairs.
+        let workspace = (7u128 * (chi as u128) * (chi as u128)) << (2 * k);
+        if workspace > self.workspace_cap {
+            return Err(crate::backend::workspace_allocation_error(
+                self.name(),
+                what,
+                workspace,
+            ));
+        }
+        let end = self.sites.len() - 1;
+        match self.center {
+            Some(at) => self.move_center(at.clamp(first, last)),
+            None if first <= end - last => self.establish_center(first),
+            None => self.establish_center(last),
+        }
+        let rho = self.reduced_density_sites(sites);
+        Ok(schmidt::schmidt_values_from_density(&rho, 1 << k))
+    }
+
+    /// Reduced density matrix over the chain sites `sites` (ascending), row
+    /// major `2^k x 2^k` with the leftmost site in the high bit of both
+    /// indices. Requires the center inside `sites[0]..=sites[k - 1]`: the
+    /// sites on either side of that span then contract to identities, and the
+    /// sweep over the span carries a `(ket, bra, bond, bond)` transfer object
+    /// that grows fourfold at each site it keeps open.
+    fn reduced_density_sites(&self, sites: &[usize]) -> Vec<Complex64> {
+        let (first, last) = (sites[0], sites[sites.len() - 1]);
+        let bl = self.sites[first].bond_left;
+        let mut env: Vec<Complex64> = (0..bl * bl)
+            .map(|x| if x / bl == x % bl { ONE } else { ZERO })
+            .collect();
+        let mut dim = 1usize;
+        let mut kept = sites.iter().peekable();
+        for site in first..=last {
+            let keep = kept.next_if_eq(&&site).is_some();
+            let t = &self.sites[site];
+            let (bl, br) = (t.bond_left, t.bond_right);
+            let width = 2 * br;
+            // half[o, a', i, b] = sum_a env[o, a, a'] A[a, i, b]
+            let mut half = vec![ZERO; dim * dim * bl * width];
+            for (o, rows) in half.chunks_exact_mut(bl * width).enumerate() {
+                for (ap, out) in rows.chunks_exact_mut(width).enumerate() {
+                    for a in 0..bl {
+                        let e = env[(o * bl + a) * bl + ap];
+                        for (x, amp) in out.iter_mut().zip(&t.data[a * width..(a + 1) * width]) {
+                            *x += e * amp;
+                        }
+                    }
+                }
+            }
+            // next[o', b, b'] = sum_{a', i, i'} half[o, a', i, b] conj(A[a', i', b'])
+            // with `i == i'` traced, or `i` and `i'` appended to `o` as the
+            // low bit of the ket and bra when the site is kept.
+            let next_dim = if keep { 2 * dim } else { dim };
+            let mut next = vec![ZERO; next_dim * next_dim * br * br];
+            for (o, rows) in half.chunks_exact(bl * width).enumerate() {
+                let (ket, bra) = (o / dim, o % dim);
+                for (ap, row) in rows.chunks_exact(width).enumerate() {
+                    for i in 0..2 {
+                        let ket_row = &row[i * br..(i + 1) * br];
+                        for ip in 0..2 {
+                            if !keep && ip != i {
+                                continue;
+                            }
+                            let o_next = if keep {
+                                (2 * ket + i) * next_dim + 2 * bra + ip
+                            } else {
+                                o
+                            };
+                            let bra_row = &t.data[ap * width + ip * br..ap * width + (ip + 1) * br];
+                            let dst = &mut next[o_next * br * br..(o_next + 1) * br * br];
+                            for (b, &x) in ket_row.iter().enumerate() {
+                                for (y, d) in bra_row.iter().zip(&mut dst[b * br..(b + 1) * br]) {
+                                    *d += x * y.conj();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            env = next;
+            dim = next_dim;
+        }
+        let br = self.sites[last].bond_right;
+        env.chunks_exact(br * br)
+            .map(|block| (0..br).map(|b| block[b * br + b]).sum())
+            .collect()
+    }
+
     /// Conditional outcome weights at `site`, given the boundary vector `left`
     /// that carries the bits already fixed to its left.
     ///
@@ -3129,6 +3259,37 @@ impl Backend for MpsBackend {
 
     fn reduced_density_matrix_1q(&self, qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         Ok(self.reduced_density_site(self.site_for_logical(qubit)))
+    }
+
+    /// The one-SVD route when the subsystem is a run of sites at either end
+    /// of the chain; otherwise the eigenvalues of the reduced density matrix
+    /// over the smaller side of the cut, under the dense cap. The chain order
+    /// is never re-sorted for it.
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        let n = self.num_qubits;
+        let mut sites: Vec<usize> = subsystem
+            .iter()
+            .map(|&q| self.site_for_logical(q))
+            .collect();
+        sites.sort_unstable();
+        let k = sites.len();
+        if sites[k - 1] - sites[0] + 1 == k {
+            if sites[0] == 0 {
+                return Ok(self.schmidt_values_at_bond(k - 1));
+            }
+            if sites[k - 1] == n - 1 {
+                return Ok(self.schmidt_values_at_bond(sites[0] - 1));
+            }
+        }
+        if 2 * k > n {
+            let mut inside = vec![false; n];
+            for &site in &sites {
+                inside[site] = true;
+            }
+            sites = (0..n).filter(|&site| !inside[site]).collect();
+        }
+        self.schmidt_values_by_reduced_density(&sites)
     }
 
     fn classical_results(&self) -> &[bool] {

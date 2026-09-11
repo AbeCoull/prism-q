@@ -339,12 +339,13 @@ impl Tracer {
 /// when the gate carries no angle-derived data.
 fn identity_prov(index: u32, inst: &Instruction) -> Prov {
     match inst {
-        // A Pauli rotation carries an angle at any width and no pass folds it
-        // into a matrix product, so it names itself for the angle recipe alone.
+        // A weight-2 Pauli rotation is a pair gate and folds into a 4x4 like
+        // any other. Wider ones no pass folds, so they name themselves for the
+        // angle recipe alone.
         Instruction::Gate {
-            gate: Gate::PauliRot(_),
+            gate: gate @ Gate::PauliRot(_),
             ..
-        } => vec![vec![Step::M1 { src: index }]],
+        } if gate.num_qubits() > 2 => vec![vec![Step::M1 { src: index }]],
         Instruction::Gate { gate, .. } => match gate.num_qubits() {
             1 => vec![vec![Step::M1 { src: index }]],
             2 => vec![vec![Step::M2 {

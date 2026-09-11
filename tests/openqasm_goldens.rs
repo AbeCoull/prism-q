@@ -4,6 +4,7 @@
 //! half round-trips the same programs and the generated corpus back out.
 
 mod common;
+mod conformance_corpus;
 
 use common::assert_probs_close;
 use prism_q::backend::statevector::StatevectorBackend;
@@ -253,8 +254,8 @@ fn qiskit_legacy_qreg_creg_style() {
 
 // ---- Export round-trip ----
 
-use common::conformance::generated_cases;
 use common::{SV_EPS, sv_reference_probs};
+use conformance_corpus::generated_cases;
 use prism_q::PrismError;
 use prism_q::circuit::qasm_export::to_qasm3;
 use prism_q::circuit::{Circuit, Instruction};
@@ -514,10 +515,10 @@ fn export_round_trips_a_bound_parameter_point() {
     assert_streams_match(&bound, &round_trip(&bound), "bound_point");
 }
 
-/// Every classical-control construct the parser module header lists, with the
-/// outcome it promises: parse, or reject by name with a line number. The
-/// rejections are the half worth pinning, because a construct that falls
-/// through to gate parsing reports a register error naming a brace.
+// Every classical-control construct the parser module header lists, with the
+// outcome it promises: parse, or reject by name with a line number. The
+// rejections are the half worth pinning, because a construct that falls
+// through to gate parsing reports a register error naming a brace.
 #[test]
 fn classical_control_constructs_parse_or_reject_by_name() {
     const PROLOGUE: &str = "OPENQASM 3.0;\nqubit[3] q;\nbit[2] c;\n";

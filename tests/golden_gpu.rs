@@ -10,11 +10,12 @@
 mod common;
 
 use common::assert_probs_close;
+use common::gate_fixtures::{g, pauli_rot_sample, sample_2x2, sample_4x4};
 use num_complex::Complex64;
 
 use prism_q::StatevectorBackend;
 use prism_q::backend::Backend;
-use prism_q::circuit::{Instruction, SmallVec, smallvec};
+use prism_q::circuit::{Instruction, smallvec};
 use prism_q::gates::{
     BatchPhaseData, BatchRzzData, DiagEntry, DiagonalBatchData, Gate, McuData, Multi2qData,
     MultiFusedData,
@@ -84,32 +85,9 @@ impl Fixture {
     }
 }
 
-fn g(gate: Gate, targets: &[usize]) -> Instruction {
-    let mut tv: SmallVec<[usize; 4]> = smallvec![];
-    tv.extend_from_slice(targets);
-    Instruction::Gate { gate, targets: tv }
-}
-
 // One constructed instance per `Gate` variant, fed through the exhaustive
 // `representative` match so a new variant cannot be added without a GPU
 // differential case.
-
-fn sample_2x2() -> [[Complex64; 2]; 2] {
-    [
-        [Complex64::new(0.6, -0.1), Complex64::new(-0.3, 0.2)],
-        [Complex64::new(0.2, 0.4), Complex64::new(0.7, -0.2)],
-    ]
-}
-
-fn sample_4x4() -> [[Complex64; 4]; 4] {
-    let mut mat = [[Complex64::new(0.0, 0.0); 4]; 4];
-    for (r, row) in mat.iter_mut().enumerate() {
-        for (c, entry) in row.iter_mut().enumerate() {
-            *entry = Complex64::new(0.1 * (r as f64 + 1.0), 0.07 * (c as f64 + 1.0));
-        }
-    }
-    mat
-}
 
 fn gate_samples() -> Vec<Gate> {
     let m2 = sample_2x2();
@@ -181,22 +159,6 @@ fn gate_samples() -> Vec<Gate> {
 
 // `PauliRotData` has no public constructor; pull the gate out of the circuit
 // builder, whose recognizing lowering keeps a weight-3 mixed string native.
-fn pauli_rot_sample() -> Gate {
-    let mut circuit = prism_q::Circuit::new(3, 0);
-    circuit.add_pauli_rotation(
-        0.53,
-        &[
-            prism_q::PauliTerm::x(0),
-            prism_q::PauliTerm::y(1),
-            prism_q::PauliTerm::z(2),
-        ],
-    );
-    match &circuit.instructions[0] {
-        Instruction::Gate { gate, .. } => gate.clone(),
-        _ => unreachable!("add_pauli_rotation appends a gate"),
-    }
-}
-
 /// Maps each `Gate` variant to a target layout. Exhaustive by design.
 fn representative(gate: &Gate) -> (usize, Vec<Instruction>) {
     const N: usize = 5;

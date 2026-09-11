@@ -11,6 +11,8 @@ use prism_q::backend::Backend;
 use prism_q::sim::{Engine, ResolvedBackend};
 use prism_q::{BackendKind, MpsBackend, NoiseChannel, NoiseEvent, NoiseModel, circuits, sim};
 
+// The bench seed, not the test seed: these fixtures are the bench rows, and
+// the routing under check is the routing the bench measures.
 const SEED: u64 = 0xDEAD_BEEF;
 
 #[track_caller]

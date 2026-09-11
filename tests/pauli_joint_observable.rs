@@ -193,9 +193,9 @@ fn engines_accept_arbitrary_axis_rotations() {
         .expect("SPP must accept Rx and Ry via lowering");
 }
 
-/// The generalized rotation branch must reduce to the T rule exactly, not
-/// approximately: both engines take the same code path at `theta = pi/4`, so a
-/// last-ulp difference would mean the generalization, not the rounding, is off.
+// The generalized rotation branch must reduce to the T rule exactly, not
+// approximately: both engines take the same code path at `theta = pi/4`, so a
+// last-ulp difference would mean the generalization, not the rounding, is off.
 #[test]
 fn rz_at_quarter_pi_is_bit_identical_to_t() {
     let observable = [PauliTerm::z(0), PauliTerm::y(1)];
@@ -314,10 +314,10 @@ fn spp_arbitrary_angles_match_the_statevector() {
     }
 }
 
-/// Sampling variance is set by the product of `|cos| + |sin|` over the
-/// branching rotations, so it peaks at the T angle and collapses toward the
-/// Clifford angles. That gradient is the reason the capability is worth having:
-/// near-Clifford angles cost far fewer samples for the same error.
+// Sampling variance is set by the product of `|cos| + |sin|` over the
+// branching rotations, so it peaks at the T angle and collapses toward the
+// Clifford angles. That gradient is the reason the capability is worth having:
+// near-Clifford angles cost far fewer samples for the same error.
 #[test]
 fn spp_variance_peaks_at_the_t_angle() {
     let quarter = std::f64::consts::FRAC_PI_4;

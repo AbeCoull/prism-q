@@ -1,3 +1,7 @@
+//! Trajectory sampling of the noise channels through the public shot routes:
+//! analytic single-qubit rates, agreement with the density matrix and the
+//! compiled sampler, and the seed contract across backends.
+
 use prism_q::circuit::SmallVec;
 use prism_q::*;
 

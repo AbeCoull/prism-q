@@ -247,6 +247,71 @@ fn test_svd_identity() {
 }
 
 #[test]
+fn svd_jacobi_keeps_the_singular_vectors_orthonormal_across_six_decades() {
+    // `U0 diag(s) V0^H` with `U0` and `V0` orthonormalized by Gram-Schmidt
+    // has spectrum `s` to rounding, and the factors must come back orthonormal
+    // at every scale, not only on the leading values.
+    let n = 8;
+    let unitary = |seed: u64| {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+        };
+        let mut q: Vec<Complex64> = (0..n * n).map(|_| Complex64::new(next(), next())).collect();
+        for j in 0..n {
+            for _pass in 0..2 {
+                for i in 0..j {
+                    let dot: Complex64 = (0..n).map(|r| q[i * n + r].conj() * q[j * n + r]).sum();
+                    for r in 0..n {
+                        let qi = q[i * n + r];
+                        q[j * n + r] -= dot * qi;
+                    }
+                }
+            }
+            let norm = l2_norm(&q[j * n..(j + 1) * n]);
+            for r in 0..n {
+                q[j * n + r] /= norm;
+            }
+        }
+        q
+    };
+    let u0 = unitary(1);
+    let v0 = unitary(2);
+    let s: Vec<f64> = (0..n).map(|k| 10f64.powf(-6.0 * k as f64 / 7.0)).collect();
+    let mut a = vec![ZERO; n * n];
+    for c in 0..n {
+        for r in 0..n {
+            for k in 0..n {
+                a[c * n + r] += u0[k * n + r] * s[k] * v0[k * n + c].conj();
+            }
+        }
+    }
+
+    // The construction itself carries rounding of order `eps * s[0] / s[k]`
+    // into the tail, so the spectrum is held to an absolute figure.
+    let res = svd_jacobi(&a, n, n);
+    for (k, (got, want)) in res.s.iter().zip(&s).enumerate() {
+        assert!((got - want).abs() < 1e-12, "s[{k}] = {got} expected {want}");
+    }
+    for j in 0..n {
+        for k in 0..n {
+            let u: Complex64 = (0..n)
+                .map(|r| res.u[j * res.u_rows + r].conj() * res.u[k * res.u_rows + r])
+                .sum();
+            let v: Complex64 = (0..n)
+                .map(|c| res.vt[j * res.vt_cols + c] * res.vt[k * res.vt_cols + c].conj())
+                .sum();
+            let delta = if j == k { ONE } else { ZERO };
+            assert!((u - delta).norm() < 1e-13, "u[{j}].u[{k}] = {u}");
+            assert!((v - delta).norm() < 1e-13, "vt[{j}].vt[{k}] = {v}");
+        }
+    }
+}
+
+#[test]
 fn test_svd_wide_matrix() {
     let a = vec![
         Complex64::new(1.0, 0.0),

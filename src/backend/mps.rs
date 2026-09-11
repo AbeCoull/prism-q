@@ -51,7 +51,12 @@ const ZERO: Complex64 = Complex64::new(0.0, 0.0);
 const ONE: Complex64 = Complex64::new(1.0, 0.0);
 const DEFAULT_SVD_EPSILON: f64 = 1e-12;
 const MAX_SVD_SWEEPS: usize = 100;
-const SVD_CONVERGENCE: f64 = 1e-14;
+/// Relative pair threshold of the one-sided Jacobi sweep: a pair rotates while
+/// `|a_p^H a_q|` exceeds this times `|a_p| |a_q|`. Judged against the pair's
+/// own norms rather than the whole matrix, so the columns of `U` come out
+/// orthogonal on the small singular values too; an absolute residual left
+/// them 0.56 apart on an 8x8 whose values span six decades.
+const JACOBI_REL_TOL: f64 = 1e-15;
 #[cfg(feature = "parallel")]
 const MIN_BOND_FOR_PAR: usize = 32;
 /// Shot count at or above which native sampling splits the shot loop across
@@ -259,12 +264,9 @@ impl ThinQr {
     /// Gram-Schmidt, reorthogonalizing a column until a pass stops shrinking
     /// it.
     ///
-    /// A gauge move wants the isometry rather than the spectrum, and this
-    /// holds orthogonality at rounding however wide the spectrum is. [`svd`]
-    /// does not below its faer threshold: [`svd_jacobi`] ends its sweep on a
-    /// criterion absolute in the Frobenius norm, so the columns of `U` that
-    /// belong to small singular values come out non-orthogonal, by 6.5e-8 on
-    /// the eight-site fixture in `mps_tests.rs`.
+    /// A gauge move wants the isometry rather than the spectrum, and one
+    /// Gram-Schmidt pass with reorthogonalization reaches it at rounding where
+    /// [`svd`] sweeps to convergence.
     fn factorize(&mut self, a: &[Complex64], rows: usize, cols: usize) {
         let rank_cap = rows.min(cols);
         let q = scratch_slice(&mut self.q, rows * rank_cap);
@@ -479,11 +481,8 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
         v[i * work_n + i] = ONE;
     }
 
-    let frob_sq: f64 = work.iter().map(|x| x.norm_sqr()).sum();
-    let tol = SVD_CONVERGENCE * frob_sq;
-
     for _sweep in 0..MAX_SVD_SWEEPS {
-        let mut off_diag = 0.0f64;
+        let mut rotated = false;
 
         for p in 0..work_n {
             for q in (p + 1)..work_n {
@@ -499,11 +498,10 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
                     g_pq += ap.conj() * aq;
                 }
 
-                off_diag += g_pq.norm_sqr();
-
-                if g_pq.norm_sqr() < NORM_CLAMP_MIN {
+                if g_pq.norm_sqr() <= JACOBI_REL_TOL * JACOBI_REL_TOL * g_pp * g_qq {
                     continue;
                 }
+                rotated = true;
 
                 let beta_norm = g_pq.norm();
                 let phase = g_pq / beta_norm;
@@ -538,7 +536,7 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
             }
         }
 
-        if off_diag < tol {
+        if !rotated {
             break;
         }
     }
@@ -834,8 +832,7 @@ impl MpsBackend {
     /// 2-norm error it made rather than a figure against a non-orthogonal
     /// environment. Two things bound that. The center is parked by [`svd`]
     /// rather than by the exact walk, so the environment is orthonormal to
-    /// that factorization's isometry, which under the faer threshold is
-    /// [`svd_jacobi`]'s and looser. And a cut that can lose nothing past
+    /// that factorization's isometry. And a cut that can lose nothing past
     /// rounding is left ungauged, so the sliver the construction default
     /// shaves off such a chain is not measured this way.
     ///

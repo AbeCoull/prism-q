@@ -392,6 +392,13 @@ pub(crate) fn pauli_masks(
     Ok((xmask, zmask, num_y))
 }
 
+/// Rayon fan-out threshold for the sandwich reductions. Higher than the gate
+/// kernels': a sandwich is a single lightweight O(N) reduction, so fan-out only
+/// pays off past 2^16 elements. Below that (and for a multi-term Hamiltonian's
+/// many small reductions) the sequential path is faster.
+#[cfg(feature = "parallel")]
+const SANDWICH_MIN_PAR_QUBITS: usize = 16;
+
 /// Complex Pauli sandwich `⟨λ|P|φ⟩`, where `P` acts as
 /// `P|j⟩ = i^{#Y}·(-1)^{popcount(j & Zmask)}·|j ⊕ Xmask⟩`. Returns the raw
 /// (unnormalized) complex value. The adjoint gradient engine uses this with
@@ -418,12 +425,6 @@ pub(crate) fn pauli_sandwich(
         partner.conj() * amp * sign
     };
 
-    // Higher threshold than gate kernels: the sandwich is a single lightweight
-    // O(N) reduction, so Rayon fan-out only pays off past 2^16 elements. Below
-    // that (and for a multi-term Hamiltonian's many small reductions) the
-    // sequential path is faster.
-    #[cfg(feature = "parallel")]
-    const SANDWICH_MIN_PAR_QUBITS: usize = 16;
     #[cfg(feature = "parallel")]
     let acc: Complex64 = if phi.len() >= (1 << SANDWICH_MIN_PAR_QUBITS) {
         use rayon::prelude::*;
@@ -438,6 +439,117 @@ pub(crate) fn pauli_sandwich(
     let acc: Complex64 = phi.iter().enumerate().map(|(j, &amp)| term(j, amp)).sum();
 
     acc * i_pow(num_y)
+}
+
+/// Complex Pauli sandwiches `⟨λ|P_i|φ⟩` for every mask triple in one traversal
+/// of the pair.
+///
+/// Same value as [`pauli_sandwich`] per entry, to within the association of the
+/// sum. A mask with `xmask == 0` reads `λ` at the loop index rather than at a
+/// partner index, so the two families are accumulated separately as in
+/// [`pauli_expectations_from_masks`].
+pub(crate) fn pauli_sandwiches_from_masks(
+    lambda: &[Complex64],
+    phi: &[Complex64],
+    masks: &[(usize, usize, u32)],
+) -> Vec<Complex64> {
+    if masks.len() < 2 {
+        return masks
+            .iter()
+            .map(|&(xmask, zmask, num_y)| pauli_sandwich(lambda, phi, xmask, zmask, num_y))
+            .collect();
+    }
+
+    let z_only: Vec<usize> = masks
+        .iter()
+        .filter(|&&(xmask, _, _)| xmask == 0)
+        .map(|&(_, zmask, _)| zmask)
+        .collect();
+    let general: Vec<(usize, usize)> = masks
+        .iter()
+        .filter(|&&(xmask, _, _)| xmask != 0)
+        .map(|&(xmask, zmask, _)| (xmask, zmask))
+        .collect();
+
+    let accumulate = |z_acc: &mut [Complex64], g_acc: &mut [Complex64], base: usize, len: usize| {
+        for j in base..base + len {
+            let amp = phi[j];
+            let aligned = lambda[j].conj() * amp;
+            for (slot, &zmask) in z_acc.iter_mut().zip(z_only.iter()) {
+                *slot += if (j & zmask).count_ones() & 1 == 1 {
+                    -aligned
+                } else {
+                    aligned
+                };
+            }
+            for (slot, &(xmask, zmask)) in g_acc.iter_mut().zip(general.iter()) {
+                let partner = lambda[j ^ xmask];
+                let sign = if (j & zmask).count_ones() & 1 == 1 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                *slot += partner.conj() * amp * sign;
+            }
+        }
+    };
+
+    let zeros = || {
+        (
+            vec![Complex64::new(0.0, 0.0); z_only.len()],
+            vec![Complex64::new(0.0, 0.0); general.len()],
+        )
+    };
+    let (mut z_sum, mut g_sum) = zeros();
+
+    #[cfg(feature = "parallel")]
+    if phi.len() >= (1 << SANDWICH_MIN_PAR_QUBITS) {
+        use rayon::prelude::*;
+        let chunk = crate::backend::MIN_PAR_ELEMS;
+        let (z, g) = phi
+            .par_chunks(chunk)
+            .enumerate()
+            .fold(zeros, |mut acc, (c, block)| {
+                accumulate(&mut acc.0, &mut acc.1, c * chunk, block.len());
+                acc
+            })
+            .reduce(zeros, |mut a, b| {
+                for (slot, v) in a.0.iter_mut().zip(b.0) {
+                    *slot += v;
+                }
+                for (slot, v) in a.1.iter_mut().zip(b.1) {
+                    *slot += v;
+                }
+                a
+            });
+        return finish_sandwiches(masks, &z, &g);
+    }
+
+    accumulate(&mut z_sum, &mut g_sum, 0, phi.len());
+    finish_sandwiches(masks, &z_sum, &g_sum)
+}
+
+/// Interleave the two sandwich accumulator families back into mask order, the
+/// [`finish_expectations`] split applied to the unnormalized complex values.
+fn finish_sandwiches(
+    masks: &[(usize, usize, u32)],
+    z_sum: &[Complex64],
+    g_sum: &[Complex64],
+) -> Vec<Complex64> {
+    let (mut zi, mut gi) = (0, 0);
+    masks
+        .iter()
+        .map(|&(xmask, _, num_y)| {
+            let raw = if xmask == 0 {
+                zi += 1;
+                z_sum[zi - 1]
+            } else {
+                gi += 1;
+                g_sum[gi - 1]
+            };
+            raw * i_pow(num_y)
+        })
+        .collect()
 }
 
 /// `i^{num_y}`, the phase a joint Pauli picks up from its Y factors.

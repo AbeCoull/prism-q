@@ -87,9 +87,9 @@ carrying the `gpu` feature. See [Python Bindings](python.md#gpu-backends).
 | `device.rs` | `GpuDevice`: cudarc wrapper, compiles PTX at device construction |
 | `memory.rs` | `GpuBuffer`: device `Complex64` storage |
 | `kernels/mod.rs` | `KERNEL_NAMES`, `LauncherScratch`, composed `kernel_source()` concatenating dense + stabilizer + BTS |
-| `kernels/dense.rs` | PTX source and Rust launcher for every `Gate` variant |
-| `kernels/stabilizer.rs` | PTX source and launchers for tableau init, 11 Clifford gates, `rowmul_words` |
-| `kernels/bts.rs` | PTX source and launchers for compiled BTS shot sampling |
+| `kernels/dense.rs` | Rust launchers for every `Gate` variant; CUDA C source in `kernels/dense.cu` |
+| `kernels/stabilizer.rs` | Launchers for tableau init, 11 Clifford gates, `rowmul_words`; source in `kernels/stabilizer.cu` |
+| `kernels/bts.rs` | Launchers for compiled BTS shot sampling; source in `kernels/bts.cu` |
 
 ## Kernel coverage
 
@@ -104,10 +104,11 @@ each applying its sub-gates in shared memory. A pass with fewer than three sub-g
 falls back to per gate launches. `Multi2q` still launches once per sub-gate; rare in
 practice.
 
-**PTX template substitution:** the CUDA C source is held as a template string
-(`KERNEL_SOURCE_TEMPLATE`) with placeholders such as `{{BP_TABLE_SIZE}}` and
-`{{TILE_Q}}`. The `kernel_source()` function substitutes them at device construction from
-the Rust constants in `src/backend/statevector/kernels.rs`, keeping CPU and GPU in sync.
+**PTX template substitution:** the CUDA C source lives in `.cu` files beside the Rust
+launchers and reaches `KERNEL_SOURCE_TEMPLATE` through `include_str!`. `kernels/dense.cu`
+carries placeholders such as `{{BP_TABLE_SIZE}}` and `{{TILE_Q}}`. The `kernel_source()`
+function substitutes them at device construction from the Rust constants in
+`src/backend/statevector/kernels.rs`, keeping CPU and GPU in sync.
 
 ## Correctness
 

@@ -155,7 +155,6 @@ impl Parameters {
         self.links.push(ParamLink { instruction, slot });
     }
 
-    /// The recorded links.
     pub fn links(&self) -> &[ParamLink] {
         &self.links
     }

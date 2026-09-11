@@ -373,6 +373,7 @@ unsafe fn apply_full_loop_fma(state: &mut [Complex64], target: usize, mat: &MatB
     }
 }
 
+/// Requires `target >= 2`, so the AVX2 pair loop runs whole iterations.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn apply_full_loop_avx2fma_inline(
@@ -380,7 +381,7 @@ unsafe fn apply_full_loop_avx2fma_inline(
     target: usize,
     mat: &MatBroadcast256,
 ) {
-    // SAFETY: caller guarantees target >= 2 (half >= 4, avx_pairs >= 2).
+    // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
         let half = 1usize << target;
         let block_size = half << 1;

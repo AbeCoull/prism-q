@@ -311,7 +311,6 @@ unsafe fn rowmul_words_avx2_nt(
 }
 
 #[cfg(target_arch = "aarch64")]
-#[allow(dead_code)]
 #[target_feature(enable = "neon")]
 unsafe fn rowmul_words_neon(
     dst_x: &mut [u64],

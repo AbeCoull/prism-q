@@ -91,7 +91,6 @@ pub struct SparseBackend {
 }
 
 impl SparseBackend {
-    /// Create a new sparse backend with the given RNG seed.
     pub fn new(seed: u64) -> Self {
         Self {
             num_qubits: 0,

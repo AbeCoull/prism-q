@@ -3240,13 +3240,7 @@ pub(crate) fn run_shots_with_noise(
 mod tests;
 
 #[cfg(all(test, feature = "gpu"))]
-mod terminal_gpu_stub_tests;
-
-#[cfg(all(test, feature = "gpu"))]
-mod expectation_gpu_stub_tests;
-
-#[cfg(all(test, feature = "gpu"))]
-mod noise_gpu_stub_tests;
+mod gpu_stub_tests;
 
 #[cfg(test)]
 mod terminal_candidate_matrix_tests;

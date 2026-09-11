@@ -83,7 +83,6 @@ pub struct QecObservableEstimate {
 }
 
 impl QecSampleResult {
-    /// Create an empty result with zero shots.
     pub fn empty(num_measurements: usize, num_detectors: usize, num_observables: usize) -> Self {
         Self {
             total_shots: 0,

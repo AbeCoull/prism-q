@@ -165,9 +165,8 @@ pub(crate) fn insert_zero_bit(val: usize, bit_pos: usize) -> usize {
 
 /// Wrapper to send a raw pointer across Rayon threads.
 ///
-/// SAFETY: Callers must ensure no data races. Each thread must access
-/// disjoint elements. The mask-based index bijection guarantees this for
-/// controlled-gate kernels.
+/// Callers must partition the state so each thread touches disjoint elements.
+/// The mask-based index bijection establishes that for controlled-gate kernels.
 #[cfg(feature = "parallel")]
 #[derive(Copy, Clone)]
 pub(crate) struct SendPtr(pub(crate) *mut Complex64);
@@ -235,7 +234,6 @@ fn qft_block_enabled() -> bool {
 }
 
 impl StatevectorBackend {
-    /// Create a new statevector backend with the given RNG seed.
     pub fn new(seed: u64) -> Self {
         Self {
             num_qubits: 0,

@@ -25,6 +25,23 @@ fn run_both(circuit: &Circuit, seed: u64) -> (Vec<f64>, Vec<f64>) {
     (mono_probs, fact_probs)
 }
 
+fn run_vs_statevector(circuit: &Circuit, seed: u64) -> (Vec<f64>, Vec<f64>) {
+    use crate::backend::statevector::StatevectorBackend;
+
+    let mut sv = StatevectorBackend::new(seed);
+    sv.init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    let mut fact = FactoredStabilizerBackend::new(seed);
+    fact.init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for inst in &circuit.instructions {
+        sv.apply(inst).unwrap();
+        fact.apply(inst).unwrap();
+    }
+
+    (sv.probabilities().unwrap(), fact.probabilities().unwrap())
+}
+
 fn assert_probs_eq(a: &[f64], b: &[f64], tol: f64) {
     assert_eq!(a.len(), b.len(), "probability vector length mismatch");
     for (i, (pa, pb)) in a.iter().zip(b.iter()).enumerate() {
@@ -421,28 +438,30 @@ fn diag_five_blocks_3q() {
     assert_probs_eq(&mono, &fact, 1e-12);
 }
 
+// CZ and SWAP only, no CX: the pairwise CZs build three disjoint blocks,
+// each SWAP bridges two of them, and the later CZs land inside the merged
+// tableau on remapped local indices.
 #[test]
 fn diag_cz_swap_sequence() {
-    let mut c = Circuit::new(4, 0);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::S, &[1]);
-    c.add_gate(Gate::Sdg, &[2]);
-    c.add_gate(Gate::X, &[3]);
-    c.add_gate(Gate::Y, &[0]);
-    c.add_gate(Gate::Z, &[1]);
-    c.add_gate(Gate::SX, &[2]);
-    c.add_gate(Gate::SXdg, &[3]);
-    c.add_gate(Gate::Cx, &[0, 1]);
+    let mut c = Circuit::new(6, 0);
+    for q in 0..6 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_gate(Gate::Cz, &[0, 1]);
     c.add_gate(Gate::Cz, &[2, 3]);
+    c.add_gate(Gate::Cz, &[4, 5]);
+    c.add_gate(Gate::S, &[1]);
+    c.add_gate(Gate::S, &[3]);
+    c.add_gate(Gate::S, &[5]);
     c.add_gate(Gate::Swap, &[1, 2]);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::H, &[1]);
-    c.add_gate(Gate::H, &[2]);
-    c.add_gate(Gate::H, &[3]);
-    c.add_gate(Gate::Cx, &[0, 3]);
-    c.add_gate(Gate::Cz, &[1, 2]);
-    let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    c.add_gate(Gate::Cz, &[0, 3]);
+    c.add_gate(Gate::Swap, &[3, 4]);
+    c.add_gate(Gate::Cz, &[2, 5]);
+    for q in 0..6 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    let (sv, fact) = run_vs_statevector(&c, 42);
+    assert_probs_eq(&sv, &fact, 1e-12);
 }
 
 #[test]
@@ -564,28 +583,29 @@ fn diag_post_merge_h_cx() {
     assert_probs_eq(&mono, &fact, 1e-12);
 }
 
+// Three Bell blocks are joined into one tableau by a CX and a SWAP, then the
+// H, CX and CZ tail runs entirely on the merged sub-tableau, where every
+// target has been remapped to a local index by the merge.
 #[test]
 fn diag_post_merge_h_cx_cz() {
-    let mut c = Circuit::new(4, 0);
+    let mut c = Circuit::new(6, 0);
     c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::S, &[1]);
-    c.add_gate(Gate::Sdg, &[2]);
-    c.add_gate(Gate::X, &[3]);
-    c.add_gate(Gate::Y, &[0]);
-    c.add_gate(Gate::Z, &[1]);
-    c.add_gate(Gate::SX, &[2]);
-    c.add_gate(Gate::SXdg, &[3]);
     c.add_gate(Gate::Cx, &[0, 1]);
-    c.add_gate(Gate::Cz, &[2, 3]);
-    c.add_gate(Gate::Swap, &[1, 2]);
-    c.add_gate(Gate::H, &[0]);
-    c.add_gate(Gate::H, &[1]);
     c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::H, &[4]);
+    c.add_gate(Gate::Cx, &[4, 5]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::Swap, &[3, 4]);
+    c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[3]);
-    c.add_gate(Gate::Cx, &[0, 3]);
-    c.add_gate(Gate::Cz, &[1, 2]);
-    let (mono, fact) = run_both(&c, 42);
-    assert_probs_eq(&mono, &fact, 1e-12);
+    c.add_gate(Gate::H, &[5]);
+    c.add_gate(Gate::Cx, &[5, 0]);
+    c.add_gate(Gate::Cz, &[1, 4]);
+    c.add_gate(Gate::Cx, &[2, 5]);
+    c.add_gate(Gate::Cz, &[0, 3]);
+    let (sv, fact) = run_vs_statevector(&c, 42);
+    assert_probs_eq(&sv, &fact, 1e-12);
 }
 
 #[test]

@@ -23,8 +23,16 @@
 //! # When to prefer this backend
 //!
 //! - Clifford-only circuits (randomized benchmarking, error correction).
-//! - Very large qubit counts (1000+) where statevector is impossible.
+//! - Large qubit counts (1000+) past the statevector memory cap.
 //! - Verification of Clifford subcircuits before layering T gates.
+//!
+//! # When NOT to use this backend
+//!
+//! - Any non-Clifford gate: automatic dispatch never routes here, and a
+//!   hand-picked stabilizer backend fails at the first such gate. A small
+//!   T count goes to the stabilizer-rank and Pauli-propagation engines.
+//! - Amplitude or statevector output past about 20 qubits: the export is
+//!   dense in 2^n even though the tableau is not.
 //!
 //! # Performance characteristics
 //!
@@ -151,7 +159,6 @@ impl Clone for StabilizerBackend {
 }
 
 impl StabilizerBackend {
-    /// Create a new stabilizer backend with the given RNG seed.
     pub fn new(seed: u64) -> Self {
         Self {
             n: 0,

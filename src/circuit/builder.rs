@@ -343,7 +343,6 @@ impl CircuitBuilder {
         (circuit, params)
     }
 
-    /// Borrow the circuit without consuming the builder.
     pub fn circuit(&self) -> &Circuit {
         &self.circuit
     }

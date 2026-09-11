@@ -7,16 +7,15 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
 
     #[cfg(target_arch = "x86_64")]
     if len >= 4 && has_avx2() {
-        // SAFETY: AVX2 checked above. Slices provide valid pointers
-        // for len u64 values.
+        // SAFETY: AVX2 detected; slices provide valid pointers for len u64 values.
         unsafe { xor_words_ptr(dst.as_mut_ptr(), src.as_ptr(), len) };
         return;
     }
 
     #[cfg(target_arch = "aarch64")]
     if len >= 2 {
-        // SAFETY: NEON is baseline on aarch64. Slices
-        // provide valid pointers for len u64 values.
+        // SAFETY: NEON is baseline on aarch64; slices provide valid pointers
+        // for len u64 values.
         unsafe { xor_words_ptr(dst.as_mut_ptr(), src.as_ptr(), len) };
         return;
     }
@@ -30,23 +29,23 @@ pub(crate) fn xor_words(dst: &mut [u64], src: &[u64]) {
 pub(crate) unsafe fn xor_words_ptr(dst: *mut u64, src: *const u64, len: usize) {
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
-        // SAFETY: AVX2 checked above. The caller guarantees both
-        // pointers are valid for len u64 values.
+        // SAFETY: AVX2 detected; the caller guarantees both pointers are valid
+        // for len u64 values.
         unsafe { xor_words_avx2(dst, src, len) };
         return;
     }
 
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: NEON is baseline on aarch64. The caller
-        // guarantees both pointers are valid for len u64 values.
+        // SAFETY: NEON is baseline on aarch64; the caller guarantees both pointers
+        // are valid for len u64 values.
         unsafe { xor_words_neon(dst, src, len) };
         return;
     }
 
     #[allow(unreachable_code)]
     for i in 0..len {
-        // SAFETY: The caller guarantees both pointers are valid for len u64 values.
+        // SAFETY: same contract as the enclosing unsafe fn.
         unsafe { *dst.add(i) ^= *src.add(i) };
     }
 }
@@ -59,8 +58,8 @@ unsafe fn xor_words_avx2(dst: *mut u64, src: *const u64, len: usize) {
     let chunks = len / 4;
     for i in 0..chunks {
         let off = i * 4;
-        // SAFETY: The caller guarantees pointers are valid for len u64 values.
-        // Unaligned loads and stores are used for arbitrary slice alignment.
+        // SAFETY: same contract as the enclosing unsafe fn.
+        // Unaligned loads and stores serve arbitrary slice alignment.
         unsafe {
             let d = _mm256_loadu_si256(dst.add(off) as *const __m256i);
             let s = _mm256_loadu_si256(src.add(off) as *const __m256i);
@@ -69,7 +68,7 @@ unsafe fn xor_words_avx2(dst: *mut u64, src: *const u64, len: usize) {
     }
     let tail = chunks * 4;
     for i in tail..len {
-        // SAFETY: The caller guarantees both pointers are valid for len u64 values.
+        // SAFETY: same contract as the enclosing unsafe fn.
         unsafe { *dst.add(i) ^= *src.add(i) };
     }
 }
@@ -82,7 +81,7 @@ unsafe fn xor_words_neon(dst: *mut u64, src: *const u64, len: usize) {
     let chunks = len / 2;
     for i in 0..chunks {
         let off = i * 2;
-        // SAFETY: The caller guarantees pointers are valid for len u64 values.
+        // SAFETY: same contract as the enclosing unsafe fn.
         unsafe {
             let d = vld1q_u64(dst.add(off));
             let s = vld1q_u64(src.add(off));
@@ -90,7 +89,7 @@ unsafe fn xor_words_neon(dst: *mut u64, src: *const u64, len: usize) {
         }
     }
     if len & 1 != 0 {
-        // SAFETY: The caller guarantees both pointers are valid for len u64 values.
+        // SAFETY: same contract as the enclosing unsafe fn.
         unsafe { *dst.add(len - 1) ^= *src.add(len - 1) };
     }
 }

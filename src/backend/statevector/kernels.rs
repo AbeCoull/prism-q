@@ -871,8 +871,6 @@ unsafe fn batch_phase_tile_bmi2(
     }
 }
 
-/// Run a single FFT stage in parallel.
-///
 /// Run one FFT stage in parallel.
 ///
 /// Large group counts split by group. High-stride stages split inside each
@@ -1327,6 +1325,7 @@ unsafe fn radix4_butterfly_neon(
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
 #[allow(clippy::too_many_arguments)]
 unsafe fn radix4_butterfly_slices_neon(
     a_ptr: *mut f64,

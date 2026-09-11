@@ -63,6 +63,19 @@ use rayon::prelude::*;
 
 type GateList = SmallVec<[(usize, [[Complex64; 2]; 2]); 4]>;
 
+macro_rules! seq_or_par {
+    ($cond:expr, $seq:expr, $par:expr) => {{
+        #[cfg(feature = "parallel")]
+        if $cond {
+            $par
+        } else {
+            $seq
+        }
+        #[cfg(not(feature = "parallel"))]
+        $seq
+    }};
+}
+
 struct SubState {
     state: Vec<Complex64>,
     /// Global qubit indices, sorted ascending. Position = local qubit index.
@@ -81,7 +94,6 @@ pub struct FactoredBackend {
 }
 
 impl FactoredBackend {
-    /// Create a new factored backend with the given RNG seed.
     pub fn new(seed: u64) -> Self {
         Self {
             num_qubits: 0,
@@ -262,25 +274,13 @@ impl FactoredBackend {
             sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS
         };
 
-        macro_rules! seq_or_par {
-            ($seq:expr, $par:expr) => {{
-                #[cfg(feature = "parallel")]
-                if par {
-                    $par
-                } else {
-                    $seq
-                }
-                #[cfg(not(feature = "parallel"))]
-                $seq
-            }};
-        }
-
         match gate {
             Gate::Rzz(theta) => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
                 seq_or_par!(
+                    par,
                     apply_rzz_seq(&mut sub.state, q0, q1, *theta),
                     par_apply_rzz(&mut sub.state, q0, q1, *theta)
                 );
@@ -290,6 +290,7 @@ impl FactoredBackend {
                 let ctrl = Self::local_qubit(sub, targets[0]);
                 let tgt = Self::local_qubit(sub, targets[1]);
                 seq_or_par!(
+                    par,
                     apply_cx_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt),
                     par_apply_cx(&mut sub.state, ctrl, tgt)
                 );
@@ -299,6 +300,7 @@ impl FactoredBackend {
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
                 seq_or_par!(
+                    par,
                     apply_cz_seq(&mut sub.state, sub.qubits.len(), q0, q1),
                     par_apply_cz(&mut sub.state, q0, q1)
                 );
@@ -308,6 +310,7 @@ impl FactoredBackend {
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
                 seq_or_par!(
+                    par,
                     apply_swap_seq(&mut sub.state, sub.qubits.len(), q0, q1),
                     par_apply_swap(&mut sub.state, q0, q1)
                 );
@@ -318,11 +321,13 @@ impl FactoredBackend {
                 let tgt = Self::local_qubit(sub, targets[1]);
                 if let Some(phase) = gate.controlled_phase() {
                     seq_or_par!(
+                        par,
                         apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt, phase),
                         par_apply_cu_phase(&mut sub.state, sub.qubits.len(), ctrl, tgt, phase)
                     );
                 } else {
                     seq_or_par!(
+                        par,
                         apply_cu_seq(&mut sub.state, sub.qubits.len(), ctrl, tgt, **mat),
                         par_apply_cu(&mut sub.state, sub.qubits.len(), ctrl, tgt, **mat)
                     );
@@ -338,6 +343,7 @@ impl FactoredBackend {
                 let local_tgt = Self::local_qubit(sub, targets[nc]);
                 if let Some(phase) = gate.controlled_phase() {
                     seq_or_par!(
+                        par,
                         apply_mcu_phase_seq(
                             &mut sub.state,
                             sub.qubits.len(),
@@ -355,6 +361,7 @@ impl FactoredBackend {
                     );
                 } else {
                     seq_or_par!(
+                        par,
                         apply_mcu_seq(
                             &mut sub.state,
                             sub.qubits.len(),
@@ -381,6 +388,7 @@ impl FactoredBackend {
                     .map(|&(gq, ph)| (Self::local_qubit(sub, gq), ph))
                     .collect();
                 seq_or_par!(
+                    par,
                     apply_batch_phase_seq(
                         &mut sub.state,
                         sub.qubits.len(),
@@ -395,6 +403,7 @@ impl FactoredBackend {
                 let q0 = Self::local_qubit(sub, targets[0]);
                 let q1 = Self::local_qubit(sub, targets[1]);
                 seq_or_par!(
+                    par,
                     simd::PreparedGate2q::new(mat).apply_full(
                         &mut sub.state,
                         sub.qubits.len(),
@@ -414,6 +423,7 @@ impl FactoredBackend {
                 if gate.is_diagonal_1q() {
                     let skip_lo = is_phase_one(mat[0][0]);
                     seq_or_par!(
+                        par,
                         simd::apply_diagonal_sequential(
                             &mut sub.state,
                             local,
@@ -425,6 +435,7 @@ impl FactoredBackend {
                     );
                 } else {
                     seq_or_par!(
+                        par,
                         simd::PreparedGate1q::new(&mat)
                             .apply_full_sequential(&mut sub.state, local),
                         apply_single_gate_par(&mut sub.state, local, &mat)
@@ -467,24 +478,12 @@ impl FactoredBackend {
         #[cfg(feature = "parallel")]
         let par = sub.qubits.len() >= PARALLEL_THRESHOLD_QUBITS;
 
-        macro_rules! seq_or_par {
-            ($seq:expr, $par:expr) => {{
-                #[cfg(feature = "parallel")]
-                if par {
-                    $par
-                } else {
-                    $seq
-                }
-                #[cfg(not(feature = "parallel"))]
-                $seq
-            }};
-        }
-
         match entry {
             DiagEntry::Phase1q { qubit, d0, d1 } => {
                 let lq = Self::local_qubit(sub, *qubit);
                 let skip_lo = (d0.re - 1.0).abs() < 1e-15 && d0.im.abs() < 1e-15;
                 seq_or_par!(
+                    par,
                     simd::apply_diagonal_sequential(&mut sub.state, lq, *d0, *d1, skip_lo),
                     par_apply_diagonal(&mut sub.state, lq, *d0, *d1, skip_lo)
                 );
@@ -493,6 +492,7 @@ impl FactoredBackend {
                 let lq0 = Self::local_qubit(sub, *q0);
                 let lq1 = Self::local_qubit(sub, *q1);
                 seq_or_par!(
+                    par,
                     apply_cu_phase_seq(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase),
                     par_apply_cu_phase(&mut sub.state, sub.qubits.len(), lq0, lq1, *phase)
                 );
@@ -501,6 +501,7 @@ impl FactoredBackend {
                 let lq0 = Self::local_qubit(sub, *q0);
                 let lq1 = Self::local_qubit(sub, *q1);
                 seq_or_par!(
+                    par,
                     apply_parity2q_seq(&mut sub.state, lq0, lq1, *same, *diff),
                     par_apply_parity2q(&mut sub.state, lq0, lq1, *same, *diff)
                 );

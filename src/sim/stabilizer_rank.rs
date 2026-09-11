@@ -1192,7 +1192,3 @@ pub fn run_stabilizer_rank_shots(
 #[cfg(test)]
 #[path = "stabilizer_rank_tests.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "stabilizer_rank_more_tests.rs"]
-mod more_tests;

@@ -46,12 +46,12 @@ impl SignedPauli {
     }
 
     #[inline(always)]
-    pub fn get_x(&self, q: usize) -> bool {
+    fn get_x(&self, q: usize) -> bool {
         (self.x[q >> 6] >> (q & 63)) & 1 == 1
     }
 
     #[inline(always)]
-    pub fn get_z(&self, q: usize) -> bool {
+    fn get_z(&self, q: usize) -> bool {
         (self.z[q >> 6] >> (q & 63)) & 1 == 1
     }
 

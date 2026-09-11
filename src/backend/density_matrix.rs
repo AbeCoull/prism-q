@@ -25,10 +25,10 @@
 //! reset, classically-conditioned gates, exact one-qubit Kraus channels
 //! (`apply_1q_kraus`), exact two-qubit Kraus channels (`apply_2q_kraus`, with
 //! `apply_2q_depolarizing` taking the twirled closed form instead), and
-//! exact `Tr(rho P)` expectation (`expectation_pauli`, reachable through
-//! `pauli_expectations`). Fused gates are accepted, so `sim` fuses for this
-//! backend, and at the `2n` width its buffer actually costs rather than at the
-//! circuit width. `QftBlock` carries qubit indices outside the instruction
+//! exact `Tr(rho P)` expectation (`expectations_pauli`, which backs
+//! [`Backend::pauli_expectations`]). Fused gates are accepted, so `sim` fuses
+//! for this backend, and at the `2n` width its buffer actually costs rather
+//! than at the circuit width. `QftBlock` carries qubit indices outside the instruction
 //! targets and is remapped onto the ket register before the left product; the
 //! tiled shapes (`MultiFused`, `Multi2q`) apply their constituent gates one at
 //! a time instead. See [`Backend::supports_fused_gates`] for the ordering
@@ -332,7 +332,6 @@ pub struct DensityMatrixBackend {
 }
 
 impl DensityMatrixBackend {
-    /// Create a new density-matrix backend with the given RNG seed.
     pub fn new(seed: u64) -> Self {
         Self {
             num_qubits: 0,
@@ -1235,21 +1234,13 @@ impl DensityMatrixBackend {
         }
     }
 
-    /// Exact `Tr(rho P)` for the joint Pauli reduced to `(xmask, zmask, num_y)`,
+    /// Exact `Tr(rho P)` for every joint Pauli reduced to `(xmask, zmask, num_y)`,
     /// where `P|j> = i^{num_y} * (-1)^{popcount(j & zmask)} * |j ^ xmask>`. The
-    /// trace collapses to a single diagonal-offset sweep:
+    /// trace collapses to a diagonal-offset sum:
     /// `Tr(rho P) = i^{num_y} sum_j (-1)^{popcount(j & zmask)} rho[j][j ^ xmask]`.
-    pub fn expectation_pauli(&self, xmask: usize, zmask: usize, num_y: u32) -> f64 {
-        self.expectations_pauli(&[(xmask, zmask, num_y)])[0]
-    }
-
-    /// [`DensityMatrixBackend::expectation_pauli`] for every mask triple in one
-    /// sweep of the `4^n` buffer.
     ///
-    /// Each row is visited once and contributes one entry per observable, so
-    /// the strided sweep is paid once instead of once per observable. Values
-    /// match the single-observable form exactly: the accumulation order within
-    /// an observable is unchanged.
+    /// Each row of the `4^n` buffer is visited once and contributes one entry per
+    /// observable, so the strided sweep is paid once instead of once per observable.
     pub fn expectations_pauli(&self, masks: &[(usize, usize, u32)]) -> Vec<f64> {
         let d = self.dim();
         #[cfg(feature = "gpu")]

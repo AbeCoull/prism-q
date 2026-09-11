@@ -244,7 +244,6 @@ unsafe fn transpose_64x64_avx2(matrix: &mut [u64; 64]) {
 }
 
 #[cfg(target_arch = "aarch64")]
-#[allow(dead_code)]
 unsafe fn transpose_64x64_neon(matrix: &mut [u64; 64]) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {

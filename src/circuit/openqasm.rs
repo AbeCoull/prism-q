@@ -2296,60 +2296,7 @@ impl<'a> Parser<'a> {
         }
 
         let max_qubit = call_qubits.iter().max().copied().unwrap_or(0) + 1;
-        let mut sub_parser = Parser {
-            input: "",
-            qregs: HashMap::new(),
-            cregs: HashMap::new(),
-            gate_defs: HashMap::new(),
-            def_defs: HashMap::new(),
-            total_qubits: max_qubit,
-            total_cbits: self.total_cbits,
-            gate_expansion_depth: self.gate_expansion_depth + 1,
-            region_depth: self.region_depth,
-            param_vars: Some(var_map),
-            int_vars: self.int_vars.clone(),
-            inputs: HashMap::new(),
-            input_names: Vec::new(),
-            links: Vec::new(),
-            pending_input_slot: None,
-            nested: true,
-        };
-        sub_parser.qregs.insert(
-            "__q__".to_string(),
-            Register {
-                offset: 0,
-                size: max_qubit,
-            },
-        );
-        for (k, v) in &self.qregs {
-            sub_parser.qregs.insert(
-                k.clone(),
-                Register {
-                    offset: v.offset,
-                    size: v.size,
-                },
-            );
-        }
-        for (k, v) in &self.cregs {
-            sub_parser.cregs.insert(
-                k.clone(),
-                Register {
-                    offset: v.offset,
-                    size: v.size,
-                },
-            );
-        }
-        for (k, v) in &self.gate_defs {
-            sub_parser.gate_defs.insert(
-                k.clone(),
-                GateDefinition {
-                    params: v.params.clone(),
-                    qubits: v.qubits.clone(),
-                    body: v.body.clone(),
-                },
-            );
-        }
-        self.copy_def_defs_into(&mut sub_parser);
+        let sub_parser = self.expansion_sub_parser(max_qubit, var_map, self.int_vars.clone());
 
         let mut all_instrs = Vec::new();
         for stmt in &def.body {
@@ -2503,6 +2450,31 @@ impl<'a> Parser<'a> {
             .max(self.total_qubits.saturating_sub(1))
             + 1;
 
+        let mut sub_parser = self.expansion_sub_parser(max_qubit, float_vars, Some(int_vars));
+
+        let mut substituted: Vec<String> = Vec::with_capacity(def.body.len());
+        for stmt in &def.body {
+            let mut expanded = stmt.clone();
+            for (qname, qidx) in &qubit_substs {
+                expanded = replace_word(&expanded, qname, &format!("__q__[{}]", qidx));
+            }
+            for (iname, ival) in &int_substs {
+                expanded = replace_word(&expanded, iname, &ival.to_string());
+            }
+            substituted.push(expanded);
+        }
+
+        let lines: Vec<&str> = substituted.iter().map(String::as_str).collect();
+        let instrs = sub_parser.parse_lines(&lines, line_num.saturating_sub(1))?;
+        Ok(Some(instrs))
+    }
+
+    fn expansion_sub_parser(
+        &self,
+        max_qubit: usize,
+        param_vars: HashMap<String, f64>,
+        int_vars: Option<HashMap<String, i64>>,
+    ) -> Parser<'static> {
         let mut sub_parser = Parser {
             input: "",
             qregs: HashMap::new(),
@@ -2513,8 +2485,8 @@ impl<'a> Parser<'a> {
             total_cbits: self.total_cbits,
             gate_expansion_depth: self.gate_expansion_depth + 1,
             region_depth: self.region_depth,
-            param_vars: Some(float_vars),
-            int_vars: Some(int_vars),
+            param_vars: Some(param_vars),
+            int_vars,
             inputs: HashMap::new(),
             input_names: Vec::new(),
             links: Vec::new(),
@@ -2557,22 +2529,7 @@ impl<'a> Parser<'a> {
             );
         }
         self.copy_def_defs_into(&mut sub_parser);
-
-        let mut substituted: Vec<String> = Vec::with_capacity(def.body.len());
-        for stmt in &def.body {
-            let mut expanded = stmt.clone();
-            for (qname, qidx) in &qubit_substs {
-                expanded = replace_word(&expanded, qname, &format!("__q__[{}]", qidx));
-            }
-            for (iname, ival) in &int_substs {
-                expanded = replace_word(&expanded, iname, &ival.to_string());
-            }
-            substituted.push(expanded);
-        }
-
-        let lines: Vec<&str> = substituted.iter().map(String::as_str).collect();
-        let instrs = sub_parser.parse_lines(&lines, line_num.saturating_sub(1))?;
-        Ok(Some(instrs))
+        sub_parser
     }
 
     fn strip_modifiers(line: &str, line_num: usize) -> Result<(Vec<Modifier>, &str)> {

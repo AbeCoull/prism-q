@@ -355,6 +355,21 @@ fn label_width(label: &str, font_size: f64) -> f64 {
     label.chars().count() as f64 * font_size * CHAR_WIDTH_FACTOR + LABEL_PADDING
 }
 
+fn emit_theme_vars(svg: &mut String, theme: &Theme, auto_theme: bool) {
+    let _ = write!(svg, "<style>:root{{");
+    if auto_theme {
+        LIGHT.emit_css_vars(svg);
+    } else {
+        theme.emit_css_vars(svg);
+    }
+    let _ = write!(svg, "}}");
+    if auto_theme {
+        let _ = write!(svg, "@media(prefers-color-scheme:dark){{:root{{");
+        DARK.emit_css_vars(svg);
+        let _ = write!(svg, "}}}}");
+    }
+}
+
 fn empty_svg(theme: &Theme) -> String {
     format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 60\">\
@@ -576,18 +591,7 @@ fn render_svg(
     );
     let _ = writeln!(svg, "</defs>");
 
-    let _ = write!(svg, "<style>:root{{");
-    if opts.auto_theme {
-        LIGHT.emit_css_vars(&mut svg);
-    } else {
-        theme.emit_css_vars(&mut svg);
-    }
-    let _ = write!(svg, "}}");
-    if opts.auto_theme {
-        let _ = write!(svg, "@media(prefers-color-scheme:dark){{:root{{");
-        DARK.emit_css_vars(&mut svg);
-        let _ = write!(svg, "}}}}");
-    }
+    emit_theme_vars(&mut svg, theme, opts.auto_theme);
     let anim_gate = if opts.animate {
         "animation:gate-in 0.3s ease both;"
     } else {
@@ -1490,18 +1494,7 @@ fn render_svg_heatmap(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &SvgOp
          role=\"img\" aria-label=\"Gate density heatmap: {n} qubits, {depth} moments\">",
         total_w, total_h,
     );
-    let _ = write!(svg, "<style>:root{{");
-    if opts.auto_theme {
-        LIGHT.emit_css_vars(&mut svg);
-    } else {
-        theme.emit_css_vars(&mut svg);
-    }
-    let _ = write!(svg, "}}");
-    if opts.auto_theme {
-        let _ = write!(svg, "@media(prefers-color-scheme:dark){{:root{{");
-        DARK.emit_css_vars(&mut svg);
-        let _ = write!(svg, "}}}}");
-    }
+    emit_theme_vars(&mut svg, theme, opts.auto_theme);
     let _ = writeln!(
         svg,
         "text{{font-family:Inter,-apple-system,system-ui,sans-serif;\

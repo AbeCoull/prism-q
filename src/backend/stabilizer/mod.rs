@@ -956,110 +956,25 @@ impl StabilizerBackend {
         Ok(self.compute_statevector())
     }
 
-    /// Build the dense statevector by projecting a support seed through each
-    /// stabilizer generator.
-    ///
-    /// Algorithm:
-    /// 1. Gaussian-eliminate to find the support (same as `compute_probabilities`)
-    /// 2. Pick the first basis state in the support as seed
-    /// 3. Apply projector (I + g_i)/2 for each original stabilizer generator
-    /// 4. Normalize
-    ///
-    /// For Pauli g = (-1)^r × ∏_j X_j^{x_j} Z_j^{z_j}:
-    ///   g|y⟩ = (-1)^{r + popcount(z & y)} |y ⊕ x_bits⟩
+    /// Build the dense statevector by projecting the support seed through each
+    /// stabilizer generator. See [`project_generators`].
     fn compute_statevector(&self) -> Vec<Complex64> {
         let n = self.n;
         let dim = 1usize << n;
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let seed = self.find_support_seed();
 
         let mut state = vec![Complex64::new(0.0, 0.0); dim];
-        state[seed] = Complex64::new(1.0, 0.0);
-
-        // Projectors (I + g_i)/2 commute (stabilizer generators commute) so order
-        // is irrelevant.
-        //
-        // AG convention: g = (-1)^r × i^m × ∏_j X_j^{x_j} Z_j^{z_j}
-        // where m = popcount(x_bits & z_bits) counts the implicit i-factor from
-        // Y-type qubits (Y = iXZ, so each x=1,z=1 qubit contributes factor i).
-        //
-        // Action: g|y⟩ = (-1)^{r + dot(z,y)} × i^m × |y ⊕ x_bits⟩
-
-        let powers_of_i = [
-            Complex64::new(1.0, 0.0),
-            Complex64::new(0.0, 1.0),
-            Complex64::new(-1.0, 0.0),
-            Complex64::new(0.0, -1.0),
-        ];
+        state[self.find_support_seed()] = Complex64::new(1.0, 0.0);
 
         let mut visited_gen = vec![0u32; dim];
-        let mut current_gen = 0u32;
-        for i in 0..n {
-            let row = i + n;
-            let base = row * stride;
-
-            let mut x_bits = 0usize;
-            let mut z_bits = 0usize;
-            for w in 0..nw {
-                let shift = w * 64;
-                if shift < usize::BITS as usize {
-                    x_bits |= (self.xz[base + w] as usize) << shift;
-                    z_bits |= (self.xz[base + nw + w] as usize) << shift;
-                }
-            }
-            let r = self.phase[row];
-
-            let m = (x_bits & z_bits).count_ones() as usize;
-            let i_factor = powers_of_i[m & 3];
-            let base_sign = if r { -1.0 } else { 1.0 };
-
-            if x_bits == 0 {
-                for (y, s) in state.iter_mut().enumerate() {
-                    let dot_parity = (z_bits & y).count_ones() & 1;
-                    let phase_val = if dot_parity == 0 {
-                        base_sign
-                    } else {
-                        -base_sign
-                    };
-                    if phase_val < 0.0 {
-                        *s = Complex64::new(0.0, 0.0);
-                    }
-                }
-            } else {
-                current_gen += 1;
-                for y in 0..dim {
-                    if visited_gen[y] == current_gen {
-                        continue;
-                    }
-                    let partner = y ^ x_bits;
-                    visited_gen[partner] = current_gen;
-
-                    let a = state[y];
-                    let b = state[partner];
-
-                    let dot_y = (z_bits & y).count_ones() & 1;
-                    let real_y = if dot_y == 0 { base_sign } else { -base_sign };
-                    let gy_phase = i_factor * real_y;
-
-                    let dot_p = (z_bits & partner).count_ones() & 1;
-                    let real_p = if dot_p == 0 { base_sign } else { -base_sign };
-                    let gp_phase = i_factor * real_p;
-
-                    state[y] = (a + b * gp_phase) * 0.5;
-                    state[partner] = (b + a * gy_phase) * 0.5;
-                }
-            }
-        }
-
-        let norm_sq: f64 = state.iter().map(|c| c.norm_sqr()).sum();
-        if norm_sq > NORM_CLAMP_MIN {
-            let inv_norm = 1.0 / norm_sq.sqrt();
-            for amp in &mut state {
-                *amp *= inv_norm;
-            }
-        }
+        project_generators(
+            &mut state,
+            &mut visited_gen,
+            &self.xz,
+            &self.phase,
+            n,
+            self.num_words,
+            self.stride(),
+        );
 
         state
     }
@@ -1457,5 +1372,101 @@ impl Backend for StabilizerBackend {
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         // Delegate to the inherent method; it handles both CPU and GPU paths.
         StabilizerBackend::export_statevector(self)
+    }
+}
+
+/// Project a support seed through the `n` stabilizer generators and normalize,
+/// building the dense statevector in place.
+///
+/// `sv` holds the seed basis state and has `2^n` entries; `visited_gen` is a
+/// scratch buffer of the same length. Rows `n..2n` of `xz` are the generators,
+/// bit-packed as `nw` X words then `nw` Z words per `stride`-word row.
+///
+/// AG convention: `g = (-1)^r * i^m * prod_j X_j^{x_j} Z_j^{z_j}`, where
+/// `m = popcount(x_bits & z_bits)` counts the implicit i-factor the Y-type
+/// qubits contribute, so `g|y> = (-1)^{r + dot(z,y)} * i^m * |y ^ x_bits>`.
+/// The projectors `(I + g_i)/2` commute, so generator order is irrelevant.
+pub(crate) fn project_generators(
+    sv: &mut [Complex64],
+    visited_gen: &mut [u32],
+    xz: &[u64],
+    phase: &[bool],
+    n: usize,
+    nw: usize,
+    stride: usize,
+) {
+    let dim = sv.len();
+    let zero = Complex64::new(0.0, 0.0);
+    let powers_of_i = [
+        Complex64::new(1.0, 0.0),
+        Complex64::new(0.0, 1.0),
+        Complex64::new(-1.0, 0.0),
+        Complex64::new(0.0, -1.0),
+    ];
+
+    let mut current_gen = 0u32;
+    for i in 0..n {
+        let row = i + n;
+        let base = row * stride;
+
+        let mut x_bits = 0usize;
+        let mut z_bits = 0usize;
+        for w in 0..nw {
+            let shift = w * 64;
+            if shift < usize::BITS as usize {
+                x_bits |= (xz[base + w] as usize) << shift;
+                z_bits |= (xz[base + nw + w] as usize) << shift;
+            }
+        }
+        let r = phase[row];
+
+        let m = (x_bits & z_bits).count_ones() as usize;
+        let i_factor = powers_of_i[m & 3];
+        let base_sign = if r { -1.0 } else { 1.0 };
+
+        if x_bits == 0 {
+            for (y, s) in sv.iter_mut().enumerate() {
+                let dot_parity = (z_bits & y).count_ones() & 1;
+                let phase_val = if dot_parity == 0 {
+                    base_sign
+                } else {
+                    -base_sign
+                };
+                if phase_val < 0.0 {
+                    *s = zero;
+                }
+            }
+        } else {
+            current_gen += 1;
+            for y in 0..dim {
+                if visited_gen[y] == current_gen {
+                    continue;
+                }
+                let partner = y ^ x_bits;
+                visited_gen[partner] = current_gen;
+
+                let a = sv[y];
+                let b = sv[partner];
+
+                let dot_y = (z_bits & y).count_ones() & 1;
+                let real_y = if dot_y == 0 { base_sign } else { -base_sign };
+                let gy_phase = i_factor * real_y;
+
+                let dot_p = (z_bits & partner).count_ones() & 1;
+                let real_p = if dot_p == 0 { base_sign } else { -base_sign };
+                let gp_phase = i_factor * real_p;
+
+                sv[y] = (a + b * gp_phase) * 0.5;
+                sv[partner] = (b + a * gy_phase) * 0.5;
+            }
+        }
+    }
+
+    let norm_sq: f64 = sv.iter().map(Complex64::norm_sqr).sum();
+    if norm_sq > NORM_CLAMP_MIN {
+        let inv_norm = 1.0 / norm_sq.sqrt();
+        for amp in sv {
+            *amp *= inv_norm;
+        }
     }
 }

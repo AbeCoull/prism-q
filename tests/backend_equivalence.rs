@@ -19,6 +19,7 @@ use prism_q::backend::Backend;
 use prism_q::backend::mps::MpsBackend;
 use prism_q::backend::product::ProductStateBackend;
 use prism_q::backend::sparse::SparseBackend;
+use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
@@ -1257,6 +1258,42 @@ fn factored_stabilizer_export_statevector_two_clusters_matches() {
             (a - e).norm() < EPS,
             "factored-stabilizer export[{i}]: expected {e}, got {a}"
         );
+    }
+}
+
+// One entangled cluster, so both stabilizer backends run the same generator
+// projection. `S` after `H` makes a Y-type generator (the i-factor branch), the
+// CX chain makes Z-only generators (the sign-zeroing branch), and the 2-3 pair
+// makes an X-type one (the partner walk).
+#[test]
+fn stabilizer_exports_match_statevector_amplitudes() {
+    let mut c = Circuit::new(4, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::S, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Cx, &[1, 2]);
+    c.add_gate(Gate::H, &[3]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::Z, &[1]);
+
+    let sv_ref = run_and_state(&c);
+
+    let mut stab = StabilizerBackend::new(SEED);
+    sim::run_on(&mut stab, &c).unwrap();
+    let mut fs = prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::new(SEED);
+    sim::run_on(&mut fs, &c).unwrap();
+
+    for (name, sv) in [
+        ("stabilizer", stab.export_statevector().unwrap()),
+        ("factored-stabilizer", fs.export_statevector().unwrap()),
+    ] {
+        assert_eq!(sv.len(), sv_ref.len());
+        for (i, (a, e)) in sv.iter().zip(sv_ref.iter()).enumerate() {
+            assert!(
+                (a - e).norm() < EPS,
+                "{name} export[{i}]: expected {e}, got {a}"
+            );
+        }
     }
 }
 

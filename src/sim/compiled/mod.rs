@@ -2459,6 +2459,44 @@ const MAX_RANK_FOR_RANK_SPACE: usize = 20;
 const MIN_SHOTS_PER_OUTCOME: usize = 4;
 const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
+fn finish_sampler(
+    mut flip_rows: Vec<Vec<u64>>,
+    num_meas_words: usize,
+    rank: usize,
+    num_measurements: usize,
+    ref_bits: &[bool],
+    seed: u64,
+) -> CompiledSampler {
+    minimize_flip_row_weight(&mut flip_rows);
+
+    let lut = if rank >= LUT_MIN_RANK {
+        Some(FlipLut::build(&flip_rows, num_meas_words))
+    } else {
+        None
+    };
+
+    let sparse = SparseParity::from_flip_rows(&flip_rows, num_measurements);
+    let xor_dag = build_xor_dag_if_useful(&sparse);
+    let ref_bits_packed = pack_bools(ref_bits);
+    let parity_blocks = build_parity_blocks_if_useful(&sparse, rank, &ref_bits_packed);
+
+    CompiledSampler {
+        flip_rows,
+        ref_bits_packed,
+        rank,
+        num_measurements,
+        rng: ChaCha8Rng::seed_from_u64(seed),
+        lut,
+        sparse: Some(sparse),
+        xor_dag,
+        parity_blocks,
+        #[cfg(feature = "gpu")]
+        gpu_context: None,
+        #[cfg(feature = "gpu")]
+        gpu_bts_cache: None,
+    }
+}
+
 /// Compile a Clifford circuit's measurements via forward stabilizer
 /// simulation; [`compile_measurements`] routes registers of 64 or more qubits
 /// here.
@@ -2629,34 +2667,14 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
     }
 
     let num_meas_words = m_words;
-    minimize_flip_row_weight(&mut flip_rows);
-
-    let lut = if rank >= LUT_MIN_RANK {
-        Some(FlipLut::build(&flip_rows, num_meas_words))
-    } else {
-        None
-    };
-
-    let sparse = SparseParity::from_flip_rows(&flip_rows, num_measurements);
-    let xor_dag = build_xor_dag_if_useful(&sparse);
-    let ref_bits_packed = pack_bools(&ref_bits);
-    let parity_blocks = build_parity_blocks_if_useful(&sparse, rank, &ref_bits_packed);
-
-    Ok(CompiledSampler {
+    Ok(finish_sampler(
         flip_rows,
-        ref_bits_packed,
+        num_meas_words,
         rank,
         num_measurements,
-        rng: ChaCha8Rng::seed_from_u64(seed),
-        lut,
-        sparse: Some(sparse),
-        xor_dag,
-        parity_blocks,
-        #[cfg(feature = "gpu")]
-        gpu_context: None,
-        #[cfg(feature = "gpu")]
-        gpu_bts_cache: None,
-    })
+        &ref_bits,
+        seed,
+    ))
 }
 
 fn compile_measurements_filtered(
@@ -3072,34 +3090,14 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
         }
     }
 
-    minimize_flip_row_weight(&mut flip_rows);
-
-    let lut = if rank >= LUT_MIN_RANK {
-        Some(FlipLut::build(&flip_rows, num_meas_words))
-    } else {
-        None
-    };
-
-    let sparse = SparseParity::from_flip_rows(&flip_rows, num_measurements);
-    let xor_dag = build_xor_dag_if_useful(&sparse);
-    let ref_bits_packed = pack_bools(&ref_bits);
-    let parity_blocks = build_parity_blocks_if_useful(&sparse, rank, &ref_bits_packed);
-
-    Ok(CompiledSampler {
+    Ok(finish_sampler(
         flip_rows,
-        ref_bits_packed,
+        num_meas_words,
         rank,
         num_measurements,
-        rng: ChaCha8Rng::seed_from_u64(seed),
-        lut,
-        sparse: Some(sparse),
-        xor_dag,
-        parity_blocks,
-        #[cfg(feature = "gpu")]
-        gpu_context: None,
-        #[cfg(feature = "gpu")]
-        gpu_bts_cache: None,
-    })
+        &ref_bits,
+        seed,
+    ))
 }
 
 /// Sample shots via the compiled (Heisenberg-picture) path.

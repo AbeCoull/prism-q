@@ -26,11 +26,11 @@ pub(super) use crate::backend::MIN_QUBITS_FOR_PAR_GATES;
 use crate::backend::MIN_ANTI_ROWS_FOR_PAR;
 
 #[cfg(feature = "parallel")]
-struct SendU64Ptr(*mut u64);
+pub(crate) struct SendU64Ptr(pub(crate) *mut u64);
 #[cfg(feature = "parallel")]
 impl SendU64Ptr {
     #[inline(always)]
-    fn ptr(&self) -> *mut u64 {
+    pub(crate) fn ptr(&self) -> *mut u64 {
         self.0
     }
 }
@@ -42,11 +42,11 @@ unsafe impl Send for SendU64Ptr {}
 unsafe impl Sync for SendU64Ptr {}
 
 #[cfg(feature = "parallel")]
-struct SendBoolPtr(*mut bool);
+pub(crate) struct SendBoolPtr(pub(crate) *mut bool);
 #[cfg(feature = "parallel")]
 impl SendBoolPtr {
     #[inline(always)]
-    fn ptr(&self) -> *mut bool {
+    pub(crate) fn ptr(&self) -> *mut bool {
         self.0
     }
 }

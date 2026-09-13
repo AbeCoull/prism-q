@@ -3162,7 +3162,7 @@ pub(crate) fn apply_noise_event_dm(dm: &mut DensityMatrixBackend, event: &NoiseE
 /// decides and this function rejects. The circuit is checked against the
 /// density-matrix qubit cap and the noise model is validated before any
 /// allocation.
-fn evolve_density_matrix(
+pub(crate) fn evolve_density_matrix(
     kind: &BackendKind,
     circuit: &Circuit,
     noise: Option<&NoiseModel>,

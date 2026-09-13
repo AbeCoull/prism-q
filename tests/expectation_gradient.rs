@@ -697,3 +697,19 @@ fn an_untrainable_gate_inside_a_run_splits_it() {
 
     assert_matches_shift(&c, &obs, &params);
 }
+
+#[test]
+fn a_phase_gate_shares_a_run_with_a_rotation_of_the_other_mask_family() {
+    // Z0 is diagonal and Y1 is not, so the run's sandwiches split across both
+    // accumulator families and the interleave has to put them back in order.
+    let (a, b) = (0.73, 1.24);
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Ry(a), &[1]);
+    c.add_gate(Gate::P(b), &[0]);
+    let params = Parameters::all_rotations(&c);
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::x(0)]), (0.5, vec![PauliTerm::y(1)])];
+
+    assert_matches_shift(&c, &obs, &params);
+}

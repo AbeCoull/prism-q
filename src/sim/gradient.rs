@@ -19,10 +19,11 @@ use num_complex::Complex64;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits, reserve_dense_output};
 use crate::circuit::parameter::{Parameters, angle_mut};
-use crate::circuit::{Circuit, Instruction, SmallVec};
+use crate::circuit::{Circuit, Instruction, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
 use crate::gates::{
-    BatchRzzData, Gate, GeneratorKind, MultiFusedData, is_diagonal_2x2, pauli_rot_masks,
+    BatchRzzData, DiagEntry, DiagonalBatchData, Gate, GeneratorKind, MultiFusedData,
+    is_diagonal_2x2, pauli_rot_masks,
 };
 
 use super::noise::NoiseModel;
@@ -201,25 +202,11 @@ pub fn run_expectation_gradient(
 
         masks.clear();
         masks.extend(run.iter().map(|g| (g.xmask, g.zmask, g.num_y)));
-        let projectors = run.iter().any(|g| g.phase);
-        if projectors {
-            masks.push((0, 0, 0));
-        }
         let values = pauli_sandwiches_from_masks(lambda.state_vector(), phi.state_vector(), &masks);
-        let overlap = if projectors {
-            values[run.len()].im
-        } else {
-            0.0
-        };
 
         for (g, value) in run.iter().zip(&values) {
-            let contrib = if g.phase {
-                value.im - overlap
-            } else {
-                value.im
-            };
             while cursor < links.len() && links[cursor].instruction == g.index {
-                gradient[links[cursor].slot] += contrib;
+                gradient[links[cursor].slot] += value.im;
                 cursor += 1;
             }
         }
@@ -237,40 +224,36 @@ pub fn run_expectation_gradient(
     Ok(ExpectationGradient { value, gradient })
 }
 
-/// One trainable gate staged in a commuting run: its instruction index, the
-/// Pauli masks of its generator, and whether that generator is the phase
-/// gate's projector `|1⟩⟨1| = (I - Z) / 2`, whose contribution subtracts the
-/// identity sandwich from the Z one.
+/// One trainable gate staged in a commuting run: its instruction index and the
+/// Pauli masks of its generator.
 struct RunGate {
     index: usize,
     xmask: usize,
     zmask: usize,
     num_y: u32,
-    phase: bool,
 }
 
 impl RunGate {
     fn new(index: usize, kind: GeneratorKind<'_>, targets: &[usize]) -> Self {
-        let (xmask, zmask, num_y, phase) = match kind {
-            GeneratorKind::RotX => (1usize << targets[0], 0, 0, false),
+        let (xmask, zmask, num_y) = match kind {
+            GeneratorKind::RotX => (1usize << targets[0], 0, 0),
             GeneratorKind::RotY => {
                 let bit = 1usize << targets[0];
-                (bit, bit, 1, false)
+                (bit, bit, 1)
             }
-            GeneratorKind::RotZ => (0, 1usize << targets[0], 0, false),
-            GeneratorKind::RotZz => (0, (1usize << targets[0]) | (1usize << targets[1]), 0, false),
-            GeneratorKind::Phase => (0, 1usize << targets[0], 0, true),
-            GeneratorKind::RotPauli(axes) => {
-                let (xmask, zmask, num_y) = pauli_rot_masks(targets, axes);
-                (xmask, zmask, num_y, false)
-            }
+            GeneratorKind::RotZ => (0, 1usize << targets[0], 0),
+            GeneratorKind::RotZz => (0, (1usize << targets[0]) | (1usize << targets[1]), 0),
+            // The projector generator differs from Z by the identity, whose
+            // sandwich `⟨λ|φ⟩ = ⟨φ|H|φ⟩` is real and contributes nothing to the
+            // imaginary part, so `P(θ) = e^{iθ/2} Rz(θ)` differentiates as `Rz`.
+            GeneratorKind::Phase => (0, 1usize << targets[0], 0),
+            GeneratorKind::RotPauli(axes) => pauli_rot_masks(targets, axes),
         };
         Self {
             index,
             xmask,
             zmask,
             num_y,
-            phase,
         }
     }
 
@@ -299,8 +282,9 @@ fn inverse_instruction(instruction: &Instruction) -> Instruction {
 
 /// Inverses of a commuting run, collapsed into a batch gate where the run's
 /// gate type has one: `MultiFused` for single-qubit rotations on distinct
-/// qubits, `BatchRzz` for an Rzz layer. Anything else falls back to one
-/// instruction per gate. Order within a run is free because its gates commute.
+/// qubits, `BatchRzz` for an Rzz layer, `DiagonalBatch` for a mixed diagonal
+/// run. Anything else falls back to one instruction per gate. Order within a
+/// run is free because its gates commute.
 fn run_inverse_instructions(circuit: &Circuit, run: &[RunGate]) -> Vec<Instruction> {
     let gates: Vec<(&Gate, &[usize])> = run
         .iter()
@@ -319,6 +303,9 @@ fn run_inverse_instructions(circuit: &Circuit, run: &[RunGate]) -> Vec<Instructi
         if let Some(batched) = batch_rzz_inverse(&gates) {
             return batched;
         }
+        if let Some(diagonal) = diagonal_batch_inverse(&gates) {
+            return vec![diagonal];
+        }
     }
 
     gates
@@ -333,7 +320,9 @@ fn run_inverse_instructions(circuit: &Circuit, run: &[RunGate]) -> Vec<Instructi
 fn multi_fused_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
     let mut fused: Vec<(usize, [[Complex64; 2]; 2])> = Vec::with_capacity(gates.len());
     for &(gate, targets) in gates {
-        if gate.num_qubits() != 1 || fused.iter().any(|&(q, _)| q == targets[0]) {
+        if !matches!(gate, Gate::Rx(_) | Gate::Ry(_) | Gate::Rz(_) | Gate::P(_))
+            || fused.iter().any(|&(q, _)| q == targets[0])
+        {
             return None;
         }
         fused.push((targets[0], gate.inverse().matrix_2x2()));
@@ -360,24 +349,54 @@ fn batch_rzz_inverse(gates: &[(&Gate, &[usize])]) -> Option<Vec<Instruction>> {
     Some(
         edges
             .chunks(BatchRzzData::MAX_EDGES)
-            .map(|chunk| {
-                let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
-                for &(q0, q1, _) in chunk {
-                    for q in [q0, q1] {
-                        if !targets.contains(&q) {
-                            targets.push(q);
+            .map(|chunk| match chunk {
+                [(q0, q1, theta)] => Instruction::Gate {
+                    gate: Gate::Rzz(*theta),
+                    targets: smallvec![*q0, *q1],
+                },
+                _ => {
+                    let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
+                    for &(q0, q1, _) in chunk {
+                        for q in [q0, q1] {
+                            if !targets.contains(&q) {
+                                targets.push(q);
+                            }
                         }
                     }
-                }
-                Instruction::Gate {
-                    gate: Gate::BatchRzz(Box::new(BatchRzzData {
-                        edges: chunk.to_vec(),
-                    })),
-                    targets,
+                    Instruction::Gate {
+                        gate: Gate::BatchRzz(Box::new(BatchRzzData {
+                            edges: chunk.to_vec(),
+                        })),
+                        targets,
+                    }
                 }
             })
             .collect(),
     )
+}
+
+/// A run of diagonal rotations collapsed into one `DiagonalBatch` sweep. The
+/// kernel has no entry cap: a payload whose connected components outgrow the
+/// phase tables falls back to a per-element pass, still one traversal.
+fn diagonal_batch_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
+    let mut entries: Vec<DiagEntry> = Vec::with_capacity(gates.len());
+    let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
+    for &(gate, gate_targets) in gates {
+        if !matches!(gate, Gate::Rz(_) | Gate::P(_) | Gate::Rzz(_)) {
+            return None;
+        }
+        entries.extend(gate.inverse().diag_entries(gate_targets));
+        for &q in gate_targets {
+            if !targets.contains(&q) {
+                targets.push(q);
+            }
+        }
+    }
+    targets.sort_unstable();
+    Some(Instruction::Gate {
+        gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
+        targets,
+    })
 }
 
 /// Per-instruction flag: true if the gate lies in the Hamiltonian's inverse
@@ -897,6 +916,7 @@ mod tests {
         c.add_gate(Gate::Rz(0.7), &[0]);
         c.add_gate(Gate::Rzz(0.9), &[0, 1]);
         c.add_gate(Gate::Rzz(1.1), &[2, 3]);
+        c.add_gate(Gate::Rx(1.3), &[0]);
 
         let run = |indices: &[usize]| -> Vec<RunGate> {
             indices
@@ -919,9 +939,6 @@ mod tests {
             }]
         ));
 
-        let repeated_qubit = run_inverse_instructions(&c, &run(&[2, 0]));
-        assert_eq!(repeated_qubit.len(), 2);
-
         let rzz_layer = run_inverse_instructions(&c, &run(&[4, 3]));
         assert!(matches!(
             rzz_layer.as_slice(),
@@ -931,7 +948,53 @@ mod tests {
             }]
         ));
 
-        let mixed = run_inverse_instructions(&c, &run(&[4, 1]));
-        assert_eq!(mixed.len(), 2);
+        let repeated_qubit = run_inverse_instructions(&c, &run(&[2, 0]));
+        assert!(matches!(
+            repeated_qubit.as_slice(),
+            [Instruction::Gate {
+                gate: Gate::DiagonalBatch(_),
+                ..
+            }]
+        ));
+
+        let non_diagonal = run_inverse_instructions(&c, &run(&[5, 4]));
+        assert_eq!(non_diagonal.len(), 2);
+    }
+
+    #[test]
+    fn a_mixed_diagonal_run_collapses_into_one_diagonal_batch() {
+        // The Rz layer and the Rzz chain of an Ising ansatz merge into one run:
+        // every generator is Z type, so nothing splits them.
+        let n = 6;
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Rzz(0.31 + 0.07 * q as f64), &[q, q + 1]);
+        }
+        for q in 0..3 {
+            c.add_gate(Gate::Rz(0.4 + 0.11 * q as f64), &[q]);
+        }
+
+        let run: Vec<RunGate> = (0..c.instructions.len())
+            .rev()
+            .map(|i| {
+                let Instruction::Gate { gate, targets } = &c.instructions[i] else {
+                    unreachable!()
+                };
+                RunGate::new(i, gate.pauli_generator().unwrap(), targets)
+            })
+            .collect();
+
+        let inverses = run_inverse_instructions(&c, &run);
+        let [
+            Instruction::Gate {
+                gate: Gate::DiagonalBatch(data),
+                targets,
+            },
+        ] = inverses.as_slice()
+        else {
+            panic!("expected one DiagonalBatch, got {inverses:?}")
+        };
+        assert_eq!(data.entries.len(), 8);
+        assert_eq!(targets.as_slice(), &[0, 1, 2, 3, 4, 5]);
     }
 }

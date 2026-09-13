@@ -404,9 +404,10 @@ const SANDWICH_MIN_PAR_QUBITS: usize = 16;
 /// (unnormalized) complex value. The adjoint gradient engine uses this with
 /// distinct `λ` and `φ`; `pauli_expectation_from_masks` is the `λ = φ` case.
 ///
-/// Inlined explicitly: this is the adjoint engine's inner reduction, called
-/// once per parameter, and leaving the decision to LTO ties it to how many
-/// other callers the function happens to have.
+/// Inlined explicitly: the single-mask fallback of
+/// [`pauli_sandwiches_from_masks`], [`pauli_expectation_from_masks`] and the
+/// distributed backend all reduce through this, and leaving the decision to LTO
+/// ties it to how many callers the function happens to have.
 #[inline]
 pub(crate) fn pauli_sandwich(
     lambda: &[Complex64],

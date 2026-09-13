@@ -11,27 +11,37 @@ fn clifford_t_chain(n: usize) -> Circuit {
     circuit
 }
 
-/// The routes that propagate an observable instead of holding a state.
-fn stateless_kinds() -> [BackendKind; 4] {
+/// The routes that propagate an observable instead of holding a state, each
+/// with the name its error must carry.
+fn stateless_kinds() -> [(BackendKind, &'static str); 4] {
     [
-        BackendKind::StabilizerRank,
-        BackendKind::StochasticPauli { num_samples: 64 },
-        BackendKind::DeterministicPauli {
-            epsilon: 1e-3,
-            max_terms: 1024,
-        },
-        BackendKind::PauliPath {
-            epsilon: 1e-3,
-            max_terms: 1024,
-        },
+        (BackendKind::StabilizerRank, "stabilizer-rank"),
+        (
+            BackendKind::StochasticPauli { num_samples: 64 },
+            "stochastic Pauli",
+        ),
+        (
+            BackendKind::DeterministicPauli {
+                epsilon: 1e-3,
+                max_terms: 1024,
+            },
+            "deterministic Pauli",
+        ),
+        (
+            BackendKind::PauliPath {
+                epsilon: 1e-3,
+                max_terms: 1024,
+            },
+            "Pauli path",
+        ),
     ]
 }
 
-fn assert_no_state(error: PrismError, terminal: &str) {
+fn assert_no_state(error: PrismError, terminal: &str, route: &str) {
     match error {
         PrismError::IncompatibleBackend { reason, .. } => {
             assert!(
-                reason.starts_with(terminal) && reason.contains("holds a state"),
+                reason.starts_with(terminal) && reason.contains(&format!("the {route} route")),
                 "{reason}"
             );
         }
@@ -42,7 +52,7 @@ fn assert_no_state(error: PrismError, terminal: &str) {
 #[test]
 fn stateless_routes_decline_both_diagnostics() {
     let circuit = clifford_t_chain(6);
-    for kind in stateless_kinds() {
+    for (kind, route) in stateless_kinds() {
         assert_no_state(
             simulate(&circuit)
                 .backend(kind.clone())
@@ -50,6 +60,7 @@ fn stateless_routes_decline_both_diagnostics() {
                 .reduced_density_matrix(&[0, 1])
                 .unwrap_err(),
             "a reduced density matrix",
+            route,
         );
         assert_no_state(
             simulate(&circuit)
@@ -58,6 +69,7 @@ fn stateless_routes_decline_both_diagnostics() {
                 .entanglement_entropy(&[0, 1])
                 .unwrap_err(),
             "entanglement entropy",
+            route,
         );
     }
 }
@@ -130,14 +142,14 @@ fn the_entropy_terminal_declines_under_a_noise_model() {
 }
 
 // Readout error is indexed by classical bit and never reaches the state, so a
-// model carrying it is rejected rather than silently ignored.
+// model carrying it is rejected rather than silently ignored. The register
+// declares the bits the model is indexed by and measures none of them, since a
+// measurement would fail the unitary check first.
 #[test]
 fn readout_error_is_rejected_by_both_diagnostics() {
     let mut circuit = Circuit::new(2, 2);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_gate(Gate::Cx, &[0, 1]);
-    circuit.add_measure(0, 0);
-    circuit.add_measure(1, 1);
     let noise = noise::NoiseBuilder::new()
         .uniform_readout_error(0.01, 0.02)
         .build(&circuit)
@@ -200,4 +212,92 @@ fn the_subsystem_is_validated_before_the_run() {
             .unwrap_err(),
         PrismError::InvalidParameter { .. }
     ));
+}
+
+// A measurement, reset or conditional leaves one seeded branch of several, not
+// the state a diagnostic is defined on, so both terminals reject one before
+// any state is allocated.
+#[test]
+fn a_non_unitary_circuit_is_rejected_by_both_diagnostics() {
+    let mut measured = Circuit::new(2, 1);
+    measured.add_gate(Gate::H, &[0]);
+    measured.add_gate(Gate::Cx, &[0, 1]);
+    measured.add_measure(0, 0);
+
+    let mut reset = Circuit::new(2, 0);
+    reset.add_gate(Gate::H, &[0]);
+    reset.add_gate(Gate::Cx, &[0, 1]);
+    reset.add_reset(0);
+
+    let mut conditional = Circuit::new(2, 1);
+    conditional.add_gate(Gate::H, &[0]);
+    conditional.instructions.extend(crate::circuit::guarded(
+        crate::circuit::ClassicalCondition::BitIsOne(0),
+        vec![Instruction::Gate {
+            gate: Gate::X,
+            targets: crate::circuit::SmallVec::from_slice(&[1]),
+        }],
+    ));
+
+    for circuit in [measured, reset, conditional] {
+        for (error, subject) in [
+            (
+                simulate(&circuit)
+                    .seed(42)
+                    .reduced_density_matrix(&[0])
+                    .unwrap_err(),
+                "a reduced density matrix requires a unitary circuit",
+            ),
+            (
+                simulate(&circuit)
+                    .seed(42)
+                    .entanglement_entropy(&[0])
+                    .unwrap_err(),
+                "entanglement entropy requires a unitary circuit",
+            ),
+        ] {
+            match error {
+                PrismError::IncompatibleBackend { reason, .. } => {
+                    assert!(reason.starts_with(subject), "{reason}");
+                }
+                other => panic!("expected IncompatibleBackend, got {other:?}"),
+            }
+        }
+    }
+}
+
+// Auto picks the stabilizer for a Clifford circuit and the factored backend
+// for a partially independent one, neither of which holds a spectrum. The
+// route was the dispatcher's choice, so it falls back to the statevector; the
+// same backend named explicitly still declines.
+#[test]
+fn auto_falls_back_to_the_statevector_when_its_route_cannot_answer() {
+    let mut bell = Circuit::new(2, 0);
+    bell.add_gate(Gate::H, &[0]);
+    bell.add_gate(Gate::Cx, &[0, 1]);
+    let result = simulate(&bell).seed(42).entanglement_entropy(&[0]).unwrap();
+    assert!((result.entropy - std::f64::consts::LN_2).abs() < 1e-12);
+    assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
+
+    assert_eq!(
+        simulate(&bell)
+            .backend(BackendKind::Stabilizer)
+            .seed(42)
+            .entanglement_entropy(&[0])
+            .unwrap_err(),
+        PrismError::BackendUnsupported {
+            backend: "stabilizer".to_string(),
+            operation: "Schmidt values".to_string(),
+        }
+    );
+
+    let mut split = Circuit::new(10, 0);
+    terminal_candidate_matrix_tests::rx_cx_chain(&mut split, 0..8);
+    terminal_candidate_matrix_tests::rx_cx_chain(&mut split, 8..10);
+    let result = simulate(&split)
+        .seed(42)
+        .entanglement_entropy(&[8])
+        .unwrap();
+    assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
+    assert!(result.entropy > 0.0, "entropy {}", result.entropy);
 }

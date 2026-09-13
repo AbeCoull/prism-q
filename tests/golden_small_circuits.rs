@@ -1611,7 +1611,9 @@ fn the_entropy_terminal_reads_zero_on_a_product_state() {
 }
 
 // (|00> + |11>) / sqrt 2: entropy ln 2 with two Schmidt values of 1 / sqrt 2,
-// a one-qubit marginal of I / 2, and purity Tr((I / 2)^2) = 1 / 2.
+// a one-qubit marginal of I / 2, and purity Tr((I / 2)^2) = 1 / 2. `Auto`
+// routes a Clifford circuit to the stabilizer, which holds neither, so these
+// values also pin its fallback to the statevector.
 #[test]
 fn the_terminals_read_a_bell_pair_as_a_maximally_mixed_marginal() {
     let circuit = bell_circuit();
@@ -1619,10 +1621,12 @@ fn the_terminals_read_a_bell_pair_as_a_maximally_mixed_marginal() {
     let c = |re: f64| Complex64::new(re, 0.0);
     for qubit in 0..2 {
         for kind in [
+            BackendKind::Auto,
             BackendKind::Statevector,
             BackendKind::Mps { max_bond_dim: 64 },
         ] {
             let result = entropy_through(kind, &circuit, &[qubit]);
+            assert_eq!(result.subsystem, vec![qubit]);
             assert!(
                 (result.entropy - std::f64::consts::LN_2).abs() < EPS,
                 "qubit {qubit}: entropy {}",
@@ -1634,14 +1638,16 @@ fn the_terminals_read_a_bell_pair_as_a_maximally_mixed_marginal() {
                 "bell",
             );
         }
-        let rho = rdm_through(BackendKind::Statevector, &circuit, &[qubit]);
-        assert_eq!(rho.qubits, vec![qubit]);
-        assert_entries(
-            &rho.data,
-            &[c(0.5), c(0.0), c(0.0), c(0.5)],
-            "bell marginal",
-        );
-        assert!((rho.purity() - 0.5).abs() < EPS, "purity {}", rho.purity());
+        for kind in [BackendKind::Auto, BackendKind::Statevector] {
+            let rho = rdm_through(kind, &circuit, &[qubit]);
+            assert_eq!(rho.qubits, vec![qubit]);
+            assert_entries(
+                &rho.data,
+                &[c(0.5), c(0.0), c(0.0), c(0.5)],
+                "bell marginal",
+            );
+            assert!((rho.purity() - 0.5).abs() < EPS, "purity {}", rho.purity());
+        }
     }
 }
 

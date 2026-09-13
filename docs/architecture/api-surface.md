@@ -36,9 +36,10 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 **State diagnostics:** `Simulate::reduced_density_matrix` returns a
 `ReducedDensityMatrix` (row major, side `2^k`, `qubits[0]` the lowest bit of the row
 index) with a `purity` method for `Tr(rho^2)`; `Simulate::entanglement_entropy` returns
-an `EntropyResult` carrying the von Neumann entropy in nats and, where the backend
-produced one, the descending Schmidt spectrum. Which backends answer each is tabulated
-in [Backends](./backends.md).
+an `EntropyResult` carrying the von Neumann entropy in nats and the descending Schmidt
+spectrum. Both require a unitary circuit, and under `BackendKind::Auto` a route that
+cannot answer falls back to the statevector. Which backends answer each is tabulated in
+[Backends](./backends.md).
 
 **Gradients:**
 `run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`

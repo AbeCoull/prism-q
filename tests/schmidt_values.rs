@@ -19,7 +19,7 @@ use prism_q::backend::stabilizer::StabilizerBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 use prism_q::circuit::Circuit;
-use prism_q::circuits::ghz_circuit;
+use prism_q::circuits::{brickwork_circuit, ghz_circuit};
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::{BackendKind, simulate};
@@ -127,6 +127,10 @@ fn terminal_entropy(kind: BackendKind, circuit: &Circuit, subsystem: &[usize]) -
         .seed(SEED)
         .entanglement_entropy(subsystem)
         .unwrap();
+    assert_eq!(
+        result.subsystem, subsystem,
+        "the terminal echoed a different subsystem"
+    );
     let values = result
         .schmidt_values
         .as_deref()
@@ -216,4 +220,25 @@ fn the_terminal_names_the_backend_that_declines() {
             }
         );
     }
+}
+
+// A bond cap of 2 truncates a brick-wall state, so the chain is unnormalized
+// until it is read. The spectrum is still normalized on the way out and the
+// result says the route discarded weight.
+#[test]
+fn the_terminal_normalizes_a_truncating_chain_and_says_so() {
+    let circuit = brickwork_circuit(8, 6, SEED);
+    let result = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 2 })
+        .seed(SEED)
+        .entanglement_entropy(&[0, 1, 2, 3])
+        .unwrap();
+    let values = result.schmidt_values.as_deref().unwrap();
+    let total: f64 = values.iter().map(|s| s * s).sum();
+    assert!((total - 1.0).abs() < 1e-12, "squares sum to {total}");
+    assert!(
+        !result.metadata.is_exact(),
+        "a chain truncated at bond 2 reported {:?}",
+        result.metadata.exactness
+    );
 }

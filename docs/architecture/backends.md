@@ -233,11 +233,18 @@ itself exact whatever budget it was given.
 ## State diagnostics
 
 `Simulate::reduced_density_matrix` and `Simulate::entanglement_entropy` read the output
-state once the circuit has been applied. Both resolve to a single backend, as the native
-expectation path does, and both ask that backend for the answer in its own
-representation; a backend that has no kernel for one of them reports
-`BackendUnsupported` naming itself and the diagnostic rather than falling back to a
-dense export.
+state once the circuit has been applied, so both require a unitary circuit: a
+measurement, reset or conditional leaves one seeded branch of several, not the state the
+diagnostic is defined on. Both resolve to a single backend, as the native expectation
+path does, and both ask that backend for the answer in its own representation; an
+explicitly selected backend with no kernel for one of them reports `BackendUnsupported`
+naming itself and the diagnostic rather than falling back to a dense export.
+
+Under `BackendKind::Auto` the route is the dispatcher's choice, not the caller's, so a
+resolved backend that cannot answer is replaced by the statevector while the circuit fits
+its cap. A Clifford circuit routed to the stabilizer, a partially independent one routed
+to the factored backend, and a sparse-friendly one all still read their entropy that way;
+the same circuits decline when the backend is named explicitly.
 
 | Backend | Reduced density matrix | Entanglement entropy |
 | --- | --- | --- |

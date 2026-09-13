@@ -333,3 +333,42 @@ fn the_adjoint_gradient_declines_a_start_state() {
         "expected IncompatibleBackend, got {err:?}"
     );
 }
+
+// A start state of |+>|0> through one CX is a Bell pair, so both diagnostics
+// read the closed forms off a register the circuit alone never prepares.
+#[test]
+fn the_diagnostics_read_the_evolved_start_state() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    let plus_zero = vec![
+        Complex64::new(half, 0.0),
+        Complex64::new(half, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+    ];
+
+    let entropy = simulate(&circuit)
+        .initial_state(&plus_zero)
+        .seed(SEED)
+        .entanglement_entropy(&[0])
+        .unwrap();
+    assert_close(
+        entropy.entropy,
+        std::f64::consts::LN_2,
+        "start-state entropy",
+    );
+    let values = entropy.schmidt_values.as_deref().unwrap();
+    assert_eq!(values.len(), 2);
+    assert_close(values[0], half, "first Schmidt value");
+
+    let rho = simulate(&circuit)
+        .initial_state(&plus_zero)
+        .seed(SEED)
+        .reduced_density_matrix(&[1])
+        .unwrap();
+    assert_close(rho.data[0].re, 0.5, "rho[0][0]");
+    assert_close(rho.data[3].re, 0.5, "rho[1][1]");
+    assert_close(rho.data[1].norm(), 0.0, "rho[0][1]");
+    assert_close(rho.purity(), 0.5, "purity");
+}

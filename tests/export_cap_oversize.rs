@@ -1,6 +1,7 @@
 //! Dense export cap on the queries priced against it: reduced density matrices
-//! and Schmidt spectra. One binary because each pins `PRISM_MAX_EXPORT_QUBITS`
-//! to 4, and the cap is cached per process.
+//! and Schmidt spectra, on the backends and through the terminal. One binary
+//! because each pins `PRISM_MAX_EXPORT_QUBITS` to 4, and the cap is cached per
+//! process.
 
 mod common;
 
@@ -17,6 +18,7 @@ use prism_q::circuit::Circuit;
 use prism_q::circuits::ghz_circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
+use prism_q::{BackendKind, simulate};
 
 fn small_export_cap() {
     caps::set_once(&[("PRISM_MAX_EXPORT_QUBITS", "4")]);
@@ -117,4 +119,38 @@ fn a_spectrum_declines_when_its_transient_prices_past_the_export_cap() {
     );
     // A run of sites at either end is one SVD at the cut, whatever its width.
     assert_ghz_spectrum(&mps.schmidt_values(&[0, 1, 2, 3, 4]).unwrap());
+}
+
+// The terminal prices the answer once the plan names the backend, before the
+// circuit is executed, so an oversized subsystem costs no simulation.
+#[test]
+fn the_terminal_declines_an_oversized_subsystem_before_running() {
+    small_export_cap();
+
+    let ghz = ghz_circuit(5);
+    let rho = simulate(&ghz)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .reduced_density_matrix(&[0, 3])
+        .unwrap();
+    assert_eq!(rho.data.len(), 16);
+
+    match simulate(&ghz)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .reduced_density_matrix(&[0, 3, 1])
+        .unwrap_err()
+    {
+        PrismError::IncompatibleBackend { backend, reason } => {
+            assert_eq!(backend, "statevector");
+            assert!(
+                reason.starts_with(
+                    "reduced density matrix on 3 qubits, which is the size of a statevector \
+                     for 6 qubits"
+                ),
+                "{reason}"
+            );
+        }
+        other => panic!("unexpected error {other:?}"),
+    }
 }

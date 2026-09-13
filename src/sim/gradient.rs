@@ -432,7 +432,7 @@ pub(crate) fn shift_gradient(
 ) -> Result<ExpectationGradient> {
     params.validate(circuit)?;
     if initial_state.is_some() || noise.is_some() {
-        super::require_unitary_circuit(kind, circuit)?;
+        super::require_unitary_circuit(kind, circuit, "expectation values require")?;
     }
 
     let observables: Vec<Vec<PauliTerm>> =

@@ -24,9 +24,11 @@ const NEAR_ZERO_NORM_SQ: f64 = 1e-24;
 
 /// Threshold for detecting identity-like matrices (element norm).
 ///
-/// Used in `is_diagonal_1q()` for fused gate diagonal detection and in
-/// `controlled_phase()` for phase-gate structure recognition.
-const IDENTITY_EPS: f64 = 1e-12;
+/// Used in `is_diagonal_1q()` for fused gate diagonal detection, in
+/// `controlled_phase()` for phase-gate structure recognition, and by the
+/// fusion pass for the identity drop. `RECOGNIZE_EPS` is held at this value so
+/// the matrix recognizers cannot accept a gate an identity drop would reject.
+pub(crate) const IDENTITY_EPS: f64 = 1e-12;
 
 /// Quantum gate identifier.
 ///
@@ -1035,7 +1037,7 @@ impl Gate {
                 (1, 0)
             };
             let phase = mat[r][c] / named[r][c];
-            if (phase.norm_sqr() - 1.0).abs() > RECOGNIZE_EPS {
+            if (phase.norm() - 1.0).abs() > RECOGNIZE_EPS {
                 continue;
             }
             let scaled = [
@@ -1100,8 +1102,16 @@ pub(crate) fn is_diagonal_4x4(mat: &[[Complex64; 4]; 4]) -> bool {
     true
 }
 
-/// Entry tolerance (on `norm_sqr`) for the matrix recognizers.
-const RECOGNIZE_EPS: f64 = 1e-10;
+/// Per-entry magnitude tolerance for `recognize_matrix` and
+/// `recognize_matrix_up_to_phase`.
+///
+/// Taken from `IDENTITY_EPS` so neither can accept a matrix the fusion pass
+/// would refuse to drop as an identity: a disc of this radius on each entry
+/// sits inside the box the identity check puts on the real and imaginary
+/// parts. A tolerance on `norm_sqr` would admit the square root of this, which
+/// is large enough to swallow a whole rotation: `Rx(1e-5)` differs from the
+/// identity by 5e-6 per entry but by only 2.5e-11 squared.
+const RECOGNIZE_EPS: f64 = IDENTITY_EPS;
 
 /// Named single-qubit gates the matrix recognizers try, in order.
 const NAMED_1Q_CANDIDATES: &[Gate] = &[
@@ -1119,7 +1129,7 @@ const NAMED_1Q_CANDIDATES: &[Gate] = &[
 ];
 
 fn matrices_equal(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) -> bool {
-    (0..2).all(|i| (0..2).all(|j| (a[i][j] - b[i][j]).norm_sqr() <= eps))
+    (0..2).all(|i| (0..2).all(|j| (a[i][j] - b[i][j]).norm() <= eps))
 }
 
 fn format_angle(theta: f64) -> String {

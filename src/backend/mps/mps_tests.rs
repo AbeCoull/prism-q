@@ -1450,19 +1450,6 @@ fn a_non_unitary_write_off_the_center_drops_it() {
     kraus.apply_1q_matrix(center + 1, &damping).unwrap();
     assert_eq!(kraus.center, None, "a Kraus branch kept the record");
 
-    let mut measured = chain_with_center(center);
-    measured
-        .apply(&Instruction::Measure {
-            qubit: center + 1,
-            classical_bit: 0,
-        })
-        .unwrap();
-    assert_eq!(measured.center, None, "a measurement kept the record");
-
-    let mut reset = chain_with_center(center);
-    reset.reset(center + 1).unwrap();
-    assert_eq!(reset.center, None, "a reset kept the record");
-
     // What dropping it buys: the cut after a Kraus branch still books the error
     // it makes, because it rebuilds rather than trusting a stale record.
     let (booked, realized) = one_cut(&kraus, 3, cx_at(3));
@@ -1474,19 +1461,119 @@ fn a_non_unitary_write_off_the_center_drops_it() {
 }
 
 // The center site is under no isometry claim, so a projection there leaves
-// every other site exactly as canonical as it was.
+// every other site exactly as canonical as it was. A measurement elsewhere
+// walks the center onto the site it is about to write, which is what lets the
+// record survive rather than being dropped for the next cut to rebuild.
 #[test]
-fn a_projection_on_the_center_keeps_it() {
+fn a_projection_takes_the_center_and_keeps_it() {
     let center = 2;
-    let mut b = chain_with_center(center);
+    for site in [center, center + 1] {
+        let mut measured = chain_with_center(center);
+        measured
+            .apply(&Instruction::Measure {
+                qubit: site,
+                classical_bit: 0,
+            })
+            .unwrap();
+        assert_eq!(measured.center, Some(site), "measurement at site {site}");
+        measured.assert_gauge(site);
+
+        let mut reset = chain_with_center(center);
+        reset.reset(site).unwrap();
+        assert_eq!(reset.center, Some(site), "reset at site {site}");
+        reset.assert_gauge(site);
+    }
+}
+
+// The first measurement on a chain carrying no record establishes one, and the
+// weights it then reads off the center site are the Born weights of the dense
+// vector. Every site, so the walk is checked in both directions.
+#[test]
+fn born_weights_on_a_fresh_chain_match_the_dense_vector() {
+    let n = 6;
+    let base = mps_after(&crate::circuits::brickwork_circuit(n, 4, 42), 4096);
+    assert_eq!(base.center, None, "the fixture arrived gauged");
+    let dense = base.export_statevector().unwrap();
+    let norm = base.pauli_expectation(&[]).unwrap().re;
+
+    for site in 0..n {
+        let mut b = base.clone();
+        let weights = b.born_weights(site);
+        assert_eq!(b.center, Some(site));
+        b.assert_gauge(site);
+
+        let expected: f64 = dense
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (index >> site) & 1 == 1)
+            .map(|(_, amplitude)| amplitude.norm_sqr())
+            .sum();
+        // Against the chain's own norm rather than against their sum, so a
+        // scale on both weights fails here instead of cancelling.
+        assert!(
+            (weights[1] - norm * expected).abs() < 1e-12,
+            "site {site} reads {} against {}",
+            weights[1],
+            norm * expected
+        );
+        assert!(
+            (weights[0] + weights[1] - norm).abs() < 1e-12,
+            "site {site} weights sum to {} against a norm of {norm}",
+            weights[0] + weights[1]
+        );
+    }
+}
+
+// A chain no cut can take weight from has no use for a center: the exact
+// constructor holds an unbounded cap and a threshold of zero, so a record left
+// by a measurement would put a walk on every later gate for an error no cut
+// makes.
+#[test]
+fn an_exact_chain_keeps_no_center_through_a_measurement() {
+    let n = 6;
+    let mut b = MpsBackend::new_exact(42);
+    b.init(n, 1).unwrap();
+    b.apply_instructions(&crate::circuits::brickwork_circuit(n, 4, 42).instructions)
+        .unwrap();
+    assert_eq!(b.center, None);
+
     b.apply(&Instruction::Measure {
-        qubit: center,
+        qubit: 2,
         classical_bit: 0,
     })
     .unwrap();
+    assert_eq!(b.center, None, "an exact chain kept a record");
+    assert_eq!(b.truncation_discarded(), 0.0);
 
-    assert_eq!(b.center, Some(center));
-    b.assert_gauge(center);
+    let mark = b.center_steps;
+    b.dispatch_gate(&Gate::Cx, &[3, 4]).unwrap();
+    assert_eq!(
+        b.center_steps, mark,
+        "a gate after the measurement walked for a cut that cannot lose"
+    );
+
+    b.reset(4).unwrap();
+    assert_eq!(b.center, None, "a reset kept a record");
+
+    // The other arm of the same predicate: a threshold of zero under a finite
+    // cap can still lose weight, so that chain does keep the record.
+    let mut capped = MpsBackend::new(42, 8);
+    capped.set_svd_epsilon(0.0);
+    capped.init(n, 1).unwrap();
+    capped
+        .apply_instructions(&crate::circuits::brickwork_circuit(n, 4, 42).instructions)
+        .unwrap();
+    capped
+        .apply(&Instruction::Measure {
+            qubit: 2,
+            classical_bit: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        capped.center,
+        Some(2),
+        "a capped chain dropped the record a later cut needs"
+    );
 }
 
 // End to end: a chain of Schmidt rank 2 under a cap of 3 drives the policy on

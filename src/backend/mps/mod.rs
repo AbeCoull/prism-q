@@ -858,6 +858,15 @@ impl MpsBackend {
                 && (rank >= GAUGE_RANK as u128 || self.bond_high_water >= GAUGE_RANK))
     }
 
+    /// Whether any cut of this chain can lose weight, and so whether a gauge
+    /// is worth recording at all. An unbounded cap with a threshold of zero
+    /// keeps every singular value of every cut, which is what the exact
+    /// constructor asks for, and a center there would put a walk on every
+    /// later two-qubit gate for an error no cut makes.
+    fn cuts_can_lose_weight(&self) -> bool {
+        self.svd_epsilon > 0.0 || self.max_bond_dim < usize::MAX
+    }
+
     /// Drop the recorded center unless the write lands on it.
     ///
     /// A write that is not an isometry on `site` breaks the gauge the record
@@ -2086,13 +2095,13 @@ impl MpsBackend {
     /// buffer is allocated once rather than per site.
     ///
     /// [`Self::compute_right_env`] deliberately keeps the four-index form
-    /// instead of calling this. Its callers are measurement and reset, where
-    /// projection has just zeroed half of each site tensor and the environments
-    /// are mostly zero; the `env_val == ZERO` skip there beats dense `O(χ³)`
-    /// arithmetic by 14% on `mps/hotspots/measure_reset_32q_r3` (496 µs against
-    /// 574 µs). The sweep below runs on unprojected chains where the
-    /// environments are dense and the asymptotics decide instead. Measure both
-    /// before unifying them.
+    /// instead of calling this. It serves the single-site reduced density
+    /// matrix, whose chains carry the zeros a projection leaves behind, and the
+    /// `env_val == ZERO` skip there beat dense `O(χ³)` arithmetic by 14% on
+    /// `mps/hotspots/measure_reset_32q_r3` (496 µs against 574 µs) while that
+    /// row still went through the environments. The sweep below runs on
+    /// unprojected chains where the environments are dense and the asymptotics
+    /// decide instead. Measure both before unifying them.
     fn contract_right_env(
         &self,
         site: usize,
@@ -2222,96 +2231,68 @@ impl MpsBackend {
     }
 
     fn apply_reset(&mut self, qubit: usize) {
-        let prob = self.site_outcome_probabilities(qubit);
+        let prob = self.born_weights(qubit);
         let outcome = usize::from(self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0));
         self.collapse_site_to_zero(qubit, outcome, prob[outcome].clamp(0.0, 1.0));
     }
 
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
-        let prob = self.site_outcome_probabilities(qubit);
+        let prob = self.born_weights(qubit);
 
         let measured = usize::from(self.rng.random::<f64>() < prob[1].clamp(0.0, 1.0));
         self.classical_bits[classical_bit] = measured == 1;
         self.project_site_outcome(qubit, measured, prob[measured].clamp(0.0, 1.0));
     }
 
-    fn site_outcome_probabilities(&self, site: usize) -> [f64; 2] {
-        let l_env = self.compute_left_env(site);
-        let r_env = self.compute_right_env(site);
+    /// Unnormalized weight of each outcome at `site`, taken with the
+    /// orthogonality center walked onto it.
+    ///
+    /// Every other site is then an isometry and both environments contract to
+    /// identities, which leaves the weights as the site's own row sums: `O(χ²)`
+    /// against the `O(n·χ⁴)` of the two environment sweeps a site off the
+    /// center needs. The projection that follows writes `site` alone, the one
+    /// site under no isometry claim, so the center survives it and the next
+    /// measurement pays the distance between the two sites rather than a
+    /// rebuild from the end of the chain. A chain
+    /// [`Self::cuts_can_lose_weight`] rules out keeps no record past the
+    /// projection: the walk is still the cheaper way to the weights, and the
+    /// gauge would only tax the gates that follow.
+    fn born_weights(&mut self, site: usize) -> [f64; 2] {
+        match self.center {
+            Some(_) => self.move_center(site),
+            None => self.establish_center(site),
+        }
+
         let t = &self.sites[site];
-        let bl = t.bond_left;
         let br = t.bond_right;
-
         let mut prob = [0.0f64; 2];
-        for (outcome, prob_out) in prob.iter_mut().enumerate() {
-            #[cfg(feature = "parallel")]
-            if bl >= MIN_BOND_FOR_PAR {
-                let val: Complex64 = (0..bl)
-                    .into_par_iter()
-                    .map(|alpha| {
-                        let mut sum = ZERO;
-                        for alpha_p in 0..bl {
-                            let l_val = l_env[alpha * bl + alpha_p];
-                            if l_val == ZERO {
-                                continue;
-                            }
-                            for beta in 0..br {
-                                for beta_p in 0..br {
-                                    let r_val = r_env[beta * br + beta_p];
-                                    if r_val == ZERO {
-                                        continue;
-                                    }
-                                    sum += l_val
-                                        * t.data[t.idx(alpha, outcome, beta)]
-                                        * t.data[t.idx(alpha_p, outcome, beta_p)].conj()
-                                        * r_val;
-                                }
-                            }
-                        }
-                        sum
-                    })
-                    .sum();
-                *prob_out = val.re;
-                continue;
+        for alpha in 0..t.bond_left {
+            let row = &t.data[alpha * (2 * br)..(alpha + 1) * (2 * br)];
+            for (outcome, weight) in prob.iter_mut().enumerate() {
+                *weight += row[outcome * br..(outcome + 1) * br]
+                    .iter()
+                    .map(|x| x.norm_sqr())
+                    .sum::<f64>();
             }
-
-            let mut val = ZERO;
-            for alpha in 0..bl {
-                for alpha_p in 0..bl {
-                    let l_val = l_env[alpha * bl + alpha_p];
-                    if l_val == ZERO {
-                        continue;
-                    }
-                    for beta in 0..br {
-                        for beta_p in 0..br {
-                            let r_val = r_env[beta * br + beta_p];
-                            if r_val == ZERO {
-                                continue;
-                            }
-                            val += l_val
-                                * t.data[t.idx(alpha, outcome, beta)]
-                                * t.data[t.idx(alpha_p, outcome, beta_p)].conj()
-                                * r_val;
-                        }
-                    }
-                }
-            }
-            *prob_out = val.re;
         }
         prob
     }
 
-    /// Take the Born probability from the caller so the site environments are
-    /// contracted once per measurement rather than twice, the convention
-    /// [`Self::collapse_site_to_zero`] already uses for reset.
+    /// Take the Born weight from the caller, which read it off the center in
+    /// [`Self::born_weights`], the convention [`Self::collapse_site_to_zero`]
+    /// already uses for reset. The write lands on the center, so the gauge
+    /// comes through it intact.
     fn project_site_outcome(&mut self, site: usize, outcome: usize, prob: f64) -> f64 {
+        debug_assert_eq!(self.center, Some(site), "a projection off the center");
+        if !self.cuts_can_lose_weight() {
+            self.center = None;
+        }
         if prob <= NORM_CLAMP_MIN {
             return 0.0;
         }
         let inv_sqrt_prob = 1.0 / prob.sqrt();
         let scale = Complex64::new(inv_sqrt_prob, 0.0);
         let other = 1 - outcome;
-        self.invalidate_center_unless(site);
 
         let t = &mut self.sites[site];
         let bl = t.bond_left;
@@ -2331,14 +2312,17 @@ impl MpsBackend {
     ///
     /// Writing the surviving component straight into the zero slot folds in the
     /// X that a trajectory reset would otherwise apply after projecting onto
-    /// outcome 1, and takes the Born probability from the caller so the site
-    /// environments are contracted once per reset rather than twice.
+    /// outcome 1, and takes the Born weight from the caller, which read it off
+    /// the center in [`Self::born_weights`].
     fn collapse_site_to_zero(&mut self, site: usize, outcome: usize, prob: f64) {
+        debug_assert_eq!(self.center, Some(site), "a reset off the center");
+        if !self.cuts_can_lose_weight() {
+            self.center = None;
+        }
         if prob <= NORM_CLAMP_MIN {
             return;
         }
         let scale = Complex64::new(1.0 / prob.sqrt(), 0.0);
-        self.invalidate_center_unless(site);
         let t = &mut self.sites[site];
         let br = t.bond_right;
         for alpha in 0..t.bond_left {
@@ -2358,7 +2342,7 @@ impl MpsBackend {
     pub(crate) fn project_z_outcome(&mut self, qubit: usize, outcome: bool) -> f64 {
         let site = self.site_for_logical(qubit);
         let outcome = usize::from(outcome);
-        let prob = self.site_outcome_probabilities(site)[outcome].clamp(0.0, 1.0);
+        let prob = self.born_weights(site)[outcome].clamp(0.0, 1.0);
         self.project_site_outcome(site, outcome, prob)
     }
 
@@ -2539,8 +2523,7 @@ impl MpsBackend {
     /// Writes `w[i * bond_right + β] = Σ_α left[α] · A[α, i, β]` into `w` and
     /// returns the unnormalized weight of each outcome. The conditioned left
     /// environment is the rank-one `left[α]·conj(left[α'])`, which collapses
-    /// the four-index contraction of [`Self::site_outcome_probabilities`] to
-    /// `O(χ²)`.
+    /// the four-index contraction a general environment owes to `O(χ²)`.
     fn site_conditional_weights(
         &self,
         site: usize,

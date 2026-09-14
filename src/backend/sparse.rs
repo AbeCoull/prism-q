@@ -56,7 +56,7 @@ const MIN_SHOTS_FOR_PAR: usize = 32;
 const SHOTS_PER_STREAM: usize = 256;
 
 use crate::backend::{
-    Backend, BasisSamples, dense_probability_len, dense_statevector_len, is_phase_one,
+    Backend, BasisSamples, dense_probability_len, dense_statevector_len, is_phase_one, overlap,
     reduced_density, reserve_dense_output, schmidt,
 };
 use crate::circuit::Instruction;
@@ -658,6 +658,10 @@ impl Backend for SparseBackend {
         "sparse"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn resolved(&self) -> crate::sim::ResolvedBackend {
         crate::sim::ResolvedBackend::Sparse
     }
@@ -785,6 +789,34 @@ impl Backend for SparseBackend {
         }
         reduced_density::normalize_trace(&mut rho, dim);
         Ok(rho)
+    }
+
+    /// One pass over this map with a lookup in the other, `O(nnz)` and no
+    /// width cap: only the basis states both hold carry weight into the inner
+    /// product.
+    fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
+        if let Some(sparse) = other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<SparseBackend>())
+        {
+            if sparse.num_qubits == self.num_qubits {
+                let mut inner = Complex64::new(0.0, 0.0);
+                for (index, amp) in &self.state {
+                    if let Some(theirs) = sparse.state.get(index) {
+                        inner += amp.conj() * theirs;
+                    }
+                }
+                let left: f64 = self.state.values().map(Complex64::norm_sqr).sum();
+                let right: f64 = sparse.state.values().map(Complex64::norm_sqr).sum();
+                return Ok(overlap::normalized(inner.norm_sqr(), left, right));
+            }
+        }
+        overlap::export_overlap_sq(
+            self.name(),
+            self.num_qubits(),
+            || self.export_statevector(),
+            other,
+        )
     }
 
     fn classical_results(&self) -> &[bool] {

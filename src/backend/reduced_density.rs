@@ -51,6 +51,36 @@ pub(crate) fn traced_base(e: usize, ascending: &[usize]) -> usize {
         .fold(e, |base, &q| insert_zero_bit(base, q))
 }
 
+/// Multiply one block's `side x side` factor into `rho`, the block's qubits
+/// sitting at `positions` in the subsystem's index order.
+///
+/// Blocks of a factored register are exactly unentangled, so the joint
+/// reduced density matrix is the Kronecker product of their own, taken here
+/// one block at a time through the bits of the row and column index that
+/// block occupies.
+pub(crate) fn multiply_block_factor(
+    rho: &mut [Complex64],
+    dim: usize,
+    positions: &[usize],
+    factor: &[Complex64],
+    side: usize,
+) {
+    let gather: Vec<usize> = (0..dim)
+        .map(|t| {
+            positions
+                .iter()
+                .enumerate()
+                .fold(0, |s, (j, &i)| s | (((t >> i) & 1) << j))
+        })
+        .collect();
+    for (t, &row) in gather.iter().enumerate() {
+        let out = &mut rho[t * dim..(t + 1) * dim];
+        for (entry, &col) in out.iter_mut().zip(&gather) {
+            *entry *= factor[row * side + col];
+        }
+    }
+}
+
 /// Scale `rho` so its trace is 1, whatever norm the state it was read from
 /// carried.
 pub(crate) fn normalize_trace(rho: &mut [Complex64], dim: usize) {

@@ -232,38 +232,55 @@ itself exact whatever budget it was given.
 
 ## State diagnostics
 
-`Simulate::reduced_density_matrix` and `Simulate::entanglement_entropy` read the output
-state once the circuit has been applied, so both require a unitary circuit: a
-measurement, reset or conditional leaves one seeded branch of several, not the state the
-diagnostic is defined on. Both resolve to a single backend, as the native expectation
-path does, and both ask that backend for the answer in its own representation; an
-explicitly selected backend with no kernel for one of them reports `BackendUnsupported`
-naming itself and the diagnostic rather than falling back to a dense export.
+`Simulate::reduced_density_matrix`, `Simulate::entanglement_entropy` and
+`Simulate::overlap` read the output state once the circuit has been applied, so all three
+require a unitary circuit: a measurement, reset or conditional leaves one seeded branch of
+several, not the state the diagnostic is defined on. Each resolves to a single backend, as
+the native expectation path does, and asks that backend for the answer in its own
+representation; an explicitly selected backend with no kernel for one of them reports
+`BackendUnsupported` naming itself and the diagnostic rather than falling back to a dense
+export.
 
 Under `BackendKind::Auto` the route is the dispatcher's choice, not the caller's, so a
 resolved backend that cannot answer is replaced by the statevector while the circuit fits
-its cap. A Clifford circuit routed to the stabilizer, a partially independent one routed
-to the factored backend, and a sparse-friendly one all still read their entropy that way;
-the same circuits decline when the backend is named explicitly.
+its cap. A partially independent circuit routed to the factored backend and a
+sparse-friendly one both read their entropy that way, and the same circuits decline when
+the backend is named explicitly. A Clifford circuit keeps its tableau, which answers the
+entropy and the marginal without expanding anything.
 
-| Backend | Reduced density matrix | Entanglement entropy |
-| --- | --- | --- |
-| Statevector (host or device) | Partial trace over the complement | One thin SVD of the reshaped amplitudes, with the Schmidt spectrum |
-| Sparse | Grouped over the traced index | Declines |
-| Factored | Kronecker of the per-block traces | Declines |
-| Product state | Kronecker of the per-qubit factors | `0`, with the single Schmidt value `1` |
-| Density matrix | Partial trace of the mixture | Declines: a mixture has no Schmidt decomposition |
-| MPS | Declines | One SVD at the cut, or the eigenvalues of the reduced density matrix when the subsystem is not contiguous in chain order |
-| Tensor network | Declines | Declines |
-| Stabilizer, factored-stabilizer | Declines | Declines |
-| Distributed statevector | Declines | Declines |
+| Backend | Reduced density matrix | Entanglement entropy | State overlap |
+| --- | --- | --- | --- |
+| Statevector (host or device) | Partial trace over the complement | One thin SVD of the reshaped amplitudes, with the Schmidt spectrum | Dense dot product |
+| Sparse | Grouped over the traced index | Declines | Lookup join over the nonzeros against another sparse map, at any width |
+| Factored | Kronecker of the per-block traces | Declines | Dense export |
+| Product state | Kronecker of the per-qubit factors | `0`, with the single Schmidt value `1` | Product of the per-qubit inner products against another product state, at any width |
+| Density matrix | Partial trace of the mixture | Declines: a mixture has no Schmidt decomposition | Declines: the fidelity of two mixtures is not an inner product |
+| MPS | Declines | One SVD at the cut, or the eigenvalues of the reduced density matrix when the subsystem is not contiguous in chain order | Chain contraction against another chain in the same site order, at any width |
+| Tensor network | Declines | Declines | Dense export |
+| Stabilizer, factored-stabilizer | Projector onto the generators supported inside the subsystem | Rank of the generators restricted to the cut, less the subsystem size, in units of `ln 2`, with the flat spectrum that rank stands for | Rank of the two tableaux merged, at any width while both hold their rows on the host, on the stabilizer; a device-resident tableau and the factored form take the dense export |
+| Distributed statevector | Declines | Declines | Dense export |
 
 The entropy is the von Neumann entropy in nats, so a Bell pair reads `ln 2`, and the
 Schmidt values come back descending with their squares summing to one whatever norm the
-representation carried. The reduced density matrix is row major with side `2^k` and
-trace one, and its `4^k` entries are priced as a `2k`-qubit statevector against the dense
-export cap. A noise model sends either terminal to the density matrix, which answers the
-marginal of the exact mixture and declines the entropy.
+representation carried. A stabilizer cut of rank `r` has `2^r` equal weights, so its
+tableau reads the rank off one elimination and builds the list from it; past the dense
+export cap those values no longer fit while the rank still does, and the entropy comes
+back alone with `EntropyResult::schmidt_values` at `None`. That is the width where the
+old fallback to the statevector could not answer at all. The reduced density matrix is
+row major with side `2^k` and trace one, and its `4^k` entries are priced as a
+`2k`-qubit statevector against the dense export cap. A noise model sends the marginal and
+the entropy to the density matrix, which answers the marginal of the exact mixture and
+declines the entropy.
+
+`Simulate::overlap` takes a second seeded builder, so each side carries its own backend,
+seed and start state, and the two circuits must declare the same width. The result is
+the modulus squared of the inner product over the two normalized states; the amplitude is
+not reported, since a tableau keeps no global phase and every MPS truncation moves one.
+Normalization divides by both norms on every route, so an unnormalized chain answers the
+same as a unit-norm state. Two states in the same representation take the native route at
+any width, and every other pair is served by a dense export of both, which reaches exactly
+as far as the export cap does. A noise model on either side is rejected, since the
+fidelity of two mixtures is a different computation.
 
 ## What a backend reports about its own result
 

@@ -45,7 +45,8 @@ use num_complex::Complex64;
 use smallvec::SmallVec;
 
 use crate::backend::{
-    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, reserve_dense_output,
+    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, overlap,
+    reduced_density, reserve_dense_output, schmidt,
 };
 use crate::circuit::Instruction;
 #[cfg(feature = "gpu")]
@@ -60,6 +61,7 @@ use std::borrow::Cow;
 #[cfg(feature = "gpu")]
 use std::sync::Arc;
 
+pub(crate) mod diagnostics;
 pub(crate) mod kernels;
 #[cfg(test)]
 mod tests;
@@ -615,6 +617,43 @@ impl StabilizerBackend {
 
     pub fn raw_tableau(&self) -> (&[u64], &[bool]) {
         (&self.xz, &self.phase)
+    }
+
+    /// The tableau as a read-only query sees it. Rows `n..2n` are current
+    /// whatever the destabilizers are doing, so unlike
+    /// [`StabilizerBackend::rows_with_destabilizers`] this borrows the host
+    /// rows instead of materializing a copy of the other half.
+    fn stabilizer_rows(&self) -> Result<kernels::rowops::TableauRows<'_>> {
+        #[cfg(feature = "gpu")]
+        if self.gpu_tableau.is_some() {
+            let (xz, phase) = self.copy_device_tableau_with_pending()?;
+            return Ok((Cow::Owned(xz), Cow::Owned(phase)));
+        }
+        let (xz, phase) = self.raw_tableau();
+        Ok((Cow::Borrowed(xz), Cow::Borrowed(phase)))
+    }
+
+    /// Ebits across the cut at `subsystem`, the rank its diagnostics share.
+    fn cut_rank(&self, subsystem: &[usize]) -> Result<usize> {
+        let (xz, _) = self.stabilizer_rows()?;
+        Ok(diagnostics::subsystem_rank(
+            &xz,
+            self.n,
+            self.num_words,
+            subsystem,
+        ))
+    }
+
+    /// Whether the host rows are the live tableau, which they are not while a
+    /// device copy holds it.
+    #[cfg(feature = "gpu")]
+    fn host_rows_live(&self) -> bool {
+        self.gpu_tableau.is_none()
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    fn host_rows_live(&self) -> bool {
+        true
     }
 
     /// Tableau rows with current destabilizers, for a read-only query: the
@@ -1367,6 +1406,67 @@ impl Backend for StabilizerBackend {
                 ))
             })
             .collect()
+    }
+
+    /// `2^r` copies of `2^(-r/2)` for the rank `r` of the cut: a stabilizer
+    /// state's spectrum is flat, so the rank is the whole of it. The list is
+    /// priced against the dense export cap, past which only
+    /// [`Backend::entanglement_entropy`] answers.
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        schmidt::validate_subsystem(subsystem, self.n)?;
+        diagnostics::flat_spectrum(self.name(), self.cut_rank(subsystem)?)
+    }
+
+    /// `(rank of the generators restricted to the cut) - |A|` in units of
+    /// `ln 2`, at any width: the rank is read off one elimination and the
+    /// spectrum it stands for is never built.
+    fn entanglement_entropy(&mut self, subsystem: &[usize]) -> Result<f64> {
+        schmidt::validate_subsystem(subsystem, self.n)?;
+        Ok(self.cut_rank(subsystem)? as f64 * std::f64::consts::LN_2)
+    }
+
+    /// `2^-k` times the sum over the stabilizer subgroup supported inside
+    /// `subsystem`, which is the projector a stabilizer marginal is. The
+    /// group is read off one elimination over the complement's columns, so
+    /// the `2^n` export is never taken.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        schmidt::validate_qubit_set(subsystem, self.n)?;
+        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let (xz, phase) = self.stabilizer_rows()?;
+        Ok(diagnostics::subsystem_density(
+            &xz,
+            &phase,
+            self.n,
+            self.num_words,
+            subsystem,
+            dim,
+        ))
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    /// `2^(n - r)` for the rank `r` of the two stabilizer groups merged, and
+    /// `0` on a sign conflict, at any width. A device-resident tableau and
+    /// any other representation take the dense route.
+    fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
+        if let Some(tableau) = other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<StabilizerBackend>())
+        {
+            if tableau.n == self.n && self.host_rows_live() && tableau.host_rows_live() {
+                return Ok(crate::sim::stabilizer_rank::stabilizer_overlap_sq(
+                    self, tableau, self.n,
+                ));
+            }
+        }
+        overlap::export_overlap_sq(
+            self.name(),
+            self.num_qubits(),
+            || self.export_statevector(),
+            other,
+        )
     }
 
     fn export_statevector(&self) -> Result<Vec<Complex64>> {

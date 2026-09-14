@@ -1279,6 +1279,10 @@ impl Backend for DensityMatrixBackend {
         "density_matrix"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn resolved(&self) -> crate::sim::ResolvedBackend {
         crate::sim::ResolvedBackend::DensityMatrix
     }
@@ -1287,6 +1291,15 @@ impl Backend for DensityMatrixBackend {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
             operation: "Schmidt values of a mixed state".to_string(),
+        })
+    }
+
+    /// Declined: the fidelity of two mixtures is not an inner product, and a
+    /// mixture holds no statevector for the dense route to export.
+    fn overlap_sq(&self, _other: &dyn Backend) -> Result<f64> {
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "state overlap".to_string(),
         })
     }
 

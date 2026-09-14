@@ -1993,6 +1993,10 @@ impl Backend for DistributedStatevectorBackend {
         BACKEND_NAME
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn resolved(&self) -> crate::sim::ResolvedBackend {
         crate::sim::ResolvedBackend::Distributed
     }

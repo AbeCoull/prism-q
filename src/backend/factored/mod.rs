@@ -647,6 +647,10 @@ impl Backend for FactoredBackend {
         "factored"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn resolved(&self) -> crate::sim::ResolvedBackend {
         crate::sim::ResolvedBackend::Factored
     }
@@ -756,20 +760,7 @@ impl Backend for FactoredBackend {
             let factor =
                 reduced_density::dense_reduced_density(&sub.state, sub.qubits.len(), &local);
             let side = 1usize << local.len();
-            let gather: Vec<usize> = (0..dim)
-                .map(|t| {
-                    positions
-                        .iter()
-                        .enumerate()
-                        .fold(0, |s, (j, &i)| s | (((t >> i) & 1) << j))
-                })
-                .collect();
-            for (t, &row) in gather.iter().enumerate() {
-                let out = &mut rho[t * dim..(t + 1) * dim];
-                for (entry, &col) in out.iter_mut().zip(&gather) {
-                    *entry *= factor[row * side + col];
-                }
-            }
+            reduced_density::multiply_block_factor(&mut rho, dim, &positions, &factor, side);
         }
         reduced_density::normalize_trace(&mut rho, dim);
         Ok(rho)

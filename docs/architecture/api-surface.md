@@ -37,7 +37,11 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 `ReducedDensityMatrix` (row major, side `2^k`, `qubits[0]` the lowest bit of the row
 index) with a `purity` method for `Tr(rho^2)`; `Simulate::entanglement_entropy` returns
 an `EntropyResult` carrying the von Neumann entropy in nats and the descending Schmidt
-spectrum. Both require a unitary circuit, and under `BackendKind::Auto` a route that
+spectrum, which is `None` where the backend holds the entropy without the spectrum
+behind it;
+`Simulate::overlap` takes a second seeded builder over a circuit of the same width and
+returns an `OverlapResult` carrying the squared inner product and the provenance of both
+runs. All three require a unitary circuit, and under `BackendKind::Auto` a route that
 cannot answer falls back to the statevector. Which backends answer each is tabulated in
 [Backends](./backends.md).
 

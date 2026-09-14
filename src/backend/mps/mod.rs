@@ -418,24 +418,29 @@ impl MpsBackend {
         self.truncation_discarded = 0.0;
     }
 
-    /// Cumulative relative state weight discarded by SVD truncation since
-    /// [`Backend::init`] or the last [`Self::reset_truncation_tracking`].
+    /// Cumulative fraction of the state's squared weight discarded by SVD
+    /// truncation since [`Backend::init`] or the last
+    /// [`Self::reset_truncation_tracking`].
     ///
-    /// [`Backend::init`]: crate::backend::Backend::init
+    /// The unit is squared: a cut that moves the state by `d` in the 2-norm
+    /// books `d * d`, so a total of 1e-24 answers for a distance of 1e-12 and
+    /// for an infidelity of 1e-24. Comparing it against a distance reads
+    /// twelve orders too small.
+    ///
     /// At the default threshold, epsilon truncation contributes negligibly and
     /// a meaningful value indicates the bond-dimension cap discarded real
     /// weight; after [`Self::set_svd_epsilon`] both sources contribute.
     ///
     /// A cut that can lose weight takes the orthogonality center onto its own
-    /// sites first, so what it books is the relative 2-norm error it made
-    /// rather than a figure against a non-orthogonal environment: every cut
-    /// that can reach the bond cap, every threshold cut once the chain's bonds
-    /// have reached `GAUGE_RANK`, and under that a two-site threshold cut
-    /// that would drop a value above `SVD_RESOLUTION` of its largest. The
-    /// center is parked by [`svd()`] rather than by the exact walk, so the
-    /// environment is orthonormal to that factorization's isometry. A chain
-    /// under both marks is left ungauged, and what its cuts shed at rounding
-    /// is not measured this way.
+    /// sites first, so what it books is the error it made rather than a figure
+    /// against a non-orthogonal environment: every cut that can reach the bond
+    /// cap, every threshold cut once the chain's bonds have reached
+    /// `GAUGE_RANK`, under that a two-site or block threshold cut that would
+    /// drop a value above `SVD_RESOLUTION` of its largest, and every cut on a
+    /// chain already carrying a center, which a measurement leaves behind on
+    /// any chain whose cuts can lose weight at all. The center is parked by
+    /// [`svd()`] rather than by the exact walk, so the environment is
+    /// orthonormal to that factorization's isometry.
     ///
     /// The total sums one relative discard per SVD rather than measuring the
     /// final state, so a chain that truncates heavily can carry it past 1,
@@ -444,6 +449,8 @@ impl MpsBackend {
     /// Truncation does not renormalize the chain. Every read rescales instead:
     /// expectation values, shot sampling, the probability terminal and
     /// [`Self::export_statevector`] all describe the normalized state.
+    ///
+    /// [`Backend::init`]: crate::backend::Backend::init
     pub fn truncation_discarded(&self) -> f64 {
         self.truncation_discarded
     }

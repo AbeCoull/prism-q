@@ -34,14 +34,30 @@ fn assert_declines(backend: &mut dyn Backend, operation: &str) {
     assert_eq!(backend.entanglement_entropy(&[0, 1]).unwrap_err(), expected);
 }
 
+// A stabilizer cut of rank r has 2^r equal weights, so both tableau backends
+// read the whole spectrum off that rank: a GHZ cut is one ebit, two values of
+// 1 / sqrt 2, and `ln 2`.
 #[test]
-fn stabilizer_declines_schmidt_values() {
-    assert_declines(&mut StabilizerBackend::new(SEED), "Schmidt values");
-}
-
-#[test]
-fn factored_stabilizer_declines_schmidt_values() {
-    assert_declines(&mut FactoredStabilizerBackend::new(SEED), "Schmidt values");
+fn the_tableau_backends_read_the_flat_spectrum_from_the_rank() {
+    let backends: [Box<dyn Backend>; 2] = [
+        Box::new(StabilizerBackend::new(SEED)),
+        Box::new(FactoredStabilizerBackend::new(SEED)),
+    ];
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    for mut backend in backends {
+        sim::run_on(backend.as_mut(), &ghz_circuit(4)).unwrap();
+        let name = backend.name();
+        let values = backend.schmidt_values(&[0, 1]).unwrap();
+        assert_eq!(values.len(), 2, "{name}: {values:?}");
+        for value in &values {
+            assert!((value - half).abs() < 1e-12, "{name}: {values:?}");
+        }
+        let entropy = backend.entanglement_entropy(&[0, 1]).unwrap();
+        assert!(
+            (entropy - std::f64::consts::LN_2).abs() < 1e-12,
+            "{name}: entropy {entropy}"
+        );
+    }
 }
 
 #[test]
@@ -200,7 +216,6 @@ fn the_terminal_names_the_backend_that_declines() {
             "tensornetwork",
             "Schmidt values",
         ),
-        (BackendKind::Stabilizer, "stabilizer", "Schmidt values"),
         (BackendKind::Factored, "factored", "Schmidt values"),
         (
             BackendKind::DensityMatrix,

@@ -160,10 +160,27 @@ pub struct EntropyResult {
     /// Von Neumann entropy of the subsystem in nats: a Bell pair reads `ln 2`.
     pub entropy: f64,
     /// Schmidt values across the cut, descending, with squares summing to 1.
-    /// `None` on the mixed state a noise model evolves, which has no Schmidt
-    /// decomposition.
+    /// `None` where the backend holds the entropy without the spectrum that
+    /// stands behind it, as a stabilizer cut past the export cap does: its
+    /// `2^r` equal values do not fit.
     pub schmidt_values: Option<Vec<f64>>,
     pub metadata: RunMetadata,
+}
+
+/// Overlap between the output states of two runs, returned by
+/// [`Simulate::overlap`].
+#[derive(Debug, Clone)]
+pub struct OverlapResult {
+    /// `|<a|b>|^2` over the two normalized states: 1 for the same state up to
+    /// phase, 0 for orthogonal ones. The amplitude itself is not reported,
+    /// since a tableau keeps no global phase and every MPS truncation moves
+    /// one.
+    pub fidelity: f64,
+    /// Provenance of the run the terminal was called on, the left of the
+    /// inner product.
+    pub left: RunMetadata,
+    /// Provenance of the run passed as the argument.
+    pub right: RunMetadata,
 }
 
 /// Typestate marker: [`Simulate`] builder with no seed chosen yet.
@@ -672,7 +689,10 @@ impl<'c> Simulate<'c, Seeded> {
     /// gives. The Schmidt values come back with the entropy, descending and
     /// normalized.
     ///
-    /// An explicitly selected backend with no spectrum reports
+    /// A backend that holds the entropy without the spectrum behind it, a
+    /// stabilizer cut past the export cap, answers with
+    /// [`EntropyResult::schmidt_values`] set to `None`.
+    /// An explicitly selected backend that holds neither reports
     /// `BackendUnsupported` naming itself; under [`BackendKind::Auto`] such a
     /// route falls back to the statevector while the circuit fits its cap. A
     /// noise model declines outright: it sends the run to the density matrix,
@@ -713,13 +733,95 @@ impl<'c> Simulate<'c, Seeded> {
         )?;
         let metadata = backend_metadata(&*backend);
         ensure_exact_result(self.require_exact, &metadata)?;
-        let values = backend.schmidt_values(subsystem)?;
+        // A tableau past the export cap holds the entropy as a rank while its
+        // `2^r` equal values do not fit, so the spectrum declining is not the
+        // terminal declining. A backend holding neither reports the spectrum's
+        // own error, which is what its entropy raises too.
+        let (entropy, schmidt_values) = match backend.schmidt_values(subsystem) {
+            Ok(values) => (
+                crate::backend::schmidt::entropy_of_schmidt_values(&values),
+                Some(values),
+            ),
+            Err(declined) => match backend.entanglement_entropy(subsystem) {
+                Ok(entropy) => (entropy, None),
+                Err(_) => return Err(declined),
+            },
+        };
         Ok(EntropyResult {
             subsystem: subsystem.to_vec(),
-            entropy: crate::backend::schmidt::entropy_of_schmidt_values(&values),
-            schmidt_values: Some(values),
+            entropy,
+            schmidt_values,
             metadata,
         })
+    }
+
+    /// `|<a|b>|^2` between this circuit's output state and `other`'s, honoring
+    /// the backend each side selected.
+    ///
+    /// The two circuits must declare the same width, and both must be unitary
+    /// for the reason [`Simulate::reduced_density_matrix`] gives. Each side
+    /// carries its own backend, seed and start state, and each resolves to a
+    /// single backend rather than the decomposed route, since two circuits
+    /// need not split into the same independent blocks.
+    ///
+    /// A pair of unlike representations is served by a dense export of both
+    /// states, so it reaches as far as the export cap does. A pair that shares
+    /// one answers natively at any width: two chains in the same site order,
+    /// two tableaux, two product states, or two sparse maps. A noise model on
+    /// either side is rejected, since the fidelity of two mixtures is not an
+    /// inner product.
+    pub fn overlap(self, other: Simulate<'_, Seeded>) -> Result<OverlapResult> {
+        let diagnostic = Diagnostic::Overlap;
+        if self.circuit.num_qubits != other.circuit.num_qubits {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "{} needs two circuits of the same width; got {} and {} qubits",
+                    diagnostic.terminal(),
+                    self.circuit.num_qubits,
+                    other.circuit.num_qubits
+                ),
+            });
+        }
+        let (left_backend, left) = self.overlap_side(diagnostic)?;
+        let (right_backend, right) = other.overlap_side(diagnostic)?;
+        Ok(OverlapResult {
+            fidelity: left_backend.overlap_sq(&*right_backend)?,
+            left,
+            right,
+        })
+    }
+
+    /// One side of [`Simulate::overlap`]: the guards both sides answer to,
+    /// then the backend this side's kind resolves to, run and handed back with
+    /// its provenance.
+    fn overlap_side(self, diagnostic: Diagnostic) -> Result<(Box<dyn Backend>, RunMetadata)> {
+        let seed = self.seed_value();
+        let terminal = diagnostic.terminal();
+        require_unitary_circuit(&self.kind, self.circuit, "a state overlap requires")?;
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if self.noise_model.is_some() {
+            return Err(PrismError::IncompatibleBackend {
+                backend: format!("{:?}", self.kind),
+                reason: format!(
+                    "{terminal} is an inner product of two pure states, and a noise model \
+                     evolves a mixture, whose fidelity is a different computation; drop \
+                     the model, or compare the mixtures through `reduced_density_matrix`"
+                ),
+            });
+        }
+        let backend = diagnostic_backend(
+            &self.kind,
+            self.circuit,
+            self.initial_state,
+            seed,
+            diagnostic,
+            0,
+        )?;
+        let metadata = backend_metadata(&*backend);
+        ensure_exact_result(self.require_exact, &metadata)?;
+        Ok((backend, metadata))
     }
 
     /// Compute `⟨H⟩` and its exact gradient with respect to the bound
@@ -2594,6 +2696,7 @@ fn analytic_expectations(values: Vec<f64>, metadata: RunMetadata) -> Expectation
 enum Diagnostic {
     ReducedDensityMatrix,
     Entropy,
+    Overlap,
 }
 
 impl Diagnostic {
@@ -2601,6 +2704,7 @@ impl Diagnostic {
         match self {
             Diagnostic::ReducedDensityMatrix => "a reduced density matrix",
             Diagnostic::Entropy => "entanglement entropy",
+            Diagnostic::Overlap => "a state overlap",
         }
     }
 }
@@ -2620,11 +2724,18 @@ fn plan_answers(plan: &BackendPlan, diagnostic: Diagnostic) -> bool {
                 | BackendPlan::Factored
                 | BackendPlan::ProductState
                 | BackendPlan::DensityMatrix { .. }
+                | BackendPlan::Stabilizer { .. }
+                | BackendPlan::FactoredStabilizer
         ),
         Diagnostic::Entropy => matches!(
             plan,
-            BackendPlan::Statevector { .. } | BackendPlan::Mps { .. } | BackendPlan::ProductState
+            BackendPlan::Statevector { .. }
+                | BackendPlan::Mps { .. }
+                | BackendPlan::ProductState
+                | BackendPlan::Stabilizer { .. }
+                | BackendPlan::FactoredStabilizer
         ),
+        Diagnostic::Overlap => !matches!(plan, BackendPlan::DensityMatrix { .. }),
     }
 }
 
@@ -2650,7 +2761,7 @@ fn check_diagnostic_width(backend: &dyn Backend, diagnostic: Diagnostic, k: usiz
             crate::backend::reduced_density::reduced_density_side(backend.name(), k)?;
             Ok(())
         }
-        Diagnostic::Entropy => Ok(()),
+        Diagnostic::Entropy | Diagnostic::Overlap => Ok(()),
     }
 }
 

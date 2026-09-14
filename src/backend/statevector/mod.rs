@@ -739,6 +739,10 @@ impl Backend for StatevectorBackend {
         "statevector"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn resolved(&self) -> crate::sim::ResolvedBackend {
         crate::sim::ResolvedBackend::Statevector
     }

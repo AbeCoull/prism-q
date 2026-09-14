@@ -31,8 +31,9 @@
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
 //! | `init_from_amplitudes` | Everything except Statevector, DistributedStatevector, and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. The distributed statevector takes the full vector on every rank and keeps its own slice. |
-//! | `reduced_density_matrix` | Mps, TensorNetwork, Stabilizer, FactoredStabilizer, DistributedStatevector | Each holds the state in a form a partial trace has to be contracted out of, an environment sweep for the chain, a doubled network, a projector over the generators inside the subsystem, or a slice exchange across rank qubits, and none of those kernels exists yet. |
-//! | `schmidt_values` | Everything except Statevector, Mps, and ProductState | A mixture has no Schmidt decomposition, and a tableau's spectrum is flat, so its entropy is a rank and not a list. Sparse, factored, tensor-network and distributed states could answer through a reduced density matrix but do not yet. `entanglement_entropy` follows, since its default reads the spectrum. |
+//! | `reduced_density_matrix` | Mps, TensorNetwork, DistributedStatevector | Each holds the state in a form a partial trace has to be contracted out of, an environment sweep for the chain, a doubled network, or a slice exchange across rank qubits, and none of those kernels exists yet. |
+//! | `schmidt_values` | Everything except Statevector, Mps, ProductState, Stabilizer, and FactoredStabilizer | A mixture has no Schmidt decomposition. Sparse, factored, tensor-network and distributed states could answer through a reduced density matrix but do not yet, and `entanglement_entropy` follows wherever its default reads the spectrum. A stabilizer cut's spectrum is flat, so the two tableau backends build it from a rank and decline only past the dense export cap, where the `2^r` equal values no longer fit while the rank behind them still does. |
+//! | `overlap_sq` | DensityMatrix | The fidelity of two mixtures is not an inner product, and the dense route the default takes needs a statevector a mixture has none of. |
 //!
 //! [`Backend::reduced_density_matrix_1q`] and [`Backend::apply_1q_matrix`] are
 //! two halves of one capability, sampling a non-Pauli branch and applying the
@@ -51,6 +52,7 @@ pub mod factored;
 pub mod factored_stabilizer;
 pub(crate) mod memory;
 pub mod mps;
+pub(crate) mod overlap;
 pub mod product;
 pub(crate) mod reduced_density;
 pub(crate) mod schmidt;
@@ -738,6 +740,37 @@ pub trait Backend {
             backend: self.name().to_string(),
             operation: "reduced density matrix".to_string(),
         })
+    }
+
+    /// The concrete backend behind a `&dyn Backend`, so [`Backend::overlap_sq`]
+    /// can recognize its own representation on the other side of the inner
+    /// product. An implementor that wants the fast paths writes `Some(self)`;
+    /// the default hides the concrete type, which costs only the dense route.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
+    /// `|<self|other>|^2` over the two normalized states: 1 for the same state
+    /// up to phase, 0 for orthogonal ones.
+    ///
+    /// The modulus squared rather than the amplitude, since a tableau keeps no
+    /// global phase and every MPS truncation moves one, so this is the only
+    /// number all the representations agree on. Widths that disagree report
+    /// `InvalidParameter`. Normalization divides by `<self|self><other|other>`
+    /// on every route, so an unnormalized chain or a pruned sparse map answers
+    /// the same as a unit-norm state.
+    ///
+    /// The default exports both states under the dense export cap, which is
+    /// how far a pair of unlike representations is served; an override that
+    /// finds its own kind through [`Backend::as_any`] answers at any width.
+    /// See the module docs for what declines it.
+    fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
+        overlap::export_overlap_sq(
+            self.name(),
+            self.num_qubits(),
+            || self.export_statevector(),
+            other,
+        )
     }
 
     /// Apply a 2×2 matrix to a single qubit without allocating.

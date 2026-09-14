@@ -38,7 +38,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::{
-    Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len,
+    Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, overlap,
     reserve_dense_output,
 };
 use crate::circuit::Instruction;
@@ -127,6 +127,10 @@ impl Backend for ProductStateBackend {
         "productstate"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn resolved(&self) -> crate::sim::ResolvedBackend {
         crate::sim::ResolvedBackend::ProductState
     }
@@ -205,6 +209,31 @@ impl Backend for ProductStateBackend {
     fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
         crate::backend::schmidt::validate_subsystem(subsystem, self.num_qubits)?;
         Ok(vec![1.0])
+    }
+
+    /// Product of the per-qubit inner products, `O(n)` and no width cap: the
+    /// state factorizes, so the overlap with another product state does.
+    fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
+        if let Some(product) = other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<ProductStateBackend>())
+        {
+            if product.num_qubits == self.num_qubits {
+                let (mut inner_sq, mut left, mut right) = (1.0, 1.0, 1.0);
+                for (a, b) in self.qubits.iter().zip(&product.qubits) {
+                    inner_sq *= (a[0].conj() * b[0] + a[1].conj() * b[1]).norm_sqr();
+                    left *= a[0].norm_sqr() + a[1].norm_sqr();
+                    right *= b[0].norm_sqr() + b[1].norm_sqr();
+                }
+                return Ok(overlap::normalized(inner_sq, left, right));
+            }
+        }
+        overlap::export_overlap_sq(
+            self.name(),
+            self.num_qubits(),
+            || self.export_statevector(),
+            other,
+        )
     }
 
     /// Kronecker product of the per-qubit `2 x 2` factors, each qubit of

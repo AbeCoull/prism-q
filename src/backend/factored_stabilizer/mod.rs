@@ -39,8 +39,11 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::stabilizer::kernels::{rowmul_words, rowops};
-use crate::backend::stabilizer::project_generators;
-use crate::backend::{Backend, dense_probability_len, dense_statevector_len, reserve_dense_output};
+use crate::backend::stabilizer::{diagnostics, project_generators};
+use crate::backend::{
+    Backend, dense_probability_len, dense_statevector_len, reduced_density, reserve_dense_output,
+    schmidt,
+};
 use crate::circuit::Instruction;
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
@@ -688,6 +691,25 @@ impl FactoredStabilizerBackend {
         true
     }
 
+    /// Ebits across the cut at `subsystem`, summed over the clusters it
+    /// crosses. A cluster lying wholly on one side of the cut carries none.
+    fn cut_rank(&self, subsystem: &[usize]) -> usize {
+        let mut total = 0;
+        for (index, sub) in self.subs.iter().enumerate() {
+            let Some(sub) = sub else { continue };
+            let local: Vec<usize> = subsystem
+                .iter()
+                .filter(|&&q| self.qubit_to_sub[q] == index)
+                .map(|&q| sub.local_qubit(q))
+                .collect();
+            if local.is_empty() || local.len() == sub.n {
+                continue;
+            }
+            total += diagnostics::subsystem_rank(&sub.xz, sub.n, sub.num_words, &local);
+        }
+        total
+    }
+
     fn find_free_slot(&mut self) -> usize {
         for (i, s) in self.subs.iter().enumerate() {
             if s.is_none() {
@@ -702,6 +724,10 @@ impl FactoredStabilizerBackend {
 impl Backend for FactoredStabilizerBackend {
     fn name(&self) -> &'static str {
         "factored-stabilizer"
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 
     fn resolved(&self) -> crate::sim::ResolvedBackend {
@@ -905,6 +931,53 @@ impl Backend for FactoredStabilizerBackend {
                 Ok(product)
             })
             .collect()
+    }
+
+    /// `2^r` copies of `2^(-r/2)` for the rank `r` of the cut, as the
+    /// stabilizer backend, priced against the dense export cap.
+    fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        diagnostics::flat_spectrum(self.name(), self.cut_rank(subsystem))
+    }
+
+    /// The cut's rank times `ln 2`, at any width. Clusters are unentangled, so
+    /// a cut that crosses several of them adds up and one lying wholly on
+    /// either side contributes nothing.
+    fn entanglement_entropy(&mut self, subsystem: &[usize]) -> Result<f64> {
+        schmidt::validate_subsystem(subsystem, self.num_qubits)?;
+        Ok(self.cut_rank(subsystem) as f64 * std::f64::consts::LN_2)
+    }
+
+    /// Kronecker product of the per-cluster marginals, each the projector
+    /// its sub-tableau's generators inside the subsystem define.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let dim = reduced_density::reduced_density_side(self.name(), subsystem.len())?;
+        let mut rho = vec![Complex64::new(1.0, 0.0); dim * dim];
+        for (index, sub) in self.subs.iter().enumerate() {
+            let Some(sub) = sub else { continue };
+            let positions: Vec<usize> = (0..subsystem.len())
+                .filter(|&i| self.qubit_to_sub[subsystem[i]] == index)
+                .collect();
+            if positions.is_empty() {
+                continue;
+            }
+            let local: Vec<usize> = positions
+                .iter()
+                .map(|&i| sub.local_qubit(subsystem[i]))
+                .collect();
+            let side = 1usize << local.len();
+            let factor = diagnostics::subsystem_density(
+                &sub.xz,
+                &sub.phase,
+                sub.n,
+                sub.num_words,
+                &local,
+                side,
+            );
+            reduced_density::multiply_block_factor(&mut rho, dim, &positions, &factor, side);
+        }
+        Ok(rho)
     }
 
     fn reset(&mut self, qubit: usize) -> Result<()> {

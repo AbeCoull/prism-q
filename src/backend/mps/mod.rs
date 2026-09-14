@@ -46,7 +46,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::backend::{
-    Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len,
+    Backend, BasisSamples, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, overlap,
     reserve_dense_output, schmidt, simd,
 };
 use crate::circuit::Instruction;
@@ -2802,6 +2802,10 @@ impl Backend for MpsBackend {
         "mps"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn resolved(&self) -> crate::sim::ResolvedBackend {
         crate::sim::ResolvedBackend::Mps
     }
@@ -2909,6 +2913,31 @@ impl Backend for MpsBackend {
             sites = (0..n).filter(|&site| !inside[site]).collect();
         }
         self.schmidt_values_by_reduced_density(&sites)
+    }
+
+    /// [`MpsBackend::inner_product`] when both chains carry the same site
+    /// layout, `O(n chi^3)` and no width cap. The contraction pairs sites by
+    /// chain position, so a chain whose virtual swaps left a different order
+    /// takes the dense route instead.
+    fn overlap_sq(&self, other: &dyn Backend) -> Result<f64> {
+        if let Some(chain) = other
+            .as_any()
+            .and_then(|any| any.downcast_ref::<MpsBackend>())
+        {
+            if chain.num_qubits == self.num_qubits && chain.logical_to_site == self.logical_to_site
+            {
+                let inner = self.inner_product(chain)?;
+                let left = self.inner_product(self)?.re;
+                let right = chain.inner_product(chain)?.re;
+                return Ok(overlap::normalized(inner.norm_sqr(), left, right));
+            }
+        }
+        overlap::export_overlap_sq(
+            self.name(),
+            self.num_qubits(),
+            || self.export_statevector(),
+            other,
+        )
     }
 
     fn classical_results(&self) -> &[bool] {

@@ -153,6 +153,10 @@ impl Backend for ProbabilityFailureBackend {
         "probability_failure"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         self.classical_bits = vec![false; num_classical_bits];

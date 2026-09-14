@@ -677,117 +677,84 @@ fn prune_terms(branches: &mut Vec<WeightedBranch>, max_terms: usize) -> (usize, 
 
 /// Stabilizer inner product |⟨φ₁|φ₂⟩|² via combined stabilizer group method.
 ///
-/// Merges generators into a 2n-row tableau, Gaussian-eliminates to find rank r.
-/// Sign conflict (P and -P both present) → 0. Otherwise |⟨φ₁|φ₂⟩|² = 2^{n-r}.
+/// Merges the two generator sets into 2n rows, eliminates over GF(2) to find
+/// the rank r of the merged strings, and reads |⟨φ₁|φ₂⟩|² = 2^{n-r}. A row
+/// that eliminates to the identity string names a Pauli both groups hold; if
+/// either group holds it with the opposite sign the states are orthogonal.
+///
+/// Each row keeps its two group factors apart rather than as one merged Pauli.
+/// Rows of different groups can anticommute, so a merged product would depend
+/// on the order the elimination happened to multiply them in, and a leftover
+/// row would carry reordering signs that say nothing about the two groups. A
+/// factor stays inside its own group, whose elements all commute, so it stays
+/// a signed Pauli and the two signs compare directly.
 pub fn stabilizer_overlap_sq(s1: &StabilizerBackend, s2: &StabilizerBackend, n: usize) -> f64 {
     let nw = n.div_ceil(64);
     let stride = 2 * nw;
+    let total_rows = 2 * n;
 
     let (xz1, phase1) = s1.raw_tableau();
     let (xz2, phase2) = s2.raw_tableau();
 
-    let mut combined_x = vec![0u64; 2 * n * nw];
-    let mut combined_z = vec![0u64; 2 * n * nw];
-    let mut combined_phase = vec![false; 2 * n];
+    let mut left = vec![0u64; total_rows * stride];
+    let mut right = vec![0u64; total_rows * stride];
+    let mut left_sign = vec![false; total_rows];
+    let mut right_sign = vec![false; total_rows];
 
     for i in 0..n {
-        let src1 = (i + n) * stride;
-        let src2 = (i + n) * stride;
-        for w in 0..nw {
-            combined_x[i * nw + w] = xz1[src1 + w];
-            combined_z[i * nw + w] = xz1[src1 + nw + w];
-            combined_x[(i + n) * nw + w] = xz2[src2 + w];
-            combined_z[(i + n) * nw + w] = xz2[src2 + nw + w];
-        }
-        combined_phase[i] = phase1[i + n];
-        combined_phase[i + n] = phase2[i + n];
+        let src = (i + n) * stride;
+        left[i * stride..(i + 1) * stride].copy_from_slice(&xz1[src..src + stride]);
+        left_sign[i] = phase1[i + n];
+        let dst = (i + n) * stride;
+        right[dst..dst + stride].copy_from_slice(&xz2[src..src + stride]);
+        right_sign[i + n] = phase2[i + n];
     }
 
-    // Gaussian elimination on the combined 2n × 2n Pauli system
+    // The row's Pauli string, which the elimination pivots on, is the product
+    // of its two factors, and their strings multiply as the XOR.
+    let has_bit = |left: &[u64], right: &[u64], row: usize, word: usize, mask: u64| {
+        (left[row * stride + word] ^ right[row * stride + word]) & mask != 0
+    };
+
     let mut rank = 0usize;
-    let total_rows = 2 * n;
+    for col in 0..2 * n {
+        let qubit = col % n;
+        let half = if col < n { 0 } else { nw };
+        let word = half + qubit / 64;
+        let mask = 1u64 << (qubit % 64);
 
-    // Iterate over 2n columns (X-block then Z-block) for full rank determination
-    for col in 0..(2 * n) {
-        let word = (col % n) / 64;
-        let bit = 1u64 << ((col % n) % 64);
-        let is_x_col = col < n;
-
-        let mut pivot = None;
-        for row in rank..total_rows {
-            let has = if is_x_col {
-                combined_x[row * nw + word] & bit != 0
-            } else {
-                combined_z[row * nw + word] & bit != 0
-            };
-            if has {
-                pivot = Some(row);
-                break;
-            }
-        }
-
-        let pivot = match pivot {
-            Some(p) => p,
-            None => continue,
+        let Some(pivot) = (rank..total_rows).find(|&r| has_bit(&left, &right, r, word, mask))
+        else {
+            continue;
         };
-
         if pivot != rank {
-            for w in 0..nw {
-                combined_x.swap(rank * nw + w, pivot * nw + w);
-                combined_z.swap(rank * nw + w, pivot * nw + w);
+            for w in 0..stride {
+                left.swap(rank * stride + w, pivot * stride + w);
+                right.swap(rank * stride + w, pivot * stride + w);
             }
-            combined_phase.swap(rank, pivot);
+            left_sign.swap(rank, pivot);
+            right_sign.swap(rank, pivot);
         }
 
-        for row in 0..total_rows {
-            if row == rank {
+        for row in rank + 1..total_rows {
+            if !has_bit(&left, &right, row, word, mask) {
                 continue;
             }
-            let has_bit = if is_x_col {
-                combined_x[row * nw + word] & bit != 0
-            } else {
-                combined_z[row * nw + word] & bit != 0
-            };
-            if !has_bit {
-                continue;
-            }
-
-            // AG rowmul: row ← row × rank (exact same phase logic as stabilizer.rs)
-            let mut sum = if combined_phase[row] { 2u64 } else { 0 }
-                + if combined_phase[rank] { 2u64 } else { 0 };
-
-            for w in 0..nw {
-                let x1 = combined_x[row * nw + w];
-                let z1 = combined_z[row * nw + w];
-                let x2 = combined_x[rank * nw + w];
-                let z2 = combined_z[rank * nw + w];
-
-                let new_x = x1 ^ x2;
-                let new_z = z1 ^ z2;
-
-                if (x1 | z1 | x2 | z2) != 0 {
-                    let nonzero = (new_x | new_z) & (x1 | z1) & (x2 | z2);
-                    let pos = (x1 & z1 & !x2 & z2) | (x1 & !z1 & x2 & z2) | (!x1 & z1 & x2 & !z2);
-                    sum = sum.wrapping_add(2 * pos.count_ones() as u64);
-                    sum = sum.wrapping_sub(nonzero.count_ones() as u64);
-                }
-
-                combined_x[row * nw + w] = new_x;
-                combined_z[row * nw + w] = new_z;
-            }
-
-            combined_phase[row] = (sum & 3) >= 2;
+            multiply_within_group(&mut left, &mut left_sign, rank, row, nw, stride);
+            multiply_within_group(&mut right, &mut right_sign, rank, row, nw, stride);
         }
-
         rank += 1;
     }
 
-    // Check for sign conflicts: any row that is all-zero X,Z but phase=true
-    // means P and -P are both in the combined group → overlap = 0
+    // Every row past the rank has the identity string, so its two factors are
+    // the same Pauli drawn from the two groups. Opposite signs put P in one
+    // group and -P in the other, and the overlap is 0.
     for row in rank..total_rows {
-        let all_zero =
-            (0..nw).all(|w| combined_x[row * nw + w] == 0 && combined_z[row * nw + w] == 0);
-        if all_zero && combined_phase[row] {
+        debug_assert!(
+            (0..stride).all(|w| left[row * stride + w] == right[row * stride + w]),
+            "a row past the rank eliminated to the identity string"
+        );
+        if left_sign[row] != right_sign[row] {
             return 0.0;
         }
     }
@@ -796,6 +763,28 @@ pub fn stabilizer_overlap_sq(s1: &StabilizerBackend, s2: &StabilizerBackend, n: 
     // r ≥ n always (each group alone has n independent generators).
     // r = n → identical states (overlap = 1). r = 2n → minimum nonzero overlap (2^{-n}).
     2.0_f64.powi(n as i32 - rank as i32)
+}
+
+/// `rows[dst] <- rows[dst] * rows[src]` in Aaronson-Gottesman normal form,
+/// both factors drawn from one stabilizer group. `dst` is past `src`, as the
+/// forward elimination above leaves it.
+fn multiply_within_group(
+    rows: &mut [u64],
+    signs: &mut [bool],
+    src: usize,
+    dst: usize,
+    nw: usize,
+    stride: usize,
+) {
+    debug_assert!(src < dst);
+    let initial = 2 * u64::from(signs[src]) + 2 * u64::from(signs[dst]);
+    let (head, tail) = rows.split_at_mut(dst * stride);
+    let (src_x, src_z) = head[src * stride..src * stride + stride].split_at(nw);
+    let (dst_x, dst_z) = tail[..stride].split_at_mut(nw);
+    let sum =
+        crate::backend::stabilizer::kernels::rowmul_words(dst_x, dst_z, src_x, src_z, initial);
+    debug_assert_eq!(sum & 1, 0, "elements of one stabilizer group commute");
+    signs[dst] = (sum & 3) == 2;
 }
 
 /// Phase-sensitive stabilizer inner product for small validation fixtures.

@@ -50,7 +50,7 @@ fn assert_no_state(error: PrismError, terminal: &str, route: &str) {
 }
 
 #[test]
-fn stateless_routes_decline_both_diagnostics() {
+fn stateless_routes_decline_every_diagnostic() {
     let circuit = clifford_t_chain(6);
     for (kind, route) in stateless_kinds() {
         assert_no_state(
@@ -64,11 +64,20 @@ fn stateless_routes_decline_both_diagnostics() {
         );
         assert_no_state(
             simulate(&circuit)
-                .backend(kind)
+                .backend(kind.clone())
                 .seed(42)
                 .entanglement_entropy(&[0, 1])
                 .unwrap_err(),
             "entanglement entropy",
+            route,
+        );
+        assert_no_state(
+            simulate(&circuit)
+                .backend(kind.clone())
+                .seed(42)
+                .overlap(simulate(&circuit).backend(kind).seed(42))
+                .unwrap_err(),
+            "a state overlap",
             route,
         );
     }
@@ -266,31 +275,161 @@ fn a_non_unitary_circuit_is_rejected_by_both_diagnostics() {
     }
 }
 
-// Auto picks the stabilizer for a Clifford circuit and the factored backend
-// for a partially independent one, neither of which holds a spectrum. The
-// route was the dispatcher's choice, so it falls back to the statevector; the
-// same backend named explicitly still declines.
+// A stabilizer state's spectrum is flat, so the tableau reads both the entropy
+// and the values off one rank, and `Auto` keeps the route instead of falling
+// back to the statevector.
 #[test]
-fn auto_falls_back_to_the_statevector_when_its_route_cannot_answer() {
+fn the_stabilizer_answers_the_entropy_and_the_flat_spectrum() {
     let mut bell = Circuit::new(2, 0);
     bell.add_gate(Gate::H, &[0]);
     bell.add_gate(Gate::Cx, &[0, 1]);
-    let result = simulate(&bell).seed(42).entanglement_entropy(&[0]).unwrap();
-    assert!((result.entropy - std::f64::consts::LN_2).abs() < 1e-12);
-    assert_eq!(result.metadata.backend, ResolvedBackend::Statevector);
-
-    assert_eq!(
-        simulate(&bell)
-            .backend(BackendKind::Stabilizer)
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    for kind in [BackendKind::Auto, BackendKind::Stabilizer] {
+        let result = simulate(&bell)
+            .backend(kind)
             .seed(42)
             .entanglement_entropy(&[0])
+            .unwrap();
+        assert!((result.entropy - std::f64::consts::LN_2).abs() < 1e-12);
+        assert_eq!(result.metadata.backend, ResolvedBackend::Stabilizer);
+        let values = result.schmidt_values.unwrap();
+        assert_eq!(values.len(), 2, "{values:?}");
+        assert!(
+            values.iter().all(|v| (v - half).abs() < 1e-12),
+            "{values:?}"
+        );
+    }
+}
+
+// Past the export cap the `2^r` values of a wide cut do not fit, while the
+// rank behind them still does, so the terminal reports the entropy with no
+// spectrum rather than declining.
+#[test]
+fn a_wide_stabilizer_cut_answers_the_entropy_without_the_spectrum() {
+    let width = crate::backend::schmidt::export_cap() + 2;
+    let mut circuit = Circuit::new(2 * width, 0);
+    for q in 0..width {
+        circuit.add_gate(Gate::H, &[q]);
+        circuit.add_gate(Gate::Cx, &[q, q + width]);
+    }
+    let subsystem: Vec<usize> = (0..width).collect();
+    let result = simulate(&circuit)
+        .backend(BackendKind::Stabilizer)
+        .seed(42)
+        .entanglement_entropy(&subsystem)
+        .unwrap();
+    assert!(
+        (result.entropy - width as f64 * std::f64::consts::LN_2).abs() < 1e-9,
+        "entropy {}",
+        result.entropy
+    );
+    assert!(result.schmidt_values.is_none());
+}
+
+// A mixture has no statevector to dot, and Uhlmann fidelity is not an inner
+// product, so the density matrix declines the overlap by name.
+#[test]
+fn the_density_matrix_declines_the_overlap() {
+    let mut bell = Circuit::new(2, 0);
+    bell.add_gate(Gate::H, &[0]);
+    bell.add_gate(Gate::Cx, &[0, 1]);
+    assert_eq!(
+        simulate(&bell)
+            .backend(BackendKind::DensityMatrix)
+            .seed(42)
+            .overlap(simulate(&bell).backend(BackendKind::DensityMatrix).seed(42))
             .unwrap_err(),
         PrismError::BackendUnsupported {
-            backend: "stabilizer".to_string(),
-            operation: "Schmidt values".to_string(),
+            backend: "density_matrix".to_string(),
+            operation: "state overlap".to_string(),
         }
     );
+}
 
+// Two registers of different sizes have no inner product, and the check comes
+// before either circuit runs.
+#[test]
+fn the_overlap_terminal_rejects_a_width_mismatch() {
+    let two = Circuit::new(2, 0);
+    let three = Circuit::new(3, 0);
+    match simulate(&two)
+        .seed(42)
+        .overlap(simulate(&three).seed(42))
+        .unwrap_err()
+    {
+        PrismError::InvalidParameter { message } => {
+            assert!(
+                message.starts_with("a state overlap needs two circuits of the same width"),
+                "{message}"
+            );
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
+// The overlap is an inner product of two pure states, so a noise model on
+// either side is rejected rather than answered off one trajectory.
+#[test]
+fn the_overlap_terminal_declines_under_a_noise_model() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let noise = noise::NoiseBuilder::new()
+        .after_gates(
+            noise::GateFilter::all(),
+            noise::NoiseChannel::Depolarizing { p: 0.02 },
+        )
+        .build(&circuit)
+        .unwrap();
+    for (left, right) in [(Some(&noise), None), (None, Some(&noise))] {
+        let mut a = simulate(&circuit);
+        if let Some(model) = left {
+            a = a.noise(model);
+        }
+        let mut b = simulate(&circuit);
+        if let Some(model) = right {
+            b = b.noise(model);
+        }
+        match a.seed(42).overlap(b.seed(42)).unwrap_err() {
+            PrismError::IncompatibleBackend { reason, .. } => {
+                assert!(
+                    reason.starts_with("a state overlap is an inner product of two pure states"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected IncompatibleBackend, got {other:?}"),
+        }
+    }
+}
+
+// A measurement leaves one seeded branch of several, not the state an overlap
+// is defined on, so the terminal rejects it before any state is allocated.
+#[test]
+fn the_overlap_terminal_rejects_a_non_unitary_circuit() {
+    let mut measured = Circuit::new(2, 1);
+    measured.add_gate(Gate::H, &[0]);
+    measured.add_measure(0, 0);
+    let unitary = Circuit::new(2, 1);
+    match simulate(&measured)
+        .seed(42)
+        .overlap(simulate(&unitary).seed(42))
+        .unwrap_err()
+    {
+        PrismError::IncompatibleBackend { reason, .. } => {
+            assert!(
+                reason.starts_with("a state overlap requires a unitary circuit"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected IncompatibleBackend, got {other:?}"),
+    }
+}
+
+// Auto picks the factored backend for a partially independent circuit, which
+// holds no spectrum. The route was the dispatcher's choice, so it falls back
+// to the statevector.
+#[test]
+fn auto_falls_back_to_the_statevector_when_its_route_cannot_answer() {
     let mut split = Circuit::new(10, 0);
     terminal_candidate_matrix_tests::rx_cx_chain(&mut split, 0..8);
     terminal_candidate_matrix_tests::rx_cx_chain(&mut split, 8..10);

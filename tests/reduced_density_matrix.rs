@@ -513,14 +513,24 @@ fn tensor_network_declines_the_reduced_density_matrix() {
     assert_declines(&mut TensorNetworkBackend::new(SEED));
 }
 
+// Both tableau backends read the marginal off the projector onto the
+// generators supported inside the subsystem, never off a dense export.
 #[test]
-fn stabilizer_declines_the_reduced_density_matrix() {
-    assert_declines(&mut StabilizerBackend::new(SEED));
-}
-
-#[test]
-fn factored_stabilizer_declines_the_reduced_density_matrix() {
-    assert_declines(&mut FactoredStabilizerBackend::new(SEED));
+fn the_tableau_backends_answer_the_reduced_density_matrix() {
+    let circuit = ghz_circuit(4);
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &circuit).unwrap();
+    let expected = naive_rdm(&sv.export_statevector().unwrap(), &[0, 2]);
+    let backends: [Box<dyn Backend>; 2] = [
+        Box::new(StabilizerBackend::new(SEED)),
+        Box::new(FactoredStabilizerBackend::new(SEED)),
+    ];
+    for mut backend in backends {
+        sim::run_on(backend.as_mut(), &circuit).unwrap();
+        let name = backend.name();
+        let rho = rdm_of(backend.as_mut(), &[0, 2]);
+        assert_matrix_close(&rho, &expected, 1e-14, name);
+    }
 }
 
 // The same rejections on every backend that answers, and unlike a cut, the
@@ -631,8 +641,6 @@ fn the_terminal_names_the_backend_that_declines() {
     for (kind, name) in [
         (BackendKind::Mps { max_bond_dim: 64 }, "mps"),
         (BackendKind::TensorNetwork, "tensornetwork"),
-        (BackendKind::Stabilizer, "stabilizer"),
-        (BackendKind::FactoredStabilizer, "factored-stabilizer"),
     ] {
         assert_eq!(
             simulate(&circuit)

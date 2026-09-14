@@ -20,7 +20,9 @@ use prism_q::circuit::Circuit;
 use prism_q::circuits;
 use prism_q::gates::{Gate, McuData};
 use prism_q::sim;
-use prism_q::{BackendKind, EntropyResult, ReducedDensityMatrix, simulate};
+use prism_q::{
+    BackendKind, EntropyResult, OverlapResult, ReducedDensityMatrix, ResolvedBackend, simulate,
+};
 use prism_q::{PauliAxis, PauliTerm};
 use prism_q::{QecOptions, QecPauli, QecProgram, run_qec_program, run_qec_program_reference};
 
@@ -1612,8 +1614,8 @@ fn the_entropy_terminal_reads_zero_on_a_product_state() {
 
 // (|00> + |11>) / sqrt 2: entropy ln 2 with two Schmidt values of 1 / sqrt 2,
 // a one-qubit marginal of I / 2, and purity Tr((I / 2)^2) = 1 / 2. `Auto`
-// routes a Clifford circuit to the stabilizer, which holds neither, so these
-// values also pin its fallback to the statevector.
+// routes a Clifford circuit to the stabilizer, whose marginal is a projector
+// and whose entropy is a rank, so the marginal loop also pins that route.
 #[test]
 fn the_terminals_read_a_bell_pair_as_a_maximally_mixed_marginal() {
     let circuit = bell_circuit();
@@ -1621,7 +1623,6 @@ fn the_terminals_read_a_bell_pair_as_a_maximally_mixed_marginal() {
     let c = |re: f64| Complex64::new(re, 0.0);
     for qubit in 0..2 {
         for kind in [
-            BackendKind::Auto,
             BackendKind::Statevector,
             BackendKind::Mps { max_bond_dim: 64 },
         ] {
@@ -1709,5 +1710,174 @@ fn the_terminals_read_the_w_state_one_qubit_marginal() {
             "purity {}",
             rho.purity()
         );
+    }
+}
+
+// A stabilizer tableau holds the GHZ entropy as a rank, the two equal Schmidt
+// values that rank stands for, and its marginal as a projector, none of which
+// expands the 2^n vector: ln 2 at every cut and the two corners of the
+// k-qubit marginal.
+#[test]
+fn the_stabilizer_terminals_read_ghz_5_from_the_tableau() {
+    let circuit = circuits::ghz_circuit(5);
+    let half = std::f64::consts::FRAC_1_SQRT_2;
+    for cut in 1..5 {
+        let subsystem: Vec<usize> = (0..cut).collect();
+        let result = entropy_through(BackendKind::Stabilizer, &circuit, &subsystem);
+        assert!(
+            (result.entropy - std::f64::consts::LN_2).abs() < EPS,
+            "cut {cut}: entropy {}",
+            result.entropy
+        );
+        let values = result.schmidt_values.unwrap();
+        assert_spectrum(&values, &[half, half], &format!("cut {cut}"));
+    }
+    for qubits in [vec![2usize], vec![4, 1], vec![0, 3, 2]] {
+        let dim = 1usize << qubits.len();
+        let mut expected = vec![Complex64::new(0.0, 0.0); dim * dim];
+        expected[0] = Complex64::new(0.5, 0.0);
+        expected[dim * dim - 1] = Complex64::new(0.5, 0.0);
+        let rho = rdm_through(BackendKind::Stabilizer, &circuit, &qubits);
+        assert_entries(&rho.data, &expected, &format!("ghz_5 on {qubits:?}"));
+        assert!((rho.purity() - 0.5).abs() < EPS, "purity {}", rho.purity());
+    }
+}
+
+// ---- The overlap terminal ----
+
+fn overlap_through(kind: BackendKind, left: &Circuit, right: &Circuit) -> OverlapResult {
+    simulate(left)
+        .backend(kind.clone())
+        .seed(common::SEED)
+        .overlap(simulate(right).backend(kind).seed(common::SEED))
+        .unwrap()
+}
+
+fn assert_route(
+    result: &OverlapResult,
+    left: ResolvedBackend,
+    right: ResolvedBackend,
+    label: &str,
+) {
+    assert_eq!(result.left.backend, left, "{label}: left route");
+    assert_eq!(result.right.backend, right, "{label}: right route");
+}
+
+fn plus_circuit(n: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit
+}
+
+// A state against itself reads 1 on every route, whatever norm the
+// representation carries and whatever global phase it dropped.
+#[test]
+fn the_overlap_terminal_reads_one_against_the_same_circuit() {
+    let circuit = circuits::ghz_circuit(4);
+    for (kind, route) in [
+        (BackendKind::Auto, ResolvedBackend::Stabilizer),
+        (BackendKind::Statevector, ResolvedBackend::Statevector),
+        (BackendKind::Stabilizer, ResolvedBackend::Stabilizer),
+        (BackendKind::Mps { max_bond_dim: 64 }, ResolvedBackend::Mps),
+        (BackendKind::Sparse, ResolvedBackend::Sparse),
+        (BackendKind::TensorNetwork, ResolvedBackend::TensorNetwork),
+    ] {
+        let label = format!("{kind:?}");
+        let result = overlap_through(kind, &circuit, &circuit);
+        assert!(
+            (result.fidelity - 1.0).abs() < EPS,
+            "{label}: fidelity {}",
+            result.fidelity
+        );
+        assert_route(&result, route, route, &label);
+    }
+}
+
+// |<0|H|0>|^2 = |1 / sqrt 2|^2 = 1 / 2. Neither side entangles, so `Auto`
+// takes the product route on both.
+#[test]
+fn the_overlap_terminal_reads_a_half_between_zero_and_plus() {
+    let zero = Circuit::new(1, 0);
+    let plus = plus_circuit(1);
+    for (kind, route) in [
+        (BackendKind::Auto, ResolvedBackend::ProductState),
+        (BackendKind::Statevector, ResolvedBackend::Statevector),
+        (BackendKind::ProductState, ResolvedBackend::ProductState),
+        (BackendKind::Mps { max_bond_dim: 4 }, ResolvedBackend::Mps),
+    ] {
+        let label = format!("{kind:?}");
+        let result = overlap_through(kind, &zero, &plus);
+        assert!(
+            (result.fidelity - 0.5).abs() < EPS,
+            "{label}: fidelity {}",
+            result.fidelity
+        );
+        assert_route(&result, route, route, &label);
+    }
+}
+
+// The GHZ state puts 1 / sqrt 2 on two of the 2^n basis states and |+>^n puts
+// 2^(-n / 2) on all of them, so the inner product is 2 / sqrt(2 * 2^n) and its
+// square is 2^(1 - n).
+#[test]
+fn the_overlap_terminal_reads_ghz_against_the_plus_state() {
+    for n in 2..=5 {
+        let expected = 2.0f64.powi(1 - n as i32);
+        // Under `Auto` the two sides land on different representations, the
+        // entangled one on the tableau and `|+>^n` on the product state, so
+        // this row takes the dense export rather than either native route.
+        for (kind, left, right) in [
+            (
+                BackendKind::Auto,
+                ResolvedBackend::Stabilizer,
+                ResolvedBackend::ProductState,
+            ),
+            (
+                BackendKind::Statevector,
+                ResolvedBackend::Statevector,
+                ResolvedBackend::Statevector,
+            ),
+            (
+                BackendKind::Stabilizer,
+                ResolvedBackend::Stabilizer,
+                ResolvedBackend::Stabilizer,
+            ),
+        ] {
+            let label = format!("{kind:?} on {n} qubits");
+            let result = overlap_through(kind, &circuits::ghz_circuit(n), &plus_circuit(n));
+            assert!(
+                (result.fidelity - expected).abs() < EPS,
+                "{label}: fidelity {} against {expected}",
+                result.fidelity
+            );
+            assert_route(&result, left, right, &label);
+        }
+    }
+}
+
+// A trailing Z flips the sign of the |11> branch, and (|00> + |11>) / sqrt 2
+// is orthogonal to (|00> - |11>) / sqrt 2.
+#[test]
+fn the_overlap_terminal_reads_zero_between_bell_and_its_sign_flip() {
+    let bell = bell_circuit();
+    let mut flipped = bell_circuit();
+    flipped.add_gate(Gate::Z, &[0]);
+    for (kind, route) in [
+        (BackendKind::Auto, ResolvedBackend::Stabilizer),
+        (BackendKind::Statevector, ResolvedBackend::Statevector),
+        (BackendKind::Stabilizer, ResolvedBackend::Stabilizer),
+        (BackendKind::Mps { max_bond_dim: 4 }, ResolvedBackend::Mps),
+        (BackendKind::Sparse, ResolvedBackend::Sparse),
+    ] {
+        let label = format!("{kind:?}");
+        let result = overlap_through(kind, &bell, &flipped);
+        assert!(
+            result.fidelity.abs() < EPS,
+            "{label}: fidelity {}",
+            result.fidelity
+        );
+        assert_route(&result, route, route, &label);
     }
 }

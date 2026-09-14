@@ -14,6 +14,8 @@
 //! `Rzz`, `P`, and `PauliRot` for both: those are the `Gate` variants carrying
 //! a rotation angle, so the shift rule reaches no gate the adjoint rejects.
 
+use std::borrow::Cow;
+
 use num_complex::Complex64;
 
 use crate::backend::statevector::StatevectorBackend;
@@ -115,18 +117,23 @@ pub fn run_expectation_gradient(
 
     // A gate outside the Hamiltonian's inverse light cone conjugates the
     // back-propagated observable trivially, so ⟨H⟩ and every gradient entry
-    // are unchanged when it is dropped. Both passes walk the in-cone gates
-    // only, unfused, to keep a 1:1 gate-to-generator correspondence.
+    // are unchanged when it is dropped.
     let in_cone = observable_light_cone(circuit, hamiltonian);
     let kept: Vec<usize> = (0..circuit.instructions.len())
         .filter(|&i| in_cone[i])
         .collect();
 
+    // The forward pass has to land |φ⟩ = U|0...0⟩ and nothing else, so it runs
+    // the kept gates through the ordinary fusion pipeline. The sweep below
+    // rebuilds every intermediate state by inverting `circuit.instructions` one
+    // entry at a time, so its 1:1 gate-to-generator view of the trainable gates
+    // survives whatever shape the fused stream takes.
     let mut phi = StatevectorBackend::new(seed);
     phi.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    for &i in &kept {
-        phi.apply(&circuit.instructions[i])?;
-    }
+    let forward = kept_subcircuit(circuit, &kept);
+    let expanded = super::expand_for_backend(&phi, &forward);
+    let fused = super::fuse_for_backend(&phi, &expanded);
+    phi.apply_instructions(&fused.instructions)?;
 
     let (value, lambda_state) = build_lambda_and_value(phi.state_vector(), &masked)?;
 
@@ -397,6 +404,20 @@ fn diagonal_batch_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
         gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
         targets,
     })
+}
+
+/// The gates `kept` indexes, as a circuit of the original width so the fusion
+/// floors read the same qubit count. Borrowed when the cone keeps every
+/// instruction.
+fn kept_subcircuit<'a>(circuit: &'a Circuit, kept: &[usize]) -> Cow<'a, Circuit> {
+    if kept.len() == circuit.instructions.len() {
+        return Cow::Borrowed(circuit);
+    }
+    let instructions = kept
+        .iter()
+        .map(|&i| circuit.instructions[i].clone())
+        .collect();
+    Cow::Owned(circuit.with_instructions(instructions))
 }
 
 /// Per-instruction flag: true if the gate lies in the Hamiltonian's inverse
@@ -996,5 +1017,32 @@ mod tests {
         };
         assert_eq!(data.entries.len(), 8);
         assert_eq!(targets.as_slice(), &[0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_full_light_cone_borrows_the_circuit_it_was_cut_from() {
+        let mut c = Circuit::new(2, 1);
+        c.add_gate(Gate::Rx(0.3), &[0]);
+        c.add_gate(Gate::Cx, &[0, 1]);
+        c.add_gate(Gate::Ry(0.7), &[1]);
+
+        let all: Vec<usize> = (0..c.instructions.len()).collect();
+        assert!(matches!(kept_subcircuit(&c, &all), Cow::Borrowed(_)));
+
+        let pruned = kept_subcircuit(&c, &[0, 2]);
+        assert!(matches!(pruned, Cow::Owned(_)));
+        assert_eq!(pruned.num_qubits, c.num_qubits);
+        assert_eq!(pruned.num_classical_bits, c.num_classical_bits);
+        let gates: Vec<&Gate> = pruned
+            .instructions
+            .iter()
+            .map(|inst| {
+                let Instruction::Gate { gate, .. } = inst else {
+                    unreachable!()
+                };
+                gate
+            })
+            .collect();
+        assert!(matches!(gates.as_slice(), [Gate::Rx(_), Gate::Ry(_)]));
     }
 }

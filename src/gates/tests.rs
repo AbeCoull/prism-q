@@ -512,6 +512,33 @@ fn test_recognize_non_clifford_returns_none() {
     assert_eq!(Gate::recognize_matrix(&ry), None);
 }
 
+// The tolerance is a per-entry magnitude, so the boundary sits where the
+// entries differ by 1e-12 and not at its square root. Rx(1e-13) has
+// off-diagonal entries of 5e-14, Rx(1e-11) has 5e-12.
+#[test]
+fn test_recognize_tolerance_is_a_per_entry_magnitude() {
+    let inside = Gate::Rx(1e-13).matrix_2x2();
+    assert_eq!(Gate::recognize_matrix(&inside), Some(Gate::Id));
+
+    let outside = Gate::Rx(1e-11).matrix_2x2();
+    assert_eq!(Gate::recognize_matrix(&outside), None);
+}
+
+// A rotation small enough to read as identity under a squared tolerance still
+// moves amplitude, and a phase a hair off pi/2 is not S.
+#[test]
+fn test_recognize_rejects_a_gate_that_still_moves_amplitude() {
+    let rx = Gate::Rx(1e-5).matrix_2x2();
+    assert_eq!(Gate::recognize_matrix(&rx), None);
+
+    let near_s = Gate::P(std::f64::consts::FRAC_PI_2 + 1e-6).matrix_2x2();
+    assert_eq!(Gate::recognize_matrix(&near_s), None);
+    assert!(matches!(
+        Gate::recognize_matrix_up_to_phase(&near_s),
+        Some((Gate::Rz(_), _))
+    ));
+}
+
 // A named gate carries no scalar, so a phased match has to fail: emitting `H`
 // for `e^{i0.42}·H` would drop the factor. `T·X·T` is the product a fusion run
 // actually builds, and it is `e^{iπ/4}·X`.

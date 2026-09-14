@@ -1314,3 +1314,34 @@ fn parser_built_fused_2q_absorbs_neighbouring_1q_gates() {
         "ms-basis chain",
     );
 }
+
+#[test]
+fn a_rotation_just_outside_the_recognizer_tolerance_survives_the_pass() {
+    // The 1q pass flushes every run, a run of one included, through the matrix
+    // recognizer. Rx(1e-5) sits 5e-6 per entry away from the identity, a
+    // squared magnitude of 2.5e-11 against the 1e-10 a squared tolerance
+    // admits, so such a recognizer deletes the gate and the |1> weight on
+    // qubit 0 comes back as zero. 12 qubits clears the 1q floor and the H/T
+    // pair on qubit 1 is what makes the pass rebuild the stream at all.
+    let mut c = Circuit::new(12, 0);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rx(1e-5), &[0]);
+
+    assert_fusion_preserves_state(&c);
+}
+
+#[test]
+fn a_phase_just_outside_the_recognizer_tolerance_is_not_snapped() {
+    // P(pi/2 + 1e-6) lands 1e-6 per entry from S. Snapping it to S drops the
+    // offset from every amplitude the gate touches.
+    let mut c = Circuit::new(12, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::P(std::f64::consts::FRAC_PI_2 + 1e-6), &[0]);
+
+    assert_fusion_preserves_state(&c);
+}

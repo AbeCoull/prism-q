@@ -307,6 +307,11 @@ pub struct MpsBackend {
     /// test can price the walk a gate order asks for.
     #[cfg(test)]
     center_steps: usize,
+    /// Relative squared weight the walk's factorizations have left behind in
+    /// the columns they dropped, so a test can hold the walk to its own
+    /// rounding.
+    #[cfg(test)]
+    qr_discarded: f64,
     /// Grow-only scratch for one step of [`MpsBackend::move_center`], which
     /// runs one to three times per two-qubit gate once the center is
     /// maintained: the factorization buffers and the neighbour the step
@@ -334,6 +339,8 @@ impl Clone for MpsBackend {
             bond_high_water: self.bond_high_water,
             #[cfg(test)]
             center_steps: self.center_steps,
+            #[cfg(test)]
+            qr_discarded: self.qr_discarded,
             workspace_cap: self.workspace_cap,
             scratch_theta: Vec::new(),
             scratch_right_t: Vec::new(),
@@ -361,6 +368,8 @@ impl MpsBackend {
             bond_high_water: 1,
             #[cfg(test)]
             center_steps: 0,
+            #[cfg(test)]
+            qr_discarded: 0.0,
             workspace_cap: crate::backend::mps_workspace_cap_elements(),
             scratch_theta: Vec::new(),
             scratch_right_t: Vec::new(),
@@ -880,6 +889,10 @@ impl MpsBackend {
 
         self.qr.factorize(mat, rows, bond);
         let chi = self.qr.rank;
+        #[cfg(test)]
+        {
+            self.qr_discarded += self.qr.discarded;
+        }
 
         let br = self.sites[site + 1].bond_right;
         let next = &self.sites[site + 1].data;
@@ -943,6 +956,10 @@ impl MpsBackend {
 
         self.qr.factorize(mat, rows, bond);
         let chi = self.qr.rank;
+        #[cfg(test)]
+        {
+            self.qr_discarded += self.qr.discarded;
+        }
 
         let bl = self.sites[site - 1].bond_left;
         let prev = &self.sites[site - 1].data;

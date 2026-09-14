@@ -59,6 +59,13 @@ pub(super) struct ThinQr {
     pub(super) r: Vec<Complex64>,
     v: Vec<Complex64>,
     pub(super) rank: usize,
+    /// Squared weight the last [`ThinQr::factorize`] left with the columns it
+    /// dropped, relative to the whole input. A column is dropped only where
+    /// the columns before it already span it, so this reads the factorization's
+    /// own rounding. Test-only: the walk runs one to three times per two-qubit
+    /// gate and no shipped path reads this.
+    #[cfg(test)]
+    pub(super) discarded: f64,
 }
 
 pub(super) fn l2_norm(v: &[Complex64]) -> f64 {
@@ -80,10 +87,16 @@ impl ThinQr {
         let v = scratch_slice(&mut self.v, rows);
         r.fill(ZERO);
         let mut rank = 0usize;
+        #[cfg(test)]
+        let (mut total, mut dropped) = (0.0f64, 0.0f64);
 
         for j in 0..cols {
             v.copy_from_slice(&a[j * rows..j * rows + rows]);
             let column_norm = l2_norm(v);
+            #[cfg(test)]
+            {
+                total += column_norm * column_norm;
+            }
             let mut previous = column_norm;
             let mut residual = column_norm;
             for _ in 0..QR_MAX_PASSES {
@@ -122,7 +135,16 @@ impl ThinQr {
                 }
                 r[rank * cols + j] = Complex64::new(residual, 0.0);
                 rank += 1;
+            } else {
+                #[cfg(test)]
+                {
+                    dropped += residual * residual;
+                }
             }
+        }
+        #[cfg(test)]
+        {
+            self.discarded = if total > 0.0 { dropped / total } else { 0.0 };
         }
 
         if rank == 0 {

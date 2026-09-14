@@ -565,3 +565,151 @@ fn wide_adjoint_gradient_rejects_before_reducing_the_observable() {
     let hamiltonian = vec![(1.0, vec![PauliTerm::z(n - 1)])];
     assert!(run_expectation_gradient(&circuit, &hamiltonian, &params, SEED).is_err());
 }
+
+/// Assert the adjoint gradient against the exact parameter-shift rule, slot by
+/// slot.
+fn assert_matches_shift(circuit: &Circuit, obs: &Hamiltonian, params: &Parameters) {
+    let adjoint = run_expectation_gradient(circuit, obs, params, SEED).unwrap();
+    let shift = run_expectation_gradient_shift(circuit, obs, params, SEED).unwrap();
+    assert!((adjoint.value - shift.value).abs() < 1e-10);
+    for (slot, (got, want)) in adjoint.gradient.iter().zip(&shift.gradient).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-10,
+            "slot {slot}: adjoint {got} vs shift {want}"
+        );
+    }
+}
+
+#[test]
+fn commuting_runs_split_by_anticommuting_generators_match_shift() {
+    // Rx layer, CX ladder, Rzz layer, Rz layer holding one Ry. The Rzz and Rz
+    // generators are all Z type and merge into one run; the Ry anticommutes
+    // with the Rz on its own qubit and cuts that run in two; the CX ladder is
+    // not trainable and cuts again.
+    let n = 6;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Rx(0.2 + 0.05 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Rzz(0.31 + 0.07 * q as f64), &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::Rz(0.4 + 0.11 * q as f64), &[q]);
+        if q == 2 {
+            c.add_gate(Gate::Ry(0.83), &[q]);
+        }
+    }
+    let params = Parameters::all_rotations(&c);
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.6, vec![PauliTerm::x(2)]),
+        (-0.4, vec![PauliTerm::y(3), PauliTerm::z(4)]),
+        (0.25, vec![PauliTerm::x(5)]),
+    ];
+
+    assert_matches_shift(&c, &obs, &params);
+}
+
+#[test]
+fn two_layer_qaoa_matches_shift() {
+    let c = circuits::qaoa_circuit(8, 2, SEED);
+    let params = Parameters::all_rotations(&c);
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.8, vec![PauliTerm::z(3), PauliTerm::z(4)]),
+        (-0.5, vec![PauliTerm::x(6)]),
+        (0.3, vec![PauliTerm::y(2), PauliTerm::y(7)]),
+    ];
+
+    assert_matches_shift(&c, &obs, &params);
+}
+
+#[test]
+fn mixed_weight_pauli_rotations_match_shift() {
+    // X0Y1 commutes with Y0X1 and the two weight-4 strings commute with each
+    // other, so those pair into runs; X1Y2 anticommutes with Y0X1X2X3 and
+    // splits the sweep there.
+    let mut c = Circuit::new(4, 0);
+    for q in 0..4 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_pauli_rotation(0.31, &[PauliTerm::x(0), PauliTerm::y(1)]);
+    c.add_pauli_rotation(0.23, &[PauliTerm::y(0), PauliTerm::x(1)]);
+    c.add_pauli_rotation(
+        0.17,
+        &[
+            PauliTerm::x(0),
+            PauliTerm::x(1),
+            PauliTerm::y(2),
+            PauliTerm::x(3),
+        ],
+    );
+    c.add_pauli_rotation(
+        0.41,
+        &[
+            PauliTerm::y(0),
+            PauliTerm::x(1),
+            PauliTerm::x(2),
+            PauliTerm::x(3),
+        ],
+    );
+    c.add_pauli_rotation(0.29, &[PauliTerm::x(1), PauliTerm::y(2)]);
+    let params = Parameters::all_rotations(&c);
+    assert_eq!(params.num_slots(), 5);
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.7, vec![PauliTerm::x(2)]),
+        (-0.4, vec![PauliTerm::y(1), PauliTerm::z(3)]),
+    ];
+
+    assert_matches_shift(&c, &obs, &params);
+}
+
+#[test]
+fn an_untrainable_gate_inside_a_run_splits_it() {
+    // The Rz layer would batch as one run, but the untrainable Ry on qubit 1
+    // sits inside it and anticommutes with the Rz on that qubit, so the sweep
+    // has to break there and still apply the Ry inverse to both states.
+    let mut c = Circuit::new(4, 0);
+    for q in 0..4 {
+        c.add_gate(Gate::H, &[q]);
+    }
+    c.add_gate(Gate::Rz(0.3), &[0]);
+    c.add_gate(Gate::Rz(0.7), &[1]);
+    c.add_gate(Gate::Ry(0.55), &[1]);
+    c.add_gate(Gate::Rz(0.9), &[2]);
+    c.add_gate(Gate::Rz(1.2), &[3]);
+
+    let mut params = Parameters::new(4);
+    for (slot, instruction) in [4usize, 5, 7, 8].into_iter().enumerate() {
+        params.link(instruction, slot);
+    }
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::x(0), PauliTerm::x(1)]),
+        (0.5, vec![PauliTerm::y(1)]),
+        (-0.6, vec![PauliTerm::x(2), PauliTerm::x(3)]),
+    ];
+
+    assert_matches_shift(&c, &obs, &params);
+}
+
+#[test]
+fn a_phase_gate_shares_a_run_with_a_rotation_of_the_other_mask_family() {
+    // Z0 is diagonal and Y1 is not, so the run's sandwiches split across both
+    // accumulator families and the interleave has to put them back in order.
+    let (a, b) = (0.73, 1.24);
+    let mut c = Circuit::new(2, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::Ry(a), &[1]);
+    c.add_gate(Gate::P(b), &[0]);
+    let params = Parameters::all_rotations(&c);
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::x(0)]), (0.5, vec![PauliTerm::y(1)])];
+
+    assert_matches_shift(&c, &obs, &params);
+}

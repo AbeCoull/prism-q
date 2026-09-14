@@ -33,10 +33,12 @@ use dispatch::{
     run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use metadata::{Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
+#[cfg(feature = "distributed")]
+pub(crate) use observable::pauli_sandwich;
 pub use observable::{ObservableExpectation, PauliObservable};
 pub(crate) use observable::{
     finish_expectations, i_pow, pauli_expectation_from_masks, pauli_expectations_from_masks,
-    pauli_masks, pauli_sandwich, validate_observable,
+    pauli_masks, pauli_sandwiches_from_masks, validate_observable,
 };
 pub use probability::{FactoredBlock, Probabilities, ProbabilitiesIter};
 pub use shots::{ShotsResult, bitstring};

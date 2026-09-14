@@ -19,13 +19,16 @@ use num_complex::Complex64;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits, reserve_dense_output};
 use crate::circuit::parameter::{Parameters, angle_mut};
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, Instruction, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
-use crate::gates::{Gate, GeneratorKind, pauli_rot_masks};
+use crate::gates::{
+    BatchRzzData, DiagEntry, DiagonalBatchData, Gate, GeneratorKind, MultiFusedData,
+    is_diagonal_2x2, pauli_rot_masks,
+};
 
 use super::noise::NoiseModel;
 use super::unified_pauli::PauliTerm;
-use super::{BackendKind, i_pow, pauli_masks, pauli_sandwich};
+use super::{BackendKind, i_pow, pauli_masks, pauli_sandwiches_from_masks};
 
 /// Expectation value and its gradient with respect to each parameter slot.
 #[derive(Debug, Clone, PartialEq)]
@@ -152,40 +155,248 @@ pub fn run_expectation_gradient(
     let mut lambda = StatevectorBackend::new(seed);
     lambda.init_from_state(lambda_state, circuit.num_classical_bits)?;
 
+    // The sweep is the in-cone tail from the earliest trainable gate, walked
+    // backwards. Its trainable gates group into commuting runs, which share
+    // one state pair for their sandwiches and one fused pass for their
+    // inverses; a non-trainable gate carries no contribution and splits runs.
+    let sweep = &kept[kept.partition_point(|&i| i < earliest)..];
     let mut cursor = 0;
-    for &i in kept.iter().rev() {
-        if i < earliest {
-            break;
-        }
-        let Instruction::Gate { gate, targets } = &circuit.instructions[i] else {
-            unreachable!("the light cone keeps gate instructions only")
-        };
+    let mut end = sweep.len();
+    let mut run: Vec<RunGate> = Vec::new();
+    let mut masks: Vec<(usize, usize, u32)> = Vec::new();
 
-        if cursor < links.len() && links[cursor].instruction == i {
+    while end > 0 {
+        let i = sweep[end - 1];
+        if cursor >= links.len() || links[cursor].instruction != i {
+            let inverse = inverse_instruction(&circuit.instructions[i]);
+            phi.apply(&inverse)?;
+            lambda.apply(&inverse)?;
+            end -= 1;
+            continue;
+        }
+
+        run.clear();
+        let mut start = end;
+        let mut lookahead = cursor;
+        while start > 0 {
+            let index = sweep[start - 1];
+            if lookahead >= links.len() || links[lookahead].instruction != index {
+                break;
+            }
+            let Instruction::Gate { gate, targets } = &circuit.instructions[index] else {
+                unreachable!("the light cone keeps gate instructions only")
+            };
             let kind = gate
                 .pauli_generator()
                 .expect("trainable instruction validated as differentiable");
-            let contrib =
-                gradient_contribution(kind, targets, lambda.state_vector(), phi.state_vector());
-            while cursor < links.len() && links[cursor].instruction == i {
-                gradient[links[cursor].slot] += contrib;
+            let candidate = RunGate::new(index, kind, targets);
+            if run.iter().any(|member| !member.commutes_with(&candidate)) {
+                break;
+            }
+            while lookahead < links.len() && links[lookahead].instruction == index {
+                lookahead += 1;
+            }
+            run.push(candidate);
+            start -= 1;
+        }
+
+        masks.clear();
+        masks.extend(run.iter().map(|g| (g.xmask, g.zmask, g.num_y)));
+        let values = pauli_sandwiches_from_masks(lambda.state_vector(), phi.state_vector(), &masks);
+
+        for (g, value) in run.iter().zip(&values) {
+            while cursor < links.len() && links[cursor].instruction == g.index {
+                gradient[links[cursor].slot] += value.im;
                 cursor += 1;
             }
         }
 
         // The earliest in-cone trainable gate is the last one evaluated; its
         // inverse and every gate before it can be skipped.
-        if i > earliest {
-            let inverse = Instruction::Gate {
-                gate: gate.inverse(),
-                targets: targets.clone(),
-            };
+        let applied = run.len() - usize::from(sweep[start] == earliest);
+        for inverse in run_inverse_instructions(circuit, &run[..applied]) {
             phi.apply(&inverse)?;
             lambda.apply(&inverse)?;
         }
+        end = start;
     }
 
     Ok(ExpectationGradient { value, gradient })
+}
+
+/// One trainable gate staged in a commuting run: its instruction index and the
+/// Pauli masks of its generator.
+struct RunGate {
+    index: usize,
+    xmask: usize,
+    zmask: usize,
+    num_y: u32,
+}
+
+impl RunGate {
+    fn new(index: usize, kind: GeneratorKind<'_>, targets: &[usize]) -> Self {
+        let (xmask, zmask, num_y) = match kind {
+            GeneratorKind::RotX => (1usize << targets[0], 0, 0),
+            GeneratorKind::RotY => {
+                let bit = 1usize << targets[0];
+                (bit, bit, 1)
+            }
+            GeneratorKind::RotZ => (0, 1usize << targets[0], 0),
+            GeneratorKind::RotZz => (0, (1usize << targets[0]) | (1usize << targets[1]), 0),
+            // The projector generator differs from Z by the identity, whose
+            // sandwich `⟨λ|φ⟩ = ⟨φ|H|φ⟩` is real and contributes nothing to the
+            // imaginary part, so `P(θ) = e^{iθ/2} Rz(θ)` differentiates as `Rz`.
+            GeneratorKind::Phase => (0, 1usize << targets[0], 0),
+            GeneratorKind::RotPauli(axes) => pauli_rot_masks(targets, axes),
+        };
+        Self {
+            index,
+            xmask,
+            zmask,
+            num_y,
+        }
+    }
+
+    /// Two Pauli strings commute exactly when they anticommute on an even
+    /// number of qubits. `exp(-iθP/2)` then commutes with the other string as
+    /// well, which is what lets a run share one state pair: conjugating a
+    /// member's generator by the inverses of the members that follow it leaves
+    /// the generator, so every sandwich in the run reads the same `⟨λ|` and
+    /// `|φ⟩` as it would at its own position.
+    fn commutes_with(&self, other: &RunGate) -> bool {
+        let anticommuting =
+            (self.xmask & other.zmask).count_ones() + (self.zmask & other.xmask).count_ones();
+        anticommuting.is_multiple_of(2)
+    }
+}
+
+fn inverse_instruction(instruction: &Instruction) -> Instruction {
+    let Instruction::Gate { gate, targets } = instruction else {
+        unreachable!("the light cone keeps gate instructions only")
+    };
+    Instruction::Gate {
+        gate: gate.inverse(),
+        targets: targets.clone(),
+    }
+}
+
+/// Inverses of a commuting run, collapsed into a batch gate where the run's
+/// gate type has one: `MultiFused` for single-qubit rotations on distinct
+/// qubits, `BatchRzz` for an Rzz layer, `DiagonalBatch` for a mixed diagonal
+/// run. Anything else falls back to one instruction per gate. Order within a
+/// run is free because its gates commute.
+fn run_inverse_instructions(circuit: &Circuit, run: &[RunGate]) -> Vec<Instruction> {
+    let gates: Vec<(&Gate, &[usize])> = run
+        .iter()
+        .map(|g| {
+            let Instruction::Gate { gate, targets } = &circuit.instructions[g.index] else {
+                unreachable!("the light cone keeps gate instructions only")
+            };
+            (gate, targets.as_slice())
+        })
+        .collect();
+
+    if gates.len() > 1 {
+        if let Some(fused) = multi_fused_inverse(&gates) {
+            return vec![fused];
+        }
+        if let Some(batched) = batch_rzz_inverse(&gates) {
+            return batched;
+        }
+        if let Some(diagonal) = diagonal_batch_inverse(&gates) {
+            return vec![diagonal];
+        }
+    }
+
+    gates
+        .iter()
+        .map(|&(gate, targets)| Instruction::Gate {
+            gate: gate.inverse(),
+            targets: targets.iter().copied().collect(),
+        })
+        .collect()
+}
+
+fn multi_fused_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
+    let mut fused: Vec<(usize, [[Complex64; 2]; 2])> = Vec::with_capacity(gates.len());
+    for &(gate, targets) in gates {
+        if !matches!(gate, Gate::Rx(_) | Gate::Ry(_) | Gate::Rz(_) | Gate::P(_))
+            || fused.iter().any(|&(q, _)| q == targets[0])
+        {
+            return None;
+        }
+        fused.push((targets[0], gate.inverse().matrix_2x2()));
+    }
+    let all_diagonal = fused.iter().all(|(_, mat)| is_diagonal_2x2(mat));
+    let targets: SmallVec<[usize; 4]> = fused.iter().map(|&(q, _)| q).collect();
+    Some(Instruction::Gate {
+        gate: Gate::MultiFused(Box::new(MultiFusedData {
+            gates: fused,
+            all_diagonal,
+        })),
+        targets,
+    })
+}
+
+fn batch_rzz_inverse(gates: &[(&Gate, &[usize])]) -> Option<Vec<Instruction>> {
+    let mut edges: Vec<(usize, usize, f64)> = Vec::with_capacity(gates.len());
+    for &(gate, targets) in gates {
+        let Gate::Rzz(theta) = gate else {
+            return None;
+        };
+        edges.push((targets[0], targets[1], -theta));
+    }
+    Some(
+        edges
+            .chunks(BatchRzzData::MAX_EDGES)
+            .map(|chunk| match chunk {
+                [(q0, q1, theta)] => Instruction::Gate {
+                    gate: Gate::Rzz(*theta),
+                    targets: smallvec![*q0, *q1],
+                },
+                _ => {
+                    let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
+                    for &(q0, q1, _) in chunk {
+                        for q in [q0, q1] {
+                            if !targets.contains(&q) {
+                                targets.push(q);
+                            }
+                        }
+                    }
+                    Instruction::Gate {
+                        gate: Gate::BatchRzz(Box::new(BatchRzzData {
+                            edges: chunk.to_vec(),
+                        })),
+                        targets,
+                    }
+                }
+            })
+            .collect(),
+    )
+}
+
+/// A run of diagonal rotations collapsed into one `DiagonalBatch` sweep. The
+/// kernel has no entry cap: a payload whose connected components outgrow the
+/// phase tables falls back to a per-element pass, still one traversal.
+fn diagonal_batch_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
+    let mut entries: Vec<DiagEntry> = Vec::with_capacity(gates.len());
+    let mut targets: SmallVec<[usize; 4]> = SmallVec::new();
+    for &(gate, gate_targets) in gates {
+        if !matches!(gate, Gate::Rz(_) | Gate::P(_) | Gate::Rzz(_)) {
+            return None;
+        }
+        entries.extend(gate.inverse().diag_entries(gate_targets));
+        for &q in gate_targets {
+            if !targets.contains(&q) {
+                targets.push(q);
+            }
+        }
+    }
+    targets.sort_unstable();
+    Some(Instruction::Gate {
+        gate: Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
+        targets,
+    })
 }
 
 /// Per-instruction flag: true if the gate lies in the Hamiltonian's inverse
@@ -316,48 +527,6 @@ fn build_lambda_and_value(
 
     let value = gather_lambda_chunk(&groups, phi, 0, &mut lambda);
     Ok((value, lambda))
-}
-
-/// Gradient contribution `d⟨H⟩/dθ` of a single trainable gate, from the
-/// generator sandwich `⟨λ|G|φ⟩` with `|φ⟩` on the output side of the gate.
-fn gradient_contribution(
-    kind: GeneratorKind<'_>,
-    targets: &[usize],
-    lambda: &[Complex64],
-    phi: &[Complex64],
-) -> f64 {
-    match kind {
-        GeneratorKind::RotX => {
-            let x = 1usize << targets[0];
-            pauli_sandwich(lambda, phi, x, 0, 0).im
-        }
-        GeneratorKind::RotY => {
-            let b = 1usize << targets[0];
-            pauli_sandwich(lambda, phi, b, b, 1).im
-        }
-        GeneratorKind::RotZ => {
-            let z = 1usize << targets[0];
-            pauli_sandwich(lambda, phi, 0, z, 0).im
-        }
-        GeneratorKind::RotZz => {
-            let z = (1usize << targets[0]) | (1usize << targets[1]);
-            pauli_sandwich(lambda, phi, 0, z, 0).im
-        }
-        GeneratorKind::Phase => {
-            let bit = 1usize << targets[0];
-            let mut acc = Complex64::new(0.0, 0.0);
-            for (j, &amp) in phi.iter().enumerate() {
-                if j & bit != 0 {
-                    acc += lambda[j].conj() * amp;
-                }
-            }
-            -2.0 * acc.im
-        }
-        GeneratorKind::RotPauli(axes) => {
-            let (xmask, zmask, num_y) = pauli_rot_masks(targets, axes);
-            pauli_sandwich(lambda, phi, xmask, zmask, num_y).im
-        }
-    }
 }
 
 /// Compute `⟨H⟩` and its gradient by the parameter-shift rule, routing every
@@ -716,5 +885,116 @@ mod tests {
         for (i, (w, g)) in want.iter().zip(&got).enumerate() {
             assert!((w - g).norm() < 1e-12, "slot {i}: {w} vs {g}");
         }
+    }
+
+    #[test]
+    fn pauli_rot_generators_commute_on_an_even_anticommuting_count() {
+        use crate::sim::unified_pauli::PauliAxis;
+        let gate = |index: usize, axes: &[PauliAxis], targets: &[usize]| {
+            RunGate::new(index, GeneratorKind::RotPauli(axes), targets)
+        };
+        let x0y1 = gate(0, &[PauliAxis::X, PauliAxis::Y], &[0, 1]);
+        let y0x1 = gate(1, &[PauliAxis::Y, PauliAxis::X], &[0, 1]);
+        let wide = gate(
+            2,
+            &[PauliAxis::Y, PauliAxis::X, PauliAxis::X, PauliAxis::X],
+            &[0, 1, 2, 3],
+        );
+        let x1y2 = gate(3, &[PauliAxis::X, PauliAxis::Y], &[1, 2]);
+
+        assert!(x0y1.commutes_with(&y0x1));
+        assert!(x0y1.commutes_with(&x0y1));
+        assert!(!wide.commutes_with(&x1y2));
+        assert!(wide.commutes_with(&y0x1));
+    }
+
+    #[test]
+    fn a_run_collapses_to_one_batch_gate_only_when_its_type_has_one() {
+        let mut c = Circuit::new(4, 0);
+        c.add_gate(Gate::Rz(0.3), &[0]);
+        c.add_gate(Gate::Rz(0.5), &[1]);
+        c.add_gate(Gate::Rz(0.7), &[0]);
+        c.add_gate(Gate::Rzz(0.9), &[0, 1]);
+        c.add_gate(Gate::Rzz(1.1), &[2, 3]);
+        c.add_gate(Gate::Rx(1.3), &[0]);
+
+        let run = |indices: &[usize]| -> Vec<RunGate> {
+            indices
+                .iter()
+                .map(|&i| {
+                    let Instruction::Gate { gate, targets } = &c.instructions[i] else {
+                        unreachable!()
+                    };
+                    RunGate::new(i, gate.pauli_generator().unwrap(), targets)
+                })
+                .collect()
+        };
+
+        let distinct = run_inverse_instructions(&c, &run(&[1, 0]));
+        assert!(matches!(
+            distinct.as_slice(),
+            [Instruction::Gate {
+                gate: Gate::MultiFused(_),
+                ..
+            }]
+        ));
+
+        let rzz_layer = run_inverse_instructions(&c, &run(&[4, 3]));
+        assert!(matches!(
+            rzz_layer.as_slice(),
+            [Instruction::Gate {
+                gate: Gate::BatchRzz(_),
+                ..
+            }]
+        ));
+
+        let repeated_qubit = run_inverse_instructions(&c, &run(&[2, 0]));
+        assert!(matches!(
+            repeated_qubit.as_slice(),
+            [Instruction::Gate {
+                gate: Gate::DiagonalBatch(_),
+                ..
+            }]
+        ));
+
+        let non_diagonal = run_inverse_instructions(&c, &run(&[5, 4]));
+        assert_eq!(non_diagonal.len(), 2);
+    }
+
+    #[test]
+    fn a_mixed_diagonal_run_collapses_into_one_diagonal_batch() {
+        // The Rz layer and the Rzz chain of an Ising ansatz merge into one run:
+        // every generator is Z type, so nothing splits them.
+        let n = 6;
+        let mut c = Circuit::new(n, 0);
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Rzz(0.31 + 0.07 * q as f64), &[q, q + 1]);
+        }
+        for q in 0..3 {
+            c.add_gate(Gate::Rz(0.4 + 0.11 * q as f64), &[q]);
+        }
+
+        let run: Vec<RunGate> = (0..c.instructions.len())
+            .rev()
+            .map(|i| {
+                let Instruction::Gate { gate, targets } = &c.instructions[i] else {
+                    unreachable!()
+                };
+                RunGate::new(i, gate.pauli_generator().unwrap(), targets)
+            })
+            .collect();
+
+        let inverses = run_inverse_instructions(&c, &run);
+        let [
+            Instruction::Gate {
+                gate: Gate::DiagonalBatch(data),
+                targets,
+            },
+        ] = inverses.as_slice()
+        else {
+            panic!("expected one DiagonalBatch, got {inverses:?}")
+        };
+        assert_eq!(data.entries.len(), 8);
+        assert_eq!(targets.as_slice(), &[0, 1, 2, 3, 4, 5]);
     }
 }

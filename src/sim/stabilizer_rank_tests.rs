@@ -804,3 +804,98 @@ fn approx_path_tdg_runs() {
     let result = run_stabilizer_rank_approx(&c, 7, 16).unwrap();
     assert!(result.probabilities.iter().all(|p| p.is_finite()));
 }
+
+// A Clifford circuit on `n` qubits drawn from `rng`: `2 * n` layers of one
+// single-qubit gate and one entangler each, enough for the two states of a
+// pair to share no structure.
+fn random_clifford(n: usize, rng: &mut ChaCha8Rng) -> Circuit {
+    let singles = [
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+        Gate::SX,
+    ];
+    let pairs = [Gate::Cx, Gate::Cz, Gate::Swap];
+    let mut circuit = Circuit::new(n, 0);
+    for _ in 0..2 * n {
+        circuit.add_gate(
+            singles[rng.random_range(0..singles.len())].clone(),
+            &[rng.random_range(0..n)],
+        );
+        let a = rng.random_range(0..n);
+        let b = (a + 1 + rng.random_range(0..n - 1)) % n;
+        circuit.add_gate(pairs[rng.random_range(0..pairs.len())].clone(), &[a, b]);
+    }
+    circuit
+}
+
+fn tableau_of(circuit: &Circuit) -> StabilizerBackend {
+    let mut backend = StabilizerBackend::new(42);
+    crate::sim::run_on(&mut backend, circuit).unwrap();
+    backend
+}
+
+fn dense_overlap_sq(a: &StabilizerBackend, b: &StabilizerBackend) -> f64 {
+    let (x, y) = (
+        a.export_statevector().unwrap(),
+        b.export_statevector().unwrap(),
+    );
+    let inner: Complex64 = x.iter().zip(&y).map(|(p, q)| p.conj() * q).sum();
+    inner.norm_sqr()
+}
+
+// Two unrelated Clifford states, not one state against a perturbation of
+// itself: rows drawn from two different stabilizer groups can anticommute, and
+// their product then carries a factor of i that a merged row has to keep. The
+// pair below is the smallest one where the elimination reaches such a product,
+// and rounding the factor to a sign reads 1/2 on two orthogonal states.
+#[test]
+fn overlap_of_two_orthogonal_clifford_states_is_zero() {
+    let mut left = Circuit::new(2, 0);
+    left.add_gate(Gate::H, &[0]);
+    left.add_gate(Gate::H, &[1]);
+    left.add_gate(Gate::Cz, &[0, 1]);
+    left.add_gate(Gate::Sdg, &[0]);
+    left.add_gate(Gate::Cz, &[0, 1]);
+
+    let mut right = Circuit::new(2, 0);
+    right.add_gate(Gate::H, &[0]);
+    right.add_gate(Gate::Cz, &[0, 1]);
+    right.add_gate(Gate::S, &[0]);
+    right.add_gate(Gate::Cx, &[0, 1]);
+
+    let (a, b) = (tableau_of(&left), tableau_of(&right));
+    assert!(
+        dense_overlap_sq(&a, &b) < 1e-12,
+        "the fixture is meant to be an orthogonal pair"
+    );
+    let overlap = stabilizer_overlap_sq(&a, &b, 2);
+    assert!(
+        overlap < 1e-12,
+        "overlap of an orthogonal pair reads {overlap}"
+    );
+}
+
+// 400 unrelated pairs across widths 2 to 5, each against the dense inner
+// product of the same two tableaux. A merged row whose phase is rounded to a
+// sign fails about 3% of these.
+#[test]
+fn overlap_matches_the_dense_inner_product_over_random_clifford_pairs() {
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
+    for n in 2..=5 {
+        for case in 0..100 {
+            let left = random_clifford(n, &mut rng);
+            let right = random_clifford(n, &mut rng);
+            let (a, b) = (tableau_of(&left), tableau_of(&right));
+            let want = dense_overlap_sq(&a, &b);
+            let got = stabilizer_overlap_sq(&a, &b, n);
+            assert!(
+                (got - want).abs() < 1e-12,
+                "{n} qubits, pair {case}: tableau overlap {got} against dense {want}"
+            );
+        }
+    }
+}

@@ -713,3 +713,223 @@ fn a_phase_gate_shares_a_run_with_a_rotation_of_the_other_mask_family() {
 
     assert_matches_shift(&c, &obs, &params);
 }
+
+/// A layered fixture reaching every fusion floor: a single-qubit run that
+/// fuses, a CX ladder that absorbs it, three trainable rotations buried inside
+/// fusable neighbours, then an Rzz layer and a phase layer.
+fn fusion_ladder(n: usize) -> (Circuit, Parameters, Hamiltonian) {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let mut params = Parameters::new(3);
+    for (slot, q) in [0usize, n / 2, n - 1].into_iter().enumerate() {
+        c.add_gate(Gate::Sdg, &[q]);
+        c.add_gate(Gate::Ry(0.37 + 0.19 * slot as f64), &[q]);
+        params.link(c.instructions.len() - 1, slot);
+        c.add_gate(Gate::S, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Rzz(0.17 + 0.01 * q as f64), &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::P(0.11 + 0.02 * q as f64), &[q]);
+    }
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.6, vec![PauliTerm::x(n / 2)]),
+        (-0.4, vec![PauliTerm::y(n - 1)]),
+    ];
+    (c, params, obs)
+}
+
+#[test]
+fn every_fusion_floor_width_matches_shift() {
+    // 9 qubits sits below the first floor, then the single-qubit, two-qubit,
+    // tiled, diagonal-batch and post-phase-batch floors in turn. Each trainable
+    // Ry sits between an Sdg and an S, so the forward pass folds it into a
+    // neighbour while the sweep keeps reading it on its own.
+    for n in [9usize, 10, 12, 14, 16, 18] {
+        let (c, params, obs) = fusion_ladder(n);
+        assert_matches_shift(&c, &obs, &params);
+    }
+}
+
+#[test]
+fn a_fusable_untrainable_prefix_matches_shift() {
+    // Every trainable gate sits in the last layer, so the sweep stops at the
+    // head of that layer and the whole prefix reaches the forward pass fused
+    // without the sweep ever inverting it.
+    let n = 14;
+    let mut c = Circuit::new(n, 0);
+    for _ in 0..3 {
+        for q in 0..n {
+            c.add_gate(Gate::H, &[q]);
+            c.add_gate(Gate::T, &[q]);
+        }
+        for q in 0..n - 1 {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    let mut params = Parameters::new(2);
+    for (slot, q) in [0usize, n - 1].into_iter().enumerate() {
+        c.add_gate(Gate::Rx(0.41 + 0.13 * slot as f64), &[q]);
+        params.link(c.instructions.len() - 1, slot);
+    }
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0)]),
+        (0.5, vec![PauliTerm::x(n - 1)]),
+    ];
+    assert_matches_shift(&c, &obs, &params);
+}
+
+#[test]
+fn trainable_pauli_rotations_absorbed_into_a_fused_2q_match_shift() {
+    // A weight-2 PauliRot anchors a two-qubit fusion, so the pending 1q gates
+    // on its targets fold into a Fused2q together with the rotation itself and
+    // it leaves the forward stream entirely. The sweep goes on reading it from
+    // the circuit as written.
+    let n = 12;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..3 {
+        c.add_gate(Gate::Rz(0.21 + 0.07 * q as f64), &[q]);
+    }
+    c.add_pauli_rotation(0.31, &[PauliTerm::x(0), PauliTerm::y(1)]);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_pauli_rotation(0.47, &[PauliTerm::x(1), PauliTerm::y(2)]);
+
+    let pauli_rots = |instructions: &[Instruction]| {
+        instructions
+            .iter()
+            .filter(|inst| {
+                matches!(
+                    inst,
+                    Instruction::Gate {
+                        gate: Gate::PauliRot(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+    };
+    let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+    assert!(
+        pauli_rots(&fused.instructions) < pauli_rots(&c.instructions),
+        "a trainable rotation has to be absorbed for the test to cover anything"
+    );
+
+    let params = Parameters::all_rotations(&c);
+    assert_eq!(params.num_slots(), 5);
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.6, vec![PauliTerm::x(2)]),
+    ];
+    assert_matches_shift(&c, &obs, &params);
+}
+
+#[test]
+fn a_rotation_the_recognizer_could_swallow_still_carries_its_gradient() {
+    // Rx(1e-5) is a run of one and its matrix is 1e-5 per entry from the
+    // identity. Were the pass to delete it, the forward pass would land a state
+    // the sweep then inverts a gate out of that was never applied, and the
+    // gradient would come back zero instead of -sin(1e-5). The H and T on qubit
+    // 1 are what make the pass rebuild the stream at all.
+    let theta = 1e-5;
+    let mut c = Circuit::new(12, 0);
+    c.add_gate(Gate::H, &[1]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rx(theta), &[0]);
+    let mut params = Parameters::new(1);
+    params.link(3, 0);
+
+    let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
+    assert_matches_shift(&c, &obs, &params);
+
+    let g = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    assert!((g.gradient[0] + theta.sin()).abs() < 1e-12);
+}
+
+#[test]
+fn commuting_runs_at_a_fusing_width_match_shift() {
+    // The run splits the narrow fixture covers, at a width where the forward
+    // pass reorders and batches: the Rzz and Rz generators merge into one run,
+    // the Ry on qubit 2 cuts it, and the CX ladder cuts again.
+    let n = 14;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Rx(0.2 + 0.05 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Rzz(0.31 + 0.07 * q as f64), &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::Rz(0.4 + 0.11 * q as f64), &[q]);
+        if q == 2 {
+            c.add_gate(Gate::Ry(0.83), &[q]);
+        }
+    }
+    let params = Parameters::all_rotations(&c);
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.6, vec![PauliTerm::x(2)]),
+        (-0.4, vec![PauliTerm::y(3), PauliTerm::z(4)]),
+        (0.25, vec![PauliTerm::x(n - 1)]),
+    ];
+    assert_matches_shift(&c, &obs, &params);
+}
+
+#[test]
+fn a_pruned_cone_still_fuses_what_is_left() {
+    // No gate crosses the two halves and the observable touches the lower one,
+    // so the cone drops the upper half and the forward pass fuses the
+    // subcircuit that survives rather than the circuit as written. The two
+    // trainable rotations in the upper half carry an exactly zero gradient.
+    let n = 14;
+    let half = n / 2;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+        c.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..half - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in half..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let mut params = Parameters::new(4);
+    for (slot, q) in [0usize, half - 1, half, n - 1].into_iter().enumerate() {
+        c.add_gate(Gate::Ry(0.29 + 0.13 * slot as f64), &[q]);
+        params.link(c.instructions.len() - 1, slot);
+    }
+
+    let obs: Hamiltonian = vec![
+        (1.0, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+        (0.5, vec![PauliTerm::x(half - 1)]),
+    ];
+    assert_matches_shift(&c, &obs, &params);
+
+    let g = run_expectation_gradient(&c, &obs, &params, SEED).unwrap();
+    assert_eq!(g.gradient[2], 0.0);
+    assert_eq!(g.gradient[3], 0.0);
+}

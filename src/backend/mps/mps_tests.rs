@@ -1730,6 +1730,213 @@ fn a_block_gate_establishes_a_center_of_its_own() {
     );
 }
 
+// The block decomposition cuts where the two-site kernel does, so a block on
+// a chain under both gauge marks owes the same spectrum retry: a value the
+// factorization resolves takes the center before the block is cut again, one
+// at the factorization's own rounding does not. A controlled phase of `angle`
+// on three sites of a product of plus states leaves the block a Schmidt value
+// of about `angle / 4`, which the angle places on either side of the
+// resolution while both sit under the default threshold.
+#[test]
+fn a_block_gate_gauges_when_it_drops_what_the_factorization_resolves() {
+    use crate::gates::McuData;
+
+    for (angle, gauged) in [(2e-13, true), (2e-17, false)] {
+        let mut circuit = Circuit::new(6, 0);
+        for q in 0..6 {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.add_gate(
+            Gate::Mcu(Box::new(McuData {
+                num_controls: 2,
+                mat: [[ONE, ZERO], [ZERO, Complex64::from_polar(1.0, angle)]],
+            })),
+            &[2, 3, 4],
+        );
+
+        let b = mps_after(&circuit, 64);
+        assert_eq!(b.current_max_bond_dim(), 1, "angle {angle:e}");
+        assert_eq!(b.center.is_some(), gauged, "angle {angle:e}");
+        if gauged {
+            assert!(
+                b.truncation_discarded() > 0.0,
+                "angle {angle:e} booked nothing"
+            );
+        } else {
+            assert_eq!(b.center_steps, 0, "angle {angle:e}");
+        }
+    }
+}
+
+// The retry end to end: the first cut keeps every value it has, the second
+// drops one the factorization resolves and aborts, and what comes out of the
+// second pass is the state the dense vector holds. The rollback itself is
+// pinned field by field below.
+#[test]
+fn a_block_retry_lands_on_the_statevector() {
+    use crate::gates::McuData;
+
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let prefix = mps_after(&circuit, 64);
+    assert_eq!(prefix.center, None, "the prefix gauged before the block");
+    assert_eq!(prefix.current_max_bond_dim(), 2);
+
+    circuit.add_gate(
+        Gate::Mcu(Box::new(McuData {
+            num_controls: 2,
+            mat: Gate::Ry(2e-13).matrix_2x2(),
+        })),
+        &[0, 1, 2],
+    );
+
+    let b = mps_after(&circuit, 64);
+    assert!(b.center.is_some(), "the block never retried");
+    assert!(b.center_steps > 0, "the retry never walked");
+    assert!(b.truncation_discarded() > 0.0, "the retry booked nothing");
+    assert_eq!(b.current_max_bond_dim(), 2);
+
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(n, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+
+    let expected = sv.export_statevector().unwrap();
+    let actual = b.export_statevector().unwrap();
+    for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-12,
+            "amplitude {i} reads {a} against {e}"
+        );
+    }
+}
+
+// The rollback, field by field, taken straight off the aborted attempt rather
+// than through the retry that follows it. The two angle pairs make different
+// fields answer: under the resolution the first cut truncates and books while
+// writing one value, over the threshold it writes two and raises the bond
+// high-water mark. Both abort on the second cut.
+#[test]
+fn the_block_rollback_puts_back_every_field_it_touched() {
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    for (first, expected_water) in [(2e-17, 1usize), (2e-6, 2)] {
+        // Diagonal over three sites: a phase across the block's first cut, and
+        // one across its second that the factorization resolves.
+        let mut gate = vec![ZERO; 64];
+        for state in 0..8usize {
+            let mut angle = 0.0;
+            if state & 6 == 6 {
+                angle += first;
+            }
+            if state & 3 == 3 {
+                angle += 2e-13;
+            }
+            gate[state * 8 + state] = Complex64::from_polar(1.0, angle);
+        }
+
+        let mut b = mps_after(&circuit, 64);
+        assert_eq!(b.center, None, "the chain gauged before the block");
+        assert_eq!(b.bond_high_water, 1);
+        let sites = b.sites.clone();
+        let booked = b.truncation_discarded();
+
+        let mut attempt = b.clone();
+        assert!(
+            !attempt.cut_block(&gate, 8, 0, 3),
+            "first {first:e}: the attempt did not abort"
+        );
+        assert_eq!(
+            attempt.bond_high_water, 1,
+            "first {first:e}: the attempt left its high-water mark"
+        );
+        assert_eq!(
+            attempt.truncation_discarded(),
+            booked,
+            "first {first:e}: the attempt left its booking"
+        );
+        for (site, (x, y)) in attempt.sites.iter().zip(&sites).enumerate() {
+            assert_eq!(
+                (x.bond_left, x.bond_right),
+                (y.bond_left, y.bond_right),
+                "first {first:e}: site {site} shape"
+            );
+            assert!(
+                x.data == y.data,
+                "first {first:e}: site {site} data differs"
+            );
+        }
+
+        // What the attempt would have left behind, so the assertions above are
+        // predicates rather than accidents: the gauged pass writes the same
+        // first cut, and its mark is the one the rollback had to undo.
+        b.establish_center(0);
+        assert!(b.cut_block(&gate, 8, 0, 3));
+        assert_eq!(
+            b.bond_high_water, expected_water,
+            "first {first:e}: the cut never wrote the mark the rollback undoes"
+        );
+    }
+}
+
+// The rollback puts back the booking and the high-water mark as well as the
+// sites. The block below carries a controlled phase across its first cut small
+// enough to sit under the resolution, which that cut books and continues past,
+// and one across its second cut over it, which aborts: a booking left in place
+// would be counted twice. Without the restore this reads 2.500180312933e-27
+// against the 2.500180287933e-27 a chain gauged up front produces.
+#[test]
+fn a_block_retry_puts_back_what_the_attempt_booked() {
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    // Diagonal over the three sites of the block, with the first site of the
+    // block in the high bit: a phase on its first pair and one on its second.
+    let mut gate = vec![ZERO; 64];
+    for s in 0..8usize {
+        let mut angle = 0.0;
+        if s & 6 == 6 {
+            angle += 2e-17;
+        }
+        if s & 3 == 3 {
+            angle += 2e-13;
+        }
+        gate[s * 8 + s] = Complex64::from_polar(1.0, angle);
+    }
+
+    let mut retried = mps_after(&circuit, 64);
+    assert_eq!(retried.center, None, "the chain gauged before the block");
+    retried.apply_adjacent_n_qubit(&gate, 8, 0).unwrap();
+    assert!(retried.center.is_some(), "the block never retried");
+
+    let mut reference = mps_after(&circuit, 64);
+    reference.establish_center(0);
+    reference.apply_adjacent_n_qubit(&gate, 8, 0).unwrap();
+
+    assert_eq!(
+        retried.truncation_discarded(),
+        reference.truncation_discarded(),
+        "the attempt left its booking behind"
+    );
+    assert_eq!(retried.bond_high_water, reference.bond_high_water);
+    for (site, (x, y)) in retried.sites.iter().zip(&reference.sites).enumerate() {
+        assert_eq!(
+            (x.bond_left, x.bond_right),
+            (y.bond_left, y.bond_right),
+            "site {site} shape"
+        );
+        assert!(x.data == y.data, "site {site} data differs");
+    }
+}
+
 // End to end, which is what a caller sees: the error the whole run carries
 // against the untruncated chain, and how close the reported total lands to it.
 // The ungauged path read an infidelity of 3.566e-2 here against a booked

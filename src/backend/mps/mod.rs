@@ -1708,7 +1708,8 @@ impl MpsBackend {
         n: usize,
         bl: usize,
         br: usize,
-    ) {
+        judge: bool,
+    ) -> bool {
         let mut remaining = theta.to_vec();
         let mut cur_bl = bl;
         let mut remaining_dim = 1usize << n;
@@ -1771,6 +1772,9 @@ impl MpsBackend {
 
             let svd_result = svd(&mat, rows, cols);
             let chi_new = truncated_svd_rank(&svd_result.s, self.svd_epsilon, self.max_bond_dim);
+            if judge && discards_resolvable_weight(&svd_result.s, chi_new) {
+                return false;
+            }
             self.record_truncation(&svd_result.s, chi_new);
             self.bond_high_water = self.bond_high_water.max(chi_new);
 
@@ -1806,6 +1810,7 @@ impl MpsBackend {
                 };
             }
         }
+        true
     }
 
     /// Reject a dense `2^n x 2^n` gate matrix over the workspace budget before
@@ -1857,28 +1862,61 @@ impl MpsBackend {
                 workspace,
             ));
         }
+        if !self.cut_block(gate, dim, start_site, n) {
+            self.establish_center(start_site);
+            let gauged = self.cut_block(gate, dim, start_site, n);
+            debug_assert!(gauged, "a block cut in gauge judged its spectrum");
+        }
+        Ok(())
+    }
 
-        // The block decomposition sweeps left to right and leaves the weight
-        // on its last site, so a center anywhere in the block ends there. One
-        // outside it would leave the sites between non-orthogonal, and the
-        // block's own cuts would be the ones paying for it. The decomposition
-        // makes its cuts in one sweep, so there is no spectrum retry here: a
-        // block under both gauge marks cuts ungauged.
+    /// One attempt at [`Self::apply_adjacent_n_qubit`]. Returns `false`,
+    /// having put the block's sites back, when the chain has no center and a
+    /// cut of the decomposition drops a value the factorization resolves.
+    ///
+    /// The decomposition sweeps left to right and leaves the weight on the
+    /// block's last site, so a center anywhere in the block ends there. One
+    /// outside it would leave the sites between non-orthogonal, and the
+    /// block's own cuts would be the ones paying for it. The two-site kernel
+    /// judges its cut before writing anything, where the spectrum that shows
+    /// it here is only reached once the sites before that cut are written, so
+    /// the retry restores them from a copy. Only a threshold can drop a value
+    /// on the ungauged arm, since a cut that could reach the cap gauges
+    /// instead, so at a threshold of zero there is nothing to judge and no
+    /// copy is taken.
+    fn cut_block(&mut self, gate: &[Complex64], dim: usize, start_site: usize, n: usize) -> bool {
+        let block = start_site..start_site + n;
+        let bl = self.sites[start_site].bond_left;
+        let br = self.sites[block.end - 1].bond_right;
         let maintained = self.center.is_some() || self.cut_can_lose(widest_block_cut(bl, br, n));
         if maintained {
             match self.center {
-                Some(at) => self.move_center(at.clamp(start_site, start_site + n - 1)),
+                Some(at) => self.move_center(at.clamp(start_site, block.end - 1)),
                 None => self.establish_center(start_site),
             }
         }
+        let judging = !maintained && self.svd_epsilon > 0.0;
 
         let (theta, bl, br) = self.contract_n_sites(start_site, n);
         let theta_prime = Self::apply_gate_to_theta(&theta, gate, dim, bl, br);
-        self.decompose_n_sites(&theta_prime, start_site, n, bl, br);
-        if maintained {
-            self.center = Some(start_site + n - 1);
+        if !judging {
+            self.decompose_n_sites(&theta_prime, start_site, n, bl, br, false);
+            if maintained {
+                self.center = Some(block.end - 1);
+            }
+            return true;
         }
-        Ok(())
+
+        let saved = self.sites[block.clone()].to_vec();
+        let booked = self.truncation_discarded;
+        let high_water = self.bond_high_water;
+        if self.decompose_n_sites(&theta_prime, start_site, n, bl, br, true) {
+            return true;
+        }
+        self.sites[block].clone_from_slice(&saved);
+        self.truncation_discarded = booked;
+        self.bond_high_water = high_water;
+        false
     }
 
     /// Apply an N-qubit gate to arbitrary (possibly non-adjacent) qubits.

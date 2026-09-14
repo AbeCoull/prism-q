@@ -25,14 +25,12 @@ use num_complex::Complex64;
 
 use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{
-    DiagEntry, DiagonalBatchData, Gate, Multi2qData, MultiFusedData, is_diagonal_2x2,
+    DiagEntry, DiagonalBatchData, Gate, IDENTITY_EPS, Multi2qData, MultiFusedData, is_diagonal_2x2,
     is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
 };
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
 use super::fusion_rzz::{fuse_batch_rzz, fuse_rzz};
-
-pub(super) const IDENTITY_EPS: f64 = 1e-12;
 
 use super::plan::{Place, Tracer};
 
@@ -296,12 +294,8 @@ fn flush(pending: &mut Option<PendingFusion>, output: &mut Vec<Instruction>, t: 
     if let Some(p) = pending.take() {
         if !is_identity(&p.matrix) {
             let gate = match Gate::recognize_matrix(&p.matrix) {
-                // A run collapsing to a named gate or to the identity drops the
-                // stored angles, so a rebinding cannot rebuild it.
-                Some(Gate::Id) => {
-                    t.bail();
-                    return;
-                }
+                // A run collapsing to a named gate drops the stored angles, so
+                // a rebinding cannot rebuild it.
                 Some(named) => {
                     t.bail();
                     named

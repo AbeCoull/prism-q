@@ -129,6 +129,67 @@ fn brickwork_rows_saturate_the_bond_ladder() {
     );
 }
 
+// The `mps/hotspots/measure_brickwork_16q_r3` row prices a measurement at
+// bond, which its neighbour `measure_reset_32q_r3` cannot: a controlled-not on
+// two plus states is the identity, so that fixture never leaves bond one. What
+// this one owes is real bond around its measurement rounds.
+#[test]
+fn the_measured_brickwork_row_carries_bond() {
+    let mut circuit = prism_q::circuit::Circuit::new(16, 16);
+    for round in 0..3 {
+        let layers = circuits::brickwork_circuit(16, 5, SEED);
+        circuit.instructions.extend(layers.instructions);
+        for q in (round % 2..16).step_by(4) {
+            circuit.add_measure(q, q);
+        }
+    }
+
+    let mut backend = MpsBackend::new(SEED, 64);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    let mut peak = 1usize;
+    let mut measured = 0usize;
+    for instruction in &circuit.instructions {
+        backend.apply(instruction).unwrap();
+        peak = peak.max(backend.current_max_bond_dim());
+        if matches!(instruction, prism_q::Instruction::Measure { .. }) {
+            measured += 1;
+        }
+    }
+    assert!(
+        peak >= 16,
+        "measure_brickwork_16q_r3: peak bond {peak} leaves the row pricing bookkeeping"
+    );
+    assert_eq!(measured, 12, "measure_brickwork_16q_r3: measurement count");
+}
+
+// The `mps/brickwork_d24/b256/12` row prices the orthogonality-center walk
+// rather than the cap, so its fixture has to stay under the cap while carrying
+// enough bond to walk. The half of that claim which reads the rank at which a
+// threshold cut takes the center is held against the constant itself, in the
+// backend's own tests; what an outside test can see is the cap.
+#[test]
+fn the_gauge_walk_row_stays_under_its_cap() {
+    let circuit = circuits::brickwork_circuit(12, 24, SEED);
+    let mut backend = MpsBackend::new(SEED, 256);
+    backend
+        .init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    backend.apply_instructions(&circuit.instructions).unwrap();
+
+    let peak = backend.current_max_bond_dim();
+    assert!(
+        peak < 256,
+        "brickwork_d24/12: peak bond {peak} reaches its own cap"
+    );
+    let discarded = backend.truncation_discarded();
+    assert!(
+        discarded < 1e-20,
+        "brickwork_d24/12: the cap discarded {discarded:.3e}, so the row prices truncation"
+    );
+}
+
 // The `mps/matched_d12` row prices SWAP routing at real bond, so its two
 // claims are that gates stay non-adjacent and that the bond saturates the
 // cap. The second check is the one that catches a fixed pairing: its gates

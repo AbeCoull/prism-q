@@ -198,6 +198,60 @@ pub fn run_and_state(circuit: &Circuit) -> Vec<Complex64> {
     backend.state_vector().to_vec()
 }
 
+/// Reverse the low `num_qubits` bits of a basis-state index.
+///
+/// PRISM-Q carries two basis orderings and both are load-bearing. A
+/// statevector index puts qubit 0 in the least significant bit; a gate matrix
+/// (`Fused2q`, `matrix_4x4`, 2q Kraus operators) puts `targets[0]` in the most
+/// significant. The two are bit reversals of each other, so this converts in
+/// either direction.
+pub fn reverse_qubit_bits(index: usize, num_qubits: usize) -> usize {
+    (0..num_qubits)
+        .filter(|bit| (index >> (num_qubits - 1 - bit)) & 1 == 1)
+        .fold(0, |acc, bit| acc | (1 << bit))
+}
+
+/// The unitary a circuit implements, indexed in gate-matrix order.
+///
+/// Column `c` is the circuit applied to the basis state `c` names, so a
+/// circuit holding one gate on `0..n` in order reproduces that gate's matrix
+/// exactly. Panics on a circuit that is not unitary, since `run_on_state`
+/// rejects one.
+pub fn circuit_unitary(circuit: &Circuit) -> Vec<Vec<Complex64>> {
+    let n = circuit.num_qubits;
+    let dim = 1usize << n;
+    let mut unitary = vec![vec![Complex64::new(0.0, 0.0); dim]; dim];
+    for col in 0..dim {
+        let mut start = vec![Complex64::new(0.0, 0.0); dim];
+        start[reverse_qubit_bits(col, n)] = Complex64::new(1.0, 0.0);
+        let mut backend = StatevectorBackend::new(SEED);
+        sim::run_on_state(&mut backend, circuit, &start).unwrap();
+        let state = backend.state_vector();
+        for (row, amplitudes) in unitary.iter_mut().enumerate() {
+            amplitudes[col] = state[reverse_qubit_bits(row, n)];
+        }
+    }
+    unitary
+}
+
+pub fn assert_unitary_close(
+    actual: &[Vec<Complex64>],
+    expected: &[Vec<Complex64>],
+    eps: f64,
+    label: &str,
+) {
+    assert_eq!(actual.len(), expected.len(), "{label}: dimension");
+    for (r, (got_row, want_row)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(got_row.len(), want_row.len(), "{label}: row {r} width");
+        for (c, (got, want)) in got_row.iter().zip(want_row).enumerate() {
+            assert!(
+                (got - want).norm() < eps,
+                "{label}: [{r}][{c}] expected {want}, got {got}"
+            );
+        }
+    }
+}
+
 pub fn run_stabilizer_probs(circuit: &Circuit) -> Vec<f64> {
     run_fused_probs(&mut StabilizerBackend::new(SEED), circuit)
 }

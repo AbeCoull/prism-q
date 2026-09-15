@@ -90,6 +90,64 @@ impl Probabilities {
         }
     }
 
+    /// Joint distribution over `qubits`, `2^k` entries with `qubits[0]` in the
+    /// lowest bit, the index order [`ReducedDensityMatrix::data`] states.
+    ///
+    /// The factored arm sums each block over the qubits it holds and multiplies
+    /// the block marginals into place, so the cost is `2^k` per block rather
+    /// than the `2^n` a walk over the joint distribution would pay.
+    ///
+    /// # Panics
+    /// Panics if a qubit index is out of range for the distribution.
+    ///
+    /// [`ReducedDensityMatrix::data`]: crate::sim::ReducedDensityMatrix::data
+    pub fn subset_marginal(&self, qubits: &[usize]) -> Vec<f64> {
+        let width = 1usize << qubits.len();
+        match self {
+            Probabilities::Dense(v) => {
+                let mut out = vec![0.0f64; width];
+                for (index, &p) in v.iter().enumerate() {
+                    out[gather_bits(index, qubits)] += p;
+                }
+                out
+            }
+            Probabilities::Factored { blocks, .. } => {
+                let mut out = vec![1.0f64; width];
+                for block in blocks {
+                    let picks: Vec<(usize, usize)> = qubits
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &q)| block.mask >> q & 1 == 1)
+                        .map(|(out_bit, &q)| (local_bit(block.mask, q), out_bit))
+                        .collect();
+                    if picks.is_empty() {
+                        continue;
+                    }
+                    let mut block_marginal = vec![0.0f64; 1usize << picks.len()];
+                    for (index, &p) in block.probs.iter().enumerate() {
+                        let local = picks
+                            .iter()
+                            .enumerate()
+                            .fold(0usize, |acc, (bit, &(source, _))| {
+                                acc | (index >> source & 1) << bit
+                            });
+                        block_marginal[local] += p;
+                    }
+                    for (state, slot) in out.iter_mut().enumerate() {
+                        let local = picks
+                            .iter()
+                            .enumerate()
+                            .fold(0usize, |acc, (bit, &(_, source))| {
+                                acc | (state >> source & 1) << bit
+                            });
+                        *slot *= block_marginal[local];
+                    }
+                }
+                out
+            }
+        }
+    }
+
     /// Probability of a single computational basis state. O(1) for dense,
     /// O(K) for factored where K is the number of independent blocks.
     ///
@@ -171,6 +229,21 @@ impl Probabilities {
             }
         }
     }
+}
+
+/// Pack the bits `index` holds at `qubits` into a dense index, `qubits[0]`
+/// lowest.
+fn gather_bits(index: usize, qubits: &[usize]) -> usize {
+    qubits
+        .iter()
+        .enumerate()
+        .fold(0usize, |acc, (bit, &q)| acc | (index >> q & 1) << bit)
+}
+
+/// Position of global qubit `q` within a block's local index, which counts the
+/// block's qubits below it.
+fn local_bit(mask: u64, q: usize) -> usize {
+    (mask & ((1u64 << q) - 1)).count_ones() as usize
 }
 
 /// Concrete iterator for [`Probabilities::iter`].

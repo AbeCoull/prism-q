@@ -599,7 +599,7 @@ fn bench_statevector_diag_mixed(c: &mut Criterion) {
 const HARDWARE_BASIS_REWRITES: [(&str, &str); 3] = [
     (
         "ecr",
-        "rx(-pi/2) q[{a}];\nrz(-pi/4) q[{a}];\necr q[{a}], q[{b}];\nx q[{a}];\n",
+        "ecr q[{a}], q[{b}];\nx q[{a}];\nrz(-pi/2) q[{a}];\nrx(-pi/2) q[{b}];\n",
     ),
     (
         "rxx",

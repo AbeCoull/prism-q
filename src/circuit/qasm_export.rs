@@ -242,6 +242,27 @@ fn spell_cu(mat: &[[Complex64; 2]; 2]) -> Option<String> {
 
 /// A two-qubit matrix as one of the named families the parser builds.
 fn spell_2q(mat: &[[Complex64; 4]; 4]) -> Option<String> {
+    if close_4x4(&Parser::ecr_matrix(), mat) {
+        return Some("ecr".to_string());
+    }
+    for (index, name) in [
+        (0usize, "cphaseshift00"),
+        (1, "cphaseshift01"),
+        (2, "cphaseshift10"),
+    ] {
+        let theta = mat[index][index].arg();
+        if close_4x4(&Parser::cphaseshift_matrix(index, theta), mat) {
+            return Some(format!("{name}({theta})"));
+        }
+    }
+    let theta = mat[1][2].arg();
+    if close_4x4(&Parser::pswap_matrix(theta), mat) {
+        return Some(format!("pswap({theta})"));
+    }
+    let theta = 2.0 * mat[1][2].im.atan2(mat[1][1].re);
+    if close_4x4(&Parser::xy_matrix(theta), mat) {
+        return Some(format!("xy({theta})"));
+    }
     if close_4x4(&Parser::syc_matrix(), mat) {
         return Some("syc".to_string());
     }

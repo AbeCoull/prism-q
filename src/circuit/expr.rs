@@ -1,6 +1,7 @@
-//! Arithmetic expression evaluation for OpenQASM gate parameters: `+ - * /`,
-//! parentheses, radix-prefixed literals, math functions, the constants
-//! pi/tau/euler, and identifiers resolved against an optional variable table.
+//! Arithmetic expression evaluation for OpenQASM gate parameters: `+ - * / %`
+//! and `**`, parentheses, radix-prefixed literals, math functions, the
+//! constants pi/tau/euler, and identifiers resolved against an optional
+//! variable table.
 
 use crate::error::{PrismError, Result};
 use std::collections::HashMap;
@@ -9,9 +10,12 @@ use std::collections::HashMap;
 //
 // Grammar:
 //   expr    → term (('+' | '-') term)*
-//   term    → unary (('*' | '/') unary)*
-//   unary   → '-' unary | primary
-//   primary → NUMBER | 'pi' | 'tau' | IDENT '(' expr ')' | '(' expr ')' | IDENT
+//   term    → unary (('*' | '/' | '%') unary)*
+//   unary   → '-' unary | power
+//   power   → primary ('**' unary)?          right associative, binds tighter
+//                                            than unary minus so -2**2 is -4
+//   primary → NUMBER | 'pi' | 'tau' | IDENT '(' args ')' | '(' expr ')' | IDENT
+//   args    → expr (',' expr)*
 
 struct ExprParser<'e> {
     chars: &'e [u8],
@@ -81,14 +85,11 @@ impl<'e> ExprParser<'e> {
                 }
                 Some(b'/') => {
                     self.pos += 1;
-                    let right = self.parse_unary()?;
-                    if right == 0.0 {
-                        return Err(PrismError::Parse {
-                            line: self.line,
-                            message: "division by zero in angle expression".to_string(),
-                        });
-                    }
-                    left /= right;
+                    left /= self.non_zero_divisor("division")?;
+                }
+                Some(b'%') => {
+                    self.pos += 1;
+                    left %= self.non_zero_divisor("modulo")?;
                 }
                 _ => break,
             }
@@ -102,8 +103,33 @@ impl<'e> ExprParser<'e> {
         } else if self.eat(b'+') {
             self.parse_unary()
         } else {
-            self.parse_primary()
+            self.parse_power()
         }
+    }
+
+    fn parse_power(&mut self) -> Result<f64> {
+        let base = self.parse_primary()?;
+        self.skip_ws();
+        if self.chars[self.pos..].starts_with(b"**") {
+            self.pos += 2;
+            // The exponent takes a unary, so `2 ** -1` reads as a power of a
+            // negation rather than as a subtraction.
+            return finite(self.line, "**", base.powf(self.parse_unary()?));
+        }
+        Ok(base)
+    }
+
+    /// Read the right side of `/` or `%`, rejecting a zero the result would
+    /// turn into an infinity or a NaN.
+    fn non_zero_divisor(&mut self, operation: &str) -> Result<f64> {
+        let right = self.parse_unary()?;
+        if right == 0.0 {
+            return Err(PrismError::Parse {
+                line: self.line,
+                message: format!("{operation} by zero in angle expression"),
+            });
+        }
+        Ok(right)
     }
 
     fn parse_number(&mut self) -> Result<f64> {
@@ -239,14 +265,17 @@ impl<'e> ExprParser<'e> {
             self.skip_ws();
             if self.pos < self.chars.len() && self.chars[self.pos] == b'(' {
                 self.pos += 1;
-                let arg = self.parse_expr()?;
+                let mut args = vec![self.parse_expr()?];
+                while self.eat(b',') {
+                    args.push(self.parse_expr()?);
+                }
                 if !self.eat(b')') {
                     return Err(PrismError::Parse {
                         line: self.line,
                         message: format!("unmatched `(` after function `{ident}`"),
                     });
                 }
-                return self.apply_function(&ident, arg);
+                return self.apply_function(&ident, &args);
             }
             return self.resolve_const_or_var(&ident);
         }
@@ -257,35 +286,55 @@ impl<'e> ExprParser<'e> {
         })
     }
 
-    fn apply_function(&self, name: &str, arg: f64) -> Result<f64> {
-        let val = match name {
-            "sin" => arg.sin(),
-            "cos" => arg.cos(),
-            "tan" => arg.tan(),
-            "asin" => arg.asin(),
-            "acos" => arg.acos(),
-            "atan" => arg.atan(),
-            "sqrt" => arg.sqrt(),
-            "exp" => arg.exp(),
-            "ln" => arg.ln(),
-            "log2" => arg.log2(),
-            "abs" => arg.abs(),
-            "ceil" => arg.ceil(),
-            "floor" => arg.floor(),
-            _ => {
-                return Err(PrismError::Parse {
+    /// Apply an OpenQASM builtin. The spec spellings (`arcsin`, `ceiling`,
+    /// `log`) are the primary names; the shorter C ones are accepted too,
+    /// since exported and hand-written sources use both.
+    fn apply_function(&self, name: &str, args: &[f64]) -> Result<f64> {
+        let arity = |wanted: usize| -> Result<()> {
+            if args.len() == wanted {
+                Ok(())
+            } else {
+                Err(PrismError::Parse {
                     line: self.line,
-                    message: format!("unknown function `{name}` in expression"),
-                });
+                    message: format!("`{name}` takes {wanted} argument(s), got {}", args.len()),
+                })
             }
         };
-        if !val.is_finite() {
-            return Err(PrismError::Parse {
-                line: self.line,
-                message: format!("{name}({arg}) produced non-finite result"),
-            });
-        }
-        Ok(val)
+        let two = |f: fn(f64, f64) -> f64| -> Result<f64> {
+            arity(2)?;
+            Ok(f(args[0], args[1]))
+        };
+        let val = match name {
+            "mod" => two(|a, b| a % b)?,
+            "pow" => two(f64::powf)?,
+            _ => {
+                arity(1)?;
+                let arg = args[0];
+                match name {
+                    "sin" => arg.sin(),
+                    "cos" => arg.cos(),
+                    "tan" => arg.tan(),
+                    "arcsin" | "asin" => arg.asin(),
+                    "arccos" | "acos" => arg.acos(),
+                    "arctan" | "atan" => arg.atan(),
+                    "sqrt" => arg.sqrt(),
+                    "exp" => arg.exp(),
+                    "log" | "ln" => arg.ln(),
+                    "log2" => arg.log2(),
+                    "abs" => arg.abs(),
+                    "ceiling" | "ceil" => arg.ceil(),
+                    "floor" => arg.floor(),
+                    "popcount" => popcount(self.line, arg)?,
+                    _ => {
+                        return Err(PrismError::Parse {
+                            line: self.line,
+                            message: format!("unknown function `{name}` in expression"),
+                        });
+                    }
+                }
+            }
+        };
+        finite(self.line, name, val)
     }
 
     fn resolve_const_or_var(&self, name: &str) -> Result<f64> {
@@ -307,6 +356,31 @@ impl<'e> ExprParser<'e> {
             message: format!("unknown identifier `{name}` in expression"),
         })
     }
+}
+
+/// Reject a result no angle can carry, naming what produced it.
+fn finite(line: usize, source: &str, value: f64) -> Result<f64> {
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(PrismError::Parse {
+            line,
+            message: format!("`{source}` produced the non-finite value {value}"),
+        })
+    }
+}
+
+/// Set bits of a non-negative integer. The argument reaches here as the `f64`
+/// every expression evaluates to, so a fractional or negative one is rejected
+/// rather than truncated.
+fn popcount(line: usize, arg: f64) -> Result<f64> {
+    if arg < 0.0 || arg.fract() != 0.0 || arg > u64::MAX as f64 {
+        return Err(PrismError::Parse {
+            line,
+            message: format!("`popcount` takes a non-negative integer, got {arg}"),
+        });
+    }
+    Ok(f64::from((arg as u64).count_ones()))
 }
 
 pub(super) fn eval_expr(

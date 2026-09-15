@@ -557,6 +557,16 @@ impl<'c> Simulate<'c, Seeded> {
         self,
         observable: &PauliObservable,
     ) -> Result<ObservableExpectation> {
+        self.observable_expectation_ref(observable)
+    }
+
+    /// [`Simulate::observable_expectation`] without consuming the builder, so
+    /// [`Simulate::observable_variance`] can evaluate `H` and `H^2` on one
+    /// request.
+    fn observable_expectation_ref(
+        &self,
+        observable: &PauliObservable,
+    ) -> Result<ObservableExpectation> {
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
@@ -616,9 +626,77 @@ impl<'c> Simulate<'c, Seeded> {
             ));
         }
         let result =
-            run_observable_expectation_reported(self.kind, self.circuit, observable, seed)?;
+            run_observable_expectation_reported(self.kind.clone(), self.circuit, observable, seed)?;
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
+    }
+
+    /// Joint probability distribution over `qubits`, `2^k` entries with
+    /// `qubits[0]` in the lowest bit.
+    ///
+    /// The subset generalizes [`Simulate::marginals`], which reports each
+    /// qubit on its own and so cannot show correlation: a Bell pair reads
+    /// `(0.5, 0.5)` twice there and `[0.5, 0, 0, 0.5]` here. Routing follows
+    /// [`Simulate::run`], including the exact mixture a noise model asks for
+    /// and its rejection of readout error, which acts on the measurement
+    /// record rather than on the state.
+    ///
+    /// A backend that exposes no distribution for the circuit reports
+    /// `BackendUnsupported` naming itself.
+    pub fn probabilities_of(self, qubits: &[usize]) -> Result<Vec<f64>> {
+        crate::backend::schmidt::validate_qubit_set(qubits, self.circuit.num_qubits)?;
+        let kind = format!("{:?}", self.kind);
+        let outcome = self.run()?;
+        let probabilities = outcome
+            .probabilities
+            .ok_or(PrismError::BackendUnsupported {
+                backend: kind,
+                operation: "a probability distribution to marginalize".into(),
+            })?;
+        Ok(probabilities.subset_marginal(qubits))
+    }
+
+    /// Full amplitude vector of the circuit's output state, honoring the
+    /// selected backend.
+    ///
+    /// Indexed with qubit 0 in the least significant bit, so `x q[0]` puts the
+    /// amplitude at index 1. The circuit must be unitary, for the reason
+    /// [`Simulate::reduced_density_matrix`] gives.
+    ///
+    /// A noise model declines: a mixture has no single amplitude vector, and
+    /// [`Simulate::reduced_density_matrix`] over the whole register is the
+    /// terminal that answers there. The density-matrix backend declines for
+    /// the same reason whether or not noise is attached.
+    ///
+    /// The vector holds `2^n` amplitudes, so a register past the dense export
+    /// cap reports `IncompatibleBackend` before allocating rather than after.
+    pub fn state_vector(self) -> Result<Vec<Complex64>> {
+        let seed = self.seed_value();
+        let diagnostic = Diagnostic::StateVector;
+        require_unitary_circuit(&self.kind, self.circuit, "a statevector requires")?;
+        if self.require_exact {
+            reject_approximate_route(&self.kind, self.circuit)?;
+        }
+        if self.noise_model.is_some() {
+            return Err(PrismError::IncompatibleBackend {
+                backend: format!("{:?}", self.kind),
+                reason: format!(
+                    "{} is a pure state; a noise model evolves a mixture, which \
+                     `reduced_density_matrix` over the whole register reports",
+                    diagnostic.terminal()
+                ),
+            });
+        }
+        let backend = diagnostic_backend(
+            &self.kind,
+            self.circuit,
+            self.initial_state,
+            seed,
+            diagnostic,
+            self.circuit.num_qubits,
+        )?;
+        ensure_exact_result(self.require_exact, &backend_metadata(&*backend))?;
+        backend.export_statevector()
     }
 
     /// Reduced density matrix of `qubits` on the circuit's output state,
@@ -2694,6 +2772,7 @@ fn analytic_expectations(values: Vec<f64>, metadata: RunMetadata) -> Expectation
 /// the route can be judged before the circuit runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Diagnostic {
+    StateVector,
     ReducedDensityMatrix,
     Entropy,
     Overlap,
@@ -2702,6 +2781,7 @@ enum Diagnostic {
 impl Diagnostic {
     fn terminal(self) -> &'static str {
         match self {
+            Diagnostic::StateVector => "a statevector",
             Diagnostic::ReducedDensityMatrix => "a reduced density matrix",
             Diagnostic::Entropy => "entanglement entropy",
             Diagnostic::Overlap => "a state overlap",
@@ -2735,7 +2815,9 @@ fn plan_answers(plan: &BackendPlan, diagnostic: Diagnostic) -> bool {
                 | BackendPlan::Stabilizer { .. }
                 | BackendPlan::FactoredStabilizer
         ),
-        Diagnostic::Overlap => !matches!(plan, BackendPlan::DensityMatrix { .. }),
+        Diagnostic::StateVector | Diagnostic::Overlap => {
+            !matches!(plan, BackendPlan::DensityMatrix { .. })
+        }
     }
 }
 
@@ -2759,6 +2841,15 @@ fn check_diagnostic_width(backend: &dyn Backend, diagnostic: Diagnostic, k: usiz
     match diagnostic {
         Diagnostic::ReducedDensityMatrix => {
             crate::backend::reduced_density::reduced_density_side(backend.name(), k)?;
+            Ok(())
+        }
+        Diagnostic::StateVector => {
+            if k > crate::backend::schmidt::export_cap() {
+                return Err(crate::backend::schmidt::export_cap_exceeded(
+                    backend.name(),
+                    format!("dense statevector of {k} qubits"),
+                ));
+            }
             Ok(())
         }
         Diagnostic::Entropy | Diagnostic::Overlap => Ok(()),

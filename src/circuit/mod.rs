@@ -16,6 +16,7 @@ mod draw;
 pub use draw::TextOptions;
 mod svg;
 pub use svg::SvgOptions;
+pub mod braket;
 mod expr;
 pub mod fusion;
 mod fusion_phase;
@@ -25,6 +26,7 @@ pub mod parameter;
 pub(crate) mod plan;
 pub mod prepared;
 pub mod qasm_export;
+pub(crate) mod synthesis;
 
 pub use parameter::{ParamLink, Parameters};
 pub use prepared::PreparedCircuit;

@@ -1215,6 +1215,38 @@ fn thin_qr_of_a_zero_matrix_is_still_an_isometry() {
     assert!(qr.r[..cols].iter().all(|x| x.norm() == 0.0));
 }
 
+// Four columns against two rows: the cap stops the loop at rank 2, and the two
+// columns it kept already span every column, so the pair it drops carries the
+// factorization's rounding and the product still reproduces the input.
+#[test]
+fn thin_qr_books_only_rounding_when_it_runs_out_of_rank() {
+    let (rows, cols) = (2usize, 4usize);
+    let a: Vec<Complex64> = (0..rows * cols)
+        .map(|i| Complex64::new(1.0 + i as f64, 0.5 * i as f64 - 1.0))
+        .collect();
+
+    let mut qr = ThinQr::default();
+    qr.factorize(&a, rows, cols);
+    assert_eq!(qr.rank, 2);
+    assert!(
+        qr.discarded < 1e-28,
+        "the rank cap dropped {:.3e} of relative weight",
+        qr.discarded
+    );
+    for j in 0..cols {
+        for k in 0..rows {
+            let got: Complex64 = (0..qr.rank)
+                .map(|i| qr.q[i * rows + k] * qr.r[i * cols + j])
+                .sum();
+            assert!(
+                (got - a[j * rows + k]).norm() < 1e-14,
+                "column {j} row {k}: {got} against {}",
+                a[j * rows + k]
+            );
+        }
+    }
+}
+
 // Squared 2-norm distance between two chains over one site layout, taken on
 // the stored tensors: a truncated chain is not normalized and every read
 // rescales, which would hide the very weight under test.
@@ -1418,19 +1450,6 @@ fn a_non_unitary_write_off_the_center_drops_it() {
     kraus.apply_1q_matrix(center + 1, &damping).unwrap();
     assert_eq!(kraus.center, None, "a Kraus branch kept the record");
 
-    let mut measured = chain_with_center(center);
-    measured
-        .apply(&Instruction::Measure {
-            qubit: center + 1,
-            classical_bit: 0,
-        })
-        .unwrap();
-    assert_eq!(measured.center, None, "a measurement kept the record");
-
-    let mut reset = chain_with_center(center);
-    reset.reset(center + 1).unwrap();
-    assert_eq!(reset.center, None, "a reset kept the record");
-
     // What dropping it buys: the cut after a Kraus branch still books the error
     // it makes, because it rebuilds rather than trusting a stale record.
     let (booked, realized) = one_cut(&kraus, 3, cx_at(3));
@@ -1442,19 +1461,119 @@ fn a_non_unitary_write_off_the_center_drops_it() {
 }
 
 // The center site is under no isometry claim, so a projection there leaves
-// every other site exactly as canonical as it was.
+// every other site exactly as canonical as it was. A measurement elsewhere
+// walks the center onto the site it is about to write, which is what lets the
+// record survive rather than being dropped for the next cut to rebuild.
 #[test]
-fn a_projection_on_the_center_keeps_it() {
+fn a_projection_takes_the_center_and_keeps_it() {
     let center = 2;
-    let mut b = chain_with_center(center);
+    for site in [center, center + 1] {
+        let mut measured = chain_with_center(center);
+        measured
+            .apply(&Instruction::Measure {
+                qubit: site,
+                classical_bit: 0,
+            })
+            .unwrap();
+        assert_eq!(measured.center, Some(site), "measurement at site {site}");
+        measured.assert_gauge(site);
+
+        let mut reset = chain_with_center(center);
+        reset.reset(site).unwrap();
+        assert_eq!(reset.center, Some(site), "reset at site {site}");
+        reset.assert_gauge(site);
+    }
+}
+
+// The first measurement on a chain carrying no record establishes one, and the
+// weights it then reads off the center site are the Born weights of the dense
+// vector. Every site, so the walk is checked in both directions.
+#[test]
+fn born_weights_on_a_fresh_chain_match_the_dense_vector() {
+    let n = 6;
+    let base = mps_after(&crate::circuits::brickwork_circuit(n, 4, 42), 4096);
+    assert_eq!(base.center, None, "the fixture arrived gauged");
+    let dense = base.export_statevector().unwrap();
+    let norm = base.pauli_expectation(&[]).unwrap().re;
+
+    for site in 0..n {
+        let mut b = base.clone();
+        let weights = b.born_weights(site);
+        assert_eq!(b.center, Some(site));
+        b.assert_gauge(site);
+
+        let expected: f64 = dense
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| (index >> site) & 1 == 1)
+            .map(|(_, amplitude)| amplitude.norm_sqr())
+            .sum();
+        // Against the chain's own norm rather than against their sum, so a
+        // scale on both weights fails here instead of cancelling.
+        assert!(
+            (weights[1] - norm * expected).abs() < 1e-12,
+            "site {site} reads {} against {}",
+            weights[1],
+            norm * expected
+        );
+        assert!(
+            (weights[0] + weights[1] - norm).abs() < 1e-12,
+            "site {site} weights sum to {} against a norm of {norm}",
+            weights[0] + weights[1]
+        );
+    }
+}
+
+// A chain no cut can take weight from has no use for a center: the exact
+// constructor holds an unbounded cap and a threshold of zero, so a record left
+// by a measurement would put a walk on every later gate for an error no cut
+// makes.
+#[test]
+fn an_exact_chain_keeps_no_center_through_a_measurement() {
+    let n = 6;
+    let mut b = MpsBackend::new_exact(42);
+    b.init(n, 1).unwrap();
+    b.apply_instructions(&crate::circuits::brickwork_circuit(n, 4, 42).instructions)
+        .unwrap();
+    assert_eq!(b.center, None);
+
     b.apply(&Instruction::Measure {
-        qubit: center,
+        qubit: 2,
         classical_bit: 0,
     })
     .unwrap();
+    assert_eq!(b.center, None, "an exact chain kept a record");
+    assert_eq!(b.truncation_discarded(), 0.0);
 
-    assert_eq!(b.center, Some(center));
-    b.assert_gauge(center);
+    let mark = b.center_steps;
+    b.dispatch_gate(&Gate::Cx, &[3, 4]).unwrap();
+    assert_eq!(
+        b.center_steps, mark,
+        "a gate after the measurement walked for a cut that cannot lose"
+    );
+
+    b.reset(4).unwrap();
+    assert_eq!(b.center, None, "a reset kept a record");
+
+    // The other arm of the same predicate: a threshold of zero under a finite
+    // cap can still lose weight, so that chain does keep the record.
+    let mut capped = MpsBackend::new(42, 8);
+    capped.set_svd_epsilon(0.0);
+    capped.init(n, 1).unwrap();
+    capped
+        .apply_instructions(&crate::circuits::brickwork_circuit(n, 4, 42).instructions)
+        .unwrap();
+    capped
+        .apply(&Instruction::Measure {
+            qubit: 2,
+            classical_bit: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        capped.center,
+        Some(2),
+        "a capped chain dropped the record a later cut needs"
+    );
 }
 
 // End to end: a chain of Schmidt rank 2 under a cap of 3 drives the policy on
@@ -1696,6 +1815,213 @@ fn a_block_gate_establishes_a_center_of_its_own() {
         booked >= realized && booked < 1.1 * realized,
         "the block booked {booked:.6e} against a realized {realized:.6e}"
     );
+}
+
+// The block decomposition cuts where the two-site kernel does, so a block on
+// a chain under both gauge marks owes the same spectrum retry: a value the
+// factorization resolves takes the center before the block is cut again, one
+// at the factorization's own rounding does not. A controlled phase of `angle`
+// on three sites of a product of plus states leaves the block a Schmidt value
+// of about `angle / 4`, which the angle places on either side of the
+// resolution while both sit under the default threshold.
+#[test]
+fn a_block_gate_gauges_when_it_drops_what_the_factorization_resolves() {
+    use crate::gates::McuData;
+
+    for (angle, gauged) in [(2e-13, true), (2e-17, false)] {
+        let mut circuit = Circuit::new(6, 0);
+        for q in 0..6 {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        circuit.add_gate(
+            Gate::Mcu(Box::new(McuData {
+                num_controls: 2,
+                mat: [[ONE, ZERO], [ZERO, Complex64::from_polar(1.0, angle)]],
+            })),
+            &[2, 3, 4],
+        );
+
+        let b = mps_after(&circuit, 64);
+        assert_eq!(b.current_max_bond_dim(), 1, "angle {angle:e}");
+        assert_eq!(b.center.is_some(), gauged, "angle {angle:e}");
+        if gauged {
+            assert!(
+                b.truncation_discarded() > 0.0,
+                "angle {angle:e} booked nothing"
+            );
+        } else {
+            assert_eq!(b.center_steps, 0, "angle {angle:e}");
+        }
+    }
+}
+
+// The retry end to end: the first cut keeps every value it has, the second
+// drops one the factorization resolves and aborts, and what comes out of the
+// second pass is the state the dense vector holds. The rollback itself is
+// pinned field by field below.
+#[test]
+fn a_block_retry_lands_on_the_statevector() {
+    use crate::gates::McuData;
+
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+    let prefix = mps_after(&circuit, 64);
+    assert_eq!(prefix.center, None, "the prefix gauged before the block");
+    assert_eq!(prefix.current_max_bond_dim(), 2);
+
+    circuit.add_gate(
+        Gate::Mcu(Box::new(McuData {
+            num_controls: 2,
+            mat: Gate::Ry(2e-13).matrix_2x2(),
+        })),
+        &[0, 1, 2],
+    );
+
+    let b = mps_after(&circuit, 64);
+    assert!(b.center.is_some(), "the block never retried");
+    assert!(b.center_steps > 0, "the retry never walked");
+    assert!(b.truncation_discarded() > 0.0, "the retry booked nothing");
+    assert_eq!(b.current_max_bond_dim(), 2);
+
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(n, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+
+    let expected = sv.export_statevector().unwrap();
+    let actual = b.export_statevector().unwrap();
+    for (i, (e, a)) in expected.iter().zip(&actual).enumerate() {
+        assert!(
+            (e - a).norm() < 1e-12,
+            "amplitude {i} reads {a} against {e}"
+        );
+    }
+}
+
+// The rollback, field by field, taken straight off the aborted attempt rather
+// than through the retry that follows it. The two angle pairs make different
+// fields answer: under the resolution the first cut truncates and books while
+// writing one value, over the threshold it writes two and raises the bond
+// high-water mark. Both abort on the second cut.
+#[test]
+fn the_block_rollback_puts_back_every_field_it_touched() {
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    for (first, expected_water) in [(2e-17, 1usize), (2e-6, 2)] {
+        // Diagonal over three sites: a phase across the block's first cut, and
+        // one across its second that the factorization resolves.
+        let mut gate = vec![ZERO; 64];
+        for state in 0..8usize {
+            let mut angle = 0.0;
+            if state & 6 == 6 {
+                angle += first;
+            }
+            if state & 3 == 3 {
+                angle += 2e-13;
+            }
+            gate[state * 8 + state] = Complex64::from_polar(1.0, angle);
+        }
+
+        let mut b = mps_after(&circuit, 64);
+        assert_eq!(b.center, None, "the chain gauged before the block");
+        assert_eq!(b.bond_high_water, 1);
+        let sites = b.sites.clone();
+        let booked = b.truncation_discarded();
+
+        let mut attempt = b.clone();
+        assert!(
+            !attempt.cut_block(&gate, 8, 0, 3),
+            "first {first:e}: the attempt did not abort"
+        );
+        assert_eq!(
+            attempt.bond_high_water, 1,
+            "first {first:e}: the attempt left its high-water mark"
+        );
+        assert_eq!(
+            attempt.truncation_discarded(),
+            booked,
+            "first {first:e}: the attempt left its booking"
+        );
+        for (site, (x, y)) in attempt.sites.iter().zip(&sites).enumerate() {
+            assert_eq!(
+                (x.bond_left, x.bond_right),
+                (y.bond_left, y.bond_right),
+                "first {first:e}: site {site} shape"
+            );
+            assert!(
+                x.data == y.data,
+                "first {first:e}: site {site} data differs"
+            );
+        }
+
+        // What the attempt would have left behind, so the assertions above are
+        // predicates rather than accidents: the gauged pass writes the same
+        // first cut, and its mark is the one the rollback had to undo.
+        b.establish_center(0);
+        assert!(b.cut_block(&gate, 8, 0, 3));
+        assert_eq!(
+            b.bond_high_water, expected_water,
+            "first {first:e}: the cut never wrote the mark the rollback undoes"
+        );
+    }
+}
+
+// The rollback puts back the booking and the high-water mark as well as the
+// sites. The block below carries a controlled phase across its first cut small
+// enough to sit under the resolution, which that cut books and continues past,
+// and one across its second cut over it, which aborts: a booking left in place
+// would be counted twice. Without the restore this reads 2.500180312933e-27
+// against the 2.500180287933e-27 a chain gauged up front produces.
+#[test]
+fn a_block_retry_puts_back_what_the_attempt_booked() {
+    let n = 6;
+    let mut circuit = Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+
+    // Diagonal over the three sites of the block, with the first site of the
+    // block in the high bit: a phase on its first pair and one on its second.
+    let mut gate = vec![ZERO; 64];
+    for s in 0..8usize {
+        let mut angle = 0.0;
+        if s & 6 == 6 {
+            angle += 2e-17;
+        }
+        if s & 3 == 3 {
+            angle += 2e-13;
+        }
+        gate[s * 8 + s] = Complex64::from_polar(1.0, angle);
+    }
+
+    let mut retried = mps_after(&circuit, 64);
+    assert_eq!(retried.center, None, "the chain gauged before the block");
+    retried.apply_adjacent_n_qubit(&gate, 8, 0).unwrap();
+    assert!(retried.center.is_some(), "the block never retried");
+
+    let mut reference = mps_after(&circuit, 64);
+    reference.establish_center(0);
+    reference.apply_adjacent_n_qubit(&gate, 8, 0).unwrap();
+
+    assert_eq!(
+        retried.truncation_discarded(),
+        reference.truncation_discarded(),
+        "the attempt left its booking behind"
+    );
+    assert_eq!(retried.bond_high_water, reference.bond_high_water);
+    for (site, (x, y)) in retried.sites.iter().zip(&reference.sites).enumerate() {
+        assert_eq!(
+            (x.bond_left, x.bond_right),
+            (y.bond_left, y.bond_right),
+            "site {site} shape"
+        );
+        assert!(x.data == y.data, "site {site} data differs");
+    }
 }
 
 // End to end, which is what a caller sees: the error the whole run carries
@@ -2418,4 +2744,138 @@ fn the_schmidt_walk_books_nothing_and_leaves_the_center_at_the_cut() {
             "amplitude {i} moved from {x} to {y}"
         );
     }
+}
+
+// A 24-layer brickwork carried on by ten Hadamard and CX ladders: the bonds
+// saturate the width, so every cut runs in gauge and the run books a total the
+// statevector can be held against.
+fn brickwork_then_ladders(n: usize) -> Circuit {
+    let mut circuit = crate::circuits::brickwork_circuit(n, 24, 0xDEAD_BEEF);
+    for _ in 0..10 {
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    circuit
+}
+
+// A dropped column leaves a residual no larger than the relative tolerance
+// times its own norm, so a whole factorization sheds at most that squared,
+// about 1e-28 of relative weight, whatever it is handed. The rank cap is the
+// smaller of rows and columns and so is never below the rank of the matrix,
+// which means that once the loop has kept that many orthonormal columns they
+// span the whole column space and every column after them orthogonalizes down
+// to the same rounding. Both arms below are chains a projection left rank
+// deficient, the second one narrow enough that the factorization is handed
+// four columns against two rows.
+#[test]
+fn the_walk_drops_a_column_only_where_it_carries_rounding() {
+    let mut b = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    b.establish_center(0);
+    let mark = b.qr_discarded;
+    b.project_z_outcome(3, false);
+    let before = interior_bonds(&b);
+    b.establish_center(0);
+    b.move_center(7);
+    b.move_center(0);
+
+    let after = interior_bonds(&b);
+    assert!(
+        after.iter().zip(&before).any(|(a, b)| a < b),
+        "the walk dropped no column: bonds {before:?} against {after:?}"
+    );
+    let dropped = b.qr_discarded - mark;
+    assert!(
+        dropped < 1e-28,
+        "the walk discarded {dropped:.3e} of relative weight, past its own rounding"
+    );
+
+    // Successive projections leave a site whose stored right bond is more than
+    // twice its left, which is the case the rank cap decides rather than the
+    // tolerance. This host reads 1.7e-96 out of the walk that crosses it.
+    let mut b = mps_after(&crate::circuits::brickwork_circuit(8, 6, 42), 4096);
+    b.project_z_outcome(0, false);
+    b.project_z_outcome(1, false);
+    let (site, t) = b
+        .sites
+        .iter()
+        .enumerate()
+        .find(|(_, t)| t.bond_right > 2 * t.bond_left)
+        .expect("no site hands the factorization more columns than rows");
+    let shape = (t.bond_left, t.bond_right);
+    let mark = b.qr_discarded;
+    b.move_center(7);
+
+    assert!(
+        b.sites[site].bond_right < shape.1,
+        "site {site} kept its bond of {} against {} rows",
+        shape.1,
+        2 * shape.0
+    );
+    let dropped = b.qr_discarded - mark;
+    assert!(
+        dropped < 1e-28,
+        "the rank cap discarded {dropped:.3e} of relative weight"
+    );
+}
+
+// What the reported total answers for is the squared 2-norm error. Uncapped,
+// the run below lands 6.07e-13 from the statevector, whose square 3.68e-25 is
+// what the booked 3.57e-25 covers; under a cap of 80 the pair reads 5.42e-2
+// against 6.39e-2. Comparing the booked figure against the distance itself
+// reads twelve orders too small.
+#[test]
+fn a_gauged_run_lands_where_its_booked_weight_says() {
+    let n = 14;
+    let circuit = brickwork_then_ladders(n);
+
+    let mut sv = crate::backend::statevector::StatevectorBackend::new(42);
+    sv.init(n, 0).unwrap();
+    sv.apply_instructions(&circuit.instructions).unwrap();
+    let reference = sv.export_statevector().unwrap();
+
+    for cap in [80usize, 1 << 20] {
+        let b = mps_after(&circuit, cap);
+        assert!(b.center.is_some(), "cap {cap} never drove the policy");
+        assert_eq!(b.qr_discarded, 0.0, "cap {cap}: the walk dropped a column");
+
+        let booked = b.truncation_discarded();
+        assert!(booked > 0.0, "cap {cap} never truncated");
+        let v = b.export_statevector().unwrap();
+        let realized: f64 = reference
+            .iter()
+            .zip(&v)
+            .map(|(r, x)| (r - x).norm_sqr())
+            .sum();
+        assert!(
+            realized < 1.5 * booked && booked < 1.5 * realized,
+            "cap {cap} booked {booked:.3e} against a realized {realized:.3e}"
+        );
+    }
+}
+
+// The row `mps/brickwork_d24/b256/12` prices the walk rather than the cap, so
+// the fixture has to clear the rank at which a threshold cut takes the center
+// and stay under its cap. Held against the constant itself: raising it past
+// the fixture's peak would leave the row measuring traversal alone.
+#[test]
+fn the_gauge_walk_bench_row_walks_under_its_cap() {
+    let b = mps_after(
+        &crate::circuits::brickwork_circuit(12, 24, 0xDEAD_BEEF),
+        256,
+    );
+    let peak = b.current_max_bond_dim();
+    assert!(
+        (GAUGE_RANK..256).contains(&peak),
+        "peak bond {peak} no longer walks under the 256 cap"
+    );
+    assert!(b.center.is_some(), "the row records no center to walk");
+    assert!(b.center_steps > 0, "the row never walks");
+    assert!(
+        b.truncation_discarded() < 1e-20,
+        "the row truncates, so it prices the cap"
+    );
 }

@@ -308,6 +308,24 @@ fn non_clifford_noise_circuit(n_qubits: usize, depth: usize) -> Circuit {
     with_terminal_measurements(circuit)
 }
 
+/// Brickwork layers between rounds of mid-circuit measurement.
+///
+/// `mps_measure_reset_circuit` holds bond one from end to end, since a
+/// controlled-not on two plus states is the identity, so it prices the
+/// bookkeeping a measurement does rather than the work at bond. This one
+/// rebuilds real bond between its rounds.
+fn mps_measured_brickwork_circuit(n_qubits: usize, rounds: usize) -> Circuit {
+    let mut circuit = Circuit::new(n_qubits, n_qubits);
+    for round in 0..rounds {
+        let layers = circuits::brickwork_circuit(n_qubits, 5, SEED);
+        circuit.instructions.extend(layers.instructions);
+        for q in (round % 2..n_qubits).step_by(4) {
+            circuit.add_measure(q, q);
+        }
+    }
+    circuit
+}
+
 fn run_mps_apply_only(circuit: &Circuit, max_bond_dim: usize) {
     let mut backend = MpsBackend::new(SEED, max_bond_dim);
     backend
@@ -1280,6 +1298,14 @@ fn bench_mps_hotspots(c: &mut Criterion) {
         b.iter(|| run_mps_apply_only(&meas_reset, 64));
     });
 
+    // The same shape at bond: the row above peaks at bond one, so it cannot
+    // reach the walk a measurement leaves behind. Shape pinned in
+    // `tests/bench_fixture_routing.rs`.
+    let meas_brickwork = mps_measured_brickwork_circuit(16, 3);
+    group.bench_function("measure_brickwork_16q_r3", |b| {
+        b.iter(|| run_mps_apply_only(&meas_brickwork, 64));
+    });
+
     // Routed long-range pairs sit adjacent after the SWAPs and peak at bond 2,
     // so this row matches the 64-cap row and guards the routing path against
     // cap-dependent cost at the bond 256 default.
@@ -1321,6 +1347,15 @@ fn bench_mps_brickwork(c: &mut Criterion) {
     let circuit = circuits::brickwork_circuit(18, 24, SEED);
     group.bench_with_input(BenchmarkId::new("b256_e3", 18), &circuit, |b, circ| {
         b.iter(|| run_mps_apply_only_with_epsilon(circ, 256, 1e-3));
+    });
+
+    // The walk on its own: at 12 qubits the peak bond clears the rank at which
+    // a threshold cut takes the orthogonality center, and stays under the cap,
+    // so every cut pays the walk for an error the cap never makes. Shape pinned
+    // in `tests/bench_fixture_routing.rs`.
+    let circuit = circuits::brickwork_circuit(12, 24, SEED);
+    group.bench_with_input(BenchmarkId::new("b256", 12), &circuit, |b, circ| {
+        b.iter(|| run_mps_apply_only(circ, 256));
     });
 
     group.finish();

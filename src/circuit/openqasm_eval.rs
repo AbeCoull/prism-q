@@ -394,8 +394,14 @@ impl<'a> Parser<'a> {
                     AssignOp::Add => current + folded,
                     AssignOp::Sub => current - folded,
                     AssignOp::Mul => current * folded,
-                    AssignOp::Div | AssignOp::Rem if folded == 0.0 => {
-                        return Err(parse_error(line, format!("{}= by zero", op.spelling())));
+                    AssignOp::Div if folded == 0.0 => {
+                        return Err(parse_error(
+                            line,
+                            "division by zero in a compound assignment",
+                        ));
+                    }
+                    AssignOp::Rem if folded == 0.0 => {
+                        return Err(parse_error(line, "modulo by zero in a compound assignment"));
                     }
                     AssignOp::Div => current / folded,
                     AssignOp::Rem => current % folded,
@@ -1321,7 +1327,8 @@ impl<'a> Parser<'a> {
                     return Err(parse_error(
                         line,
                         format!(
-                            "expected `{0}==value` or `{0}[i]` in `if` condition",
+                            "expected `{0}==value`, `{0}!=value`, `{0}[i]`, `!{0}[i]` or \
+                             `{0}[i]==0/1` in `if` condition, got `{0}`",
                             operand.describe()
                         ),
                     ));

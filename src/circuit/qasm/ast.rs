@@ -5,6 +5,8 @@
 //! was written on, so a diagnostic from deep inside an expanded `for` or `gate`
 //! body still points at the source.
 
+use std::fmt;
+
 use super::expr::Expr;
 
 pub(crate) type Block<'a> = Vec<Stmt<'a>>;
@@ -135,18 +137,6 @@ pub(crate) enum AssignOp {
     Rem,
 }
 
-impl AssignOp {
-    pub(crate) fn spelling(self) -> char {
-        match self {
-            AssignOp::Add => '+',
-            AssignOp::Sub => '-',
-            AssignOp::Mul => '*',
-            AssignOp::Div => '/',
-            AssignOp::Rem => '%',
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) enum Modifier<'a> {
     Inv,
@@ -176,14 +166,14 @@ pub(crate) struct Operand<'a> {
 }
 
 impl<'a> Operand<'a> {
-    /// How the reference reads back in a diagnostic.
+    /// How the reference reads back in a diagnostic, subscript included.
     pub(crate) fn describe(&self) -> String {
         let base = match self.name {
             OperandName::Register(name) => name.to_string(),
             OperandName::Physical(index) => format!("${index}"),
         };
-        match self.index {
-            Some(_) => format!("{base}[...]"),
+        match &self.index {
+            Some(index) => format!("{base}[{index}]"),
             None => base,
         }
     }
@@ -211,6 +201,37 @@ pub(crate) enum Index<'a> {
     Range(Box<Range<'a>>),
     /// `{a, b, c}`, an explicit list in the order written.
     Set(Vec<Expr<'a>>),
+}
+
+impl fmt::Display for Index<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Index::Single(expr) => write!(f, "{expr}"),
+            Index::Set(entries) => {
+                f.write_str("{")?;
+                for (at, entry) in entries.iter().enumerate() {
+                    if at > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{entry}")?;
+                }
+                f.write_str("}")
+            }
+            Index::Range(range) => {
+                if let Some(start) = &range.start {
+                    write!(f, "{start}")?;
+                }
+                f.write_str(":")?;
+                if let Some(step) = &range.step {
+                    write!(f, "{step}:")?;
+                }
+                match &range.stop {
+                    Some(stop) => write!(f, "{stop}"),
+                    None => Ok(()),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

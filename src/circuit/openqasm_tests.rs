@@ -2990,3 +2990,82 @@ fn a_gate_parameter_shadows_a_register_of_the_same_name() {
         other => panic!("{other:?}"),
     }
 }
+
+// A diagnostic names the reference as it was written. The tree keeps the
+// subscript rather than the source span, so the rendering is what proves it.
+#[test]
+fn a_subscript_reads_back_into_its_diagnostic() {
+    for (source, wanted) in [
+        ("qubit[4] q;\nh q[-1];\n", "negative index in `q[-1]`"),
+        (
+            "qubit[4] q;\nh q[0:0:3];\n",
+            "range step in `q[0:0:3]` must be non-zero",
+        ),
+        ("qubit[4] q;\nh q[3:1];\n", "`q[3:1]` names no index"),
+        (
+            "const int n = 9;\nqubit[4] q;\nh q[n];\n",
+            "invalid qubit index 9",
+        ),
+    ] {
+        let message = format!("{}", parse(source).expect_err(source));
+        assert!(message.contains(wanted), "`{source}` gave: {message}");
+    }
+}
+
+#[test]
+fn a_bare_register_condition_names_the_forms_it_accepts() {
+    let message = format!(
+        "{}",
+        parse("bit[2] c;\nqubit[1] q;\nif (c) x q[0];\n").expect_err("bare register")
+    );
+    for wanted in ["`c==value`", "`c[i]`", "`!c[i]`", "`c[i]==0/1`"] {
+        assert!(message.contains(wanted), "{message}");
+    }
+}
+
+#[test]
+fn a_compound_assignment_by_zero_names_the_operation() {
+    let divide = format!("{}", parse("int n = 4;\nn /= 0;\n").expect_err("divide"));
+    assert!(divide.contains("division by zero"), "{divide}");
+    let modulo = format!("{}", parse("int n = 4;\nn %= 0;\n").expect_err("modulo"));
+    assert!(modulo.contains("modulo by zero"), "{modulo}");
+}
+
+// Three shapes the line reader accepted or mis-resolved because a newline ended
+// a statement and a name was only ever looked up by text.
+#[test]
+fn shapes_the_line_reader_let_through_are_rejected() {
+    let missing = parse("qubit[1] q;\nh q[0]\n").expect_err("missing semicolon");
+    assert!(format!("{missing}").contains("`;`"), "{missing}");
+
+    let trailing = parse("qubit[2] q;\ncx q[0], q[1],;\n").expect_err("trailing comma");
+    assert!(matches!(trailing, PrismError::Parse { .. }), "{trailing:?}");
+
+    // A second `qubit[1] q;` used to allocate a second register and rebind the
+    // name to it, leaving the first one unreachable.
+    let redeclared = parse("qubit[1] q;\nqubit[1] q;\n").expect_err("redeclared");
+    assert!(format!("{redeclared}").contains("already"), "{redeclared}");
+}
+
+// Three the line reader rejected or mis-resolved, which the tree resolves by
+// scope rather than by text.
+#[test]
+fn shapes_the_line_reader_rejected_now_parse() {
+    let sized = parse("const int n = 3;\nqubit[n] q;\nh q[2];\n").expect("const register size");
+    assert_eq!(sized.num_qubits, 3);
+
+    let aliased =
+        parse("qubit[1] q;\nbit[4] c;\nlet a = c[1];\nswitch (a) { case 1 { x q[0]; } }\n")
+            .expect("switch on a one-bit alias");
+    assert_eq!(aliased.instructions.len(), 1);
+
+    let inverted = parse("def sub(qubit a) { rx(0.5) a; }\nqubit[1] q;\ninv @ sub(q[0]);\n")
+        .expect("inv on a def call");
+    match &inverted.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rx(theta),
+            ..
+        } => assert!((theta + 0.5).abs() < 1e-12),
+        other => panic!("{other:?}"),
+    }
+}

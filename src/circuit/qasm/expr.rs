@@ -4,6 +4,7 @@
 //! body above all, is parsed once and evaluated per pass.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use super::lexer::Kind;
 use super::stream::Stream;
@@ -73,6 +74,51 @@ impl<'a> Expr<'a> {
             Expr::Ident(name) => Some(name),
             _ => None,
         }
+    }
+}
+
+impl fmt::Display for Expr<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expr::Number(value) => {
+                // A whole number reads back as it was written rather than as a
+                // float, since that is how an index or a bound is spelled.
+                if value.fract() == 0.0 && value.abs() < 1e15 {
+                    write!(f, "{}", *value as i64)
+                } else {
+                    write!(f, "{value}")
+                }
+            }
+            Expr::Ident(name) => f.write_str(name),
+            Expr::Negate(inner) => {
+                f.write_str("-")?;
+                grouped(f, inner)
+            }
+            Expr::Binary { op, left, right } => {
+                grouped(f, left)?;
+                write!(f, " {} ", op.spelling())?;
+                grouped(f, right)
+            }
+            Expr::Call(call) => {
+                write!(f, "{}(", call.name)?;
+                for (at, arg) in call.args.iter().enumerate() {
+                    if at > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{arg}")?;
+                }
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+/// A subexpression, parenthesised when it is itself an operator application so
+/// the rendering reads back with the grouping it was parsed with.
+fn grouped(f: &mut fmt::Formatter<'_>, expr: &Expr<'_>) -> fmt::Result {
+    match expr {
+        Expr::Binary { .. } => write!(f, "({expr})"),
+        _ => write!(f, "{expr}"),
     }
 }
 

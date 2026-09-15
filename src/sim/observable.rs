@@ -3,6 +3,7 @@
 //! route evaluates mean and variance with. Also holds the joint-Pauli mask
 //! reduction and the expectation kernels the backends share.
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use num_complex::Complex64;
@@ -98,6 +99,107 @@ impl PauliObservable {
 
     pub(crate) fn grouping(&self) -> &Grouping {
         self.grouping.get_or_init(|| compute_grouping(&self.terms))
+    }
+
+    /// The constant term's coefficient and the rest of the sum.
+    ///
+    /// `Var(H + cI) = Var(H)`, so a variance squares the traceless part rather
+    /// than the whole sum: at a large `c` the constant dominates both `<H^2>`
+    /// and `<H>^2` and the difference loses the spread it was meant to report.
+    pub fn split_identity(&self) -> (f64, PauliObservable) {
+        let mut offset = 0.0;
+        let mut rest = PauliObservable::new();
+        for (coefficient, string) in &self.terms {
+            if string.is_empty() {
+                offset += coefficient;
+            } else {
+                rest.merge_term(*coefficient, string.clone());
+            }
+        }
+        (offset, rest)
+    }
+
+    /// `H^2` as a Pauli sum, the second moment [`Simulate::observable_variance`]
+    /// reads `Var(H) = <H^2> - <H>^2` from.
+    ///
+    /// Every coefficient of the square is real. Two Pauli strings either
+    /// commute, and their product carries no phase, or anticommute, and the
+    /// `(j, k)` and `(k, j)` products carry opposite imaginary phases that
+    /// cancel. Phases are tracked as powers of `i` so that cancellation is
+    /// exact rather than a subtraction of two nearly equal floats.
+    ///
+    /// Costs `T^2` string products over `T` terms, so it suits the tensor
+    /// products and small Hermitian matrices an observable request names
+    /// rather than a molecular Hamiltonian.
+    ///
+    /// [`Simulate::observable_variance`]: crate::sim::Simulate::observable_variance
+    pub fn square(&self) -> PauliObservable {
+        let mut accumulated: BTreeMap<Vec<PauliTerm>, f64> = BTreeMap::new();
+        for (left, left_string) in &self.terms {
+            for (right, right_string) in &self.terms {
+                let (phase, product) = multiply_pauli_strings(left_string, right_string);
+                if phase % 2 == 1 {
+                    continue;
+                }
+                let sign = if phase == 0 { 1.0 } else { -1.0 };
+                *accumulated.entry(product).or_insert(0.0) += sign * left * right;
+            }
+        }
+        let norm = self.terms.iter().map(|(c, _)| c.abs()).sum::<f64>();
+        let tolerance = f64::EPSILON * norm * norm * self.terms.len().max(1) as f64;
+        let mut squared = PauliObservable::new();
+        for (string, coefficient) in accumulated {
+            if coefficient.abs() > tolerance {
+                squared.merge_term(coefficient, string);
+            }
+        }
+        squared
+    }
+}
+
+/// Product of two sorted Pauli strings as `(power of i, string)`.
+fn multiply_pauli_strings(left: &[PauliTerm], right: &[PauliTerm]) -> (u32, Vec<PauliTerm>) {
+    let mut phase = 0u32;
+    let mut product = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        let (a, b) = (left[i], right[j]);
+        match a.qubit.cmp(&b.qubit) {
+            std::cmp::Ordering::Less => {
+                product.push(a);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                product.push(b);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                if let Some((step, axis)) = multiply_pauli_axes(a.axis, b.axis) {
+                    phase = (phase + step) % 4;
+                    product.push(PauliTerm::new(a.qubit, axis));
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    product.extend_from_slice(&left[i..]);
+    product.extend_from_slice(&right[j..]);
+    (phase, product)
+}
+
+/// `a * b` on one qubit as `(power of i, axis)`, `None` when the two axes
+/// agree and the product is the identity.
+fn multiply_pauli_axes(a: PauliAxis, b: PauliAxis) -> Option<(u32, PauliAxis)> {
+    use PauliAxis::{X, Y, Z};
+    match (a, b) {
+        (X, Y) => Some((1, Z)),
+        (Y, Z) => Some((1, X)),
+        (Z, X) => Some((1, Y)),
+        (Y, X) => Some((3, Z)),
+        (Z, Y) => Some((3, X)),
+        (X, Z) => Some((3, Y)),
+        _ => None,
     }
 }
 

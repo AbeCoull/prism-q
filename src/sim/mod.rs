@@ -4,6 +4,7 @@
 //! the complexity lives in the backends and the parser. Entry points:
 //! [`simulate`], [`run_qasm`], [`run_on`].
 
+pub mod braket;
 pub mod compiled;
 mod decomposed;
 mod dispatch;
@@ -19,6 +20,7 @@ mod terminal_sampling;
 mod trajectory;
 pub mod unified_pauli;
 
+pub use braket::ResultValue;
 pub(crate) use decomposed::merge_probabilities;
 use decomposed::{
     MIN_DECOMPOSITION_QUBITS, run_decomposed, run_decomposed_prefused, should_decompose,
@@ -148,6 +150,17 @@ impl ReducedDensityMatrix {
     pub fn purity(&self) -> f64 {
         self.data.iter().map(|entry| entry.norm_sqr()).sum()
     }
+}
+
+/// Operator variance of a weighted Pauli observable, returned by
+/// [`Simulate::observable_variance`].
+#[derive(Debug, Clone)]
+pub struct ObservableVariance {
+    /// `<H^2> - <H>^2` on the output state.
+    pub variance: f64,
+    /// `<H>` on the same state, evaluated on the way to the variance.
+    pub mean: f64,
+    pub metadata: RunMetadata,
 }
 
 /// Entanglement entropy of a subsystem, returned by
@@ -629,6 +642,32 @@ impl<'c> Simulate<'c, Seeded> {
             run_observable_expectation_reported(self.kind.clone(), self.circuit, observable, seed)?;
         ensure_exact_result(self.require_exact, &result.metadata)?;
         Ok(result)
+    }
+
+    /// `Var(H) = <H^2> - <H>^2` for a weighted Pauli observable on the
+    /// circuit's output state.
+    ///
+    /// This is the spread of the operator itself, the number a shot-based
+    /// estimate of `<H>` converges on dividing by the shot count. It is not
+    /// [`ObservableExpectation::variance`], which sums per-group variances and
+    /// so drops the covariance between measurement groups.
+    ///
+    /// Evaluates `H` and the square of its traceless part through
+    /// [`Simulate::observable_expectation`], so backend routing, noise, and
+    /// start states behave as they do there. The constant term is held out of
+    /// the square rather than cancelled inside it; see
+    /// [`PauliObservable::split_identity`]. The square carries up to `T^2`
+    /// terms over `H`'s `T`; see [`PauliObservable::square`].
+    pub fn observable_variance(self, observable: &PauliObservable) -> Result<ObservableVariance> {
+        let (offset, traceless) = observable.split_identity();
+        let mean = self.observable_expectation_ref(observable)?;
+        let second = self.observable_expectation_ref(&traceless.square())?;
+        let centered = mean.mean - offset;
+        Ok(ObservableVariance {
+            variance: second.mean - centered * centered,
+            mean: mean.mean,
+            metadata: mean.metadata,
+        })
     }
 
     /// Joint probability distribution over `qubits`, `2^k` entries with

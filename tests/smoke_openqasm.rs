@@ -470,16 +470,6 @@ fn modifier_ctrl_ctrl_x_no_action() {
     );
 }
 
-#[test]
-fn modifier_ctrl_swap_rejected() {
-    let qasm = "OPENQASM 3.0;\nqubit[3] q;\nctrl @ swap q[0], q[1], q[2];";
-    let err = openqasm::parse(qasm).unwrap_err();
-    assert!(
-        format!("{err}").contains("unsupported"),
-        "expected unsupported, got: {err}"
-    );
-}
-
 fn assert_same_state(actual: &str, expected: &str, label: &str) {
     let lhs = openqasm::parse(actual).unwrap();
     let rhs = openqasm::parse(expected).unwrap();
@@ -638,7 +628,22 @@ fn modifier_inv_lowered_u3_returns_to_ground() {
 }
 
 #[test]
-fn modifier_inv_lowered_ecr_round_trips() {
+fn modifier_inv_lowered_iswap_round_trips() {
+    let qasm = r#"
+        OPENQASM 3.0;
+        qubit[2] q;
+        h q[0];
+        iswap q[0], q[1];
+        inv @ iswap q[0], q[1];
+    "#;
+    let plain = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];";
+    assert_same_state(qasm, plain, "inv @ lowered iswap");
+}
+
+// `ecr` is a matrix gate, so `inv @` inverts the matrix rather than reversing
+// an expanded body. Its controlled form is covered in tests/gate_modifiers.rs.
+#[test]
+fn modifier_inv_matrix_ecr_round_trips() {
     let qasm = r#"
         OPENQASM 3.0;
         qubit[2] q;
@@ -647,7 +652,7 @@ fn modifier_inv_lowered_ecr_round_trips() {
         inv @ ecr q[0], q[1];
     "#;
     let plain = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];";
-    assert_same_state(qasm, plain, "inv @ lowered ecr");
+    assert_same_state(qasm, plain, "inv @ matrix ecr");
 }
 
 #[test]
@@ -664,35 +669,6 @@ fn modifier_pow_lowered_u3_repeats_lowering() {
         u3(0.3, 0.4, 0.5) q[0];
     "#;
     assert_same_state(qasm, plain, "pow(2) @ lowered u3");
-}
-
-#[test]
-fn modifier_ctrl_lowered_u3_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[2] q;
-        ctrl @ u3(0.3, 0.4, 0.5) q[0], q[1];
-    "#;
-    let err = format!("{}", openqasm::parse(qasm).unwrap_err());
-    assert!(
-        err.contains("unsupported") && err.contains("ctrl @"),
-        "expected a ctrl-specific unsupported error, got: {err}"
-    );
-}
-
-#[test]
-fn modifier_ctrl_user_gate_rejected() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[2] q;
-        gate st a { s a; t a; }
-        ctrl @ st q[0], q[1];
-    "#;
-    let err = openqasm::parse(qasm).unwrap_err();
-    assert!(
-        format!("{err}").contains("unsupported"),
-        "expected unsupported, got: {err}"
-    );
 }
 
 #[test]

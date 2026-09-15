@@ -72,3 +72,29 @@ fn export_one_qubit_above_the_export_cap_names_it() {
     at_cap.init(CAP, 0).unwrap();
     assert_eq!(at_cap.export_statevector().unwrap().len(), 1 << CAP);
 }
+
+// The terminal prices the vector from the qubit count before the circuit runs,
+// so the rejection names the cap rather than arriving from the backend after
+// the work is already paid for.
+#[test]
+fn state_vector_terminal_one_qubit_above_the_export_cap_names_it() {
+    small_caps();
+    let n = CAP + 1;
+    let circuit = circuits::ghz_circuit(n);
+    let err = simulate(&circuit)
+        .seed(SEED)
+        .backend(BackendKind::Statevector)
+        .state_vector()
+        .unwrap_err();
+    let reason = incompatible_reason(err);
+    assert!(
+        reason.contains(&format!("{n} qubits")) && reason.contains("PRISM_MAX_EXPORT_QUBITS"),
+        "{reason}"
+    );
+
+    let at_cap = circuits::ghz_circuit(CAP);
+    assert_eq!(
+        simulate(&at_cap).seed(SEED).state_vector().unwrap().len(),
+        1 << CAP
+    );
+}

@@ -4,19 +4,26 @@
 //!
 //! | Construct | Example | Notes |
 //! |-----------|---------|-------|
-//! | Header | `OPENQASM 3.0;` | 2.0 also accepted for compat |
+//! | Header | `OPENQASM 3.0;` | 2.0 also accepted for compat; a later major version is rejected rather than read as 3 |
 //! | Include | `include "stdgates.inc";` | Accepted, ignored (gates built-in) |
 //! | Qubit declaration | `qubit[4] q;` | OQ3 syntax (primary) |
 //! | Bit declaration | `bit[4] c;` | OQ3 syntax (primary) |
 //! | Legacy qreg/creg | `qreg q[4]; creg c[4];` | OQ2 compat |
 //! | Input parameter | `input float[64] theta;` | One named slot; [`parse_parametric`] returns them |
 //! | Output declaration | `output bit[4] c;` | Declares the register; every bit is reported anyway |
-//! | 1-qubit gates | `h q[0]; x q[1];` | id, x, y, z, h, s, sdg, t, tdg, sx, sxdg, p/phase, r, gpi, gpi2, u/U forms |
+//! | 1-qubit gates | `h q[0]; x q[1];` | id/i, x, y, z, h, s, sdg/si, t, tdg/ti, sx/v, sxdg/vi, p/phase/phaseshift, r/prx, gpi, gpi2, u/U forms |
 //! | Parametric gates | `rx(pi/4) q[0];` | rx, ry, rz, cu, ms, arithmetic expressions with `pi`, math functions |
-//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase, crx, cry, crz, csx, swap, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
-//! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases |
-//! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
-//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` (chainable), `pow(k) @` (integer k) for direct gates; `inv @` and `pow(k) @` also apply to a user `gate`, a `def` call and a gate that lowers to a sequence, reversing or repeating the expanded body |
+//! | 2-qubit gates | `cx q[0], q[1];` | cx/cnot, cy, cz, ch, cs, csdg, cp/cphase/cphaseshift, cphaseshift00/01/10, crx, cry, crz, csx/cv, swap, pswap, xy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, syc, sqrt_iswap |
+//! | Pauli rotation | `rzz(t) q[0], q[1];` `rxyz(t) q[0], q[1], q[2];` | `r` plus the Pauli letters, one per qubit argument; `rxx`, `ryy`, `rzz` are the two-letter cases, also spelled `xx`, `yy`, `zz` |
+//! | Multi-qubit gates | `ccx q[0], q[1], q[2];` | ccx/toffoli/ccnot, ccz, cswap/fredkin, c3x, c4x, mcx, rccx, rc3x/rcccx |
+//! | Gate modifiers | `inv @ h q[0];` | `inv @`, `ctrl @` and `negctrl @` (chainable), `pow(k) @` for any real k. A control applies to whatever the gate expanded to, so it reaches a user `gate` and a lowered gate as well as a direct one; a fractional `pow` is the principal power of what the call expanded to |
+//! | Global phase | `gphase(pi/2);` `ctrl @ gphase(pi/2) q[0];` | Carried rather than dropped: it is observable through a `state_vector` result and under a control |
+//! | Classical declaration | `int n = 3;` `const float t = pi/4;` | `int`, `uint`, `bool`, `float`, `angle`, with an optional width. Folded at parse time, so the value reads as an index, a loop bound, a gate angle or a condition operand |
+//! | Classical assignment | `n = n + 1;` `n += 1;` | Plain and compound forms on a declared, non-`const` name |
+//! | Register slice | `h q[0:2];` `h q[0:2:6];` `h q[{0, 3}];` | Inclusive range with an optional step in the middle, or an explicit index set. Broadcasts like a whole register |
+//! | Register alias | `let a = q[0:1];` `let a = q[2] ++ q[0];` | Names qubits or bits in the order written; an alias is itself sliceable |
+//! | Physical qubits | `h $0;` `cx $0, $1;` | Absolute indices with no declaration; the register is as wide as the highest one named, and a declared register alongside is rejected |
+//! | Block comments | `/* ... */` | Blanked in place, so line numbers survive; they do not nest |
 //! | Measurement (OQ3) | `c[0] = measure q[0];` | Assignment syntax (primary) |
 //! | Measurement (OQ2) | `measure q[0] -> c[0];` | Arrow syntax (compat) |
 //! | Register broadcast | `h q;` / `cx q, r;` | Applies gate to all qubits in register |
@@ -37,18 +44,28 @@
 //! | Static for loop | `for int i in [0:n] { ... }` | Inclusive ranges, optional step, set form `{a,b,c}` |
 //! | Barrier | `barrier q[0], q[1];` | |
 //! | Line comments | `// comment` | |
+//! | Expression operators | `rx(2 ** -1 % 3)` | `+ - * / %` and `**`, which is right associative and binds tighter than unary minus |
+//! | Expression builtins | `rx(mod(7, 3))` | `arcsin`, `arccos`, `arctan`, `ceiling`, `cos`, `exp`, `floor`, `log`, `mod`, `popcount`, `pow`, `sin`, `sqrt`, `tan`, plus the shorter C spellings |
+//! | Angle dialect | [`parse_with`] | `gpi`, `gpi2`, `ms` take turns under [`Dialect::Native`] and radians under [`Dialect::Braket`] |
+//! | Result pragma | `#pragma braket result expectation z(q[0])` | [`Dialect::Braket`] only; reaches the caller through [`parse_braket`] |
+//! | Noise pragma | `#pragma braket noise bit_flip(0.1) q[0]` | Builds a [`NoiseModel`] event after the preceding instruction |
+//! | Inline unitary | `#pragma braket unitary([[0, 1], [1, 0]]) q[0]` | One or two targets; wider has no matrix gate variant |
+//! | Verbatim box | `#pragma braket verbatim` then `box { ... }` | The body runs as written; a `box` without the pragma is rejected |
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
 //!
-//! - `defcal`, `extern`, `opaque`, `box`, `while`, `return`, `break`
+//! - `defcal`, `extern`, `opaque`, `while`, `return`, `break`, and a `box`
+//!   that no `#pragma braket verbatim` precedes
 //! - `def` bodies that contain `measure`, `reset`, `bit`, `creg`, `return`,
 //!   or the `=measure` assignment shape (V1 supports unitary subroutines only)
 //! - `def` declarations with a return type
-//! - `ctrl @ swap` modifier form (use `cswap` or `fredkin` keyword instead)
-//! - `ctrl @` on a user `gate`, a `def` call, or a gate that lowers to a
-//!   sequence at parse time (`u`, `u1` to `u3`, `iswap`, `ecr`, `dcx`, `cswap`,
-//!   `rccx`, `rc3x`, `mcx`): an expanded body carries no controlled form
-//! - `pow(k) @` with non-integer k (fractional powers)
+//! - `ctrl @` on a `def` call: a subroutine is not a gate and the language
+//!   gives it no controlled form
+//! - `ctrl @` and a fractional `pow(k) @` on a call spanning more than four
+//!   qubits: both reduce the call to a dense matrix first, and that matrix is
+//!   where the width bound sits
+//! - a `qubit` or `qreg` declaration in a program that also names physical
+//!   qubits (`$0`)
 //! - Bit literal comparisons against integers other than `0` / `1`
 //! - Negative integer literals in `if` register comparisons
 //! - `else` whose `if` body measures into a bit the condition reads, and
@@ -70,14 +87,19 @@
 //!
 //! The reverse direction is [`qasm_export`](super::qasm_export).
 
+use std::borrow::Cow;
+
 use num_complex::Complex64;
 
+use super::braket::{self, NoiseSpec, ResultSpec};
+use crate::circuit::synthesis;
 use crate::circuit::{
     Circuit, ClassicalCondition, Instruction, MAX_REGION_DEPTH, ParamLink, Parameters, SmallVec,
     guarded, pauli_rotation_gate, smallvec,
 };
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
+use crate::gates::{Gate, spectral};
+use crate::sim::noise::{NoiseEvent, NoiseModel};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use std::collections::HashMap;
 
@@ -88,10 +110,37 @@ fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
     }
 }
 
+/// Angle convention a program is read under.
+///
+/// Vendors disagree on the units of the hardware-native family (`gpi`, `gpi2`,
+/// `ms`): IonQ's transpiler emits turns, Amazon Braket emits radians, and the
+/// gate names are the same either way. Every other gate takes radians under
+/// both.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Dialect {
+    /// IonQ's reading: `gpi`, `gpi2`, and `ms` take turns.
+    #[default]
+    Native,
+    /// Amazon Braket's reading: `gpi`, `gpi2`, and `ms` take radians.
+    Braket,
+}
+
+impl Dialect {
+    /// Convert a source angle for the hardware-native family into turns, the
+    /// unit [`Parser::ms_matrix`] and its peers take.
+    fn native_turns(self, angle: f64) -> f64 {
+        match self {
+            Dialect::Native => angle,
+            Dialect::Braket => angle / std::f64::consts::TAU,
+        }
+    }
+}
+
 /// Parse an OpenQASM 3.0 string into a PRISM-Q [`Circuit`].
 ///
 /// This is the primary input entrypoint. The entire parse happens in-memory
-/// from the provided `&str`, no file I/O.
+/// from the provided `&str`, no file I/O. Reads the source under
+/// [`Dialect::Native`]; use [`parse_with`] to select another.
 ///
 /// # Errors
 ///
@@ -100,7 +149,16 @@ fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
 /// `input`, whose value this entry point has nowhere to take. Use
 /// [`parse_parametric`] for those.
 pub fn parse(input: &str) -> Result<Circuit> {
-    let (circuit, params) = Parser::new(input).parse()?;
+    parse_with(input, Dialect::Native)
+}
+
+/// Parse an OpenQASM 3.0 string under an explicit [`Dialect`].
+///
+/// # Errors
+///
+/// Same conditions as [`parse`].
+pub fn parse_with(input: &str, dialect: Dialect) -> Result<Circuit> {
+    let (circuit, params) = parse_parametric_with(input, dialect)?;
     if params.num_slots() > 0 {
         return Err(PrismError::InvalidParameter {
             message: format!(
@@ -129,13 +187,78 @@ pub fn parse(input: &str) -> Result<Circuit> {
 ///
 /// Same conditions as [`parse`], less the `input` rejection.
 pub fn parse_parametric(input: &str) -> Result<(Circuit, Parameters)> {
-    Parser::new(input).parse()
+    parse_parametric_with(input, Dialect::Native)
 }
 
+/// Parse an OpenQASM 3.0 string plus its `input` [`Parameters`] under an
+/// explicit [`Dialect`].
+///
+/// # Errors
+///
+/// Same conditions as [`parse_parametric`].
+pub fn parse_parametric_with(input: &str, dialect: Dialect) -> Result<(Circuit, Parameters)> {
+    let source = strip_block_comments(input)?;
+    Parser::new_with(&source, dialect).parse()
+}
+
+/// A Braket program: the circuit, its free parameters, and everything the
+/// `#pragma braket` lines declared beside it.
+#[derive(Debug, Clone)]
+pub struct BraketProgram {
+    pub circuit: Circuit,
+    pub parameters: Parameters,
+    /// `#pragma braket result` requests in declaration order, empty when the
+    /// program measures instead.
+    pub results: Vec<ResultSpec>,
+    /// The model `#pragma braket noise` lines built, `None` when there were
+    /// none.
+    pub noise: Option<NoiseModel>,
+}
+
+/// Parse an OpenQASM 3.0 string under [`Dialect::Braket`], keeping what the
+/// pragmas declare.
+///
+/// This is the entry point for Braket programs. [`parse`] and
+/// [`parse_parametric`] read [`Dialect::Native`], where a pragma is an
+/// unsupported construct, and [`parse_with`] under [`Dialect::Braket`] reads
+/// the pragmas but has nowhere to return what they declared, so it drops them.
+///
+/// # Errors
+///
+/// Same conditions as [`parse_parametric`], plus a malformed pragma and a
+/// noise pragma with no preceding instruction to follow.
+pub fn parse_braket(input: &str) -> Result<BraketProgram> {
+    let source = strip_block_comments(input)?;
+    let mut parser = Parser::new_with(&source, Dialect::Braket);
+    let (circuit, parameters, results, noise) = parser.parse_program()?;
+    Ok(BraketProgram {
+        circuit,
+        parameters,
+        results,
+        noise,
+    })
+}
+
+#[derive(Clone, Copy)]
 enum Modifier {
     Inv,
-    Ctrl,
-    Pow(i64),
+    /// `pow(k)`. A real exponent, so a fractional power of a single-qubit gate
+    /// reaches [`Gate::matrix_power_real`].
+    Pow(f64),
+    /// `ctrl` and `negctrl`, which differ only in the control polarity.
+    Ctrl {
+        negated: bool,
+    },
+}
+
+impl Modifier {
+    /// Control polarity when this is a control modifier, `None` otherwise.
+    fn control(&self) -> Option<bool> {
+        match self {
+            Modifier::Ctrl { negated } => Some(*negated),
+            _ => None,
+        }
+    }
 }
 
 struct Register {
@@ -172,12 +295,34 @@ enum BlockKind {
     For,
     If,
     Switch,
+    /// A `box`, which Braket requires a verbatim pragma to open and which
+    /// simulation runs transparently.
+    Box,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RegisterKind {
     Qubit,
     Classical,
+}
+
+/// A `let` alias: the qubits or bits it names, in the order it named them.
+struct Alias {
+    kind: RegisterKind,
+    indices: Vec<usize>,
+}
+
+/// Type of a classical variable, which decides how its value is read back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClassicalType {
+    Int,
+    Bool,
+    Float,
+}
+
+struct ClassicalDecl {
+    ty: ClassicalType,
+    constant: bool,
 }
 
 impl RegisterKind {
@@ -232,10 +377,33 @@ pub(crate) struct Parser<'a> {
     /// True while parsing a block body, whose instruction indices are local to
     /// that body and so cannot carry a top-level parameter link.
     nested: bool,
+    dialect: Dialect,
+    /// `#pragma braket result` requests, in declaration order.
+    results: Vec<ResultSpec>,
+    /// `#pragma braket noise` events, each paired with the top-level
+    /// instruction index it follows.
+    noise_specs: Vec<(usize, NoiseSpec)>,
+    /// Noise the statement just parsed declared, handed up to `parse_lines`,
+    /// which is the only place that knows the instruction index it follows.
+    pending_noise: Option<NoiseSpec>,
+    /// True once a verbatim pragma has been seen and before its `box` opens.
+    verbatim_pending: bool,
+    /// The program names physical qubits (`$0`) instead of declaring registers.
+    physical: bool,
+    /// `let` aliases by name; the values live beside the registers they index.
+    aliases: HashMap<String, Alias>,
+    /// Declared classical variables. The values sit in `int_vars` and
+    /// `param_vars`, which is where every expression already reads them.
+    classical: HashMap<String, ClassicalDecl>,
 }
 
 const MAX_GATE_EXPANSION_DEPTH: usize = 32;
 const MAX_FOR_ITERATIONS: i64 = 1_000_000;
+
+/// Largest whole-number `pow(k)` exponent, which bounds both the repetition of
+/// an expansion and the matrix product a single-qubit gate takes. Without it a
+/// literal exponent aborts the process rather than returning an error.
+const MAX_POW_REPEATS: i64 = 1_000_000;
 
 use super::expr::{contains_word, eval_expr, replace_word, split_top_level_commas};
 
@@ -256,6 +424,157 @@ fn pauli_rotation_axes(name: &str) -> Option<Vec<PauliAxis>> {
     letters.chars().map(PauliAxis::from_letter).collect()
 }
 
+/// The `r`-prefixed spelling of a two-qubit Pauli rotation Braket writes bare.
+///
+/// Exact names only: `xy` is Braket's XY interaction, not `rxy`.
+fn bare_pauli_rotation(name: &str) -> Option<&'static str> {
+    match name {
+        "xx" => Some("rxx"),
+        "yy" => Some("ryy"),
+        "zz" => Some("rzz"),
+        _ => None,
+    }
+}
+
+/// Where a scan sits inside the source, so a `/*` in a line comment or a
+/// string literal is not read as a block comment opener.
+enum Scan {
+    Code,
+    LineComment,
+    Text,
+    Block,
+}
+
+/// Blank out `/* ... */` spans, keeping every newline so line numbers survive
+/// and every other column so an error still quotes what the author wrote.
+///
+/// Block comments do not nest in OpenQASM, so the first `*/` closes the span
+/// whatever is inside it.
+fn strip_block_comments(input: &str) -> Result<Cow<'_, str>> {
+    if !input.contains("/*") {
+        return Ok(Cow::Borrowed(input));
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut scan = Scan::Code;
+    let mut opened = 1usize;
+    let mut line = 1usize;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match scan {
+            Scan::Code => match ch {
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    scan = Scan::Block;
+                    opened = line;
+                    out.push_str("  ");
+                }
+                '/' if chars.peek() == Some(&'/') => {
+                    scan = Scan::LineComment;
+                    out.push(ch);
+                }
+                '"' => {
+                    scan = Scan::Text;
+                    out.push(ch);
+                }
+                _ => out.push(ch),
+            },
+            Scan::LineComment => {
+                if ch == '\n' {
+                    scan = Scan::Code;
+                }
+                out.push(ch);
+            }
+            Scan::Text => {
+                // A string ends at its closing quote or at the end of its
+                // line, which keeps one stray quote from swallowing the rest
+                // of the program.
+                if ch == '"' || ch == '\n' {
+                    scan = Scan::Code;
+                } else if ch == '\\' && chars.peek().is_some_and(|next| *next != '\n') {
+                    out.push(ch);
+                    out.push(chars.next().expect("peeked"));
+                    continue;
+                }
+                out.push(ch);
+            }
+            Scan::Block => {
+                if ch == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    scan = Scan::Code;
+                    out.push_str("  ");
+                } else if ch == '\n' {
+                    out.push('\n');
+                } else {
+                    out.push(' ');
+                }
+            }
+        }
+        if ch == '\n' {
+            line += 1;
+        }
+    }
+    if matches!(scan, Scan::Block) {
+        return Err(parse_error(opened, "unterminated `/*` block comment"));
+    }
+    Ok(Cow::Owned(out))
+}
+
+/// Highest `$k` the program names, `None` when it names none.
+fn highest_physical_qubit(lines: &[&str]) -> Option<usize> {
+    let mut highest = None;
+    let mut calibration = 0usize;
+    for line in lines {
+        let code = strip_comment(line);
+        // A `defcal` names a calibration target rather than a program qubit,
+        // and is rejected by name further on, so its whole body is skipped
+        // here rather than sizing a register. A string literal holds a file
+        // name, not a qubit.
+        let code = strip_string_literals(code);
+        let starts = code.trim_start().starts_with("defcal");
+        if starts || calibration > 0 {
+            calibration += code.matches('{').count();
+            calibration = calibration.saturating_sub(code.matches('}').count());
+            continue;
+        }
+        let code = code.as_ref();
+        let bytes = code.as_bytes();
+        for (at, _) in code.match_indices('$') {
+            let digits = bytes[at + 1..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits == 0 {
+                continue;
+            }
+            if let Ok(index) = code[at + 1..at + 1 + digits].parse::<usize>() {
+                highest = Some(highest.map_or(index, |seen: usize| seen.max(index)));
+            }
+        }
+    }
+    highest
+}
+
+/// Blank the body of every double-quoted span, keeping the line's length so a
+/// column stays where it was.
+fn strip_string_literals(line: &str) -> Cow<'_, str> {
+    if !line.contains('"') {
+        return Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut inside = false;
+    for character in line.chars() {
+        if character == '"' {
+            inside = !inside;
+            out.push(character);
+        } else if inside {
+            out.push(' ');
+        } else {
+            out.push(character);
+        }
+    }
+    Cow::Owned(out)
+}
+
 fn strip_comment(line: &str) -> &str {
     match line.find("//") {
         Some(pos) => &line[..pos],
@@ -270,6 +589,7 @@ fn block_kind_name(kind: BlockKind) -> &'static str {
         BlockKind::For => "for",
         BlockKind::If => "if",
         BlockKind::Switch => "switch",
+        BlockKind::Box => "box",
     }
 }
 
@@ -495,6 +815,62 @@ fn find_matching_close_brace(s: &str) -> Option<usize> {
     None
 }
 
+/// Split `lhs op= rhs` at its assignment, returning the left side, the
+/// compound operator when there is one, and the right side.
+///
+/// A comparison is not an assignment, so `==`, `!=`, `<=` and `>=` are stepped
+/// over rather than split on.
+fn split_assignment(s: &str) -> Option<(&str, Option<char>, &str)> {
+    let bytes = s.as_bytes();
+    for index in 0..bytes.len() {
+        if bytes[index] != b'=' {
+            continue;
+        }
+        if bytes.get(index + 1) == Some(&b'=') {
+            continue;
+        }
+        let previous = if index == 0 { b' ' } else { bytes[index - 1] };
+        if matches!(previous, b'=' | b'!' | b'<' | b'>') {
+            continue;
+        }
+        if matches!(previous, b'+' | b'-' | b'*' | b'/' | b'%') {
+            return Some((&s[..index - 1], Some(previous as char), &s[index + 1..]));
+        }
+        return Some((&s[..index], None, &s[index + 1..]));
+    }
+    None
+}
+
+/// Split a qubit or bit argument list on its commas, stepping over the ones
+/// inside an index set such as `q[{0, 3}]`.
+fn split_operands(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (at, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(&s[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// True for a name a declaration may bind.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn is_ident_char_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
@@ -702,8 +1078,9 @@ fn split_body_into_lines(body: &str) -> Vec<String> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
+    fn new_with(input: &'a str, dialect: Dialect) -> Self {
         Self {
+            dialect,
             input,
             qregs: HashMap::new(),
             cregs: HashMap::new(),
@@ -720,22 +1097,68 @@ impl<'a> Parser<'a> {
             links: Vec::new(),
             pending_input_slot: None,
             nested: false,
+            results: Vec::new(),
+            noise_specs: Vec::new(),
+            pending_noise: None,
+            verbatim_pending: false,
+            physical: false,
+            aliases: HashMap::new(),
+            classical: HashMap::new(),
         }
     }
 
     fn parse(mut self) -> Result<(Circuit, Parameters)> {
+        let (circuit, params, _, _) = self.parse_program()?;
+        Ok((circuit, params))
+    }
+
+    fn parse_program(
+        &mut self,
+    ) -> Result<(Circuit, Parameters, Vec<ResultSpec>, Option<NoiseModel>)> {
         let lines: Vec<&str> = self.input.lines().collect();
+        // Physical qubits declare no register, so the width has to come from
+        // the highest index the program names before any of it is read.
+        if let Some(highest) = highest_physical_qubit(&lines) {
+            self.physical = true;
+            self.total_qubits = highest + 1;
+        }
         let instructions = self.parse_lines(&lines, 0)?;
+        if self.verbatim_pending {
+            return Err(parse_error(
+                lines.len(),
+                "a verbatim pragma must be followed by a `box`",
+            ));
+        }
 
         let circuit = Circuit {
             num_qubits: self.total_qubits,
             num_classical_bits: self.total_cbits,
             instructions,
         };
-        let params = Parameters::from_links(self.links, self.input_names.len())
-            .with_names(self.input_names)
-            .pinned_to(&circuit);
-        Ok((circuit, params))
+        let params =
+            Parameters::from_links(std::mem::take(&mut self.links), self.input_names.len())
+                .with_names(std::mem::take(&mut self.input_names))
+                .pinned_to(&circuit);
+        let noise = self.build_noise_model(&circuit)?;
+        Ok((circuit, params, std::mem::take(&mut self.results), noise))
+    }
+
+    fn build_noise_model(&mut self, circuit: &Circuit) -> Result<Option<NoiseModel>> {
+        if self.noise_specs.is_empty() {
+            return Ok(None);
+        }
+        let mut model = NoiseModel {
+            after_gate: vec![Vec::new(); circuit.instructions.len()],
+            readout: vec![None; circuit.num_classical_bits],
+        };
+        for (index, spec) in std::mem::take(&mut self.noise_specs) {
+            model.after_gate[index].push(NoiseEvent {
+                channel: spec.channel,
+                qubits: spec.qubits.into_iter().collect(),
+            });
+        }
+        model.validate_for(circuit)?;
+        Ok(Some(model))
     }
 
     fn parse_lines(&mut self, lines: &[&str], line_offset: usize) -> Result<Vec<Instruction>> {
@@ -771,6 +1194,17 @@ impl<'a> Parser<'a> {
                             slot,
                         });
                     }
+                }
+                if let Some(spec) = self.pending_noise.take() {
+                    // A channel acts at the point the pragma stands, which is
+                    // after everything emitted so far.
+                    if base == 0 {
+                        return Err(parse_error(
+                            line_num,
+                            "a noise pragma needs a preceding instruction to follow",
+                        ));
+                    }
+                    self.noise_specs.push((base - 1, spec));
                 }
                 instructions.extend(produced);
             }
@@ -814,8 +1248,13 @@ impl<'a> Parser<'a> {
         // one-statement `if (c) x q[0];` form has no brace and falls through to
         // `parse_if_statement` below. The caller dispatches the block once its
         // braces balance and no `else` follows.
+        if first_word == "#pragma" {
+            return self.parse_pragma(line, line_num);
+        }
+
         if matches!(first_word, "gate" | "def" | "for" | "switch")
             || (first_word == "if" && line.contains('{'))
+            || (first_word == "box" && self.verbatim_pending)
         {
             let kind = match first_word {
                 "gate" => BlockKind::Gate,
@@ -823,6 +1262,7 @@ impl<'a> Parser<'a> {
                 "for" => BlockKind::For,
                 "if" => BlockKind::If,
                 "switch" => BlockKind::Switch,
+                "box" => BlockKind::Box,
                 _ => unreachable!(),
             };
             if !line.contains('{') {
@@ -846,6 +1286,7 @@ impl<'a> Parser<'a> {
         }
 
         if line.starts_with("OPENQASM") {
+            Self::check_version(line, line_num)?;
             return Ok(Vec::new());
         }
         if line.starts_with("include") {
@@ -874,6 +1315,17 @@ impl<'a> Parser<'a> {
         }
         if line.starts_with("creg") {
             self.parse_creg_legacy(line, line_num)?;
+            return Ok(Vec::new());
+        }
+        if matches!(
+            first_word.split('[').next().unwrap_or(first_word),
+            "const" | "int" | "uint" | "float" | "angle" | "bool" | "complex"
+        ) {
+            self.parse_classical_decl(line, line_num)?;
+            return Ok(Vec::new());
+        }
+        if first_word == "let" {
+            self.parse_alias_decl(line, line_num)?;
             return Ok(Vec::new());
         }
 
@@ -916,9 +1368,363 @@ impl<'a> Parser<'a> {
             });
         }
 
+        if self.parse_assignment(line, line_num)? {
+            return Ok(Vec::new());
+        }
+
         let (instrs, slot) = self.parse_gate_application(line, line_num)?;
         self.pending_input_slot = slot;
         Ok(instrs)
+    }
+
+    /// `int i = 3;`, `const float x = pi / 2;`, and the widths and spellings
+    /// beside them.
+    ///
+    /// The value is folded at parse time and lands in the same maps a `for`
+    /// variable and a gate parameter use, so an index, a loop bound, a gate
+    /// angle and a condition all read it without further plumbing.
+    fn parse_classical_decl(&mut self, line: &str, line_num: usize) -> Result<()> {
+        let mut rest = line.trim();
+        let constant = match strip_leading_keyword(rest, "const") {
+            Some(after) => {
+                rest = after;
+                true
+            }
+            None => false,
+        };
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        let keyword = &rest[..end];
+        let mut after_type = rest[end..].trim_start();
+        if let Some(width) = after_type.strip_prefix('[') {
+            let close = width.find(']').ok_or_else(|| {
+                parse_error(line_num, format!("missing `]` in `{keyword}` width"))
+            })?;
+            after_type = width[close + 1..].trim_start();
+        }
+        let ty = match keyword {
+            "int" | "uint" => ClassicalType::Int,
+            "bool" => ClassicalType::Bool,
+            "float" | "angle" => ClassicalType::Float,
+            other => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!("`{other}` declarations"),
+                    line: line_num,
+                });
+            }
+        };
+
+        let (name, initializer) = match split_assignment(after_type) {
+            Some((name, Some(op), _)) => {
+                return Err(parse_error(
+                    line_num,
+                    format!(
+                        "`{op}=` is an update, not a declaration of `{}`",
+                        name.trim()
+                    ),
+                ));
+            }
+            Some((name, None, value)) => (name.trim(), Some(value.trim())),
+            None => (after_type.trim(), None),
+        };
+        if !is_identifier(name) {
+            return Err(parse_error(
+                line_num,
+                format!("`{name}` is not a name a `{keyword}` declaration can bind"),
+            ));
+        }
+        self.reject_redeclaration(name, line_num)?;
+
+        let Some(initializer) = initializer else {
+            if constant {
+                return Err(parse_error(
+                    line_num,
+                    format!("`const {keyword} {name}` needs a value"),
+                ));
+            }
+            self.bind_classical(name, ty, 0.0, constant);
+            return Ok(());
+        };
+        let value = self.eval_declared(ty, initializer, line_num)?;
+        self.bind_classical(name, ty, value, constant);
+        Ok(())
+    }
+
+    /// `name = expr;` and its compound forms, true when the line was one.
+    fn parse_assignment(&mut self, line: &str, line_num: usize) -> Result<bool> {
+        let Some((target, compound, value)) = split_assignment(line) else {
+            return Ok(false);
+        };
+        let target = target.trim();
+        let Some(decl) = self.classical.get(target) else {
+            return Ok(false);
+        };
+        let (ty, constant) = (decl.ty, decl.constant);
+        if constant {
+            return Err(parse_error(
+                line_num,
+                format!("`{target}` is `const` and cannot be assigned"),
+            ));
+        }
+        let source = match compound {
+            Some(op) => format!("({target}) {op} ({})", value.trim()),
+            None => value.trim().to_string(),
+        };
+        let value = self.eval_declared(ty, &source, line_num)?;
+        self.bind_classical(target, ty, value, false);
+        Ok(true)
+    }
+
+    /// Fold an initializer or assigned expression to the value its type holds.
+    ///
+    /// An `input` is named rather than left to the expression evaluator, which
+    /// would report it as an unknown identifier.
+    fn eval_declared(&self, ty: ClassicalType, source: &str, line_num: usize) -> Result<f64> {
+        if let Some(name) = self
+            .input_names
+            .iter()
+            .find(|name| contains_word(source, name))
+        {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!(
+                    "input `{name}` in a classical declaration; an input binds an angle whole"
+                ),
+                line: line_num,
+            });
+        }
+        match ty {
+            ClassicalType::Float => eval_expr(source, line_num, self.param_vars.as_ref()),
+            ClassicalType::Int => {
+                Ok(eval_int_expr(source, line_num, self.int_vars.as_ref())? as f64)
+            }
+            ClassicalType::Bool => Ok(f64::from(
+                eval_int_expr(source, line_num, self.int_vars.as_ref())? != 0,
+            )),
+        }
+    }
+
+    fn bind_classical(&mut self, name: &str, ty: ClassicalType, value: f64, constant: bool) {
+        self.classical
+            .insert(name.to_string(), ClassicalDecl { ty, constant });
+        self.param_vars
+            .get_or_insert_with(HashMap::new)
+            .insert(name.to_string(), value);
+        if ty == ClassicalType::Float {
+            if let Some(ints) = self.int_vars.as_mut() {
+                ints.remove(name);
+            }
+        } else {
+            self.int_vars
+                .get_or_insert_with(HashMap::new)
+                .insert(name.to_string(), value as i64);
+        }
+    }
+
+    fn reject_redeclaration(&self, name: &str, line_num: usize) -> Result<()> {
+        let clash = if self.classical.contains_key(name) {
+            "a classical variable"
+        } else if self.aliases.contains_key(name) {
+            "an alias"
+        } else if self.qregs.contains_key(name) || self.cregs.contains_key(name) {
+            "a register"
+        } else if self.inputs.contains_key(name) {
+            "an input"
+        } else {
+            return Ok(());
+        };
+        Err(parse_error(
+            line_num,
+            format!("`{name}` is already {clash}"),
+        ))
+    }
+
+    /// `let a = q[0:1];`, an alias naming qubits or bits in an explicit order.
+    ///
+    /// Operands join with `++`, and an alias is itself an operand, so a slice
+    /// of a slice resolves through the first one's order rather than the
+    /// register's.
+    fn parse_alias_decl(&mut self, line: &str, line_num: usize) -> Result<()> {
+        let rest = strip_leading_keyword(line, "let")
+            .ok_or_else(|| parse_error(line_num, "expected `let <name> = <register>`"))?;
+        let Some((name, compound, source)) = split_assignment(rest) else {
+            return Err(parse_error(line_num, "expected `let <name> = <register>`"));
+        };
+        if compound.is_some() {
+            return Err(parse_error(line_num, "expected `let <name> = <register>`"));
+        }
+        let name = name.trim();
+        if !is_identifier(name) {
+            return Err(parse_error(
+                line_num,
+                format!("`{name}` is not a name an alias can bind"),
+            ));
+        }
+        self.reject_redeclaration(name, line_num)?;
+
+        let mut kind: Option<RegisterKind> = None;
+        let mut indices: Vec<usize> = Vec::new();
+        for piece in source.split("++") {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                return Err(parse_error(
+                    line_num,
+                    format!("alias `{name}` joins an empty operand"),
+                ));
+            }
+            let (piece_kind, resolved) = self.alias_operand(piece, line_num)?;
+            match kind {
+                Some(seen) if seen != piece_kind => {
+                    return Err(parse_error(
+                        line_num,
+                        format!("alias `{name}` joins qubits and classical bits"),
+                    ));
+                }
+                _ => kind = Some(piece_kind),
+            }
+            indices.extend(resolved);
+        }
+        let kind =
+            kind.ok_or_else(|| parse_error(line_num, format!("alias `{name}` names nothing")))?;
+        self.aliases
+            .insert(name.to_string(), Alias { kind, indices });
+        Ok(())
+    }
+
+    /// One operand of an alias, resolved on the side of the register wall the
+    /// name it opens with sits on.
+    fn alias_operand(
+        &self,
+        token: &str,
+        line_num: usize,
+    ) -> Result<(RegisterKind, SmallVec<[usize; 4]>)> {
+        let name = token.split('[').next().unwrap_or(token).trim();
+        let alias_kind = self.aliases.get(name).map(|alias| alias.kind);
+        if token.starts_with('$')
+            || self.qregs.contains_key(name)
+            || alias_kind == Some(RegisterKind::Qubit)
+        {
+            return Ok((
+                RegisterKind::Qubit,
+                self.resolve_qubit_arg(token, line_num)?,
+            ));
+        }
+        if self.cregs.contains_key(name) || alias_kind == Some(RegisterKind::Classical) {
+            return Ok((
+                RegisterKind::Classical,
+                self.resolve_cbit_arg(token, line_num)?,
+            ));
+        }
+        Err(PrismError::UndefinedRegister {
+            name: name.to_string(),
+            line: line_num,
+        })
+    }
+
+    /// Dispatch a `#pragma braket ...` line.
+    ///
+    /// Only the Braket dialect reads these; under any other the pragma is an
+    /// unsupported construct rather than a silently dropped line, since
+    /// dropping a result request would leave the caller with nothing to report
+    /// and no reason why.
+    fn parse_pragma(&mut self, line: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        let body = line.trim_start_matches("#pragma").trim();
+        let Some(braket_body) = body.strip_prefix("braket") else {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: format!("pragma `{body}`"),
+                line: line_num,
+            });
+        };
+        if self.dialect != Dialect::Braket {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "`#pragma braket`, which needs `Dialect::Braket`".to_string(),
+                line: line_num,
+            });
+        }
+        if self.nested {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "`#pragma braket` inside a block body".to_string(),
+                line: line_num,
+            });
+        }
+        let braket_body = braket_body.trim();
+        let (kind, rest) = match braket_body.split_once(char::is_whitespace) {
+            Some((kind, rest)) => (kind, rest.trim()),
+            None => (braket_body, ""),
+        };
+        match kind {
+            "result" => {
+                let total = self.total_qubits;
+                let spec = braket::parse_result_pragma(rest, line_num, total, &|token| {
+                    self.resolve_qubit_arg(token, line_num)
+                        .map(|targets| targets.to_vec())
+                })?;
+                self.results.push(spec);
+                Ok(Vec::new())
+            }
+            "noise" => {
+                let spec = braket::parse_noise_pragma(rest, line_num, &|token| {
+                    self.resolve_qubit_arg(token, line_num)
+                        .map(|targets| targets.to_vec())
+                })?;
+                self.pending_noise = Some(spec);
+                Ok(Vec::new())
+            }
+            "verbatim" => {
+                self.verbatim_pending = true;
+                Ok(Vec::new())
+            }
+            _ if braket_body.starts_with("unitary") => {
+                self.parse_unitary_pragma(braket_body, line_num)
+            }
+            other => Err(PrismError::UnsupportedConstruct {
+                construct: format!("`#pragma braket {other}`"),
+                line: line_num,
+            }),
+        }
+    }
+
+    /// `#pragma braket unitary([[...]]) q[0]`, an inline gate matrix.
+    fn parse_unitary_pragma(&mut self, body: &str, line_num: usize) -> Result<Vec<Instruction>> {
+        let rest = body.trim_start_matches("unitary").trim();
+        if !rest.starts_with('(') {
+            return Err(parse_error(
+                line_num,
+                "`unitary` takes its matrix in parentheses",
+            ));
+        }
+        let (matrix_text, targets_text) = braket::split_paren_body(rest, line_num)?;
+        let matrix = braket::parse_matrix(matrix_text, line_num)?;
+        let mut targets: SmallVec<[usize; 4]> = smallvec![];
+        for token in split_operands(targets_text) {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            targets.extend(self.resolve_qubit_arg(token, line_num)?);
+        }
+        braket::unitary_instructions(&matrix, &targets, line_num)
+    }
+
+    /// Body of a verbatim `box`, run as ordinary instructions.
+    ///
+    /// Verbatim marks a region the device compiler must not rewrite, which a
+    /// simulator has nothing to honour, so the contents execute as written.
+    fn parse_box_block(&mut self, buf: &str, start_line: usize) -> Result<Vec<Instruction>> {
+        self.verbatim_pending = false;
+        let (open, close) = extract_top_braced_body(buf)
+            .ok_or_else(|| parse_error(start_line, "expected `{` in `box` block"))?;
+        let body = &buf[open + 1..close];
+        let statements: Vec<&str> = body
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        let was_nested = self.nested;
+        self.nested = true;
+        let result = self.parse_lines(&statements, start_line.saturating_sub(1));
+        self.nested = was_nested;
+        result
     }
 
     fn dispatch_block(&mut self, state: &BlockState) -> Result<Vec<Instruction>> {
@@ -934,13 +1740,29 @@ impl<'a> Parser<'a> {
             BlockKind::For => self.expand_for_block(&state.buf, state.start_line),
             BlockKind::If => self.parse_if_block(&state.buf, state.start_line),
             BlockKind::Switch => self.parse_switch_block(&state.buf, state.start_line),
+            BlockKind::Box => self.parse_box_block(&state.buf, state.start_line),
         }
+    }
+
+    /// A physical qubit is an absolute index and a declared one is an offset
+    /// into a register, so a program using both has two meanings for `0`.
+    fn reject_mixed_addressing(&self, line_num: usize) -> Result<()> {
+        if self.physical {
+            return Err(PrismError::UnsupportedConstruct {
+                construct:
+                    "a qubit register beside physical qubits (`$0`), which address the same hardware two ways"
+                        .to_string(),
+                line: line_num,
+            });
+        }
+        Ok(())
     }
 
     /// OQ3 syntax: `qubit[4] q` or `qubit q` (single qubit).
     fn parse_qubit_decl(&mut self, line: &str, line_num: usize) -> Result<()> {
         let (name, size) =
             Self::parse_oq3_register_decl(line, "qubit", RegisterKind::Qubit, line_num)?;
+        self.reject_mixed_addressing(line_num)?;
         let offset = self.total_qubits;
         self.total_qubits += size;
         self.qregs.insert(name, Register { offset, size });
@@ -1102,6 +1924,7 @@ impl<'a> Parser<'a> {
     fn parse_qreg_legacy(&mut self, line: &str, line_num: usize) -> Result<()> {
         let rest = line.strip_prefix("qreg").unwrap().trim();
         let (name, size) = Self::parse_legacy_register_decl(rest, line_num)?;
+        self.reject_mixed_addressing(line_num)?;
         let offset = self.total_qubits;
         self.total_qubits += size;
         self.qregs.insert(name, Register { offset, size });
@@ -1145,19 +1968,162 @@ impl<'a> Parser<'a> {
         Ok((name, size))
     }
 
-    /// Resolve a qubit argument that may be indexed (`q[0]`) or a bare register (`q`).
-    /// Returns all matching qubit indices.
+    /// Resolve a qubit argument that may be indexed (`q[0]`), sliced
+    /// (`q[0:2]`), an alias, or a bare register (`q`). Returns all matching
+    /// qubit indices.
     fn resolve_qubit_arg(&self, token: &str, line_num: usize) -> Result<SmallVec<[usize; 4]>> {
+        if let Some(index) = token.strip_prefix('$') {
+            let index = index
+                .parse::<usize>()
+                .map_err(|_| PrismError::UndefinedRegister {
+                    name: token.to_string(),
+                    line: line_num,
+                })?;
+            return Ok(smallvec![index]);
+        }
+        if let Some(indices) = self.resolve_alias_arg(RegisterKind::Qubit, token, line_num)? {
+            return Ok(indices);
+        }
         self.resolve_register_arg(&self.qregs, RegisterKind::Qubit, token, line_num)
     }
 
-    /// Resolve a classical bit argument that may be indexed (`c[0]`) or a bare register (`c`).
+    /// Resolve a classical bit argument that may be indexed (`c[0]`), sliced,
+    /// an alias, or a bare register (`c`).
     fn resolve_cbit_arg(&self, token: &str, line_num: usize) -> Result<SmallVec<[usize; 4]>> {
+        if let Some(indices) = self.resolve_alias_arg(RegisterKind::Classical, token, line_num)? {
+            return Ok(indices);
+        }
         self.resolve_register_arg(&self.cregs, RegisterKind::Classical, token, line_num)
     }
 
     fn resolve_cbit(&self, token: &str, line_num: usize) -> Result<usize> {
+        if let Some(indices) = self.resolve_alias_arg(RegisterKind::Classical, token, line_num)? {
+            return match indices.as_slice() {
+                [single] => Ok(*single),
+                _ => Err(parse_error(
+                    line_num,
+                    format!("`{token}` names {} bits where one belongs", indices.len()),
+                )),
+            };
+        }
         self.resolve_register_index(&self.cregs, RegisterKind::Classical, token, line_num)
+    }
+
+    /// Indices an alias reference names, `None` when the token opens with a
+    /// name no alias of `kind` binds.
+    fn resolve_alias_arg(
+        &self,
+        kind: RegisterKind,
+        token: &str,
+        line_num: usize,
+    ) -> Result<Option<SmallVec<[usize; 4]>>> {
+        let (name, bracket) = match token.find('[') {
+            Some(open) => {
+                let close = token.rfind(']').ok_or_else(|| {
+                    parse_error(line_num, format!("expected `]` in reference: `{token}`"))
+                })?;
+                (token[..open].trim(), Some(&token[open + 1..close]))
+            }
+            None => (token.trim(), None),
+        };
+        let Some(alias) = self.aliases.get(name) else {
+            return Ok(None);
+        };
+        if alias.kind != kind {
+            return Err(parse_error(
+                line_num,
+                format!("alias `{name}` names {}s", alias.kind.name()),
+            ));
+        }
+        let Some(bracket) = bracket else {
+            return Ok(Some(alias.indices.iter().copied().collect()));
+        };
+        let picks = self.select_indices(alias.indices.len(), bracket, kind, token, line_num)?;
+        Ok(Some(picks.iter().map(|&at| alias.indices[at]).collect()))
+    }
+
+    /// Indices a bracket names on a register of `size`: one index, an
+    /// inclusive `start:stop` range with an optional step in the middle, or a
+    /// `{a, b, c}` set.
+    fn select_indices(
+        &self,
+        size: usize,
+        source: &str,
+        kind: RegisterKind,
+        token: &str,
+        line_num: usize,
+    ) -> Result<SmallVec<[usize; 4]>> {
+        let source = source.trim();
+        let bound = |value: i64| -> Result<usize> {
+            let index = usize::try_from(value)
+                .map_err(|_| parse_error(line_num, format!("negative index in `{token}`")))?;
+            if index >= size {
+                return Err(kind.invalid_index(index, size));
+            }
+            Ok(index)
+        };
+        if let Some(inner) = source.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+            let mut out = SmallVec::new();
+            for entry in split_top_level_commas(inner) {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                out.push(bound(eval_int_expr(
+                    entry,
+                    line_num,
+                    self.int_vars.as_ref(),
+                )?)?);
+            }
+            if out.is_empty() {
+                return Err(parse_error(line_num, format!("`{token}` names no index")));
+            }
+            return Ok(out);
+        }
+        if !source.contains(':') {
+            return Ok(smallvec![bound(eval_int_expr(
+                source,
+                line_num,
+                self.int_vars.as_ref()
+            )?)?]);
+        }
+
+        let parts: Vec<&str> = source.split(':').collect();
+        let (start_src, step_src, stop_src) = match parts.as_slice() {
+            [start, stop] => (*start, "", *stop),
+            [start, step, stop] => (*start, *step, *stop),
+            _ => {
+                return Err(parse_error(
+                    line_num,
+                    format!("malformed range in `{token}`"),
+                ));
+            }
+        };
+        let at = |text: &str, fallback: i64| -> Result<i64> {
+            if text.trim().is_empty() {
+                return Ok(fallback);
+            }
+            eval_int_expr(text, line_num, self.int_vars.as_ref())
+        };
+        let start = at(start_src, 0)?;
+        let stop = at(stop_src, size as i64 - 1)?;
+        let step = at(step_src, 1)?;
+        if step == 0 {
+            return Err(parse_error(
+                line_num,
+                format!("range step in `{token}` must be non-zero"),
+            ));
+        }
+        let mut out = SmallVec::new();
+        let mut index = start;
+        while (step > 0 && index <= stop) || (step < 0 && index >= stop) {
+            out.push(bound(index)?);
+            index += step;
+        }
+        if out.is_empty() {
+            return Err(parse_error(line_num, format!("`{token}` names no index")));
+        }
+        Ok(out)
     }
 
     fn resolve_register_arg(
@@ -1167,10 +2133,25 @@ impl<'a> Parser<'a> {
         token: &str,
         line_num: usize,
     ) -> Result<SmallVec<[usize; 4]>> {
-        if token.contains('[') {
-            Ok(smallvec![self.resolve_register_index(
-                registers, kind, token, line_num
-            )?])
+        if let Some(open) = token.find('[') {
+            let close = token.rfind(']').ok_or_else(|| {
+                parse_error(line_num, format!("expected `]` in reference: `{token}`"))
+            })?;
+            let inner = &token[open + 1..close];
+            if !inner.contains(':') && !inner.contains('{') {
+                return Ok(smallvec![
+                    self.resolve_register_index(registers, kind, token, line_num)?
+                ]);
+            }
+            let name = token[..open].trim();
+            let reg = registers
+                .get(name)
+                .ok_or_else(|| PrismError::UndefinedRegister {
+                    name: name.to_string(),
+                    line: line_num,
+                })?;
+            let picks = self.select_indices(reg.size, inner, kind, token, line_num)?;
+            Ok(picks.iter().map(|at| reg.offset + at).collect())
         } else {
             let reg = registers
                 .get(token)
@@ -1545,7 +2526,12 @@ impl<'a> Parser<'a> {
                 .map(|s| replace_word(s, &var_name, &v.to_string()))
                 .collect();
 
+            // A declaration in the body binds for that iteration only, so the
+            // whole classical scope is restored rather than the loop variable
+            // alone.
             let saved = self.int_vars.clone();
+            let saved_params = self.param_vars.clone();
+            let saved_classical = self.classical_copy();
             let mut new_vars = saved.clone().unwrap_or_default();
             new_vars.insert(var_name.clone(), v);
             self.int_vars = Some(new_vars);
@@ -1556,6 +2542,8 @@ impl<'a> Parser<'a> {
             self.nested = was_nested;
 
             self.int_vars = saved;
+            self.param_vars = saved_params;
+            self.classical = saved_classical;
             all_instrs.extend(result?);
         }
 
@@ -1565,7 +2553,7 @@ impl<'a> Parser<'a> {
     fn parse_barrier(&self, line: &str, line_num: usize) -> Result<Instruction> {
         let rest = line.strip_prefix("barrier").unwrap().trim();
         let mut qubits = SmallVec::<[usize; 4]>::new();
-        for token in rest.split(',') {
+        for token in split_operands(rest) {
             qubits.extend(self.resolve_qubit_arg(token.trim(), line_num)?);
         }
         Ok(Instruction::Barrier { qubits })
@@ -1581,7 +2569,7 @@ impl<'a> Parser<'a> {
             ));
         }
         let mut out = Vec::new();
-        for token in rest.split(',') {
+        for token in split_operands(rest) {
             let qubits = self.resolve_qubit_arg(token.trim(), line_num)?;
             for q in qubits {
                 out.push(Instruction::Reset { qubit: q });
@@ -2050,6 +3038,13 @@ impl<'a> Parser<'a> {
 
         let (gate_name, params, input_slot, args_str) =
             self.split_gate_line(gate_line, line_num)?;
+        if gate_name == "gphase" {
+            let qubits = self.resolve_qubit_list(args_str, line_num)?;
+            return Ok((
+                self.resolve_global_phase(&params, &modifiers, &qubits, line_num)?,
+                None,
+            ));
+        }
         if input_slot.is_some() && !modifiers.is_empty() {
             return Err(PrismError::UnsupportedConstruct {
                 construct: format!("modifier on `{gate_name}` reading an `input`"),
@@ -2057,9 +3052,9 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let qubit_tokens: Vec<&str> = args_str
-            .split(',')
-            .map(|s| s.trim())
+        let qubit_tokens: Vec<&str> = split_operands(args_str)
+            .into_iter()
+            .map(str::trim)
             .filter(|t| !t.is_empty())
             .collect();
         let resolved: Vec<SmallVec<[usize; 4]>> = qubit_tokens
@@ -2092,22 +3087,99 @@ impl<'a> Parser<'a> {
         Ok((all_instrs, input_slot))
     }
 
+    /// Qubits an argument list names, one per token, rejecting a register that
+    /// would broadcast.
+    fn resolve_qubit_list(&self, args: &str, line_num: usize) -> Result<Vec<usize>> {
+        split_operands(args)
+            .into_iter()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(|token| {
+                let resolved = self.resolve_qubit_arg(token, line_num)?;
+                match resolved.as_slice() {
+                    [single] => Ok(*single),
+                    _ => Err(parse_error(
+                        line_num,
+                        format!("`{token}` names a register where one qubit belongs"),
+                    )),
+                }
+            })
+            .collect()
+    }
+
+    /// `gphase(theta)` multiplies the state by `e^(i theta)`.
+    ///
+    /// A global phase is observable through a `state_vector` result and under a
+    /// control, where `ctrl(e^(i theta) I)` is a phase gate on the control, so
+    /// it is carried rather than dropped. With controls it becomes exactly that
+    /// phase; without, an identity scaled by the phase on the first qubit,
+    /// which is the same operator wherever it is placed.
+    fn resolve_global_phase(
+        &self,
+        params: &[f64],
+        modifiers: &[Modifier],
+        qubits: &[usize],
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        Self::expect_param_count("gphase", params, 1, line_num)?;
+        let controls: Vec<bool> = modifiers.iter().filter_map(Modifier::control).collect();
+        if qubits.len() != controls.len() {
+            return Err(PrismError::GateArity {
+                gate: "gphase".to_string(),
+                expected: controls.len(),
+                got: qubits.len(),
+            });
+        }
+        let mut angle = params[0];
+        for modifier in modifiers {
+            match modifier {
+                Modifier::Inv => angle = -angle,
+                Modifier::Pow(k) => angle *= k,
+                Modifier::Ctrl { .. } => {}
+            }
+        }
+
+        if controls.is_empty() {
+            if self.total_qubits == 0 {
+                return Err(parse_error(
+                    line_num,
+                    "`gphase` needs a qubit to carry the phase, and none is declared",
+                ));
+            }
+            let scale = Complex64::from_polar(1.0, angle);
+            let zero = Complex64::new(0.0, 0.0);
+            return Ok(vec![Self::ig(
+                Gate::Fused(Box::new([[scale, zero], [zero, scale]])),
+                &[0],
+            )]);
+        }
+
+        let negated: Vec<usize> = qubits
+            .iter()
+            .zip(&controls)
+            .filter(|&(_, &negated)| negated)
+            .map(|(&qubit, _)| qubit)
+            .collect();
+        let mut out: Vec<Instruction> = negated.iter().map(|&q| Self::ig(Gate::X, &[q])).collect();
+        let phase = Gate::P(angle);
+        out.push(match qubits.split_last() {
+            Some((&last, [])) => Self::ig(phase, &[last]),
+            Some((_, rest)) => Self::ig(Gate::mcu(phase.matrix_2x2(), rest.len() as u8), qubits),
+            None => unreachable!("the control-free case returned above"),
+        });
+        out.extend(negated.iter().map(|&q| Self::ig(Gate::X, &[q])));
+        Ok(out)
+    }
+
     /// Build the instruction an `r<letters>` application names, checking the
     /// arity and distinctness `pauli_rotation_gate` would otherwise panic on.
     fn resolve_pauli_rotation(
         gate_name: &str,
         axes: &[PauliAxis],
         params: &[f64],
-        modifiers: &[Modifier],
         qubits: &SmallVec<[usize; 4]>,
         line_num: usize,
     ) -> Result<Instruction> {
-        if !modifiers.is_empty() {
-            return Err(PrismError::UnsupportedConstruct {
-                construct: format!("modifier on Pauli rotation `{gate_name}`"),
-                line: line_num,
-            });
-        }
         Self::expect_param_count(gate_name, params, 1, line_num)?;
         if qubits.len() != axes.len() {
             return Err(PrismError::GateArity {
@@ -2154,6 +3226,13 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Build what one gate call names, splitting off the control qubits a
+    /// `ctrl` or `negctrl` chain consumes.
+    ///
+    /// The arity a controlled call spells includes those qubits, so the body is
+    /// resolved on what is left and the controls are added to whatever it
+    /// expanded to. `inv` and `pow` commute with a control, so they apply to
+    /// the body first and the result is the same either way.
     fn resolve_gate_application_once(
         &self,
         gate_name: &str,
@@ -2163,14 +3242,45 @@ impl<'a> Parser<'a> {
         has_input: bool,
         line_num: usize,
     ) -> Result<Vec<Instruction>> {
-        // The arity a `ctrl @` call spells includes the control qubits, so the
-        // rejection has to precede the expanded body's own arity check.
-        if modifiers.iter().any(|m| matches!(m, Modifier::Ctrl))
-            && (Self::lowers_to_sequence(gate_name) || self.gate_defs.contains_key(gate_name))
-        {
-            return Err(Self::ctrl_on_expansion_error(gate_name, line_num));
+        let polarity: Vec<bool> = modifiers.iter().filter_map(Modifier::control).collect();
+        if polarity.is_empty() {
+            return self
+                .resolve_gate_body(gate_name, params, modifiers, qubits, has_input, line_num);
         }
+        if qubits.len() <= polarity.len() {
+            return Err(PrismError::GateArity {
+                gate: gate_name.to_string(),
+                expected: polarity.len() + 1,
+                got: qubits.len(),
+            });
+        }
+        let (controls, rest) = qubits.split_at(polarity.len());
+        let unitary: Vec<Modifier> = modifiers
+            .iter()
+            .filter(|m| m.control().is_none())
+            .copied()
+            .collect();
+        let body = self.resolve_gate_body(
+            gate_name,
+            params,
+            &unitary,
+            &rest.iter().copied().collect(),
+            has_input,
+            line_num,
+        )?;
+        let controlled = Self::control_expansion(body, controls, line_num)?;
+        Ok(Self::conjugate_negations(controlled, controls, &polarity))
+    }
 
+    fn resolve_gate_body(
+        &self,
+        gate_name: &str,
+        params: &[f64],
+        modifiers: &[Modifier],
+        qubits: &SmallVec<[usize; 4]>,
+        has_input: bool,
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
         if let Some(instrs) = Self::resolve_decomposed_gate(gate_name, params, qubits, line_num)? {
             // A lowering folds the angle into its own arithmetic, so binding a
             // slot afterwards would write the raw value over a derived one.
@@ -2195,17 +3305,13 @@ impl<'a> Parser<'a> {
             return Self::modify_expansion(instrs, modifiers, gate_name, line_num);
         }
 
-        if let Some(axes) = pauli_rotation_axes(gate_name) {
-            return Self::resolve_pauli_rotation(
-                gate_name, &axes, params, modifiers, qubits, line_num,
-            )
-            .map(|instr| vec![instr]);
+        if let Some(axes) = pauli_rotation_axes(bare_pauli_rotation(gate_name).unwrap_or(gate_name))
+        {
+            let instr = Self::resolve_pauli_rotation(gate_name, &axes, params, qubits, line_num)?;
+            return Self::modify_expansion(vec![instr], modifiers, gate_name, line_num);
         }
 
-        let mut gate = Self::resolve_gate(gate_name, params, line_num)?;
-        for modifier in modifiers.iter().rev() {
-            gate = Self::apply_modifier(gate, modifier, line_num)?;
-        }
+        let mut gate = Self::resolve_gate(gate_name, params, self.dialect, line_num)?;
         let expected = gate.num_qubits();
         if qubits.len() != expected {
             return Err(PrismError::GateArity {
@@ -2213,6 +3319,19 @@ impl<'a> Parser<'a> {
                 expected,
                 got: qubits.len(),
             });
+        }
+        // A matrix power needs a matrix, which only the single-qubit gates
+        // carry. Wider gates take a whole-number power as repetition.
+        let foldable = expected == 1 || modifiers.iter().all(|m| !matches!(m, Modifier::Pow(_)));
+        if !foldable {
+            let single = vec![Instruction::Gate {
+                gate,
+                targets: qubits.clone(),
+            }];
+            return Self::modify_expansion(single, modifiers, gate_name, line_num);
+        }
+        for modifier in modifiers.iter().rev() {
+            gate = Self::apply_modifier(gate, modifier);
         }
         Ok(vec![Instruction::Gate {
             gate,
@@ -2476,6 +3595,7 @@ impl<'a> Parser<'a> {
         int_vars: Option<HashMap<String, i64>>,
     ) -> Parser<'static> {
         let mut sub_parser = Parser {
+            dialect: self.dialect,
             input: "",
             qregs: HashMap::new(),
             cregs: HashMap::new(),
@@ -2492,6 +3612,13 @@ impl<'a> Parser<'a> {
             links: Vec::new(),
             pending_input_slot: None,
             nested: true,
+            results: Vec::new(),
+            noise_specs: Vec::new(),
+            pending_noise: None,
+            verbatim_pending: false,
+            physical: self.physical,
+            aliases: HashMap::new(),
+            classical: self.classical_copy(),
         };
         sub_parser.qregs.insert(
             "__q__".to_string(),
@@ -2528,15 +3655,69 @@ impl<'a> Parser<'a> {
                 },
             );
         }
+        for (name, alias) in &self.aliases {
+            sub_parser.aliases.insert(
+                name.clone(),
+                Alias {
+                    kind: alias.kind,
+                    indices: alias.indices.clone(),
+                },
+            );
+        }
         self.copy_def_defs_into(&mut sub_parser);
         sub_parser
     }
 
+    fn classical_copy(&self) -> HashMap<String, ClassicalDecl> {
+        self.classical
+            .iter()
+            .map(|(name, decl)| {
+                (
+                    name.clone(),
+                    ClassicalDecl {
+                        ty: decl.ty,
+                        constant: decl.constant,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Accept the OpenQASM versions this parser implements, and name the one it
+    /// was handed otherwise.
+    ///
+    /// A 2.0 program is read as the compatible subset. Anything past 3 is
+    /// rejected rather than read as 3 and silently misparsed where the
+    /// languages differ.
+    fn check_version(line: &str, line_num: usize) -> Result<()> {
+        let version = line["OPENQASM".len()..].trim();
+        let major = version
+            .split_once('.')
+            .map_or(version, |(major, _)| major)
+            .trim();
+        match major.parse::<u32>() {
+            Ok(2) | Ok(3) => Ok(()),
+            Ok(_) => Err(PrismError::UnsupportedConstruct {
+                construct: format!("OPENQASM {version}, where this parser reads 2 and 3"),
+                line: line_num,
+            }),
+            Err(_) => Err(parse_error(
+                line_num,
+                format!("`{version}` is not an OpenQASM version"),
+            )),
+        }
+    }
+
+    /// Split the modifier chain off a gate application.
+    ///
+    /// The separator is `@` rather than `" @ "`: the language puts no
+    /// requirement on the space around it, and `ctrl@x q[0], q[1];` would
+    /// otherwise read as a gate named `ctrl@x`.
     fn strip_modifiers(line: &str, line_num: usize) -> Result<(Vec<Modifier>, &str)> {
-        if !line.contains(" @ ") {
+        if !line.contains('@') {
             return Ok((vec![], line));
         }
-        let parts: Vec<&str> = line.split(" @ ").collect();
+        let parts: Vec<&str> = line.split('@').collect();
         let gate_line = parts[parts.len() - 1].trim_start();
         let mut modifiers = Vec::with_capacity(parts.len() - 1);
         for part in &parts[..parts.len() - 1] {
@@ -2544,7 +3725,9 @@ impl<'a> Parser<'a> {
             if token == "inv" {
                 modifiers.push(Modifier::Inv);
             } else if token == "ctrl" {
-                modifiers.push(Modifier::Ctrl);
+                modifiers.push(Modifier::Ctrl { negated: false });
+            } else if token == "negctrl" {
+                modifiers.push(Modifier::Ctrl { negated: true });
             } else if let Some(rest) = token.strip_prefix("pow(") {
                 let rest = rest.strip_suffix(')').ok_or_else(|| {
                     parse_error(
@@ -2552,14 +3735,14 @@ impl<'a> Parser<'a> {
                         format!("unmatched `(` in pow modifier: `{token}`"),
                     )
                 })?;
-                let k: i64 = rest
-                    .trim()
-                    .parse()
-                    .map_err(|_| PrismError::UnsupportedConstruct {
-                        construct: format!("pow({rest})"),
-                        line: line_num,
-                    })?;
-                modifiers.push(Modifier::Pow(k));
+                let exponent = eval_expr(rest, line_num, None)?;
+                if exponent.fract() == 0.0 && exponent.abs() > MAX_POW_REPEATS as f64 {
+                    return Err(parse_error(
+                        line_num,
+                        format!("pow({exponent}) repeats a gate more than {MAX_POW_REPEATS} times"),
+                    ));
+                }
+                modifiers.push(Modifier::Pow(exponent));
             } else {
                 return Err(PrismError::UnsupportedConstruct {
                     construct: token.to_string(),
@@ -2570,11 +3753,238 @@ impl<'a> Parser<'a> {
         Ok((modifiers, gate_line))
     }
 
+    /// A square matrix read the other way round, which swaps row-major and
+    /// column-major without changing what it means.
+    fn transposed(matrix: &[Complex64], dim: usize) -> Vec<Complex64> {
+        let mut out = vec![Complex64::new(0.0, 0.0); dim * dim];
+        for row in 0..dim {
+            for column in 0..dim {
+                out[column * dim + row] = matrix[row * dim + column];
+            }
+        }
+        out
+    }
+
     fn ctrl_on_expansion_error(name: &str, line_num: usize) -> PrismError {
         PrismError::UnsupportedConstruct {
-            construct: format!("ctrl @ `{name}`, which expands to a gate sequence"),
+            construct: format!(
+                "ctrl @ `{name}`, a subroutine rather than a gate, so it has no controlled form"
+            ),
             line: line_num,
         }
+    }
+
+    /// Repeat an expansion `k` times, inverting it first for a negative `k`.
+    ///
+    /// A whole-number exponent is repetition whatever the gate's width, which
+    /// is why a multi-qubit `pow` needs no matrix power.
+    fn repeat_expansion(
+        instrs: Vec<Instruction>,
+        k: f64,
+        name: &str,
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        if k.fract() != 0.0 {
+            // A fraction is a matrix power rather than a repetition, so the
+            // whole expansion is composed into one matrix first, whether it
+            // is a single gate or a lowering of several.
+            let Some((span, matrix)) = synthesis::expansion_matrix(&instrs) else {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "pow({k}) @ `{name}`, whose lowering spans more than {} qubits or \
+                         carries an instruction with no matrix",
+                        synthesis::MAX_COMPOSED_QUBITS
+                    ),
+                    line: line_num,
+                });
+            };
+            let dim = 1usize << span.len();
+            let powered = spectral::unitary_power(&Self::transposed(&matrix, dim), dim, k);
+            return Ok(synthesis::dense_unitary(
+                &Self::transposed(&powered, dim),
+                &span,
+            ));
+        }
+        let base = if k < 0.0 {
+            Self::invert_expansion(instrs, name, line_num)?
+        } else {
+            instrs
+        };
+        let repeats = k.abs() as usize;
+        let mut powered = Vec::with_capacity(base.len() * repeats);
+        for _ in 0..repeats {
+            powered.extend(base.iter().cloned());
+        }
+        Ok(powered)
+    }
+
+    /// Add `controls` to every instruction of an expansion.
+    ///
+    /// `ctrl(U1 U2 ... Un) = ctrl(U1) ctrl(U2) ... ctrl(Un)`, so a gate with no
+    /// controlled form of its own still has one wherever its lowering does.
+    fn control_expansion(
+        instrs: Vec<Instruction>,
+        controls: &[usize],
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        let mut out = Vec::with_capacity(instrs.len());
+        for instr in instrs {
+            if let Instruction::Gate { targets, .. } = &instr
+                && let Some(&shared) = targets.iter().find(|target| controls.contains(target))
+            {
+                return Err(parse_error(
+                    line_num,
+                    format!("qubit {shared} is both a control and a target"),
+                ));
+            }
+            out.extend(Self::control_instruction(instr, controls, line_num)?);
+        }
+        Ok(out)
+    }
+
+    /// One instruction under `controls`, as one or more instructions.
+    fn control_instruction(
+        instr: Instruction,
+        controls: &[usize],
+        line_num: usize,
+    ) -> Result<Vec<Instruction>> {
+        let Instruction::Gate { gate, targets } = instr else {
+            return Err(PrismError::UnsupportedConstruct {
+                construct: "ctrl @ a body that measures, resets, or branches".to_string(),
+                line: line_num,
+            });
+        };
+        let extra = controls.len();
+        let prefixed = |rest: &[usize]| -> SmallVec<[usize; 4]> {
+            controls
+                .iter()
+                .copied()
+                .chain(rest.iter().copied())
+                .collect()
+        };
+        let widen = |num_controls: usize| -> Result<u8> {
+            num_controls
+                .checked_add(extra)
+                .and_then(|total| u8::try_from(total).ok())
+                .ok_or_else(|| PrismError::UnsupportedConstruct {
+                    construct: format!("ctrl @ chain past {} controls", u8::MAX),
+                    line: line_num,
+                })
+        };
+        let controlled = match &gate {
+            g if g.num_qubits() == 1 => {
+                let mat = gate.matrix_2x2();
+                vec![Self::ig(
+                    Self::controlled_unitary(mat, widen(0)?),
+                    &prefixed(&targets),
+                )]
+            }
+            Gate::Cx => vec![Self::ig(
+                Self::controlled_unitary(Gate::X.matrix_2x2(), widen(1)?),
+                &prefixed(&targets),
+            )],
+            Gate::Cz => vec![Self::ig(
+                Self::controlled_unitary(Gate::Z.matrix_2x2(), widen(1)?),
+                &prefixed(&targets),
+            )],
+            Gate::Cu(mat) => vec![Self::ig(
+                Self::controlled_unitary(**mat, widen(1)?),
+                &prefixed(&targets),
+            )],
+            Gate::Mcu(data) => vec![Self::ig(
+                Self::controlled_unitary(data.mat, widen(data.num_controls as usize)?),
+                &prefixed(&targets),
+            )],
+            // Fredkin: conjugating by a CNOT turns the swap into one extra
+            // control on a Toffoli rather than three controlled CNOTs.
+            Gate::Swap => {
+                let (a, b) = (targets[0], targets[1]);
+                vec![
+                    Self::ig(Gate::Cx, &[b, a]),
+                    Self::ig(
+                        Self::controlled_unitary(Gate::X.matrix_2x2(), widen(1)?),
+                        &prefixed(&[a, b]),
+                    ),
+                    Self::ig(Gate::Cx, &[b, a]),
+                ]
+            }
+            // `Rzz` is `Rz` conjugated by a CNOT pair, and the conjugation
+            // needs no control of its own: with the control low the pair
+            // cancels.
+            Gate::Rzz(theta) => {
+                let (a, b) = (targets[0], targets[1]);
+                vec![
+                    Self::ig(Gate::Cx, &[a, b]),
+                    Self::ig(
+                        Self::controlled_unitary(Gate::Rz(*theta).matrix_2x2(), widen(0)?),
+                        &prefixed(&[b]),
+                    ),
+                    Self::ig(Gate::Cx, &[a, b]),
+                ]
+            }
+            // Everything else two-qubit is carried as a matrix, and a
+            // controlled one has no gate variant wide enough to hold it.
+            // `ctrl(V D V*) = V ctrl(D) V*` reaches it through the variants
+            // that do exist, at a cost independent of the control count.
+            other if other.num_qubits() == 2 => {
+                let mat = other.matrix_4x4();
+                let flat: Vec<Complex64> = mat.iter().flat_map(|row| row.iter().copied()).collect();
+                synthesis::controlled_dense(&flat, controls, &targets)
+            }
+            // A wider Pauli rotation has no matrix accessor, but its CNOT
+            // ladder is an expansion like any other, so the same rule applies
+            // one level down.
+            Gate::PauliRot(data) => {
+                let mut ladder = Vec::new();
+                crate::circuit::pauli_rotation_lowering(
+                    data.theta(),
+                    &targets,
+                    data.axes(),
+                    |gate, wires| ladder.push(Self::ig(gate, wires)),
+                );
+                Self::control_expansion(ladder, controls, line_num)?
+            }
+            other => {
+                return Err(PrismError::UnsupportedConstruct {
+                    construct: format!(
+                        "ctrl @ {}, which has no controlled form and no lowering to control",
+                        other.name()
+                    ),
+                    line: line_num,
+                });
+            }
+        };
+        Ok(controlled)
+    }
+
+    /// A unitary under `num_controls` controls, taking the named two-qubit
+    /// variant where one exists.
+    fn controlled_unitary(mat: [[num_complex::Complex64; 2]; 2], num_controls: u8) -> Gate {
+        if num_controls == 1 {
+            Self::resolve_controlled(mat)
+        } else {
+            Gate::mcu(mat, num_controls)
+        }
+    }
+
+    /// Wrap `instrs` in `X` on each negated control, which is what turns a
+    /// `ctrl` into a `negctrl`: the gate fires on `|0>` instead of `|1>`.
+    fn conjugate_negations(
+        instrs: Vec<Instruction>,
+        controls: &[usize],
+        polarity: &[bool],
+    ) -> Vec<Instruction> {
+        let negated: Vec<usize> = polarity
+            .iter()
+            .zip(controls)
+            .filter(|(negated, _)| **negated)
+            .map(|(_, &qubit)| qubit)
+            .collect();
+        if negated.is_empty() {
+            return instrs;
+        }
+        let flips = || negated.iter().map(|&qubit| Self::ig(Gate::X, &[qubit]));
+        flips().chain(instrs).chain(flips()).collect()
     }
 
     /// Apply modifiers to the instruction sequence a `gate` or `def` body
@@ -2589,20 +3999,8 @@ impl<'a> Parser<'a> {
         for modifier in modifiers.iter().rev() {
             instrs = match modifier {
                 Modifier::Inv => Self::invert_expansion(instrs, name, line_num)?,
-                Modifier::Pow(k) => {
-                    let base = if *k < 0 {
-                        Self::invert_expansion(instrs, name, line_num)?
-                    } else {
-                        instrs
-                    };
-                    let repeats = k.unsigned_abs() as usize;
-                    let mut powered = Vec::with_capacity(base.len() * repeats);
-                    for _ in 0..repeats {
-                        powered.extend(base.iter().cloned());
-                    }
-                    powered
-                }
-                Modifier::Ctrl => return Err(Self::ctrl_on_expansion_error(name, line_num)),
+                Modifier::Pow(k) => Self::repeat_expansion(instrs, *k, name, line_num)?,
+                Modifier::Ctrl { .. } => return Err(Self::ctrl_on_expansion_error(name, line_num)),
             };
         }
         Ok(instrs)
@@ -2629,40 +4027,11 @@ impl<'a> Parser<'a> {
             .collect()
     }
 
-    fn apply_modifier(gate: Gate, modifier: &Modifier, line_num: usize) -> Result<Gate> {
+    fn apply_modifier(gate: Gate, modifier: &Modifier) -> Gate {
         match modifier {
-            Modifier::Inv => Ok(gate.inverse()),
-            Modifier::Pow(k) => {
-                if gate.num_qubits() != 1 {
-                    return Err(PrismError::UnsupportedConstruct {
-                        construct: format!("pow({k}) @ {} (only single-qubit gates)", gate.name()),
-                        line: line_num,
-                    });
-                }
-                Ok(gate.matrix_power(*k))
-            }
-            Modifier::Ctrl => match &gate {
-                g if g.num_qubits() == 1 => {
-                    let mat = gate.matrix_2x2();
-                    Ok(Self::resolve_controlled(mat))
-                }
-                Gate::Cu(mat) => Ok(Gate::mcu(**mat, 2)),
-                Gate::Cx => Ok(Gate::mcu(Gate::X.matrix_2x2(), 2)),
-                Gate::Cz => Ok(Gate::mcu(Gate::Z.matrix_2x2(), 2)),
-                Gate::Mcu(data) => {
-                    let num_controls = data.num_controls.checked_add(1).ok_or_else(|| {
-                        PrismError::UnsupportedConstruct {
-                            construct: format!("ctrl @ chain past {} controls", u8::MAX),
-                            line: line_num,
-                        }
-                    })?;
-                    Ok(Gate::mcu(data.mat, num_controls))
-                }
-                _ => Err(PrismError::UnsupportedConstruct {
-                    construct: format!("ctrl @ {} (unsupported gate type)", gate.name()),
-                    line: line_num,
-                }),
-            },
+            Modifier::Inv => gate.inverse(),
+            Modifier::Pow(k) => gate.matrix_power_real(*k),
+            Modifier::Ctrl { .. } => unreachable!("controls are applied to the expansion"),
         }
     }
 
@@ -2750,17 +4119,17 @@ impl<'a> Parser<'a> {
         Ok((values, input_slot))
     }
 
-    fn resolve_gate(name: &str, params: &[f64], line_num: usize) -> Result<Gate> {
+    fn resolve_gate(name: &str, params: &[f64], dialect: Dialect, line_num: usize) -> Result<Gate> {
         match name {
-            "id" => Ok(Gate::Id),
+            "id" | "i" => Ok(Gate::Id),
             "x" => Ok(Gate::X),
             "y" => Ok(Gate::Y),
             "z" => Ok(Gate::Z),
             "h" => Ok(Gate::H),
             "s" => Ok(Gate::S),
-            "sdg" => Ok(Gate::Sdg),
+            "sdg" | "si" => Ok(Gate::Sdg),
             "t" => Ok(Gate::T),
-            "tdg" => Ok(Gate::Tdg),
+            "tdg" | "ti" => Ok(Gate::Tdg),
             "rx" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::Rx(params[0]))
@@ -2773,17 +4142,17 @@ impl<'a> Parser<'a> {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::Rz(params[0]))
             }
-            "p" | "phase" => {
+            "p" | "phase" | "phaseshift" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::P(params[0]))
             }
-            "r" => {
+            "r" | "prx" => {
                 Self::expect_param_count(name, params, 2, line_num)?;
                 Ok(Gate::Fused(Box::new(Self::r_matrix(params[0], params[1]))))
             }
-            "sx" => Ok(Gate::SX),
-            "sxdg" => Ok(Gate::SXdg),
-            "cp" | "cphase" => {
+            "sx" | "v" => Ok(Gate::SX),
+            "sxdg" | "vi" => Ok(Gate::SXdg),
+            "cp" | "cphase" | "cphaseshift" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::cphase(params[0]))
             }
@@ -2810,10 +4179,10 @@ impl<'a> Parser<'a> {
                 Self::expect_param_count(name, params, 1, line_num)?;
                 Ok(Gate::cu(Gate::Rz(params[0]).matrix_2x2()))
             }
-            "csx" => Ok(Gate::cu(Gate::SX.matrix_2x2())),
+            "csx" | "cv" => Ok(Gate::cu(Gate::SX.matrix_2x2())),
             "cz" => Ok(Gate::Cz),
             "swap" => Ok(Gate::Swap),
-            "ccx" | "toffoli" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 2)),
+            "ccx" | "toffoli" | "ccnot" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 2)),
             "ccz" => Ok(Gate::mcu(Gate::Z.matrix_2x2(), 2)),
             "c3x" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 3)),
             "c4x" => Ok(Gate::mcu(Gate::X.matrix_2x2(), 4)),
@@ -2831,11 +4200,13 @@ impl<'a> Parser<'a> {
             }
             "gpi" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
-                Ok(Gate::Fused(Box::new(Self::gpi_matrix(params[0]))))
+                let phi = dialect.native_turns(params[0]);
+                Ok(Gate::Fused(Box::new(Self::gpi_matrix(phi))))
             }
             "gpi2" => {
                 Self::expect_param_count(name, params, 1, line_num)?;
-                Ok(Gate::Fused(Box::new(Self::gpi2_matrix(params[0]))))
+                let phi = dialect.native_turns(params[0]);
+                Ok(Gate::Fused(Box::new(Self::gpi2_matrix(phi))))
             }
             "ms" => {
                 if !(params.len() == 2 || params.len() == 3) {
@@ -2846,9 +4217,43 @@ impl<'a> Parser<'a> {
                         ),
                     });
                 }
-                let theta = params.get(2).copied().unwrap_or(0.25);
+                // The omitted third angle is a quarter turn under either
+                // dialect, so the default is already in native units.
+                let theta = match params.get(2) {
+                    Some(value) => dialect.native_turns(*value),
+                    None => 0.25,
+                };
                 Ok(Gate::Fused2q(Box::new(Self::ms_matrix(
-                    params[0], params[1], theta,
+                    dialect.native_turns(params[0]),
+                    dialect.native_turns(params[1]),
+                    theta,
+                ))))
+            }
+            "ecr" => Ok(Gate::Fused2q(Box::new(Self::ecr_matrix()))),
+            "xy" => {
+                Self::expect_param_count(name, params, 1, line_num)?;
+                Ok(Gate::Fused2q(Box::new(Self::xy_matrix(params[0]))))
+            }
+            "pswap" => {
+                Self::expect_param_count(name, params, 1, line_num)?;
+                Ok(Gate::Fused2q(Box::new(Self::pswap_matrix(params[0]))))
+            }
+            "cphaseshift00" => {
+                Self::expect_param_count(name, params, 1, line_num)?;
+                Ok(Gate::Fused2q(Box::new(Self::cphaseshift_matrix(
+                    0, params[0],
+                ))))
+            }
+            "cphaseshift01" => {
+                Self::expect_param_count(name, params, 1, line_num)?;
+                Ok(Gate::Fused2q(Box::new(Self::cphaseshift_matrix(
+                    1, params[0],
+                ))))
+            }
+            "cphaseshift10" => {
+                Self::expect_param_count(name, params, 1, line_num)?;
+                Ok(Gate::Fused2q(Box::new(Self::cphaseshift_matrix(
+                    2, params[0],
                 ))))
             }
             "syc" => Ok(Gate::Fused2q(Box::new(Self::syc_matrix()))),
@@ -2867,27 +4272,6 @@ impl<'a> Parser<'a> {
             gate,
             targets: SmallVec::from_slice(targets),
         }
-    }
-
-    /// Whether [`Parser::resolve_decomposed_gate`] lowers this name.
-    fn lowers_to_sequence(name: &str) -> bool {
-        matches!(
-            name,
-            "mcx"
-                | "rccx"
-                | "rc3x"
-                | "rcccx"
-                | "cswap"
-                | "fredkin"
-                | "ecr"
-                | "iswap"
-                | "dcx"
-                | "u1"
-                | "u2"
-                | "u3"
-                | "u"
-                | "U"
-        )
     }
 
     /// Handle gates that decompose into multiple instructions at parse time.
@@ -2976,17 +4360,6 @@ impl<'a> Parser<'a> {
                     Self::ig(Gate::Cx, &[t2, t1]),
                     Self::ig(Gate::mcu(Gate::X.matrix_2x2(), 2), &[ctrl, t1, t2]),
                     Self::ig(Gate::Cx, &[t2, t1]),
-                ]))
-            }
-            "ecr" => {
-                Self::check_arity(name, qubits, 2)?;
-                let q0 = qubits[0];
-                let q1 = qubits[1];
-                Ok(Some(vec![
-                    Self::ig(Gate::Rz(std::f64::consts::FRAC_PI_4), &[q0]),
-                    Self::ig(Gate::Rx(std::f64::consts::FRAC_PI_2), &[q0]),
-                    Self::ig(Gate::Cx, &[q0, q1]),
-                    Self::ig(Gate::X, &[q0]),
                 ]))
             }
             "iswap" => {
@@ -3184,6 +4557,63 @@ impl<'a> Parser<'a> {
                 c,
             ],
         ]
+    }
+
+    /// Echoed cross-resonance, `(XI - YX) / sqrt(2)` with `targets[0]` the
+    /// leading factor.
+    pub(crate) fn ecr_matrix() -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let r = Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+        let i = Complex64::new(0.0, std::f64::consts::FRAC_1_SQRT_2);
+        [
+            [zero, zero, r, i],
+            [zero, zero, i, r],
+            [r, -i, zero, zero],
+            [-i, r, zero, zero],
+        ]
+    }
+
+    /// XY interaction, a half-angle rotation inside the single-excitation
+    /// subspace.
+    pub(crate) fn xy_matrix(theta: f64) -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let c = Complex64::new((theta / 2.0).cos(), 0.0);
+        let s = Complex64::new(0.0, (theta / 2.0).sin());
+        [
+            [one, zero, zero, zero],
+            [zero, c, s, zero],
+            [zero, s, c, zero],
+            [zero, zero, zero, one],
+        ]
+    }
+
+    /// Phased SWAP: a swap whose exchanged amplitudes pick up `e^{i theta}`.
+    /// The angle is not halved.
+    pub(crate) fn pswap_matrix(theta: f64) -> [[Complex64; 4]; 4] {
+        let zero = Complex64::new(0.0, 0.0);
+        let one = Complex64::new(1.0, 0.0);
+        let phase = Complex64::from_polar(1.0, theta);
+        [
+            [one, zero, zero, zero],
+            [zero, zero, phase, zero],
+            [zero, phase, zero, zero],
+            [zero, zero, zero, one],
+        ]
+    }
+
+    /// Diagonal two-qubit phase on the single basis state `index`, where bit 1
+    /// of `index` is `targets[0]`. `index` 3 is the ordinary controlled phase.
+    pub(crate) fn cphaseshift_matrix(index: usize, theta: f64) -> [[Complex64; 4]; 4] {
+        let mut mat = [[Complex64::new(0.0, 0.0); 4]; 4];
+        for (i, row) in mat.iter_mut().enumerate() {
+            row[i] = if i == index {
+                Complex64::from_polar(1.0, theta)
+            } else {
+                Complex64::new(1.0, 0.0)
+            };
+        }
+        mat
     }
 
     pub(crate) fn syc_matrix() -> [[Complex64; 4]; 4] {

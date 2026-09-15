@@ -486,6 +486,38 @@ fn count_unique_diag_qubits(entries: &[DiagEntry]) -> usize {
     seen.len()
 }
 
+/// An eigenvalue angle within this of `-pi` is read at `+pi` instead.
+///
+/// Both spell the same eigenvalue, and the principal branch is closed at `+pi`,
+/// so `pow(0.5) @ p(-pi)` gives `S` rather than `S-dagger`: a half turn written
+/// the other way round is still a half turn.
+const PRINCIPAL_BRANCH_SNAP: f64 = 1e-9;
+
+/// `angle` on the principal branch `(-pi, pi]`.
+pub(crate) fn principal_angle(angle: f64) -> f64 {
+    let wrapped = angle.rem_euclid(std::f64::consts::TAU);
+    let folded = if wrapped > std::f64::consts::PI {
+        wrapped - std::f64::consts::TAU
+    } else {
+        wrapped
+    };
+    if folded <= -std::f64::consts::PI + PRINCIPAL_BRANCH_SNAP {
+        std::f64::consts::PI
+    } else {
+        folded
+    }
+}
+
+/// `e^(-i phase) U`, which has determinant 1 when `phase` is half the argument
+/// of `det U`.
+fn special_unitary(m: &[[Complex64; 2]; 2], phase: f64) -> [[Complex64; 2]; 2] {
+    let factor = Complex64::new(0.0, -phase).exp();
+    [
+        [m[0][0] * factor, m[0][1] * factor],
+        [m[1][0] * factor, m[1][1] * factor],
+    ]
+}
+
 #[inline]
 pub(crate) fn mat_mul_2x2(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> [[Complex64; 2]; 2] {
     [
@@ -662,6 +694,70 @@ impl Gate {
         }
     }
 
+    /// Dense matrix over the gate's own targets, row major with `targets[0]`
+    /// the most significant bit of both indices.
+    ///
+    /// `None` for the batched and tiled variants, whose targets the fusion
+    /// passes assign rather than a caller, and which no lowering here reaches.
+    pub(crate) fn dense_matrix(&self) -> Option<Vec<Complex64>> {
+        let zero = Complex64::new(0.0, 0.0);
+        match self {
+            Gate::Mcu(data) => {
+                let dim = 1usize << self.num_qubits();
+                let mut out = vec![zero; dim * dim];
+                for index in 0..dim - 2 {
+                    out[index * dim + index] = Complex64::new(1.0, 0.0);
+                }
+                for row in 0..2 {
+                    for column in 0..2 {
+                        out[(dim - 2 + row) * dim + (dim - 2 + column)] = data.mat[row][column];
+                    }
+                }
+                Some(out)
+            }
+            Gate::PauliRot(data) => {
+                let width = data.axes.len();
+                let dim = 1usize << width;
+                let half = data.theta / 2.0;
+                let mut out = vec![zero; dim * dim];
+                // `P` holds one non-zero per column, so the string is walked
+                // column by column rather than materialized as a product.
+                for column in 0..dim {
+                    let mut row = column;
+                    let mut value = Complex64::new(0.0, -half.sin());
+                    for (index, axis) in data.axes.iter().enumerate() {
+                        let bit = width - 1 - index;
+                        let set = column >> bit & 1;
+                        match axis {
+                            PauliAxis::X => row ^= 1 << bit,
+                            PauliAxis::Y => {
+                                row ^= 1 << bit;
+                                value *= Complex64::new(0.0, if set == 0 { 1.0 } else { -1.0 });
+                            }
+                            PauliAxis::Z => {
+                                if set == 1 {
+                                    value = -value;
+                                }
+                            }
+                        }
+                    }
+                    out[row * dim + column] += value;
+                    out[column * dim + column] += Complex64::new(half.cos(), 0.0);
+                }
+                Some(out)
+            }
+            _ if self.num_qubits() == 1 => {
+                let m = self.matrix_2x2();
+                Some(vec![m[0][0], m[0][1], m[1][0], m[1][1]])
+            }
+            _ if self.num_qubits() == 2 => {
+                let m = self.matrix_4x4();
+                Some(m.iter().flat_map(|row| row.iter().copied()).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// Human-readable gate name (for errors, logs, and OpenQASM round-tripping).
     #[inline]
     pub fn name(&self) -> &'static str {
@@ -829,6 +925,74 @@ impl Gate {
             acc = mat_mul_2x2(&base_mat, &acc);
         }
         Gate::Fused(Box::new(acc))
+    }
+
+    /// `U^t` for a real exponent, on a single-qubit gate.
+    ///
+    /// The principal power: `U` is written as
+    /// `e^(i(phi + a)) P+ + e^(i(phi - a)) P-` through the axis-angle form
+    /// every 2x2 unitary has, each eigenvalue angle is brought onto the
+    /// principal branch `(-pi, pi]`, and both are scaled by `t`. Reading it
+    /// from the spectrum rather than from the axis-angle pair keeps
+    /// `pow(0.5) @ rx(theta)` at `rx(theta/2)` for a rotation past `pi`, where
+    /// scaling the half-angle picks the other root.
+    ///
+    /// The two decompositions of `U` (`phi` and `phi + pi`) give the same pair
+    /// of eigenvalue angles with the projectors exchanged, so the branch `arg`
+    /// takes for the determinant does not reach the answer. That is what makes
+    /// the sign of a zero harmless here.
+    ///
+    /// A whole-number exponent goes through [`Gate::matrix_power`] instead, so
+    /// that `pow(2) @ t` stays the named `S` rather than becoming a matrix.
+    ///
+    /// # Panics
+    /// Panics in debug builds if the gate is not single-qubit.
+    pub(crate) fn matrix_power_real(&self, t: f64) -> Gate {
+        debug_assert_eq!(
+            self.num_qubits(),
+            1,
+            "matrix_power_real only for single-qubit gates"
+        );
+        if t.fract() == 0.0 && t.abs() <= i64::MAX as f64 {
+            return self.matrix_power(t as i64);
+        }
+        let m = self.matrix_2x2();
+        let det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+        let phase = det.arg() / 2.0;
+        let special = special_unitary(&m, phase);
+        let cosine = (special[0][0].re + special[1][1].re) / 2.0;
+        let axis = [
+            (special[0][1].im + special[1][0].im) / 2.0,
+            (special[0][1].re - special[1][0].re) / 2.0,
+            (special[0][0].im - special[1][1].im) / 2.0,
+        ];
+        let norm = axis.iter().map(|c| c * c).sum::<f64>().sqrt();
+        let angle = norm.atan2(cosine);
+        let unit = if norm > 0.0 {
+            [axis[0] / norm, axis[1] / norm, axis[2] / norm]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
+        let upper = Complex64::from_polar(1.0, t * principal_angle(phase + angle));
+        let lower = Complex64::from_polar(1.0, t * principal_angle(phase - angle));
+        let projected = [
+            [
+                Complex64::new(unit[2], 0.0),
+                Complex64::new(unit[0], -unit[1]),
+            ],
+            [
+                Complex64::new(unit[0], unit[1]),
+                Complex64::new(-unit[2], 0.0),
+            ],
+        ];
+        let mut powered = [[Complex64::new(0.0, 0.0); 2]; 2];
+        for (row, (target, source)) in powered.iter_mut().zip(projected).enumerate() {
+            for (column, (cell, entry)) in target.iter_mut().zip(source).enumerate() {
+                let identity = Complex64::new(f64::from(u8::from(row == column)), 0.0);
+                *cell = ((identity + entry) * upper + (identity - entry) * lower) * 0.5;
+            }
+        }
+        Gate::Fused(Box::new(powered))
     }
 
     /// Create a single-controlled unitary gate with the given 2x2 matrix.
@@ -1212,6 +1376,8 @@ impl fmt::Display for Gate {
         }
     }
 }
+
+pub(crate) mod spectral;
 
 #[cfg(test)]
 mod tests;

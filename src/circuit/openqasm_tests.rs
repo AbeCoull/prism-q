@@ -381,13 +381,6 @@ fn test_ctrl_ctrl_ctrl_x() {
 }
 
 #[test]
-fn test_ctrl_swap_rejected() {
-    let qasm = "OPENQASM 3.0;\nqubit[3] q;\nctrl @ swap q[0], q[1], q[2];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::UnsupportedConstruct { .. }));
-}
-
-#[test]
 fn test_no_modifier_unchanged() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\ncx q[0], q[1];";
     let c = parse(qasm).unwrap();
@@ -752,10 +745,18 @@ fn test_relative_phase_x_decompositions() {
 }
 
 #[test]
-fn test_modifier_on_decomposed_gate_rejected() {
+fn test_modifier_on_pauli_rotation() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\ninv @ rxx(pi/4) q[0], q[1];";
-    let err = parse(qasm).unwrap_err();
-    assert!(matches!(err, PrismError::UnsupportedConstruct { .. }));
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.instructions.len(), 1);
+    let Instruction::Gate {
+        gate: Gate::PauliRot(data),
+        ..
+    } = &c.instructions[0]
+    else {
+        panic!("expected a PauliRot, got {:?}", c.instructions[0]);
+    };
+    assert!((data.theta() + std::f64::consts::FRAC_PI_4).abs() < 1e-12);
 }
 
 #[test]
@@ -845,12 +846,6 @@ fn test_pauli_rotation_rejections() {
 
     let arity = parse("OPENQASM 3.0;\nqubit[3] q;\nrxyz(0.3) q[0], q[1];");
     assert!(matches!(arity, Err(PrismError::GateArity { .. })));
-
-    let modified = parse("OPENQASM 3.0;\nqubit[3] q;\ninv @ rxyz(0.3) q[0], q[1], q[2];");
-    assert!(matches!(
-        modified,
-        Err(PrismError::UnsupportedConstruct { .. })
-    ));
 
     // `rccx` is not a Pauli string, `c` being no Pauli letter, so the name
     // still reaches its own decomposition.
@@ -999,113 +994,63 @@ fn test_google_cirq_native_matrices() {
 
 #[test]
 fn test_ionq_native_gate_matrices() {
-    let qasm = r#"
-        OPENQASM 3.0;
-        qubit[2] q;
-        gpi(0.25) q[0];
-        gpi2(0.5) q[0];
-        ms(0.125, 0.25, 0.125) q[0], q[1];
-        ms(0.0, 0.0) q[0], q[1];
-    "#;
+    // The hardware-native family reads angles in turns under the default
+    // dialect, so a quarter turn of `gpi` is the Y-like antidiagonal and an
+    // omitted third `ms` angle is a quarter turn. That family under Braket's
+    // reading in radians, and the rest of the gate set, are pinned against
+    // independent references in tests/gate_matrix.rs.
+    let qasm = "OPENQASM 3.0;
+qubit[2] q;
+gpi(0.25) q[0];
+ms(0.0, 0.0) q[0], q[1];";
     let c = parse(qasm).unwrap();
     let zero = num_complex::Complex64::new(0.0, 0.0);
     let i = num_complex::Complex64::new(0.0, 1.0);
-    if let Instruction::Gate { gate, .. } = &c.instructions[0] {
-        if let Gate::Fused(mat) = gate {
-            assert_mat2_close(mat, [[zero, -i], [i, zero]]);
-        } else {
-            panic!("expected Fused");
-        }
-    } else {
-        panic!("expected gate");
-    }
 
-    if let Instruction::Gate { gate, .. } = &c.instructions[1] {
-        if let Gate::Fused(mat) = gate {
-            let h = std::f64::consts::FRAC_1_SQRT_2;
-            let expected = [
-                [
-                    num_complex::Complex64::new(h, 0.0),
-                    num_complex::Complex64::new(0.0, h),
-                ],
-                [
-                    num_complex::Complex64::new(0.0, h),
-                    num_complex::Complex64::new(h, 0.0),
-                ],
-            ];
-            assert_mat2_close(mat, expected);
-        } else {
-            panic!("expected Fused");
-        }
-    } else {
-        panic!("expected gate");
-    }
+    let Instruction::Gate {
+        gate: Gate::Fused(gpi),
+        ..
+    } = &c.instructions[0]
+    else {
+        panic!("expected a Fused gpi");
+    };
+    assert_mat2_close(gpi, [[zero, -i], [i, zero]]);
 
-    let theta = 0.125;
-    let phi0 = 0.125;
-    let phi1 = 0.25;
-    let c0 = num_complex::Complex64::new((std::f64::consts::PI * theta).cos(), 0.0);
-    let s0 = num_complex::Complex64::new(0.0, -(std::f64::consts::PI * theta).sin());
-    let expected_ms = [
+    let Instruction::Gate {
+        gate: Gate::Fused2q(ms),
+        ..
+    } = &c.instructions[1]
+    else {
+        panic!("expected a Fused2q ms");
+    };
+    let h = num_complex::Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
+    let o = num_complex::Complex64::new(0.0, -std::f64::consts::FRAC_1_SQRT_2);
+    assert_mat4_close(
+        ms,
         [
-            c0,
-            zero,
-            zero,
-            s0 * num_complex::Complex64::from_polar(1.0, -std::f64::consts::TAU * (phi0 + phi1)),
+            [h, zero, zero, o],
+            [zero, h, o, zero],
+            [zero, o, h, zero],
+            [o, zero, zero, h],
         ],
-        [
-            zero,
-            c0,
-            s0 * num_complex::Complex64::from_polar(1.0, -std::f64::consts::TAU * (phi0 - phi1)),
-            zero,
-        ],
-        [
-            zero,
-            s0 * num_complex::Complex64::from_polar(1.0, std::f64::consts::TAU * (phi0 - phi1)),
-            c0,
-            zero,
-        ],
-        [
-            s0 * num_complex::Complex64::from_polar(1.0, std::f64::consts::TAU * (phi0 + phi1)),
-            zero,
-            zero,
-            c0,
-        ],
-    ];
-    if let Instruction::Gate { gate, .. } = &c.instructions[2] {
-        if let Gate::Fused2q(mat) = gate {
-            assert_mat4_close(mat, expected_ms);
-        } else {
-            panic!("expected Fused2q");
-        }
-    } else {
-        panic!("expected gate");
-    }
-
-    let c_default = num_complex::Complex64::new(std::f64::consts::FRAC_1_SQRT_2, 0.0);
-    let s_default = num_complex::Complex64::new(0.0, -std::f64::consts::FRAC_1_SQRT_2);
-    let expected_default_ms = [
-        [c_default, zero, zero, s_default],
-        [zero, c_default, s_default, zero],
-        [zero, s_default, c_default, zero],
-        [s_default, zero, zero, c_default],
-    ];
-    if let Instruction::Gate { gate, .. } = &c.instructions[3] {
-        if let Gate::Fused2q(mat) = gate {
-            assert_mat4_close(mat, expected_default_ms);
-        } else {
-            panic!("expected Fused2q");
-        }
-    } else {
-        panic!("expected gate");
-    }
+    );
 }
 
 #[test]
 fn test_ecr_gate() {
+    // `ecr` resolves to a matrix gate rather than a lowering, so `inv @` and
+    // `pow @` invert and repeat the matrix instead of an expanded body. Its
+    // unitary is pinned in tests/gate_matrix.rs.
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\necr q[0], q[1];";
     let c = parse(qasm).unwrap();
-    assert_eq!(c.instructions.len(), 4);
+    assert_eq!(c.instructions.len(), 1);
+    assert!(matches!(
+        &c.instructions[0],
+        Instruction::Gate {
+            gate: Gate::Fused2q(_),
+            targets
+        } if targets.as_slice() == [0, 1]
+    ));
 }
 
 #[test]
@@ -2723,7 +2668,7 @@ fn gate_names_round_trip_through_resolve_gate() {
                     .collect();
                 super::pauli_rotation_gate(params[0], &factors).0
             }
-            None => Parser::resolve_gate(gate.name(), &params, 0)
+            None => Parser::resolve_gate(gate.name(), &params, Dialect::Native, 0)
                 .unwrap_or_else(|e| panic!("`{}` did not resolve: {e}", gate.name())),
         };
         assert_eq!(
@@ -2733,4 +2678,267 @@ fn gate_names_round_trip_through_resolve_gate() {
             gate.name()
         );
     }
+}
+
+// Expression operators and builtins
+
+fn angle_of(source: &str) -> f64 {
+    let circuit = parse(source).unwrap_or_else(|e| panic!("`{source}`: {e}"));
+    match &circuit.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rx(theta),
+            ..
+        } => *theta,
+        other => panic!("expected an rx, got {other:?}"),
+    }
+}
+
+fn angle_err(source: &str) -> PrismError {
+    parse(source)
+        .err()
+        .unwrap_or_else(|| panic!("`{source}` should not parse"))
+}
+
+fn rx(expression: &str) -> String {
+    format!("OPENQASM 3.0;\nqubit[1] q;\nrx({expression}) q[0];")
+}
+
+#[test]
+fn expression_operators_follow_openqasm_precedence() {
+    let cases = [
+        ("2 ** 3", 8.0),
+        // `**` binds tighter than unary minus, so this is -(2^2).
+        ("-2 ** 2", -4.0),
+        // and it is right associative.
+        ("2 ** 3 ** 2", 512.0),
+        ("2 ** -1", 0.5),
+        ("2 ** 3 * 4", 32.0),
+        ("7 % 3", 1.0),
+        ("-7 % 3", -1.0),
+        ("7.5 % 2", 1.5),
+        ("1 + 2 * 3 % 4", 3.0),
+    ];
+    for (expression, expected) in cases {
+        let actual = angle_of(&rx(expression));
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "`{expression}`: got {actual}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn builtin_functions_take_their_spec_spellings() {
+    let cases = [
+        ("arcsin(1.0)", std::f64::consts::FRAC_PI_2),
+        ("arccos(1.0)", 0.0),
+        ("arctan(1.0)", std::f64::consts::FRAC_PI_4),
+        ("asin(1.0)", std::f64::consts::FRAC_PI_2),
+        ("ceiling(0.2)", 1.0),
+        ("ceil(0.2)", 1.0),
+        ("floor(1.8)", 1.0),
+        ("log(euler)", 1.0),
+        ("ln(euler)", 1.0),
+        ("abs(-2.5)", 2.5),
+        ("mod(7, 3)", 1.0),
+        ("pow(2, 10)", 1024.0),
+        ("popcount(7)", 3.0),
+        ("popcount(0)", 0.0),
+        ("popcount(0xff)", 8.0),
+    ];
+    for (expression, expected) in cases {
+        let actual = angle_of(&rx(expression));
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "`{expression}`: got {actual}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn malformed_expressions_name_what_is_wrong() {
+    for (expression, needle) in [
+        ("mod(7)", "argument"),
+        ("pow(2, 3, 4)", "argument"),
+        ("popcount(1.5)", "popcount"),
+        ("popcount(-1)", "popcount"),
+        ("1 % 0", "modulo by zero"),
+        ("1 / 0", "division by zero"),
+        ("sizeof(2)", "unknown function"),
+    ] {
+        let err = format!("{}", angle_err(&rx(expression)));
+        assert!(
+            err.contains(needle),
+            "`{expression}`: expected `{needle}` in `{err}`"
+        );
+    }
+}
+
+// Block comments, version, physical qubits
+
+// A block comment is blanked rather than removed, so the line a later error
+// names is still the line the author wrote it on.
+#[test]
+fn block_comments_are_skipped_and_keep_line_numbers() {
+    let source = "OPENQASM 3.0;\n\
+                  /* a comment\n\
+                     spanning lines */\n\
+                  qubit[2] q;\n\
+                  h /* inline */ q[0];\n\
+                  nonsense q[0];\n";
+    let err = parse(source).unwrap_err();
+    assert!(
+        matches!(err, PrismError::UnsupportedConstruct { line: 6, .. }),
+        "got {err:?}"
+    );
+
+    let circuit = parse("OPENQASM 3.0;\nqubit[1] q;\nh /* mid */ q[0];\n").unwrap();
+    assert_eq!(circuit.gate_count(), 1);
+}
+
+#[test]
+fn a_block_comment_does_not_nest_and_must_close() {
+    // The first `*/` closes the span, so the tail is code and does not parse.
+    assert!(parse("OPENQASM 3.0;\nqubit[1] q;\n/* a /* b */ c */\nh q[0];\n").is_err());
+    let err = parse("OPENQASM 3.0;\nqubit[1] q;\n/* never closed\nh q[0];\n").unwrap_err();
+    assert!(
+        matches!(err, PrismError::Parse { line: 3, .. }),
+        "got {err:?}"
+    );
+}
+
+// A `//` inside a block comment and a `/*` inside a line comment or a string
+// are all text, not delimiters.
+#[test]
+fn comment_delimiters_do_not_cross_each_other() {
+    let circuit = parse(
+        "OPENQASM 3.0;\n\
+         // a line comment with /* in it\n\
+         /* a block comment with // in it */\n\
+         include \"std/*gates.inc\";\n\
+         qubit[1] q;\n\
+         h q[0];\n",
+    )
+    .unwrap();
+    assert_eq!(circuit.gate_count(), 1);
+}
+
+#[test]
+fn the_version_statement_is_checked() {
+    for accepted in ["OPENQASM 3.0;", "OPENQASM 3;", "OPENQASM 2.0;"] {
+        let source = format!("{accepted}\nqubit[1] q;\nh q[0];\n");
+        assert!(parse(&source).is_ok(), "`{accepted}`");
+    }
+    for rejected in ["OPENQASM 4.0;", "OPENQASM 99;"] {
+        let source = format!("{rejected}\nqubit[1] q;\nh q[0];\n");
+        assert!(
+            matches!(
+                parse(&source),
+                Err(PrismError::UnsupportedConstruct { line: 1, .. })
+            ),
+            "`{rejected}`"
+        );
+    }
+    assert!(matches!(
+        parse("OPENQASM three;\nqubit[1] q;\n"),
+        Err(PrismError::Parse { line: 1, .. })
+    ));
+}
+
+// A physical qubit is an absolute index, so the register is as wide as the
+// highest one named and nothing declares it.
+#[test]
+fn physical_qubits_size_the_register() {
+    let circuit =
+        parse("OPENQASM 3.0;\nbit[1] c;\nh $0;\ncx $0, $3;\nc[0] = measure $3;\n").unwrap();
+    assert_eq!(circuit.num_qubits, 4);
+    assert_eq!(circuit.measurement_map(), [(3, 0)]);
+    let Instruction::Gate { targets, .. } = &circuit.instructions[1] else {
+        panic!("expected a gate");
+    };
+    assert_eq!(targets.as_slice(), [0, 3]);
+}
+
+#[test]
+fn physical_qubits_and_a_register_cannot_be_mixed() {
+    for source in [
+        "OPENQASM 3.0;\nqubit[2] q;\nh $0;\n",
+        "OPENQASM 2.0;\nqreg q[2];\nh $0;\n",
+    ] {
+        assert!(
+            matches!(parse(source), Err(PrismError::UnsupportedConstruct { .. })),
+            "`{source}`"
+        );
+    }
+}
+
+// A `$` inside a string literal is part of a file name, not a qubit, so the
+// prescan has to leave it alone or the register comes back nine qubits wider
+// and every declaration reads as mixed addressing.
+#[test]
+fn test_physical_scan_skips_string_literals() {
+    let qasm = "OPENQASM 3.0;\ninclude \"a$9.inc\";\nqubit[2] q;\nh q[0];";
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.num_qubits, 2);
+}
+
+// A `defcal` names a calibration target rather than a program qubit, and is
+// rejected by name rather than by the register it would otherwise size.
+#[test]
+fn test_defcal_is_rejected_by_name() {
+    let qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ndefcal x $0 { }";
+    let err = parse(qasm).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::UnsupportedConstruct { construct, .. } if construct == "defcal"),
+        "got {err}"
+    );
+}
+
+#[test]
+fn test_version_message_names_the_range() {
+    for version in ["1.0", "4.0"] {
+        let err = parse(&format!("OPENQASM {version};\nqubit[1] q;\nh q[0];")).unwrap_err();
+        assert!(
+            format!("{err}").contains("reads 2 and 3"),
+            "`{version}`: got {err}"
+        );
+    }
+}
+
+// A control and its target cannot be the same qubit: the controlled gate would
+// index the same amplitude twice.
+#[test]
+fn test_control_and_target_must_differ() {
+    for qasm in [
+        "OPENQASM 3.0;\nqubit[2] q;\nctrl @ x q[0], q[0];",
+        "OPENQASM 3.0;\nqubit[2] q;\nnegctrl @ h q[1], q[1];",
+        "OPENQASM 3.0;\nqubit[3] q;\nctrl @ swap q[1], q[0], q[1];",
+    ] {
+        let err = parse(qasm).unwrap_err();
+        assert!(
+            format!("{err}").contains("both a control and a target"),
+            "`{qasm}`: got {err}"
+        );
+    }
+}
+
+// A `defcal` body carries physical qubits too, and skipping only its first
+// line would size the register off the rest of it.
+#[test]
+fn test_physical_scan_skips_a_defcal_body() {
+    let qasm = "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ndefcal x $0 {\n  shift_phase($1, 0.5);\n}";
+    let err = parse(qasm).unwrap_err();
+    assert!(
+        matches!(&err, PrismError::UnsupportedConstruct { construct, .. } if construct == "defcal"),
+        "got {err}"
+    );
+}
+
+// One stray quote used to turn the rest of the program into a string, leaving
+// a later block comment in the source.
+#[test]
+fn test_a_string_ends_at_its_own_line() {
+    let qasm = "OPENQASM 3.0;\nqubit[1] q;\n// a \" stray quote\n/* dropped */\nx q[0];";
+    let c = parse(qasm).unwrap();
+    assert_eq!(c.instructions.len(), 1);
 }

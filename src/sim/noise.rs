@@ -349,7 +349,7 @@ impl ReadoutError {
 /// assert_eq!(result.shots.len(), 100);
 /// # Ok::<(), prism_q::PrismError>(())
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NoiseModel {
     /// Events fired after each instruction, indexed by instruction position;
     /// length must equal the circuit's instruction count.

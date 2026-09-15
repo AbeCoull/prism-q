@@ -966,6 +966,36 @@ fn bench_statevector_rdm(c: &mut Criterion) {
     group.finish();
 }
 
+// A Braket `state_vector` result reverses the basis index of every amplitude
+// on the way out, since qubit 0 is the most significant bit there and the
+// least significant one here. The circuit is a product state so the row is
+// dominated by the export and the reversal rather than by the evolution.
+fn bench_braket_state_vector(c: &mut Criterion) {
+    let mut group = c.benchmark_group("braket/state_vector");
+    configure_group(&mut group);
+
+    for &n in &[20usize, 22] {
+        let mut builder = prism_q::CircuitBuilder::new(n);
+        for qubit in 0..n {
+            builder.h(qubit);
+        }
+        let circuit = builder.build();
+        let specs = [prism_q::circuit::braket::ResultSpec::StateVector];
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .seed(SEED)
+                        .braket_results(&specs)
+                        .unwrap(),
+                );
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // ---- Stabilizer backend ----
 
 fn bench_stabilizer_scaling(c: &mut Criterion) {
@@ -3717,6 +3747,7 @@ criterion_group! {
     bench_statevector_entanglement,
     bench_statevector_scalability,
     bench_statevector_rdm,
+    bench_braket_state_vector,
     // Stabilizer
     bench_stabilizer_scaling,
     bench_stabilizer_random_pairs,

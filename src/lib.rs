@@ -66,6 +66,7 @@ pub mod sim;
 #[cfg(feature = "parallel")]
 pub mod threading;
 
+pub use backend::density_matrix::DensityMatrixBackend;
 #[cfg(feature = "distributed")]
 pub use backend::distributed_statevector::DistributedStatevectorBackend;
 pub use backend::factored::FactoredBackend;
@@ -123,10 +124,10 @@ pub use sim::unified_pauli::{
 };
 pub use sim::{
     BackendKind, CountsResult, Engine, EntropyResult, Exactness, ExpectationResult, FactoredBlock,
-    MarginalsResult, ObservableExpectation, OverlapResult, PauliObservable, Placement,
-    Probabilities, ReducedDensityMatrix, ResolvedBackend, RunMetadata, RunOutcome, Seeded,
-    ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values, run_observable_expectation,
-    run_on, run_on_state, run_qasm, simulate,
+    MarginalsResult, ObservableExpectation, ObservableVariance, OverlapResult, PauliObservable,
+    Placement, Probabilities, ReducedDensityMatrix, ResolvedBackend, RunMetadata, RunOutcome,
+    Seeded, ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values,
+    run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
 };
 #[cfg(feature = "parallel")]
 pub use threading::ThreadPool;

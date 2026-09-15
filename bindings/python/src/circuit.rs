@@ -125,6 +125,15 @@ impl PyCircuit {
         self.0.is_clifford_only()
     }
 
+    /// Qubit and classical bit of every measurement, as `(qubit, bit)` pairs in
+    /// record order.
+    ///
+    /// Measurements inside a guarded region are included: whether the region is
+    /// taken is a runtime fact, so the map covers what the circuit can write.
+    fn measurement_map(&self) -> Vec<(usize, usize)> {
+        self.0.measurement_map()
+    }
+
     /// Append a gate acting on `targets`.
     fn add_gate(&mut self, gate: &PyGate, targets: Vec<usize>) -> PyPrismResult<()> {
         check_targets(self.0.num_qubits, gate.inner(), &targets)?;

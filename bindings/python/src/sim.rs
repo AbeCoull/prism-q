@@ -8,12 +8,12 @@
 use std::collections::HashMap;
 
 use num_complex::Complex64;
-use numpy::PyArray1;
-use prism_q::backend::Backend;
+use numpy::{PyArray1, PyArray2};
 use prism_q::{
     BackendKind, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel, ParamLink,
-    Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities, RunMetadata,
-    RunOutcome, ShotsResult, StatevectorBackend, bitstring, simulate as core_simulate,
+    Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities,
+    ReducedDensityMatrix, RunMetadata, RunOutcome, ShotsResult, bitstring,
+    simulate as core_simulate,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -22,13 +22,12 @@ use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
 use crate::error::{PyPrismResult, invalid};
 use crate::noise::PyNoiseModel;
-use crate::numpy_util::{complex_array, f64_array};
+use crate::numpy_util::{bool_matrix, complex_array, complex_matrix, f64_array};
 
 pub(crate) const DEFAULT_SEED: u64 = 42;
 
 /// A configured simulation. Set options with `.seed()`, `.backend()`,
-/// `.noise()`, then run a terminal: `.run()`, `.shots()`, `.sample_counts()`,
-/// `.marginals()`, or `.state_vector()`.
+/// `.noise()`, then run one terminal, which consumes the request.
 #[pyclass(name = "Simulation", module = "prism_q")]
 pub struct PySimulation {
     circuit: Circuit,
@@ -208,24 +207,32 @@ impl PySimulation {
 
     /// Exact statevector amplitudes as a `complex128` array.
     ///
-    /// Always uses the statevector backend regardless of `.backend(...)`, and
-    /// does not support an attached noise model.
+    /// Indexed with qubit 0 in the least significant bit, so `x q[0]` puts the
+    /// amplitude at index 1. Honours `.backend(...)`; a backend holding no pure
+    /// state declines rather than answering from a statevector the caller did
+    /// not ask for. An attached noise model declines for the same reason.
     fn state_vector<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray1<Complex64>>> {
-        if self.noise.is_some() {
-            return Err(invalid(
-                "state_vector() does not support noise; a mixture has no statevector,                  so read run().probabilities on the density-matrix backend instead",
-            ));
-        }
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
         let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
         let amps: Vec<Complex64> = py.detach(|| {
-            let mut backend = StatevectorBackend::new(seed);
-            match start {
-                Some(amplitudes) => prism_q::run_on_state(&mut backend, circuit, amplitudes)?,
-                None => prism_q::run_on(&mut backend, circuit)?,
-            };
-            backend.export_statevector()
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).state_vector()
         })?;
         Ok(complex_array(py, amps))
     }
@@ -320,6 +327,172 @@ impl PySimulation {
         Ok(values)
     }
 
+    /// Joint probability distribution over `qubits`, `2 ** len(qubits)` entries
+    /// with `qubits[0]` in the lowest bit.
+    ///
+    /// Generalizes [`marginals`], which reports each qubit on its own and so
+    /// cannot show correlation: a Bell pair reads `(0.5, 0.5)` twice there and
+    /// `[0.5, 0, 0, 0.5]` here. Honours `.backend(...)` and an attached noise
+    /// model, whose answer is the marginal of the exact mixture.
+    #[pyo3(signature = (qubits))]
+    fn probabilities_of<'py>(
+        &self,
+        py: Python<'py>,
+        qubits: Vec<usize>,
+    ) -> PyPrismResult<Bound<'py, PyArray1<f64>>> {
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
+        let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
+        let values = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).probabilities_of(&qubits)
+        })?;
+        Ok(f64_array(py, values))
+    }
+
+    /// Reduced density matrix of `qubits`, with the route that produced it.
+    ///
+    /// `result.matrix[t][u]` is `<t|rho|u>` with bit `i` of `t` the state of
+    /// `qubits[i]`, so `qubits[0]` is the lowest bit as it is in a basis index.
+    /// The circuit must be unitary: the answer is read off one state, and a
+    /// measurement or reset leaves one seeded branch of several. With a noise
+    /// model attached the answer is the marginal of the exact mixture.
+    #[pyo3(signature = (qubits))]
+    fn reduced_density_matrix(
+        &self,
+        py: Python<'_>,
+        qubits: Vec<usize>,
+    ) -> PyPrismResult<PyReducedDensityMatrix> {
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
+        let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
+        let reduced: ReducedDensityMatrix = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).reduced_density_matrix(&qubits)
+        })?;
+        Ok(PyReducedDensityMatrix {
+            purity: reduced.purity(),
+            qubits: reduced.qubits,
+            data: reduced.data,
+            metadata: PyRunMetadata::new(reduced.metadata),
+        })
+    }
+
+    /// Von Neumann entropy of `subsystem` in nats, with the Schmidt spectrum
+    /// behind it.
+    ///
+    /// A Bell pair cut in half reads `ln 2`. The cut must leave both sides
+    /// non-empty, so the whole register is rejected. `schmidt_values` is `None`
+    /// where the backend holds the entropy without the spectrum, as a
+    /// stabilizer cut past the export cap does.
+    #[pyo3(signature = (subsystem))]
+    fn entanglement_entropy(
+        &self,
+        py: Python<'_>,
+        subsystem: Vec<usize>,
+    ) -> PyPrismResult<PyEntropyResult> {
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
+        let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
+        let result = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).entanglement_entropy(&subsystem)
+        })?;
+        Ok(PyEntropyResult {
+            subsystem: result.subsystem,
+            entropy: result.entropy,
+            schmidt_values: result.schmidt_values,
+            metadata: PyRunMetadata::new(result.metadata),
+        })
+    }
+
+    /// `Var(H) = <H^2> - <H>^2` for a weighted Pauli observable.
+    ///
+    /// This is the spread of the operator itself, not
+    /// `ObservableExpectation.variance`, which sums per-group variances and so
+    /// drops the covariance between measurement groups. `hamiltonian` takes the
+    /// [`observable_expectation`] term shape.
+    #[pyo3(signature = (hamiltonian))]
+    fn observable_variance(
+        &self,
+        py: Python<'_>,
+        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+    ) -> PyPrismResult<PyObservableVariance> {
+        let observable = build_observable(hamiltonian)?;
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
+        let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
+        let result = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).observable_variance(&observable)
+        })?;
+        Ok(PyObservableVariance {
+            variance: result.variance,
+            mean: result.mean,
+            metadata: PyRunMetadata::new(result.metadata),
+        })
+    }
+
     /// Compute `⟨H⟩` and its grouped-measurement variance for a weighted Pauli
     /// observable on the circuit's output state.
     ///
@@ -336,11 +509,7 @@ impl PySimulation {
         py: Python<'_>,
         hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
     ) -> PyPrismResult<PyObservableExpectation> {
-        let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
-        for (coefficient, factors) in hamiltonian {
-            terms.push((coefficient, parse_pauli_string(factors)?));
-        }
-        let observable = PauliObservable::from_terms(terms)?;
+        let observable = build_observable(hamiltonian)?;
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let require_exact = self.require_exact;
@@ -412,6 +581,18 @@ impl PySimulation {
 
 fn parse_observables(observables: Vec<Vec<(usize, String)>>) -> PyPrismResult<Vec<Vec<PauliTerm>>> {
     observables.into_iter().map(parse_pauli_string).collect()
+}
+
+/// Build a weighted Pauli observable from the `(coefficient, factors)` term
+/// shape the Python terminals take.
+fn build_observable(
+    hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+) -> PyPrismResult<PauliObservable> {
+    let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
+    for (coefficient, factors) in hamiltonian {
+        terms.push((coefficient, parse_pauli_string(factors)?));
+    }
+    Ok(PauliObservable::from_terms(terms)?)
 }
 
 pub(crate) fn parse_pauli_string(factors: Vec<(usize, String)>) -> PyPrismResult<Vec<PauliTerm>> {
@@ -550,6 +731,134 @@ impl PyRunMetadata {
             "RunMetadata(backend={}{engine}, {exact}, placement={})",
             self.backend(),
             self.placement()
+        )
+    }
+}
+
+/// Operator variance of a weighted Pauli observable and the mean beside it.
+#[pyclass(name = "ObservableVariance", module = "prism_q")]
+pub struct PyObservableVariance {
+    variance: f64,
+    mean: f64,
+    metadata: PyRunMetadata,
+}
+
+#[pymethods]
+impl PyObservableVariance {
+    /// `<H^2> - <H>^2` on the output state.
+    #[getter]
+    fn variance(&self) -> f64 {
+        self.variance
+    }
+
+    /// `<H>` on the same state, evaluated on the way to the variance.
+    #[getter]
+    fn mean(&self) -> f64 {
+        self.mean
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ObservableVariance(variance={:.6}, mean={:.6})",
+            self.variance, self.mean
+        )
+    }
+}
+
+/// Reduced density matrix of a qubit subset and the route that produced it.
+#[pyclass(name = "ReducedDensityMatrix", module = "prism_q")]
+pub struct PyReducedDensityMatrix {
+    qubits: Vec<usize>,
+    data: Vec<Complex64>,
+    purity: f64,
+    metadata: PyRunMetadata,
+}
+
+#[pymethods]
+impl PyReducedDensityMatrix {
+    /// The subsystem as it was requested, which fixes the index order of
+    /// `matrix`.
+    #[getter]
+    fn qubits(&self) -> Vec<usize> {
+        self.qubits.clone()
+    }
+
+    /// The matrix as a `complex128` array of side `2 ** len(qubits)`, row
+    /// major, with `qubits[0]` the lowest bit of both indices.
+    #[getter]
+    fn matrix<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<Complex64>>> {
+        let side = 1usize << self.qubits.len();
+        complex_matrix(py, side, side, self.data.clone())
+    }
+
+    /// `Tr(rho^2)`: 1 for a pure marginal, `2 ** -len(qubits)` for the
+    /// maximally mixed one.
+    #[getter]
+    fn purity(&self) -> f64 {
+        self.purity
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ReducedDensityMatrix(qubits={:?}, purity={:.6})",
+            self.qubits, self.purity
+        )
+    }
+}
+
+/// Entanglement entropy of a subsystem and the Schmidt spectrum behind it.
+#[pyclass(name = "EntropyResult", module = "prism_q")]
+pub struct PyEntropyResult {
+    subsystem: Vec<usize>,
+    entropy: f64,
+    schmidt_values: Option<Vec<f64>>,
+    metadata: PyRunMetadata,
+}
+
+#[pymethods]
+impl PyEntropyResult {
+    /// The subsystem as it was requested, the side of the cut the entropy is
+    /// read on.
+    #[getter]
+    fn subsystem(&self) -> Vec<usize> {
+        self.subsystem.clone()
+    }
+
+    /// Von Neumann entropy in nats: a Bell pair cut in half reads `ln 2`.
+    #[getter]
+    fn entropy(&self) -> f64 {
+        self.entropy
+    }
+
+    /// Schmidt values across the cut as a `float64` array, descending, with
+    /// squares summing to 1. `None` where the backend holds the entropy
+    /// without the spectrum that stands behind it.
+    #[getter]
+    fn schmidt_values<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
+        self.schmidt_values
+            .as_ref()
+            .map(|values| f64_array(py, values.clone()))
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "EntropyResult(subsystem={:?}, entropy={:.6})",
+            self.subsystem, self.entropy
         )
     }
 }
@@ -717,9 +1026,18 @@ pub struct PyShotsResult {
 
 #[pymethods]
 impl PyShotsResult {
+    /// Shot records as a `(num_shots, num_classical_bits)` bool array.
+    ///
+    /// Column `i` is classical bit `i`, matching the `counts` key order.
     #[getter]
-    fn shots(&self) -> Vec<Vec<bool>> {
-        self.inner.shots.clone()
+    fn shots<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
+        let rows = self.inner.num_shots();
+        let cols = self.inner.num_classical_bits();
+        let mut flat = Vec::with_capacity(rows * cols);
+        for shot in &self.inner.shots {
+            flat.extend_from_slice(shot);
+        }
+        bool_matrix(py, rows, cols, flat)
     }
 
     #[getter]

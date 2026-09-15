@@ -85,6 +85,46 @@ def test_statevector_is_complex128():
     assert math.isclose(abs(sv[7]) ** 2, 0.5, abs_tol=1e-9)
 
 
+def test_statevector_honours_the_selected_backend():
+    # A backend holding no pure state declines rather than being replaced by
+    # one that does.
+    ghz = circuits.ghz(2)
+    sv = simulate(ghz).seed(1).backend(prism_q.BackendKind.stabilizer()).state_vector()
+    assert math.isclose(abs(sv[0]) ** 2, 0.5, abs_tol=1e-9)
+    with pytest.raises(prism_q.PrismError) as backend:
+        simulate(ghz).seed(1).backend(prism_q.BackendKind.density_matrix()).state_vector()
+    assert backend.value.kind == "backend_unsupported"
+
+    # A noise model declines for the same reason from the other direction: a
+    # mixture has no one pure state to export.
+    noise = prism_q.NoiseModel.uniform_depolarizing(ghz, 0.1)
+    with pytest.raises(prism_q.PrismError) as mixed:
+        simulate(ghz).seed(1).noise(noise).state_vector()
+    assert mixed.value.kind
+
+
+def test_shots_is_a_bool_matrix():
+    bell = parse_qasm(BELL_QASM)
+    result = simulate(bell).seed(1).shots(16)
+    shots = result.shots
+    assert shots.dtype == np.bool_
+    assert shots.shape == (16, 2)
+    # Both classical bits agree in every shot of a Bell pair.
+    assert np.array_equal(shots[:, 0], shots[:, 1])
+
+
+def test_errors_carry_a_kind():
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        parse_qasm("OPENQASM 3.0;\nqubit[1] q;\nnosuchgate q[0];")
+    assert excinfo.value.kind == "unsupported_construct"
+
+    with pytest.raises(prism_q.PrismError) as excinfo:
+        simulate(circuits.ghz(2)).seed(1).backend(
+            prism_q.BackendKind.density_matrix()
+        ).state_vector()
+    assert excinfo.value.kind == "backend_unsupported"
+
+
 def test_marginals():
     bell = CircuitBuilder(2).h(0).cx(0, 1).build()
     marginals = simulate(bell).seed(1).marginals()
@@ -226,3 +266,59 @@ def test_observable_expectation_clifford_route_has_no_variance():
     assert result.mean == pytest.approx(1.0, abs=1e-12)
     assert result.variance is None
     assert result.group_variances is None
+
+
+def test_subset_probability_shows_what_marginals_cannot():
+    circuit = prism_q.parse_qasm(
+        "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncnot q[0], q[1];"
+    )
+    sim = prism_q.simulate(circuit).seed(42)
+    assert np.allclose([p for p, _ in sim.marginals()], [0.5, 0.5])
+    joint = prism_q.simulate(circuit).seed(42).probabilities_of([0, 1])
+    assert np.allclose(joint, [0.5, 0.0, 0.0, 0.5])
+
+    # A Bell pair is symmetric under a transposition, so the target order shows
+    # only on a state that is not.
+    asymmetric = prism_q.parse_qasm("OPENQASM 3.0;\nqubit[2] q;\nx q[0];")
+    sim = prism_q.simulate(asymmetric).seed(42)
+    assert np.allclose(sim.probabilities_of([0, 1]), [0.0, 1.0, 0.0, 0.0])
+    swapped = prism_q.simulate(asymmetric).seed(42).probabilities_of([1, 0])
+    # qubits[0] is the lowest bit, so naming the pair the other way transposes.
+    assert np.allclose(swapped, [0.0, 0.0, 1.0, 0.0])
+
+
+def test_reduced_density_matrix_and_entropy_of_a_bell_pair():
+    circuit = prism_q.parse_qasm(
+        "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncnot q[0], q[1];"
+    )
+    reduced = prism_q.simulate(circuit).seed(42).reduced_density_matrix([0])
+    assert reduced.qubits == [0]
+    assert reduced.matrix.shape == (2, 2)
+    assert np.allclose(reduced.matrix, np.eye(2) * 0.5)
+    assert np.isclose(reduced.purity, 0.5)
+    assert reduced.metadata.is_exact
+
+    result = prism_q.simulate(circuit).seed(42).entanglement_entropy([0])
+    assert np.isclose(result.entropy, math.log(2))
+    assert np.allclose(sorted(result.schmidt_values), [2**-0.5, 2**-0.5])
+
+
+def test_observable_variance_is_the_operator_spread():
+    # ry(pi/4)|0> is the +1 eigenstate of (X + Z)/sqrt(2), so the operator has
+    # no spread while measuring X and Z in separate groups reads 1/2 each.
+    circuit = prism_q.parse_qasm(
+        f"OPENQASM 3.0;\nqubit[1] q;\nry({math.pi / 4}) q[0];"
+    )
+    terms = [(1.0, [(0, "X")]), (1.0, [(0, "Z")])]
+    operator = prism_q.simulate(circuit).seed(42).observable_variance(terms)
+    grouped = prism_q.simulate(circuit).seed(42).observable_expectation(terms)
+    assert np.isclose(operator.variance, 0.0, atol=1e-9)
+    assert np.isclose(grouped.variance, 1.0)
+    assert np.isclose(operator.mean, grouped.mean)
+
+
+def test_measurement_map_lists_every_written_bit():
+    circuit = prism_q.parse_qasm(
+        "OPENQASM 3.0;\nqubit[2] q;\nbit[2] c;\nh q[0];\nc = measure q;"
+    )
+    assert circuit.measurement_map() == [(0, 0), (1, 1)]

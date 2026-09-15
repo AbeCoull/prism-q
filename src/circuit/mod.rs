@@ -17,7 +17,6 @@ pub use draw::TextOptions;
 mod svg;
 pub use svg::SvgOptions;
 pub mod braket;
-mod expr;
 pub mod fusion;
 mod fusion_phase;
 mod fusion_rzz;
@@ -25,6 +24,7 @@ pub mod openqasm;
 pub mod parameter;
 pub(crate) mod plan;
 pub mod prepared;
+pub(crate) mod qasm;
 pub mod qasm_export;
 pub(crate) mod synthesis;
 

@@ -1,4 +1,15 @@
 use super::*;
+use crate::circuit::qasm::{expr as qasm_expr, lexer, stream::Stream};
+
+fn eval_expr(source: &str, line: usize, vars: Option<&HashMap<&str, f64>>) -> Result<f64> {
+    let tokens = lexer::tokenize(source)?;
+    let mut stream = Stream::new(&tokens);
+    let expr = qasm_expr::parse(&mut stream)?;
+    if !stream.at_end() {
+        return Err(stream.expected("the end of the expression"));
+    }
+    qasm_expr::eval(&expr, line, vars)
+}
 
 fn assert_complex_close(actual: num_complex::Complex64, expected: num_complex::Complex64) {
     assert!(
@@ -1681,8 +1692,8 @@ fn test_expr_nested_functions() {
 #[test]
 fn test_expr_variables() {
     let mut vars = HashMap::new();
-    vars.insert("theta".to_string(), std::f64::consts::FRAC_PI_4);
-    vars.insert("phi".to_string(), std::f64::consts::FRAC_PI_2);
+    vars.insert("theta", std::f64::consts::FRAC_PI_4);
+    vars.insert("phi", std::f64::consts::FRAC_PI_2);
     let v = Some(&vars);
     assert!((eval_expr("theta", 0, v).unwrap() - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
     assert!(
@@ -1897,31 +1908,6 @@ fn test_qasm_gate_def_expression_with_arithmetic() {
             _ => panic!("expected Rz"),
         }
     }
-}
-
-#[test]
-fn test_replace_word_boundary() {
-    assert_eq!(replace_word("theta a", "a", "X"), "theta X");
-    assert_eq!(replace_word("a theta a", "a", "X"), "X theta X");
-    assert_eq!(replace_word("abc a ab", "a", "X"), "abc X ab");
-    assert_eq!(
-        replace_word("rz(theta) a", "a", "__q__[0]"),
-        "rz(theta) __q__[0]"
-    );
-}
-
-#[test]
-fn test_split_top_level_commas_nested() {
-    let parts = split_top_level_commas("sin(pi/4), cos(0)");
-    assert_eq!(parts.len(), 2);
-    assert_eq!(parts[0].trim(), "sin(pi/4)");
-    assert_eq!(parts[1].trim(), "cos(0)");
-}
-
-#[test]
-fn test_split_top_level_commas_simple() {
-    let parts = split_top_level_commas("pi/2, pi/4, 0.1");
-    assert_eq!(parts.len(), 3);
 }
 
 #[test]
@@ -2941,4 +2927,145 @@ fn test_a_string_ends_at_its_own_line() {
     let qasm = "OPENQASM 3.0;\nqubit[1] q;\n// a \" stray quote\n/* dropped */\nx q[0];";
     let c = parse(qasm).unwrap();
     assert_eq!(c.instructions.len(), 1);
+}
+
+// The front end reads a token stream, so a statement ends at its `;` and a
+// block at its `}` wherever the newlines fall. Every program here is one the
+// line-oriented reader could not take.
+#[test]
+fn a_statement_ends_at_its_semicolon_not_its_line() {
+    let split = parse("OPENQASM 3.0;\nqubit[2] q;\nh\n  q[0]\n  ;\ncx\n  q[0],\n  q[1];\n")
+        .expect("split statements");
+    let packed =
+        parse("OPENQASM 3.0; qubit[2] q; h q[0]; cx q[0], q[1];").expect("packed statements");
+    assert_eq!(
+        format!("{:?}", split.instructions),
+        format!("{:?}", packed.instructions)
+    );
+    assert_eq!(split.num_qubits, 2);
+}
+
+#[test]
+fn a_block_ends_at_its_brace_not_its_line() {
+    let wrapped = parse(
+        "OPENQASM 3.0;\nqubit[2] q;\ngate flip(t)\n  a,\n  b\n{\n  rx(t) a;\n  cx a, b;\n}\nflip(pi) q[0], q[1];\n",
+    )
+    .expect("wrapped gate definition");
+    let inline = parse(
+        "OPENQASM 3.0; qubit[2] q; gate flip(t) a, b { rx(t) a; cx a, b; } flip(pi) q[0], q[1];",
+    )
+    .expect("inline gate definition");
+    assert_eq!(
+        format!("{:?}", wrapped.instructions),
+        format!("{:?}", inline.instructions)
+    );
+}
+
+#[test]
+fn a_guarded_region_reads_across_lines_either_way() {
+    let wrapped = parse(
+        "OPENQASM 3.0;\nqubit[2] q;\nbit[2] c;\nmeasure q[0] -> c[0];\nif (c[0])\n{\n  x q[1];\n}\nelse\n{\n  y q[1];\n}\n",
+    )
+    .expect("wrapped region");
+    let inline = parse(
+        "OPENQASM 3.0; qubit[2] q; bit[2] c; measure q[0] -> c[0]; if (c[0]) { x q[1]; } else { y q[1]; }",
+    )
+    .expect("inline region");
+    assert_eq!(
+        format!("{:?}", wrapped.instructions),
+        format!("{:?}", inline.instructions)
+    );
+}
+
+// A gate body is parsed once and run against the call's bindings, so a name
+// the body shares with an enclosing register is the parameter, not the
+// register.
+#[test]
+fn a_gate_parameter_shadows_a_register_of_the_same_name() {
+    let circuit =
+        parse("OPENQASM 3.0; qubit[4] a; gate flip a { x a; } flip a[2];").expect("shadowed name");
+    assert_eq!(circuit.instructions.len(), 1);
+    match &circuit.instructions[0] {
+        Instruction::Gate { targets, .. } => assert_eq!(targets.as_slice(), &[2]),
+        other => panic!("{other:?}"),
+    }
+}
+
+// A diagnostic names the reference as it was written. The tree keeps the
+// subscript rather than the source span, so the rendering is what proves it.
+#[test]
+fn a_subscript_reads_back_into_its_diagnostic() {
+    for (source, wanted) in [
+        ("qubit[4] q;\nh q[-1];\n", "negative index in `q[-1]`"),
+        (
+            "qubit[4] q;\nh q[0:0:3];\n",
+            "range step in `q[0:0:3]` must be non-zero",
+        ),
+        ("qubit[4] q;\nh q[3:1];\n", "`q[3:1]` names no index"),
+        (
+            "const int n = 9;\nqubit[4] q;\nh q[n];\n",
+            "invalid qubit index 9",
+        ),
+    ] {
+        let message = format!("{}", parse(source).expect_err(source));
+        assert!(message.contains(wanted), "`{source}` gave: {message}");
+    }
+}
+
+#[test]
+fn a_bare_register_condition_names_the_forms_it_accepts() {
+    let message = format!(
+        "{}",
+        parse("bit[2] c;\nqubit[1] q;\nif (c) x q[0];\n").expect_err("bare register")
+    );
+    for wanted in ["`c==value`", "`c[i]`", "`!c[i]`", "`c[i]==0/1`"] {
+        assert!(message.contains(wanted), "{message}");
+    }
+}
+
+#[test]
+fn a_compound_assignment_by_zero_names_the_operation() {
+    let divide = format!("{}", parse("int n = 4;\nn /= 0;\n").expect_err("divide"));
+    assert!(divide.contains("division by zero"), "{divide}");
+    let modulo = format!("{}", parse("int n = 4;\nn %= 0;\n").expect_err("modulo"));
+    assert!(modulo.contains("modulo by zero"), "{modulo}");
+}
+
+// Three shapes the line reader accepted or mis-resolved because a newline ended
+// a statement and a name was only ever looked up by text.
+#[test]
+fn shapes_the_line_reader_let_through_are_rejected() {
+    let missing = parse("qubit[1] q;\nh q[0]\n").expect_err("missing semicolon");
+    assert!(format!("{missing}").contains("`;`"), "{missing}");
+
+    let trailing = parse("qubit[2] q;\ncx q[0], q[1],;\n").expect_err("trailing comma");
+    assert!(matches!(trailing, PrismError::Parse { .. }), "{trailing:?}");
+
+    // A second `qubit[1] q;` used to allocate a second register and rebind the
+    // name to it, leaving the first one unreachable.
+    let redeclared = parse("qubit[1] q;\nqubit[1] q;\n").expect_err("redeclared");
+    assert!(format!("{redeclared}").contains("already"), "{redeclared}");
+}
+
+// Three the line reader rejected or mis-resolved, which the tree resolves by
+// scope rather than by text.
+#[test]
+fn shapes_the_line_reader_rejected_now_parse() {
+    let sized = parse("const int n = 3;\nqubit[n] q;\nh q[2];\n").expect("const register size");
+    assert_eq!(sized.num_qubits, 3);
+
+    let aliased =
+        parse("qubit[1] q;\nbit[4] c;\nlet a = c[1];\nswitch (a) { case 1 { x q[0]; } }\n")
+            .expect("switch on a one-bit alias");
+    assert_eq!(aliased.instructions.len(), 1);
+
+    let inverted = parse("def sub(qubit a) { rx(0.5) a; }\nqubit[1] q;\ninv @ sub(q[0]);\n")
+        .expect("inv on a def call");
+    match &inverted.instructions[0] {
+        Instruction::Gate {
+            gate: Gate::Rx(theta),
+            ..
+        } => assert!((theta + 0.5).abs() < 1e-12),
+        other => panic!("{other:?}"),
+    }
 }

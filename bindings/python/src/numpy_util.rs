@@ -17,6 +17,22 @@ pub fn complex_array(py: Python<'_>, values: Vec<Complex64>) -> Bound<'_, PyArra
     values.into_pyarray(py)
 }
 
+/// Build a row-major `(rows, cols)` `complex128` NumPy matrix from a flat
+/// buffer.
+pub fn complex_matrix(
+    py: Python<'_>,
+    rows: usize,
+    cols: usize,
+    flat: Vec<Complex64>,
+) -> PyPrismResult<Bound<'_, PyArray2<Complex64>>> {
+    let array = Array2::from_shape_vec((rows, cols), flat).map_err(|e| {
+        invalid(format!(
+            "failed to shape ({rows}, {cols}) complex matrix: {e}"
+        ))
+    })?;
+    Ok(array.into_pyarray(py))
+}
+
 /// Build a row-major `(rows, cols)` boolean NumPy matrix from a flat buffer.
 pub fn bool_matrix(
     py: Python<'_>,

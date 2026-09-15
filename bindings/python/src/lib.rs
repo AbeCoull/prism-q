@@ -7,6 +7,7 @@
 use pyo3::prelude::*;
 
 mod backend;
+mod braket;
 mod circuit;
 mod distributed;
 mod error;
@@ -19,6 +20,7 @@ mod qec;
 mod sim;
 
 use backend::PyBackendKind;
+use braket::PyBraketProgram;
 use circuit::{PyCircuit, PyCircuitBuilder};
 use error::PrismError;
 use gate::PyGate;
@@ -29,8 +31,8 @@ use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
 use sim::{
-    PyCountsResult, PyObservableExpectation, PyRunMetadata, PyRunOutcome, PyShotsResult,
-    PySimulation,
+    PyCountsResult, PyEntropyResult, PyObservableExpectation, PyObservableVariance,
+    PyReducedDensityMatrix, PyRunMetadata, PyRunOutcome, PyShotsResult, PySimulation,
 };
 
 #[pymodule]
@@ -54,6 +56,9 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCountsResult>()?;
     m.add_class::<PyRunMetadata>()?;
     m.add_class::<PyObservableExpectation>()?;
+    m.add_class::<PyObservableVariance>()?;
+    m.add_class::<PyEntropyResult>()?;
+    m.add_class::<PyReducedDensityMatrix>()?;
     m.add_class::<PyQecBasis>()?;
     m.add_class::<PyRecordRef>()?;
     m.add_class::<PyQecNoise>()?;
@@ -61,8 +66,10 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyQecResult>()?;
     m.add_class::<PyDetectorErrorModel>()?;
     m.add_class::<PyDecoder>()?;
+    m.add_class::<PyBraketProgram>()?;
 
     m.add_function(wrap_pyfunction!(circuit::parse_qasm, m)?)?;
+    m.add_function(wrap_pyfunction!(braket::parse_braket, m)?)?;
     m.add_function(wrap_pyfunction!(sim::simulate, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;
 

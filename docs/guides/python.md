@@ -123,7 +123,11 @@ outcome = sim.run()
 | `sample_counts(n)` | `CountsResult`: frequency histogram | yes | without `.noise()` |
 | `marginals()` | `list[tuple[float, float]]`, per-qubit `(p0, p1)` | density matrix only | yes |
 | `state_vector()` | `complex128` amplitudes | no | yes |
+| `probabilities_of(qubits)` | `float64` joint distribution over a subset, `qubits[0]` the lowest bit | density matrix only | yes |
+| `reduced_density_matrix(qubits)` | `ReducedDensityMatrix`: `.matrix` over a subset with `qubits[0]` the lowest bit, `.purity`, `.metadata` | density matrix only | yes |
+| `entanglement_entropy(subsystem)` | `EntropyResult`: von Neumann and Renyi-2 entropy of the cut | density matrix only | yes |
 | `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only | yes |
+| `observable_variance(obs)` | `ObservableVariance`: `<H^2> - <H>^2` beside the mean | density matrix only | yes |
 | `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes | no |
 | `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no | no |
 
@@ -137,12 +141,38 @@ Circuits with mid-circuit measurement or classical conditioning are rejected on
 that route, since the mixture holds every measurement branch at once.
 
 Terminals that cannot honor a model raise `PrismError` naming the reason, rather
-than silently ignoring it. `state_vector()` always uses the statevector backend
-and `density_matrix_expectation_values()` always uses the density-matrix
-backend, both regardless of `.backend(...)`.
+than silently ignoring it. `state_vector()` honors `.backend(...)` and declines
+on a backend holding no pure state, rather than substituting one that does;
+`density_matrix_expectation_values()` always uses the density-matrix backend.
 
 `ShotsResult` and `CountsResult` both expose `counts()`, returning a dict keyed
-by bitstring.
+by bitstring. `ShotsResult.shots` is a `bool` array of shape `(shots, bits)`
+rather than a list of lists, so a caller indexing it as a nested list needs
+`.tolist()`.
+
+### Amazon Braket programs
+
+`parse_braket(source)` reads a program under Braket's dialect and returns a
+`BraketProgram`: its `circuit`, `parameters`, `noise` model, and the `results`
+its `#pragma braket result` lines requested. `evaluate()` runs it and returns
+one dict per request carrying `type` and `value`, in Braket's own basis order
+where qubit 0 is the most significant bit:
+
+```python
+from prism_q import parse_braket
+
+program = parse_braket(source)
+exact = program.evaluate()
+sampled = program.evaluate(shots=1000)
+```
+
+At the default `shots=0` every value is exact and `sample` is declined. Above
+zero the values come from a measurement record, and `state_vector`, `amplitude`
+and `density_matrix` are declined in turn. See the
+[OpenQASM guide](openqasm.md) for the pragma surface.
+
+`PrismError` carries a `kind` string naming the variant it came from, so a
+caller can branch on the failure without matching its message.
 
 ### Distributions too wide to write down
 

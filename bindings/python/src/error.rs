@@ -24,9 +24,37 @@ impl From<prism_q::PrismError> for PyPrismError {
     }
 }
 
+/// Stable discriminant for a [`prism_q::PrismError`], surfaced as the raised
+/// exception's `kind` attribute.
+///
+/// `Display` flattens every variant into one string, so without this a caller
+/// that has to tell a parse failure from an unsupported backend is left
+/// matching on message text.
+fn error_kind(err: &prism_q::PrismError) -> &'static str {
+    use prism_q::PrismError as E;
+    match err {
+        E::Parse { .. } => "parse",
+        E::UnsupportedConstruct { .. } => "unsupported_construct",
+        E::InvalidQubit { .. } => "invalid_qubit",
+        E::InvalidClassicalBit { .. } => "invalid_classical_bit",
+        E::GateArity { .. } => "gate_arity",
+        E::BackendUnsupported { .. } => "backend_unsupported",
+        E::InvalidParameter { .. } => "invalid_parameter",
+        E::UndefinedRegister { .. } => "undefined_register",
+        E::ExportUnsupported { .. } => "export_unsupported",
+        E::IncompatibleBackend { .. } => "incompatible_backend",
+    }
+}
+
 impl From<PyPrismError> for PyErr {
     fn from(err: PyPrismError) -> PyErr {
-        PrismError::new_err(err.0.to_string())
+        let kind = error_kind(&err.0);
+        let py_err = PrismError::new_err(err.0.to_string());
+        Python::attach(|py| {
+            // Failing to annotate must not displace the error being reported.
+            let _ = py_err.value(py).setattr("kind", kind);
+        });
+        py_err
     }
 }
 

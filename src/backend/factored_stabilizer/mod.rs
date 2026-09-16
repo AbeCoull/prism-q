@@ -38,7 +38,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
-use crate::backend::stabilizer::kernels::{rowmul_words, rowops};
+use crate::backend::stabilizer::kernels::{self, rowmul_words, rowops};
 use crate::backend::stabilizer::{diagnostics, project_generators};
 use crate::backend::{
     Backend, dense_probability_len, dense_statevector_len, reduced_density, reserve_dense_output,
@@ -204,6 +204,23 @@ impl SubTableau {
         let nw = self.num_words;
         let (xz, phase) = self.gate_rows();
         rowops::swap_all(xz, phase, nw, par, a, b);
+    }
+
+    /// Batched gate application over this cluster's rows, reusing the dense
+    /// backend's word grouping. Worth the buffering only once a row spans
+    /// enough words that one pass per gate is the cost; below that the cluster
+    /// sits in cache and the per-gate path is already free.
+    fn apply_gate_run(&mut self, instructions: &[Instruction]) -> Result<()> {
+        if self.num_words < kernels::MIN_WORDS_FOR_BATCH {
+            for instruction in instructions {
+                let Instruction::Gate { gate, targets } = instruction else {
+                    unreachable!("a gate run holds gates only")
+                };
+                self.dispatch_gate(gate, targets)?;
+            }
+            return Ok(());
+        }
+        kernels::apply_gates_word_batch(self, instructions)
     }
 
     fn dispatch_gate(&mut self, gate: &Gate, local_targets: &[usize]) -> Result<()> {
@@ -475,6 +492,27 @@ pub struct FactoredStabilizerBackend {
     cluster_cap: usize,
 }
 
+impl kernels::BatchTarget for SubTableau {
+    fn num_words(&self) -> usize {
+        self.num_words
+    }
+
+    fn batch_rows(&mut self) -> kernels::GateRows<'_> {
+        self.lazy_destab = true;
+        kernels::GateRows {
+            n: self.n,
+            num_words: self.num_words,
+            row_start: self.n,
+            xz: &mut self.xz,
+            phase: &mut self.phase,
+        }
+    }
+
+    fn apply_one(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
+        self.dispatch_gate(gate, targets)
+    }
+}
+
 impl FactoredStabilizerBackend {
     pub fn new(seed: u64) -> Self {
         Self {
@@ -743,6 +781,47 @@ impl Backend for FactoredStabilizerBackend {
             self.subs.push(Some(SubTableau::new_single(q)));
         }
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+        Ok(())
+    }
+
+    /// Batch each run of gates that stays inside one cluster.
+    ///
+    /// A run ends at the first instruction that is not a gate or whose targets
+    /// reach outside the cluster the run is on, so a merge still happens where
+    /// the per-instruction path would have done it. Targets are rewritten to
+    /// cluster-local indices once per run into a reused buffer, which also
+    /// retires the per-gate `SmallVec` the default loop built.
+    fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
+        let mut run: Vec<Instruction> = Vec::new();
+        let mut at = 0;
+        while at < instructions.len() {
+            let Instruction::Gate { targets, .. } = &instructions[at] else {
+                self.apply(&instructions[at])?;
+                at += 1;
+                continue;
+            };
+            let cluster = self.ensure_same_sub(targets)?;
+
+            run.clear();
+            while at < instructions.len() {
+                let Instruction::Gate { gate, targets } = &instructions[at] else {
+                    break;
+                };
+                if targets.iter().any(|&q| self.qubit_to_sub[q] != cluster) {
+                    break;
+                }
+                let sub = self.subs[cluster].as_ref().unwrap();
+                let local: SmallVec<[usize; 4]> =
+                    targets.iter().map(|&t| sub.local_qubit(t)).collect();
+                run.push(Instruction::Gate {
+                    gate: gate.clone(),
+                    targets: local,
+                });
+                at += 1;
+            }
+
+            self.subs[cluster].as_mut().unwrap().apply_gate_run(&run)?;
+        }
         Ok(())
     }
 

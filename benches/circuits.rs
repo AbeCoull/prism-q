@@ -944,6 +944,51 @@ fn bench_statevector_scalability(c: &mut Criterion) {
     group.finish();
 }
 
+// The marginals terminal on the default backend, which had no row. Two
+// fixtures because the cost splits by how much of it is the evolution: the
+// ansatz spends most of the row applying gates, the GHZ chain almost none, so
+// the readout shows up at a different fraction of each.
+fn bench_statevector_marginals(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/marginals");
+    configure_group(&mut group);
+
+    for &n in &[18usize, 20, 22] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 3, SEED);
+        group.bench_with_input(BenchmarkId::new("hea_l3", n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Statevector)
+                        .seed(42)
+                        .marginals()
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    for &n in &[18usize, 20, 22] {
+        let mut circuit = Circuit::new(n, 0);
+        circuit.add_gate(Gate::H, &[0]);
+        for i in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[i, i + 1]);
+        }
+        group.bench_with_input(BenchmarkId::new("ghz", n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Statevector)
+                        .seed(42)
+                        .marginals()
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // Diagnostic row: the state is built once, so each row prices one partial
 // trace over the complement of `k` qubits spread across the register, the
 // threaded reduce included.
@@ -1106,6 +1151,37 @@ fn bench_factored_stabilizer_scaling(c: &mut Criterion) {
                 run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
             });
         });
+    }
+    group.finish();
+}
+
+// `random_clifford_circuit` places each brick CX with probability one half, so
+// after ten layers roughly one bond in thirty stays open and the clusters
+// settle near thirty qubits: below the word-batching floor, and small enough
+// that a full sweep is cache-resident. This fixture places every CX, so the
+// register collapses to one cluster and the rows price the regime where this
+// backend degenerates to a single wide tableau.
+//
+// Two depths because the cost splits in two there. The cluster forms in the
+// second layer whatever the depth, so `d10` is dominated by the merge chain
+// that builds it and `d40` by the gate stream that follows.
+fn bench_factored_stabilizer_single_cluster(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored_stabilizer/single_cluster");
+    configure_group(&mut group);
+
+    for &depth in &[10usize, 40] {
+        for &n in &[256usize, 500, 1000] {
+            let circuit = circuits::clifford_heavy_circuit(n, depth, SEED);
+            group.bench_with_input(
+                BenchmarkId::new(format!("d{depth}"), n),
+                &circuit,
+                |b, circ| {
+                    b.iter(|| {
+                        run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
+                    });
+                },
+            );
+        }
     }
     group.finish();
 }
@@ -3777,6 +3853,7 @@ criterion_group! {
     bench_statevector_depth_sweep,
     bench_statevector_entanglement,
     bench_statevector_scalability,
+    bench_statevector_marginals,
     bench_statevector_rdm,
     bench_braket_state_vector,
     // Stabilizer
@@ -3785,6 +3862,7 @@ criterion_group! {
     bench_stabilizer_measurement,
     // Factored stabilizer
     bench_factored_stabilizer_scaling,
+    bench_factored_stabilizer_single_cluster,
     bench_factored_stabilizer_local,
     bench_factored_stabilizer_measurement,
     // Sparse

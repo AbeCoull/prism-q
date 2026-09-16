@@ -758,6 +758,10 @@ impl Backend for SparseBackend {
         ])
     }
 
+    fn supports_two_qubit_kraus(&self) -> bool {
+        true
+    }
+
     /// Nonzeros sorted by their traced index, then an outer product within
     /// each run: `O(nnz log nnz)` for the sort plus `O(nnz * g)` products,
     /// `g` the largest run. The sort fixes the summation order, so the answer

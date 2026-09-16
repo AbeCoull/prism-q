@@ -703,34 +703,46 @@ fn two_qubit_kraus_trajectory_branch_weight_reads_the_state() {
     )
     .unwrap();
 
-    let result = simulate(&circuit)
-        .backend(BackendKind::Statevector)
-        .noise(&noise)
-        .seed(SEED)
-        .shots(shots)
-        .unwrap();
-    let mean = |bit: usize| {
-        let ones = result.shots.iter().filter(|s| s[bit]).count();
-        1.0 - 2.0 * (ones as f64 / shots as f64)
-    };
+    // Every representation that reaches the pair runs the same channel against
+    // the same exact mixture, so a reduction that reads the wrong pair fails
+    // here rather than only where it was written.
+    for kind in [
+        BackendKind::Statevector,
+        BackendKind::Sparse,
+        BackendKind::Factored,
+        BackendKind::Mps { max_bond_dim: 16 },
+    ] {
+        let result = simulate(&circuit)
+            .backend(kind.clone())
+            .noise(&noise)
+            .seed(SEED)
+            .shots(shots)
+            .unwrap();
+        let mean = |bit: usize| {
+            let ones = result.shots.iter().filter(|s| s[bit]).count();
+            1.0 - 2.0 * (ones as f64 / shots as f64)
+        };
 
-    // Three standard errors at 8192 shots is 0.033. A weight drawn from a
-    // constant instead of the state would put <Z> at 1 - 2*0.75*(1-gamma/2),
-    // which is 0.175 away from the exact value here.
-    for (bit, expected) in exact.iter().enumerate() {
-        assert!(
-            (mean(bit) - expected).abs() < 0.035,
-            "bit {bit}: trajectory {} against the exact {expected}",
-            mean(bit)
-        );
+        // Three standard errors at 8192 shots is 0.033. A weight drawn from a
+        // constant instead of the state would put <Z> at 1 - 2*0.75*(1-gamma/2),
+        // which is 0.175 away from the exact value here.
+        for (bit, expected) in exact.iter().enumerate() {
+            assert!(
+                (mean(bit) - expected).abs() < 0.035,
+                "{kind:?} bit {bit}: trajectory {} against the exact {expected}",
+                mean(bit)
+            );
+        }
     }
 }
 
-// A two-qubit Kraus channel needs a backend that can reduce a pair, and only
-// the host statevector can. The rejection lands at dispatch, before a shot
-// allocates state, rather than part way through the first trajectory.
+// A tensor network holds the state as a contraction with no partial trace, so
+// it cannot weigh the branches. The rejection lands at dispatch, before a shot
+// allocates state, rather than part way through the first trajectory. The other
+// two declines never reach this door: a tableau is refused by the Pauli-only
+// check and a product state by the entangling gate the channel rule needs.
 #[test]
-fn two_qubit_kraus_rejected_on_a_backend_without_the_reduction() {
+fn two_qubit_kraus_rejected_before_a_shot_allocates_state() {
     let mut circuit = Circuit::new(2, 2);
     circuit.add_gate(Gate::Cx, &[0, 1]);
     circuit.add_measure(0, 0);
@@ -742,14 +754,14 @@ fn two_qubit_kraus_rejected_on_a_backend_without_the_reduction() {
         .unwrap();
 
     let err = simulate(&circuit)
-        .backend(BackendKind::Mps { max_bond_dim: 16 })
+        .backend(BackendKind::TensorNetwork)
         .noise(&noise)
         .seed(SEED)
         .shots(4)
         .unwrap_err();
     assert!(
         matches!(&err, PrismError::IncompatibleBackend { reason, .. }
-            if reason.contains("two-qubit reduced density matrix")),
+            if reason.contains("reduced density matrix")),
         "{err:?}"
     );
 }

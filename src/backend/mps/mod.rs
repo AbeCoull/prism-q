@@ -2855,7 +2855,14 @@ impl Backend for MpsBackend {
         crate::sim::ResolvedBackend::Mps
     }
 
+    /// A chain still at bond 1 certifies itself: every cut it made was rank 1,
+    /// so no singular value could have been dropped and the product it holds is
+    /// the state. Any wider chain reports `Approximate` whether or not this run
+    /// truncated, since the bond cap can discard weight.
     fn exactness(&self) -> crate::sim::Exactness {
+        if self.bond_high_water == 1 && self.truncation_discarded <= 0.0 {
+            return crate::sim::Exactness::Exact;
+        }
         crate::sim::Exactness::Approximate {
             fidelity_lower_bound: Some((1.0 - self.truncation_discarded).max(0.0)),
         }

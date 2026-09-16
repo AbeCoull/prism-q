@@ -258,14 +258,17 @@ fn zero_shots_still_names_the_route() {
 }
 
 // Mid-circuit measurement forces the per-shot route, where each shot evolves
-// its own state and the ensemble keeps the weakest claim.
+// its own state and the ensemble keeps the weakest claim. The Bell pair left
+// on qubits 1 and 2 is what makes the claim approximate: a chain still at bond
+// 1 truncated nothing and says so.
 #[test]
 fn per_shot_route_stamps_metadata() {
-    let mut circuit = Circuit::new(2, 2);
+    let mut circuit = Circuit::new(3, 2);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_measure(0, 0);
+    circuit.add_gate(Gate::H, &[1]);
     circuit.add_gate(Gate::T, &[1]);
-    circuit.add_gate(Gate::Cx, &[0, 1]);
+    circuit.add_gate(Gate::Cx, &[1, 2]);
     circuit.add_measure(1, 1);
 
     let shots = simulate(&circuit)

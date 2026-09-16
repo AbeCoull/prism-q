@@ -707,6 +707,11 @@ pub(super) enum ExecutionPlan {
 /// Name the engine `kind` resolves to when that engine can discard state
 /// weight or estimate by sampling, `None` when the route is exact.
 ///
+/// Exactness is a property of the route and the circuit together, not of the
+/// route alone: an engine that can truncate still answers exactly on a circuit
+/// whose state it holds without loss, and only a predicate that proves that for
+/// every circuit of the shape may say so here.
+///
 /// Resolved from the circuit rather than read off a finished run, so
 /// [`Simulate::require_exact`] rejects before paying for the state it would
 /// throw away.
@@ -716,8 +721,18 @@ pub(super) fn approximate_route_name(
     kind: &BackendKind,
     circuit: &Circuit,
 ) -> Option<&'static str> {
+    // Diagonal and permutation gates keep the all-zero start on a single basis
+    // state, so an MPS holds it at bond 1 and has nothing to truncate. A start
+    // state other than |0...0> never reaches an MPS route at all, since
+    // `initial_state_plan` rejects every representation derived from that start.
+    let mps_is_exact = circuit.is_sparse_friendly();
     match kind {
-        BackendKind::Mps { .. } => return Some("Mps"),
+        BackendKind::Mps { .. } => {
+            if mps_is_exact {
+                return None;
+            }
+            return Some("Mps");
+        }
         BackendKind::StochasticPauli { .. } => return Some("StochasticPauli"),
         BackendKind::DeterministicPauli { epsilon, max_terms } => {
             if *epsilon > 0.0 || *max_terms > 0 {
@@ -738,7 +753,7 @@ pub(super) fn approximate_route_name(
     }
     let (_, has_partial_independence) = crate::sim::analyze_independence(circuit);
     match select_auto_backend_choice(circuit, has_partial_independence) {
-        Family::Mps => Some("Mps"),
+        Family::Mps if !mps_is_exact => Some("Mps"),
         _ => None,
     }
 }

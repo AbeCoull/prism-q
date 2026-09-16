@@ -2855,7 +2855,16 @@ impl Backend for MpsBackend {
         crate::sim::ResolvedBackend::Mps
     }
 
+    /// A chain whose bonds are all 1 certifies itself: it is a product state,
+    /// and with nothing discarded on the way to it there was no approximation
+    /// to make. Any wider chain reports `Approximate` whether or not this run
+    /// truncated, since the bond cap can discard weight. The claim comes from
+    /// the chain rather than from the cut history, which records what a cut
+    /// wrote and so passes over a bond a center move widened.
     fn exactness(&self) -> crate::sim::Exactness {
+        if self.current_max_bond_dim() == 1 && self.truncation_discarded <= 0.0 {
+            return crate::sim::Exactness::Exact;
+        }
         crate::sim::Exactness::Approximate {
             fidelity_lower_bound: Some((1.0 - self.truncation_discarded).max(0.0)),
         }

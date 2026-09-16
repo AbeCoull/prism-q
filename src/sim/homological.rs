@@ -806,12 +806,17 @@ pub(crate) fn run_shots_homological_inner(
 /// Builds the error chain complex and compiled sampler, then computes
 /// exact per-measurement noisy probabilities in O(nnz(E)) time.
 /// Works for any qubit count, not limited by syndrome rank.
+///
+/// Readout error needs no syndrome class on a marginal: a bit reported 1 was
+/// either measured 1 and not flipped or measured 0 and flipped, so the reported
+/// probability is `p(1 - p10) + (1 - p) p01`. Per-shot sampling is still the
+/// only route for correlations between bits.
 pub fn noisy_marginals_analytical(
     circuit: &Circuit,
     noise: &NoiseModel,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    noise.ensure_pauli_only()?;
+    noise.ensure_chain_complex_channels()?;
     let ecc = ErrorChainComplex::build(circuit, noise, seed)?;
     let compiled = crate::sim::compiled::compile_measurements(circuit, seed)?;
     let noiseless = compiled.marginal_probabilities();
@@ -830,7 +835,11 @@ pub fn noisy_marginals_analytical(
     let mut result = vec![0.5f64; num_classical];
     for (mi, &cbit) in classical_bit_order.iter().enumerate() {
         if cbit < num_classical && mi < noisy.len() {
-            result[cbit] = noisy[mi];
+            let p = noisy[mi];
+            result[cbit] = match noise.readout.get(cbit).and_then(Option::as_ref) {
+                Some(err) => p * (1.0 - err.p10) + (1.0 - p) * err.p01,
+                None => p,
+            };
         }
     }
     Ok(result)

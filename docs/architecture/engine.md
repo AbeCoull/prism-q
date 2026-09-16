@@ -107,7 +107,10 @@ result, which is what makes `require_exact()` an opt-out: rejecting by default
 would remove the only route an oversize non-sparse circuit has.
 
 `require_exact()` resolves the route from the circuit and errors before
-allocating, so it does not pay for state it would discard. Sparse Pauli dynamics
+allocating, so it does not pay for state it would discard. Exactness is read
+from the route and the circuit together rather than from the route alone: an
+oversize circuit of diagonal and permutation gates only holds a single basis
+state, so the MPS carrying it never leaves bond 1 and is accepted. Sparse Pauli dynamics
 truncates on coefficient magnitudes it only learns while propagating, so that
 route cannot be decided in advance and is caught by a second check on the
 finished result. Both checks run in every terminal.

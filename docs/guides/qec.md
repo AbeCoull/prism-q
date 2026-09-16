@@ -115,3 +115,7 @@ peeling semantics and the validation against the exact ML rate.
 `run_shots_homological` and `ErrorChainComplex` model the GF(2) chain complex over noise
 locations, identifying undetectable error cycles. `noisy_marginals_analytical` computes
 marginals in closed form from the parity matrix and noise rates, with no Monte Carlo.
+Readout error is part of that closed form, a reported 1 being either a measured 1 that
+did not flip or a measured 0 that did, while the shot route rejects it: a per-shot draw
+against the record has no syndrome class. Both reject a channel the complex cannot hold,
+which is any non-Pauli channel and any channel naming two qubits.

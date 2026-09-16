@@ -111,6 +111,63 @@ fn require_exact_rejects_the_approximate_route() {
     assert!(simulate(&circuit).seed(SEED).marginals().is_ok());
 }
 
+// Diagonal and permutation gates hold the all-zero start on a single basis
+// state, so the MPS route taken past the sparse index width never leaves bond 1
+// and has nothing to truncate. The route check used to reject the whole class.
+#[test]
+fn require_exact_accepts_a_wide_basis_preserving_circuit() {
+    small_sv_cap();
+    const WIDE: usize = 66;
+    let mut circuit = Circuit::new(WIDE, 0);
+    circuit.add_gate(Gate::X, &[0]);
+    for q in 1..WIDE {
+        circuit.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    for q in 0..WIDE {
+        circuit.add_gate(Gate::P(0.3), &[q]);
+    }
+
+    let result = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .marginals()
+        .unwrap();
+    assert_eq!(result.metadata.backend, ResolvedBackend::Mps);
+    assert!(result.metadata.is_exact(), "{:?}", result.metadata);
+    assert!(
+        result
+            .marginals
+            .iter()
+            .all(|&(p0, p1)| p0 < TOL && (p1 - 1.0).abs() < TOL),
+        "the ladder sets every qubit: {:?}",
+        &result.marginals[..4]
+    );
+}
+
+// One non-diagonal single-qubit gate is enough to leave the class, and the
+// rejection has to come back with it.
+#[test]
+fn require_exact_still_rejects_a_wide_superposing_circuit() {
+    small_sv_cap();
+    const WIDE: usize = 66;
+    let mut circuit = Circuit::new(WIDE, 0);
+    circuit.add_gate(Gate::H, &[0]);
+    for q in 1..WIDE {
+        circuit.add_gate(Gate::Cx, &[q - 1, q]);
+    }
+    circuit.add_gate(Gate::P(0.3), &[0]);
+
+    let err = simulate(&circuit)
+        .seed(SEED)
+        .require_exact()
+        .marginals()
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { backend, .. } if backend == "Mps"),
+        "{err:?}"
+    );
+}
+
 struct Fixture {
     circuit: Circuit,
     params: Parameters,

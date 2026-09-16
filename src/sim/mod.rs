@@ -233,6 +233,10 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     /// an approximate answer is worse than no answer, and the run returns
     /// `IncompatibleBackend` naming the engine it would have used.
     ///
+    /// A circuit whose gates all preserve computational basis states is the
+    /// exception: it stays on one basis state, so that route holds it at bond 1
+    /// and answers exactly.
+    ///
     /// Routes that can be decided from the circuit are rejected before any state
     /// is allocated; sparse Pauli dynamics only learns that it truncated while
     /// propagating, so that one is caught on the finished result instead.

@@ -296,6 +296,53 @@ fn analytical_marginals_match_sampled_small() {
 }
 
 #[test]
+fn analytical_marginals_fold_in_readout_error() {
+    // Deterministic bits under a readout-only model, so the closed form is the
+    // whole answer: bit 0 is measured 1 and reads 1 with probability 1 - p10,
+    // bit 1 is measured 0 and reads 1 with probability p01.
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(crate::gates::Gate::X, &[0]);
+    circuit.measure_all();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    noise.set_bit_readout_error(0, 0.02, 0.07);
+    noise.set_bit_readout_error(1, 0.03, 0.11);
+
+    let marginals = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+    assert!((marginals[0] - 0.93).abs() < 1e-12, "{marginals:?}");
+    assert!((marginals[1] - 0.03).abs() < 1e-12, "{marginals:?}");
+}
+
+#[test]
+fn analytical_marginals_with_readout_match_sampled() {
+    let n = 6;
+    let mut circuit = circuits::ghz_circuit(n);
+    circuit.measure_all();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    for bit in 0..n {
+        noise.set_bit_readout_error(bit, 0.04, 0.09);
+    }
+
+    let analytical = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
+
+    let shots = 20_000;
+    let sampled = crate::sim::noise::run_shots_noisy(&circuit, &noise, shots, 42).unwrap();
+    let counts: Vec<f64> = (0..n)
+        .map(|bit| sampled.shots.iter().filter(|record| record[bit]).count() as f64 / shots as f64)
+        .collect();
+
+    for bit in 0..n {
+        // Five sigma on a binomial proportion at this shot count.
+        let sigma = (analytical[bit] * (1.0 - analytical[bit]) / shots as f64).sqrt();
+        assert!(
+            (analytical[bit] - counts[bit]).abs() < 5.0 * sigma,
+            "bit {bit}: analytical={:.6}, sampled={:.6}, sigma={sigma:.6}",
+            analytical[bit],
+            counts[bit],
+        );
+    }
+}
+
+#[test]
 fn analytical_marginals_ghz_50q() {
     let n = 50;
     let mut circuit = circuits::ghz_circuit(n);

@@ -448,11 +448,19 @@ impl NoiseModel {
     /// shot is drawn. A live two-qubit channel answers `false` here and still
     /// runs on the Clifford samplers; an inert one blocks nothing.
     pub fn is_pauli_only(&self) -> bool {
+        self.has_chain_complex_channels()
+            && self.readout.iter().flatten().all(ReadoutError::is_inert)
+    }
+
+    /// True when every channel fits one column of the error chain complex: a
+    /// single-qubit Pauli draw, or inert. Readout is not a channel and is
+    /// judged separately, since only some of the routes over the complex need
+    /// it folded into a syndrome class.
+    pub(crate) fn has_chain_complex_channels(&self) -> bool {
         self.after_gate
             .iter()
             .flat_map(|events| events.iter())
             .all(|e| e.channel.is_pauli() || e.channel.is_inert())
-            && self.readout.iter().flatten().all(ReadoutError::is_inert)
     }
 
     /// True when every channel samples as a Pauli frame draw, whatever the
@@ -485,14 +493,30 @@ impl NoiseModel {
     /// the measurement record ahead of sampling, which readout error, drawn
     /// per shot against the record itself, is not part of.
     pub fn ensure_pauli_only(&self) -> Result<()> {
-        if !self.is_pauli_only() {
+        self.ensure_chain_complex_channels()?;
+        if !self.readout.iter().flatten().all(ReadoutError::is_inert) {
+            return Err(crate::error::PrismError::IncompatibleBackend {
+                backend: "homological sampler".into(),
+                reason: "readout error is drawn per shot against the record rather than \
+                         folded into a syndrome class; sample through `run_shots_noisy`, \
+                         or read per-bit marginals through `noisy_marginals_analytical`, \
+                         which applies it in closed form"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Return an error if any channel falls outside the error chain complex,
+    /// which holds one column per single-qubit Pauli error.
+    pub(crate) fn ensure_chain_complex_channels(&self) -> Result<()> {
+        if !self.has_chain_complex_channels() {
             return Err(crate::error::PrismError::IncompatibleBackend {
                 backend: "homological sampler".into(),
                 reason: "non-Pauli noise channels (amplitude damping, phase damping, \
-                         thermal relaxation, custom Kraus) carry no Pauli frame, a \
+                         thermal relaxation, custom Kraus) carry no Pauli frame, and a \
                          two-qubit channel spans two error columns where the complex \
-                         holds one, and readout error is drawn per shot rather than \
-                         folded into a syndrome class; sample through `run_shots_noisy`"
+                         holds one; sample through `run_shots_noisy`"
                     .into(),
             });
         }

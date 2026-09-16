@@ -534,6 +534,8 @@ impl StabilizerBackend {
         let p_data: SmallVec<[u64; 32]> = SmallVec::from_slice(&self.xz[p_base..p_base + stride]);
         let p_phase = self.phase[p_row];
 
+        let d_row = p_row - n;
+        self.sgi_new_a.clear();
         for i in 0..2 * n {
             if i == p_row {
                 continue;
@@ -551,10 +553,12 @@ impl StabilizerBackend {
                     initial_sum,
                 );
                 self.phase[i] = (sum & 3) >= 2;
+                if i != d_row {
+                    self.sgi_new_a.push(i as u32);
+                }
             }
         }
 
-        let d_row = p_row - n;
         let d_base = d_row * stride;
         self.xz.copy_within(p_base..p_base + stride, d_base);
         self.phase[d_row] = self.phase[p_row];
@@ -566,7 +570,64 @@ impl StabilizerBackend {
 
         self.classical_bits[classical_bit] = outcome;
 
-        self.rebuild_qubit_active();
+        let at = self.sgi_new_a.partition_point(|&g| (g as usize) < d_row);
+        self.sgi_new_a.insert(at, d_row as u32);
+        self.widen_active_by_pivot(&p_data);
+    }
+
+    /// Record the support the collapse handed to the rows in `sgi_new_a`: each
+    /// was multiplied by the pivot, and the destabilizer row took a copy of it,
+    /// so any of them can now be active wherever the pivot was.
+    ///
+    /// The result covers the true support without matching it. Readers tolerate
+    /// the surplus: a measurement re-reads the tableau bit before using an
+    /// entry, a one-qubit gate applied to a row with no support there is the
+    /// identity, and a two-qubit gate re-derives both lists from the rows it
+    /// touched. Only an entry that is missing can drop an update.
+    ///
+    /// The alternative is [`Self::rebuild_qubit_active`], a full-tableau pass
+    /// per measurement, which is what makes measure-all on an entangled state
+    /// cubic in the qubit count. A 2000-qubit CNOT wall measured on every qubit
+    /// ran 275 ms with the rebuild and 19 ms with this.
+    fn widen_active_by_pivot(&mut self, p_data: &[u64]) {
+        let n = self.n;
+        let nw = self.num_words;
+
+        let mut support: SmallVec<[usize; 32]> = SmallVec::new();
+        for w in 0..nw {
+            let mut bits = p_data[w] | p_data[nw + w];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                let q = w * 64 + b;
+                if q < n {
+                    support.push(q);
+                }
+                bits &= bits - 1;
+            }
+        }
+
+        let widened = support.len() * (self.sgi_max_active + self.sgi_new_a.len());
+        if widened >= 2 * n * nw {
+            self.rebuild_qubit_active();
+            return;
+        }
+
+        for &q in &support {
+            let gained = union_rows(
+                &self.qubit_active[q],
+                &self.sgi_new_a,
+                &mut self.sgi_merge_buf,
+            );
+            if gained == 0 {
+                continue;
+            }
+            std::mem::swap(&mut self.qubit_active[q], &mut self.sgi_merge_buf);
+            self.total_weight += gained;
+            let len = self.qubit_active[q].len();
+            if len > self.sgi_max_active {
+                self.sgi_max_active = len;
+            }
+        }
     }
 
     pub(super) fn rebuild_qubit_active(&mut self) {
@@ -812,4 +873,32 @@ impl StabilizerBackend {
         }
         Ok(())
     }
+}
+
+/// Union of two ascending duplicate-free row lists, written to `out`. Returns
+/// how many entries `list` gained.
+fn union_rows(list: &[u32], added: &[u32], out: &mut Vec<u32>) -> usize {
+    out.clear();
+    out.reserve(list.len() + added.len());
+    let (mut ia, mut ib) = (0, 0);
+    while ia < list.len() && ib < added.len() {
+        match list[ia].cmp(&added[ib]) {
+            std::cmp::Ordering::Less => {
+                out.push(list[ia]);
+                ia += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                out.push(added[ib]);
+                ib += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                out.push(list[ia]);
+                ia += 1;
+                ib += 1;
+            }
+        }
+    }
+    out.extend_from_slice(&list[ia..]);
+    out.extend_from_slice(&added[ib..]);
+    out.len() - list.len()
 }

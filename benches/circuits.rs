@@ -1059,6 +1059,37 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
             },
         );
     }
+
+    // Every qubit of a CNOT wall collapses at random, where the GHZ chain
+    // collapses once and reads the rest off deterministically. That makes the
+    // per-collapse index maintenance the cost, and nothing else in the corpus
+    // drives a run of random collapses this long.
+    for &n in &[1000, 2000, 4000] {
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        for d in 0..10 {
+            let mut q = d % 2;
+            while q + 1 < n {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+                q += 2;
+            }
+        }
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+
+        group.bench_with_input(
+            BenchmarkId::new("wall_measure_all", n),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+                });
+            },
+        );
+    }
     group.finish();
 }
 

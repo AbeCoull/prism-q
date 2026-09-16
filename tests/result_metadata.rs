@@ -257,19 +257,40 @@ fn zero_shots_still_names_the_route() {
     }
 }
 
+// A chain that filled a bond keeps the route's claim even at a cap it never
+// reached, which is what separates the carve-out from a general reading of
+// realized truncation. One brickwork layer is not enough to get there: a CX
+// with both legs on |+> is the identity, so the first layer leaves a product.
+#[test]
+fn a_chain_that_filled_a_bond_is_not_reported_exact() {
+    let outcome = simulate(&entangling_brickwork(6, 2))
+        .backend(BackendKind::Mps { max_bond_dim: 64 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert!(!outcome.metadata.is_exact(), "{:?}", outcome.metadata);
+    assert_eq!(outcome.metadata.fidelity_lower_bound(), Some(1.0));
+
+    let product = simulate(&entangling_brickwork(6, 1))
+        .backend(BackendKind::Mps { max_bond_dim: 64 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert!(product.metadata.is_exact(), "{:?}", product.metadata);
+}
+
 // Mid-circuit measurement forces the per-shot route, where each shot evolves
-// its own state and the ensemble keeps the weakest claim. The Bell pair left
-// on qubits 1 and 2 is what makes the claim approximate: a chain still at bond
-// 1 truncated nothing and says so.
+// its own state and the ensemble keeps the weakest claim. The pair left open on
+// qubits 1 and 2 is what makes the claim approximate: a chain whose bonds are
+// all 1 discarded nothing and says so.
 #[test]
 fn per_shot_route_stamps_metadata() {
-    let mut circuit = Circuit::new(3, 2);
+    let mut circuit = Circuit::new(3, 1);
     circuit.add_gate(Gate::H, &[0]);
     circuit.add_measure(0, 0);
     circuit.add_gate(Gate::H, &[1]);
     circuit.add_gate(Gate::T, &[1]);
     circuit.add_gate(Gate::Cx, &[1, 2]);
-    circuit.add_measure(1, 1);
 
     let shots = simulate(&circuit)
         .backend(BackendKind::Mps { max_bond_dim: 8 })

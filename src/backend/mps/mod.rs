@@ -2855,12 +2855,14 @@ impl Backend for MpsBackend {
         crate::sim::ResolvedBackend::Mps
     }
 
-    /// A chain still at bond 1 certifies itself: every cut it made was rank 1,
-    /// so no singular value could have been dropped and the product it holds is
-    /// the state. Any wider chain reports `Approximate` whether or not this run
-    /// truncated, since the bond cap can discard weight.
+    /// A chain whose bonds are all 1 certifies itself: it is a product state,
+    /// and with nothing discarded on the way to it there was no approximation
+    /// to make. Any wider chain reports `Approximate` whether or not this run
+    /// truncated, since the bond cap can discard weight. The claim comes from
+    /// the chain rather than from [`Self::bond_high_water`], which records what
+    /// a cut wrote and so passes over a bond a center move widened.
     fn exactness(&self) -> crate::sim::Exactness {
-        if self.bond_high_water == 1 && self.truncation_discarded <= 0.0 {
+        if self.current_max_bond_dim() == 1 && self.truncation_discarded <= 0.0 {
             return crate::sim::Exactness::Exact;
         }
         crate::sim::Exactness::Approximate {

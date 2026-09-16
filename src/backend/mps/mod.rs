@@ -2938,6 +2938,67 @@ impl Backend for MpsBackend {
         Ok(self.reduced_density_site(self.site_for_logical(qubit)))
     }
 
+    /// Contracted out of the chain rather than traced out of a vector: with the
+    /// center inside the span, the sites on either side of it collapse to
+    /// identities and one sweep carries a transfer object that grows fourfold
+    /// per kept site. The sweep indexes by chain position, so a SWAP-routed
+    /// layout is permuted back into the requested qubit order at the end.
+    fn reduced_density_matrix(&mut self, subsystem: &[usize]) -> Result<Vec<Complex64>> {
+        schmidt::validate_qubit_set(subsystem, self.num_qubits)?;
+        let k = subsystem.len();
+        let dim = crate::backend::reduced_density::reduced_density_side(self.name(), k)?;
+
+        let mut order: Vec<usize> = (0..k).collect();
+        order.sort_by_key(|&i| self.site_for_logical(subsystem[i]));
+        let sites: Vec<usize> = order
+            .iter()
+            .map(|&i| self.site_for_logical(subsystem[i]))
+            .collect();
+
+        let (first, last) = (sites[0], sites[k - 1]);
+        let chi = self.sites[first..=last]
+            .iter()
+            .fold(1usize, |chi, t| chi.max(t.bond_left).max(t.bond_right));
+        let workspace = (7u128 * (chi as u128) * (chi as u128)) << (2 * k);
+        if workspace > self.workspace_cap {
+            return Err(crate::backend::workspace_allocation_error(
+                self.name(),
+                "a reduced density matrix over the span these qubits occupy",
+                workspace,
+            ));
+        }
+
+        let end = self.sites.len() - 1;
+        match self.center {
+            Some(at) => self.move_center(at.clamp(first, last)),
+            None if first <= end - last => self.establish_center(first),
+            None => self.establish_center(last),
+        }
+        let contracted = self.reduced_density_sites(&sites);
+
+        // Bit `k - 1 - j` of a contracted index is the site at position `j`,
+        // which hosts `subsystem[order[j]]` and so becomes bit `order[j]`.
+        let permuted: Vec<usize> = (0..dim)
+            .map(|t| {
+                (0..k)
+                    .filter(|&j| (t >> (k - 1 - j)) & 1 == 1)
+                    .fold(0, |index, j| index | (1 << order[j]))
+            })
+            .collect();
+        let mut rho = vec![ZERO; dim * dim];
+        for (t, row) in contracted.chunks_exact(dim).enumerate() {
+            for (tp, &amp) in row.iter().enumerate() {
+                rho[permuted[t] * dim + permuted[tp]] = amp;
+            }
+        }
+        crate::backend::reduced_density::normalize_trace(&mut rho, dim);
+        Ok(rho)
+    }
+
+    fn supports_two_qubit_kraus(&self) -> bool {
+        true
+    }
+
     /// The one-SVD route when the subsystem is a run of sites at either end
     /// of the chain; otherwise the eigenvalues of the reduced density matrix
     /// over the smaller side of the cut, under the dense cap. The chain order

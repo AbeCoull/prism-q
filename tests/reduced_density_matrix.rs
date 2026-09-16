@@ -6,7 +6,7 @@
 mod common;
 
 use common::circuits::{CircuitCase, exact_small_cases, product_separable_cases};
-use common::{DM_EPS, FACTORED_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, SV_EPS};
+use common::{DM_EPS, FACTORED_EPS, MPS_EPS, PRODUCT_EPS, SEED, SPARSE_EPS, SV_EPS};
 use num_complex::Complex64;
 use prism_q::PrismError;
 use prism_q::backend::Backend;
@@ -257,6 +257,18 @@ fn factored_matches_the_statevector_on_the_small_corpus() {
     );
 }
 
+// The chain sweeps its own environment, so the cost follows the span the named
+// qubits occupy and the reversed subsystems pin the permutation back into the
+// requested order.
+#[test]
+fn mps_matches_the_statevector_on_the_small_corpus() {
+    assert_matches_statevector(
+        &|| Box::new(MpsBackend::new(SEED, 64)),
+        &exact_small_cases(),
+        MPS_EPS,
+    );
+}
+
 // The eight-qubit cases put the mixture past the parallel threshold, so both
 // partial-trace paths of the density matrix are covered.
 #[test]
@@ -504,11 +516,6 @@ fn assert_declines(backend: &mut dyn Backend) {
 }
 
 #[test]
-fn mps_declines_the_reduced_density_matrix() {
-    assert_declines(&mut MpsBackend::new(SEED, 64));
-}
-
-#[test]
 fn tensor_network_declines_the_reduced_density_matrix() {
     assert_declines(&mut TensorNetworkBackend::new(SEED));
 }
@@ -638,22 +645,17 @@ fn the_terminal_matches_the_statevector_on_the_separable_corpus() {
 #[test]
 fn the_terminal_names_the_backend_that_declines() {
     let circuit = ghz_circuit(4);
-    for (kind, name) in [
-        (BackendKind::Mps { max_bond_dim: 64 }, "mps"),
-        (BackendKind::TensorNetwork, "tensornetwork"),
-    ] {
-        assert_eq!(
-            simulate(&circuit)
-                .backend(kind)
-                .seed(SEED)
-                .reduced_density_matrix(&[0, 2])
-                .unwrap_err(),
-            PrismError::BackendUnsupported {
-                backend: name.to_string(),
-                operation: "reduced density matrix".to_string(),
-            }
-        );
-    }
+    assert_eq!(
+        simulate(&circuit)
+            .backend(BackendKind::TensorNetwork)
+            .seed(SEED)
+            .reduced_density_matrix(&[0, 2])
+            .unwrap_err(),
+        PrismError::BackendUnsupported {
+            backend: "tensornetwork".to_string(),
+            operation: "reduced density matrix".to_string(),
+        }
+    );
 }
 
 // Depolarizing noise on a Bell pair leaves the pair mixed, so the two-qubit

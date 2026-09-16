@@ -778,6 +778,43 @@ fn test_sgi_500q_clifford_d10_matches_gate_by_gate() {
     );
 }
 
+// A CNOT wall collapses on every qubit: each measurement finds a pivot, so the
+// index is widened n times in a row with the SGI path still engaged. That is
+// the shape the widening is there for, so it is pinned against a gate-by-gate
+// run of the same circuit.
+#[test]
+fn test_sgi_cnot_wall_measure_all_matches_gate_by_gate() {
+    let n = 400;
+    let mut c = Circuit::new(n, n);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for d in 0..10 {
+        let mut q = d % 2;
+        while q + 1 < n {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+            q += 2;
+        }
+    }
+    c.measure_all();
+
+    let mut b1 = StabilizerBackend::new(42);
+    b1.init(c.num_qubits, c.num_classical_bits).unwrap();
+    for instr in &c.instructions {
+        b1.apply(instr).unwrap();
+    }
+    let r1 = b1.classical_results().to_vec();
+
+    let mut b2 = StabilizerBackend::new(42);
+    sim::run_on(&mut b2, &c).unwrap();
+    let r2 = b2.classical_results().to_vec();
+
+    assert_eq!(
+        r1, r2,
+        "CNOT wall 400q measure-all: gate-by-gate vs apply_instructions mismatch"
+    );
+}
+
 #[test]
 fn test_sgi_300q_ghz_all_agree() {
     let n = 300;
@@ -846,7 +883,7 @@ fn test_sgi_index_consistency() {
 // The brick layer keeps row weight low so the SGI path stays engaged, and the
 // long-range CX fan out of the reset target gives the measurement pivot support
 // on qubits that the rows anticommuting with it do not already touch. That is
-// what makes the post-reset index staleness observable.
+// what makes the post-reset index widening observable.
 fn sgi_reset_circuit(n: usize) -> Circuit {
     let mut c = crate::circuits::clifford_heavy_circuit(n, 2, 42);
     for k in 0..8 {
@@ -907,8 +944,12 @@ fn test_sgi_reset_random_outcome_matches_gate_by_gate() {
     );
 }
 
+// A collapse widens the index by the pivot's support rather than rebuilding it,
+// so past a measurement or reset the lists are a superset of the true support.
+// That is the invariant every reader needs: an entry with no support is a
+// wasted visit, an unlisted active row is a dropped update.
 #[test]
-fn test_sgi_reset_leaves_index_consistent() {
+fn test_sgi_reset_leaves_index_covering() {
     let n = 300;
     let circuit = sgi_reset_circuit(n);
     assert_sgi_engaged_at_reset(&circuit);
@@ -931,16 +972,22 @@ fn test_sgi_reset_leaves_index_consistent() {
 
     let stride = b.stride();
     let nw = b.num_words;
+    for q in 0..n {
+        let list = &b.qubit_active[q];
+        assert!(
+            list.windows(2).all(|w| w[0] < w[1]),
+            "qubit_active[{q}] is not ascending and duplicate free"
+        );
+    }
     for g in 0..2 * n {
         let row = &b.xz[g * stride..(g + 1) * stride];
         for q in 0..n {
             let word = q / 64;
             let bit_mask = 1u64 << (q % 64);
             let active = row[word] & bit_mask != 0 || row[nw + word] & bit_mask != 0;
-            assert_eq!(
-                active,
-                b.qubit_active[q].contains(&(g as u32)),
-                "after reset: generator {g} qubit {q} active={active} disagrees with the index"
+            assert!(
+                !active || b.qubit_active[q].contains(&(g as u32)),
+                "after reset: generator {g} is active on qubit {q} but the index omits it"
             );
         }
     }
@@ -952,11 +999,9 @@ fn test_sgi_reset_leaves_index_consistent() {
 // guarded region is the in-repo path that reaches `apply_instructions` after a
 // per-instruction prefix.
 //
-// The region opens with gates rather than a measurement: `sgi_measure_random`
-// rebuilds the index on its way out, so a random measurement would repair the
-// staleness before anything else could read it. An SGI gate iterates
-// `qubit_active[q]` and updates only the rows it lists, which is where a stale
-// index silently drops the rest.
+// The region opens with gates because an SGI gate iterates `qubit_active[q]`
+// and updates only the rows it lists, which is where a stale index silently
+// drops the rest.
 //
 // The reference drives the same circuit entirely per instruction, so it never
 // reaches a bulk entry and never takes the SGI path at all.

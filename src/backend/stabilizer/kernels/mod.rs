@@ -2,11 +2,11 @@
 //! full-tableau row loops, the SGI path that touches only rows active on a
 //! gate's qubits, and entry points for word-group batching.
 
-mod batch;
+pub(crate) mod batch;
 pub(crate) mod rowops;
 mod simd;
 
-pub(crate) use batch::MIN_WORDS_FOR_BATCH;
+pub(crate) use batch::{BatchTarget, GateRows, MIN_WORDS_FOR_BATCH, apply_gates_word_batch};
 pub(crate) use simd::{rowmul_words, xor_words};
 
 use smallvec::SmallVec;

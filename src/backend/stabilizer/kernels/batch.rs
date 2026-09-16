@@ -246,7 +246,23 @@ fn apply_prepared_ops(xw: &mut u64, zw: &mut u64, p: &mut bool, ops: &[PrepOp]) 
     }
 }
 
-impl StabilizerBackend {
+/// The rows one batched gate pass sweeps, borrowed from whichever tableau owns
+/// them. `row_start` is the first row a gate updates: zero for a full tableau,
+/// `n` when destabilizers are deferred.
+pub(crate) struct GateRows<'a> {
+    pub(crate) xz: &'a mut [u64],
+    pub(crate) phase: &'a mut [bool],
+    pub(crate) n: usize,
+    pub(crate) num_words: usize,
+    pub(crate) row_start: usize,
+}
+
+impl GateRows<'_> {
+    #[inline(always)]
+    fn stride(&self) -> usize {
+        2 * self.num_words
+    }
+
     /// Execute all gates in a word group against every tableau row.
     ///
     /// Loads each row's X-word and Z-word once, applies all gates in the group,
@@ -257,7 +273,7 @@ impl StabilizerBackend {
         }
         let stride = self.stride();
         let nw = self.num_words;
-        let gs = self.gate_row_start;
+        let gs = self.row_start;
         let ops = prepare_word_ops(gates);
 
         let process_row = |row: &mut [u64], p: &mut bool| {
@@ -312,7 +328,7 @@ impl StabilizerBackend {
 
         let stride = self.stride();
         let nw = self.num_words;
-        let gs = self.gate_row_start;
+        let gs = self.row_start;
 
         let prepared: Vec<(usize, Vec<PrepOp>)> = word_groups
             .iter()
@@ -360,7 +376,7 @@ impl StabilizerBackend {
     }
 
     fn pcc_apply_cross_word(&mut self, cross_word: &[CrossWordGate]) {
-        let gs = self.gate_row_start;
+        let gs = self.row_start;
         let total_rows = 2 * self.n + 1;
         let active_rows = total_rows - gs;
         let col_words = active_rows.div_ceil(64);
@@ -509,7 +525,7 @@ impl StabilizerBackend {
 
         let stride = self.stride();
         let nw = self.num_words;
-        let gs = self.gate_row_start;
+        let gs = self.row_start;
 
         let prepared: Vec<(usize, Vec<PrepOp>)> = word_groups
             .iter()
@@ -600,6 +616,18 @@ impl StabilizerBackend {
             group.clear();
         }
         cross_word.clear();
+    }
+}
+
+impl StabilizerBackend {
+    fn gate_rows_view(&mut self) -> GateRows<'_> {
+        GateRows {
+            n: self.n,
+            num_words: self.num_words,
+            row_start: self.gate_row_start,
+            xz: &mut self.xz,
+            phase: &mut self.phase,
+        }
     }
 
     /// Classify a gate into a BatchGate for word-group batching.
@@ -757,7 +785,8 @@ impl StabilizerBackend {
                             bits |= 1u64 << bg.b_bit;
                         }
                         if cross_word_qubits[w] & bits != 0 {
-                            self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                            self.gate_rows_view()
+                                .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
                             cross_word_qubits.fill(0);
                         }
                         word_groups[w].push(bg);
@@ -771,7 +800,8 @@ impl StabilizerBackend {
                         let m0 = 1u64 << b0;
                         let m1 = 1u64 << b1;
                         if cross_word_qubits[w0] & m0 != 0 || cross_word_qubits[w1] & m1 != 0 {
-                            self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                            self.gate_rows_view()
+                                .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
                             cross_word_qubits.fill(0);
                         }
                         let kind = match gate {
@@ -789,13 +819,15 @@ impl StabilizerBackend {
                         cross_word_qubits[w0] |= m0;
                         cross_word_qubits[w1] |= m1;
                     } else {
-                        self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                        self.gate_rows_view()
+                            .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
                         cross_word_qubits.fill(0);
                         self.dispatch_gate(gate, targets)?;
                     }
                 }
                 Instruction::Measure { .. } => {
-                    self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                    self.gate_rows_view()
+                        .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
                     cross_word_qubits.fill(0);
                     let run_possible = matches!(
                         instructions.get(idx + MIN_MEASURES_FOR_BATCH - 1),
@@ -824,7 +856,8 @@ impl StabilizerBackend {
                     self.apply(instruction)?;
                 }
                 _ => {
-                    self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                    self.gate_rows_view()
+                        .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
                     cross_word_qubits.fill(0);
                     self.apply(instruction)?;
                 }
@@ -832,7 +865,8 @@ impl StabilizerBackend {
             idx += 1;
         }
 
-        self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+        self.gate_rows_view()
+            .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
         Ok(())
     }
 
@@ -841,67 +875,112 @@ impl StabilizerBackend {
         instructions: &[Instruction],
     ) -> Result<()> {
         self.sgi_stale = true;
-        let nw = self.num_words;
-        let mut word_groups: Vec<Vec<BatchGate>> = vec![Vec::new(); nw];
-        let mut cross_word: Vec<CrossWordGate> = Vec::new();
-        let mut cross_word_qubits: Vec<u64> = vec![0u64; nw];
+        apply_gates_word_batch(self, instructions)
+    }
+}
 
-        for instruction in instructions {
-            match instruction {
-                Instruction::Gate { gate, targets } => {
-                    if let Some((w, bg)) = Self::classify_gate(gate, targets) {
-                        let mut bits = 1u64 << bg.a_bit;
-                        if bg.kind >= BatchGate::CX {
-                            bits |= 1u64 << bg.b_bit;
-                        }
-                        if cross_word_qubits[w] & bits != 0 {
-                            self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
-                            cross_word_qubits.fill(0);
-                        }
-                        word_groups[w].push(bg);
-                    } else if let (Gate::Cx | Gate::Cz | Gate::Swap, &[t0, t1]) =
-                        (gate, targets.as_slice())
-                    {
-                        let w0 = t0 / 64;
-                        let w1 = t1 / 64;
-                        let b0 = (t0 % 64) as u8;
-                        let b1 = (t1 % 64) as u8;
-                        let m0 = 1u64 << b0;
-                        let m1 = 1u64 << b1;
-                        if cross_word_qubits[w0] & m0 != 0 || cross_word_qubits[w1] & m1 != 0 {
-                            self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
-                            cross_word_qubits.fill(0);
-                        }
-                        let kind = match gate {
-                            Gate::Cx => BatchGate::CX,
-                            Gate::Cz => BatchGate::CZ,
-                            _ => BatchGate::SWAP,
-                        };
-                        cross_word.push(CrossWordGate {
-                            kind,
-                            w0: w0 as u16,
-                            w1: w1 as u16,
-                            b0,
-                            b1,
-                        });
-                        cross_word_qubits[w0] |= m0;
-                        cross_word_qubits[w1] |= m1;
-                    } else {
-                        self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
-                        cross_word_qubits.fill(0);
-                        self.dispatch_gate(gate, targets)?;
+/// A tableau a batched gate run can drive.
+pub(crate) trait BatchTarget {
+    fn num_words(&self) -> usize;
+    fn batch_rows(&mut self) -> GateRows<'_>;
+    /// Apply one gate the word classifier declined, after a flush.
+    fn apply_one(&mut self, gate: &Gate, targets: &[usize]) -> Result<()>;
+}
+
+impl BatchTarget for StabilizerBackend {
+    fn num_words(&self) -> usize {
+        self.num_words
+    }
+
+    fn batch_rows(&mut self) -> GateRows<'_> {
+        self.gate_rows_view()
+    }
+
+    fn apply_one(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
+        self.dispatch_gate(gate, targets)
+    }
+}
+
+/// Word-group batching over a run of gates, for any tableau that can hand over
+/// its gate rows. One pass over the rows covers every gate buffered since the
+/// last flush, where the per-instruction path costs one pass per gate.
+///
+/// A gate the word classifier declines goes to [`BatchTarget::apply_one`] after
+/// a flush, so ordering holds whatever the target does with it.
+pub(crate) fn apply_gates_word_batch<T: BatchTarget>(
+    target: &mut T,
+    instructions: &[Instruction],
+) -> Result<()> {
+    let nw = target.num_words();
+    let mut word_groups: Vec<Vec<BatchGate>> = vec![Vec::new(); nw];
+    let mut cross_word: Vec<CrossWordGate> = Vec::new();
+    let mut cross_word_qubits: Vec<u64> = vec![0u64; nw];
+
+    for instruction in instructions {
+        match instruction {
+            Instruction::Gate { gate, targets } => {
+                if let Some((w, bg)) = StabilizerBackend::classify_gate(gate, targets) {
+                    let mut bits = 1u64 << bg.a_bit;
+                    if bg.kind >= BatchGate::CX {
+                        bits |= 1u64 << bg.b_bit;
                     }
-                }
-                _ => {
-                    self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                    if cross_word_qubits[w] & bits != 0 {
+                        target
+                            .batch_rows()
+                            .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                        cross_word_qubits.fill(0);
+                    }
+                    word_groups[w].push(bg);
+                } else if let (Gate::Cx | Gate::Cz | Gate::Swap, &[t0, t1]) =
+                    (gate, targets.as_slice())
+                {
+                    let w0 = t0 / 64;
+                    let w1 = t1 / 64;
+                    let b0 = (t0 % 64) as u8;
+                    let b1 = (t1 % 64) as u8;
+                    let m0 = 1u64 << b0;
+                    let m1 = 1u64 << b1;
+                    if cross_word_qubits[w0] & m0 != 0 || cross_word_qubits[w1] & m1 != 0 {
+                        target
+                            .batch_rows()
+                            .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                        cross_word_qubits.fill(0);
+                    }
+                    let kind = match gate {
+                        Gate::Cx => BatchGate::CX,
+                        Gate::Cz => BatchGate::CZ,
+                        _ => BatchGate::SWAP,
+                    };
+                    cross_word.push(CrossWordGate {
+                        kind,
+                        w0: w0 as u16,
+                        w1: w1 as u16,
+                        b0,
+                        b1,
+                    });
+                    cross_word_qubits[w0] |= m0;
+                    cross_word_qubits[w1] |= m1;
+                } else {
+                    target
+                        .batch_rows()
+                        .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
                     cross_word_qubits.fill(0);
+                    target.apply_one(gate, targets)?;
                 }
             }
+            _ => {
+                target
+                    .batch_rows()
+                    .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                cross_word_qubits.fill(0);
+            }
         }
-
-        self.flush_all_with_cross_word(&mut word_groups, &mut cross_word);
-        Ok(())
     }
+
+    target
+        .batch_rows()
+        .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+    Ok(())
 }
 
 #[cfg(test)]

@@ -907,3 +907,35 @@ fn pauli_expectations_follow_a_measurement_split() {
     };
     assert_eq!(got, vec![sign, sign, sign, sign, 0.0]);
 }
+
+// The bulk path groups gates into runs and hands each run to the word batcher,
+// where the per-instruction path applies one gate at a time. A brick layer that
+// places every CX collapses the register to one cluster, which is the only
+// shape wide enough for the batcher to engage.
+#[test]
+fn bulk_gate_runs_match_the_per_instruction_path() {
+    use crate::backend::Backend;
+
+    let n = 300;
+    let mut circuit = crate::circuits::clifford_heavy_circuit(n, 6, 42);
+    circuit.num_classical_bits = n;
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+
+    let mut stepwise = FactoredStabilizerBackend::new(42);
+    stepwise.init(n, n).unwrap();
+    for instruction in &circuit.instructions {
+        stepwise.apply(instruction).unwrap();
+    }
+
+    let mut bulk = FactoredStabilizerBackend::new(42);
+    bulk.init(n, n).unwrap();
+    bulk.apply_instructions(&circuit.instructions).unwrap();
+
+    assert_eq!(
+        stepwise.classical_results(),
+        bulk.classical_results(),
+        "bulk gate runs disagree with the per-instruction path"
+    );
+}

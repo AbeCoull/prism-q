@@ -31,7 +31,8 @@ For the CPU and GPU architectures each backend supports, see the
 ## Documentation
 
 Full documentation is published at <https://abecoull.github.io/prism-q/>. The generated
-API reference is on [docs.rs](https://docs.rs/prism-q).
+API reference is on [docs.rs](https://docs.rs/prism-q). A machine-readable index of the
+documentation site is at <https://abecoull.github.io/prism-q/llms.txt>.
 
 ## Installation
 

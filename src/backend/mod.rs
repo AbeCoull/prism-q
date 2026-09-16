@@ -27,11 +27,11 @@
 //! | `apply_1q_matrix` | Stabilizer, FactoredStabilizer | A tableau stores a state by its stabilizer group, closed under Clifford conjugation. A general 2x2 has no image in that group, and a Kraus branch is not even unitary. |
 //! | `reduced_density_matrix_1q` | Stabilizer, FactoredStabilizer | Derivable from a tableau, but the operator it feeds cannot be applied (row above), so the branch would be sampled and never used. |
 //! | `reduced_density_matrix_1q` | DistributedStatevector | Trajectories run shots on Rayon workers whose order differs per rank, so per-shot noise would issue rank collectives out of lockstep. `run_shots_with_noise` rejects the backend for that reason, which closes the only path here. |
-//! | `reduced_density_matrix_2q` | Everything except Statevector | Feeds the branch weights of a correlated two-qubit Kraus channel, which needs the joint state of the pair. A tableau, a product state, and a factored register hold no joint amplitude for an arbitrary pair; MPS and sparse could answer but do not yet. `Backend::supports_two_qubit_kraus` reports the coverage, and `run_shots_with_noise` rejects on it before allocating state. |
+//! | `reduced_density_matrix_2q` | TensorNetwork, DistributedStatevector | Feeds the branch weights of a correlated two-qubit Kraus channel, which needs the joint state of the pair. The default reads it out of `Backend::reduced_density_matrix`, so the decline follows that one. Answering is necessary and not sufficient: the branch operator is a general 2x2 block on the pair, so `Backend::supports_two_qubit_kraus` also requires a `Gate::Fused2q` kernel, which is what holds the two tableau backends and the product state out. `run_shots_with_noise` rejects on that query before allocating state. |
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
 //! | `init_from_amplitudes` | Everything except Statevector, DistributedStatevector, and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. The distributed statevector takes the full vector on every rank and keeps its own slice. |
-//! | `reduced_density_matrix` | Mps, TensorNetwork, DistributedStatevector | Each holds the state in a form a partial trace has to be contracted out of, an environment sweep for the chain, a doubled network, or a slice exchange across rank qubits, and none of those kernels exists yet. |
+//! | `reduced_density_matrix` | TensorNetwork, DistributedStatevector | Each holds the state in a form a partial trace has to be contracted out of, a doubled network or a slice exchange across rank qubits, and neither kernel exists yet. The chain sweeps its own environment for it, at a cost set by the span the named qubits occupy rather than by how many there are. |
 //! | `schmidt_values` | Everything except Statevector, Mps, ProductState, Stabilizer, and FactoredStabilizer | A mixture has no Schmidt decomposition. Sparse, factored, tensor-network and distributed states could answer through a reduced density matrix but do not yet, and `entanglement_entropy` follows wherever its default reads the spectrum. A stabilizer cut's spectrum is flat, so the two tableau backends build it from a rank and decline only past the dense export cap, where the `2^r` equal values no longer fit while the rank behind them still does. |
 //! | `overlap_sq` | DensityMatrix | The fidelity of two mixtures is not an inner product, and the dense route the default takes needs a statevector a mixture has none of. |
 //!
@@ -611,11 +611,19 @@ pub trait Backend {
     /// Implementations index the two qubits as distinct bit positions, so
     /// `q0 == q1` panics rather than returning a block read from overlapping
     /// amplitudes.
-    fn reduced_density_matrix_2q(&self, _q0: usize, _q1: usize) -> Result<[[Complex64; 4]; 4]> {
-        Err(crate::error::PrismError::BackendUnsupported {
-            backend: self.name().to_string(),
-            operation: "reduced_density_matrix_2q".to_string(),
-        })
+    /// The default reads the pair out of [`Backend::reduced_density_matrix`],
+    /// so a representation with a partial trace answers without writing a
+    /// second kernel, and one without it declines here as it does there.
+    fn reduced_density_matrix_2q(&mut self, q0: usize, q1: usize) -> Result<[[Complex64; 4]; 4]> {
+        assert_ne!(q0, q1, "reduced_density_matrix_2q needs distinct qubits");
+        let rho = self.reduced_density_matrix(&[q1, q0])?;
+        let mut out = [[Complex64::new(0.0, 0.0); 4]; 4];
+        for (t, row) in out.iter_mut().enumerate() {
+            for (tp, entry) in row.iter_mut().enumerate() {
+                *entry = rho[t * 4 + tp];
+            }
+        }
+        Ok(out)
     }
 
     /// Reset a qubit to |0⟩, discarding any prior amplitude on that qubit.

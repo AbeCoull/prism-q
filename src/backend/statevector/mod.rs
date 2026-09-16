@@ -929,7 +929,7 @@ impl Backend for StatevectorBackend {
         true
     }
 
-    fn reduced_density_matrix_2q(&self, q0: usize, q1: usize) -> Result<[[Complex64; 4]; 4]> {
+    fn reduced_density_matrix_2q(&mut self, q0: usize, q1: usize) -> Result<[[Complex64; 4]; 4]> {
         assert_ne!(q0, q1, "reduced_density_matrix_2q needs distinct qubits");
         #[cfg(feature = "gpu")]
         if self.gpu_state.is_some() {

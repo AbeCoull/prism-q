@@ -3487,10 +3487,12 @@ pub(crate) fn run_shots_with_noise(
     if noise_model.has_two_qubit_kraus() && !plan.build(seed).supports_two_qubit_kraus() {
         return Err(crate::error::PrismError::IncompatibleBackend {
             backend: format!("{:?}", plan.resolved()),
-            reason: "a two-qubit Kraus channel needs the two-qubit reduced density matrix \
-                     its branch probabilities are drawn from, which only the host \
-                     statevector provides; run on BackendKind::Statevector, or evaluate \
-                     the channel exactly on BackendKind::DensityMatrix"
+            reason: "a two-qubit Kraus channel needs the pair's reduced density matrix \
+                     its branch probabilities are drawn from, and a kernel for the branch \
+                     operator, which is not unitary. A tableau and a product state have no \
+                     such kernel, and a tensor network traces out no arbitrary pair; run on \
+                     a statevector, sparse, factored or MPS route, or evaluate the channel \
+                     exactly on BackendKind::DensityMatrix"
                 .into(),
         });
     }

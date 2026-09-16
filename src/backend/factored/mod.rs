@@ -737,6 +737,10 @@ impl Backend for FactoredBackend {
         ])
     }
 
+    fn supports_two_qubit_kraus(&self) -> bool {
+        true
+    }
+
     /// Blocks are exactly unentangled, so the answer is the product of one
     /// partial trace per block that meets `subsystem`, each over
     /// `2^(n_b + k_b)` amplitudes, multiplied in through the bits of the row

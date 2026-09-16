@@ -77,6 +77,7 @@ use crate::circuit::Instruction;
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::error::Result;
 use crate::gates::Gate;
+use crate::sim::unified_pauli::PauliTerm;
 
 #[cfg(feature = "gpu")]
 use crate::gpu::{GpuContext, GpuState};
@@ -938,6 +939,36 @@ impl Backend for StatevectorBackend {
             });
         }
         Ok(self.reduced_density_matrix_two(q0, q1))
+    }
+
+    fn supports_pauli_expectation(&self) -> bool {
+        true
+    }
+
+    /// One pass over the amplitudes per observable group, in place.
+    ///
+    /// The result divides by the norm, so `pending_norm` needs no application:
+    /// it scales bra and ket alike. A device-resident state is read back first,
+    /// which is the transfer a device kernel would remove.
+    fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        let masks = observables
+            .iter()
+            .map(|observable| crate::sim::pauli_masks(observable, self.num_qubits))
+            .collect::<Result<Vec<_>>>()?;
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = self.gpu_state.as_ref() {
+            let state = gpu.export_statevector()?;
+            let norm = crate::backend::state_norm_sqr(&state);
+            return Ok(crate::sim::pauli_expectations_from_masks(
+                &state, &masks, norm,
+            ));
+        }
+        let norm = crate::backend::state_norm_sqr(&self.state);
+        Ok(crate::sim::pauli_expectations_from_masks(
+            &self.state,
+            &masks,
+            norm,
+        ))
     }
 
     fn schmidt_values(&mut self, subsystem: &[usize]) -> Result<Vec<f64>> {

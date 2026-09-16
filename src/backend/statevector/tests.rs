@@ -1890,3 +1890,80 @@ fn diagonal_mixed_batches_avoid_the_per_amplitude_fallback() {
         assert_eq!(fallbacks, 0, "diag_mixed_l6/{n} fell back to per-amplitude");
     }
 }
+
+// A measurement leaves the amplitudes scaled by `pending_norm`, which
+// `pauli_expectations` never applies. The ratio it returns has to be the same
+// one the normalized export gives.
+#[test]
+fn pauli_expectations_ignore_the_deferred_measurement_norm() {
+    use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+
+    let mut backend = StatevectorBackend::new(7);
+    backend.init(3, 1).unwrap();
+    backend
+        .apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: [0].into_iter().collect(),
+        })
+        .unwrap();
+    backend
+        .apply(&Instruction::Gate {
+            gate: Gate::Cx,
+            targets: [0, 1].into_iter().collect(),
+        })
+        .unwrap();
+    backend
+        .apply(&Instruction::Gate {
+            gate: Gate::H,
+            targets: [2].into_iter().collect(),
+        })
+        .unwrap();
+    backend
+        .apply(&Instruction::Measure {
+            qubit: 0,
+            classical_bit: 0,
+        })
+        .unwrap();
+    assert_ne!(
+        backend.pending_norm, 1.0,
+        "fixture must leave a deferred norm"
+    );
+
+    let observables = vec![
+        vec![PauliTerm::new(0, PauliAxis::Z)],
+        vec![PauliTerm::new(1, PauliAxis::Z)],
+        vec![PauliTerm::new(2, PauliAxis::X)],
+        vec![
+            PauliTerm::new(0, PauliAxis::Z),
+            PauliTerm::new(1, PauliAxis::Z),
+        ],
+    ];
+    let got = backend.pauli_expectations(&observables).unwrap();
+
+    let normalized = backend.export_statevector().unwrap();
+    let norm = crate::backend::state_norm_sqr(&normalized);
+    let masks = observables
+        .iter()
+        .map(|o| crate::sim::pauli_masks(o, 3).unwrap())
+        .collect::<Vec<_>>();
+    let want = crate::sim::pauli_expectations_from_masks(&normalized, &masks, norm);
+
+    for (index, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!(
+            (g - w).abs() < 1e-12,
+            "observable {index}: got {g}, want {w}"
+        );
+    }
+    let outcome = if backend.classical_results()[0] {
+        -1.0
+    } else {
+        1.0
+    };
+    assert!((got[0] - outcome).abs() < 1e-12, "Z0 must be the outcome");
+    assert!(
+        (got[1] - outcome).abs() < 1e-12,
+        "Z1 follows Z0 on a Bell pair"
+    );
+    assert!((got[2] - 1.0).abs() < 1e-12, "X2 on |+> reads 1");
+    assert!((got[3] - 1.0).abs() < 1e-12, "Z0 Z1 is +1 either way");
+}

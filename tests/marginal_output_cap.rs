@@ -48,6 +48,31 @@ fn direct_route_marginals_answer_past_the_dense_cap() {
         &want,
         "mps",
     );
+    // The dense backend answers from its own amplitudes too, so the cap it
+    // would hit building a distribution never applies.
+    assert_marginals(BackendKind::Statevector, &circuit, &want, "statevector");
+}
+
+// GHZ gives every qubit the same even marginal, so a route that returned 0.5
+// everywhere would pass the case above. Tilting the first rotation makes the
+// state `cos(t/2)|0..0> + sin(t/2)|1..1>`, where every marginal is uneven and
+// known in closed form, and the CX chain keeps the register one component so
+// the route still resolves onto a single backend.
+#[test]
+fn statevector_marginals_are_uneven_past_the_dense_cap() {
+    small_prob_cap();
+    const THETA: f64 = 0.7;
+
+    let mut circuit = Circuit::new(N, 0);
+    circuit.add_gate(Gate::Ry(THETA), &[0]);
+    for q in 0..N - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+
+    let p0 = (THETA / 2.0).cos().powi(2);
+    let want = vec![(p0, 1.0 - p0); N];
+    assert!((p0 - 0.5).abs() > 1e-3, "fixture has only even marginals");
+    assert_marginals(BackendKind::Statevector, &circuit, &want, "statevector");
 }
 
 // No entangling gate, so the route is subsystem decomposition, whose merge

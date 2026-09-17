@@ -2412,6 +2412,20 @@ fn run_marginals_result_with(
         return marginals_from_pauli_expectations(&backend, n);
     }
 
+    // A marginal is a `Z_q` expectation, so a unitary circuit under the cap
+    // gets the same bounded tensor dry run the expectation terminal takes.
+    if kind.is_auto() && n <= max_statevector_qubits() && !has_nonunitary_or_classical_ops(circuit)
+    {
+        let observables: Vec<Vec<PauliTerm>> = (0..n).map(|q| vec![PauliTerm::z(q)]).collect();
+        if let Some(result) = tensor_route_expectations(circuit, &observables) {
+            let result = result?;
+            return Ok(MarginalsResult {
+                marginals: expectations_to_marginals(&result.values),
+                metadata: result.metadata,
+            });
+        }
+    }
+
     if let Some(backend) = try_native_marginal_backend(&kind, circuit, seed)? {
         return marginals_from_pauli_expectations(&*backend, n);
     }
@@ -2521,6 +2535,9 @@ fn run_expectation_values_reported(
             } else if kind.is_auto() {
                 if circuit.num_qubits > max_statevector_qubits() {
                     return expectation_values_native(&kind, circuit, observables, seed);
+                }
+                if let Some(result) = tensor_route_expectations(circuit, observables) {
+                    return result;
                 }
                 expectation_values_statevector(&kind, circuit, observables, seed)
             } else {
@@ -2951,6 +2968,38 @@ fn diagnostic_backend(
     check_diagnostic_width(&*backend, diagnostic, subsystem_len)?;
     execute(&mut *backend, circuit, &SimOptions::classical_only())?;
     Ok(backend)
+}
+
+/// Width from which an `Auto` expectation terminal tries the scalar tensor
+/// path first. Below it the statevector run takes a few milliseconds and the
+/// bounded dry run that decides the route would cost as much as the run.
+const TENSOR_ROUTE_MIN_QUBITS: usize = 18;
+
+/// The scalar tensor route for an `Auto` expectation terminal under the
+/// statevector cap: `None` below [`TENSOR_ROUTE_MIN_QUBITS`], on a circuit the
+/// scalar network cannot hold, or when any observable's bounded greedy plan
+/// crosses the peak bound, so the caller takes its dense route. Observables
+/// are validated first, so a bad one errors before any dry run.
+fn tensor_route_expectations(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+) -> Option<Result<ExpectationResult>> {
+    if circuit.num_qubits < TENSOR_ROUTE_MIN_QUBITS || observables.is_empty() {
+        return None;
+    }
+    for observable in observables {
+        if let Err(e) = validate_observable(observable, circuit.num_qubits) {
+            return Some(Err(e));
+        }
+    }
+    let values = crate::backend::tensornetwork::bounded_expectations_zero_state(
+        circuit,
+        observables,
+        crate::backend::tensornetwork::AUTO_EXPECTATION_PEAK_BOUND,
+    )?;
+    Some(values.map(|values| {
+        analytic_expectations(values, RunMetadata::exact(ResolvedBackend::TensorNetwork))
+    }))
 }
 
 /// Evaluate `observables` on the backend `kind` resolves to, using that

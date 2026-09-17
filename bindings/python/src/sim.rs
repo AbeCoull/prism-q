@@ -288,6 +288,54 @@ impl PySimulation {
         Ok((result.value, f64_array(py, result.gradient)))
     }
 
+    /// Same gradient by the parameter-shift rule: two extra circuit runs per
+    /// parameter instead of one backward sweep, and the only route for a
+    /// backend with no adjoint pass. Takes the [`expectation_gradient`]
+    /// argument shape and returns the same pair.
+    #[pyo3(signature = (hamiltonian, parameters))]
+    fn expectation_gradient_shift<'py>(
+        &self,
+        py: Python<'py>,
+        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        parameters: Vec<(usize, usize)>,
+    ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
+        if self.noise.is_some() {
+            return Err(invalid(
+                "expectation_gradient_shift() does not support noise",
+            ));
+        }
+        let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
+        for (coeff, factors) in hamiltonian {
+            terms.push((coeff, parse_pauli_string(factors)?));
+        }
+        let links: Vec<ParamLink> = parameters
+            .into_iter()
+            .map(|(instruction, slot)| ParamLink { instruction, slot })
+            .collect();
+        let num_slots = links.iter().map(|l| l.slot + 1).max().unwrap_or(0);
+        let params = Parameters::from_links(links, num_slots);
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
+        let circuit = &self.circuit;
+        let start = self.initial_state.as_deref();
+        let result = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            // Carried so the core rejects it rather than ignoring it here.
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).expectation_gradient_shift(&terms, &params)
+        })?;
+        Ok((result.value, f64_array(py, result.gradient)))
+    }
+
     /// Compute `⟨ψ|P|ψ⟩` for each joint Pauli observable on the circuit's
     /// output state, honoring the selected backend.
     ///
@@ -490,6 +538,98 @@ impl PySimulation {
             variance: result.variance,
             mean: result.mean,
             metadata: PyRunMetadata::new(result.metadata),
+        })
+    }
+
+    /// The [`expectation_values`] terminal with the provenance of the run that
+    /// served it. Worth calling over the bare list when the route matters:
+    /// under `BackendKind.auto()` a wide shallow circuit can be answered by a
+    /// tensor contraction rather than by the state vector, and only the
+    /// metadata says which ran.
+    #[pyo3(signature = (observables))]
+    fn expectation_values_reported(
+        &self,
+        py: Python<'_>,
+        observables: Vec<Vec<(usize, String)>>,
+    ) -> PyPrismResult<PyExpectationResult> {
+        let observables = parse_observables(observables)?;
+        let seed = self.seed.unwrap_or(DEFAULT_SEED);
+        let kind = self.kind.clone();
+        let require_exact = self.require_exact;
+        let circuit = &self.circuit;
+        let owned_noise = self.owned_noise(py);
+        let start = self.initial_state.as_deref();
+        let result = py.detach(|| {
+            let mut sim = core_simulate(circuit);
+            if require_exact {
+                sim = sim.require_exact();
+            }
+            if let Some(k) = &kind {
+                sim = sim.backend(k.clone());
+            }
+            if let Some(nm) = &owned_noise {
+                sim = sim.noise(nm);
+            }
+            if let Some(amplitudes) = start {
+                sim = sim.initial_state(amplitudes);
+            }
+            sim.seed(seed).expectation_values_reported(&observables)
+        })?;
+        Ok(PyExpectationResult {
+            values: result.values,
+            metadata: PyRunMetadata::new(result.metadata),
+        })
+    }
+
+    /// `|<a|b>|^2` between this circuit's output state and `other`'s.
+    ///
+    /// Both circuits must declare the same width and both must be unitary.
+    /// Each side keeps its own backend, seed and start state, so the result
+    /// carries one provenance per side. Two states in the same representation
+    /// contract natively at any width; a mismatched pair is served by a dense
+    /// export of both, so it reaches only as far as the export cap. A noise
+    /// model on either side is rejected, since the fidelity of two mixtures is
+    /// not an inner product.
+    #[pyo3(signature = (other))]
+    fn overlap(&self, py: Python<'_>, other: &PySimulation) -> PyPrismResult<PyOverlapResult> {
+        let left_noise = self.owned_noise(py);
+        let right_noise = other.owned_noise(py);
+        let result = py.detach(|| {
+            let mut left = core_simulate(&self.circuit);
+            if self.require_exact {
+                left = left.require_exact();
+            }
+            if let Some(k) = &self.kind {
+                left = left.backend(k.clone());
+            }
+            if let Some(nm) = &left_noise {
+                left = left.noise(nm);
+            }
+            if let Some(amplitudes) = self.initial_state.as_deref() {
+                left = left.initial_state(amplitudes);
+            }
+
+            let mut right = core_simulate(&other.circuit);
+            if other.require_exact {
+                right = right.require_exact();
+            }
+            if let Some(k) = &other.kind {
+                right = right.backend(k.clone());
+            }
+            if let Some(nm) = &right_noise {
+                right = right.noise(nm);
+            }
+            if let Some(amplitudes) = other.initial_state.as_deref() {
+                right = right.initial_state(amplitudes);
+            }
+
+            left.seed(self.seed.unwrap_or(DEFAULT_SEED))
+                .overlap(right.seed(other.seed.unwrap_or(DEFAULT_SEED)))
+        })?;
+        Ok(PyOverlapResult {
+            fidelity: result.fidelity,
+            left: PyRunMetadata::new(result.left),
+            right: PyRunMetadata::new(result.right),
         })
     }
 
@@ -813,6 +953,66 @@ impl PyReducedDensityMatrix {
             "ReducedDensityMatrix(qubits={:?}, purity={:.6})",
             self.qubits, self.purity
         )
+    }
+}
+
+/// Expectation values with the provenance of the run that produced them.
+#[pyclass(name = "ExpectationResult", module = "prism_q")]
+pub struct PyExpectationResult {
+    values: Vec<f64>,
+    metadata: PyRunMetadata,
+}
+
+#[pymethods]
+impl PyExpectationResult {
+    /// One value per observable, in the order they were passed.
+    #[getter]
+    fn values<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f64>> {
+        f64_array(py, self.values.clone())
+    }
+
+    #[getter]
+    fn metadata(&self) -> PyRunMetadata {
+        self.metadata.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("ExpectationResult(values={} terms)", self.values.len())
+    }
+}
+
+/// Squared overlap of two output states, with one provenance per side.
+#[pyclass(name = "OverlapResult", module = "prism_q")]
+pub struct PyOverlapResult {
+    fidelity: f64,
+    left: PyRunMetadata,
+    right: PyRunMetadata,
+}
+
+#[pymethods]
+impl PyOverlapResult {
+    /// `|<a|b>|^2` over the two normalized states: 1 for the same state up to
+    /// phase, 0 for orthogonal ones. The amplitude itself is not reported,
+    /// since a tableau keeps no global phase and every truncation moves one.
+    #[getter]
+    fn fidelity(&self) -> f64 {
+        self.fidelity
+    }
+
+    /// Provenance of the run the terminal was called on.
+    #[getter]
+    fn left(&self) -> PyRunMetadata {
+        self.left.clone()
+    }
+
+    /// Provenance of the run passed as the argument.
+    #[getter]
+    fn right(&self) -> PyRunMetadata {
+        self.right.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("OverlapResult(fidelity={:.6})", self.fidelity)
     }
 }
 

@@ -71,3 +71,18 @@ def test_invalid_axis_is_rejected():
         assert False, "expected an error for invalid axis"
     except Exception:
         pass
+
+def test_parameter_shift_matches_the_adjoint_gradient():
+    builder = CircuitBuilder(2)
+    builder.h(0).rz(0.9, 0).param(0).cx(0, 1).ry(0.4, 1).param(1)
+    circuit = builder.build()
+    links = builder.parameter_links()
+
+    hamiltonian = [(1.0, [(0, "Z"), (1, "Z")]), (0.5, [(1, "X")])]
+    value, grad = simulate(circuit).seed(42).expectation_gradient(hamiltonian, links)
+    shift_value, shift_grad = (
+        simulate(circuit).seed(42).expectation_gradient_shift(hamiltonian, links)
+    )
+
+    assert math.isclose(value, shift_value, abs_tol=1e-9)
+    assert np.allclose(grad, shift_grad, atol=1e-9)

@@ -8,6 +8,7 @@ use crate::backend::statevector::StatevectorBackend;
 use crate::backend::tensornetwork::TensorNetworkBackend;
 use crate::circuit::smallvec;
 use crate::gates::Gate;
+use crate::sim::unified_pauli::SpdTruncation;
 
 fn make_clifford_circuit() -> Circuit {
     let mut c = Circuit::new(3, 0);
@@ -192,8 +193,10 @@ fn pauli_marginal_errors(circuit: &Circuit) -> Vec<PrismError> {
     [
         BackendKind::StochasticPauli { num_samples: 100 },
         BackendKind::DeterministicPauli {
-            epsilon: 0.0,
-            max_terms: 0,
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
         },
     ]
     .into_iter()
@@ -1644,8 +1647,10 @@ fn test_pauli_backends_reject_mid_circuit_measurements() {
     assert!(matches!(
         run_shots_with(
             BackendKind::DeterministicPauli {
-                epsilon: 1e-3,
-                max_terms: 1000
+                truncation: SpdTruncation::Threshold {
+                    epsilon: 1e-3,
+                    max_terms: 1000
+                }
             },
             &circuit,
             10,
@@ -1673,8 +1678,10 @@ fn test_pauli_backends_reject_generic_run() {
     assert!(matches!(
         simulate(&c)
             .backend(BackendKind::DeterministicPauli {
-                epsilon: 0.0,
-                max_terms: 0
+                truncation: SpdTruncation::Threshold {
+                    epsilon: 0.0,
+                    max_terms: 0
+                }
             })
             .seed(42)
             .run()
@@ -1694,8 +1701,10 @@ fn test_pauli_backends_return_marginals_through_builder() {
         .unwrap();
     let spd = simulate(&c)
         .backend(BackendKind::DeterministicPauli {
-            epsilon: 0.0,
-            max_terms: 0,
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
         })
         .seed(42)
         .marginals()
@@ -1732,8 +1741,10 @@ fn test_pauli_marginals_reject_gates_outside_the_rotation_family() {
     assert_eq!(
         simulate(&supported)
             .backend(BackendKind::DeterministicPauli {
-                epsilon: 0.0,
-                max_terms: 0,
+                truncation: SpdTruncation::Threshold {
+                    epsilon: 0.0,
+                    max_terms: 0
+                }
             })
             .seed(42)
             .marginals()
@@ -1802,8 +1813,10 @@ fn test_noise_rejects_pauli_backends() {
     assert!(matches!(
         run_shots_with_noise(
             BackendKind::DeterministicPauli {
-                epsilon: 1e-3,
-                max_terms: 1000
+                truncation: SpdTruncation::Threshold {
+                    epsilon: 1e-3,
+                    max_terms: 1000
+                }
             },
             &circuit,
             &nm,

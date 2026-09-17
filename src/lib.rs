@@ -119,9 +119,9 @@ pub use sim::stabilizer_rank::{
     stabilizer_overlap_sq,
 };
 pub use sim::unified_pauli::{
-    PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SppObservableResult, SppResult,
-    inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_budgeted,
-    run_spd_observable_light_cone, run_spp, run_spp_observable,
+    PauliAxis, PauliTerm, SpdObservableResult, SpdResult, SpdTruncation, SppObservableResult,
+    SppResult, inverse_light_cone, run_spd, run_spd_observable, run_spd_observable_budgeted,
+    run_spd_observable_light_cone, run_spd_with, run_spp, run_spp_observable,
 };
 pub use sim::{
     BackendKind, CountsResult, Engine, EntropyResult, Exactness, ExpectationResult, FactoredBlock,

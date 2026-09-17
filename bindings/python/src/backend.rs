@@ -5,7 +5,7 @@
 //! Nothing here owns `MPI_Init`: the distributed context attaches to an MPI
 //! mpi4py already started.
 
-use prism_q::BackendKind;
+use prism_q::{BackendKind, SpdTruncation};
 use pyo3::prelude::*;
 
 use crate::distributed::PyDistributedContext;
@@ -78,7 +78,22 @@ impl PyBackendKind {
     #[staticmethod]
     #[pyo3(signature = (epsilon = 0.0, max_terms = 65536))]
     fn deterministic_pauli(epsilon: f64, max_terms: usize) -> Self {
-        Self(BackendKind::DeterministicPauli { epsilon, max_terms })
+        Self(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Threshold { epsilon, max_terms },
+        })
+    }
+
+    /// Deterministic sparse Pauli dynamics holding a fixed term count: the
+    /// smallest-magnitude surplus terms are dropped whenever the weighted sum
+    /// passes `max_terms`. No threshold to guess, and growth the budget caps
+    /// cannot reach the engine's internal ceiling, which is where
+    /// `deterministic_pauli()` dies when its epsilon prunes nothing.
+    #[staticmethod]
+    #[pyo3(signature = (max_terms = 65536))]
+    fn deterministic_pauli_budget(max_terms: usize) -> Self {
+        Self(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Budget { max_terms },
+        })
     }
 
     /// Structure-driven dispatch with the supplied device opted in. Blocks that

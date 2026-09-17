@@ -16,6 +16,7 @@ use crate::backend::{
 };
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
+use crate::sim::unified_pauli::SpdTruncation;
 
 #[cfg(any(feature = "gpu", feature = "distributed"))]
 use std::sync::Arc;
@@ -126,11 +127,11 @@ pub enum BackendKind {
         num_samples: usize,
     },
     /// Deterministic sparse Pauli dynamics (SPD); serves marginal and
-    /// observable queries only. Terms below `epsilon` are dropped once the
-    /// weighted sum exceeds `max_terms` (0 disables truncation).
+    /// observable queries only. [`SpdTruncation`] picks between the threshold
+    /// policy and the budget one, which holds a fixed term count and so cannot
+    /// die at the internal ceiling on growth the budget already caps.
     DeterministicPauli {
-        epsilon: f64,
-        max_terms: usize,
+        truncation: SpdTruncation,
     },
     /// Heisenberg Pauli propagation through a noise model; serves expectation
     /// values and observable expectations only.
@@ -701,7 +702,7 @@ pub(super) enum ExecutionPlan {
     Backend(BackendPlan),
     StabilizerRank,
     StochasticPauli { num_samples: usize },
-    DeterministicPauli { epsilon: f64, max_terms: usize },
+    DeterministicPauli { truncation: SpdTruncation },
     PauliPath,
 }
 
@@ -735,12 +736,15 @@ pub(super) fn approximate_route_name(
             return Some("Mps");
         }
         BackendKind::StochasticPauli { .. } => return Some("StochasticPauli"),
-        BackendKind::DeterministicPauli { epsilon, max_terms } => {
-            if *epsilon > 0.0 || *max_terms > 0 {
-                return Some("DeterministicPauli");
+        BackendKind::DeterministicPauli { truncation } => match *truncation {
+            SpdTruncation::Threshold { epsilon, max_terms } => {
+                if epsilon > 0.0 || max_terms > 0 {
+                    return Some("DeterministicPauli");
+                }
+                return None;
             }
-            return None;
-        }
+            _ => return Some("DeterministicPauli"),
+        },
         BackendKind::PauliPath { epsilon, max_terms } => {
             if *epsilon > 0.0 || *max_terms > 0 {
                 return Some("PauliPath");
@@ -829,10 +833,9 @@ pub(super) fn resolve(
             };
         }
         BackendKind::PauliPath { .. } => return ExecutionPlan::PauliPath,
-        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+        BackendKind::DeterministicPauli { truncation } => {
             return ExecutionPlan::DeterministicPauli {
-                epsilon: *epsilon,
-                max_terms: *max_terms,
+                truncation: *truncation,
             };
         }
         #[cfg(feature = "gpu")]
@@ -1526,15 +1529,19 @@ mod dispatch_matrix_tests {
         assert!(matches!(
             resolve(
                 &BackendKind::DeterministicPauli {
-                    epsilon: 0.5,
-                    max_terms: 3
+                    truncation: SpdTruncation::Threshold {
+                        epsilon: 0.5,
+                        max_terms: 3
+                    }
                 },
                 &circuit,
                 false
             ),
             ExecutionPlan::DeterministicPauli {
-                epsilon: e,
-                max_terms: 3
+                truncation: SpdTruncation::Threshold {
+                    epsilon: e,
+                    max_terms: 3
+                }
             } if e == 0.5
         ));
     }

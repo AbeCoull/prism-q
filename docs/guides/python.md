@@ -284,6 +284,7 @@ Pass an explicit one to override it.
 | `density_matrix()` | Exact mixed states, never chosen by `auto()` |
 | `stochastic_pauli(num_samples=1000)` | Sampled Pauli propagation |
 | `deterministic_pauli(epsilon=0.0, max_terms=65536)` | Truncated Pauli propagation |
+| `deterministic_pauli_budget(max_terms=65536)` | Pauli propagation holding a fixed term count |
 | `auto_gpu(context)`, `statevector_gpu(context)`, `stabilizer_gpu(context)`, `density_matrix_gpu(context)` | CUDA device paths, see [GPU backends](#gpu-backends) |
 
 The density-matrix backend stores `4^n` amplitudes, so its qubit ceiling is

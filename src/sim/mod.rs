@@ -60,7 +60,7 @@ use terminal_sampling::{
     sample_counts_from_probs, sample_counts_from_state, sample_shots_from_probs,
     sample_shots_from_state,
 };
-use unified_pauli::PauliTerm;
+use unified_pauli::{PauliTerm, SpdTruncation};
 
 type TerminalStatevector = (StatevectorBackend, Vec<(usize, usize)>);
 
@@ -1726,11 +1726,11 @@ fn run_direct(
                     reason: "StochasticPauli produces marginal estimates only; use `simulate(...).marginals()`".into(),
                 })
             }
-            ExecutionPlan::DeterministicPauli { epsilon, max_terms } => {
+            ExecutionPlan::DeterministicPauli { truncation } => {
                 Err(crate::error::PrismError::IncompatibleBackend {
                     backend: format!(
                         "{:?}",
-                        BackendKind::DeterministicPauli { epsilon, max_terms }
+                        BackendKind::DeterministicPauli { truncation }
                     ),
                     reason: "DeterministicPauli produces marginals only; use `simulate(...).marginals()`".into(),
                 })
@@ -2307,17 +2307,19 @@ fn marginals_from_pauli_expectations(
     })
 }
 
-/// Route-level exactness per the [`Exactness`] convention: only `epsilon > 0`
-/// can discard terms, so it marks the route approximate even on a run that
-/// discarded nothing; `epsilon == 0` overflows into an error instead of an
-/// approximation and stays exact. The realized bound is a coefficient
-/// magnitude rather than a state overlap, so it stays `total_discarded` on
-/// the engine result and never a fidelity bound.
-fn spd_metadata(epsilon: f64) -> RunMetadata {
-    if epsilon > 0.0 {
-        RunMetadata::approximate(ResolvedBackend::DeterministicPauli)
-    } else {
+/// Route-level exactness per the [`Exactness`] convention: a policy that can
+/// discard marks the route approximate even on a run that discarded nothing.
+/// Only a zero-threshold policy stays exact, since it overflows into an error
+/// instead of an approximation; a budget always drops once the sum passes it.
+/// The realized bound is a coefficient magnitude rather than a state overlap,
+/// so it stays `total_discarded` on the engine result and never a fidelity
+/// bound.
+fn spd_metadata(truncation: &SpdTruncation) -> RunMetadata {
+    let exact = matches!(*truncation, SpdTruncation::Threshold { epsilon, .. } if epsilon <= 0.0);
+    if exact {
         RunMetadata::exact(ResolvedBackend::DeterministicPauli)
+    } else {
+        RunMetadata::approximate(ResolvedBackend::DeterministicPauli)
     }
 }
 
@@ -2376,12 +2378,12 @@ fn run_marginals_result_with(
                     .with_shots(*num_samples),
             });
         }
-        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+        BackendKind::DeterministicPauli { truncation } => {
             validate_pauli_marginal_backend(&kind, circuit)?;
-            let spd = unified_pauli::run_spd(circuit, *epsilon, *max_terms)?;
+            let spd = unified_pauli::run_spd_with(circuit, truncation)?;
             return Ok(MarginalsResult {
                 marginals: expectations_to_marginals(&spd.expectations),
-                metadata: spd_metadata(*epsilon),
+                metadata: spd_metadata(truncation),
             });
         }
         _ => {}
@@ -2395,7 +2397,10 @@ fn run_marginals_result_with(
         let spd = unified_pauli::run_spd(circuit, 0.0, AUTO_SPD_MAX_TERMS)?;
         return Ok(MarginalsResult {
             marginals: expectations_to_marginals(&spd.expectations),
-            metadata: spd_metadata(0.0),
+            metadata: spd_metadata(&SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: AUTO_SPD_MAX_TERMS,
+            }),
         });
     }
 
@@ -2516,13 +2521,13 @@ fn run_expectation_values_reported(
                     .with_shots(*num_samples),
             })
         }
-        BackendKind::DeterministicPauli { epsilon, max_terms } => {
+        BackendKind::DeterministicPauli { truncation } => {
             let mut values = Vec::with_capacity(observables.len());
             for obs in observables {
-                let r = unified_pauli::run_spd_observable(circuit, obs, *epsilon, *max_terms)?;
+                let r = unified_pauli::run_spd_observable_with(circuit, obs, truncation)?;
                 values.push(r.mean);
             }
-            Ok(analytic_expectations(values, spd_metadata(*epsilon)))
+            Ok(analytic_expectations(values, spd_metadata(truncation)))
         }
         _ if kind.is_auto() || kind.is_stabilizer_family() => {
             if circuit.is_clifford_only() {
@@ -2531,7 +2536,13 @@ fn run_expectation_values_reported(
                     let r = unified_pauli::run_spd_observable(circuit, obs, 0.0, 0)?;
                     values.push(r.mean);
                 }
-                Ok(analytic_expectations(values, spd_metadata(0.0)))
+                Ok(analytic_expectations(
+                    values,
+                    spd_metadata(&SpdTruncation::Threshold {
+                        epsilon: 0.0,
+                        max_terms: 0,
+                    }),
+                ))
             } else if kind.is_auto() {
                 if circuit.num_qubits > max_statevector_qubits() {
                     return expectation_values_native(&kind, circuit, observables, seed);

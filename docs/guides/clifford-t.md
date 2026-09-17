@@ -72,11 +72,40 @@ run_spp(circuit, num_samples, seed) // -> SppResult
 
 ## Deterministic Sparse Pauli Dynamics (`src/sim/unified_pauli.rs`)
 
-Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T gates deterministically branch X/Y terms. Identical strings auto-merge. Optional ε-truncation for approximate mode. Exact for small T-counts, approximate with bounded error for larger ones.
+Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T gates
+deterministically branch X/Y terms. Identical strings auto-merge. Exact for small T
+counts, approximate with a bounded error for larger ones.
 
 ```rust
 run_spd(circuit, epsilon, max_terms) // -> SpdResult
+run_spd_with(circuit, &truncation)   // -> SpdResult, any policy
 ```
+
+Two truncation policies, selectable from the builder as well as from the free
+functions:
+
+```rust
+let values = simulate(&circuit)
+    .backend(BackendKind::DeterministicPauli {
+        truncation: SpdTruncation::Budget { max_terms: 1 << 16 },
+    })
+    .expectation_values(&observables)?;
+```
+
+`SpdTruncation::Threshold { epsilon, max_terms }` drops terms below `epsilon` once
+the sum passes `max_terms`, and `max_terms = 0` disables pruning for an exact run.
+Its failure mode is an `epsilon` too small to hold the growth: the sum climbs to
+the engine's internal ceiling and the run errors there rather than returning an
+over-truncated value.
+
+`SpdTruncation::Budget { max_terms }` drops the smallest-magnitude surplus terms
+instead, exactly enough to return to the budget. There is no threshold to guess,
+and growth the budget already caps cannot reach the ceiling, so it is the policy
+to reach for when the term count is the binding constraint. A budget of zero is
+rejected rather than dropping every term.
+
+Both report the discarded coefficient magnitude on the engine result, and that sum
+bounds the error by `|error| <= sum |discarded|`. It is not a fidelity bound.
 
 ## Pauli path propagation under noise (`src/sim/unified_pauli.rs`)
 

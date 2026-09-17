@@ -36,6 +36,7 @@ pub(crate) const IDENTITY_EPS: f64 = 1e-12;
 /// parameter inline. Variants with larger payloads (matrices, batch data) box them
 /// to keep the enum at 16 bytes for cache-friendly instruction streams.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Gate {
     /// Identity.
     Id,

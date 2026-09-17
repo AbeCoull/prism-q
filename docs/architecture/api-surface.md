@@ -105,3 +105,11 @@ Not re-exported at the root but part of the documented surface: the `Backend` tr
 `BasisSamples` at `prism_q::backend`, the density matrix backend at
 `prism_q::backend::density_matrix`, and the accumulator chunk-size helpers
 (`default_chunk_size`, `optimal_chunk_size`) at `prism_q::sim::compiled`.
+
+## Growth of the public enums
+
+`Gate`, `BackendKind`, `ResolvedBackend`, `Engine`, `PrismError` and `NoiseChannel` are
+`#[non_exhaustive]`. A new gate, backend, engine label, error variant or channel is an
+additive release, so a `match` on any of them outside the crate keeps a wildcard arm.
+`Instruction` is exhaustive on purpose: it is the circuit IR, and a new instruction kind
+changes what every consumer has to handle, so adding one is a breaking change.

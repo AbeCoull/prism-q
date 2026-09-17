@@ -159,7 +159,8 @@ fn gate_samples() -> Vec<Gate> {
 
 // `PauliRotData` has no public constructor; pull the gate out of the circuit
 // builder, whose recognizing lowering keeps a weight-3 mixed string native.
-/// Maps each `Gate` variant to a target layout. Exhaustive by design.
+/// Maps each `Gate` variant to a target layout. A variant without one fails here, so a
+/// new gate cannot slip past the comparison unlisted.
 fn representative(gate: &Gate) -> (usize, Vec<Instruction>) {
     const N: usize = 5;
     let targets: Vec<usize> = match gate {
@@ -192,6 +193,7 @@ fn representative(gate: &Gate) -> (usize, Vec<Instruction>) {
             (*start as usize..*start as usize + *num as usize).collect()
         }
         Gate::PauliRot(data) => (0..data.axes().len()).map(|i| i + 1).collect(),
+        other => panic!("no representative layout for {other:?}"),
     };
     let mut insts: Vec<Instruction> = (0..N).map(|q| g(Gate::H, &[q])).collect();
     insts.push(g(gate.clone(), &targets));

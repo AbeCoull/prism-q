@@ -77,7 +77,9 @@
 //!   `switch` whose arm measures into the switched register: both lowerings
 //!   re-read the bits after an earlier body ran
 //! - `switch` with a `default` and more case labels than the region depth bound
-//! - `duration`, `stretch` outside `def` parameter lists
+//! - `duration`, `stretch` and `delay` outside `def` parameter lists, and `array`
+//!   declarations. Each declines by name rather than as a syntax error on its
+//!   operands, which is what `delay[10ns] q[0]` would otherwise produce
 //! - `input` of any type but `float` and `angle`, and `output` of any type but
 //!   `bit`
 //! - an `input` anywhere but as the whole angle argument of a top-level

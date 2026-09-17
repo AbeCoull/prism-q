@@ -1947,6 +1947,50 @@ fn bench_compare_general(c: &mut Criterion) {
 
 // ---- Auto dispatch sweeps ----
 
+/// The expectation terminal under `Auto` at the widths where the scalar tensor
+/// route is tried first. The first three rows take it; the last three are the
+/// families the bounded dry run rejects, so they carry its overhead on top of
+/// the statevector run and gate it.
+fn bench_auto_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/expectation");
+    configure_group(&mut group);
+
+    let rows: Vec<(&str, Circuit)> = vec![
+        ("random_d10/24", circuits::random_circuit(24, 10, SEED)),
+        ("qaoa_l3/24", circuits::qaoa_circuit(24, 3, SEED)),
+        ("brickwork_d4/20", circuits::brickwork_circuit(20, 4, SEED)),
+        ("qft/20", circuits::qft_circuit(20)),
+        ("qv_d20/20", circuits::quantum_volume_circuit(20, 20, SEED)),
+        (
+            "hea_l8/22",
+            circuits::hardware_efficient_ansatz(22, 8, SEED),
+        ),
+    ];
+    for (name, circuit) in rows {
+        let n = circuit.num_qubits;
+        let observables: Vec<Vec<PauliTerm>> = (0..8)
+            .map(|k| {
+                let a = (k * n / 8) % n;
+                let b = (a + n / 3 + 1) % n;
+                vec![PauliTerm::z(a), PauliTerm::z(b)]
+            })
+            .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(name), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Auto)
+                        .seed(42)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_auto_random(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/random_d10");
     configure_group(&mut group);
@@ -3894,6 +3938,7 @@ criterion_group! {
     bench_tn_noisy_chain,
     bench_tn_sample_chain,
     // Auto dispatch
+    bench_auto_expectation,
     bench_auto_random,
     bench_auto_qft,
     bench_auto_qft_textbook,

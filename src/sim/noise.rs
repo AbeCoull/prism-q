@@ -38,12 +38,22 @@ pub enum NoiseChannel {
     /// Pure dephasing: phase randomisation with amplitude `sqrt(gamma)` on the
     /// `|1⟩` state. Populations are preserved.
     PhaseDamping { gamma: f64 },
-    /// Combined T1 + T2 relaxation over a gate of duration `gate_time`, at zero
-    /// temperature and requiring `t2 <= 2·t1`. Populations decay as
-    /// `exp(-gate_time/t1)` and coherences as `exp(-gate_time/t2)`; both the
-    /// exact and the trajectory route realize that as amplitude damping composed
-    /// with pure dephasing.
-    ThermalRelaxation { t1: f64, t2: f64, gate_time: f64 },
+    /// Combined T1 + T2 relaxation over a gate of duration `gate_time`,
+    /// requiring `t2 <= 2·t1`. Populations decay as `exp(-gate_time/t1)` and
+    /// coherences as `exp(-gate_time/t2)`; both the exact and the trajectory
+    /// route realize that as generalized amplitude damping composed with pure
+    /// dephasing.
+    ///
+    /// `excited_population` is the steady state the qubit relaxes toward: 0 for
+    /// a cold qubit that settles in the ground state, 0.5 for one whose steady
+    /// state is maximally mixed. A device's value is
+    /// `1 / (1 + exp(h f / k T))` at frequency `f` and temperature `T`.
+    ThermalRelaxation {
+        t1: f64,
+        t2: f64,
+        gate_time: f64,
+        excited_population: f64,
+    },
     /// Symmetric two-qubit depolarizing: each of the 15 non-identity
     /// two-qubit Paulis occurs with probability `p/15`.
     TwoQubitDepolarizing { p: f64 },
@@ -175,7 +185,12 @@ impl NoiseChannel {
             NoiseChannel::AmplitudeDamping { gamma } | NoiseChannel::PhaseDamping { gamma } => {
                 validate_probability("gamma", *gamma)?;
             }
-            NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
+            NoiseChannel::ThermalRelaxation {
+                t1,
+                t2,
+                gate_time,
+                excited_population,
+            } => {
                 if !t1.is_finite() || *t1 <= 0.0 {
                     return Err(crate::error::PrismError::InvalidParameter {
                         message: "thermal relaxation t1 must be finite and positive".into(),
@@ -197,6 +212,7 @@ impl NoiseChannel {
                         message: "thermal relaxation requires t2 <= 2*t1".into(),
                     });
                 }
+                validate_probability("excited_population", *excited_population)?;
             }
             NoiseChannel::Custom { kraus } => validate_kraus_set("Custom", kraus)?,
             NoiseChannel::Kraus2q { kraus } => validate_kraus_set("Kraus2q", kraus)?,
@@ -3076,6 +3092,24 @@ fn amplitude_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {
     ]
 }
 
+/// Kraus set of generalized amplitude damping: decay toward `|0>` at rate
+/// `gamma` weighted by `1 - excited`, excitation toward `|1>` at the same rate
+/// weighted by `excited`. At `excited == 0` the last two operators vanish and
+/// the set is the amplitude-damping pair.
+fn generalized_amplitude_damping_kraus(gamma: f64, excited: f64) -> [[[Complex64; 2]; 2]; 4] {
+    let s = (1.0 - gamma).max(0.0).sqrt();
+    let g = gamma.max(0.0).sqrt();
+    let cold = (1.0 - excited).max(0.0).sqrt();
+    let hot = excited.max(0.0).sqrt();
+    let c = |re: f64| Complex64::new(re, 0.0);
+    [
+        [[c(cold), c(0.0)], [c(0.0), c(cold * s)]],
+        [[c(0.0), c(cold * g)], [c(0.0), c(0.0)]],
+        [[c(hot * s), c(0.0)], [c(0.0), c(hot)]],
+        [[c(0.0), c(0.0)], [c(hot * g), c(0.0)]],
+    ]
+}
+
 fn phase_damping_kraus(gamma: f64) -> [[[Complex64; 2]; 2]; 2] {
     let s = (1.0 - gamma).max(0.0).sqrt();
     let g = gamma.max(0.0).sqrt();
@@ -3143,14 +3177,24 @@ pub(crate) fn kraus_1q(channel: &NoiseChannel) -> Vec<[[Complex64; 2]; 2]> {
         NoiseChannel::Depolarizing { p } => pauli(p / 3.0, p / 3.0, p / 3.0),
         NoiseChannel::AmplitudeDamping { gamma } => amplitude_damping_kraus(*gamma).to_vec(),
         NoiseChannel::PhaseDamping { gamma } => phase_damping_kraus(*gamma).to_vec(),
-        NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
+        NoiseChannel::ThermalRelaxation {
+            t1,
+            t2,
+            gate_time,
+            excited_population,
+        } => {
             let (gad, gpd) = thermal_relaxation_rates(*t1, *t2, *gate_time);
-            let ad = amplitude_damping_kraus(gad);
+            let ad = generalized_amplitude_damping_kraus(gad, *excited_population);
             let pd = phase_damping_kraus(gpd);
-            let mut out = Vec::with_capacity(4);
+            let mut out = Vec::with_capacity(8);
             for a in &ad {
                 for p in &pd {
-                    out.push(crate::gates::mat_mul_2x2(a, p));
+                    let k = crate::gates::mat_mul_2x2(a, p);
+                    // A zero operator is a branch that never fires, and at zero
+                    // temperature half the set is zero.
+                    if k.iter().flatten().any(|e| e.norm_sqr() > 0.0) {
+                        out.push(k);
+                    }
                 }
             }
             out

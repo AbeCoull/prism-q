@@ -257,9 +257,12 @@ The exact route applies a declared set literally while the trajectory route
 normalizes its branch probabilities, so a set that is not trace preserving would
 mean two different things depending on which engine ran it.
 
-`ThermalRelaxation { t1, t2, gate_time }` is amplitude damping composed with
-pure dephasing on both routes, at rates chosen so populations decay as
-`exp(-gate_time/t1)` and coherences as `exp(-gate_time/t2)`. A mixture of reset
+`ThermalRelaxation` is generalized amplitude damping composed with pure
+dephasing on both routes, at rates chosen so populations decay as
+`exp(-gate_time/t1)` and coherences as `exp(-gate_time/t2)` toward a steady state
+of `excited_population`. At zero excited population the two operators that excite
+or hold a hot steady state are zero, which leaves the amplitude-damping pair and
+the three-branch unraveling the trajectory route had before the field existed. A mixture of reset
 and `Z` reproduces the population decay but reaches the coherence decay only for
 `t2 <= t1`, and needs a negative dephasing probability above it.
 

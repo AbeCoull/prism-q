@@ -467,7 +467,7 @@ model.validate()
 ```
 
 Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,
-`phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time)`,
+`phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time, excited_population=0.0)`,
 `two_qubit_depolarizing(p)`, and `custom(kraus)` for an explicit list of 2x2
 Kraus operators. `validate()` checks probabilities and Kraus completeness;
 `is_pauli_only()` reports whether the model holds only single-qubit Pauli

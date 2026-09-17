@@ -266,6 +266,7 @@ fn thermal_noise_model(circuit: &Circuit) -> prism_q::NoiseModel {
                         t1: 100.0,
                         t2: 80.0,
                         gate_time: 1.0,
+                        excited_population: 0.0,
                     },
                     qubits: prism_q::circuit::SmallVec::from_slice(&[q]),
                 })

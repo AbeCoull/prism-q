@@ -81,6 +81,7 @@ fn thermal_relaxation_validation() {
             t1: 100.0,
             t2: 50.0,
             gate_time: 1.0,
+            excited_population: 0.0,
         }
         .validate()
         .is_ok()
@@ -90,6 +91,7 @@ fn thermal_relaxation_validation() {
             t1: 0.0,
             t2: 1.0,
             gate_time: 1.0,
+            excited_population: 0.0,
         }
         .validate()
         .is_err()
@@ -99,6 +101,7 @@ fn thermal_relaxation_validation() {
             t1: 1.0,
             t2: -1.0,
             gate_time: 1.0,
+            excited_population: 0.0,
         }
         .validate()
         .is_err()
@@ -108,6 +111,7 @@ fn thermal_relaxation_validation() {
             t1: 1.0,
             t2: 1.0,
             gate_time: -1.0,
+            excited_population: 0.0,
         }
         .validate()
         .is_err()
@@ -119,6 +123,7 @@ fn thermal_relaxation_validation() {
             t1: 50.0,
             t2: 150.0,
             gate_time: 10.0,
+            excited_population: 0.0,
         }
         .validate()
         .is_err()
@@ -128,6 +133,30 @@ fn thermal_relaxation_validation() {
             t1: 50.0,
             t2: 100.0,
             gate_time: 10.0,
+            excited_population: 0.0,
+        }
+        .validate()
+        .is_ok()
+    );
+    for excited in [-0.1, 1.5, f64::NAN] {
+        assert!(
+            NoiseChannel::ThermalRelaxation {
+                t1: 50.0,
+                t2: 100.0,
+                gate_time: 10.0,
+                excited_population: excited,
+            }
+            .validate()
+            .is_err(),
+            "excited_population {excited} should be rejected"
+        );
+    }
+    assert!(
+        NoiseChannel::ThermalRelaxation {
+            t1: 50.0,
+            t2: 100.0,
+            gate_time: 10.0,
+            excited_population: 0.5,
         }
         .validate()
         .is_ok()

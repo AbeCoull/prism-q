@@ -387,6 +387,7 @@ fn dm_named_channel_lowering_preserves_trace_and_decay() {
             t1: 50.0,
             t2: 40.0,
             gate_time: 10.0,
+            excited_population: 0.0,
         },
         NoiseChannel::Custom {
             kraus: vec![identity],
@@ -413,6 +414,7 @@ fn dm_named_channel_lowering_preserves_trace_and_decay() {
         t1,
         t2,
         gate_time: gt,
+        excited_population: 0.0,
     };
     let mut dm = DensityMatrixBackend::new(42);
     dm.init(1, 0).unwrap();

@@ -223,6 +223,8 @@ is approximated at the channel. A unital Pauli channel (`Pauli`, `Depolarizing`,
 `PhaseDamping`, `TwoQubitDepolarizing`) scales each letter by one eigenvalue.
 `AmplitudeDamping` and `ThermalRelaxation` are not unital: their adjoint sends `Z` to
 `(1 - gamma) Z + gamma I`, and the sum carries that identity branch as a second term.
+A thermal channel with a nonzero `excited_population` scales that identity term by the
+steady-state polarization `1 - 2 p`, so it vanishes at a maximally mixed steady state.
 `Custom` Kraus, `Kraus2q`, and readout error have no Pauli-basis form and are rejected
 naming the density matrix.
 

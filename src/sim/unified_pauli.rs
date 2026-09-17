@@ -1282,7 +1282,12 @@ fn channel_action(channel: &NoiseChannel) -> Option<ChannelAction> {
             })
         }
         NoiseChannel::AmplitudeDamping { gamma } => Some(damping(*gamma)),
-        NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
+        NoiseChannel::ThermalRelaxation {
+            t1,
+            t2,
+            gate_time,
+            excited_population,
+        } => {
             let (gad, gpd) = thermal_relaxation_rates(*t1, *t2, *gate_time);
             let dephase = (1.0 - gpd).max(0.0).sqrt();
             let ChannelAction::Local { lambda, .. } = damping(gad) else {
@@ -1290,7 +1295,10 @@ fn channel_action(channel: &NoiseChannel) -> Option<ChannelAction> {
             };
             Some(ChannelAction::Local {
                 lambda: [lambda[0] * dephase, lambda[1] * dephase, lambda[2]],
-                z_to_identity: gad,
+                // The identity the `Z` letter picks up is the steady-state
+                // polarization, `1 - 2 * excited`, so it vanishes at the
+                // maximally mixed steady state and inverts above it.
+                z_to_identity: gad * (1.0 - 2.0 * *excited_population),
             })
         }
         NoiseChannel::TwoQubitDepolarizing { p } => Some(ChannelAction::Depolarizing2q {

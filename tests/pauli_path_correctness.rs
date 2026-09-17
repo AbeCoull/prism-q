@@ -148,6 +148,21 @@ fn thermal_relaxation_matches_density_matrix() {
             t1: 40.0,
             t2: 55.0,
             gate_time: 1.5,
+            excited_population: 0.0,
+        },
+    );
+}
+
+#[test]
+fn hot_thermal_relaxation_matches_density_matrix() {
+    assert_matches_density_matrix(
+        "hot thermal relaxation",
+        6,
+        NoiseChannel::ThermalRelaxation {
+            t1: 40.0,
+            t2: 55.0,
+            gate_time: 1.5,
+            excited_population: 0.4,
         },
     );
 }

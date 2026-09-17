@@ -45,6 +45,25 @@ def test_amplitude_damping_expectation_is_analytic():
     assert math.isclose(value, 2.0 * gamma - 1.0, abs_tol=DM_EPS)
 
 
+def test_thermal_relaxation_walks_toward_its_excited_population():
+    # One long interval drives a ground-state qubit most of the way to the
+    # configured steady state, and <Z> tracks it as 1 - 2 p.
+    excited = 0.4
+    builder = CircuitBuilder(1)
+    for _ in range(40):
+        builder = builder.id(0)
+    circuit = builder.build()
+    model = NoiseModel.empty(circuit)
+    for index in range(40):
+        model.add_event(
+            index, NoiseChannel.thermal_relaxation(100.0, 80.0, 25.0, excited), [0]
+        )
+    (value,) = (
+        simulate(circuit).seed(SEED).noise(model).density_matrix_expectation_values([[(0, "Z")]])
+    )
+    assert math.isclose(value, 1.0 - 2.0 * excited, abs_tol=1e-6)
+
+
 def test_depolarizing_expectation_is_analytic():
     # Depolarizing applies X, Y, Z each with p/3; on |+> only Y and Z flip the
     # sign of <X>, giving 1 - 4p/3.

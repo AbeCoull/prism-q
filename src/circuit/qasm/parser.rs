@@ -226,7 +226,11 @@ fn reset<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
 
 fn barrier<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     stream.advance();
-    let targets = operand_list(stream, "barrier")?;
+    let targets = if stream.kind() == Kind::Semicolon {
+        Vec::new()
+    } else {
+        operand_list(stream, "barrier")?
+    };
     stream.expect(Kind::Semicolon)?;
     Ok(StmtKind::Barrier { targets })
 }

@@ -207,8 +207,12 @@ impl<'a> Parser<'a> {
             }
             StmtKind::Barrier { targets } => {
                 let mut qubits = SmallVec::<[usize; 4]>::new();
-                for target in targets {
-                    qubits.extend(self.qubits_of(target)?);
+                if targets.is_empty() {
+                    qubits.extend(0..self.total_qubits);
+                } else {
+                    for target in targets {
+                        qubits.extend(self.qubits_of(target)?);
+                    }
                 }
                 Ok(vec![Instruction::Barrier { qubits }])
             }

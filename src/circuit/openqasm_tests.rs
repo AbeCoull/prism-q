@@ -1239,6 +1239,27 @@ fn test_broadcast_barrier() {
 }
 
 #[test]
+fn bare_barrier_matches_the_named_register() {
+    let named = parse("OPENQASM 3.0;\nqubit[3] q;\nbarrier q;").unwrap();
+    let bare = parse("OPENQASM 3.0;\nqubit[3] q;\nbarrier;").unwrap();
+    assert_eq!(
+        format!("{:?}", bare.instructions),
+        format!("{:?}", named.instructions)
+    );
+}
+
+#[test]
+fn bare_barrier_spans_every_register() {
+    let c = parse("OPENQASM 3.0;\nqubit[3] q;\nqubit[2] r;\nbarrier;").unwrap();
+    assert_eq!(c.instructions.len(), 1);
+    if let Instruction::Barrier { qubits } = &c.instructions[0] {
+        assert_eq!(qubits.as_slice(), &[0, 1, 2, 3, 4]);
+    } else {
+        panic!("expected barrier");
+    }
+}
+
+#[test]
 fn test_broadcast_parametric_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[3] q;\nrz(pi/4) q;";
     let c = parse(qasm).unwrap();

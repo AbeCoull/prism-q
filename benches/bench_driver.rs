@@ -405,16 +405,6 @@ fn bench_classical_only(c: &mut Criterion) {
         circuit.add_measure(0, 0);
 
         group.bench_with_input(
-            BenchmarkId::new("with_probs", n_qubits),
-            &circuit,
-            |b, circ| {
-                b.iter(|| {
-                    run_with(BackendKind::Statevector, circ, 42).unwrap();
-                });
-            },
-        );
-
-        group.bench_with_input(
             BenchmarkId::new("classical_only", n_qubits),
             &circuit,
             |b, circ| {

@@ -253,8 +253,8 @@ circuit splits into independent blocks; circuits past the statevector memory bud
 to Sparse when sparse-friendly and otherwise to MPS with bond dimension 256; partially
 independent circuits go to Factored; everything else runs on Statevector. Clifford+T
 circuits with few T gates route through the stabilizer rank and Pauli propagation
-engines before this tree. The memory budget is dynamic, derived from available RAM at
-dispatch time, and can be overridden with `PRISM_MAX_SV_QUBITS`.
+engines before this tree. The budget is half the machine's physical memory, read once
+and cached, and `PRISM_MAX_SV_QUBITS` overrides it.
 
 ## Gates and OpenQASM support
 

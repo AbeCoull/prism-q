@@ -58,7 +58,7 @@ use prism_q::{simulate, BackendKind, NoiseModel};
 let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
 let result = simulate(&circuit)
     .backend(BackendKind::Statevector)
-    .noise(noise)
+    .noise(&noise)
     .seed(42)
     .shots(1024)
     .unwrap();

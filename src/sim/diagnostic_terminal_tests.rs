@@ -1,5 +1,6 @@
 use super::*;
 use crate::gates::Gate;
+use crate::sim::unified_pauli::SpdTruncation;
 
 fn clifford_t_chain(n: usize) -> Circuit {
     let mut circuit = Circuit::new(n, 0);
@@ -22,8 +23,10 @@ fn stateless_kinds() -> [(BackendKind, &'static str); 4] {
         ),
         (
             BackendKind::DeterministicPauli {
-                epsilon: 1e-3,
-                max_terms: 1024,
+                truncation: SpdTruncation::Threshold {
+                    epsilon: 1e-3,
+                    max_terms: 1024,
+                },
             },
             "deterministic Pauli",
         ),

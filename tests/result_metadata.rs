@@ -6,7 +6,7 @@ mod common;
 use common::SEED;
 use prism_q::{
     BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
-    Placement, ResolvedBackend, run_shots_compiled, simulate,
+    Placement, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
 };
 
 fn bell() -> Circuit {
@@ -390,8 +390,10 @@ fn spd_exactness_marks_the_route_not_the_run() {
 
     let exact_route = simulate(&circuit)
         .backend(BackendKind::DeterministicPauli {
-            epsilon: 0.0,
-            max_terms: 0,
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
         })
         .seed(SEED)
         .expectation_values_reported(&observables)
@@ -402,8 +404,10 @@ fn spd_exactness_marks_the_route_not_the_run() {
     // route still reports approximate.
     let approx_route = simulate(&circuit)
         .backend(BackendKind::DeterministicPauli {
-            epsilon: 1e-300,
-            max_terms: 1 << 16,
+            truncation: SpdTruncation::Threshold {
+                epsilon: 1e-300,
+                max_terms: 1 << 16,
+            },
         })
         .seed(SEED)
         .expectation_values_reported(&observables)

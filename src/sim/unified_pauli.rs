@@ -902,25 +902,53 @@ pub struct SpdResult {
     pub total_discarded: f64,
 }
 
-/// Truncation policy for one SPD run. Both variants report the same
-/// composable 1-norm error accounting through `total_discarded`.
-enum Truncation {
+/// Truncation policy for deterministic sparse Pauli dynamics.
+///
+/// Both arms report the discarded coefficient magnitude on the result, and
+/// that sum bounds the error by `|error| <= sum |discarded|`. Neither is a
+/// fidelity bound.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpdTruncation {
+    /// Drop terms below `epsilon` whenever the weighted sum exceeds
+    /// `max_terms`; `max_terms == 0` disables mid-run pruning. An `epsilon`
+    /// too small to hold the growth reaches the internal term ceiling and
+    /// errors there rather than returning an over-truncated value.
     Threshold { epsilon: f64, max_terms: usize },
+    /// Hold the sum at `max_terms` by dropping the smallest-magnitude surplus
+    /// terms, exactly enough to return to the budget. No threshold to guess,
+    /// and growth the budget already caps cannot reach the ceiling.
     Budget { max_terms: usize },
 }
 
-impl Truncation {
+impl SpdTruncation {
+    /// Reject a budget that would drop every term or outrun the internal
+    /// ceiling. Called by every entry point, so a policy built by hand cannot
+    /// reach the propagation loop unchecked.
+    fn validate(&self) -> Result<()> {
+        if let SpdTruncation::Budget { max_terms } = *self {
+            if max_terms == 0 || max_terms > SPD_MAX_TERMS_CEILING {
+                return Err(PrismError::InvalidParameter {
+                    message: format!(
+                        "budgeted SPD needs a term budget between 1 and {SPD_MAX_TERMS_CEILING}"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Mid-run enforcement after one instruction. Discarded mass accumulates
     /// into `total_discarded` only when a drop fires, so the exact path keeps
     /// no unconditional float add in the per-instruction loop.
     fn enforce(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
         match *self {
-            Truncation::Threshold { epsilon, max_terms } => {
+            SpdTruncation::Threshold { epsilon, max_terms } => {
                 if max_terms > 0 && sum.terms.len() > max_terms {
                     *total_discarded += sum.truncate(epsilon);
                 }
             }
-            Truncation::Budget { max_terms } => {
+            SpdTruncation::Budget { max_terms } => {
                 if sum.terms.len() > max_terms {
                     *total_discarded += sum.truncate_to_budget(max_terms);
                 }
@@ -930,7 +958,7 @@ impl Truncation {
 
     /// Terminal sweep after the backward pass.
     fn final_sweep(&self, sum: &mut WeightedPauliSum, total_discarded: &mut f64) {
-        if let Truncation::Threshold { epsilon, .. } = *self {
+        if let SpdTruncation::Threshold { epsilon, .. } = *self {
             if epsilon > 0.0 {
                 *total_discarded += sum.truncate(epsilon);
             }
@@ -971,7 +999,7 @@ pub fn run_spd_observable(
     run_spd_observable_with(
         circuit,
         observable,
-        &Truncation::Threshold { epsilon, max_terms },
+        &SpdTruncation::Threshold { epsilon, max_terms },
     )
 }
 
@@ -988,21 +1016,15 @@ pub fn run_spd_observable_budgeted(
     observable: &[PauliTerm],
     max_terms: usize,
 ) -> Result<SpdObservableResult> {
-    if max_terms == 0 || max_terms > SPD_MAX_TERMS_CEILING {
-        return Err(PrismError::InvalidParameter {
-            message: format!(
-                "budgeted SPD needs a term budget between 1 and {SPD_MAX_TERMS_CEILING}"
-            ),
-        });
-    }
-    run_spd_observable_with(circuit, observable, &Truncation::Budget { max_terms })
+    run_spd_observable_with(circuit, observable, &SpdTruncation::Budget { max_terms })
 }
 
-fn run_spd_observable_with(
+pub(crate) fn run_spd_observable_with(
     circuit: &Circuit,
     observable: &[PauliTerm],
-    truncation: &Truncation,
+    truncation: &SpdTruncation,
 ) -> Result<SpdObservableResult> {
+    truncation.validate()?;
     let lowered = validate_and_lower(circuit, "SPD observable")?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
@@ -1045,6 +1067,13 @@ fn run_spd_observable_with(
 /// stay under a hard term ceiling. See [`run_spd_observable`] for a single
 /// joint observable and for the truncation contract.
 pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdResult> {
+    run_spd_with(circuit, &SpdTruncation::Threshold { epsilon, max_terms })
+}
+
+/// [`run_spd`] under any truncation policy, including the budget one that has
+/// no threshold to guess.
+pub fn run_spd_with(circuit: &Circuit, truncation: &SpdTruncation) -> Result<SpdResult> {
+    truncation.validate()?;
     let lowered = validate_and_lower(circuit, "SPD")?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
@@ -1091,9 +1120,7 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
                 }
             }
 
-            if max_terms > 0 && sum.terms.len() > max_terms {
-                total_discarded += sum.truncate(epsilon);
-            }
+            truncation.enforce(&mut sum, &mut total_discarded);
             check_spd_term_ceiling(sum.terms.len(), "SPD")?;
 
             if sum.terms.len() > peak_terms {
@@ -1101,9 +1128,7 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
             }
         }
 
-        if epsilon > 0.0 {
-            total_discarded += sum.truncate(epsilon);
-        }
+        truncation.final_sweep(&mut sum, &mut total_discarded);
 
         expectations.push(sum.diagonal_expectation());
     }
@@ -1448,7 +1473,7 @@ pub fn run_pauli_path_observable(
 ) -> Result<PauliPathResult> {
     let ops = pauli_path_ops(circuit, noise, "PauliPath")?;
     let (obs, obs_coeff) = pauli_vec_from_terms(circuit.num_qubits, observable)?;
-    let truncation = Truncation::Threshold { epsilon, max_terms };
+    let truncation = SpdTruncation::Threshold { epsilon, max_terms };
 
     let mut sum = WeightedPauliSum::new();
     sum.insert(obs, obs_coeff);

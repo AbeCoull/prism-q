@@ -214,8 +214,10 @@ fn gate_head(gate: &Gate) -> Option<String> {
     })
 }
 
-/// A single-qubit matrix as `p`, `rz`, or `u`, or `None` when it carries a
-/// global phase none of those three absorb.
+/// A single-qubit matrix as `p`, `rz`, or `u`, or as `sx` or `sxdg`, the two
+/// named gates whose phase `u` cannot carry (`pow(3) @ sx` is `sxdg`, and
+/// `sxdg` is not `rx(-pi / 2)`), or `None` when it carries a global phase
+/// none of those absorb.
 fn spell_1q(mat: &[[Complex64; 2]; 2]) -> Option<String> {
     let phase = mat[1][1].arg();
     if close_2x2(&Gate::P(phase).matrix_2x2(), mat) {
@@ -229,7 +231,10 @@ fn spell_1q(mat: &[[Complex64; 2]; 2]) -> Option<String> {
     if gamma.abs() < EPS && close_2x2(&Parser::u_matrix(theta, phi, lam), mat) {
         return Some(format!("u({theta}, {phi}, {lam})"));
     }
-    None
+    [Gate::SX, Gate::SXdg]
+        .iter()
+        .find(|gate| close_2x2(&gate.matrix_2x2(), mat))
+        .and_then(gate_head)
 }
 
 /// The controlled form, whose fourth parameter carries the global phase `u`
@@ -555,6 +560,20 @@ mod tests {
         assert!(matches!(
             to_qasm3(&circuit),
             Err(PrismError::ExportUnsupported { index: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn sx_family_from_a_matrix_keeps_its_name() {
+        assert_eq!(spell_1q(&Gate::SX.matrix_2x2()).unwrap(), "sx");
+        assert_eq!(spell_1q(&Gate::SXdg.matrix_2x2()).unwrap(), "sxdg");
+        let circuit = one_gate(Gate::Fused(Box::new(Gate::SXdg.matrix_2x2())), &[0]);
+        assert!(matches!(
+            reparse(&circuit).instructions[0],
+            Instruction::Gate {
+                gate: Gate::SXdg,
+                ..
+            }
         ));
     }
 

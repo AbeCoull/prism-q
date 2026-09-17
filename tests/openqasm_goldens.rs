@@ -256,6 +256,7 @@ fn qiskit_legacy_qreg_creg_style() {
 
 use common::{SV_EPS, sv_reference_probs};
 use conformance_corpus::generated_cases;
+use num_complex::Complex64;
 use prism_q::PrismError;
 use prism_q::circuit::qasm_export::to_qasm3;
 use prism_q::circuit::{Circuit, Instruction};
@@ -321,6 +322,7 @@ fn instructions_match(a: &Instruction, b: &Instruction) -> bool {
             },
         ) => qa == qb && ca == cb,
         (Instruction::Reset { qubit: qa }, Instruction::Reset { qubit: qb }) => qa == qb,
+        (Instruction::Region(_), Instruction::Region(_)) => format!("{a:?}") == format!("{b:?}"),
         (Instruction::Barrier { qubits: qa }, Instruction::Barrier { qubits: qb }) => qa == qb,
         (
             Instruction::Conditional {
@@ -845,4 +847,343 @@ fn an_input_binds_a_pauli_rotation_and_survives_the_round_trip() {
         })
         .count();
     assert_eq!(native, 2, "the round trip lost a native rotation");
+}
+
+// ---- Generated-program round trip ----
+
+// A seeded source generator over the statement grammar: both headers and
+// register spellings, every subscript shape, modifier chains, a gate
+// definition, classical constants in angles and indices, both measure
+// spellings, every condition shape with an else arm, loops over ranges and
+// sets, switch and barrier. Each program is parsed, exported, parsed
+// again, and the two streams and their statevector probabilities compared, so
+// a construct the parser reads differently from what the exporter writes for
+// it fails here with the program text in the message.
+struct ProgramGen {
+    state: u64,
+}
+
+impl ProgramGen {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
+        }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+
+    fn chance(&mut self, percent: u64) -> bool {
+        self.next() % 100 < percent
+    }
+
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[self.below(items.len())]
+    }
+
+    fn angle(&mut self, has_theta: bool) -> String {
+        let mut choices = vec![
+            "pi / 4",
+            "-pi / 3",
+            "0.7",
+            "2 * pi / 7",
+            "1e-1",
+            "pi",
+            "(pi + 1) / 2",
+            "-0.25",
+        ];
+        if has_theta {
+            choices.push("theta");
+            choices.push("2 * theta");
+        }
+        self.pick(&choices).to_string()
+    }
+
+    fn qubit(&mut self, n: usize, has_k: bool) -> String {
+        if has_k && self.chance(15) {
+            "q[k]".to_string()
+        } else {
+            format!("q[{}]", self.below(n))
+        }
+    }
+
+    // One or more qubits: single, range, stepped range, open range, set, or
+    // the whole register.
+    fn qubit_group(&mut self, n: usize) -> String {
+        match self.below(6) {
+            0 => "q".to_string(),
+            1 => format!("q[{}]", self.below(n)),
+            2 => {
+                let a = self.below(n);
+                let b = a + self.below(n - a);
+                format!("q[{a}:{b}]")
+            }
+            3 if n >= 3 => format!("q[0:2:{}]", n - 1),
+            4 => format!("q[{}:]", self.below(n)),
+            _ => {
+                let a = self.below(n);
+                let b = self.below(n);
+                if a == b {
+                    format!("q[{{{a}}}]")
+                } else {
+                    format!("q[{{{a}, {b}}}]")
+                }
+            }
+        }
+    }
+
+    fn distinct_pair(&mut self, n: usize) -> (usize, usize) {
+        let a = self.below(n);
+        let b = (a + 1 + self.below(n - 1)) % n;
+        (a, b)
+    }
+
+    fn condition(&mut self, m: usize) -> String {
+        let j = self.below(m);
+        match self.below(6) {
+            0 => format!("c == {}", self.below(1 << m.min(4))),
+            1 => format!("c != {}", self.below(1 << m.min(4))),
+            2 => format!("c[{j}]"),
+            3 => format!("!c[{j}]"),
+            4 if m >= 2 => format!("c[0] ^ c[{}]", m - 1),
+            _ => format!("c[{j}] == {}", self.below(2)),
+        }
+    }
+
+    fn program(&mut self) -> String {
+        let legacy = self.chance(25);
+        let n = 1 + self.below(5);
+        let m = self.below(n + 1);
+        let has_theta = !legacy && self.chance(40);
+        let has_k = !legacy && n >= 2 && self.chance(40);
+        let has_def = !legacy && n >= 2 && self.chance(40);
+        let mut out = String::new();
+        if legacy {
+            out.push_str("OPENQASM 2.0;\ninclude \"qelib1.inc\";\n");
+            out.push_str(&format!("qreg q[{n}];\n"));
+            if m > 0 {
+                out.push_str(&format!("creg c[{m}];\n"));
+            }
+        } else {
+            out.push_str("OPENQASM 3.0;\n");
+            if self.chance(50) {
+                out.push_str("include \"stdgates.inc\";\n");
+            }
+            out.push_str(&format!("qubit[{n}] q;\n"));
+            if m > 0 {
+                out.push_str(&format!("bit[{m}] c;\n"));
+            }
+        }
+        if has_theta {
+            out.push_str("float theta = 0.3;\n");
+        }
+        if has_k {
+            out.push_str(&format!("const int k = {};\n", self.below(n)));
+        }
+        if has_def {
+            out.push_str("gate rzx(t) a, b { h b; cx a, b; rz(t) b; cx a, b; h b; }\n");
+        }
+        let mut measured = false;
+        let count = 3 + self.below(10);
+        for _ in 0..count {
+            match self.below(14) {
+                0 | 1 => {
+                    let g = self.pick(&["h", "x", "y", "z", "s", "sdg", "t", "tdg", "sx"]);
+                    let target = self.qubit_group(n);
+                    out.push_str(&format!("{g} {target};\n"));
+                }
+                2 | 3 => {
+                    let g = self.pick(&["rx", "ry", "rz", "p"]);
+                    let angle = self.angle(has_theta);
+                    let target = self.qubit(n, has_k);
+                    out.push_str(&format!("{g}({angle}) {target};\n"));
+                }
+                4 if n >= 2 => {
+                    let (a, b) = self.distinct_pair(n);
+                    let stmt = match self.below(6) {
+                        0 => format!("cx q[{a}], q[{b}];"),
+                        1 => format!("cz q[{a}], q[{b}];"),
+                        2 => format!("swap q[{a}], q[{b}];"),
+                        3 => format!("rzz({}) q[{a}], q[{b}];", self.angle(has_theta)),
+                        4 => format!("crx({}) q[{a}], q[{b}];", self.angle(has_theta)),
+                        _ => format!("cp({}) q[{a}], q[{b}];", self.angle(has_theta)),
+                    };
+                    out.push_str(&stmt);
+                    out.push('\n');
+                }
+                5 if !legacy => {
+                    let modifier =
+                        self.pick(&["inv @ ", "pow(2) @ ", "pow(3) @ ", "inv @ pow(2) @ "]);
+                    let g = self.pick(&["x", "y", "s", "t", "sx", "h"]);
+                    let target = self.qubit(n, has_k);
+                    out.push_str(&format!("{modifier}{g} {target};\n"));
+                }
+                6 if !legacy && n >= 2 => {
+                    let (a, b) = self.distinct_pair(n);
+                    let modifier = self.pick(&["ctrl @ ", "negctrl @ ", "ctrl @ inv @ "]);
+                    let g = self.pick(&["x", "y", "z", "h", "s"]);
+                    out.push_str(&format!("{modifier}{g} q[{a}], q[{b}];\n"));
+                }
+                7 if has_def => {
+                    let (a, b) = self.distinct_pair(n);
+                    let angle = self.angle(has_theta);
+                    out.push_str(&format!("rzx({angle}) q[{a}], q[{b}];\n"));
+                }
+                8 if m > 0 => {
+                    let i = self.below(n);
+                    let j = self.below(m);
+                    if legacy || self.chance(50) {
+                        out.push_str(&format!("measure q[{i}] -> c[{j}];\n"));
+                    } else {
+                        out.push_str(&format!("c[{j}] = measure q[{i}];\n"));
+                    }
+                    measured = true;
+                }
+                9 if measured => {
+                    let cond = if legacy {
+                        format!("c == {}", self.below(1 << m.min(4)))
+                    } else {
+                        self.condition(m)
+                    };
+                    let g = self.pick(&["x", "z", "h"]);
+                    let target = self.below(n);
+                    if legacy || self.chance(50) {
+                        out.push_str(&format!("if ({cond}) {g} q[{target}];\n"));
+                    } else {
+                        let other = self.pick(&["y", "s"]);
+                        out.push_str(&format!(
+                            "if ({cond}) {{ {g} q[{target}]; }} else {{ {other} q[{target}]; }}\n"
+                        ));
+                    }
+                }
+                10 if !legacy => {
+                    let stmt = match self.below(3) {
+                        0 => format!("for int i in [0:{}] {{ h q[i]; }}", n - 1),
+                        1 if n >= 3 => format!("for int i in [0:2:{}] {{ x q[i]; }}", n - 1),
+                        _ => format!("for i in {{0, {}}} {{ z q[i]; }}", n - 1),
+                    };
+                    out.push_str(&stmt);
+                    out.push('\n');
+                }
+                11 if !legacy && measured => {
+                    let a = self.below(n);
+                    out.push_str(&format!(
+                        "switch (c) {{ case 0 {{ x q[{a}]; }} case 1, 2 {{ z q[{a}]; }} default {{ h q[{a}]; }} }}\n"
+                    ));
+                }
+                12 => {
+                    let target = self.qubit_group(n);
+                    out.push_str(&format!("barrier {target};\n"));
+                }
+                13 => {
+                    out.push_str(&format!("reset q[{}];\n", self.below(n)));
+                }
+                _ => {
+                    let target = self.qubit_group(n);
+                    out.push_str(&format!("h {target};\n"));
+                }
+            }
+        }
+        out
+    }
+}
+
+// A modifier chain can evaluate to a matrix payload the exporter recognizes
+// as a named gate (`inv @ pow(2) @ s` is `p(-pi)`), so the stream comes back
+// with a different variant carrying the same unitary. Streams match either
+// exactly or, for a single-qubit gate on the same target, up to global phase.
+fn assert_streams_equivalent(original: &Circuit, round: &Circuit, label: &str) {
+    assert_eq!(
+        original.num_qubits, round.num_qubits,
+        "{label}: qubit count"
+    );
+    assert_eq!(
+        original.num_classical_bits, round.num_classical_bits,
+        "{label}: classical bit count"
+    );
+    assert_eq!(
+        original.instructions.len(),
+        round.instructions.len(),
+        "{label}: instruction count"
+    );
+    for (i, (a, b)) in original
+        .instructions
+        .iter()
+        .zip(&round.instructions)
+        .enumerate()
+    {
+        if instructions_match(a, b) {
+            continue;
+        }
+        let same_1q = match (a, b) {
+            (
+                Instruction::Gate {
+                    gate: ga,
+                    targets: ta,
+                },
+                Instruction::Gate {
+                    gate: gb,
+                    targets: tb,
+                },
+            ) => {
+                ta == tb
+                    && ga.num_qubits() == 1
+                    && gb.num_qubits() == 1
+                    && matrices_match_up_to_phase(&ga.matrix_2x2(), &gb.matrix_2x2())
+            }
+            _ => false,
+        };
+        assert!(
+            same_1q,
+            "{label}: instruction {i} differs\n  before: {a:?}\n  after:  {b:?}"
+        );
+    }
+}
+
+fn matrices_match_up_to_phase(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2]) -> bool {
+    let (r, c) = (0..2)
+        .flat_map(|r| (0..2).map(move |c| (r, c)))
+        .max_by(|x, y| a[x.0][x.1].norm().total_cmp(&a[y.0][y.1].norm()))
+        .expect("four entries");
+    if a[r][c].norm() < PAYLOAD_EPS || b[r][c].norm() < PAYLOAD_EPS {
+        return false;
+    }
+    let phase = b[r][c] / a[r][c];
+    if (phase.norm() - 1.0).abs() > PAYLOAD_EPS {
+        return false;
+    }
+    a.iter()
+        .flatten()
+        .zip(b.iter().flatten())
+        .all(|(x, y)| (x * phase - y).norm() < PAYLOAD_EPS)
+}
+
+#[test]
+fn export_round_trips_generated_programs() {
+    for seed in 0..1000u64 {
+        let source = ProgramGen::new(seed).program();
+        let circuit = openqasm::parse(&source)
+            .unwrap_or_else(|err| panic!("seed {seed}: parse failed: {err}\n{source}"));
+        let qasm = to_qasm3(&circuit)
+            .unwrap_or_else(|err| panic!("seed {seed}: export failed: {err}\n{source}"));
+        let round = openqasm::parse(&qasm).unwrap_or_else(|err| {
+            panic!("seed {seed}: reparse failed: {err}\n{source}\n---\n{qasm}")
+        });
+        let label = format!("seed {seed}\n{source}\n---\n{qasm}");
+        assert_streams_equivalent(&circuit, &round, &label);
+        assert_probs_close(
+            &sv_reference_probs(&round),
+            &sv_reference_probs(&circuit),
+            SV_EPS,
+            &label,
+        );
+    }
 }

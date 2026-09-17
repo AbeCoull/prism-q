@@ -43,6 +43,7 @@ fn error_kind(err: &prism_q::PrismError) -> &'static str {
         E::UndefinedRegister { .. } => "undefined_register",
         E::ExportUnsupported { .. } => "export_unsupported",
         E::IncompatibleBackend { .. } => "incompatible_backend",
+        _ => "other",
     }
 }
 

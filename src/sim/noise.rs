@@ -26,6 +26,7 @@ use crate::sim::{BackendKind, ShotsResult};
 /// instead on a Clifford circuit, see [`NoiseChannel::is_pauli`] and
 /// [`NoiseChannel::TwoQubitDepolarizing`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum NoiseChannel {
     /// Independent Pauli X/Y/Z error with given per-branch probabilities.
     Pauli { px: f64, py: f64, pz: f64 },

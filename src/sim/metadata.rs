@@ -29,6 +29,7 @@ impl ExpectationResult {
 ///
 /// [`BackendKind::Auto`]: crate::sim::BackendKind::Auto
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResolvedBackend {
     ProductState,
     Stabilizer,
@@ -64,6 +65,7 @@ pub enum ResolvedBackend {
 /// between at run time on the shot count and the depth ratio. The backend alone
 /// does not say which ran; each variant names the sampler that did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Engine {
     /// `CompiledSampler`: the noiseless parity map.
     CompiledSampler,

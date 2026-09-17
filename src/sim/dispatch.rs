@@ -85,6 +85,7 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 ///
 /// [`run_stabilizer_rank_approx`]: crate::run_stabilizer_rank_approx
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BackendKind {
     Auto,
     Statevector,

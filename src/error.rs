@@ -9,6 +9,7 @@ use thiserror::Error;
 
 /// Top-level error type for PRISM-Q operations.
 #[derive(Debug, Error, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PrismError {
     /// OpenQASM parse error with source line number.
     #[error("parse error at line {line}: {message}")]

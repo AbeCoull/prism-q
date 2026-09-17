@@ -25,6 +25,34 @@ pub(crate) const MIN_WORDS_FOR_BATCH: usize = 4;
 /// costs more than the scans it replaces.
 pub(crate) const MIN_MEASURES_FOR_BATCH: usize = 8;
 
+/// A run of `CX(k, k + 1)` at least this long takes the chain kernel, one pass
+/// over the rows with the prefix parity carried across words, instead of a
+/// word-group flush per word it crosses.
+pub(crate) const MIN_CX_CHAIN: usize = 16;
+
+/// Length of the leading run of `CX(q, q + 1)`, `CX(q + 1, q + 2)`, ... in
+/// `instructions`, zero when it does not start with one.
+pub(crate) fn cx_chain_len(instructions: &[Instruction]) -> usize {
+    let mut len = 0;
+    let mut expect: Option<usize> = None;
+    for instruction in instructions {
+        let Instruction::Gate {
+            gate: Gate::Cx,
+            targets,
+        } = instruction
+        else {
+            break;
+        };
+        let [c, t] = targets.as_slice() else { break };
+        if *t != c + 1 || expect.is_some_and(|q| q != *c) {
+            break;
+        }
+        expect = Some(*t);
+        len += 1;
+    }
+    len
+}
+
 /// Compact gate representation for batched word-group execution.
 ///
 /// All gates in a word group target the same u64 word. `a_bit` and `b_bit`
@@ -94,11 +122,13 @@ impl Default for OneMasks {
     }
 }
 
-/// Pre-processed operation: either a batch of 1q masks or a single 2q gate.
+/// Pre-processed operation: a batch of 1q masks, a single 2q gate, or a run of
+/// `CX(k, k + 1)` for `k` in `first..last` applied as one word operation.
 #[derive(Clone, Copy)]
 enum PrepOp {
     Masks(OneMasks),
     Gate2q(BatchGate),
+    CxChain { first: u8, last: u8 },
 }
 
 /// Build a prepared operation sequence from a batch of gates.
@@ -119,6 +149,27 @@ fn prepare_word_ops(gates: &[BatchGate]) -> Vec<PrepOp> {
                 masks = OneMasks::default();
                 used = 0;
                 has_masks = false;
+            }
+            if g.kind == BatchGate::CX && g.b_bit == g.a_bit + 1 {
+                match ops.last_mut() {
+                    Some(PrepOp::CxChain { last, .. }) if *last == g.a_bit => {
+                        *last = g.b_bit;
+                        continue;
+                    }
+                    Some(PrepOp::Gate2q(prev))
+                        if prev.kind == BatchGate::CX
+                            && prev.b_bit == prev.a_bit + 1
+                            && prev.b_bit == g.a_bit =>
+                    {
+                        let first = prev.a_bit;
+                        *ops.last_mut().unwrap() = PrepOp::CxChain {
+                            first,
+                            last: g.b_bit,
+                        };
+                        continue;
+                    }
+                    _ => {}
+                }
             }
             ops.push(PrepOp::Gate2q(*g));
         } else {
@@ -190,12 +241,41 @@ fn apply_1q_masks(xw: &mut u64, zw: &mut u64, p: &mut bool, m: &OneMasks) {
     }
 }
 
+/// `CX(k, k + 1)` for `k` in `first..last`, in that order, as word operations.
+///
+/// Gate `k` reads control `k` after the gates before it and target `k + 1`
+/// before any gate touches it, so the control's X bit is the prefix parity of
+/// the original X bits from `first`, the target's bits are the originals, and
+/// the control's Z bit is still the original. That fixes every phase term from
+/// the input words alone; the X range then becomes the prefix parity and each
+/// control's Z bit takes the XOR with its target's.
+#[inline(always)]
+fn apply_cx_chain(xw: &mut u64, zw: &mut u64, p: &mut bool, first: u8, last: u8) {
+    let range = (u64::MAX >> (63 - last)) & (u64::MAX << first);
+    let controls = range & !(1u64 << last);
+    let mut prefix = *xw & range;
+    prefix ^= prefix << 1;
+    prefix ^= prefix << 2;
+    prefix ^= prefix << 4;
+    prefix ^= prefix << 8;
+    prefix ^= prefix << 16;
+    prefix ^= prefix << 32;
+    prefix &= range;
+    let z = *zw;
+    let x = *xw;
+    let terms = prefix & controls & (z >> 1) & !((x >> 1) ^ z);
+    *p ^= terms.count_ones() & 1 != 0;
+    *xw = (x & !range) | prefix;
+    *zw = (z & !controls) | ((z ^ (z >> 1)) & controls);
+}
+
 /// Apply a pre-computed operation sequence to a single (xw, zw, phase) tuple.
 #[inline(always)]
 fn apply_prepared_ops(xw: &mut u64, zw: &mut u64, p: &mut bool, ops: &[PrepOp]) {
     for op in ops {
         match op {
             PrepOp::Masks(m) => apply_1q_masks(xw, zw, p, m),
+            PrepOp::CxChain { first, last } => apply_cx_chain(xw, zw, p, *first, *last),
             PrepOp::Gate2q(g) => {
                 let mask_a = 1u64 << g.a_bit;
                 match g.kind {
@@ -261,6 +341,70 @@ impl GateRows<'_> {
     #[inline(always)]
     fn stride(&self) -> usize {
         2 * self.num_words
+    }
+
+    /// `CX(k, k + 1)` for `k` in `start..end`, in one pass over the rows.
+    ///
+    /// Each word takes [`apply_cx_chain`] with the prefix parity of the word
+    /// before it carried into its low bit, and the gate across the boundary is
+    /// applied between the two: its control is that carry, its target's bits
+    /// are read from the next word before anything touches them, and its
+    /// control's Z bit is still the original because the in-word chain never
+    /// writes the last bit of the range. A word with nothing in it once the
+    /// carry lands, and no Z bit waiting in the next word's low position, is
+    /// skipped whole.
+    fn apply_cx_chain_run(&mut self, start: usize, end: usize) {
+        let stride = self.stride();
+        let nw = self.num_words;
+        let gs = self.row_start;
+        let (ws, we) = (start / 64, end / 64);
+        let (first, last) = ((start % 64) as u8, (end % 64) as u8);
+
+        let process_row = |row: &mut [u64], p: &mut bool| {
+            let mut carry = 0u64;
+            for w in ws..=we {
+                let lo = if w == ws { first } else { 0 };
+                let hi = if w == we { last } else { 63 };
+                let z_next = if w < we { row[nw + w + 1] & 1 } else { 0 };
+                let mut xw = row[w] ^ carry;
+                let mut zw = row[nw + w];
+                if xw | zw == 0 && z_next == 0 {
+                    if carry != 0 {
+                        row[w] = 0;
+                    }
+                    carry = 0;
+                    continue;
+                }
+                apply_cx_chain(&mut xw, &mut zw, p, lo, hi);
+                if w < we {
+                    let x_next = row[w + 1] & 1;
+                    let control = xw >> 63;
+                    let z_control = zw >> 63;
+                    *p ^= (control & z_next & !(x_next ^ z_control)) & 1 != 0;
+                    zw ^= z_next << 63;
+                    carry = control;
+                }
+                row[w] = xw;
+                row[nw + w] = zw;
+            }
+        };
+
+        #[cfg(feature = "parallel")]
+        if self.n >= MIN_QUBITS_FOR_PAR_GATES {
+            use rayon::prelude::*;
+            self.xz[gs * stride..]
+                .par_chunks_mut(stride)
+                .zip(self.phase[gs..].par_iter_mut())
+                .for_each(|(row, p)| process_row(row, p));
+            return;
+        }
+
+        for (row, p) in self.xz[gs * stride..]
+            .chunks_mut(stride)
+            .zip(self.phase[gs..].iter_mut())
+        {
+            process_row(row, p);
+        }
     }
 
     /// Execute all gates in a word group against every tableau row.
@@ -779,6 +923,17 @@ impl StabilizerBackend {
             let instruction = &instructions[idx];
             match instruction {
                 Instruction::Gate { gate, targets } => {
+                    let chain = cx_chain_len(&instructions[idx..]);
+                    if chain >= MIN_CX_CHAIN {
+                        self.gate_rows_view()
+                            .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                        cross_word_qubits.fill(0);
+                        let start = targets[0];
+                        self.gate_rows_view()
+                            .apply_cx_chain_run(start, start + chain);
+                        idx += chain;
+                        continue;
+                    }
                     if let Some((w, bg)) = Self::classify_gate(gate, targets) {
                         let mut bits = 1u64 << bg.a_bit;
                         if bg.kind >= BatchGate::CX {
@@ -916,9 +1071,23 @@ pub(crate) fn apply_gates_word_batch<T: BatchTarget>(
     let mut cross_word: Vec<CrossWordGate> = Vec::new();
     let mut cross_word_qubits: Vec<u64> = vec![0u64; nw];
 
-    for instruction in instructions {
+    let mut idx = 0;
+    while idx < instructions.len() {
+        let instruction = &instructions[idx];
+        idx += 1;
         match instruction {
             Instruction::Gate { gate, targets } => {
+                let chain = cx_chain_len(&instructions[idx - 1..]);
+                if chain >= MIN_CX_CHAIN {
+                    target
+                        .batch_rows()
+                        .flush_all_with_cross_word(&mut word_groups, &mut cross_word);
+                    cross_word_qubits.fill(0);
+                    let start = targets[0];
+                    target.batch_rows().apply_cx_chain_run(start, start + chain);
+                    idx += chain - 1;
+                    continue;
+                }
                 if let Some((w, bg)) = StabilizerBackend::classify_gate(gate, targets) {
                     let mut bits = 1u64 << bg.a_bit;
                     if bg.kind >= BatchGate::CX {
@@ -995,6 +1164,109 @@ mod tests {
         let mut b = StabilizerBackend::new(42);
         sim::run_on(&mut b, circuit).unwrap();
         b.classical_results().iter().filter(|x| !**x).count()
+    }
+
+    // The scalar CX row update, one gate at a time, that the word formula
+    // has to reproduce bit for bit including the phase.
+    fn cx_chain_reference(xw: &mut u64, zw: &mut u64, p: &mut bool, first: u8, last: u8) {
+        for k in first..last {
+            let (c, t) = (k, k + 1);
+            let xa = (*xw >> c) & 1;
+            let za = (*zw >> c) & 1;
+            let xb = (*xw >> t) & 1;
+            let zb = (*zw >> t) & 1;
+            *p ^= (xa & zb & (xb ^ za ^ 1)) == 1;
+            if xa == 1 {
+                *xw ^= 1u64 << t;
+            }
+            if zb == 1 {
+                *zw ^= 1u64 << c;
+            }
+        }
+    }
+
+    #[test]
+    fn cx_chain_word_formula_matches_the_scalar_chain() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..4000 {
+            let a = (next() % 64) as u8;
+            let b = (next() % 64) as u8;
+            let (first, last) = if a <= b { (a, b) } else { (b, a) };
+            let (x0, z0, p0) = (next(), next(), next() & 1 == 1);
+            let (mut xw, mut zw, mut p) = (x0, z0, p0);
+            let (mut xr, mut zr, mut pr) = (x0, z0, p0);
+            super::apply_cx_chain(&mut xw, &mut zw, &mut p, first, last);
+            cx_chain_reference(&mut xr, &mut zr, &mut pr, first, last);
+            assert_eq!(
+                (xw, zw, p),
+                (xr, zr, pr),
+                "range {first}..={last} on {x0:#x} {z0:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn cx_chain_run_matches_per_gate_rows() {
+        let n = 500;
+        let prefix = crate::circuits::clifford_random_pairs(n, 4, 0);
+        let mut base = StabilizerBackend::new(0);
+        sim::run_on(&mut base, &prefix).unwrap();
+        for (start, end) in [
+            (3usize, 498usize),
+            (0, 64),
+            (63, 65),
+            (60, 200),
+            (128, 192),
+            (100, 127),
+        ] {
+            let mut a = base.clone();
+            a.gate_rows_view().apply_cx_chain_run(start, end);
+            let mut b = base.clone();
+            let mut chain = Circuit::new(n, 0);
+            for k in start..end {
+                chain.add_gate(Gate::Cx, &[k, k + 1]);
+            }
+            for instr in &chain.instructions {
+                b.apply(instr).unwrap();
+            }
+            let (xa, pa) = a.raw_tableau();
+            let (xb, pb) = b.raw_tableau();
+            let stride = 2 * n.div_ceil(64);
+            let bad: Vec<usize> = (0..2 * n)
+                .filter(|&r| xa[r * stride..(r + 1) * stride] != xb[r * stride..(r + 1) * stride])
+                .collect();
+            let badp: Vec<usize> = (0..2 * n).filter(|&r| pa[r] != pb[r]).collect();
+            assert!(
+                bad.is_empty() && badp.is_empty(),
+                "chain {start}..{end}: {} rows differ {:?}, {} phases differ {:?}",
+                bad.len(),
+                &bad[..bad.len().min(8)],
+                badp.len(),
+                &badp[..badp.len().min(8)]
+            );
+        }
+    }
+
+    #[test]
+    fn cx_chain_len_stops_where_the_chain_does() {
+        let mut c = Circuit::new(8, 0);
+        c.add_gate(Gate::Cx, &[2, 3]);
+        c.add_gate(Gate::Cx, &[3, 4]);
+        c.add_gate(Gate::Cx, &[4, 5]);
+        c.add_gate(Gate::Cx, &[6, 7]);
+        assert_eq!(super::cx_chain_len(&c.instructions), 3);
+        assert_eq!(super::cx_chain_len(&c.instructions[3..]), 1);
+        let mut d = Circuit::new(8, 0);
+        d.add_gate(Gate::Cx, &[3, 2]);
+        d.add_gate(Gate::H, &[0]);
+        assert_eq!(super::cx_chain_len(&d.instructions), 0);
+        assert_eq!(super::cx_chain_len(&d.instructions[1..]), 0);
     }
 
     fn assert_runs(circuit: &Circuit) {

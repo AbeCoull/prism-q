@@ -56,6 +56,7 @@ pub mod circuit;
 pub mod circuits;
 #[cfg(feature = "distributed")]
 pub mod distributed;
+mod env_knobs;
 pub mod error;
 pub mod gates;
 #[cfg(feature = "gpu")]

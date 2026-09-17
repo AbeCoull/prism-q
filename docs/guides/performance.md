@@ -46,13 +46,38 @@ only at a fixed thread count. The per-path contract is in
 
 ## Tuning environment variables
 
-| Variable | Effect |
-|----------|--------|
-| `PRISM_MAX_SV_QUBITS` | Override the statevector memory cap |
-| `RAYON_NUM_THREADS` | Cap Rayon thread count |
-| `PRISM_NO_AVX2_2Q` | Force the 128-bit FMA 2q kernel (A/B comparison) |
-| `PRISM_NO_REORDER` | Disable disjoint `Fused2q` tier grouping |
-| `PRISM_GPU_MIN_QUBITS` | GPU crossover qubit count (with the `gpu` feature) |
+Every knob is read once per process, on first use, and cached. A value that
+does not parse, or falls below the knob's minimum, prints a warning on stderr
+naming the variable and behaves as if the variable were unset: a typo never
+fails a run and never passes silently. Flags are presence-only: setting the
+variable to anything switches the path off.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `PRISM_MAX_SV_QUBITS` | detected | Statevector qubit cap; see [Backends](../architecture/backends.md#memory-budget) for every cap |
+| `PRISM_MAX_DM_QUBITS` | `floor(cap_sv / 2)` | Density-matrix qubit cap, bounded by the statevector cap |
+| `PRISM_MAX_PROB_QUBITS` | detected | Dense probability output cap |
+| `PRISM_MAX_EXPORT_QUBITS` | detected | Dense statevector export cap |
+| `PRISM_MAX_DENSE_OUTCOME_BITS` | detected | Measured-bit cap for dense terminal sampling |
+| `PRISM_MAX_SPARSE_QUBITS` | detected | Sparse amplitude map holds at most `2^q` entries |
+| `PRISM_MAX_FACTORED_MERGE_QUBITS` | detected | Factored merged-block width |
+| `PRISM_MAX_MPS_WORKSPACE_QUBITS` | detected | MPS contraction workspace, at most `2^q` amplitudes |
+| `PRISM_MAX_TN_PEAK_QUBITS` | detected | Largest planned tensor-network intermediate, `2^q` elements |
+| `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | detected | Factored stabilizer merged-cluster width |
+| `PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB` | `256` | Soft cap on cached QFT twiddle tables; `0` disables the cache |
+| `PRISM_GPU_MIN_QUBITS` | `14` | Auto GPU crossover qubit count (`gpu` feature) |
+| `PRISM_STABILIZER_GPU_MIN_QUBITS` | `100000` | Stabilizer GPU crossover qubit count |
+| `PRISM_GPU_BTS_MIN_SHOTS` | `131072` | Shot count from which compiled BTS sampling runs on the device |
+| `PRISM_GPU_BTS_MIN_RANK` | `4` | Compiled-sampler rank from which BTS sampling runs on the device (minimum 1) |
+| `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR` | `2` | Parity-weight factor for the BTS device route (minimum 1) |
+| `PRISM_DIST_MIN_LOCAL_QUBITS` | `10` | Minimum local qubits per rank before distribution is worthwhile (minimum 1) |
+| `PRISM_DIST_EXCHANGE_CHUNK` | unbounded | Amplitudes per message on the rank exchange paths (minimum 1) |
+| `PRISM_DIST_RELABEL` | `1` | `0`/`false` disables qubit relabeling in the distributed backend |
+| `RAYON_NUM_THREADS` | all cores | Rayon thread count, read by Rayon itself |
+| `PRISM_NO_AVX2_2Q` | unset | Flag: force the 128-bit FMA two-qubit kernel |
+| `PRISM_NO_AVX2_KRAUS` | unset | Flag: disable the AVX2 dense two-qubit Kraus kernel |
+| `PRISM_NO_REORDER` | unset | Flag: disable disjoint `Fused2q` tier grouping |
+| `PRISM_NO_QFT_BLOCK` | unset | Flag: expand `QftBlock` to the textbook sequence |
 
 ## Benchmarking
 

@@ -195,19 +195,22 @@ impl QftTwiddleCache {
     }
 }
 
-const QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+const QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_MB: usize = 256;
 
 // Soft LRU cap for QFT twiddles. One oversized table may occupy the cache
 // alone, which keeps large repeated QFT runs from rebuilding twiddles every
-// sample. Set the environment value to 0 to disable caching.
+// sample. `PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB=0` disables caching.
 #[inline]
 fn qft_twiddle_cache_limit_bytes() -> usize {
-    std::env::var("PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .map_or(QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES, |mb| {
-            mb.saturating_mul(1024 * 1024)
-        })
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        crate::env_knobs::usize_knob(
+            "PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB",
+            QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_MB,
+            0,
+        )
+        .saturating_mul(1024 * 1024)
+    })
 }
 
 #[inline(always)]
@@ -4048,7 +4051,9 @@ mod qft_twiddle_cache_tests {
 
     #[test]
     fn concurrent_misses_share_one_table() {
-        let cache = RwLock::new(QftTwiddleCache::new(QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_BYTES));
+        let cache = RwLock::new(QftTwiddleCache::new(
+            QFT_TWIDDLE_CACHE_DEFAULT_LIMIT_MB * 1024 * 1024,
+        ));
         let tables: Vec<QftTwiddleTable> = std::thread::scope(|scope| {
             let handles: Vec<_> = (0..8)
                 .map(|_| scope.spawn(|| cached_qft_twiddles(&cache, 6)))

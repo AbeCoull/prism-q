@@ -177,3 +177,32 @@ them; see [Shot and observable queries above the dense cap](#shot-and-observable
 
 These targets are listed so the matrix reflects the roadmap rather than hiding
 the gaps.
+
+## Compatibility
+
+The minimum supported Rust version is 1.87.0. It is pinned in three places that are
+updated together: `rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, and the
+`CI_MSRV` job that builds against exactly that toolchain. Raising it is a minor bump
+while the crate is below 1.0.
+
+Four feature flags are part of the surface: `parallel`, on by default, and `gpu`,
+`distributed` and `distributed-mpi`, each off. `bench-fast` and `bench-internal` are
+not: they exist to shape benchmark runs, they gate items no caller should reach for,
+and they may change or disappear in any release.
+
+The crate and the Python wheel carry one version. A release bumps the crate, then
+writes that same version into the bindings manifest and tags the wheel `py-v<version>`,
+so a wheel and a crate that share a number were built from one commit. Below 1.0 the
+minor position is the compatibility boundary, because Cargo reads `0.32.0` as
+`^0.32.0`: `0.32` to `0.33` already signals a break to every downstream caret
+requirement, so the release tooling resolves a breaking change to a minor bump rather
+than to 1.0.0.
+
+What a version promises is the surface tabulated in
+[API surface](../architecture/api-surface.md) and the Python package. Which backend
+`Auto` picks for a given circuit, where the fusion thresholds sit, how fast a kernel
+runs, and what the benchmark rows are named all move underneath that promise without a
+bump, because they are implementation rather than interface. `Gate`, `BackendKind`,
+`ResolvedBackend`, `Engine`, `PrismError`, `NoiseChannel` and `SpdTruncation` are
+`#[non_exhaustive]`, so a new variant is additive; a `match` on any of them outside the
+crate keeps a wildcard arm.

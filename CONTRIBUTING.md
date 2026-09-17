@@ -159,6 +159,11 @@ reading the commit range.
 To cut 1.0.0, set the version in `Cargo.toml` by hand and release from there. The
 workflow will not reach it on its own.
 
+The wheel follows in the same run: the workflow writes the new version into
+`bindings/python/Cargo.toml` and tags it `py-v<version>`, so the two never drift. What
+a version promises to callers, which feature flags are part of the surface, and the MSRV
+pin are stated once in [Compatibility](docs/guides/capabilities.md#compatibility).
+
 ## CI
 
 PRs run formatting, clippy, nextest, doctests, doc build, coverage, the release

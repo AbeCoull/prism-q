@@ -102,7 +102,7 @@ template's angle while every other payload moved.
 
 Fusion cost tracks instruction count and is close to flat in qubit count, while gate
 application is `2^n`. The ratio therefore moves by an order of magnitude across the
-useful range: for `hardware_efficient_ansatz(n, 5)` on this project's reference host,
+useful range: for `hardware_efficient_ansatz(n, 5, seed)` on this project's reference host,
 fusion is about 22% of a run at 12 qubits and about 0.3% at 20.
 
 ```admonish tip

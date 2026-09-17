@@ -2711,7 +2711,7 @@ fn grouped_expectation_statevector(
 
     // A device-resident state reduces every mask on the card; the host keeps
     // its state and norm for the moments pass below.
-    let (values, host) = match pauli_expectations_on_device(&backend, &combined) {
+    let (values, host) = match backend.pauli_expectations_on_device(&combined) {
         Some(values) => (values?, None),
         None => {
             let state = backend.state_vector();
@@ -3020,7 +3020,7 @@ fn expectation_values_statevector(
         .collect::<Result<Vec<_>>>()?;
     backend.apply_instructions(&fused.instructions)?;
 
-    let values = match pauli_expectations_on_device(&backend, &masks) {
+    let values = match backend.pauli_expectations_on_device(&masks) {
         Some(values) => values?,
         None => {
             let state = backend.state_vector();
@@ -3030,37 +3030,6 @@ fn expectation_values_statevector(
     };
     let metadata = backend_metadata(&backend);
     Ok(analytic_expectations(values, metadata))
-}
-
-/// [`pauli_expectations_from_masks`] evaluated on a device-resident state:
-/// one reduction launch over every mask plus an appended identity mask that
-/// supplies the norm, so nothing but `16 * (masks.len() + 1)` bytes leaves the
-/// card. `None` when the state lives on the host.
-fn pauli_expectations_on_device(
-    backend: &StatevectorBackend,
-    masks: &[(usize, usize, u32)],
-) -> Option<Result<Vec<f64>>> {
-    if !backend.is_gpu_resident() {
-        return None;
-    }
-    let request: Vec<(u64, u64)> = masks
-        .iter()
-        .map(|&(xmask, zmask, _)| (xmask as u64, zmask as u64))
-        .chain(std::iter::once((0, 0)))
-        .collect();
-    let sums = match backend.gpu_pauli_sums(&request)? {
-        Ok(sums) => sums,
-        Err(e) => return Some(Err(e)),
-    };
-    let norm = sums[masks.len()].re;
-    if norm == 0.0 {
-        return Some(Ok(vec![0.0; masks.len()]));
-    }
-    Some(Ok(masks
-        .iter()
-        .zip(&sums)
-        .map(|(&(_, _, num_y), sum)| (sum * i_pow(num_y)).re / norm)
-        .collect()))
 }
 
 /// Multi-shot execution for the distributed statevector backend.

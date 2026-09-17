@@ -2919,3 +2919,49 @@ fn statevector_gpu_custom_kraus_trajectories_match_cpu() {
         );
     }
 }
+
+// The marginals terminal reads `<Z_q>` per qubit through the backend's own
+// Pauli expectation, which on a device-resident state reduces on the card and
+// reads back one sum per qubit rather than the whole state.
+#[test]
+fn gpu_marginals_match_cpu_statevector() {
+    use prism_q::{BackendKind, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 16;
+    let mut circuit = prism_q::Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3 + 0.01 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.5), &[q]);
+    }
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .marginals()
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .backend(BackendKind::StatevectorGpu {
+            context: f.ctx.clone(),
+        })
+        .seed(42)
+        .marginals()
+        .unwrap();
+
+    assert_eq!(cpu.marginals.len(), n);
+    assert_eq!(gpu.marginals.len(), n);
+    for q in 0..n {
+        let (c0, c1) = cpu.marginals[q];
+        let (g0, g1) = gpu.marginals[q];
+        assert!(
+            (c0 - g0).abs() < 1e-10 && (c1 - g1).abs() < 1e-10,
+            "qubit {q}: cpu ({c0}, {c1}) gpu ({g0}, {g1})"
+        );
+    }
+}

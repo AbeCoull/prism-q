@@ -586,6 +586,38 @@ impl StatevectorBackend {
         None
     }
 
+    /// [`pauli_expectations_from_masks`](crate::sim::pauli_expectations_from_masks)
+    /// evaluated on a device-resident state: one reduction launch over every
+    /// mask plus an appended identity mask that supplies the norm, so nothing
+    /// but `16 * (masks.len() + 1)` bytes leaves the card. `None` when the
+    /// state lives on the host.
+    pub(crate) fn pauli_expectations_on_device(
+        &self,
+        masks: &[(usize, usize, u32)],
+    ) -> Option<Result<Vec<f64>>> {
+        if !self.is_gpu_resident() {
+            return None;
+        }
+        let request: Vec<(u64, u64)> = masks
+            .iter()
+            .map(|&(xmask, zmask, _)| (xmask as u64, zmask as u64))
+            .chain(std::iter::once((0, 0)))
+            .collect();
+        let sums = match self.gpu_pauli_sums(&request)? {
+            Ok(sums) => sums,
+            Err(e) => return Some(Err(e)),
+        };
+        let norm = sums[masks.len()].re;
+        if norm == 0.0 {
+            return Some(Ok(vec![0.0; masks.len()]));
+        }
+        Some(Ok(masks
+            .iter()
+            .zip(&sums)
+            .map(|(&(_, _, num_y), sum)| (sum * crate::sim::i_pow(num_y)).re / norm)
+            .collect()))
+    }
+
     #[cfg(feature = "gpu")]
     pub(crate) fn gpu_state(&self) -> Option<&GpuState> {
         self.gpu_state.as_ref()
@@ -948,20 +980,15 @@ impl Backend for StatevectorBackend {
     /// One pass over the amplitudes per observable group, in place.
     ///
     /// The result divides by the norm, so `pending_norm` needs no application:
-    /// it scales bra and ket alike. A device-resident state is read back first,
-    /// which is the transfer a device kernel would remove.
+    /// it scales bra and ket alike. A device-resident state reduces on the card
+    /// and reads back one sum per observable.
     fn pauli_expectations(&self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
         let masks = observables
             .iter()
             .map(|observable| crate::sim::pauli_masks(observable, self.num_qubits))
             .collect::<Result<Vec<_>>>()?;
-        #[cfg(feature = "gpu")]
-        if let Some(gpu) = self.gpu_state.as_ref() {
-            let state = gpu.export_statevector()?;
-            let norm = crate::backend::state_norm_sqr(&state);
-            return Ok(crate::sim::pauli_expectations_from_masks(
-                &state, &masks, norm,
-            ));
+        if let Some(values) = self.pauli_expectations_on_device(&masks) {
+            return values;
         }
         let norm = crate::backend::state_norm_sqr(&self.state);
         Ok(crate::sim::pauli_expectations_from_masks(

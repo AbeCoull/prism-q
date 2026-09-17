@@ -303,6 +303,37 @@ def test_reduced_density_matrix_and_entropy_of_a_bell_pair():
     assert np.allclose(sorted(result.schmidt_values), [2**-0.5, 2**-0.5])
 
 
+def test_overlap_of_two_states():
+    bell = prism_q.parse_qasm(
+        "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncnot q[0], q[1];"
+    )
+    plus = prism_q.parse_qasm("OPENQASM 3.0;\nqubit[2] q;\nh q[0];\nh q[1];")
+
+    same = prism_q.simulate(bell).seed(42).overlap(prism_q.simulate(bell).seed(42))
+    assert np.isclose(same.fidelity, 1.0)
+    assert same.left.is_exact and same.right.is_exact
+
+    # |Bell> and |++> share the |00> and |11> halves, each with amplitude 1/2.
+    mixed = prism_q.simulate(bell).seed(42).overlap(prism_q.simulate(plus).seed(42))
+    assert np.isclose(mixed.fidelity, 0.5)
+
+
+def test_expectation_values_reported_names_its_backend():
+    circuit = prism_q.parse_qasm(
+        "OPENQASM 3.0;\nqubit[2] q;\nh q[0];\ncnot q[0], q[1];"
+    )
+    observables = [[(0, "Z"), (1, "Z")], [(0, "X")]]
+    reported = (
+        prism_q.simulate(circuit).seed(42).expectation_values_reported(observables)
+    )
+    bare = prism_q.simulate(circuit).seed(42).expectation_values(observables)
+
+    assert np.allclose(reported.values, bare)
+    assert np.allclose(reported.values, [1.0, 0.0])
+    assert reported.metadata.backend
+    assert reported.metadata.is_exact
+
+
 def test_observable_variance_is_the_operator_spread():
     # ry(pi/4)|0> is the +1 eigenstate of (X + Z)/sqrt(2), so the operator has
     # no spread while measuring X and Z in separate groups reads 1/2 each.

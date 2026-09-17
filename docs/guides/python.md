@@ -128,10 +128,22 @@ outcome = sim.run()
 | `reduced_density_matrix(qubits)` | `ReducedDensityMatrix`: `.matrix` over a subset with `qubits[0]` the lowest bit, `.purity`, `.metadata` | density matrix only | yes |
 | `entanglement_entropy(subsystem)` | `EntropyResult`: von Neumann and Renyi-2 entropy of the cut | density matrix only | yes |
 | `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only | yes |
+| `expectation_values_reported(obs)` | `ExpectationResult`: the same values with `.metadata` naming the backend that served them | density matrix only | yes |
 | `observable_variance(obs)` | `ObservableVariance`: `<H^2> - <H>^2` beside the mean | density matrix only | yes |
 | `observable_expectation(h)` | `ObservableExpectation`: the weighted mean with its variance, group variances and standard error | density matrix only | yes |
 | `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes | no |
 | `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no | no |
+| `expectation_gradient_shift(h, params)` | `(value, gradient)` via the parameter-shift rule | no | no |
+| `overlap(other)` | `OverlapResult`: `\|<a\|b>\|^2` against a second seeded builder, with one `.metadata` per side | no | yes |
+
+`expectation_values_reported()` is worth calling over `expectation_values()`
+when the route matters: under `auto()` a wide shallow circuit can be answered by
+a tensor contraction rather than by the state vector, and only the metadata says
+which ran. `expectation_gradient_shift()` computes the same gradient as
+`expectation_gradient()` at two extra circuit runs per parameter, and is the
+only route on a backend with no adjoint pass. `overlap()` takes a second seeded
+builder, so each side keeps its own backend, seed and start state; both circuits
+must declare the same width and both must be unitary.
 
 `shots()` and `sample_counts()` average trajectories on any backend holding a
 per-shot pure state. Every row marked "density matrix only" reads the exact mixed state

@@ -25,8 +25,9 @@ use num_complex::Complex64;
 
 use super::{Circuit, GuardedRegion, Instruction, SmallVec, smallvec};
 use crate::gates::{
-    DiagEntry, DiagonalBatchData, Gate, IDENTITY_EPS, Multi2qData, MultiFusedData, is_diagonal_2x2,
-    is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
+    DiagEntry, DiagonalBatchData, Gate, IDENTITY_EPS, MULTI_2Q_HIGH_BUDGET, Multi2qData,
+    MultiFusedData, is_diagonal_2x2, is_diagonal_4x4, kron_2x2, mat_mul_2x2, mat_mul_4x4,
+    multi_2q_join,
 };
 
 use super::fusion_phase::{batch_post_phase_1q, fuse_controlled_phases};
@@ -725,24 +726,6 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
 /// A 2q gate on (q0, q1) fits in a tile of 2^N elements iff max(q0, q1) < N.
 /// L2 tiles = 16384 = 2^14 → max qubit ≤ 13.
 /// L3 tiles = 131072 = 2^17 → max qubit ≤ 16.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tier2q {
-    L2,
-    L3,
-    Individual,
-}
-
-fn classify_2q_tier(q0: usize, q1: usize) -> Tier2q {
-    let max_q = q0.max(q1);
-    if max_q <= 13 {
-        Tier2q::L2
-    } else if max_q <= 16 {
-        Tier2q::L3
-    } else {
-        Tier2q::Individual
-    }
-}
-
 #[inline]
 fn swap_order_4x4(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
     let swap = Gate::Swap.matrix_4x4();
@@ -972,13 +955,13 @@ fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<
 }
 
 /// Reorder consecutive `Fused2q` gates with pairwise-disjoint qubit supports
-/// so that gates of the same `Tier2q` are grouped together. Disjoint-support
-/// 2q gates commute, so reordering is identity-preserving.
+/// so that gates which share one subcube tile sit next to each other.
+/// Disjoint-support 2q gates commute, so reordering is identity-preserving.
 ///
 /// Random pair circuits such as Quantum Volume emit `Fused2q` streams whose
-/// tiers are interleaved. The downstream `fuse_multi_2q_gates` only batches
-/// consecutive same-tier gates, so without this pass tier transitions break
-/// the run after every one or two gates.
+/// high qubits are interleaved. The downstream `fuse_multi_2q_gates` batches
+/// consecutive gates while they fit one tile, so without this pass a gate on
+/// a fresh high qubit breaks the run every one or two gates.
 ///
 /// Returns `Cow::Borrowed` when no reorder happens.
 pub(crate) fn reorder_disjoint_fused2q<'a>(
@@ -987,7 +970,7 @@ pub(crate) fn reorder_disjoint_fused2q<'a>(
 ) -> Cow<'a, Circuit> {
     let circuit = input.as_ref();
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
-    let mut window: Vec<(Tier2q, Instruction, usize)> = Vec::new();
+    let mut window: Vec<(Instruction, usize)> = Vec::new();
     let mut window_qubits = vec![false; circuit.num_qubits];
     let mut changed = false;
     t.begin();
@@ -1011,7 +994,7 @@ pub(crate) fn reorder_disjoint_fused2q<'a>(
             }
             window_qubits[q0] = true;
             window_qubits[q1] = true;
-            window.push((classify_2q_tier(q0, q1), inst.clone(), i));
+            window.push((inst.clone(), i));
         } else {
             flush_disjoint_window(
                 &mut window,
@@ -1041,28 +1024,42 @@ pub(crate) fn reorder_disjoint_fused2q<'a>(
     }
 }
 
+/// Emit a window of disjoint `Fused2q` gates packed first-fit into groups that
+/// each fit one subcube tile, in the window's own order within a group.
 fn flush_disjoint_window(
-    window: &mut Vec<(Tier2q, Instruction, usize)>,
+    window: &mut Vec<(Instruction, usize)>,
     window_qubits: &mut [bool],
     output: &mut Vec<Instruction>,
     changed: &mut bool,
     t: &mut Tracer,
 ) {
-    if window.len() >= 2 {
-        let mut tier_counts = [0u32; 3];
-        for (tier, _, _) in window.iter() {
-            tier_counts[*tier as usize] += 1;
-        }
-        let any_tier_batchable = tier_counts.iter().any(|&c| c >= MIN_MULTI_2Q_BATCH as u32);
-        if any_tier_batchable {
-            let already_sorted = window.windows(2).all(|w| (w[0].0 as u8) <= (w[1].0 as u8));
-            if !already_sorted {
-                window.sort_by_key(|(tier, _, _)| *tier as u8);
-                *changed = true;
+    let mut groups: Vec<(SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>, Vec<usize>)> = Vec::new();
+    for (k, (inst, _)) in window.iter().enumerate() {
+        let Instruction::Gate { targets, .. } = inst else {
+            unreachable!("the window holds Fused2q gates only");
+        };
+        let (q0, q1) = (targets[0], targets[1]);
+        let slot = groups
+            .iter()
+            .position(|(high, _)| multi_2q_join(high, q0, q1).is_some());
+        match slot {
+            Some(g) => {
+                groups[g].0 = multi_2q_join(&groups[g].0, q0, q1).expect("fits, checked above");
+                groups[g].1.push(k);
+            }
+            None => {
+                let high = multi_2q_join(&[], q0, q1).expect("one pair fits a tile");
+                groups.push((high, vec![k]));
             }
         }
     }
-    for (_, inst, src) in window.drain(..) {
+    let order: Vec<usize> = groups.into_iter().flat_map(|(_, m)| m).collect();
+    if order.iter().enumerate().any(|(pos, &k)| pos != k) {
+        *changed = true;
+    }
+    let mut taken: Vec<Option<(Instruction, usize)>> = window.drain(..).map(Some).collect();
+    for k in order {
+        let (inst, src) = taken[k].take().expect("each window slot is emitted once");
         output.push(inst);
         t.keep(src);
     }
@@ -1073,10 +1070,10 @@ fn flush_disjoint_window(
 
 /// Batch consecutive `Fused2q` gates into `Multi2q` for cache-tiled execution.
 ///
-/// Scans for runs of consecutive `Fused2q` instructions within the same cache
-/// tier (L2 or L3). Each run of ≥2 gates is replaced by a single `Multi2q`
-/// gate that the statevector backend applies in a tiled pass. Individual-tier
-/// gates (max qubit > 16) are left as-is.
+/// A run of consecutive `Fused2q` instructions grows while its gates fit one
+/// subcube tile: at most [`MULTI_2Q_HIGH_BUDGET`] distinct qubits at or above
+/// the tile's low bits. Each run of two or more gates becomes one `Multi2q`
+/// that the statevector backend applies in one pass over the state.
 ///
 /// Returns the input unchanged when no batch forms.
 pub(crate) fn fuse_multi_2q_gates<'a>(
@@ -1086,20 +1083,20 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
     let mut pending: Vec<(usize, usize, [[Complex64; 4]; 4])> = Vec::new();
     let mut pending_src: Vec<usize> = Vec::new();
-    let mut current_tier: Option<Tier2q> = None;
+    let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
     let mut changed = false;
 
     let flush = |pending: &mut Vec<(usize, usize, [[Complex64; 4]; 4])>,
                  pending_src: &mut Vec<usize>,
-                 tier: &mut Option<Tier2q>,
+                 high: &mut SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>,
                  output: &mut Vec<Instruction>,
                  changed: &mut bool,
                  tracer: &mut Tracer| {
+        high.clear();
         if pending.is_empty() {
             return;
         }
-        let t = tier.take().unwrap();
-        if t == Tier2q::Individual || pending.len() < MIN_MULTI_2Q_BATCH {
+        if pending.len() < MIN_MULTI_2Q_BATCH {
             for (k, (q0, q1, mat)) in pending.drain(..).enumerate() {
                 output.push(Instruction::Gate {
                     gate: Gate::Fused2q(Box::new(mat)),
@@ -1143,23 +1140,21 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
             } => {
                 let q0 = targets[0];
                 let q1 = targets[1];
-                let tier = classify_2q_tier(q0, q1);
-
-                if let Some(ct) = current_tier {
-                    if ct != tier {
+                let joined = match multi_2q_join(&high, q0, q1) {
+                    Some(joined) => joined,
+                    None => {
                         flush(
                             &mut pending,
                             &mut pending_src,
-                            &mut current_tier,
+                            &mut high,
                             &mut output,
                             &mut changed,
                             tracer,
                         );
+                        multi_2q_join(&[], q0, q1).expect("one pair fits a tile")
                     }
-                }
-                if current_tier.is_none() {
-                    current_tier = Some(tier);
-                }
+                };
+                high = joined;
                 pending.push((q0, q1, **mat));
                 tracer.note_idx(&mut pending_src, i);
             }
@@ -1167,7 +1162,7 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
                 flush(
                     &mut pending,
                     &mut pending_src,
-                    &mut current_tier,
+                    &mut high,
                     &mut output,
                     &mut changed,
                     tracer,
@@ -1180,7 +1175,7 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
     flush(
         &mut pending,
         &mut pending_src,
-        &mut current_tier,
+        &mut high,
         &mut output,
         &mut changed,
         tracer,

@@ -1,8 +1,13 @@
 # OpenQASM Support
 
 PRISM-Q parses a practical subset of OpenQASM 3.0, with backward compatibility for common
-2.0 syntax. The parser converts text directly to the [Circuit IR](../architecture/ir.md)
-with no intermediate AST.
+2.0 syntax. Text is lexed, parsed to a statement tree, and evaluated into the
+[Circuit IR](../architecture/ir.md); the tree holds syntax only, so a program's meaning is
+decided once, in the evaluator.
+
+[The subset](#the-subset) below states what parses and what declines. A construct that is
+valid OpenQASM but outside the subset returns `UnsupportedConstruct` naming it, never a
+panic and never a silent drop.
 
 ## Parsing and running
 
@@ -290,6 +295,49 @@ The indices are absolute, so the register is as wide as the highest one named
 and nothing declares it. A `qubit` or `qreg` declaration in the same program is
 rejected: a physical index and a register offset would give `0` two meanings.
 
+## The subset
+
+`UnsupportedConstruct` means the program is valid OpenQASM that this parser does not
+implement. `Parse` means the text is not accepted as written. The remaining variants name
+the specific mistake: `UndefinedRegister`, `InvalidQubit`, `InvalidClassicalBit`,
+`GateArity`.
+
+| Construct | Status | What a decline returns |
+| --- | --- | --- |
+| `OPENQASM 2.0` and `3.0` headers | Parses | Any other version: `UnsupportedConstruct` naming the version |
+| `include "..."` | Accepted and ignored | Nothing. The standard gates are built in, so an include adds no names; a gate it would have defined declines later by name |
+| `qubit`, `qreg`, `bit`, `creg` | Parses | |
+| Physical qubits (`$0`) | Parses | A `qubit` or `qreg` declaration in the same program: `UnsupportedConstruct` |
+| `int`, `uint`, `bool`, `float`, `angle`, `const` | Parses | Any other type, `complex` included: `UnsupportedConstruct` naming the type |
+| `array` declarations | Declines | `UnsupportedConstruct` |
+| `duration`, `stretch`, `delay` | Declines | `UnsupportedConstruct`. Timing has no meaning here: nothing schedules |
+| `input`, `output` | Parses | `input` of a type other than `float` or `angle`, `output` of a type other than `bit`, or an `input` anywhere but as the whole angle argument of a top-level parametric gate: `UnsupportedConstruct` |
+| `measure`, `reset` | Parses | A register measure whose widths disagree: `Parse` |
+| `barrier q;` and `barrier q[0], q[1];` | Parses | `barrier;` with no operand: `Parse`. Name the register to barrier all of it |
+| `if`, `else`, `else if` | Parses | `else` at the head of a statement: `UnsupportedConstruct`. An `else` whose `if` body measures into a bit the condition reads: `Parse` |
+| `switch`, `case`, `default` | Parses | An arm that measures into the switched register: `Parse`. More case labels than the region depth bound when a `default` is present: `UnsupportedConstruct` |
+| `for` | Unrolls at parse time | A range in any form but `[start:stop]`, `[start:step:stop]` or `{a,b,c}`: `UnsupportedConstruct` naming what it found. The bounds themselves may be classical variables |
+| `while` | Declines | `UnsupportedConstruct` |
+| `def` | Inlines a unitary body at the call site | A classical bit parameter or a return type: `UnsupportedConstruct` |
+| `gate` blocks | Parses | |
+| `defcal`, `extern`, `opaque`, `box` | Declines | `UnsupportedConstruct` |
+| `ctrl`, `negctrl`, `inv`, `pow(k)` | Parses, chainable in any order | See [Other supported constructs](#other-supported-constructs) for the reach of each, and below for the declines |
+| `gphase(theta)` | Parses and is carried | |
+| `#pragma braket ...` | Parses under `Dialect::Braket` | Any other dialect, or any other pragma: `UnsupportedConstruct` naming the pragma |
+| A gate name the crate does not implement | Declines | `UnsupportedConstruct` naming it |
+| A gate call at the wrong width | Declines | `GateArity` naming the gate, the arity it wanted, and what it got |
+
+Modifier declines, all `UnsupportedConstruct`: `ctrl @` on a `def` call, which is a
+subroutine rather than a gate; `ctrl @` on a body that measures, resets or branches;
+a `ctrl @` chain past 255 controls; `pow(k) @` on a call spanning more than four qubits
+or carrying an instruction with no matrix; `inv @` on a body that is not a gate sequence;
+and a whole-number `pow` past one million repetitions, which returns `Parse` naming the
+count instead.
+
+Every decline above happens at parse time, so a program that parses is one the IR can
+hold. The backend it then runs on may still decline the circuit; those limits are on the
+[Capabilities](capabilities.md) page, not here.
+
 ## Other supported constructs
 
 - Gate modifiers: `ctrl @`, `negctrl @`, `inv @`, `pow(k) @`, chainable and in
@@ -352,16 +400,13 @@ if (c[0]) {
 ```
 
 ```admonish warning title="Not supported"
-`while` loops and classical expressions beyond the condition language. A `for` loop
-with a compile-time trip count unrolls at parse time; a `def` subroutine inlines at
-its call site, but only a unitary one. A construct that parses as valid OpenQASM but
-is unsupported returns `UnsupportedConstruct` rather than panicking; see the
-[Error Model](../architecture/api-surface.md).
+[The subset](#the-subset) has the full list. The two declines worth the reasoning: `else`
+is rejected when the `if` body measures into a bit the condition reads, and `switch` when
+any arm measures into the switched register. Both lower to a chain of guards that re-read
+the classical bits, so such a source could otherwise take two arms of one choice. An
+`else` body may write freely, since nothing re-reads after it.
 
-`else` is rejected when the `if` body measures into a bit the condition reads, and
-`switch` when any arm measures into the switched register. Both lower to a chain of
-guards that re-read the classical bits, so such a source could otherwise take two arms
-of one choice. An `else` body may write freely: nothing re-reads after it.
+Classical expressions beyond the condition language are outside the subset, as is `while`.
 ```
 
 ```admonish note title="Qubit ordering"

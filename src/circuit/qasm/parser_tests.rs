@@ -278,6 +278,28 @@ fn unimplemented_keywords_are_rejected_by_name() {
 }
 
 #[test]
+fn timing_and_array_declines_name_the_construct() {
+    for source in [
+        "delay[10ns] q[0];",
+        "delay q[0];",
+        "duration d = 10ns;",
+        "array[int[32], 2] a;",
+    ] {
+        match error(source) {
+            PrismError::UnsupportedConstruct { construct, .. } => {
+                assert!(
+                    construct.contains("delay")
+                        || construct.contains("duration")
+                        || construct.contains("array"),
+                    "`{source}` gave `{construct}`"
+                );
+            }
+            other => panic!("`{source}` gave {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn an_unclosed_block_names_what_was_missing() {
     let message = format!("{}", error("gate g a { h a;"));
     assert!(message.contains('}'), "{message}");

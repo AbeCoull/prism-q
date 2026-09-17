@@ -1967,3 +1967,118 @@ fn pauli_expectations_ignore_the_deferred_measurement_norm() {
     assert!((got[2] - 1.0).abs() < 1e-12, "X2 on |+> reads 1");
     assert!((got[3] - 1.0).abs() < 1e-12, "Z0 Z1 is +1 either way");
 }
+
+mod multi_2q_subcube {
+    use crate::backend::Backend;
+    use crate::backend::statevector::StatevectorBackend;
+    use crate::circuit::Circuit;
+    use crate::gates::{Gate, Multi2qData};
+    use num_complex::Complex64;
+    use rand::{RngExt, SeedableRng};
+    use rand_chacha::ChaCha8Rng;
+
+    fn dense_4x4(rng: &mut ChaCha8Rng) -> [[Complex64; 4]; 4] {
+        let mut m = [[Complex64::new(0.0, 0.0); 4]; 4];
+        for row in m.iter_mut() {
+            for e in row.iter_mut() {
+                *e = Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5);
+            }
+        }
+        m
+    }
+
+    fn random_state(n: usize, rng: &mut ChaCha8Rng) -> Vec<Complex64> {
+        let raw: Vec<Complex64> = (0..1usize << n)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect();
+        let norm = raw.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+        raw.into_iter().map(|a| a / norm).collect()
+    }
+
+    // The batch as one Multi2q against the same gates one at a time, from the
+    // same random start state, so a wrong gather, a wrong remap, or a wrong
+    // order all show.
+    fn batch_matches_per_gate(n: usize, pairs: &[(usize, usize)], seed: u64) {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let gates: Vec<(usize, usize, [[Complex64; 4]; 4])> = pairs
+            .iter()
+            .map(|&(q0, q1)| (q0, q1, dense_4x4(&mut rng)))
+            .collect();
+        let start = random_state(n, &mut rng);
+
+        let mut batched = Circuit::new(n, 0);
+        let mut targets: Vec<usize> = pairs.iter().flat_map(|&(a, b)| [a, b]).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        batched.add_gate(
+            Gate::Multi2q(Box::new(Multi2qData {
+                gates: gates.clone(),
+            })),
+            &targets,
+        );
+        let mut one_by_one = Circuit::new(n, 0);
+        for &(q0, q1, mat) in &gates {
+            one_by_one.add_gate(Gate::Fused2q(Box::new(mat)), &[q0, q1]);
+        }
+
+        let run = |circuit: &Circuit| {
+            let mut b = StatevectorBackend::new(1);
+            b.init_from_amplitudes(start.clone(), 0).unwrap();
+            b.apply_instructions(&circuit.instructions).unwrap();
+            b.state_vector().to_vec()
+        };
+        let got = run(&batched);
+        let want = run(&one_by_one);
+        for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert!((g - w).norm() < 1e-12, "amplitude {i}: {g} vs {w}");
+        }
+    }
+
+    #[test]
+    fn four_high_qubits_gather_into_one_tile() {
+        // n = 16: high qubits 12, 13, 14, 15 fill the budget, low run is 10 bits.
+        batch_matches_per_gate(
+            16,
+            &[
+                (0, 15),
+                (14, 3),
+                (15, 14),
+                (2, 9),
+                (12, 13),
+                (14, 3),
+                (13, 0),
+            ],
+            7,
+        );
+    }
+
+    #[test]
+    fn a_high_qubit_inside_the_run_rides_there() {
+        // n = 17: {10, 11, 16} shrinks to {16} once the run widens to 13 bits.
+        batch_matches_per_gate(17, &[(10, 11), (16, 2), (11, 16), (5, 10)], 11);
+    }
+
+    #[test]
+    fn a_wide_state_with_repeated_pairs_keeps_order() {
+        batch_matches_per_gate(
+            20,
+            &[
+                (19, 4),
+                (4, 19),
+                (17, 18),
+                (1, 17),
+                (19, 18),
+                (0, 1),
+                (18, 4),
+            ],
+            23,
+        );
+    }
+
+    #[test]
+    fn a_batch_over_the_budget_still_matches() {
+        // Five distinct high qubits: no subcube plan, the tiered fallback runs.
+        batch_matches_per_gate(18, &[(10, 11), (12, 13), (14, 2), (13, 10)], 5);
+        batch_matches_per_gate(18, &[(10, 11), (12, 13), (14, 15), (16, 17)], 3);
+    }
+}

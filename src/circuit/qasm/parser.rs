@@ -19,9 +19,26 @@ const DECLARATION_TYPES: &[&str] = &[
     "int", "uint", "float", "angle", "bool", "complex", "duration", "stretch",
 ];
 
-/// Keywords the language has and this parser does not implement.
-const UNSUPPORTED: &[&str] = &[
-    "defcal", "extern", "opaque", "while", "return", "break", "continue", "else",
+/// Keywords the language has and this parser does not implement, each with
+/// the text its decline carries. A keyword parses as valid OpenQASM, so it
+/// owes `UnsupportedConstruct` rather than the syntax error its operands would
+/// otherwise produce: `delay[10ns] q[0]` reads as a malformed gate call and
+/// `duration d = 10ns` as a malformed expression, and neither says why.
+const UNSUPPORTED: &[(&str, &str)] = &[
+    ("defcal", "defcal"),
+    ("extern", "extern"),
+    ("opaque", "opaque"),
+    ("while", "while"),
+    ("return", "return"),
+    ("break", "break"),
+    ("continue", "continue"),
+    ("else", "else"),
+    (
+        "delay",
+        "`delay`, a timing instruction with no schedule to delay against",
+    ),
+    ("duration", "`duration` declarations"),
+    ("array", "`array` declarations"),
 ];
 
 pub(crate) fn parse_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
@@ -51,9 +68,9 @@ fn statement_kind<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
     }
 
     let word = stream.peek().text;
-    if let Some(keyword) = UNSUPPORTED.iter().find(|entry| **entry == word) {
+    if let Some((_, construct)) = UNSUPPORTED.iter().find(|(keyword, _)| *keyword == word) {
         return Err(PrismError::UnsupportedConstruct {
-            construct: (*keyword).to_string(),
+            construct: (*construct).to_string(),
             line: stream.line(),
         });
     }

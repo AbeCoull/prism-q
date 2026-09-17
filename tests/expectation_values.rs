@@ -5,7 +5,7 @@ mod common;
 
 use prism_q::gates::Gate;
 use prism_q::{
-    BackendKind, Circuit, NoiseModel, PauliAxis, PauliObservable, PauliTerm,
+    BackendKind, Circuit, NoiseModel, PauliAxis, PauliObservable, PauliTerm, ResolvedBackend,
     density_matrix_expectation_values, run_expectation_values, run_observable_expectation,
     simulate,
 };
@@ -833,6 +833,25 @@ fn readout_fixture() -> (Circuit, NoiseModel, NoiseModel) {
     let mut with_readout = NoiseModel::uniform_depolarizing(&circuit, 0.01);
     with_readout.with_readout_error(0.3, 0.0);
     (circuit, clean, with_readout)
+}
+
+#[test]
+fn density_matrix_serves_expectation_values_without_noise() {
+    let circuit = bell();
+    let observables = [
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::x(0), PauliTerm::x(1)],
+        vec![PauliTerm::y(0)],
+    ];
+
+    let reported = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+
+    assert_close(&reported.values, &[1.0, 1.0, 0.0], TOL);
+    assert_eq!(reported.metadata.backend, ResolvedBackend::DensityMatrix);
 }
 
 #[test]

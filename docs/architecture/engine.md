@@ -131,7 +131,15 @@ flowchart TD
     IND -- no --> SV["Statevector (exact)"]
 ```
 
-Memory limit is dynamically computed from available system RAM (50% budget, capped at 33 qubits). Overridable via `PRISM_MAX_SV_QUBITS` environment variable. Falls back to 28 qubits (4 GB) when detection unavailable.
+The memory limit comes from detected physical memory: half of it is the budget,
+and the cap is the widest register whose `2^n` `Complex64` amplitudes fit, so 29
+qubits on a 16 GiB host and 30 on 32 GiB. `PRISM_MAX_SV_QUBITS` overrides it with
+a qubit count, and an unparseable value warns and leaves detection in charge
+rather than disabling the cap. When detection itself fails the cap is disabled,
+with a warning on stderr: a register too wide for the machine then aborts on
+allocation rather than routing to another backend, since there is no figure left
+to route against. `src/backend/memory.rs` holds the derivation and the other
+dense caps that share it.
 
 For a user-facing version of this decision, see [Choosing a Backend](../getting-started/choosing-a-backend.md).
 

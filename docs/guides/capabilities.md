@@ -83,16 +83,17 @@ bounded only by their own representation.
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
 | Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
 | Tensor Network | Dense | Native, one doubled-network contraction per observable |
-| Density Matrix | Dense | Rejected, naming the backend |
+| Density Matrix | Dense | Native, `Tr(rho P)` per observable |
 
 Native sampling is deterministic from the seed alone: the same seed and shot
 count reproduce the same bitstrings. It is not shot-for-shot identical to the
 dense route, which consumes its randomness on a different schedule; the
 distributions agree.
 
-Backends without an observable path return `BackendUnsupported` naming
-themselves, so a rejected request says which engine could not serve it rather
-than blaming the route that selected it.
+Every backend the crate ships has an observable path. The trait default is a
+`BackendUnsupported` naming the backend, so one added later that omits the path
+declines loudly, and the rejection says which engine could not serve the request
+rather than blaming the route that selected it.
 
 `simulate(...).marginals()` reads per-qubit Z expectations rather than a
 distribution when the resolved backend has an observable path and the circuit

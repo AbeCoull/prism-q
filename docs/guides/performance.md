@@ -12,8 +12,8 @@ reference under [Fusion Pipeline](../architecture/fusion.md) and
    when it does not apply.
 2. **Cache-resident tiling** keeps batched gates (`MultiFused`, `Multi2q`) operating on
    L2/L3-sized tiles so repeated passes reuse hot data.
-3. **SIMD** vectorizes the inner complex-arithmetic loop with AVX2+FMA, FMA, and BMI2,
-   with a scalar fallback on non-x86_64.
+3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
+   runtime: AVX2+FMA, FMA or SSE2 on x86_64, NEON on aarch64, scalar elsewhere.
 
 The levers are ordered, and lever 3 comes with a prior question: can the arithmetic be
 removed rather than issued faster? A kernel whose operations an algebraic identity or an

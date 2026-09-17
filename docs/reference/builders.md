@@ -20,6 +20,13 @@ Pre-built circuits for benchmarking and testing, in `src/circuits.rs`. Each retu
 | `phase_estimation_circuit(n)` | Quantum phase estimation |
 | `independent_bell_pairs(n_pairs)` | Independent Bell pairs |
 | `independent_random_blocks(blocks, size, depth, seed)` | Independent random blocks |
+| `partially_independent_circuit(n, depth, seed)` | Mostly independent halves with a few crossing gates |
+| `disjoint_block_layers_circuit(n, k, layers, seed)` | Layers of disjoint `k`-qubit blocks |
+| `diagonal_mixed_circuit(n, layers, seed)` | Diagonal families mixed with single-qubit rotations |
+| `local_clifford_blocks(num_blocks, block_size, depth, seed)` | Clifford blocks with no coupling between them |
+| `brickwork_circuit(n, depth, seed)` | Alternating even and odd two-qubit layers |
+| `matched_brickwork_circuit(n, depth, seed)` | Brickwork whose layers pair up for cancellation |
+| `sparse_walk_circuit(n, k, depth, seed)` | Walk that keeps roughly `k` amplitudes live |
 
 ## Example
 

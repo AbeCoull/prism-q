@@ -2,13 +2,14 @@
 
 ## Parser
 
-Handwritten parser targeting a practical OpenQASM 3.0 subset. It processes input line by line and converts `&str` directly to `Circuit` IR with no intermediate AST.
+Handwritten front end in three stages: a lexer turns source into tokens, a parser turns
+tokens into a statement tree, and a walker turns that tree into `Circuit` IR. The tree
+holds syntax only, so meaning is decided once, in the walker. A statement ends at its
+`;` and a block at its `}`, wherever the newlines fall.
 
-**Supported**: `qubit`/`bit` declarations, OpenQASM standard gates and aliases (x, y, z, h, s, sdg, t, tdg, sx, rx, ry, rz, p/phase, cx/CX/cnot, cy, cz, cp/cphase, crx, cry, crz, ch, swap, ccx/toffoli, cswap/fredkin, cu, u1, u2, u3/u/U), Qiskit and exporter gates (sxdg, cs, csdg, csx, ccz, r, rzz, rxx, ryy, xx_plus_yy, xx_minus_yy, ecr, iswap, dcx, c3x, c4x, mcx, rccx, rc3x/rcccx), hardware-native gates (gpi, gpi2, ms, syc, sqrt_iswap, sqrt_iswap_inv), gate modifiers (`ctrl @`, `inv @`, `pow(k) @`), user-defined `gate` blocks, classical `if` conditionals with a single statement or a braced body, multi-register broadcast, measure, barrier, expression evaluator with math functions. OpenQASM 2.0 backward compatibility (`qreg`/`creg`, `measure q -> c` syntax).
-
-**Unsupported**: `for`/`while` loops, subroutines, classical expressions beyond `if`.
-
-See the [OpenQASM Support guide](../guides/openqasm.md) for a user-facing walkthrough.
+The [OpenQASM guide](../guides/openqasm.md#the-subset) tabulates what parses, what
+declines, and which error each decline returns. That table is the list; this page does
+not keep a second copy.
 
 ## Circuit IR
 
@@ -18,6 +19,7 @@ See the [OpenQASM Support guide](../guides/openqasm.md) for a user-facing walkth
 |---------|--------|-------------|
 | `Gate` | `gate`, `targets` | Gate application |
 | `Measure` | `qubit`, `classical_bit` | Destructive measurement |
+| `Reset` | `qubit` | Return one qubit to `|0>`, mid-circuit |
 | `Barrier` | `qubits` | Synchronization barrier |
 | `Conditional` | `condition`, `gate`, `targets` | Classical-controlled gate |
 | `Region` | `Box<GuardedRegion>` | Classical-controlled span of instructions |
@@ -95,6 +97,7 @@ payloads.
 | `Id`, `X`, `Y`, `Z`, `H`, `S`, `Sdg`, `T`, `Tdg`, `SX`, `SXdg` | None | 16B |
 | `Rx(f64)`, `Ry(f64)`, `Rz(f64)`, `P(f64)`, `Rzz(f64)` | Inline f64 | 16B |
 | `Cx`, `Cz`, `Swap` | None | 16B |
+| `QftBlock { start: u8, num: u8 }` | Inline pair, the one boxless composite | 16B |
 | `Cu(Box<[[Complex64; 2]; 2]>)` | Boxed 2×2 | 16B |
 | `Mcu(Box<McuData>)` | Boxed matrix + control count | 16B |
 | `Fused(Box<[[Complex64; 2]; 2]>)` | Boxed pre-fused 1q matrix | 16B |

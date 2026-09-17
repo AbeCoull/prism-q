@@ -18,7 +18,8 @@ use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{
-    BatchPhaseData, BatchRzzData, DiagEntry, Gate, diag_entries_phase, pauli_rot_masks,
+    BatchPhaseData, BatchRzzData, DiagEntry, Gate, MULTI_2Q_HIGH_BUDGET, MULTI_2Q_LOW_BITS,
+    MULTI_2Q_TILE_BITS, diag_entries_phase, pauli_rot_masks,
 };
 use crate::sim::unified_pauli::PauliAxis;
 #[cfg(feature = "parallel")]
@@ -50,6 +51,158 @@ pub(crate) fn multi_2q_single_tier(gates: &[(usize, usize, [[Complex64; 4]; 4])]
     gates
         .iter()
         .all(|&(q0, q1, _)| q0.max(q1) <= MULTI_GATE_MAX_L2_TARGET)
+}
+
+/// Tile geometry for a `Multi2q` batch that reaches past the lowest tile bits:
+/// a tile is `2^high.len()` contiguous runs of `2^low` amplitudes, one run per
+/// setting of the `high` qubits, and `low + high.len() == MULTI_2Q_TILE_BITS`.
+/// Gathered into one buffer, run `c` occupies `[c << low, (c + 1) << low)`, so
+/// a low qubit keeps its bit and the `j`th high qubit becomes bit `low + j`.
+struct SubcubePlan {
+    low: usize,
+    high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>,
+    /// Qubit index to bit position inside the gathered tile.
+    map: Vec<usize>,
+}
+
+impl SubcubePlan {
+    /// Index bits outside the tile, ascending: the ones an outer index walks.
+    fn rest(&self, num_qubits: usize) -> Vec<usize> {
+        (self.low..num_qubits)
+            .filter(|q| !self.high.contains(q))
+            .collect()
+    }
+}
+
+/// The subcube tile for `gates`, or `None` when the batch is served better by
+/// the in-place tiles (every qubit below bit 14, or the state is one tile) or
+/// cannot be tiled at all (more than [`MULTI_2Q_HIGH_BUDGET`] distinct qubits
+/// at or above [`MULTI_2Q_LOW_BITS`]).
+fn subcube_plan(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    num_qubits: usize,
+) -> Option<SubcubePlan> {
+    if num_qubits <= MULTI_2Q_TILE_BITS {
+        return None;
+    }
+    let max_q = gates.iter().map(|&(q0, q1, _)| q0.max(q1)).max()?;
+    if max_q < MULTI_2Q_TILE_BITS {
+        return None;
+    }
+    let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
+    for &(q0, q1, _) in gates {
+        for q in [q0, q1] {
+            if q >= MULTI_2Q_LOW_BITS && !high.contains(&q) {
+                if high.len() == MULTI_2Q_HIGH_BUDGET {
+                    return None;
+                }
+                high.push(q);
+            }
+        }
+    }
+    // A high qubit that lands inside the contiguous run rides there instead,
+    // which lengthens the run and can free another; iterate to a fixed point.
+    let mut low = MULTI_2Q_TILE_BITS - high.len();
+    loop {
+        let before = high.len();
+        high.retain(|&mut q| q >= low);
+        if high.len() == before {
+            break;
+        }
+        low = MULTI_2Q_TILE_BITS - high.len();
+    }
+    high.sort_unstable();
+    let mut map = vec![usize::MAX; num_qubits];
+    for (q, slot) in map.iter_mut().enumerate().take(low) {
+        *slot = q;
+    }
+    for (j, &h) in high.iter().enumerate() {
+        map[h] = low + j;
+    }
+    Some(SubcubePlan { low, high, map })
+}
+
+fn prepare_2q(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+) -> Vec<(usize, usize, simd::PreparedGate2q)> {
+    gates
+        .iter()
+        .map(|&(q0, q1, ref mat)| (q0, q1, simd::PreparedGate2q::new(mat)))
+        .collect()
+}
+
+thread_local! {
+    /// The gathered tile, one per thread and kept between batches: a fresh
+    /// allocation per subcube paid more in page faults than the sweeps it
+    /// saved.
+    static SUBCUBE_TILE: std::cell::RefCell<Vec<Complex64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn with_subcube_tile<R>(f: impl FnOnce(&mut [Complex64]) -> R) -> R {
+    SUBCUBE_TILE.with(|tile| {
+        let mut tile = tile.borrow_mut();
+        if tile.len() != 1 << MULTI_2Q_TILE_BITS {
+            tile.resize(1 << MULTI_2Q_TILE_BITS, Complex64::new(0.0, 0.0));
+        }
+        f(&mut tile)
+    })
+}
+
+/// Gather the subcube `outer` selects into this thread's tile, apply `gates`
+/// there in order through the contiguous tiled kernel, and scatter it back.
+/// Applying in place across the runs instead was measured slower at every
+/// width: the strided group walk gives up the paired AVX2 kernel.
+///
+/// # Safety
+/// `state` must point at `2^num_qubits` amplitudes laid out for `plan` and
+/// `rest`, and no other access to this subcube may overlap the call.
+unsafe fn apply_subcube(
+    state: *mut Complex64,
+    plan: &SubcubePlan,
+    rest: &[usize],
+    outer: usize,
+    gates: &[(usize, usize, simd::PreparedGate2q)],
+) {
+    let run = 1usize << plan.low;
+    let mut base = 0usize;
+    for (j, &p) in rest.iter().enumerate() {
+        base |= ((outer >> j) & 1) << p;
+    }
+    let run_offset = |c: usize| {
+        let mut off = base;
+        for (j, &h) in plan.high.iter().enumerate() {
+            off |= ((c >> j) & 1) << h;
+        }
+        off
+    };
+    let runs = 1usize << plan.high.len();
+    with_subcube_tile(|tile| {
+        for c in 0..runs {
+            // SAFETY: same contract as the enclosing unsafe fn; the run is
+            // inside the subcube and the tile holds `runs << low` elements.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    state.add(run_offset(c)),
+                    tile.as_mut_ptr().add(c << plan.low),
+                    run,
+                );
+            }
+        }
+        for &(q0, q1, ref prepared) in gates {
+            prepared.apply_tiled(tile, MULTI_2Q_TILE_BITS, plan.map[q0], plan.map[q1]);
+        }
+        for c in 0..runs {
+            // SAFETY: same contract as the enclosing unsafe fn.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    tile.as_ptr().add(c << plan.low),
+                    state.add(run_offset(c)),
+                    run,
+                );
+            }
+        }
+    });
 }
 
 /// Targets folded into one shared high-target traversal. `lanes * tile_len` is
@@ -3472,16 +3625,51 @@ impl StatevectorBackend {
         }
     }
 
+    fn apply_multi_2q_subcube(
+        &mut self,
+        gates: &[(usize, usize, [[Complex64; 4]; 4])],
+        plan: &SubcubePlan,
+    ) {
+        let prepared = prepare_2q(gates);
+        let rest = plan.rest(self.num_qubits);
+        let state = self.state.as_mut_ptr();
+        for outer in 0..1usize << (self.num_qubits - MULTI_2Q_TILE_BITS) {
+            // SAFETY: `state` holds 2^num_qubits amplitudes and each `outer`
+            // addresses its own subcube, applied one at a time here.
+            unsafe { apply_subcube(state, plan, &rest, outer, &prepared) };
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    fn apply_multi_2q_subcube_par(
+        &mut self,
+        gates: &[(usize, usize, [[Complex64; 4]; 4])],
+        plan: &SubcubePlan,
+    ) {
+        let prepared = prepare_2q(gates);
+        let rest = plan.rest(self.num_qubits);
+        let ptr = SendPtr(self.state.as_mut_ptr());
+        (0..1usize << (self.num_qubits - MULTI_2Q_TILE_BITS))
+            .into_par_iter()
+            .for_each(|outer| {
+                // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct
+                // `outer` values address disjoint subcubes, so no two tasks
+                // touch the same amplitude.
+                unsafe { apply_subcube(ptr.as_complex_ptr(), plan, &rest, outer, &prepared) };
+            });
+    }
+
     /// Apply multiple two-qubit gates in a cache-tiled pass.
     ///
-    /// Partitions gates by `max(q0, q1)` into three tiers matching `apply_multi_1q`:
-    /// - **L2** (max qubit ≤ 13): 16K-element tiles (256 KB)
-    /// - **L3** (max qubit ≤ 16): 131K-element tiles (2 MB)
-    /// - **Individual** (max qubit > 16): per-gate full-state passes
-    ///
-    /// Within each tier the gates are applied sequentially per tile, keeping data
-    /// cache-resident. `PreparedGate2q::apply_full` works on sub-slices because it
-    /// uses `1 << (num_qubits - 2)` for iteration, relative to slice length.
+    /// A batch whose qubits reach past the lowest tile bits takes the subcube
+    /// path (see [`subcube_plan`]): each 256 KB subcube is gathered into a
+    /// per-thread tile, every gate is applied there in order, and the tile is
+    /// scattered back, so the whole batch costs one pass over the state plus
+    /// in-cache arithmetic.
+    /// A batch that sits entirely below bit 14 tiles the state in place. Any
+    /// other list falls back to the tiered pass by `max(q0, q1)`: L2 tiles up
+    /// to qubit 13, L3 tiles up to 16, one full pass per gate above that. That
+    /// pass runs tier by tier, so it keeps application order only within a tier.
     #[inline(always)]
     pub(crate) fn apply_multi_2q(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
         if gates.is_empty() {
@@ -3489,6 +3677,15 @@ impl StatevectorBackend {
         }
         if gates.len() == 1 {
             self.apply_fused_2q(gates[0].0, gates[0].1, &gates[0].2);
+            return;
+        }
+        if let Some(plan) = subcube_plan(gates, self.num_qubits) {
+            #[cfg(feature = "parallel")]
+            if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+                self.apply_multi_2q_subcube_par(gates, &plan);
+                return;
+            }
+            self.apply_multi_2q_subcube(gates, &plan);
             return;
         }
 

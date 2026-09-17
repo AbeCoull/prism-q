@@ -364,6 +364,37 @@ pub struct Multi2qData {
     pub gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
 }
 
+/// A `Multi2q` batch runs inside one tile of `2^MULTI_2Q_TILE_BITS` amplitudes
+/// (256 KB, an L2 cache): the tile is the lowest bits of the index plus up to
+/// [`MULTI_2Q_HIGH_BUDGET`] gathered high qubits, so a batch is tileable when
+/// its gates touch at most that many distinct qubits at or above
+/// [`MULTI_2Q_LOW_BITS`].
+pub(crate) const MULTI_2Q_TILE_BITS: usize = 14;
+/// Qubits from this index up count against a batch's high-qubit budget.
+pub(crate) const MULTI_2Q_LOW_BITS: usize = 10;
+/// Most distinct high qubits one `Multi2q` batch may span.
+pub(crate) const MULTI_2Q_HIGH_BUDGET: usize = MULTI_2Q_TILE_BITS - MULTI_2Q_LOW_BITS;
+
+/// The high qubits `high` grows to if the pair joins the batch, or `None` when
+/// the pair would take it past [`MULTI_2Q_HIGH_BUDGET`].
+pub(crate) fn multi_2q_join(
+    high: &[usize],
+    q0: usize,
+    q1: usize,
+) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
+    let mut joined: smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> =
+        high.iter().copied().collect();
+    for q in [q0, q1] {
+        if q >= MULTI_2Q_LOW_BITS && !joined.contains(&q) {
+            if joined.len() == MULTI_2Q_HIGH_BUDGET {
+                return None;
+            }
+            joined.push(q);
+        }
+    }
+    Some(joined)
+}
+
 /// Controlled `mat` as a 4x4 with the control on the high bit of the basis index.
 #[inline]
 pub(crate) fn cu_matrix_4x4(mat: &[[Complex64; 2]; 2]) -> [[Complex64; 4]; 4] {

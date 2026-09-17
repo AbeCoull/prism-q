@@ -1151,6 +1151,47 @@ fn qv_12_uses_multi_2q_fusion() {
 }
 
 #[test]
+fn qv_20_batches_fit_one_subcube_tile() {
+    use crate::gates::{MULTI_2Q_HIGH_BUDGET, MULTI_2Q_LOW_BITS};
+    let circuit = crate::circuits::quantum_volume_circuit(20, 20, 42);
+    let fused = fuse_circuit(&circuit, true);
+    let mut batches = 0usize;
+    let mut batched_gates = 0usize;
+    let mut lone = 0usize;
+    for inst in &fused.instructions {
+        match inst {
+            Instruction::Gate {
+                gate: Gate::Multi2q(data),
+                ..
+            } => {
+                let mut high: Vec<usize> = data
+                    .gates
+                    .iter()
+                    .flat_map(|&(q0, q1, _)| [q0, q1])
+                    .filter(|&q| q >= MULTI_2Q_LOW_BITS)
+                    .collect();
+                high.sort_unstable();
+                high.dedup();
+                assert!(high.len() <= MULTI_2Q_HIGH_BUDGET, "batch spans {high:?}");
+                batches += 1;
+                batched_gates += data.gates.len();
+            }
+            Instruction::Gate {
+                gate: Gate::Fused2q(_),
+                ..
+            } => lone += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(batched_gates + lone, 200);
+    // Ten disjoint pairs per layer pack into a few tiles, not one sweep each.
+    assert!(
+        batches + lone <= 80,
+        "{batches} batches and {lone} lone gates"
+    );
+}
+
+#[test]
 fn test_recognition_extends_clifford_prefix() {
     let mut c = Circuit::new(2, 0);
     // T, T on q0 then CX then Rx on q1

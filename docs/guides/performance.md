@@ -11,7 +11,9 @@ reference under [Fusion Pipeline](../architecture/fusion.md) and
    reducing memory traffic over the statevector. It is qubit-count gated and zero-cost
    when it does not apply.
 2. **Cache-resident tiling** keeps batched gates (`MultiFused`, `Multi2q`) operating on
-   L2/L3-sized tiles so repeated passes reuse hot data.
+   L2-sized tiles so repeated passes reuse hot data. A `Multi2q` tile is the low bits of
+   the index plus up to four gathered high qubits, so a batch of gates on any qubits
+   costs one pass over the state as long as it spans at most four qubits above bit 10.
 3. **SIMD** vectorizes the inner complex-arithmetic loop with AVX2+FMA, FMA, and BMI2,
    with a scalar fallback on non-x86_64.
 

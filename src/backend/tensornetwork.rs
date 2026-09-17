@@ -1000,12 +1000,18 @@ impl ScalarExpectationNetwork {
         Ok(())
     }
 
-    fn contract(mut self) -> Result<f64> {
+    fn contract(self) -> Result<f64> {
         if self.tensors.is_empty() {
             return Ok(1.0);
         }
-        let result = greedy_contract(
+        let plan = plan_with_restarts(&self.tensors);
+        self.contract_on(&plan)
+    }
+
+    fn contract_on(mut self, plan: &ContractionPlan) -> Result<f64> {
+        let result = contract_planned(
             &mut self.tensors,
+            plan,
             "tensor_network_scalar",
             "scalar expectation",
         )?;
@@ -1042,6 +1048,53 @@ pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm
     }
     network.append_observable(pauli_terms)?;
     network.contract()
+}
+
+/// Largest greedy-tree intermediate, in elements, under which the `Auto`
+/// expectation route takes the scalar path. Measured over 24 circuits: every
+/// family the scalar path beat the statevector on stayed under it for every
+/// observable, every family it lost to crossed it, and the bounded pass that
+/// decides costs 1 to 22 ms.
+pub(crate) const AUTO_EXPECTATION_PEAK_BOUND: usize = 1 << 12;
+
+/// `<0| U^dag P U |0>` for every observable, each contracted on a greedy tree
+/// that stays under `bound` elements. `None` when any observable's tree
+/// crosses the bound, or the circuit holds an instruction the network cannot
+/// append, so the caller falls back to a dense route. The plan the dry run
+/// produced is the plan contracted, so nothing is planned twice.
+pub(crate) fn bounded_expectations_zero_state(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+    bound: usize,
+) -> Option<Result<Vec<f64>>> {
+    let circuit = crate::circuit::expand_qft_blocks(circuit);
+    let mut planned = Vec::with_capacity(observables.len());
+    for observable in observables {
+        let mut network = ScalarExpectationNetwork::new(circuit.num_qubits);
+        for instruction in &circuit.instructions {
+            match instruction {
+                Instruction::Gate { gate, targets } => network.append_gate(gate, targets).ok()?,
+                Instruction::Barrier { .. } => {}
+                _ => return None,
+            }
+        }
+        if let Err(e) = network.append_observable(observable) {
+            return Some(Err(e));
+        }
+        let slots: Vec<Option<TensorMeta>> = network
+            .tensors
+            .iter()
+            .map(|t| Some(TensorMeta::of(t)))
+            .collect();
+        let plan = plan_pairs(slots, None, bound)?;
+        planned.push((network, plan));
+    }
+    Some(
+        planned
+            .into_iter()
+            .map(|(network, plan)| network.contract_on(&plan))
+            .collect(),
+    )
 }
 
 /// Bench-visible wrapper over [`expectation_zero_state`]; not stable API.

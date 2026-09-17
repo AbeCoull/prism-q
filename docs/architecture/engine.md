@@ -258,7 +258,7 @@ All `BackendKind` variants:
 | `Sparse` | HashMap state | Explicit or auto (above memory limit, sparse-friendly) |
 | `Mps { max_bond_dim }` | Matrix Product State | Explicit or auto (above memory limit) |
 | `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
-| `TensorNetwork` | Deferred contraction | Explicit |
+| `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal on a unitary circuit of 18 qubits or more under the statevector cap, when a bounded greedy plan for every observable stays under `2^12` elements |
 | `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
 | `StabilizerRank` | Weighted stabilizer sum | Explicit or auto (Clifford+T inside the size-derived T budget; the exact expansion only) |
 | `StochasticPauli { num_samples }` | SPP | Explicit |

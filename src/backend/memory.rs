@@ -40,10 +40,11 @@ pub(crate) fn max_density_matrix_qubits() -> usize {
     })
 }
 
-/// Read a qubit-cap override from `env_var`, returning `None` when unset or
-/// unparseable.
+/// Read a qubit-cap override from `env_var`: `None` when unset, and when the
+/// value is not a count, with a warning, so detection applies rather than a
+/// typo silently re-enabling it.
 fn env_qubit_override(env_var: &str) -> Option<usize> {
-    std::env::var(env_var).ok().and_then(|val| val.parse().ok())
+    crate::env_knobs::usize_override(env_var, 0)
 }
 
 pub(crate) fn max_dense_probability_qubits() -> usize {

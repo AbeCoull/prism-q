@@ -21,6 +21,8 @@ pub use comm::{RankComm, SerialComm};
 #[cfg(feature = "distributed-mpi")]
 pub use comm::MpiComm;
 
+use crate::env_knobs::parse_usize_knob;
+
 /// Default minimum local qubit count below which distribution is not worthwhile.
 ///
 /// Small slices per rank spend more time in communication than computation.
@@ -87,30 +89,8 @@ pub fn relabel_enabled() -> bool {
     })
 }
 
-/// Read a count knob, warning on stderr and falling back to `default` when the
-/// value does not parse or falls below `min`.
-///
-/// Warning rather than erroring is the knob contract: every reader is a cached
-/// initializer on an infallible path, so an invalid value must not take down a
-/// run that would otherwise be correct with the default.
-fn parse_usize_knob(var: &str, raw: Option<String>, default: usize, min: usize) -> usize {
-    let Some(raw) = raw else {
-        return default;
-    };
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n >= min => n,
-        Ok(n) => {
-            eprintln!("warning: {var}={n} is below the minimum of {min}; using {default}.");
-            default
-        }
-        Err(_) => {
-            eprintln!("warning: {var}={raw:?} is not a count; using {default}.");
-            default
-        }
-    }
-}
-
-/// Read a flag knob. See [`parse_usize_knob`] for why an invalid value warns.
+/// Read a flag knob: `0`/`false` and `1`/`true` in any case; anything else
+/// warns on stderr and yields `default`, for the reason `env_knobs` gives.
 fn parse_bool_knob(var: &str, raw: Option<String>, default: bool) -> bool {
     let Some(raw) = raw else {
         return default;

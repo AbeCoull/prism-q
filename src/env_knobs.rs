@@ -43,24 +43,6 @@ pub(crate) fn parse_usize_override(var: &str, raw: Option<String>, min: usize) -
     }
 }
 
-/// A flag knob: `0`/`false` and `1`/`true` in any case; anything else warns
-/// and yields `default`.
-pub(crate) fn parse_bool_knob(var: &str, raw: Option<String>, default: bool) -> bool {
-    let Some(raw) = raw else {
-        return default;
-    };
-    match raw.trim() {
-        "0" => false,
-        "1" => true,
-        other if other.eq_ignore_ascii_case("false") => false,
-        other if other.eq_ignore_ascii_case("true") => true,
-        other => {
-            eprintln!("warning: {var}={other:?} is not a flag; using {default}.");
-            default
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,18 +69,5 @@ mod tests {
         assert_eq!(parse("abc"), None, "unparseable is absent, not zero");
         assert_eq!(parse("2e1"), None);
         assert_eq!(parse_usize_override("PRISM_TEST", None, 0), None);
-    }
-
-    #[test]
-    fn a_flag_knob_reads_both_spellings_in_any_case() {
-        let parse = |raw: &str| parse_bool_knob("PRISM_TEST", Some(raw.into()), true);
-        assert!(!parse("0"));
-        assert!(!parse("false"));
-        assert!(!parse("FALSE"));
-        assert!(parse("1"));
-        assert!(parse("true"));
-        assert!(parse("yes"), "unrecognized falls back to the default");
-        assert!(parse(""), "empty falls back to the default");
-        assert!(parse_bool_knob("PRISM_TEST", None, true));
     }
 }

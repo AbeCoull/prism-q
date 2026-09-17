@@ -21,7 +21,7 @@ pub use comm::{RankComm, SerialComm};
 #[cfg(feature = "distributed-mpi")]
 pub use comm::MpiComm;
 
-use crate::env_knobs::{parse_bool_knob, parse_usize_knob};
+use crate::env_knobs::parse_usize_knob;
 
 /// Default minimum local qubit count below which distribution is not worthwhile.
 ///
@@ -87,6 +87,24 @@ pub fn relabel_enabled() -> bool {
             true,
         )
     })
+}
+
+/// Read a flag knob: `0`/`false` and `1`/`true` in any case; anything else
+/// warns on stderr and yields `default`, for the reason `env_knobs` gives.
+fn parse_bool_knob(var: &str, raw: Option<String>, default: bool) -> bool {
+    let Some(raw) = raw else {
+        return default;
+    };
+    match raw.trim() {
+        "0" => false,
+        "1" => true,
+        other if other.eq_ignore_ascii_case("false") => false,
+        other if other.eq_ignore_ascii_case("true") => true,
+        other => {
+            eprintln!("warning: {var}={other:?} is not a flag; using {default}.");
+            default
+        }
+    }
 }
 
 /// Shared handle to a rank transport for distributed simulation.

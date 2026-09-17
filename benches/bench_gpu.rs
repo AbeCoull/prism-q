@@ -1019,6 +1019,33 @@ fn bench_gpu_pauli_expect(c: &mut Criterion) {
     group.finish();
 }
 
+/// The marginals terminal on a device-resident state: one `<Z_q>` per qubit,
+/// reduced on the card through the backend's Pauli expectation.
+fn bench_gpu_marginals(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/marginals");
+    configure_group(&mut group);
+    let kind = gpu_kind(&ctx);
+    let sizes: &[usize] = if is_fast() { &[20] } else { &[20, 22, 24] };
+
+    for &n in sizes {
+        let circuit = circuits::random_circuit(n, 2, SEED);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(kind.clone())
+                        .seed(SEED)
+                        .marginals()
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Device-to-host readback of a prepared state through `export_statevector`.
 /// The plain rows leave the deferred norm at one; the `scaled` rows measure
 /// one qubit of the uniform superposition first so the in-place norm pass
@@ -1067,6 +1094,7 @@ criterion_group! {
     bench_gpu_direct_kernel,
     bench_gpu_measurement,
     bench_gpu_pauli_expect,
+    bench_gpu_marginals,
     bench_gpu_export,
     bench_gpu_noisy_kraus,
     bench_cpu_noisy_kraus,

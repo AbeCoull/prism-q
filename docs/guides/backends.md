@@ -1,7 +1,9 @@
 # Backends Deep Dive
 
-PRISM-Q does not have one simulation algorithm. It has nine, each optimal for a
-different class of circuit. This guide is the task-oriented companion to the
+PRISM-Q does not have one simulation algorithm. It has nine backends, each holding a
+different kind of state, plus four Clifford+T and Pauli-propagation engines that hold no
+state at all and answer observables directly; those are in
+[Clifford+T Simulation](./clifford-t.md). This guide is the task-oriented companion to the
 [architecture reference](../architecture/backends.md): it focuses on scaling and when to
 reach for each one. To select a backend in code, see
 [Choosing a Backend](../getting-started/choosing-a-backend.md). For which CPU and

@@ -149,6 +149,23 @@ per value on a route that estimates rather than evaluates. An evaluated route
 reports `Exact` and no interval, so a caller distinguishes "converged" from "not
 estimated" without comparing a float against zero.
 
+## Declared limits
+
+A limit either declines by name or has no form to write. Nothing here truncates an
+input and answers anyway.
+
+| Limit | What you get |
+| --- | --- |
+| Thermal relaxation is zero temperature | No error. `t1`, `t2` and `gate_time` describe a device whose steady state is the ground state, and there is no field for an excited-state population, so a hot qubit cannot be expressed rather than being silently cooled |
+| Kraus sets reach two qubits | No error. `Kraus2q` is the widest set in the channel enum and three or more qubits has no variant, so a wider set cannot be written. A wider interaction is modelled by composing the channels the enum does carry, or by the density matrix directly |
+| Readout error acts on the measurement record | `InvalidParameter` from `run`, `marginals`, `expectation_values` and `observable_expectation`, naming the terminals that do apply it. A marginal is indexed by qubit and readout by classical bit, so there is nothing to apply it to |
+| `EXP_VAL` in a QEC program must be terminal and live | `InvalidParameter` naming the op that followed it, or the qubit measured since its last reset |
+| `EXP_VAL` on the reference QEC runner reaches 64 qubits | `IncompatibleBackend` naming the cap and the width the program needs. The Pauli-mask reduction is one word per shot; statevector memory binds long before this does |
+| Analytical conditional expectation reaches 12 postselection rows | `BackendUnsupported` naming the count and the cap, and pointing at the reference runner, since the expansion is `2^rows` Pauli evaluations |
+
+Backend width and memory caps are separate and live with the terminals that raise
+them; see [Shot and observable queries above the dense cap](#shot-and-observable-queries-above-the-dense-cap).
+
 ## Not yet supported
 
 | Target | Status | Notes |
@@ -160,3 +177,32 @@ estimated" without comparing a float against zero.
 
 These targets are listed so the matrix reflects the roadmap rather than hiding
 the gaps.
+
+## Compatibility
+
+The minimum supported Rust version is 1.87.0. It is pinned in three places that are
+updated together: `rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, and the
+`CI_MSRV` job that builds against exactly that toolchain. Raising it is a minor bump
+while the crate is below 1.0.
+
+Four feature flags are part of the surface: `parallel`, on by default, and `gpu`,
+`distributed` and `distributed-mpi`, each off. `bench-fast` and `bench-internal` are
+not: they exist to shape benchmark runs, they gate items no caller should reach for,
+and they may change or disappear in any release.
+
+The crate and the Python wheel carry one version. A release bumps the crate, then
+writes that same version into the bindings manifest and tags the wheel `py-v<version>`,
+so a wheel and a crate that share a number were built from one commit. Below 1.0 the
+minor position is the compatibility boundary, because Cargo reads `0.32.0` as
+`^0.32.0`: `0.32` to `0.33` already signals a break to every downstream caret
+requirement, so the release tooling resolves a breaking change to a minor bump rather
+than to 1.0.0.
+
+What a version promises is the surface tabulated in
+[API surface](../architecture/api-surface.md) and the Python package. Which backend
+`Auto` picks for a given circuit, where the fusion thresholds sit, how fast a kernel
+runs, and what the benchmark rows are named all move underneath that promise without a
+bump, because they are implementation rather than interface. `Gate`, `BackendKind`,
+`ResolvedBackend`, `Engine`, `PrismError`, `NoiseChannel` and `SpdTruncation` are
+`#[non_exhaustive]`, so a new variant is additive; a `match` on any of them outside the
+crate keeps a wildcard arm.

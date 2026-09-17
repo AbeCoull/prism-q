@@ -1,10 +1,12 @@
 # Backends
 
-PRISM-Q ships nine CPU backends, an optional CUDA path attached to the statevector and
-stabilizer backends, and a feature-gated distributed statevector backend that shards the
-dense state across MPI ranks. The [simulation engine](./engine.md) picks a backend
-automatically (the density matrix, tensor network, and distributed backends are
-explicit-dispatch only), or you can select explicitly. For a task-oriented version of
+PRISM-Q ships nine CPU backends, an optional CUDA path attached to the statevector,
+stabilizer and density-matrix backends, and a feature-gated distributed statevector
+backend that shards the dense state across MPI ranks. The
+[simulation engine](./engine.md) picks a backend automatically, or you can select one.
+The density matrix and the distributed backend are explicit only; the tensor network is
+explicit except on an expectation or marginals terminal, where `Auto` reaches it for a
+wide shallow unitary circuit. For a task-oriented version of
 this material, see the [Backends Deep Dive guide](../guides/backends.md).
 
 The diagrams below are rendered directly from PRISM-Q's own SVG circuit renderer.
@@ -168,9 +170,10 @@ kernels. A unitary `U` on the ket register gives the left product `U rho`; the r
 product `rho U^dagger` takes the gate's conjugate form on the bra register where one
 exists, and otherwise conjugates the buffer around the pass. So `U rho U^dagger` costs
 two statevector passes, plus two conjugations only for the variants with no conjugate
-form. `Rzz` is the exception that carries gate math of its own: both factors are
-diagonal, so the ket and bra phases cancel wherever the two registers agree on the target
-pair's parity, and the sandwich collapses to a single pass over a combined table.
+form. The diagonal gates carry math of their own: `Rzz` and the batched
+families (`BatchPhase`, `BatchRzz`, `DiagonalBatch`) have both factors diagonal, so the
+ket and bra phases cancel wherever the two registers agree on the parity of the targets,
+and each sandwich collapses to a single pass over a combined table.
 
 Memory is `16 * 4^n` bytes, so the ceiling is about 14 qubits on a 16 GiB host and 15 on
 32 GiB (`PRISM_MAX_DM_QUBITS` moves it within the statevector budget). With a device

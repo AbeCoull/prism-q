@@ -31,6 +31,7 @@ scope, duplicate qubits in a Pauli product, and `DEPOLARIZE2` target pairing.
 | `ObservableInclude` | `observable`, `records` | Includes for the same observable index XOR into a single row. |
 | `ExpectationValue` | `terms`, `coefficient` | `coefficient * <P>` in the final state. Terminal placement, live qubits only. |
 | `Postselect` | `records`, `expected` | The shot is accepted only when the parity over `records` matches `expected`. |
+| `Feedforward` | `records`, `expected`, `body` | The body runs only when the parity over `records` matches `expected`. See the [QEC IR reference](./qec-ir.md) for what a body admits. |
 | `Noise` | `channel`, `targets` | Pauli-noise annotation. Zero probability is inactive. |
 | `Tick` | | Scheduling separator with no semantic effect. |
 
@@ -157,7 +158,8 @@ undo the rotations, measure the scratch), and a final record-count check that
 the lowering emitted exactly `num_measurements` records.
 
 The clean Clifford lowering emits measurements in place: rotate the measured
-qubit into the Z basis, measure into the next record, rotate back. `MPP` uses
+qubit into the Z basis and measure into the next record. The rotation is not undone, so
+the qubit is left in the Z frame. `MPP` uses
 one scratch qubit at index `num_qubits`, reset between uses. Resets emit a
 reset followed by the basis rotation.
 

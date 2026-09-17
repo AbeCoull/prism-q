@@ -86,16 +86,20 @@ carrying the `gpu` feature. See [Python Bindings](python.md#gpu-backends).
 | `mod.rs` | `GpuContext`, `GpuState` public entry points |
 | `device.rs` | `GpuDevice`: cudarc wrapper, compiles PTX at device construction |
 | `memory.rs` | `GpuBuffer`: device `Complex64` storage |
-| `kernels/mod.rs` | `KERNEL_NAMES`, `LauncherScratch`, composed `kernel_source()` concatenating dense + stabilizer + BTS |
+| `kernels/mod.rs` | `KERNEL_NAMES`, `LauncherScratch`, composed `kernel_source()` concatenating dense, stabilizer, BTS and density |
 | `kernels/dense.rs` | Rust launchers for every `Gate` variant; CUDA C source in `kernels/dense.cu` |
 | `kernels/stabilizer.rs` | Launchers for tableau init, 11 Clifford gates, `rowmul_words`; source in `kernels/stabilizer.cu` |
 | `kernels/bts.rs` | Launchers for compiled BTS shot sampling; source in `kernels/bts.cu` |
+| `kernels/density.rs` | Launchers for the density-matrix path: sandwiches, Kraus channels, projection and Pauli expectation; source in `kernels/density.cu` |
 
 ## Kernel coverage
 
-Every variant in the `Gate` enum has a dedicated kernel. Batched
-variants (`BatchPhase`, `BatchRzz`, `DiagonalBatch`, `MultiFused { all_diagonal: true }`)
-use LUT kernels that consume the same host table builders as the CPU path.
+Every `Gate` variant runs on the device, though not each through a kernel of its own.
+The one- and two-qubit gates with a fixed matrix share one dense matrix launcher,
+`QftBlock` expands on the host into Hadamards and controlled phases, and `PauliRot`
+lowers to a CNOT ladder around a parity-phase kernel. Batched variants (`BatchPhase`,
+`BatchRzz`, `DiagonalBatch`, `MultiFused { all_diagonal: true }`) use LUT kernels that
+consume the same host table builders as the CPU path.
 Non-diagonal `MultiFused` uses a shared memory tiled kernel (`apply_multi_fused_tiled`,
 `TILE_Q = 10`, `TILE_SIZE = 1024`) over a chosen set of ten qubits per pass: the five
 lowest qubits, which keep a warp's loads contiguous, plus up to five of the sub-gates'

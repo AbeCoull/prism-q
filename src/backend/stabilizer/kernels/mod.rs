@@ -535,8 +535,13 @@ impl StabilizerBackend {
         let p_phase = self.phase[p_row];
 
         let d_row = p_row - n;
+        // The index covers every row with support here, so the anticommuting
+        // rows are among its entries; the bit is re-read because the index is a
+        // superset. Walking it rather than all `2n` rows is what keeps a run of
+        // collapses off the strided full-tableau scan.
         self.sgi_new_a.clear();
-        for i in 0..2 * n {
+        for k in 0..self.qubit_active[qubit].len() {
+            let i = self.qubit_active[qubit][k] as usize;
             if i == p_row {
                 continue;
             }

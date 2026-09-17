@@ -1098,6 +1098,94 @@ fn test_pcc_random_pairs_matches_gate_by_gate() {
     );
 }
 
+// A CX chain over a tableau whose rows carry X and Z bits everywhere, crossing
+// seven word boundaries and starting and ending mid-word, so every phase term
+// the chain kernel folds is live. Compared against the per-gate path on the
+// eager run, where the batch driver owns the chain, and on the lazy run, where
+// the kernel sweeps the stabilizer half alone.
+#[test]
+fn test_cx_chain_matches_gate_by_gate_across_words() {
+    use crate::circuits;
+    let n = 500;
+    for seed in 0..4u64 {
+        let mut circuit = circuits::clifford_random_pairs(n, 4, seed);
+        for k in 3..n - 2 {
+            circuit.add_gate(Gate::Cx, &[k, k + 1]);
+        }
+        let mut gates_only = circuit.clone();
+        circuit.measure_all();
+
+        let mut b1 = StabilizerBackend::new(seed);
+        b1.init(n, circuit.num_classical_bits).unwrap();
+        for instr in &circuit.instructions {
+            b1.apply(instr).unwrap();
+        }
+        let mut b2 = StabilizerBackend::new(seed);
+        sim::run_on(&mut b2, &circuit).unwrap();
+        assert_eq!(
+            b1.classical_results(),
+            b2.classical_results(),
+            "seed {seed}: eager chain outcomes"
+        );
+
+        gates_only.num_classical_bits = 0;
+        let mut l1 = StabilizerBackend::new_lazy(seed);
+        l1.init(n, 0).unwrap();
+        for instr in &gates_only.instructions {
+            l1.apply(instr).unwrap();
+        }
+        let mut l2 = StabilizerBackend::new_lazy(seed);
+        sim::run_on(&mut l2, &gates_only).unwrap();
+        let (xz1, ph1) = l1.raw_tableau();
+        let (xz2, ph2) = l2.raw_tableau();
+        let stride = 2 * n.div_ceil(64);
+        assert_eq!(
+            &xz1[n * stride..],
+            &xz2[n * stride..],
+            "seed {seed}: lazy chain rows"
+        );
+        assert_eq!(&ph1[n..], &ph2[n..], "seed {seed}: lazy chain phases");
+    }
+}
+
+// Runs shorter than the chain kernel's floor still fuse inside a word group,
+// including one that ends on bit 63, and a lone chain gate stays a plain gate.
+#[test]
+fn test_short_cx_chains_fuse_inside_word_groups() {
+    use crate::circuits;
+    let n = 320;
+    for seed in 0..4u64 {
+        let mut circuit = circuits::clifford_random_pairs(n, 3, seed);
+        for (start, len) in [
+            (1usize, 2usize),
+            (10, 7),
+            (49, 14),
+            (64, 15),
+            (130, 3),
+            (200, 1),
+        ] {
+            for k in start..start + len {
+                circuit.add_gate(Gate::Cx, &[k, k + 1]);
+            }
+            circuit.add_gate(Gate::S, &[start]);
+        }
+        circuit.measure_all();
+
+        let mut b1 = StabilizerBackend::new(seed);
+        b1.init(n, circuit.num_classical_bits).unwrap();
+        for instr in &circuit.instructions {
+            b1.apply(instr).unwrap();
+        }
+        let mut b2 = StabilizerBackend::new(seed);
+        sim::run_on(&mut b2, &circuit).unwrap();
+        assert_eq!(
+            b1.classical_results(),
+            b2.classical_results(),
+            "seed {seed}"
+        );
+    }
+}
+
 // The per-instruction path must stay lazy across gates, reconstruct on the
 // first measurement, and produce the exact outcome sequence of an eager run:
 // gates update the stabilizer half identically in both modes, so pivot

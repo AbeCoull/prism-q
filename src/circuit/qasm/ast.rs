@@ -71,6 +71,7 @@ pub(crate) enum StmtKind<'a> {
         targets: Vec<Operand<'a>>,
     },
     Barrier {
+        /// Empty for a bare `barrier;`, which spans every qubit declared so far.
         targets: Vec<Operand<'a>>,
     },
     If(Box<Conditional<'a>>),

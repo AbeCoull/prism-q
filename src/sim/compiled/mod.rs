@@ -31,8 +31,8 @@ pub use accumulator::{
 };
 pub(crate) use accumulator::{counts_from_chunks, for_each_chunk, marginals_from_chunks};
 pub use parity::ParityStats;
-pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity, XorDag};
-use parity::{build_parity_blocks_if_useful, build_xor_dag_if_useful, minimize_flip_row_weight};
+pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity};
+use parity::{build_parity_blocks_if_useful, minimize_flip_row_weight};
 
 pub(crate) use crate::backend::word_ops::xor_words;
 pub(crate) use propagation::batch_propagate_backward;
@@ -213,7 +213,6 @@ pub struct CompiledSampler {
     rng: ChaCha8Rng,
     lut: Option<FlipLut>,
     sparse: Option<SparseParity>,
-    xor_dag: Option<XorDag>,
     parity_blocks: Option<ParityBlocks>,
     #[cfg(feature = "gpu")]
     gpu_context: Option<std::sync::Arc<crate::gpu::GpuContext>>,
@@ -411,7 +410,6 @@ impl CompiledSampler {
             && self.sparse.is_some()
             && self.rank > 0
             && self.parity_blocks.is_none()
-            && self.xor_dag.is_none()
     }
 
     #[cfg(feature = "gpu")]
@@ -696,7 +694,7 @@ impl CompiledSampler {
     /// GPU BTS sampling with on-device meas-major to shot-major bit-transpose.
     ///
     /// Returns `Some(Ok(data))` when the compiled circuit matches the GPU BTS
-    /// path (flat sparse, no xor_dag, shot threshold crossed). `data` is in
+    /// path (flat sparse, shot threshold crossed). `data` is in
     /// shot-major layout (`num_shots * m_words` u64s) so callers can skip the
     /// host `into_shot_major_data()` transpose for downstream
     /// shot-major consumers (noise apply, etc.). `None` signals "use the CPU
@@ -1014,7 +1012,6 @@ impl CompiledSampler {
         if num_shots <= BTS_BATCH_SHOTS {
             let data = bts_single_pass(
                 sparse,
-                self.xor_dag.as_ref(),
                 num_shots,
                 &self.ref_bits_packed,
                 &mut fast_rng,
@@ -1032,7 +1029,6 @@ impl CompiledSampler {
 
         let data = bts_batched(
             sparse,
-            self.xor_dag.as_ref(),
             num_shots,
             s_words,
             &self.ref_bits_packed,
@@ -1398,7 +1394,6 @@ impl CompiledSampler {
         let data = if num_shots > BTS_BATCH_SHOTS {
             bts_batched(
                 &det_sparse,
-                None,
                 num_shots,
                 s_words,
                 &det_ref,
@@ -2476,7 +2471,6 @@ fn finish_sampler(
     };
 
     let sparse = SparseParity::from_flip_rows(&flip_rows, num_measurements);
-    let xor_dag = build_xor_dag_if_useful(&sparse);
     let ref_bits_packed = pack_bools(ref_bits);
     let parity_blocks = build_parity_blocks_if_useful(&sparse, rank, &ref_bits_packed);
 
@@ -2488,7 +2482,6 @@ fn finish_sampler(
         rng: ChaCha8Rng::seed_from_u64(seed),
         lut,
         sparse: Some(sparse),
-        xor_dag,
         parity_blocks,
         #[cfg(feature = "gpu")]
         gpu_context: None,
@@ -2547,7 +2540,6 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
             rng: ChaCha8Rng::seed_from_u64(seed),
             lut: None,
             sparse: None,
-            xor_dag: None,
             parity_blocks: None,
             #[cfg(feature = "gpu")]
             gpu_context: None,
@@ -2697,7 +2689,6 @@ fn compile_measurements_filtered(
             rng: ChaCha8Rng::seed_from_u64(seed),
             lut: None,
             sparse: None,
-            xor_dag: None,
             parity_blocks: None,
             #[cfg(feature = "gpu")]
             gpu_context: None,
@@ -2776,7 +2767,6 @@ fn compile_measurements_filtered(
         &rank_offsets,
         num_global_measurements,
     );
-    let xor_dag = build_xor_dag_if_useful(&sparse);
     let parity_blocks =
         build_filtered_parity_blocks(&block_samplers, &local_to_global).map(|mut blocks| {
             blocks.direct_scatter = true;
@@ -2791,7 +2781,6 @@ fn compile_measurements_filtered(
         rng: ChaCha8Rng::seed_from_u64(seed),
         lut,
         sparse: Some(sparse),
-        xor_dag,
         parity_blocks,
         #[cfg(feature = "gpu")]
         gpu_context: None,
@@ -3021,7 +3010,6 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
             rng: ChaCha8Rng::seed_from_u64(seed),
             lut: None,
             sparse: None,
-            xor_dag: None,
             parity_blocks: None,
             #[cfg(feature = "gpu")]
             gpu_context: None,

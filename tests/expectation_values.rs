@@ -5,9 +5,9 @@ mod common;
 
 use prism_q::gates::Gate;
 use prism_q::{
-    BackendKind, Circuit, NoiseModel, PauliAxis, PauliObservable, PauliTerm,
-    density_matrix_expectation_values, run_expectation_values, run_observable_expectation,
-    simulate,
+    BackendKind, Circuit, NoiseModel, PauliAxis, PauliObservable, PauliTerm, ResolvedBackend,
+    SpdTruncation, density_matrix_expectation_values, run_expectation_values,
+    run_observable_expectation, simulate,
 };
 
 const TOL: f64 = 1e-10;
@@ -116,8 +116,10 @@ fn clifford_t_deterministic_pauli_matches_statevector() {
         .unwrap();
     let spd = simulate(&c)
         .backend(BackendKind::DeterministicPauli {
-            epsilon: 0.0,
-            max_terms: 0,
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
         })
         .seed(42)
         .expectation_values(&observables)
@@ -165,8 +167,10 @@ fn non_unitary_circuit_is_rejected() {
         BackendKind::Auto,
         BackendKind::Statevector,
         BackendKind::DeterministicPauli {
-            epsilon: 0.0,
-            max_terms: 0,
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
         },
         BackendKind::StochasticPauli { num_samples: 16 },
     ] {
@@ -833,6 +837,149 @@ fn readout_fixture() -> (Circuit, NoiseModel, NoiseModel) {
     let mut with_readout = NoiseModel::uniform_depolarizing(&circuit, 0.01);
     with_readout.with_readout_error(0.3, 0.0);
     (circuit, clean, with_readout)
+}
+
+// Backward from `Z_0` the Hadamard gives `X_0`, the CX ladder spreads it to
+// `X` on every qubit, and each Rz then splits every term, so the weighted sum
+// reaches exactly `2^rotations`.
+fn branching_ladder(rotations: usize) -> Circuit {
+    let mut c = Circuit::new(rotations, 0);
+    for q in 0..rotations {
+        c.add_gate(Gate::Rz(0.7), &[q]);
+    }
+    for q in 1..rotations {
+        c.add_gate(Gate::Cx, &[0, q]);
+    }
+    c.add_gate(Gate::H, &[0]);
+    c
+}
+
+#[test]
+fn budgeted_spd_is_reachable_from_the_builder() {
+    use prism_q::{PrismError, run_spd_observable_budgeted};
+
+    let observables = [vec![PauliTerm::z(0)]];
+    let grows = branching_ladder(21);
+
+    let threshold = simulate(&grows)
+        .backend(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Threshold {
+                epsilon: 0.0,
+                max_terms: 0,
+            },
+        })
+        .seed(42)
+        .expectation_values(&observables);
+    assert!(
+        matches!(threshold, Err(PrismError::BackendUnsupported { .. })),
+        "a threshold that prunes nothing should die at the term ceiling, got {threshold:?}"
+    );
+
+    let budget = 1 << 12;
+    let reported = simulate(&grows)
+        .backend(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Budget { max_terms: budget },
+        })
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    let direct = run_spd_observable_budgeted(&grows, &observables[0], budget).unwrap();
+    assert_eq!(reported.values[0], direct.mean);
+    assert_eq!(
+        reported.metadata.backend,
+        ResolvedBackend::DeterministicPauli
+    );
+    assert!(!reported.metadata.is_exact());
+    assert!(direct.total_discarded > 0.0);
+
+    // A sum that never passes the budget discards nothing, so the same
+    // selection is exact and the statevector agrees term for term.
+    let held = branching_ladder(12);
+    let values = simulate(&held)
+        .backend(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Budget { max_terms: budget },
+        })
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    let reference = simulate(&held)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .expectation_values(&observables)
+        .unwrap();
+    assert_eq!(
+        run_spd_observable_budgeted(&held, &observables[0], budget)
+            .unwrap()
+            .total_discarded,
+        0.0
+    );
+    assert_close(&values, &reference, TOL);
+}
+
+#[test]
+fn a_zero_budget_is_rejected_rather_than_dropping_everything() {
+    use prism_q::PrismError;
+    let circuit = branching_ladder(8);
+    let result = simulate(&circuit)
+        .backend(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Budget { max_terms: 0 },
+        })
+        .seed(42)
+        .expectation_values(&[vec![PauliTerm::z(0)]]);
+    match result {
+        Err(PrismError::InvalidParameter { message }) => {
+            assert!(message.contains("term budget"), "{message}")
+        }
+        other => panic!("expected a zero budget to be rejected: {other:?}"),
+    }
+}
+
+#[test]
+fn budgeted_spd_marginals_hold_the_term_count() {
+    use prism_q::circuits;
+
+    let circuit = circuits::clifford_t_circuit(10, 20, 0.6, 42);
+    let budget = simulate(&circuit)
+        .backend(BackendKind::DeterministicPauli {
+            truncation: SpdTruncation::Budget { max_terms: 1 << 12 },
+        })
+        .seed(42)
+        .marginals()
+        .unwrap();
+    let reference = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .marginals()
+        .unwrap();
+
+    assert_eq!(budget.marginals.len(), circuit.num_qubits);
+    for (q, ((p0, _), (r0, _))) in budget
+        .marginals
+        .iter()
+        .zip(&reference.marginals)
+        .enumerate()
+    {
+        assert!((p0 - r0).abs() < 1e-9, "qubit {q}: {p0} vs {r0}");
+    }
+}
+
+#[test]
+fn density_matrix_serves_expectation_values_without_noise() {
+    let circuit = bell();
+    let observables = [
+        vec![PauliTerm::z(0), PauliTerm::z(1)],
+        vec![PauliTerm::x(0), PauliTerm::x(1)],
+        vec![PauliTerm::y(0)],
+    ];
+
+    let reported = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .seed(42)
+        .expectation_values_reported(&observables)
+        .unwrap();
+
+    assert_close(&reported.values, &[1.0, 1.0, 0.0], TOL);
+    assert_eq!(reported.metadata.backend, ResolvedBackend::DensityMatrix);
 }
 
 #[test]

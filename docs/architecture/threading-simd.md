@@ -8,7 +8,7 @@ For which SIMD tiers and architectures each backend supports, see the
 | Backend | State representation | Memory | Access pattern |
 |---------|---------------------|--------|----------------|
 | Statevector | `Vec<Complex64>` (2^n) | $O(2^n)$ | Strided pair iteration |
-| Stabilizer | Bit-packed `Vec<u64>` tableau | $O(n^2/8)$ bytes | Sequential row iteration |
+| Stabilizer | Bit-packed `Vec<u64>` tableau | $O(n^2/2)$ bytes | Sequential row iteration |
 | Sparse | `HashMap<usize, Complex64>` | $O(k)$, $k$ = nonzero | Hash-based random access |
 | MPS | Chain of rank-3 tensors | $O(n\chi^2)$ | Sequential site access |
 | Product | `Vec<[Complex64; 2]>` | $O(n)$ | Per-qubit independent |
@@ -36,8 +36,13 @@ Pool width is not free of consequences for results; see the determinism contract
 
 1. **AVX2+FMA** (256-bit): 2 complex pairs per iteration. Gated by `MAX_AVX2_STATE` for full-state passes (Skylake frequency throttling), but used freely within MultiFused L2 tiles where data is cache-resident.
 2. **FMA** (128-bit): Default for larger states. 3-op complex multiply (permute + mul + fmaddsub).
-3. **BMI2**: `_pext_u64` for BatchPhase, BatchRzz, and DiagonalBatch LUT indexing. One BMI2 bit extraction replaces loops with repeated shifts and ORs.
-4. **Scalar fallback**: No intrinsics. All SIMD functions have a `#[cfg(not(target_arch = "x86_64"))]` fallback.
+3. **SSE2** (128-bit): x86_64 baseline, 2 mul plus shuffle, xor and add.
+4. **NEON** (128-bit): the aarch64 baseline, a real kernel rather than a fallback. 1 mul plus 1 fma against a pre-negated matrix.
+5. **Scalar**: no intrinsics, for everything that is neither x86_64 nor aarch64.
+
+`_pext_u64` is not a tier. BatchPhase, BatchRzz and DiagonalBatch use it for LUT
+indexing where BMI2 is present, one bit extraction in place of a shift-and-or loop, and
+fall back to that loop where it is not.
 
 Two key SIMD structs hoist matrix broadcast at construction time, avoiding per-element dispatch:
 

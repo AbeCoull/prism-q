@@ -47,6 +47,7 @@ def test_sparse_backend_runs():
     [
         BackendKind.stochastic_pauli(4000),
         BackendKind.deterministic_pauli(0.0, 4096),
+        BackendKind.deterministic_pauli_budget(4096),
     ],
 )
 def test_pauli_backends_return_valid_marginals(backend):

@@ -28,7 +28,7 @@ use prism_q::qec::cut_selection::{InteractionGraph, cut_score, min_fill_treewidt
 use prism_q::qec::observable_reroute::{cone_telemetry, min_cone_z_representative, xor_z_support};
 use prism_q::{
     BackendKind, Circuit, Gate, PauliObservable, PauliTerm, QecOptions, QecProgram, QecRecordRef,
-    QecTStrategy, circuits, run_qec_program_with_strategy, run_spd_observable,
+    QecTStrategy, SpdTruncation, circuits, run_qec_program_with_strategy, run_spd_observable,
     run_spd_observable_budgeted, run_spd_observable_light_cone, simulate,
 };
 #[cfg(feature = "bench-internal")]
@@ -626,8 +626,10 @@ fn bench_pauli_engine_qaoa(c: &mut Criterion) {
             b.iter(|| {
                 simulate(&circuit)
                     .backend(BackendKind::DeterministicPauli {
-                        epsilon: 0.0,
-                        max_terms: 0,
+                        truncation: SpdTruncation::Threshold {
+                            epsilon: 0.0,
+                            max_terms: 0,
+                        },
                     })
                     .seed(SEED)
                     .observable_expectation(&maxcut)

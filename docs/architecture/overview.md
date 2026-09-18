@@ -38,7 +38,9 @@ flowchart TD
     B --> SP[Sparse]
     B --> PR[Product]
     B --> ST[Stabilizer]
+    B --> FS[Factored Stabilizer]
     B --> FA[Factored]
+    B --> DM[Density Matrix]
 ```
 
 The remaining pages in this section follow that flow: the

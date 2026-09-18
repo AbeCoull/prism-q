@@ -22,9 +22,10 @@ pip install maturin
 maturin develop --manifest-path bindings/python/Cargo.toml
 ```
 
-The bindings enable the `parallel` feature by default. The `gpu` feature is
-optional and off in the published wheels (see [GPU backends](#gpu-backends));
-the distributed backend is not reachable from Python.
+The bindings enable the `parallel` feature by default. `gpu` and `distributed-mpi`
+are optional and off in the published wheels, so a wheel from PyPI has neither the CUDA
+paths (see [GPU backends](#gpu-backends)) nor the sharded statevector (see
+[Distributed](#distributed-backend)); building from source turns either on.
 
 ## Quick start
 
@@ -129,6 +130,7 @@ outcome = sim.run()
 | `expectation_values(obs)` | `list[float]`, `⟨ψ\|P\|ψ⟩` per observable | density matrix only | yes |
 | `expectation_values_reported(obs)` | `ExpectationResult`: the same values with `.metadata` naming the backend that served them | density matrix only | yes |
 | `observable_variance(obs)` | `ObservableVariance`: `<H^2> - <H>^2` beside the mean | density matrix only | yes |
+| `observable_expectation(h)` | `ObservableExpectation`: the weighted mean with its variance, group variances and standard error | density matrix only | yes |
 | `density_matrix_expectation_values(obs)` | `list[float]`, exact `Tr(rho P)` | yes | no |
 | `expectation_gradient(h, params)` | `(value, gradient)` via the adjoint method | no | no |
 | `expectation_gradient_shift(h, params)` | `(value, gradient)` via the parameter-shift rule | no | no |
@@ -144,9 +146,9 @@ builder, so each side keeps its own backend, seed and start state; both circuits
 must declare the same width and both must be unitary.
 
 `shots()` and `sample_counts()` average trajectories on any backend holding a
-per-shot pure state. The three rows marked "density matrix only" read the exact
-mixed state instead, so they need
-`.backend(BackendKind.density_matrix())`; auto dispatch never selects it. There
+per-shot pure state. Every row marked "density matrix only" reads the exact mixed state
+instead, so it needs `.backend(BackendKind.density_matrix())`; auto dispatch never
+selects it. There
 the mixture is evolved once and every terminal reads that one evolution, so the
 probabilities are seed independent and the observables carry no sampling error.
 Circuits with mid-circuit measurement or classical conditioning are rejected on
@@ -231,8 +233,8 @@ dimension the circuit never fills reports `is_exact == False` with
 `fidelity_lower_bound == 1.0`, so the flag answers whether the answer could have
 been approximated and the bound answers whether it was.
 
-Automatic dispatch sends a circuit past the statevector cap to a bounded-bond
-MPS, which is the only route those circuits have. That is taken by default and
+Automatic dispatch sends a circuit past the statevector cap to the sparse map when it
+is sparse-friendly and to a bounded-bond MPS otherwise. That is taken by default and
 the result says so. `.require_exact()` rejects it instead, raising `PrismError`
 naming the engine it would have used.
 
@@ -268,9 +270,8 @@ propagation) are only valid from |0...0>: a Clifford circuit produces a
 stabilizer state only when its input is one. So `auto()` resolves to the
 statevector, the GPU and distributed statevectors and `density_matrix()` are the
 only other backends that accept one, and every other choice raises `PrismError`
-naming itself. `run()`, `shots()`,
-`sample_counts()`, `marginals()`, `expectation_values()`, and `state_vector()`
-carry it; `expectation_gradient()` and `density_matrix_expectation_values()`
+naming itself. Every terminal whose table row says
+so carries it; `expectation_gradient()` and `density_matrix_expectation_values()`
 reject it, as do `shots()` and `sample_counts()` with a noise model attached,
 since trajectory replay reinitializes a pure state per shot. To evolve a start
 state under noise, read the exact mixture with `run()`, `marginals()`, or
@@ -295,12 +296,14 @@ Pass an explicit one to override it.
 | `density_matrix()` | Exact mixed states, never chosen by `auto()` |
 | `stochastic_pauli(num_samples=1000)` | Sampled Pauli propagation |
 | `deterministic_pauli(epsilon=0.0, max_terms=65536)` | Truncated Pauli propagation |
+| `deterministic_pauli_budget(max_terms=65536)` | Pauli propagation holding a fixed term count |
 | `auto_gpu(context)`, `statevector_gpu(context)`, `stabilizer_gpu(context)`, `density_matrix_gpu(context)` | CUDA device paths, see [GPU backends](#gpu-backends) |
 
 The density-matrix backend stores `4^n` amplitudes, so its qubit ceiling is
 about half the statevector cap; exceeding it raises `PrismError` naming the cap.
-The distributed statevector backend has no Python constructor: `MPI_Init`
-ownership between the interpreter, mpi4py, and the extension is unsettled.
+`statevector_distributed(context)` reaches the sharded backend; the extension attaches
+to a running MPI rather than calling `MPI_Init` itself, which is what makes it safe
+beside mpi4py.
 
 ## GPU backends
 

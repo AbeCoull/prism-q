@@ -69,9 +69,10 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 **Clifford+T:**
 `run_stabilizer_rank`, `run_stabilizer_rank_approx`, `stabilizer_overlap_sq`,
 `stabilizer_inner_product`, `StabRankResult`, `run_spp`, `run_spp_observable`,
-`run_spd`, `run_spd_observable`, `run_spd_observable_light_cone`, `inverse_light_cone`,
-`PauliAxis`, `PauliTerm`, `SppResult`, `SppObservableResult`, `SpdResult`,
-`SpdObservableResult`
+`run_spd`, `run_spd_with`, `run_spd_observable`, `run_spd_observable_budgeted`,
+`run_spd_observable_light_cone`, `inverse_light_cone`, `PauliAxis`, `PauliTerm`,
+`SppResult`, `SppObservableResult`, `SpdResult`, `SpdObservableResult`,
+`SpdTruncation`
 
 **Types:**
 `Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `SvgOptions`,
@@ -108,8 +109,9 @@ Not re-exported at the root but part of the documented surface: the `Backend` tr
 
 ## Growth of the public enums
 
-`Gate`, `BackendKind`, `ResolvedBackend`, `Engine`, `PrismError` and `NoiseChannel` are
-`#[non_exhaustive]`. A new gate, backend, engine label, error variant or channel is an
-additive release, so a `match` on any of them outside the crate keeps a wildcard arm.
+`Gate`, `BackendKind`, `ResolvedBackend`, `Engine`, `PrismError`, `NoiseChannel` and
+`SpdTruncation` are `#[non_exhaustive]`. A new gate, backend, engine label, error variant or channel is an
+additive release, and so is a third truncation policy, so a `match` on any of them
+outside the crate keeps a wildcard arm.
 `Instruction` is exhaustive on purpose: it is the circuit IR, and a new instruction kind
 changes what every consumer has to handle, so adding one is a breaking change.

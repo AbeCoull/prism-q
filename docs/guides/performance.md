@@ -10,12 +10,14 @@ reference under [Fusion Pipeline](../architecture/fusion.md) and
 1. **Fusion** collapses many small gate passes into fewer, larger ones before execution,
    reducing memory traffic over the statevector. It is qubit-count gated and zero-cost
    when it does not apply.
-2. **Cache-resident tiling** keeps batched gates (`MultiFused`, `Multi2q`) operating on
-   L2-sized tiles so repeated passes reuse hot data. A `Multi2q` tile is the low bits of
-   the index plus up to four gathered high qubits, so a batch of gates on any qubits
-   costs one pass over the state as long as it spans at most four qubits above bit 10.
-3. **SIMD** vectorizes the inner complex-arithmetic loop with AVX2+FMA, FMA, and BMI2,
-   with a scalar fallback on non-x86_64.
+2. **Cache-resident tiling** keeps batched gates working on data that stays hot across
+   a pass, in two shapes. `MultiFused` splits its gates by target: bit 13 and below run
+   on 256 KB tiles, bits 14 through 16 on 2 MB ones, and higher targets run untiled. A
+   `Multi2q` tile is the low 10 bits of the index plus up to four gathered high qubits,
+   so a batch of gates on any qubits costs one pass over the state as long as it spans
+   at most four qubits above bit 10.
+3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
+   runtime: AVX2+FMA, FMA or SSE2 on x86_64, NEON on aarch64, scalar elsewhere.
 
 The levers are ordered, and lever 3 comes with a prior question: can the arithmetic be
 removed rather than issued faster? A kernel whose operations an algebraic identity or an

@@ -76,7 +76,10 @@ divided by `⟨ψ|ψ⟩` rather than assumed unit.
 `run_shots_with` picks the native path through `try_native_terminal_backend`,
 which requires the route to land on a single backend and probes the capability
 before `init`, so a backend without one costs an allocation and nothing else.
-`run_counts_with` needs no separate path: its tail is `run_shots_with(..).counts()`.
+`run_counts_with` shares that setup but keeps its own native arm, counting
+`sample_basis_states` directly instead of materializing shots, so seeded counts from the
+two can differ at a finite shot count. Only the distributed branch delegates to
+`run_shots_with(..).counts()`.
 
 The product state is the one backend taken past subsystem decomposition. It
 already stores one factor per qubit, so splitting a non-entangling circuit into
@@ -84,14 +87,14 @@ independent blocks pays a backend, a partition, and a merge per block to rebuild
 what one native draw reads off the state, and past 64 qubits the merged block
 distribution has no representation at all. Every other backend keeps the block
 split it had before, which `only_the_product_state_takes_the_native_sampler_past_decomposition`
-(`src/sim/mod.rs`) pins from both sides.
+(`src/sim/tests.rs`) pins from both sides.
 
 MPS records each bit against the logical qubit currently hosted at a site rather
 than the site index, so a layout permuted by SWAP routing needs no
 canonicalization pass. `tests/native_sampling.rs` pins that case; the exact
 check that the conditional decomposition reproduces the dense vector to 1e-12
 lives in `mps_conditional_path_probabilities_match_the_dense_vector`
-(`src/backend/mps.rs`), and the corpus-wide comparison is the query matrix in
+(`src/backend/mps/mps_tests.rs`), and the corpus-wide comparison is the query matrix in
 `tests/conformance_matrix.rs`.
 
 The tensor network answers below its dense ceiling from one contraction of
@@ -172,9 +175,10 @@ bit(q1)`, the packing `Gate::matrix_4x4` uses. The density matrix compiles the
 set into a 16x16 block superoperator (`apply_2q_kraus`, which
 `apply_2q_depolarizing` lowers onto). The trajectory engine draws a branch from
 `Tr(Kdagger K rho)` over `Backend::reduced_density_matrix_2q` and applies the
-normalized operator as a `Fused2q`. Only the host statevector implements that
-reduction, and `run_shots_with_noise` checks `Backend::supports_two_qubit_kraus`
-before the first shot, so an `Auto` route that picked another backend is named
+normalized operator as a `Fused2q`. The host statevector, sparse, factored and MPS
+backends answer that reduction; the tableau backends, the product state, the tensor
+network and the distributed statevector decline it. `run_shots_with_noise` checks
+`Backend::supports_two_qubit_kraus` before the first shot, so an `Auto` route that picked another backend is named
 at dispatch rather than part way through a trajectory.
 
 ## Noisy engine routing and the observable-result contract
@@ -265,7 +269,7 @@ shot-for-shot: engines consume independent RNG streams, so the same seed
 produces different shots with matching observable statistics (marginals,
 correlators, histograms). Cross-engine tests pin every engine to the analytic
 marginals from `noisy_marginals_analytical` and to each other's correlator
-statistics: `pauli_engines_share_observable_statistics` (`src/sim/noise.rs`),
+statistics: `pauli_engines_share_observable_statistics` (`src/sim/noise_tests.rs`),
 `trajectory_pauli_matches_brute_force` (`src/sim/trajectory.rs`), and the
 channel-level analytic checks in `tests/trajectory_correctness.rs`.
 

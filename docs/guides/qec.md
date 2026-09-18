@@ -15,14 +15,15 @@ use prism_q::{simulate, BackendKind, NoiseModel};
 let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
 let result = simulate(&circuit)
     .backend(BackendKind::Statevector)
-    .noise(noise)
+    .noise(&noise)
     .seed(42)
     .shots(1024)
     .unwrap();
 ```
 
-`NoiseModel` carries per-instruction depolarizing channels (`NoiseOp { qubit, px, py, pz }`)
-and supports readout error and amplitude damping. For Clifford circuits, the noisy
+`NoiseModel` carries a list of `NoiseEvent { channel, qubits }` per instruction, where
+the channel is a `NoiseChannel`: Pauli, depolarizing, readout error, amplitude damping
+and the rest. For Clifford circuits, the noisy
 compiled sampler propagates noise sensitivity rows and XORs fired channels into each
 sample, avoiding per-shot state evolution entirely.
 
@@ -54,8 +55,9 @@ Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,
 detectors, observables, postselection, `X_ERROR` / `Z_ERROR` / `DEPOLARIZE1` /
 `DEPOLARIZE2` noise, and terminal `EXP_VAL` final-state expectation estimates
 (noiseless programs use the analytical T strategies, with any detector records
-still sampled by the packed runner; noisy programs use the per-shot reference
-runner). Non-Clifford gates are rejected on the packed sampling path.
+still sampled by the packed runner; a noisy program is estimated exactly on the density
+matrix when it fits, and falls to the per-shot reference runner when it carries
+measurement records or postselection or exceeds the density-matrix cap). Non-Clifford gates are rejected on the packed sampling path.
 See the [QEC IR reference](../architecture/qec-ir.md) for the full
 grammar, and [QEC program execution](../architecture/qec-programs.md) for the
 runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.

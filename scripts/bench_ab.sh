@@ -758,8 +758,8 @@ set +e
         function abs(v) { return v < 0 ? -v : v }
 
         END {
-            print "| Benchmark | Ref | New | Change | Control (ref) | Control (new) | Samples | Verdict |"
-            print "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
+            print "| Benchmark | Ref | New | Change | Paired | Control (ref) | Control (new) | Samples | Verdict |"
+            print "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"
 
             compared = 0
             regressions = 0
@@ -794,6 +794,29 @@ set +e
                 change = (new - ref) * 100 / ref
                 ctl_ref = (a2 - a1) * 100 / a1
                 floor = abs(ctl_ref) > abs(ctl_new) ? abs(ctl_ref) : abs(ctl_new)
+
+                # Reported, not gated. The lane means pool passes 1 and 4 against
+                # 2 and 3, so a load transient inside one pass biases that lane
+                # whole. Passes 1 and 2 are adjacent in wall-clock order, as are
+                # 3 and 4, so a transient spanning either boundary moves both
+                # sides of that pair together. Two independent readings that
+                # disagree in sign are the single-run form of two runs that
+                # disagree, which this project already treats as no result.
+                if (light) {
+                    paired_text = "n/a"
+                } else {
+                    pr1 = (b1 - a1) * 100 / a1
+                    pr2 = (b2 - a2) * 100 / a2
+                    if (pr1 * pr2 < 0) {
+                        paired = 0
+                    } else {
+                        paired = abs(pr1) < abs(pr2) ? abs(pr1) : abs(pr2)
+                        if (pr1 < 0) { paired = -paired }
+                    }
+                    paired_text = pct(paired)
+                    if (abs(paired) > threshold && abs(change) <= threshold) { paired_only++ }
+                    if (abs(change) > threshold && abs(paired) <= threshold) { lane_only++ }
+                }
 
                 # A row measured at the reduced control count has a wider own-spread by
                 # construction, so it neither sets the host noise floor nor joins the
@@ -835,13 +858,17 @@ set +e
                     unresolvable++; unresolved[unresolvable] = id
                 }
 
-                printf "| `%s` | %s | %s | %s | %s | %s | %s | %s |\n",
-                    id, fmt(ref), fmt(new), pct(change), pct(ctl_ref), ctl_new_text,
-                    samples[id], verdict
+                printf "| `%s` | %s | %s | %s | %s | %s | %s | %s | %s |\n",
+                    id, fmt(ref), fmt(new), pct(change), paired_text, pct(ctl_ref),
+                    ctl_new_text, samples[id], verdict
                 compared++
             }
 
             print ""
+            if (!light && (paired_only > 0 || lane_only > 0)) {
+                printf "Paired disagrees with Change past the %.1f%% threshold on %d row(s): %d only paired, %d only lane-mean. Reported for comparison; the verdict is still the Change column.\n\n",
+                    threshold, paired_only + lane_only, paired_only, lane_only
+            }
             printf "%d rows compared. Worst same-code control spread: %.1f%%",
                 compared, worst_floor
             if (slowed > 0) {

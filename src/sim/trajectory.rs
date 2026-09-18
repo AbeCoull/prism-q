@@ -128,17 +128,20 @@ fn apply_phase_damping(
 /// mixture of reset and `Z` cannot: it needs a negative dephasing probability
 /// whenever `t1 < t2 <= 2*t1`.
 ///
-/// The composition has four Kraus operators, but every one of them has a
-/// diagonal `Kdagger K`, so the branch probabilities read off `P(1)` alone and
-/// need no reduced density matrix. The two that move population are both
-/// proportional to `|0><1|` and leave the same normalized state, so they merge.
-/// That leaves three branches behind one probability read and one matrix pass.
+/// Every operator in the composition has a diagonal `Kdagger K`, so the branch
+/// probabilities read off `P(1)` alone and need no reduced density matrix. The
+/// two that decay are both proportional to `|0><1|` and leave the same
+/// normalized state, as are the two that dephase, so each pair merges. That
+/// leaves five branches behind one probability read and one matrix pass, and at
+/// zero temperature the two that excite or hold the hot steady state carry no
+/// weight, which is the three-branch unraveling this had before.
 fn apply_thermal_relaxation(
     backend: &mut dyn Backend,
     qubit: usize,
     t1: f64,
     t2: f64,
     gate_time: f64,
+    excited: f64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
     if t1 <= 0.0 || t2 <= 0.0 || gate_time <= 0.0 {
@@ -146,8 +149,13 @@ fn apply_thermal_relaxation(
     }
     let (gad, gpd) = crate::sim::noise::thermal_relaxation_rates(t1, t2, gate_time);
     let p1 = backend.qubit_probability(qubit)?;
-    let p_relax = gad * p1;
-    let p_dephase = (1.0 - gad) * gpd * p1;
+    let p0 = 1.0 - p1;
+    let cold = 1.0 - excited;
+
+    let p_relax = cold * gad * p1;
+    let p_dephase = ((cold * (1.0 - gad)) + excited) * gpd * p1;
+    let p_excite = excited * gad * p0;
+    let p_hold_hot = excited * ((1.0 - gad) * p0 + (1.0 - gpd) * p1);
 
     let zero = Complex64::new(0.0, 0.0);
     let r: f64 = rand::RngExt::random(rng);
@@ -157,12 +165,24 @@ fn apply_thermal_relaxation(
     } else if r < p_relax + p_dephase {
         let s = (1.0 / p1).sqrt();
         [[zero, zero], [zero, Complex64::new(s, 0.0)]]
+    } else if r < p_relax + p_dephase + p_excite {
+        let s = (1.0 / p0).sqrt();
+        [[zero, zero], [Complex64::new(s, 0.0), zero]]
+    } else if r < p_relax + p_dephase + p_excite + p_hold_hot {
+        if p_hold_hot <= JUMP_EPSILON {
+            return Ok(());
+        }
+        let inv = (excited / p_hold_hot).sqrt();
+        [
+            [Complex64::new((1.0 - gad).sqrt() * inv, 0.0), zero],
+            [zero, Complex64::new((1.0 - gpd).sqrt() * inv, 0.0)],
+        ]
     } else {
-        let denom = 1.0 - p_relax - p_dephase;
+        let denom = 1.0 - p_relax - p_dephase - p_excite - p_hold_hot;
         if denom <= JUMP_EPSILON {
             return Ok(());
         }
-        let inv = 1.0 / denom.sqrt();
+        let inv = cold.sqrt() / denom.sqrt();
         let keep = ((1.0 - gad) * (1.0 - gpd)).sqrt() * inv;
         [
             [Complex64::new(inv, 0.0), zero],
@@ -402,9 +422,20 @@ fn apply_noise_event(
         NoiseChannel::PhaseDamping { gamma } => {
             apply_phase_damping(backend, event.qubits[0], *gamma, rng)
         }
-        NoiseChannel::ThermalRelaxation { t1, t2, gate_time } => {
-            apply_thermal_relaxation(backend, event.qubits[0], *t1, *t2, *gate_time, rng)
-        }
+        NoiseChannel::ThermalRelaxation {
+            t1,
+            t2,
+            gate_time,
+            excited_population,
+        } => apply_thermal_relaxation(
+            backend,
+            event.qubits[0],
+            *t1,
+            *t2,
+            *gate_time,
+            *excited_population,
+            rng,
+        ),
         NoiseChannel::TwoQubitDepolarizing { p } => {
             apply_two_qubit_depolarizing(backend, event.qubits[0], event.qubits[1], *p, rng)
         }

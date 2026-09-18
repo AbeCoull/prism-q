@@ -156,7 +156,6 @@ input and answers anyway.
 
 | Limit | What you get |
 | --- | --- |
-| Thermal relaxation is zero temperature | No error. `t1`, `t2` and `gate_time` describe a device whose steady state is the ground state, and there is no field for an excited-state population, so a hot qubit cannot be expressed rather than being silently cooled |
 | Kraus sets reach two qubits | No error. `Kraus2q` is the widest set in the channel enum and three or more qubits has no variant, so a wider set cannot be written. A wider interaction is modelled by composing the channels the enum does carry, or by the density matrix directly |
 | Readout error acts on the measurement record | `InvalidParameter` from `run`, `marginals`, `expectation_values` and `observable_expectation`, naming the terminals that do apply it. A marginal is indexed by qubit and readout by classical bit, so there is nothing to apply it to |
 | `EXP_VAL` in a QEC program must be terminal and live | `InvalidParameter` naming the op that followed it, or the qubit measured since its last reset |

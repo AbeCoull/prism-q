@@ -309,6 +309,7 @@ fn every_channel_model(circuit: &Circuit) -> NoiseModel {
             t1: 50.0,
             t2: 30.0,
             gate_time: 1.0,
+            excited_population: 0.0,
         },
         NoiseChannel::Custom {
             kraus: amplitude_damping(0.07),

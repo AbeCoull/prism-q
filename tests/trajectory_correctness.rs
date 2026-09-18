@@ -255,6 +255,7 @@ fn thermal_relaxation_preserves_superposition_statistics() {
             t1: 1.0,
             t2: 1.0,
             gate_time: 1e-6,
+            excited_population: 0.0,
         },
         qubits: SmallVec::from_slice(&[0]),
     }];
@@ -285,6 +286,7 @@ fn thermal_relaxation_ramsey_matches_exact_t2() {
             t1: 1.0,
             t2: 1.0,
             gate_time: 1.0,
+            excited_population: 0.0,
         },
         qubits: SmallVec::from_slice(&[0]),
     }];
@@ -312,6 +314,7 @@ fn thermal_relaxation_amplitude_damping_limit_matches_density_matrix() {
         t1: 1.0,
         t2: 2.0,
         gate_time: 0.5,
+        excited_population: 0.0,
     };
 
     let mut unitary = Circuit::new(1, 0);
@@ -366,6 +369,7 @@ fn thermal_relaxation_strong_reset_to_ground() {
             t1: 1.0,
             t2: 1.0,
             gate_time: 2.3,
+            excited_population: 0.0,
         },
         qubits: SmallVec::from_slice(&[0]),
     }];
@@ -680,6 +684,157 @@ fn statevector_amplitude_damping_matches_density_matrix() {
     }
 }
 
+// A qubit driven by nothing but thermal relaxation walks to its configured
+// steady state from either end, so starting from |0> and from |1> must meet.
+#[test]
+fn thermal_relaxation_settles_at_the_configured_excited_population() {
+    let excited = 0.3;
+    let steps = 60;
+
+    let settle = |start_excited: bool| {
+        let mut circuit = Circuit::new(1, 0);
+        if start_excited {
+            circuit.add_gate(Gate::X, &[0]);
+        }
+        for _ in 0..steps {
+            circuit.add_gate(Gate::Id, &[0]);
+        }
+        let mut model = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        for (index, instruction) in circuit.instructions.iter().enumerate() {
+            if matches!(instruction, Instruction::Gate { gate: Gate::Id, .. }) {
+                model.after_gate[index] = vec![NoiseEvent {
+                    channel: NoiseChannel::ThermalRelaxation {
+                        t1: 100.0,
+                        t2: 80.0,
+                        gate_time: 25.0,
+                        excited_population: excited,
+                    },
+                    qubits: SmallVec::from_slice(&[0]),
+                }];
+            }
+        }
+        let z =
+            density_matrix_expectation_values(&circuit, &[vec![PauliTerm::z(0)]], Some(&model), 42)
+                .unwrap()[0];
+        (1.0 - z) / 2.0
+    };
+
+    let from_ground = settle(false);
+    let from_excited = settle(true);
+    assert!(
+        (from_ground - excited).abs() < 1e-6,
+        "from |0> settled at {from_ground}, wanted {excited}"
+    );
+    assert!(
+        (from_excited - excited).abs() < 1e-6,
+        "from |1> settled at {from_excited}, wanted {excited}"
+    );
+}
+
+// A zero excited population is the channel this had before it grew the field,
+// so the Kraus set must come back byte for byte rather than merely close.
+#[test]
+fn a_cold_thermal_channel_keeps_its_old_steady_state() {
+    let mut circuit = Circuit::new(1, 0);
+    circuit.add_gate(Gate::X, &[0]);
+    for _ in 0..40 {
+        circuit.add_gate(Gate::Id, &[0]);
+    }
+    let mut model = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    for (index, instruction) in circuit.instructions.iter().enumerate() {
+        if matches!(instruction, Instruction::Gate { gate: Gate::Id, .. }) {
+            model.after_gate[index] = vec![NoiseEvent {
+                channel: NoiseChannel::ThermalRelaxation {
+                    t1: 100.0,
+                    t2: 80.0,
+                    gate_time: 25.0,
+                    excited_population: 0.0,
+                },
+                qubits: SmallVec::from_slice(&[0]),
+            }];
+        }
+    }
+    // Residual excited weight after n intervals is exp(-n * gate_time / t1),
+    // so 40 steps at a quarter of t1 leaves about 4.5e-5.
+    let z = density_matrix_expectation_values(&circuit, &[vec![PauliTerm::z(0)]], Some(&model), 42)
+        .unwrap()[0];
+    assert!(z > 0.9999, "cold qubit settled at <Z> = {z}");
+}
+
+// Trajectory sampling and the exact mixture must agree on a hot channel, which
+// is the branch pair that carries no weight at zero temperature.
+#[test]
+fn hot_thermal_relaxation_trajectories_match_the_density_matrix() {
+    let num_shots = 20000;
+
+    let build = |measure: bool| {
+        let mut circuit = Circuit::new(2, if measure { 2 } else { 0 });
+        circuit.add_gate(Gate::H, &[0]);
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        for _ in 0..4 {
+            circuit.add_gate(Gate::Id, &[0]);
+            circuit.add_gate(Gate::Id, &[1]);
+        }
+        if measure {
+            circuit.add_measure(0, 0);
+            circuit.add_measure(1, 1);
+        }
+        circuit
+    };
+    let thermal_model = |circuit: &Circuit| {
+        let mut model = NoiseModel::uniform_depolarizing(circuit, 0.0);
+        for (index, instruction) in circuit.instructions.iter().enumerate() {
+            if let Instruction::Gate {
+                gate: Gate::Id,
+                targets,
+            } = instruction
+            {
+                model.after_gate[index] = vec![NoiseEvent {
+                    channel: NoiseChannel::ThermalRelaxation {
+                        t1: 60.0,
+                        t2: 45.0,
+                        gate_time: 20.0,
+                        excited_population: 0.35,
+                    },
+                    qubits: SmallVec::from_slice(&[targets[0]]),
+                }];
+            }
+        }
+        model
+    };
+
+    let unitary = build(false);
+    let observables: Vec<Vec<PauliTerm>> = (0..2).map(|q| vec![PauliTerm::z(q)]).collect();
+    let exact = density_matrix_expectation_values(
+        &unitary,
+        &observables,
+        Some(&thermal_model(&unitary)),
+        42,
+    )
+    .unwrap();
+
+    let measured = build(true);
+    let shots = run_shots_with_noise(
+        BackendKind::Statevector,
+        &measured,
+        &thermal_model(&measured),
+        num_shots,
+        42,
+    )
+    .unwrap();
+
+    let sigma = 1.0 / (num_shots as f64).sqrt();
+    for q in 0..2 {
+        let ones = shots.shots.iter().filter(|record| record[q]).count() as f64;
+        let measured_z = 1.0 - 2.0 * ones / num_shots as f64;
+        assert!(
+            (measured_z - exact[q]).abs() <= 5.0 * sigma,
+            "qubit {q}: trajectory <Z> = {measured_z}, density matrix = {}",
+            exact[q]
+        );
+    }
+}
+
 // Thermal relaxation composes two damping channels into a three-branch sampler,
 // so it exercises a wider branch set than the single-channel tests on the same
 // two-block state.
@@ -690,6 +845,7 @@ fn factored_thermal_relaxation_matches_density_matrix() {
         t1: 100.0,
         t2: 80.0,
         gate_time: 20.0,
+        excited_population: 0.0,
     };
 
     let unitary = damped_two_block_circuit(0);

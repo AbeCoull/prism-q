@@ -46,9 +46,19 @@ impl PyNoiseChannel {
     }
 
     /// Combined T1 + T2 relaxation over a gate of duration `gate_time`.
+    ///
+    /// `excited_population` is the steady state the qubit relaxes toward: 0 for
+    /// a cold qubit settling in the ground state, 0.5 for a maximally mixed
+    /// steady state.
     #[staticmethod]
-    fn thermal_relaxation(t1: f64, t2: f64, gate_time: f64) -> Self {
-        Self(NoiseChannel::ThermalRelaxation { t1, t2, gate_time })
+    #[pyo3(signature = (t1, t2, gate_time, excited_population = 0.0))]
+    fn thermal_relaxation(t1: f64, t2: f64, gate_time: f64, excited_population: f64) -> Self {
+        Self(NoiseChannel::ThermalRelaxation {
+            t1,
+            t2,
+            gate_time,
+            excited_population,
+        })
     }
 
     /// Symmetric two-qubit depolarizing channel.

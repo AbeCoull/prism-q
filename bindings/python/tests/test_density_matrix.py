@@ -45,6 +45,31 @@ def test_amplitude_damping_expectation_is_analytic():
     assert math.isclose(value, 2.0 * gamma - 1.0, abs_tol=DM_EPS)
 
 
+def test_thermal_relaxation_walks_toward_its_excited_population():
+    # <Z> relaxes geometrically toward the steady state 1 - 2 p, so after n
+    # intervals it sits at (1 - 2 p) + 2 p (1 - gamma)^n. Forty intervals at
+    # gate_time / t1 = 0.25 leave exp(-10), about 3.6e-5 short of the limit,
+    # which is why this pins the closed form rather than the limit alone.
+    excited = 0.4
+    steps = 40
+    t1, t2, gate_time = 100.0, 80.0, 25.0
+    builder = CircuitBuilder(1)
+    for _ in range(steps):
+        builder = builder.id(0)
+    circuit = builder.build()
+    model = NoiseModel.empty(circuit)
+    for index in range(steps):
+        model.add_event(
+            index, NoiseChannel.thermal_relaxation(t1, t2, gate_time, excited), [0]
+        )
+    (value,) = (
+        simulate(circuit).seed(SEED).noise(model).density_matrix_expectation_values([[(0, "Z")]])
+    )
+    gamma = 1.0 - math.exp(-gate_time / t1)
+    expected = (1.0 - 2.0 * excited) + 2.0 * excited * (1.0 - gamma) ** steps
+    assert math.isclose(value, expected, abs_tol=1e-9)
+
+
 def test_depolarizing_expectation_is_analytic():
     # Depolarizing applies X, Y, Z each with p/3; on |+> only Y and Z flip the
     # sign of <X>, giving 1 - 4p/3.

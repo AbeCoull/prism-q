@@ -4,7 +4,7 @@
 
 #[cfg(feature = "parallel")]
 use super::SendPtrU64;
-use super::parity::{SparseParity, XorDag};
+use super::parity::SparseParity;
 use super::rng::Xoshiro256PlusPlus;
 #[cfg(target_arch = "aarch64")]
 use super::rng::Xoshiro256PlusPlusX2;
@@ -46,22 +46,16 @@ fn xor_reduce_scalar(cols: &[u32], random_bits: &[u64]) -> u64 {
 
 pub(super) fn bts_single_pass(
     sparse: &SparseParity,
-    xor_dag: Option<&XorDag>,
     num_shots: usize,
     ref_bits: &[u64],
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
-    if let Some(dag) = xor_dag {
-        sample_bts_meas_major_dag(sparse, dag, num_shots, ref_bits, rng, rank)
-    } else {
-        sample_bts_meas_major(sparse, num_shots, ref_bits, rng, rank)
-    }
+    sample_bts_meas_major(sparse, num_shots, ref_bits, rng, rank)
 }
 
 pub(super) fn bts_batched(
     sparse: &SparseParity,
-    xor_dag: Option<&XorDag>,
     num_shots: usize,
     total_s_words: usize,
     ref_bits: &[u64],
@@ -132,7 +126,6 @@ pub(super) fn bts_batched(
                                 let batch_offset = word_offset + chunk_done / 64;
                                 let batch_data = bts_single_pass(
                                     sparse,
-                                    xor_dag,
                                     batch_shots,
                                     ref_bits,
                                     &mut thread_rng,
@@ -180,7 +173,7 @@ pub(super) fn bts_batched(
         let batch_s_words = batch_shots.div_ceil(64);
         let word_offset = shots_done / 64;
 
-        let batch_data = bts_single_pass(sparse, xor_dag, batch_shots, ref_bits, rng, rank);
+        let batch_data = bts_single_pass(sparse, batch_shots, ref_bits, rng, rank);
 
         for m in 0..num_meas {
             let src = &batch_data[m * batch_s_words..(m + 1) * batch_s_words];
@@ -265,63 +258,6 @@ pub(super) fn apply_ref_bits_meas_major(
         }
     }
     super::clear_meas_major_shot_padding(meas_major, num_shots, num_meas, s_words);
-}
-
-fn sample_bts_meas_major_dag(
-    sparse: &SparseParity,
-    dag: &XorDag,
-    num_shots: usize,
-    ref_bits: &[u64],
-    rng: &mut Xoshiro256PlusPlus,
-    rank: usize,
-) -> Vec<u64> {
-    let num_meas = sparse.num_rows;
-    let s_words = num_shots.div_ceil(64);
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("avx2") && num_shots >= 256 {
-            // SAFETY: AVX2 detected, all pointer arithmetic bounded by allocation sizes
-            return unsafe {
-                sample_bts_meas_major_dag_avx2(sparse, dag, num_shots, ref_bits, rng, rank)
-            };
-        }
-    }
-
-    let mut meas_major = vec![0u64; num_meas * s_words];
-    let mut random_bits = vec![0u64; rank];
-
-    for batch in 0..s_words {
-        for r in random_bits.iter_mut().take(rank) {
-            *r = rng.next_u64();
-        }
-        if batch == s_words - 1 {
-            let mask = shot_tail_mask(num_shots);
-            if mask != u64::MAX {
-                for r in random_bits.iter_mut().take(rank) {
-                    *r &= mask;
-                }
-            }
-        }
-
-        for (m, entry) in dag.entries.iter().enumerate() {
-            if entry.parent.is_none() && entry.residual_cols.is_empty() {
-                continue;
-            }
-            let mut acc = if let Some(p) = entry.parent {
-                meas_major[p * s_words + batch]
-            } else {
-                0u64
-            };
-            for &c in &entry.residual_cols {
-                acc ^= random_bits[c as usize];
-            }
-            meas_major[m * s_words + batch] = acc;
-        }
-    }
-
-    apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-    meas_major
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -701,97 +637,6 @@ unsafe fn xor_reduce_avx2(
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn sample_bts_meas_major_dag_avx2(
-    sparse: &SparseParity,
-    dag: &XorDag,
-    num_shots: usize,
-    ref_bits: &[u64],
-    rng: &mut Xoshiro256PlusPlus,
-    rank: usize,
-) -> Vec<u64> {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        use std::arch::x86_64::*;
-
-        let num_meas = sparse.num_rows;
-        let s_words = num_shots.div_ceil(64);
-        let s_quads = num_shots.div_ceil(256);
-        let rem = num_shots % 256;
-
-        let mut meas_major = vec![0u64; num_meas * s_words];
-        let mut vrng = Xoshiro256PlusPlusX4::from_scalar(rng);
-        let mut random_avx: Vec<__m256i> = vec![_mm256_setzero_si256(); rank];
-
-        for quad in 0..s_quads {
-            let base_sw = quad * 4;
-            let words_this_quad = (s_words - base_sw).min(4);
-
-            for avx in random_avx.iter_mut().take(rank) {
-                *avx = vrng.next_m256i();
-            }
-
-            if quad == s_quads - 1 && rem != 0 {
-                let full_words = rem / 64;
-                let tail_bits = rem % 64;
-                let mut mask_buf = [!0u64; 4];
-                for val in mask_buf
-                    .iter_mut()
-                    .skip(full_words + usize::from(tail_bits > 0))
-                {
-                    *val = 0;
-                }
-                if tail_bits > 0 {
-                    mask_buf[full_words] = (1u64 << tail_bits) - 1;
-                }
-                let mask_vec = _mm256_loadu_si256(mask_buf.as_ptr() as *const __m256i);
-                for avx in random_avx.iter_mut().take(rank) {
-                    *avx = _mm256_and_si256(*avx, mask_vec);
-                }
-            }
-
-            for (m, entry) in dag.entries.iter().enumerate() {
-                if entry.parent.is_none() && entry.residual_cols.is_empty() {
-                    continue;
-                }
-                let mut acc = if let Some(p) = entry.parent {
-                    let parent_ptr = meas_major[p * s_words + base_sw..].as_ptr();
-                    if words_this_quad == 4 {
-                        _mm256_loadu_si256(parent_ptr as *const __m256i)
-                    } else {
-                        let mut tmp = [0u64; 4];
-                        for (w, slot) in tmp.iter_mut().enumerate().take(words_this_quad) {
-                            *slot = *parent_ptr.add(w);
-                        }
-                        _mm256_loadu_si256(tmp.as_ptr() as *const __m256i)
-                    }
-                } else {
-                    _mm256_setzero_si256()
-                };
-
-                for &c in &entry.residual_cols {
-                    acc = _mm256_xor_si256(acc, random_avx[c as usize]);
-                }
-
-                let out_ptr = meas_major[m * s_words + base_sw..].as_mut_ptr();
-                if words_this_quad == 4 {
-                    _mm256_storeu_si256(out_ptr as *mut __m256i, acc);
-                } else {
-                    let mut tmp = [0u64; 4];
-                    _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, acc);
-                    for (w, &val) in tmp.iter().enumerate().take(words_this_quad) {
-                        *out_ptr.add(w) = val;
-                    }
-                }
-            }
-        }
-
-        apply_ref_bits_meas_major(&mut meas_major, ref_bits, num_meas, s_words, num_shots);
-        meas_major
-    }
-}
-
 #[cfg(target_arch = "aarch64")]
 const BTS_PAIR_TILE: usize = 8;
 
@@ -1118,19 +963,6 @@ mod tests {
     }
 
     #[test]
-    fn sample_bts_dag_path() {
-        let rank = 3;
-        let num_meas = 5;
-        let flip_rows = vec![vec![0b11111u64], vec![0b01010u64], vec![0b10001u64]];
-        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
-        let dag = sparse.build_xor_dag();
-        let ref_bits = vec![0u64];
-        let mut r = rng(7);
-        let out = bts_single_pass(&sparse, Some(&dag), 64, &ref_bits, &mut r, rank);
-        assert_eq!(out.len(), num_meas);
-    }
-
-    #[test]
     fn bts_batched_matches_single_pass_layout() {
         let rank = 2;
         let num_meas = 3;
@@ -1140,38 +972,7 @@ mod tests {
         let num_shots: usize = 128;
         let total_s_words = num_shots.div_ceil(64);
         let mut r = rng(13);
-        let out = bts_batched(
-            &sparse,
-            None,
-            num_shots,
-            total_s_words,
-            &ref_bits,
-            &mut r,
-            rank,
-        );
-        assert_eq!(out.len(), num_meas * total_s_words);
-    }
-
-    #[test]
-    fn bts_batched_dag_runs() {
-        let rank = 2;
-        let num_meas = 4;
-        let flip_rows = vec![vec![0xFu64], vec![0xAu64]];
-        let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
-        let dag = sparse.build_xor_dag();
-        let ref_bits = vec![0u64];
-        let num_shots: usize = 200;
-        let total_s_words = num_shots.div_ceil(64);
-        let mut r = rng(99);
-        let out = bts_batched(
-            &sparse,
-            Some(&dag),
-            num_shots,
-            total_s_words,
-            &ref_bits,
-            &mut r,
-            rank,
-        );
+        let out = bts_batched(&sparse, num_shots, total_s_words, &ref_bits, &mut r, rank);
         assert_eq!(out.len(), num_meas * total_s_words);
     }
 }

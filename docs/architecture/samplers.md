@@ -14,7 +14,6 @@ For multi-shot sampling without materializing the full statevector on every shot
 |----------|-----------|--------|
 | `FlipLut` | Small rank | 256-entry XOR lookup table |
 | `SparseParity` | Sparse rows | Only flip non-zero columns |
-| `XorDag` | General | Optimal XOR-reduction DAG |
 | `ParityBlocks` | Blocked structure | Per-block independent sampling |
 
 **ShotAccumulator trait**: Pluggable result collection.

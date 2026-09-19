@@ -52,58 +52,6 @@ impl SparseParity {
         &self.col_indices[start..end]
     }
 
-    pub fn build_xor_dag(&self) -> XorDag {
-        let n = self.num_rows;
-        let mut entries: Vec<XorDagEntry> = Vec::with_capacity(n);
-
-        for m in 0..n {
-            let cols = self.row_cols(m);
-            let weight = cols.len();
-
-            let mut best_parent = None;
-            let mut best_residual_weight = weight;
-
-            for p in 0..m {
-                let parent_cols = self.row_cols(p);
-                let sym_diff_size = symmetric_difference_size(cols, parent_cols);
-                if sym_diff_size < best_residual_weight {
-                    best_residual_weight = sym_diff_size;
-                    best_parent = Some(p);
-                }
-            }
-
-            if let Some(p) = best_parent {
-                if best_residual_weight < weight {
-                    let parent_cols = self.row_cols(p);
-                    let residual = symmetric_difference(cols, parent_cols);
-                    entries.push(XorDagEntry {
-                        parent: Some(p),
-                        residual_cols: residual,
-                    });
-                } else {
-                    entries.push(XorDagEntry {
-                        parent: None,
-                        residual_cols: cols.to_vec(),
-                    });
-                }
-            } else {
-                entries.push(XorDagEntry {
-                    parent: None,
-                    residual_cols: cols.to_vec(),
-                });
-            }
-        }
-
-        let original_weight: usize = (0..n).map(|m| self.row_weight(m)).sum();
-        let dag_weight: usize = entries.iter().map(|e| e.residual_cols.len()).sum();
-
-        XorDag {
-            entries,
-            original_weight,
-            dag_weight,
-        }
-    }
-
     pub fn stats(&self) -> ParityStats {
         if self.num_rows == 0 {
             return ParityStats {
@@ -226,44 +174,6 @@ impl SparseParity {
             non_det_rows,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct XorDagEntry {
-    pub parent: Option<usize>,
-    pub residual_cols: Vec<u32>,
-}
-
-/// Row-reuse evaluation order: each row either evaluates its columns from
-/// scratch or XORs a small residual column set onto an already computed
-/// parent row, cutting total XOR work from `original_weight` to `dag_weight`.
-#[derive(Debug, Clone)]
-pub struct XorDag {
-    pub entries: Vec<XorDagEntry>,
-    pub original_weight: usize,
-    pub dag_weight: usize,
-}
-
-fn symmetric_difference_size(a: &[u32], b: &[u32]) -> usize {
-    let mut count = 0;
-    let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Less => {
-                count += 1;
-                i += 1;
-            }
-            std::cmp::Ordering::Greater => {
-                count += 1;
-                j += 1;
-            }
-            std::cmp::Ordering::Equal => {
-                i += 1;
-                j += 1;
-            }
-        }
-    }
-    count + (a.len() - i) + (b.len() - j)
 }
 
 fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
@@ -405,31 +315,6 @@ impl ParityBlocks {
 
 pub(super) fn row_weight(row: &[u64]) -> u32 {
     row.iter().map(|w| w.count_ones()).sum()
-}
-
-const MAX_MEASUREMENTS_FOR_DAG: usize = 2000;
-const MIN_DAG_REDUCTION_PCT: usize = 20;
-const MIN_MEAN_WEIGHT_FOR_DAG: usize = 3;
-
-pub(super) fn build_xor_dag_if_useful(sparse: &SparseParity) -> Option<XorDag> {
-    if sparse.num_rows <= 1 || sparse.num_rows > MAX_MEASUREMENTS_FOR_DAG {
-        return None;
-    }
-    let stats = sparse.stats();
-    if stats.mean_weight < MIN_MEAN_WEIGHT_FOR_DAG as f64 {
-        return None;
-    }
-    let dag = sparse.build_xor_dag();
-    if dag.original_weight == 0 {
-        return None;
-    }
-    let saved = dag.original_weight - dag.dag_weight;
-    let reduction_pct = 100 * saved / dag.original_weight;
-    if reduction_pct >= MIN_DAG_REDUCTION_PCT {
-        Some(dag)
-    } else {
-        None
-    }
 }
 
 const MIN_BLOCKS_FOR_PARALLEL: usize = 2;

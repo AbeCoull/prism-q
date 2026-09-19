@@ -992,26 +992,7 @@ fn weight_minimization_preserves_sampling() {
 }
 
 #[test]
-fn xor_dag_reduces_weight() {
-    let sp = SparseParity {
-        col_indices: vec![0, 1, 0, 1, 2, 1, 2],
-        row_offsets: vec![0, 2, 5, 7],
-        num_rows: 3,
-        non_det_rows: vec![0, 1, 2],
-    };
-    let dag = sp.build_xor_dag();
-    assert!(
-        dag.dag_weight < dag.original_weight,
-        "DAG weight {} should be less than original {}",
-        dag.dag_weight,
-        dag.original_weight
-    );
-    assert_eq!(dag.original_weight, 2 + 3 + 2);
-    assert!(dag.entries[1].parent.is_some() || dag.entries[2].parent.is_some());
-}
-
-#[test]
-fn xor_dag_bts_correctness() {
+fn bts_bulk_sampling_conserves_shots() {
     let mut c = circuits::clifford_random_pairs(16, 20, 42);
     c.num_classical_bits = 16;
     for i in 0..16 {
@@ -1694,7 +1675,6 @@ fn gpu_bts_below_threshold_with_stub_context_stays_on_cpu() {
     let mut cpu = compile_measurements(&c, 42).unwrap();
     assert!(cpu.should_use_bts(shots));
     assert!(cpu.parity_blocks.is_none());
-    assert!(cpu.xor_dag.is_none());
     let cpu_counts = cpu.sample_bulk_packed(shots).counts();
 
     let mut gpu = compile_measurements(&c, 42)

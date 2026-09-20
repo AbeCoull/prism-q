@@ -18,6 +18,7 @@ use crate::sim::{Seeded, Simulate};
 
 /// One computed `#pragma braket result`, in Braket's conventions.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ResultValue {
     /// Amplitudes with qubit 0 in the most significant bit.
     StateVector(Vec<Complex64>),

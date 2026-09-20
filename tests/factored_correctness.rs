@@ -471,7 +471,7 @@ fn factored_block_probabilities_expand_to_the_merged_vector() {
             Probabilities::Factored { blocks, .. } => {
                 assert!(blocks.len() > 1, "{n}q: expected more than one block")
             }
-            Probabilities::Dense(_) => panic!("{n}q: expected the factored variant"),
+            _ => panic!("{n}q: expected the factored variant"),
         }
 
         let merged = backend.probabilities().unwrap();
@@ -516,7 +516,7 @@ fn batched_diagonal_gates_keep_independent_blocks_apart() {
     fn block_count(backend: &FactoredBackend) -> usize {
         match backend.block_probabilities() {
             Some(Probabilities::Factored { blocks, .. }) => blocks.len(),
-            Some(Probabilities::Dense(_)) => panic!("expected the factored variant"),
+            Some(_) => panic!("expected the factored variant"),
             None => 1,
         }
     }

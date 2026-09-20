@@ -26,6 +26,7 @@ use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
 /// cannot run. [`QecTStrategy::Reference`] is the analytical correctness
 /// anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum QecTStrategy {
     /// Production dispatcher. Exact light-cone SPD, CAMPS, then tensor network.
     Auto,

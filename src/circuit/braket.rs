@@ -16,6 +16,7 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Qubits a pragma names.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Targets {
     /// Every declared qubit, which `all` and an omitted target list both mean.
     All,
@@ -28,6 +29,7 @@ pub enum Targets {
 /// matrix; only the first three are Pauli axes, so the others are their own
 /// variants rather than a widened [`PauliAxis`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ObservableFactor {
     Pauli {
         axis: PauliAxis,
@@ -421,6 +423,7 @@ fn assert_hermitian(matrix: &[Vec<Complex64>], line: usize) -> Result<()> {
 
 /// One `#pragma braket result` request, in declaration order.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ResultSpec {
     StateVector,
     DensityMatrix(Targets),

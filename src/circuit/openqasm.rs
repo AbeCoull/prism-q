@@ -123,6 +123,7 @@ fn parse_error(line: usize, message: impl Into<String>) -> PrismError {
 /// gate names are the same either way. Every other gate takes radians under
 /// both.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[non_exhaustive]
 pub enum Dialect {
     /// IonQ's reading: `gpi`, `gpi2`, and `ms` take turns.
     #[default]

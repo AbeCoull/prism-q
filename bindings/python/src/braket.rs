@@ -10,6 +10,7 @@ use prism_q::circuit::braket::{Observable, ObservableFactor, ResultSpec, Targets
 use prism_q::circuit::openqasm;
 use prism_q::sim::ResultValue;
 use prism_q::{BackendKind, simulate};
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -25,6 +26,9 @@ fn targets_to_py<'py>(py: Python<'py>, targets: &Targets) -> PyResult<Bound<'py,
     match targets {
         Targets::All => Ok(py.None().into_bound(py)),
         Targets::These(indices) => Ok(PyList::new(py, indices)?.into_any()),
+        other => Err(PyNotImplementedError::new_err(format!(
+            "target form {other:?} is newer than this binding"
+        ))),
     }
 }
 
@@ -51,6 +55,11 @@ fn factor_to_py<'py>(py: Python<'py>, factor: &ObservableFactor) -> PyResult<Bou
             let side = matrix.len();
             let flat: Vec<Complex64> = matrix.iter().flatten().copied().collect();
             entry.set_item("matrix", complex_matrix(py, side, side, flat)?)?;
+        }
+        other => {
+            return Err(PyNotImplementedError::new_err(format!(
+                "observable factor {other:?} is newer than this binding"
+            )));
         }
     }
     Ok(entry)
@@ -80,6 +89,11 @@ fn result_to_py<'py>(py: Python<'py>, spec: &ResultSpec) -> PyResult<Bound<'py, 
         | ResultSpec::Variance(observable)
         | ResultSpec::Sample(observable) => {
             entry.set_item("observable", observable_to_py(py, observable)?)?;
+        }
+        other => {
+            return Err(PyNotImplementedError::new_err(format!(
+                "result request {other:?} is newer than this binding"
+            )));
         }
     }
     Ok(entry)
@@ -212,6 +226,11 @@ impl PyBraketProgram {
                         rows.append(f64_array(py, single))?;
                     }
                     entry.set_item("value", rows)?;
+                }
+                other => {
+                    return Err(PyNotImplementedError::new_err(format!(
+                        "result value {other:?} is newer than this binding"
+                    )));
                 }
             }
             list.append(entry)?;

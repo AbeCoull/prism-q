@@ -17,6 +17,7 @@ pub struct FactoredBlock {
 /// per-block marginal distributions that are multiplied on demand,
 /// avoiding the O(2^N) Kronecker product unless explicitly requested.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Probabilities {
     /// Full probability vector of length 2^n.
     Dense(Vec<f64>),

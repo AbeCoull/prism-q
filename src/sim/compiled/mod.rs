@@ -1506,6 +1506,7 @@ impl CompiledSampler {
 
 /// Memory layout of a [`PackedShots`] bit matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ShotLayout {
     /// Rows are shots; each row packs that shot's measurement bits.
     ShotMajor,

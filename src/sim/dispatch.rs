@@ -939,7 +939,7 @@ pub(super) fn has_temporal_clifford_opportunity(kind: &BackendKind, circuit: &Ci
             | Instruction::Reset { .. }
             | Instruction::Conditional { .. }
             | Instruction::Region(_) => break,
-            Instruction::Barrier { .. } => {}
+            Instruction::Barrier { .. } | Instruction::Save { .. } => {}
         }
     }
     prefix_gates >= min_gates && prefix_gates < circuit.instructions.len()
@@ -1024,6 +1024,7 @@ pub(super) fn run_temporal_clifford(
         classical_bits: sv.classical_results().to_vec(),
         probabilities,
         metadata: crate::sim::backend_metadata(&sv),
+        saves: Vec::new(),
     })
 }
 

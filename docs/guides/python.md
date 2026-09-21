@@ -508,6 +508,37 @@ accumulation can move the last ulp, so compare against `1e-12` rather than
 asserting exact equality.
 ```
 
+## Mid-circuit saves
+
+A save point records the state where it sits, so a circuit can be inspected part
+way through without being cut in two and run twice.
+
+```python
+from prism_q import CircuitBuilder, SaveSpec, simulate
+
+builder = CircuitBuilder(4)
+for q in range(4):
+    builder.h(q)
+circuit = builder.build()
+circuit.add_save(SaveSpec.StateVector, "after_hadamards")
+circuit.add_gate(Gate.cx(), [0, 1])
+
+outcome = simulate(circuit).seed(42).run()
+for record in outcome.saves:
+    print(record["label"], record["kind"], record["value"].shape)
+```
+
+Each record is a dictionary with `label`, `kind`, and `value`. `SaveSpec.StateVector`
+and `SaveSpec.DensityMatrix` come back as `complex128` arrays, the density matrix flat
+and row major over `2**n` rows; `SaveSpec.Probabilities` comes back as `float64`.
+Records arrive in the order their points were reached, and labels need not be unique.
+
+A save is a barrier across the whole register, so no gate is fused or reordered across
+it. Only `run` returns the records: `shots`, `marginals` and the rest decline a circuit
+carrying a save point rather than running it and dropping what it recorded. The same
+goes for routes that hold no state to read, and for OpenQASM export, which has no save
+syntax to write.
+
 ## Parameter sweeps
 
 A variational loop rebinds angles while the gate sequence stays fixed.

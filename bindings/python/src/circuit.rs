@@ -1,7 +1,7 @@
 //! Circuit construction, OpenQASM parsing, and reusable circuit builders.
 
 use prism_q::circuit::openqasm;
-use prism_q::{Circuit, CircuitBuilder, Gate, Instruction, PauliTerm, circuits};
+use prism_q::{Circuit, CircuitBuilder, Gate, Instruction, PauliTerm, SaveSpec, circuits};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -95,6 +95,25 @@ fn check_mcu_targets(num_qubits: usize, controls: &[usize], target: usize) -> Py
     Ok(())
 }
 
+/// What a save point records.
+#[pyclass(name = "SaveSpec", module = "prism_q", eq, eq_int, from_py_object)]
+#[derive(Clone, Copy, PartialEq)]
+pub enum PySaveSpec {
+    StateVector,
+    Probabilities,
+    DensityMatrix,
+}
+
+impl PySaveSpec {
+    fn to_core(self) -> SaveSpec {
+        match self {
+            PySaveSpec::StateVector => SaveSpec::StateVector,
+            PySaveSpec::Probabilities => SaveSpec::Probabilities,
+            PySaveSpec::DensityMatrix => SaveSpec::DensityMatrix,
+        }
+    }
+}
+
 #[pymethods]
 impl PyCircuit {
     #[new]
@@ -171,6 +190,21 @@ impl PyCircuit {
         check_qubit(self.0.num_qubits, qubit, "qubit")?;
         self.0.add_reset(qubit);
         Ok(())
+    }
+
+    /// Append a save point recording `spec` under `label`.
+    ///
+    /// A save observes the whole register and is a fusion barrier across every
+    /// qubit. Only `run` returns the records; every other terminal declines a
+    /// circuit carrying one.
+    fn add_save(&mut self, spec: PySaveSpec, label: String) {
+        self.0.add_save(spec.to_core(), label);
+    }
+
+    /// Number of save points in the circuit.
+    #[getter]
+    fn save_count(&self) -> usize {
+        self.0.save_count()
     }
 
     /// Append a barrier across `qubits`.

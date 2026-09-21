@@ -40,7 +40,7 @@ fn step(instruction: &Instruction) -> Step<'_> {
         Instruction::Measure { .. } | Instruction::Reset { .. } | Instruction::Barrier { .. } => {
             Step::Skip
         }
-        Instruction::Region(_) => Step::Opaque,
+        Instruction::Region(_) | Instruction::Save { .. } => Step::Opaque,
     }
 }
 

@@ -294,7 +294,8 @@ impl ErrorChainComplex {
                 }
                 Instruction::Measure { .. }
                 | Instruction::Reset { .. }
-                | Instruction::Barrier { .. } => {}
+                | Instruction::Barrier { .. }
+                | Instruction::Save { .. } => {}
                 Instruction::Conditional { gate, targets, .. } => {
                     batch_propagate_backward(
                         &mut x_packed,

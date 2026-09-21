@@ -95,7 +95,8 @@ fn validate_and_lower<'c>(circuit: &'c Circuit, backend: &'static str) -> Result
                 needs_lowering = true;
             }
             Instruction::Barrier { .. } => {}
-            Instruction::Measure { .. }
+            Instruction::Save { .. }
+            | Instruction::Measure { .. }
             | Instruction::Reset { .. }
             | Instruction::Conditional { .. }
             | Instruction::Region(_) => {
@@ -1409,7 +1410,8 @@ fn pauli_path_ops(circuit: &Circuit, noise: &NoiseModel, backend: &str) -> Resul
                 })?;
             }
             Instruction::Barrier { .. } => {}
-            Instruction::Measure { .. }
+            Instruction::Save { .. }
+            | Instruction::Measure { .. }
             | Instruction::Reset { .. }
             | Instruction::Conditional { .. }
             | Instruction::Region(_) => {

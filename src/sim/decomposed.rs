@@ -141,6 +141,7 @@ fn merge_decomposed_results(
         classical_bits: merged_classical,
         probabilities,
         metadata: RunMetadata::decomposed(block_metadata),
+        saves: Vec::new(),
     })
 }
 

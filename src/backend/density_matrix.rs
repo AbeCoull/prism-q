@@ -1389,6 +1389,9 @@ impl Backend for DensityMatrixBackend {
         match instruction {
             Instruction::Gate { gate, targets } => self.apply_unitary(gate, targets),
             Instruction::Barrier { .. } => Ok(()),
+            Instruction::Save { label, .. } => {
+                Err(crate::backend::save_not_applied("DensityMatrix", label))
+            }
             Instruction::Measure {
                 qubit,
                 classical_bit,

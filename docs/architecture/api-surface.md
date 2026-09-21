@@ -33,6 +33,13 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 `run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
 `ObservableExpectation`, `bitstring`
 
+**Save points:** `Circuit::add_save` appends an `Instruction::Save` recording a
+`SaveSpec`, and `Simulate::run` returns one `SaveRecord` per point in `RunOutcome::saves`,
+carrying a `SavedValue`. See [Circuit IR](./ir.md) for what a save does to fusion and
+which routes decline one.
+
+Use it from about 10 qubits up.
+
 **State diagnostics:** `Simulate::reduced_density_matrix` returns a
 `ReducedDensityMatrix` (row major, side `2^k`, `qubits[0]` the lowest bit of the row
 index) with a `purity` method for `Tr(rho^2)`; `Simulate::entanglement_entropy` returns

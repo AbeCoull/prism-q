@@ -2878,6 +2878,15 @@ pub(crate) fn defer_measure_reset_circuit(circuit: &Circuit) -> Result<Circuit> 
                         .to_string(),
                 });
             }
+            Instruction::Save { label, .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "CompiledSampler".to_string(),
+                    reason: format!(
+                        "save point `{label}` needs a state to read, and shot sampling \
+                         reorders measurements rather than holding one"
+                    ),
+                });
+            }
         }
     }
 

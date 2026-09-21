@@ -297,6 +297,9 @@ impl StatevectorBackend {
             } => self.apply_measure_gpu(*qubit, *classical_bit),
             Instruction::Reset { qubit } => self.apply_reset_gpu(*qubit),
             Instruction::Barrier { .. } => Ok(()),
+            Instruction::Save { label, .. } => {
+                Err(crate::backend::save_not_applied("Statevector", label))
+            }
             Instruction::Conditional {
                 condition,
                 gate,
@@ -889,6 +892,9 @@ impl Backend for StatevectorBackend {
                 self.apply_reset(*qubit);
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("Statevector", label));
+            }
             Instruction::Conditional {
                 condition,
                 gate,

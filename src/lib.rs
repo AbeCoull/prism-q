@@ -80,8 +80,8 @@ pub use backend::statevector::StatevectorBackend;
 pub use backend::tensornetwork::TensorNetworkBackend;
 pub use circuit::builder::CircuitBuilder;
 pub use circuit::{
-    Circuit, ClassicalCondition, Instruction, ParamLink, Parameters, PreparedCircuit, SvgOptions,
-    TextOptions,
+    Circuit, ClassicalCondition, Instruction, ParamLink, Parameters, PreparedCircuit, SaveRecord,
+    SaveSpec, SavedValue, SvgOptions, TextOptions,
 };
 #[cfg(feature = "distributed-mpi")]
 pub use distributed::MpiComm;

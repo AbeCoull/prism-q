@@ -173,6 +173,9 @@ impl Backend for ProductStateBackend {
                 self.qubits[*qubit] = [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)];
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("ProductState", label));
+            }
             Instruction::Conditional {
                 condition,
                 gate,

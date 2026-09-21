@@ -712,6 +712,9 @@ impl Backend for SparseBackend {
                 self.apply_reset(*qubit);
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("Sparse", label));
+            }
             Instruction::Conditional {
                 condition,
                 gate,

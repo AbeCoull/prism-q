@@ -2904,6 +2904,9 @@ impl Backend for MpsBackend {
                 self.apply_reset(self.site_for_logical(*qubit));
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("Mps", label));
+            }
             Instruction::Conditional {
                 condition,
                 gate,

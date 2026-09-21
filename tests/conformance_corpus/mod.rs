@@ -382,6 +382,7 @@ fn describe_instructions(instructions: &[Instruction]) -> String {
             } => format!("measure q{qubit}->c{classical_bit}"),
             Instruction::Reset { qubit } => format!("reset q{qubit}"),
             Instruction::Barrier { qubits } => format!("barrier {}", describe_targets(qubits)),
+            Instruction::Save { spec, label, .. } => format!("save {spec:?} as {label}"),
             Instruction::Conditional {
                 condition,
                 gate,

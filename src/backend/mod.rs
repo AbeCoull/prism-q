@@ -231,6 +231,22 @@ pub(crate) fn measurement_inv_norm(outcome: bool, prob_one: f64) -> f64 {
 }
 
 #[inline(always)]
+/// A save point reached a backend, which means the runner did not split the
+/// instruction stream at it.
+///
+/// Saves are serviced between segments by `sim`, using the backend's own export
+/// methods, so no backend implements one. A route that cannot split (a compiled
+/// sampler, a Pauli-propagation engine) declines the circuit before it runs, and
+/// this is the message if one ever slips past that check.
+pub(crate) fn save_not_applied(backend: &str, label: &str) -> crate::error::PrismError {
+    crate::error::PrismError::IncompatibleBackend {
+        backend: backend.to_string(),
+        reason: format!(
+            "save point `{label}` reached the backend; saves are recorded between              instruction segments, so this route does not support them"
+        ),
+    }
+}
+
 pub(crate) fn init_classical_bits(bits: &mut Vec<bool>, num: usize) {
     if bits.len() == num {
         bits.fill(false);

@@ -23,8 +23,28 @@ not keep a second copy.
 | `Barrier` | `qubits` | Synchronization barrier |
 | `Conditional` | `condition`, `gate`, `targets` | Classical-controlled gate |
 | `Region` | `Box<GuardedRegion>` | Classical-controlled span of instructions |
+| `Save` | `spec`, `qubits`, `label` | Record the state at this point |
 
 Targets use `SmallVec<[usize; 4]>`, inline storage for up to 4 qubits, no heap allocation for typical gates.
+
+### Save points
+
+`Save` records the state as it stands where it sits. Its `qubits` field lists the whole
+register, which is what makes it a fusion barrier: every pass reads an instruction's
+qubits to decide what may move past it, so a save blocks reordering in both directions
+without a rule of its own.
+
+No backend implements a save. The runner splits the instruction stream at each save
+point, hands the backend the segments between them, and reads the state in between
+through the export the spec names: `export_statevector` for `StateVector`,
+`probabilities` for `Probabilities`, `reduced_density_matrix` over the whole register
+for `DensityMatrix`. A backend that cannot produce that form fails the run with its own
+message rather than returning a record it could not fill, and a route that rewrites the
+circuit rather than executing it (the compiled samplers, the stabilizer-rank engine, the
+Pauli-propagation engines) declines a circuit carrying one.
+
+Only `Simulate::run` returns the records. Every other terminal declines a circuit with
+save points rather than running it and discarding what they recorded.
 
 ### Guarded regions
 

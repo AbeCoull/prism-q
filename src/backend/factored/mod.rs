@@ -693,6 +693,9 @@ impl Backend for FactoredBackend {
                 Ok(())
             }
             Instruction::Barrier { .. } => Ok(()),
+            Instruction::Save { label, .. } => {
+                Err(crate::backend::save_not_applied("Factored", label))
+            }
             Instruction::Conditional {
                 condition,
                 gate,

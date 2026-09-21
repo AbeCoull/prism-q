@@ -12,11 +12,12 @@ use numpy::{PyArray1, PyArray2};
 use prism_q::{
     BackendKind, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel, ParamLink,
     Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities,
-    ReducedDensityMatrix, RunMetadata, RunOutcome, ShotsResult, bitstring,
+    ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue, ShotsResult, bitstring,
     simulate as core_simulate,
 };
+use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
@@ -1137,6 +1138,7 @@ pub struct PyRunOutcome {
     classical_bits: Vec<bool>,
     probabilities: Option<Probabilities>,
     metadata: PyRunMetadata,
+    saves: Vec<SaveRecord>,
 }
 
 impl PyRunOutcome {
@@ -1145,6 +1147,7 @@ impl PyRunOutcome {
             classical_bits: outcome.classical_bits,
             probabilities: outcome.probabilities,
             metadata: PyRunMetadata::new(outcome.metadata),
+            saves: outcome.saves,
         }
     }
 }
@@ -1154,6 +1157,42 @@ impl PyRunOutcome {
     #[getter]
     fn classical_bits(&self) -> Vec<bool> {
         self.classical_bits.clone()
+    }
+
+    /// What each save point recorded, in the order the points were reached.
+    ///
+    /// One dictionary per record with `label`, `kind`, and `value`. A
+    /// statevector or density matrix arrives as a `complex128` array and
+    /// probabilities as `float64`; a density matrix is flat and row major over
+    /// `2^n` rows.
+    #[getter]
+    fn saves<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let out = PyList::empty(py);
+        for record in &self.saves {
+            let entry = PyDict::new(py);
+            entry.set_item("label", &record.label)?;
+            match &record.value {
+                SavedValue::StateVector(amps) => {
+                    entry.set_item("kind", "statevector")?;
+                    entry.set_item("value", complex_array(py, amps.clone()))?;
+                }
+                SavedValue::Probabilities(probs) => {
+                    entry.set_item("kind", "probabilities")?;
+                    entry.set_item("value", f64_array(py, probs.clone()))?;
+                }
+                SavedValue::DensityMatrix(rho) => {
+                    entry.set_item("kind", "density_matrix")?;
+                    entry.set_item("value", complex_array(py, rho.clone()))?;
+                }
+                other => {
+                    return Err(PyNotImplementedError::new_err(format!(
+                        "saved value {other:?} is newer than this binding"
+                    )));
+                }
+            }
+            out.append(entry)?;
+        }
+        Ok(out)
     }
 
     /// Probability of each basis state as a `float64` array, or `None` if the

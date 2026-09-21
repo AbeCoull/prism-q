@@ -372,7 +372,7 @@ Pull requests run a focused benchmark gate after lint and tests pass.
 `scripts/bench_ci.sh` delegates to the adjacent-binary A/B above, with the PR
 base commit as the reference, so the gate reports a same-code control column per
 row and fires only when a row exceeds both the threshold and its own control
-spread.
+spread, in two runs rather than one.
 
 Until 2026-08, the two sides ran as separate `cargo bench` invocations with the
 head build between them, on a shared runner. A row a hosted runner cannot resolve
@@ -403,16 +403,32 @@ Representative CI workloads:
 | `statevector/qpe_t_gate/16q` | Phase estimation with non-Clifford gates |
 | `statevector/qaoa_l3/16` | QAOA workload with ZZ rotations and mixer layers |
 | `stabilizer/scaling/500` | Clifford stabilizer backend path |
-| `stabilizer/measurement/ghz_measure_all/500` | GHZ preparation plus terminal measurements |
+| `stabilizer/measurement/wall_measure_all/1000` | Stabilizer collapse and index maintenance under random measurement |
 | `compiled_sampler/noiseless/noiseless_500q_10k` | Compiled shot sampling path |
 | `compiled_sampler/noisy/noisy_500q_10k` | Compiled Pauli-noise shot sampling path |
 
 The sizes are the smallest that still exercise the pipeline that ships, not the smallest
 available: `MIN_QUBITS_FOR_DIAG_BATCH = 16` and `MIN_QUBITS_FOR_POST_PHASE_BATCH = 18` in
 `circuit/fusion.rs` are the floors, and `qft_textbook` has no 18 in its size list so it
-stays at 20. Six passes over the eight rows take about 75 seconds. On a quiet host they
-resolve the 5% gate: three same-code runs read worst control spreads of 6.0%, 7.1%, and
-5.9%, with no row moving more than 3.6% against an identical binary.
+stays at 20. Six passes over the eight rows take about 75 seconds.
+
+The stabilizer row measures a CNOT wall rather than a GHZ chain. A GHZ chain collapses
+once and reads the rest of the register off deterministically, so it prices almost none
+of the measurement work, and at 500 qubits it ran in the microsecond band where that
+fixture is a known cache cliff: one pull request saw it read +5.7% and fail the gate,
+then -1.4% and pass on a rerun of the same commit, with a tight same-code control both
+times, because the reference lane itself moved 113 to 165 microseconds between the two
+runs on a byte-identical cached executable.
+
+A reported regression has to repeat before it blocks. The set runs a second time and
+only a row that regressed in both counts, because a single run at this tier is not a
+result. Four same-code runs on the reference host, identical binaries in both lanes,
+returned three passes and one failure, the failure on `statevector/scalability_d5/18` at
++5.3% against a 4.2% control spread; their worst same-code control spreads were 20.6%,
+8.5%, 21.8% and 18.3%. An earlier three-run measurement recorded here read 6.0%, 7.1%
+and 5.9% on the same host, so the tier's noise floor is not a fixed property of the
+machine and the gate cannot assume the tight case. Confirmation costs nothing on a green
+run and one extra set on a red one.
 
 Local reproduction, against `main` as the reference:
 

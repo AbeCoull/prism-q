@@ -1777,30 +1777,56 @@ unsafe fn apply_fused_2q_group_fma_inner(state: *mut f64, i: [usize; 4], mat: &M
         let sf2 = _mm_shuffle_pd(s2, s2, 0b01);
         let sf3 = _mm_shuffle_pd(s3, s3, 0b01);
 
-        // Sum the im*swap(z) terms first, then fold the re*z terms onto that
-        // sum: fmaddsub subtracts it in the real lanes and adds it in the
-        // imaginary ones, which is the complex product, and the three fmadd
-        // that follow add the remaining real-part products lane by lane.
-        // Eight FMA-class ops per row against eleven with a separate add per
-        // term, which is the floor for sixteen real multiply-adds.
+        // Two independent chains per row, the re*z terms and the im*swap(z)
+        // terms, joined by one addsub (subtract in the real lanes, add in the
+        // imaginary ones, which is the complex product). Nine ops against
+        // eight for a single chain, but a depth of five FMA latencies instead
+        // of eight: with four rows in flight the single chain left the
+        // scheduler waiting on latency at about twice the port-limited cost.
         macro_rules! row {
             ($r:expr) => {{
                 let off = $r * 4;
-                let mut t = _mm_mul_pd(mat.ii[off], sf0);
-                t = _mm_fmadd_pd(mat.ii[off + 1], sf1, t);
-                t = _mm_fmadd_pd(mat.ii[off + 2], sf2, t);
-                t = _mm_fmadd_pd(mat.ii[off + 3], sf3, t);
-                let mut acc = _mm_fmaddsub_pd(mat.rr[off], s0, t);
-                acc = _mm_fmadd_pd(mat.rr[off + 1], s1, acc);
-                acc = _mm_fmadd_pd(mat.rr[off + 2], s2, acc);
-                acc = _mm_fmadd_pd(mat.rr[off + 3], s3, acc);
-                _mm_storeu_pd(state.add(i[$r] * 2), acc);
+                let mut re = _mm_mul_pd(mat.rr[off], s0);
+                let mut im = _mm_mul_pd(mat.ii[off], sf0);
+                re = _mm_fmadd_pd(mat.rr[off + 1], s1, re);
+                im = _mm_fmadd_pd(mat.ii[off + 1], sf1, im);
+                re = _mm_fmadd_pd(mat.rr[off + 2], s2, re);
+                im = _mm_fmadd_pd(mat.ii[off + 2], sf2, im);
+                re = _mm_fmadd_pd(mat.rr[off + 3], s3, re);
+                im = _mm_fmadd_pd(mat.ii[off + 3], sf3, im);
+                _mm_storeu_pd(state.add(i[$r] * 2), _mm_addsub_pd(re, im));
             }};
         }
         row!(0);
         row!(1);
         row!(2);
         row!(3);
+    }
+}
+
+/// Visit every base index of a two-qubit sweep, `step` groups at a time.
+///
+/// A base has zeros at bits `lo` and `hi` (`lo < hi`), so the set splits into
+/// three index segments: the bits below `lo`, the bits between, and the bits
+/// above `hi`. Walking them as nested loops replaces two variable-shift
+/// `insert_zero_bit` calls per group with an add; in the AVX2 pair loop those
+/// shifts were a third of the instruction stream and the loop read at about
+/// twice its port-limited cost.
+#[inline(always)]
+fn for_each_2q_base(n_iter: usize, lo: usize, hi: usize, step: usize, mut f: impl FnMut(usize)) {
+    let a_len = 1usize << lo;
+    let b_len = 1usize << (hi - lo - 1);
+    let c_len = n_iter / (a_len * b_len);
+    for c in 0..c_len {
+        let cbase = c << (hi + 1);
+        for b in 0..b_len {
+            let bbase = cbase + (b << (lo + 1));
+            let mut a = 0;
+            while a < a_len {
+                f(bbase + a);
+                a += step;
+            }
+        }
     }
 }
 
@@ -1817,13 +1843,10 @@ unsafe fn apply_fused_2q_loop_fma(
 ) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
-        use crate::backend::statevector::insert_zero_bit;
-
-        for k in 0..n_iter {
-            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+        for_each_2q_base(n_iter, lo, hi, 1, |base| {
+            let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
             apply_fused_2q_group_fma_inner(state, i, mat);
-        }
+        });
     }
 }
 
@@ -1859,20 +1882,19 @@ unsafe fn apply_fused_2q_pair_avx2_inner(state: *mut f64, i: [usize; 4], mat: &M
         let sf2 = _mm256_shuffle_pd(s2, s2, 0b0101);
         let sf3 = _mm256_shuffle_pd(s3, s3, 0b0101);
 
-        // Same fold as the 128-bit group kernel: one chain for the im*swap(z)
-        // terms, one for the re*z terms, eight FMA-class ops per row.
+        // Same two chains as the 128-bit group kernel, joined by one addsub.
         macro_rules! row {
             ($r:expr) => {{
                 let off = $r * 4;
-                let mut t = _mm256_mul_pd(mat.ii[off], sf0);
-                t = _mm256_fmadd_pd(mat.ii[off + 1], sf1, t);
-                t = _mm256_fmadd_pd(mat.ii[off + 2], sf2, t);
-                t = _mm256_fmadd_pd(mat.ii[off + 3], sf3, t);
-                let mut acc = _mm256_fmaddsub_pd(mat.rr[off], s0, t);
-                acc = _mm256_fmadd_pd(mat.rr[off + 1], s1, acc);
-                acc = _mm256_fmadd_pd(mat.rr[off + 2], s2, acc);
-                acc = _mm256_fmadd_pd(mat.rr[off + 3], s3, acc);
-                _mm256_storeu_pd(state.add(i[$r] * 2), acc);
+                let mut re = _mm256_mul_pd(mat.rr[off], s0);
+                let mut im = _mm256_mul_pd(mat.ii[off], sf0);
+                re = _mm256_fmadd_pd(mat.rr[off + 1], s1, re);
+                im = _mm256_fmadd_pd(mat.ii[off + 1], sf1, im);
+                re = _mm256_fmadd_pd(mat.rr[off + 2], s2, re);
+                im = _mm256_fmadd_pd(mat.ii[off + 2], sf2, im);
+                re = _mm256_fmadd_pd(mat.rr[off + 3], s3, re);
+                im = _mm256_fmadd_pd(mat.ii[off + 3], sf3, im);
+                _mm256_storeu_pd(state.add(i[$r] * 2), _mm256_addsub_pd(re, im));
             }};
         }
         row!(0);
@@ -1900,30 +1922,19 @@ unsafe fn apply_fused_2q_loop_avx2(
 ) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
-        use crate::backend::statevector::insert_zero_bit;
-
         if lo == 0 {
-            for k in 0..n_iter {
-                let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-                let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+            for_each_2q_base(n_iter, lo, hi, 1, |base| {
+                let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
                 apply_fused_2q_group_fma_inner(state, i, mat128);
-            }
+            });
             return;
         }
-
-        let pairs = n_iter / 2;
-        for pk in 0..pairs {
-            let k = pk * 2;
-            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
+        // `lo > 0` makes the lowest segment at least two long, so every
+        // group has its k + 1 neighbour adjacent and no tail is left.
+        for_each_2q_base(n_iter, lo, hi, 2, |base| {
+            let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
             apply_fused_2q_pair_avx2_inner(state, i, mat256);
-        }
-        if n_iter & 1 == 1 {
-            let k = n_iter - 1;
-            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
-            apply_fused_2q_group_fma_inner(state, i, mat128);
-        }
+        });
     }
 }
 
@@ -1999,21 +2010,6 @@ impl Mat4x4Broadcast {
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn complex_mul_neon_preswapped(
-    c_rr: float64x2_t,
-    c_ii_as: float64x2_t,
-    z: float64x2_t,
-    z_swap: float64x2_t,
-) -> float64x2_t {
-    // SAFETY: same contract as the enclosing unsafe fn.
-    unsafe {
-        let prod = vmulq_f64(c_rr, z);
-        vfmaq_f64(prod, c_ii_as, z_swap)
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[inline(always)]
 unsafe fn apply_fused_2q_group_neon(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
@@ -2027,29 +2023,99 @@ unsafe fn apply_fused_2q_group_neon(state: *mut f64, i: [usize; 4], mat: &Mat4x4
         let sf2 = vextq_f64(s2, s2, 1);
         let sf3 = vextq_f64(s3, s3, 1);
 
+        // Two chains per row, `rr * z` and `ii_as * swap(z)` (the two halves
+        // of each complex product, the imaginary half pre-signed), joined by
+        // one add: nine ops at a dependency depth of five, where one chain
+        // of eight left the x86 kernels latency-bound at twice their port
+        // cost.
         macro_rules! row {
             ($r:expr) => {{
                 let off = $r * 4;
-                let mut acc = complex_mul_neon_preswapped(mat.rr[off], mat.ii_as[off], s0, sf0);
-                acc = vaddq_f64(
-                    acc,
-                    complex_mul_neon_preswapped(mat.rr[off + 1], mat.ii_as[off + 1], s1, sf1),
-                );
-                acc = vaddq_f64(
-                    acc,
-                    complex_mul_neon_preswapped(mat.rr[off + 2], mat.ii_as[off + 2], s2, sf2),
-                );
-                acc = vaddq_f64(
-                    acc,
-                    complex_mul_neon_preswapped(mat.rr[off + 3], mat.ii_as[off + 3], s3, sf3),
-                );
-                vst1q_f64(state.add(i[$r] * 2), acc);
+                let mut re = vmulq_f64(mat.rr[off], s0);
+                let mut im = vmulq_f64(mat.ii_as[off], sf0);
+                re = vfmaq_f64(re, mat.rr[off + 1], s1);
+                im = vfmaq_f64(im, mat.ii_as[off + 1], sf1);
+                re = vfmaq_f64(re, mat.rr[off + 2], s2);
+                im = vfmaq_f64(im, mat.ii_as[off + 2], sf2);
+                re = vfmaq_f64(re, mat.rr[off + 3], s3);
+                im = vfmaq_f64(im, mat.ii_as[off + 3], sf3);
+                vst1q_f64(state.add(i[$r] * 2), vaddq_f64(re, im));
             }};
         }
         row!(0);
         row!(1);
         row!(2);
         row!(3);
+    }
+}
+
+/// Two groups at once: the group at `i` and the one at `i + 1`, adjacent
+/// amplitudes when the lower target is above bit 0. Each matrix constant is
+/// loaded once and feeds both groups, so the pair costs 32 constant loads
+/// where two group calls cost 64, against NEON's 32 vector registers.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn apply_fused_2q_pair_neon(state: *mut f64, i: [usize; 4], mat: &Mat4x4Broadcast) {
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        let p0 = state.add(i[0] * 2);
+        let p1 = state.add(i[1] * 2);
+        let p2 = state.add(i[2] * 2);
+        let p3 = state.add(i[3] * 2);
+        let a0 = vld1q_f64(p0);
+        let b0 = vld1q_f64(p0.add(2));
+        let a1 = vld1q_f64(p1);
+        let b1 = vld1q_f64(p1.add(2));
+        let a2 = vld1q_f64(p2);
+        let b2 = vld1q_f64(p2.add(2));
+        let a3 = vld1q_f64(p3);
+        let b3 = vld1q_f64(p3.add(2));
+
+        let af0 = vextq_f64(a0, a0, 1);
+        let bf0 = vextq_f64(b0, b0, 1);
+        let af1 = vextq_f64(a1, a1, 1);
+        let bf1 = vextq_f64(b1, b1, 1);
+        let af2 = vextq_f64(a2, a2, 1);
+        let bf2 = vextq_f64(b2, b2, 1);
+        let af3 = vextq_f64(a3, a3, 1);
+        let bf3 = vextq_f64(b3, b3, 1);
+
+        // Two chains per row and per group, as in the group kernel.
+        macro_rules! row {
+            ($r:expr, $p:expr) => {{
+                let off = $r * 4;
+                let c = mat.rr[off];
+                let mut re_a = vmulq_f64(c, a0);
+                let mut re_b = vmulq_f64(c, b0);
+                let c = mat.ii_as[off];
+                let mut im_a = vmulq_f64(c, af0);
+                let mut im_b = vmulq_f64(c, bf0);
+                let c = mat.rr[off + 1];
+                re_a = vfmaq_f64(re_a, c, a1);
+                re_b = vfmaq_f64(re_b, c, b1);
+                let c = mat.ii_as[off + 1];
+                im_a = vfmaq_f64(im_a, c, af1);
+                im_b = vfmaq_f64(im_b, c, bf1);
+                let c = mat.rr[off + 2];
+                re_a = vfmaq_f64(re_a, c, a2);
+                re_b = vfmaq_f64(re_b, c, b2);
+                let c = mat.ii_as[off + 2];
+                im_a = vfmaq_f64(im_a, c, af2);
+                im_b = vfmaq_f64(im_b, c, bf2);
+                let c = mat.rr[off + 3];
+                re_a = vfmaq_f64(re_a, c, a3);
+                re_b = vfmaq_f64(re_b, c, b3);
+                let c = mat.ii_as[off + 3];
+                im_a = vfmaq_f64(im_a, c, af3);
+                im_b = vfmaq_f64(im_b, c, bf3);
+                vst1q_f64($p, vaddq_f64(re_a, im_a));
+                vst1q_f64($p.add(2), vaddq_f64(re_b, im_b));
+            }};
+        }
+        row!(0, p0);
+        row!(1, p1);
+        row!(2, p2);
+        row!(3, p3);
     }
 }
 
@@ -2065,13 +2131,17 @@ unsafe fn apply_fused_2q_loop_neon(
 ) {
     // SAFETY: same contract as the enclosing unsafe fn.
     unsafe {
-        use crate::backend::statevector::insert_zero_bit;
-
-        for k in 0..n_iter {
-            let base = insert_zero_bit(insert_zero_bit(k, lo), hi);
-            let i = [base, base | mask1, base | mask0, base | mask0 | mask1];
-            apply_fused_2q_group_neon(state, i, mat);
+        if lo == 0 {
+            for_each_2q_base(n_iter, lo, hi, 1, |base| {
+                let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
+                apply_fused_2q_group_neon(state, i, mat);
+            });
+            return;
         }
+        for_each_2q_base(n_iter, lo, hi, 2, |base| {
+            let i = [base, base + mask1, base + mask0, base + mask0 + mask1];
+            apply_fused_2q_pair_neon(state, i, mat);
+        });
     }
 }
 

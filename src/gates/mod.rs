@@ -365,29 +365,73 @@ pub struct Multi2qData {
     pub gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
 }
 
-/// A `Multi2q` batch runs inside one tile of `2^MULTI_2Q_TILE_BITS` amplitudes
-/// (256 KB, an L2 cache): the tile is the lowest bits of the index plus up to
-/// [`MULTI_2Q_HIGH_BUDGET`] gathered high qubits, so a batch is tileable when
-/// its gates touch at most that many distinct qubits at or above
-/// [`MULTI_2Q_LOW_BITS`].
-pub(crate) const MULTI_2Q_TILE_BITS: usize = 14;
-/// Qubits from this index up count against a batch's high-qubit budget.
-pub(crate) const MULTI_2Q_LOW_BITS: usize = 10;
-/// Most distinct high qubits one `Multi2q` batch may span.
-pub(crate) const MULTI_2Q_HIGH_BUDGET: usize = MULTI_2Q_TILE_BITS - MULTI_2Q_LOW_BITS;
+/// A `Multi2q` batch runs inside one tile of `2^tile_bits` amplitudes: the
+/// lowest bits of the index plus up to `tile_bits - MULTI_2Q_LOW_BITS` gathered
+/// high qubits, so a batch is tileable when its gates touch at most that many
+/// distinct qubits at or above [`multi_2q_low_bits`]. The tile size is per
+/// platform, see [`multi_2q_tile_bits`]; [`MULTI_2Q_HIGH_BUDGET`] is the
+/// widest budget any platform reaches and sizes the inline qubit lists.
+pub(crate) const MULTI_2Q_MAX_TILE_BITS: usize = 18;
+/// Smallest tile any platform uses, 256 KB: one L2 on the x86 cores measured.
+pub(crate) const MULTI_2Q_MIN_TILE_BITS: usize = 14;
+/// Fewest low bits a tile keeps contiguous: 64-amplitude runs, 1 KB each.
+pub(crate) const MULTI_2Q_MIN_LOW_BITS: usize = 6;
+/// Most distinct high qubits one `Multi2q` batch may span on any platform.
+pub(crate) const MULTI_2Q_HIGH_BUDGET: usize = MULTI_2Q_MAX_TILE_BITS - MULTI_2Q_MIN_LOW_BITS;
+
+/// Qubits from this index up count against a batch's high-qubit budget: the
+/// tile keeps `2^low_bits` amplitudes contiguous per run and gathers the rest.
+/// Default 6, the shortest run, since every bit taken from the run is one
+/// more high qubit a pass over the state can serve: at 24 qubits a quantum
+/// volume circuit went from 88 passes to 54 and ran 10% faster against 10.
+/// `PRISM_MULTI_2Q_LOW_BITS` overrides it, clamped to
+/// `MULTI_2Q_MIN_LOW_BITS..tile_bits`.
+pub(crate) fn multi_2q_low_bits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        crate::env_knobs::usize_override("PRISM_MULTI_2Q_LOW_BITS", 1)
+            .unwrap_or(6)
+            .clamp(MULTI_2Q_MIN_LOW_BITS, multi_2q_tile_bits() - 1)
+    })
+}
+
+/// Log2 of the `Multi2q` tile in amplitudes: 2^14, 256 KB, or
+/// `PRISM_MULTI_2Q_TILE_BITS` clamped to
+/// `MULTI_2Q_MIN_TILE_BITS..=MULTI_2Q_MAX_TILE_BITS`.
+///
+/// The tile has to sit in the core's private cache: on an i7-6700K (256 KB
+/// of L2 per core, 8 MB of L3 shared by four) a 1 MB tile ran quantum volume
+/// at 22 and 24 qubits 2x slower and a 2 MB tile 3x, while 512 KB read flat.
+/// A wider tile takes more of a random-pair layer per pass over the state,
+/// so on a core with a larger private cache the knob is worth a sweep.
+pub(crate) fn multi_2q_tile_bits() -> usize {
+    static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        crate::env_knobs::usize_override("PRISM_MULTI_2Q_TILE_BITS", 1)
+            .unwrap_or(MULTI_2Q_MIN_TILE_BITS)
+            .clamp(MULTI_2Q_MIN_TILE_BITS, MULTI_2Q_MAX_TILE_BITS)
+    })
+}
+
+/// Most distinct high qubits one `Multi2q` batch may span on this platform.
+pub(crate) fn multi_2q_high_budget() -> usize {
+    multi_2q_tile_bits() - multi_2q_low_bits()
+}
 
 /// The high qubits `high` grows to if the pair joins the batch, or `None` when
-/// the pair would take it past [`MULTI_2Q_HIGH_BUDGET`].
+/// the pair would take it past [`multi_2q_high_budget`].
 pub(crate) fn multi_2q_join(
     high: &[usize],
     q0: usize,
     q1: usize,
 ) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
+    let budget = multi_2q_high_budget();
+    let low_bits = multi_2q_low_bits();
     let mut joined: smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> =
         high.iter().copied().collect();
     for q in [q0, q1] {
-        if q >= MULTI_2Q_LOW_BITS && !joined.contains(&q) {
-            if joined.len() == MULTI_2Q_HIGH_BUDGET {
+        if q >= low_bits && !joined.contains(&q) {
+            if joined.len() == budget {
                 return None;
             }
             joined.push(q);

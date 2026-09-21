@@ -13,9 +13,13 @@ reference under [Fusion Pipeline](../architecture/fusion.md) and
 2. **Cache-resident tiling** keeps batched gates working on data that stays hot across
    a pass, in two shapes. `MultiFused` splits its gates by target: bit 13 and below run
    on 256 KB tiles, bits 14 through 16 on 2 MB ones, and higher targets run untiled. A
-   `Multi2q` tile is the low 10 bits of the index plus up to four gathered high qubits,
-   so a batch of gates on any qubits costs one pass over the state as long as it spans
-   at most four qubits above bit 10.
+   `Multi2q` tile is a contiguous run of the low index bits plus gathered high qubits,
+   64 amplitudes per run and up to eight high qubits in a 2^14 tile, so a batch of
+   gates on any qubits costs one pass over the state as long as it spans at most eight
+   qubits above bit 6. The tile is 256 KB, one core's private L2 on the x86 parts
+   measured (a 1 MB tile ran 2x slower at 22 and 24 qubits on an i7-6700K);
+   `PRISM_MULTI_2Q_TILE_BITS` and `PRISM_MULTI_2Q_LOW_BITS` set both by hand, and a
+   core with a larger private cache is worth a sweep of the first.
 3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
    runtime: AVX2+FMA, FMA or SSE2 on x86_64, NEON on aarch64, scalar elsewhere.
 
@@ -79,6 +83,8 @@ variable to anything switches the path off.
 | `PRISM_DIST_RELABEL` | `1` | `0`/`false` disables qubit relabeling in the distributed backend |
 | `RAYON_NUM_THREADS` | all cores | Rayon thread count, read by Rayon itself |
 | `PRISM_NO_AVX2_2Q` | unset | Flag: force the 128-bit FMA two-qubit kernel |
+| `PRISM_MULTI_2Q_TILE_BITS` | 14 | Log2 of the `Multi2q` tile in amplitudes, 14 to 18 |
+| `PRISM_MULTI_2Q_LOW_BITS` | 6 | Log2 of the contiguous run a `Multi2q` tile gathers, 6 to one below the tile bits; fewer means more high qubits per pass |
 | `PRISM_NO_AVX2_KRAUS` | unset | Flag: disable the AVX2 dense two-qubit Kraus kernel |
 | `PRISM_NO_REORDER` | unset | Flag: disable disjoint `Fused2q` tier grouping |
 | `PRISM_NO_QFT_BLOCK` | unset | Flag: expand `QftBlock` to the textbook sequence |

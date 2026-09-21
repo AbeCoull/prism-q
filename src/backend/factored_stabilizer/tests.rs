@@ -939,3 +939,40 @@ fn bulk_gate_runs_match_the_per_instruction_path() {
         "bulk gate runs disagree with the per-instruction path"
     );
 }
+
+#[test]
+fn shifted_bit_runs_match_the_bit_loop_across_word_boundaries() {
+    use crate::backend::factored_stabilizer::{or_shifted_bits, position_runs};
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    for _ in 0..200 {
+        let src_n = rng.random_range(1..200usize);
+        let other_n = rng.random_range(0..200usize);
+        let mut merged: Vec<bool> = (0..src_n).map(|_| true).collect();
+        merged.extend((0..other_n).map(|_| false));
+        for i in (1..merged.len()).rev() {
+            merged.swap(i, rng.random_range(0..=i));
+        }
+        let positions: Vec<usize> = merged
+            .iter()
+            .enumerate()
+            .filter(|&(_, &mine)| mine)
+            .map(|(pos, _)| pos)
+            .collect();
+        let src_nw = src_n.div_ceil(64);
+        let dst_nw = (src_n + other_n).div_ceil(64);
+        let src: Vec<u64> = (0..src_nw).map(|_| rng.random()).collect();
+
+        let mut expected = vec![0u64; dst_nw];
+        for (local, &merged) in positions.iter().enumerate() {
+            if src[local / 64] >> (local % 64) & 1 != 0 {
+                expected[merged / 64] |= 1 << (merged % 64);
+            }
+        }
+        let mut got = vec![0u64; dst_nw];
+        for &(start, len, shift) in &position_runs(&positions) {
+            or_shifted_bits(&src, start, len, shift, &mut got);
+        }
+        assert_eq!(got, expected, "src_n={src_n} other_n={other_n}");
+    }
+}

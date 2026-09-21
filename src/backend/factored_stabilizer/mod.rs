@@ -551,9 +551,9 @@ impl FactoredStabilizerBackend {
         }
 
         let src = self.subs[src_idx].take().unwrap();
-        let dst = self.subs[dst_idx].as_ref().unwrap();
+        let d = self.subs[dst_idx].as_mut().unwrap();
 
-        let a = dst.n;
+        let a = d.n;
         let b = src.n;
         let new_nw = total_n.div_ceil(64);
         let new_stride = 2 * new_nw;
@@ -565,9 +565,9 @@ impl FactoredStabilizerBackend {
 
         let (mut di, mut si) = (0, 0);
         while di < a || si < b {
-            if di < a && (si >= b || dst.qubits[di] < src.qubits[si]) {
+            if di < a && (si >= b || d.qubits[di] < src.qubits[si]) {
                 dst_positions.push(merged_qubits.len());
-                merged_qubits.push(dst.qubits[di]);
+                merged_qubits.push(d.qubits[di]);
                 di += 1;
             } else {
                 src_positions.push(merged_qubits.len());
@@ -575,49 +575,47 @@ impl FactoredStabilizerBackend {
                 si += 1;
             }
         }
+        let dst_runs = position_runs(&dst_positions);
+        let src_runs = position_runs(&src_positions);
 
-        let mut new_xz = vec![0u64; total_rows * new_stride];
-        let mut new_phase = vec![false; total_rows];
-
-        let dst_ref = self.subs[dst_idx].as_ref().unwrap();
         // Destabilizer rows are not copied: a merge only happens on the way
         // into a cross-cluster gate, which stales them immediately, so the
         // merged cluster starts lazy and the next measurement rebuilds them.
-        #[allow(clippy::needless_range_loop)]
+        let mut new_xz = vec![0u64; total_rows * new_stride];
+        let mut new_phase = vec![false; total_rows];
         for r in 0..a {
             remap_row(
-                &dst_ref.xz,
-                dst_ref.stride(),
+                &d.xz,
+                d.stride(),
                 a + r,
-                &dst_positions,
-                dst_ref.num_words,
+                &dst_runs,
+                d.num_words,
                 &mut new_xz,
                 new_stride,
                 total_n + r,
                 new_nw,
             );
-            new_phase[total_n + r] = dst_ref.phase[a + r];
+            new_phase[total_n + r] = d.phase[a + r];
         }
+        d.xz = new_xz;
+        d.phase = new_phase;
         for r in 0..b {
             remap_row(
                 &src.xz,
                 src.stride(),
                 b + r,
-                &src_positions,
+                &src_runs,
                 src.num_words,
-                &mut new_xz,
+                &mut d.xz,
                 new_stride,
                 total_n + a + r,
                 new_nw,
             );
-            new_phase[total_n + a + r] = src.phase[b + r];
+            d.phase[total_n + a + r] = src.phase[b + r];
         }
 
-        let d = self.subs[dst_idx].as_mut().unwrap();
         d.n = total_n;
         d.num_words = new_nw;
-        d.xz = new_xz;
-        d.phase = new_phase;
         d.qubits = merged_qubits;
         d.lazy_destab = true;
 
@@ -1112,12 +1110,55 @@ impl Backend for FactoredStabilizerBackend {
     }
 }
 
+/// Stretches of local qubits that keep their spacing in the merged order, as
+/// `(start, len, shift)`: local bits `start..start + len` land at `start + shift`.
+/// Merged qubit lists are sorted, so a run only breaks where the other
+/// cluster's qubits interleave, and a run count near the smaller cluster's
+/// width is the norm.
+fn position_runs(positions: &[usize]) -> SmallVec<[(usize, usize, usize); 8]> {
+    let mut runs = SmallVec::new();
+    let mut start = 0;
+    while start < positions.len() {
+        let shift = positions[start] - start;
+        let mut end = start + 1;
+        while end < positions.len() && positions[end] - end == shift {
+            end += 1;
+        }
+        runs.push((start, end - start, shift));
+        start = end;
+    }
+    runs
+}
+
+/// OR bits `start..start + len` of `src` into `dst` at `start + shift`, a word
+/// at a time. Every moved bit must fit in `dst`.
+fn or_shifted_bits(src: &[u64], start: usize, len: usize, shift: usize, dst: &mut [u64]) {
+    let end = start + len;
+    let (dw_off, sh) = (shift / 64, shift % 64);
+    let mut bit = start;
+    while bit < end {
+        let w = bit / 64;
+        let lo = bit % 64;
+        let hi = (end - w * 64).min(64);
+        let chunk = src[w] & ((u64::MAX >> (64 - (hi - lo))) << lo);
+        let dw = w + dw_off;
+        dst[dw] |= chunk << sh;
+        if sh != 0 {
+            let spill = chunk >> (64 - sh);
+            if spill != 0 {
+                dst[dw + 1] |= spill;
+            }
+        }
+        bit = w * 64 + hi;
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn remap_row(
     src_xz: &[u64],
     src_stride: usize,
     src_row: usize,
-    positions: &[usize],
+    runs: &[(usize, usize, usize)],
     src_nw: usize,
     dst_xz: &mut [u64],
     dst_stride: usize,
@@ -1126,20 +1167,11 @@ fn remap_row(
 ) {
     let src_base = src_row * src_stride;
     let dst_base = dst_row * dst_stride;
-    let src_n = positions.len();
-    #[allow(clippy::needless_range_loop)]
-    for local in 0..src_n {
-        let sw = local / 64;
-        let sb = local % 64;
-        let merged = positions[local];
-        let dw = merged / 64;
-        let db = merged % 64;
-        if src_xz[src_base + sw] & (1u64 << sb) != 0 {
-            dst_xz[dst_base + dw] |= 1u64 << db;
-        }
-        if src_xz[src_base + src_nw + sw] & (1u64 << sb) != 0 {
-            dst_xz[dst_base + dst_nw + dw] |= 1u64 << db;
-        }
+    let (src_x, src_z) = src_xz[src_base..src_base + 2 * src_nw].split_at(src_nw);
+    let (dst_x, dst_z) = dst_xz[dst_base..dst_base + 2 * dst_nw].split_at_mut(dst_nw);
+    for &(start, len, shift) in runs {
+        or_shifted_bits(src_x, start, len, shift, dst_x);
+        or_shifted_bits(src_z, start, len, shift, dst_z);
     }
 }
 

@@ -855,6 +855,12 @@ impl Backend for FactoredStabilizerBackend {
                 self.try_split(ss);
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied(
+                    "FactoredStabilizer",
+                    label,
+                ));
+            }
             Instruction::Conditional {
                 condition,
                 gate,

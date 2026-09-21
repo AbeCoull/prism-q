@@ -161,6 +161,9 @@ input and answers anyway.
 | `EXP_VAL` in a QEC program must be terminal and live | `InvalidParameter` naming the op that followed it, or the qubit measured since its last reset |
 | `EXP_VAL` on the reference QEC runner reaches 64 qubits | `IncompatibleBackend` naming the cap and the width the program needs. The Pauli-mask reduction is one word per shot; statevector memory binds long before this does |
 | Analytical conditional expectation reaches 12 postselection rows | `BackendUnsupported` naming the count and the cap, and pointing at the reference runner, since the expansion is `2^rows` Pauli evaluations |
+| Save points are returned by `run` alone | `IncompatibleBackend` naming the terminal and the number of save points. A shot loop runs the circuit many times and a marginal reduces it, so neither has a place to put one record per point |
+| A save needs a route that holds a state | `IncompatibleBackend` naming the save and the route. The compiled samplers reorder measurements, the stabilizer-rank engine carries a weighted sum of branches, and the Pauli-propagation engines carry no state vector at all |
+| A save has no OpenQASM spelling | `ExportUnsupported` naming the save and its label. The subset has no save syntax to export into |
 
 Backend width and memory caps are separate and live with the terminals that raise
 them; see [Shot and observable queries above the dense cap](#shot-and-observable-queries-above-the-dense-cap).

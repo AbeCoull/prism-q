@@ -66,7 +66,7 @@ fn profile_one(circuit: &Circuit) -> IterProfile {
             Instruction::Measure { .. } => "measure",
             Instruction::Reset { .. } => "reset",
             Instruction::Region(_) => "if",
-            Instruction::Barrier { .. } => continue,
+            Instruction::Barrier { .. } | Instruction::Save { .. } => continue,
         };
 
         let start = Instant::now();

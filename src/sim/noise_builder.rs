@@ -479,7 +479,7 @@ fn instruction_qubits(instr: &Instruction) -> SmallVec<[usize; 4]> {
             targets.clone()
         }
         Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => smallvec![*qubit],
-        Instruction::Barrier { qubits } => qubits.clone(),
+        Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => qubits.clone(),
         Instruction::Region(region) => region.qubits().iter().copied().collect(),
     }
 }

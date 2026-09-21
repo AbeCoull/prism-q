@@ -284,7 +284,8 @@ pub fn is_clifford(circuit: &Circuit) -> bool {
             }
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
-            | Instruction::Barrier { .. } => {}
+            | Instruction::Barrier { .. }
+            | Instruction::Save { .. } => {}
         }
     }
     true

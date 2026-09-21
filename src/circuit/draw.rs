@@ -167,6 +167,12 @@ pub(super) fn assign_moments(circuit: &Circuit) -> Vec<Vec<PlacedOp>> {
                 kind: OpKind::Barrier,
                 gate: None,
             },
+            Instruction::Save { qubits, label, .. } => PlacedOp {
+                label: label.clone(),
+                qubits: SmallVec::from_slice(qubits),
+                kind: OpKind::Barrier,
+                gate: None,
+            },
             Instruction::Conditional {
                 condition,
                 gate,
@@ -818,7 +824,7 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
             Instruction::Reset { .. } => {
                 *gate_counts.entry("reset").or_default() += 1;
             }
-            Instruction::Barrier { .. } => barrier_count += 1,
+            Instruction::Barrier { .. } | Instruction::Save { .. } => barrier_count += 1,
             Instruction::Conditional { gate, .. } => {
                 conditional_count += 1;
                 *gate_counts.entry(gate.name()).or_default() += 1;
@@ -875,7 +881,7 @@ fn render_summary(circuit: &Circuit) -> Vec<String> {
                 std::slice::from_ref(qubit)
             }
             Instruction::Region(region) => region.qubits(),
-            Instruction::Barrier { .. } => continue,
+            Instruction::Barrier { .. } | Instruction::Save { .. } => continue,
         };
         for &q in targets {
             if q < n {

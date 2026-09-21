@@ -263,6 +263,14 @@ fn lower_probability_circuit(circuit: &Circuit) -> Result<Cow<'_, Circuit>> {
     for inst in &circuit.instructions {
         match inst {
             Instruction::Gate { .. } | Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(PrismError::IncompatibleBackend {
+                    backend: "stabilizer_rank".into(),
+                    reason: format!(
+                        "save point `{label}` has no single state to read: the route                          carries a weighted sum of stabilizer branches"
+                    ),
+                });
+            }
             Instruction::Measure { .. } | Instruction::Reset { .. } => {
                 return Err(PrismError::IncompatibleBackend {
                     backend: "stabilizer_rank".into(),
@@ -824,7 +832,8 @@ fn validate_shot_instructions(instructions: &[Instruction]) -> Result<()> {
             }
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
-            | Instruction::Barrier { .. } => {
+            | Instruction::Barrier { .. }
+            | Instruction::Save { .. } => {
                 continue;
             }
         };
@@ -1050,6 +1059,13 @@ fn process_mps_instruction(
         }
         Instruction::Reset { qubit } => apply_reset_mps(branches, *qubit, rng),
         Instruction::Barrier { .. } => Ok(()),
+        Instruction::Save { label, .. } => Err(PrismError::IncompatibleBackend {
+            backend: "stabilizer_rank".into(),
+            reason: format!(
+                "save point `{label}` has no single state to read: the route carries a \
+                 weighted sum of stabilizer branches"
+            ),
+        }),
         Instruction::Conditional {
             condition,
             gate,
@@ -1080,7 +1096,8 @@ fn build_mps_branches_for_unitary(circuit: &Circuit, seed: u64) -> Result<Vec<We
             Instruction::Gate { .. } | Instruction::Barrier { .. } => {
                 process_mps_instruction(&mut branches, inst, &mut classical_bits, &mut rng)?;
             }
-            Instruction::Measure { .. }
+            Instruction::Save { .. }
+            | Instruction::Measure { .. }
             | Instruction::Reset { .. }
             | Instruction::Conditional { .. }
             | Instruction::Region(_) => {

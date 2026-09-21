@@ -220,7 +220,7 @@ pub fn fuse_controlled_phases<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> 
                 );
                 output.push(inst.clone());
             }
-            Instruction::Barrier { qubits } => {
+            Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => {
                 flush_phase_qubits_in_use(
                     qubits,
                     false,

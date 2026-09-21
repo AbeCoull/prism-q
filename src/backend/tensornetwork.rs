@@ -1035,6 +1035,9 @@ pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm
         match instruction {
             Instruction::Gate { gate, targets } => network.append_gate(gate, targets)?,
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("TensorNetwork", label));
+            }
             Instruction::Measure { .. }
             | Instruction::Reset { .. }
             | Instruction::Conditional { .. }
@@ -1713,6 +1716,9 @@ impl Backend for TensorNetworkBackend {
                 self.apply_reset(*qubit)?;
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("TensorNetwork", label));
+            }
             Instruction::Conditional {
                 condition,
                 gate,

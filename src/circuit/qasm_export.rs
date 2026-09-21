@@ -118,6 +118,12 @@ fn emit(
             }
             let _ = writeln!(out, "{pad}barrier {};", args(qubits));
         }
+        Instruction::Save { label, .. } => {
+            return Err(PrismError::ExportUnsupported {
+                index,
+                reason: format!("save point `{label}` has no OpenQASM spelling"),
+            });
+        }
         Instruction::Conditional {
             condition,
             gate,

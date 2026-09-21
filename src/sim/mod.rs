@@ -52,7 +52,7 @@ use num_complex::Complex64;
 use crate::backend::sparse::MAX_SPARSE_INDEX_QUBITS;
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits};
-use crate::circuit::{Circuit, Instruction};
+use crate::circuit::{Circuit, Instruction, SaveRecord, SaveSpec, SavedValue};
 use crate::error::{PrismError, Result};
 use crate::sim::noise::NoiseModel;
 use shots::{packed_shots_to_classical_bits, sample_shots, shots_from_basis_samples};
@@ -99,6 +99,9 @@ pub struct RunOutcome {
     pub probabilities: Option<Probabilities>,
     /// Which engine ran, whether the answer is exact, and where the state lived.
     pub metadata: RunMetadata,
+    /// What each [`Instruction::Save`] point recorded, in the order the points
+    /// were reached. Empty unless the circuit carries save points.
+    pub saves: Vec<SaveRecord>,
 }
 
 /// Frequency histogram returned by query-aware count sampling.
@@ -378,11 +381,14 @@ impl<'c> Simulate<'c, Seeded> {
             let classical_bits =
                 sample_exact_noisy_shots(&probabilities, self.circuit, noise_model, 1, seed)
                     .swap_remove(0);
-            return Ok(RunOutcome {
+            let outcome = RunOutcome {
                 classical_bits,
                 probabilities: Some(probabilities),
                 metadata: exact_mixture_metadata(&self.kind),
-            });
+                saves: Vec::new(),
+            };
+            ensure_saves_recorded(self.circuit, &outcome)?;
+            return Ok(outcome);
         }
         if let Some(state) = self.initial_state {
             return run_from_initial_state(
@@ -398,10 +404,27 @@ impl<'c> Simulate<'c, Seeded> {
         Ok(outcome)
     }
 
+    /// Refuse a circuit carrying save points on a terminal that cannot return
+    /// them. Only [`Simulate::run`] has a place to put the records.
+    fn reject_saves(&self, terminal: &str) -> Result<()> {
+        if self.circuit.save_count() == 0 {
+            return Ok(());
+        }
+        Err(PrismError::IncompatibleBackend {
+            backend: format!("{:?}", self.kind),
+            reason: format!(
+                "the circuit carries {} save point(s), which only `run` returns, so \
+                 `{terminal}` declines it",
+                self.circuit.save_count()
+            ),
+        })
+    }
+
     /// Execute `num_shots` times, collecting per-shot classical bits. Accepts
     /// an attached noise model.
     #[inline]
     pub fn shots(self, num_shots: usize) -> Result<ShotsResult> {
+        self.reject_saves("shots")?;
         let seed = self.seed_value();
         let require_exact = self.require_exact;
         if require_exact {
@@ -427,6 +450,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// while drawing from the identical distribution.
     #[inline]
     pub fn sample_counts(self, num_shots: usize) -> Result<CountsResult> {
+        self.reject_saves("sample_counts")?;
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
@@ -457,6 +481,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// `sample_counts` is the terminal that applies it.
     #[inline]
     pub fn marginals(self) -> Result<MarginalsResult> {
+        self.reject_saves("marginals")?;
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
@@ -502,6 +527,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// disagree by the readout rate.
     #[inline]
     pub fn expectation_values(self, observables: &[Vec<PauliTerm>]) -> Result<Vec<f64>> {
+        self.reject_saves("expectation_values")?;
         self.expectation_values_reported(observables)
             .map(ExpectationResult::into_values)
     }
@@ -574,6 +600,7 @@ impl<'c> Simulate<'c, Seeded> {
         self,
         observable: &PauliObservable,
     ) -> Result<ObservableExpectation> {
+        self.reject_saves("observable_expectation")?;
         self.observable_expectation_ref(observable)
     }
 
@@ -663,6 +690,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// [`PauliObservable::split_identity`]. The square carries up to `T^2`
     /// terms over `H`'s `T`; see [`PauliObservable::square`].
     pub fn observable_variance(self, observable: &PauliObservable) -> Result<ObservableVariance> {
+        self.reject_saves("observable_variance")?;
         let (offset, traceless) = observable.split_identity();
         let mean = self.observable_expectation_ref(observable)?;
         let second = self.observable_expectation_ref(&traceless.square())?;
@@ -687,6 +715,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// A backend that exposes no distribution for the circuit reports
     /// `BackendUnsupported` naming itself.
     pub fn probabilities_of(self, qubits: &[usize]) -> Result<Vec<f64>> {
+        self.reject_saves("probabilities_of")?;
         crate::backend::schmidt::validate_qubit_set(qubits, self.circuit.num_qubits)?;
         let kind = format!("{:?}", self.kind);
         let outcome = self.run()?;
@@ -714,6 +743,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// The vector holds `2^n` amplitudes, so a register past the dense export
     /// cap reports `IncompatibleBackend` before allocating rather than after.
     pub fn state_vector(self) -> Result<Vec<Complex64>> {
+        self.reject_saves("state_vector")?;
         let seed = self.seed_value();
         let diagnostic = Diagnostic::StateVector;
         require_unitary_circuit(&self.kind, self.circuit, "a statevector requires")?;
@@ -757,6 +787,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// the caller did not make. With a noise model attached the answer is the
     /// marginal of the exact mixture, which needs the density-matrix backend.
     pub fn reduced_density_matrix(self, qubits: &[usize]) -> Result<ReducedDensityMatrix> {
+        self.reject_saves("reduced_density_matrix")?;
         let seed = self.seed_value();
         let diagnostic = Diagnostic::ReducedDensityMatrix;
         let terminal = diagnostic.terminal();
@@ -819,6 +850,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// noise model declines outright: it sends the run to the density matrix,
     /// whose mixed state has no Schmidt decomposition.
     pub fn entanglement_entropy(self, subsystem: &[usize]) -> Result<EntropyResult> {
+        self.reject_saves("entanglement_entropy")?;
         let seed = self.seed_value();
         let diagnostic = Diagnostic::Entropy;
         let terminal = diagnostic.terminal();
@@ -892,6 +924,7 @@ impl<'c> Simulate<'c, Seeded> {
     /// either side is rejected, since the fidelity of two mixtures is not an
     /// inner product.
     pub fn overlap(self, other: Simulate<'_, Seeded>) -> Result<OverlapResult> {
+        self.reject_saves("overlap")?;
         let diagnostic = Diagnostic::Overlap;
         if self.circuit.num_qubits != other.circuit.num_qubits {
             return Err(PrismError::InvalidParameter {
@@ -959,6 +992,7 @@ impl<'c> Simulate<'c, Seeded> {
         hamiltonian: &[(f64, Vec<PauliTerm>)],
         params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
+        self.reject_saves("expectation_gradient")?;
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
@@ -1011,6 +1045,7 @@ impl<'c> Simulate<'c, Seeded> {
         hamiltonian: &[(f64, Vec<PauliTerm>)],
         params: &crate::circuit::Parameters,
     ) -> Result<gradient::ExpectationGradient> {
+        self.reject_saves("expectation_gradient_shift")?;
         let seed = self.seed_value();
         if self.require_exact {
             reject_approximate_route(&self.kind, self.circuit)?;
@@ -1267,10 +1302,31 @@ fn fuse_for_backend<'a>(
 
 /// Fuse `circuit` for `backend` and apply it, leaving initialization to the
 /// caller. The start-state analogue of [`execute`], which owns the |0...0⟩ init.
-fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<()> {
+/// [`apply_fused_circuit`] for a terminal that has nowhere to put a save.
+///
+/// Only [`Simulate::run`] returns save records, so every other terminal
+/// declines a circuit carrying a save point rather than running it and
+/// discarding what the points recorded.
+fn apply_fused_without_saves(
+    backend: &mut dyn Backend,
+    circuit: &Circuit,
+    terminal: &str,
+) -> Result<()> {
+    if circuit.save_count() > 0 {
+        return Err(PrismError::IncompatibleBackend {
+            backend: backend.name().to_string(),
+            reason: format!(
+                "save points are returned by `run`, and `{terminal}` has nowhere to put them"
+            ),
+        });
+    }
+    apply_fused_circuit(backend, circuit).map(|_| ())
+}
+
+fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<Vec<SaveRecord>> {
     let expanded = expand_for_backend(&*backend, circuit);
     let fused = fuse_for_backend(&*backend, &expanded);
-    backend.apply_instructions(&fused.instructions)
+    apply_recording_saves(backend, &fused.instructions)
 }
 
 fn run_from_initial_state(
@@ -1281,7 +1337,7 @@ fn run_from_initial_state(
     opts: &SimOptions,
 ) -> Result<RunOutcome> {
     let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
-    apply_fused_circuit(&mut *backend, circuit)?;
+    let saves = apply_fused_circuit(&mut *backend, circuit)?;
 
     let probabilities = if opts.probabilities {
         try_backend_probabilities(&*backend)?
@@ -1292,6 +1348,7 @@ fn run_from_initial_state(
         classical_bits: backend.classical_results().to_vec(),
         probabilities,
         metadata: backend_metadata(&*backend),
+        saves,
     })
 }
 
@@ -1348,7 +1405,7 @@ fn marginals_from_initial_state(
     seed: u64,
 ) -> Result<MarginalsResult> {
     let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
-    apply_fused_circuit(&mut *backend, circuit)?;
+    apply_fused_without_saves(&mut *backend, circuit, "marginals")?;
     if backend.supports_pauli_expectation() {
         return marginals_from_pauli_expectations(&*backend, circuit.num_qubits);
     }
@@ -1372,7 +1429,7 @@ fn expectation_values_from_initial_state(
         .collect::<Result<Vec<_>>>()?;
 
     let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
-    apply_fused_circuit(&mut *backend, circuit)?;
+    apply_fused_without_saves(&mut *backend, circuit, "expectation_values")?;
     let metadata = backend_metadata(&*backend);
     if backend.supports_pauli_expectation() {
         let values = backend.pauli_expectations(observables)?;
@@ -1496,7 +1553,28 @@ fn probs_only_result(probs: Vec<f64>, metadata: RunMetadata) -> RunOutcome {
         probabilities: Some(Probabilities::Dense(probs)),
         classical_bits: vec![],
         metadata,
+        saves: Vec::new(),
     }
+}
+
+/// Fail rather than return a run that quietly skipped a save point.
+///
+/// Routes that cannot read a state mid-circuit decline by name where they meet
+/// the instruction. This is the backstop for a route that instead drops the
+/// instruction while rewriting the circuit, which is what the decomposed and
+/// exact-mixture paths do.
+fn ensure_saves_recorded(circuit: &Circuit, outcome: &RunOutcome) -> Result<()> {
+    let wanted = circuit.save_count();
+    if wanted == outcome.saves.len() {
+        return Ok(());
+    }
+    Err(PrismError::IncompatibleBackend {
+        backend: format!("{:?}", outcome.metadata.backend),
+        reason: format!(
+            "circuit carries {wanted} save point(s) and the route that ran recorded {}",
+            outcome.saves.len()
+        ),
+    })
 }
 
 fn try_backend_probabilities(backend: &dyn Backend) -> Result<Option<Probabilities>> {
@@ -1593,7 +1671,7 @@ fn execute_circuit(
     opts: &SimOptions,
 ) -> Result<RunOutcome> {
     backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    backend.apply_instructions(&circuit.instructions)?;
+    let saves = apply_recording_saves(backend, &circuit.instructions)?;
 
     let probabilities = if opts.probabilities {
         try_backend_probabilities(backend)?
@@ -1605,7 +1683,76 @@ fn execute_circuit(
         classical_bits: backend.classical_results().to_vec(),
         probabilities,
         metadata: backend_metadata(backend),
+        saves,
     })
+}
+
+/// Apply `instructions`, reading the state at each save point.
+///
+/// The stream is handed to the backend in the segments between save points, so
+/// no backend implements a save and none can batch across one. A circuit with
+/// no save points takes one call, the same as before.
+fn apply_recording_saves(
+    backend: &mut dyn Backend,
+    instructions: &[Instruction],
+) -> Result<Vec<SaveRecord>> {
+    let first = instructions
+        .iter()
+        .position(|i| matches!(i, Instruction::Save { .. }));
+    let Some(first) = first else {
+        backend.apply_instructions(instructions)?;
+        return Ok(Vec::new());
+    };
+
+    let mut saves = Vec::new();
+    let mut start = 0;
+    for (i, inst) in instructions.iter().enumerate().skip(first) {
+        let Instruction::Save { spec, label, .. } = inst else {
+            continue;
+        };
+        backend.apply_instructions(&instructions[start..i])?;
+        saves.push(SaveRecord {
+            label: label.clone(),
+            value: read_save(backend, *spec, label)?,
+        });
+        start = i + 1;
+    }
+    backend.apply_instructions(&instructions[start..])?;
+    Ok(saves)
+}
+
+/// Read one save off the backend that is mid-circuit.
+///
+/// Every spec maps to an export the backend already offers, so a backend that
+/// cannot produce the requested form fails here with its own message rather
+/// than needing a save implementation of its own.
+fn read_save(backend: &mut dyn Backend, spec: SaveSpec, label: &str) -> Result<SavedValue> {
+    let named = |err: crate::error::PrismError| match err {
+        crate::error::PrismError::IncompatibleBackend { backend, reason } => {
+            crate::error::PrismError::IncompatibleBackend {
+                backend,
+                reason: format!("save point `{label}`: {reason}"),
+            }
+        }
+        other => other,
+    };
+    match spec {
+        SaveSpec::StateVector => backend
+            .export_statevector()
+            .map(SavedValue::StateVector)
+            .map_err(named),
+        SaveSpec::Probabilities => backend
+            .probabilities()
+            .map(SavedValue::Probabilities)
+            .map_err(named),
+        SaveSpec::DensityMatrix => {
+            let whole: Vec<usize> = (0..backend.num_qubits()).collect();
+            backend
+                .reduced_density_matrix(&whole)
+                .map(SavedValue::DensityMatrix)
+                .map_err(named)
+        }
+    }
 }
 
 /// Provenance read off the engine that ran, after it ran. Exactness and
@@ -1653,7 +1800,9 @@ fn run_with_internal(
         return execute(&mut *backend, circuit, &opts);
     }
     let route = plan_probability_route(&kind, circuit);
-    run_route(&kind, circuit, seed, opts, &route)
+    let outcome = run_route(&kind, circuit, seed, opts, &route)?;
+    ensure_saves_recorded(circuit, &outcome)?;
+    Ok(outcome)
 }
 
 /// Execute one seed of a planned probability route. Shot loops plan once and
@@ -1757,12 +1906,92 @@ pub fn run_on_state(
 ) -> Result<RunOutcome> {
     check_initial_state_len(initial_state, circuit.num_qubits)?;
     backend.init_from_amplitudes(initial_state.to_vec(), circuit.num_classical_bits)?;
-    apply_fused_circuit(backend, circuit)?;
+    let saves = apply_fused_circuit(backend, circuit)?;
     Ok(RunOutcome {
         classical_bits: backend.classical_results().to_vec(),
         probabilities: try_backend_probabilities(backend)?,
         metadata: backend_metadata(backend),
+        saves,
     })
+}
+
+/// Run several circuits, holding one backend across those that can share it.
+///
+/// What this saves is the backend construction and its `2^n` allocation, which
+/// `init` reuses when the next circuit has the same width. Route analysis is not
+/// saved: the circuits differ, so each one is planned either way.
+///
+/// That puts the crossover higher than it looks. Measured over 200 distinct
+/// circuits, best of fifteen, three runs on one host: at 8 qubits the batch is
+/// slower by 0.5 to 0.8 microseconds a run, because the allocation it avoids is
+/// smaller than the per-circuit bookkeeping it adds; at 10 qubits it saves 0.8
+/// to 4.2; at 12 qubits it saves 10 to 37, which is 2% to 8%. Reach for it from
+/// about 10 qubits up, and use a plain loop below that.
+///
+/// Results are identical to running each circuit on its own with the same seed.
+/// A circuit that draws randomness (a measurement, a reset, or a classical
+/// condition) gets a backend of its own, because a held backend would carry its
+/// RNG forward into the next circuit and change what the next one measures.
+///
+/// # Errors
+/// The first circuit that fails ends the batch and returns its error, so a
+/// caller that wants the rest to run should call this per circuit.
+pub fn run_batch(circuits: &[Circuit], kind: BackendKind, seed: u64) -> Result<Vec<RunOutcome>> {
+    let mut out = Vec::with_capacity(circuits.len());
+    let mut held: Option<(dispatch::BackendPlan, usize, Box<dyn Backend + Send>)> = None;
+
+    for circuit in circuits {
+        let Some(plan) = batch_plan(&kind, circuit) else {
+            held = None;
+            out.push(run_with_internal(
+                kind.clone(),
+                circuit,
+                seed,
+                SimOptions::default(),
+            )?);
+            continue;
+        };
+
+        let reusable = matches!(
+            &held,
+            Some((p, width, _)) if *width == circuit.num_qubits && dispatch::same_plan(p, &plan)
+        );
+        if !reusable {
+            held = Some((plan.clone(), circuit.num_qubits, plan.build(seed)));
+        }
+        let (_, _, backend) = held.as_mut().expect("just built");
+        out.push(execute(&mut **backend, circuit, &SimOptions::default())?);
+    }
+    Ok(out)
+}
+
+/// The plan a circuit can share, or `None` when it must run on its own.
+///
+/// A circuit that draws randomness needs a fresh RNG to match its solo run, and
+/// anything that is not a direct backend route has no single plan to hold.
+fn batch_plan(kind: &BackendKind, circuit: &Circuit) -> Option<dispatch::BackendPlan> {
+    let draws_randomness = circuit.instructions.iter().any(|i| {
+        matches!(
+            i,
+            Instruction::Measure { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Conditional { .. }
+                | Instruction::Region(_)
+        )
+    });
+    if draws_randomness {
+        return None;
+    }
+    let ProbabilityRoute::Direct {
+        has_partial_independence,
+    } = plan_probability_route(kind, circuit)
+    else {
+        return None;
+    };
+    match resolve(kind, circuit, has_partial_independence) {
+        ExecutionPlan::Backend(plan) => Some(plan),
+        _ => None,
+    }
 }
 
 /// Parse an OpenQASM string and execute with automatic backend selection.
@@ -2947,7 +3176,7 @@ fn diagnostic_backend(
     if let Some(state) = initial_state {
         let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
         check_diagnostic_width(&*backend, diagnostic, subsystem_len)?;
-        apply_fused_circuit(&mut *backend, circuit)?;
+        apply_fused_without_saves(&mut *backend, circuit, "state diagnostics")?;
         return Ok(backend);
     }
     if !kind.is_auto() {

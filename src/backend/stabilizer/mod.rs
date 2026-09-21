@@ -1278,6 +1278,9 @@ impl Backend for StabilizerBackend {
         if self.gpu_tableau.is_some() {
             match instruction {
                 Instruction::Barrier { .. } => return Ok(()),
+                Instruction::Save { label, .. } => {
+                    return Err(crate::backend::save_not_applied("Stabilizer", label));
+                }
                 Instruction::Conditional { condition, .. }
                     if !condition.evaluate(&self.classical_bits) =>
                 {
@@ -1315,6 +1318,9 @@ impl Backend for StabilizerBackend {
                 self.apply_reset(*qubit)?;
             }
             Instruction::Barrier { .. } => {}
+            Instruction::Save { label, .. } => {
+                return Err(crate::backend::save_not_applied("Stabilizer", label));
+            }
             Instruction::Conditional {
                 condition,
                 gate,

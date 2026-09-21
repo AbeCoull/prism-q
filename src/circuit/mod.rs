@@ -33,6 +33,7 @@ pub use prepared::PreparedCircuit;
 
 use crate::gates::{Gate, PauliRotData};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
+use num_complex::Complex64;
 pub use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 
@@ -175,6 +176,32 @@ impl Circuit {
         });
     }
 
+    /// Append a save point recording `spec` under `label`.
+    ///
+    /// A save observes the whole register, so it is a fusion barrier across
+    /// every qubit: no gate moves across it in either direction. Labels are not
+    /// required to be unique; records come back in the order their points were
+    /// reached.
+    ///
+    /// Whether a save succeeds depends on the backend that ends up running the
+    /// circuit, and a backend that cannot produce `spec` fails the run rather
+    /// than omitting the record.
+    pub fn add_save(&mut self, spec: SaveSpec, label: impl Into<String>) {
+        self.instructions.push(Instruction::Save {
+            spec,
+            qubits: (0..self.num_qubits).collect(),
+            label: label.into(),
+        });
+    }
+
+    /// Count of save points in the circuit.
+    pub fn save_count(&self) -> usize {
+        self.instructions
+            .iter()
+            .filter(|i| matches!(i, Instruction::Save { .. }))
+            .count()
+    }
+
     /// Count of gate instructions (excludes measurements and barriers).
     pub fn gate_count(&self) -> usize {
         let mut count = 0;
@@ -247,7 +274,7 @@ impl Circuit {
                         return false;
                     }
                 }
-                Instruction::Barrier { .. } => {}
+                Instruction::Barrier { .. } | Instruction::Save { .. } => {}
             }
         }
         true
@@ -480,6 +507,7 @@ impl Circuit {
                             .push(Instruction::Barrier { qubits: new_qs });
                     }
                 }
+                Instruction::Save { .. } => {}
                 Instruction::Conditional { targets, .. } => {
                     if targets.iter().all(|&t| old_to_new_qubit[t].is_some()) {
                         sub.instructions
@@ -590,6 +618,7 @@ impl Circuit {
                         }
                     }
                 }
+                Instruction::Save { .. } => {}
                 Instruction::Conditional { targets, .. } => {
                     let (comp_idx, _) = qubit_map[targets[0]];
                     subs[comp_idx]
@@ -646,7 +675,8 @@ impl Circuit {
                 Instruction::Measure { .. }
                 | Instruction::Reset { .. }
                 | Instruction::Conditional { .. }
-                | Instruction::Region(_) => {
+                | Instruction::Region(_)
+                | Instruction::Save { .. } => {
                     split_at = i;
                     break;
                 }
@@ -730,7 +760,7 @@ fn for_each_placement(
                 visit(inst, d);
                 qubit_depth[*qubit] = d + 1;
             }
-            Instruction::Barrier { qubits } => {
+            Instruction::Barrier { qubits } | Instruction::Save { qubits, .. } => {
                 let d = qubits.iter().map(|&q| qubit_depth[q]).max().unwrap_or(0);
                 visit(inst, d);
                 for &q in qubits.iter() {
@@ -1279,6 +1309,7 @@ fn fold_static_guards_into(
                 }
                 out.push(inst.clone());
             }
+            Instruction::Save { .. } => out.push(inst.clone()),
             Instruction::Conditional {
                 condition,
                 gate,
@@ -1412,6 +1443,15 @@ fn remap_instruction(
             classical_bit: cbit(*classical_bit),
         },
         Instruction::Reset { qubit: q } => Instruction::Reset { qubit: qubit(*q) },
+        Instruction::Save {
+            spec,
+            qubits,
+            label,
+        } => Instruction::Save {
+            spec: *spec,
+            qubits: qubits.iter().map(|&q| qubit(q)).collect(),
+            label: label.clone(),
+        },
         Instruction::Barrier { qubits } => Instruction::Barrier {
             qubits: qubits.iter().map(|&q| qubit(q)).collect(),
         },
@@ -1440,7 +1480,10 @@ fn collect_region_qubits(body: &[Instruction], out: &mut SmallVec<[usize; 4]>) {
         match inst {
             Instruction::Gate { targets, .. }
             | Instruction::Conditional { targets, .. }
-            | Instruction::Barrier { qubits: targets } => out.extend_from_slice(targets),
+            | Instruction::Barrier { qubits: targets }
+            | Instruction::Save {
+                qubits: targets, ..
+            } => out.extend_from_slice(targets),
             Instruction::Measure { qubit, .. } | Instruction::Reset { qubit } => out.push(*qubit),
             Instruction::Region(inner) => out.extend_from_slice(inner.qubits()),
         }
@@ -1501,6 +1544,48 @@ pub enum Instruction {
     /// Boxed so the variant costs a pointer: `Instruction` is 96 bytes and this
     /// keeps it there.
     Region(Box<GuardedRegion>),
+    /// Record the state as it stands at this point in the circuit.
+    ///
+    /// `qubits` lists every qubit the save observes, which is the whole
+    /// register for the dense forms. Fusion reads it the same way it reads a
+    /// barrier's, so no gate crosses a save point.
+    Save {
+        spec: SaveSpec,
+        qubits: SmallVec<[usize; 4]>,
+        label: String,
+    },
+}
+
+/// What a [`Instruction::Save`] point records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SaveSpec {
+    /// Amplitudes, `2^n` of them. Declined by backends that hold no dense
+    /// statevector.
+    StateVector,
+    /// Probability of each basis state, `2^n` of them.
+    Probabilities,
+    /// The full density matrix, `2^n` by `2^n`, row major. Only the density
+    /// matrix backend holds one.
+    DensityMatrix,
+}
+
+/// One recorded save, in the order its point was reached.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SaveRecord {
+    /// The label given at [`Circuit::add_save`].
+    pub label: String,
+    pub value: SavedValue,
+}
+
+/// The state a save point recorded.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum SavedValue {
+    StateVector(Vec<Complex64>),
+    Probabilities(Vec<f64>),
+    /// Row major, `2^n` rows of `2^n`.
+    DensityMatrix(Vec<Complex64>),
 }
 
 #[cfg(test)]

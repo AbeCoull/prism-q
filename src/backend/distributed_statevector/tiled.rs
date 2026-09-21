@@ -448,6 +448,10 @@ impl TiledStatevector {
                 self.reset(*qubit)
             }
             Instruction::Barrier { .. } => Ok(()),
+            Instruction::Save { label, .. } => Err(crate::backend::save_not_applied(
+                "StatevectorDistributed",
+                label,
+            )),
             Instruction::Region(region) => {
                 if region.condition().evaluate(&self.classical_bits) {
                     for inner in region.body() {
@@ -768,7 +772,9 @@ impl TiledStatevector {
                     self.count_passes(region.body(), gate_passes, gate_count, open_batch)?;
                     continue;
                 }
-                Instruction::Measure { .. } | Instruction::Reset { .. } => {
+                Instruction::Measure { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Save { .. } => {
                     *open_batch = false;
                     continue;
                 }

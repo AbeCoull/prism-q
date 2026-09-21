@@ -508,6 +508,56 @@ accumulation can move the last ulp, so compare against `1e-12` rather than
 asserting exact equality.
 ```
 
+## Mid-circuit saves
+
+A save point records the state where it sits, so a circuit can be inspected part
+way through without being cut in two and run twice.
+
+```python
+from prism_q import CircuitBuilder, SaveSpec, simulate
+
+builder = CircuitBuilder(4)
+for q in range(4):
+    builder.h(q)
+circuit = builder.build()
+circuit.add_save(SaveSpec.StateVector, "after_hadamards")
+circuit.add_gate(Gate.cx(), [0, 1])
+
+outcome = simulate(circuit).seed(42).run()
+for record in outcome.saves:
+    print(record["label"], record["kind"], record["value"].shape)
+```
+
+Each record is a dictionary with `label`, `kind`, and `value`. `SaveSpec.StateVector`
+and `SaveSpec.DensityMatrix` come back as `complex128` arrays, the density matrix flat
+and row major over `2**n` rows; `SaveSpec.Probabilities` comes back as `float64`.
+Records arrive in the order their points were reached, and labels need not be unique.
+
+A save is a barrier across the whole register, so no gate is fused or reordered across
+it. Only `run` returns the records: `shots`, `marginals` and the rest decline a circuit
+carrying a save point rather than running it and dropping what it recorded. The same
+goes for routes that hold no state to read, and for OpenQASM export, which has no save
+syntax to write.
+
+## Running many small circuits
+
+`run_batch` takes a list and crosses into Rust once, holding one backend across
+circuits of the same width that draw no randomness.
+
+```python
+from prism_q import run_batch
+
+outcomes = run_batch(circuits, seed=42)
+```
+
+Results match running each circuit alone with the same seed, and the first failure ends
+the batch. Two things are saved and they pull in opposite directions. The crossing into
+Rust measured about 2.4 microseconds per call at 6 to 8 qubits, and a batch pays it
+once. The backend allocation is the other, and it grows with width: in Rust the batch
+runs 0.5 to 0.8 microseconds slower per circuit at 8 qubits, saves under 4 at 10, and
+saves 10 to 37 at 12. So the crossing is what pays at the small end and the allocation
+at the wide end, and the flat middle around 10 qubits is where neither is worth much.
+
 ## Parameter sweeps
 
 A variational loop rebinds angles while the gate sequence stays fixed.

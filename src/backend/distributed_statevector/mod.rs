@@ -2089,6 +2089,10 @@ impl Backend for DistributedStatevectorBackend {
             }
             Instruction::Reset { qubit } => self.reset_dist(*qubit),
             Instruction::Barrier { .. } => Ok(()),
+            Instruction::Save { label, .. } => Err(crate::backend::save_not_applied(
+                "StatevectorDistributed",
+                label,
+            )),
             Instruction::Conditional {
                 condition,
                 gate,

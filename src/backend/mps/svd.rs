@@ -41,6 +41,12 @@ pub(super) fn scratch_slice(buf: &mut Vec<Complex64>, len: usize) -> &mut [Compl
 
 /// Orthogonalization passes a column gets before it is accepted or dropped.
 const QR_MAX_PASSES: usize = 3;
+/// Element count from which [`ThinQr`] factorizes through faer's blocked
+/// Householder QR instead of Gram-Schmidt. Swept on `mps/brickwork_d24`: the
+/// 64 by 256 class and up gains 7% to 9% on the cap-256 rows, while 128 by 64
+/// (8192) sent to faer costs 9% to 15% on the cap-64 rows.
+#[cfg(feature = "parallel")]
+const QR_FAER_MIN_ELEMS: usize = 16384;
 /// A pass leaving the residual above this fraction of its norm before the
 /// pass has cancelled nothing significant, so the direction has settled.
 const QR_PASS_RETAIN: f64 = 0.5;
@@ -81,6 +87,45 @@ impl ThinQr {
     /// Gram-Schmidt pass with reorthogonalization reaches it at rounding where
     /// [`svd`] sweeps to convergence.
     pub(super) fn factorize(&mut self, a: &[Complex64], rows: usize, cols: usize) {
+        #[cfg(feature = "parallel")]
+        if rows * cols >= QR_FAER_MIN_ELEMS {
+            self.factorize_faer(a, rows, cols);
+            return;
+        }
+        self.factorize_gram_schmidt(a, rows, cols)
+    }
+
+    /// Blocked Householder QR through faer, for the shapes where Gram-Schmidt's
+    /// column-at-a-time projections lose to a blocked reflector sweep.
+    #[cfg(feature = "parallel")]
+    fn factorize_faer(&mut self, a: &[Complex64], rows: usize, cols: usize) {
+        use faer::MatRef;
+
+        let k = rows.min(cols);
+        let qr = MatRef::from_column_major_slice(a, rows, cols).qr();
+        let q_mat = qr.compute_thin_Q();
+        let r_mat = qr.thin_R();
+
+        let q = scratch_slice(&mut self.q, rows * k);
+        for j in 0..k {
+            for i in 0..rows {
+                q[j * rows + i] = q_mat[(i, j)];
+            }
+        }
+        let r = scratch_slice(&mut self.r, k * cols);
+        for i in 0..k {
+            for j in 0..cols {
+                r[i * cols + j] = if j >= i { r_mat[(i, j)] } else { ZERO };
+            }
+        }
+        self.rank = k;
+        #[cfg(test)]
+        {
+            self.discarded = 0.0;
+        }
+    }
+
+    fn factorize_gram_schmidt(&mut self, a: &[Complex64], rows: usize, cols: usize) {
         let rank_cap = rows.min(cols);
         let q = scratch_slice(&mut self.q, rows * rank_cap);
         let r = scratch_slice(&mut self.r, rank_cap * cols);

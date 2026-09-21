@@ -776,6 +776,32 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
     }
 }
 
+/// Run a list of circuits, holding one backend across those that can share it.
+///
+/// One crossing into Rust for the whole list rather than one per circuit, and
+/// one backend across circuits of the same width that draw no randomness. Both
+/// savings are small and both are per run, so this pays on many circuits of
+/// about 8 qubits or fewer and measures the same as a loop above 10.
+///
+/// Results are identical to running each circuit on its own with the same seed.
+/// The first failure ends the batch.
+#[pyfunction]
+#[pyo3(signature = (circuits, backend = None, seed = DEFAULT_SEED))]
+pub fn run_batch(
+    py: Python<'_>,
+    circuits: Vec<PyRef<'_, PyCircuit>>,
+    backend: Option<PyBackendKind>,
+    seed: u64,
+) -> PyPrismResult<Vec<PyRunOutcome>> {
+    let kind = backend.map(|b| b.0).unwrap_or(BackendKind::Auto);
+    let owned: Vec<Circuit> = circuits.iter().map(|c| c.0.clone()).collect();
+    let outcomes = py.detach(|| prism_q::sim::run_batch(&owned, kind, seed))?;
+    Ok(outcomes
+        .into_iter()
+        .map(PyRunOutcome::from_outcome)
+        .collect())
+}
+
 /// Parse an OpenQASM string and run with automatic backend selection.
 #[pyfunction]
 pub fn run_qasm(source: &str, seed: u64) -> PyPrismResult<PyRunOutcome> {

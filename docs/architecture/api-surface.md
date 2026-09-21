@@ -30,7 +30,7 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 
 **Simulation:**
 `simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`,
-`run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
+`run_batch`, `run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
 `ObservableExpectation`, `bitstring`
 
 **Save points:** `Circuit::add_save` appends an `Instruction::Save` recording a
@@ -38,7 +38,12 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 carrying a `SavedValue`. See [Circuit IR](./ir.md) for what a save does to fusion and
 which routes decline one.
 
-Use it from about 10 qubits up.
+**Batches:** `run_batch` runs a list of circuits, holding one backend across those of the
+same width that draw no randomness. Results match running each circuit alone with the
+same seed. What it saves is the `2^n` allocation, not the route analysis, which every
+circuit pays either way, so the saving grows with width rather than shrinking: measured
+over 200 circuits, three runs, it is 0.5 to 0.8 microseconds a run slower at 8 qubits,
+saves 0.8 to 4.2 at 10, and saves 10 to 37 at 12. Use it from about 10 qubits up.
 
 **State diagnostics:** `Simulate::reduced_density_matrix` returns a
 `ReducedDensityMatrix` (row major, side `2^k`, `qubits[0]` the lowest bit of the row

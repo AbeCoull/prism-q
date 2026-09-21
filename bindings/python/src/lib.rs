@@ -76,6 +76,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(braket::parse_braket, m)?)?;
     m.add_function(wrap_pyfunction!(sim::simulate, m)?)?;
     m.add_function(wrap_pyfunction!(sim::run_qasm, m)?)?;
+    m.add_function(wrap_pyfunction!(sim::run_batch, m)?)?;
 
     circuit::register_circuits(m)?;
 

@@ -616,6 +616,60 @@ pub(super) enum BackendPlan {
     Distributed(Arc<DistributedContext>),
 }
 
+/// True when two accelerator targets are the same device with the same failure
+/// mode. A soft and a hard build of one context differ, because a device
+/// allocation failure sends them to different places.
+fn same_accel(a: &Accel, b: &Accel) -> bool {
+    match (a, b) {
+        (Accel::Cpu, Accel::Cpu) => true,
+        #[cfg(feature = "gpu")]
+        (
+            Accel::Gpu {
+                context: cx,
+                soft: sx,
+            },
+            Accel::Gpu {
+                context: cy,
+                soft: sy,
+            },
+        ) => Arc::ptr_eq(cx, cy) && sx == sy,
+        #[cfg(feature = "gpu")]
+        _ => false,
+    }
+}
+
+/// True when two plans build the same engine with the same settings, so one
+/// backend can serve both.
+///
+/// Written out rather than derived because the distributed variant holds a
+/// context that has no equality, and sharing a rank's backend across circuits
+/// is not something this answers yes to.
+pub(super) fn same_plan(a: &BackendPlan, b: &BackendPlan) -> bool {
+    match (a, b) {
+        (BackendPlan::ProductState, BackendPlan::ProductState)
+        | (BackendPlan::Sparse, BackendPlan::Sparse)
+        | (BackendPlan::TensorNetwork, BackendPlan::TensorNetwork)
+        | (BackendPlan::Factored, BackendPlan::Factored)
+        | (BackendPlan::FactoredStabilizer, BackendPlan::FactoredStabilizer) => true,
+        (BackendPlan::Mps { max_bond_dim: x }, BackendPlan::Mps { max_bond_dim: y }) => x == y,
+        (
+            BackendPlan::Stabilizer {
+                accel: ax,
+                lazy: lx,
+            },
+            BackendPlan::Stabilizer {
+                accel: ay,
+                lazy: ly,
+            },
+        ) => same_accel(ax, ay) && lx == ly,
+        (BackendPlan::Statevector { accel: x }, BackendPlan::Statevector { accel: y })
+        | (BackendPlan::DensityMatrix { accel: x }, BackendPlan::DensityMatrix { accel: y }) => {
+            same_accel(x, y)
+        }
+        _ => false,
+    }
+}
+
 impl BackendPlan {
     /// Engine this plan builds, for a shot request that runs the plan zero
     /// times and so has no backend to read provenance off.

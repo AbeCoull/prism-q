@@ -109,9 +109,15 @@ Not re-exported at the root but part of the documented surface: the `Backend` tr
 
 ## Growth of the public enums
 
-`Gate`, `BackendKind`, `ResolvedBackend`, `Engine`, `PrismError`, `NoiseChannel` and
-`SpdTruncation` are `#[non_exhaustive]`. A new gate, backend, engine label, error variant or channel is an
-additive release, and so is a third truncation policy, so a `match` on any of them
-outside the crate keeps a wildcard arm.
-`Instruction` is exhaustive on purpose: it is the circuit IR, and a new instruction kind
+Public enums are `#[non_exhaustive]` unless named below. A new gate, backend, engine
+label, error variant, noise channel, truncation policy, dialect, result request or
+result value is an additive release, so a `match` on one from outside the crate keeps a
+wildcard arm.
+
+`Instruction` stays exhaustive. It is the circuit IR, and a new instruction kind
 changes what every consumer has to handle, so adding one is a breaking change.
+
+So do the enums that mirror a closed mathematical set, where a wildcard arm the caller
+can never reach buys nothing: `PauliAxis`, `MpsPauliAxis` and `QecBasis` are X, Y and Z,
+`GeneratorKind` and `DiagEntry` are gate-algebra shapes, and `QftTextbookStep` is a
+fixed decomposition.

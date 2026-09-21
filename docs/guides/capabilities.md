@@ -201,7 +201,7 @@ What a version promises is the surface tabulated in
 [API surface](../architecture/api-surface.md) and the Python package. Which backend
 `Auto` picks for a given circuit, where the fusion thresholds sit, how fast a kernel
 runs, and what the benchmark rows are named all move underneath that promise without a
-bump, because they are implementation rather than interface. `Gate`, `BackendKind`,
-`ResolvedBackend`, `Engine`, `PrismError`, `NoiseChannel` and `SpdTruncation` are
-`#[non_exhaustive]`, so a new variant is additive; a `match` on any of them outside the
-crate keeps a wildcard arm.
+bump, because they are implementation rather than interface. Public enums are
+`#[non_exhaustive]` apart from a handful that mirror a closed set, so a new variant is
+additive and a `match` on one outside the crate keeps a wildcard arm. That page names
+the exceptions.

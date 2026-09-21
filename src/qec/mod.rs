@@ -119,6 +119,7 @@ impl QecPauli {
 /// [`QecProgram::detector_rows`], at the moment that operation is reached
 /// during the walk). `Lookback(1)` is the most recent measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum QecRecordRef {
     Absolute(usize),
     Lookback(usize),
@@ -164,6 +165,7 @@ impl QecRecordRef {
 /// [`QecProgram`]. Probability zero is treated as an inactive annotation by
 /// runner APIs.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum QecNoise {
     /// With probability `p`, apply X to each target.
     XError(f64),
@@ -200,6 +202,7 @@ impl QecNoise {
 
 /// One operation in a native QEC program.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum QecOp {
     /// Standard PRISM-Q gate operation. The compiled runner requires Clifford
     /// gates; the reference runner accepts any gate the statevector backend

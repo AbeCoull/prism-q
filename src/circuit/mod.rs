@@ -1000,6 +1000,7 @@ fn expanded_pauli_rotations(instructions: &[Instruction]) -> Vec<Instruction> {
 
 /// Condition for classically-controlled gate execution.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ClassicalCondition {
     /// True when the classical bit at `bit` is 1.
     BitIsOne(usize),

@@ -840,12 +840,14 @@ impl PyRunMetadata {
         self.inner.fidelity_lower_bound()
     }
 
-    /// `"host"` or `"device"`.
+    /// `"host"` or `"device"`, or `"unknown"` for a placement newer than
+    /// this binding.
     #[getter]
     fn placement(&self) -> &'static str {
         match self.inner.placement {
             Placement::Host => "host",
             Placement::Device => "device",
+            _ => "unknown",
         }
     }
 
@@ -862,6 +864,7 @@ impl PyRunMetadata {
                 fidelity_lower_bound: Some(bound),
             } => format!("approximate(fidelity>={bound:.6})"),
             Exactness::Approximate { .. } => "approximate".to_string(),
+            _ => "unknown".to_string(),
         };
         let engine = self
             .engine()
@@ -1210,6 +1213,7 @@ impl PyRunOutcome {
             None => "none",
             Some(Probabilities::Dense(_)) => "dense",
             Some(Probabilities::Factored { .. }) => "factored",
+            Some(_) => "other",
         };
         format!(
             "RunOutcome(classical_bits={}, probabilities={form})",

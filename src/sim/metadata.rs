@@ -79,6 +79,7 @@ pub enum Engine {
 
 /// Whether a result is exact for the circuit as given.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Exactness {
     Exact,
     /// The engine that ran can discard state weight or estimate by sampling.
@@ -95,6 +96,7 @@ pub enum Exactness {
 
 /// Where the state lived during the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Placement {
     Host,
     Device,

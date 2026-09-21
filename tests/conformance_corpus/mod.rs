@@ -457,6 +457,7 @@ fn describe_condition(condition: &ClassicalCondition) -> String {
                 .join("^");
             format!("({terms})=={}", u8::from(*expected))
         }
+        other => format!("{other:?}"),
     }
 }
 

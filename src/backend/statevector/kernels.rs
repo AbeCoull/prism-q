@@ -18,8 +18,8 @@ use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{
-    BatchPhaseData, BatchRzzData, DiagEntry, Gate, MULTI_2Q_HIGH_BUDGET, MULTI_2Q_LOW_BITS,
-    MULTI_2Q_TILE_BITS, diag_entries_phase, pauli_rot_masks,
+    BatchPhaseData, BatchRzzData, DiagEntry, Gate, MULTI_2Q_HIGH_BUDGET, diag_entries_phase,
+    multi_2q_high_budget, multi_2q_low_bits, multi_2q_tile_bits, pauli_rot_masks,
 };
 use crate::sim::unified_pauli::PauliAxis;
 #[cfg(feature = "parallel")]
@@ -55,10 +55,11 @@ pub(crate) fn multi_2q_single_tier(gates: &[(usize, usize, [[Complex64; 4]; 4])]
 
 /// Tile geometry for a `Multi2q` batch that reaches past the lowest tile bits:
 /// a tile is `2^high.len()` contiguous runs of `2^low` amplitudes, one run per
-/// setting of the `high` qubits, and `low + high.len() == MULTI_2Q_TILE_BITS`.
+/// setting of the `high` qubits, and `low + high.len() == tile_bits`.
 /// Gathered into one buffer, run `c` occupies `[c << low, (c + 1) << low)`, so
 /// a low qubit keeps its bit and the `j`th high qubit becomes bit `low + j`.
 struct SubcubePlan {
+    tile_bits: usize,
     low: usize,
     high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>,
     /// Qubit index to bit position inside the gathered tile.
@@ -75,25 +76,28 @@ impl SubcubePlan {
 }
 
 /// The subcube tile for `gates`, or `None` when the batch is served better by
-/// the in-place tiles (every qubit below bit 14, or the state is one tile) or
-/// cannot be tiled at all (more than [`MULTI_2Q_HIGH_BUDGET`] distinct qubits
-/// at or above [`MULTI_2Q_LOW_BITS`]).
+/// the in-place tiles (every qubit below the tile bits, or the state is one
+/// tile) or cannot be tiled at all (more than [`multi_2q_high_budget`]
+/// distinct qubits at or above [`multi_2q_low_bits`]).
 fn subcube_plan(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
-    if num_qubits <= MULTI_2Q_TILE_BITS {
+    let tile_bits = multi_2q_tile_bits();
+    if num_qubits <= tile_bits {
         return None;
     }
     let max_q = gates.iter().map(|&(q0, q1, _)| q0.max(q1)).max()?;
-    if max_q < MULTI_2Q_TILE_BITS {
+    if max_q < tile_bits {
         return None;
     }
+    let budget = multi_2q_high_budget();
+    let low_bits = multi_2q_low_bits();
     let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
     for &(q0, q1, _) in gates {
         for q in [q0, q1] {
-            if q >= MULTI_2Q_LOW_BITS && !high.contains(&q) {
-                if high.len() == MULTI_2Q_HIGH_BUDGET {
+            if q >= low_bits && !high.contains(&q) {
+                if high.len() == budget {
                     return None;
                 }
                 high.push(q);
@@ -102,14 +106,14 @@ fn subcube_plan(
     }
     // A high qubit that lands inside the contiguous run rides there instead,
     // which lengthens the run and can free another; iterate to a fixed point.
-    let mut low = MULTI_2Q_TILE_BITS - high.len();
+    let mut low = tile_bits - high.len();
     loop {
         let before = high.len();
         high.retain(|&mut q| q >= low);
         if high.len() == before {
             break;
         }
-        low = MULTI_2Q_TILE_BITS - high.len();
+        low = tile_bits - high.len();
     }
     high.sort_unstable();
     let mut map = vec![usize::MAX; num_qubits];
@@ -119,7 +123,12 @@ fn subcube_plan(
     for (j, &h) in high.iter().enumerate() {
         map[h] = low + j;
     }
-    Some(SubcubePlan { low, high, map })
+    Some(SubcubePlan {
+        tile_bits,
+        low,
+        high,
+        map,
+    })
 }
 
 fn prepare_2q(
@@ -139,11 +148,11 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-fn with_subcube_tile<R>(f: impl FnOnce(&mut [Complex64]) -> R) -> R {
+fn with_subcube_tile<R>(tile_bits: usize, f: impl FnOnce(&mut [Complex64]) -> R) -> R {
     SUBCUBE_TILE.with(|tile| {
         let mut tile = tile.borrow_mut();
-        if tile.len() != 1 << MULTI_2Q_TILE_BITS {
-            tile.resize(1 << MULTI_2Q_TILE_BITS, Complex64::new(0.0, 0.0));
+        if tile.len() != 1 << tile_bits {
+            tile.resize(1 << tile_bits, Complex64::new(0.0, 0.0));
         }
         f(&mut tile)
     })
@@ -177,7 +186,7 @@ unsafe fn apply_subcube(
         off
     };
     let runs = 1usize << plan.high.len();
-    with_subcube_tile(|tile| {
+    with_subcube_tile(plan.tile_bits, |tile| {
         for c in 0..runs {
             // SAFETY: same contract as the enclosing unsafe fn; the run is
             // inside the subcube and the tile holds `runs << low` elements.
@@ -190,7 +199,7 @@ unsafe fn apply_subcube(
             }
         }
         for &(q0, q1, ref prepared) in gates {
-            prepared.apply_tiled(tile, MULTI_2Q_TILE_BITS, plan.map[q0], plan.map[q1]);
+            prepared.apply_tiled(tile, plan.tile_bits, plan.map[q0], plan.map[q1]);
         }
         for c in 0..runs {
             // SAFETY: same contract as the enclosing unsafe fn.
@@ -3633,7 +3642,7 @@ impl StatevectorBackend {
         let prepared = prepare_2q(gates);
         let rest = plan.rest(self.num_qubits);
         let state = self.state.as_mut_ptr();
-        for outer in 0..1usize << (self.num_qubits - MULTI_2Q_TILE_BITS) {
+        for outer in 0..1usize << (self.num_qubits - plan.tile_bits) {
             // SAFETY: `state` holds 2^num_qubits amplitudes and each `outer`
             // addresses its own subcube, applied one at a time here.
             unsafe { apply_subcube(state, plan, &rest, outer, &prepared) };
@@ -3649,7 +3658,7 @@ impl StatevectorBackend {
         let prepared = prepare_2q(gates);
         let rest = plan.rest(self.num_qubits);
         let ptr = SendPtr(self.state.as_mut_ptr());
-        (0..1usize << (self.num_qubits - MULTI_2Q_TILE_BITS))
+        (0..1usize << (self.num_qubits - plan.tile_bits))
             .into_par_iter()
             .for_each(|outer| {
                 // SAFETY: `ptr` holds 2^num_qubits amplitudes and distinct

@@ -1152,7 +1152,7 @@ fn qv_12_uses_multi_2q_fusion() {
 
 #[test]
 fn qv_20_batches_fit_one_subcube_tile() {
-    use crate::gates::{MULTI_2Q_HIGH_BUDGET, MULTI_2Q_LOW_BITS};
+    use crate::gates::{multi_2q_high_budget, multi_2q_low_bits};
     let circuit = crate::circuits::quantum_volume_circuit(20, 20, 42);
     let fused = fuse_circuit(&circuit, true);
     let mut batches = 0usize;
@@ -1168,11 +1168,11 @@ fn qv_20_batches_fit_one_subcube_tile() {
                     .gates
                     .iter()
                     .flat_map(|&(q0, q1, _)| [q0, q1])
-                    .filter(|&q| q >= MULTI_2Q_LOW_BITS)
+                    .filter(|&q| q >= multi_2q_low_bits())
                     .collect();
                 high.sort_unstable();
                 high.dedup();
-                assert!(high.len() <= MULTI_2Q_HIGH_BUDGET, "batch spans {high:?}");
+                assert!(high.len() <= multi_2q_high_budget(), "batch spans {high:?}");
                 batches += 1;
                 batched_gates += data.gates.len();
             }

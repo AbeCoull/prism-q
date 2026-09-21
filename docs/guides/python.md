@@ -539,6 +539,25 @@ carrying a save point rather than running it and dropping what it recorded. The 
 goes for routes that hold no state to read, and for OpenQASM export, which has no save
 syntax to write.
 
+## Running many small circuits
+
+`run_batch` takes a list and crosses into Rust once, holding one backend across
+circuits of the same width that draw no randomness.
+
+```python
+from prism_q import run_batch
+
+outcomes = run_batch(circuits, seed=42)
+```
+
+Results match running each circuit alone with the same seed, and the first failure ends
+the batch. Two things are saved and they pull in opposite directions. The crossing into
+Rust measured about 2.4 microseconds per call at 6 to 8 qubits, and a batch pays it
+once. The backend allocation is the other, and it grows with width: in Rust the batch
+runs 0.5 to 0.8 microseconds slower per circuit at 8 qubits, saves under 4 at 10, and
+saves 10 to 37 at 12. So the crossing is what pays at the small end and the allocation
+at the wide end, and the flat middle around 10 qubits is where neither is worth much.
+
 ## Parameter sweeps
 
 A variational loop rebinds angles while the gate sequence stays fixed.

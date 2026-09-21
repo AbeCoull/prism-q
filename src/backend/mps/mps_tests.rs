@@ -1195,6 +1195,44 @@ fn thin_qr_drops_a_dependent_column_and_keeps_the_product() {
     }
 }
 
+// Wide enough to take the blocked Householder arm under `parallel`, and the
+// same contract as the small cases: an isometry, and a product that reproduces
+// the input.
+#[test]
+fn thin_qr_of_a_wide_matrix_is_an_isometry_that_reproduces_the_input() {
+    use rand::{RngExt, SeedableRng};
+    let (rows, cols) = (128usize, 128usize);
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+    let a: Vec<Complex64> = (0..rows * cols)
+        .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+        .collect();
+
+    let mut qr = ThinQr::default();
+    qr.factorize(&a, rows, cols);
+    assert_eq!(qr.rank, cols);
+    for i in 0..qr.rank {
+        for j in 0..qr.rank {
+            let dot: Complex64 = (0..rows)
+                .map(|k| qr.q[i * rows + k].conj() * qr.q[j * rows + k])
+                .sum();
+            let want = if i == j { ONE } else { ZERO };
+            assert!((dot - want).norm() < 1e-12, "column {i} against {j}: {dot}");
+        }
+    }
+    for j in 0..cols {
+        for k in 0..rows {
+            let got: Complex64 = (0..qr.rank)
+                .map(|i| qr.q[i * rows + k] * qr.r[i * cols + j])
+                .sum();
+            assert!(
+                (got - a[j * rows + k]).norm() < 1e-12,
+                "column {j} row {k}: {got} against {}",
+                a[j * rows + k]
+            );
+        }
+    }
+}
+
 #[test]
 fn thin_qr_of_a_zero_matrix_is_still_an_isometry() {
     let (rows, cols) = (4usize, 2usize);

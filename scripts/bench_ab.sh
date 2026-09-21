@@ -853,7 +853,9 @@ set +e
                     verdict = "slower"
                 }
 
-                if (change > threshold && change > floor) { regressions++ }
+                if (change > threshold && change > floor) {
+                    regressions++; regressed[regressions] = id
+                }
                 if (floor > threshold && !control_row) {
                     unresolvable++; unresolved[unresolvable] = id
                 }
@@ -906,6 +908,8 @@ set +e
                 status = 1
                 printf "**Regression verdict**: FAIL. %d row(s) regressed beyond %s%% and beyond their own control spread.%s\n",
                     regressions, threshold, tier_note
+                print ""
+                for (i = 1; i <= regressions; i++) { printf "- `%s`\n", regressed[i] }
             } else {
                 printf "**Regression verdict**: PASS at %s%%.%s\n", threshold, tier_note
             }

@@ -398,6 +398,15 @@ jobs:
             echo "## Benchmark Regression Gate"
             echo ""
             cat bench_results/ci-ab.md
+            if [[ -f bench_results/ci-ab-confirm.md ]]; then
+              echo ""
+              echo "### Confirmation run"
+              echo ""
+              echo "The first run reported a regression, so the set ran again. Only a row"
+              echo "that regressed in both blocks the merge."
+              echo ""
+              cat bench_results/ci-ab-confirm.md
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
@@ -407,7 +416,9 @@ jobs:
         with:
           name: benchmark-regression
           if-no-files-found: ignore
-          path: head/bench_results/ci-ab.md
+          path: |
+            head/bench_results/ci-ab.md
+            head/bench_results/ci-ab-confirm.md
 
   coverage:
     name: Coverage

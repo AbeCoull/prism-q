@@ -1777,17 +1777,23 @@ unsafe fn apply_fused_2q_group_fma_inner(state: *mut f64, i: [usize; 4], mat: &M
         let sf2 = _mm_shuffle_pd(s2, s2, 0b01);
         let sf3 = _mm_shuffle_pd(s3, s3, 0b01);
 
+        // Sum the im*swap(z) terms first, then fold the re*z terms onto that
+        // sum: fmaddsub subtracts it in the real lanes and adds it in the
+        // imaginary ones, which is the complex product, and the three fmadd
+        // that follow add the remaining real-part products lane by lane.
+        // Eight FMA-class ops per row against eleven with a separate add per
+        // term, which is the floor for sixteen real multiply-adds.
         macro_rules! row {
             ($r:expr) => {{
                 let off = $r * 4;
-                let t = _mm_mul_pd(mat.ii[off], sf0);
+                let mut t = _mm_mul_pd(mat.ii[off], sf0);
+                t = _mm_fmadd_pd(mat.ii[off + 1], sf1, t);
+                t = _mm_fmadd_pd(mat.ii[off + 2], sf2, t);
+                t = _mm_fmadd_pd(mat.ii[off + 3], sf3, t);
                 let mut acc = _mm_fmaddsub_pd(mat.rr[off], s0, t);
-                let t = _mm_mul_pd(mat.ii[off + 1], sf1);
-                acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 1], s1, t));
-                let t = _mm_mul_pd(mat.ii[off + 2], sf2);
-                acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 2], s2, t));
-                let t = _mm_mul_pd(mat.ii[off + 3], sf3);
-                acc = _mm_add_pd(acc, _mm_fmaddsub_pd(mat.rr[off + 3], s3, t));
+                acc = _mm_fmadd_pd(mat.rr[off + 1], s1, acc);
+                acc = _mm_fmadd_pd(mat.rr[off + 2], s2, acc);
+                acc = _mm_fmadd_pd(mat.rr[off + 3], s3, acc);
                 _mm_storeu_pd(state.add(i[$r] * 2), acc);
             }};
         }
@@ -1853,17 +1859,19 @@ unsafe fn apply_fused_2q_pair_avx2_inner(state: *mut f64, i: [usize; 4], mat: &M
         let sf2 = _mm256_shuffle_pd(s2, s2, 0b0101);
         let sf3 = _mm256_shuffle_pd(s3, s3, 0b0101);
 
+        // Same fold as the 128-bit group kernel: one chain for the im*swap(z)
+        // terms, one for the re*z terms, eight FMA-class ops per row.
         macro_rules! row {
             ($r:expr) => {{
                 let off = $r * 4;
-                let t = _mm256_mul_pd(mat.ii[off], sf0);
+                let mut t = _mm256_mul_pd(mat.ii[off], sf0);
+                t = _mm256_fmadd_pd(mat.ii[off + 1], sf1, t);
+                t = _mm256_fmadd_pd(mat.ii[off + 2], sf2, t);
+                t = _mm256_fmadd_pd(mat.ii[off + 3], sf3, t);
                 let mut acc = _mm256_fmaddsub_pd(mat.rr[off], s0, t);
-                let t = _mm256_mul_pd(mat.ii[off + 1], sf1);
-                acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 1], s1, t));
-                let t = _mm256_mul_pd(mat.ii[off + 2], sf2);
-                acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 2], s2, t));
-                let t = _mm256_mul_pd(mat.ii[off + 3], sf3);
-                acc = _mm256_add_pd(acc, _mm256_fmaddsub_pd(mat.rr[off + 3], s3, t));
+                acc = _mm256_fmadd_pd(mat.rr[off + 1], s1, acc);
+                acc = _mm256_fmadd_pd(mat.rr[off + 2], s2, acc);
+                acc = _mm256_fmadd_pd(mat.rr[off + 3], s3, acc);
                 _mm256_storeu_pd(state.add(i[$r] * 2), acc);
             }};
         }

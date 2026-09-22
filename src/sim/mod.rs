@@ -27,12 +27,12 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_EXACT,
-    MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB,
-    MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name,
-    auto_selects_cpu_statevector, build_statevector, has_temporal_clifford_opportunity,
-    initial_state_plan, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
-    run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
+    AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS,
+    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
+    MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name, auto_selects_cpu_statevector,
+    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, plan_for_family,
+    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
+    stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use metadata::{Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
 #[cfg(feature = "distributed")]
@@ -1830,11 +1830,6 @@ fn run_route(
         ProbabilityRoute::Decomposed(components) => {
             run_decomposed(kind, components, circuit, seed, &opts)
         }
-        ProbabilityRoute::StabilizerRank => {
-            let sr = stabilizer_rank::run_stabilizer_rank(circuit, seed)?;
-            let metadata = RunMetadata::exact(ResolvedBackend::StabilizerRank);
-            Ok(probs_only_result(sr.probabilities, metadata))
-        }
         ProbabilityRoute::TemporalClifford {
             has_partial_independence,
         } => match plan_temporal_clifford(kind, circuit) {
@@ -2117,15 +2112,13 @@ pub(super) fn auto_stabilizer_rank_t_count(circuit: &Circuit, max_t: usize) -> O
 }
 
 /// Routing precedence for the probability path: decomposition (with the
-/// large sparse-Clifford factored-stabilizer override), then the Clifford+T
-/// stabilizer-rank shortcut, then temporal Clifford, then direct family
-/// resolution. `run_with_internal` executes this plan and
+/// large sparse-Clifford factored-stabilizer override), then temporal Clifford,
+/// then direct family resolution. `run_with_internal` executes this plan and
 /// `auto_terminal_statevector_candidate` consults it, so the two cannot
 /// drift apart.
 enum ProbabilityRoute {
     FactoredStabilizer,
     Decomposed(Vec<Vec<usize>>),
-    StabilizerRank,
     /// The temporal-Clifford predicate holds; `run_route` builds the plan and
     /// falls back to direct resolution should the split come back empty.
     TemporalClifford {
@@ -2148,13 +2141,6 @@ fn plan_probability_route(kind: &BackendKind, circuit: &Circuit) -> ProbabilityR
             return ProbabilityRoute::FactoredStabilizer;
         }
         return ProbabilityRoute::Decomposed(components);
-    }
-    if kind.is_auto()
-        && circuit.num_qubits <= MAX_STABILIZER_RANK_QUBITS
-        && !has_nonunitary_or_classical_ops(circuit)
-        && auto_stabilizer_rank_t_count(circuit, MAX_AUTO_T_COUNT_EXACT).is_some()
-    {
-        return ProbabilityRoute::StabilizerRank;
     }
     if has_temporal_clifford_opportunity(kind, circuit) {
         return ProbabilityRoute::TemporalClifford {

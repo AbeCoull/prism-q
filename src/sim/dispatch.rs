@@ -34,8 +34,6 @@ use super::{RunOutcome, try_backend_probabilities};
 
 pub(super) const AUTO_MPS_BOND_DIM: usize = 256;
 
-pub(super) const MAX_AUTO_T_COUNT_EXACT: usize = 18;
-
 pub(super) const MAX_AUTO_T_COUNT_SHOTS: usize = 40;
 
 pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 25;
@@ -68,11 +66,12 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 /// `Auto` resolves per call from circuit shape. Two routes run before the
 /// family tree: circuits that decompose into independent blocks run per block
 /// (Clifford-only circuits at 128 qubits and above with a 16+ qubit block use
-/// FactoredStabilizer), and Clifford+T circuits up to 25 qubits whose T count
-/// fits the size-derived stabilizer-rank budget run the exact StabilizerRank
-/// expansion (shot paths to 40 T gates; `MAX_AUTO_T_COUNT_EXACT` and
-/// `MAX_AUTO_T_COUNT_SHOTS` above). The pruned expansion is reachable only
-/// through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
+/// FactoredStabilizer), and shot paths sample Clifford+T circuits whose T
+/// count fits the size-derived stabilizer-rank budget through the StabilizerRank
+/// expansion, to 40 T gates (`MAX_AUTO_T_COUNT_SHOTS` above). A probability
+/// query never takes that expansion under `Auto`, since it is slower than the
+/// statevector at every width both can hold. The pruned expansion is reachable
+/// only through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
 /// on Clifford+T circuits at 12 qubits and above answer via Sparse Pauli
 /// Dynamics. The remaining tree:
 ///
@@ -1662,21 +1661,5 @@ mod dispatch_matrix_tests {
         assert_eq!(plan.family(), Family::Stabilizer);
         assert!(matches!(plan.accel(), Accel::Gpu { soft: false, .. }));
         assert_cpu_family(&stab_kind, &clifford(8), false, Family::Stabilizer);
-    }
-
-    // The auto probability route runs the exact stabilizer-rank expansion and
-    // nothing else: at every width it admits, the size-derived budget sits at
-    // or below the exact ceiling, so a T count that fits the budget fits the
-    // ceiling. A budget change that breaks this re-opens the question of a
-    // pruned route under Auto.
-    #[test]
-    fn auto_stabilizer_rank_budget_stays_inside_the_exact_ceiling() {
-        for n in 1..=MAX_STABILIZER_RANK_QUBITS {
-            let budget = stabilizer_rank_budget(n);
-            assert!(
-                budget <= MAX_AUTO_T_COUNT_EXACT,
-                "width {n}: budget {budget} exceeds the exact ceiling {MAX_AUTO_T_COUNT_EXACT}"
-            );
-        }
     }
 }

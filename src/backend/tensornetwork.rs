@@ -757,6 +757,7 @@ struct SlicePlan {
     legs: SmallVec<[LegId; 4]>,
     dims: SmallVec<[usize; 4]>,
     count: usize,
+    #[cfg_attr(not(feature = "parallel"), allow(dead_code))]
     peak: usize,
 }
 

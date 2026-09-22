@@ -25,7 +25,7 @@ use circuit::{PyCircuit, PyCircuitBuilder, PySaveSpec};
 use error::PrismError;
 use gate::PyGate;
 use gpu::PyGpuContext;
-use noise::{PyNoiseChannel, PyNoiseModel};
+use noise::{PyDeviceCalibration, PyNoiseChannel, PyNoiseModel};
 use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
@@ -52,6 +52,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::distributed::PyDistributedContext>()?;
     m.add_class::<PyNoiseChannel>()?;
     m.add_class::<PyNoiseModel>()?;
+    m.add_class::<PyDeviceCalibration>()?;
     m.add_class::<PySimulation>()?;
     m.add_class::<PyRunOutcome>()?;
     m.add_class::<PyShotsResult>()?;

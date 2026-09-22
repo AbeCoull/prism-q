@@ -112,7 +112,8 @@ that simulation runs inside instead of sizing the process-wide one. See
 **Data types:**
 `CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`,
 `NoisyCompiledSampler`, `NoiseChannel`, `NoiseEvent`, `NoiseModel`, `NoiseBuilder`,
-`GateFilter`, `ReadoutError`, `HomologicalSampler`, `ErrorChainComplex`
+`GateFilter`, `ReadoutError`, `DeviceCalibration`, `QubitCalibration`, `GateCalibration`,
+`HomologicalSampler`, `ErrorChainComplex`
 
 Not re-exported at the root but part of the documented surface: the `Backend` trait and
 `BasisSamples` at `prism_q::backend`, the density matrix backend at

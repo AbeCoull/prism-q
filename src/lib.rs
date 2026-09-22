@@ -98,6 +98,7 @@ pub use qec::{
 };
 #[cfg(feature = "bench-internal")]
 pub use qec::{QecProfiledCounts, QecProfiledSampler, compile_qec_profiled_sampler};
+pub use sim::calibration::{DeviceCalibration, GateCalibration, QubitCalibration};
 pub use sim::compiled::{
     CompiledDetectorSampler, CompiledSampler, CorrelatorAccumulator, DetectorSampleBatch,
     HistogramAccumulator, MarginalsAccumulator, NullAccumulator, PackedShots, ParityStats,

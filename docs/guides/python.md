@@ -466,6 +466,17 @@ model.with_readout_error(0.01, 0.01)
 model.validate()
 ```
 
+A device calibration table lowers onto a circuit in one call. `DeviceCalibration.parse`
+reads the text form described in the [Noise and QEC guide](./qec.md), and the presets
+carry illustrative magnitudes for a technology class rather than a measured device:
+
+```python
+from prism_q import DeviceCalibration
+
+calibration = DeviceCalibration.superconducting_transmon(circuit.num_qubits)
+model = calibration.to_noise_model(circuit)
+```
+
 Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,
 `phase_damping(gamma)`, `thermal_relaxation(t1, t2, gate_time, excited_population=0.0)`,
 `two_qubit_depolarizing(p)`, and `custom(kraus)` for an explicit list of 2x2

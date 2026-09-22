@@ -1,0 +1,10 @@
+# Four-qubit calibration used by tests/device_calibration.rs.
+# Times in seconds, rates as probabilities.
+qubit 0 t1=120e-6 t2=80e-6 p01=0.02 p10=0.03
+qubit 1 t1=95e-6 t2=110e-6 p01=0.01 p10=0.025
+qubit 2 t1=150e-6 t2=150e-6 p01=0.015 p10=0.04   # t2 = t1 is inside the bound
+qubit 3 t1=80e-6 t2=60e-6                        # ideal readout
+
+gate1q time=35e-9 error=3e-4
+gate2q time=300e-9 error=8e-3
+gate2q 1 2 time=250e-9 error=5e-3

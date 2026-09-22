@@ -101,18 +101,19 @@ pub enum BackendKind {
     /// Per-qubit product state for circuits without entangling gates.
     ProductState,
     /// Deferred-contraction tensor network for low-treewidth circuits.
+    TensorNetwork,
+    /// The tensor network with bond truncation at the peak cap.
     ///
-    /// `tolerance` opts the contraction into bond truncation: at the
-    /// tensor-network peak cap, an intermediate is factored and the new bond
-    /// kept only as far as discarding at most `tolerance` of that cut's
-    /// squared weight allows, and index slicing covers whatever stays above
-    /// the cap. `None`, the exact default, leaves slicing as the only lever.
-    /// A tolerance above zero makes the run approximate, so
+    /// An intermediate over the tensor-network peak cap is factored and the
+    /// new bond kept only as far as discarding at most `tolerance` of that
+    /// cut's squared weight allows; index slicing covers whatever stays above
+    /// the cap. `tolerance` must be finite and above zero, since zero is
+    /// [`BackendKind::TensorNetwork`]. The run is approximate, so
     /// [`Simulate::require_exact`] rejects it.
     ///
     /// [`Simulate::require_exact`]: crate::sim::Simulate::require_exact
-    TensorNetwork {
-        tolerance: Option<f64>,
+    TensorNetworkBounded {
+        tolerance: f64,
     },
     /// Dynamic split-state simulation for sparse-entanglement circuits.
     Factored,
@@ -294,7 +295,8 @@ impl BackendKind {
             | BackendKind::Mps { .. }
             | BackendKind::ProductState
             | BackendKind::Factored
-            | BackendKind::TensorNetwork { .. }
+            | BackendKind::TensorNetwork
+            | BackendKind::TensorNetworkBounded { .. }
             | BackendKind::DensityMatrix => true,
             #[cfg(feature = "gpu")]
             BackendKind::AutoGpu { .. }
@@ -346,12 +348,13 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
                 reason: "circuit contains entangling gates".into(),
             });
         }
-        BackendKind::TensorNetwork {
-            tolerance: Some(tolerance),
-        } if !(tolerance.is_finite() && *tolerance >= 0.0) => {
+        BackendKind::TensorNetworkBounded { tolerance }
+            if !(tolerance.is_finite() && *tolerance > 0.0) =>
+        {
             return Err(PrismError::InvalidParameter {
                 message: format!(
-                    "tensor-network tolerance must be a finite fraction at or above zero, got {tolerance}"
+                    "tensor-network tolerance must be a finite fraction above zero, got {tolerance}; \
+                     TensorNetwork is the exact contraction"
                 ),
             });
         }
@@ -719,9 +722,10 @@ impl BackendPlan {
         match self {
             BackendPlan::ProductState => Box::new(ProductStateBackend::new(seed)),
             BackendPlan::Sparse => Box::new(SparseBackend::new(seed)),
-            BackendPlan::TensorNetwork { tolerance } => {
-                Box::new(TensorNetworkBackend::with_tolerance(seed, *tolerance))
-            }
+            BackendPlan::TensorNetwork { tolerance } => Box::new(match *tolerance {
+                Some(tolerance) => TensorNetworkBackend::with_tolerance(seed, tolerance),
+                None => TensorNetworkBackend::new(seed),
+            }),
             BackendPlan::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
             BackendPlan::FactoredStabilizer => {
                 Box::new(crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed))
@@ -817,12 +821,7 @@ pub(super) fn approximate_route_name(
             }
             return Some("Mps");
         }
-        BackendKind::TensorNetwork { tolerance } => {
-            if tolerance.is_some_and(|value| value > 0.0) {
-                return Some("TensorNetwork");
-            }
-            return None;
-        }
+        BackendKind::TensorNetworkBounded { .. } => return Some("TensorNetworkBounded"),
         BackendKind::StochasticPauli { .. } => return Some("StochasticPauli"),
         BackendKind::DeterministicPauli { truncation } => match *truncation {
             SpdTruncation::Threshold { epsilon, max_terms } => {
@@ -861,7 +860,7 @@ pub(super) fn plan_for_family(
         Family::Sparse => BackendPlan::Sparse,
         Family::TensorNetwork => BackendPlan::TensorNetwork {
             tolerance: match kind {
-                BackendKind::TensorNetwork { tolerance } => *tolerance,
+                BackendKind::TensorNetworkBounded { tolerance } => Some(*tolerance),
                 _ => None,
             },
         },
@@ -915,7 +914,9 @@ pub(super) fn resolve(
             });
         }
         BackendKind::ProductState => Family::ProductState,
-        BackendKind::TensorNetwork { .. } => Family::TensorNetwork,
+        BackendKind::TensorNetwork | BackendKind::TensorNetworkBounded { .. } => {
+            Family::TensorNetwork
+        }
         BackendKind::Factored => Family::Factored,
         BackendKind::FactoredStabilizer => Family::FactoredStabilizer,
         BackendKind::DensityMatrix => Family::DensityMatrix,
@@ -1593,10 +1594,7 @@ mod dispatch_matrix_tests {
             (BackendKind::Stabilizer, Family::Stabilizer),
             (BackendKind::Sparse, Family::Sparse),
             (BackendKind::ProductState, Family::ProductState),
-            (
-                BackendKind::TensorNetwork { tolerance: None },
-                Family::TensorNetwork,
-            ),
+            (BackendKind::TensorNetwork, Family::TensorNetwork),
             (BackendKind::Factored, Family::Factored),
             (BackendKind::FactoredStabilizer, Family::FactoredStabilizer),
         ];

@@ -153,7 +153,7 @@ fn every_backend_that_answers_agrees() {
     for backend in [
         BackendKind::Auto,
         BackendKind::Sparse,
-        BackendKind::TensorNetwork { tolerance: None },
+        BackendKind::TensorNetwork,
         BackendKind::Mps { max_bond_dim: 32 },
     ] {
         let actual = simulate(&circuit)

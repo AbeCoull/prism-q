@@ -157,7 +157,7 @@ fn every_terminal_stamps_metadata() {
         BackendKind::Sparse,
         BackendKind::Mps { max_bond_dim: 16 },
         BackendKind::Factored,
-        BackendKind::TensorNetwork { tolerance: None },
+        BackendKind::TensorNetwork,
         BackendKind::DensityMatrix,
     ];
 

@@ -36,7 +36,7 @@ fn weak_chain(n: usize, layers: usize) -> Circuit {
     circuit
 }
 
-fn loaded(circuit: &Circuit, tolerance: Option<f64>) -> TensorNetworkBackend {
+fn loaded(circuit: &Circuit, tolerance: f64) -> TensorNetworkBackend {
     let mut tn = TensorNetworkBackend::with_tolerance(SEED, tolerance);
     tn.init(circuit.num_qubits, circuit.num_classical_bits)
         .unwrap();
@@ -58,7 +58,7 @@ fn a_bounded_contraction_stays_inside_the_bound_it_reports() {
     let circuit = weak_chain(14, 4);
     let terms = [PauliTerm::z(0), PauliTerm::z(7)];
 
-    let tn = loaded(&circuit, Some(1e-3));
+    let tn = loaded(&circuit, 1e-3);
     let approximate = tn.pauli_expectations(&[terms.to_vec()]).unwrap()[0];
     let Exactness::Approximate {
         fidelity_lower_bound,
@@ -88,7 +88,7 @@ fn a_zero_tolerance_stays_exact() {
     let circuit = weak_chain(14, 4);
     let terms = [PauliTerm::z(0), PauliTerm::z(7)];
 
-    let tn = loaded(&circuit, Some(0.0));
+    let tn = loaded(&circuit, 0.0);
     let value = tn.pauli_expectations(&[terms.to_vec()]).unwrap()[0];
     assert_eq!(tn.exactness(), Exactness::Exact);
     assert_eq!(tn.truncation_discarded(), 0.0);
@@ -102,17 +102,15 @@ fn require_exact_rejects_a_bounded_tensor_network() {
     small_caps();
     let circuit = weak_chain(6, 2);
     let err = simulate(&circuit)
-        .backend(BackendKind::TensorNetwork {
-            tolerance: Some(1e-3),
-        })
+        .backend(BackendKind::TensorNetworkBounded { tolerance: 1e-3 })
         .require_exact()
         .seed(SEED)
         .run()
         .unwrap_err();
-    assert!(format!("{err}").contains("TensorNetwork"), "{err}");
+    assert!(format!("{err}").contains("TensorNetworkBounded"), "{err}");
 
     simulate(&circuit)
-        .backend(BackendKind::TensorNetwork { tolerance: None })
+        .backend(BackendKind::TensorNetwork)
         .require_exact()
         .seed(SEED)
         .run()
@@ -120,16 +118,16 @@ fn require_exact_rejects_a_bounded_tensor_network() {
 }
 
 // A tolerance the truncation rule cannot read as a fraction would keep rank 1
-// and discard nearly everything, so it is refused rather than served.
+// and discard nearly everything, so it is refused rather than served. Zero is
+// refused too: the bounded kind is always approximate, and the exact
+// contraction has its own kind.
 #[test]
 fn an_unusable_tolerance_is_refused() {
     small_caps();
     let circuit = weak_chain(6, 2);
-    for bad in [-1e-3, f64::NAN, f64::INFINITY] {
+    for bad in [-1e-3, 0.0, f64::NAN, f64::INFINITY] {
         let err = simulate(&circuit)
-            .backend(BackendKind::TensorNetwork {
-                tolerance: Some(bad),
-            })
+            .backend(BackendKind::TensorNetworkBounded { tolerance: bad })
             .seed(SEED)
             .run()
             .unwrap_err();

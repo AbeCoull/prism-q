@@ -10,10 +10,7 @@ fn main() {
         ("Stabilizer", BackendKind::Stabilizer),
         ("Sparse", BackendKind::Sparse),
         ("MPS (bond=64)", BackendKind::Mps { max_bond_dim: 64 }),
-        (
-            "Tensor Network",
-            BackendKind::TensorNetwork { tolerance: None },
-        ),
+        ("Tensor Network", BackendKind::TensorNetwork),
         ("Factored", BackendKind::Factored),
         ("Auto", BackendKind::Auto),
         // ProductState omitted: rejects entangling gates by design.

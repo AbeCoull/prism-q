@@ -261,7 +261,7 @@ fn terminal_kind(backend: BackendKind) -> Kind {
     match backend {
         BackendKind::Sparse => Kind::Sparse,
         BackendKind::Mps => Kind::Mps { max_bond_dim: 64 },
-        BackendKind::TensorNetwork => Kind::TensorNetwork { tolerance: None },
+        BackendKind::TensorNetwork => Kind::TensorNetwork,
         BackendKind::Factored => Kind::Factored,
         BackendKind::Stabilizer => Kind::Stabilizer,
         BackendKind::Product => Kind::ProductState,

@@ -43,7 +43,7 @@ fn explicit_probabilities_one_qubit_above_the_ceiling_name_the_cap() {
     small_caps();
     let n = PROB_CAP + 1;
     let err = simulate(&circuits::ghz_circuit(n))
-        .backend(BackendKind::TensorNetwork { tolerance: None })
+        .backend(BackendKind::TensorNetwork)
         .seed(SEED)
         .run()
         .unwrap_err();
@@ -54,7 +54,7 @@ fn explicit_probabilities_one_qubit_above_the_ceiling_name_the_cap() {
     );
 
     let at_cap = simulate(&circuits::ghz_circuit(PROB_CAP))
-        .backend(BackendKind::TensorNetwork { tolerance: None })
+        .backend(BackendKind::TensorNetwork)
         .seed(SEED)
         .run()
         .unwrap();

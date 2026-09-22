@@ -1782,10 +1782,7 @@ fn the_overlap_terminal_reads_one_against_the_same_circuit() {
         (BackendKind::Stabilizer, ResolvedBackend::Stabilizer),
         (BackendKind::Mps { max_bond_dim: 64 }, ResolvedBackend::Mps),
         (BackendKind::Sparse, ResolvedBackend::Sparse),
-        (
-            BackendKind::TensorNetwork { tolerance: None },
-            ResolvedBackend::TensorNetwork,
-        ),
+        (BackendKind::TensorNetwork, ResolvedBackend::TensorNetwork),
     ] {
         let label = format!("{kind:?}");
         let result = overlap_through(kind, &circuit, &circuit);

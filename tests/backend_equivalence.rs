@@ -649,7 +649,7 @@ fn tn_expectation_values_route_matches_auto() {
     ];
 
     let actual = sim::simulate(&c)
-        .backend(prism_q::BackendKind::TensorNetwork { tolerance: None })
+        .backend(prism_q::BackendKind::TensorNetwork)
         .seed(SEED)
         .expectation_values(&observables)
         .unwrap();

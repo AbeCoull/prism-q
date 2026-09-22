@@ -45,7 +45,7 @@
 //! touches shapes and legs only, so a restart costs a heap walk, not data
 //! movement. The winning plan's peak is held to `PRISM_MAX_TN_PEAK_QUBITS`
 //! (a memory-derived `2^q` elements by default) before the replay allocates
-//! anything.
+//! anything, so a contraction the host cannot hold errors instead of aborting.
 //!
 //! # Index slicing at the memory ceiling
 //!
@@ -55,8 +55,10 @@
 //! multiplicative time factor in exchange for a divided peak. Only a plan
 //! still over the cap once `PRISM_MAX_TN_SLICES` assignments are on the table
 //! is rejected, and the rejection names the same cap it always did. Slices
-//! are independent, so the parallel build runs them through Rayon with one
-//! accumulator per thread. Sliced legs are shared by exactly two tensors, so
+//! are independent, so the parallel build runs them through Rayon, but only as
+//! many at once as fit under the cap together: the cap bounds the live
+//! intermediates of a sliced run the way it bounds an unsliced one. Sliced legs
+//! are shared by exactly two tensors, so
 //! the slice results sum; open legs stay whole. Every terminal contracts
 //! through the same path, and the result is exact either way.
 //!
@@ -749,11 +751,13 @@ fn max_slices() -> usize {
 
 /// Legs fixed for a sliced contraction, in the order they were chosen.
 ///
-/// `count` is the product of `dims`: one contraction per assignment.
+/// `count` is the product of `dims`: one contraction per assignment. `peak`
+/// is the largest intermediate one slice plans, in elements.
 struct SlicePlan {
     legs: SmallVec<[LegId; 4]>,
     dims: SmallVec<[usize; 4]>,
     count: usize,
+    peak: usize,
 }
 
 thread_local! {
@@ -904,7 +908,12 @@ fn choose_slices(
         cost = candidate;
     }
 
-    (!legs.is_empty()).then_some(SlicePlan { legs, dims, count })
+    (!legs.is_empty()).then_some(SlicePlan {
+        legs,
+        dims,
+        count,
+        peak: cost.peak,
+    })
 }
 
 /// Copy `tensor` with each axis named in `pinned` held at one index and kept
@@ -999,10 +1008,18 @@ fn accumulate_slice(total: Option<Tensor>, addend: Tensor) -> Tensor {
 /// Sum the slices of `plan` over every assignment of the sliced legs.
 ///
 /// Every slice replays the same tree over its own copy of the network, so the
-/// results carry identical legs and add elementwise. The parallel arm folds
-/// into one accumulator per thread, so a slice allocates its network and its
-/// intermediates and nothing else.
-fn contract_slices(tensors: &[Tensor], plan: &ContractionPlan, slice: &SlicePlan) -> Tensor {
+/// results carry identical legs and add elementwise.
+///
+/// The parallel arm runs slices in waves of as many as fit under `peak_cap`
+/// together, `peak_cap / slice.peak` of them. Each slice's intermediates reach
+/// up to `slice.peak`, so letting every worker take one at once would hold the
+/// sum of their peaks, which the cap was sized never to allow.
+fn contract_slices(
+    tensors: &[Tensor],
+    plan: &ContractionPlan,
+    slice: &SlicePlan,
+    peak_cap: usize,
+) -> Tensor {
     let run = |index: usize| {
         let mut network = slice_network(tensors, slice, index);
         replay_plan(&mut network, plan)
@@ -1010,24 +1027,23 @@ fn contract_slices(tensors: &[Tensor], plan: &ContractionPlan, slice: &SlicePlan
 
     #[cfg(feature = "parallel")]
     {
-        (0..slice.count)
-            .into_par_iter()
-            .fold(
-                || None,
-                |total, index| Some(accumulate_slice(total, run(index))),
-            )
-            .reduce(
-                || None,
-                |left, right| match (left, right) {
-                    (Some(left), Some(right)) => Some(accumulate_slice(Some(left), right)),
-                    (left, right) => left.or(right),
-                },
-            )
-            .expect("a slice plan holds at least one slice")
+        let wave = (peak_cap / slice.peak.max(1)).clamp(1, slice.count);
+        let mut total = None;
+        for start in (0..slice.count).step_by(wave) {
+            let end = (start + wave).min(slice.count);
+            let part = (start..end)
+                .into_par_iter()
+                .map(run)
+                .reduce_with(|left, right| accumulate_slice(Some(left), right))
+                .expect("a wave holds at least one slice");
+            total = Some(accumulate_slice(total, part));
+        }
+        total.expect("a slice plan holds at least one slice")
     }
 
     #[cfg(not(feature = "parallel"))]
     {
+        let _ = peak_cap;
         (0..slice.count)
             .fold(None, |total, index| {
                 Some(accumulate_slice(total, run(index)))
@@ -1081,7 +1097,7 @@ fn slice_to_fit(
         ));
     };
     LAST_SLICE_COUNT.with(|count| count.set(slice.count));
-    let summed = contract_slices(tensors, plan, &slice);
+    let summed = contract_slices(tensors, plan, &slice, limits.peak_cap);
     tensors.clear();
     Ok(summed)
 }
@@ -1912,15 +1928,27 @@ pub struct TensorNetworkBackend {
 
 impl TensorNetworkBackend {
     pub fn new(seed: u64) -> Self {
-        Self::with_tolerance(seed, None)
+        Self::build(seed, None)
     }
 
     /// A backend whose contractions may truncate an intermediate bond when
     /// the planned peak crosses the memory cap, discarding at most
     /// `tolerance` of a cut tensor's squared weight per cut.
     ///
-    /// `None` keeps every contraction exact and is what [`Self::new`] builds.
-    pub fn with_tolerance(seed: u64, tolerance: Option<f64>) -> Self {
+    /// A tolerance of zero discards nothing and stays exact.
+    ///
+    /// # Panics
+    ///
+    /// When `tolerance` is negative or not finite.
+    pub fn with_tolerance(seed: u64, tolerance: f64) -> Self {
+        assert!(
+            tolerance.is_finite() && tolerance >= 0.0,
+            "tensor-network tolerance must be a finite fraction at or above zero, got {tolerance}"
+        );
+        Self::build(seed, Some(tolerance))
+    }
+
+    fn build(seed: u64, tolerance: Option<f64>) -> Self {
         Self {
             num_qubits: 0,
             tensors: Vec::new(),
@@ -2986,13 +3014,17 @@ mod tests {
         let metas: Vec<TensorMeta> = network.tensors.iter().map(TensorMeta::of).collect();
         let slice = choose_slices(&metas, &plan, limits).expect("the fixture slices");
         assert!(slice.count > 1, "the fixture did not slice");
-        let summed = contract_slices(&network.tensors, &plan, &slice);
-        assert!(
-            (summed.data[0].re - exact).abs() < 1e-10,
-            "{} vs {exact} over {} slices",
-            summed.data[0].re,
-            slice.count
-        );
+        assert!(slice.peak <= limits.peak_cap);
+        // One slice per wave, three per wave, and every slice in one wave.
+        for cap in [slice.peak, slice.peak * 3, usize::MAX] {
+            let summed = contract_slices(&network.tensors, &plan, &slice, cap);
+            assert!(
+                (summed.data[0].re - exact).abs() < 1e-10,
+                "{} vs {exact} over {} slices at cap {cap}",
+                summed.data[0].re,
+                slice.count
+            );
+        }
     }
 
     #[test]

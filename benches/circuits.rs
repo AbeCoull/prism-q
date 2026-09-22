@@ -1639,7 +1639,7 @@ fn bench_tn_scaling(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_with(BackendKind::TensorNetwork { tolerance: None }, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
             });
         });
     }
@@ -1654,7 +1654,7 @@ fn bench_tn_linear_chain(c: &mut Criterion) {
         let circuit = dense_entanglement_circuit(n, 5);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_with(BackendKind::TensorNetwork { tolerance: None }, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
             });
         });
     }
@@ -1771,8 +1771,9 @@ fn bench_tn_sliced_contraction(_c: &mut Criterion) {}
 ///
 /// `tn/scalar_hea_l7` at 50 qubits peaks at 8388608 elements, 128 MB in one
 /// intermediate. A cap of `2^22` halves that, which the search meets with four
-/// slices, so the row prices the slice loop and its Rayon fold against the whole
-/// contraction the tree-quality group runs. Deeper caps are not pricable here:
+/// slices, so the row prices the slice loop against the whole contraction the
+/// tree-quality group runs. Slices near the cap run one or two at a time,
+/// since only as many run at once as fit under it together. Deeper caps are not pricable here:
 /// at `2^20` the same contraction takes the whole 1024-slice budget and one
 /// iteration runs for minutes. The cap and budget are arguments rather than
 /// environment variables so the rest of the process keeps the real ceiling.
@@ -1881,7 +1882,7 @@ fn bench_tn_midmeasure_chain(c: &mut Criterion) {
         let circuit = mid_measured_chain(n, 4);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_with(BackendKind::TensorNetwork { tolerance: None }, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
             });
         });
     }
@@ -1902,14 +1903,7 @@ fn bench_tn_noisy_chain(c: &mut Criterion) {
     let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
     group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
         b.iter(|| {
-            run_shots_with_noise(
-                BackendKind::TensorNetwork { tolerance: None },
-                circ,
-                &noise,
-                100,
-                42,
-            )
-            .unwrap();
+            run_shots_with_noise(BackendKind::TensorNetwork, circ, &noise, 100, 42).unwrap();
         });
     });
     group.finish();
@@ -1930,8 +1924,7 @@ fn bench_tn_sample_chain(c: &mut Criterion) {
         circuit.measure_all();
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_shots_with(BackendKind::TensorNetwork { tolerance: None }, circ, 32, 42)
-                    .unwrap();
+                run_shots_with(BackendKind::TensorNetwork, circ, 32, 42).unwrap();
             });
         });
     }

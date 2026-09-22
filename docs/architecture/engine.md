@@ -143,6 +143,26 @@ dense caps that share it.
 
 For a user-facing version of this decision, see [Choosing a Backend](../getting-started/choosing-a-backend.md).
 
+### Routes the tree does not show
+
+The tree above is the family choice for a state terminal. Six further routes
+are reachable under `Auto` alone, each tested before it and each with its own
+constants, in `src/sim/dispatch.rs` and `src/sim/mod.rs`:
+
+| Route | Taken when |
+| --- | --- |
+| Factored stabilizer | Clifford only, the circuit splits into independent components, at least 128 qubits, and the largest component is at least 16 |
+| Stabilizer rank, exact | A probability terminal on a unitary circuit of at most 25 qubits whose T count fits the budget `n - 2*ceil(log2 n)`, itself capped at 18 |
+| Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 |
+| Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits, truncating at 65536 terms |
+| Scalar tensor contraction | An expectation or marginals terminal whose planned contraction stays inside the peak bound |
+| Temporal Clifford split | A circuit at or below the statevector cap that is not Clifford only and opens with a Clifford prefix long enough to pay for the handover |
+
+Every one of them answers where the tree would have said statevector or
+stabilizer, so the backend a result reports is the only reliable statement of
+what ran. See
+[what a backend reports](backends.md#what-a-backend-reports-about-its-own-result).
+
 ## Start states other than |0...0>
 
 `Simulate::initial_state` bypasses the tree above entirely. Every branch of it

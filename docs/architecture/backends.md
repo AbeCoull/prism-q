@@ -287,6 +287,34 @@ any width, and every other pair is served by a dense export of both, which reach
 as far as the export cap does. A noise model on either side is rejected, since the
 fidelity of two mixtures is a different computation.
 
+## Auto dispatch policy
+
+Routing constants are static values in `src/sim/dispatch.rs`. The dense memory
+caps are the exception: `src/backend/memory.rs` derives them from detected
+physical memory. The split is deliberate.
+
+A capability limit is detected. Getting one wrong means an allocation that fails
+or a host that swaps, and physical memory is cheap to read and hard to misread.
+`PRISM_MAX_SV_QUBITS` and its siblings override the derivation for a run that
+knows better than the detection.
+
+A performance threshold stays static, with an environment override where the
+value is worth sweeping. The device crossover is the worked case: a default of
+14 qubits with `PRISM_GPU_MIN_QUBITS` beside it, rather than a figure read off
+the installed card. Detecting one of these means detecting cache geometry or
+device throughput, and a detected value that is wrong is a silent slowdown no
+test catches, where a wrong static default is at least the same slowdown on
+every host and shows up in one measurement. Runtime detection of a performance
+threshold waits for a host that can validate the detection.
+
+Changing a threshold takes a measurement, not an argument. The `auto/crossover`
+group in `benches/circuits.rs` holds both arms at the sizes either side of the
+factored-stabilizer floor, the exact stabilizer-rank budget and the Pauli
+marginals floor, so a boundary is read off the pair rather than argued from the
+constant. The fusion floors and the parallel threshold have no such pair,
+because nothing selects between them at run time: moving one of those means
+building both values and comparing the binaries.
+
 ## What a backend reports about its own result
 
 Three `Backend` methods carry provenance onto every result: `resolved` names the

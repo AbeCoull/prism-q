@@ -187,7 +187,7 @@ would hide the error inside it.
 
 ## Subsystem decomposition
 
-Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately with per-block Auto dispatch. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
+Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately: under `Auto` each block picks its own backend, and under an explicit kind every block runs that kind, so the merged result reports `Decomposed` rather than any one engine. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
 
 Block-level Rayon parallelism when all blocks are <14 qubits (avoids oversubscription with block-internal parallelism).
 

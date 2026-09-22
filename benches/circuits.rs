@@ -2006,12 +2006,14 @@ fn bench_auto_crossover(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/crossover");
     configure_group(&mut group);
 
-    // The second arm is named for the route it takes, not the kind it asks
-    // for: an independent-component circuit resolves to the decomposed route
-    // whatever backend the caller names, so `FactoredStabilizer` reaches this
-    // backend only through Auto's override. Depth 200 rather than 10 because
-    // at depth 10 these rows sit near 500 us, where two arms running the same
-    // route read 14% to 48% apart on the reference host.
+    // An explicit kind on an independent-component circuit takes the decomposed
+    // route and runs that kind once per block, so no `BackendKind` puts one
+    // factored-stabilizer backend across the whole circuit: only Auto's
+    // override does, above the floor. The `factored` arm reaches it at every
+    // size through `run_on`, which brackets the floor from below and, above
+    // it, runs what `auto` runs. Depth 200 rather than 10 because at depth 10
+    // these rows sit near 500 us, where two arms running the same route read
+    // 14% to 48% apart on the reference host.
     for &(blocks, block_size) in &[(6usize, 16usize), (8, 16), (10, 16), (20, 8)] {
         let n = blocks * block_size;
         let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);
@@ -2024,6 +2026,12 @@ fn bench_auto_crossover(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("decomposed", &id), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("factored", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+                sim::run_on(&mut backend, circ).unwrap();
             });
         });
     }

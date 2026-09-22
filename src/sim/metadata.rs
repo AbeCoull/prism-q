@@ -129,6 +129,7 @@ impl BondReport {
 ///
 /// [`Simulate`]: crate::sim::Simulate
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RunMetadata {
     pub backend: ResolvedBackend,
     /// Which sampler ran, when `backend` is a label several share. `None`

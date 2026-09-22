@@ -639,6 +639,12 @@ impl SparseBackend {
                     self.apply_fused_2q(q0, q1, mat)?;
                 }
             }
+            Gate::Unitary(_) => {
+                return Err(crate::error::PrismError::BackendUnsupported {
+                    backend: "sparse".to_string(),
+                    operation: format!("dense multi-qubit gate `{}`", gate.name()),
+                });
+            }
             other => {
                 debug_assert!(
                     targets.len() == 1,

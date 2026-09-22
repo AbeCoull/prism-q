@@ -240,7 +240,10 @@ impl SubTableau {
             _ => {
                 return Err(PrismError::BackendUnsupported {
                     backend: "factored-stabilizer".to_string(),
-                    operation: format!("gate {:?}", gate),
+                    operation: format!(
+                        "non-Clifford gate `{}` (factored stabilizer supports Clifford gates only)",
+                        gate.name()
+                    ),
                 });
             }
         }

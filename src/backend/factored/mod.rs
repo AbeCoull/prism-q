@@ -52,8 +52,11 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 #[cfg(feature = "parallel")]
 use crate::backend::statevector::SendPtr;
+use crate::backend::statevector::kernels::apply_unitary_seq;
 #[cfg(feature = "parallel")]
-use crate::backend::statevector::kernels::{apply_multi_1q_par, apply_single_gate_par};
+use crate::backend::statevector::kernels::{
+    apply_multi_1q_par, apply_single_gate_par, par_apply_unitary,
+};
 #[cfg(feature = "parallel")]
 use crate::backend::{
     MIN_PAR_ELEMS, MIN_PAR_ITERS, PARALLEL_THRESHOLD_QUBITS, chunk_min_len as par_chunk_min_len,
@@ -378,6 +381,16 @@ impl FactoredBackend {
                         )
                     );
                 }
+            }
+            Gate::Unitary(data) => {
+                let sub = self.substates[ss_idx].as_mut().unwrap();
+                let local: SmallVec<[usize; 4]> =
+                    targets.iter().map(|&q| Self::local_qubit(sub, q)).collect();
+                seq_or_par!(
+                    par,
+                    apply_unitary_seq(&mut sub.state, &local, data.matrix()),
+                    par_apply_unitary(&mut sub.state, &local, data.matrix())
+                );
             }
             Gate::BatchPhase(data) => {
                 let sub = self.substates[ss_idx].as_mut().unwrap();

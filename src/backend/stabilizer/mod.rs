@@ -554,7 +554,8 @@ impl StabilizerBackend {
             | Gate::Fused2q(_)
             | Gate::Multi2q(_)
             | Gate::QftBlock { .. }
-            | Gate::PauliRot(_) => Err(PrismError::BackendUnsupported {
+            | Gate::PauliRot(_)
+            | Gate::Unitary(_) => Err(PrismError::BackendUnsupported {
                 backend: self.name().to_string(),
                 operation: format!(
                     "non-Clifford gate `{}` (stabilizer backend supports Clifford gates only)",

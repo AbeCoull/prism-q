@@ -1169,6 +1169,16 @@ where
             let full = TensorNetworkBackend::mcu_full_matrix(data.num_controls as usize, &data.mat);
             emit(GateTensorOp::NQ(targets, full))
         }
+        Gate::Unitary(data) => {
+            check_arity(data.num_qubits())?;
+            let dim = 1usize << data.num_qubits();
+            let full: Vec<Vec<Complex64>> = data
+                .matrix()
+                .chunks(dim)
+                .map(<[Complex64]>::to_vec)
+                .collect();
+            emit(GateTensorOp::NQ(targets, full))
+        }
         Gate::BatchPhase(data) => {
             if targets.is_empty() {
                 return Err(PrismError::GateArity {

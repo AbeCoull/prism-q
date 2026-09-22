@@ -594,3 +594,126 @@ fn test_recognize_up_to_phase_returns_the_scalar() {
 fn mcu_with_zero_controls_panics() {
     let _ = Gate::mcu(Gate::X.matrix_2x2(), 0);
 }
+
+/// Flatten a nested matrix into the row-major form `Gate::unitary` takes.
+fn flat<const N: usize>(rows: &[[Complex64; N]; N]) -> Vec<Complex64> {
+    rows.iter().flat_map(|row| row.iter().copied()).collect()
+}
+
+/// `mat` lifted to `k` qubits as the identity outside its trailing 2x2 block.
+fn controlled(mat: &[[Complex64; 2]; 2], k: usize) -> Vec<Complex64> {
+    let dim = 1usize << k;
+    let mut out = vec![Complex64::new(0.0, 0.0); dim * dim];
+    for i in 0..dim - 2 {
+        out[i * dim + i] = Complex64::new(1.0, 0.0);
+    }
+    for row in 0..2 {
+        for column in 0..2 {
+            out[(dim - 2 + row) * dim + (dim - 2 + column)] = mat[row][column];
+        }
+    }
+    out
+}
+
+/// The `2^k`-point DFT matrix: dense, complex, and unitary, so no detector in
+/// the constructor can lower it.
+fn dft(k: usize) -> Vec<Complex64> {
+    let dim = 1usize << k;
+    let scale = 1.0 / (dim as f64).sqrt();
+    let mut out = Vec::with_capacity(dim * dim);
+    for row in 0..dim {
+        for column in 0..dim {
+            let angle = std::f64::consts::TAU * (row * column % dim) as f64 / dim as f64;
+            out.push(Complex64::from_polar(scale, angle));
+        }
+    }
+    out
+}
+
+#[test]
+fn unitary_recognizes_a_one_qubit_named_gate() {
+    let gate = Gate::unitary(flat(&Gate::H.matrix_2x2()), 1).unwrap();
+    assert_eq!(gate, Gate::H);
+    assert!(gate.is_clifford());
+}
+
+#[test]
+fn unitary_keeps_an_unnamed_one_qubit_matrix_as_a_fused_matrix() {
+    let gate = Gate::unitary(flat(&Gate::Rx(0.7).matrix_2x2()), 1).unwrap();
+    assert!(matches!(gate, Gate::Fused(_)), "{gate:?}");
+    assert_eq!(gate.matrix_2x2(), Gate::Rx(0.7).matrix_2x2());
+}
+
+#[test]
+fn unitary_recognizes_the_named_two_qubit_gates() {
+    for named in [Gate::Cx, Gate::Cz, Gate::Swap] {
+        assert_eq!(Gate::unitary(flat(&named.matrix_4x4()), 2).unwrap(), named);
+    }
+    assert!(matches!(
+        Gate::unitary(flat(&Gate::Rzz(0.4).matrix_4x4()), 2).unwrap(),
+        Gate::Rzz(theta) if (theta - 0.4).abs() < 1e-12
+    ));
+    assert!(matches!(
+        Gate::unitary(flat(&Gate::cu(Gate::H.matrix_2x2()).matrix_4x4()), 2).unwrap(),
+        Gate::Cu(_)
+    ));
+}
+
+#[test]
+fn unitary_lowers_an_identity_blocked_matrix_to_mcu() {
+    for k in 3..=MAX_UNITARY_QUBITS {
+        let gate = Gate::unitary(controlled(&Gate::X.matrix_2x2(), k), k).unwrap();
+        let Gate::Mcu(data) = &gate else {
+            panic!("expected Mcu at k = {k}, got {gate:?}");
+        };
+        assert_eq!(data.num_controls as usize, k - 1);
+        assert_eq!(gate.num_qubits(), k);
+    }
+}
+
+#[test]
+fn unitary_keeps_a_dense_wide_matrix() {
+    for k in 3..=MAX_UNITARY_QUBITS {
+        let gate = Gate::unitary(dft(k), k).unwrap();
+        assert!(matches!(gate, Gate::Unitary(_)), "{gate:?}");
+        assert_eq!(gate.num_qubits(), k);
+        assert_eq!(gate.name(), "unitary");
+    }
+}
+
+#[test]
+fn unitary_rejects_a_matrix_that_is_not_unitary() {
+    let mut mat = flat(&Gate::Cx.matrix_4x4());
+    mat[0] = Complex64::new(0.5, 0.0);
+    let err = Gate::unitary(mat, 2).unwrap_err().to_string();
+    assert!(err.contains("not unitary"), "{err}");
+
+    let err = Gate::unitary(vec![Complex64::new(1.0, 0.0); 5], 1)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("4 entries"), "{err}");
+
+    let err = Gate::unitary(vec![Complex64::new(f64::NAN, 0.0); 4], 1)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not finite"), "{err}");
+
+    let err = Gate::unitary(vec![Complex64::new(0.0, 0.0); 1 << 12], 6)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("between 1 and"), "{err}");
+}
+
+#[test]
+fn unitary_inverse_is_the_adjoint() {
+    let mat = dft(3);
+    let Gate::Unitary(inverse) = Gate::unitary(mat.clone(), 3).unwrap().inverse() else {
+        panic!("expected a dense inverse");
+    };
+    for row in 0..8 {
+        for column in 0..8 {
+            let want = mat[column * 8 + row].conj();
+            assert!((inverse.matrix()[row * 8 + column] - want).norm() < 1e-15);
+        }
+    }
+}

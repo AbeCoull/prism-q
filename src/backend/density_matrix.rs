@@ -231,6 +231,7 @@ fn conjugate_gate(gate: &Gate) -> Option<Gate> {
             mat: conjugate_2x2(&data.mat),
             num_controls: data.num_controls,
         }))),
+        Gate::Unitary(data) => Some(Gate::Unitary(Box::new(data.conjugated()))),
         _ => None,
     }
 }

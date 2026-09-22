@@ -128,6 +128,22 @@ payloads.
 | `BatchRzz(Box<BatchRzzData>)` | Batched ZZ rotations | 16B |
 | `DiagonalBatch(Box<DiagonalBatchData>)` | Mixed diagonal 1q/2q batch | 16B |
 | `PauliRot(Box<PauliRotData>)` | Multi-qubit Pauli rotation, boxed angle plus letters | 16B |
+| `Unitary(Box<UnitaryData>)` | Caller-supplied dense `2^k x 2^k` matrix, boxed with its width | 16B |
+
+`Unitary` is the one variant built from a matrix a caller hands in, through
+`Gate::unitary`, which checks `U U^dagger = I` to 1e-9 and then lowers whatever
+an existing variant already carries: a named gate or `Fused` at one qubit, a
+named two-qubit gate, `Cu`, or `Fused2q` at two, and `Mcu` at any width when the
+matrix is the identity outside its trailing 2x2 block. Only a dense matrix on
+three or four qubits reaches the variant, so Clifford recognition and the
+controlled-gate kernels keep firing on the forms they know.
+`Circuit::add_unitary` adds the one lowering that needs the target indices: a
+diagonal whose phases factor into one- and two-body terms becomes a
+`DiagonalBatch`.
+
+Fusion neither builds nor absorbs a `Unitary`. Blocking is driven by the
+instruction targets, so the gate acts as a barrier over its own qubits while
+runs on other qubits fuse around it.
 
 ```admonish note title="Qubit ordering"
 `q[0]` is the least significant bit. Applying `x q[0]` produces state index 1, not 2.

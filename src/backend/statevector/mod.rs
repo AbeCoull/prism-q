@@ -13,8 +13,9 @@
 //! # Gate support
 //!
 //! The full gate set, including MCU, every fused or batched variant, a native
-//! `Gate::QftBlock` kernel on the CPU whole-state path, and a native
-//! `Gate::PauliRot` kernel on the CPU path.
+//! `Gate::QftBlock` kernel on the CPU whole-state path, and native
+//! `Gate::PauliRot` and `Gate::Unitary` kernels on the CPU path. The device
+//! path declines `Gate::Unitary` by name.
 //!
 //! # When to prefer this backend
 //!
@@ -399,6 +400,10 @@ impl StatevectorBackend {
                 });
                 result
             }
+            Gate::Unitary(_) => Err(crate::error::PrismError::BackendUnsupported {
+                backend: "statevector (device-resident)".to_string(),
+                operation: format!("dense multi-qubit gate `{}`", gate.name()),
+            }),
             Gate::MultiFused(data) => {
                 if data.all_diagonal {
                     k::launch_apply_multi_fused_diagonal(&ctx, gpu, &data.gates)
@@ -729,6 +734,9 @@ impl StatevectorBackend {
             }
             Gate::PauliRot(data) => {
                 self.apply_pauli_rot(targets, data.theta, &data.axes);
+            }
+            Gate::Unitary(data) => {
+                self.apply_unitary(targets, data.matrix());
             }
             Gate::MultiFused(data) => {
                 if data.all_diagonal {

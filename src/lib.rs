@@ -88,7 +88,9 @@ pub use distributed::MpiComm;
 #[cfg(feature = "distributed")]
 pub use distributed::{DistributedContext, RankComm, SerialComm};
 pub use error::{PrismError, Result};
-pub use gates::{BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData};
+pub use gates::{
+    BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData, UnitaryData,
+};
 pub use qec::{
     DetectorErrorModel, ErrorMechanism, QecBasis, QecCompiledRows, QecMeasurementRow, QecNoise,
     QecObservableEstimate, QecObservableReroute, QecOp, QecOptions, QecPauli, QecProgram,

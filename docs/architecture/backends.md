@@ -114,6 +114,8 @@ Word-group batching fuses multiple 1q gate flushes into single tableau passes. T
 
 Probability extraction uses coset-based enumeration with GF(2) Gaussian elimination. O(2^k) where k is the number of non-diagonal generators, rather than O(2^n).
 
+`export_tableau` returns the rows as `(words, phases)` and `init_from_tableau` accepts the same pair, so a Clifford state prepared by one run can start another (a warm start, or a checkpoint). The packing: `2n + 1` rows of `2 * ceil(n / 64)` `u64` words, destabilizer rows `0..n`, stabilizer rows `n..2n`, then a scratch row the importer ignores. Each row is its X words followed by its Z words, with qubit `q` at bit `q % 64` of word `q / 64` in each half, and `phases[r]` is true when row `r` carries sign -1. The import checks the lengths and that destabilizer `i` anticommutes with stabilizer `i`, nothing more: rows that break the rest of the commutation structure are accepted and produce wrong outcomes without an error. The random stream restarts from the importing backend's seed. The factored backend imports the same pair as one cluster over every qubit, held to the merged-cluster cap, and its `export_tableau` scatters every cluster into that joint layout.
+
 **Factored Stabilizer** (`FactoredStabilizerBackend`): Per-cluster tableaux with dynamic merging. Starts with one qubit per cluster. Cross-cluster 2q gates merge tableaux. Measurement and reset can split independent sub-tableaux again. Independent subsystems avoid full-tableau work when product structure is preserved.
 
 ## Sparse

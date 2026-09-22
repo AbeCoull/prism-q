@@ -277,6 +277,34 @@ since trajectory replay reinitializes a pure state per shot. To evolve a start
 state under noise, read the exact mixture with `run()`, `marginals()`, or
 `expectation_values()` on `density_matrix()`.
 
+## Handing a Clifford state to a second run
+
+`StabilizerBackend` is a tableau held across calls. `run(circuit)` resets it to
+the circuit's width and runs the circuit; `export_tableau()` returns the rows as
+a `uint64` array of bit-packed words and a `bool` array of row signs;
+`import_tableau(num_qubits, words, phases, num_classical_bits)` starts a backend
+from that pair; and `apply(circuit)` runs a circuit on the held state without
+resetting it. The pair is the raw tableau, so it is the checkpoint format for a
+Clifford prefix that is expensive to replay.
+
+```python
+from prism_q import StabilizerBackend
+
+prep = StabilizerBackend(seed=42)
+prep.run(clifford_prefix)
+words, phases = prep.export_tableau()
+
+resumed = StabilizerBackend(seed=42)
+resumed.import_tableau(clifford_prefix.num_qubits, words, phases, num_classical_bits=8)
+bits = resumed.apply(measurement_suffix)
+```
+
+The import checks the lengths and that each destabilizer anticommutes with its
+stabilizer partner, nothing more; the intended input is an export. The random
+stream restarts from the importing backend's seed, so a resumed run and an
+uninterrupted one draw the same outcomes only when neither drew before the
+split.
+
 ## Selecting a backend
 
 `BackendKind.auto()` is the default and picks a backend from circuit structure.

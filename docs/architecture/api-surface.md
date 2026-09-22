@@ -91,7 +91,7 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 `TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
 `MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
 `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`, `MultiFusedData`,
-`BatchPhaseData`, `McuData`, `Multi2qData`
+`BatchPhaseData`, `McuData`, `Multi2qData`, `UnitaryData`
 
 **Backends:**
 `StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`,

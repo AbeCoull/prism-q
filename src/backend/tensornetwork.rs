@@ -60,6 +60,18 @@
 //! the slice results sum; open legs stay whole. Every terminal contracts
 //! through the same path, and the result is exact either way.
 //!
+//! # Bounded contraction
+//!
+//! [`TensorNetworkBackend::with_tolerance`] trades exactness for reach. With
+//! a tolerance set, a plan over the cap first has an intermediate factored
+//! across the cut that separates its partner-facing legs from the rest, the
+//! new bond kept only as far as the tolerance on that cut's relative
+//! discarded weight allows. The factored halves go back into the network and
+//! the rest is replanned, so the peak comes down without the whole tensor
+//! ever forming. Slicing then covers whatever truncation leaves above the
+//! cap. Without a tolerance, slicing is the only lever and the answer is
+//! exact.
+//!
 //! # Observables and shots both contract natively
 //!
 //! `Backend::pauli_expectations` and `Backend::reduced_density_matrix_1q` both
@@ -676,20 +688,30 @@ fn join_disjoint(mut slots: Vec<Option<Tensor>>) -> Tensor {
 
 /// Contract an entire tensor network along a planned pair order.
 ///
-/// Planning walks metadata only; the replay in [`contract_planned`] is where
+/// Planning walks metadata only; the replay in [`contract_within`] is where
 /// data moves.
-fn greedy_contract(tensors: &mut Vec<Tensor>, backend: &str, operation: &str) -> Result<Tensor> {
+fn greedy_contract(
+    tensors: &mut Vec<Tensor>,
+    limits: ContractionLimits,
+    backend: &str,
+    operation: &str,
+) -> Result<Tensor> {
     debug_assert!(!tensors.is_empty());
 
     let plan = plan_with_restarts(tensors);
-    contract_planned(tensors, &plan, backend, operation)
+    contract_within(tensors, &plan, limits, backend, operation)
 }
 
-/// Peak-intermediate cap and slice budget one contraction runs under.
+/// Peak-intermediate cap, slice budget and truncation tolerance one
+/// contraction runs under.
+///
+/// `tolerance` is the per-cut relative squared weight a bounded contraction
+/// may discard; `None` keeps the contraction exact.
 #[derive(Clone, Copy)]
 struct ContractionLimits {
     peak_cap: usize,
     slice_budget: usize,
+    tolerance: Option<f64>,
 }
 
 impl ContractionLimits {
@@ -697,6 +719,14 @@ impl ContractionLimits {
         Self {
             peak_cap: tensor_peak_cap_elements(),
             slice_budget: max_slices(),
+            tolerance: None,
+        }
+    }
+
+    fn with_tolerance(tolerance: Option<f64>) -> Self {
+        Self {
+            tolerance,
+            ..Self::from_env()
         }
     }
 }
@@ -728,6 +758,7 @@ struct SlicePlan {
 
 thread_local! {
     static LAST_SLICE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+    static LAST_DISCARDED: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
 }
 
 /// Slices the most recent contraction on this thread summed over, 1 when it
@@ -735,6 +766,12 @@ thread_local! {
 #[doc(hidden)]
 pub fn last_slice_count() -> usize {
     LAST_SLICE_COUNT.with(std::cell::Cell::get)
+}
+
+/// Relative squared weight the most recent contraction on this thread
+/// discarded, summed over its cuts.
+fn last_discarded() -> f64 {
+    LAST_DISCARDED.with(std::cell::Cell::get)
 }
 
 /// Cost of one slice of a plan, and the legs a further slice could act on.
@@ -999,31 +1036,14 @@ fn contract_slices(tensors: &[Tensor], plan: &ContractionPlan, slice: &SlicePlan
     }
 }
 
-/// Replay `plan` over `tensors`, holding the peak to the tensor-network cap
-/// and slicing the contraction when it does not fit.
+/// Replay `plan` over `tensors`, holding the peak to the tensor-network cap.
 ///
-/// A contraction whose planned peak fits runs whole. One that does not is cut
-/// into independent slices that sum, and only a contraction still over the cap
-/// within the slice budget is rejected; `backend` and `operation` name it.
-/// Every terminal contracts through here, so all of them take that route.
-fn contract_planned(
-    tensors: &mut Vec<Tensor>,
-    plan: &ContractionPlan,
-    backend: &str,
-    operation: &str,
-) -> Result<Tensor> {
-    contract_within(
-        tensors,
-        plan,
-        ContractionLimits::from_env(),
-        backend,
-        operation,
-    )
-}
-
-/// [`contract_planned`] with the limits supplied rather than read from the
-/// environment, for the bench wrapper and for the callers already holding a
-/// set.
+/// A contraction whose planned peak fits runs whole. One that does not is
+/// brought under the cap by the levers the limits allow, in order: bond
+/// truncation when a tolerance is set, then index slicing over whatever is
+/// still above the cap. Only a contraction over the cap after both is
+/// rejected, and `backend` and `operation` name it. Every terminal contracts
+/// through here, so all of them take that route.
 fn contract_within(
     tensors: &mut Vec<Tensor>,
     plan: &ContractionPlan,
@@ -1031,11 +1051,26 @@ fn contract_within(
     backend: &str,
     operation: &str,
 ) -> Result<Tensor> {
+    LAST_DISCARDED.with(|weight| weight.set(0.0));
     if plan.peak <= limits.peak_cap {
         LAST_SLICE_COUNT.with(|count| count.set(1));
         return Ok(replay_plan(tensors, plan));
     }
+    match limits.tolerance {
+        Some(tolerance) => contract_truncated(tensors, limits, tolerance, backend, operation),
+        None => slice_to_fit(tensors, plan, limits, backend, operation),
+    }
+}
 
+/// Sum the slices that bring `plan` under the cap, or reject when the slice
+/// budget cannot reach it.
+fn slice_to_fit(
+    tensors: &mut Vec<Tensor>,
+    plan: &ContractionPlan,
+    limits: ContractionLimits,
+    backend: &str,
+    operation: &str,
+) -> Result<Tensor> {
     let metas: Vec<TensorMeta> = tensors.iter().map(TensorMeta::of).collect();
     let Some(slice) = choose_slices(&metas, plan, limits) else {
         return Err(tensor_peak_error(
@@ -1049,6 +1084,244 @@ fn contract_within(
     let summed = contract_slices(tensors, plan, &slice);
     tensors.clear();
     Ok(summed)
+}
+
+/// Contract with intermediate bonds truncated at `tolerance`, slicing
+/// whatever truncation leaves above the cap.
+///
+/// Each pass plans the live network, replays it as far as the cap allows, and
+/// factors the operand of the first pair that would cross it. Keeping that
+/// operand in factored form is what pays: the next plan contracts the small
+/// side against the partner rather than the whole tensor. A pass that fails
+/// to lower the peak and total it ranks on hands the rest to slicing, which
+/// also bounds the loop, since both counts fall on every pass that continues.
+fn contract_truncated(
+    tensors: &mut Vec<Tensor>,
+    limits: ContractionLimits,
+    tolerance: f64,
+    backend: &str,
+    operation: &str,
+) -> Result<Tensor> {
+    let mut discarded = 0.0f64;
+    let mut ranked = (usize::MAX, usize::MAX);
+    loop {
+        let plan = plan_with_restarts(tensors);
+        if plan.peak <= limits.peak_cap {
+            LAST_SLICE_COUNT.with(|count| count.set(1));
+            LAST_DISCARDED.with(|weight| weight.set(discarded));
+            return Ok(replay_plan(tensors, &plan));
+        }
+        if (plan.peak, plan.total) >= ranked {
+            let summed = slice_to_fit(tensors, &plan, limits, backend, operation)?;
+            LAST_DISCARDED.with(|weight| weight.set(discarded));
+            return Ok(summed);
+        }
+        ranked = (plan.peak, plan.total);
+        let Some(step) = truncate_one(tensors, &plan, limits.peak_cap, tolerance) else {
+            let plan = plan_with_restarts(tensors);
+            let summed = slice_to_fit(tensors, &plan, limits, backend, operation)?;
+            LAST_DISCARDED.with(|weight| weight.set(discarded));
+            return Ok(summed);
+        };
+        discarded += step;
+    }
+}
+
+/// Replay `plan` until a pair would cross `cap`, then factor one of that
+/// pair's operands and put both halves back among the live tensors.
+///
+/// Returns the relative squared weight the cut discarded, or `None` when
+/// neither operand admits a cut that shrinks the blocked result. `tensors`
+/// holds the network as far as the replay got either way, so the caller
+/// replans rather than reusing `plan`.
+fn truncate_one(
+    tensors: &mut Vec<Tensor>,
+    plan: &ContractionPlan,
+    cap: usize,
+    tolerance: f64,
+) -> Option<f64> {
+    let mut slots: Vec<Option<Tensor>> = std::mem::take(tensors).into_iter().map(Some).collect();
+    let mut blocked = None;
+    for &(i, j) in &plan.pairs {
+        let a = slots[i].take().expect("planned pair is live");
+        let b = slots[j].take().expect("planned pair is live");
+        if contraction_result_size(&TensorMeta::of(&a), &TensorMeta::of(&b)) > cap {
+            blocked = Some((a, b));
+            break;
+        }
+        slots.push(Some(contract(&a, &b)));
+    }
+
+    let mut live: Vec<Tensor> = slots.into_iter().flatten().collect();
+    let Some((a, b)) = blocked else {
+        *tensors = live;
+        return None;
+    };
+
+    let shared: SmallVec<[LegId; 6]> = a
+        .legs
+        .iter()
+        .filter(|leg| b.legs.contains(leg))
+        .copied()
+        .collect();
+    let bond = 1 + live
+        .iter()
+        .chain([&a, &b])
+        .flat_map(|tensor| tensor.legs.iter().copied())
+        .max()
+        .expect("the blocked pair carries legs");
+    let (first, second) = if free_size(&a, &shared) >= free_size(&b, &shared) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+
+    let cut = split_bond(&first, &shared, bond, tolerance)
+        .map(|parts| (parts, false))
+        .or_else(|| split_bond(&second, &shared, bond, tolerance).map(|parts| (parts, true)));
+
+    let Some(((far, near, discarded), second_was_cut)) = cut else {
+        live.push(first);
+        live.push(second);
+        *tensors = live;
+        return None;
+    };
+    live.push(far);
+    live.push(near);
+    live.push(if second_was_cut { first } else { second });
+    *tensors = live;
+    Some(discarded)
+}
+
+/// Element count of the legs `tensor` does not share with its partner.
+fn free_size(tensor: &Tensor, shared: &[LegId]) -> usize {
+    tensor
+        .legs
+        .iter()
+        .enumerate()
+        .filter(|(_, leg)| !shared.contains(leg))
+        .map(|(axis, _)| tensor.shape[axis])
+        .product::<usize>()
+        .max(1)
+}
+
+/// Factor `tensor` across the cut that puts the legs in `near` on one side,
+/// joining the halves through a new `bond` truncated at `tolerance`.
+///
+/// Returns the far half, the near half carrying the singular values, and the
+/// relative squared weight the cut discarded. `None` when the cut leaves one
+/// side empty, or when the kept rank would not shrink the contraction the
+/// caller is trying to fit, in which case holding the tensor whole is both
+/// cheaper and exact.
+fn split_bond(
+    tensor: &Tensor,
+    near: &[LegId],
+    bond: LegId,
+    tolerance: f64,
+) -> Option<(Tensor, Tensor, f64)> {
+    let far_axes: SmallVec<[usize; 6]> = (0..tensor.rank())
+        .filter(|&axis| !near.contains(&tensor.legs[axis]))
+        .collect();
+    let near_axes: SmallVec<[usize; 6]> = (0..tensor.rank())
+        .filter(|&axis| near.contains(&tensor.legs[axis]))
+        .collect();
+    if far_axes.is_empty() || near_axes.is_empty() {
+        return None;
+    }
+
+    let rows: usize = far_axes.iter().map(|&axis| tensor.shape[axis]).product();
+    let cols: usize = near_axes.iter().map(|&axis| tensor.shape[axis]).product();
+
+    let mut perm: SmallVec<[usize; 6]> = far_axes.clone();
+    perm.extend_from_slice(&near_axes);
+    let ordered = if perm
+        .iter()
+        .enumerate()
+        .all(|(axis, &source)| axis == source)
+    {
+        Cow::Borrowed(tensor)
+    } else {
+        Cow::Owned(transpose(tensor, &perm))
+    };
+
+    let zero = Complex64::new(0.0, 0.0);
+    let mut column_major = vec![zero; rows * cols];
+    for row in 0..rows {
+        for col in 0..cols {
+            column_major[col * rows + row] = ordered.data[row * cols + col];
+        }
+    }
+    let factored = crate::backend::mps::svd(&column_major, rows, cols);
+
+    let total: f64 = factored.s.iter().map(|value| value * value).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let chi = kept_rank(&factored.s, total * tolerance);
+    if chi >= rows {
+        return None;
+    }
+    let discarded = factored.s[chi..]
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        / total;
+
+    let mut far_shape: SmallVec<[usize; 6]> =
+        far_axes.iter().map(|&axis| tensor.shape[axis]).collect();
+    let mut far_legs: SmallVec<[LegId; 6]> =
+        far_axes.iter().map(|&axis| tensor.legs[axis]).collect();
+    far_shape.push(chi);
+    far_legs.push(bond);
+    let mut far_data = vec![zero; rows * chi];
+    for row in 0..rows {
+        for rank in 0..chi {
+            far_data[row * chi + rank] = factored.u[rank * rows + row];
+        }
+    }
+
+    let mut near_shape: SmallVec<[usize; 6]> = smallvec::smallvec![chi];
+    let mut near_legs: SmallVec<[LegId; 6]> = smallvec::smallvec![bond];
+    for &axis in &near_axes {
+        near_shape.push(tensor.shape[axis]);
+        near_legs.push(tensor.legs[axis]);
+    }
+    let mut near_data = vec![zero; chi * cols];
+    for rank in 0..chi {
+        let value = factored.s[rank];
+        for col in 0..cols {
+            near_data[rank * cols + col] = factored.vt[rank * cols + col] * value;
+        }
+    }
+
+    Some((
+        Tensor {
+            data: far_data,
+            shape: far_shape,
+            legs: far_legs,
+        },
+        Tensor {
+            data: near_data,
+            shape: near_shape,
+            legs: near_legs,
+        },
+        discarded,
+    ))
+}
+
+/// Shortest prefix of the descending `values` that leaves at most `budget` of
+/// squared weight behind, and never fewer than one.
+fn kept_rank(values: &[f64], budget: f64) -> usize {
+    let mut discarded = 0.0f64;
+    let mut kept = values.len();
+    for (index, &value) in values.iter().enumerate().rev() {
+        discarded += value * value;
+        if discarded > budget {
+            break;
+        }
+        kept = index;
+    }
+    kept.max(1)
 }
 
 /// Contract `tensors` along `plan`. Pairs the plan leaves uncontracted share
@@ -1475,15 +1748,16 @@ pub fn scalar_expectation(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Resul
     expectation_zero_state(circuit, pauli_terms)
 }
 
-/// [`scalar_expectation`] with the peak cap and slice budget supplied rather
-/// than read from the environment, so one process can hold rows on both sides
-/// of the ceiling; not stable API.
+/// [`scalar_expectation`] with the peak cap, slice budget and truncation
+/// tolerance supplied rather than read from the environment, so one process
+/// can hold rows on both sides of the ceiling; not stable API.
 #[cfg(feature = "bench-internal")]
-pub fn scalar_expectation_sliced(
+pub fn scalar_expectation_capped(
     circuit: &Circuit,
     pauli_terms: &[PauliTerm],
     peak_cap: usize,
     slice_budget: usize,
+    tolerance: Option<f64>,
 ) -> Result<f64> {
     let mut network = ScalarExpectationNetwork::new(circuit.num_qubits);
     for instruction in &circuit.instructions {
@@ -1496,6 +1770,7 @@ pub fn scalar_expectation_sliced(
     network.contract(ContractionLimits {
         peak_cap,
         slice_budget,
+        tolerance,
     })
 }
 
@@ -1631,10 +1906,21 @@ pub struct TensorNetworkBackend {
     next_leg: usize,
     classical_bits: Vec<bool>,
     rng: ChaCha8Rng,
+    tolerance: Option<f64>,
+    truncation_discarded: std::cell::Cell<f64>,
 }
 
 impl TensorNetworkBackend {
     pub fn new(seed: u64) -> Self {
+        Self::with_tolerance(seed, None)
+    }
+
+    /// A backend whose contractions may truncate an intermediate bond when
+    /// the planned peak crosses the memory cap, discarding at most
+    /// `tolerance` of a cut tensor's squared weight per cut.
+    ///
+    /// `None` keeps every contraction exact and is what [`Self::new`] builds.
+    pub fn with_tolerance(seed: u64, tolerance: Option<f64>) -> Self {
         Self {
             num_qubits: 0,
             tensors: Vec::new(),
@@ -1642,7 +1928,32 @@ impl TensorNetworkBackend {
             next_leg: 0,
             classical_bits: Vec::new(),
             rng: ChaCha8Rng::seed_from_u64(seed),
+            tolerance,
+            truncation_discarded: std::cell::Cell::new(0.0),
         }
+    }
+
+    /// Cumulative fraction of squared weight the contractions of this backend
+    /// have discarded since [`Backend::init`].
+    ///
+    /// The total sums one relative discard per cut rather than measuring the
+    /// final state, so a run that truncates heavily can carry it past 1,
+    /// where the fidelity it implies clamps to zero and certifies nothing.
+    ///
+    /// [`Backend::init`]: crate::backend::Backend::init
+    pub fn truncation_discarded(&self) -> f64 {
+        self.truncation_discarded.get()
+    }
+
+    /// Limits every terminal of this backend contracts under.
+    fn limits(&self) -> ContractionLimits {
+        ContractionLimits::with_tolerance(self.tolerance)
+    }
+
+    /// Add what the contraction just finished discarded to the running total.
+    fn book_truncation(&self) {
+        self.truncation_discarded
+            .set(self.truncation_discarded.get() + last_discarded());
     }
 
     fn fresh_leg(&mut self) -> LegId {
@@ -1956,10 +2267,11 @@ impl TensorNetworkBackend {
         let rho = match plan {
             Some(slot) => {
                 let plan = cached_plan(&network, slot);
-                contract_planned(&mut network, plan, self.name(), operation)?
+                contract_within(&mut network, plan, self.limits(), self.name(), operation)?
             }
-            None => greedy_contract(&mut network, self.name(), operation)?,
+            None => greedy_contract(&mut network, self.limits(), self.name(), operation)?,
         };
+        self.book_truncation();
 
         let axis = |leg: LegId| {
             rho.legs
@@ -2010,7 +2322,13 @@ impl TensorNetworkBackend {
             });
         }
 
-        let result = greedy_contract(&mut network, self.name(), "pauli expectation")?;
+        let result = greedy_contract(
+            &mut network,
+            self.limits(),
+            self.name(),
+            "pauli expectation",
+        )?;
+        self.book_truncation();
         debug_assert!(result.legs.is_empty(), "sandwich leaves every leg paired");
         Ok(result.data[0].re)
     }
@@ -2021,7 +2339,8 @@ impl TensorNetworkBackend {
         dense_statevector_len(self.name(), "contraction", self.num_qubits)?;
 
         let mut tensors = self.tensors.clone();
-        let result = greedy_contract(&mut tensors, self.name(), "contraction")?;
+        let result = greedy_contract(&mut tensors, self.limits(), self.name(), "contraction")?;
+        self.book_truncation();
 
         // The result tensor's legs should be exactly the output_legs.
         // PRISM-Q convention: q[0] = LSB of state index. In row-major
@@ -2075,10 +2394,34 @@ impl Backend for TensorNetworkBackend {
         crate::sim::ResolvedBackend::TensorNetwork
     }
 
+    /// `Exact` without a tolerance, whatever the contraction did, since every
+    /// other route to the cap preserves the value. A tolerance reports
+    /// `Approximate` whether or not this run cut anything, since the route
+    /// could have.
+    ///
+    /// The bound is 1 minus the summed per-cut relative discarded weights: a
+    /// first-order truncation estimate, not a certificate. Errors compound
+    /// across cuts, and summing the weights understates the compounded error,
+    /// since the strict bound on the infidelity is the square of the summed
+    /// square roots. The two agree only when a single cut truncates. A
+    /// doubled contraction, which `pauli_expectations` and
+    /// `reduced_density_matrix_1q` both run, cuts in the doubled space, so
+    /// what the bound describes there is the quadratic form rather than the
+    /// state.
+    fn exactness(&self) -> crate::sim::Exactness {
+        match self.tolerance {
+            Some(tolerance) if tolerance > 0.0 => crate::sim::Exactness::Approximate {
+                fidelity_lower_bound: Some((1.0 - self.truncation_discarded.get()).max(0.0)),
+            },
+            _ => crate::sim::Exactness::Exact,
+        }
+    }
+
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         self.num_qubits = num_qubits;
         self.tensors = Vec::new();
         self.next_leg = 0;
+        self.truncation_discarded.set(0.0);
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
 
         self.output_legs = Vec::with_capacity(num_qubits);
@@ -2632,6 +2975,7 @@ mod tests {
         let limits = ContractionLimits {
             peak_cap: 1 << 8,
             slice_budget: 1 << 10,
+            tolerance: None,
         };
         assert!(
             plan.peak > limits.peak_cap,
@@ -2662,6 +3006,7 @@ mod tests {
         let limits = ContractionLimits {
             peak_cap: 1 << 8,
             slice_budget: 2,
+            tolerance: None,
         };
         assert!(choose_slices(&metas, &plan, limits).is_none());
     }
@@ -2685,6 +3030,74 @@ mod tests {
         let one = pin_axes(&tensor, &[(0, 1), (1, 0)]);
         assert_eq!(one.shape.as_slice(), &[1, 1]);
         assert_eq!(one.data, vec_of(&[3.0]));
+    }
+
+    #[test]
+    fn test_kept_rank_drops_only_what_the_budget_covers() {
+        // Squared weights 1, 0.25, 0.01 and 0.0001, and the budget is an
+        // absolute squared weight, not a fraction.
+        let values = [1.0, 0.5, 0.1, 0.01];
+        assert_eq!(kept_rank(&values, 0.0), 4);
+        assert_eq!(kept_rank(&values, 0.0001), 3);
+        assert_eq!(kept_rank(&values, 0.011), 2);
+        assert_eq!(kept_rank(&values, 10.0), 1, "never fewer than one");
+    }
+
+    // A cut at zero tolerance keeps the full rank, so contracting the halves
+    // back has to reproduce the tensor: the split is exact and the only
+    // thing a tolerance buys is a shorter bond.
+    #[test]
+    fn test_a_zero_tolerance_cut_reconstructs_the_tensor() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let tensor = Tensor {
+            data: (0..32)
+                .map(|_| {
+                    use rand::RngExt;
+                    Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5)
+                })
+                .collect(),
+            shape: smallvec::smallvec![2, 2, 2, 4],
+            legs: smallvec::smallvec![10, 11, 12, 13],
+        };
+
+        let (far, near, discarded) = split_bond(&tensor, &[13], 99, 0.0).expect("the cut applies");
+        assert_eq!(discarded, 0.0);
+        assert!(far.legs.contains(&99) && near.legs.contains(&99));
+
+        let rebuilt = contract(&far, &near);
+        let perm: SmallVec<[usize; 6]> = tensor
+            .legs
+            .iter()
+            .map(|leg| {
+                rebuilt
+                    .legs
+                    .iter()
+                    .position(|held| held == leg)
+                    .expect("the halves carry every original leg")
+            })
+            .collect();
+        let ordered = transpose(&rebuilt, &perm);
+        assert_eq!(ordered.shape, tensor.shape);
+        for (got, want) in ordered.data.iter().zip(&tensor.data) {
+            assert!((got - want).norm() < 1e-12, "{got} vs {want}");
+        }
+    }
+
+    // A cut that cannot shrink the blocked contraction declines, so the
+    // caller holds the tensor whole rather than paying for an SVD and two
+    // factors that buy nothing.
+    #[test]
+    fn test_a_cut_that_cannot_shrink_declines() {
+        let tensor = Tensor {
+            data: vec![Complex64::new(1.0, 0.0); 8],
+            shape: smallvec::smallvec![2, 4],
+            legs: smallvec::smallvec![10, 11],
+        };
+        assert!(
+            split_bond(&tensor, &[10, 11], 99, 0.5).is_none(),
+            "no far side"
+        );
+        assert!(split_bond(&tensor, &[], 99, 0.5).is_none(), "no near side");
     }
 
     fn vec_of(values: &[f64]) -> Vec<Complex64> {

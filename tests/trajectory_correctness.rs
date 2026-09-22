@@ -99,8 +99,14 @@ fn tensor_network_amplitude_damping_analytic() {
     circuit.add_measure(1, 1);
 
     let noise = NoiseModel::with_amplitude_damping(&circuit, gamma);
-    let result =
-        run_shots_with_noise(BackendKind::TensorNetwork, &circuit, &noise, 5000, 42).unwrap();
+    let result = run_shots_with_noise(
+        BackendKind::TensorNetwork { tolerance: None },
+        &circuit,
+        &noise,
+        5000,
+        42,
+    )
+    .unwrap();
 
     for q in 0..2 {
         let p_zero = result.shots.iter().filter(|s| !s[q]).count() as f64 / 5000.0;

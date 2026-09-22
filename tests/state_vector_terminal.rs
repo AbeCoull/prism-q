@@ -90,7 +90,7 @@ fn every_pure_state_backend_answers_with_its_own_export() {
                 BackendKind::Statevector,
                 BackendKind::Sparse,
                 BackendKind::Factored,
-                BackendKind::TensorNetwork,
+                BackendKind::TensorNetwork { tolerance: None },
                 BackendKind::Mps { max_bond_dim: 32 },
             ],
         ),

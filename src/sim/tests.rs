@@ -859,7 +859,7 @@ fn test_export_norm_qft() {
         (BackendKind::Statevector, "statevector/qft8"),
         (BackendKind::Sparse, "sparse/qft8"),
         (BackendKind::Mps { max_bond_dim: 128 }, "mps/qft8"),
-        (BackendKind::TensorNetwork, "tn/qft8"),
+        (BackendKind::TensorNetwork { tolerance: None }, "tn/qft8"),
     ] {
         let mut backend = resolve_backend(&kind, &circuit, false).build(42);
         run_on(backend.as_mut(), &circuit).unwrap();
@@ -1950,7 +1950,7 @@ fn test_smoke_all_backends_clifford() {
         BackendKind::FactoredStabilizer,
         BackendKind::Sparse,
         BackendKind::Mps { max_bond_dim: 64 },
-        BackendKind::TensorNetwork,
+        BackendKind::TensorNetwork { tolerance: None },
         BackendKind::Factored,
     ] {
         assert_probs_match(kind, &circuit, &sv_probs, 1e-8);
@@ -1969,7 +1969,7 @@ fn test_smoke_all_backends_general() {
     for kind in [
         BackendKind::Sparse,
         BackendKind::Mps { max_bond_dim: 64 },
-        BackendKind::TensorNetwork,
+        BackendKind::TensorNetwork { tolerance: None },
         BackendKind::Factored,
     ] {
         assert_probs_match(kind, &circuit, &sv_probs, 1e-8);

@@ -212,7 +212,7 @@ fn the_terminal_names_the_backend_that_declines() {
     for (kind, name, operation) in [
         (BackendKind::Sparse, "sparse", "Schmidt values"),
         (
-            BackendKind::TensorNetwork,
+            BackendKind::TensorNetwork { tolerance: None },
             "tensornetwork",
             "Schmidt values",
         ),

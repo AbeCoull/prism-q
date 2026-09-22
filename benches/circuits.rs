@@ -10,7 +10,7 @@ use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 #[cfg(feature = "bench-internal")]
-use prism_q::backend::tensornetwork::{scalar_expectation, scalar_expectation_sliced};
+use prism_q::backend::tensornetwork::{scalar_expectation, scalar_expectation_capped};
 use prism_q::circuit::fusion::fuse_circuit;
 use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
@@ -1639,7 +1639,7 @@ fn bench_tn_scaling(c: &mut Criterion) {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork { tolerance: None }, circ, 42).unwrap();
             });
         });
     }
@@ -1654,7 +1654,7 @@ fn bench_tn_linear_chain(c: &mut Criterion) {
         let circuit = dense_entanglement_circuit(n, 5);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork { tolerance: None }, circ, 42).unwrap();
             });
         });
     }
@@ -1786,7 +1786,36 @@ fn bench_tn_sliced_contraction(c: &mut Criterion) {
     let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
     group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
         b.iter(|| {
-            black_box(scalar_expectation_sliced(circ, &observable, 1 << 22, 1 << 10).unwrap());
+            black_box(
+                scalar_expectation_capped(circ, &observable, 1 << 22, 1 << 10, None).unwrap(),
+            );
+        });
+    });
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_bounded_contraction(_c: &mut Criterion) {}
+
+/// The same lowered cap with a truncation tolerance set, so bond truncation
+/// runs ahead of slicing.
+///
+/// Pairs with `tn/sliced_hea_l7`: same circuit, same cap, same budget, and
+/// the tolerance is the only difference, so the row prices what truncation
+/// costs and how much of the slice loop it removes.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_bounded_contraction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/bounded_hea_l7");
+    configure_group(&mut group);
+
+    let n = 50;
+    let circuit = circuits::hardware_efficient_ansatz(n, 7, SEED);
+    let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+    group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+        b.iter(|| {
+            black_box(
+                scalar_expectation_capped(circ, &observable, 1 << 22, 1 << 10, Some(1e-3)).unwrap(),
+            );
         });
     });
     group.finish();
@@ -1852,7 +1881,7 @@ fn bench_tn_midmeasure_chain(c: &mut Criterion) {
         let circuit = mid_measured_chain(n, 4);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_with(BackendKind::TensorNetwork, circ, 42).unwrap();
+                run_with(BackendKind::TensorNetwork { tolerance: None }, circ, 42).unwrap();
             });
         });
     }
@@ -1873,7 +1902,14 @@ fn bench_tn_noisy_chain(c: &mut Criterion) {
     let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.01);
     group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
         b.iter(|| {
-            run_shots_with_noise(BackendKind::TensorNetwork, circ, &noise, 100, 42).unwrap();
+            run_shots_with_noise(
+                BackendKind::TensorNetwork { tolerance: None },
+                circ,
+                &noise,
+                100,
+                42,
+            )
+            .unwrap();
         });
     });
     group.finish();
@@ -1894,7 +1930,8 @@ fn bench_tn_sample_chain(c: &mut Criterion) {
         circuit.measure_all();
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
-                run_shots_with(BackendKind::TensorNetwork, circ, 32, 42).unwrap();
+                run_shots_with(BackendKind::TensorNetwork { tolerance: None }, circ, 32, 42)
+                    .unwrap();
             });
         });
     }
@@ -3964,6 +4001,7 @@ criterion_group! {
     bench_tn_scalar_wide_deep,
     bench_tn_scalar_tree_quality,
     bench_tn_sliced_contraction,
+    bench_tn_bounded_contraction,
     bench_tn_rdm_chain,
     bench_tn_midmeasure_chain,
     bench_tn_noisy_chain,

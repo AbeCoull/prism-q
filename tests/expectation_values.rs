@@ -357,7 +357,7 @@ fn product_expectation_values_cover_each_axis_eigenstate() {
 fn tensor_network_expectation_values_match_statevector() {
     assert_matches_statevector(
         "tensor network expectation",
-        BackendKind::TensorNetwork,
+        BackendKind::TensorNetwork { tolerance: None },
         &entangled_non_clifford(6),
     );
 }

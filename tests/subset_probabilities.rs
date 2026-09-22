@@ -123,7 +123,7 @@ fn every_backend_that_answers_agrees() {
         BackendKind::Auto,
         BackendKind::Sparse,
         BackendKind::Factored,
-        BackendKind::TensorNetwork,
+        BackendKind::TensorNetwork { tolerance: None },
         BackendKind::DensityMatrix,
         BackendKind::Mps { max_bond_dim: 32 },
     ] {

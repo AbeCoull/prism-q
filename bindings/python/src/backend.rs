@@ -42,7 +42,7 @@ impl PyBackendKind {
     }
     #[staticmethod]
     fn tensor_network() -> Self {
-        Self(BackendKind::TensorNetwork)
+        Self(BackendKind::TensorNetwork { tolerance: None })
     }
     #[staticmethod]
     fn factored() -> Self {

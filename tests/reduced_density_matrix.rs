@@ -647,7 +647,7 @@ fn the_terminal_names_the_backend_that_declines() {
     let circuit = ghz_circuit(4);
     assert_eq!(
         simulate(&circuit)
-            .backend(BackendKind::TensorNetwork)
+            .backend(BackendKind::TensorNetwork { tolerance: None })
             .seed(SEED)
             .reduced_density_matrix(&[0, 2])
             .unwrap_err(),

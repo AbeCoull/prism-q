@@ -400,7 +400,7 @@ fn shift_runs_on_the_tensor_network() {
 
     let obs: Hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
     let tn = simulate(&c)
-        .backend(BackendKind::TensorNetwork)
+        .backend(BackendKind::TensorNetwork { tolerance: None })
         .seed(SEED)
         .expectation_gradient_shift(&obs, &params)
         .unwrap();

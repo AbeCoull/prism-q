@@ -754,7 +754,7 @@ fn two_qubit_kraus_rejected_before_a_shot_allocates_state() {
         .unwrap();
 
     let err = simulate(&circuit)
-        .backend(BackendKind::TensorNetwork)
+        .backend(BackendKind::TensorNetwork { tolerance: None })
         .noise(&noise)
         .seed(SEED)
         .shots(4)

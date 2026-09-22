@@ -43,7 +43,7 @@ fn a_save_matches_running_the_prefix_alone() {
         (BackendKind::Statevector, 6),
         (BackendKind::Sparse, 6),
         (BackendKind::Mps { max_bond_dim: 64 }, 6),
-        (BackendKind::TensorNetwork, 6),
+        (BackendKind::TensorNetwork { tolerance: None }, 6),
         (BackendKind::Auto, 6),
     ] {
         let mut prefix = Circuit::new(n, n);

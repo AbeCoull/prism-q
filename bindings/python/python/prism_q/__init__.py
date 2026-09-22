@@ -37,6 +37,7 @@ except ImportError:
 from ._prism_q import (
     __version__,
     BackendKind,
+    BondReport,
     BraketProgram,
     Circuit,
     CircuitBuilder,
@@ -78,6 +79,7 @@ _sys.modules[__name__ + ".circuits"] = circuits
 __all__ = [
     "__version__",
     "BackendKind",
+    "BondReport",
     "BraketProgram",
     "Circuit",
     "CircuitBuilder",

@@ -4,6 +4,7 @@
 mod common;
 
 use common::SEED;
+use prism_q::circuits::brickwork_circuit;
 use prism_q::{
     BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
     Placement, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
@@ -76,6 +77,50 @@ fn mps_reports_a_fidelity_bound() {
         bound < 1.0,
         "bond 2 on a ladder with T gates on every layer must discard weight, got {bound}"
     );
+}
+
+// The exactness label marks the route, so it reads the same at a cap the chain
+// fills and at one it never reaches. The bond report is what tells the two
+// apart: eleven brickwork layers on 20 qubits carry the inner cuts past a bond
+// of 32 and nowhere near 4096.
+#[test]
+fn mps_reports_peak_bond_and_cap_saturation() {
+    let circuit = brickwork_circuit(20, 11, SEED);
+    let observables = vec![vec![PauliTerm::z(0)]];
+
+    let clamped = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 32 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let bond = clamped.metadata.bond.expect("an MPS run reports its bond");
+    assert!(bond.saturated(), "{bond:?}");
+    assert_eq!(bond.peak, 32);
+    assert_eq!(bond.cap, 32);
+
+    let roomy = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 4096 })
+        .seed(SEED)
+        .run()
+        .unwrap();
+    let bond = roomy.metadata.bond.expect("an MPS run reports its bond");
+    assert!(!bond.saturated(), "{bond:?}");
+    assert_eq!(bond.cap, 4096);
+    assert!(bond.peak > 32 && bond.peak < 4096, "{bond:?}");
+
+    let expectations = simulate(&circuit)
+        .backend(BackendKind::Mps { max_bond_dim: 4096 })
+        .seed(SEED)
+        .expectation_values_reported(&observables)
+        .unwrap();
+    assert_eq!(expectations.metadata.bond, Some(bond));
+
+    let statevector = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(statevector.metadata.bond, None);
 }
 
 #[test]

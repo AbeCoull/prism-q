@@ -225,6 +225,7 @@ print(result.metadata.engine)                # None unless samplers share the ba
 print(result.metadata.is_exact)              # True
 print(result.metadata.fidelity_lower_bound)  # None when exact
 print(result.metadata.placement)             # 'host' or 'device'
+print(result.metadata.bond)                  # None unless the MPS ran
 ```
 
 `is_exact` is False when the engine that ran can discard state weight or
@@ -232,6 +233,11 @@ estimate by sampling. It marks the route, not the run: an MPS whose bond
 dimension the circuit never fills reports `is_exact == False` with
 `fidelity_lower_bound == 1.0`, so the flag answers whether the answer could have
 been approximated and the bound answers whether it was.
+
+An MPS run also reports `bond`, with `peak` (the widest bond any cut kept over the
+run), `cap` (the configured maximum), and `saturated` (`peak >= cap`). Saturation is
+the signal that the cap bound the run: a run whose peak stayed under the cap
+truncated nothing on the cap's account, whatever the exactness label says.
 
 Automatic dispatch sends a circuit past the statevector cap to the sparse map when it
 is sparse-friendly and to a bounded-bond MPS otherwise. That is taken by default and

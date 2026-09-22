@@ -289,18 +289,20 @@ fidelity of two mixtures is a different computation.
 
 ## What a backend reports about its own result
 
-Three `Backend` methods carry provenance onto every result: `resolved` names the
+Four `Backend` methods carry provenance onto every result: `resolved` names the
 engine, `exactness` says whether its representation can discard state weight and
-how much this run discarded, and `placement` says whether the state lived on the
-device. All three have defaults, so an out-of-tree backend compiles unchanged and
-is named by `Backend::name`.
+how much this run discarded, `placement` says whether the state lived on the
+device, and `bond_report` gives the peak bond dimension against the cap for a
+representation bounded by one. All four have defaults, so an out-of-tree backend
+compiles unchanged and is named by `Backend::name`.
 
 These are reports, not predictions. `exactness` is read after the circuit has
 been applied, so the MPS bound reflects the singular values this run actually
 discarded, and `placement` reflects where the amplitudes ended up after any
-device fallback. The MPS accumulates discarded weight per SVD and returns
-`1 - total` as a fidelity lower bound; the sum is over relative discarded
-weights, so the bound is conservative.
+device fallback. Only the MPS answers `bond_report`, and a peak that reached
+the cap is the hard signal that the cap bound the run. The MPS accumulates
+discarded weight per SVD and returns `1 - total` as a fidelity lower bound; the
+sum is over relative discarded weights, so the bound is conservative.
 
 The decomposed route runs one backend per independent block and merges: its
 exactness is the weakest of the parts, its fidelity bound is the product, and its

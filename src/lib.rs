@@ -124,10 +124,10 @@ pub use sim::unified_pauli::{
     run_spd_observable_light_cone, run_spd_with, run_spp, run_spp_observable,
 };
 pub use sim::{
-    BackendKind, CountsResult, Engine, EntropyResult, Exactness, ExpectationResult, FactoredBlock,
-    MarginalsResult, ObservableExpectation, ObservableVariance, OverlapResult, PauliObservable,
-    Placement, Probabilities, ReducedDensityMatrix, ResolvedBackend, RunMetadata, RunOutcome,
-    Seeded, ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values,
+    BackendKind, BondReport, CountsResult, Engine, EntropyResult, Exactness, ExpectationResult,
+    FactoredBlock, MarginalsResult, ObservableExpectation, ObservableVariance, OverlapResult,
+    PauliObservable, Placement, Probabilities, ReducedDensityMatrix, ResolvedBackend, RunMetadata,
+    RunOutcome, Seeded, ShotsResult, Simulate, Unseeded, bitstring, run_expectation_values,
     run_observable_expectation, run_on, run_on_state, run_qasm, simulate,
 };
 #[cfg(feature = "parallel")]

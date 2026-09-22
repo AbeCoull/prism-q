@@ -31,7 +31,7 @@ use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
 use sim::{
-    PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
+    PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
     PyObservableVariance, PyOverlapResult, PyReducedDensityMatrix, PyRunMetadata, PyRunOutcome,
     PyShotsResult, PySimulation,
 };
@@ -57,6 +57,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyShotsResult>()?;
     m.add_class::<PyCountsResult>()?;
     m.add_class::<PyRunMetadata>()?;
+    m.add_class::<PyBondReport>()?;
     m.add_class::<PyObservableExpectation>()?;
     m.add_class::<PyObservableVariance>()?;
     m.add_class::<PyEntropyResult>()?;

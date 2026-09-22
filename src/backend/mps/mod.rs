@@ -287,7 +287,8 @@ pub struct MpsBackend {
     /// from there; a write that cannot hold the claim clears it.
     center: Option<usize>,
     /// Widest bond any cut has written since [`Backend::init`], which decides
-    /// with [`GAUGE_RANK`] whether a threshold cut takes the center. Read as a
+    /// with [`GAUGE_RANK`] whether a threshold cut takes the center and is the
+    /// peak the result reports through [`Backend::bond_report`]. Read as a
     /// high-water mark so the decision costs a compare per gate rather than a
     /// scan of the chain.
     bond_high_water: usize,
@@ -2868,6 +2869,13 @@ impl Backend for MpsBackend {
         crate::sim::Exactness::Approximate {
             fidelity_lower_bound: Some((1.0 - self.truncation_discarded).max(0.0)),
         }
+    }
+
+    fn bond_report(&self) -> Option<crate::sim::BondReport> {
+        Some(crate::sim::BondReport {
+            peak: self.bond_high_water,
+            cap: self.max_bond_dim,
+        })
     }
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {

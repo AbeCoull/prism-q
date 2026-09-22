@@ -34,7 +34,9 @@ use dispatch::{
     initial_state_plan, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
     run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
-pub use metadata::{Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata};
+pub use metadata::{
+    BondReport, Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata,
+};
 #[cfg(feature = "distributed")]
 pub(crate) use observable::pauli_sandwich;
 pub use observable::{ObservableExpectation, PauliObservable};
@@ -1760,7 +1762,10 @@ fn read_save(backend: &mut dyn Backend, spec: SaveSpec, label: &str) -> Result<S
 /// this run discarded, and the placement reflects where the amplitudes ended up
 /// after any device fallback.
 pub(crate) fn backend_metadata(backend: &dyn Backend) -> RunMetadata {
-    RunMetadata::new(backend.resolved(), backend.exactness(), backend.placement())
+    let mut metadata =
+        RunMetadata::new(backend.resolved(), backend.exactness(), backend.placement());
+    metadata.bond = backend.bond_report();
+    metadata
 }
 
 #[cfg(test)]

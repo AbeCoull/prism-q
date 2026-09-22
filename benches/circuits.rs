@@ -2006,24 +2006,26 @@ fn bench_auto_crossover(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/crossover");
     configure_group(&mut group);
 
+    // The second arm is named for the route it takes, not the kind it asks
+    // for: an independent-component circuit resolves to the decomposed route
+    // whatever backend the caller names, so `FactoredStabilizer` reaches this
+    // backend only through Auto's override. Depth 200 rather than 10 because
+    // at depth 10 these rows sit near 500 us, where two arms running the same
+    // route read 14% to 48% apart on the reference host.
     for &(blocks, block_size) in &[(6usize, 16usize), (8, 16), (10, 16), (20, 8)] {
         let n = blocks * block_size;
-        let circuit = circuits::local_clifford_blocks(blocks, block_size, 10, SEED);
+        let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);
         let id = format!("fstab_{n}q_b{block_size}");
         group.bench_with_input(BenchmarkId::new("auto", &id), &circuit, |b, circ| {
             b.iter(|| {
                 run_with(BackendKind::Auto, circ, 42).unwrap();
             });
         });
-        group.bench_with_input(
-            BenchmarkId::new("factored_stabilizer", &id),
-            &circuit,
-            |b, circ| {
-                b.iter(|| {
-                    run_with(BackendKind::FactoredStabilizer, circ, 42).unwrap();
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("decomposed", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        });
     }
 
     for &t in &[6usize, 10, 12] {

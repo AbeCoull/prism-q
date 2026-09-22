@@ -1,5 +1,6 @@
 import math
 
+import numpy as np
 import pytest
 
 import prism_q
@@ -158,3 +159,52 @@ def test_unknown_pauli_axis_is_rejected():
     circuit = CircuitBuilder(1).h(0).build()
     with pytest.raises(prism_q.PrismError):
         simulate(circuit).seed(SEED).density_matrix_expectation_values([[(0, "W")]])
+
+
+def test_initial_density_matrix_continues_an_exported_mixture():
+    first = CircuitBuilder(3).h(0).cx(0, 1).cx(1, 2).build()
+    second = CircuitBuilder(3).t(0).ry(0.4, 1).cx(2, 0).build()
+    whole = CircuitBuilder(3).h(0).cx(0, 1).cx(1, 2).t(0).ry(0.4, 1).cx(2, 0).build()
+    dm = BackendKind.density_matrix()
+    rho = (
+        simulate(first)
+        .backend(dm)
+        .noise(NoiseModel.uniform_depolarizing(first, 0.02))
+        .seed(SEED)
+        .reduced_density_matrix([0, 1, 2])
+        .matrix
+    )
+    resumed = (
+        simulate(second)
+        .backend(dm)
+        .noise(NoiseModel.uniform_depolarizing(second, 0.02))
+        .initial_density_matrix(rho)
+        .seed(SEED)
+        .run()
+        .probabilities
+    )
+    exact = (
+        simulate(whole)
+        .backend(dm)
+        .noise(NoiseModel.uniform_depolarizing(whole, 0.02))
+        .seed(SEED)
+        .run()
+        .probabilities
+    )
+    assert np.allclose(resumed, exact, atol=DM_EPS)
+
+
+def test_initial_density_matrix_validation_and_backend_limits():
+    circuit = CircuitBuilder(1).x(0).build()
+    dm = BackendKind.density_matrix()
+    mixed = [[0.75, 0.0], [0.0, 0.25]]
+    probs = simulate(circuit).backend(dm).initial_density_matrix(mixed).seed(SEED).run().probabilities
+    assert abs(probs[0] - 0.25) < DM_EPS and abs(probs[1] - 0.75) < DM_EPS
+    with pytest.raises(prism_q.PrismError, match="Hermitian"):
+        simulate(circuit).backend(dm).initial_density_matrix([[0.5, 0.25j], [0.25j, 0.5]]).run()
+    with pytest.raises(prism_q.PrismError, match="trace"):
+        simulate(circuit).backend(dm).initial_density_matrix([[0.6, 0.0], [0.0, 0.6]]).run()
+    with pytest.raises(prism_q.PrismError, match="square"):
+        simulate(circuit).backend(dm).initial_density_matrix(np.zeros((1, 4), dtype=complex)).run()
+    with pytest.raises(prism_q.PrismError, match="Statevector"):
+        simulate(circuit).backend(BackendKind.statevector()).initial_density_matrix(mixed).run()

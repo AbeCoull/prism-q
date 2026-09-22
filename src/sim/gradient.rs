@@ -617,7 +617,7 @@ pub(crate) fn shift_gradient(
     hamiltonian: &[(f64, Vec<PauliTerm>)],
     params: &Parameters,
     noise: Option<&NoiseModel>,
-    initial_state: Option<&[Complex64]>,
+    initial_state: Option<super::StartState<'_>>,
     seed: u64,
 ) -> Result<ExpectationGradient> {
     params.validate(circuit)?;

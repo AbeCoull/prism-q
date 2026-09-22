@@ -3235,7 +3235,7 @@ pub(crate) fn evolve_density_matrix(
     kind: &BackendKind,
     circuit: &Circuit,
     noise: Option<&NoiseModel>,
-    initial_state: Option<&[Complex64]>,
+    initial_state: Option<super::StartState<'_>>,
     seed: u64,
 ) -> Result<DensityMatrixBackend> {
     use super::dispatch::{Accel, Family, accel_for, build_density_matrix};
@@ -3267,7 +3267,7 @@ pub(crate) fn evolve_density_matrix(
     match initial_state {
         Some(state) => {
             crate::sim::check_initial_state_len(state, circuit.num_qubits)?;
-            dm.init_from_amplitudes(state.to_vec(), circuit.num_classical_bits)?;
+            state.load(&mut dm, circuit.num_classical_bits)?;
         }
         None => dm.init(circuit.num_qubits, circuit.num_classical_bits)?,
     }
@@ -3311,7 +3311,7 @@ pub(crate) fn density_matrix_probabilities(
     kind: &BackendKind,
     circuit: &Circuit,
     noise: &NoiseModel,
-    initial_state: Option<&[Complex64]>,
+    initial_state: Option<super::StartState<'_>>,
     seed: u64,
 ) -> Result<Vec<f64>> {
     evolve_density_matrix(kind, circuit, Some(noise), initial_state, seed)?.probabilities()
@@ -3379,7 +3379,7 @@ pub(crate) fn dm_expectation_values(
     circuit: &Circuit,
     observables: &[Vec<crate::PauliTerm>],
     noise: Option<&NoiseModel>,
-    initial_state: Option<&[Complex64]>,
+    initial_state: Option<super::StartState<'_>>,
     seed: u64,
 ) -> Result<Vec<f64>> {
     let dm = evolve_density_matrix(kind, circuit, noise, initial_state, seed)?;

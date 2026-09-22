@@ -43,6 +43,8 @@
 //!   with a noise model attached routes every `Simulate` terminal except the two
 //!   gradient terminals to that one evolution.
 //! - Mixed-state diagnostics: purity and exact `Tr(rho P)` observables.
+//! - Continuing from a stored mixture: [`Backend::init_from_density_matrix`]
+//!   takes the buffer [`DensityMatrixBackend::density_matrix`] exports.
 //!
 //! # When NOT to use this backend
 //!
@@ -377,6 +379,20 @@ impl DensityMatrixBackend {
             return launched(dk::norm_sqr(gpu.context(), gpu, self.num_qubits));
         }
         crate::backend::state_norm_sqr(&self.sv.state)
+    }
+
+    /// The host cap, or with a device attached the VRAM budget in its place.
+    fn check_capacity(&self, num_qubits: usize) -> Result<()> {
+        #[cfg(feature = "gpu")]
+        if let Some(ctx) = &self.gpu_context {
+            return check_device_budget(ctx, num_qubits);
+        }
+        crate::backend::check_state_allocation(
+            "density_matrix",
+            num_qubits,
+            crate::backend::max_density_matrix_qubits(),
+            crate::backend::DM_QUBIT_CAP_ENV,
+        )
     }
 
     #[inline]
@@ -1334,21 +1350,7 @@ impl Backend for DensityMatrixBackend {
     /// With a device attached the host cap does not apply: the mixture is
     /// budgeted against free VRAM instead, before anything is allocated.
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
-        #[cfg(feature = "gpu")]
-        if let Some(ctx) = &self.gpu_context {
-            check_device_budget(ctx, num_qubits)?;
-            self.num_qubits = num_qubits;
-            self.classical_bits = vec![false; num_classical_bits];
-            return self.sv.init(2 * num_qubits, 0);
-        }
-
-        crate::backend::check_state_allocation(
-            "density_matrix",
-            num_qubits,
-            crate::backend::max_density_matrix_qubits(),
-            crate::backend::DM_QUBIT_CAP_ENV,
-        )?;
-
+        self.check_capacity(num_qubits)?;
         self.num_qubits = num_qubits;
         self.classical_bits = vec![false; num_classical_bits];
         self.sv.init(2 * num_qubits, 0)
@@ -1356,6 +1358,25 @@ impl Backend for DensityMatrixBackend {
 
     fn supports_initial_state(&self) -> bool {
         true
+    }
+
+    fn supports_initial_density_matrix(&self) -> bool {
+        true
+    }
+
+    /// The buffer becomes `rho` itself: moved in on the host, uploaded in one
+    /// transfer when the mixture is device resident. The cap check of
+    /// [`init`](Self::init) runs first, before the buffer is sized.
+    fn init_from_density_matrix(
+        &mut self,
+        rho: Vec<Complex64>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        let num_qubits = crate::backend::validate_initial_density_matrix(&rho)?;
+        self.check_capacity(num_qubits)?;
+        self.num_qubits = num_qubits;
+        self.classical_bits = vec![false; num_classical_bits];
+        self.sv.init_from_state(rho, 0)
     }
 
     /// Starts from the pure mixture `|psi><psi|`, so the buffer is the `4^n`

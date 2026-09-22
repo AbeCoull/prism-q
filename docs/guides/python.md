@@ -277,6 +277,43 @@ since trajectory replay reinitializes a pure state per shot. To evolve a start
 state under noise, read the exact mixture with `run()`, `marginals()`, or
 `expectation_values()` on `density_matrix()`.
 
+## Starting from a mixture
+
+`.initial_density_matrix(rho)` starts the density-matrix backend from a mixed
+state. It takes a square `complex128` NumPy array, or a sequence of rows, in
+the layout `reduced_density_matrix()` over the whole register returns:
+row-major `2 ** n` by `2 ** n` with qubit 0 the least significant bit of both
+indices. A noisy run can be paused, its mixture stored, and resumed later:
+
+```python
+from prism_q import BackendKind, NoiseModel, simulate
+
+dm = BackendKind.density_matrix()
+rho = (
+    simulate(first)
+    .backend(dm)
+    .noise(NoiseModel.uniform_depolarizing(first, 0.02))
+    .reduced_density_matrix(range(first.num_qubits))
+    .matrix
+)
+probs = (
+    simulate(second)
+    .backend(dm)
+    .noise(NoiseModel.uniform_depolarizing(second, 0.02))
+    .initial_density_matrix(rho)
+    .run()
+    .probabilities
+)
+```
+
+The matrix must have `4 ** num_qubits` entries, be Hermitian to 1e-12 per
+entry, and have unit trace to 1e-9; one failing a check raises `PrismError`
+naming it. Positive semidefiniteness is not checked. Only `density_matrix()`
+and its GPU sibling accept a mixture, so every other backend, `auto()`
+included, raises `PrismError` naming itself. The terminal table above applies
+unchanged, and setting a mixture clears an earlier `.initial_state()`, as that
+call clears a mixture.
+
 ## Selecting a backend
 
 `BackendKind.auto()` is the default and picks a backend from circuit structure.

@@ -372,3 +372,88 @@ fn the_diagnostics_read_the_evolved_start_state() {
     assert_close(rho.data[1].norm(), 0.0, "rho[0][1]");
     assert_close(rho.purity(), 0.5, "purity");
 }
+
+/// diag(0.75, 0.25): a classical mixture, so any route holding a pure state
+/// answers differently.
+fn mixed() -> Vec<Complex64> {
+    vec![
+        Complex64::new(0.75, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.25, 0.0),
+    ]
+}
+
+#[test]
+fn the_density_matrix_evolves_a_start_mixture() {
+    let mut circuit = Circuit::new(1, 0);
+    circuit.add_gate(Gate::X, &[0]);
+
+    let probs = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .initial_density_matrix(&mixed())
+        .seed(SEED)
+        .run()
+        .expect("the density matrix accepts a start mixture")
+        .probabilities
+        .expect("dense probabilities")
+        .to_vec();
+    assert_close(probs[0], 0.25, "p(0)");
+    assert_close(probs[1], 0.75, "p(1)");
+
+    let reduced = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .initial_density_matrix(&mixed())
+        .seed(SEED)
+        .reduced_density_matrix(&[0])
+        .expect("the diagnostic reads the evolved mixture");
+    assert_close(reduced.purity(), 0.75 * 0.75 + 0.25 * 0.25, "purity");
+}
+
+#[test]
+fn backends_without_a_start_mixture_name_themselves() {
+    let mut circuit = Circuit::new(1, 0);
+    circuit.add_gate(Gate::X, &[0]);
+    for (kind, name) in [
+        (BackendKind::Auto, "Auto"),
+        (BackendKind::Statevector, "Statevector"),
+        (BackendKind::Stabilizer, "Stabilizer"),
+        (BackendKind::Sparse, "Sparse"),
+        (BackendKind::Mps { max_bond_dim: 64 }, "Mps"),
+    ] {
+        let err = simulate(&circuit)
+            .backend(kind)
+            .initial_density_matrix(&mixed())
+            .seed(SEED)
+            .run()
+            .expect_err("only the density matrix holds a mixture");
+
+        match err {
+            PrismError::IncompatibleBackend { backend, reason } => {
+                assert!(backend.contains(name), "{backend}");
+                assert!(reason.contains("density matrix"), "{reason}");
+            }
+            other => panic!("expected IncompatibleBackend for {name}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_start_mixture_of_the_wrong_width_is_rejected() {
+    let mut circuit = Circuit::new(2, 0);
+    circuit.add_gate(Gate::Cx, &[0, 1]);
+
+    let err = simulate(&circuit)
+        .backend(BackendKind::DensityMatrix)
+        .initial_density_matrix(&mixed())
+        .seed(SEED)
+        .run()
+        .expect_err("one qubit of mixture for a two-qubit circuit");
+    match err {
+        PrismError::InvalidParameter { message } => {
+            assert!(message.contains("density matrix entries"), "{message}");
+            assert!(message.contains("needs 16"), "{message}");
+        }
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}

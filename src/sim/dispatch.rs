@@ -29,6 +29,7 @@ use crate::backend::distributed_statevector::DistributedStatevectorBackend;
 #[cfg(feature = "distributed")]
 use crate::distributed::DistributedContext;
 
+use super::StartState;
 use super::metadata::ResolvedBackend;
 use super::{RunOutcome, try_backend_probabilities};
 
@@ -923,7 +924,33 @@ pub(super) fn resolve(
 /// density matrix.
 /// `Auto` lands on the statevector unconditionally: the caller already holds
 /// `2^n` amplitudes, so the dense state is affordable by construction.
-pub(super) fn initial_state_plan(kind: &BackendKind, num_qubits: usize) -> Result<BackendPlan> {
+///
+/// A start mixture narrows further, to the density matrix and its device
+/// sibling: no other representation holds one, and `Auto` never selects the
+/// density matrix, so it is declined by name like the rest.
+pub(super) fn initial_state_plan(
+    kind: &BackendKind,
+    num_qubits: usize,
+    start: StartState<'_>,
+) -> Result<BackendPlan> {
+    if let StartState::DensityMatrix(_) = start {
+        return match kind {
+            BackendKind::DensityMatrix => {
+                Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits))
+            }
+            #[cfg(feature = "gpu")]
+            BackendKind::DensityMatrixGpu { .. } => {
+                Ok(plan_for_family(kind, Family::DensityMatrix, num_qubits))
+            }
+            other => Err(PrismError::IncompatibleBackend {
+                backend: format!("{other:?}"),
+                reason: "a start density matrix runs on the density matrix, which holds a \
+                         mixture; every other representation holds a pure state, so select \
+                         `BackendKind::DensityMatrix` or its device sibling"
+                    .into(),
+            }),
+        };
+    }
     match kind {
         BackendKind::Auto | BackendKind::Statevector => {
             Ok(plan_for_family(kind, Family::Statevector, num_qubits))

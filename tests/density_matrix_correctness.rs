@@ -1852,3 +1852,170 @@ fn dm_rzz_sandwich_matches_statevector_over_full_tomography() {
         );
     }
 }
+
+/// The register of `noisy_circuit` evolved in two halves, so a mixture
+/// exported between them can be re-imported and the continuation compared
+/// against the uninterrupted run. No measurements: the halves are applied to
+/// held backends as well as through `simulate`.
+fn first_half(c: &mut Circuit) {
+    for q in 0..NOISY_N {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..NOISY_N - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+}
+
+fn second_half(c: &mut Circuit) {
+    for q in 0..NOISY_N {
+        c.add_gate(Gate::T, &[q]);
+        c.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+    }
+    c.add_gate(Gate::Cx, &[NOISY_N - 1, 0]);
+}
+
+fn split_run() -> (Circuit, Circuit, Circuit) {
+    let mut first = Circuit::new(NOISY_N, 0);
+    first_half(&mut first);
+    let mut second = Circuit::new(NOISY_N, 0);
+    second_half(&mut second);
+    let mut whole = Circuit::new(NOISY_N, 0);
+    first_half(&mut whole);
+    second_half(&mut whole);
+    (first, second, whole)
+}
+
+fn assert_same_mixture(want: &[Complex64], got: &[Complex64], label: &str) {
+    assert_eq!(want.len(), got.len(), "{label}: buffer length");
+    for (i, (w, g)) in want.iter().zip(got).enumerate() {
+        assert!(
+            (w - g).norm() < DM_EPS,
+            "{label}: entry {i} want {w:?} got {g:?}"
+        );
+    }
+}
+
+#[test]
+fn dm_import_of_an_exported_mixture_continues_the_run() {
+    let (first, second, _) = split_run();
+    let mut uninterrupted = DensityMatrixBackend::new(SEED);
+    uninterrupted.init(NOISY_N, 0).unwrap();
+    uninterrupted
+        .apply_instructions(&first.instructions)
+        .unwrap();
+    uninterrupted.apply_2q_depolarizing(0, 1, DEPOLARIZING_P);
+    uninterrupted.apply_2q_depolarizing(2, 3, DEPOLARIZING_P);
+    let exported = uninterrupted.density_matrix().unwrap();
+
+    let mut resumed = DensityMatrixBackend::new(SEED);
+    assert!(resumed.supports_initial_density_matrix());
+    resumed
+        .init_from_density_matrix(exported.clone(), 0)
+        .unwrap();
+    assert_eq!(resumed.num_qubits(), NOISY_N);
+    assert!(
+        resumed.purity() < 1.0 - DEPOLARIZING_P,
+        "the fixture must be a mixture: purity {}",
+        resumed.purity()
+    );
+    assert_same_mixture(
+        &exported,
+        &resumed.density_matrix().unwrap(),
+        "import round trip",
+    );
+
+    for backend in [&mut uninterrupted, &mut resumed] {
+        backend.apply_instructions(&second.instructions).unwrap();
+        backend.apply_2q_depolarizing(1, 2, DEPOLARIZING_P);
+    }
+    assert_same_mixture(
+        &uninterrupted.density_matrix().unwrap(),
+        &resumed.density_matrix().unwrap(),
+        "continued evolution",
+    );
+}
+
+#[test]
+fn simulate_continues_a_noisy_run_from_an_imported_mixture() {
+    use prism_q::{BackendKind, NoiseModel, PauliTerm};
+    let (first, second, whole) = split_run();
+    let all: Vec<usize> = (0..NOISY_N).collect();
+    let noise_first = NoiseModel::uniform_depolarizing(&first, DEPOLARIZING_P);
+    let noise_second = NoiseModel::uniform_depolarizing(&second, DEPOLARIZING_P);
+    let noise_whole = NoiseModel::uniform_depolarizing(&whole, DEPOLARIZING_P);
+
+    let rho = sim::simulate(&first)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_first)
+        .seed(SEED)
+        .reduced_density_matrix(&all)
+        .unwrap()
+        .data;
+
+    let resumed = sim::simulate(&second)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_second)
+        .initial_density_matrix(&rho)
+        .seed(SEED)
+        .run()
+        .unwrap()
+        .probabilities
+        .unwrap()
+        .to_vec();
+    let exact = dm_noisy_probs(&whole, &noise_whole, SEED);
+    assert_probs_close(&resumed, &exact, DM_EPS, "resumed noisy distribution");
+
+    let observables = vec![
+        vec![PauliTerm::z(0)],
+        vec![PauliTerm::x(1), PauliTerm::z(3)],
+        vec![PauliTerm::y(2), PauliTerm::x(0)],
+    ];
+    let from_import = sim::simulate(&second)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_second)
+        .initial_density_matrix(&rho)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    let uninterrupted = sim::simulate(&whole)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_whole)
+        .seed(SEED)
+        .expectation_values(&observables)
+        .unwrap();
+    for (i, (a, b)) in from_import.iter().zip(&uninterrupted).enumerate() {
+        assert!((a - b).abs() < DM_EPS, "observable {i}: {a} vs {b}");
+    }
+}
+
+fn import_error(rho: Vec<Complex64>) -> String {
+    match DensityMatrixBackend::new(SEED).init_from_density_matrix(rho, 0) {
+        Err(prism_q::PrismError::InvalidParameter { message }) => message,
+        other => panic!("expected InvalidParameter, got {other:?}"),
+    }
+}
+
+#[test]
+fn dm_import_rejects_a_non_hermitian_mixture() {
+    // Entry (0, 1) must be the conjugate of entry (1, 0); here they are equal.
+    let rho = vec![c(0.5, 0.0), c(0.25, 0.1), c(0.25, 0.1), c(0.5, 0.0)];
+    let message = import_error(rho);
+    assert!(message.contains("Hermitian"), "{message}");
+}
+
+#[test]
+fn dm_import_rejects_a_mixture_without_unit_trace() {
+    let rho = vec![c(0.6, 0.0), c(0.0, 0.0), c(0.0, 0.0), c(0.6, 0.0)];
+    let message = import_error(rho);
+    assert!(message.contains("trace"), "{message}");
+}
+
+#[test]
+fn dm_import_rejects_a_buffer_that_is_not_a_square_power_of_two() {
+    for len in [3usize, 8] {
+        let mut rho = vec![c(0.0, 0.0); len];
+        rho[0] = c(1.0, 0.0);
+        let message = import_error(rho);
+        assert!(message.contains("4^n"), "{message}");
+    }
+}

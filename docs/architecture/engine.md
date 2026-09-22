@@ -165,6 +165,22 @@ unnormalized vector is rejected rather than rescaled, because the statevector's
 deferred-normalization factor is reset to 1 by the load and a silent rescale
 would hide the error inside it.
 
+`Simulate::initial_density_matrix` is the mixed-state counterpart. It takes the
+`4^n` buffer `DensityMatrixBackend::density_matrix` exports, row-major
+`2^n x 2^n` with qubit 0 the least significant bit of both indices, so a
+mixture can be stored between runs or composed from two evolutions. Only
+`DensityMatrix` and `DensityMatrixGpu` hold one, so `initial_state_plan`
+declines every other kind by name, `Auto` included, since automatic dispatch
+never selects the density matrix. `Backend::init_from_density_matrix` validates
+the buffer before the register is sized: `4^n` entries, every entry finite,
+each entry pair Hermitian to 1e-12 (scaled by the larger magnitude once that
+exceeds 1), and unit trace to 1e-9, with `InvalidParameter` naming the failed
+check. Positive semidefiniteness is not checked: that needs an
+eigendecomposition the backend does not carry, so a mixture with a negative
+eigenvalue evolves without complaint. On the host the buffer is moved in as the
+backend's own; on the device it is uploaded in one transfer, in place of the
+outer product the pure-state load forms.
+
 ## Subsystem decomposition
 
 Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately with per-block Auto dispatch. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.

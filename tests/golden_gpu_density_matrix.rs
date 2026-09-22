@@ -705,3 +705,109 @@ fn dm_gpu_noisy_shift_gradient_matches_cpu() {
     }
     assert!(host.gradient.iter().any(|g| g.abs() > 1e-3));
 }
+
+#[test]
+fn dm_gpu_imports_an_exported_mixture_and_continues() {
+    let Some(fx) = Fixture::try_new() else {
+        return;
+    };
+    let n = 4;
+    let (mut cpu, mut gpu) = fx.prepared_pair(n);
+    let exported = gpu.density_matrix().unwrap();
+
+    let mut resumed_gpu = fx.device_backend();
+    assert!(resumed_gpu.supports_initial_density_matrix());
+    resumed_gpu
+        .init_from_density_matrix(exported.clone(), n)
+        .unwrap();
+    assert_eq!(resumed_gpu.placement(), Placement::Device);
+    let mut resumed_cpu = DensityMatrixBackend::new(SEED);
+    resumed_cpu.init_from_density_matrix(exported, n).unwrap();
+    assert_same_mixture(&cpu, &resumed_gpu, "device import of the device export");
+
+    let tail = circuits::random_circuit(n, 3, SEED + 1);
+    for backend in [&mut cpu, &mut gpu, &mut resumed_gpu, &mut resumed_cpu] {
+        backend.apply_instructions(&tail.instructions).unwrap();
+        backend.apply_1q_kraus(1, &depolarizing_1q(0.05));
+        backend.apply_2q_depolarizing(0, n - 1, 0.03);
+    }
+    assert_same_mixture(
+        &cpu,
+        &resumed_gpu,
+        "device continuation against the uninterrupted host run",
+    );
+    assert_same_mixture(
+        &resumed_cpu,
+        &gpu,
+        "host continuation against the uninterrupted device run",
+    );
+}
+
+#[test]
+fn dm_gpu_simulate_continues_a_noisy_run_from_an_imported_mixture() {
+    let Some(fx) = Fixture::try_new() else {
+        return;
+    };
+    let n = 4;
+    let p = 0.02;
+    let first = circuits::random_circuit(n, 2, SEED);
+    let second = circuits::random_circuit(n, 2, SEED + 1);
+    let mut whole = first.clone();
+    whole
+        .instructions
+        .extend(second.instructions.iter().cloned());
+    let all: Vec<usize> = (0..n).collect();
+    let noise_first = NoiseModel::uniform_depolarizing(&first, p);
+    let noise_second = NoiseModel::uniform_depolarizing(&second, p);
+    let noise_whole = NoiseModel::uniform_depolarizing(&whole, p);
+
+    let rho = sim::simulate(&first)
+        .backend(fx.kind())
+        .noise(&noise_first)
+        .seed(SEED)
+        .reduced_density_matrix(&all)
+        .unwrap()
+        .data;
+    let resumed = sim::simulate(&second)
+        .backend(fx.kind())
+        .noise(&noise_second)
+        .initial_density_matrix(&rho)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_eq!(resumed.metadata.placement, Placement::Device);
+    let host = sim::simulate(&whole)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&noise_whole)
+        .seed(SEED)
+        .run()
+        .unwrap();
+    assert_probs_close(
+        &resumed.probabilities.unwrap().to_vec(),
+        &host.probabilities.unwrap().to_vec(),
+        EPS,
+        "device resume against the uninterrupted host run",
+    );
+}
+
+#[test]
+fn dm_gpu_import_rejects_a_bad_mixture_before_uploading() {
+    let Some(fx) = Fixture::try_new() else {
+        return;
+    };
+    let not_hermitian = vec![
+        c(0.5),
+        Complex64::new(0.25, 0.1),
+        Complex64::new(0.25, 0.1),
+        c(0.5),
+    ];
+    let off_trace = vec![c(0.6), c(0.0), c(0.0), c(0.6)];
+    for (rho, check) in [(not_hermitian, "Hermitian"), (off_trace, "trace")] {
+        match fx.device_backend().init_from_density_matrix(rho, 0) {
+            Err(prism_q::PrismError::InvalidParameter { message }) => {
+                assert!(message.contains(check), "{message}");
+            }
+            other => panic!("expected InvalidParameter naming {check}, got {other:?}"),
+        }
+    }
+}

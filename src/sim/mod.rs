@@ -1984,36 +1984,90 @@ pub fn run_on_state(
 /// condition) gets a backend of its own, because a held backend would carry its
 /// RNG forward into the next circuit and change what the next one measures.
 ///
+/// Under the `parallel` feature, a batch whose circuits all sit below 14 qubits
+/// splits across Rayon workers, each holding its own backend. Those runs are
+/// single-threaded inside, so the batch is where the cores go. A wider circuit, a
+/// density matrix from 7 qubits, or a GPU or distributed kind keeps the whole
+/// batch on one thread.
+///
 /// # Errors
-/// The first circuit that fails ends the batch and returns its error, so a
-/// caller that wants the rest to run should call this per circuit.
+/// Returns the error of the first failing circuit in list order. A caller that
+/// wants every circuit's result should call this per circuit.
 pub fn run_batch(circuits: &[Circuit], kind: BackendKind, seed: u64) -> Result<Vec<RunOutcome>> {
-    let mut out = Vec::with_capacity(circuits.len());
-    let mut held: Option<(dispatch::BackendPlan, usize, Box<dyn Backend + Send>)> = None;
-
-    for circuit in circuits {
-        let Some(plan) = batch_plan(&kind, circuit) else {
-            held = None;
-            out.push(run_with_internal(
-                kind.clone(),
-                circuit,
-                seed,
-                SimOptions::default(),
-            )?);
-            continue;
-        };
-
-        let reusable = matches!(
-            &held,
-            Some((p, width, _)) if *width == circuit.num_qubits && dispatch::same_plan(p, &plan)
-        );
-        if !reusable {
-            held = Some((plan.clone(), circuit.num_qubits, plan.build(seed)));
-        }
-        let (_, _, backend) = held.as_mut().expect("just built");
-        out.push(execute(&mut **backend, circuit, &SimOptions::default())?);
+    #[cfg(feature = "parallel")]
+    if circuits.len() > 1
+        && circuits
+            .iter()
+            .all(|c| runs_split_across_workers(&kind, c.num_qubits))
+    {
+        use rayon::prelude::*;
+        let outcomes: Vec<Result<RunOutcome>> = circuits
+            .par_iter()
+            .map_init(
+                || None,
+                |held, circuit| run_batch_entry(&kind, circuit, seed, held),
+            )
+            .collect();
+        return outcomes.into_iter().collect();
     }
-    Ok(out)
+
+    let mut held = None;
+    circuits
+        .iter()
+        .map(|circuit| run_batch_entry(&kind, circuit, seed, &mut held))
+        .collect()
+}
+
+type HeldBackend = Option<(dispatch::BackendPlan, usize, Box<dyn Backend + Send>)>;
+
+fn run_batch_entry(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    held: &mut HeldBackend,
+) -> Result<RunOutcome> {
+    let Some(plan) = batch_plan(kind, circuit) else {
+        *held = None;
+        return run_with_internal(kind.clone(), circuit, seed, SimOptions::default());
+    };
+
+    let reusable = matches!(
+        &*held,
+        Some((p, width, _)) if *width == circuit.num_qubits && dispatch::same_plan(p, &plan)
+    );
+    if !reusable {
+        *held = Some((plan.clone(), circuit.num_qubits, plan.build(seed)));
+    }
+    let (_, _, backend) = held.as_mut().expect("just built");
+    execute(&mut **backend, circuit, &SimOptions::default())
+}
+
+/// Whether separate runs of `num_qubits`-wide circuits on `kind` should split across
+/// Rayon workers: only below the kernels' own parallel floor, counting a density
+/// matrix at twice its width since each worker holds a state, and never on a kind
+/// bound to one device or rank context.
+#[cfg(feature = "parallel")]
+pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -> bool {
+    #[cfg(feature = "gpu")]
+    if matches!(
+        kind,
+        BackendKind::AutoGpu { .. }
+            | BackendKind::StatevectorGpu { .. }
+            | BackendKind::DensityMatrixGpu { .. }
+            | BackendKind::StabilizerGpu { .. }
+    ) {
+        return false;
+    }
+    #[cfg(feature = "distributed")]
+    if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
+        return false;
+    }
+    let width = if kind.is_density_matrix() {
+        2 * num_qubits
+    } else {
+        num_qubits
+    };
+    width < crate::backend::PARALLEL_THRESHOLD_QUBITS
 }
 
 /// The plan a circuit can share, or `None` when it must run on its own.

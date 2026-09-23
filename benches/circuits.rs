@@ -2131,7 +2131,72 @@ fn bench_auto_crossover(c: &mut Criterion) {
         }
     }
 
+    // T gates spread through random-pairing layers, so every qubit's light
+    // cone holds most of them and the Pauli sum grows with the T count. Each
+    // width has one row the Pauli route wins and one it loses to the
+    // statevector.
+    for &(n, t) in &[(12usize, 8usize), (12, 24), (16, 24), (16, 32)] {
+        let circuit = wide_clifford_t_circuit(n, t, 12, SEED);
+        let id = format!("spd_wide_{n}q_{t}t");
+        group.bench_with_input(BenchmarkId::new("auto", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Auto)
+                        .seed(42)
+                        .marginals()
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
     group.finish();
+}
+
+/// `depth` layers of random single-qubit Cliffords, `t_count` T or Tdg gates
+/// spread evenly across the layers, and a CX on a random pairing of all qubits.
+fn wide_clifford_t_circuit(n: usize, t_count: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let cliffords = [
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::SX,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+    ];
+    let shuffle = |order: &mut [usize], rng: &mut ChaCha8Rng| {
+        for i in (1..order.len()).rev() {
+            order.swap(i, rng.random_range(0..=i));
+        }
+    };
+    for layer in 0..depth {
+        for q in 0..n {
+            c.add_gate(
+                cliffords[rng.random_range(0..cliffords.len())].clone(),
+                &[q],
+            );
+        }
+        let layer_t = t_count * (layer + 1) / depth - t_count * layer / depth;
+        let mut order: Vec<usize> = (0..n).collect();
+        shuffle(&mut order, &mut rng);
+        for &q in order.iter().take(layer_t) {
+            let gate = if rng.random_bool(0.5) {
+                Gate::T
+            } else {
+                Gate::Tdg
+            };
+            c.add_gate(gate, &[q]);
+        }
+        shuffle(&mut order, &mut rng);
+        for pair in order.chunks_exact(2) {
+            c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
+        }
+    }
+    c
 }
 
 fn bench_auto_random(c: &mut Criterion) {

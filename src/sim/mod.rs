@@ -25,9 +25,9 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    AUTO_SPD_MAX_TERMS, BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS,
-    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
-    MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name, auto_selects_cpu_statevector,
+    BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
+    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
+    accel_for, approximate_route_name, auto_selects_cpu_statevector, auto_spd_work_budget,
     build_statevector, has_temporal_clifford_opportunity, initial_state_plan, plan_for_family,
     plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
     stabilizer_rank_budget, validate_explicit_backend,
@@ -2710,14 +2710,21 @@ fn run_marginals_result_with(
         && circuit.has_t_gates()
         && n >= MIN_QUBITS_FOR_SPD_AUTO
     {
-        let spd = unified_pauli::run_spd(circuit, 0.0, AUTO_SPD_MAX_TERMS)?;
-        return Ok(MarginalsResult {
-            marginals: expectations_to_marginals(&spd.expectations),
-            metadata: spd_metadata(&SpdTruncation::Threshold {
-                epsilon: 0.0,
-                max_terms: AUTO_SPD_MAX_TERMS,
-            }),
-        });
+        let exact = SpdTruncation::Threshold {
+            epsilon: 0.0,
+            max_terms: 0,
+        };
+        let spd = if n <= max_statevector_qubits() {
+            unified_pauli::run_spd_exact_within(circuit, auto_spd_work_budget(circuit))?
+        } else {
+            Some(unified_pauli::run_spd_with(circuit, &exact)?)
+        };
+        if let Some(spd) = spd {
+            return Ok(MarginalsResult {
+                marginals: expectations_to_marginals(&spd.expectations),
+                metadata: spd_metadata(&exact),
+            });
+        }
     }
 
     // The distributed backend answers a marginal from rank-local sums plus one

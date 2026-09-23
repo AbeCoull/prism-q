@@ -1992,6 +1992,89 @@ fn bench_auto_expectation(c: &mut Criterion) {
     group.finish();
 }
 
+/// `Auto` beside the backend it passes over, at the sizes where a routing
+/// constant switches. Each set brackets one constant so the boundary can be
+/// read off the two arms either side of it: the factored-stabilizer floor (128
+/// qubits with a largest block of 16), the exact stabilizer-rank budget (`n`
+/// less twice `ceil(log2 n)`, which is 10 at 20 qubits), and the Pauli
+/// marginals floor (12 qubits).
+///
+/// Boundaries bracketed elsewhere and not repeated here: the factored override
+/// in `factored/dynamic_advantage`, the dense families in `compare/general_d10`,
+/// and the scalar tensor route in `auto/expectation`.
+fn bench_auto_crossover(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/crossover");
+    configure_group(&mut group);
+
+    // An explicit kind on an independent-component circuit takes the decomposed
+    // route and runs that kind once per block, so no `BackendKind` puts one
+    // factored-stabilizer backend across the whole circuit: only Auto's
+    // override does, above the floor. The `factored` arm reaches it at every
+    // size through `run_on`, which brackets the floor from below and, above
+    // it, runs what `auto` runs. Depth 200 rather than 10 because at depth 10
+    // these rows sit near 500 us, where two arms running the same route read
+    // 14% to 48% apart on the reference host.
+    for &(blocks, block_size) in &[(6usize, 16usize), (8, 16), (10, 16), (20, 8)] {
+        let n = blocks * block_size;
+        let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);
+        let id = format!("fstab_{n}q_b{block_size}");
+        group.bench_with_input(BenchmarkId::new("auto", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Auto, circ, 42).unwrap();
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("decomposed", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Stabilizer, circ, 42).unwrap();
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("factored", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                let mut backend = prism_q::FactoredStabilizerBackend::new(42);
+                sim::run_on(&mut backend, circ).unwrap();
+            });
+        });
+    }
+
+    for &t in &[6usize, 10, 12] {
+        let circuit = clifford_t_circuit(20, t, SEED);
+        let id = format!("rank_20q_{t}t");
+        group.bench_with_input(BenchmarkId::new("auto", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Auto, circ, 42).unwrap();
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("statevector", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    for &n in &[10usize, 12, 16] {
+        let circuit = clifford_t_circuit(n, 8, SEED);
+        let id = format!("spd_{n}q_8t");
+        for (name, kind) in [
+            ("auto", BackendKind::Auto),
+            ("statevector", BackendKind::Statevector),
+        ] {
+            group.bench_with_input(BenchmarkId::new(name, &id), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(kind.clone())
+                            .seed(42)
+                            .marginals()
+                            .unwrap(),
+                    )
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 fn bench_auto_random(c: &mut Criterion) {
     let mut group = c.benchmark_group("auto/random_d10");
     configure_group(&mut group);
@@ -3940,6 +4023,7 @@ criterion_group! {
     bench_tn_sample_chain,
     // Auto dispatch
     bench_auto_expectation,
+    bench_auto_crossover,
     bench_auto_random,
     bench_auto_qft,
     bench_auto_qft_textbook,

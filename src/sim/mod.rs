@@ -5,6 +5,7 @@
 //! [`simulate`], [`run_qasm`], [`run_on`].
 
 pub mod braket;
+pub mod calibration;
 pub mod compiled;
 mod decomposed;
 mod dispatch;

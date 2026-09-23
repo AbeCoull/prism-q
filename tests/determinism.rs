@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{SEED, count_gates};
+use common::{SEED, count_gates, mix_seed};
 use num_complex::Complex64;
 use prism_q::circuit::SmallVec;
 use prism_q::circuits::qft_circuit;
@@ -455,8 +455,8 @@ fn measure_every_qubit(c: &mut Circuit, first_bit: usize) {
     }
 }
 
-// Each shot runs on seed `SEED + i` whether the loop splits or not, so the
-// shots match a pool of one, a wider pool, and separate seeded runs.
+// Each shot runs on `mix_seed(SEED, i)` whether the loop splits or not, so the
+// shots match a pool of one, a wider pool, and separate runs on those seeds.
 fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
     let shots = |threads: usize| {
         in_pool(threads, || {
@@ -476,10 +476,10 @@ fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
         "per-shot metadata differs"
     );
 
-    let separate: Vec<Vec<bool>> = (0..PER_SHOT_SHOTS as u64)
+    let separate: Vec<Vec<bool>> = (0..PER_SHOT_SHOTS)
         .map(|i| {
             simulate(circuit)
-                .seed(SEED.wrapping_add(i))
+                .seed(mix_seed(SEED, i))
                 .run()
                 .expect("run")
                 .classical_bits
@@ -599,18 +599,15 @@ fn noisy_stabilizer_trajectories_identical_across_thread_counts() {
         "trajectory metadata differs"
     );
 
-    let separate: Vec<Vec<bool>> = (0..PER_SHOT_SHOTS as u64)
-        .flat_map(|i| {
-            simulate(&circuit)
-                .noise(&noise)
-                .seed(SEED.wrapping_add(i))
-                .shots(1)
-                .expect("noisy shot")
-                .shots
-        })
-        .collect();
+    // Three shots stay on the serial loop, which must draw the same shot seeds.
+    let serial = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(3)
+        .expect("serial noisy shots");
     assert_eq!(
-        single.shots, separate,
-        "trajectories differ from seeded runs"
+        serial.shots,
+        single.shots[..3],
+        "serial trajectories differ from split ones"
     );
 }

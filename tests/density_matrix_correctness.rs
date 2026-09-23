@@ -285,15 +285,13 @@ fn dm_exact_noisy_distribution_is_seed_independent_and_matches_the_trajectory_me
         assert_probs_close(&repeat, &exact, DM_EPS, "exact noisy distribution per seed");
     }
 
-    // Shot `i` of a run seeded `s` draws on `s + i`, so the bases are spaced by
-    // the shot count; adjacent ones would replay the same trajectories.
     let shots_per_seed = 250;
     let mut counts = vec![0u64; 1 << NOISY_N];
     for offset in 0..NOISY_SEEDS {
         let result = sim::simulate(&circuit)
             .backend(BackendKind::Statevector)
             .noise(&noise)
-            .seed(SEED + offset * shots_per_seed as u64)
+            .seed(SEED + offset)
             .shots(shots_per_seed)
             .unwrap();
         for (idx, count) in histogram(&result.shots, counts.len()).iter().enumerate() {

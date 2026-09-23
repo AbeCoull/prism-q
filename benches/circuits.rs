@@ -2515,6 +2515,111 @@ fn bench_batch_sweep(c: &mut Criterion) {
     group.finish();
 }
 
+/// `count` bindings for `params`, each drawn uniformly from `[0, 2pi)` on its
+/// own seeded stream.
+fn binding_points(params: &Parameters, count: u64) -> Vec<Vec<f64>> {
+    (0..count)
+        .map(|k| {
+            let mut rng = ChaCha8Rng::seed_from_u64(SEED.wrapping_add(k));
+            (0..params.num_slots())
+                .map(|_| rng.random::<f64>() * std::f64::consts::TAU)
+                .collect()
+        })
+        .collect()
+}
+
+/// Transverse-field Ising energy: a `ZZ` chain plus an `X` field, two commuting
+/// groups.
+fn ising_hamiltonian(n: usize) -> PauliObservable {
+    let chain = (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
+    let field = (0..n).map(|q| (0.5, vec![PauliTerm::x(q)]));
+    PauliObservable::from_terms(chain.chain(field).collect::<Vec<_>>()).unwrap()
+}
+
+/// Twenty energy evaluations of a two-layer ansatz, the inner loop of a
+/// variational optimizer. `simulate_loop` binds a fresh circuit and hands it to
+/// `simulate`, which plans dispatch and fuses at every point. `prepared` binds
+/// through a held [`PreparedCircuit`] and still hands the bound circuit to
+/// `simulate`.
+fn bench_prepared_energy(c: &mut Criterion) {
+    const POINTS: u64 = 20;
+
+    let mut group = c.benchmark_group("prepared/hea_l2_energy");
+    configure_group(&mut group);
+
+    for &n in &[8, 10, 12, 14] {
+        let template = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let params = Parameters::all_rotations(&template);
+        let points = binding_points(&params, POINTS);
+        let hamiltonian = ising_hamiltonian(n);
+
+        group.bench_function(BenchmarkId::new("simulate_loop", n), |b| {
+            b.iter(|| {
+                for values in &points {
+                    let bound = params.bind(&template, values).unwrap();
+                    let energy = sim::simulate(&bound)
+                        .seed(SEED)
+                        .observable_expectation(&hamiltonian)
+                        .unwrap();
+                    black_box(energy.mean);
+                }
+            });
+        });
+        group.bench_function(BenchmarkId::new("prepared", n), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| {
+                for values in &points {
+                    let bound = prepared.bind(values).unwrap();
+                    let energy = sim::simulate(bound)
+                        .seed(SEED)
+                        .observable_expectation(&hamiltonian)
+                        .unwrap();
+                    black_box(energy.mean);
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// A 200-binding sweep of a two-layer ansatz through one [`PreparedCircuit`].
+/// `prepared_loop` calls `run` per binding and is the control for
+/// `prepared_many`, which collects the same calls into one vector.
+fn bench_prepared_sweep(c: &mut Criterion) {
+    const POINTS: u64 = 200;
+
+    let mut group = c.benchmark_group("prepared/hea_l2_sweep");
+    configure_group(&mut group);
+
+    for &n in &[4, 8, 10, 12] {
+        let template = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let params = Parameters::all_rotations(&template);
+        let points = binding_points(&params, POINTS);
+
+        group.bench_function(BenchmarkId::new("prepared_many", n), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| {
+                let outcomes: Vec<_> = points
+                    .iter()
+                    .map(|values| prepared.run(values, SEED).unwrap())
+                    .collect();
+                black_box(outcomes);
+            });
+        });
+        group.bench_function(BenchmarkId::new("prepared_loop", n), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| {
+                for values in &points {
+                    black_box(prepared.run(values, SEED).unwrap());
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // A Trotter ansatz over the largest Jordan-Wigner strings of the seeded
 // two-body operator, on an alternating occupation reference. The recognizing
 // constructor lowers the weight-1 and ZZ generators, so the stream mixes named
@@ -4152,6 +4257,9 @@ criterion_group! {
     bench_gradient_prefix,
     bench_gradient_shift_small,
     bench_batch_sweep,
+    // Prepared circuit terminals and sweeps
+    bench_prepared_energy,
+    bench_prepared_sweep,
     // Variational loop iteration (rebuild vs rebind under simulation cost)
     bench_vqe_loop,
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)

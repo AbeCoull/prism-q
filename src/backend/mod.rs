@@ -69,7 +69,7 @@ use num_complex::Complex64;
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::sim::unified_pauli::PauliTerm;
-use crate::sim::{Exactness, Placement, ResolvedBackend};
+use crate::sim::{BondReport, Exactness, Placement, ResolvedBackend};
 
 /// Qubit count at which dense amplitude kernels switch to Rayon; the factored
 /// backend applies it per sub-state, the density matrix backend to its
@@ -264,12 +264,12 @@ pub(crate) const NORM_CLAMP_MIN: f64 = 1e-30;
 pub(crate) const PHASE_IS_ONE_EPS: f64 = 1e-15;
 
 pub(crate) use memory::{
-    DM_QUBIT_CAP_ENV, check_state_allocation, check_tensor_peak, dense_probability_len,
-    dense_statevector_len, max_dense_outcome_bits, max_density_matrix_qubits,
-    max_factored_merge_qubits, max_sparse_entries, max_stabilizer_cluster_qubits,
-    max_statevector_qubits, mps_workspace_cap_elements, reserve_dense_output,
-    stabilizer_cluster_error, statevector_probability_len, tensor_probability_len,
-    workspace_allocation_error,
+    DM_QUBIT_CAP_ENV, check_state_allocation, dense_probability_len, dense_statevector_len,
+    max_dense_outcome_bits, max_density_matrix_qubits, max_factored_merge_qubits,
+    max_sparse_entries, max_stabilizer_cluster_qubits, max_statevector_qubits,
+    mps_workspace_cap_elements, reserve_dense_output, stabilizer_cluster_error,
+    statevector_probability_len, tensor_peak_cap_elements, tensor_peak_error,
+    tensor_probability_len, workspace_allocation_error,
 };
 
 /// Whether `phase` equals `1+0i` within [`PHASE_IS_ONE_EPS`].
@@ -488,6 +488,13 @@ pub trait Backend {
     /// path, and only when the `gpu` feature is on.
     fn placement(&self) -> Placement {
         Placement::Host
+    }
+
+    /// Peak bond dimension the run kept against its cap, for a representation
+    /// that has one. Called once per run, after the circuit has been applied;
+    /// the default reports none.
+    fn bond_report(&self) -> Option<BondReport> {
+        None
     }
 
     /// Initialize (or reset) state for a circuit with the given dimensions.

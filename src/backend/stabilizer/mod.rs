@@ -218,17 +218,109 @@ impl StabilizerBackend {
         let want_lazy = self.lazy_destab;
         self.lazy_destab = false;
         self.gate_row_start = 0;
+        self.finish_host_init(num_classical_bits);
+        if want_lazy {
+            self.enable_lazy_destab();
+        }
+        Ok(())
+    }
+
+    /// Start from a tableau exported by [`Self::export_tableau`] instead of
+    /// |0...0⟩, so a prepared Clifford state can be handed to a second run.
+    ///
+    /// Layout, with `n = num_qubits` and `nw = ceil(n / 64)`: `words` holds
+    /// `2 * n + 1` rows of `2 * nw` `u64` words, destabilizer rows `0..n`, then
+    /// stabilizer rows `n..2n`, then the scratch row the export carries, whose
+    /// contents are ignored. A row is its `nw` X words followed by its `nw` Z
+    /// words, and qubit `q` is bit `q % 64` of word `q / 64` in each half.
+    /// `phases[r]` is true when row `r` carries sign -1.
+    ///
+    /// The intended input is the export of an earlier run at the same width.
+    /// Only the lengths and the diagonal pairing (destabilizer `i` anticommutes
+    /// with stabilizer `i`) are checked; a row set that breaks the rest of the
+    /// commutation structure is accepted and yields wrong measurement outcomes
+    /// without an error. The random stream restarts from the seed given at
+    /// construction.
+    ///
+    /// # Errors
+    /// `InvalidParameter` when a length does not match `num_qubits` or a
+    /// diagonal pair commutes.
+    pub fn init_from_tableau(
+        &mut self,
+        num_qubits: usize,
+        mut words: Vec<u64>,
+        mut phases: Vec<bool>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        let n = num_qubits;
+        let nw = n.div_ceil(64);
+        kernels::rowops::check_imported_rows(n, &words, &phases)?;
+        words[2 * n * 2 * nw..].fill(0);
+        phases[2 * n] = false;
+
+        #[cfg(feature = "gpu")]
+        if let Some(ctx) = self.gpu_context.clone() {
+            match GpuTableau::new(ctx, n) {
+                Ok(mut tableau) => {
+                    tableau.copy_from_host(&words, &phases)?;
+                    self.attach_device_tableau(tableau, n, nw, num_classical_bits);
+                    return Ok(());
+                }
+                Err(_) if self.gpu_soft => {
+                    self.gpu_context = None;
+                    self.gpu_tableau = None;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        self.n = n;
+        self.num_words = nw;
+        self.xz = words;
+        self.phase = phases;
+        self.gate_row_start = if self.lazy_destab { n } else { 0 };
+        self.qubit_active = vec![Vec::new(); n];
+        self.rebuild_qubit_active();
+        self.finish_host_init(num_classical_bits);
+        Ok(())
+    }
+
+    /// Shared tail of the host init paths once the rows and the SGI index are
+    /// in place: drops the GPU bookkeeping the new rows invalidate and sizes
+    /// the classical register.
+    fn finish_host_init(&mut self, num_classical_bits: usize) {
         #[cfg(feature = "gpu")]
         {
             self.pending_gpu_ops.clear();
             self.gpu_batch_scratch.clear();
         }
-
         crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
-        if want_lazy {
-            self.enable_lazy_destab();
-        }
-        Ok(())
+    }
+
+    /// Commit to GPU mode on a live device tableau: the host rows are dropped
+    /// and the SGI counters zeroed, since neither describes the tableau while
+    /// it lives on the device.
+    #[cfg(feature = "gpu")]
+    fn attach_device_tableau(
+        &mut self,
+        tableau: GpuTableau,
+        n: usize,
+        nw: usize,
+        num_classical_bits: usize,
+    ) {
+        self.n = n;
+        self.num_words = nw;
+        self.xz.clear();
+        self.phase.clear();
+        self.qubit_active = Vec::new();
+        self.total_weight = 0;
+        self.sgi_max_active = 0;
+        self.lazy_destab = false;
+        self.gate_row_start = 0;
+        self.gpu_tableau = Some(tableau);
+        self.pending_gpu_ops.clear();
+        self.gpu_batch_scratch.clear();
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
     }
 
     /// Opt into GPU acceleration using the given shared execution context.
@@ -577,6 +669,10 @@ impl StabilizerBackend {
     /// elimination. Halves gate cost for long Clifford prefixes with few
     /// measurements. Both the per-instruction [`Backend::apply`] path and the
     /// bulk apply paths preserve laziness across gates.
+    ///
+    /// Call this on a freshly initialized tableau: the sparse generator index
+    /// it installs takes the identity generators' supports as read rather than
+    /// scanning the rows.
     pub fn enable_lazy_destab(&mut self) {
         if self.lazy_destab || self.n == 0 {
             return;
@@ -951,20 +1047,18 @@ impl StabilizerBackend {
         (is_random, random_x_support, outcomes)
     }
 
-    /// Export a host-readable snapshot of the raw tableau: bit-packed `xz`
-    /// and per-row `phase`. When a GPU tableau is attached the data is copied
-    /// back via `GpuTableau::copy_to_host` with queued ops replayed; otherwise
-    /// the host vectors are cloned.
+    /// Export a host-readable snapshot of the tableau: bit-packed `xz` and
+    /// per-row `phase`, in the layout [`Self::init_from_tableau`] documents
+    /// and accepts. Destabilizers are current in the copy: a lazy backend
+    /// materializes them, and a device tableau is copied back with queued ops
+    /// replayed.
     ///
     /// Used by golden tests to compare GPU kernel output against the CPU
     /// reference byte for byte. Also gives user-facing diagnostics access to
     /// the underlying tableau without forcing statevector materialisation.
     pub fn export_tableau(&self) -> Result<(Vec<u64>, Vec<bool>)> {
-        #[cfg(feature = "gpu")]
-        if self.gpu_tableau.is_some() {
-            return self.copy_device_tableau_with_pending();
-        }
-        Ok((self.xz.clone(), self.phase.clone()))
+        let (xz, phase) = self.rows_with_destabilizers()?;
+        Ok((xz.into_owned(), phase.into_owned()))
     }
 
     /// Constructs the 2^n amplitude vector by projecting |0...0⟩ through each
@@ -1254,19 +1348,7 @@ impl Backend for StabilizerBackend {
                 }
                 Err(e) => return Err(e),
             };
-            self.n = n;
-            self.num_words = nw;
-            self.xz.clear();
-            self.phase.clear();
-            self.qubit_active = Vec::new();
-            self.total_weight = 0;
-            self.sgi_max_active = 0;
-            self.lazy_destab = false;
-            self.gate_row_start = 0;
-            self.gpu_tableau = Some(tableau);
-            self.pending_gpu_ops.clear();
-            self.gpu_batch_scratch.clear();
-            crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+            self.attach_device_tableau(tableau, n, nw, num_classical_bits);
             return Ok(());
         }
 

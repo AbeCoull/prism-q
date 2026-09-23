@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from prism_q import BackendKind, CircuitBuilder, circuits, simulate
+from prism_q import BackendKind, CircuitBuilder, PrismError, StabilizerBackend, circuits, simulate
 
 
 def _bell():
@@ -57,3 +57,43 @@ def test_pauli_backends_return_valid_marginals(backend):
     for p0, p1 in marginals:
         assert 0.0 <= p0 <= 1.0
         assert math.isclose(p0 + p1, 1.0, abs_tol=1e-6)
+
+
+def _clifford_halves(n, bits):
+    prefix = CircuitBuilder(n, bits)
+    for q in range(n):
+        prefix.h(q)
+    for q in range(n - 1):
+        prefix.cx(q, q + 1)
+    suffix = CircuitBuilder(n, bits)
+    for q in range(bits):
+        suffix.h(q).measure(q, q)
+    return prefix.build(), suffix.build()
+
+
+def test_stabilizer_tableau_round_trip_resumes_the_run():
+    prefix, suffix = _clifford_halves(6, 4)
+
+    whole = StabilizerBackend(seed=7)
+    whole.run(prefix)
+    expected = whole.apply(suffix)
+
+    prep = StabilizerBackend(seed=7)
+    prep.run(prefix)
+    words, phases = prep.export_tableau()
+    assert words.dtype == np.uint64
+    assert phases.dtype == np.bool_
+
+    resumed = StabilizerBackend(seed=7)
+    resumed.import_tableau(6, words, phases, num_classical_bits=4)
+    assert resumed.num_qubits == 6
+    assert resumed.apply(suffix) == expected
+
+
+def test_stabilizer_import_rejects_a_short_word_array():
+    prep = StabilizerBackend(seed=7)
+    prep.run(circuits.ghz(4))
+    words, phases = prep.export_tableau()
+    with pytest.raises(PrismError) as excinfo:
+        prep.import_tableau(4, words[:-1], phases)
+    assert excinfo.value.kind == "invalid_parameter"

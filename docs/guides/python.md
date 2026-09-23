@@ -225,6 +225,7 @@ print(result.metadata.engine)                # None unless samplers share the ba
 print(result.metadata.is_exact)              # True
 print(result.metadata.fidelity_lower_bound)  # None when exact
 print(result.metadata.placement)             # 'host' or 'device'
+print(result.metadata.bond)                  # None unless the MPS ran
 ```
 
 `is_exact` is False when the engine that ran can discard state weight or
@@ -232,6 +233,11 @@ estimate by sampling. It marks the route, not the run: an MPS whose bond
 dimension the circuit never fills reports `is_exact == False` with
 `fidelity_lower_bound == 1.0`, so the flag answers whether the answer could have
 been approximated and the bound answers whether it was.
+
+An MPS run also reports `bond`, with `peak` (the widest bond any cut kept over the
+run), `cap` (the configured maximum), and `saturated` (`peak >= cap`). Saturation is
+the signal that the cap bound the run: a run whose peak stayed under the cap
+truncated nothing on the cap's account, whatever the exactness label says.
 
 Automatic dispatch sends a circuit past the statevector cap to the sparse map when it
 is sparse-friendly and to a bounded-bond MPS otherwise. That is taken by default and
@@ -313,6 +319,34 @@ and its GPU sibling accept a mixture, so every other backend, `auto()`
 included, raises `PrismError` naming itself. The terminal table above applies
 unchanged, and setting a mixture clears an earlier `.initial_state()`, as that
 call clears a mixture.
+
+## Handing a Clifford state to a second run
+
+`StabilizerBackend` is a tableau held across calls. `run(circuit)` resets it to
+the circuit's width and runs the circuit; `export_tableau()` returns the rows as
+a `uint64` array of bit-packed words and a `bool` array of row signs;
+`import_tableau(num_qubits, words, phases, num_classical_bits)` starts a backend
+from that pair; and `apply(circuit)` runs a circuit on the held state without
+resetting it. The pair is the raw tableau, so it is the checkpoint format for a
+Clifford prefix that is expensive to replay.
+
+```python
+from prism_q import StabilizerBackend
+
+prep = StabilizerBackend(seed=42)
+prep.run(clifford_prefix)
+words, phases = prep.export_tableau()
+
+resumed = StabilizerBackend(seed=42)
+resumed.import_tableau(clifford_prefix.num_qubits, words, phases, num_classical_bits=8)
+bits = resumed.apply(measurement_suffix)
+```
+
+The import checks the lengths and that each destabilizer anticommutes with its
+stabilizer partner, nothing more; the intended input is an export. The random
+stream restarts from the importing backend's seed, so a resumed run and an
+uninterrupted one draw the same outcomes only when neither drew before the
+split.
 
 ## Selecting a backend
 
@@ -501,6 +535,17 @@ model.add_event(0, NoiseChannel.amplitude_damping(0.05), [0])
 model.add_event(1, NoiseChannel.two_qubit_depolarizing(0.02), [0, 1])
 model.with_readout_error(0.01, 0.01)
 model.validate()
+```
+
+A device calibration table lowers onto a circuit in one call. `DeviceCalibration.parse`
+reads the text form described in the [Noise and QEC guide](./qec.md), and the presets
+carry illustrative magnitudes for a technology class rather than a measured device:
+
+```python
+from prism_q import DeviceCalibration
+
+calibration = DeviceCalibration.superconducting_transmon(circuit.num_qubits)
+model = calibration.to_noise_model(circuit)
 ```
 
 Channels are `pauli(px, py, pz)`, `depolarizing(p)`, `amplitude_damping(gamma)`,

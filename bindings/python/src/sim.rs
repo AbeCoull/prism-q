@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use num_complex::Complex64;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
-    BackendKind, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel, ParamLink,
-    Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities,
+    BackendKind, BondReport, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel,
+    ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities,
     ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue, ShotsResult, bitstring,
     simulate as core_simulate,
 };
@@ -993,6 +993,12 @@ impl PyRunMetadata {
         self.inner.shots
     }
 
+    /// Peak bond dimension against the cap, `None` unless the MPS ran.
+    #[getter]
+    fn bond(&self) -> Option<PyBondReport> {
+        self.inner.bond.map(|inner| PyBondReport { inner })
+    }
+
     fn __repr__(&self) -> String {
         let exact = match self.inner.exactness {
             Exactness::Exact => "exact".to_string(),
@@ -1010,6 +1016,46 @@ impl PyRunMetadata {
             "RunMetadata(backend={}{engine}, {exact}, placement={})",
             self.backend(),
             self.placement()
+        )
+    }
+}
+
+/// Peak bond dimension an MPS run kept, beside the cap it ran under.
+#[pyclass(name = "BondReport", module = "prism_q")]
+pub struct PyBondReport {
+    inner: BondReport,
+}
+
+#[pymethods]
+impl PyBondReport {
+    /// Widest bond any cut kept over the run, never above `cap`.
+    #[getter]
+    fn peak(&self) -> usize {
+        self.inner.peak
+    }
+
+    /// The configured maximum bond dimension.
+    #[getter]
+    fn cap(&self) -> usize {
+        self.inner.cap
+    }
+
+    /// True when some cut reached the cap.
+    #[getter]
+    fn saturated(&self) -> bool {
+        self.inner.saturated()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "BondReport(peak={}, cap={}, saturated={})",
+            self.inner.peak,
+            self.inner.cap,
+            if self.inner.saturated() {
+                "True"
+            } else {
+                "False"
+            }
         )
     }
 }

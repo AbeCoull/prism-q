@@ -106,6 +106,12 @@ sampled result. `Auto` selecting an approximate backend is disclosed by the
 result, which is what makes `require_exact()` an opt-out: rejecting by default
 would remove the only route an oversize non-sparse circuit has.
 
+A run that resolved to the MPS also carries `bond`, a `BondReport` of the peak
+bond dimension any cut kept against the configured cap. Its `saturated()` is the
+signal that the cap bound the run; `Exactness::Approximate` marks the route and is
+reported whether or not the cap was reached. Every other backend leaves `bond`
+as `None`.
+
 `require_exact()` resolves the route from the circuit and errors before
 allocating, so it does not pay for state it would discard. Exactness is read
 from the route and the circuit together rather than from the route alone: an
@@ -142,6 +148,26 @@ to route against. `src/backend/memory.rs` holds the derivation and the other
 dense caps that share it.
 
 For a user-facing version of this decision, see [Choosing a Backend](../getting-started/choosing-a-backend.md).
+
+### Routes the tree does not show
+
+The tree above is the family choice for a state terminal. Six further routes
+are reachable under `Auto` alone, each tested before it and each with its own
+constants, in `src/sim/dispatch.rs` and `src/sim/mod.rs`:
+
+| Route | Taken when |
+| --- | --- |
+| Factored stabilizer | Clifford only, the circuit splits into independent components, at least 128 qubits, and the largest component is at least 16 |
+| Stabilizer rank, exact | A probability terminal on a unitary circuit of at most 25 qubits whose T count fits the budget `n - 2*ceil(log2 n)`, itself capped at 18 |
+| Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 |
+| Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits, truncating at 65536 terms |
+| Scalar tensor contraction | An expectation or marginals terminal whose planned contraction stays inside the peak bound |
+| Temporal Clifford split | A circuit at or below the statevector cap that is not Clifford only and opens with a Clifford prefix long enough to pay for the handover |
+
+Every one of them answers where the tree would have said statevector or
+stabilizer, so the backend a result reports is the only reliable statement of
+what ran. See
+[what a backend reports](backends.md#what-a-backend-reports-about-its-own-result).
 
 ## Start states other than |0...0>
 
@@ -183,7 +209,7 @@ outer product the pure-state load forms.
 
 ## Subsystem decomposition
 
-Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately with per-block Auto dispatch. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
+Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately: under `Auto` each block picks its own backend, and under an explicit kind every block runs that kind, so the merged result reports `Decomposed` rather than any one engine. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
 
 Block-level Rayon parallelism when all blocks are <14 qubits (avoids oversubscription with block-internal parallelism).
 

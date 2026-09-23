@@ -103,6 +103,19 @@ pub enum BackendKind {
     ProductState,
     /// Deferred-contraction tensor network for low-treewidth circuits.
     TensorNetwork,
+    /// The tensor network with bond truncation at the peak cap.
+    ///
+    /// An intermediate over the tensor-network peak cap is factored and the
+    /// new bond kept only as far as discarding at most `tolerance` of that
+    /// cut's squared weight allows; index slicing covers whatever stays above
+    /// the cap. `tolerance` must be finite and above zero, since zero is
+    /// [`BackendKind::TensorNetwork`]. The run is approximate, so
+    /// [`Simulate::require_exact`] rejects it.
+    ///
+    /// [`Simulate::require_exact`]: crate::sim::Simulate::require_exact
+    TensorNetworkBounded {
+        tolerance: f64,
+    },
     /// Dynamic split-state simulation for sparse-entanglement circuits.
     Factored,
     /// Clifford+T decomposition into weighted stabilizer branches.
@@ -284,6 +297,7 @@ impl BackendKind {
             | BackendKind::ProductState
             | BackendKind::Factored
             | BackendKind::TensorNetwork
+            | BackendKind::TensorNetworkBounded { .. }
             | BackendKind::DensityMatrix => true,
             #[cfg(feature = "gpu")]
             BackendKind::AutoGpu { .. }
@@ -333,6 +347,16 @@ pub(super) fn validate_explicit_backend(kind: &BackendKind, circuit: &Circuit) -
             return Err(PrismError::IncompatibleBackend {
                 backend: "productstate".into(),
                 reason: "circuit contains entangling gates".into(),
+            });
+        }
+        BackendKind::TensorNetworkBounded { tolerance }
+            if !(tolerance.is_finite() && *tolerance > 0.0) =>
+        {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "tensor-network tolerance must be a finite fraction above zero, got {tolerance}; \
+                     TensorNetwork is the exact contraction"
+                ),
             });
         }
         BackendKind::StabilizerRank if !circuit.has_t_gates() => {
@@ -597,7 +621,9 @@ fn build_stabilizer(accel: &Accel, lazy: bool, seed: u64) -> StabilizerBackend {
 pub(super) enum BackendPlan {
     ProductState,
     Sparse,
-    TensorNetwork,
+    TensorNetwork {
+        tolerance: Option<f64>,
+    },
     Factored,
     FactoredStabilizer,
     Mps {
@@ -649,9 +675,12 @@ pub(super) fn same_plan(a: &BackendPlan, b: &BackendPlan) -> bool {
     match (a, b) {
         (BackendPlan::ProductState, BackendPlan::ProductState)
         | (BackendPlan::Sparse, BackendPlan::Sparse)
-        | (BackendPlan::TensorNetwork, BackendPlan::TensorNetwork)
         | (BackendPlan::Factored, BackendPlan::Factored)
         | (BackendPlan::FactoredStabilizer, BackendPlan::FactoredStabilizer) => true,
+        (
+            BackendPlan::TensorNetwork { tolerance: x },
+            BackendPlan::TensorNetwork { tolerance: y },
+        ) => x == y,
         (BackendPlan::Mps { max_bond_dim: x }, BackendPlan::Mps { max_bond_dim: y }) => x == y,
         (
             BackendPlan::Stabilizer {
@@ -678,7 +707,7 @@ impl BackendPlan {
         match self {
             BackendPlan::ProductState => ResolvedBackend::ProductState,
             BackendPlan::Sparse => ResolvedBackend::Sparse,
-            BackendPlan::TensorNetwork => ResolvedBackend::TensorNetwork,
+            BackendPlan::TensorNetwork { .. } => ResolvedBackend::TensorNetwork,
             BackendPlan::Factored => ResolvedBackend::Factored,
             BackendPlan::FactoredStabilizer => ResolvedBackend::FactoredStabilizer,
             BackendPlan::Mps { .. } => ResolvedBackend::Mps,
@@ -694,7 +723,10 @@ impl BackendPlan {
         match self {
             BackendPlan::ProductState => Box::new(ProductStateBackend::new(seed)),
             BackendPlan::Sparse => Box::new(SparseBackend::new(seed)),
-            BackendPlan::TensorNetwork => Box::new(TensorNetworkBackend::new(seed)),
+            BackendPlan::TensorNetwork { tolerance } => Box::new(match *tolerance {
+                Some(tolerance) => TensorNetworkBackend::with_tolerance(seed, tolerance),
+                None => TensorNetworkBackend::new(seed),
+            }),
             BackendPlan::Factored => Box::new(crate::backend::factored::FactoredBackend::new(seed)),
             BackendPlan::FactoredStabilizer => {
                 Box::new(crate::backend::factored_stabilizer::FactoredStabilizerBackend::new(seed))
@@ -726,7 +758,7 @@ impl BackendPlan {
         match self {
             BackendPlan::ProductState => Family::ProductState,
             BackendPlan::Sparse => Family::Sparse,
-            BackendPlan::TensorNetwork => Family::TensorNetwork,
+            BackendPlan::TensorNetwork { .. } => Family::TensorNetwork,
             BackendPlan::Factored => Family::Factored,
             BackendPlan::FactoredStabilizer => Family::FactoredStabilizer,
             BackendPlan::Mps { .. } => Family::Mps,
@@ -790,6 +822,7 @@ pub(super) fn approximate_route_name(
             }
             return Some("Mps");
         }
+        BackendKind::TensorNetworkBounded { .. } => return Some("TensorNetworkBounded"),
         BackendKind::StochasticPauli { .. } => return Some("StochasticPauli"),
         BackendKind::DeterministicPauli { truncation } => match *truncation {
             SpdTruncation::Threshold { epsilon, max_terms } => {
@@ -826,7 +859,12 @@ pub(super) fn plan_for_family(
     match family {
         Family::ProductState => BackendPlan::ProductState,
         Family::Sparse => BackendPlan::Sparse,
-        Family::TensorNetwork => BackendPlan::TensorNetwork,
+        Family::TensorNetwork => BackendPlan::TensorNetwork {
+            tolerance: match kind {
+                BackendKind::TensorNetworkBounded { tolerance } => Some(*tolerance),
+                _ => None,
+            },
+        },
         Family::Factored => BackendPlan::Factored,
         Family::FactoredStabilizer => BackendPlan::FactoredStabilizer,
         Family::Mps => BackendPlan::Mps {
@@ -877,7 +915,9 @@ pub(super) fn resolve(
             });
         }
         BackendKind::ProductState => Family::ProductState,
-        BackendKind::TensorNetwork => Family::TensorNetwork,
+        BackendKind::TensorNetwork | BackendKind::TensorNetworkBounded { .. } => {
+            Family::TensorNetwork
+        }
         BackendKind::Factored => Family::Factored,
         BackendKind::FactoredStabilizer => Family::FactoredStabilizer,
         BackendKind::DensityMatrix => Family::DensityMatrix,

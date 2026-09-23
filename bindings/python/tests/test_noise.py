@@ -1,7 +1,14 @@
 import pytest
 
 import prism_q
-from prism_q import CircuitBuilder, NoiseChannel, NoiseModel, parse_qasm, simulate
+from prism_q import (
+    CircuitBuilder,
+    DeviceCalibration,
+    NoiseChannel,
+    NoiseModel,
+    parse_qasm,
+    simulate,
+)
 
 BELL_QASM = """
 OPENQASM 3.0;
@@ -38,6 +45,28 @@ def test_amplitude_damping_is_not_pauli_only():
     assert not model.is_pauli_only()
     counts = simulate(circuit).seed(1).noise(model).shots(1000).counts()
     assert sum(counts.values()) == 1000
+
+
+def test_device_calibration_parses_and_lowers():
+    circuit = parse_qasm(BELL_QASM)
+    calibration = DeviceCalibration.parse(
+        "qubit 0 t1=120e-6 t2=80e-6 p01=0.02 p10=0.03\n"
+        "qubit 1 t1=95e-6 t2=110e-6\n"
+        "gate1q time=35e-9 error=3e-4\n"
+        "gate2q time=300e-9 error=8e-3\n"
+    )
+    assert calibration.num_qubits == 2
+    model = calibration.to_noise_model(circuit)
+    model.validate()
+    assert not model.is_pauli_only()
+    counts = simulate(circuit).seed(1).noise(model).shots(1000).counts()
+    assert sum(counts.values()) == 1000
+
+    preset = DeviceCalibration.superconducting_transmon(2)
+    preset.to_noise_model(circuit).validate()
+    with pytest.raises(prism_q.PrismError) as info:
+        DeviceCalibration.parse("qubit 0 t1=1e-4 t2=5e-4\n")
+    assert "line 1" in str(info.value)
 
 
 def test_readout_error_applies():

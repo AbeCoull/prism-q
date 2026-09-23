@@ -1,8 +1,9 @@
 //! `Gate` wrapper exposing only the safe, user-constructible gate set.
 //!
-//! The fusion-internal variants (`Fused`, `BatchPhase`, `MultiFused`, ...) are
-//! never exposed: they carry internal qubit indices and constructing them by
-//! hand corrupts simulation state.
+//! The batched variants (`BatchPhase`, `MultiFused`, ...) are never exposed:
+//! they carry internal qubit indices and constructing them by hand corrupts
+//! simulation state. A dense matrix reaches the fused forms through
+//! `Gate.unitary`, which validates it first.
 
 use num_complex::Complex64;
 use prism_q::Gate;
@@ -130,6 +131,28 @@ impl PyGate {
             return Err(invalid("mcu requires at least one control qubit"));
         }
         Ok(Self(Gate::mcu(extract_2x2(matrix)?, num_controls)))
+    }
+
+    /// Dense unitary from a `2^k x 2^k` complex matrix, the first target qubit
+    /// indexing the most significant bit of both matrix indices.
+    ///
+    /// The matrix is checked unitary and comes back as whichever gate carries
+    /// it: a named gate or a one-qubit matrix at `k = 1`, a named two-qubit
+    /// gate or a 4x4 matrix at `k = 2`, `mcu` when it is the identity outside
+    /// its trailing 2x2 block, and a dense `k`-qubit gate otherwise.
+    #[staticmethod]
+    fn unitary(matrix: &Bound<'_, PyAny>) -> PyPrismResult<Self> {
+        let rows: Vec<Vec<Complex64>> = matrix.extract().map_err(|_| {
+            invalid("expected a square complex matrix (nested sequence or ndarray)")
+        })?;
+        let dim = rows.len();
+        if !dim.is_power_of_two() || rows.iter().any(|row| row.len() != dim) {
+            return Err(invalid(format!(
+                "matrix must be square with a power-of-two side, got {dim} rows"
+            )));
+        }
+        let flat: Vec<Complex64> = rows.into_iter().flatten().collect();
+        Ok(Self(Gate::unitary(flat, dim.trailing_zeros() as usize)?))
     }
 
     /// Number of qubits the gate acts on.

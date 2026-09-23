@@ -2754,6 +2754,15 @@ impl MpsBackend {
                 let gate_mat = mcu_matrix(num_ctrl, &data.mat, &role_order);
                 self.apply_n_qubit_gate(&gate_mat, dim, &all_qubits)?;
             }
+            Gate::Unitary(data) => {
+                let n = data.num_qubits();
+                self.check_n_qubit_gate_matrix(n)?;
+                let sites: Vec<usize> = targets
+                    .iter()
+                    .map(|&qubit| self.site_for_logical(qubit))
+                    .collect();
+                self.apply_n_qubit_gate(data.matrix(), 1 << n, &sites)?;
+            }
             Gate::BatchPhase(data) => {
                 if let [(target, phase)] = data.phases[..] {
                     let g = crate::gates::cu_matrix_4x4(&[[ONE, ZERO], [ZERO, phase]]);

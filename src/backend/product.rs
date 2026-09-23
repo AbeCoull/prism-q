@@ -81,7 +81,8 @@ impl ProductStateBackend {
             | Gate::BatchPhase(_)
             | Gate::BatchRzz(_)
             | Gate::Fused2q(_)
-            | Gate::Multi2q(_) => Err(PrismError::BackendUnsupported {
+            | Gate::Multi2q(_)
+            | Gate::Unitary(_) => Err(PrismError::BackendUnsupported {
                 backend: "productstate".to_string(),
                 operation: format!(
                     "entangling gate `{}` (product state backend supports single-qubit gates only)",

@@ -18,8 +18,9 @@ use crate::backend::simd;
 use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_mcu_qubits};
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{
-    BatchPhaseData, BatchRzzData, DiagEntry, Gate, MULTI_2Q_HIGH_BUDGET, diag_entries_phase,
-    multi_2q_high_budget, multi_2q_low_bits, multi_2q_tile_bits, pauli_rot_masks,
+    BatchPhaseData, BatchRzzData, DiagEntry, Gate, MAX_UNITARY_QUBITS, MULTI_2Q_HIGH_BUDGET,
+    diag_entries_phase, multi_2q_high_budget, multi_2q_low_bits, multi_2q_tile_bits,
+    pauli_rot_masks,
 };
 use crate::sim::unified_pauli::PauliAxis;
 #[cfg(feature = "parallel")]
@@ -1991,6 +1992,123 @@ fn apply_multi_1q_shared(state: &mut [Complex64], gates: &[(usize, [[Complex64; 
     });
 }
 
+/// Gather offsets of a dense unitary's `2^k` amplitudes from a base index:
+/// matrix index `m` reads bit `k - 1 - i` for `targets[i]`, so `targets[0]`
+/// is the most significant matrix-index bit.
+#[inline(always)]
+fn unitary_offsets(targets: &[usize]) -> [usize; 1 << MAX_UNITARY_QUBITS] {
+    let k = targets.len();
+    let mut offsets = [0usize; 1 << MAX_UNITARY_QUBITS];
+    for (m, offset) in offsets.iter_mut().enumerate().take(1 << k) {
+        for (i, &target) in targets.iter().enumerate() {
+            *offset |= ((m >> (k - 1 - i)) & 1) << target;
+        }
+    }
+    offsets
+}
+
+/// Targets sorted ascending, the order `insert_zero_bit` needs to place a base
+/// index around every target bit.
+#[inline(always)]
+fn sorted_unitary_targets(targets: &[usize]) -> [usize; MAX_UNITARY_QUBITS] {
+    let mut sorted = [0usize; MAX_UNITARY_QUBITS];
+    sorted[..targets.len()].copy_from_slice(targets);
+    sorted[..targets.len()].sort_unstable();
+    sorted
+}
+
+/// `state[base + offsets[r]] = sum_c mat[r * dim + c] * state[base + offsets[c]]`
+/// over the `dim` amplitudes one base index selects, `amps` the gather buffer.
+///
+/// # Safety
+/// `base + off` must index the buffer behind `ptr` for every entry of
+/// `offsets`, and nothing else may touch those amplitudes meanwhile.
+#[inline(always)]
+unsafe fn apply_unitary_at(
+    ptr: *mut Complex64,
+    base: usize,
+    offsets: &[usize],
+    mat: &[Complex64],
+    amps: &mut [Complex64],
+) {
+    let dim = offsets.len();
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        for (slot, &off) in amps.iter_mut().zip(offsets) {
+            *slot = *ptr.add(base + off);
+        }
+        for (row, &off) in offsets.iter().enumerate() {
+            let coeffs = mat.get_unchecked(row * dim..(row + 1) * dim);
+            let mut acc = Complex64::new(0.0, 0.0);
+            for (c, a) in coeffs.iter().zip(amps.iter()) {
+                acc += c * a;
+            }
+            *ptr.add(base + off) = acc;
+        }
+    }
+}
+
+/// Apply a dense `2^k x 2^k` matrix over `targets` in one gather-scatter pass,
+/// `targets[0]` the most significant matrix-index bit. Shared with the
+/// factored backend, whose blocks are bare statevector slices.
+#[inline(always)]
+pub(crate) fn apply_unitary_seq(state: &mut [Complex64], targets: &[usize], mat: &[Complex64]) {
+    let k = targets.len();
+    let dim = 1usize << k;
+    let sorted = sorted_unitary_targets(targets);
+    let offsets = unitary_offsets(targets);
+    let num_bases = state.len() >> k;
+    let ptr = state.as_mut_ptr();
+    let mut amps = [Complex64::new(0.0, 0.0); 1 << MAX_UNITARY_QUBITS];
+    for i in 0..num_bases {
+        let mut base = i;
+        for &q in &sorted[..k] {
+            base = insert_zero_bit(base, q);
+        }
+        // SAFETY: insert_zero_bit over the ascending targets maps each base
+        // index onto an in-bounds index with every target bit clear, so the
+        // `dim` offsets select in-bounds amplitudes disjoint across bases.
+        unsafe {
+            apply_unitary_at(ptr, base, &offsets[..dim], mat, &mut amps[..dim]);
+        }
+    }
+}
+
+/// [`apply_unitary_seq`] with the base indices split across Rayon tasks.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+pub(crate) fn par_apply_unitary(state: &mut [Complex64], targets: &[usize], mat: &[Complex64]) {
+    let k = targets.len();
+    let dim = 1usize << k;
+    let sorted = sorted_unitary_targets(targets);
+    let offsets = unitary_offsets(targets);
+    let num_bases = state.len() >> k;
+    let ptr = SendPtr(state.as_mut_ptr());
+    (0..num_bases)
+        .into_par_iter()
+        .with_min_len(MIN_PAR_ITERS)
+        .for_each(move |i| {
+            let mut amps = [Complex64::new(0.0, 0.0); 1 << MAX_UNITARY_QUBITS];
+            let mut base = i;
+            for &q in &sorted[..k] {
+                base = insert_zero_bit(base, q);
+            }
+            // SAFETY: insert_zero_bit over the ascending targets maps each
+            // base index onto an in-bounds index with every target bit clear,
+            // so the `dim` offsets select in-bounds amplitudes disjoint across
+            // bases, and no two Rayon tasks share an amplitude.
+            unsafe {
+                apply_unitary_at(
+                    ptr.as_complex_ptr(),
+                    base,
+                    &offsets[..dim],
+                    mat,
+                    &mut amps[..dim],
+                );
+            }
+        });
+}
+
 /// Apply a `MultiFused` batch in the tiered tiled pass. Shared with the factored
 /// backend, whose blocks are bare statevector slices.
 #[cfg(feature = "parallel")]
@@ -2593,6 +2711,16 @@ impl StatevectorBackend {
                     }
                 });
         }
+    }
+
+    #[inline(always)]
+    pub(super) fn apply_unitary(&mut self, targets: &[usize], mat: &[Complex64]) {
+        #[cfg(feature = "parallel")]
+        if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS {
+            par_apply_unitary(&mut self.state, targets, mat);
+            return;
+        }
+        apply_unitary_seq(&mut self.state, targets, mat);
     }
 
     #[inline(always)]

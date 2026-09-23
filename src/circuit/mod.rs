@@ -106,6 +106,39 @@ impl Circuit {
         self.add_gate(gate, &targets);
     }
 
+    /// Append the `2^k x 2^k` unitary `mat` on the `k` qubits `targets`.
+    ///
+    /// Lowers the matrix the way [`Gate::unitary`] does and, on top of that,
+    /// a diagonal one to a [`Gate::DiagonalBatch`] whenever its phases factor
+    /// into one and two body terms, which needs the target qubits and so
+    /// cannot happen in the target-free constructor. A diagonal that does not
+    /// factor (a `CCZ` reaches `Mcu` first; a general three-body phase does
+    /// not) stays dense.
+    ///
+    /// # Errors
+    /// The errors of [`Gate::unitary`], with `k` read from `targets.len()`.
+    ///
+    /// # Panics
+    /// Panics if any target index is out of bounds.
+    pub fn add_unitary(
+        &mut self,
+        mat: Vec<Complex64>,
+        targets: &[usize],
+    ) -> crate::error::Result<()> {
+        let gate = match Gate::unitary(mat, targets.len())? {
+            Gate::Fused2q(m) => {
+                let flat: Vec<Complex64> = m.iter().flat_map(|row| row.iter().copied()).collect();
+                crate::gates::diagonal_batch(&flat, targets).unwrap_or(Gate::Fused2q(m))
+            }
+            Gate::Unitary(data) => {
+                crate::gates::diagonal_batch(data.matrix(), targets).unwrap_or(Gate::Unitary(data))
+            }
+            other => other,
+        };
+        self.add_gate(gate, targets);
+        Ok(())
+    }
+
     /// Append a measurement operation.
     ///
     /// # Panics

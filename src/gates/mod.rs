@@ -140,6 +140,220 @@ pub enum Gate {
     /// statevector applies it in one pass; backends without the kernel receive
     /// the CNOT-ladder lowering from `circuit::expand_pauli_rotations`.
     PauliRot(Box<PauliRotData>),
+
+    /// Dense unitary on three or more qubits, a row-major `2^k x 2^k` matrix
+    /// with `targets[0]` the most significant bit of both indices, the packing
+    /// [`Gate::matrix_4x4`] uses.
+    ///
+    /// Built only by [`Gate::unitary`], which lowers one and two qubit
+    /// matrices and the structured wider ones into the existing variants, so
+    /// this variant carries only what nothing else can. The CPU statevector
+    /// applies it in one gather-scatter pass; the factored, density matrix,
+    /// MPS, and tensor network backends apply it through their dense paths,
+    /// and every other backend declines it by name.
+    Unitary(Box<UnitaryData>),
+}
+
+/// Widest matrix [`Gate::unitary`] accepts, in qubits.
+pub const MAX_UNITARY_QUBITS: usize = 4;
+
+/// Tolerance on `max |(U^dagger U - I)_ij|` for a matrix [`Gate::unitary`]
+/// accepts, matching the norm tolerance on a caller-supplied start state.
+const UNITARY_EPS: f64 = 1e-9;
+
+/// Data for a dense multi-qubit unitary.
+///
+/// Fields are private: the kernels read `num_qubits` and the matrix length as
+/// one fact, and a disagreement between them is an out-of-bounds read rather
+/// than a wrong answer. [`Gate::unitary`] is the only constructor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitaryData {
+    mat: Vec<Complex64>,
+    num_qubits: u8,
+}
+
+impl UnitaryData {
+    /// Row-major `2^k x 2^k` entries, `targets[0]` the most significant index
+    /// bit.
+    pub fn matrix(&self) -> &[Complex64] {
+        &self.mat
+    }
+
+    pub fn num_qubits(&self) -> usize {
+        self.num_qubits as usize
+    }
+
+    fn adjoint(&self) -> UnitaryData {
+        let dim = 1usize << self.num_qubits;
+        let mut mat = vec![Complex64::new(0.0, 0.0); dim * dim];
+        for row in 0..dim {
+            for column in 0..dim {
+                mat[row * dim + column] = self.mat[column * dim + row].conj();
+            }
+        }
+        UnitaryData {
+            mat,
+            num_qubits: self.num_qubits,
+        }
+    }
+
+    pub(crate) fn conjugated(&self) -> UnitaryData {
+        UnitaryData {
+            mat: self.mat.iter().map(Complex64::conj).collect(),
+            num_qubits: self.num_qubits,
+        }
+    }
+}
+
+/// Reject a matrix [`Gate::unitary`] cannot carry: a width outside
+/// `1..=MAX_UNITARY_QUBITS`, a length other than `4^k`, a non-finite entry,
+/// or a deviation of `U^dagger U` from the identity past `UNITARY_EPS`.
+fn check_unitary_matrix(mat: &[Complex64], num_qubits: usize) -> crate::error::Result<()> {
+    let invalid = |message: String| crate::error::PrismError::InvalidParameter { message };
+    if num_qubits == 0 || num_qubits > MAX_UNITARY_QUBITS {
+        return Err(invalid(format!(
+            "a unitary needs between 1 and {MAX_UNITARY_QUBITS} qubits, got {num_qubits}"
+        )));
+    }
+    let dim = 1usize << num_qubits;
+    if mat.len() != dim * dim {
+        return Err(invalid(format!(
+            "a {num_qubits}-qubit unitary needs {} entries ({dim}x{dim}), got {}",
+            dim * dim,
+            mat.len()
+        )));
+    }
+    if let Some(index) = mat.iter().position(|entry| !entry.is_finite()) {
+        return Err(invalid(format!(
+            "unitary entry ({}, {}) is not finite",
+            index / dim,
+            index % dim
+        )));
+    }
+    let mut worst = (0.0f64, 0usize, 0usize);
+    for i in 0..dim {
+        for j in 0..dim {
+            let mut dot = Complex64::new(0.0, 0.0);
+            for row in 0..dim {
+                dot += mat[row * dim + i].conj() * mat[row * dim + j];
+            }
+            if i == j {
+                dot -= Complex64::new(1.0, 0.0);
+            }
+            let deviation = dot.norm();
+            if deviation > worst.0 {
+                worst = (deviation, i, j);
+            }
+        }
+    }
+    if worst.0 > UNITARY_EPS {
+        return Err(invalid(format!(
+            "matrix is not unitary: U^dagger U differs from the identity by {:.3e} at ({}, {}), \
+             above the {UNITARY_EPS:e} tolerance",
+            worst.0, worst.1, worst.2
+        )));
+    }
+    Ok(())
+}
+
+/// The trailing 2x2 block of `mat` when everything outside it is the identity,
+/// which is the `Mcu` shape with every other qubit a control.
+fn controlled_block(mat: &[Complex64], num_qubits: usize) -> Option<[[Complex64; 2]; 2]> {
+    let dim = 1usize << num_qubits;
+    let split = dim - 2;
+    for row in 0..dim {
+        for column in 0..dim {
+            if row >= split && column >= split {
+                continue;
+            }
+            let expected = if row == column { 1.0 } else { 0.0 };
+            if (mat[row * dim + column] - Complex64::new(expected, 0.0)).norm() >= IDENTITY_EPS {
+                return None;
+            }
+        }
+    }
+    Some([
+        [mat[split * dim + split], mat[split * dim + split + 1]],
+        [
+            mat[(split + 1) * dim + split],
+            mat[(split + 1) * dim + split + 1],
+        ],
+    ])
+}
+
+/// A diagonal `2^k x 2^k` matrix over `targets` as a [`Gate::DiagonalBatch`],
+/// or `None` when it is not diagonal or its phases do not factor into the one
+/// and two body terms [`DiagEntry`] spells (a `CCZ` does not).
+///
+/// The factorization is the multiplicative Moebius inversion of the diagonal
+/// over the subsets of size at most two, and the product is checked against
+/// every entry within `UNITARY_EPS` before the batch is trusted. The global
+/// phase rides on the first target's `d0`, so the batch reproduces the matrix
+/// rather than the matrix up to phase.
+pub(crate) fn diagonal_batch(mat: &[Complex64], targets: &[usize]) -> Option<Gate> {
+    let k = targets.len();
+    let dim = 1usize << k;
+    for row in 0..dim {
+        for column in 0..dim {
+            if row != column && mat[row * dim + column].norm() >= IDENTITY_EPS {
+                return None;
+            }
+        }
+    }
+    let diag = |index: usize| mat[index * dim + index];
+    let unit = |i: usize| 1usize << (k - 1 - i);
+    let one = Complex64::new(1.0, 0.0);
+    let g0 = diag(0);
+    let g1: Vec<Complex64> = (0..k).map(|i| diag(unit(i)) / g0).collect();
+    let mut g2 = vec![one; k * k];
+    for i in 0..k {
+        for j in i + 1..k {
+            g2[i * k + j] = diag(unit(i) | unit(j)) * g0 / (diag(unit(i)) * diag(unit(j)));
+        }
+    }
+    for index in 0..dim {
+        let mut product = g0;
+        for i in 0..k {
+            if index & unit(i) == 0 {
+                continue;
+            }
+            product *= g1[i];
+            for j in i + 1..k {
+                if index & unit(j) != 0 {
+                    product *= g2[i * k + j];
+                }
+            }
+        }
+        if (product - diag(index)).norm() > UNITARY_EPS {
+            return None;
+        }
+    }
+    let mut entries = Vec::with_capacity(k + k * (k - 1) / 2);
+    entries.push(DiagEntry::Phase1q {
+        qubit: targets[0],
+        d0: g0,
+        d1: g0 * g1[0],
+    });
+    for i in 1..k {
+        entries.push(DiagEntry::Phase1q {
+            qubit: targets[i],
+            d0: one,
+            d1: g1[i],
+        });
+    }
+    for i in 0..k {
+        for j in i + 1..k {
+            let phase = g2[i * k + j];
+            if (phase - one).norm() >= IDENTITY_EPS {
+                entries.push(DiagEntry::Phase2q {
+                    q0: targets[i],
+                    q1: targets[j],
+                    phase,
+                });
+            }
+        }
+    }
+    Some(Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })))
 }
 
 /// Analytic differentiation generator for a parametric gate.
@@ -622,6 +836,7 @@ impl Gate {
             }
             Gate::DiagonalBatch(data) => count_unique_diag_qubits(&data.entries),
             Gate::PauliRot(data) => data.axes.len(),
+            Gate::Unitary(data) => data.num_qubits(),
             Gate::MultiFused(data) => data.gates.len(),
             Gate::Multi2q(data) => {
                 count_unique_qubits(data.gates.iter().flat_map(|&(q0, q1, _)| [q0, q1]))
@@ -712,6 +927,7 @@ impl Gate {
             | Gate::BatchRzz(_)
             | Gate::DiagonalBatch(_)
             | Gate::PauliRot(_)
+            | Gate::Unitary(_)
             | Gate::MultiFused(_)
             | Gate::Fused2q(_)
             | Gate::Multi2q(_) => {
@@ -828,6 +1044,7 @@ impl Gate {
                 }
                 Some(out)
             }
+            Gate::Unitary(data) => Some(data.mat.clone()),
             _ if self.num_qubits() == 1 => {
                 let m = self.matrix_2x2();
                 Some(vec![m[0][0], m[0][1], m[1][0], m[1][1]])
@@ -869,6 +1086,7 @@ impl Gate {
             Gate::BatchPhase(_) => "batch_phase",
             Gate::QftBlock { .. } => "qft_block",
             Gate::PauliRot(_) => "pauli_rot",
+            Gate::Unitary(_) => "unitary",
             Gate::BatchRzz(_) => "batch_rzz",
             Gate::DiagonalBatch(_) => "diagonal_batch",
             Gate::MultiFused(_) => "multi_fused",
@@ -910,6 +1128,7 @@ impl Gate {
                 theta: -data.theta,
                 axes: data.axes.clone(),
             })),
+            Gate::Unitary(data) => Gate::Unitary(Box::new(data.adjoint())),
             Gate::BatchRzz(data) => Gate::BatchRzz(Box::new(BatchRzzData {
                 edges: data
                     .edges
@@ -1100,6 +1319,47 @@ impl Gate {
             return Gate::cu(mat);
         }
         Gate::Mcu(Box::new(McuData { mat, num_controls }))
+    }
+
+    /// Build the gate applying the `2^k x 2^k` matrix `mat` to `k` qubits.
+    ///
+    /// `mat` is row major with `targets[0]` the most significant bit of both
+    /// indices, the packing [`Gate::matrix_4x4`] uses. The result is whichever
+    /// existing variant carries the matrix: a named gate or `Fused` at one
+    /// qubit; `Cx`, `Cz`, `Swap`, `Rzz`, `Cu`, or `Fused2q` at two; `Mcu` when
+    /// the matrix is the identity outside its trailing 2x2 block; and
+    /// [`Gate::Unitary`] only for a dense matrix on three or more qubits, so
+    /// Clifford recognition, controlled-phase dispatch, and fusion keep firing
+    /// on the forms they know. A diagonal on three or more qubits needs the
+    /// target qubits to lower; [`crate::Circuit::add_unitary`] does that.
+    ///
+    /// # Errors
+    /// `InvalidParameter` when `num_qubits` is zero or above
+    /// [`MAX_UNITARY_QUBITS`], when `mat.len()` is not `4^num_qubits`, when an
+    /// entry is not finite, or when `U^dagger U` differs from the identity by
+    /// more than `1e-9` in any entry.
+    pub fn unitary(mat: Vec<Complex64>, num_qubits: usize) -> crate::error::Result<Gate> {
+        check_unitary_matrix(&mat, num_qubits)?;
+        Ok(match num_qubits {
+            1 => {
+                let m = [[mat[0], mat[1]], [mat[2], mat[3]]];
+                Gate::recognize_matrix(&m).unwrap_or_else(|| Gate::Fused(Box::new(m)))
+            }
+            2 => {
+                let mut m = [[Complex64::new(0.0, 0.0); 4]; 4];
+                for (row, entries) in m.iter_mut().enumerate() {
+                    entries.copy_from_slice(&mat[row * 4..row * 4 + 4]);
+                }
+                recognize_matrix_4x4(&m)
+            }
+            _ => match controlled_block(&mat, num_qubits) {
+                Some(block) => Gate::mcu(block, (num_qubits - 1) as u8),
+                None => Gate::Unitary(Box::new(UnitaryData {
+                    mat,
+                    num_qubits: num_qubits as u8,
+                })),
+            },
+        })
     }
 
     /// Create a controlled-phase gate CPhase(θ) = Cu(\[\[1,0\],\[0,e^{iθ}\]\]).
@@ -1384,6 +1644,33 @@ fn matrices_equal(a: &[[Complex64; 2]; 2], b: &[[Complex64; 2]; 2], eps: f64) ->
     (0..2).all(|i| (0..2).all(|j| (a[i][j] - b[i][j]).norm() <= eps))
 }
 
+fn matrices_equal_4x4(a: &[[Complex64; 4]; 4], b: &[[Complex64; 4]; 4], eps: f64) -> bool {
+    (0..4).all(|i| (0..4).all(|j| (a[i][j] - b[i][j]).norm() <= eps))
+}
+
+/// The named two-qubit gate `mat` equals within `RECOGNIZE_EPS`, then `Rzz`,
+/// then `Cu` when the matrix is the identity outside its trailing block, else
+/// `Fused2q`. Exact, not up to a global phase, for the reason
+/// [`Gate::recognize_matrix`] gives.
+fn recognize_matrix_4x4(mat: &[[Complex64; 4]; 4]) -> Gate {
+    for candidate in [Gate::Cx, Gate::Cz, Gate::Swap] {
+        if matrices_equal_4x4(mat, &candidate.matrix_4x4(), RECOGNIZE_EPS) {
+            return candidate;
+        }
+    }
+    if is_diagonal_4x4(mat) {
+        let theta = 2.0 * mat[1][1].arg();
+        if matrices_equal_4x4(mat, &Gate::Rzz(theta).matrix_4x4(), RECOGNIZE_EPS) {
+            return Gate::Rzz(theta);
+        }
+    }
+    let flat: Vec<Complex64> = mat.iter().flat_map(|row| row.iter().copied()).collect();
+    match controlled_block(&flat, 2) {
+        Some(block) => Gate::cu(block),
+        None => Gate::Fused2q(Box::new(*mat)),
+    }
+}
+
 fn format_angle(theta: f64) -> String {
     const FRACTIONS: &[(f64, &str)] = &[
         (1.0, "π"),
@@ -1444,6 +1731,7 @@ impl fmt::Display for Gate {
             Gate::Mcu(data) => write!(f, "MCU({}ctrl)", data.num_controls),
             Gate::Fused(_) => f.write_str("U"),
             Gate::Fused2q(_) => f.write_str("U2"),
+            Gate::Unitary(data) => write!(f, "U{}", data.num_qubits()),
             Gate::MultiFused(data) => write!(f, "MF[{}]", data.gates.len()),
             Gate::BatchPhase(data) => write!(f, "BP[{}]", data.phases.len()),
             Gate::QftBlock { start, num } => write!(f, "QFT[{}..{}]", start, start + num),

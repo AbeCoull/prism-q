@@ -16,7 +16,8 @@
 //! OpenQASM spelling and are rejected: `MultiFused`, `Multi2q`,
 //! `BatchPhase`, `BatchRzz`, `DiagonalBatch`, a `Fused2q` outside the two-qubit
 //! families the parser builds, and a single-qubit matrix carrying a global phase
-//! no named rotation absorbs.
+//! no named rotation absorbs. A dense [`Gate::Unitary`] is rejected for the same
+//! reason: the subset has no syntax carrying a matrix literal.
 
 use num_complex::Complex64;
 use std::collections::BTreeSet;

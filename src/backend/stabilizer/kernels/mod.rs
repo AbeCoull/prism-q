@@ -449,7 +449,8 @@ impl StabilizerBackend {
             | Gate::Fused2q(_)
             | Gate::Multi2q(_)
             | Gate::QftBlock { .. }
-            | Gate::PauliRot(_) => {
+            | Gate::PauliRot(_)
+            | Gate::Unitary(_) => {
                 return Err(PrismError::BackendUnsupported {
                     backend: self.name().to_string(),
                     operation: format!(
@@ -845,7 +846,8 @@ impl StabilizerBackend {
             | Gate::Fused2q(_)
             | Gate::Multi2q(_)
             | Gate::QftBlock { .. }
-            | Gate::PauliRot(_) => {
+            | Gate::PauliRot(_)
+            | Gate::Unitary(_) => {
                 return Err(PrismError::BackendUnsupported {
                     backend: self.name().to_string(),
                     operation: format!(

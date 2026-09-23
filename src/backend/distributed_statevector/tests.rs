@@ -2225,3 +2225,66 @@ fn loopback_simulate_starts_the_distributed_backend_from_a_state() {
         }
     }
 }
+
+/// The `2^k`-point DFT as a dense gate: unitary, and dense enough that no
+/// detector in the constructor lowers it into an existing variant.
+fn dft_gate(k: usize) -> crate::gates::Gate {
+    let dim = 1usize << k;
+    let scale = 1.0 / (dim as f64).sqrt();
+    let mut mat = Vec::with_capacity(dim * dim);
+    for row in 0..dim {
+        for column in 0..dim {
+            let angle = std::f64::consts::TAU * (row * column % dim) as f64 / dim as f64;
+            mat.push(Complex64::from_polar(scale, angle));
+        }
+    }
+    let gate = crate::gates::Gate::unitary(mat, k).expect("the DFT is unitary");
+    assert!(matches!(gate, crate::gates::Gate::Unitary(_)), "{gate:?}");
+    gate
+}
+
+// Five qubits across four ranks leaves three local, exactly the gate's width,
+// so every target has to be relabelled in before the local kernel runs.
+fn dense_unitary_circuit() -> Circuit {
+    let mut b = CircuitBuilder::new(5);
+    b.rx(0.3, 0).rx(0.7, 1).rx(1.1, 2).rx(1.5, 3).rx(1.9, 4);
+    b.gate(dft_gate(3), &[4, 0, 2]);
+    b.ry(0.6, 4).cx(4, 1);
+    b.build()
+}
+
+#[test]
+fn loopback_dense_unitary_reaches_a_global_target() {
+    relax_min_local_qubits();
+    let circuit = dense_unitary_circuit();
+    let expected = reference_probs(&circuit);
+    for &size in &[1usize, 2, 4] {
+        let actual = loopback_probs_with(&circuit, size, usize::MAX, true);
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "length mismatch at size {size}"
+        );
+        for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
+            assert!(
+                (e - a).abs() < TOL,
+                "size {size}: prob[{i}] expected {e}, got {a}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_dense_unitary_on_a_global_qubit_declines_by_name() {
+    relax_min_local_qubits();
+    let circuit = dense_unitary_circuit();
+    let message = run_ranks(4, |ctx| {
+        let mut backend = DistributedStatevectorBackend::new(ctx, SEED);
+        backend.set_relabel(false);
+        run_on(&mut backend, &circuit)
+            .expect_err("expected a decline")
+            .to_string()
+    })
+    .swap_remove(0);
+    assert!(message.contains("unitary"), "{message}");
+}

@@ -480,6 +480,11 @@ fn required_local_qubits(gate: &Gate, targets: &[usize]) -> SmallVec<[usize; 8]>
                 }
             }
         }
+        Gate::Unitary(_) => {
+            for &q in targets {
+                push(&mut req, q);
+            }
+        }
         g if g.num_qubits() == 1 && !g.is_diagonal_1q() => {
             push(&mut req, targets[0]);
         }
@@ -1719,6 +1724,10 @@ impl DistributedStatevectorBackend {
                 }
                 Ok(())
             }
+            Gate::Unitary(_) => Err(self.unsupported(&format!(
+                "dense multi-qubit gate `{}` on more qubits than one rank holds locally",
+                gate.name()
+            ))),
             _ => Err(self.unsupported("gate spanning a global qubit")),
         }
     }

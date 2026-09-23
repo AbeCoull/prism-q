@@ -64,6 +64,34 @@ Notes:
   from an injected amplitude vector through `.initial_state(...)`: every rank
   receives the full `2^n` vector and keeps only its own slice.
 
+## Dense multi-qubit unitaries
+
+`Gate::unitary` takes a caller-supplied `2^k x 2^k` matrix and lowers it into
+the existing gate set wherever one of those variants carries it; only a dense
+matrix on three or four qubits becomes `Gate::Unitary`, which fewer backends
+execute. A lowered matrix is an ordinary gate and every backend treats it as
+one, so the table below covers the dense form alone.
+
+| Backend | Dense `Gate::Unitary` |
+| --- | --- |
+| Statevector (CPU) | Native, one gather-scatter pass over the state |
+| Statevector (CUDA) | Declines, no device kernel |
+| Factored | Native, on the merged block holding the targets |
+| Density Matrix (CPU) | Native, `U rho U^dagger` on the doubled register |
+| Density Matrix (CUDA) | Declines, no device kernel |
+| MPS | Native, through the same swap network a multi-controlled gate uses |
+| Tensor Network | Native, as one `k`-leg tensor |
+| Sparse | Declines, the gate is dense by construction |
+| Product State | Declines, it entangles its targets |
+| Stabilizer, Factored Stabilizer | Decline, not Clifford |
+| Stabilizer Rank, Stochastic Pauli, Deterministic Pauli | Decline, no Clifford+T lowering |
+| Distributed statevector | Native once the targets are relabelled local; declines when they cannot be, since no exchange path carries a dense `k`-qubit gate |
+
+Every decline is a `BackendUnsupported` naming the backend and the gate, so a
+route that cannot serve the matrix says so rather than dropping it. The gate
+also has no OpenQASM spelling: exporting a circuit that holds one raises
+`ExportUnsupported`.
+
 ## Shot and observable queries above the dense cap
 
 `simulate(...).shots(n)`, `.sample_counts(n)`, and `.expectation_values(...)`

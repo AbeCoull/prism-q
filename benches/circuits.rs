@@ -1139,6 +1139,33 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
     group.finish();
 }
 
+// The dense terminals alone, on a tableau prepared outside the timed loop. Every
+// brick CX is placed, so the factored backend holds one cluster and both
+// backends reduce the same width.
+fn bench_stabilizer_dense_terminals(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stabilizer/dense_terminal");
+    configure_group(&mut group);
+
+    let n = 18;
+    let circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
+    let mut stab = prism_q::StabilizerBackend::new(42);
+    sim::run_on(&mut stab, &circuit).unwrap();
+    let mut fstab = prism_q::FactoredStabilizerBackend::new(42);
+    sim::run_on(&mut fstab, &circuit).unwrap();
+
+    let backends: [(&str, &dyn Backend); 2] =
+        [("stabilizer", &stab), ("factored_stabilizer", &fstab)];
+    for (name, backend) in backends {
+        group.bench_function(BenchmarkId::new(format!("{name}_probabilities"), n), |b| {
+            b.iter(|| black_box(backend.probabilities().unwrap()));
+        });
+        group.bench_function(BenchmarkId::new(format!("{name}_statevector"), n), |b| {
+            b.iter(|| black_box(backend.export_statevector().unwrap()));
+        });
+    }
+    group.finish();
+}
+
 // ---- Factored stabilizer backend ----
 
 fn bench_factored_stabilizer_scaling(c: &mut Criterion) {
@@ -2131,7 +2158,72 @@ fn bench_auto_crossover(c: &mut Criterion) {
         }
     }
 
+    // T gates spread through random-pairing layers, so every qubit's light
+    // cone holds most of them and the Pauli sum grows with the T count. Each
+    // width has one row the Pauli route wins and one it loses to the
+    // statevector.
+    for &(n, t) in &[(12usize, 8usize), (12, 24), (16, 24), (16, 32)] {
+        let circuit = wide_clifford_t_circuit(n, t, 12, SEED);
+        let id = format!("spd_wide_{n}q_{t}t");
+        group.bench_with_input(BenchmarkId::new("auto", &id), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Auto)
+                        .seed(42)
+                        .marginals()
+                        .unwrap(),
+                )
+            });
+        });
+    }
+
     group.finish();
+}
+
+/// `depth` layers of random single-qubit Cliffords, `t_count` T or Tdg gates
+/// spread evenly across the layers, and a CX on a random pairing of all qubits.
+fn wide_clifford_t_circuit(n: usize, t_count: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    let cliffords = [
+        Gate::H,
+        Gate::S,
+        Gate::Sdg,
+        Gate::SX,
+        Gate::X,
+        Gate::Y,
+        Gate::Z,
+    ];
+    let shuffle = |order: &mut [usize], rng: &mut ChaCha8Rng| {
+        for i in (1..order.len()).rev() {
+            order.swap(i, rng.random_range(0..=i));
+        }
+    };
+    for layer in 0..depth {
+        for q in 0..n {
+            c.add_gate(
+                cliffords[rng.random_range(0..cliffords.len())].clone(),
+                &[q],
+            );
+        }
+        let layer_t = t_count * (layer + 1) / depth - t_count * layer / depth;
+        let mut order: Vec<usize> = (0..n).collect();
+        shuffle(&mut order, &mut rng);
+        for &q in order.iter().take(layer_t) {
+            let gate = if rng.random_bool(0.5) {
+                Gate::T
+            } else {
+                Gate::Tdg
+            };
+            c.add_gate(gate, &[q]);
+        }
+        shuffle(&mut order, &mut rng);
+        for pair in order.chunks_exact(2) {
+            c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
+        }
+    }
+    c
 }
 
 fn bench_auto_random(c: &mut Criterion) {
@@ -4202,7 +4294,108 @@ fn bench_dynamic_shots(c: &mut Criterion) {
     group.finish();
 }
 
-/// Neutrality row: an untouched statevector row re-run under a density-matrix
+/// Random Ry/Rz layers with brick CX, a measurement of qubit 0 after `depth`
+/// layers, then `depth` more layers and a measurement of the last qubit.
+fn mid_circuit_rotation_circuit(n: usize, depth: usize) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let mut circuit = Circuit::new(n, 2);
+    let mut layers = |circuit: &mut Circuit| {
+        for layer in 0..depth {
+            for q in 0..n {
+                circuit.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+                circuit.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            }
+            for q in ((layer % 2)..n - 1).step_by(2) {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    };
+    layers(&mut circuit);
+    circuit.add_measure(0, 0);
+    layers(&mut circuit);
+    circuit.add_measure(n - 1, 1);
+    circuit
+}
+
+/// A mid-circuit measurement replays the circuit once per shot. The 16-qubit row
+/// runs fewer shots because each one is a full `2^16` evolution.
+fn bench_dynamic_mid_circuit_shots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic/mid_circuit_shots");
+    configure_group(&mut group);
+
+    for &(n, shots) in &[(6usize, 1_000usize), (10, 1_000), (12, 1_000), (16, 32)] {
+        let circuit = mid_circuit_rotation_circuit(n, 2);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+
+    group.finish();
+}
+
+/// Clifford layers, a measurement of qubit 0 that conditions an X on qubit 1,
+/// a reset of qubit 0, more layers, then every qubit measured. The condition and
+/// the reset keep it off the compiled sampler, so Auto replays it per shot on a
+/// tableau.
+fn dynamic_clifford_circuit(n: usize, depth: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, n);
+    layered_clifford_body(&mut circuit, n, depth, SEED);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_reset(0);
+    layered_clifford_body(&mut circuit, n, depth, SEED ^ 1);
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+/// Per-shot tableau replays, clean and under depolarizing noise, at widths the
+/// statevector parallel floor covers but the tableau row loops do not.
+fn bench_dynamic_clifford_shots(c: &mut Criterion) {
+    let shots = 1_000usize;
+
+    let mut group = c.benchmark_group("dynamic/clifford_shots");
+    configure_group(&mut group);
+    for &n in &[16usize, 32, 64] {
+        let circuit = dynamic_clifford_circuit(n, 4);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("dynamic/noisy_clifford_shots");
+    configure_group(&mut group);
+    for &n in &[16usize, 64] {
+        let circuit = dynamic_clifford_circuit(n, 4);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_shots_with_noise(BackendKind::Auto, circ, &noise, shots, SEED).unwrap()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Neutrality row:an untouched statevector row re-run under a density-matrix
 /// group name. The density-matrix backend shares no kernels with the
 /// statevector path, so this must stay within the 5% regression gate.
 fn bench_density_matrix_neutrality(c: &mut Criterion) {
@@ -4247,6 +4440,7 @@ criterion_group! {
     bench_stabilizer_scaling,
     bench_stabilizer_random_pairs,
     bench_stabilizer_measurement,
+    bench_stabilizer_dense_terminals,
     // Factored stabilizer
     bench_factored_stabilizer_scaling,
     bench_factored_stabilizer_single_cluster,
@@ -4359,6 +4553,8 @@ criterion_group! {
     // Dynamic circuits (guard cost, dead-region predicate, per-shot cliff)
     bench_dynamic_guarded_region,
     bench_dynamic_dead_region,
-    bench_dynamic_shots
+    bench_dynamic_shots,
+    bench_dynamic_mid_circuit_shots,
+    bench_dynamic_clifford_shots
 }
 criterion_main!(benches);

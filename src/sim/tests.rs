@@ -1150,15 +1150,54 @@ fn test_shots_cached_fusion_matches_uncached() {
 
     let cached = run_shots_with(BackendKind::Statevector, &circuit, 20, 42).unwrap();
     for i in 0..20 {
-        let seed_i = 42u64.wrapping_add(i as u64);
         let single = run_with_internal(
             BackendKind::Statevector,
             &circuit,
-            seed_i,
+            mix_seed(42, i),
             SimOptions::default(),
         )
         .unwrap();
         assert_eq!(cached.shots[i], single.classical_bits, "shot {i} mismatch");
+    }
+}
+
+// With shot `i` on `seed + i`, shot `i + 1` of a run seeded 42 was shot `i` of a
+// run seeded 43, so averaging over consecutive seeds pooled near-copies.
+#[test]
+fn adjacent_run_seeds_draw_unrelated_shots() {
+    let num_shots = 1000;
+    let seeds: std::collections::HashSet<u64> = (0..num_shots)
+        .flat_map(|i| [mix_seed(42, i), mix_seed(43, i)])
+        .collect();
+    assert_eq!(seeds.len(), 2 * num_shots, "shot seeds collide across runs");
+
+    let n = 8;
+    let mut circuit = Circuit::new(n, n + 1);
+    for q in 0..n {
+        circuit.add_gate(Gate::H, &[q]);
+    }
+    circuit.add_measure(0, n);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: crate::circuit::ClassicalCondition::BitIsOne(n),
+        gate: Gate::X,
+        targets: smallvec![1],
+    });
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    assert!(!circuit.has_terminal_measurements_only());
+
+    let shots = 200;
+    let a = run_shots_with(BackendKind::Statevector, &circuit, shots, 42).unwrap();
+    let b = run_shots_with(BackendKind::Statevector, &circuit, shots, 43).unwrap();
+    for shift in 1..=4 {
+        let aligned = (0..shots - shift)
+            .filter(|&i| a.shots[i + shift] == b.shots[i] || a.shots[i] == b.shots[i + shift])
+            .count();
+        assert!(
+            aligned < shots / 10,
+            "runs seeded 42 and 43 agree at {aligned} positions under shift {shift}"
+        );
     }
 }
 

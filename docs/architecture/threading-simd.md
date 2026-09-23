@@ -58,7 +58,7 @@ Reproducibility is stated per path. Gate application never reduces across tasks,
 is exactly reproducible; everything that sums floating-point values in parallel is
 reproducible to the last ulp only; the batched compiled sampler is reproducible only at
 a fixed thread count. `tests/determinism.rs` pins the dense unitary,
-terminal sampling, reduction, and compiled-sampler claims below by running the same
+terminal sampling, per-shot replay, reduction, and compiled-sampler claims below by running the same
 seeded circuits in scoped 1-thread and 4-thread pools; the trajectory, SPD, and
 stabilizer bullets stand on the mechanisms they state.
 
@@ -79,8 +79,17 @@ comparison run used.
   into fewer outcomes builds its histogram through a parallel reduction and moves to the
   ulp-stable class below.
 - **Noisy trajectory shots: bitwise for a given seed, at any thread count.** Each shot's
-  generator is seeded from the shot index, not the worker, and results are collected in
-  shot order.
+  generator is seeded from the run seed and the shot index, not the worker, and results
+  are collected in shot order.
+- **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
+  mid-circuit measurement, a condition or a region runs once per shot, and below the
+  width where the resolved engine's own kernels go parallel those runs split across
+  workers: 14 qubits for dense engines, 128 for a tableau, any width for a product
+  state. Noisy trajectories follow the same rule. Shot `i` runs on a seed hashed from
+  the run seed and `i` with SplitMix64, and results fold in shot order. Runs on
+  adjacent seeds draw unrelated shots rather than the same shots offset by one.
+  Pinned for dense, decomposed, tableau and product-state circuits, and for tableau
+  trajectories.
 - **Parallel reductions: stable to about 1e-12, not bitwise.** Norms, measurement
   collapse probabilities, reduced density matrices, and expectation values sum
   deterministic per-chunk partials in Rayon's combine order, which varies with pool width

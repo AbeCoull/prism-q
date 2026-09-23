@@ -41,7 +41,11 @@ pub(super) const MAX_STABILIZER_RANK_QUBITS: usize = 25;
 
 pub(super) const MIN_QUBITS_FOR_SPD_AUTO: usize = 12;
 
-pub(super) const AUTO_SPD_MAX_TERMS: usize = 65536;
+/// Statevector amplitude updates one SPD term step is priced at when `Auto`
+/// answers marginals. A term step measured 100 to 300 ns against about 1.4 ns
+/// per amplitude update; 64 leans toward the Pauli route so a circuit it wins
+/// stays on it.
+pub(super) const AUTO_SPD_AMPLITUDES_PER_TERM: usize = 64;
 
 pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 128;
 
@@ -57,6 +61,18 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
     num_qubits.saturating_sub(log2n)
 }
 
+/// SPD term steps `Auto` spends on a marginals query before handing it to the
+/// statevector: the dense run's `instructions * 2^n` amplitude updates, priced
+/// at [`AUTO_SPD_AMPLITUDES_PER_TERM`] each.
+#[inline]
+pub(super) fn auto_spd_work_budget(circuit: &Circuit) -> usize {
+    circuit.instructions.len().saturating_mul(
+        1usize
+            .checked_shl(circuit.num_qubits as u32)
+            .unwrap_or(usize::MAX),
+    ) / AUTO_SPD_AMPLITUDES_PER_TERM
+}
+
 /// Backend selection for a simulation run.
 ///
 /// `Auto` resolves per call from circuit shape. Two routes run before the
@@ -69,7 +85,8 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 /// statevector at every width both can hold. The pruned expansion is reachable
 /// only through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
 /// on Clifford+T circuits at 12 qubits and above answer via Sparse Pauli
-/// Dynamics. The remaining tree:
+/// Dynamics, which hands a circuit that fits the statevector back to the tree
+/// once its Pauli sum costs more than the dense run would. The remaining tree:
 ///
 /// 1. No entangling gates        → ProductState (O(n))
 /// 2. All Clifford gates         → Stabilizer (O(n²))

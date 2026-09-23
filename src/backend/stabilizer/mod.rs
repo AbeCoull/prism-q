@@ -42,12 +42,10 @@
 //! - Probability extraction: O(2^n * n), limited by dense output memory budget
 
 use num_complex::Complex64;
-use smallvec::SmallVec;
 
-use crate::backend::{
-    Backend, NORM_CLAMP_MIN, dense_probability_len, dense_statevector_len, overlap,
-    reduced_density, reserve_dense_output, schmidt,
-};
+#[cfg(feature = "gpu")]
+use crate::backend::dense_probability_len;
+use crate::backend::{Backend, overlap, reduced_density, schmidt};
 use crate::circuit::Instruction;
 #[cfg(feature = "gpu")]
 use crate::error::PrismError;
@@ -61,12 +59,13 @@ use std::borrow::Cow;
 #[cfg(feature = "gpu")]
 use std::sync::Arc;
 
+pub(crate) mod dense;
 pub(crate) mod diagnostics;
 pub(crate) mod kernels;
 #[cfg(test)]
 mod tests;
 
-use kernels::{MIN_WORDS_FOR_BATCH, rowmul_words, xor_words};
+use kernels::{MIN_WORDS_FOR_BATCH, rowmul_words};
 
 #[cfg(feature = "gpu")]
 use crate::gpu::kernels::stabilizer::CliffordBatchScratch;
@@ -489,37 +488,25 @@ impl StabilizerBackend {
         Ok((cpu.xz, cpu.phase))
     }
 
-    #[inline]
-    fn validate_probability_capacity(&self) -> Result<()> {
-        let dim = dense_probability_len(self.name(), self.n)?;
-        let mut check = Vec::<f64>::new();
-        reserve_dense_output(&mut check, dim, self.name(), "probabilities")?;
-        drop(check);
-        Ok(())
+    fn dense_probabilities(&self, xz: &[u64], phase: &[bool]) -> Result<Vec<f64>> {
+        dense::dense_probabilities(
+            xz,
+            phase,
+            self.n,
+            self.num_words,
+            self.stride(),
+            self.name(),
+        )
     }
 
-    /// GPU probabilities. Validate dense output capacity first, then copy the
-    /// tableau back and reuse the CPU `compute_probabilities` path.
+    /// GPU probabilities. Check the dense output width first, then copy the
+    /// tableau back, replaying queued Clifford ops that have not been flushed to
+    /// the device so the result matches a fully-flushed state.
     #[cfg(feature = "gpu")]
     fn probabilities_gpu(&self) -> Result<Vec<f64>> {
-        self.validate_probability_capacity()?;
-        // `self` is borrowed immutably; the CPU reducer operates on a
-        // host-visible tableau. Copy out to a throwaway backend instead of
-        // mutating self so `probabilities()` can stay `&self`. Queued Clifford
-        // ops that have not been flushed to the device are replayed onto the
-        // copied buffers so the returned probabilities match a fully-flushed
-        // state.
+        dense_probability_len(self.name(), self.n)?;
         let (xz, phase) = self.copy_device_tableau_with_pending()?;
-        // The throwaway backend exposes `compute_probabilities` through its
-        // inherent API. Populating `n`, `num_words`, `xz`, `phase`, and
-        // `classical_bits` is enough for that method.
-        let mut cpu = StabilizerBackend::new(0);
-        cpu.n = self.n;
-        cpu.num_words = self.num_words;
-        cpu.xz = xz;
-        cpu.phase = phase;
-        cpu.classical_bits = self.classical_bits.clone();
-        Ok(cpu.compute_probabilities())
+        self.dense_probabilities(&xz, &phase)
     }
 
     #[cfg(feature = "gpu")]
@@ -1049,263 +1036,31 @@ impl StabilizerBackend {
         Ok((xz.into_owned(), phase.into_owned()))
     }
 
-    /// Constructs the 2^n amplitude vector by projecting |0...0⟩ through each
-    /// stabilizer generator: |ψ⟩ = ∏_i (I + g_i)/2 |seed⟩, normalized.
+    /// Constructs the 2^n amplitude vector by projecting a support basis state
+    /// through each stabilizer generator: |ψ⟩ = ∏_i (I + g_i)/2 |seed⟩, normalized.
     ///
     /// Each projection applies Pauli string g_i to the dense vector in O(2^n),
-    /// giving O(n x 2^n) total, same complexity as `compute_probabilities`.
+    /// giving O(n x 2^n) total.
     pub fn export_statevector(&self) -> Result<Vec<Complex64>> {
         #[cfg(feature = "gpu")]
         if self.gpu_tableau.is_some() {
-            // Host copy-back path: device tableau plus any queued Clifford ops
-            // → throwaway CPU backend → inherent CPU export. The throwaway
-            // backend's gpu_tableau is None, so the recursive call here falls
-            // through to the CPU branch.
+            // Host copy-back path: device tableau plus any queued Clifford ops.
             let (xz, phase) = self.copy_device_tableau_with_pending()?;
-            let mut cpu = StabilizerBackend::new(0);
-            cpu.n = self.n;
-            cpu.num_words = self.num_words;
-            cpu.xz = xz;
-            cpu.phase = phase;
-            cpu.classical_bits = self.classical_bits.clone();
-            return cpu.export_statevector();
+            return self.dense_statevector(&xz, &phase);
         }
-        let dim = dense_statevector_len(self.name(), "statevector export", self.n)?;
-        let mut check = Vec::<Complex64>::new();
-        reserve_dense_output(&mut check, dim, self.name(), "statevector export")?;
-        drop(check);
-        Ok(self.compute_statevector())
+        self.dense_statevector(&self.xz, &self.phase)
     }
 
-    /// Build the dense statevector by projecting the support seed through each
-    /// stabilizer generator. See [`project_generators`].
-    fn compute_statevector(&self) -> Vec<Complex64> {
-        let n = self.n;
-        let dim = 1usize << n;
-
-        let mut state = vec![Complex64::new(0.0, 0.0); dim];
-        state[self.find_support_seed()] = Complex64::new(1.0, 0.0);
-
-        let mut visited_gen = vec![0u32; dim];
-        project_generators(
-            &mut state,
-            &mut visited_gen,
-            &self.xz,
-            &self.phase,
-            n,
+    fn dense_statevector(&self, xz: &[u64], phase: &[bool]) -> Result<Vec<Complex64>> {
+        dense::dense_statevector(
+            xz,
+            phase,
+            self.n,
             self.num_words,
             self.stride(),
-        );
-
-        state
-    }
-
-    /// Gaussian-eliminate the stabilizer X-part to separate diagonal (Z-only)
-    /// from non-diagonal generators.
-    ///
-    /// Returns (stab_x, stab_z, stab_phase, diag_indices, num_pivots).
-    /// stab_x and stab_z are flat arrays with stride `nw` (row i at offset `i * nw`).
-    #[allow(clippy::type_complexity)]
-    fn gauss_eliminate_x(&self) -> (Vec<u64>, Vec<u64>, Vec<bool>, Vec<usize>, usize) {
-        let n = self.n;
-        let stride = self.stride();
-        let nw = self.num_words;
-
-        let mut stab_x = vec![0u64; n * nw];
-        let mut stab_z = vec![0u64; n * nw];
-        let mut stab_phase = vec![false; n];
-
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..n {
-            let src = (i + n) * stride;
-            let dst = i * nw;
-            stab_x[dst..dst + nw].copy_from_slice(&self.xz[src..src + nw]);
-            stab_z[dst..dst + nw].copy_from_slice(&self.xz[src + nw..src + nw + nw]);
-            stab_phase[i] = self.phase[i + n];
-        }
-
-        let mut remaining: Vec<usize> = (0..n).collect();
-
-        for col in 0..n {
-            let w = col / 64;
-            let b = col % 64;
-            let mut pivot_idx = None;
-            for (ri, &row) in remaining.iter().enumerate() {
-                if (stab_x[row * nw + w] >> b) & 1 == 1 {
-                    pivot_idx = Some(ri);
-                    break;
-                }
-            }
-
-            if let Some(ri) = pivot_idx {
-                let pr = remaining.swap_remove(ri);
-                let pr_off = pr * nw;
-
-                for row in 0..n {
-                    if row == pr {
-                        continue;
-                    }
-                    let row_off = row * nw;
-                    if (stab_x[row_off + w] >> b) & 1 == 1 {
-                        let initial_sum = if stab_phase[pr] { 2u64 } else { 0 }
-                            + if stab_phase[row] { 2u64 } else { 0 };
-                        // SAFETY: row != pr, so [row_off..row_off+nw] and
-                        // [pr_off..pr_off+nw] are non-overlapping regions.
-                        let (dst_x, dst_z, src_x, src_z) = unsafe {
-                            let xp = stab_x.as_mut_ptr();
-                            let zp = stab_z.as_mut_ptr();
-                            (
-                                std::slice::from_raw_parts_mut(xp.add(row_off), nw),
-                                std::slice::from_raw_parts_mut(zp.add(row_off), nw),
-                                std::slice::from_raw_parts(xp.add(pr_off) as *const u64, nw),
-                                std::slice::from_raw_parts(zp.add(pr_off) as *const u64, nw),
-                            )
-                        };
-                        let sum = rowmul_words(dst_x, dst_z, src_x, src_z, initial_sum);
-                        stab_phase[row] = (sum & 3) >= 2;
-                    }
-                }
-            }
-        }
-
-        let k = n - remaining.len();
-        let diag = remaining;
-
-        (stab_x, stab_z, stab_phase, diag, k)
-    }
-
-    fn solve_diagonal_seed(
-        stab_z: &[u64],
-        stab_phase: &[bool],
-        diag: &[usize],
-        nw: usize,
-        n: usize,
-    ) -> usize {
-        let d = diag.len();
-        if d == 0 {
-            return 0;
-        }
-
-        let mut z_rows: Vec<u64> = Vec::with_capacity(d * nw);
-        let mut phases: Vec<bool> = Vec::with_capacity(d);
-        for &di in diag {
-            z_rows.extend_from_slice(&stab_z[di * nw..(di + 1) * nw]);
-            phases.push(stab_phase[di]);
-        }
-
-        let mut pivot_col = vec![usize::MAX; d];
-        let mut available_cols: Vec<usize> = (0..n).collect();
-
-        for row in 0..d {
-            let row_off = row * nw;
-            let mut found = None;
-            for (ci, &col) in available_cols.iter().enumerate() {
-                if (z_rows[row_off + col / 64] >> (col % 64)) & 1 == 1 {
-                    found = Some(ci);
-                    break;
-                }
-            }
-
-            if let Some(ci) = found {
-                let col = available_cols.swap_remove(ci);
-                pivot_col[row] = col;
-                let w = col / 64;
-                let b = col % 64;
-
-                let pivot_z: SmallVec<[u64; 16]> =
-                    SmallVec::from_slice(&z_rows[row_off..row_off + nw]);
-                let pivot_phase = phases[row];
-
-                #[allow(clippy::needless_range_loop)]
-                for other in 0..d {
-                    if other == row {
-                        continue;
-                    }
-                    let other_off = other * nw;
-                    if (z_rows[other_off + w] >> b) & 1 == 1 {
-                        // SAFETY: other_off..other_off+nw and pivot_z are non-overlapping
-                        // valid regions of nw u64s. pivot_z was cloned from z_rows at
-                        // row_off (row != other), so the regions do not alias.
-                        unsafe {
-                            xor_words(z_rows.as_mut_ptr().add(other_off), pivot_z.as_ptr(), nw);
-                        }
-                        phases[other] ^= pivot_phase;
-                    }
-                }
-            }
-        }
-
-        let mut seed = 0usize;
-        for row in 0..d {
-            if pivot_col[row] != usize::MAX && phases[row] {
-                seed |= 1 << pivot_col[row];
-            }
-        }
-        seed
-    }
-
-    fn find_support_seed(&self) -> usize {
-        let nw = self.num_words;
-        let (_stab_x, stab_z, stab_phase, diag, _k) = self.gauss_eliminate_x();
-        Self::solve_diagonal_seed(&stab_z, &stab_phase, &diag, nw, self.n)
-    }
-
-    /// Coset-based probability extraction.
-    ///
-    /// After Gaussian elimination, the support is a coset of size 2^k defined
-    /// by the X-parts of the k non-diagonal generators. Uses GF(2) solve to
-    /// find a seed state, then Gray code enumerates all 2^k coset members.
-    /// O(n^3/64) for Gaussian elimination + O(2^n) for zeroing + O(2^k) for
-    /// coset enumeration (vs old O(2^n × d × n/64) brute-force).
-    pub(super) fn compute_probabilities(&self) -> Vec<f64> {
-        let n = self.n;
-        let dim = 1usize << n;
-        let nw = self.num_words;
-        let (stab_x, stab_z, stab_phase, diag, k) = self.gauss_eliminate_x();
-
-        let amplitude_sq = 1.0 / (1u64 << k) as f64;
-
-        let seed = Self::solve_diagonal_seed(&stab_z, &stab_phase, &diag, nw, n);
-
-        if k == n {
-            return vec![amplitude_sq; dim];
-        }
-
-        let mut non_diag_set = vec![true; n];
-        for &di in &diag {
-            non_diag_set[di] = false;
-        }
-
-        let coset_gens: Vec<usize> = (0..n)
-            .filter(|&i| non_diag_set[i])
-            .map(|i| {
-                let mut x = 0usize;
-                #[allow(clippy::needless_range_loop)]
-                for w in 0..nw {
-                    let shift = w * 64;
-                    if shift < usize::BITS as usize {
-                        x |= (stab_x[i * nw + w] as usize) << shift;
-                    }
-                }
-                x
-            })
-            .collect();
-
-        debug_assert_eq!(coset_gens.len(), k);
-
-        let mut probs = vec![0.0f64; dim];
-
-        let coset_size = 1usize << k;
-        let mut current = seed;
-        probs[current] = amplitude_sq;
-
-        for i in 1..coset_size {
-            let bit = i.trailing_zeros() as usize;
-            current ^= coset_gens[bit];
-            probs[current] = amplitude_sq;
-        }
-
-        probs
+            self.name(),
+            "statevector export",
+        )
     }
 }
 
@@ -1449,8 +1204,7 @@ impl Backend for StabilizerBackend {
         if self.gpu_tableau.is_some() {
             return self.probabilities_gpu();
         }
-        self.validate_probability_capacity()?;
-        Ok(self.compute_probabilities())
+        self.dense_probabilities(&self.xz, &self.phase)
     }
 
     fn num_qubits(&self) -> usize {
@@ -1548,101 +1302,5 @@ impl Backend for StabilizerBackend {
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         // Delegate to the inherent method; it handles both CPU and GPU paths.
         StabilizerBackend::export_statevector(self)
-    }
-}
-
-/// Project a support seed through the `n` stabilizer generators and normalize,
-/// building the dense statevector in place.
-///
-/// `sv` holds the seed basis state and has `2^n` entries; `visited_gen` is a
-/// scratch buffer of the same length. Rows `n..2n` of `xz` are the generators,
-/// bit-packed as `nw` X words then `nw` Z words per `stride`-word row.
-///
-/// AG convention: `g = (-1)^r * i^m * prod_j X_j^{x_j} Z_j^{z_j}`, where
-/// `m = popcount(x_bits & z_bits)` counts the implicit i-factor the Y-type
-/// qubits contribute, so `g|y> = (-1)^{r + dot(z,y)} * i^m * |y ^ x_bits>`.
-/// The projectors `(I + g_i)/2` commute, so generator order is irrelevant.
-pub(crate) fn project_generators(
-    sv: &mut [Complex64],
-    visited_gen: &mut [u32],
-    xz: &[u64],
-    phase: &[bool],
-    n: usize,
-    nw: usize,
-    stride: usize,
-) {
-    let dim = sv.len();
-    let zero = Complex64::new(0.0, 0.0);
-    let powers_of_i = [
-        Complex64::new(1.0, 0.0),
-        Complex64::new(0.0, 1.0),
-        Complex64::new(-1.0, 0.0),
-        Complex64::new(0.0, -1.0),
-    ];
-
-    let mut current_gen = 0u32;
-    for i in 0..n {
-        let row = i + n;
-        let base = row * stride;
-
-        let mut x_bits = 0usize;
-        let mut z_bits = 0usize;
-        for w in 0..nw {
-            let shift = w * 64;
-            if shift < usize::BITS as usize {
-                x_bits |= (xz[base + w] as usize) << shift;
-                z_bits |= (xz[base + nw + w] as usize) << shift;
-            }
-        }
-        let r = phase[row];
-
-        let m = (x_bits & z_bits).count_ones() as usize;
-        let i_factor = powers_of_i[m & 3];
-        let base_sign = if r { -1.0 } else { 1.0 };
-
-        if x_bits == 0 {
-            for (y, s) in sv.iter_mut().enumerate() {
-                let dot_parity = (z_bits & y).count_ones() & 1;
-                let phase_val = if dot_parity == 0 {
-                    base_sign
-                } else {
-                    -base_sign
-                };
-                if phase_val < 0.0 {
-                    *s = zero;
-                }
-            }
-        } else {
-            current_gen += 1;
-            for y in 0..dim {
-                if visited_gen[y] == current_gen {
-                    continue;
-                }
-                let partner = y ^ x_bits;
-                visited_gen[partner] = current_gen;
-
-                let a = sv[y];
-                let b = sv[partner];
-
-                let dot_y = (z_bits & y).count_ones() & 1;
-                let real_y = if dot_y == 0 { base_sign } else { -base_sign };
-                let gy_phase = i_factor * real_y;
-
-                let dot_p = (z_bits & partner).count_ones() & 1;
-                let real_p = if dot_p == 0 { base_sign } else { -base_sign };
-                let gp_phase = i_factor * real_p;
-
-                sv[y] = (a + b * gp_phase) * 0.5;
-                sv[partner] = (b + a * gy_phase) * 0.5;
-            }
-        }
-    }
-
-    let norm_sq: f64 = sv.iter().map(Complex64::norm_sqr).sum();
-    if norm_sq > NORM_CLAMP_MIN {
-        let inv_norm = 1.0 / norm_sq.sqrt();
-        for amp in sv {
-            *amp *= inv_norm;
-        }
     }
 }

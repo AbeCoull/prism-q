@@ -963,6 +963,71 @@ fn budgeted_spd_marginals_hold_the_term_count() {
     }
 }
 
+fn assert_marginals_match_statevector(circuit: &Circuit, got: &[(f64, f64)]) {
+    let reference = simulate(circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .marginals()
+        .unwrap();
+    assert_eq!(got.len(), reference.marginals.len());
+    for (q, (a, b)) in got.iter().zip(&reference.marginals).enumerate() {
+        assert!(
+            (a.0 - b.0).abs() < 1e-12 && (a.1 - b.1).abs() < 1e-12,
+            "qubit {q}: {a:?} vs {b:?}"
+        );
+    }
+}
+
+#[test]
+fn auto_marginals_leave_a_pauli_sum_past_the_term_ceiling_to_the_statevector() {
+    use prism_q::{PrismError, run_spd};
+
+    let mut ladder = Circuit::new(21, 0);
+    for q in 0..21 {
+        ladder.add_gate(Gate::T, &[q]);
+    }
+    for q in 1..21 {
+        ladder.add_gate(Gate::Cx, &[0, q]);
+    }
+    ladder.add_gate(Gate::H, &[0]);
+    assert!(matches!(
+        run_spd(&ladder, 0.0, 65536),
+        Err(PrismError::BackendUnsupported { .. })
+    ));
+
+    let auto = simulate(&ladder).seed(42).marginals().unwrap();
+    assert_ne!(auto.metadata.backend, ResolvedBackend::DeterministicPauli);
+    assert!(auto.metadata.is_exact());
+    assert_marginals_match_statevector(&ladder, &auto.marginals);
+}
+
+#[test]
+fn auto_marginals_keep_a_few_t_gates_on_pauli_propagation() {
+    let n = 16;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::H, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in (0..n).step_by(2) {
+        c.add_gate(Gate::T, &[q]);
+    }
+    for q in 0..n {
+        c.add_gate(if q % 3 == 0 { Gate::S } else { Gate::H }, &[q]);
+    }
+    for q in (0..n - 1).step_by(2) {
+        c.add_gate(Gate::Cx, &[q + 1, q]);
+    }
+    assert_eq!(c.t_count(), 8);
+
+    let auto = simulate(&c).seed(42).marginals().unwrap();
+    assert_eq!(auto.metadata.backend, ResolvedBackend::DeterministicPauli);
+    assert!(auto.metadata.is_exact());
+    assert_marginals_match_statevector(&c, &auto.marginals);
+}
+
 #[test]
 fn density_matrix_serves_expectation_values_without_noise() {
     let circuit = bell();

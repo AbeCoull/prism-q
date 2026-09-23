@@ -2,7 +2,7 @@
 
 use num_complex::Complex64;
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 
 use crate::error::{PyPrismResult, invalid};
@@ -43,4 +43,26 @@ pub fn bool_matrix(
     let array = Array2::from_shape_vec((rows, cols), flat)
         .map_err(|e| invalid(format!("failed to shape ({rows}, {cols}) bool matrix: {e}")))?;
     Ok(array.into_pyarray(py))
+}
+
+/// Read a 1-D `uint64` NumPy array, or any sequence of ints, into a `Vec`.
+pub fn u64_words(value: &Bound<'_, PyAny>) -> PyPrismResult<Vec<u64>> {
+    if let Ok(array) = value.cast::<PyArray1<u64>>() {
+        return Ok(array.readonly().as_array().to_vec());
+    }
+    value.extract().map_err(|e| {
+        invalid(format!(
+            "expected a uint64 array or a sequence of ints: {e}"
+        ))
+    })
+}
+
+/// Read a 1-D `bool` NumPy array, or any sequence of bools, into a `Vec`.
+pub fn bool_flags(value: &Bound<'_, PyAny>) -> PyPrismResult<Vec<bool>> {
+    if let Ok(array) = value.cast::<PyArray1<bool>>() {
+        return Ok(array.readonly().as_array().to_vec());
+    }
+    value
+        .extract()
+        .map_err(|e| invalid(format!("expected a bool array or a sequence of bools: {e}")))
 }

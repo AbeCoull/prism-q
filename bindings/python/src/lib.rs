@@ -19,7 +19,7 @@ mod parameter;
 mod qec;
 mod sim;
 
-use backend::PyBackendKind;
+use backend::{PyBackendKind, PyStabilizerBackend};
 use braket::PyBraketProgram;
 use circuit::{PyCircuit, PyCircuitBuilder, PySaveSpec};
 use error::PrismError;
@@ -46,6 +46,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCircuitBuilder>()?;
     m.add_class::<PySaveSpec>()?;
     m.add_class::<PyBackendKind>()?;
+    m.add_class::<PyStabilizerBackend>()?;
     m.add_class::<PyParameters>()?;
     m.add_class::<PyPreparedCircuit>()?;
     m.add_class::<PyGpuContext>()?;

@@ -440,6 +440,44 @@ fn anticommutes(row: &[u64], nw: usize, term_x: &[u64], term_z: &[u64]) -> bool 
     parity & 1 == 1
 }
 
+/// Check that `xz` and `phase` hold `2 * n + 1` rows in the export layout and
+/// that destabilizer `i` anticommutes with stabilizer `i` for every `i`. The
+/// rest of the commutation structure is not checked.
+pub(crate) fn check_imported_rows(n: usize, xz: &[u64], phase: &[bool]) -> Result<()> {
+    let nw = n.div_ceil(64);
+    let stride = 2 * nw;
+    let rows = 2 * n + 1;
+    if xz.len() != rows * stride {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "tableau import for {n} qubits takes {} words ({rows} rows of {stride}), got {}",
+                rows * stride,
+                xz.len()
+            ),
+        });
+    }
+    if phase.len() != rows {
+        return Err(PrismError::InvalidParameter {
+            message: format!(
+                "tableau import for {n} qubits takes {rows} phases, got {}",
+                phase.len()
+            ),
+        });
+    }
+    for i in 0..n {
+        let destab = &xz[i * stride..(i + 1) * stride];
+        let stab = &xz[(n + i) * stride..(n + i + 1) * stride];
+        if !anticommutes(stab, nw, &destab[..nw], &destab[nw..]) {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "tableau import: destabilizer row {i} commutes with stabilizer row {i}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Tableau rows with current destabilizers for a read-only query, borrowed
 /// when the backend's own rows qualify and owned when they had to be rebuilt.
 pub(crate) type TableauRows<'a> = (Cow<'a, [u64]>, Cow<'a, [bool]>);

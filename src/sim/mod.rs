@@ -1660,6 +1660,30 @@ pub(crate) struct PreparedRoute {
     /// Set when the template reads the RNG, so every point gets a fresh backend
     /// and measures what a solo run with its seed measures.
     draws_randomness: bool,
+    values: PreparedValues,
+    observable: PreparedObservable,
+}
+
+/// Who answers [`Simulate::expectation_values`] for a prepared template.
+#[derive(Clone, Copy)]
+enum PreparedValues {
+    Held,
+    /// `Auto` from [`TENSOR_ROUTE_MIN_QUBITS`]: the bound circuit is offered to
+    /// the scalar tensor route first, as `Simulate` offers it.
+    TensorFirst,
+    /// `Simulate` would take a route the held backend does not reproduce.
+    Simulate,
+}
+
+/// Who answers [`Simulate::observable_expectation`] for a prepared template.
+#[derive(Clone, Copy)]
+enum PreparedObservable {
+    /// Term by term on the held backend, with no variance.
+    Held,
+    /// The grouped evaluator on the held statevector, with its variance.
+    Grouped,
+    /// `Simulate` would take a route the held backend does not reproduce.
+    Simulate,
 }
 
 impl PreparedRoute {
@@ -1675,11 +1699,94 @@ impl PreparedRoute {
             let mut backend = self.plan.build(seed);
             return execute_circuit(&mut *backend, circuit, &SimOptions::default());
         }
+        execute_circuit(self.held_backend(seed), circuit, &SimOptions::default())
+    }
+
+    /// [`Simulate::expectation_values`] on `bound`, evaluated by applying
+    /// `applied` verbatim, or `None` when the caller should ask `Simulate`.
+    pub(crate) fn expectation_values(
+        &mut self,
+        bound: &Circuit,
+        applied: &Circuit,
+        observables: &[Vec<PauliTerm>],
+        seed: u64,
+    ) -> Option<Result<Vec<f64>>> {
+        match self.values {
+            PreparedValues::Simulate => return None,
+            PreparedValues::TensorFirst => {
+                if let Some(result) = tensor_route_expectations(bound, observables) {
+                    return Some(result.map(ExpectationResult::into_values));
+                }
+            }
+            PreparedValues::Held => {}
+        }
+        Some(
+            self.held_expectation_values(applied, observables, seed)
+                .map(|(values, _)| values),
+        )
+    }
+
+    /// [`Simulate::observable_expectation`] on the circuit `applied` was bound
+    /// from, or `None` when the caller should ask `Simulate`.
+    pub(crate) fn observable_expectation(
+        &mut self,
+        applied: &Circuit,
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Option<Result<ObservableExpectation>> {
+        match self.observable {
+            PreparedObservable::Simulate => None,
+            PreparedObservable::Held => Some(
+                self.held_expectation_values(applied, &observable_vecs(observable), seed)
+                    .map(|(values, metadata)| {
+                        weighted_observable_result(observable, &values, None, metadata)
+                    }),
+            ),
+            PreparedObservable::Grouped => Some(self.held_grouped(applied, observable, seed)),
+        }
+    }
+
+    fn held_backend(&mut self, seed: u64) -> &mut dyn Backend {
         if !matches!(&self.held, Some((s, _)) if *s == seed) {
             self.held = Some((seed, self.plan.build(seed)));
         }
         let (_, backend) = self.held.as_mut().expect("just built");
-        execute_circuit(&mut **backend, circuit, &SimOptions::default())
+        &mut **backend
+    }
+
+    fn held_expectation_values(
+        &mut self,
+        circuit: &Circuit,
+        observables: &[Vec<PauliTerm>],
+        seed: u64,
+    ) -> Result<(Vec<f64>, RunMetadata)> {
+        for observable in observables {
+            validate_observable(observable, circuit.num_qubits)?;
+        }
+        let backend = self.held_backend(seed);
+        execute_circuit(&mut *backend, circuit, &SimOptions::classical_only())?;
+        Ok((
+            backend.pauli_expectations(observables)?,
+            backend_metadata(backend),
+        ))
+    }
+
+    fn held_grouped(
+        &mut self,
+        circuit: &Circuit,
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Result<ObservableExpectation> {
+        for (_, factors) in observable.terms() {
+            validate_observable(factors, circuit.num_qubits)?;
+        }
+        let backend = self.held_backend(seed);
+        execute_circuit(&mut *backend, circuit, &SimOptions::classical_only())?;
+        let statevector = backend
+            .as_any()
+            .and_then(|any| any.downcast_ref::<StatevectorBackend>())
+            .expect("a grouped answer is settled only on a statevector plan");
+        grouped_expectation_on_state(statevector, observable, seed)
     }
 }
 
@@ -1712,12 +1819,61 @@ pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<P
     if has_pauli_rot && !probe.supports_pauli_rotation() {
         return None;
     }
+    let (values, observable) = prepared_expectations(kind, template, &*probe);
     Some(PreparedRoute {
         supports_fused: probe.supports_fused_gates(),
         plan,
         held: None,
         draws_randomness: draws_randomness(template),
+        values,
+        observable,
     })
+}
+
+/// Settle which expectation terminals the held backend `probe` answers the
+/// way `Simulate` answers them.
+///
+/// Both decline a template the terminals reject, whose error `Simulate`
+/// reports, and a Clifford template under `Auto` or a stabilizer kind, which
+/// `Simulate` propagates through the Pauli route rather than a backend. The
+/// weighted observable takes the grouped evaluator wherever `Simulate` would,
+/// so its variance survives, and declines when the held backend is not the
+/// statevector that evaluator reads.
+fn prepared_expectations(
+    kind: &BackendKind,
+    template: &Circuit,
+    probe: &dyn Backend,
+) -> (PreparedValues, PreparedObservable) {
+    let clifford_route =
+        (kind.is_auto() || kind.is_stabilizer_family()) && template.is_clifford_only();
+    if draws_randomness(template)
+        || template.save_count() > 0
+        || clifford_route
+        || !probe.supports_pauli_expectation()
+    {
+        return (PreparedValues::Simulate, PreparedObservable::Simulate);
+    }
+    let fits_dense = template.num_qubits <= max_statevector_qubits();
+    let values = if kind.is_auto() && fits_dense && template.num_qubits >= TENSOR_ROUTE_MIN_QUBITS {
+        PreparedValues::TensorFirst
+    } else {
+        PreparedValues::Held
+    };
+    let grouped = match kind {
+        BackendKind::Statevector => true,
+        #[cfg(feature = "gpu")]
+        BackendKind::StatevectorGpu { .. } => true,
+        _ => kind.is_auto() && fits_dense,
+    };
+    let holds_statevector = probe
+        .as_any()
+        .is_some_and(|any| any.is::<StatevectorBackend>());
+    let observable = match (grouped, holds_statevector) {
+        (false, _) => PreparedObservable::Held,
+        (true, true) => PreparedObservable::Grouped,
+        (true, false) => PreparedObservable::Simulate,
+    };
+    (values, observable)
 }
 
 /// Shared init → apply → extract logic.
@@ -3001,13 +3157,13 @@ fn weighted_observable_result(
     }
 }
 
-/// Evaluate a weighted observable on the statevector: the mean and most group
-/// variances from one shared batched traversal, large groups from a dedicated
-/// moments pass.
+/// Evaluate a weighted observable on the statevector: small groups from one
+/// shared batched traversal, each large group's mean and variance from a
+/// dedicated moments pass.
 ///
 /// `Var(H_g) = <H_g^2> - <H_g>^2` per commuting group. For a small group the
 /// square expands into pairwise product strings appended to the same
-/// traversal that serves the term means; a group past the pair budget takes a
+/// traversal that serves its term means; a group past the pair budget takes a
 /// single-pass moment accumulation instead, on the state as run when the
 /// group is Z-only and on a basis-rotated copy otherwise.
 fn grouped_expectation_statevector(
@@ -3029,12 +3185,25 @@ fn grouped_expectation_statevector(
     let expanded = expand_for_backend(&backend, circuit);
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    backend.apply_instructions(&fused.instructions)?;
+    grouped_expectation_on_state(&backend, observable, seed)
+}
+
+/// The reduction half of [`grouped_expectation_statevector`], on a backend
+/// that has already run the circuit. `seed` seeds the scratch backend a
+/// basis-rotated moments pass runs on.
+fn grouped_expectation_on_state(
+    backend: &StatevectorBackend,
+    observable: &PauliObservable,
+    seed: u64,
+) -> Result<ObservableExpectation> {
+    let num_qubits = backend.num_qubits();
+    let terms = observable.terms();
     let masks = terms
         .iter()
-        .map(|(_, factors)| pauli_masks(factors, circuit.num_qubits))
+        .map(|(_, factors)| pauli_masks(factors, num_qubits))
         .collect::<Result<Vec<_>>>()?;
-    backend.apply_instructions(&fused.instructions)?;
-    let metadata = backend_metadata(&backend);
+    let metadata = backend_metadata(backend);
 
     let grouping = observable.grouping();
 
@@ -3043,9 +3212,10 @@ fn grouped_expectation_statevector(
     // (shared qubits carry equal axes and cancel to identity), so each pair is
     // one more mask. Large groups fall back to a dedicated moments pass, which
     // costs a fixed number of state sweeps where the pair expansion grows
-    // quadratically.
-    let mut combined = masks.clone();
-    let mut pair_blocks: Vec<(usize, usize, Vec<f64>)> = Vec::new();
+    // quadratically. Each group's mean comes out of whichever pass serves its
+    // variance, so a large group's terms stay out of the shared traversal.
+    let mut combined = Vec::with_capacity(masks.len());
+    let mut pair_blocks: Vec<(usize, usize, usize, Vec<f64>)> = Vec::new();
     let mut deferred: Vec<usize> = Vec::new();
     for (gi, group) in grouping.groups.iter().enumerate() {
         let members = &group.term_indices;
@@ -3053,7 +3223,9 @@ fn grouped_expectation_statevector(
             deferred.push(gi);
             continue;
         }
-        let first_mask = combined.len();
+        let first_term = combined.len();
+        combined.extend(members.iter().map(|&i| masks[i]));
+        let first_pair = combined.len();
         let mut pair_coefficients = Vec::with_capacity(members.len() * (members.len() - 1) / 2);
         for (pos, &i) in members.iter().enumerate() {
             for &j in &members[pos + 1..] {
@@ -3063,7 +3235,7 @@ fn grouped_expectation_statevector(
                 pair_coefficients.push(2.0 * terms[i].0 * terms[j].0);
             }
         }
-        pair_blocks.push((gi, first_mask, pair_coefficients));
+        pair_blocks.push((gi, first_term, first_pair, pair_coefficients));
     }
 
     // A device-resident state reduces every mask on the card; the host keeps
@@ -3078,15 +3250,20 @@ fn grouped_expectation_statevector(
         }
     };
 
-    let mean: f64 = terms.iter().zip(&values).map(|((c, _), v)| c * v).sum();
+    let mut mean: f64 = terms
+        .iter()
+        .filter(|(_, factors)| factors.is_empty())
+        .map(|(c, _)| c)
+        .sum();
     let mut group_variances = vec![0.0; grouping.groups.len()];
 
-    for (gi, first_mask, pair_coefficients) in &pair_blocks {
+    for (gi, first_term, first_pair, pair_coefficients) in &pair_blocks {
         let group = &grouping.groups[*gi];
         let m1: f64 = group
             .term_indices
             .iter()
-            .map(|&i| terms[i].0 * values[i])
+            .zip(&values[*first_term..])
+            .map(|(&i, v)| terms[i].0 * v)
             .sum();
         let square_diag: f64 = group
             .term_indices
@@ -3095,9 +3272,10 @@ fn grouped_expectation_statevector(
             .sum();
         let square_cross: f64 = pair_coefficients
             .iter()
-            .zip(&values[*first_mask..])
+            .zip(&values[*first_pair..])
             .map(|(c, v)| c * v)
             .sum();
+        mean += m1;
         group_variances[*gi] = (square_diag + square_cross - m1 * m1).max(0.0);
     }
 
@@ -3125,7 +3303,7 @@ fn grouped_expectation_statevector(
                     .iter()
                     .map(|&i| masks[i].0 | masks[i].1)
                     .collect();
-                let rotation_circuit = group.basis_rotation_circuit(circuit.num_qubits);
+                let rotation_circuit = group.basis_rotation_circuit(num_qubits);
                 let rotation = crate::circuit::fusion::fuse_circuit(&rotation_circuit, true);
                 let rotated = scratch.get_or_insert_with(|| StatevectorBackend::new(seed));
                 rotated.init_from_amplitudes(state.to_vec(), 0)?;
@@ -3137,6 +3315,7 @@ fn grouped_expectation_statevector(
                     norm,
                 )
             };
+            mean += m1;
             group_variances[gi] = (m2 - m1 * m1).max(0.0);
         }
     }
@@ -3151,11 +3330,11 @@ fn grouped_expectation_statevector(
     })
 }
 
-/// Pair-expansion budget per commuting group. Measured on the 2000-string
-/// Jordan-Wigner fixture at n=20: one extra general mask in the shared
-/// traversal costs about 0.6 ms while a scratch-rotation moments pass costs
-/// about 11 ms, so groups whose pair count stays under that ratio expand
-/// inline and larger groups take the dedicated pass.
+/// Pair-expansion budget per commuting group. The dedicated pass pays a scratch
+/// copy and a basis rotation per group that the pair expansion avoids. On the
+/// 2000-string Jordan-Wigner fixture, sending every multi-term group through it
+/// cost about 3x this budget's reduction at n=16 and n=20, and about 0.6x at
+/// n=12.
 const MAX_PAIR_MASKS_PER_GROUP: usize = 20;
 
 /// Values from a route that evaluates rather than samples, so there is no

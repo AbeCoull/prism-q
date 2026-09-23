@@ -6,8 +6,8 @@ use prism_q::backend::Backend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::fusion::fuse_circuit;
 use prism_q::{
-    Circuit, CircuitBuilder, Gate, Instruction, ParamLink, Parameters, PauliTerm, PreparedCircuit,
-    circuits,
+    Circuit, CircuitBuilder, Gate, Instruction, ObservableExpectation, ParamLink, Parameters,
+    PauliObservable, PauliTerm, PreparedCircuit, circuits,
 };
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -798,4 +798,312 @@ fn a_builder_pauli_rotation_takes_a_parameter_slot() {
 fn a_prepared_circuit_is_send() {
     fn assert_send<T: Send>() {}
     assert_send::<PreparedCircuit>();
+}
+
+fn pauli_strings(n: usize) -> Vec<Vec<PauliTerm>> {
+    let mut strings: Vec<Vec<PauliTerm>> = (0..n).map(|q| vec![PauliTerm::z(q)]).collect();
+    strings.push(vec![PauliTerm::x(0), PauliTerm::x(1)]);
+    strings.push(vec![PauliTerm::y(2), PauliTerm::z(4), PauliTerm::x(n - 1)]);
+    strings
+}
+
+// A `ZZ` chain and an `X` field each form one group past the pair budget, so
+// both the Z-only and the basis-rotated moments passes run, and the `Y` term
+// lands in a small group that takes the pair expansion.
+fn energy(n: usize) -> PauliObservable {
+    let chain = (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
+    let field = (0..n).map(|q| (0.5, vec![PauliTerm::x(q)]));
+    let extra = [
+        (0.25, vec![PauliTerm::y(0), PauliTerm::y(1)]),
+        (-0.75, vec![]),
+    ];
+    PauliObservable::from_terms(chain.chain(field).chain(extra).collect::<Vec<_>>()).unwrap()
+}
+
+// Random bindings, then the three degenerate ones that send `bind_fused` back
+// through the pass pipeline.
+fn bindings_with_fallback(slots: usize, seed: u64) -> Vec<Vec<f64>> {
+    let mut points: Vec<Vec<f64>> = (0..3).map(|k| angles(slots, seed + k)).collect();
+    points.push(vec![0.0; slots]);
+    points.push(vec![std::f64::consts::PI; slots]);
+    points.push(angles(slots, seed + 3));
+    points.push(vec![std::f64::consts::FRAC_PI_2; slots]);
+    points
+}
+
+fn assert_values_close(got: &[f64], expected: &[f64], what: &str) {
+    assert_eq!(got.len(), expected.len(), "{what}");
+    for (i, (a, b)) in got.iter().zip(expected).enumerate() {
+        assert!((a - b).abs() < 1e-12, "{what} value {i}: {a} vs {b}");
+    }
+}
+
+fn assert_observables_close(
+    got: &ObservableExpectation,
+    expected: &ObservableExpectation,
+    what: &str,
+) {
+    assert_values_close(&[got.mean], &[expected.mean], &format!("{what} mean"));
+    assert_eq!(
+        got.variance.is_some(),
+        expected.variance.is_some(),
+        "{what}"
+    );
+    if let (Some(a), Some(b)) = (got.variance, expected.variance) {
+        assert_values_close(&[a], &[b], &format!("{what} variance"));
+    }
+    match (&got.group_variances, &expected.group_variances) {
+        (Some(a), Some(b)) => assert_values_close(a, b, &format!("{what} group variances")),
+        (None, None) => {}
+        _ => panic!("{what}: group variances present on one side only"),
+    }
+    assert_eq!(got.metadata.backend, expected.metadata.backend, "{what}");
+}
+
+// Eighteen qubits is where `Auto` offers the circuit to the tensor route first.
+#[test]
+fn expectation_values_match_simulate_on_every_binding() {
+    for n in [12, 18] {
+        let template = circuits::hardware_efficient_ansatz(n, 3, SEED);
+        let params = Parameters::all_rotations(&template);
+        let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+        assert!(prepared.reuses_fusion_plan());
+        let observables = pauli_strings(n);
+
+        for (point, values) in bindings_with_fallback(params.num_slots(), 7000)
+            .iter()
+            .enumerate()
+        {
+            let independent = params.bind(&template, values).unwrap();
+            let expected = prism_q::simulate(&independent)
+                .seed(SEED)
+                .expectation_values(&observables)
+                .unwrap();
+            let got = prepared
+                .expectation_values(values, &observables, SEED)
+                .unwrap();
+            assert_values_close(&got, &expected, &format!("{n} qubits, point {point}"));
+        }
+    }
+}
+
+#[test]
+fn observable_expectation_matches_simulate_on_every_binding() {
+    let template = circuits::hardware_efficient_ansatz(12, 3, SEED);
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+    let observable = energy(12);
+
+    for (point, values) in bindings_with_fallback(params.num_slots(), 7100)
+        .iter()
+        .enumerate()
+    {
+        let independent = params.bind(&template, values).unwrap();
+        let expected = prism_q::simulate(&independent)
+            .seed(SEED)
+            .observable_expectation(&observable)
+            .unwrap();
+        assert!(expected.variance.is_some());
+        let got = prepared
+            .observable_expectation(values, &observable, SEED)
+            .unwrap();
+        assert_observables_close(&got, &expected, &format!("point {point}"));
+    }
+}
+
+// Two halves that never interact, which `Auto` decomposes, so no held route
+// exists and every terminal asks `simulate`.
+fn independent_halves() -> Circuit {
+    let mut c = Circuit::new(6, 0);
+    for half in [0, 3] {
+        for q in half..half + 3 {
+            c.add_gate(Gate::Ry(0.3), &[q]);
+            c.add_gate(Gate::Rz(0.4), &[q]);
+        }
+        c.add_gate(Gate::Cx, &[half, half + 1]);
+        c.add_gate(Gate::Cx, &[half + 1, half + 2]);
+        for q in half..half + 3 {
+            c.add_gate(Gate::Rx(0.5), &[q]);
+        }
+    }
+    c
+}
+
+// Explicit kinds that take the grouped and the per-term routes, one of which
+// holds no fused gates, and an `Auto` template with no held route at all.
+#[test]
+fn expectation_terminals_match_simulate_across_routes() {
+    let ansatz = circuits::hardware_efficient_ansatz(6, 2, SEED);
+    let observables = pauli_strings(6);
+    let observable = energy(6);
+
+    for (kind, template) in [
+        (prism_q::BackendKind::Statevector, ansatz.clone()),
+        (
+            prism_q::BackendKind::Mps { max_bond_dim: 64 },
+            ansatz.clone(),
+        ),
+        (prism_q::BackendKind::Factored, ansatz.clone()),
+        (prism_q::BackendKind::DensityMatrix, ansatz),
+        (prism_q::BackendKind::Auto, independent_halves()),
+    ] {
+        let params = Parameters::all_rotations(&template);
+        let mut prepared =
+            PreparedCircuit::with_backend(template.clone(), params.clone(), kind.clone()).unwrap();
+        for (point, values) in bindings_with_fallback(params.num_slots(), 7200)
+            .iter()
+            .enumerate()
+        {
+            let what = format!("{kind:?} point {point}");
+            let independent = params.bind(&template, values).unwrap();
+            let sim = || {
+                prism_q::simulate(&independent)
+                    .backend(kind.clone())
+                    .seed(SEED)
+            };
+            let expected = sim().expectation_values(&observables).unwrap();
+            let got = prepared
+                .expectation_values(values, &observables, SEED)
+                .unwrap();
+            assert_values_close(&got, &expected, &what);
+
+            let expected = sim().observable_expectation(&observable).unwrap();
+            let got = prepared
+                .observable_expectation(values, &observable, SEED)
+                .unwrap();
+            assert_observables_close(&got, &expected, &what);
+        }
+    }
+}
+
+#[test]
+fn expectation_terminals_reject_a_measured_template_as_simulate_does() {
+    let mut template = Circuit::new(4, 1);
+    template.instructions = circuits::hardware_efficient_ansatz(4, 1, SEED).instructions;
+    template.add_measure(0, 0);
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template, params.clone()).unwrap();
+    let values = angles(params.num_slots(), 1);
+
+    assert!(
+        prepared
+            .expectation_values(&values, &pauli_strings(4), SEED)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .observable_expectation(&values, &energy(4), SEED)
+            .is_err()
+    );
+    assert!(prepared.run(&values, SEED).is_ok());
+}
+
+// Eight qubits splits across workers under `parallel`; fourteen runs in order.
+#[test]
+fn many_terminals_are_bit_identical_to_a_loop() {
+    for n in [8, 14] {
+        let template = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let params = Parameters::all_rotations(&template);
+        let points = bindings_with_fallback(params.num_slots(), 7300 + n as u64);
+        let observables = pauli_strings(n);
+        let observable = energy(n);
+
+        let mut looped = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+        let mut many = PreparedCircuit::new(template, params).unwrap();
+
+        let runs = many.run_many(&points, SEED).unwrap();
+        let values = many
+            .expectation_values_many(&points, &observables, SEED)
+            .unwrap();
+        let energies = many
+            .observable_expectation_many(&points, &observable, SEED)
+            .unwrap();
+        assert_eq!(runs.len(), points.len());
+        assert_eq!(values.len(), points.len());
+        assert_eq!(energies.len(), points.len());
+
+        for (point, binding) in points.iter().enumerate() {
+            let what = format!("{n} qubits, point {point}");
+            let run = looped.run(binding, SEED).unwrap();
+            assert_eq!(
+                runs[point].probabilities.as_ref().unwrap().to_vec(),
+                run.probabilities.unwrap().to_vec(),
+                "{what}"
+            );
+            assert_eq!(
+                values[point],
+                looped
+                    .expectation_values(binding, &observables, SEED)
+                    .unwrap(),
+                "{what}"
+            );
+            let energy = looped
+                .observable_expectation(binding, &observable, SEED)
+                .unwrap();
+            assert_eq!(energies[point].mean, energy.mean, "{what}");
+            assert_eq!(energies[point].variance, energy.variance, "{what}");
+            assert_eq!(
+                energies[point].group_variances, energy.group_variances,
+                "{what}"
+            );
+        }
+    }
+}
+
+#[test]
+fn many_terminals_report_the_first_failing_binding() {
+    let template = circuits::hardware_efficient_ansatz(4, 1, SEED);
+    let params = Parameters::all_rotations(&template);
+    let mut prepared = PreparedCircuit::new(template, params.clone()).unwrap();
+    let good = angles(params.num_slots(), 3);
+    let short = vec![0.1];
+    let err = prepared
+        .run_many(&[good.clone(), short, good], SEED)
+        .unwrap_err();
+    assert!(matches!(err, prism_q::PrismError::InvalidParameter { .. }));
+    assert!(prepared.run_many::<Vec<f64>>(&[], SEED).unwrap().is_empty());
+}
+
+// Each binding in a sweep has to measure what a solo run with the same seed
+// measures, whichever worker it lands on.
+#[test]
+fn run_many_with_mid_circuit_measurement_matches_simulate() {
+    let mut template = Circuit::new(3, 3);
+    template.add_gate(Gate::H, &[0]);
+    template.add_gate(Gate::Rx(0.0), &[1]);
+    template.add_gate(Gate::Cx, &[0, 2]);
+    template.add_measure(0, 0);
+    template.add_gate(Gate::Rx(0.0), &[1]);
+    template.add_gate(Gate::Cx, &[1, 2]);
+    template.add_measure(1, 1);
+    template.add_measure(2, 2);
+    let params = Parameters::from_links(
+        vec![
+            ParamLink {
+                instruction: 1,
+                slot: 0,
+            },
+            ParamLink {
+                instruction: 4,
+                slot: 1,
+            },
+        ],
+        2,
+    );
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+
+    let points: Vec<[f64; 2]> = (0..24)
+        .map(|k| {
+            let v = angles(2, 8000 + k % 5);
+            [v[0], v[1]]
+        })
+        .collect();
+    for seed in [SEED, 9] {
+        let outcomes = prepared.run_many(&points, seed).unwrap();
+        for (values, got) in points.iter().zip(&outcomes) {
+            let independent = params.bind(&template, values).unwrap();
+            let expected = prism_q::simulate(&independent).seed(seed).run().unwrap();
+            assert_eq!(got.classical_bits, expected.classical_bits, "{values:?}");
+        }
+    }
 }

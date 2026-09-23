@@ -62,7 +62,10 @@ cannot answer falls back to the statevector. Which backends answer each is tabul
 
 **Parameters and binding:**
 `Parameters`, `ParamLink`, `PreparedCircuit`. The gradient path reads the links and
-binding writes through them.
+binding writes through them. `PreparedCircuit` carries `run`, `expectation_values` and
+`observable_expectation`, each answering what the `Simulate` terminal of that name
+answers on the bound circuit, plus a `_many` form of each that takes a list of bindings
+and splits it across cores where `run_batch` would.
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`,

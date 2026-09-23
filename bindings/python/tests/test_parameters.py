@@ -63,6 +63,47 @@ def test_run_agrees_with_a_rebuilt_circuit():
         assert held.metadata.backend == fresh.metadata.backend
 
 
+OBSERVABLES = [[(0, "Z")], [(1, "X"), (2, "Y")], [(0, "Z"), (3, "Z")]]
+HAMILTONIAN = [(1.0, [(0, "Z"), (1, "Z")]), (0.5, [(2, "X")]), (-0.25, [])]
+
+
+def test_expectation_terminals_agree_with_a_rebuilt_circuit():
+    prepared = _prepared_ansatz()
+    for values in POINTS:
+        fresh = simulate(_ansatz(values).build()).seed(42)
+        np.testing.assert_allclose(
+            prepared.expectation_values(values, OBSERVABLES),
+            fresh.expectation_values(OBSERVABLES),
+            atol=1e-12,
+        )
+        held = prepared.observable_expectation(values, HAMILTONIAN)
+        expected = simulate(_ansatz(values).build()).seed(42).observable_expectation(
+            HAMILTONIAN
+        )
+        assert math.isclose(held.mean, expected.mean, abs_tol=1e-12)
+        assert math.isclose(held.variance, expected.variance, abs_tol=1e-12)
+
+
+def test_many_terminals_match_a_loop():
+    prepared = _prepared_ansatz()
+    bindings = np.array(POINTS * 4)
+    runs = prepared.run_many(bindings, seed=7)
+    values = prepared.expectation_values_many(bindings, OBSERVABLES, seed=7)
+    energies = prepared.observable_expectation_many(bindings.tolist(), HAMILTONIAN)
+    assert len(runs) == len(bindings)
+    assert values.shape == (len(bindings), len(OBSERVABLES))
+    for row, point in enumerate(bindings):
+        np.testing.assert_array_equal(
+            runs[row].probabilities, prepared.run(point, seed=7).probabilities
+        )
+        np.testing.assert_array_equal(
+            values[row], prepared.expectation_values(point, OBSERVABLES, seed=7)
+        )
+        assert energies[row].mean == prepared.observable_expectation(point, HAMILTONIAN).mean
+    with pytest.raises(PrismError):
+        prepared.run_many(np.zeros((2, 7)))
+
+
 def test_run_reuses_one_object_across_a_sweep():
     prepared = _prepared_ansatz()
     assert prepared.reuses_fusion_plan

@@ -33,6 +33,21 @@ pub fn complex_matrix(
     Ok(array.into_pyarray(py))
 }
 
+/// Build a row-major `(rows, cols)` `float64` NumPy matrix from a flat buffer.
+pub fn f64_matrix(
+    py: Python<'_>,
+    rows: usize,
+    cols: usize,
+    flat: Vec<f64>,
+) -> PyPrismResult<Bound<'_, PyArray2<f64>>> {
+    let array = Array2::from_shape_vec((rows, cols), flat).map_err(|e| {
+        invalid(format!(
+            "failed to shape ({rows}, {cols}) float matrix: {e}"
+        ))
+    })?;
+    Ok(array.into_pyarray(py))
+}
+
 /// Build a row-major `(rows, cols)` boolean NumPy matrix from a flat buffer.
 pub fn bool_matrix(
     py: Python<'_>,

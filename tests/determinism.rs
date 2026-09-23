@@ -389,6 +389,33 @@ fn prepared_sweeps_bitwise_equal_across_thread_counts() {
     );
 }
 
+// A parameter-shift gradient below the parallel floor splits its links into one
+// chunk per worker, so the chunk boundaries move with the thread count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn shift_gradient_bitwise_equal_across_thread_counts() {
+    let circuit = prism_q::circuits::hardware_efficient_ansatz(10, 2, SEED);
+    let params = Parameters::all_rotations(&circuit);
+    let hamiltonian: Vec<(f64, Vec<PauliTerm>)> = (0..9)
+        .map(|q| {
+            (
+                0.5 + 0.1 * q as f64,
+                vec![PauliTerm::z(q), PauliTerm::x(q + 1)],
+            )
+        })
+        .collect();
+    let gradient = |threads: usize| {
+        in_pool(threads, || {
+            prism_q::run_expectation_gradient_shift(&circuit, &hamiltonian, &params, SEED)
+                .expect("shift gradient")
+        })
+    };
+    let base = gradient(1);
+    for threads in [3, THREADS_HI] {
+        assert_eq!(base, gradient(threads), "{threads} threads");
+    }
+}
+
 // The batched compiled sampler derives one RNG stream per worker, so its shot
 // set is a function of the pool width: reproducible at a fixed thread count,
 // documented as thread-count-dependent in threading-simd.md.

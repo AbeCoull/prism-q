@@ -144,10 +144,7 @@ fn gate_samples() -> Vec<Gate> {
                 },
             ],
         })),
-        Gate::MultiFused(Box::new(MultiFusedData {
-            gates: vec![(0, m2), (1, m2)],
-            all_diagonal: false,
-        })),
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![(0, m2), (1, m2)]))),
         Gate::Fused2q(Box::new(m4)),
         Gate::Multi2q(Box::new(Multi2qData {
             gates: vec![(0, 1, m4)],
@@ -425,10 +422,12 @@ fn multi_fused_mixed_gates() {
         insts.push(g(Gate::H, &[q]));
     }
     insts.push(g(
-        Gate::MultiFused(Box::new(MultiFusedData {
-            gates: vec![(0, mat_a), (1, mat_b), (2, mat_a), (3, mat_b)],
-            all_diagonal: false,
-        })),
+        Gate::MultiFused(Box::new(MultiFusedData::new(vec![
+            (0, mat_a),
+            (1, mat_b),
+            (2, mat_a),
+            (3, mat_b),
+        ]))),
         &[0, 1, 2, 3],
     ));
     f.compare(n, &insts);
@@ -648,10 +647,7 @@ fn multi_fused_all_high_targets_matches_cpu() {
         insts.push(g(Gate::Rz(0.1 * q as f64), &[q]));
     }
     insts.push(g(
-        Gate::MultiFused(Box::new(MultiFusedData {
-            gates,
-            all_diagonal: false,
-        })),
+        Gate::MultiFused(Box::new(MultiFusedData::new(gates))),
         &[10, 11, 12, 13],
     ));
     f.compare(n, &insts);
@@ -683,10 +679,7 @@ fn multi_fused_every_qubit_16q_matches_cpu() {
         insts.push(g(Gate::Cx, &[q, q + 1]));
     }
     insts.push(g(
-        Gate::MultiFused(Box::new(MultiFusedData {
-            gates,
-            all_diagonal: false,
-        })),
+        Gate::MultiFused(Box::new(MultiFusedData::new(gates))),
         &(0..n).collect::<Vec<_>>(),
     ));
     f.compare(n, &insts);
@@ -729,10 +722,7 @@ fn multi_fused_nondiag_tiled_matches_cpu() {
         insts.push(g(Gate::H, &[q]));
     }
     insts.push(g(
-        Gate::MultiFused(Box::new(MultiFusedData {
-            gates,
-            all_diagonal: false,
-        })),
+        Gate::MultiFused(Box::new(MultiFusedData::new(gates))),
         &(0..8).collect::<Vec<_>>(),
     ));
     f.compare(n, &insts);
@@ -759,10 +749,7 @@ fn multi_fused_diagonal_batched_matches_cpu() {
         insts.push(g(Gate::H, &[q]));
     }
     insts.push(g(
-        Gate::MultiFused(Box::new(MultiFusedData {
-            gates: gates.clone(),
-            all_diagonal: true,
-        })),
+        Gate::MultiFused(Box::new(MultiFusedData::new(gates.clone()))),
         &(0..8).collect::<Vec<_>>(),
     ));
     f.compare(n, &insts);

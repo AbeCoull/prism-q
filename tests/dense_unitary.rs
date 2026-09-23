@@ -371,7 +371,7 @@ fn fusion_treats_a_dense_unitary_as_a_barrier() {
         Instruction::Gate { gate, targets } => {
             targets.contains(&qubit)
                 || match gate {
-                    Gate::MultiFused(data) => data.gates.iter().any(|&(q, _)| q == qubit),
+                    Gate::MultiFused(data) => data.gates().iter().any(|&(q, _)| q == qubit),
                     Gate::Multi2q(data) => {
                         data.gates.iter().any(|&(a, b, _)| a == qubit || b == qubit)
                     }

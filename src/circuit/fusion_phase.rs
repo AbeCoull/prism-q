@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use num_complex::Complex64;
 
 use super::{Circuit, Instruction, SmallVec, smallvec};
-use crate::gates::{BatchPhaseData, Gate, MultiFusedData, is_diagonal_2x2};
+use crate::gates::{BatchPhaseData, Gate, MultiFusedData};
 
 use super::fusion::push_unique;
 use super::plan::{Place, Tracer};
@@ -316,12 +316,8 @@ pub(super) fn batch_post_phase_1q<'a>(
                 push_unique(&mut targets, q);
             }
             targets.sort_unstable();
-            let all_diagonal = pending.iter().all(|(_, m)| is_diagonal_2x2(m));
             output.push(Instruction::Gate {
-                gate: Gate::MultiFused(Box::new(MultiFusedData {
-                    gates: std::mem::take(pending),
-                    all_diagonal,
-                })),
+                gate: Gate::MultiFused(Box::new(MultiFusedData::new(std::mem::take(pending)))),
                 targets,
             });
             if t.on {

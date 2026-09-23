@@ -25,9 +25,9 @@ use super::plan::{Place, Tracer};
 /// Floor for the 1q fusion, reorder, and batching passes. Below it gate execution takes
 /// nanoseconds and cloning the instruction stream costs more than fusion saves.
 #[cfg(not(miri))]
-const MIN_QUBITS_FOR_FUSION: usize = 10;
+pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 10;
 #[cfg(miri)]
-const MIN_QUBITS_FOR_FUSION: usize = 8;
+pub(crate) const MIN_QUBITS_FOR_FUSION: usize = 8;
 
 #[cfg(not(miri))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 14;

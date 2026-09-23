@@ -251,7 +251,9 @@ impl PreparedCircuit {
         bindings: &[V],
         seed: u64,
     ) -> Result<Vec<RunOutcome>> {
-        self.map_bindings(bindings, |prepared, values| prepared.run(values, seed))
+        self.map_split(bindings, |prepared, values| {
+            prepared.run(values.as_ref(), seed)
+        })
     }
 
     /// [`expectation_values`](Self::expectation_values) on each binding in order,
@@ -265,8 +267,8 @@ impl PreparedCircuit {
         observables: &[Vec<PauliTerm>],
         seed: u64,
     ) -> Result<Vec<Vec<f64>>> {
-        self.map_bindings(bindings, |prepared, values| {
-            prepared.expectation_values(values, observables, seed)
+        self.map_split(bindings, |prepared, values| {
+            prepared.expectation_values(values.as_ref(), observables, seed)
         })
     }
 
@@ -281,8 +283,8 @@ impl PreparedCircuit {
         observable: &PauliObservable,
         seed: u64,
     ) -> Result<Vec<ObservableExpectation>> {
-        self.map_bindings(bindings, |prepared, values| {
-            prepared.observable_expectation(values, observable, seed)
+        self.map_split(bindings, |prepared, values| {
+            prepared.observable_expectation(values.as_ref(), observable, seed)
         })
     }
 
@@ -301,17 +303,18 @@ impl PreparedCircuit {
         Ok(fused)
     }
 
-    /// Evaluate `eval` per binding. A worker copy starts from the settled parts
-    /// rather than from `self`, whose held backend is not `Sync`; results do not
-    /// depend on binding history, so the copy answers as `self` would.
-    fn map_bindings<V, T, F>(&mut self, bindings: &[V], eval: F) -> Result<Vec<T>>
+    /// Evaluate `eval` per item, in order, splitting the items across Rayon workers
+    /// where [`run_many`](Self::run_many) splits. A worker copy starts from the
+    /// settled parts rather than from `self`, whose held backend is not `Sync`;
+    /// results do not depend on binding history, so the copy answers as `self` would.
+    pub(crate) fn map_split<I, T, F>(&mut self, items: &[I], eval: F) -> Result<Vec<T>>
     where
-        V: AsRef<[f64]> + Sync,
+        I: Sync,
         T: Send,
-        F: Fn(&mut Self, &[f64]) -> Result<T> + Sync,
+        F: Fn(&mut Self, &I) -> Result<T> + Sync,
     {
         #[cfg(feature = "parallel")]
-        if bindings.len() > 1
+        if items.len() > 1
             && crate::sim::runs_split_across_workers(&self.kind, self.template.num_qubits)
         {
             use rayon::prelude::*;
@@ -324,9 +327,9 @@ impl PreparedCircuit {
                 skeleton,
                 ..
             } = &*self;
-            // Each worker claims the next unclaimed binding until none remain, so it
+            // Each worker claims the next unclaimed item until none remain, so it
             // builds its copy once. `map_init` builds one per split of the range,
-            // which for a short list is nearly one per binding.
+            // which for a short list is nearly one per item.
             let next = AtomicUsize::new(0);
             let claimed: Vec<Vec<(usize, Result<T>)>> = (0..rayon::current_num_threads())
                 .into_par_iter()
@@ -335,7 +338,7 @@ impl PreparedCircuit {
                     let mut claimed = Vec::new();
                     loop {
                         let k = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(values) = bindings.get(k) else {
+                        let Some(item) = items.get(k) else {
                             return claimed;
                         };
                         let worker = worker.get_or_insert_with(|| {
@@ -347,7 +350,7 @@ impl PreparedCircuit {
                                 skeleton.clone(),
                             )
                         });
-                        claimed.push((k, eval(worker, values.as_ref())));
+                        claimed.push((k, eval(worker, item)));
                     }
                 })
                 .collect();
@@ -355,9 +358,6 @@ impl PreparedCircuit {
             results.sort_unstable_by_key(|&(k, _)| k);
             return results.into_iter().map(|(_, result)| result).collect();
         }
-        bindings
-            .iter()
-            .map(|values| eval(self, values.as_ref()))
-            .collect()
+        items.iter().map(|item| eval(self, item)).collect()
     }
 }

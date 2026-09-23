@@ -20,8 +20,8 @@ use num_complex::Complex64;
 
 use crate::backend::statevector::StatevectorBackend;
 use crate::backend::{Backend, max_statevector_qubits, reserve_dense_output};
-use crate::circuit::parameter::{Parameters, angle_mut};
-use crate::circuit::{Circuit, Instruction, SmallVec, smallvec};
+use crate::circuit::parameter::{ParamLink, Parameters, angle_mut, angle_of};
+use crate::circuit::{Circuit, Instruction, PreparedCircuit, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
 use crate::gates::{
     BatchRzzData, DiagEntry, DiagonalBatchData, Gate, GeneratorKind, MultiFusedData,
@@ -620,6 +620,14 @@ pub(crate) fn shift_gradient(
     seed: u64,
 ) -> Result<ExpectationGradient> {
     params.validate(circuit)?;
+    // Below the fusion floor there is no plan to replay, and the prepared copy
+    // each worker builds costs more than the route and allocation it saves.
+    if initial_state.is_none()
+        && noise.is_none()
+        && circuit.num_qubits >= crate::circuit::fusion::MIN_QUBITS_FOR_FUSION
+    {
+        return prepared_shift_gradient(kind, circuit, hamiltonian, params, seed);
+    }
     if initial_state.is_some() || noise.is_some() {
         super::require_unitary_circuit(kind, circuit, "expectation values require")?;
     }
@@ -705,6 +713,74 @@ pub(crate) fn shift_gradient(
     Ok(ExpectationGradient { value, gradient })
 }
 
+/// [`shift_gradient`] with neither noise nor a start state: every evaluation binds
+/// one [`PreparedCircuit`], so the route is settled and the fusion plan captured
+/// once rather than per shifted circuit.
+fn prepared_shift_gradient(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    hamiltonian: &[(f64, Vec<PauliTerm>)],
+    params: &Parameters,
+    seed: u64,
+) -> Result<ExpectationGradient> {
+    // One slot per linked instruction rather than per parameter slot, since a
+    // shift moves one gate even where its slot drives several.
+    let links = params.links();
+    let mut sites: Vec<usize> = links.iter().map(|link| link.instruction).collect();
+    sites.sort_unstable();
+    sites.dedup();
+    let base: Vec<f64> = sites
+        .iter()
+        .map(|&i| angle_of(&circuit.instructions[i]))
+        .collect();
+    let site_params = Parameters::from_links(
+        sites
+            .iter()
+            .enumerate()
+            .map(|(slot, &instruction)| ParamLink { instruction, slot })
+            .collect(),
+        sites.len(),
+    );
+
+    let observables: Vec<Vec<PauliTerm>> =
+        hamiltonian.iter().map(|(_, terms)| terms.clone()).collect();
+    let energy = |prepared: &mut PreparedCircuit, values: &[f64]| -> Result<f64> {
+        let per_term = prepared.expectation_values(values, &observables, seed)?;
+        Ok(hamiltonian
+            .iter()
+            .zip(per_term)
+            .map(|((coeff, _), v)| coeff * v)
+            .sum())
+    };
+
+    let mut prepared = PreparedCircuit::with_backend(circuit.clone(), site_params, kind.clone())?;
+    let value = energy(&mut prepared, &base)?;
+    let mut gradient = vec![0.0; params.num_slots()];
+    if params.is_empty() {
+        return Ok(ExpectationGradient { value, gradient });
+    }
+
+    // Terms are summed into their slots in link order however the links were
+    // split, so the gradient does not depend on the thread count.
+    let shift = std::f64::consts::FRAC_PI_2;
+    let terms = prepared.map_split(links, |worker, link| {
+        let site = sites
+            .binary_search(&link.instruction)
+            .expect("every link names a site");
+        let mut values = base.clone();
+        values[site] = base[site] + shift;
+        let plus = energy(worker, &values)?;
+        values[site] = base[site] - shift;
+        let minus = energy(worker, &values)?;
+        Ok(0.5 * (plus - minus))
+    })?;
+    for (link, term) in links.iter().zip(terms) {
+        gradient[link.slot] += term;
+    }
+
+    Ok(ExpectationGradient { value, gradient })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,11 +851,8 @@ mod tests {
         assert!((g.gradient[0] - (-2.0 * theta.sin())).abs() < 1e-9);
     }
 
-    // Eight qubits splits the links across workers under `parallel`; the reference
-    // sums the same terms in link order on one thread, so the bits must agree.
-    #[test]
-    fn shift_gradient_matches_a_sequential_sum_bit_for_bit() {
-        let circuit = crate::circuits::hardware_efficient_ansatz(8, 2, 7);
+    fn hea_with_shared_slots(n: usize) -> (Circuit, Parameters) {
+        let circuit = crate::circuits::hardware_efficient_ansatz(n, 2, 7);
         let mut params = Parameters::new(3);
         let rotations = circuit.instructions.iter().enumerate().filter(|(_, inst)| {
             matches!(
@@ -793,34 +866,133 @@ mod tests {
         for (k, (i, _)) in rotations.enumerate() {
             params.link(i, k % 3);
         }
+        (circuit, params)
+    }
+
+    fn slot_per_link(params: &Parameters) -> Parameters {
+        let links = params.links();
+        Parameters::from_links(
+            links
+                .iter()
+                .enumerate()
+                .map(|(slot, link)| ParamLink {
+                    instruction: link.instruction,
+                    slot,
+                })
+                .collect(),
+            links.len(),
+        )
+    }
+
+    fn weighted_energy(ham: &[(f64, Vec<PauliTerm>)], per_term: Vec<f64>) -> f64 {
+        ham.iter()
+            .zip(per_term)
+            .map(|((coeff, _), v)| coeff * v)
+            .sum()
+    }
+
+    // Ten qubits splits the links across workers under `parallel` and replays a
+    // fusion plan; the reference sums the same prepared terms in link order on
+    // one thread, so the bits must agree.
+    #[test]
+    fn shift_gradient_matches_a_sequential_sum_bit_for_bit() {
+        let (circuit, params) = hea_with_shared_slots(10);
         let ham = vec![
             (0.5, vec![PauliTerm::z(0), PauliTerm::z(1)]),
             (1.5, vec![PauliTerm::x(3)]),
         ];
         let observables: Vec<Vec<PauliTerm>> = ham.iter().map(|(_, t)| t.clone()).collect();
-        let energy = |c: &Circuit| -> f64 {
-            let per_term =
-                super::super::run_expectation_values_with(BackendKind::Auto, c, &observables, 42)
-                    .unwrap();
-            ham.iter()
-                .zip(per_term)
-                .map(|((coeff, _), v)| coeff * v)
-                .sum()
+        let links = params.links();
+        let sites = slot_per_link(&params);
+        let base = sites.values(&circuit).unwrap();
+        let mut prepared = PreparedCircuit::new(circuit.clone(), sites).unwrap();
+        assert!(prepared.reuses_fusion_plan());
+        let mut energy = |values: &[f64]| {
+            weighted_energy(
+                &ham,
+                prepared
+                    .expectation_values(values, &observables, 42)
+                    .unwrap(),
+            )
         };
         let shift = std::f64::consts::FRAC_PI_2;
         let mut expected = vec![0.0; 3];
-        for link in params.links() {
-            let mut shifted = circuit.clone();
-            let base = *angle_mut(&mut shifted.instructions[link.instruction]);
-            *angle_mut(&mut shifted.instructions[link.instruction]) = base + shift;
-            let plus = energy(&shifted);
-            *angle_mut(&mut shifted.instructions[link.instruction]) = base - shift;
-            let minus = energy(&shifted);
+        for (k, link) in links.iter().enumerate() {
+            let mut values = base.clone();
+            values[k] = base[k] + shift;
+            let plus = energy(&values);
+            values[k] = base[k] - shift;
+            let minus = energy(&values);
             expected[link.slot] += 0.5 * (plus - minus);
         }
 
         let g = run_expectation_gradient_shift(&circuit, &ham, &params, 42).unwrap();
         assert_eq!(g.gradient, expected);
+    }
+
+    // Angles of pi/2 on half the rotations shift to 0 and pi, which collapse a
+    // fused block to the identity or a named gate and force the replay onto the
+    // full pass pipeline.
+    #[test]
+    fn shift_gradient_matches_fresh_fusion_on_degenerate_shifts() {
+        for n in [6, 10] {
+            let (mut circuit, params) = hea_with_shared_slots(n);
+            for link in params.links().iter().step_by(2) {
+                *angle_mut(&mut circuit.instructions[link.instruction]) =
+                    std::f64::consts::FRAC_PI_2;
+            }
+            let ham: Vec<(f64, Vec<PauliTerm>)> = (0..n - 1)
+                .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
+                .chain([(0.7, vec![PauliTerm::x(2)])])
+                .collect();
+            let observables: Vec<Vec<PauliTerm>> = ham.iter().map(|(_, t)| t.clone()).collect();
+            let energy = |c: &Circuit| {
+                weighted_energy(
+                    &ham,
+                    super::super::run_expectation_values_with(
+                        BackendKind::Auto,
+                        c,
+                        &observables,
+                        42,
+                    )
+                    .unwrap(),
+                )
+            };
+            let shift = std::f64::consts::FRAC_PI_2;
+            let mut expected = vec![0.0; params.num_slots()];
+            for link in params.links() {
+                let mut shifted = circuit.clone();
+                let base = *angle_mut(&mut shifted.instructions[link.instruction]);
+                *angle_mut(&mut shifted.instructions[link.instruction]) = base + shift;
+                let plus = energy(&shifted);
+                *angle_mut(&mut shifted.instructions[link.instruction]) = base - shift;
+                let minus = energy(&shifted);
+                expected[link.slot] += 0.5 * (plus - minus);
+            }
+
+            if n == 10 {
+                let sites = slot_per_link(&params);
+                let base = sites.values(&circuit).unwrap();
+                let mut prepared = PreparedCircuit::new(circuit.clone(), sites).unwrap();
+                assert!(prepared.reuses_fusion_plan());
+                let replayed = prepared.bind_fused(&base).unwrap().instructions.len();
+                let fell_back = (0..base.len()).any(|k| {
+                    let mut values = base.clone();
+                    values[k] -= shift;
+                    prepared.bind_fused(&values).unwrap().instructions.len() != replayed
+                });
+                assert!(fell_back, "no shifted binding left the captured plan");
+            }
+
+            let g = run_expectation_gradient_shift(&circuit, &ham, &params, 42).unwrap();
+            assert!((g.value - energy(&circuit)).abs() < 1e-10, "{n}q value");
+            for (slot, (got, want)) in g.gradient.iter().zip(&expected).enumerate() {
+                assert!(
+                    (got - want).abs() < 1e-10,
+                    "{n}q slot {slot}: {got} vs {want}"
+                );
+            }
+        }
     }
 
     #[test]

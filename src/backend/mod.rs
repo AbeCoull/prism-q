@@ -1,7 +1,6 @@
 //! Simulation backend trait and implementations.
 //!
-//! Backends are the core execution engines. Each backend owns its quantum state
-//! representation and applies circuit instructions to evolve the state.
+//! Each backend owns its state representation and applies instructions to it.
 //!
 //! # Backend contract
 //!
@@ -40,11 +39,6 @@
 //! two halves of one capability, sampling a non-Pauli branch and applying the
 //! operator it selects, so their coverage is one set by construction. That set is
 //! `BackendKind::supports_general_noise`.
-//!
-//! # Adding a new backend
-//!
-//! Implement the [`Backend`] trait below, following the contract and
-//! performance requirements above.
 
 pub mod density_matrix;
 #[cfg(feature = "distributed")]
@@ -250,17 +244,13 @@ pub(crate) const MIN_QUBITS_FOR_PAR_GATES: usize = 128;
 #[cfg(feature = "parallel")]
 pub(crate) const MIN_ANTI_ROWS_FOR_PAR: usize = 4;
 
-/// Minimum probability/norm value for measurement normalization.
-///
-/// Used as `prob.clamp(NORM_CLAMP_MIN, 1.0).sqrt()` to avoid division by zero
-/// when a measurement outcome has near-zero probability due to floating point.
+/// Floor on an outcome probability before `1/sqrt`, so an outcome that rounds
+/// to zero does not divide by zero.
 pub(crate) const NORM_CLAMP_MIN: f64 = 1e-30;
 
-/// Tolerance for detecting whether a complex phase equals 1+0i.
-///
-/// Used in diagonal gate optimizations (`skip_lo`) and controlled-phase
-/// identity checks. Tighter than identity detection (1e-12) because phase
-/// errors accumulate multiplicatively.
+/// Tolerance for treating a phase as 1+0i in diagonal and controlled-phase skips.
+/// Tighter than identity detection (1e-12) because phase errors accumulate
+/// multiplicatively.
 pub(crate) const PHASE_IS_ONE_EPS: f64 = 1e-15;
 
 pub(crate) use memory::{
@@ -311,19 +301,14 @@ pub(crate) fn init_classical_bits(bits: &mut Vec<bool>, num: usize) {
     }
 }
 
-/// Initialize the Rayon thread pool to use all logical cores.
-///
-/// At 24q+ where state exceeds L3 cache, hyperthreads help hide memory
-/// latency. Benchmarks show 17% improvement with logical cores at 24q.
-/// The user can override via `RAYON_NUM_THREADS`.
+/// Size the global Rayon pool to all logical cores unless `RAYON_NUM_THREADS` is
+/// set. Hyperthreads hide memory latency once the state leaves L3: logical cores
+/// measured 17% faster at 24 qubits.
 ///
 /// Does nothing when the caller already runs inside a Rayon pool, as under
-/// [`ThreadPool::install`](crate::ThreadPool::install): that pool serves the
-/// work, and the global one stays as the caller left it. The `Once` is not
+/// [`ThreadPool::install`](crate::ThreadPool::install). The `Once` is not
 /// consumed on that path, so a later call from outside a pool still installs
-/// the global pool.
-///
-/// Safe to call multiple times. Only the first call takes effect.
+/// the global pool. Otherwise only the first call takes effect.
 #[cfg(feature = "parallel")]
 pub(crate) fn init_thread_pool() {
     if rayon::current_thread_index().is_some() {
@@ -468,7 +453,7 @@ impl BasisSamples {
 
 /// Trait that all simulation backends must implement.
 pub trait Backend {
-    /// Human-readable backend name (for error messages, logging, and benchmarks).
+    /// Backend name used in error messages and benchmark labels.
     fn name(&self) -> &'static str;
 
     /// Which engine this is, for the provenance attached to every result. The
@@ -497,9 +482,7 @@ pub trait Backend {
         None
     }
 
-    /// Initialize (or reset) state for a circuit with the given dimensions.
-    ///
-    /// After this call the backend is in the |0...0⟩ state.
+    /// Reset to |0...0⟩ with all classical bits cleared.
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()>;
 
     /// Whether [`Backend::init_from_amplitudes`] can start this backend from a
@@ -566,15 +549,11 @@ pub trait Backend {
     /// - Gate arity matches target count.
     fn apply(&mut self, instruction: &Instruction) -> Result<()>;
 
-    /// Read classical measurement results.
-    ///
-    /// Returns a slice indexed by classical bit number. `true` = measured |1⟩.
+    /// Classical bits by index, `true` for a measured |1⟩.
     fn classical_results(&self) -> &[bool];
 
-    /// Compute the probability of each computational basis state.
-    ///
-    /// Returns a `Vec<f64>` of length 2^num_qubits. Not all backends can
-    /// provide this efficiently, they may return `Err(BackendUnsupported)`.
+    /// Probability of each basis state, length `2^n`. A backend that cannot
+    /// expand its state returns `BackendUnsupported`.
     fn probabilities(&self) -> Result<Vec<f64>>;
 
     /// Per-block probabilities for a backend holding a product of independent
@@ -589,14 +568,11 @@ pub trait Backend {
         None
     }
 
-    /// Number of qubits the backend is currently configured for.
     fn num_qubits(&self) -> usize;
 
-    /// Apply a batch of instructions to the current state.
-    ///
-    /// The default implementation calls [`apply`](Backend::apply) in a loop.
-    /// Backends may override to batch gate operations for better cache
-    /// utilization (e.g., the stabilizer backend groups gates by target word).
+    /// Apply instructions in order. The default loops over
+    /// [`apply`](Backend::apply); the stabilizer backend overrides it to group
+    /// gates by target word.
     fn apply_instructions(&mut self, instructions: &[Instruction]) -> Result<()> {
         for instruction in instructions {
             self.apply(instruction)?;
@@ -619,11 +595,8 @@ pub trait Backend {
         }
     }
 
-    /// Whether this backend can handle `Gate::Fused` variants.
-    ///
-    /// Backends that operate on symbolic gate representations (e.g. stabilizer
-    /// tableau) cannot decode a fused matrix back to individual gates. The
-    /// simulation engine skips the fusion pass when this returns `false`.
+    /// Whether this backend accepts `Gate::Fused`; `sim` skips fusion when it
+    /// returns `false`, as a tableau cannot decode a fused matrix.
     ///
     /// Returning `true` also accepts `MultiFused` and `Multi2q`, whose payload
     /// gate lists must be applied in the order they are stored. Fusion emits
@@ -645,32 +618,22 @@ pub trait Backend {
         num_qubits
     }
 
-    /// Whether this backend has a native kernel for `Gate::QftBlock`.
-    ///
-    /// Native support is currently limited to whole-state CPU statevector QFT.
-    /// Other backends expand the block to textbook gates before dispatch.
+    /// Whether this backend has a native `Gate::QftBlock` kernel. Only the CPU
+    /// statevector does; others receive the textbook gates.
     fn supports_qft_block(&self) -> bool {
         false
     }
 
-    /// Whether this backend has a native kernel for `Gate::PauliRot`.
-    ///
-    /// Native support is currently limited to the host CPU statevector. Other
-    /// backends receive the CNOT-ladder lowering from
-    /// `circuit::expand_pauli_rotations` before dispatch.
+    /// Whether this backend has a native `Gate::PauliRot` kernel. Only the host
+    /// CPU statevector does; others receive the CNOT-ladder lowering from
+    /// `circuit::expand_pauli_rotations`.
     fn supports_pauli_rotation(&self) -> bool {
         false
     }
 
-    /// Export the current quantum state as a dense statevector.
-    ///
-    /// Returns a `Vec<Complex64>` of length 2^n containing the full amplitude
-    /// vector. Enables backend transitions (e.g., Stabilizer → Statevector
-    /// for temporal Clifford decomposition).
-    ///
-    /// Implemented by every backend that holds a pure state, including the
-    /// factored one, whose blocks tensor back into a joint vector. See the module
-    /// docs for what declines it.
+    /// Export the state as a dense `2^n` amplitude vector, used for backend
+    /// handoffs such as the temporal Clifford split. See the module docs for
+    /// what declines it.
     fn export_statevector(&self) -> Result<Vec<Complex64>> {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
@@ -678,23 +641,17 @@ pub trait Backend {
         })
     }
 
-    /// Compute P(qubit = |1⟩) without collapsing the state.
-    ///
-    /// Used by the trajectory engine for state-dependent noise channels
-    /// (amplitude damping, phase damping). The default derives from
-    /// [`Backend::reduced_density_matrix_1q`].
+    /// P(qubit = |1⟩) without collapsing the state, for state-dependent noise
+    /// channels. The default reads [`Backend::reduced_density_matrix_1q`].
     fn qubit_probability(&self, qubit: usize) -> Result<f64> {
         let rho = self.reduced_density_matrix_1q(qubit)?;
         Ok(rho[1][1].re.clamp(0.0, 1.0))
     }
 
-    /// Compute the one-qubit reduced density matrix without collapsing the state.
-    ///
-    /// Returned as `[[p0, r*], [r, p1]]`, where `r = <1|rho|0>`.
-    /// Used by the trajectory engine for dense custom Kraus channels whose
-    /// branch probabilities depend on coherence, not just populations. Backends
-    /// override when their representation can expose this efficiently enough for
-    /// noise sampling; see the module docs for what declines it and why.
+    /// One-qubit reduced density matrix `[[p0, r*], [r, p1]]` with
+    /// `r = <1|rho|0>`, without collapsing the state. Feeds Kraus channels whose
+    /// branch weights depend on coherence; see the module docs for what
+    /// declines it.
     fn reduced_density_matrix_1q(&self, _qubit: usize) -> Result<[[Complex64; 2]; 2]> {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
@@ -710,7 +667,7 @@ pub trait Backend {
         false
     }
 
-    /// Compute the two-qubit reduced density matrix without collapsing the state.
+    /// Two-qubit reduced density matrix, without collapsing the state.
     ///
     /// Indexed `rho[t][t']` with `t = 2 * bit(q0) + bit(q1)`, the packing
     /// [`crate::gates::Gate::matrix_4x4`] uses, so `q0` is the high bit.
@@ -735,17 +692,13 @@ pub trait Backend {
         Ok(out)
     }
 
-    /// Reset a qubit to |0⟩, discarding any prior amplitude on that qubit.
-    ///
-    /// Destructive, non-unitary. Used by OpenQASM `reset` and as a primitive
-    /// for thermal relaxation trajectory simulation. The default returns
-    /// `BackendUnsupported`; backends override for their native representation.
+    /// Reset a qubit to |0⟩.
     ///
     /// The contract is the reset channel `rho -> |0><0| (x) tr_q rho`: the
     /// qubit is traced out and replaced by |0⟩, leaving the rest of the
     /// register in the mixture the trace produces. Projecting onto |0⟩ and
-    /// renormalizing is **not** equivalent. The two agree only when the qubit
-    /// is unentangled; when it is entangled, projection also collapses its
+    /// renormalizing is not equivalent. The two agree only when the qubit is
+    /// unentangled; when it is entangled, projection also collapses its
     /// partners into the branch correlated with the |0⟩ outcome. On a Bell
     /// pair, resetting qubit 1 leaves ⟨Z0⟩ = 0 under the channel and
     /// ⟨Z0⟩ = 1 under projection.
@@ -890,12 +843,9 @@ pub trait Backend {
         )
     }
 
-    /// Apply a 2×2 matrix to a single qubit without allocating.
-    ///
-    /// Used by the trajectory engine to apply Kraus operators (amplitude
-    /// damping, phase damping, thermal relaxation, generic normalized Kraus).
-    /// The matrix need not be unitary: a jump branch is a projector scaled by
-    /// `1/sqrt(p_jump)`, and the no-jump branch renormalizes.
+    /// Apply a 2×2 Kraus branch to one qubit. The matrix need not be unitary: a
+    /// jump branch is a projector scaled by `1/sqrt(p_jump)`, and the no-jump
+    /// branch renormalizes.
     ///
     /// The default builds a `Gate::Fused` and dispatches via `apply`, which
     /// heap-allocates once per call inside a gate-application path, so every

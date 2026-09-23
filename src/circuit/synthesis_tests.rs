@@ -5,12 +5,9 @@ use crate::simulate;
 
 const EPS: f64 = 1e-9;
 
-/// The unitary `instrs` implement over `targets`, in gate-matrix order where
-/// `targets[0]` is the most significant bit.
-///
-/// Each column is read by running the instructions from the basis state that
-/// column names, so the answer comes from the simulator rather than from a
-/// second copy of the synthesis rules.
+/// The unitary `instrs` implement over `targets`, with `targets[0]` the most significant
+/// bit. Columns come from simulating each basis state, not from a second copy of the
+/// synthesis rules.
 fn realized(instrs: &[Instruction], num_qubits: usize, targets: &[usize]) -> Vec<Complex64> {
     let width = targets.len();
     let dim = 1usize << width;

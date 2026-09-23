@@ -1,9 +1,6 @@
-//! Opaque handle to a CUDA execution context.
-//!
-//! The class is present in every build. Without the `gpu` feature the
-//! constructor raises `PrismError` instead of the class being absent, so the
-//! Python API surface does not change between wheels. Construction compiles the
-//! kernel module, so it releases the GIL like the simulation terminals do.
+//! Opaque handle to a CUDA execution context. The class exists in every build;
+//! without the `gpu` feature its constructor raises `PrismError`, so the Python API
+//! does not change between wheels.
 
 use pyo3::prelude::*;
 

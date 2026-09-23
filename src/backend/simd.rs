@@ -556,11 +556,8 @@ pub(crate) fn kraus_2q_wide_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("PRISM_NO_AVX2_KRAUS").is_none())
 }
 
-/// Precomputed single-qubit gate ready for repeated application.
-///
-/// Create once per gate via [`PreparedGate1q::new`], then call [`apply`]
-/// per chunk. This avoids re-broadcasting the matrix and re-checking CPU
-/// features on every chunk.
+/// Single-qubit gate with its matrix broadcast and SIMD tier chosen once, then
+/// applied per chunk.
 pub(crate) struct PreparedGate1q {
     #[cfg(target_arch = "x86_64")]
     broadcast: MatBroadcast,
@@ -2145,11 +2142,8 @@ unsafe fn apply_fused_2q_loop_neon(
     }
 }
 
-/// Precomputed two-qubit gate ready for repeated application via SIMD.
-///
-/// Created once per gate, then applied to each 4-element group of the
-/// statevector. On x86_64 and aarch64, stores the 4×4 matrix in broadcast
-/// form for SIMD kernels. On other platforms, stores the raw matrix.
+/// Two-qubit gate prepared once and applied per 4-element group: the 4×4 matrix
+/// in broadcast form on x86_64 and aarch64, raw elsewhere.
 pub(crate) struct PreparedGate2q {
     #[cfg(target_arch = "x86_64")]
     broadcast: Mat4x4Broadcast,

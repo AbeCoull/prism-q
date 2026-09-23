@@ -68,7 +68,7 @@ fn loopback_run(circuit: &Circuit, size: usize) -> (Vec<f64>, Vec<bool>) {
 }
 
 /// Assert that probabilities and classical bits are identical across all rank
-/// counts. This checks measurement determinism across rank counts.
+/// counts.
 fn assert_loopback_deterministic(circuit: &Circuit, sizes: &[usize]) {
     for &relabel in &[true, false] {
         let (ref_probs, ref_bits) = loopback_run_with(circuit, sizes[0], relabel);
@@ -1614,7 +1614,7 @@ fn shots_indices_match_dense_draws_at_four_ranks() {
 
 // A state above 53 qubits cannot be allocated in a test, so the transport is
 // checked directly: indices with the top bit set round trip exactly through
-// uneven blocks, which the previous f64 reduction could not carry.
+// uneven blocks, which an f64 reduction could not carry.
 #[test]
 fn loopback_allgatherv_u64_round_trips_uneven_wide_blocks() {
     let size = 4;
@@ -1714,9 +1714,8 @@ fn shots_without_measurements_still_validate_configuration() {
     );
 }
 
-// A caller holding a `dyn Backend` must reach the rank-local sampler. Before
-// the override it saw `supports_native_sampling() == false` and fell back to
-// the dense probability vector.
+// A caller holding a `dyn Backend` must reach the rank-local sampler rather
+// than the dense probability vector.
 #[test]
 fn trait_sampling_draws_natively_across_rank_counts() {
     relax_min_local_qubits();
@@ -1821,7 +1820,6 @@ fn pauli_expectations_match_the_dense_route_across_rank_counts() {
         }
     }
 
-    // The public terminal rejected this backend outright before the override.
     for values in run_ranks(4, |ctx| {
         crate::simulate(&circuit)
             .distributed(ctx)

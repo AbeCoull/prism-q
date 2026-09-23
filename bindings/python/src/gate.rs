@@ -1,9 +1,6 @@
-//! `Gate` wrapper exposing only the safe, user-constructible gate set.
-//!
-//! The batched variants (`BatchPhase`, `MultiFused`, ...) are never exposed:
-//! they carry internal qubit indices and constructing them by hand corrupts
-//! simulation state. A dense matrix reaches the fused forms through
-//! `Gate.unitary`, which validates it first.
+//! `Gate` wrapper exposing only the user-constructible gates. Batched variants
+//! (`BatchPhase`, `MultiFused`, ...) carry internal qubit indices and are never exposed;
+//! a dense matrix reaches the fused forms through `Gate.unitary`, which validates it.
 
 use num_complex::Complex64;
 use prism_q::Gate;
@@ -155,7 +152,6 @@ impl PyGate {
         Ok(Self(Gate::unitary(flat, dim.trailing_zeros() as usize)?))
     }
 
-    /// Number of qubits the gate acts on.
     #[getter]
     fn num_qubits(&self) -> usize {
         self.0.num_qubits()

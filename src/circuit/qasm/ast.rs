@@ -1,9 +1,7 @@
 //! Syntax tree for an OpenQASM program.
 //!
-//! Every name in the tree borrows the source it was read from, so a parse
-//! allocates for structure and never for text. Every node carries the line it
-//! was written on, so a diagnostic from deep inside an expanded `for` or `gate`
-//! body still points at the source.
+//! Names borrow the source text. Statements and operands carry their source line,
+//! so a diagnostic from inside an expanded `for` or `gate` body points at the source.
 
 use std::fmt;
 
@@ -65,7 +63,7 @@ pub(crate) enum StmtKind<'a> {
     /// Boxed because two operands would otherwise set the width of every
     /// statement in the tree.
     Measure(Box<Measure<'a>>),
-    /// A lone `;`, which costs nothing to accept and carries nothing.
+    /// A lone `;`.
     Empty,
     Reset {
         targets: Vec<Operand<'a>>,

@@ -1,14 +1,6 @@
-//! Distributed context, transport, and thresholds.
+//! Distributed context, rank transport, and tuning thresholds.
 //!
-//! [`DistributedContext`] wraps a shared [`RankComm`] transport. Backend modules
-//! define their own state partitioning and use this module for rank access.
-//!
-//! Available contexts:
-//! - [`DistributedContext::serial`]: one rank for tests and runs without MPI.
-//! - `DistributedContext::world`: the MPI world communicator (requires the
-//!   `distributed-mpi` feature and an MPI launcher).
-//!
-//! Tuning thresholds are cached after the first environment variable read.
+//! Each threshold reads its environment variable once and caches the result.
 
 pub mod comm;
 #[cfg(any(test, feature = "bench-internal"))]
@@ -23,14 +15,14 @@ pub use comm::MpiComm;
 
 use crate::env_knobs::parse_usize_knob;
 
-/// Default minimum local qubit count below which distribution is not worthwhile.
-///
-/// Small slices per rank spend more time in communication than computation.
+/// Default for `PRISM_DIST_MIN_LOCAL_QUBITS`. Smaller slices per rank spend more time
+/// in communication than computation.
 pub const MIN_LOCAL_QUBITS_DEFAULT: usize = 10;
 
 /// Minimum local qubits per rank, tunable via `PRISM_DIST_MIN_LOCAL_QUBITS`.
 ///
-/// An unparseable or out-of-range value warns on stderr and uses the default.
+/// The distributed backend rejects a register split that leaves fewer. An unparseable
+/// or out-of-range value warns on stderr and uses the default.
 pub fn min_local_qubits() -> usize {
     use std::sync::OnceLock;
     static CACHED: OnceLock<usize> = OnceLock::new();
@@ -44,16 +36,12 @@ pub fn min_local_qubits() -> usize {
     })
 }
 
-/// Maximum number of amplitudes exchanged per message on the direct exchange
-/// paths of the distributed backend. Chunking bounds the transfer buffers to
-/// this value.
-///
-/// Tunable via `PRISM_DIST_EXCHANGE_CHUNK`. The default (`usize::MAX`) keeps the
-/// original one message behavior, so there is no change unless set.
+/// Default for `PRISM_DIST_EXCHANGE_CHUNK`: each rank exchange goes as one message.
 pub const EXCHANGE_CHUNK_DEFAULT: usize = usize::MAX;
 
-/// Chunk size in amplitudes for the tiled rank exchanges.
+/// Largest rank exchange message in amplitudes, tunable via `PRISM_DIST_EXCHANGE_CHUNK`.
 ///
+/// Tiling the direct and relabel exchanges by this bounds the transfer buffers.
 /// An unparseable or out-of-range value warns on stderr and uses the default.
 pub fn exchange_chunk() -> usize {
     use std::sync::OnceLock;
@@ -122,7 +110,6 @@ impl std::fmt::Debug for DistributedContext {
 }
 
 impl DistributedContext {
-    /// Build a context from any [`RankComm`] implementation.
     pub fn from_comm(comm: Arc<dyn RankComm>) -> Arc<Self> {
         Arc::new(Self { comm })
     }
@@ -150,12 +137,10 @@ impl DistributedContext {
         Ok(MpiComm::attach_world()?.map(|c| Self::from_comm(Arc::new(c))))
     }
 
-    /// Index of the calling rank.
     pub fn rank(&self) -> usize {
         self.comm.rank()
     }
 
-    /// Total number of ranks.
     pub fn size(&self) -> usize {
         self.comm.size()
     }

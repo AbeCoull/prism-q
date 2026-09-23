@@ -1,10 +1,6 @@
-//! Opaque handle to an MPI world this process did not start.
-//!
-//! The class is present in every build; without the `distributed-mpi` feature
-//! the constructor raises, which is the shape [`crate::gpu`] uses. Nothing here
-//! calls `MPI_Init` or `MPI_Finalize`. mpi4py owns MPI's lifetime, and a handle
-//! whose refcount drop ran `MPI_Finalize` would make every later MPI call in
-//! the interpreter erroneous.
+//! Opaque handle to an MPI world this process did not start. Nothing here calls
+//! `MPI_Init` or `MPI_Finalize`: mpi4py owns MPI's lifetime, and a drop that ran
+//! `MPI_Finalize` would make every later MPI call in the interpreter erroneous.
 
 use pyo3::prelude::*;
 

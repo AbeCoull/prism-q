@@ -1,9 +1,7 @@
 //! Error types for PRISM-Q.
 //!
-//! Parsing and simulation entry points return [`PrismError`] for invalid input.
-//! Construction and accessor APIs panic on API misuse (out-of-bounds indices,
-//! wrong-variant accessors); each such method documents the condition under
-//! `# Panics`. Internal invariants use `debug_assert!` and fire in debug builds.
+//! Invalid input returns [`PrismError`]. API misuse (out-of-bounds indices,
+//! wrong-variant accessors) panics, and each such method says so under `# Panics`.
 
 use thiserror::Error;
 
@@ -15,7 +13,7 @@ pub enum PrismError {
     #[error("parse error at line {line}: {message}")]
     Parse { line: usize, message: String },
 
-    /// Encountered a valid OpenQASM construct that PRISM-Q v0 does not support.
+    /// Valid OpenQASM that PRISM-Q does not support.
     #[error("unsupported construct at line {line}: `{construct}`")]
     UnsupportedConstruct { construct: String, line: usize },
 

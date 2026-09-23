@@ -1,10 +1,6 @@
-//! Fusion plan capture and replay.
-//!
-//! A fusion pass decides its block structure from the gate sequence, not from
-//! the rotation angles. [`FusionPlan`] records those decisions once as a recipe
-//! per fused payload, so a later binding rebuilds the matrices without deciding
-//! the structure again. [`FusionPlan::replay`] verifies the assumptions the
-//! recorded plan rests on and reports when a binding invalidates them.
+//! Fusion plan capture and replay. [`FusionPlan`] records the block structure fusion chose
+//! from the gate sequence, with a recipe per fused payload, so a later binding rebuilds the
+//! matrices without re-running fusion unless the new angles break a recorded decision.
 
 use std::ops::Range;
 
@@ -282,8 +278,7 @@ impl Tracer {
         }
     }
 
-    /// Record a source index, but only while tracking. The ordinary fusion path
-    /// allocates nothing for bookkeeping no one will read.
+    /// Record a source index while tracking; the untraced path allocates nothing.
     #[inline]
     pub(super) fn note(&self, v: &mut Vec<(usize, Place)>, i: usize, place: Place) {
         if self.on {

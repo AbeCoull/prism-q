@@ -34,31 +34,21 @@
 //!
 //! - Single-qubit gates: iterate 2^(n-1) pairs with stride 2^target.
 //! - CX/CZ/SWAP: specialized routines avoid materializing a 4×4 matrix.
-//! - All gate kernels are `#[inline(always)]` to enable LTO to inline across
-//!   the dispatch boundary.
-//! - No heap allocation in per-amplitude inner loops. QFT twiddle tables may
-//!   allocate once outside the loop and are bounded by cache policy.
+//! - QFT twiddle tables allocate once outside the per-amplitude loop and are
+//!   bounded by cache policy.
 //!
-//! # Threading strategy
+//! # Threading and SIMD
 //!
-//! The pair-iteration loops are embarrassingly parallel. When the `parallel`
-//! feature is enabled and the qubit count meets `PARALLEL_THRESHOLD_QUBITS`
-//! (default: 14), each kernel dispatches to a Rayon-parallelized variant
-//! using `par_chunks_mut` / `split_at_mut`. Most partitioning uses safe
-//! slices; a few hot kernels use raw pointers after proving disjoint access.
-//! The sequential path is unchanged when the feature is off or the circuit is
-//! below threshold.
+//! The pair-iteration loops are embarrassingly parallel. With the `parallel`
+//! feature at `PARALLEL_THRESHOLD_QUBITS` (14) and above, each kernel splits
+//! across Rayon with `par_chunks_mut` / `split_at_mut`; a few hot kernels use
+//! raw pointers after proving disjoint access.
 //!
-//! # SIMD strategy
-//!
-//! The single-qubit gate kernel uses explicit SIMD intrinsics via the shared
-//! `simd` module. Complex64 (2×f64 = 128 bits) maps to one `__m128d` register.
-//! Matrix entries are precomputed as broadcast pairs `[re, re]` / `[im, im]`.
-//! Runtime dispatch: AVX2+FMA (256-bit) > FMA (128-bit) > SSE2 > scalar.
-//!
-//! Two-qubit gate and measurement parallel inner loops use SIMD bulk helpers
-//! (`negate_slice`, `swap_slices`, `norm_sqr_sum`, `zero_slice`)
-//! that dispatch to AVX2 implementations when available.
+//! The single-qubit kernel runs through the shared `simd` module: matrix
+//! entries are precomputed as broadcast pairs `[re, re]` / `[im, im]`, and
+//! runtime dispatch picks AVX2+FMA (256-bit), FMA (128-bit), SSE2, or scalar.
+//! Two-qubit gate and measurement loops use the SIMD bulk helpers
+//! (`negate_slice`, `swap_slices`, `norm_sqr_sum`, `zero_slice`).
 
 pub(crate) mod kernels;
 #[cfg(test)]
@@ -209,7 +199,6 @@ impl SendPtr {
     }
 }
 
-/// Full state-vector backend.
 pub struct StatevectorBackend {
     pub(crate) num_qubits: usize,
     pub(crate) state: Vec<Complex64>,
@@ -281,15 +270,10 @@ impl StatevectorBackend {
             self.gpu_state.is_some(),
             "apply_gpu called without gpu_state (callers must check self.gpu_state.is_some() first)"
         );
-        // Unconditional GPU dispatch: every instruction routes to a kernel once
-        // `gpu_state` is Some. This path is the explicit opt-in surface
-        // (`StatevectorBackend::with_gpu(ctx)`) and intentionally skips the
-        // dispatch-level crossover. Direct `with_gpu` callers request
-        // kernel behavior. For size-based crossover plus decomposition-aware
-        // routing, use `sim::simulate(...).backend(BackendKind::StatevectorGpu
-        // { context })`, which honors `gpu_min_qubits()` per sub-block.
-        //
-        // Caveat: Multi2q launches one kernel for each subgate (rare in practice).
+        // Every instruction routes to a kernel once `gpu_state` is Some: an
+        // explicit `with_gpu(ctx)` skips the dispatch-level crossover, which
+        // `BackendKind::StatevectorGpu` applies per sub-block through
+        // `gpu_min_qubits()`. Multi2q launches one kernel per subgate.
         match instruction {
             Instruction::Gate { gate, targets } => self.dispatch_gate_gpu(gate, targets),
             Instruction::Measure {

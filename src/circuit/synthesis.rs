@@ -1,8 +1,6 @@
-//! Lowering a dense unitary onto the gate variants the backends carry.
-//!
-//! One and two qubit matrices have their own variants. A wider matrix, or one
-//! under a control, is reduced to multi-controlled gates instead of growing the
-//! [`Gate`] enum, whose size the instruction stream pays for on every circuit.
+//! Lowering a dense unitary onto the gate variants the backends carry. A matrix wider than
+//! two qubits, or one under a control, becomes multi-controlled gates rather than a new
+//! [`Gate`] variant, whose size every instruction stream pays for.
 
 use num_complex::Complex64;
 use smallvec::SmallVec;

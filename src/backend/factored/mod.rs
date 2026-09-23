@@ -107,7 +107,6 @@ impl FactoredBackend {
         }
     }
 
-    /// Translate a global qubit index to a local index within its sub-state.
     #[inline(always)]
     fn local_qubit(sub: &SubState, global: usize) -> usize {
         sub.qubits.iter().position(|&q| q == global).unwrap()
@@ -222,7 +221,7 @@ impl FactoredBackend {
         Ok(())
     }
 
-    /// Central gate dispatch. Translates global qubit indices to local and
+    /// Central gate dispatch: translates global qubit indices to local and
     /// applies the sequential or Rayon kernel on the sub-state slice; the
     /// parallel path engages at `PARALLEL_THRESHOLD_QUBITS`.
     #[inline(always)]
@@ -788,11 +787,10 @@ impl Backend for FactoredBackend {
 
     /// Apply a Kraus branch to one qubit without boxing a `Gate::Fused`.
     ///
-    /// The default routes through `apply`, which allocates per call, and this is
-    /// the one override a live path depends on: a non-Pauli channel on a factored
-    /// run reaches here once per damping event. A single target never merges
-    /// sub-states, so kernel selection matches the `Gate::Fused` arm of
-    /// `dispatch_gate` exactly.
+    /// The default routes through `apply`, which allocates per call, and a
+    /// non-Pauli channel on a factored run reaches here once per damping event.
+    /// A single target never merges sub-states, so kernel selection matches the
+    /// `Gate::Fused` arm of `dispatch_gate`.
     fn apply_1q_matrix(&mut self, qubit: usize, matrix: &[[Complex64; 2]; 2]) -> Result<()> {
         let ss_idx = self.qubit_to_substate[qubit];
         let sub = self.substates[ss_idx].as_mut().unwrap();

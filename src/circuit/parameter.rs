@@ -84,7 +84,6 @@ impl Parameters {
         self.names.get(slot).map(String::as_str)
     }
 
-    /// Slot a name refers to.
     pub fn slot_of(&self, name: &str) -> Option<usize> {
         self.names.iter().position(|n| n == name)
     }
@@ -109,8 +108,7 @@ impl Parameters {
         self
     }
 
-    /// Give every bindable gate its own slot, in circuit order. The common
-    /// case for a variational ansatz where each rotation is independent.
+    /// Give every bindable gate its own slot, in circuit order.
     pub fn all_rotations(circuit: &Circuit) -> Self {
         let mut links = Vec::new();
         for (i, inst) in circuit.instructions.iter().enumerate() {
@@ -142,9 +140,7 @@ impl Parameters {
     /// Record that `instruction` reads `slot`.
     ///
     /// # Panics
-    /// Panics if `slot` is not below the declared slot count. Slot bounds are
-    /// fixed when the set is constructed, so an out-of-range slot is a caller
-    /// bug rather than bad input.
+    /// Panics if `slot` is not below the declared slot count.
     pub fn link(&mut self, instruction: usize, slot: usize) {
         assert!(
             slot < self.num_slots,

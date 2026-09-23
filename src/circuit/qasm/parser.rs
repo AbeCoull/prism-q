@@ -12,18 +12,17 @@ use super::lexer::{Kind, Token};
 use super::stream::Stream;
 use crate::error::{PrismError, Result};
 
-/// Keywords that open a classical declaration. `complex`, `duration` and
-/// `stretch` parse and are declined by the evaluator, which is where the
-/// reason belongs.
+/// Keywords that open a classical declaration. `complex` and `stretch` parse and
+/// are declined by the evaluator; `duration` never gets here, as `UNSUPPORTED`
+/// declines it first.
 const DECLARATION_TYPES: &[&str] = &[
     "int", "uint", "float", "angle", "bool", "complex", "duration", "stretch",
 ];
 
-/// Keywords the language has and this parser does not implement, each with
-/// the text its decline carries. A keyword parses as valid OpenQASM, so it
-/// owes `UnsupportedConstruct` rather than the syntax error its operands would
-/// otherwise produce: `delay[10ns] q[0]` reads as a malformed gate call and
-/// `duration d = 10ns` as a malformed expression, and neither says why.
+/// Keywords the language has and this parser declines, with the text each decline
+/// carries. Declining by name returns `UnsupportedConstruct` where the operands
+/// would otherwise give a bare syntax error (`delay[10ns] q[0]` reads as a
+/// malformed gate call).
 const UNSUPPORTED: &[(&str, &str)] = &[
     ("defcal", "defcal"),
     ("extern", "extern"),

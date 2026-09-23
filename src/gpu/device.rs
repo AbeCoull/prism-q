@@ -1,5 +1,4 @@
-//! CUDA device wrapper. Isolates cudarc so alternative backends (wgpu, ROCm) can be substituted
-//! by replacing this file.
+//! CUDA device handle, kernel module loading, and the on-disk PTX cache.
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -15,8 +14,8 @@ use super::kernels::{KERNEL_NAMES, kernel_source};
 
 /// Handle to a CUDA-capable device.
 ///
-/// Owns the CUDA context, default stream, and compiled PTX module. The `Stub` variant exists
-/// so unit tests can exercise the `with_gpu()` builder path without CUDA available.
+/// Owns the CUDA context, default stream, and compiled PTX module. A stub variant lets unit
+/// tests exercise the `with_gpu()` builder path without CUDA.
 #[derive(Debug)]
 pub struct GpuDevice {
     inner: DeviceInner,
@@ -68,9 +67,7 @@ impl GpuDevice {
         })
     }
 
-    /// Query whether any CUDA-capable GPU is available on this system.
-    ///
-    /// Safe to call without a device; returns `false` if detection fails for any reason.
+    /// Whether device 0 opens; any detection failure reads as `false`.
     pub fn is_available() -> bool {
         CudaContext::new(0).is_ok()
     }
@@ -88,8 +85,7 @@ impl GpuDevice {
     /// Free VRAM currently available on the selected device in bytes.
     ///
     /// Reflects allocations by all processes sharing the device, including the
-    /// current process's own outstanding `GpuBuffer`s. Useful for deciding
-    /// whether a pending statevector allocation is likely to fit.
+    /// current process's own outstanding `GpuBuffer`s.
     pub fn vram_available(&self) -> Result<usize> {
         match &self.inner {
             DeviceInner::Real { context, .. } => context
@@ -103,9 +99,8 @@ impl GpuDevice {
     /// Maximum qubits representable as a Complex64 statevector in the currently
     /// free VRAM.
     ///
-    /// Computed as `floor(log2(vram_available / 16))`. Each amplitude is two f64s =
-    /// 16 bytes. Free memory moves with other processes sharing the device, so the
-    /// value is advisory and can differ between calls.
+    /// Computed as `floor(log2(vram_available / 16))`. Free memory moves with other
+    /// processes sharing the device, so the value is advisory and can differ between calls.
     pub fn max_qubits_for_statevector(&self) -> Result<usize> {
         let bytes = self.vram_available()?;
         let elements = bytes / 16;

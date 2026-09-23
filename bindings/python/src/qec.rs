@@ -106,7 +106,6 @@ impl PyQecProgram {
         })
     }
 
-    /// Set runner options.
     #[pyo3(signature = (shots, seed = 42, chunk_size = None, keep_measurements = true))]
     fn set_options(
         &mut self,
@@ -140,7 +139,6 @@ impl PyQecProgram {
         self.inner.num_observables()
     }
 
-    /// Append a gate.
     fn push_gate(&mut self, gate: &PyGate, targets: Vec<usize>) -> PyPrismResult<()> {
         self.inner.push_gate(gate.inner().clone(), &targets)?;
         Ok(())

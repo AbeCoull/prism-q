@@ -1,10 +1,8 @@
 //! Integer-keyed hashing for hot maps.
 //!
-//! The stdlib default hasher is SipHash-1-3, which is collision-resistant
-//! against adversarial keys. Nothing in this crate hashes untrusted input: keys
-//! are basis-state indices and packed measurement words. The multiply-xor hash
-//! below costs a rotate, an xor, and a multiply per word, which is what the
-//! sparse state map and the shot histogram want on their inner loops.
+//! Keys are basis-state indices and packed measurement words, never untrusted input,
+//! so SipHash's collision resistance buys nothing. This hash costs a rotate, an xor
+//! and a multiply per word.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};

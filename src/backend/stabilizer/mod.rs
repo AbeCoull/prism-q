@@ -76,12 +76,9 @@ use crate::gpu::{GpuContext, GpuTableau};
 /// Clifford-only stabilizer simulation on an Aaronson-Gottesman tableau,
 /// O(n²) space.
 ///
-/// Manually implements `Clone`: the CPU tableau fields (`xz`, `phase`, SGI
-/// buffers, etc.) clone element-for-element just like the old derived impl.
-/// Cloning while the GPU tableau is attached panics, because the device-side
-/// `CudaSlice` cannot be duplicated and cloning to a "GPU context without a
-/// tableau" state would silently corrupt subsequent CPU-path calls. Existing
-/// call sites (`sim::stabilizer_rank`) only clone CPU-mode backends.
+/// Cloning panics while a GPU tableau is attached: the device `CudaSlice`
+/// cannot be duplicated, and a clone without it would corrupt later CPU-path
+/// calls.
 pub struct StabilizerBackend {
     pub(super) n: usize,
     pub(super) num_words: usize,
@@ -350,11 +347,8 @@ impl StabilizerBackend {
     /// tableau is device-resident, otherwise to the CPU `rowmul_words` SIMD
     /// helper.
     ///
-    /// This function is **not part of the stable public API**. It exists to
-    /// let integration tests in `tests/golden_gpu.rs` drive the GPU rowmul
-    /// kernel directly against the CPU reference; user-facing code invokes
-    /// rowmul through measurement. Signature and behaviour may change
-    /// without notice across any release.
+    /// Not stable API: it lets `tests/golden_gpu.rs` drive the GPU rowmul
+    /// kernel against the CPU reference, and may change in any release.
     #[doc(hidden)]
     pub fn rowmul_rows_for_testing(&mut self, src_row: usize, dst_row: usize) -> Result<()> {
         #[cfg(feature = "gpu")]
@@ -525,18 +519,15 @@ impl StabilizerBackend {
         cpu.xz = xz;
         cpu.phase = phase;
         cpu.classical_bits = self.classical_bits.clone();
-        // compute_probabilities reads only xz, phase, n, num_words.
         Ok(cpu.compute_probabilities())
     }
 
-    /// Queue a 1q Clifford op onto `pending_gpu_ops`.
     #[cfg(feature = "gpu")]
     fn queue_1q_gpu(&mut self, opcode: u32, target: usize) {
         self.pending_gpu_ops
             .extend_from_slice(&[opcode, target as u32, 0, 0]);
     }
 
-    /// Queue a 2q Clifford op onto `pending_gpu_ops`.
     #[cfg(feature = "gpu")]
     fn queue_2q_gpu(&mut self, opcode: u32, a: usize, b: usize) {
         self.pending_gpu_ops
@@ -1053,10 +1044,6 @@ impl StabilizerBackend {
     /// and accepts. Destabilizers are current in the copy: a lazy backend
     /// materializes them, and a device tableau is copied back with queued ops
     /// replayed.
-    ///
-    /// Used by golden tests to compare GPU kernel output against the CPU
-    /// reference byte for byte. Also gives user-facing diagnostics access to
-    /// the underlying tableau without forcing statevector materialisation.
     pub fn export_tableau(&self) -> Result<(Vec<u64>, Vec<bool>)> {
         let (xz, phase) = self.rows_with_destabilizers()?;
         Ok((xz.into_owned(), phase.into_owned()))

@@ -72,7 +72,7 @@ fn numbers_split_from_what_follows_them() {
 }
 
 // A `/*` inside a line comment or a string opens nothing, and a `//` inside a
-// string ends nothing. Each used to need its own rescan.
+// string ends nothing.
 #[test]
 fn comments_and_strings_do_not_reach_into_each_other() {
     assert_eq!(kinds("a // /* b\nc"), vec![Kind::Ident, Kind::Ident]);

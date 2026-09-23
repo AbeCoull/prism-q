@@ -1,14 +1,7 @@
-//! Circuit intermediate representation.
+//! Backend-agnostic circuit IR that every frontend lowers into.
 //!
-//! The IR is backend-agnostic. All frontends (OpenQASM, future programmatic builders)
-//! target this IR. Backends consume it without knowledge of the source format.
-//!
-//! # Design notes
-//! - `Instruction` uses `SmallVec<[usize; 4]>` for qubit targets. Most gates (1-2 qubits)
-//!   store targets inline without heap allocation. Multi-controlled gates (≥5 qubits) spill
-//!   to the heap transparently.
-//! - The circuit is append-only during construction. Optimization passes (fusion, reordering,
-//!   cancellation) operate on the instruction stream via [`fusion::fuse_circuit`].
+//! Targets are `SmallVec<[usize; 4]>`, inline up to four qubits. Optimization passes
+//! rewrite the instruction stream through [`fusion::fuse_circuit`].
 
 pub mod builder;
 pub(crate) mod clifford_t;
@@ -40,16 +33,12 @@ use std::borrow::Cow;
 /// A quantum circuit in PRISM-Q's internal representation.
 #[derive(Debug, Clone)]
 pub struct Circuit {
-    /// Total number of qubits.
     pub num_qubits: usize,
-    /// Total number of classical bits.
     pub num_classical_bits: usize,
-    /// Ordered sequence of instructions.
     pub instructions: Vec<Instruction>,
 }
 
 impl Circuit {
-    /// Create an empty circuit with the given qubit and classical bit counts.
     pub fn new(num_qubits: usize, num_classical_bits: usize) -> Self {
         Self {
             num_qubits,
@@ -61,10 +50,9 @@ impl Circuit {
     /// Append a gate operation.
     ///
     /// # Panics
-    /// Panics if any target index is out of bounds or if the gate's arity
-    /// does not match `targets.len()`. Bounds checks run in both debug and
-    /// release builds: a bad index propagates into kernel pointer math and
-    /// would corrupt or read uninitialised memory otherwise.
+    /// Panics if any target is out of bounds or the gate's arity does not match
+    /// `targets.len()`. The checks run in release builds too, because a bad index
+    /// reaches kernel pointer math.
     #[inline]
     pub fn add_gate(&mut self, gate: Gate, targets: &[usize]) {
         assert_eq!(
@@ -108,12 +96,11 @@ impl Circuit {
 
     /// Append the `2^k x 2^k` unitary `mat` on the `k` qubits `targets`.
     ///
-    /// Lowers the matrix the way [`Gate::unitary`] does and, on top of that,
-    /// a diagonal one to a [`Gate::DiagonalBatch`] whenever its phases factor
-    /// into one and two body terms, which needs the target qubits and so
-    /// cannot happen in the target-free constructor. A diagonal that does not
-    /// factor (a `CCZ` reaches `Mcu` first; a general three-body phase does
-    /// not) stays dense.
+    /// Lowers the matrix the way [`Gate::unitary`] does, and also lowers a
+    /// diagonal whose phases factor into one and two body terms to a
+    /// [`Gate::DiagonalBatch`], which needs the targets the constructor lacks.
+    /// A diagonal that does not factor stays dense (a `CCZ` reaches `Mcu`
+    /// first; a general three-body phase does not).
     ///
     /// # Errors
     /// The errors of [`Gate::unitary`], with `k` read from `targets.len()`.
@@ -214,11 +201,8 @@ impl Circuit {
     /// A save observes the whole register, so it is a fusion barrier across
     /// every qubit: no gate moves across it in either direction. Labels are not
     /// required to be unique; records come back in the order their points were
-    /// reached.
-    ///
-    /// Whether a save succeeds depends on the backend that ends up running the
-    /// circuit, and a backend that cannot produce `spec` fails the run rather
-    /// than omitting the record.
+    /// reached. A backend that cannot produce `spec` fails the run rather than
+    /// omitting the record.
     pub fn add_save(&mut self, spec: SaveSpec, label: impl Into<String>) {
         self.instructions.push(Instruction::Save {
             spec,
@@ -227,7 +211,6 @@ impl Circuit {
         });
     }
 
-    /// Count of save points in the circuit.
     pub fn save_count(&self) -> usize {
         self.instructions
             .iter()
@@ -261,10 +244,8 @@ impl Circuit {
         })
     }
 
-    /// True if every gate in the circuit is a Clifford gate.
-    ///
-    /// When true, the stabilizer backend can simulate this circuit exactly
-    /// in O(n^2) time regardless of qubit count.
+    /// True if every gate, guarded ones included, is Clifford, so the stabilizer
+    /// backend simulates it exactly in O(n^2) per gate at any width.
     pub fn is_clifford_only(&self) -> bool {
         !any_gate(&self.instructions, &mut |gate| !gate.is_clifford())
     }
@@ -278,17 +259,15 @@ impl Circuit {
         })
     }
 
-    /// True if every gate preserves computational basis states (diagonal or
-    /// permutation). When true, the sparse backend is optimal: the state
-    /// always has exactly one non-zero amplitude, giving O(1) memory and O(n)
-    /// per-gate cost regardless of qubit count.
+    /// True if every gate is diagonal or a permutation, so a basis state keeps a
+    /// single nonzero amplitude throughout: O(1) memory and O(n) per gate on the
+    /// sparse backend.
     pub fn is_sparse_friendly(&self) -> bool {
         !any_gate(&self.instructions, &mut |gate| !gate.preserves_sparsity())
     }
 
-    /// True if the circuit contains any multi-qubit (entangling) gates.
-    ///
-    /// When false, the product state backend can simulate in O(n) time.
+    /// True if any gate touches two or more qubits. When false, the product state
+    /// backend runs in O(n).
     pub fn has_entangling_gates(&self) -> bool {
         any_gate(&self.instructions, &mut |gate| gate.num_qubits() >= 2)
     }
@@ -379,14 +358,11 @@ impl Circuit {
         })
     }
 
-    /// Partition qubits into independent (non-interacting) subsystems.
+    /// Partition qubits into independent subsystems.
     ///
-    /// Two qubits are in the same subsystem if any multi-qubit gate connects
-    /// them, transitively. Classical dependencies (measure qubit → conditional
-    /// target) also merge subsystems, since the conditional outcome depends on
-    /// measurement results that must be available in the same simulation context.
-    /// Returns a list of qubit groups, each sorted.
-    /// A fully-entangled circuit returns a single group containing all qubits.
+    /// Two qubits share a subsystem if a multi-qubit gate connects them,
+    /// transitively, or if a condition on one's measurement guards the other.
+    /// Each group is sorted, and groups are ordered by their lowest qubit.
     pub fn independent_subsystems(&self) -> Vec<Vec<usize>> {
         let n = self.num_qubits;
         if n == 0 {
@@ -419,7 +395,6 @@ impl Circuit {
             }
         }
 
-        // Build cbit → measurement qubit map for classical dependency tracking
         let mut cbit_to_qubit: Vec<Option<usize>> = vec![None; self.num_classical_bits.max(1)];
         for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
             cbit_to_qubit[classical_bit] = Some(qubit);
@@ -563,11 +538,8 @@ impl Circuit {
         (sub, qubit_set.to_vec(), classical_bits_used)
     }
 
-    /// Partition all instructions across independent subsystems in a single pass.
-    ///
-    /// Replaces K calls to `extract_subcircuit` (each scanning the full instruction
-    /// stream) with two O(N) passes: one for classical bit discovery, one for
-    /// instruction routing.
+    /// Extract every component in two passes over the instruction stream, rather
+    /// than one `extract_subcircuit` scan per component.
     pub(crate) fn partition_subcircuits(
         &self,
         components: &[Vec<usize>],
@@ -682,18 +654,11 @@ impl Circuit {
             .collect()
     }
 
-    /// Split the circuit into a Clifford prefix and a non-Clifford tail.
+    /// Split the circuit into a Clifford prefix and the rest.
     ///
-    /// Returns `Some((prefix, tail))` if the circuit starts with at least one
-    /// Clifford gate before the first non-Clifford gate. The prefix contains
-    /// only Clifford gates, measurements, and barriers; the tail starts at
-    /// the first non-Clifford gate and includes everything after it.
-    ///
-    /// Measurements terminate the prefix (they collapse state and must be
-    /// committed before backend switch). Barriers are transparent.
-    ///
-    /// Returns `None` if the circuit has no Clifford prefix (first gate is
-    /// non-Clifford) or is entirely Clifford.
+    /// The prefix holds only Clifford gates and barriers. The tail starts at the
+    /// first non-Clifford gate, measurement, reset, conditional, region, or save.
+    /// Returns `None` when either part would be empty.
     pub(crate) fn clifford_prefix_split(&self) -> Option<(Circuit, Circuit)> {
         let mut split_at = 0;
 
@@ -718,7 +683,6 @@ impl Circuit {
             split_at = i + 1;
         }
 
-        // No split if first gate is already non-Clifford or entire circuit is Clifford
         if split_at == 0 || split_at >= self.instructions.len() {
             return None;
         }
@@ -733,8 +697,6 @@ impl Circuit {
     }
 
     /// Same register shape as `self` with a replacement instruction list.
-    ///
-    /// The rebuild form every fusion pass uses to emit its rewritten circuit.
     pub(crate) fn with_instructions(&self, instructions: Vec<Instruction>) -> Circuit {
         Circuit {
             num_qubits: self.num_qubits,
@@ -804,9 +766,7 @@ fn for_each_placement(
     }
 }
 
-/// One step in the textbook QFT decomposition. Yielded by
-/// [`qft_textbook_steps`] so backends and the sim layer share a single
-/// definition of the H + controlled-phase + Swap pattern.
+/// One step of the textbook QFT decomposition yielded by [`qft_textbook_steps`].
 #[derive(Debug, Clone, Copy)]
 pub enum QftTextbookStep {
     Hadamard(usize),
@@ -930,17 +890,11 @@ pub(crate) fn pauli_rotation_lowering(
     }
 }
 
-/// Expand `Gate::PauliRot` instructions to the CNOT-ladder lowering.
-///
-/// Backends without the native kernel call this before dispatch, the same
-/// probe-plus-expansion route as [`expand_qft_blocks`]. Returns
-/// `Cow::Borrowed` when there is nothing to expand.
 /// Lower a Pauli rotation to the gate and target order a circuit stores it as,
 /// the recognizing step behind [`Circuit::add_pauli_rotation`].
 ///
-/// Shared with the OpenQASM parser, which builds the instruction itself and so
-/// cannot go through `add_pauli_rotation`. Targets come back sorted by qubit
-/// with the letters aligned to them.
+/// Shared with the OpenQASM parser, which builds the instruction itself. Targets
+/// come back sorted by qubit with the letters aligned to them.
 ///
 /// # Panics
 /// Panics if `factors` is empty or names a qubit twice.
@@ -1024,6 +978,8 @@ pub(crate) fn append_parity_rotations(circuit: &mut Circuit, terms: &[PauliTerm]
     }
 }
 
+/// Expand `Gate::PauliRot` instructions to the CNOT-ladder lowering, for backends
+/// without the native kernel. Returns `Cow::Borrowed` when there is nothing to expand.
 pub fn expand_pauli_rotations(circuit: &Circuit) -> std::borrow::Cow<'_, Circuit> {
     if !any_bare_gate(&circuit.instructions, &mut |gate| {
         matches!(gate, Gate::PauliRot(_))
@@ -1069,13 +1025,14 @@ pub enum ClassicalCondition {
     BitIsOne(usize),
     /// True when the classical bit at `bit` is 0.
     BitIsZero(usize),
-    /// True when the classical register (bits `offset..offset+size`) equals `value`.
+    /// True when bits `offset..offset+size`, bit `offset + i` weighted `1 << i`,
+    /// equal `value`.
     RegisterEquals {
         offset: usize,
         size: usize,
         value: u64,
     },
-    /// True when the classical register (bits `offset..offset+size`) does not equal `value`.
+    /// Negation of `RegisterEquals`.
     RegisterNotEquals {
         offset: usize,
         size: usize,
@@ -1083,17 +1040,15 @@ pub enum ClassicalCondition {
     },
     /// True when the XOR of the listed bits equals `expected`.
     ///
-    /// The bits need not be contiguous, which is what a register comparison
-    /// cannot express and what a detector-style predicate over measurement
-    /// records needs. Boxed to keep the enum at the size the register variants
-    /// already set. An empty bit list has parity zero and no OpenQASM form, so
-    /// [`qasm_export`] rejects it.
+    /// The bits need not be contiguous, as a detector predicate over measurement
+    /// records requires. Boxed to keep the enum at the register variants' size.
+    /// An empty list has parity zero and no OpenQASM form, so [`qasm_export`]
+    /// rejects it.
     Parity { bits: Box<[usize]>, expected: bool },
 }
 
 impl ClassicalCondition {
-    /// The condition that holds exactly when this one does not. Total: the
-    /// language is closed under negation.
+    /// The condition that holds exactly when this one does not.
     pub fn negate(&self) -> ClassicalCondition {
         match self {
             ClassicalCondition::BitIsOne(bit) => ClassicalCondition::BitIsZero(*bit),
@@ -1559,14 +1514,11 @@ pub enum Instruction {
     },
     /// Measure a qubit, storing the outcome in a classical bit.
     Measure { qubit: usize, classical_bit: usize },
-    /// Reset a qubit to |0⟩. Destructive, non-unitary.
+    /// Reset a qubit to |0⟩.
     Reset { qubit: usize },
-    /// Barrier: scheduling hint, no physical operation.
-    /// Backends should treat this as a no-op.
+    /// Scheduling hint with no physical effect.
     Barrier { qubits: SmallVec<[usize; 4]> },
-    /// Conditionally apply a gate based on classical measurement results.
-    ///
-    /// The single-gate lowering of [`Instruction::Region`]; see [`guarded`].
+    /// Single-gate form of [`Instruction::Region`]; see [`guarded`].
     Conditional {
         condition: ClassicalCondition,
         gate: Gate,
@@ -1835,7 +1787,6 @@ mod tests {
             targets: SmallVec::from_slice(&[2]),
         });
         let subs = c.independent_subsystems();
-        // All four qubits should be in one group due to classical dependency
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0], vec![0, 1, 2, 3]);
     }
@@ -1847,7 +1798,6 @@ mod tests {
         c.add_gate(Gate::Cx, &[2, 3]);
         c.add_measure(0, 0);
         c.add_measure(2, 1);
-        // No conditionals, subsystems remain independent
         let subs = c.independent_subsystems();
         assert_eq!(subs.len(), 2);
     }

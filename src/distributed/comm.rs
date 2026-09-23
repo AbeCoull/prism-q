@@ -1,10 +1,5 @@
-//! Rank transport for distributed simulation.
-//!
-//! [`RankComm`] abstracts the collective and peer operations used by distributed
-//! backends. It is independent of state representation.
-//!
-//! [`SerialComm`] is the single rank implementation used by tests. `MpiComm`
-//! uses `rsmpi` behind the `distributed-mpi` feature and requires `mpiexec`.
+//! Rank transport for distributed simulation: the [`RankComm`] trait, the single rank
+//! [`SerialComm`], and `MpiComm` over `rsmpi` behind the `distributed-mpi` feature.
 
 use num_complex::Complex64;
 
@@ -108,7 +103,6 @@ impl RankComm for SerialComm {
 #[cfg(feature = "distributed-mpi")]
 const _: () = assert!(std::mem::size_of::<Complex64>() == 2 * std::mem::size_of::<f64>());
 
-/// Reinterpret `Complex64` as flat `f64` values for MPI calls.
 #[cfg(feature = "distributed-mpi")]
 #[inline]
 fn as_f64(slice: &[Complex64]) -> &[f64] {
@@ -196,10 +190,9 @@ impl MpiComm {
     /// Attach to an MPI another component has already initialized.
     ///
     /// The returned comm holds no `Universe`, so dropping it does not call
-    /// `MPI_Finalize`. That is the point of the constructor: in an interpreter
-    /// where mpi4py calls `MPI_Init_thread` at import and registers
-    /// `MPI_Finalize` at exit, finalizing from a dropped handle would make
-    /// every later MPI call in the process erroneous.
+    /// `MPI_Finalize`. In an interpreter where mpi4py calls `MPI_Init_thread` at
+    /// import and registers `MPI_Finalize` at exit, finalizing from a dropped
+    /// handle would make every later MPI call in the process erroneous.
     ///
     /// Returns `Ok(None)` when MPI is not initialized, and an error when the
     /// owner initialized it below `MPI_THREAD_FUNNELED`.

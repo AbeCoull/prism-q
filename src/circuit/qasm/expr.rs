@@ -43,8 +43,7 @@ pub(crate) enum Expr<'a> {
         left: Box<Expr<'a>>,
         right: Box<Expr<'a>>,
     },
-    /// Boxed because a call is the one wide variant and a leaf is the common
-    /// one, so the width of every node would otherwise follow the call.
+    /// Boxed so the one wide variant does not set the width of every node.
     Call(Box<Call<'a>>),
 }
 
@@ -55,7 +54,7 @@ pub(crate) struct Call<'a> {
 }
 
 impl<'a> Expr<'a> {
-    /// Names this expression reads, which is what decides whether it depends
+    /// True when the expression reads `name`, which decides whether it depends
     /// on an `input` slot.
     pub(crate) fn mentions(&self, name: &str) -> bool {
         match self {
@@ -252,7 +251,6 @@ fn number(text: &str, line: usize) -> Result<f64> {
 }
 
 /// Fold an expression to its value, resolving names against `vars`.
-/// Evaluate a tree to the single number an angle, an index or a bound takes.
 ///
 /// The finiteness check sits here rather than on each operator so that an
 /// overflow built from finite parts is caught too.

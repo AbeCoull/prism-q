@@ -134,7 +134,7 @@ fn apply_phase_damping(
 /// normalized state, as are the two that dephase, so each pair merges. That
 /// leaves five branches behind one probability read and one matrix pass, and at
 /// zero temperature the two that excite or hold the hot steady state carry no
-/// weight, which is the three-branch unraveling this had before.
+/// weight, leaving the three-branch unraveling.
 fn apply_thermal_relaxation(
     backend: &mut dyn Backend,
     qubit: usize,
@@ -208,7 +208,6 @@ fn apply_two_qubit_depolarizing(
         return Ok(()); // I⊗I (no error)
     }
 
-    // Sample which of 15 error terms
     let idx = ((r / pp) as usize).min(14);
     let (pauli0, pauli1) = TWO_QUBIT_PAULIS[idx];
     if pauli0 != PauliOp::I {
@@ -509,17 +508,17 @@ pub(crate) fn run_trajectory_shot(
     Ok(results)
 }
 
-/// Shot-level parallelism stops where kernel-level parallelism starts. At and
-/// above the backend parallel threshold the statevector kernels already
-/// saturate the pool, and nesting shot tasks inside kernel joins piles stolen
-/// shot frames onto one worker stack until it overflows. Same guard as
-/// `MAX_BLOCK_QUBITS_FOR_PAR` in the decomposed path.
-/// Replica cap for parallel trajectories. Each Rayon thread holds its own
-/// backend, so peak memory is `threads * state(num_qubits)` rather than one
-/// state. Bounding the qubit count bounds the replica set: at 14 qubits a
-/// statevector replica is 256 KiB, so even a large thread pool stays in the
-/// tens of megabytes. Above this the trajectories run serially, one live
-/// backend at a time, and the backend's own `init` cap is the only limit.
+/// Replica cap for parallel trajectories; at and above it they run serially,
+/// one live backend at a time, and the backend's own `init` cap is the only
+/// limit.
+///
+/// Each Rayon thread holds its own backend, so peak memory is
+/// `threads * state(num_qubits)`: below 14 qubits a statevector replica is
+/// under 256 KiB, so even a large thread pool stays in the tens of megabytes.
+/// The cap is also the backend parallel threshold, where the
+/// statevector kernels already saturate the pool and nesting shot tasks inside
+/// kernel joins piles stolen shot frames onto one worker stack until it
+/// overflows. Same guard as `MAX_BLOCK_QUBITS_FOR_PAR` in the decomposed path.
 #[cfg(feature = "parallel")]
 const MAX_QUBITS_FOR_PAR_SHOTS: usize = 14;
 
@@ -782,7 +781,6 @@ mod tests {
         circuit.add_measure(1, 1);
 
         let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
-        // Add 2q depolarizing on the CX gate
         noise.after_gate[0] = vec![NoiseEvent {
             channel: NoiseChannel::TwoQubitDepolarizing { p: 0.5 },
             qubits: smallvec![0, 1],

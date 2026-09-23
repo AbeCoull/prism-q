@@ -138,12 +138,10 @@ fn stabilizer_tableau_words(n: u128) -> u128 {
 /// Merged-cluster qubit cap for the factored stabilizer backend, checked at
 /// merge time.
 ///
-/// Separate from [`max_factored_merge_qubits`] because the resources differ in
-/// kind: a factored merge allocates `2^n` amplitudes, while a stabilizer merge
-/// allocates a tableau of `O(n^2 / 64)` words. Reusing a dense cap would hold a
-/// cluster to the dense backends' qubit ceiling, far below the widths reached by
-/// the Clifford circuits at 128 qubits and above that dispatch selects this
-/// backend for. `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` overrides it.
+/// Separate from [`max_factored_merge_qubits`] because a stabilizer merge
+/// allocates `O(n^2 / 64)` words rather than `2^n` amplitudes; a dense cap would
+/// hold clusters far below the 128-qubit and wider Clifford circuits dispatch
+/// sends here. `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` overrides it.
 pub(crate) fn max_stabilizer_cluster_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {

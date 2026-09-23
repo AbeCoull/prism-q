@@ -1,8 +1,5 @@
-//! Reusable benchmark and test circuit builders.
-//!
-//! Shared across benchmarks, profiling tools, and the cross-simulator
-//! comparison runner. All randomized builders use `ChaCha8Rng` for
-//! deterministic output given the same seed.
+//! Benchmark and test circuit builders. Randomized builders use `ChaCha8Rng`, so
+//! output is fixed per seed.
 
 use num_complex::Complex64;
 use rand::RngExt;
@@ -123,9 +120,6 @@ pub fn clifford_random_pairs(n: usize, depth: usize, seed: u64) -> Circuit {
 }
 
 /// N independent Bell pairs: qubits (0,1), (2,3), ..., (2N-2, 2N-1).
-///
-/// Decomposes into `n_pairs` blocks of 2 qubits each. Useful for
-/// benchmarking subsystem decomposition overhead vs monolithic simulation.
 pub fn independent_bell_pairs(n_pairs: usize) -> Circuit {
     let n = n_pairs * 2;
     let mut c = Circuit::new(n, 0);
@@ -180,10 +174,8 @@ pub fn partially_independent_circuit(n: usize, depth: usize, seed: u64) -> Circu
     c
 }
 
-/// K independent random sub-circuits of `block_size` qubits each.
-///
-/// Total qubits = `num_blocks * block_size`. Each block has its own
-/// brick-layer CX entanglement but no inter-block connections.
+/// `num_blocks` random brick-layer blocks of `block_size` qubits, with no gate between
+/// blocks.
 pub fn independent_random_blocks(
     num_blocks: usize,
     block_size: usize,
@@ -230,10 +222,8 @@ pub fn ghz_circuit(n: usize) -> Circuit {
     c
 }
 
-/// Build a QAOA-style circuit: `layers` of nearest-neighbor ZZ interactions + Rx mixer.
-///
-/// Each ZZ interaction is a native `Rzz(theta)`. The mixer applies Rx(beta)
-/// to every qubit. Angles are drawn randomly from the given seed.
+/// Build a QAOA-style circuit: `layers` of nearest-neighbor `Rzz` plus an `Rx` mixer,
+/// with seeded random angles.
 pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
@@ -257,10 +247,8 @@ pub fn qaoa_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
 /// is the whole register, so a backend that merges that list holds one block of
 /// `n` qubits where the circuit only ever needs `n / k` blocks of `k`.
 ///
-/// Block width sets the post-collapse cost: pairs leave blocks of four
-/// amplitudes, which lands the row in the microsecond band this host cannot
-/// resolve, so callers pricing the difference pass a `k` that keeps the split
-/// state large enough to time.
+/// At `k = 2` the split state is four-amplitude blocks, too small to time; pass a
+/// larger `k` to price the difference.
 ///
 /// # Panics
 /// Panics unless `k` is at least 2 and divides `n`, and `n / k` is at least 2.
@@ -292,11 +280,8 @@ pub fn disjoint_block_layers_circuit(n: usize, k: usize, layers: usize, seed: u6
 /// blocks, so the runs collapse into `DiagonalBatch` instructions at 16 qubits
 /// and above.
 ///
-/// Pairs sweep the register modulo `n`, which is what keeps the interaction
-/// graph connected at `layers >= 2` for any `n`. Anchoring them to the low half
-/// instead leaves every qubit above `n / 2 + layers` untouched by any 2q gate,
-/// splitting the register once that tail is wide enough for the decomposed
-/// route to claim the circuit.
+/// Pairs wrap modulo `n`, which keeps the interaction graph connected at
+/// `layers >= 2` so the decomposed route cannot claim the circuit.
 ///
 /// # Panics
 /// Panics if `n < 2` (stride selection divides by `n / 2`).
@@ -330,10 +315,7 @@ pub fn diagonal_mixed_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
     c
 }
 
-/// Build a circuit with only single-qubit rotation gates (no entanglement).
-///
-/// `depth` layers of random Rx/Ry/Rz on every qubit. Useful for benchmarking
-/// product-state and single-qubit gate throughput.
+/// Build `depth` layers of random Rx/Ry/Rz on every qubit, with no entangling gate.
 pub fn single_qubit_rotation_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
@@ -351,10 +333,8 @@ pub fn single_qubit_rotation_circuit(n: usize, depth: usize, seed: u64) -> Circu
     c
 }
 
-/// Build a Clifford+T circuit with controlled T-count.
-///
-/// Clifford depth-10 base with `t_fraction` of single-qubit gates replaced by T/Tdg.
-/// For benchmarking stabilizer rank and quasi-probability dispatch.
+/// Build `depth` layers of random Clifford 1q gates plus brick-layer CX, with each 1q
+/// gate replaced by T or Tdg with probability `t_fraction`.
 pub fn clifford_t_circuit(n: usize, depth: usize, t_fraction: f64, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
@@ -439,11 +419,8 @@ pub fn quantum_volume_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     c
 }
 
-/// K independent Clifford-only blocks of `block_size` qubits each.
-///
-/// Total qubits = `num_blocks * block_size`. Each block has brick-layer CX
-/// entanglement with random Clifford 1q gates, but no inter-block connections.
-/// For benchmarking factored stabilizer vs monolithic stabilizer.
+/// `num_blocks` Clifford brick-layer blocks of `block_size` qubits, with no gate
+/// between blocks.
 pub fn local_clifford_blocks(
     num_blocks: usize,
     block_size: usize,
@@ -475,10 +452,7 @@ pub fn local_clifford_blocks(
     c
 }
 
-/// Build a linearly-connected circuit with only CZ + single-qubit gates.
-///
-/// `depth` layers of random {H, S, T, X} + linear CZ chain. CZ-heavy circuits
-/// exercise different fusion/reordering paths than CX-heavy ones.
+/// Build `depth` layers of random {H, S, T, X} plus brick-layer CZ.
 pub fn cz_chain_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut c = Circuit::new(n, 0);
@@ -523,11 +497,9 @@ pub fn brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
 /// perfect matching: `depth` layers of random Ry/Rz on every qubit, then CZ
 /// on each pair of a seeded shuffle of the register.
 ///
-/// Pair distances average about `n / 3` and change every layer, so gates
-/// stay mostly non-adjacent under any site layout and entanglement grows
-/// across every cut; a fixed pairing would instead let SWAP routing park
-/// each pair adjacent after one layer and hold the chain at bond 2. At odd
-/// `n` one qubit of the shuffle sits out each layer.
+/// Pair distances average about `n / 3` and change every layer, so SWAP routing
+/// cannot park pairs adjacent and entanglement grows across every cut. At odd `n`
+/// one qubit sits out each layer.
 /// `tests/bench_fixture_routing.rs` pins both properties.
 pub fn matched_brickwork_circuit(n: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);

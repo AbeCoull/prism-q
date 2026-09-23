@@ -64,7 +64,6 @@ fn batch_gate_arity_counts_qubits_above_word_boundary() {
 #[test]
 fn test_h_matrix_is_unitary() {
     let m = Gate::H.matrix_2x2();
-    // H * H = I
     let mut product = [[Complex64::new(0.0, 0.0); 2]; 2];
     for i in 0..2 {
         for j in 0..2 {
@@ -84,8 +83,7 @@ fn test_h_matrix_is_unitary() {
 #[test]
 fn test_rx_pi_equals_neg_i_x() {
     let rx = Gate::Rx(std::f64::consts::PI).matrix_2x2();
-    // Rx(π) = -i·X  (up to global phase)
-    // |Rx(π)[0][1]| should be 1
+    // Rx(π) = -i·X
     assert!((rx[0][1].norm() - 1.0).abs() < 1e-12);
     assert!((rx[1][0].norm() - 1.0).abs() < 1e-12);
     assert!(rx[0][0].norm() < 1e-12);
@@ -104,7 +102,6 @@ fn test_clifford_classification() {
 
 #[test]
 fn test_preserves_sparsity() {
-    // Diagonal and permutation gates preserve sparsity
     assert!(Gate::Id.preserves_sparsity());
     assert!(Gate::X.preserves_sparsity());
     assert!(Gate::Y.preserves_sparsity());
@@ -117,21 +114,18 @@ fn test_preserves_sparsity() {
     assert!(Gate::Cz.preserves_sparsity());
     assert!(Gate::Swap.preserves_sparsity());
 
-    // Superposition-creating gates do NOT preserve sparsity
     assert!(!Gate::H.preserves_sparsity());
     assert!(!Gate::Rx(0.5).preserves_sparsity());
     assert!(!Gate::Ry(0.5).preserves_sparsity());
     assert!(!Gate::SX.preserves_sparsity());
     assert!(!Gate::SXdg.preserves_sparsity());
 
-    // Cu with diagonal matrix preserves sparsity
     let diag = Box::new([
         [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
         [Complex64::new(0.0, 0.0), Complex64::new(0.0, 1.0)],
     ]);
     assert!(Gate::Cu(diag).preserves_sparsity());
 
-    // Cu with H-like matrix does NOT preserve sparsity
     let h_mat = Box::new(Gate::H.matrix_2x2());
     assert!(!Gate::Cu(h_mat).preserves_sparsity());
 }
@@ -326,24 +320,21 @@ fn test_controlled_phase_detection() {
     let expected = Complex64::from_polar(1.0, 0.5);
     assert!((phase - expected).norm() < 1e-14);
 
-    // Non-diagonal Cu should not be detected
     let h_mat = Gate::H.matrix_2x2();
     let cu_h = Gate::Cu(Box::new(h_mat));
     assert!(cu_h.controlled_phase().is_none());
 
-    // CZ is Cu([[1,0],[0,-1]]), should be detected (phase = -1)
     let z_mat = Gate::Z.matrix_2x2();
     let cu_z = Gate::Cu(Box::new(z_mat));
     assert!(cu_z.controlled_phase().is_some());
     let z_phase = cu_z.controlled_phase().unwrap();
     assert!((z_phase.re - (-1.0)).abs() < 1e-14);
 
-    // Rz-based Cu is diagonal but mat[0][0] != 1, should NOT be detected
+    // Diagonal, but mat[0][0] != 1.
     let rz_mat = Gate::Rz(0.5).matrix_2x2();
     let cu_rz = Gate::Cu(Box::new(rz_mat));
     assert!(cu_rz.controlled_phase().is_none());
 
-    // Non-Cu gates should return None
     assert!(Gate::H.controlled_phase().is_none());
     assert!(Gate::Cx.controlled_phase().is_none());
 }

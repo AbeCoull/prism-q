@@ -331,10 +331,9 @@ pub(super) fn lower_qec_program_to_deferred_circuit(
     lower_qec_program_to_deferred_circuit_inner(program, false)
 }
 
-/// Variant of [`lower_qec_program_to_deferred_circuit`] that admits T /
-/// Tdg gates. Used by the SPD and CAMPS T-strategy adapters that
-/// evaluate observables analytically over the unitary circuit and so
-/// do not need the Clifford-only restriction.
+/// Variant of [`lower_qec_program_to_deferred_circuit`] that admits non-Clifford
+/// gates, for the SPD and CAMPS adapters that evaluate observables analytically over the
+/// unitary circuit.
 pub(super) fn lower_qec_program_to_deferred_circuit_allowing_non_clifford(
     program: &QecProgram,
 ) -> Result<QecDeferredProgram> {

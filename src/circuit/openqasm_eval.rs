@@ -77,7 +77,7 @@ fn walk_operands(block: &Block, note: &mut impl FnMut(&Operand)) {
 }
 
 impl<'a> Parser<'a> {
-    /// Read the source and run it, which is the whole of what a parse does.
+    /// Lex, parse, and run the source.
     pub(super) fn parse_program(
         &mut self,
     ) -> Result<(Circuit, Parameters, Vec<ResultSpec>, Option<NoiseModel>)> {
@@ -1440,10 +1440,9 @@ impl<'a> Parser<'a> {
 
     /// Dispatch a `#pragma braket ...` line.
     ///
-    /// Only the Braket dialect reads these; under any other the pragma is an
-    /// unsupported construct rather than a silently dropped line, since
-    /// dropping a result request would leave the caller with nothing to report
-    /// and no reason why.
+    /// Only the Braket dialect reads these. Under any other the pragma is
+    /// rejected rather than dropped, so a lost result request cannot pass
+    /// unnoticed.
     fn exec_pragma(&mut self, text: &str, line: usize) -> Result<Vec<Instruction>> {
         let body = text.trim_start_matches("#pragma").trim();
         let Some(braket_body) = body.strip_prefix("braket") else {

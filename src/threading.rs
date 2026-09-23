@@ -6,18 +6,14 @@ use crate::error::{PrismError, Result};
 /// A bounded Rayon pool that PRISM-Q runs inside, leaving the process-wide pool
 /// untouched.
 ///
-/// Simulation entry points size the global Rayon pool on first use, which an
-/// embedding application may not want. Work run through [`ThreadPool::install`]
-/// uses this pool instead, and the global pool is neither built nor resized, so
-/// an application that installed its own keeps it.
+/// Simulation entry points otherwise size the global Rayon pool on first use. Work run
+/// through [`ThreadPool::install`] uses this pool, and the global pool is neither built
+/// nor resized.
 ///
-/// Pool width is part of what a result depends on. Dense unitary evolution,
-/// seeded terminal sampling, and the stabilizer tableau are bitwise at any
-/// width, parallel reductions move by about 1e-12, and compiled (BTS) shot
-/// payloads differ between widths because the batched sampler splits shots by
-/// pool width. A narrower pool is therefore not a slower route to the same
-/// bytes for every result; the per-path contract is the determinism section of
-/// the threading architecture page.
+/// Pool width can change results. Dense unitary evolution, seeded terminal sampling,
+/// and the stabilizer tableau are bitwise at any width; parallel reductions move by
+/// about 1e-12; compiled (BTS) shot payloads differ because the batched sampler splits
+/// shots by pool width. The threading architecture page has the per-path contract.
 ///
 /// # Examples
 ///

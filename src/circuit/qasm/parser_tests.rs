@@ -131,7 +131,7 @@ fn a_modifier_chain_reads_in_order() {
         }
         other => panic!("{other:?}"),
     }
-    // No space is required around `@`, which used to read as part of the name.
+    // No space is required around `@`.
     assert!(matches!(one("ctrl@x q[0], q[1];"), StmtKind::Call { .. }));
     assert!(matches!(
         error("frobnicate @ x q[0];"),

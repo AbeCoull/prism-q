@@ -1,22 +1,11 @@
-//! Dense statevector kernels. CUDA C source compiled to PTX at runtime, plus launch
-//! helpers in Rust.
+//! Dense statevector kernels: the CUDA C template and its launchers. Kernels take the
+//! interleaved state buffer as `double2 *` for 16-byte aligned vector loads.
 //!
-//! The state buffer is `2 * 2^n` f64s laid out as interleaved (re, im) pairs matching
-//! `num_complex::Complex64` and CUDA's `double2` builtin. All kernels take the buffer as
-//! `double2 *` for 16-byte aligned vector loads.
-//!
-//! # Fused-gate strategy
-//!
-//! `BatchPhase`, `BatchRzz`, `DiagonalBatch`, and the `all_diagonal` arm of `MultiFused`
-//! are handled by dedicated batched kernels that take precomputed per-group phase LUTs
-//! (built on the host by the corresponding CPU `build_*_tables` helper) plus small
-//! metadata arrays (shifts / q0s / q1s / lens). One kernel launch per fused instruction
-//! instead of one launch per sub-gate.
-//!
-//! The non-diagonal arm of `MultiFused` uses a shared-memory tiled kernel
-//! (`apply_multi_fused_tiled`) for sub-gates whose target lies inside the tile, with
-//! per-gate fallback launches for targets outside the tile. `Multi2q` still decomposes
-//! on the host to one launch per sub-gate; rare in practice and tracked as follow-up.
+//! `BatchPhase`, `BatchRzz`, `DiagonalBatch`, and diagonal `MultiFused` each run as one
+//! launch over per-group phase tables (built by the CPU `build_*_tables` helpers) plus
+//! small shift and qubit metadata, instead of one launch per sub-gate. Non-diagonal
+//! `MultiFused` runs as shared-memory tiled passes of `apply_multi_fused_tiled`;
+//! `Multi2q` launches once per sub-gate.
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
@@ -100,19 +89,13 @@ fn qubit_list(sorted: &[u32]) -> QubitListArg {
     arg
 }
 
-/// PTX source template. Placeholders like `{{BP_TABLE_SIZE}}` are substituted when the
-/// device is constructed (see [`kernel_source`]) so the kernel's compile-time constants
-/// track the CPU constants in [`crate::backend::statevector::kernels`]. Adding a new
-/// placeholder requires matching entries in `kernel_source` below.
+/// CUDA C source template. [`kernel_source`] fills its `{{NAME}}` placeholders so the
+/// kernel's compile-time constants track the CPU constants in
+/// [`crate::backend::statevector::kernels`].
 const KERNEL_SOURCE_TEMPLATE: &str = include_str!("dense.cu");
 
-/// Materialise the PTX source with CPU-side constants substituted into the template.
-///
-/// Called once per device, at `GpuDevice::new`. The substitution is the bridge between
-/// the Rust constants in [`crate::backend::statevector::kernels`] (and the `MULTI_FUSED_*`
-/// constants in this file) and the `#define`s at the top of [`KERNEL_SOURCE_TEMPLATE`].
-/// Adding a kernel that depends on a new host constant: add a `{{PLACEHOLDER}}` to
-/// the template header, add a matching `.replace(...)` call below, done.
+/// Substitute the host constants into [`KERNEL_SOURCE_TEMPLATE`]. A new placeholder in
+/// the template needs a matching `.replace` here.
 pub(crate) fn kernel_source() -> String {
     KERNEL_SOURCE_TEMPLATE
         .replace("{{TILE_Q}}", &MULTI_FUSED_TILE_Q.to_string())
@@ -156,8 +139,6 @@ pub(crate) fn kernel_source() -> String {
         )
 }
 
-// ---- Rust-side launchers ----
-
 fn grid_for(count: u64) -> u32 {
     count.div_ceil(BLOCK_SIZE as u64).max(1) as u32
 }
@@ -186,7 +167,6 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
     let (stream, func) = stream_and_fn(ctx, "compute_probabilities")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
 
-    // Reuse the cached scratch buffer when large enough; grow if num_qubits increased.
     let mut scratch_slot = state.probs_scratch();
     if scratch_slot.as_ref().is_none_or(|b| b.len() < dim as usize) {
         *scratch_slot = Some(GpuBuffer::<f64>::alloc_zeros(device, dim as usize)?);
@@ -532,8 +512,8 @@ fn validate_mcu_qubits(n: usize, controls: &[usize], target: usize) -> Result<Ve
     Ok(sorted)
 }
 
-/// The sorted control-plus-target qubit list is uploaded through the launcher
-/// scratch for index expansion.
+/// The sorted control-plus-target qubit list rides in parameter space for index
+/// expansion.
 pub(crate) fn launch_apply_mcu(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1050,7 +1030,6 @@ pub(crate) fn launch_apply_batch_phase(
         }
     }
 
-    // Host-side: build the per-group LUTs using the CPU builder (reused as-is).
     let one = Complex64::new(1.0, 0.0);
     let mut groups = [cpu_k::BatchPhaseGroup {
         table: [one; cpu_k::BATCH_PHASE_TABLE_SIZE],
@@ -1205,9 +1184,8 @@ pub(crate) fn launch_apply_batch_rzz(
     Ok(())
 }
 
-/// Apply a `DiagonalBatch` via a single batched GPU kernel when groupable, falling back
-/// to per-entry launches if the entries need to span more groups than the LUT allows
-/// (same fallback condition as the CPU kernel).
+/// Apply a `DiagonalBatch` in one launch, or per entry when the entries span more groups
+/// than the tables allow (the CPU kernel's fallback condition).
 pub(crate) fn launch_apply_diagonal_batch(
     ctx: &GpuContext,
     state: &mut GpuState,
@@ -1220,7 +1198,6 @@ pub(crate) fn launch_apply_diagonal_batch(
     }
 
     let Some(built) = cpu_k::build_diagonal_batch_tables(entries) else {
-        // Fallback: per-entry dispatch (matches the CPU fallback path).
         let n = state.num_qubits();
         for entry in entries {
             match *entry {

@@ -84,7 +84,6 @@ impl PyParameters {
         self.0.name_of(slot).map(str::to_owned)
     }
 
-    /// Slot a name refers to.
     fn slot_of(&self, name: &str) -> Option<usize> {
         self.0.slot_of(name)
     }
@@ -123,19 +122,15 @@ impl PyParameters {
 /// A parameter template plus the fusion and dispatch work its structure
 /// implies, held across bindings.
 ///
-/// A variational sweep binds a new angle vector per point while the gate
-/// sequence stays fixed, so fusion decides the same block structure every time
-/// and dispatch picks the same backend. The constructor settles both once and
-/// `run` rebuilds only what the angles change.
+/// The constructor settles fusion and backend choice once, since a sweep keeps
+/// the gate sequence fixed, and `run` rebuilds only what the angles change.
 ///
 /// Automatic dispatch reads the template, so build it at angles representative
 /// of the sweep. A template whose rotations are all zero reads as Clifford and
 /// settles on a backend that then rejects the bound circuit.
-///
-/// The held backend is `Send` but not `Sync`, so the lock is what lets `run`
-/// release the GIL rather than serialize the interpreter behind a sweep.
 #[pyclass(name = "PreparedCircuit", module = "prism_q")]
 pub struct PyPreparedCircuit {
+    // The held backend is `Send` but not `Sync`; the lock lets `run` release the GIL.
     inner: Mutex<PreparedCircuit>,
 }
 
@@ -195,8 +190,7 @@ impl PyPreparedCircuit {
     }
 
     /// True when the fused structure was captured and bindings reuse it, false
-    /// when every binding re-runs the pass pipeline. A performance fact, not an
-    /// error: results agree either way.
+    /// when every binding re-runs the pass pipeline. Results agree either way.
     #[getter]
     fn reuses_fusion_plan(&self) -> bool {
         self.locked().reuses_fusion_plan()

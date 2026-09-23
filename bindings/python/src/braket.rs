@@ -1,9 +1,6 @@
 //! Braket program parsing: the circuit plus what its `#pragma braket` lines
-//! declared.
-//!
-//! Result requests cross as plain dictionaries rather than as classes. A
-//! caller translating into Braket's own schema objects switches on `type` and
-//! reads the rest, and a dictionary says that without a class per variant.
+//! declared. Result requests cross as dictionaries keyed on `type` rather than
+//! a class per variant, since a caller translating into Braket's schema switches on it.
 
 use num_complex::Complex64;
 use prism_q::circuit::braket::{Observable, ObservableFactor, ResultSpec, Targets};
@@ -32,8 +29,6 @@ fn targets_to_py<'py>(py: Python<'py>, targets: &Targets) -> PyResult<Bound<'py,
     }
 }
 
-/// One observable factor as a dictionary. A `hermitian` factor carries its
-/// matrix as a `complex128` array, the spelling `evaluate` returns one in.
 fn factor_to_py<'py>(py: Python<'py>, factor: &ObservableFactor) -> PyResult<Bound<'py, PyDict>> {
     let entry = PyDict::new(py);
     match factor {
@@ -99,7 +94,7 @@ fn result_to_py<'py>(py: Python<'py>, spec: &ResultSpec) -> PyResult<Bound<'py, 
     Ok(entry)
 }
 
-/// A parsed Braket program.
+/// An OpenQASM 3.0 program parsed under Amazon Braket's dialect.
 #[pyclass(name = "BraketProgram", module = "prism_q")]
 pub struct PyBraketProgram {
     circuit: prism_q::Circuit,
@@ -146,7 +141,7 @@ impl PyBraketProgram {
     /// declaration order. Values are in Braket's own conventions rather than in
     /// PRISM-Q's: qubit 0 is the most significant bit of a basis index, the
     /// opposite of every native terminal here, so `x q[0]` lands at index 2 of a
-    /// two-qubit result and not at index 1. An `expectation` or `variance` value
+    /// two-qubit result. An `expectation` or `variance` value
     /// is always a list, one entry per reported value, where Braket collapses a
     /// single-target request to a scalar.
     ///

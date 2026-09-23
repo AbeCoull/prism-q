@@ -3584,9 +3584,9 @@ impl StatevectorBackend {
     /// Apply multiple single-qubit gates in a multi-tier tiled pass.
     ///
     /// Three tiers based on gate target qubit:
-    /// - **L2 tier** (target 0..13): 256KB tiles, all applied per tile in L2 cache
-    /// - **L3 tier** (target 14..16): 2MB tiles, applied per tile in L3 cache
-    /// - **Individual** (target 17+): one shared traversal, or a single
+    /// - L2 tier (target 0..13): 256KB tiles, all applied per tile in L2 cache
+    /// - L3 tier (target 14..16): 2MB tiles, applied per tile in L3 cache
+    /// - Individual (target 17+): one shared traversal, or a single
     ///   full-state pass when only one gate lands there
     #[inline(always)]
     pub(super) fn apply_multi_1q(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {

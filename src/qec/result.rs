@@ -4,21 +4,11 @@
 use crate::error::{PrismError, Result};
 use crate::sim::compiled::PackedShots;
 
-/// Packed result shell for native QEC sampling.
+/// Packed result of native QEC sampling.
 ///
-/// `accepted_shots + discarded_shots == total_shots`. `logical_errors[i]` is
-/// the number of accepted shots whose `i`-th observable parity is 1. When
-/// [`super::QecOptions::keep_measurements`] is `false`, [`Self::measurements`]
-/// is returned with zero shots; detector and observable shots are always
-/// populated.
-///
-/// This type is `#[non_exhaustive]`: construct it through [`Self::new`],
-/// [`Self::new_with_total_shots`], or [`Self::empty`] (not a struct
-/// literal), and match its fields with a trailing `..`. New fields may be
-/// added in minor releases without a major version bump; `0.15.0` added
-/// [`Self::observable_expectations`] and the `#[non_exhaustive]` marker
-/// itself, which is a breaking change for crates that previously built or
-/// exhaustively destructured this struct.
+/// `accepted_shots + discarded_shots == total_shots`. The struct is
+/// `#[non_exhaustive]`: build it through [`Self::new`],
+/// [`Self::new_with_total_shots`], or [`Self::empty`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct QecSampleResult {
@@ -31,29 +21,21 @@ pub struct QecSampleResult {
     pub detectors: PackedShots,
     /// Logical observable records: one bit per observable per shot.
     ///
-    /// For sampled strategies each bit is a real per-shot observable
-    /// parity. Analytical T strategies (SPD / CAMPS / tensor network) have
-    /// no per-shot stream, so they synthesize these records to match the
-    /// `logical_errors` popcount: the one-bits occupy positions
-    /// `[0, accepted_shots)` and the remainder up to `total_shots` is inert
-    /// padding. Derive rates with [`Self::logical_error_rates`]
-    /// (denominator `accepted_shots`); do not align these rows
-    /// shot-for-shot with detector rows on the analytical path.
+    /// Analytical T strategies (SPD, CAMPS, tensor network) have no per-shot
+    /// stream and synthesize these rows to match `logical_errors`: the one-bits
+    /// sit in `[0, accepted_shots)` and the rest up to `total_shots` is padding.
+    /// Do not align them shot-for-shot with detector rows on that path.
     pub observables: PackedShots,
     /// Number of shots accepted after postselection (or `total_shots` when no
     /// postselection predicate is present).
     pub accepted_shots: usize,
     /// Number of shots rejected by postselection.
     pub discarded_shots: usize,
-    /// For each observable, count of accepted shots where the observable
-    /// parity equals 1. Length equals the number of observables.
+    /// Per observable, the count of accepted shots with parity 1.
     pub logical_errors: Vec<u64>,
-    /// Optional weighted-estimator expectation per observable. When
-    /// `Some`, this is the unbiased estimator's output for
-    /// `⟨1 - 2·parity⟩ ∈ [-γ^t, +γ^t]` (raw signed-importance mean);
-    /// `None` when the strategy emits raw bit counts only. Used by
-    /// analytical or weighted T strategies where the observable expectation
-    /// is not a simple ratio of bit counts.
+    /// Per-observable unbiased estimate of `⟨1 - 2·parity⟩ ∈ [-γ^t, +γ^t]` (raw
+    /// signed-importance mean) from weighted or analytical T strategies, where the
+    /// expectation is not a ratio of bit counts; `None` when only bit counts exist.
     pub observable_expectations: Option<Vec<QecObservableEstimate>>,
     /// Estimates for the program's `EXP_VAL` ops, one per op in op order,
     /// each scaled by the op's coefficient. `None` when the program has no
@@ -97,7 +79,7 @@ impl QecSampleResult {
         }
     }
 
-    /// Create a result and validate packed-shot dimensions.
+    /// Validate and build a result, taking the total from the first buffer that holds shots.
     pub fn new(
         measurements: PackedShots,
         detectors: PackedShots,
@@ -118,11 +100,8 @@ impl QecSampleResult {
         )
     }
 
-    /// Create a result with an explicit total shot count.
-    ///
-    /// Raw measurement records may be a zero-shot shape buffer when
-    /// `QecOptions::keep_measurements` is false. Detector and observable
-    /// buffers must carry the explicit shot count.
+    /// Build a result with an explicit total. `measurements` may be a zero-shot buffer;
+    /// the detector and observable buffers must hold `total_shots`.
     pub fn new_with_total_shots(
         total_shots: usize,
         measurements: PackedShots,
@@ -181,9 +160,8 @@ impl QecSampleResult {
         })
     }
 
-    /// Attach unbiased-estimator outputs alongside the raw bit counts.
-    /// Used by quasi-probability QEC T strategies. Validates that the
-    /// estimate length matches the number of observables.
+    /// Attach per-observable estimates from quasi-probability T strategies; the length
+    /// must equal the observable count.
     pub fn with_observable_expectations(
         mut self,
         estimates: Vec<QecObservableEstimate>,
@@ -201,9 +179,7 @@ impl QecSampleResult {
         Ok(self)
     }
 
-    /// Attach `EXP_VAL` estimates, one per `EXP_VAL` op in op order. There
-    /// is no packed row to validate against; callers supply one estimate
-    /// per op.
+    /// Attach `EXP_VAL` estimates, one per op in op order; the length is not checked.
     pub fn with_expectation_values(mut self, estimates: Vec<QecObservableEstimate>) -> Self {
         self.expectation_values = Some(estimates);
         self
@@ -224,16 +200,14 @@ impl QecSampleResult {
 
     /// Wilson score interval for the survivor rate.
     ///
-    /// `z_score` controls the confidence level. For example, use
-    /// `1.959963984540054` for a two-sided 95 percent interval.
+    /// `z_score` sets the confidence level: `1.959963984540054` gives a two-sided 95
+    /// percent interval.
     pub fn survivor_rate_wilson_interval(&self, z_score: f64) -> (f64, f64) {
         qec_wilson_interval(self.accepted_shots as u64, self.total_shots, z_score)
     }
 
-    /// Wilson score intervals for logical-error rates among accepted shots.
-    ///
-    /// `z_score` controls the confidence level. For example, use
-    /// `1.959963984540054` for a two-sided 95 percent interval.
+    /// Wilson score intervals for logical-error rates among accepted shots, with `z_score`
+    /// as in [`Self::survivor_rate_wilson_interval`].
     pub fn logical_error_rate_wilson_intervals(&self, z_score: f64) -> Vec<(f64, f64)> {
         self.logical_errors
             .iter()

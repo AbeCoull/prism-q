@@ -2,8 +2,7 @@
 //! observable carries.
 //!
 //! Matrices cross this module column major, the layout
-//! [`svd_jacobi`](crate::backend::mps::svd_jacobi) reads and writes, so a
-//! factor comes back ready to multiply without a transpose in between.
+//! [`svd_jacobi`](crate::backend::mps::svd_jacobi) uses, so no transpose is needed.
 
 use num_complex::Complex64;
 

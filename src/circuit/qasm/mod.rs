@@ -1,8 +1,5 @@
-//! OpenQASM front end: source text to tokens, tokens to a syntax tree, and the
-//! tree to instructions.
-//!
-//! The public entry points live in [`openqasm`](super::openqasm); this module
-//! is what they are built on.
+//! OpenQASM lexer and syntax-tree parser. [`openqasm`](super::openqasm) holds the
+//! public entry points and walks the tree into instructions.
 
 pub(crate) mod ast;
 pub(crate) mod expr;

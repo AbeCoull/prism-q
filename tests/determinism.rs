@@ -10,8 +10,8 @@ use common::{SEED, count_gates};
 use num_complex::Complex64;
 use prism_q::circuits::qft_circuit;
 use prism_q::{
-    BackendKind, Circuit, Gate, McuData, PauliTerm, StatevectorBackend, ThreadPool, run_on,
-    run_on_state, run_shots_compiled, simulate,
+    BackendKind, Circuit, Gate, McuData, PauliTerm, ResolvedBackend, StatevectorBackend,
+    ThreadPool, run_on, run_on_state, run_shots_compiled, simulate,
 };
 
 #[cfg(not(miri))]
@@ -424,4 +424,85 @@ fn mps_terminal_shots_identical_across_thread_counts() {
         SAMPLING_SHOTS as u64,
         "mps counts do not sum to the shot count"
     );
+}
+
+const PER_SHOT_SHOTS: usize = 512;
+
+// Rotations and CX on `qubits`, a measurement of the first into `bit`, then
+// more rotations, so every shot replays the circuit.
+fn add_mid_circuit_block(c: &mut Circuit, qubits: &[usize], bit: usize) {
+    for (i, &q) in qubits.iter().enumerate() {
+        c.add_gate(Gate::Ry(0.37 + 0.11 * i as f64), &[q]);
+        c.add_gate(Gate::Rz(0.53 + 0.07 * i as f64), &[q]);
+    }
+    for pair in qubits.windows(2) {
+        c.add_gate(Gate::Cx, pair);
+    }
+    c.add_measure(qubits[0], bit);
+    for (i, &q) in qubits.iter().enumerate() {
+        c.add_gate(Gate::Rx(0.29 + 0.13 * i as f64), &[q]);
+    }
+    for pair in qubits.windows(2).rev() {
+        c.add_gate(Gate::Cx, pair);
+    }
+}
+
+fn measure_every_qubit(c: &mut Circuit, first_bit: usize) {
+    for q in 0..c.num_qubits {
+        c.add_measure(q, first_bit + q);
+    }
+}
+
+// Each shot runs on seed `SEED + i` whether the loop splits or not, so the
+// shots match a pool of one, a wider pool, and separate seeded runs.
+fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
+    let shots = |threads: usize| {
+        in_pool(threads, || {
+            simulate(circuit)
+                .seed(SEED)
+                .shots(PER_SHOT_SHOTS)
+                .expect("shots")
+        })
+    };
+    let single = shots(1);
+    let wide = shots(THREADS_HI);
+    assert_eq!(single.metadata.backend, route, "unexpected shot route");
+    assert_eq!(single.shots, wide.shots, "per-shot bits differ");
+    assert_eq!(
+        format!("{:?}", single.metadata),
+        format!("{:?}", wide.metadata),
+        "per-shot metadata differs"
+    );
+
+    let separate: Vec<Vec<bool>> = (0..PER_SHOT_SHOTS as u64)
+        .map(|i| {
+            simulate(circuit)
+                .seed(SEED.wrapping_add(i))
+                .run()
+                .expect("run")
+                .classical_bits
+        })
+        .collect();
+    assert_eq!(single.shots, separate, "shots differ from seeded runs");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn mid_circuit_shots_identical_across_thread_counts() {
+    let n = 8;
+    let mut circuit = Circuit::new(n, n + 1);
+    add_mid_circuit_block(&mut circuit, &(0..n).collect::<Vec<_>>(), 0);
+    measure_every_qubit(&mut circuit, 1);
+    assert_per_shot_matches_serial(&circuit, ResolvedBackend::Statevector);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn decomposed_mid_circuit_shots_identical_across_thread_counts() {
+    let n = 8;
+    let mut circuit = Circuit::new(n, n + 2);
+    add_mid_circuit_block(&mut circuit, &[0, 1, 2, 3], 0);
+    add_mid_circuit_block(&mut circuit, &[4, 5, 6, 7], 1);
+    measure_every_qubit(&mut circuit, 2);
+    assert_per_shot_matches_serial(&circuit, ResolvedBackend::Decomposed);
 }

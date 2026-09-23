@@ -58,7 +58,7 @@ Reproducibility is stated per path. Gate application never reduces across tasks,
 is exactly reproducible; everything that sums floating-point values in parallel is
 reproducible to the last ulp only; the batched compiled sampler is reproducible only at
 a fixed thread count. `tests/determinism.rs` pins the dense unitary,
-terminal sampling, reduction, and compiled-sampler claims below by running the same
+terminal sampling, per-shot replay, reduction, and compiled-sampler claims below by running the same
 seeded circuits in scoped 1-thread and 4-thread pools; the trajectory, SPD, and
 stabilizer bullets stand on the mechanisms they state.
 
@@ -81,6 +81,11 @@ comparison run used.
 - **Noisy trajectory shots: bitwise for a given seed, at any thread count.** Each shot's
   generator is seeded from the shot index, not the worker, and results are collected in
   shot order.
+- **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
+  mid-circuit measurement, a condition or a region runs once per shot, and below the
+  parallel threshold those runs split across workers. Shot `i` runs on seed `seed + i`
+  and results fold in shot order, so the shots match separate runs seeded `seed`,
+  `seed + 1`, and so on. Pinned for a dense and a decomposed circuit.
 - **Parallel reductions: stable to about 1e-12, not bitwise.** Norms, measurement
   collapse probabilities, reduced density matrices, and expectation values sum
   deterministic per-chunk partials in Rayon's combine order, which varies with pool width

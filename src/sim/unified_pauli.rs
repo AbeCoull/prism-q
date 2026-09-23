@@ -1075,6 +1075,31 @@ pub fn run_spd(circuit: &Circuit, epsilon: f64, max_terms: usize) -> Result<SpdR
 /// no threshold to guess.
 pub fn run_spd_with(circuit: &Circuit, truncation: &SpdTruncation) -> Result<SpdResult> {
     truncation.validate()?;
+    Ok(run_spd_bounded(circuit, truncation, None)?.expect("an unbounded run always completes"))
+}
+
+/// Exact [`run_spd`] that gives up with `Ok(None)` once the term count summed
+/// over every instruction of every per-qubit pass exceeds `work_budget`, or the
+/// sum outgrows the term ceiling, so the caller can take another exact route.
+pub(crate) fn run_spd_exact_within(
+    circuit: &Circuit,
+    work_budget: usize,
+) -> Result<Option<SpdResult>> {
+    run_spd_bounded(
+        circuit,
+        &SpdTruncation::Threshold {
+            epsilon: 0.0,
+            max_terms: 0,
+        },
+        Some(work_budget),
+    )
+}
+
+fn run_spd_bounded(
+    circuit: &Circuit,
+    truncation: &SpdTruncation,
+    work_budget: Option<usize>,
+) -> Result<Option<SpdResult>> {
     let lowered = validate_and_lower(circuit, "SPD")?;
     let circuit = lowered.as_ref();
     let n = circuit.num_qubits;
@@ -1084,6 +1109,7 @@ pub fn run_spd_with(circuit: &Circuit, truncation: &SpdTruncation) -> Result<Spd
     let mut expectations = Vec::with_capacity(n);
     let mut peak_terms = 0usize;
     let mut total_discarded = 0.0;
+    let mut work = 0usize;
 
     enum Rot {
         Single { sin: f64, cos: f64 },
@@ -1122,7 +1148,14 @@ pub fn run_spd_with(circuit: &Circuit, truncation: &SpdTruncation) -> Result<Spd
             }
 
             truncation.enforce(&mut sum, &mut total_discarded);
-            check_spd_term_ceiling(sum.terms.len(), "SPD")?;
+            if let Some(budget) = work_budget {
+                work += sum.terms.len();
+                if work > budget || sum.terms.len() > SPD_MAX_TERMS_CEILING {
+                    return Ok(None);
+                }
+            } else {
+                check_spd_term_ceiling(sum.terms.len(), "SPD")?;
+            }
 
             if sum.terms.len() > peak_terms {
                 peak_terms = sum.terms.len();
@@ -1134,12 +1167,12 @@ pub fn run_spd_with(circuit: &Circuit, truncation: &SpdTruncation) -> Result<Spd
         expectations.push(sum.diagonal_expectation());
     }
 
-    Ok(SpdResult {
+    Ok(Some(SpdResult {
         expectations,
         t_count,
         max_terms: peak_terms,
         total_discarded,
-    })
+    }))
 }
 
 /// Inverse light cone of a Pauli observable under a circuit, computed

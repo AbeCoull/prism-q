@@ -38,7 +38,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::stabilizer::kernels::{self, rowmul_words, rowops};
-use crate::backend::stabilizer::{diagnostics, project_generators};
+use crate::backend::stabilizer::{dense, diagnostics};
 use crate::backend::{
     Backend, dense_probability_len, dense_statevector_len, reduced_density, reserve_dense_output,
     schmidt,
@@ -403,81 +403,26 @@ impl SubTableau {
     }
 
     fn compute_probabilities(&self) -> Result<Vec<f64>> {
-        let n = self.n;
-        let dim = dense_probability_len("factored-stabilizer", n)?;
-
-        let mut work_xz = self.xz.clone();
-        let mut work_phase = self.phase.clone();
-        let nw = self.num_words;
-        let stride = self.stride();
-
-        let (k, col_map) = gauss_eliminate_x(&mut work_xz, &mut work_phase, n, nw, stride);
-
-        let seed = solve_diagonal_seed(&work_xz, &work_phase, n, nw, stride, &col_map, k);
-
-        let mut probs = Vec::new();
-        reserve_dense_output(&mut probs, dim, "factored-stabilizer", "probabilities")?;
-        probs.resize(dim, 0.0f64);
-        let num_coset = 1usize << k;
-        let amp_sq = 1.0 / num_coset as f64;
-
-        let mut gen_xparts = Vec::with_capacity(k);
-        for g in 0..k {
-            let row = n + g;
-            let mut xval = 0usize;
-            for q in 0..n {
-                let w = q / 64;
-                let b = q % 64;
-                if work_xz[row * stride + w] & (1u64 << b) != 0 {
-                    xval |= 1 << q;
-                }
-            }
-            gen_xparts.push(xval);
-        }
-
-        let mut state = seed;
-        probs[state] = amp_sq;
-        for gray in 1..num_coset {
-            let bit = gray.trailing_zeros() as usize;
-            state ^= gen_xparts[bit];
-            probs[state] = amp_sq;
-        }
-
-        Ok(probs)
+        dense::dense_probabilities(
+            &self.xz,
+            &self.phase,
+            self.n,
+            self.num_words,
+            self.stride(),
+            "factored-stabilizer",
+        )
     }
 
     fn compute_statevector(&self) -> Result<Vec<Complex64>> {
-        let n = self.n;
-        let dim = dense_statevector_len("factored-stabilizer", "statevector", n)?;
-
-        let mut work_xz = self.xz.clone();
-        let mut work_phase = self.phase.clone();
-        let nw = self.num_words;
-        let stride = self.stride();
-
-        let (k, col_map) = gauss_eliminate_x(&mut work_xz, &mut work_phase, n, nw, stride);
-        let seed = solve_diagonal_seed(&work_xz, &work_phase, n, nw, stride, &col_map, k);
-
-        let mut sv = Vec::new();
-        reserve_dense_output(&mut sv, dim, "factored-stabilizer", "statevector")?;
-        sv.resize(dim, Complex64::new(0.0, 0.0));
-        sv[seed] = Complex64::new(1.0, 0.0);
-
-        let mut visited_gen = Vec::new();
-        reserve_dense_output(&mut visited_gen, dim, "factored-stabilizer", "statevector")?;
-        visited_gen.resize(dim, 0u32);
-
-        project_generators(
-            &mut sv,
-            &mut visited_gen,
+        dense::dense_statevector(
             &self.xz,
             &self.phase,
-            n,
-            nw,
-            stride,
-        );
-
-        Ok(sv)
+            self.n,
+            self.num_words,
+            self.stride(),
+            "factored-stabilizer",
+            "statevector",
+        )
     }
 }
 
@@ -1305,128 +1250,4 @@ fn uf_union(parent: &mut [usize], rank: &mut [u8], x: usize, y: usize) {
         parent[ry] = rx;
         rank[rx] += 1;
     }
-}
-
-fn gauss_eliminate_x(
-    xz: &mut [u64],
-    phase: &mut [bool],
-    n: usize,
-    nw: usize,
-    stride: usize,
-) -> (usize, Vec<usize>) {
-    let mut col_map: Vec<usize> = Vec::new();
-    let mut k = 0usize;
-
-    for col in 0..n {
-        let word = col / 64;
-        let bit = 1u64 << (col % 64);
-
-        let mut pivot = None;
-        for row in k..n {
-            if xz[(n + row) * stride + word] & bit != 0 {
-                pivot = Some(row);
-                break;
-            }
-        }
-
-        let Some(row) = pivot else {
-            continue;
-        };
-
-        if row != k {
-            let a_off = (n + k) * stride;
-            let b_off = (n + row) * stride;
-            for w in 0..stride {
-                xz.swap(a_off + w, b_off + w);
-            }
-            phase.swap(n + k, n + row);
-        }
-
-        for other in 0..n {
-            if other == k {
-                continue;
-            }
-            if xz[(n + other) * stride + word] & bit != 0 {
-                let src: Vec<u64> = xz[(n + k) * stride..(n + k + 1) * stride].to_vec();
-                let sp = phase[n + k];
-                let dst = &mut xz[(n + other) * stride..(n + other + 1) * stride];
-                let (dx, dz) = dst.split_at_mut(nw);
-                let initial = if sp { 2u64 } else { 0 } + if phase[n + other] { 2u64 } else { 0 };
-                let sum = rowmul_words(dx, &mut dz[..nw], &src[..nw], &src[nw..2 * nw], initial);
-                phase[n + other] = (sum & 3) >= 2;
-            }
-        }
-
-        col_map.push(col);
-        k += 1;
-    }
-
-    (k, col_map)
-}
-
-fn solve_diagonal_seed(
-    xz: &[u64],
-    phase: &[bool],
-    n: usize,
-    nw: usize,
-    stride: usize,
-    _col_map: &[usize],
-    k: usize,
-) -> usize {
-    let d = n - k;
-    if d == 0 {
-        return 0;
-    }
-
-    let mut z_rows = Vec::with_capacity(d * nw);
-    let mut phases = Vec::with_capacity(d);
-    for g in k..n {
-        let row = n + g;
-        let base = row * stride + nw;
-        z_rows.extend_from_slice(&xz[base..base + nw]);
-        phases.push(phase[row]);
-    }
-
-    let mut pivot_col = vec![usize::MAX; d];
-    let mut available_cols: Vec<usize> = (0..n).collect();
-
-    for row in 0..d {
-        let row_off = row * nw;
-        let mut found = None;
-        for (ci, &col) in available_cols.iter().enumerate() {
-            if (z_rows[row_off + col / 64] >> (col % 64)) & 1 == 1 {
-                found = Some(ci);
-                break;
-            }
-        }
-        if let Some(ci) = found {
-            let col = available_cols.swap_remove(ci);
-            pivot_col[row] = col;
-            let w = col / 64;
-            let b = col % 64;
-            let pivot_z: Vec<u64> = z_rows[row_off..row_off + nw].to_vec();
-            let pivot_phase = phases[row];
-            #[allow(clippy::needless_range_loop)]
-            for other in 0..d {
-                if other == row {
-                    continue;
-                }
-                let other_off = other * nw;
-                if (z_rows[other_off + w] >> b) & 1 == 1 {
-                    for ww in 0..nw {
-                        z_rows[other_off + ww] ^= pivot_z[ww];
-                    }
-                    phases[other] ^= pivot_phase;
-                }
-            }
-        }
-    }
-
-    let mut seed = 0usize;
-    for row in 0..d {
-        if pivot_col[row] != usize::MAX && phases[row] {
-            seed |= 1 << pivot_col[row];
-        }
-    }
-    seed
 }

@@ -1297,6 +1297,39 @@ fn stabilizer_exports_match_statevector_amplitudes() {
     }
 }
 
+// Random Clifford circuits, shallow enough that some leave the factored backend
+// with several clusters. Amplitudes are compared without a phase fit, so the two
+// backends must agree on the global phase as well as the state.
+#[test]
+fn stabilizer_and_factored_stabilizer_exports_agree_on_random_cliffords() {
+    for (n, depth) in [(5, 1), (6, 2), (9, 3), (12, 6)] {
+        for seed in 0..8 {
+            let c = prism_q::circuits::clifford_random_pairs(n, depth, seed);
+
+            let mut stab = StabilizerBackend::new(SEED);
+            sim::run_on(&mut stab, &c).unwrap();
+            let mut fs =
+                prism_q::backend::factored_stabilizer::FactoredStabilizerBackend::new(SEED);
+            sim::run_on(&mut fs, &c).unwrap();
+
+            let expected = stab.export_statevector().unwrap();
+            let actual = fs.export_statevector().unwrap();
+            assert_eq!(actual.len(), 1 << n);
+            for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+                assert!(
+                    (a - e).norm() < EPS,
+                    "n={n} depth={depth} seed={seed} export[{i}]: stabilizer {e}, factored {a}"
+                );
+            }
+
+            let expected = stab.probabilities().unwrap();
+            let actual = fs.probabilities().unwrap();
+            let label = format!("n={n} depth={depth} seed={seed}");
+            assert_probs_close(&actual, &expected, EPS, &label);
+        }
+    }
+}
+
 // The native marginal route (per-qubit Z expectations off the backend's own
 // representation) against the dense route it replaces. The entangled fixture
 // keeps every explicit kind on direct resolution; the product fixture is the one

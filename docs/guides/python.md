@@ -596,7 +596,7 @@ A save point records the state where it sits, so a circuit can be inspected part
 way through without being cut in two and run twice.
 
 ```python
-from prism_q import CircuitBuilder, SaveSpec, simulate
+from prism_q import CircuitBuilder, Gate, SaveSpec, simulate
 
 builder = CircuitBuilder(4)
 for q in range(4):

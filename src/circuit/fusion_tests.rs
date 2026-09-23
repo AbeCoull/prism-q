@@ -1,6 +1,8 @@
 use super::*;
 use crate::backend::Backend;
 use crate::circuit::plan::Tracer;
+use crate::gates::PauliRotData;
+use crate::sim::unified_pauli::PauliAxis;
 const EPS: f64 = 1e-12;
 
 fn assert_mat_close(actual: &[[Complex64; 2]; 2], expected: &[[Complex64; 2]; 2]) {
@@ -269,6 +271,58 @@ fn test_fused_probabilities_match_unfused() {
     assert_eq!(probs_unfused.len(), probs_fused.len());
     for (i, (a, b)) in probs_unfused.iter().zip(&probs_fused).enumerate() {
         assert!((a - b).abs() < 1e-10, "prob[{i}]: unfused={a}, fused={b}");
+    }
+}
+
+#[test]
+fn a_hand_built_weight_one_pauli_rotation_fuses_like_the_axis_rotation() {
+    use crate::backend::statevector::StatevectorBackend;
+    let axes = [PauliAxis::X, PauliAxis::Y, PauliAxis::Z];
+    let mut c = Circuit::new(16, 0);
+    let mut named = Circuit::new(16, 0);
+    for q in 0..16 {
+        c.add_gate(Gate::H, &[q]);
+        named.add_gate(Gate::H, &[q]);
+        let theta = 0.1 * (q as f64 + 1.0);
+        let axis = axes[q % 3];
+        c.add_gate(
+            Gate::PauliRot(Box::new(PauliRotData {
+                theta,
+                axes: vec![axis],
+            })),
+            &[q],
+        );
+        named.add_gate(
+            match axis {
+                PauliAxis::X => Gate::Rx(theta),
+                PauliAxis::Y => Gate::Ry(theta),
+                PauliAxis::Z => Gate::Rz(theta),
+            },
+            &[q],
+        );
+        c.add_gate(Gate::T, &[q]);
+        named.add_gate(Gate::T, &[q]);
+    }
+    let fused = fuse_circuit(&c, true);
+    let fused_named = fuse_circuit(&named, true);
+    assert_eq!(fused.instructions.len(), fused_named.instructions.len());
+    let mut b1 = StatevectorBackend::new(42);
+    b1.init(16, 0).unwrap();
+    for inst in &fused.instructions {
+        b1.apply(inst).unwrap();
+    }
+    let mut b2 = StatevectorBackend::new(42);
+    b2.init(16, 0).unwrap();
+    for inst in &fused_named.instructions {
+        b2.apply(inst).unwrap();
+    }
+    for (a, b) in b1
+        .probabilities()
+        .unwrap()
+        .iter()
+        .zip(&b2.probabilities().unwrap())
+    {
+        assert!((a - b).abs() < 1e-12);
     }
 }
 

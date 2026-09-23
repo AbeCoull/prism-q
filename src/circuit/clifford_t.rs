@@ -6,21 +6,24 @@ use num_complex::Complex64;
 use std::f64::consts::FRAC_PI_4;
 
 use crate::circuit::{SmallVec, pauli_rotation_lowering};
-use crate::gates::{Gate, is_diagonal_2x2};
+use crate::gates::{Gate, IDENTITY_EPS, is_diagonal_2x2};
 use crate::sim::unified_pauli::PauliAxis;
 
-/// Tolerance, in units of pi/4, for an angle to count as on the grid.
-const GRID_EPS: f64 = 1e-9;
+/// Tolerance, in radians, for an angle to count as on the pi/4 grid.
+///
+/// Snapping moves each entry of the phase or rotation matrix by at most the
+/// angle error, so holding this at the recognizer's per-entry tolerance keeps
+/// the lowering from naming a gate `recognize_matrix` would refuse.
+const GRID_EPS: f64 = IDENTITY_EPS;
 
 /// Norm below which a matrix entry counts as zero in the Euler decomposition.
 const ZERO_EPS: f64 = 1e-12;
 
 /// Number of eighth turns in `theta`, modulo 8, when `theta` is within
-/// `GRID_EPS` of a multiple of pi/4.
+/// `GRID_EPS` radians of a multiple of pi/4.
 pub(crate) fn eighth_turns(theta: f64) -> Option<u8> {
-    let k = theta / FRAC_PI_4;
-    let rounded = k.round();
-    ((k - rounded).abs() <= GRID_EPS).then(|| rounded.rem_euclid(8.0) as u8)
+    let rounded = (theta / FRAC_PI_4).round();
+    ((theta - rounded * FRAC_PI_4).abs() <= GRID_EPS).then(|| rounded.rem_euclid(8.0) as u8)
 }
 
 /// Gates the Pauli engines branch on or conjugate through without lowering.
@@ -286,6 +289,30 @@ mod tests {
         assert_eq!(eighth_turns(3.0 * FRAC_PI_4), Some(3));
         assert_eq!(eighth_turns(2.0 * PI + FRAC_PI_2), Some(2));
         assert_eq!(eighth_turns(0.3), None);
+        assert_eq!(eighth_turns(FRAC_PI_2 + 1e-10), None);
+        assert_eq!(eighth_turns(FRAC_PI_2 + 1e-13), Some(2));
+    }
+
+    #[test]
+    fn an_angle_the_recognizer_refuses_is_not_snapped_to_the_grid() {
+        let theta = FRAC_PI_2 + 1e-10;
+        let phase = Gate::P(theta).matrix_2x2();
+        assert!(Gate::recognize_matrix(&phase).is_none());
+        let err = lower_to_clifford_t(&Gate::P(theta), &[0], &mut |_, _| {}).unwrap_err();
+        assert!(err.contains("off the pi/4 grid"), "{err}");
+        let mut lowered = Vec::new();
+        lower_to_pauli_forms(&Gate::Fused(Box::new(phase)), &[0], &mut |g, _| {
+            lowered.push(g)
+        })
+        .unwrap();
+        assert!(
+            lowered.iter().all(|g| !matches!(g, Gate::S | Gate::Sdg)),
+            "{lowered:?}"
+        );
+        assert!(equal_up_to_phase(
+            &product_of_lowering(&Gate::Fused(Box::new(phase))),
+            &phase
+        ));
     }
 
     #[test]

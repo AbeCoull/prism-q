@@ -594,3 +594,25 @@ fn test_recognize_up_to_phase_returns_the_scalar() {
 fn mcu_with_zero_controls_panics() {
     let _ = Gate::mcu(Gate::X.matrix_2x2(), 0);
 }
+
+#[test]
+fn mcu_with_one_control_is_a_cu() {
+    let mat = Gate::H.matrix_2x2();
+    assert_eq!(Gate::mcu(mat, 1), Gate::cu(mat));
+    assert!(matches!(Gate::mcu(mat, 2), Gate::Mcu(_)));
+}
+
+#[test]
+fn a_weight_one_pauli_rotation_has_the_axis_rotation_matrix() {
+    for (axis, named) in [
+        (PauliAxis::X, Gate::Rx(0.7)),
+        (PauliAxis::Y, Gate::Ry(0.7)),
+        (PauliAxis::Z, Gate::Rz(0.7)),
+    ] {
+        let rot = Gate::PauliRot(Box::new(PauliRotData {
+            theta: 0.7,
+            axes: vec![axis],
+        }));
+        assert_eq!(rot.matrix_2x2(), named.matrix_2x2());
+    }
+}

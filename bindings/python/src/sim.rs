@@ -887,13 +887,12 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
 
 /// Run a list of circuits, holding one backend across those that can share it.
 ///
-/// One crossing into Rust for the whole list rather than one per circuit, and
-/// one backend across circuits of the same width that draw no randomness. Both
-/// savings are small and both are per run, so this pays on many circuits of
-/// about 8 qubits or fewer and measures the same as a loop above 10.
+/// Below 14 qubits the circuits split across cores, which a loop cannot reach
+/// because each of those runs is single-threaded inside; from 14 up this saves
+/// only the crossing into Rust.
 ///
 /// Results are identical to running each circuit on its own with the same seed.
-/// The first failure ends the batch.
+/// A failing batch raises the first failure in list order.
 #[pyfunction]
 #[pyo3(signature = (circuits, backend = None, seed = DEFAULT_SEED))]
 pub fn run_batch(

@@ -1968,27 +1968,23 @@ pub fn run_on_state(
 
 /// Run several circuits, holding one backend across those that can share it.
 ///
-/// What this saves is the backend construction and its `2^n` allocation, which
-/// `init` reuses when the next circuit has the same width. Route analysis is not
-/// saved: the circuits differ, so each one is planned either way.
+/// Under the `parallel` feature, a batch whose circuits all sit below 14 qubits
+/// splits across Rayon workers, each holding its own backend. Those runs are
+/// single-threaded inside, so the batch is the only way to reach the other cores:
+/// a 200-point sweep of a two-layer hardware-efficient ansatz ran 3.2x to 4.8x
+/// faster than a loop over [`simulate`] at 4 to 12 qubits on a four-core
+/// i7-6700K. A wider circuit, a density matrix from 7 qubits, or a GPU or
+/// distributed kind keeps the whole batch on one thread.
 ///
-/// That puts the crossover higher than it looks. Measured over 200 distinct
-/// circuits, best of fifteen, three runs on one host: at 8 qubits the batch is
-/// slower by 0.5 to 0.8 microseconds a run, because the allocation it avoids is
-/// smaller than the per-circuit bookkeeping it adds; at 10 qubits it saves 0.8
-/// to 4.2; at 12 qubits it saves 10 to 37, which is 2% to 8%. Reach for it from
-/// about 10 qubits up, and use a plain loop below that.
+/// On one thread the saving is the backend construction and its `2^n`
+/// allocation, which `init` reuses when the next circuit has the same width;
+/// route analysis is planned per circuit either way. On the same sweep that read
+/// within about 10% of the loop, in both directions.
 ///
 /// Results are identical to running each circuit on its own with the same seed.
 /// A circuit that draws randomness (a measurement, a reset, or a classical
 /// condition) gets a backend of its own, because a held backend would carry its
 /// RNG forward into the next circuit and change what the next one measures.
-///
-/// Under the `parallel` feature, a batch whose circuits all sit below 14 qubits
-/// splits across Rayon workers, each holding its own backend. Those runs are
-/// single-threaded inside, so the batch is where the cores go. A wider circuit, a
-/// density matrix from 7 qubits, or a GPU or distributed kind keeps the whole
-/// batch on one thread.
 ///
 /// # Errors
 /// Returns the error of the first failing circuit in list order. A caller that

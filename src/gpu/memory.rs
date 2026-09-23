@@ -1,8 +1,4 @@
-//! Typed GPU memory allocation wrapper.
-//!
-//! `GpuBuffer<T>` owns a `cudarc::driver::CudaSlice<T>` and exposes a minimal htod/dtoh
-//! interface. Additional element types can be supported by extending the `T: DeviceRepr`
-//! bound as needed; today only `f64` is exercised.
+//! Typed device allocation wrapper with host-to-device and device-to-host copies.
 
 use cudarc::driver::{CudaSlice, DeviceRepr, ValidAsZeroBits};
 

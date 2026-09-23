@@ -508,8 +508,7 @@ pub struct DistributedStatevectorBackend {
     /// the tile down to whole pair blocks.
     exchange_chunk: usize,
     /// Count of `sendrecv` messages issued by this rank, and the total
-    /// amplitudes exchanged. Reorder and routing passes should minimize these
-    /// counters.
+    /// amplitudes exchanged.
     exchange_messages: u64,
     exchange_amplitudes: u64,
     /// RNG for measurement decisions, seeded identically on every rank and
@@ -522,7 +521,7 @@ pub struct DistributedStatevectorBackend {
     qubit_map: Vec<usize>,
     /// Physical position to circuit qubit. Inverse of `qubit_map`.
     phys_map: Vec<usize>,
-    /// Fast path flag: true while `qubit_map` is the identity.
+    /// True while `qubit_map` is the identity.
     map_identity: bool,
     /// Whether gates relabel global qubits into local positions instead of
     /// exchanging amplitudes per gate.
@@ -540,7 +539,6 @@ pub struct DistributedStatevectorBackend {
 }
 
 impl DistributedStatevectorBackend {
-    /// Create a backend bound to the given rank context and RNG seed.
     pub fn new(context: Arc<DistributedContext>, seed: u64) -> Self {
         Self {
             context,
@@ -578,12 +576,8 @@ impl DistributedStatevectorBackend {
         self.relabel = enabled;
     }
 
-    /// Number of `sendrecv` messages this rank has issued since `init`.
-    ///
-    /// Cost proxy for this backend. One host cannot measure real network
-    /// latency, so routing changes are evaluated against this count. Counts
-    /// gate and relabel exchanges; the query paths take `&self` and cannot
-    /// record theirs.
+    /// Number of `sendrecv` messages this rank has issued since `init`, gate and
+    /// relabel exchanges only: the `&self` query paths cannot record theirs.
     pub fn exchange_messages(&self) -> u64 {
         self.exchange_messages
     }
@@ -1078,8 +1072,8 @@ impl DistributedStatevectorBackend {
     /// Exchange with the partner rank, then write this rank's half of the 2x2
     /// result. The combine is elementwise, so the exchange is tiled in chunks of
     /// [`crate::distributed::exchange_chunk`] amplitudes, bounding the receive
-    /// buffer to `chunk` instead of a full slice copy. The default chunk is
-    /// the whole slice (single message), so behavior is unchanged unless tuned.
+    /// buffer to one chunk instead of a full slice copy. The default chunk is
+    /// the whole slice.
     fn apply_global_1q(&mut self, target: usize, mat: [[Complex64; 2]; 2]) {
         let partner = self.context.rank() ^ (1usize << self.global_bit(target));
         let (c_self, c_remote) = if self.rank_bit_set(target) {
@@ -1103,18 +1097,15 @@ impl DistributedStatevectorBackend {
         }
     }
 
-    /// Apply a diagonal one qubit gate whose target is stored in the rank id.
-    ///
-    /// The rank bit is constant across the local slice, so this only scales the
-    /// slice by `d0` or `d1`.
+    /// Apply a diagonal one qubit gate whose target is stored in the rank id,
+    /// which scales the whole slice by `d0` or `d1`.
     fn apply_global_diagonal_1q(&mut self, target: usize, d0: Complex64, d1: Complex64) {
         let factor = if self.rank_bit_set(target) { d1 } else { d0 };
         scale_shard(&mut self.inner.state, factor);
     }
 
-    /// Apply a 2x2 matrix to a local target qubit, gated by a set of local
-    /// control qubits (all must be 1). The whole operation is local, so it
-    /// dispatches to the inner backend's SIMD and parallel controlled kernels.
+    /// Apply a 2x2 matrix to a local target under local controls, through the
+    /// inner backend's controlled kernels.
     fn apply_local_controlled_1q(
         &mut self,
         local_controls: &[usize],

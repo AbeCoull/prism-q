@@ -795,10 +795,9 @@ fn multiply_within_group(
     signs[dst] = (sum & 3) == 2;
 }
 
-/// Phase-sensitive stabilizer inner product for small validation fixtures.
-///
-/// Dense export is intentionally limited to the same size as probability
-/// extraction. Large-qubit shot sampling uses MPS branch contraction below.
+/// Phase-sensitive stabilizer inner product for small validation fixtures,
+/// through a dense export capped at the probability-extraction width.
+/// Large-qubit shot sampling uses MPS branch contraction instead.
 pub fn stabilizer_inner_product(
     s1: &StabilizerBackend,
     s2: &StabilizerBackend,
@@ -1173,8 +1172,8 @@ fn sample_mps_branches_online(
 /// `[cos²(π/8), sin²(π/8)]`).
 ///
 /// Terminal and mid-circuit measurements are sampled by projecting coherent
-/// weighted branches and contracting branch overlaps. This avoids the dense
-/// statevector cap used by probability-vector APIs.
+/// weighted branches and contracting branch overlaps, so the dense
+/// statevector cap does not apply.
 pub fn run_stabilizer_rank_shots(
     circuit: &Circuit,
     num_shots: usize,

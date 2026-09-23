@@ -1,9 +1,6 @@
 //! Amazon Braket's `#pragma braket` extensions: result requests, noise
-//! channels, and inline unitaries.
-//!
-//! A result request reaches the caller beside the circuit rather than inside
-//! it, [`Instruction`] describing what runs rather than
-//! what to report.
+//! channels, and inline unitaries. A result request travels beside the circuit,
+//! since an [`Instruction`] describes what runs, not what to report.
 
 use num_complex::Complex64;
 
@@ -105,8 +102,8 @@ impl ObservableFactor {
     /// then carries.
     ///
     /// The Pauli and Hadamard cases are the named single-qubit rotations; an
-    /// explicit matrix is diagonalized numerically, which needs a gate wide
-    /// enough to carry the result and so stops at two qubits.
+    /// explicit matrix is diagonalized numerically and rotated through the
+    /// two-level reduction, which stops at four qubits.
     fn diagonalize(&self, targets: &[usize]) -> Result<MeasuredFactor> {
         self.check_width(targets)?;
         let single = |gate: Gate| {
@@ -193,8 +190,7 @@ impl Observable {
     /// per qubit; every other form reports one.
     ///
     /// `h` expands as `(X + Z)/sqrt(2)` and an explicit Hermitian matrix by its
-    /// Pauli decomposition, so every observable reaches the same weighted-sum
-    /// evaluation the native terminals take.
+    /// Pauli decomposition, so every observable takes the native weighted-sum path.
     pub fn lower(&self, num_qubits: usize) -> Result<Vec<(Vec<usize>, PauliObservable)>> {
         self.grouped(num_qubits)?
             .into_iter()
@@ -224,12 +220,8 @@ impl Observable {
             .collect()
     }
 
-    /// Factors beside the qubits each reads, one group per reported value.
-    ///
-    /// Braket applies a single-qubit observable with no target list to every
-    /// qubit in parallel and reports one value for each, so `expectation z all`
-    /// on a three-qubit register is three numbers and not one. Every other form
-    /// is a single tensor product and a single value.
+    /// Factors beside the qubits each reads, one group per reported value, so
+    /// `expectation z all` on a three-qubit register is three groups.
     #[allow(clippy::type_complexity)]
     fn grouped(&self, num_qubits: usize) -> Result<Vec<Vec<(&ObservableFactor, Vec<usize>)>>> {
         if self
@@ -514,8 +506,7 @@ fn split_bracketed(text: &str, open: char, close: char, line: usize) -> Result<(
 /// Parse one complex literal in Braket's matrix notation.
 ///
 /// Accepts a real (`0`, `-1.5`), an imaginary (`1im`, `-1im`), or a sum of the
-/// two (`0.7 + 0.7im`). This is the whole grammar Braket admits inside a
-/// matrix; a general expression is not one of the forms.
+/// two (`0.7 + 0.7im`), the only forms Braket admits inside a matrix.
 pub(crate) fn parse_complex(text: &str, line: usize) -> Result<Complex64> {
     let trimmed = text.trim();
     if trimmed.is_empty() {

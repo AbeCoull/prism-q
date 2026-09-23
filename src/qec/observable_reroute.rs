@@ -1,8 +1,7 @@
-//! Product-Z observable rerouting for QEC analytical paths.
-//!
-//! This module implements the production-safe core of Method F for explicit
-//! stabilizer input. It does not infer code stabilizers. Callers must supply
-//! stabilizers that fix the evaluated state or conditioned subspace.
+//! Product-Z observable rerouting for QEC analytical paths, the core of Method F for
+//! explicit stabilizer input: multiply the observable by caller-supplied stabilizers to
+//! shrink its light cone. Stabilizers are not inferred and must fix the evaluated state
+//! or conditioned subspace.
 
 use std::collections::HashSet;
 
@@ -11,10 +10,8 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 use crate::sim::unified_pauli::{PauliTerm, inverse_light_cone};
 
-/// Upper bound on the number of supplied stabilizers the reroute search will
-/// enumerate. The search is a brute-force scan over the `2^k` subset sums of
-/// the stabilizer span, each costing a full light-cone walk, so the candidate
-/// count must stay tractable. `2^20 ≈ 1M` walks is the ceiling.
+/// Cap on supplied stabilizers: the search brute-forces the `2^k` subset sums of the
+/// stabilizer span with one light-cone walk each, so 20 allows about 1M walks.
 pub const MAX_REROUTE_STABILIZERS: usize = 20;
 
 /// Whole-circuit versus in-cone gate and T/Tdg counts for one observable's

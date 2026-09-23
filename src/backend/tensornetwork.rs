@@ -54,13 +54,12 @@
 //! contracted once per assignment of the fixed legs and summed: a
 //! multiplicative time factor in exchange for a divided peak. Only a plan
 //! still over the cap once `PRISM_MAX_TN_SLICES` assignments are on the table
-//! is rejected, and the rejection names the same cap it always did. Slices
-//! are independent, so the parallel build runs them through Rayon, but only as
-//! many at once as fit under the cap together: the cap bounds the live
-//! intermediates of a sliced run the way it bounds an unsliced one. Sliced legs
-//! are shared by exactly two tensors, so
-//! the slice results sum; open legs stay whole. Every terminal contracts
-//! through the same path, and the result is exact either way.
+//! is rejected, and the rejection names the cap. Slices are independent, so
+//! the parallel build runs them through Rayon, but only as many at once as fit
+//! under the cap together: the cap bounds the live intermediates of a sliced
+//! run the way it bounds an unsliced one. Sliced legs are shared by exactly two
+//! tensors, so the slice results sum; open legs stay whole. Every terminal
+//! contracts through the same path, and the result is exact either way.
 //!
 //! # Bounded contraction
 //!
@@ -741,7 +740,7 @@ impl ContractionLimits {
 const DEFAULT_SLICE_BUDGET: usize = 1 << 10;
 
 /// Slice budget from `PRISM_MAX_TN_SLICES`, cached for the process. A budget
-/// of 1 leaves slicing off, so the cap rejects exactly as it did before.
+/// of 1 turns slicing off, so a plan over the cap is rejected.
 fn max_slices() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {

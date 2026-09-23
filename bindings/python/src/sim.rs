@@ -1,9 +1,6 @@
-//! Simulation builder and result types.
-//!
-//! `PySimulation` mirrors the core `Simulate` typestate builder but stores
-//! owned data and rebuilds the chain inside each terminal call, so none of the
-//! Rust lifetimes or `Seeded`/`Unseeded` type parameters leak into Python.
-//! Heavy terminals release the GIL via `py.detach`.
+//! Simulation builder and result types. `PySimulation` stores owned data and rebuilds
+//! the core `Simulate` chain inside each terminal, so no Rust lifetimes or typestate
+//! parameters reach Python.
 
 use std::collections::HashMap;
 
@@ -83,8 +80,8 @@ impl PySimulation {
     /// array, indexed with qubit 0 in the least significant bit. The length must
     /// be `2 ** num_qubits` and the vector must be normalized. A start state
     /// runs on the statevector (dense, GPU, or distributed) or density-matrix
-    /// backend only. `.shots()` and
-    /// `.sample_counts()` reject one with a noise model attached, and
+    /// backend only. `.shots()` and `.sample_counts()` reject one with a noise
+    /// model attached, and
     /// `.expectation_gradient()` and `.density_matrix_expectation_values()`
     /// reject one outright.
     fn initial_state(
@@ -361,7 +358,7 @@ impl PySimulation {
 
     /// Same gradient by the parameter-shift rule: two extra circuit runs per
     /// parameter instead of one backward sweep, and the only route for a
-    /// backend with no adjoint pass. Takes the [`expectation_gradient`]
+    /// backend with no adjoint pass. Takes the `expectation_gradient()`
     /// argument shape and returns the same pair.
     #[pyo3(signature = (hamiltonian, parameters))]
     fn expectation_gradient_shift<'py>(
@@ -457,7 +454,7 @@ impl PySimulation {
     /// Joint probability distribution over `qubits`, `2 ** len(qubits)` entries
     /// with `qubits[0]` in the lowest bit.
     ///
-    /// Generalizes [`marginals`], which reports each qubit on its own and so
+    /// Generalizes `marginals()`, which reports each qubit on its own and so
     /// cannot show correlation: a Bell pair reads `(0.5, 0.5)` twice there and
     /// `[0.5, 0, 0, 0.5]` here. Honours `.backend(...)` and an attached noise
     /// model, whose answer is the marginal of the exact mixture.
@@ -595,7 +592,7 @@ impl PySimulation {
     /// This is the spread of the operator itself, not
     /// `ObservableExpectation.variance`, which sums per-group variances and so
     /// drops the covariance between measurement groups. `hamiltonian` takes the
-    /// [`observable_expectation`] term shape.
+    /// `observable_expectation()` term shape.
     #[pyo3(signature = (hamiltonian))]
     fn observable_variance(
         &self,
@@ -636,9 +633,8 @@ impl PySimulation {
         })
     }
 
-    /// The [`expectation_values`] terminal with the provenance of the run that
-    /// served it. Worth calling over the bare list when the route matters:
-    /// under `BackendKind.auto()` a wide shallow circuit can be answered by a
+    /// `expectation_values()` with the provenance of the run that served it.
+    /// Under `BackendKind.auto()` a wide shallow circuit can be answered by a
     /// tensor contraction rather than by the state vector, and only the
     /// metadata says which ran.
     #[pyo3(signature = (observables))]
@@ -741,7 +737,7 @@ impl PySimulation {
     /// Compute `⟨H⟩` and its grouped-measurement variance for a weighted Pauli
     /// observable on the circuit's output state.
     ///
-    /// `hamiltonian` takes the [`expectation_gradient`] term shape: a list of
+    /// `hamiltonian` takes the `expectation_gradient()` term shape: a list of
     /// `(coefficient, [(qubit, axis), ...])` pairs with `axis` one of `"X"`,
     /// `"Y"`, `"Z"`, identity factors omitted, and an empty factor list acting
     /// as a constant offset. Identical strings merge by summing coefficients.
@@ -794,7 +790,7 @@ impl PySimulation {
     /// density-matrix backend through the circuit and the attached noise model.
     ///
     /// Observables take the same `(qubit, axis)` form as
-    /// [`expectation_values`]. Measurements are read off the final mixed state
+    /// `expectation_values()`. Measurements are read off the final mixed state
     /// without collapse, so this is the zero-variance analogue of
     /// trajectory-averaged expectation values. Always uses the density-matrix
     /// backend regardless of `.backend(...)`, so the circuit must fit that
@@ -832,8 +828,6 @@ fn parse_observables(observables: Vec<Vec<(usize, String)>>) -> PyPrismResult<Ve
     observables.into_iter().map(parse_pauli_string).collect()
 }
 
-/// Build a weighted Pauli observable from the `(coefficient, factors)` term
-/// shape the Python terminals take.
 fn build_observable(
     hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
 ) -> PyPrismResult<PauliObservable> {
@@ -870,7 +864,7 @@ impl PySimulation {
     }
 }
 
-/// Construct a [`Simulation`] for `circuit`.
+/// Start a `Simulation` builder for `circuit`.
 #[pyfunction]
 #[pyo3(name = "simulate")]
 pub fn simulate(circuit: &PyCircuit) -> PySimulation {
@@ -887,9 +881,9 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
 
 /// Run a list of circuits, holding one backend across those that can share it.
 ///
-/// Below 14 qubits the circuits split across cores, which a loop cannot reach
-/// because each of those runs is single-threaded inside; from 14 up this saves
-/// only the crossing into Rust.
+/// Below 14 qubits (7 on the density matrix) the circuits split across cores,
+/// which a loop cannot reach because each of those runs is single-threaded
+/// inside; above that this saves only the crossing into Rust.
 ///
 /// Results are identical to running each circuit on its own with the same seed.
 /// A failing batch raises the first failure in list order.
@@ -1226,7 +1220,7 @@ impl PyEntropyResult {
 
     /// Schmidt values across the cut as a `float64` array, descending, with
     /// squares summing to 1. `None` where the backend holds the entropy
-    /// without the spectrum that stands behind it.
+    /// without the spectrum.
     #[getter]
     fn schmidt_values<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyArray1<f64>>> {
         self.schmidt_values
@@ -1307,8 +1301,6 @@ impl PyObservableExpectation {
     }
 }
 
-/// One block of a factored distribution as Python receives it: the qubits it
-/// covers, ascending, and its own distribution over them.
 type FactoredBlockPy<'py> = (Vec<usize>, Bound<'py, PyArray1<f64>>);
 
 /// Result of a single run: classical bits and the probability distribution.
@@ -1473,11 +1465,8 @@ impl PyShotsResult {
         self.inner.num_classical_bits()
     }
 
-    /// Frequency histogram keyed by bitstring.
-    ///
-    /// In each key, character `i` is classical bit `i`, with bit 0 leftmost
-    /// (LSB-first). This follows PRISM-Q's convention that `q[0]` is the
-    /// least-significant qubit, so keys read reversed relative to Qiskit.
+    /// Frequency histogram keyed by bitstring, character `i` being classical
+    /// bit `i`. Bit 0 is leftmost, so keys read reversed relative to Qiskit.
     fn counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         counts_to_dict(py, &self.inner.counts(), self.inner.num_classical_bits())
     }
@@ -1511,11 +1500,8 @@ impl PyCountsResult {
         self.num_classical_bits
     }
 
-    /// Frequency histogram keyed by bitstring.
-    ///
-    /// In each key, character `i` is classical bit `i`, with bit 0 leftmost
-    /// (LSB-first). This follows PRISM-Q's convention that `q[0]` is the
-    /// least-significant qubit, so keys read reversed relative to Qiskit.
+    /// Frequency histogram keyed by bitstring, character `i` being classical
+    /// bit `i`. Bit 0 is leftmost, so keys read reversed relative to Qiskit.
     fn counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         counts_to_dict(py, &self.counts, self.num_classical_bits)
     }

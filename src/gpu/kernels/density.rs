@@ -1,10 +1,6 @@
-//! Density-matrix kernels over the embedded `2n`-qubit buffer, CUDA C source plus
-//! launch helpers.
-//!
-//! The buffer is the statevector layout of `4^n` amplitudes with the ket index in
-//! the high `n` bits and the bra index in the low `n`, so the unitary half of the
-//! backend reuses the dense kernels unchanged. The kernels here are the channel,
-//! measurement, and readout sweeps that have no statevector counterpart.
+//! Density-matrix channel, measurement, and readout kernels. The `4^n` buffer is a
+//! `2n`-qubit statevector with the ket index in the high `n` bits and the bra index in
+//! the low `n`, so unitaries reuse the dense kernels unchanged.
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use num_complex::Complex64;

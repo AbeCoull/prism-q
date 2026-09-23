@@ -1,40 +1,29 @@
 //! Exact density-matrix backend.
 //!
-//! Stores the full density operator `rho` for `n` qubits as a `2^(2n)` amplitude
-//! buffer laid out row-major: buffer index `(r << n) | c` holds `<r|rho|c>`. That
-//! layout is isomorphic to a `2n`-qubit statevector whose high `n` qubits index
-//! the ket (row `r`) and whose low `n` qubits index the bra (column `c`). Gate
-//! application therefore reuses the validated statevector kernels directly: a
-//! unitary `U` on the ket register yields the left product `U rho`, and the same
-//! `U` applied to the bra register on a conjugated buffer yields the right product
-//! `rho U^dagger`, giving `U rho U^dagger` with no gate math of its own.
-//!
 //! # Memory layout
 //!
-//! Memory is `16 * 4^n` bytes (`4^n` `Complex64` entries), so the practical
-//! ceiling is about 14 qubits on a 16 GiB host and 15 on a 32 GiB host. With a
-//! device attached through [`DensityMatrixBackend::with_gpu`] the buffer lives in
-//! VRAM instead, where an 11 GiB card holds 13 qubits (1 GiB at 13, 4 GiB at 14
-//! plus scratch), and every sweep runs as a kernel over the embedded buffer. This
-//! backend is explicit-dispatch only and is never chosen by `Auto`.
+//! `rho` for `n` qubits is a `4^n` buffer, row-major: index `(r << n) | c` holds
+//! `<r|rho|c>`. That is a `2n`-qubit statevector with the ket in the high `n`
+//! qubits and the bra in the low `n`, so gates reuse the statevector kernels:
+//! `U` on the ket register gives `U rho`, and `conj(U)` on the bra register gives
+//! `rho U^dagger`. At 16 bytes per entry the ceiling is about 14 qubits on a
+//! 16 GiB host and 15 on 32 GiB. With [`DensityMatrixBackend::with_gpu`] the
+//! buffer lives in VRAM, where an 11 GiB card holds 13 qubits (1 GiB at 13,
+//! 4 GiB at 14 plus scratch) and every sweep runs as a kernel over the embedded
+//! buffer. Explicit dispatch only; `Auto` never picks it.
 //!
 //! # Gate support
 //!
-//! Supported: exact unitary evolution, basis-state probabilities, the one-qubit
-//! reduced density matrix, projective measurement with stochastic collapse, reset,
-//! classically-conditioned gates, exact one-qubit Kraus channels
-//! (`apply_1q_kraus`), exact two-qubit Kraus channels (`apply_2q_kraus`, with
-//! `apply_2q_depolarizing` taking the twirled closed form instead), and exact
-//! `Tr(rho P)` expectation (`expectations_pauli`, which backs
-//! [`Backend::pauli_expectations`]). Fused gates are accepted, so `sim` fuses for
-//! this backend, and at the `2n` width its buffer actually costs rather than at
-//! the circuit width. `QftBlock` carries qubit indices outside the instruction
-//! targets and is remapped onto the ket register before the left product; the
-//! tiled shapes (`MultiFused`, `Multi2q`) apply their constituent gates one at a
-//! time instead. See [`Backend::supports_fused_gates`] for the ordering contract
-//! that requires it. Diagonal gates do not take the two-product route at all:
-//! their two factors combine into one table, so `Rzz` and the diagonal batches
-//! (`BatchPhase`, `BatchRzz`, `DiagonalBatch`) each sweep the buffer once.
+//! Unitary evolution, probabilities, measurement with collapse, reset,
+//! classically conditioned gates, exact one- and two-qubit Kraus channels
+//! (`apply_1q_kraus`, `apply_2q_kraus`, and the twirled closed form
+//! `apply_2q_depolarizing`), and exact `Tr(rho P)` through
+//! [`Backend::pauli_expectations`]. Fusion runs, gated on the `2n` buffer width.
+//! `QftBlock` is remapped onto the ket register before the left product.
+//! `MultiFused` and `Multi2q` apply their constituents one at a time (see
+//! [`Backend::supports_fused_gates`] for why). Diagonal gates skip the
+//! two-product route: their two factors combine into one table, so `Rzz` and
+//! the diagonal batches each sweep the buffer once.
 //!
 //! # When to prefer this backend
 //!
@@ -238,16 +227,6 @@ fn conjugate_gate(gate: &Gate) -> Option<Gate> {
     }
 }
 
-/// The gate with every qubit index stored inside its payload shifted onto the
-/// ket register. Offsetting the instruction targets is not enough for
-/// `QftBlock`, whose whole range lives in the variant. Borrows the gate when it
-/// carries no such index.
-///
-/// `MultiFused` and `Multi2q` are deliberately absent: shifting a `Multi2q`
-/// payload reorders it, so both apply their constituents directly. The diagonal
-/// batches are absent for a different reason, that
-/// [`DensityMatrixBackend::apply_diagonal_sandwich`] takes them before the
-/// two-product route is reached.
 /// The batch payload as a flat [`DiagEntry`] list, or `None` for a gate that is
 /// not a diagonal batch. `BatchPhase` keeps its shared control in the
 /// instruction targets rather than in the payload, so it arrives separately.
@@ -279,6 +258,15 @@ fn diagonal_batch_entries(gate: &Gate, targets: &[usize]) -> Option<Vec<DiagEntr
     }
 }
 
+/// The gate with every qubit index stored inside its payload shifted onto the
+/// ket register. Offsetting the instruction targets is not enough for
+/// `QftBlock`, whose whole range lives in the variant. Borrows the gate when it
+/// carries no such index.
+///
+/// `MultiFused` and `Multi2q` are absent: shifting a `Multi2q` payload reorders
+/// it, so both apply their constituents directly. The diagonal batches are
+/// absent because [`DensityMatrixBackend::apply_diagonal_sandwich`] takes them
+/// before the two-product route is reached.
 fn ket_register_gate(gate: &Gate, n: usize) -> Cow<'_, Gate> {
     match gate {
         Gate::QftBlock { start, num } => Cow::Owned(Gate::QftBlock {
@@ -347,11 +335,9 @@ impl DensityMatrixBackend {
 
     /// Hold the mixture on the device bound to `context`.
     ///
-    /// [`Backend::init`] then allocates the `4^n` buffer in device memory after a
-    /// budget check against the free VRAM, and every sweep runs as a kernel. A
-    /// device that cannot hold the state is an error at `init`, never a host
-    /// fallback. The channel entry points keep their infallible signatures, so
-    /// a kernel launch that fails under one of them panics.
+    /// A device that cannot hold the `4^n` buffer is an error at
+    /// [`Backend::init`], never a host fallback. A kernel launch that fails
+    /// under one of the infallible channel entry points panics.
     #[cfg(feature = "gpu")]
     pub fn with_gpu(mut self, context: Arc<GpuContext>) -> Self {
         self.gpu_context = Some(context.clone());
@@ -359,7 +345,6 @@ impl DensityMatrixBackend {
         self
     }
 
-    /// The device state with its context, when the mixture is resident there.
     #[cfg(feature = "gpu")]
     fn device(&mut self) -> Option<(Arc<GpuContext>, &mut GpuState)> {
         let gpu = self.sv.gpu_state_mut()?;
@@ -528,18 +513,16 @@ impl DensityMatrixBackend {
     /// three fold both products into one pass rather than taking a conjugate
     /// form here.
     ///
-    /// `Multi2q` carries a gate list that the statevector kernel partitions by
-    /// cache tier and runs one tier at a time, which preserves application
-    /// order only while the whole list sits in one tier. Fusion guarantees that
-    /// against the circuit's own qubit indices, and the `+n` shift onto the ket
-    /// register moves gates across the tier bounds, so the ket half applies its
-    /// constituents one at a time. The bra half keeps the circuit's indices, so
-    /// it batches through the tiled pass whenever
-    /// [`kernels::multi_2q_single_tier`] holds, and falls back to
-    /// per-constituent application otherwise. `MultiFused` entries
-    /// are one per qubit and commute, so its list is order independent; it takes
-    /// the same treatment because the one-qubit sandwich is cheaper than the
-    /// tiled pass here.
+    /// `Multi2q` runs tier by tier in the statevector kernel, which preserves
+    /// application order only while the whole list sits in one tier. Fusion
+    /// guarantees that against the circuit's own qubit indices, but the `+n`
+    /// shift onto the ket register moves gates across tier bounds, so the ket
+    /// half applies its constituents one at a time. The bra half keeps the
+    /// circuit's indices, so it batches through the tiled pass whenever
+    /// [`kernels::multi_2q_single_tier`] holds and falls back to per-constituent
+    /// application otherwise. `MultiFused` entries are one per qubit and
+    /// commute, so its list is order independent; it takes the per-constituent
+    /// route because the one-qubit sandwich is cheaper than the tiled pass here.
     fn apply_unitary(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
         let n = self.num_qubits;
 
@@ -656,10 +639,8 @@ impl DensityMatrixBackend {
     /// serves both registers and the sweep reads it twice per amplitude. The
     /// table costs `2^n` against the `4^n` buffer it saves three passes on: the
     /// generic route has no conjugate form for these variants and pays two
-    /// register passes plus two buffer conjugations.
-    ///
-    /// Entry order does not matter, all of them being diagonal, so the tier
-    /// reordering the tiled payloads have to avoid cannot arise here.
+    /// register passes plus two buffer conjugations. Entries are diagonal, so
+    /// their order does not matter and the tier reordering cannot arise.
     fn apply_diagonal_sandwich(&mut self, entries: &[DiagEntry]) -> Result<()> {
         let n = self.num_qubits;
         let d = self.dim();
@@ -829,10 +810,9 @@ impl DensityMatrixBackend {
         Ok(())
     }
 
-    /// Apply a general single-qubit channel `rho -> sum_k K_k rho K_k^dagger`
-    /// on `qubit`. The Kraus set is compiled once into a 4x4 block
-    /// superoperator acting on each `(row-bit, col-bit)` block of `rho`, so the
-    /// buffer is swept once with no per-element allocation.
+    /// Apply `rho -> sum_k K_k rho K_k^dagger` on `qubit` in one buffer sweep,
+    /// through a 4x4 superoperator compiled from the Kraus set and acting on
+    /// each `(row-bit, col-bit)` block of `rho`.
     pub fn apply_1q_kraus(&mut self, qubit: usize, kraus: &[[[Complex64; 2]; 2]]) {
         let s = block_superoperator(kraus);
         self.apply_block_superoperator_infallible(qubit, &s);

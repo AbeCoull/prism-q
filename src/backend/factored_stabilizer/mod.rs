@@ -1,9 +1,8 @@
 //! Factored stabilizer simulation backend.
 //!
-//! Dynamically-partitioned stabilizer simulator: maintains independent
-//! sub-tableaux per disentangled qubit group. Merges on-demand when
-//! entangling gates bridge groups, splits when measurement reveals
-//! product structure. O((a+b)²/64) polynomial merge cost.
+//! Keeps one sub-tableau per disentangled qubit group, merging two groups when
+//! a gate bridges them (O((a+b)²/64) per merge) and splitting when measurement
+//! reveals product structure.
 //!
 //! # Memory layout
 //!

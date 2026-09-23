@@ -1,11 +1,5 @@
-//! T-gate strategy dispatch for native QEC programs.
-//!
-//! Public surface: one strategy enum and a single entry point
-//! [`run_qec_program_with_strategy`]. [`QecTStrategy::Auto`] is the
-//! production dispatcher: exact light-cone SPD, CAMPS, then the private exact
-//! tensor-network scalar fallback. [`QecTStrategy::Reference`] is the
-//! analytical correctness anchor. [`QecTStrategy::Spd`] and
-//! [`QecTStrategy::Camps`] are direct analytical paths.
+//! T-gate strategy dispatch for native QEC programs: [`run_qec_program_with_strategy`]
+//! and the SPD, CAMPS, and tensor-network observable paths behind it.
 
 use super::observable_reroute::{min_cone_z_representative, xor_z_support};
 #[cfg(test)]
@@ -19,22 +13,17 @@ use crate::gates::Gate;
 use crate::sim::compiled::PackedShots;
 use crate::sim::unified_pauli::{PauliTerm, run_spd_observable_light_cone};
 
-/// Strategy used to sample a QEC program that may contain T gates.
-///
-/// Production path is [`QecTStrategy::Auto`], which tries exact light-cone SPD,
-/// then CAMPS, then the private exact tensor-network scalar fallback when CAMPS
-/// cannot run. [`QecTStrategy::Reference`] is the analytical correctness
-/// anchor.
+/// Strategy for running a QEC program that may contain T gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum QecTStrategy {
-    /// Production dispatcher. Exact light-cone SPD, CAMPS, then tensor network.
+    /// Exact light-cone SPD, then CAMPS, then an exact tensor-network scalar fallback.
     Auto,
     /// One state-vector simulation per shot. Correctness oracle.
     Reference,
     /// Clifford-augmented matrix product state Pauli expectation path.
     Camps,
-    /// Sparse Pauli decomposition after the joint-observable upgrade.
+    /// Sparse Pauli decomposition of the joint observable over its inverse light cone.
     Spd,
 }
 
@@ -49,7 +38,7 @@ pub struct QecObservableReroute {
 }
 
 impl QecTStrategy {
-    /// Short human label used in benchmark groups and decision tables.
+    /// Lowercase label used in benchmark group names.
     pub fn label(self) -> &'static str {
         match self {
             QecTStrategy::Auto => "auto",
@@ -60,11 +49,8 @@ impl QecTStrategy {
     }
 }
 
-/// Run a QEC program under the chosen T-gate sampling strategy.
-///
-/// Use [`QecTStrategy::Auto`] for production observable runs. The
-/// [`QecTStrategy::Reference`] strategy is always available and matches
-/// [`run_qec_program_reference`] exactly.
+/// Run a QEC program under the chosen T-gate strategy; `Reference` is
+/// [`run_qec_program_reference`].
 pub fn run_qec_program_with_strategy(
     program: &QecProgram,
     strategy: QecTStrategy,
@@ -205,27 +191,15 @@ const QEC_SPD_EPSILON: f64 = 1e-10;
 /// non-zero `total_discarded`.
 const QEC_SPD_MAX_TERMS: usize = 16_384;
 
-/// Lower a QEC program into a unitary Circuit plus per-record qubit map
-/// for the joint-Pauli SPD / CAMPS analytical paths.
+/// Lower a QEC program to a unitary circuit, the per-record qubit map, and the final
+/// qubit aliases for the SPD and CAMPS paths.
 ///
-/// Delegates to the deferred-lowering machinery in `qec/noise.rs`
-/// (`lower_qec_program_to_deferred_circuit_allowing_non_clifford`),
-/// which handles Reset (fresh qubit alias), MPP (scratch qubit + CNOT
-/// chain), basis-rotated measurements (`H` / `S†H` prefix), and the
-/// trailing measurement record bookkeeping. The trailing
-/// `Instruction::Measure` ops appended by the deferred lowering are
-/// stripped from the returned Circuit so the strategies can evaluate
-/// `⟨0^n| U† P U |0^n⟩` against the pure unitary.
-///
-/// **Still rejected:**
-/// - Active `Noise` channels: SPD / CAMPS do not have an
-///   `apply_noise_to_measurements`-style hook.
-/// - `Detector`: analytical strategies do not emit detector rows yet.
-///
-/// `ExpectationValue` ops are accepted: placement is validated (terminal,
-/// live qubits only) and their program-qubit terms are translated through
-/// the returned final-alias map, since resets reassign qubits to fresh
-/// aliases in the lowered circuit.
+/// Uses the deferred lowering, which handles reset (fresh qubit alias), `MPP` (scratch
+/// qubit and CNOT chain), and basis-rotated measurements (`H` / `S†H` prefix), then strips
+/// its trailing measurements so strategies evaluate `⟨0^n| U† P U |0^n⟩` on the unitary.
+/// Rejects active noise (SPD and CAMPS have no hook to apply it) and detectors.
+/// `EXP_VAL` terms must go through the returned aliases, since a reset moves a program
+/// qubit to a fresh alias.
 fn lower_qec_program_for_pauli_observable(
     program: &QecProgram,
 ) -> Result<(Circuit, Vec<usize>, Vec<usize>)> {
@@ -310,10 +284,8 @@ fn observable_row_to_pauli_terms(
 /// per observable.
 const MAX_POSTSEL_FOR_CONDITIONAL_EXPECTATION: usize = 12;
 
-/// Resolve postselection rows into (qubit-set, sign) pairs ready for
-/// the conditional-expectation expansion. Returns
-/// `(Vec<(Vec<usize>, bool)>, Vec<f64>)`: per-row qubit list and per-row
-/// `ε_i ∈ {+1, -1}` based on the `expected` outcome bit.
+/// Resolve postselection rows to `(qubits, ε)` pairs for the conditional-expectation
+/// expansion, with `ε = -1` when the expected parity is 1 and `+1` otherwise.
 fn lower_postselection_rows(
     rows: &[(Vec<usize>, bool)],
     record_to_qubit: &[usize],
@@ -350,12 +322,10 @@ fn lower_postselection_rows(
     Ok(out)
 }
 
-/// Merge a projector Z-string with an observable's Pauli terms. A Z
-/// observable term on a projector qubit cancels it (Z·Z = I), preserving
-/// the parity semantics of the legacy record-based observables. X/Y
-/// observable terms cannot share a projector qubit: projector strings live
-/// on measured aliases while `EXP_VAL` terms are restricted to live
-/// qubits, so the supports are disjoint by construction.
+/// Merge a projector Z-string with an observable's terms; a shared Z cancels (Z·Z = I),
+/// preserving the parity semantics of record-based observables.
+/// X/Y terms cannot share a projector qubit: projectors sit on measured aliases and
+/// `EXP_VAL` terms on live qubits.
 fn merge_projector_with_observable(pi: &[PauliTerm], obs: &[PauliTerm]) -> Vec<PauliTerm> {
     use crate::sim::unified_pauli::PauliAxis;
     let mut out: Vec<PauliTerm> = obs.to_vec();
@@ -511,15 +481,8 @@ fn build_qec_result_with_acceptance(
     let num_detectors = program.num_detectors();
     let num_measurements = program.num_measurements();
     let measurements = PackedShots::from_meas_major(Vec::new(), 0, num_measurements);
-    // Detector records are empty because analytical strategies reject
-    // detectors. Observable records are synthesized so their popcount
-    // marginals equal `logical_errors`, but the analytical path has no
-    // per-shot accept mask: the `count` one-bits occupy positions
-    // `[0, accepted_shots)` and the rest is inert padding up to
-    // `total_shots`. Consumers must therefore divide by `accepted_shots`
-    // (e.g. via [`QecSampleResult::logical_error_rates`]), not
-    // `total_shots`, and must not align observable rows shot-for-shot with
-    // detector rows. Exact expectations live in `observable_expectations`.
+    // No per-shot accept mask exists here, so observable records are synthesized to
+    // match `logical_errors`, one-bits first (see `QecSampleResult::observables`).
     let detector_words = total_shots.div_ceil(64) * num_detectors;
     let detectors =
         PackedShots::from_meas_major(vec![0u64; detector_words], total_shots, num_detectors);
@@ -780,15 +743,11 @@ fn run_qec_program_tensor_network_observable(program: &QecProgram) -> Result<Qec
 /// Tolerance on `⟨ψ|S|ψ⟩ = +1` for a rerouting stabilizer.
 const REROUTE_STABILIZER_TOL: f64 = 1e-6;
 
-/// Verify that the Z-string distinguishing the original observable support from
-/// the rerouted support is a genuine `+1` stabilizer of the evaluated state.
+/// Check that `S = supp(original) ⊕ supp(rerouted)` is a `+1` stabilizer of the state.
 ///
-/// Rerouting replaces observable `O` with `O' = O · S`, which preserves the
-/// expectation only when `S |ψ⟩ = +|ψ⟩`. The reroute module documents this as a
-/// caller obligation but cannot check it (it has no state). Here the state is
-/// available cheaply via SPD on `S` alone, so validate it rather than silently
-/// evaluate a different operator. `S = supp(original) ⊕ supp(rerouted)`; an
-/// empty support means no reroute happened and is trivially valid.
+/// Rerouting evaluates `O · S` in place of `O`, which preserves the expectation only
+/// when `S |ψ⟩ = +|ψ⟩`. The reroute module has no state to check that against; SPD on
+/// `S` alone is cheap here. An empty `S` means no reroute happened.
 fn verify_reroute_is_state_stabilizer(
     circuit: &Circuit,
     original_support: &[usize],

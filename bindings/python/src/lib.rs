@@ -1,8 +1,5 @@
-//! Python bindings for PRISM-Q.
-//!
-//! This crate is a thin PyO3 wrapper over the public `prism-q` API. The
-//! compiled extension module is `prism_q._prism_q`; the pure-Python
-//! `prism_q` package re-exports it.
+//! PyO3 bindings over the public `prism-q` API. The compiled module is
+//! `prism_q._prism_q`, re-exported by the pure-Python `prism_q` package.
 
 use pyo3::prelude::*;
 

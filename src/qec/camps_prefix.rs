@@ -1,34 +1,25 @@
 //! Signed-Clifford prefix tracker for the CAMPS path.
 //!
-//! Maintains a Clifford unitary `C` implicitly via its inverse tableau:
-//! `inv_x[q] = C† · X_q · C` and `inv_z[q] = C† · Z_q · C`, each a
-//! signed Pauli string with a phase in `{1, i, -1, -i}` (encoded as
-//! `phase4 ∈ {0, 1, 2, 3}` so that the operator value is `i^phase4`).
-//! For Hermitian images of Hermitian Paulis the phase is always `0`
-//! or `2` once a row is settled; intermediate `phase4` of `1` or `3`
-//! can occur during a `rowmul` and clears by the end of the gate.
+//! Holds a Clifford `C` as its inverse tableau `inv_x[q] = C† X_q C` and
+//! `inv_z[q] = C† Z_q C`, each a Pauli row times `i^phase4`. Settled rows of Hermitian
+//! images have `phase4` of `0` or `2`; `1` or `3` occurs only inside a `rowmul` and clears
+//! by the end of the gate.
 //!
-//! The OFD disentangler reads `C† · Z_q · C` directly from the
-//! inverse-tableau row. Final-observable evaluation
-//! `⟨ψ| O |ψ⟩ = ⟨ψ'| C† O C |ψ'⟩` factors the observable into single-
-//! qubit `X`/`Z` components and reads from the same row.
+//! The OFD disentangler reads `C† Z_q C` directly from the inverse-tableau row, and
+//! final-observable evaluation `⟨ψ| O |ψ⟩ = ⟨ψ'| C† O C |ψ'⟩` factors `O` into
+//! single-qubit `X`/`Z` components read from the same rows.
 //!
-//! Per-gate updates use the rule
-//! `new inv_x[q] = C† · (U · X_q · U†) · C` (and analogous for Z),
-//! expanded by linearity over the existing tableau rows. This is the
-//! correct cumulative composition for sequential state-gate
-//! application `C ← U·C`.
+//! Per-gate updates use `new inv_x[q] = C† (U X_q U†) C` (and likewise for Z), expanded
+//! by linearity over the existing rows, which composes sequential state gates as
+//! `C ← U·C`.
 
 use crate::gates::Gate;
 
-/// Packed signed Pauli row for the inverse Clifford tableau. `(x, z)` bit
-/// pairs encode the letter directly ((0,0)=I, (1,0)=X, (0,1)=Z, (1,1)=Y)
-/// and `phase4` is the `i^{phase4}` global factor; this matches the
-/// convention in [`crate::sim::stabilizer_rank`]'s `SignedPauli`. The two
-/// are deliberately distinct: this one uses packed `Vec<u64>` rows and
-/// `rowmul` for full-tableau composition, while that one uses dense
-/// `Vec<bool>` storage and forward conjugation for a single string. Keep
-/// the letter and phase conventions in sync across both.
+/// Packed signed Pauli row. `(x, z)` bits give the letter directly ((0,0)=I, (1,0)=X,
+/// (0,1)=Z, (1,1)=Y) and `phase4` the `i^{phase4}` factor, the same conventions as
+/// `SignedPauli` in [`crate::sim::stabilizer_rank`]; keep the two in sync. This one packs
+/// rows into `Vec<u64>` and composes full tableaus with `rowmul`; that one stores dense
+/// `Vec<bool>` and forward-conjugates a single string.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SignedPauli {
     pub x: Vec<u64>,
@@ -152,9 +143,8 @@ fn rowmul_into(dst: &mut SignedPauli, src: &SignedPauli, n: usize, extra_phase4:
     dst.phase4 = (total & 3) as u8;
 }
 
-/// `rows[dst] ← (i^extra_phase4) · rows[dst] · rows[src]` for two distinct
-/// indices into the same row vector. Splits the borrow so neither row is
-/// cloned. `dst == src` is a logic error (a row times itself).
+/// `rows[dst] ← (i^extra_phase4) · rows[dst] · rows[src]` for distinct `dst` and `src`,
+/// without cloning either row.
 fn rowmul_within(rows: &mut [SignedPauli], dst: usize, src: usize, n: usize, extra_phase4: u8) {
     debug_assert_ne!(dst, src, "rowmul_within requires distinct rows");
     let hi = dst.max(src);
@@ -325,16 +315,12 @@ impl SignedCliffordPrefix {
         self.inv_z.swap(a, b);
     }
 
-    /// Right-composition state-gate fold: `C ← C · U`. Used to absorb
-    /// the disentangler inverse `D†` into the Clifford prefix after a
-    /// CAMPS T-gate. Implementing this via `apply_state_gate` would
-    /// compose on the wrong side (`U · C`), which only coincides with
-    /// `C · U` when `C` and `U` commute or `D` is trivial.
+    /// Right-compose `C ← C · U`, used to fold the disentangler inverse `D†` after a
+    /// CAMPS T-gate. `apply_state_gate` composes on the other side (`U · C`), which
+    /// agrees only when `C` and `U` commute or `D` is trivial.
     ///
-    /// Each inverse-tableau row `R = C† P C` transforms as
-    /// `R → U† R U` (Heisenberg conjugation by `U` of the existing
-    /// Pauli row), so the update is local to the columns touched by
-    /// `U` and tracks any phase introduced by the conjugation.
+    /// Each row `R = C† P C` becomes `U† R U` (Heisenberg conjugation by `U`), so the
+    /// update touches only `U`'s columns and tracks any phase the conjugation introduces.
     pub(crate) fn fold_right_state_gate(
         &mut self,
         gate: &Gate,
@@ -473,25 +459,15 @@ impl SignedCliffordPrefix {
     }
 }
 
-/// Optimization-Free Disentangler (Algorithm 1 of Liu & Clark
-/// arXiv:2412.17209). Given an MPS state `|ψ'⟩` and a Pauli string `P`
-/// expressed as a [`SignedPauli`], constructs a Clifford disentangler
-/// `D` such that applying `D` to `|ψ'⟩` leaves at least one qubit
-/// disentangled in the `|0⟩` state and rotates `P` to act trivially
-/// on that qubit.
+/// One disentangler gate with its targets.
 ///
-/// The returned cascade is a sequence of gates with their target
-/// qubits, intended to be applied to the MPS via the existing
-/// [`crate::backend::Backend`] dispatch. All gates share a single
-/// control qubit `n` chosen as the first index where MPS site `n` is
-/// in `|0⟩` and `P[n] ∈ {X, Y}`. For each other qubit `m` with non-
-/// identity Pauli factor:
-/// - `P[m] = X` → `CX(n, m)`
-/// - `P[m] = Y` → `Sdg(m), CX(n, m), S(m)` (CY decomposition)
-/// - `P[m] = Z` → `CZ(n, m)`
-///
-/// Returns an empty cascade when no such `n` exists. The disentangler
-/// inverse `D†` is what gets folded into the Clifford prefix.
+/// The Optimization-Free Disentangler (Algorithm 1 of Liu & Clark, arXiv:2412.17209)
+/// builds, for an MPS state `|ψ'⟩` and Pauli string `P`, a Clifford `D` that leaves at
+/// least one qubit disentangled in `|0⟩` and rotates `P` to act trivially on it. The
+/// cascade anchors on a qubit `n` in `|0⟩` with `P[n] ∈ {X, Y}` and emits, for each other
+/// support qubit `m`, `CX(n, m)` for X, `Sdg(m) CX(n, m) S(m)` for Y (the CY
+/// decomposition), and `CZ(n, m)` for Z. Its inverse `D†` is folded into the Clifford
+/// prefix.
 pub(crate) type OfdGate = (Gate, Vec<usize>);
 
 fn build_xy_anchor_cascade(p: &SignedPauli, n: usize, num_qubits: usize) -> Vec<OfdGate> {
@@ -520,12 +496,10 @@ fn support_qubits(p: &SignedPauli, num_qubits: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Sum of MPS-site distances over every two-qubit gate in a cascade.
-/// Same routing-cost proxy as [`anchor_routing_cost`] but evaluated on
-/// the assembled cascade so OFD and OFDS variants (which can pick
-/// different anchors and different gate sequences) can be compared
-/// directly. Single-qubit cascade gates contribute 0 since they do not
-/// route across MPS sites.
+/// Sum of MPS-site distances over a cascade's two-qubit gates: the
+/// [`anchor_routing_cost`] proxy evaluated on the assembled cascade, so OFD and OFDS
+/// cascades with different anchors compare directly. Single-qubit gates route across no
+/// sites and contribute 0.
 pub(crate) fn cascade_routing_cost(
     mps: &crate::backend::mps::MpsBackend,
     cascade: &[OfdGate],
@@ -551,14 +525,9 @@ pub(crate) enum DisentanglerKind {
     Ofds,
 }
 
-/// Cost-compare OFD vs OFDS and return the cheaper cascade, biased to
-/// OFD on ties since OFD is bond-dimension safe by construction. Caller
-/// must handle empty / single-qubit support before calling this. Only
-/// multi-qubit support paths reach disentangler dispatch.
-///
-/// Returns `Ok(None)` when neither OFD nor OFDS can produce a cascade
-/// (an invariant violation given the empty / single-qubit short-circuit
-/// happened upstream).
+/// Return the cheaper of the OFD and OFDS cascades by routing cost, OFD on ties since it
+/// preserves bond dimension. Callers handle empty and single-qubit support first, so
+/// `Ok(None)` signals an invariant violation.
 pub(crate) fn choose_disentangler(
     mps: &crate::backend::mps::MpsBackend,
     p: &SignedPauli,
@@ -620,25 +589,15 @@ pub(crate) fn build_ofd_disentangler(
     Ok(best.map(|(n, _)| (n, build_xy_anchor_cascade(p, n, num_qubits))))
 }
 
-/// Optimization-Free Disentangler with State support (Algorithm 2 of
-/// Liu & Clark arXiv:2412.17209). Same cascade structure as
-/// [`build_ofd_disentangler`] but with no `|0⟩` precondition on the
-/// anchor qubit. The `|0⟩` requirement in OFD is a bond-dimension-
-/// preservation optimization; OFDS produces a correct disentangler for
-/// any MPS state at the cost of possibly growing bond dimension when
-/// the cascade is applied.
+/// Optimization-Free Disentangler with State support (Algorithm 2 of Liu & Clark,
+/// arXiv:2412.17209): the [`build_ofd_disentangler`] cascade without the `|0⟩`
+/// precondition on the anchor. That precondition only preserves bond dimension; OFDS is
+/// correct for any MPS state but may grow bond dimension.
 ///
-/// Anchor selection:
-/// - First qubit with `P[n] ∈ {X, Y}` if any. Cascade matches OFD.
-/// - Otherwise (`P` has only `Z` letters and `>= 2` of them), anchors
-///   at the last `Z` qubit and reduces support via a CX ladder
-///   `CX(q_i, q_{i+1})` over consecutive `Z` positions. Each rung
-///   maps `Z_{q_i} Z_{q_{i+1}} → Z_{q_{i+1}}` (Heisenberg picture),
-///   leaving a single `Z` on the anchor after `k - 1` CXs.
-///
-/// Returns `None` only when `P` has fewer than two non-identity
-/// letters and none of them are `X`/`Y`. The caller already handles
-/// the empty- and single-support cases directly.
+/// The anchor is the X/Y qubit with the lowest routing cost, giving the OFD cascade. A
+/// Z-only `P` of weight two or more anchors on its lowest-cost Z qubit and runs a CX
+/// ladder toward it from both ends in site order, each rung mapping `Z_a Z_b → Z_b`.
+/// Returns `None` for a Z-only `P` of weight below two.
 pub(crate) fn build_ofds_disentangler(
     mps: &crate::backend::mps::MpsBackend,
     p: &SignedPauli,
@@ -696,12 +655,8 @@ pub(crate) fn build_ofds_disentangler(
 /// `extra_phase4 = 1` on that product. The result is evaluated on the MPS
 /// via [`crate::backend::mps::MpsBackend::pauli_expectation`].
 ///
-/// The composed string is canonicalized for the MPS evaluator: each
-/// qubit's `(x, z)` bit pattern is mapped to letter `I`/`X`/`Y`/`Z`,
-/// with the residual `(-i)` factor from rewriting `X·Z = -i·Y`
-/// absorbed into the overall coefficient alongside the stored `i^phase4`.
-/// For a Hermitian observable (which `C† O C` is whenever `O` is
-/// Hermitian and `C` unitary) the coefficient lands at `±1`.
+/// Rows are letter-level, so `i^phase4` is the whole coefficient. `C† O C` is Hermitian
+/// whenever `O` is Hermitian and `C` unitary, so the coefficient lands at `±1`.
 pub(crate) fn evaluate_pauli_observable_camps(
     prefix: &SignedCliffordPrefix,
     mps: &crate::backend::mps::MpsBackend,
@@ -749,12 +704,9 @@ const CAMPS_TRUNCATION_TOL: f64 = 1e-12;
 
 /// Reject a CAMPS T-gate application that silently truncated state weight.
 ///
-/// The MPS truncates inside `apply` (clamping bond dim to its cap) with no
-/// signal, so peeking at the post-application bond dimension misses both
-/// already-applied truncations and transient peaks that relaxed below the cap.
-/// Reading the cumulative discarded weight catches every truncation since the
-/// tracker was reset, regardless of the final bond dimension. The corrupted
-/// state is discarded by erroring, letting the auto dispatcher fall back.
+/// The MPS clamps bond dimension inside `apply` without signalling, and the final bond
+/// dimension misses transient peaks, so this reads the cumulative discarded weight since
+/// the last tracker reset. Erroring lets the auto dispatcher fall back.
 fn check_camps_truncation(
     mps: &crate::backend::mps::MpsBackend,
     target: usize,

@@ -23,38 +23,28 @@ use rand_chacha::ChaCha8Rng;
 
 /// Run a native QEC program through the scalable compiled Clifford path.
 ///
-/// Lowers supported QEC operations into the packed compiled sampler rather
-/// than dense state-vector simulation, so sampling cost grows with the number
-/// of measurement records, not with `2^n`. Supports Clifford gates, basis
-/// resets and measurements, `MPP`, detectors, observables, and postselection.
-/// Active Pauli-noise annotations (`X_ERROR`, `Z_ERROR`, `DEPOLARIZE1`,
-/// `DEPOLARIZE2`) are compiled into packed sensitivity rows that are XORed
-/// into the noiseless measurement records.
+/// Lowers the program into the packed compiled sampler, so sampling cost grows with the
+/// number of measurement records rather than `2^n`. Supports Clifford gates, basis resets
+/// and measurements, `MPP`, detectors, observables, and postselection. Active Pauli noise
+/// compiles into packed sensitivity rows XORed onto the noiseless records.
 ///
-/// Programs containing `EXP_VAL` ops are routed instead of packed-sampled.
-/// With active noise, programs that produce no measurement records, carry no
-/// postselection predicate, and fit the density-matrix qubit cap are estimated
-/// exactly as `Tr(rho P)` on the density-matrix backend, reported with
-/// `variance` `0.0`; every other noisy program runs through
-/// [`run_qec_program_reference`].
-/// Noiseless programs with detectors split into a packed sampling run for
-/// the measurement, detector, and observable records plus an analytical
-/// estimator run, falling back to the reference runner when either half
-/// cannot lower (for example non-Clifford gates on the packed half).
-/// Otherwise the analytical Auto T-strategy ladder evaluates the program.
-/// Estimates land in [`QecSampleResult::expectation_values`].
+/// Programs with `EXP_VAL` ops are routed instead, with estimates in
+/// [`QecSampleResult::expectation_values`]:
+/// - With active noise, a program with no measurement records or postselection that fits
+///   the density-matrix cap is estimated exactly as `Tr(rho P)` with `variance` `0.0`;
+///   every other noisy program runs through [`run_qec_program_reference`].
+/// - A noiseless program with detectors splits into a packed sampling run and an
+///   analytical estimator run, falling back to the reference runner when either half
+///   cannot lower.
+/// - Otherwise the analytical Auto T-strategy ladder evaluates it.
 ///
-/// V1 limitations:
-/// - Non-Clifford gates are rejected on the packed path (the `EXP_VAL`
-///   route accepts them via the analytical strategies).
-/// - A measured qubit must be `Reset` before any later gate reuses it; the
-///   compiled lowering defers measurements to the terminal records of an
-///   internal circuit. Reuse after a non-Z basis measurement is rejected
-///   rather than left to the caller, since that case also leaves the qubit in
-///   the Z frame.
-/// - [`QecOptions::chunk_size`] bounds the per-batch shot count. Setting
-///   `chunk_size` together with `keep_measurements: false` keeps peak memory
-///   at one chunk worth of measurement records.
+/// Limitations:
+/// - Non-Clifford gates are rejected on the packed path; the `EXP_VAL` route accepts them.
+/// - A measured qubit must be `Reset` before a later gate reuses it, since the lowering
+///   defers measurements to terminal records. Reuse after a non-Z basis measurement is
+///   rejected, because it also leaves the qubit in the Z frame.
+/// - [`QecOptions::chunk_size`] bounds the per-batch shot count; with
+///   `keep_measurements: false` peak memory stays at one chunk of records.
 ///
 /// # Examples
 ///
@@ -139,31 +129,18 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
 
 /// Execution for `EXP_VAL` programs carrying active noise.
 ///
-/// Eligible programs are estimated exactly on the density-matrix backend:
-/// `rho` carries the whole noisy ensemble, so `Tr(rho P)` is the value the
-/// reference runner approximates by averaging per-shot statevector
-/// expectations, and it comes out with variance `0.0` instead of a sampling
-/// spread. Everything else keeps [`run_qec_program_reference`] unchanged.
+/// Eligible programs are estimated exactly on the density-matrix backend as `Tr(rho P)`,
+/// the value the reference runner approximates by averaging per-shot expectations, with
+/// variance `0.0`. A program is eligible when it produces no measurement records (`M`
+/// and `MPP` collapse the state per shot, and the mixed state holds no record stream),
+/// has no postselection (which conditions on an accepted subensemble, while `Tr(rho P)`
+/// is unconditioned), and fits `PRISM_MAX_DM_QUBITS` (the backend stores `4^n`
+/// amplitudes).
 ///
-/// A program is eligible when all of the following hold:
-///
-/// - It produces no measurement records. `M` and `MPP` collapse the state per
-///   shot and feed the measurement, detector, and observable rows of the
-///   result; the mixed state holds no record stream, so those programs need
-///   real sampling.
-/// - It has no postselection predicate. Postselection conditions the estimate
-///   on an accepted subensemble, and `Tr(rho P)` is unconditioned.
-/// - Its width is within the density-matrix cap. The backend stores `4^n`
-///   amplitudes (see `PRISM_MAX_DM_QUBITS`).
-///
-/// Resets are eligible. Both paths implement the reset channel
-/// `rho -> |0><0| (x) tr_q rho` per the [`Backend::reset`](crate::backend::Backend::reset)
-/// contract: the density matrix applies it directly, and the reference runner
-/// samples one trajectory of it per shot, so the shot mean still converges to
-/// `Tr(rho P)`.
-///
-/// Gates or channels the density-matrix path rejects surface as an error from
-/// the lowering or the oracle, which also falls back to the reference runner.
+/// Resets are eligible: both paths implement `rho -> |0><0| (x) tr_q rho` per the
+/// [`Backend::reset`](crate::backend::Backend::reset) contract, the reference runner as one
+/// sampled trajectory per shot, so its shot mean still converges to `Tr(rho P)`. Anything
+/// else, including a lowering or oracle error, falls back to [`run_qec_program_reference`].
 fn run_qec_program_noisy_exp_val(program: &QecProgram) -> Result<QecSampleResult> {
     qec_runner_chunk_size(program.options())?;
     if program.num_measurements() > 0
@@ -245,13 +222,8 @@ fn run_qec_program_detectors_and_exp_val(program: &QecProgram) -> Result<QecSamp
     Ok(sampled.with_expectation_values(estimates))
 }
 
-/// Internal staged QEC sampler used by benchmark harnesses.
-///
-/// The ordinary public execution API is [`run_qec_program`]. This type exposes
-/// the same packed Clifford path in smaller pieces so benchmarks can measure
-/// compile, noiseless sampling, noise application, detector projection,
-/// postselection, logical counting, and total execution separately. Gated
-/// behind the `bench-internal` feature; not part of the stable API.
+/// The [`run_qec_program`] packed path in stages, so benchmarks can time compile,
+/// sampling, noise, projection, and counting separately. `bench-internal` only.
 #[cfg(feature = "bench-internal")]
 pub struct QecProfiledSampler {
     sampler: QecProfiledMeasurementSampler,
@@ -269,10 +241,7 @@ enum QecProfiledMeasurementSampler {
     Noisy(QecCompiledNoiseSampler),
 }
 
-/// Internal postselection and logical count summary.
-///
-/// Used internally by the QEC runner and exposed publicly only under the
-/// `bench-internal` feature.
+/// Postselection and logical-error counts; public only under `bench-internal`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QecProfiledCounts {
     /// Shots accepted after postselection.
@@ -284,9 +253,6 @@ pub struct QecProfiledCounts {
 }
 
 /// Compile a native QEC program into a staged sampler for benchmarks.
-///
-/// Prefer [`run_qec_program`] for application code. Gated behind the
-/// `bench-internal` feature; not part of the stable API.
 #[cfg(feature = "bench-internal")]
 pub fn compile_qec_profiled_sampler(program: &QecProgram) -> Result<QecProfiledSampler> {
     let has_noise = validate_qec_compiled_program(program)?;
@@ -322,22 +288,18 @@ pub fn compile_qec_profiled_sampler(program: &QecProgram) -> Result<QecProfiledS
 
 #[cfg(feature = "bench-internal")]
 impl QecProfiledSampler {
-    /// Number of measurement records produced per shot.
     pub fn num_measurements(&self) -> usize {
         self.num_measurements
     }
 
-    /// Number of detector records produced per shot.
     pub fn num_detectors(&self) -> usize {
         self.detector_rows.len()
     }
 
-    /// Number of observable records produced per shot.
     pub fn num_observables(&self) -> usize {
         self.observable_rows.len()
     }
 
-    /// Number of postselection predicates.
     pub fn num_postselections(&self) -> usize {
         self.postselection_rows.len()
     }
@@ -347,7 +309,6 @@ impl QecProfiledSampler {
         matches!(self.sampler, QecProfiledMeasurementSampler::Noisy(_))
     }
 
-    /// Sample noiseless measurement records.
     pub fn sample_noiseless_measurements_packed(
         &mut self,
         num_shots: usize,
@@ -367,7 +328,7 @@ impl QecProfiledSampler {
         }
     }
 
-    /// Apply compiled Pauli-noise rows to measurement records.
+    /// Apply compiled Pauli-noise rows; a noiseless sampler returns `measurements` as is.
     pub fn apply_noise_to_measurements(
         &mut self,
         measurements: PackedShots,
@@ -450,23 +411,18 @@ impl QecProfiledSampler {
     }
 }
 
-/// Run a native QEC program through the correctness-first reference path.
+/// Run a native QEC program through the per-shot statevector reference path.
 ///
-/// Executes one state-vector simulation per shot. Supports any gate the
-/// statevector backend handles (including non-Clifford), `MPP`, all four
-/// Pauli-noise channels, and postselection. Use this as a semantic oracle
-/// for small programs or to cross-check the compiled runner; cost is
-/// `O(shots * 2^n)`, so it is not the production performance path.
+/// Supports any gate the statevector backend handles, `MPP`, all four Pauli-noise
+/// channels, postselection, and `FEEDFORWARD`. Cost is `O(shots * 2^n)`: use it as a
+/// semantic oracle for small programs, not for bulk sampling.
 ///
-/// `EXP_VAL` ops are evaluated exactly on each shot's final statevector and
-/// reported in [`QecSampleResult::expectation_values`] as the sample mean and
-/// unbiased sample variance over accepted shots. With noise annotations the
-/// per-shot trajectories average to the mixed-state expectation `Tr(rho P)`
-/// and the variance captures the noise-induced spread. The Pauli-mask
-/// reduction limits `EXP_VAL` here to programs of at most 64 qubits (larger
-/// programs are rejected up front); statevector memory binds far earlier.
-/// [`QecOptions::chunk_size`] is validated for shape but not used to bound
-/// execution batches.
+/// `EXP_VAL` ops are evaluated exactly on each shot's final state and reported in
+/// [`QecSampleResult::expectation_values`] as the mean and unbiased sample variance over
+/// accepted shots; with noise the trajectories average to `Tr(rho P)`. The Pauli-mask
+/// reduction limits `EXP_VAL` programs to 64 qubits, though statevector memory binds far
+/// earlier. [`QecOptions::chunk_size`] is
+/// validated but does not batch execution.
 pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult> {
     super::validate_measured_qubit_reuse(program)?;
     qec_runner_chunk_size(program.options())?;

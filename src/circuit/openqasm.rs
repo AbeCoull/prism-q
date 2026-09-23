@@ -1,9 +1,7 @@
 //! OpenQASM 3.0 parser, v0 subset.
 //!
-//! The front end reads a token stream: the `qasm` module turns source text into
-//! tokens and a syntax tree, and this module walks that tree into a [`Circuit`].
-//! A statement ends at its `;` and a block at its `}` wherever the newlines
-//! fall.
+//! The `qasm` module lexes and parses source into a syntax tree, and this module
+//! walks the tree into a [`Circuit`]. Newlines carry no meaning.
 //!
 //! # Supported constructs
 //!
@@ -54,7 +52,7 @@
 //! | Angle dialect | [`parse_with`] | `gpi`, `gpi2`, `ms` take turns under [`Dialect::Native`] and radians under [`Dialect::Braket`] |
 //! | Result pragma | `#pragma braket result expectation z(q[0])` | [`Dialect::Braket`] only; reaches the caller through [`parse_braket`] |
 //! | Noise pragma | `#pragma braket noise bit_flip(0.1) q[0]` | Builds a [`NoiseModel`] event after the preceding instruction |
-//! | Inline unitary | `#pragma braket unitary([[0, 1], [1, 0]]) q[0]` | One or two targets; wider has no matrix gate variant |
+//! | Inline unitary | `#pragma braket unitary([[0, 1], [1, 0]]) q[0]` | Up to four targets |
 //! | Verbatim box | `#pragma braket verbatim` then `box { ... }` | The body runs as written; a `box` without the pragma is rejected |
 //!
 //! # Unsupported constructs (return `PrismError::UnsupportedConstruct`)
@@ -89,7 +87,7 @@
 //!
 //! # Error behaviour
 //!
-//! All parse failures return `PrismError::Parse` or `PrismError::UnsupportedConstruct`
+//! Parse failures return `PrismError::Parse` or `PrismError::UnsupportedConstruct`
 //! with the source line number. The parser never panics on user input.
 //!
 //! The reverse direction is [`qasm_export`](super::qasm_export).
@@ -143,18 +141,13 @@ impl Dialect {
     }
 }
 
-/// Parse an OpenQASM 3.0 string into a PRISM-Q [`Circuit`].
-///
-/// This is the primary input entrypoint. The entire parse happens in-memory
-/// from the provided `&str`, no file I/O. Reads the source under
-/// [`Dialect::Native`]; use [`parse_with`] to select another.
+/// Parse an OpenQASM 3.0 string into a [`Circuit`] under [`Dialect::Native`].
 ///
 /// # Errors
 ///
-/// Returns structured [`PrismError`] for any parse failure or unsupported
-/// construct, and [`PrismError::InvalidParameter`] when the program declares an
-/// `input`, whose value this entry point has nowhere to take. Use
-/// [`parse_parametric`] for those.
+/// Returns [`PrismError`] for any parse failure or unsupported construct, and
+/// [`PrismError::InvalidParameter`] when the program declares an `input`, which
+/// needs [`parse_parametric`].
 pub fn parse(input: &str) -> Result<Circuit> {
     parse_with(input, Dialect::Native)
 }
@@ -224,10 +217,9 @@ pub struct BraketProgram {
 /// Parse an OpenQASM 3.0 string under [`Dialect::Braket`], keeping what the
 /// pragmas declare.
 ///
-/// This is the entry point for Braket programs. [`parse`] and
-/// [`parse_parametric`] read [`Dialect::Native`], where a pragma is an
-/// unsupported construct, and [`parse_with`] under [`Dialect::Braket`] reads
-/// the pragmas but has nowhere to return what they declared, so it drops them.
+/// [`parse`] and [`parse_parametric`] read [`Dialect::Native`], where a pragma
+/// is an unsupported construct, and [`parse_with`] under [`Dialect::Braket`]
+/// reads the pragmas but drops what they declared.
 ///
 /// # Errors
 ///
@@ -365,15 +357,11 @@ const MAX_FOR_ITERATIONS: i64 = 1_000_000;
 /// literal exponent aborts the process rather than returning an error.
 const MAX_POW_REPEATS: i64 = 1_000_000;
 
-/// Pauli letters of an `r<letters>` rotation name, or `None` when the name is
-/// not one.
+/// Pauli letters of an `r<letters>` name with at least two letters, or `None`.
 ///
-/// Covers the `rxx`, `ryy`, and `rzz` OpenQASM already spells as well as the
-/// wider strings it does not, so one rule serves the whole family. `rzz` still
-/// resolves to `Gate::Rzz` and a weight-1 name to `Rx`/`Ry`/`Rz`, because
-/// `pauli_rotation_gate` lowers those; only the residual strings build the
-/// native multi-qubit gate. Names like `rccx` do not match, `c` being no Pauli
-/// letter.
+/// One rule covers `rxx`, `ryy`, `rzz` and the wider strings OpenQASM does not
+/// spell; `pauli_rotation_gate` still lowers `rzz` to `Gate::Rzz`. `rccx` does
+/// not match, `c` being no Pauli letter.
 fn pauli_rotation_axes(name: &str) -> Option<Vec<PauliAxis>> {
     let letters = name.strip_prefix('r')?;
     if letters.len() < 2 {
@@ -776,8 +764,8 @@ impl<'a> Parser<'a> {
         }])
     }
 
-    /// Determine the broadcast length from resolved qubit arguments.
-    /// All multi-element args must have the same length. Single-element args broadcast.
+    /// Broadcast length of the resolved qubit arguments. Multi-element arguments
+    /// must agree in length; single-element ones broadcast.
     fn broadcast_length(
         &self,
         resolved: &[SmallVec<[usize; 4]>],
@@ -1305,10 +1293,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Handle gates that decompose into multiple instructions at parse time.
-    ///
-    /// Returns `Ok(None)` if the gate name is not a decomposed gate (caller
-    /// should fall through to `resolve_gate`).
+    /// Lower the gates the parser expands itself, or `Ok(None)` for any other
+    /// name, which falls through to `resolve_gate`.
     fn resolve_decomposed_gate(
         name: &str,
         params: &[f64],

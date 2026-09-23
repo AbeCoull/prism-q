@@ -1,15 +1,9 @@
-//! Block-triangular sampling on the GPU.
+//! Block-triangular sampling on the GPU: a device port of the CPU `sample_bts_meas_major`
+//! fed by a host-generated random-bits pool, so both paths share one RNG contract, plus
+//! device noise application, shot-major transpose, and outcome counting.
 //!
-//! Ports the CPU path in `src/sim/compiled/bts.rs` (`sample_bts_meas_major`)
-//! to a single-kernel device launch. The kernel consumes the precomputed
-//! CSR parity matrix plus a host-generated `random_bits` pool and emits
-//! packed shot outcomes in measurement-major layout.
-//!
-//! Work partition: one thread per (measurement, 64-shot batch) pair. Host
-//! generates the full random-bits pool via the existing `Xoshiro256PlusPlus`
-//! RNG so the CPU and GPU paths share one RNG contract; very large shot
-//! counts stream through chunks of `CHUNK_SHOTS` shots at a time to bound
-//! peak GPU memory.
+//! The sampling kernel reads the precomputed CSR parity matrix and runs one thread per
+//! (measurement, 64-shot batch) pair, emitting packed outcomes in measurement-major layout.
 
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 
@@ -33,21 +27,18 @@ const COUNT_COMPACT_BLOCK_SIZE: u32 = 256;
 /// kernels; wider keys fall back to host counting.
 pub(crate) const GPU_COUNTS_MAX_WORDS: usize = 8;
 
-/// Host-side random-bits pool is allocated per chunk, so peak device memory
-/// stays bounded regardless of total shot count. Matches the CPU
-/// `BTS_BATCH_SHOTS` chunking boundary.
+/// Shots per device chunk, which bounds peak memory at any shot count. Matches the CPU
+/// `BTS_BATCH_SHOTS` boundary.
 const CHUNK_SHOTS: usize = 65_536;
 
 const KERNEL_SOURCE: &str = include_str!("bts.cu");
 
-/// Return the BTS CUDA C source for concatenation into the shared PTX module.
 pub(crate) fn kernel_source() -> String {
     KERNEL_SOURCE.to_string()
 }
 
-/// Pick a block size for the noise kernels that doesn't leave the back half
-/// of the block idle on small tiles. Clamped to `[32, NOISE_BLOCK_SIZE]` and
-/// rounded to a power of two so warp-sized scheduling stays well-behaved.
+/// Batch count rounded up to a power of two in `[32, NOISE_BLOCK_SIZE]`, so small tiles
+/// do not leave half the block idle.
 fn noise_block_threads(chunk_s_words: usize) -> u32 {
     let desired = chunk_s_words.max(1).next_power_of_two();
     desired.clamp(32, NOISE_BLOCK_SIZE as usize) as u32
@@ -182,7 +173,6 @@ impl GpuBtsCache {
             }
         }
 
-        // Serial fallback.
         for batch in 0..chunk_s_words {
             let start = batch * rank;
             let end = start + rank;
@@ -275,19 +265,12 @@ fn plan_count_table_slots(
     Ok(Some(table_slots))
 }
 
-/// Sample `num_shots` BTS shots against a cached sparse parity matrix on the
-/// GPU.
+/// Sample `num_shots` BTS shots on the GPU with the `sample_bts_meas_major` contract:
+/// measurement-major, `num_meas * num_shots.div_ceil(64)` words, and deterministic rows
+/// (empty `row_cols`) carrying only the `ref_bits` flip.
 ///
-/// Mirrors the contract of `sample_bts_meas_major`: produces a `Vec<u64>` in
-/// measurement-major layout of length `num_meas * s_words` where
-/// `s_words = num_shots.div_ceil(64)`. Deterministic rows (empty
-/// `row_cols`) come back zero-initialised then XOR-flipped with `ref_bits`,
-/// matching the CPU path exactly.
-///
-/// Shot batches are streamed through device memory in groups of
-/// `CHUNK_SHOTS` to keep peak VRAM bounded. The parity CSR arrays and
-/// `ref_bits` stay resident inside `cache`; only the random-bit payload and
-/// chunk output move each call.
+/// Shots stream through the device in `CHUNK_SHOTS` chunks. The parity CSR and
+/// `ref_bits` stay resident in `cache`; only random bits and chunk output move.
 pub(crate) fn launch_bts_sample(
     ctx: &GpuContext,
     rng: &mut Xoshiro256PlusPlus,
@@ -542,9 +525,7 @@ pub(crate) fn launch_bts_transpose_meas_to_shot(
     Ok(shot_major)
 }
 
-/// Fields shared by both noise-apply variants. Keeps the host-mask upload
-/// path and the fused device-generator path from drifting on their common
-/// arguments.
+/// Target buffer and event CSR arguments of the host-mask noise kernel.
 pub(crate) struct NoiseApplyBase<'a> {
     pub meas_major: &'a mut GpuBuffer<u64>,
     pub num_meas: usize,
@@ -746,10 +727,8 @@ pub(crate) fn apply_noise_masks_meas_major(
     Ok(())
 }
 
-/// Sample `num_shots` BTS shots on the GPU and return them in **shot-major**
-/// layout (`Vec<u64>` of length `num_shots * m_words`). The transpose from
-/// the native meas-major sampling layout runs on device, eliminating the
-/// host `into_shot_major_data()` bit-transpose from noisy workflows.
+/// Sample `num_shots` BTS shots in shot-major layout, `num_shots * m_words` words,
+/// transposing on device instead of through the host `into_shot_major_data()`.
 pub(crate) fn launch_bts_sample_shot_major_host(
     ctx: &GpuContext,
     rng: &mut Xoshiro256PlusPlus,

@@ -1,23 +1,17 @@
 //! OpenQASM 3.0 export from a [`Circuit`].
 //!
-//! Inverts [`openqasm::parse`](super::openqasm::parse) over the constructs that
-//! parser produces: re-parsing an export yields the same instruction stream, with
-//! gate matrices agreeing to floating-point round-off rather than bit for bit.
-//! Angles carried inline (`rx`, `rz`, `rzz`, `p`) survive exactly.
+//! Inverts [`openqasm::parse`](super::openqasm::parse): re-parsing an export yields
+//! the same instruction stream, gate matrices agreeing to round-off and inline
+//! angles (`rx`, `rz`, `rzz`, `p`) exactly.
 //!
-//! [`Gate::QftBlock`] expands to its textbook sequence before emission.
-//! [`Gate::PauliRot`] keeps its native form, spelled `r` followed by the Pauli
-//! letters (`rxyz(0.7) q[0], q[1], q[2];`), which generalizes the `rzz` the
-//! parser already takes and is what makes the round trip preserve the gate
-//! rather than a lowering of it. That spelling is a PRISM-Q extension: for
-//! output another toolchain reads, run
-//! [`expand_pauli_rotations`](super::expand_pauli_rotations) first and export
-//! the CNOT ladder instead. Fusion payloads have no
-//! OpenQASM spelling and are rejected: `MultiFused`, `Multi2q`,
-//! `BatchPhase`, `BatchRzz`, `DiagonalBatch`, a `Fused2q` outside the two-qubit
-//! families the parser builds, and a single-qubit matrix carrying a global phase
-//! no named rotation absorbs. A dense [`Gate::Unitary`] is rejected for the same
-//! reason: the subset has no syntax carrying a matrix literal.
+//! [`Gate::QftBlock`] expands to its textbook sequence. [`Gate::PauliRot`] keeps
+//! its `r<letters>` spelling (`rxyz(0.7) q[0], q[1], q[2];`), a PRISM-Q
+//! extension; for output another toolchain reads, run
+//! [`expand_pauli_rotations`](super::expand_pauli_rotations) first. Gates with no
+//! OpenQASM spelling are rejected: `MultiFused`, `Multi2q`, `BatchPhase`,
+//! `BatchRzz`, `DiagonalBatch`, a dense [`Gate::Unitary`], a `Fused2q` outside the
+//! two-qubit families the parser builds, and a single-qubit matrix carrying a
+//! global phase no named rotation absorbs.
 
 use num_complex::Complex64;
 use std::collections::BTreeSet;

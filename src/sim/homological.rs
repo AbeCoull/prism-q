@@ -81,13 +81,8 @@ impl F2DenseMatrix {
     }
 }
 
-/// Compute the kernel (null space) of a binary matrix over GF(2).
-///
-/// Given M ∈ F₂^{m×n}, returns a basis for ker(M) = {x ∈ F₂^n : Mx = 0}.
-/// Uses row reduction on the augmented matrix [M | I_n]^T approach:
-/// transpose M, row-reduce M^T, read off kernel vectors.
-///
-/// Returns: Vec of kernel basis vectors, each as a Vec<u64> packed bitvector of length n.
+/// Basis of ker(M) over GF(2) for M ∈ F₂^{m×n}, each vector packed into `u64`
+/// words of length n, read off a row reduction of `M^T` augmented with `I_n`.
 #[cfg(test)]
 fn gf2_kernel(matrix: &F2DenseMatrix) -> Vec<Vec<u64>> {
     let m = matrix.num_rows;

@@ -11,17 +11,10 @@ use crate::sim::{BackendKind, PreparedRoute, RunOutcome, prepared_route};
 /// A parameter template plus the fusion and dispatch work its structure
 /// implies, held across bindings.
 ///
-/// A variational sweep binds a new angle vector per point while the gate
-/// sequence stays fixed. Fusion decides the same block structure every time and
-/// dispatch picks the same backend, so [`new`](Self::new) settles both once and
-/// [`run`](Self::run) rebuilds only the block matrices, which are what the
-/// angles change.
-///
-/// Some bindings invalidate the recorded structure: a fused block collapsing to
-/// the identity, to a named gate, or changing whether it is diagonal is one
-/// fusion would have elided, renamed, or moved. Those bindings fall back to
-/// running the pass pipeline, so the circuit matches an independently fused one
-/// either way.
+/// [`new`](Self::new) settles the fused block structure and the backend once, and
+/// [`run`](Self::run) rebuilds only the block matrices the angles change. A binding that
+/// collapses a block to the identity or a named gate, or flips its diagonality, falls
+/// back to the full pass pipeline, so the result matches an independently fused circuit.
 pub struct PreparedCircuit {
     template: Circuit,
     params: Parameters,
@@ -94,9 +87,8 @@ impl PreparedCircuit {
         &self.params
     }
 
-    /// True when the fused structure was captured and bindings reuse it, false
-    /// when every binding re-runs the pass pipeline. A performance fact, not an
-    /// error: results agree either way.
+    /// True when bindings reuse the captured fused structure, false when every binding
+    /// re-runs the pass pipeline. Results agree either way.
     pub fn reuses_fusion_plan(&self) -> bool {
         self.plan.is_some()
     }
@@ -104,7 +96,7 @@ impl PreparedCircuit {
     /// Bind `values` and return the unfused circuit.
     ///
     /// # Errors
-    /// Same conditions as [`Parameters::bind`].
+    /// Same arity and finiteness conditions as [`Parameters::bind`].
     pub fn bind(&mut self, values: &[f64]) -> Result<&Circuit> {
         self.params.check_values(values)?;
         self.params.write_angles(&mut self.bound, values);
@@ -119,7 +111,7 @@ impl PreparedCircuit {
     /// fails. Prefer [`run`](Self::run), which picks the right form.
     ///
     /// # Errors
-    /// Same conditions as [`Parameters::bind`].
+    /// Same arity and finiteness conditions as [`Parameters::bind`].
     pub fn bind_fused(&mut self, values: &[f64]) -> Result<&Circuit> {
         self.params.check_values(values)?;
         self.params.write_angles(&mut self.bound, values);
@@ -142,8 +134,8 @@ impl PreparedCircuit {
     /// the backend accepts fused gates, the fusion plan.
     ///
     /// # Errors
-    /// Same conditions as [`Parameters::bind`], plus whatever the backend
-    /// reports.
+    /// Same arity and finiteness conditions as [`Parameters::bind`], plus whatever the
+    /// backend reports.
     pub fn run(&mut self, values: &[f64], seed: u64) -> Result<RunOutcome> {
         let fused = self
             .route

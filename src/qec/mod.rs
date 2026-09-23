@@ -1,44 +1,22 @@
-//! Native measurement-record QEC program IR, parser, and runners.
+//! Measurement-record QEC programs ([`QecProgram`]): parser, runners, detector error
+//! models, and a union-find decoder. The IR is separate from `Circuit` so measurement
+//! records need not fit final-measurement OpenQASM semantics.
 //!
-//! Models QEC workloads that need measurement records, detectors, observables,
-//! postselection, expectation metadata, and Pauli-noise annotations. The IR is
-//! separate from `Circuit` so measurement records do not have to fit
-//! final-measurement OpenQASM semantics.
-//!
-//! # Public surface
-//!
-//! - [`QecProgram`] is the IR. Construct via [`QecProgram::new`] /
-//!   [`QecProgram::with_options`] and the typed `push_*` methods, or load
-//!   from text via [`parse_qec_program`] / [`QecProgram::from_text`].
-//! - [`run_qec_program`] is the scalable Clifford execution path. Lowers
-//!   programs into the packed compiled sampler and supports Pauli noise by
-//!   XORing sensitivity rows onto packed measurement records.
-//! - [`run_qec_program_reference`] is the correctness oracle. One state-vector
-//!   simulation per shot. Use it for small semantic cross-checks, not bulk
-//!   sampling.
-//! - [`run_qec_program_with_strategy`] dispatches non-Clifford observable
-//!   programs through exact light-cone SPD, CAMPS, then a private exact
-//!   tensor-network scalar fallback.
-//! - [`compile_qec_program_rows`] lowers basis measurements and `MPP` records
-//!   into the packed X/Z Pauli row representation used by sampler internals.
-//!   It does not execute gates, resets, or active noise.
-//! - [`QecProgram::detector_error_model`] derives the [`DetectorErrorModel`]
-//!   implied by the program's noise annotations, detectors, and observables,
-//!   for export to matching and belief-propagation decoders.
-//! - [`UnionFindDecoder`] decodes packed detector samples against a graphlike
-//!   detector error model, predicting observable flips per shot.
-//!
-//! [`QecSampleResult`] carries packed measurement, detector, and observable
-//! shots, plus accepted and discarded shot counts after postselection and
-//! per-observable logical-error counts.
+//! - [`run_qec_program`] lowers into the packed compiled Clifford sampler and applies
+//!   Pauli noise by XORing sensitivity rows onto packed measurement records.
+//! - [`run_qec_program_reference`] runs one statevector simulation per shot, as a
+//!   correctness oracle for small programs.
+//! - [`run_qec_program_with_strategy`] dispatches non-Clifford observable programs
+//!   through exact light-cone SPD, CAMPS, then an exact tensor-network scalar fallback.
+//! - [`compile_qec_program_rows`] lowers basis measurements and `MPP` records into packed
+//!   X/Z Pauli rows without executing gates, resets, or noise.
+//! - [`QecProgram::detector_error_model`] derives the [`DetectorErrorModel`] for export
+//!   to matching and belief-propagation decoders.
+//! - [`UnionFindDecoder`] decodes packed detector samples against a graphlike model.
 
 mod camps_prefix;
-/// Treewidth-aware cut-selection heuristics for the QEC T-strategy ladder.
-///
-/// Not yet wired into the production dispatcher (which follows a fixed
-/// SPD -> CAMPS -> tensor-network ladder); exposed only under the
-/// `bench-internal` feature so the heuristics can be benchmarked without
-/// committing them to the stable public API.
+/// Treewidth-aware cut-selection heuristics, benchmark-only: the dispatcher follows a
+/// fixed SPD -> CAMPS -> tensor-network ladder and does not use them.
 #[cfg(feature = "bench-internal")]
 pub mod cut_selection;
 mod decoder;
@@ -114,10 +92,8 @@ impl QecPauli {
 
 /// Reference to a previous measurement record.
 ///
-/// Lookbacks are resolved against the count of measurement records that exist
-/// at the moment the referencing operation is appended (or, for queries like
-/// [`QecProgram::detector_rows`], at the moment that operation is reached
-/// during the walk). `Lookback(1)` is the most recent measurement.
+/// A lookback counts back from the records that precede the referencing op, so
+/// `Lookback(1)` is the most recent measurement before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum QecRecordRef {
@@ -161,9 +137,8 @@ impl QecRecordRef {
 
 /// Pauli-noise annotation for native QEC programs.
 ///
-/// Probabilities are validated when the annotation is appended to a
-/// [`QecProgram`]. Probability zero is treated as an inactive annotation by
-/// runner APIs.
+/// Probabilities are validated on append to a [`QecProgram`]; probability zero makes
+/// the annotation inactive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum QecNoise {
@@ -171,14 +146,10 @@ pub enum QecNoise {
     XError(f64),
     /// With probability `p`, apply Z to each target.
     ZError(f64),
-    /// For each target, with total probability `p`, apply a uniformly random
-    /// non-identity single-qubit Pauli. Each of X, Y, Z fires with probability
-    /// `p / 3`.
+    /// Per target, apply each of X, Y, Z with probability `p / 3`.
     Depolarize1(f64),
-    /// For each target pair, with total probability `p`, apply a uniformly
-    /// random non-identity two-qubit Pauli. Each of the 15 non-identity
-    /// two-qubit Paulis fires with probability `p / 15`. The target list is
-    /// consumed in pairs and must have even length.
+    /// Per target pair, apply each of the 15 non-identity two-qubit Paulis with
+    /// probability `p / 15`. The target list must have even length.
     Depolarize2(f64),
 }
 
@@ -208,11 +179,10 @@ pub enum QecOp {
     /// gates; the reference runner accepts any gate the statevector backend
     /// supports.
     Gate { gate: Gate, targets: Vec<usize> },
-    /// Single-qubit measurement in the requested basis. Produces one
-    /// measurement record.
+    /// Single-qubit measurement. Produces one record.
     Measure { basis: QecBasis, qubit: usize },
-    /// Pauli-product (`MPP`) measurement. Produces one measurement record
-    /// equal to the parity of the listed Pauli terms.
+    /// Pauli-product (`MPP`) measurement. Produces one record, the parity of the
+    /// listed terms.
     MeasurePauliProduct { terms: Vec<QecPauli> },
     /// Reset a qubit to the +1 eigenstate of the requested basis.
     Reset { basis: QecBasis, qubit: usize },
@@ -229,13 +199,10 @@ pub enum QecOp {
         observable: usize,
         records: Vec<QecRecordRef>,
     },
-    /// Final-state expectation-value estimator: `coefficient * <P>` where
-    /// `P` is the Pauli product over `terms`, evaluated in the program's
-    /// final state. Must be terminal (no gate, measurement, reset, or
-    /// active noise may follow) and may only reference live qubits (not
-    /// single-qubit-measured since their last reset). Estimates are
-    /// returned in [`QecSampleResult::expectation_values`], one per op in
-    /// op order.
+    /// Final-state estimator `coefficient * <P>`, `P` the product of `terms`. Must be
+    /// terminal (no gate, measurement, reset, or active noise may follow) and may
+    /// reference only qubits not single-qubit-measured since their last reset.
+    /// Estimates land in [`QecSampleResult::expectation_values`] in op order.
     ExpectationValue {
         terms: Vec<QecPauli>,
         coefficient: f64,
@@ -259,14 +226,12 @@ pub enum QecOp {
         expected: bool,
         body: Vec<QecOp>,
     },
-    /// Pauli-noise annotation applied at this point in the program. Zero
-    /// probability is treated as inactive.
+    /// Pauli-noise annotation applied at this point in the program.
     Noise {
         channel: QecNoise,
         targets: Vec<usize>,
     },
-    /// Scheduling separator. No semantic effect; carried forward for parity
-    /// with native QEC text formats.
+    /// Scheduling separator with no semantic effect, kept for the text format.
     Tick,
 }
 
@@ -285,7 +250,7 @@ pub struct QecMeasurementRow {
 }
 
 impl QecMeasurementRow {
-    /// Create a row from Pauli-product terms.
+    /// Build a row from Pauli-product terms; rejects an empty list or a repeated qubit.
     pub fn from_terms(num_qubits: usize, terms: &[QecPauli]) -> Result<Self> {
         if terms.is_empty() {
             return Err(PrismError::InvalidParameter {
@@ -315,12 +280,10 @@ impl QecMeasurementRow {
         })
     }
 
-    /// Create a single-qubit measurement row.
     pub fn single(num_qubits: usize, basis: QecBasis, qubit: usize) -> Result<Self> {
         Self::from_terms(num_qubits, &[QecPauli::new(basis, qubit)])
     }
 
-    /// Number of qubits covered by this row.
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }
@@ -330,18 +293,15 @@ impl QecMeasurementRow {
         self.weight
     }
 
-    /// Packed X mask.
     pub fn x_mask(&self) -> &[u64] {
         &self.pauli.x
     }
 
-    /// Packed Z mask.
     pub fn z_mask(&self) -> &[u64] {
         &self.pauli.z
     }
 
-    /// Pauli term on one qubit, or `None` for identity (or when `qubit` is
-    /// outside this row's qubit range).
+    /// Pauli on `qubit`, or `None` for identity or an out-of-range qubit.
     pub fn pauli_at(&self, qubit: usize) -> Option<QecBasis> {
         if qubit >= self.num_qubits {
             return None;
@@ -354,7 +314,7 @@ impl QecMeasurementRow {
         }
     }
 
-    /// Return non-identity Pauli terms in ascending qubit order.
+    /// Non-identity terms in ascending qubit order.
     pub fn terms(&self) -> Vec<QecPauli> {
         let mut terms = Vec::with_capacity(self.weight);
         for qubit in 0..self.num_qubits {
@@ -461,19 +421,12 @@ impl QecCompiledRows {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QecOptions {
     pub shots: usize,
-    /// RNG seed used by stochastic samplers and Pauli-noise dispatch.
     pub seed: u64,
-    /// Optional chunk size for the compiled runner. When `Some(n)`, sampling
-    /// proceeds in batches of at most `n` shots and intermediate measurement
-    /// matrices are not held in memory together. `None` is equivalent to
-    /// `Some(shots)`. `Some(0)` is rejected. Has no effect on the reference
-    /// runner.
+    /// Maximum shots per compiled-runner batch, bounding peak measurement-matrix memory.
+    /// `None` means one batch and `Some(0)` is rejected. The reference runner ignores it.
     pub chunk_size: Option<usize>,
-    /// When `false`, [`QecSampleResult::measurements`] is returned with zero
-    /// shots (only the column count is preserved). Detector and observable
-    /// records are always populated. Set to `false` to avoid materializing
-    /// large measurement-record matrices when only detectors and observables
-    /// are needed.
+    /// When `false`, [`QecSampleResult::measurements`] keeps only its column count and
+    /// holds zero shots; detectors and observables are always populated.
     pub keep_measurements: bool,
 }
 
@@ -695,10 +648,7 @@ impl QecProgram {
         })
     }
 
-    /// Append a feed-forward correction: `body` runs iff the parity over
-    /// `records` equals `expected`.
-    ///
-    /// See [`QecOp::Feedforward`] for what the body admits.
+    /// Append a feed-forward correction; see [`QecOp::Feedforward`] for what `body` admits.
     pub fn feedforward(
         &mut self,
         records: &[QecRecordRef],
@@ -712,9 +662,7 @@ impl QecProgram {
         })
     }
 
-    /// Walk the ops with a running count of measurement records emitted so
-    /// far. Record-referencing ops resolve relative offsets against that
-    /// count; the row-resolver methods below share this walk.
+    /// Visit every non-measurement op with the count of records emitted before it.
     fn visit_ops_with_measurement_count(
         &self,
         mut visit: impl FnMut(&QecOp, usize) -> Result<()>,
@@ -865,7 +813,6 @@ impl QecProgram {
     }
 }
 
-/// Short name for an op, used when an error must say which one it found.
 fn qec_op_name(op: &QecOp) -> &'static str {
     match op {
         QecOp::Gate { .. } => "gate",
@@ -884,16 +831,10 @@ fn qec_op_name(op: &QecOp) -> &'static str {
 
 /// Compile measurement-record operations into packed QEC row metadata.
 ///
-/// Lowers `Measure` and `MeasurePauliProduct` ops into the same packed X/Z
-/// Pauli row representation used by the compiled sampler internals, and
-/// resolves detector, observable, and postselection record references to
-/// absolute indices. Useful when consumers want the row-level representation
-/// for custom sampler integration.
-///
-/// This is a sampler-row primitive, not an execution path: it rejects
-/// programs containing gates, resets, active Pauli noise, or `EXP_VAL`.
-/// Zero-probability noise annotations are skipped. To execute a full program
-/// (including gates, resets, and noise) use [`run_qec_program`].
+/// Lowers `M` and `MPP` into the packed X/Z rows the compiled sampler uses and resolves
+/// detector, observable, and postselection references to absolute record indices.
+/// Rejects gates, resets, active noise, `EXP_VAL`, and `FEEDFORWARD`; zero-probability
+/// noise is skipped. [`run_qec_program`] executes a full program.
 pub fn compile_qec_program_rows(program: &QecProgram) -> Result<QecCompiledRows> {
     let mut measurement_rows = Vec::with_capacity(program.num_measurements());
 
@@ -982,16 +923,10 @@ pub(crate) fn qec_terms_to_pauli(terms: &[QecPauli]) -> Vec<PauliTerm> {
 
 /// Reject reuse of a qubit measured in a non-Z basis before its next reset.
 ///
-/// A basis measurement leaves the qubit in the Z frame rather than in the basis
-/// it named, so a later operation on that qubit reads a state the program did
-/// not ask for. Both lowerings take that convention, and it is only unobservable
-/// while the qubit is reset before reuse, which is the contract
-/// [`run_qec_program`] already documents. This makes it an error rather than a
-/// silent difference.
-///
-/// Z-basis measurements are unaffected: they rotate nothing, so nothing is left
-/// behind to observe. `MPP` is unaffected for the same reason, since it undoes
-/// each term's rotation before taking the record.
+/// Both lowerings leave a basis-measured qubit in the Z frame, not the basis it named,
+/// which is unobservable only while the qubit is reset before reuse (the contract
+/// [`run_qec_program`] documents). Z measurements rotate nothing, and `MPP` undoes each
+/// term's rotation before taking the record, so neither leaves a rotation behind.
 pub(crate) fn validate_measured_qubit_reuse(program: &QecProgram) -> Result<()> {
     let reuse = |qubit: usize| PrismError::InvalidParameter {
         message: format!(
@@ -1038,8 +973,6 @@ pub(crate) fn validate_measured_qubit_reuse(program: &QecProgram) -> Result<()> 
 /// disjoint). Pauli-product measurements do not affect liveness: the
 /// deferred lowering measures a scratch alias and the cross terms of the
 /// projected state cancel exactly.
-///
-/// No-op for programs without `EXP_VAL` ops.
 pub(crate) fn validate_qec_exp_val_placement(program: &QecProgram) -> Result<()> {
     let terminal_violation = |op_name: &str| PrismError::InvalidParameter {
         message: format!("`EXP_VAL` must be terminal: `{op_name}` appears after an `EXP_VAL` op"),

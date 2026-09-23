@@ -24,8 +24,6 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 /// Fluent builder for quantum circuits.
 ///
-/// Provides method-chaining syntax for circuit construction. Each gate
-/// method returns `&mut Self`, allowing compact one-liner circuits.
 /// Call [`build`](Self::build) to extract the finished [`Circuit`], or
 /// use [`run`](Self::run) / [`run_with`](Self::run_with) for direct execution.
 ///
@@ -86,7 +84,6 @@ impl CircuitBuilder {
         Self::new_with_classical(num_qubits, 0)
     }
 
-    /// Create a builder with explicit qubit and classical bit counts.
     pub fn new_with_classical(num_qubits: usize, num_classical_bits: usize) -> Self {
         Self {
             circuit: Circuit::new(num_qubits, num_classical_bits),
@@ -122,8 +119,7 @@ impl CircuitBuilder {
     /// [`Circuit::add_pauli_rotation`] does.
     ///
     /// # Panics
-    /// Panics if `factors` is empty or names a qubit twice, as well as on the
-    /// out-of-bounds index every gate method panics on.
+    /// Panics if `factors` is empty or names a qubit twice.
     pub fn pauli_rotation(&mut self, theta: f64, factors: &[PauliTerm]) -> &mut Self {
         self.circuit.add_pauli_rotation(theta, factors);
         self
@@ -204,11 +200,9 @@ impl CircuitBuilder {
     /// Measure `qubit` along `axis`, recording the eigenvalue as a bit (`+1`
     /// reads false, `-1` reads true).
     ///
-    /// Lowers to the rotation that maps the axis onto Z followed by a
-    /// computational-basis measurement, and does not rotate back: the qubit is
-    /// left in the Z eigenstate matching the recorded bit rather than in the
-    /// eigenstate of `axis`. Append the inverse rotation to restore it, at the
-    /// cost of the circuit no longer ending in measurements.
+    /// Lowers to the rotation onto Z and a Z measurement, with no rotation back: the qubit
+    /// is left in the Z eigenstate, not the `axis` one. Appending the inverse rotation
+    /// restores it, but then the circuit no longer ends in measurements.
     pub fn measure_in_basis(
         &mut self,
         qubit: usize,
@@ -263,15 +257,13 @@ impl CircuitBuilder {
         self
     }
 
-    /// Reset `qubit` to |0⟩.
     pub fn reset(&mut self, qubit: usize) -> &mut Self {
         self.circuit.add_reset(qubit);
         self
     }
 
-    /// Measure all qubits into classical bits with matching indices.
-    ///
-    /// Expands `num_classical_bits` if needed to accommodate all qubits.
+    /// Measure qubit `i` into classical bit `i`, growing `num_classical_bits` to cover
+    /// every qubit.
     pub fn measure_all(&mut self) -> &mut Self {
         self.circuit.measure_all();
         self
@@ -327,7 +319,7 @@ impl CircuitBuilder {
         self
     }
 
-    /// Extract the finished circuit, replacing the builder's internal circuit with an empty one.
+    /// Extract the finished circuit and reset the builder, discarding recorded parameters.
     pub fn build(&mut self) -> Circuit {
         self.params = Parameters::new(0);
         self.parity_scratch = None;
@@ -358,7 +350,6 @@ impl CircuitBuilder {
         crate::sim::simulate(&self.circuit).seed(seed).run()
     }
 
-    /// Execute with explicit backend selection.
     pub fn run_with(
         &self,
         kind: crate::sim::BackendKind,
@@ -370,7 +361,6 @@ impl CircuitBuilder {
             .run()
     }
 
-    /// Execute multi-shot sampling.
     pub fn run_shots(&self, num_shots: usize, seed: u64) -> crate::Result<crate::sim::ShotsResult> {
         crate::sim::simulate(&self.circuit)
             .seed(seed)

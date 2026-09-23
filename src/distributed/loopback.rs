@@ -197,8 +197,7 @@ impl RankComm for LoopbackComm {
     fn sendrecv_c64(&self, partner: usize, send: &[Complex64], recv: &mut [Complex64]) {
         debug_assert_eq!(send.len(), recv.len());
         let size = self.shared.size;
-        // Send to partner, then wait for partner to send back. Ranks that skip
-        // an exchange do not block because their partner skips it too.
+        // Ranks that skip an exchange do not block because their partner skips it too.
         self.shared.mailboxes[self.rank * size + partner].send(send);
         self.shared.mailboxes[partner * size + self.rank].recv(recv);
     }

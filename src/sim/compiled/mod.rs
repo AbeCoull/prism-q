@@ -648,8 +648,8 @@ impl CompiledSampler {
 
     /// Materialise packed shots directly on the GPU.
     ///
-    /// This is available only when the sampler has a GPU context and the
-    /// compiled circuit routes through the flat sparse BTS path. Use
+    /// Requires a GPU context and a circuit that compiled to the flat sparse
+    /// BTS path. Use
     /// [`DevicePackedShots::to_host`] to copy the full packed payload back, or
     /// [`DevicePackedShots::marginals`] / [`DevicePackedShots::counts`] to
     /// reduce on device first.
@@ -693,12 +693,10 @@ impl CompiledSampler {
 
     /// GPU BTS sampling with on-device meas-major to shot-major bit-transpose.
     ///
-    /// Returns `Some(Ok(data))` when the compiled circuit matches the GPU BTS
-    /// path (flat sparse, shot threshold crossed). `data` is in
-    /// shot-major layout (`num_shots * m_words` u64s) so callers can skip the
-    /// host `into_shot_major_data()` transpose for downstream
-    /// shot-major consumers (noise apply, etc.). `None` signals "use the CPU
-    /// path for this sampler/shot-count combination".
+    /// `Some(Ok(data))` with `data` shot-major (`num_shots * m_words` words)
+    /// when the circuit takes the GPU BTS path (flat sparse, shot threshold
+    /// crossed), sparing the host `into_shot_major_data()` transpose. `None`
+    /// means use the CPU path.
     #[cfg(feature = "gpu")]
     pub(crate) fn try_sample_bulk_shot_major_gpu(
         &mut self,
@@ -2252,9 +2250,8 @@ impl CompiledDetectorSampler {
 /// Device-resident packed shots emitted by the GPU BTS path.
 ///
 /// The payload stays in measurement-major layout on the device until an
-/// explicit host copy via [`Self::to_host`]. Marginals and exact counts can be
-/// reduced first so higher-level workflows do not have to transfer the full
-/// shot matrix.
+/// explicit host copy via [`Self::to_host`]. Marginals and exact counts can
+/// reduce on the device without transferring the shot matrix.
 #[cfg(feature = "gpu")]
 #[derive(Debug)]
 pub struct DevicePackedShots {
@@ -2350,7 +2347,6 @@ impl DevicePackedShots {
         }
     }
 
-    /// Return per-measurement marginal probabilities.
     pub fn marginals(&self) -> Result<Vec<f64>> {
         if self.num_shots == 0 {
             return Ok(vec![0.0; self.num_measurements]);

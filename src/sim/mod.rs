@@ -1,8 +1,5 @@
-//! Simulation orchestration.
-//!
-//! Connects the circuit IR to a backend. This module is deliberately thin,
-//! the complexity lives in the backends and the parser. Entry points:
-//! [`simulate`], [`run_qasm`], [`run_on`].
+//! Simulation orchestration: routes a circuit to a backend and answers the
+//! terminal queries. Entry points: [`simulate`], [`run_qasm`], [`run_on`].
 
 pub mod braket;
 pub mod calibration;
@@ -1157,8 +1154,6 @@ pub fn simulate(circuit: &Circuit) -> Simulate<'_, Unseeded> {
     }
 }
 
-/// Gate for the terminals that answer a noise model from the exact mixture,
-/// which only the density matrix holds.
 /// Rejection naming the two terminals the Pauli path engine serves.
 fn reject_pauli_path(terminal: &str) -> PrismError {
     PrismError::IncompatibleBackend {
@@ -1353,8 +1348,6 @@ fn fuse_for_backend<'a>(
     )
 }
 
-/// Fuse `circuit` for `backend` and apply it, leaving initialization to the
-/// caller. The start-state analogue of [`execute`], which owns the |0...0⟩ init.
 /// [`apply_fused_circuit`] for a terminal that has nowhere to put a save.
 ///
 /// Only [`Simulate::run`] returns save records, so every other terminal
@@ -1376,6 +1369,8 @@ fn apply_fused_without_saves(
     apply_fused_circuit(backend, circuit).map(|_| ())
 }
 
+/// Fuse `circuit` for `backend` and apply it, leaving initialization to the
+/// caller. The start-state analogue of [`execute`], which owns the |0...0⟩ init.
 fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<Vec<SaveRecord>> {
     let expanded = expand_for_backend(&*backend, circuit);
     let fused = fuse_for_backend(&*backend, &expanded);
@@ -1744,7 +1739,7 @@ fn execute_circuit(
 ///
 /// The stream is handed to the backend in the segments between save points, so
 /// no backend implements a save and none can batch across one. A circuit with
-/// no save points takes one call, the same as before.
+/// no save points takes one call.
 fn apply_recording_saves(
     backend: &mut dyn Backend,
     instructions: &[Instruction],
@@ -1824,8 +1819,8 @@ fn run(circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
     run_with(BackendKind::Auto, circuit, seed)
 }
 
-/// Constructs the backend internally based on [`BackendKind`], then runs
-/// the circuit. For a pre-constructed backend instance, use [`run_on`].
+/// Build the backend `kind` selects and run the circuit on it. For a
+/// pre-constructed backend, use [`run_on`].
 pub(crate) fn run_with(kind: BackendKind, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
     run_with_internal(kind, circuit, seed, SimOptions::default())
 }

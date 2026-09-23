@@ -57,11 +57,6 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
     num_qubits.saturating_sub(log2n)
 }
 
-// GPU crossover threshold and its env override live in `crate::gpu` so users
-// can introspect them without depending on internal dispatch plumbing. The
-// dispatch layer calls `crate::gpu::min_qubits()` directly; there is no
-// private duplicate.
-
 /// Backend selection for a simulation run.
 ///
 /// `Auto` resolves per call from circuit shape. Two routes run before the
@@ -69,7 +64,7 @@ pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
 /// (Clifford-only circuits at 128 qubits and above with a 16+ qubit block use
 /// FactoredStabilizer), and shot paths sample Clifford+T circuits whose T
 /// count fits the size-derived stabilizer-rank budget through the StabilizerRank
-/// expansion, to 40 T gates (`MAX_AUTO_T_COUNT_SHOTS` above). A probability
+/// expansion, to 40 T gates. A probability
 /// query never takes that expansion under `Auto`, since it is slower than the
 /// statevector at every width both can hold. The pruned expansion is reachable
 /// only through [`run_stabilizer_rank_approx`], never from `Auto`; marginal queries
@@ -174,11 +169,8 @@ pub enum BackendKind {
     /// VRAM check degrades to the host, so a missing, unfit, or racing device
     /// stays on CPU rather than erroring.
     ///
-    /// Acceleration reaches every entry point through one resolution
-    /// mechanism: single runs, terminal shot and counts sampling, expectation
+    /// Applies to single runs, terminal shot and counts sampling, expectation
     /// values, temporal-Clifford tails, and non-Pauli noisy trajectories.
-    ///
-    /// The context is user-supplied and is never acquired implicitly.
     #[cfg(feature = "gpu")]
     AutoGpu {
         context: Arc<GpuContext>,
@@ -188,10 +180,8 @@ pub enum BackendKind {
     /// Circuits (or decomposed sub-blocks) with fewer than
     /// [`crate::gpu::min_qubits()`] qubits (tunable via
     /// `PRISM_GPU_MIN_QUBITS`, default [`crate::gpu::MIN_QUBITS_DEFAULT`])
-    /// transparently fall back to the host statevector path, since
-    /// small states do not survive PCIe and launch-latency overhead.
-    /// Larger circuits allocate a device-resident state and route gate
-    /// application through GPU kernels.
+    /// fall back to the host statevector path, since small states do not
+    /// survive PCIe and launch-latency overhead.
     ///
     /// Compose with `simulate(...).backend(...).seed(...).run()` to get fusion
     /// plus independent-subsystem decomposition; each sub-block is evaluated
@@ -220,9 +210,8 @@ pub enum BackendKind {
     /// [`crate::gpu::stabilizer_min_qubits()`] qubits (tunable via
     /// `PRISM_STABILIZER_GPU_MIN_QUBITS`, default
     /// [`crate::gpu::STABILIZER_MIN_QUBITS_DEFAULT`]) fall back to the CPU
-    /// stabilizer path. The GPU path routes gate application to device
-    /// kernels. Measurement and reset stay on device, while probabilities and
-    /// export-style helpers still read back to the CPU algorithms.
+    /// stabilizer path. Measurement and reset stay on device; probabilities and
+    /// exports read back to the CPU algorithms.
     ///
     /// Compose with `simulate(...).backend(...).seed(...).run()` to pick up
     /// independent-subsystem decomposition; non-Clifford circuits are rejected
@@ -1474,8 +1463,7 @@ mod accel_tests {
 
 /// Table-driven coverage of [`resolve`]: every backend kind against every
 /// circuit shape class, asserting the resolved family and execution target.
-/// This is the contract that all simulator families dispatch uniformly on
-/// both targets; extend it when a family gains a capability row.
+/// Extend it when a family gains a capability row.
 #[cfg(test)]
 mod dispatch_matrix_tests {
     use super::*;

@@ -18,12 +18,13 @@ use crate::sim::compiled::{
 };
 use crate::sim::{BackendKind, ShotsResult};
 
-/// A single-qubit (or two-qubit, for `TwoQubitDepolarizing`) noise channel.
+/// A noise channel on one qubit, or on two for `TwoQubitDepolarizing` and
+/// `Kraus2q`.
 ///
-/// Channels are applied by the trajectory engine after each gate whose
-/// `NoiseModel::after_gate` entry contains a matching `NoiseEvent`. Channels
-/// that sample as a Pauli frame draw take the compiled stabilizer sampler
-/// instead on a Clifford circuit, see [`NoiseChannel::is_pauli`] and
+/// Fires after each instruction whose `NoiseModel::after_gate` slot holds a
+/// `NoiseEvent` carrying it. On a Clifford circuit, channels that sample as a
+/// Pauli frame draw take the compiled stabilizer sampler; see
+/// [`NoiseChannel::is_pauli`] and
 /// [`NoiseChannel::TwoQubitDepolarizing`].
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -161,7 +162,7 @@ impl NoiseChannel {
         self.is_pauli() || self.pauli_pair_rate().is_some()
     }
 
-    /// Return true when the trajectory engine can sample this channel exactly.
+    /// True when `validate` accepts the channel.
     pub fn is_exactly_samplable(&self) -> bool {
         self.validate().is_ok()
     }
@@ -1213,9 +1214,7 @@ fn transpose_events_to_row_major(
     }
     let total = running as usize;
 
-    // Second pass: write entries. Use a fresh cursor array because
-    // `row_counts` is still needed to validate; cheaper to just reuse it as
-    // a write cursor starting at `offsets[row]`.
+    // Second pass: write entries through a cursor starting at `offsets[row]`.
     let mut entries = vec![0u32; total];
     let mut cursor: Vec<u32> = offsets[..num_meas].to_vec();
     for e in 0..num_events {
@@ -1394,15 +1393,12 @@ impl GpuNoiseCache {
 
 /// Compiled sampler for Clifford circuits with Pauli noise.
 ///
-/// The sampler reuses the compiled measurement parity map for the noiseless
-/// circuit, then applies the requested Pauli noise model across batches of
-/// shots. When a GPU context is attached via `with_gpu` (available with the
-/// `gpu` feature), the underlying parity sampling stage may use the GPU BTS
-/// path. Materialized shot output still returns to the CPU in shot-major
-/// form, while exact counts and marginals can keep the packed
-/// measurement-major buffer on the device through noise application and
-/// reduction. `try_` methods propagate GPU errors; their plain twins fall
-/// back to the CPU path.
+/// Reuses the noiseless circuit's compiled parity map and applies the Pauli
+/// noise per batch of shots. With a GPU context attached (`with_gpu`, `gpu`
+/// feature), parity sampling may take the GPU BTS path. Materialized shots return
+/// to the host in shot-major form; counts and marginals can keep the packed
+/// measurement-major buffer on the device through noise and reduction. `try_`
+/// methods propagate GPU errors; their plain twins fall back to the CPU path.
 pub struct NoisyCompiledSampler {
     noiseless: crate::sim::compiled::CompiledSampler,
     events: FlatNoiseSensitivity,
@@ -1724,12 +1720,10 @@ impl NoisyCompiledSampler {
         Some(packed.counts_with_rank_hint(self.num_measurements))
     }
 
-    /// Sample `num_shots` noisy outcomes and return them in packed form.
+    /// Sample `num_shots` noisy outcomes, packed shot-major.
     ///
-    /// The returned [`PackedShots`] value uses shot-major layout. With a GPU
-    /// context attached, the underlying parity sampling stage may run on the
-    /// GPU before noise is applied and the packed output is materialized on
-    /// the CPU.
+    /// With a GPU context attached, parity sampling may run on the device; the
+    /// packed output is materialized on the host either way.
     pub fn sample_bulk_packed(&mut self, num_shots: usize) -> PackedShots {
         match self.try_sample_bulk_packed(num_shots) {
             Ok(packed) => packed,
@@ -1760,10 +1754,8 @@ impl NoisyCompiledSampler {
         PackedShots::from_shot_major(accum, num_shots, self.num_measurements)
     }
 
-    /// Stream noisy shots into `acc` using the default chunk size.
-    ///
-    /// This avoids materializing the full shot matrix when the caller only
-    /// needs derived aggregates such as counts or marginals.
+    /// Stream noisy shots into `acc` at the default chunk size, without
+    /// materializing the full shot matrix.
     pub fn sample_chunked<A: crate::sim::compiled::ShotAccumulator>(
         &mut self,
         total_shots: usize,
@@ -1775,8 +1767,8 @@ impl NoisyCompiledSampler {
 
     /// Stream noisy shots into `acc` with an explicit chunk size.
     ///
-    /// When a GPU context is attached, each chunk may use GPU BTS sampling for
-    /// the noiseless parity stage before noise is applied.
+    /// With a GPU context attached, each chunk may use GPU BTS sampling for the
+    /// noiseless parity stage.
     pub fn sample_chunked_with_size<A: crate::sim::compiled::ShotAccumulator>(
         &mut self,
         total_shots: usize,

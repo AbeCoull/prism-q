@@ -9,16 +9,14 @@ const MAX_QEC_EXPANDED_LINES: usize = 1_000_000;
 
 /// Parse a native measurement-record QEC program from text.
 ///
-/// Recognized instructions: `H`, `S`, `S_DAG`, `T`, `T_DAG`, `CX`, `CZ`,
-/// `R`/`RX`/`RY`, `M`/`MX`/`MY`, `MR`/`MRX`/`MRY`, `MPP`, `DETECTOR`,
-/// `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Z_ERROR`,
-/// `DEPOLARIZE1`, `DEPOLARIZE2`, `TICK`, `QUBIT_COORDS`, `SHIFT_COORDS`, and
-/// flattened `REPEAT` blocks. `rec[-k]` measurement record references are
-/// resolved against records emitted up to that point. Comments use `#`.
+/// Recognized instructions: `I`, `X`, `Y`, `Z`, `H`, `S`, `S_DAG`, `T`, `T_DAG`, `CX`,
+/// `CZ`, `R`/`RX`/`RY`, `M`/`MX`/`MY`, `MR`/`MRX`/`MRY`, `MPP`, `DETECTOR`,
+/// `OBSERVABLE_INCLUDE`, `POSTSELECT`, `EXP_VAL`, `X_ERROR`, `Z_ERROR`, `DEPOLARIZE1`,
+/// `DEPOLARIZE2`, `TICK`, `QUBIT_COORDS`, `SHIFT_COORDS` (ignored), and flattened
+/// `REPEAT` blocks. Comments use `#`.
 ///
-/// `M(p)` and `MR(p)` lower the optional measurement-error probability into a
-/// pre-measurement Pauli flip annotation; `MPP` does not currently accept a
-/// measurement-error argument.
+/// `M(p)` and `MR(p)` lower `p` into a Pauli flip before the measurement; `MPP` takes
+/// no measurement-error argument.
 pub fn parse_qec_program(input: &str) -> Result<QecProgram> {
     let lines = expand_repeats(input)?;
     let mut parser = QecTextParser::default();

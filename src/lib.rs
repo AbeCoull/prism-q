@@ -26,8 +26,8 @@
 //!
 //! # Input model
 //!
-//! The primary entrypoint accepts OpenQASM 3.0 strings (`&str`). See
-//! [`circuit::openqasm`] for the supported subset.
+//! [`run_qasm`] takes OpenQASM 3.0 source; [`circuit::openqasm`] lists the supported
+//! subset.
 //!
 //! # Backends
 //!

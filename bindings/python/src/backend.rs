@@ -1,10 +1,6 @@
-//! `BackendKind` wrapper with ergonomic static constructors, and the held
-//! stabilizer tableau a Clifford state is exported from and imported into.
-//!
-//! The GPU and distributed constructors exist in every build and take a
-//! context object, which is what fails when the matching feature is absent.
-//! Nothing here owns `MPI_Init`: the distributed context attaches to an MPI
-//! mpi4py already started.
+//! `BackendKind` static constructors, and the held stabilizer tableau a Clifford state
+//! is exported from and imported into. The GPU and distributed constructors exist in
+//! every build; their context object is what raises when the feature is absent.
 
 use numpy::{IntoPyArray, PyArray1};
 use prism_q::backend::Backend;
@@ -19,8 +15,8 @@ use crate::gpu::PyGpuContext;
 use crate::numpy_util::{bool_flags, u64_words};
 use crate::sim::DEFAULT_SEED;
 
-/// Backend selection for a simulation. Construct via the static methods, e.g.
-/// `BackendKind.auto()`, `BackendKind.mps(max_bond_dim=64)`.
+/// Backend selection, built by the static methods, e.g. `BackendKind.auto()`,
+/// `BackendKind.mps(max_bond_dim=64)`.
 #[pyclass(name = "BackendKind", module = "prism_q", from_py_object)]
 #[derive(Clone)]
 pub struct PyBackendKind(pub BackendKind);
@@ -98,9 +94,8 @@ impl PyBackendKind {
 
     /// Deterministic sparse Pauli dynamics holding a fixed term count: the
     /// smallest-magnitude surplus terms are dropped whenever the weighted sum
-    /// passes `max_terms`. No threshold to guess, and growth the budget caps
-    /// cannot reach the engine's internal ceiling, which is where
-    /// `deterministic_pauli()` dies when its epsilon prunes nothing.
+    /// passes `max_terms`. Growth never reaches the engine's internal ceiling,
+    /// where `deterministic_pauli()` fails when its epsilon prunes nothing.
     #[staticmethod]
     #[pyo3(signature = (max_terms = 65536))]
     fn deterministic_pauli_budget(max_terms: usize) -> Self {

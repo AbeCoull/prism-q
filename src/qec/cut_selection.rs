@@ -1,35 +1,25 @@
 //! Treewidth-aware cut-cost analysis for QEC observable simulation.
 //!
-//! Scores candidate qubit cuts by the joint cost of branch count `B` and
-//! post-cut contraction width `w_post`, rather than by branch count alone.
-//!
-//! Status: this is analysis tooling, not a live dispatch path. The QEC auto
-//! T-strategy (`run_qec_program_auto`) does not yet consult these scores; it
-//! follows a fixed SPD -> CAMPS -> tensor-network ladder.
-//! These functions are exercised by the cut-cost benchmarks and are intended
-//! to inform a future width-aware dispatcher. Wiring them into the dispatcher
-//! is deferred until the cost model is validated against benchmark results.
+//! Scores candidate qubit cuts by the joint cost of branch count `B` and post-cut
+//! contraction width `w_post`, rather than by branch count alone.
 //!
 //! # Definitions
 //!
-//! Let `G(V, E)` be the *interaction graph* of a circuit: `V` is the qubit
-//! set, and `{u, v} in E` if some two-qubit (or larger) gate has support
-//! `{u, v} subseteq T`. A *cut* `S subseteq V` is any qubit subset; removing
-//! `S` from `G` yields a graph `G - S` whose connected components are the
+//! Let `G(V, E)` be the *interaction graph* of a circuit: `V` is the qubit set, and
+//! `{u, v} in E` if some two-qubit (or larger) gate has support `{u, v} subseteq T`. A
+//! *cut* `S subseteq V` is any qubit subset; the connected components of `G - S` are the
 //! independent sub-problems produced by cutting at those qubits.
 //!
-//! The *post-cut contraction width* `w_post(S)` is the maximum over
-//! components `C` of `G - S` of an upper bound on the treewidth of `C`,
-//! computed by a min-fill elimination heuristic. `w_post` is an upper
-//! bound on the actual treewidth (treewidth itself is NP-hard); using an
-//! upper bound is sound for the dispatch decision (it can only reject a
-//! backend that would have succeeded, never accept one that will fail).
+//! The *post-cut contraction width* `w_post(S)` is the maximum over components `C` of
+//! `G - S` of an upper bound on the treewidth of `C`, computed by a min-fill elimination
+//! heuristic (treewidth itself is NP-hard). An upper bound is sound for the dispatch
+//! decision: it can only reject a backend that would have succeeded, never accept one
+//! that will fail.
 //!
 //! # Cut score
 //!
-//! For a cut `S` of size `k = |S|` admitting `B(S) = 2^k` branches (each
-//! branch fixes the `k` cut qubits to a computational basis state), the
-//! joint cost model is
+//! A cut of size `k = |S|` admits `B(S) = 2^k` branches, each fixing the cut qubits to a
+//! computational basis state. The joint cost model is
 //!
 //! ```text
 //! score(S) = B(S) * exp(c * w_post(S))
@@ -43,9 +33,8 @@ use std::collections::{BTreeSet, HashSet};
 use crate::circuit::{Circuit, Instruction};
 use crate::gates::Gate;
 
-/// Undirected interaction graph of a circuit. Adjacency is stored as a
-/// `Vec<BTreeSet<usize>>` indexed by qubit id; `BTreeSet` keeps the
-/// elimination order deterministic.
+/// Undirected qubit interaction graph; `BTreeSet` adjacency keeps the elimination order
+/// deterministic.
 #[derive(Debug, Clone)]
 pub struct InteractionGraph {
     pub num_qubits: usize,
@@ -53,8 +42,8 @@ pub struct InteractionGraph {
 }
 
 impl InteractionGraph {
-    /// Extract the interaction graph of a circuit. For each instruction with
-    /// `k >= 2` targets, add the complete clique on those targets.
+    /// Add a clique over each multi-qubit gate's targets, and one edge per pair inside a
+    /// batched gate.
     pub fn from_circuit(circuit: &Circuit) -> Self {
         let n = circuit.num_qubits;
         let mut adj = vec![BTreeSet::<usize>::new(); n];
@@ -147,20 +136,13 @@ fn add_interaction_edge(adj: &mut [BTreeSet<usize>], a: usize, b: usize) {
     }
 }
 
-/// Upper bound on the treewidth of `G - excluded` via the min-fill
-/// elimination heuristic.
+/// Upper bound on the treewidth of `G - excluded` via min-fill elimination.
 ///
-/// Returns the maximum, over all eliminated vertices, of `|N(v) cap remaining|`
-/// at elimination time. This is the standard `tw <= max_clique_during_elim - 1`
-/// bound expressed as the clique size; the clique size itself is reported
-/// (i.e., `tw_proxy = max_clique`) because the cost model is `exp(c * w)`
-/// and the additive constant absorbs into `c`.
-///
-/// **Soundness.** The produced elimination order has a concrete maximum
-/// induced clique size, and that value is an upper bound on the optimal
-/// treewidth plus one. The heuristic may overestimate, which is acceptable
-/// for dispatch because it can reject a backend but cannot understate the
-/// width of the chosen elimination order.
+/// Returns the largest clique `|N(v) cap remaining| + 1` formed during elimination, the
+/// standard `tw <= max_clique - 1` bound reported as the clique size, since the constant
+/// folds into `c` in `exp(c * w)`. The heuristic may overestimate, which is acceptable
+/// for dispatch: it can reject a backend but never understates the width of the
+/// elimination order it built.
 pub fn min_fill_treewidth_proxy(graph: &InteractionGraph, excluded: &HashSet<usize>) -> usize {
     let mut remaining: HashSet<usize> = (0..graph.num_qubits)
         .filter(|v| !excluded.contains(v))
@@ -216,13 +198,10 @@ pub fn min_fill_treewidth_proxy(graph: &InteractionGraph, excluded: &HashSet<usi
     max_clique
 }
 
-/// Score combining branch count and post-cut contraction width.
+/// Cut cost `2^|S| * exp(c * w_post(S))`, `w_post` the largest min-fill proxy over the
+/// components of `G - S`.
 ///
-/// `score(S) = B(S) * exp(c * w_post(S))`
-/// where `B(S) = 2^|S|` and `w_post(S)` is the per-component max of the
-/// min-fill treewidth proxy on `G - S`.
-///
-/// Returns `f64::INFINITY` if either factor overflows.
+/// Returns `f64::INFINITY` once the log score passes 700.
 pub fn cut_score(graph: &InteractionGraph, cut: &HashSet<usize>, c: f64) -> f64 {
     let k = cut.len() as f64;
     let comps = graph.components_excluding(cut);

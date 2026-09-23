@@ -70,10 +70,11 @@ impl DistributedStatevectorBackend {
     /// qubits stay global, so a relabel would move amplitudes without sparing
     /// an exchange. The per-gate path applies it, relabeling only while an
     /// unreferenced victim exists. A region or conditional SWAP also ends the
-    /// window: a region body plans itself when taken. SWAPs inside the window are followed through an
-    /// alias map, so a requirement names the qubit that holds the position at
-    /// window start. Victims are the local qubits outside the window whose
-    /// next required use is furthest away; ties go to the lowest position.
+    /// window: a region body plans itself when taken. SWAPs inside the window
+    /// are followed through an alias map, so a requirement names the qubit that
+    /// holds the position at window start. Victims are the local qubits outside
+    /// the window whose next required use is furthest away; ties go to the
+    /// lowest position.
     fn plan_window(&mut self, instructions: &[Instruction], start: usize) -> usize {
         let local = self.local_qubits();
         let mut alias: Vec<usize> = (0..self.num_qubits).collect();

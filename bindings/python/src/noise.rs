@@ -1,8 +1,4 @@
-//! Noise channels and models.
-//!
-//! `NoiseModel` is not `Clone` in the core crate, but its fields are, so the
-//! binding builds an owned copy via [`PyNoiseModel::clone_model`]. This lets a
-//! simulation release the GIL during a noisy run while still owning the model.
+//! Noise channels, noise models, and device calibration tables.
 
 use num_complex::Complex64;
 use prism_q::sim::calibration::presets;
@@ -15,7 +11,7 @@ use crate::circuit::PyCircuit;
 use crate::error::{PyPrismResult, invalid};
 use crate::gate::extract_2x2;
 
-/// A single-qubit (or two-qubit) noise channel. Construct via the static methods.
+/// A one- or two-qubit noise channel, built by the static methods.
 #[pyclass(name = "NoiseChannel", module = "prism_q", frozen, from_py_object)]
 #[derive(Clone)]
 pub struct PyNoiseChannel(pub NoiseChannel);
@@ -112,7 +108,7 @@ impl PyNoiseModel {
         }
     }
 
-    /// An empty model sized to `circuit`; populate with [`add_event`].
+    /// An empty model sized to `circuit`; populate with `add_event`.
     #[staticmethod]
     fn empty(circuit: &PyCircuit) -> Self {
         let c = circuit.inner();
@@ -145,7 +141,7 @@ impl PyNoiseModel {
         Ok(())
     }
 
-    /// Apply a symmetric readout error to all classical bits.
+    /// Set the same readout error on every classical bit.
     fn with_readout_error(&mut self, p01: f64, p10: f64) {
         self.inner.with_readout_error(p01, p10);
     }
@@ -216,8 +212,7 @@ impl PyDeviceCalibration {
 }
 
 impl PyNoiseModel {
-    /// Deep-copy the inner model. `NoiseModel` is not `Clone`, but its fields
-    /// (`NoiseEvent`, `ReadoutError`) are, so clone them field-by-field.
+    /// Deep-copy the inner model, so a simulation can own it with the GIL released.
     pub fn clone_model(&self) -> NoiseModel {
         NoiseModel {
             after_gate: self.inner.after_gate.clone(),

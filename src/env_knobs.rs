@@ -1,10 +1,6 @@
-//! Environment knobs: parsed once per process, and an invalid value warns on
-//! stderr and yields the default rather than failing the run.
-//!
-//! Every reader is a cached initializer on an infallible path, so a typo in a
-//! tuning variable must not take down a run the default would serve, and must
-//! not pass silently either: `PRISM_MAX_SV_QUBITS=abc` used to re-enable memory
-//! detection without a word.
+//! Environment knobs, parsed once per process. An invalid value warns on stderr and
+//! yields the default: readers sit on infallible paths, so a typo must neither fail
+//! the run nor pass silently.
 
 /// A count knob: `default` when unset, and when the value does not parse or
 /// falls below `min`, with a warning naming the variable.

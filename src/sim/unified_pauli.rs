@@ -1145,16 +1145,12 @@ pub fn run_spd_with(circuit: &Circuit, truncation: &SpdTruncation) -> Result<Spd
 /// Inverse light cone of a Pauli observable under a circuit, computed
 /// conservatively by gate-graph reachability.
 ///
-/// Returns, for each instruction index in `circuit.instructions`, whether the
-/// gate at that index can affect the backward-propagated observable. A gate is
-/// in the cone if its support intersects the current cone-qubit set when the
-/// circuit is traversed in reverse from the observable.
+/// One flag per entry of `circuit.instructions`: whether its support meets the
+/// cone-qubit set as the circuit is walked in reverse from the observable.
 ///
-/// Exactness: a gate whose target set is disjoint from the cone-qubit set at
-/// its backward-traversal depth conjugates the propagated observable trivially
-/// (`U_k^dag P_k U_k = P_k` because the support of `P_k` is contained in the
-/// cone set at depth `k`, and `U_k` acts as identity outside its targets).
-/// Removing those gates from the backward pass is therefore exact.
+/// Dropping the unflagged gates is exact: the support of `P_k` lies inside the
+/// cone set at depth `k`, and `U_k` acts as identity outside its targets, so
+/// `U_k^dag P_k U_k = P_k`.
 pub fn inverse_light_cone(circuit: &Circuit, observable: &[PauliTerm]) -> Vec<bool> {
     let mut cone: std::collections::HashSet<usize> = observable.iter().map(|t| t.qubit).collect();
     let n_inst = circuit.instructions.len();
@@ -1457,8 +1453,7 @@ pub struct PauliPathResult {
 /// Clifford gates conjugate it, `Rz` and `Rzz` split each anticommuting term in
 /// two, and every noise channel scales the terms by the channel's Pauli
 /// eigenvalues. Noise shrinks coefficients while rotations grow the term count,
-/// so the sum stays small whenever noise outpaces the branching rotations, which
-/// is the regime this engine exists for.
+/// so the sum stays small whenever noise outpaces the branching rotations.
 ///
 /// # Truncation
 ///

@@ -255,8 +255,7 @@ fn split_after_measuring_a_merged_cluster() {
     );
 }
 
-// A collapsed GHZ chain factors into one cluster per qubit, which exceeds
-// the former 64-component ceiling in split detection.
+// A collapsed GHZ chain factors into one cluster per qubit, past 64 components.
 #[test]
 fn split_into_more_than_64_components() {
     let n = 100;

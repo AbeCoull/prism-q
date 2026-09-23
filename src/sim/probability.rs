@@ -3,19 +3,17 @@
 //! [`Probabilities`] serves dense vectors and lazily factored per-block
 //! marginals through one interface.
 
-/// Each block represents the marginal probabilities for one independent
-/// subsystem. The `mask` indicates which global qubit positions belong
-/// to this block, and `probs` holds the 2^k marginal distribution.
+/// Marginal distribution of one independent subsystem: `mask` marks its global
+/// qubit positions and `probs` holds its `2^k` entries.
 #[derive(Debug, Clone)]
 pub struct FactoredBlock {
     pub probs: Vec<f64>,
     pub mask: u64,
 }
 
-/// For monolithic simulations this wraps a dense `Vec<f64>` of length 2^n.
-/// For decomposed simulations with independent subsystems, this stores
-/// per-block marginal distributions that are multiplied on demand,
-/// avoiding the O(2^N) Kronecker product unless explicitly requested.
+/// Distribution over basis states: a dense `2^n` vector, or the per-block
+/// marginals of a decomposed run, multiplied on demand so the `2^n` Kronecker
+/// product is built only when asked for.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Probabilities {
@@ -42,11 +40,9 @@ impl Probabilities {
         false
     }
 
-    /// Compute per-qubit marginal probabilities from an existing joint distribution.
-    ///
-    /// Returns `(P(0), P(1))` for each qubit. This is a view over already
-    /// materialized probability data. Query APIs can still choose faster direct
-    /// marginal algorithms before producing a joint distribution.
+    /// Per-qubit `(P(0), P(1))`, summed from the distribution already held.
+    /// Query APIs can still choose faster direct marginal algorithms before
+    /// producing a joint distribution.
     pub fn marginals(&self) -> Vec<(f64, f64)> {
         match self {
             Probabilities::Dense(v) => {
@@ -168,10 +164,8 @@ impl Probabilities {
         }
     }
 
-    /// Iterate over all basis-state probabilities in order.
-    ///
-    /// For `Dense` this is a direct slice iteration. For `Factored` each
-    /// probability is computed on the fly in O(K) per element.
+    /// Iterate over all basis-state probabilities in order. `Dense` iterates
+    /// the slice; `Factored` computes each entry on the fly in O(K).
     pub fn iter(&self) -> ProbabilitiesIter<'_> {
         match self {
             Probabilities::Dense(v) => ProbabilitiesIter {
@@ -190,8 +184,8 @@ impl Probabilities {
         }
     }
 
-    /// Materialize the full probability vector. O(1) clone for dense,
-    /// O(K x 2^N) for factored. Prefer [`Probabilities::get`] for spot-checking.
+    /// Materialize the full probability vector: a clone for dense, O(K x 2^N)
+    /// for factored. Prefer [`Probabilities::get`] for spot-checking.
     pub fn to_vec(&self) -> Vec<f64> {
         match self {
             Probabilities::Dense(v) => v.clone(),

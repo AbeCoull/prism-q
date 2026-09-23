@@ -16,10 +16,8 @@ pub struct SvdResult {
     pub vt_cols: usize,
 }
 
-/// Compute thin SVD via the best available algorithm.
-///
-/// With the `parallel` feature: uses faer for matrices where m*n >= 256,
-/// Jacobi for smaller. Without: always Jacobi.
+/// Thin SVD through faer when the `parallel` feature is on and `m * n >= 256`,
+/// one-sided Jacobi otherwise.
 #[doc(hidden)]
 pub fn svd(a: &[Complex64], m: usize, n: usize) -> SvdResult {
     #[cfg(feature = "parallel")]

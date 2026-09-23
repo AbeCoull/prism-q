@@ -44,8 +44,7 @@ impl ErrorMechanism {
 ///
 /// Derived by [`QecProgram::detector_error_model`]. Mechanisms are ordered by
 /// the program position of the noise annotation that first produced each
-/// symptom. Detector coordinates are carried verbatim from the program's
-/// detector ops, one entry per detector, empty when the op carried none.
+/// symptom.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectorErrorModel {
     mechanisms: Vec<ErrorMechanism>,
@@ -71,8 +70,7 @@ impl DetectorErrorModel {
         self.num_observables
     }
 
-    /// Coordinates per detector, in detector order. Empty for detectors whose
-    /// op carried no coordinates.
+    /// Coordinates per detector, verbatim from the program; empty when the op carried none.
     pub fn detector_coords(&self) -> &[Vec<f64>] {
         &self.detector_coords
     }
@@ -167,17 +165,15 @@ impl QecProgram {
     /// Derive the detector error model implied by the program's Pauli-noise
     /// annotations, detectors, and observables.
     ///
-    /// Every annotation expands into its Pauli fault branches per fault site
-    /// (one branch per target for `X_ERROR` / `Z_ERROR`, three per target for
-    /// `DEPOLARIZE1`, fifteen per target pair for `DEPOLARIZE2`). Each branch
-    /// is propagated through the circuit to the set of detectors and
-    /// observables it flips. Mutually exclusive branches at one fault site
-    /// with the same symptom sum; independent fault sites (distinct targets
-    /// of one annotation included) with the same symptom compose as
-    /// `p = p1(1-p2) + p2(1-p1)`. Faults that flip no detector and no
-    /// observable are omitted. Mechanisms are independent in the model, so
-    /// its joint statistics agree with the sampler to second order in the
-    /// branch probabilities.
+    /// Each annotation expands into Pauli fault branches per fault site (one per
+    /// target for `X_ERROR` / `Z_ERROR`, three per target for `DEPOLARIZE1`,
+    /// fifteen per target pair for `DEPOLARIZE2`), each propagated to the
+    /// detectors and observables it flips. Exclusive branches at one site with the
+    /// same symptom sum; independent sites (distinct targets of one annotation
+    /// included) with the same symptom compose as `p = p1(1-p2) + p2(1-p1)`.
+    /// Faults that flip nothing are omitted. Mechanisms are independent in the
+    /// model, so its joint statistics agree with the sampler to second order in
+    /// the branch probabilities.
     ///
     /// # Errors
     ///

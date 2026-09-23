@@ -55,7 +55,6 @@ impl<'t, 'a> Stream<'t, 'a> {
         }
     }
 
-    /// Consume the next token when it is the keyword `word`.
     pub(crate) fn eat_keyword(&mut self, word: &str) -> bool {
         if self.is_keyword(word) {
             self.advance();

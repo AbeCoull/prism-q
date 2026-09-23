@@ -3,8 +3,6 @@
 
 use crate::error::{PrismError, Result};
 
-/// What a token is. Operators are longest match, so `**` never reads as two
-/// `*` and `++` never as two `+`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Kind {
     Ident,
@@ -266,8 +264,8 @@ impl<'a> Lexer<'a> {
         self.operator(start)
     }
 
-    /// Punctuation, dispatched on the first byte. The two-byte spellings are
-    /// tested before their prefixes, so `**` never reads as two `*`.
+    /// Punctuation, longest match first, so `**` never reads as two `*` and `++`
+    /// never as two `+`.
     fn operator(&mut self, start: usize) -> Result<Token<'a>> {
         let next = self.bytes.get(start + 1).copied();
         let (kind, width) = match self.bytes[start] {

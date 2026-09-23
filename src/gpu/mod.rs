@@ -1,25 +1,8 @@
-//! Shared GPU execution resource.
+//! GPU execution context that CPU backends attach to route their hot kernels to a CUDA
+//! device, plus the device statevector and tableau types.
 //!
-//! GPU support in PRISM-Q is not a standalone backend. It is an execution
-//! context that CPU backends opt into for hot operations. Today the
-//! statevector and stabilizer backends can attach an `Arc<GpuContext>` and
-//! route their heavy kernels through this module.
-//!
-//! # Module layout
-//!
-//! - [`device`]: cudarc device wrapper, availability checks, VRAM queries
-//! - [`memory`]: [`GpuBuffer`] RAII wrapper over device allocations
-//! - `kernels::dense`: statevector kernels (CUDA C source plus launch helpers)
-//! - `kernels::stabilizer`: stabilizer tableau and measurement kernels
-//! - `kernels::bts`: compiled-sampler BTS kernels
-//! - `kernels::density`: channel and readout sweeps for the density matrix,
-//!   which embeds its `4^n` buffer as a `2n`-qubit statevector
-//!
-//! # Device state layout
-//!
-//! The statevector lives on device as a `CudaSlice<f64>` of length `2 * 2^n` holding
-//! interleaved (re, im) pairs. This matches `num_complex::Complex64` and CUDA's `double2`
-//! builtin, allowing zero-cost reinterpretation at kernel boundaries.
+//! Device statevectors are `2 * 2^n` interleaved (re, im) `f64` values, the layout of
+//! `num_complex::Complex64` and CUDA's `double2`, so neither side converts.
 
 pub mod device;
 pub(crate) mod kernels;
@@ -34,14 +17,11 @@ use crate::error::Result;
 pub use self::device::GpuDevice;
 pub use self::memory::GpuBuffer;
 
-/// Default minimum qubit count for routing a sub-circuit to GPU when
-/// [`crate::BackendKind::StatevectorGpu`] is selected.
+/// Default for `PRISM_GPU_MIN_QUBITS`: below this many qubits,
+/// [`crate::BackendKind::StatevectorGpu`] builds a host `StatevectorBackend` instead.
 ///
-/// Below this threshold the dispatch layer builds a plain host
-/// `StatevectorBackend` instead, keeping PCIe round-trips and kernel launch
-/// latency off the critical path for small circuits that fit in L3.
-/// Empirically measured at 14 on GTX 1080 Ti; override at runtime via the
-/// `PRISM_GPU_MIN_QUBITS` environment variable.
+/// Measured at 14 on a GTX 1080 Ti, where smaller states fit in L3 and PCIe round trips
+/// and launch latency dominate.
 pub const MIN_QUBITS_DEFAULT: usize = 14;
 
 /// Whether a CUDA device is present and usable in this process.
@@ -52,40 +32,27 @@ pub fn is_available() -> bool {
     GpuContext::is_available()
 }
 
-/// Effective GPU crossover threshold. Reads `PRISM_GPU_MIN_QUBITS` once per
-/// process and caches the result.
+/// Statevector GPU crossover in qubits, read from `PRISM_GPU_MIN_QUBITS` once per process.
 pub fn min_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED
         .get_or_init(|| crate::env_knobs::usize_knob("PRISM_GPU_MIN_QUBITS", MIN_QUBITS_DEFAULT, 0))
 }
 
-/// Default minimum shot count for routing compiled BTS sampling to the GPU.
-///
-/// Below this threshold the compiled sampler stays on the CPU BTS path, even
-/// when a GPU context is attached, so repeated small shot batches do not pay
-/// the device launch and transfer setup cost. Override at runtime via
-/// `PRISM_GPU_BTS_MIN_SHOTS`.
+/// Default for `PRISM_GPU_BTS_MIN_SHOTS`: smaller batches stay on the CPU BTS sampler
+/// even with a GPU context attached, skipping the launch and transfer setup.
 pub const BTS_MIN_SHOTS_DEFAULT: usize = 131_072;
 
-/// Default minimum compiled-sampler rank for routing BTS sampling to the GPU.
-///
-/// Very low-rank circuits such as GHZ or independent H layers are typically
-/// faster on the CPU even at large shot counts because the host path can
-/// expand each shot from a tiny number of random bits. Override at runtime via
-/// `PRISM_GPU_BTS_MIN_RANK`.
+/// Default for `PRISM_GPU_BTS_MIN_RANK`. Low-rank samplers such as GHZ or independent H
+/// layers run faster on the CPU even at large shot counts, since each shot expands from a
+/// few random bits.
 pub const BTS_MIN_RANK_DEFAULT: usize = 4;
 
-/// Default minimum average parity-row weight factor for routing compiled BTS
-/// sampling to the GPU.
-///
-/// The effective requirement is `total_weight >= num_measurements * factor`,
-/// which filters out low-weight parity maps whose device launch overhead tends
-/// to dominate. Override at runtime via `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR`.
+/// Default for `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR`. The GPU path requires
+/// `total_weight >= num_measurements * factor`, which filters out parity maps too sparse
+/// to cover the launch overhead.
 pub const BTS_MIN_WEIGHT_FACTOR_DEFAULT: usize = 2;
 
-/// Effective GPU BTS shot threshold. Reads `PRISM_GPU_BTS_MIN_SHOTS` once per
-/// process and caches the result.
 pub(crate) fn bts_min_shots() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -93,8 +60,6 @@ pub(crate) fn bts_min_shots() -> usize {
     })
 }
 
-/// Effective GPU BTS rank threshold. Reads `PRISM_GPU_BTS_MIN_RANK` once per
-/// process and caches the result.
 pub(crate) fn bts_min_rank() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -102,8 +67,6 @@ pub(crate) fn bts_min_rank() -> usize {
     })
 }
 
-/// Effective GPU BTS parity-weight threshold factor. Reads
-/// `PRISM_GPU_BTS_MIN_WEIGHT_FACTOR` once per process.
 pub(crate) fn bts_min_weight_factor() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -115,21 +78,15 @@ pub(crate) fn bts_min_weight_factor() -> usize {
     })
 }
 
-/// Default minimum qubit count for routing a sub-circuit to GPU when
-/// [`crate::BackendKind::StabilizerGpu`] is selected.
+/// Default for `PRISM_STABILIZER_GPU_MIN_QUBITS`, set high so
+/// [`crate::BackendKind::StabilizerGpu`] stays on the host path.
 ///
-/// Set deliberately high. The stabilizer device path now batches Clifford
-/// launches and keeps measurement on device, but the product still defaults to
-/// the host path until direct backend benchmarks justify lowering the
-/// crossover.
-///
-/// Until then, opt in explicitly via `PRISM_STABILIZER_GPU_MIN_QUBITS=0` or
-/// a similar low value for experimentation. The dispatch is correct; only
-/// the performance story is pending.
+/// The device path is correct, but no direct backend benchmark yet justifies a lower
+/// crossover. Set the variable to `0` to opt in.
 pub const STABILIZER_MIN_QUBITS_DEFAULT: usize = 100_000;
 
-/// Effective stabilizer GPU crossover threshold. Reads
-/// `PRISM_STABILIZER_GPU_MIN_QUBITS` once per process.
+/// Stabilizer GPU crossover in qubits, read from `PRISM_STABILIZER_GPU_MIN_QUBITS` once
+/// per process.
 pub fn stabilizer_min_qubits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -147,11 +104,8 @@ pub fn stabilizer_min_qubits() -> usize {
 /// both budget with it.
 pub(crate) const STATEVECTOR_BYTES_PER_AMPLITUDE: usize = 25;
 
-/// Shared GPU execution context.
-///
-/// Holds the device handle and compiled kernel module. Cheap to clone via `Arc`. Pass by
-/// `Arc<GpuContext>` so multiple backends or multiple simulations can share one device
-/// initialisation.
+/// Device handle and compiled kernel module, shared across backends and simulations
+/// through an `Arc` so the device initializes once.
 pub struct GpuContext {
     device: Arc<GpuDevice>,
     launcher_scratch: std::sync::Mutex<kernels::LauncherScratch>,
@@ -177,7 +131,6 @@ impl GpuContext {
         }))
     }
 
-    /// Whether a CUDA device is present and usable.
     pub fn is_available() -> bool {
         GpuDevice::is_available()
     }
@@ -190,8 +143,7 @@ impl GpuContext {
     /// Free VRAM currently available on the device bound to this context.
     ///
     /// Reflects allocations by all processes sharing the device, not only those
-    /// made through this `GpuContext`. Use this before allocating a large
-    /// statevector to avoid trial-and-error out-of-memory failures.
+    /// made through this `GpuContext`.
     pub fn vram_available(&self) -> Result<usize> {
         self.device.vram_available()
     }
@@ -205,11 +157,9 @@ impl GpuContext {
     /// Whether the currently-available VRAM can hold a dense Complex64
     /// statevector for `num_qubits` qubits.
     ///
-    /// Counts only the main amplitude buffer (`2 * 2^num_qubits` f64s,
-    /// 16 bytes per amplitude). Auxiliary scratch (probabilities kernel,
-    /// measurement partials) typically adds up to 2^num_qubits additional
-    /// f64s; callers expecting many concurrent measurements should leave
-    /// headroom by checking against a smaller qubit count.
+    /// Counts only the amplitude buffer at 16 bytes per amplitude;
+    /// `fits_statevector_with_scratch` also budgets the probabilities and
+    /// measurement scratch.
     pub fn fits_statevector(&self, num_qubits: usize) -> Result<bool> {
         if num_qubits >= usize::BITS as usize - 4 {
             return Ok(false);
@@ -226,13 +176,12 @@ impl GpuContext {
     /// Whether the currently-available VRAM holds a dense statevector for
     /// `num_qubits` plus the reduction scratch `GpuState` keeps live.
     ///
-    /// Budgets the `2 * 2^n` f64 amplitude buffer (16 bytes/amplitude), one
-    /// `2^n` f64 probabilities scratch buffer (8 bytes/amplitude), and one
-    /// byte per amplitude of margin for the measurement partials
-    /// (`ceil(2^n / 512)` f64) and launcher metadata, so `2^n * 25` bytes
-    /// total. This is the fail-fast gate for the `Auto` GPU statevector
-    /// leaf; the backend's soft mode ([`StatevectorBackend::with_gpu_auto`](crate::backend::statevector::StatevectorBackend::with_gpu_auto))
-    /// is the backstop for any residual transient allocation that slips past it.
+    /// Budgets 25 bytes per amplitude: 16 for amplitudes, 8 for the probabilities
+    /// scratch, and 1 of margin for the measurement partials (`ceil(2^n / 512)` f64) and
+    /// launcher metadata.
+    /// This is the fail-fast gate for the `Auto` GPU statevector leaf; the backend's
+    /// soft mode ([`StatevectorBackend::with_gpu_auto`](crate::backend::statevector::StatevectorBackend::with_gpu_auto))
+    /// catches any transient allocation that slips past it.
     pub fn fits_statevector_with_scratch(&self, num_qubits: usize) -> Result<bool> {
         if num_qubits >= usize::BITS as usize - 5 {
             return Ok(false);
@@ -296,20 +245,18 @@ impl GpuContext {
     }
 }
 
-/// Per-simulation device-resident state.
+/// Device statevector of `2 * 2^num_qubits` interleaved (re, im) f64s.
 ///
-/// Owns a `GpuBuffer<f64>` holding `2 * 2^num_qubits` f64s (interleaved re/im). Tracks
-/// `pending_norm` the same way the CPU statevector backend does, measurement collapse
-/// accumulates into this scalar and the final scale is applied at `export_statevector` or
-/// `probabilities` time.
+/// As on the CPU statevector backend, measurement collapse accumulates into
+/// `pending_norm`, applied at `export_statevector` or `probabilities` time.
 #[derive(Debug)]
 pub struct GpuState {
     context: Arc<GpuContext>,
     buffer: GpuBuffer<f64>,
     num_qubits: usize,
     pending_norm: f64,
-    /// Device-side scratch buffer for `probabilities()` output, reused across calls so
-    /// shot-sampling workflows don't re-allocate `2^n` f64s on every read.
+    /// Reused across `probabilities()` calls so shot sampling does not reallocate `2^n`
+    /// f64s per read.
     probs_scratch: std::cell::RefCell<Option<GpuBuffer<f64>>>,
 }
 
@@ -359,7 +306,6 @@ impl GpuState {
         })
     }
 
-    /// Number of qubits the buffer is sized for.
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }
@@ -369,8 +315,8 @@ impl GpuState {
         self.pending_norm
     }
 
-    /// Read the amplitude buffer as `Vec<Complex64>` with the deferred `pending_norm`
-    /// already applied. The device copy lands in the returned vector's own storage.
+    /// Read the amplitudes with `pending_norm` applied. The device copy lands in the
+    /// returned vector's own storage, with no second host copy.
     pub fn export_statevector(&self) -> Result<Vec<Complex64>> {
         let mut raw = vec![0.0_f64; self.buffer.len()];
         self.buffer.copy_to_host(self.context.device(), &mut raw)?;
@@ -403,8 +349,8 @@ impl GpuState {
         self.pending_norm = norm;
     }
 
-    /// Access (and lazily allocate) the cached device-side probabilities buffer. Returned as
-    /// a `RefMut` so the caller can pass it to a kernel launch for the duration of the call.
+    /// Cached probabilities buffer, `None` until the first caller allocates it. The caller
+    /// grows it when `num_qubits` has increased.
     pub(crate) fn probs_scratch(&self) -> std::cell::RefMut<'_, Option<GpuBuffer<f64>>> {
         self.probs_scratch.borrow_mut()
     }
@@ -441,9 +387,9 @@ fn scale_in_place(amps: &mut [Complex64], factor: f64, num_qubits: usize) {
     simd::scale_complex_slice(amps, factor);
 }
 
-/// Per-simulation device-resident stabilizer tableau.
+/// Device stabilizer tableau.
 ///
-/// Owns two buffers that mirror the CPU tableau layout in
+/// The `xz` and `phase` buffers mirror the CPU tableau layout in
 /// [`crate::backend::stabilizer::StabilizerBackend`]:
 ///
 /// - `xz`: `(2n+1)` rows × `2 * num_words` u64s per row. Word ordering per row is
@@ -465,10 +411,6 @@ pub struct GpuTableau {
 
 impl GpuTableau {
     /// Allocate a fresh identity tableau on the device bound to `context`.
-    ///
-    /// Both buffers are zero-initialised by `GpuBuffer::alloc_zeros`, then a
-    /// `stab_set_initial_tableau` kernel launch sets the destabilizer X-bits
-    /// and stabilizer Z-bits in place. Phase stays all zero (identity).
     pub fn new(context: Arc<GpuContext>, num_qubits: usize) -> Result<Self> {
         let num_words = num_qubits.div_ceil(64);
         let total_rows = 2 * num_qubits + 1;
@@ -493,7 +435,6 @@ impl GpuTableau {
         Ok(tableau)
     }
 
-    /// Qubit count the tableau is sized for.
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }
@@ -507,22 +448,16 @@ impl GpuTableau {
         &mut self.xz
     }
 
-    /// Split-borrow accessor returning both `xz` and `phase` buffers mutably.
-    /// Kernel launchers need to pass both buffers as arguments to the same
-    /// CUDA function, which requires holding concurrent mutable borrows of
-    /// separate fields on the tableau.
     pub(crate) fn xz_phase_mut(&mut self) -> (&mut GpuBuffer<u64>, &mut GpuBuffer<u8>) {
         (&mut self.xz, &mut self.phase)
     }
 
-    /// Split-borrow accessor returning the tableau XZ buffer and the cached
-    /// pivot sentinel scratch used by `stab_measure_find_pivot`.
+    /// The second buffer is the pivot sentinel scratch `stab_measure_find_pivot` writes.
     pub(crate) fn xz_pivot_mut(&mut self) -> (&mut GpuBuffer<u64>, &mut GpuBuffer<i32>) {
         (&mut self.xz, &mut self.measure_pivot)
     }
 
-    /// Split-borrow accessor returning the tableau XZ and phase buffers plus
-    /// the cached one-byte deterministic outcome scratch.
+    /// The third buffer is the one-byte deterministic outcome scratch.
     pub(crate) fn xz_phase_outcome_mut(
         &mut self,
     ) -> (&mut GpuBuffer<u64>, &mut GpuBuffer<u8>, &mut GpuBuffer<u8>) {
@@ -533,10 +468,8 @@ impl GpuTableau {
         2 * self.num_qubits + 1
     }
 
-    /// Copy the full tableau back to host: `xz` as `Vec<u64>`, `phase` as
-    /// `Vec<bool>` (0 → false, non-zero → true). Host shape mirrors the CPU
-    /// `StabilizerBackend` layout exactly; lets golden tests compare tableau
-    /// state byte for byte.
+    /// Copy the tableau to host in the CPU `StabilizerBackend` layout, reading each phase
+    /// byte as `b != 0`.
     pub fn copy_to_host(&self) -> Result<(Vec<u64>, Vec<bool>)> {
         let device = self.context.device();
         let mut xz = vec![0u64; self.xz.len()];
@@ -547,10 +480,8 @@ impl GpuTableau {
         Ok((xz, phase))
     }
 
-    /// Upload `xz` and `phase` host buffers back into the device tableau.
-    /// Used by the GPU measurement path's host copy-back: the CPU measurement
-    /// routine mutates the tableau in-place, then this call syncs the result
-    /// back to device so subsequent gate kernels see the collapsed state.
+    /// Upload host `xz` and `phase` buffers, in the `copy_to_host` layout,
+    /// into the device tableau.
     pub fn copy_from_host(&mut self, xz: &[u64], phase: &[bool]) -> Result<()> {
         let device = self.context.device();
         self.xz.copy_from_host(device, xz)?;
@@ -567,7 +498,6 @@ mod tests {
 
     #[test]
     fn stub_context_reports_available_false() {
-        // Even if a device is present, this test only uses the stub path.
         let ctx = GpuContext::stub_for_tests();
         assert!(ctx.device().is_stub());
     }
@@ -592,10 +522,8 @@ mod tests {
 
     #[test]
     fn min_qubits_default_when_env_unset() {
-        // `min_qubits()` caches its result in a OnceLock at first call. Other
-        // tests and benchmarks in the same process also read it. The invariant
-        // this test enforces is that the cached value is a plausible threshold,
-        // not a specific number (the env var may legitimately override it).
+        // The value is cached per process and the env var may override it, so only
+        // plausibility is checked.
         let n = min_qubits();
         assert!(
             (1..=32).contains(&n),
@@ -615,7 +543,6 @@ mod tests {
     #[test]
     fn stub_fits_statevector_rejects_cleanly() {
         let ctx = GpuContext::stub_for_tests();
-        // Any query should surface the underlying unsupported error.
         assert!(matches!(
             ctx.fits_statevector(4).unwrap_err(),
             PrismError::BackendUnsupported { .. }
@@ -655,8 +582,6 @@ mod tests {
     #[test]
     fn fits_statevector_with_scratch_clamps_overflow_before_device() {
         let ctx = GpuContext::stub_for_tests();
-        // Past the overflow boundary the scratch budget clamps to `Ok(false)`
-        // without touching the (stub) device.
         assert!(!ctx.fits_statevector_with_scratch(128).unwrap());
     }
 
@@ -672,8 +597,6 @@ mod tests {
     #[test]
     fn fits_tableau_clamps_overflow_before_device() {
         let ctx = GpuContext::stub_for_tests();
-        // A qubit count whose tableau byte budget overflows usize must clamp to
-        // `Ok(false)` rather than reaching the device or panicking.
         assert!(!ctx.fits_tableau(usize::MAX / 2).unwrap());
     }
 }

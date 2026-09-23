@@ -7,9 +7,9 @@ use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 
-/// Heisenberg-picture backward propagation of a Pauli through a Clifford gate.
-///
-/// Given P, computes U†·P·U where U is the gate.
+/// Heisenberg-picture backward propagation of a Pauli through a Clifford gate,
+/// `P <- U†·P·U`, up to sign: the frame carries no phase, so `HYH = -Y` lands
+/// as `Y`.
 pub fn propagate_backward(pauli: &mut PauliVec, gate: &Gate, targets: &[usize]) {
     match gate {
         Gate::H => {

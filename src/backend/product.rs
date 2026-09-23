@@ -1,7 +1,7 @@
 //! Product-state simulation backend.
 //!
-//! Represents each qubit independently as a 2-element amplitude vector (α, β).
-//! Exact for circuits with no entangling gates, providing O(n) memory simulation.
+//! Represents each qubit independently as a 2-element amplitude vector (α, β),
+//! exact for circuits with no entangling gates.
 //!
 //! # Memory layout
 //!
@@ -23,9 +23,8 @@
 //!
 //! # When to prefer this backend
 //!
-//! - Circuits with zero entangling gates (e.g., single-qubit randomized benchmarking).
-//! - As a fast validator for single-qubit gate correctness.
-//! - Scales to arbitrarily many qubits with constant per-qubit cost.
+//! - Circuits with zero entangling gates (e.g., single-qubit randomized
+//!   benchmarking), at any width.
 //!
 //! # When NOT to use this backend
 //!

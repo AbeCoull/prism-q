@@ -153,7 +153,6 @@ impl PyCircuit {
         self.0.measurement_map()
     }
 
-    /// Append a gate acting on `targets`.
     fn add_gate(&mut self, gate: &PyGate, targets: Vec<usize>) -> PyPrismResult<()> {
         check_targets(self.0.num_qubits, gate.inner(), &targets)?;
         self.0.add_gate(gate.inner().clone(), &targets);
@@ -177,7 +176,6 @@ impl PyCircuit {
         Ok(())
     }
 
-    /// Append a measurement of `qubit` into `classical_bit`.
     fn add_measure(&mut self, qubit: usize, classical_bit: usize) -> PyPrismResult<()> {
         check_qubit(self.0.num_qubits, qubit, "qubit")?;
         check_classical_bit(self.0.num_classical_bits, classical_bit)?;
@@ -185,7 +183,6 @@ impl PyCircuit {
         Ok(())
     }
 
-    /// Append a reset of `qubit` to |0>.
     fn add_reset(&mut self, qubit: usize) -> PyPrismResult<()> {
         check_qubit(self.0.num_qubits, qubit, "qubit")?;
         self.0.add_reset(qubit);
@@ -201,13 +198,11 @@ impl PyCircuit {
         self.0.add_save(spec.to_core(), label);
     }
 
-    /// Number of save points in the circuit.
     #[getter]
     fn save_count(&self) -> usize {
         self.0.save_count()
     }
 
-    /// Append a barrier across `qubits`.
     fn add_barrier(&mut self, qubits: Vec<usize>) -> PyPrismResult<()> {
         for (idx, &qubit) in qubits.iter().enumerate() {
             check_qubit(self.0.num_qubits, qubit, format!("qubits[{idx}]"))?;
@@ -232,8 +227,8 @@ impl PyCircuit {
     }
 }
 
-/// Fluent builder for quantum circuits. Gate methods return the builder for
-/// chaining; call [`build`](Self::build) to extract the [`Circuit`].
+/// Circuit builder whose gate methods return the builder for chaining;
+/// [`build`](Self::build) extracts the [`Circuit`].
 #[pyclass(name = "CircuitBuilder", module = "prism_q")]
 pub struct PyCircuitBuilder {
     inner: CircuitBuilder,
@@ -370,8 +365,7 @@ impl PyCircuitBuilder {
         Ok(slf)
     }
 
-    /// Deprecated spelling of `param`, kept so published callers keep working.
-    /// Slated for removal in the next minor release.
+    /// Deprecated alias of `param`, to be removed in the next minor release.
     fn trainable(slf: PyRefMut<'_, Self>, slot: usize) -> PyPrismResult<PyRefMut<'_, Self>> {
         Self::param(slf, slot)
     }
@@ -499,7 +493,6 @@ impl PyCircuitBuilder {
         Ok(slf)
     }
 
-    /// Append a gate acting on `targets`.
     fn gate<'py>(
         mut slf: PyRefMut<'py, Self>,
         gate: &PyGate,
@@ -510,8 +503,7 @@ impl PyCircuitBuilder {
         Ok(slf)
     }
 
-    /// Extract the finished circuit. The builder remains usable, so `build()`
-    /// can be called repeatedly and gate methods may be chained afterward.
+    /// Return a copy of the circuit so far. The builder stays usable afterward.
     fn build(&self) -> PyCircuit {
         PyCircuit(self.inner.circuit().clone())
     }

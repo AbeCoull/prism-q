@@ -1,8 +1,4 @@
-//! Error bridging between `prism_q::PrismError` and Python exceptions.
-//!
-//! The orphan rule forbids implementing `From<prism_q::PrismError> for PyErr`
-//! directly, so a local newtype carries the conversion. Binding methods return
-//! `Result<T, PyPrismError>`; PyO3 raises the registered `PrismError` exception.
+//! Error bridging between `prism_q::PrismError` and the Python `PrismError` exception.
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -25,11 +21,7 @@ impl From<prism_q::PrismError> for PyPrismError {
 }
 
 /// Stable discriminant for a [`prism_q::PrismError`], surfaced as the raised
-/// exception's `kind` attribute.
-///
-/// `Display` flattens every variant into one string, so without this a caller
-/// that has to tell a parse failure from an unsupported backend is left
-/// matching on message text.
+/// exception's `kind` attribute so callers need not match on message text.
 fn error_kind(err: &prism_q::PrismError) -> &'static str {
     use prism_q::PrismError as E;
     match err {
@@ -59,7 +51,6 @@ impl From<PyPrismError> for PyErr {
     }
 }
 
-/// Result alias for binding methods that surface `PrismError` to Python.
 pub type PyPrismResult<T> = Result<T, PyPrismError>;
 
 /// Construct an `InvalidParameter` error for binding-layer validation failures.

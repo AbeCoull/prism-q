@@ -1,49 +1,18 @@
-//! Stabilizer tableau kernels. CUDA C source compiled to PTX at runtime, plus launch
-//! helpers in Rust.
+//! Stabilizer tableau kernels and launchers over the `GpuTableau` layout. Phases take one
+//! byte per row rather than one bit so rowmul phase writes need no atomic update, and
+//! every entry point is prefixed `stab_` to stay distinct in the shared PTX module.
 //!
-//! Tableau layout mirrors the CPU `StabilizerBackend`
-//! (`src/backend/stabilizer/mod.rs`):
+//! `stab_rowmul_words` XORs a source row into a destination row with the
+//! Aaronson-Gottesman phase update. It runs as a single block whose threads partition
+//! the `num_words` loop and reduce their per-word phase contributions through a warp
+//! shuffle plus shared memory.
 //!
-//! - `xz`: `(2n+1)` rows × `2 * num_words` u64 words per row. Word ordering per row is
-//!   X-bits in `[0, num_words)` then Z-bits in `[num_words, 2*num_words)`.
-//! - `phase`: `(2n+1)` bytes, one per row (0 = +1, 1 = -1). Bytewise rather than
-//!   bit-packed so rowmul phase writes do not require atomic RMW.
-//! - Scratch row sits at index `2n` and is used only during measurement.
-//!
-//! Every entry-point name is prefixed `stab_` so it cannot collide with the dense
-//! statevector kernels when both sources are concatenated into a single PTX module.
-//!
-//! Landed kernels:
-//!
-//! - `stab_set_initial_tableau`: identity init.
-//! - `stab_apply_batch`: batched dispatch of all eleven Clifford gates
-//!   (H, S, Sdg, X, Y, Z, SX, SXdg, CX, CZ, SWAP) over a host-provided
-//!   op list, one kernel launch per flush.
-//! - `stab_rowmul_words`: XOR source row into destination row with
-//!   Aaronson-Gottesman phase update.
-//! - `stab_measure_find_pivot`, `stab_measure_cascade`,
-//!   `stab_measure_fixup`, `stab_measure_deterministic`: on-device Z-basis
-//!   measurement. Eliminates the tableau copy-back previously needed per
-//!   measure or reset.
-//!
-//! `stab_apply_batch` uses a one-block-per-row strategy across the full
-//! `2n+1`-row tableau. Threads stripe over independent word groups inside the
-//! row, which keeps reads and writes local to one row instead of striding the
-//! same word across many rows. The cross-word tail stays serial on thread 0,
-//! because different ops may still touch different bits in the same packed
-//! u64 word.
-//!
-//! `stab_rowmul_words` launches a single block per call; threads partition
-//! the `num_words` word loop and reduce their per-word phase contributions
-//! via warp-shuffle plus shared memory.
-//!
-//! Measurement orchestrates four small kernels: a pivot search with an
-//! atomicMin sentinel, a cascade that rowmul's the pivot into every row
-//! carrying an X at the target (one block per row, most blocks early-exit),
-//! a single-block fixup that moves pivot data into the paired destabilizer
-//! and installs the measured Z_q, and a deterministic-branch kernel that
-//! serialises rowmul's of stabilisers whose paired destabilisers anticommute
-//! with Z_q into the scratch row and reads its phase.
+//! Z-basis measurement runs as four small kernels: a pivot search with an `atomicMin`
+//! sentinel; a cascade that rowmuls the pivot into every row carrying an X at the
+//! target (one block per row, most blocks exit early); a single-block fixup that moves
+//! the pivot data into the paired destabilizer and installs the measured `Z_q`; and a
+//! deterministic-branch kernel that serially rowmuls, into the scratch row, the
+//! stabilizers whose paired destabilizers anticommute with `Z_q`, then reads its phase.
 
 use cudarc::driver::{CudaSlice, PushKernelArg};
 
@@ -54,21 +23,16 @@ use super::{div_ceil_grid, launch_err, linear_cfg, require_i32, require_u32, str
 
 const BLOCK_SIZE: u32 = 128;
 
-/// Stabilizer CUDA C source. Returned by `kernel_source()` and concatenated into the
-/// combined PTX module alongside the dense kernels. No template substitutions needed:
-/// all tableau shapes are passed as kernel arguments rather than compile-time constants.
+/// Stabilizer CUDA C source, used verbatim: tableau shapes are kernel arguments, not
+/// compile-time constants.
 const KERNEL_SOURCE: &str = include_str!("stabilizer.cu");
 
-/// Return the stabilizer CUDA C source for concatenation into the shared PTX module.
 pub(crate) fn kernel_source() -> String {
     KERNEL_SOURCE.to_string()
 }
 
-/// Initialise a freshly-allocated `GpuTableau` to the identity tableau: destabilizer
-/// rows are X_i, stabilizer rows are Z_i, scratch row is all zero, phase is all zero.
-///
-/// Assumes `xz` and `phase` were allocated via `GpuBuffer::alloc_zeros` (so everything
-/// else is already zero); this kernel only writes the identity bits.
+/// Write the identity bits (destabilizer row `i` is `X_i`, stabilizer row `n + i` is
+/// `Z_i`) into a tableau that must already be zeroed.
 pub(crate) fn launch_set_initial_tableau(ctx: &GpuContext, tableau: &mut GpuTableau) -> Result<()> {
     let (stream, func) = stream_and_fn(ctx, "stab_set_initial_tableau")?;
 
@@ -99,8 +63,7 @@ pub(crate) fn launch_set_initial_tableau(ctx: &GpuContext, tableau: &mut GpuTabl
     Ok(())
 }
 
-/// Clifford opcodes consumed by `stab_apply_batch`. Values are part of the ABI
-/// between the host queue and the batch kernel and must stay in sync with the
+/// Clifford opcodes consumed by `stab_apply_word_grouped`. The values must match the
 /// switch inside the kernel source.
 pub(crate) mod op {
     pub const H: u32 = 0;
@@ -122,23 +85,16 @@ pub(crate) const CLIFOP_STRIDE: usize = 4;
 
 const ZERO_U32: [u32; 1] = [0];
 
-/// Apply a batch of queued Clifford ops to the device tableau in a single
-/// launch.
+/// Apply queued Clifford ops to the device tableau.
 ///
-/// `ops` is a flat `u32` buffer of length `CLIFOP_STRIDE * num_ops` laid out
-/// as `[opcode, a, b, pad]` quads. Opcodes are the constants in [`op`]. The
-/// kernel maps one block to each tableau row, parallelises the disjoint
-/// same-word groups within that row, and leaves the cross-word tail serial
-/// on thread 0 to avoid shared-word races.
-///
-/// Host-side, this streams through `ops` (quads `[opcode, a, b, pad]`),
-/// sorting into word groups keyed by target-word plus a cross-word 2q list.
-/// Conflicts between a newly-enqueued op and the running cross-word qubit
-/// set trigger a partial launch, mirroring the CPU `flush_all_with_cross_word`
-/// discipline in `src/backend/stabilizer/kernels/batch.rs`. The kernel then
-/// amortises memory traffic across every op in a group: one `rx[w]`/`rz[w]`
-/// read and one write per thread per group regardless of how many ops the
-/// group contains.
+/// `ops` is a flat `u32` buffer of `[opcode, a, b, pad]` quads, opcodes from [`op`].
+/// Ops are grouped by target word plus a cross-word 2q list. An op on a qubit a pending
+/// cross-word op already touched forces a launch first, as the CPU
+/// `flush_all_with_cross_word` does. The kernel runs one block per tableau row, so
+/// traffic stays inside that row instead of striding one word across many rows; its
+/// threads stripe over the word groups, read and write each word once per group, and
+/// leave the cross-word tail serial on thread 0 because those ops can touch different
+/// bits of one packed word.
 pub(crate) fn launch_clifford_batch(
     ctx: &GpuContext,
     tableau: &mut GpuTableau,

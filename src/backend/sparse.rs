@@ -2,10 +2,9 @@
 //!
 //! Stores only non-zero amplitudes in a map keyed by basis-state index, giving
 //! O(k) memory where k is the number of non-zero basis states. Entries whose
-//! squared amplitude is at or below a pruning threshold (default 1e-16,
-//! raised via `SparseBackend::set_prune_epsilon`) are dropped after gates
-//! that can shrink or cancel amplitudes, and the kept entries are rescaled
-//! so the state keeps its norm.
+//! squared amplitude is at or below 1e-16 are dropped after gates that can
+//! shrink or cancel amplitudes, and the kept entries are rescaled so the state
+//! keeps its norm.
 //!
 //! Every gate walks the map, so the map hashes basis-state indices with the
 //! crate's multiply-xor hasher rather than the stdlib default.
@@ -25,9 +24,9 @@
 //!
 //! # When to prefer this backend
 //!
-//! - States with few non-zero amplitudes (computational basis states, limited superposition).
+//! - States with few non-zero amplitudes: basis states, classical-like
+//!   circuits, limited branching.
 //! - Large qubit counts where the state stays sparse throughout the circuit.
-//! - Classical-like circuits with limited branching.
 //!
 //! # When NOT to use this backend
 //!
@@ -111,20 +110,17 @@ impl SparseBackend {
         self.state.len()
     }
 
-    /// Set the pruning threshold on squared amplitude magnitude.
+    /// Set the pruning threshold on squared amplitude magnitude; 0 drops exact
+    /// zeros only.
     ///
-    /// Entries with `norm_sqr` at or below `epsilon` are dropped after gates
-    /// that can shrink or cancel amplitudes; 0 drops exact zeros only. The
-    /// construction default of 1e-16 removes only numerical dust and the run
-    /// reports as exact; a larger threshold trades state weight for a smaller
-    /// map, the run reports `Approximate`, and the dropped weight feeds the
-    /// metadata's `fidelity_lower_bound` as a first-order estimate. Lowering
-    /// the threshold again keeps the run reporting `Approximate` until the
-    /// next [`Backend::init`]; the threshold itself survives `init`, the
-    /// accumulated weight does not. Every prune that discards weight rescales
-    /// the kept entries to the norm the state had before it, so probabilities,
-    /// samples, and expectations all see a unit total and the discarded mass
-    /// shows up only in the bound.
+    /// Above the 1e-16 default the run reports `Approximate` until the next
+    /// [`Backend::init`], even if the threshold is lowered again, and the
+    /// dropped weight feeds the metadata's `fidelity_lower_bound` as a
+    /// first-order estimate. The threshold survives `init`; the accumulated
+    /// weight does not. Every prune that discards weight rescales the kept
+    /// entries to the norm the state had before it, so probabilities, samples,
+    /// and expectations all see a unit total and the discarded mass shows up
+    /// only in the bound.
     ///
     /// # Panics
     /// Panics unless `0 <= epsilon < 1`.
@@ -859,15 +855,12 @@ impl Backend for SparseBackend {
     ///
     /// Entries are sorted by basis index so the draw is a deterministic
     /// function of the state, not of map iteration order. Each block of
-    /// `SHOTS_PER_STREAM` shots draws sequentially from a ChaCha8
-    /// substream keyed on the seed and the block index (streams 2 and up;
-    /// the MPS sampler keys per shot, the block grain here amortizes cipher
-    /// setup over draws cheaper than the setup). Blocks fill in parallel
+    /// `SHOTS_PER_STREAM` shots draws from its own ChaCha8 substream keyed on
+    /// the seed and the block index (streams 2 and up). Blocks fill in parallel
     /// only when the CDF holds `MIN_STATES_FOR_PAR` entries; below that,
-    /// fork-join dispatch costs more than the whole sequential pass. Either
-    /// path walks the same partition, so the words are identical at any
-    /// thread count; the drawn bitstrings differ from the dense route's
-    /// single-stream draws by design.
+    /// fork-join dispatch costs more than the whole sequential pass. Either path
+    /// walks the same partition, so the words are identical at any thread
+    /// count. The bitstrings differ from the dense route's single-stream draws.
     fn sample_basis_states(&mut self, num_shots: usize, seed: u64) -> Result<BasisSamples> {
         let mut indices: Vec<usize> = self.state.keys().copied().collect();
         indices.sort_unstable();

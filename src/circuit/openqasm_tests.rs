@@ -800,9 +800,8 @@ fn test_rzz_gate() {
     ));
 }
 
-// `rxx` and `ryy` took a seven-gate basis-change ladder until the native
-// multi-qubit rotation gained a spelling. Equivalence to that ladder is checked
-// numerically in `tests/pauli_rot_correctness.rs`; the shape belongs here.
+// Equivalence to the basis-change ladder is checked numerically in
+// `tests/pauli_rot_correctness.rs`; this pins the parsed shape.
 #[test]
 fn test_rxx_gate() {
     let qasm = "OPENQASM 3.0;\nqubit[2] q;\nrxx(pi/4) q[0], q[1];";
@@ -2941,8 +2940,8 @@ fn test_physical_scan_skips_a_defcal_body() {
     );
 }
 
-// One stray quote used to turn the rest of the program into a string, leaving
-// a later block comment in the source.
+// A quote inside a line comment must not open a string that swallows a later
+// block comment.
 #[test]
 fn test_a_string_ends_at_its_own_line() {
     let qasm = "OPENQASM 3.0;\nqubit[1] q;\n// a \" stray quote\n/* dropped */\nx q[0];";
@@ -2950,9 +2949,7 @@ fn test_a_string_ends_at_its_own_line() {
     assert_eq!(c.instructions.len(), 1);
 }
 
-// The front end reads a token stream, so a statement ends at its `;` and a
-// block at its `}` wherever the newlines fall. Every program here is one the
-// line-oriented reader could not take.
+// A statement ends at its `;` and a block at its `}` wherever the newlines fall.
 #[test]
 fn a_statement_ends_at_its_semicolon_not_its_line() {
     let split = parse("OPENQASM 3.0;\nqubit[2] q;\nh\n  q[0]\n  ;\ncx\n  q[0],\n  q[1];\n")
@@ -3062,8 +3059,7 @@ fn shapes_the_line_reader_let_through_are_rejected() {
     let trailing = parse("qubit[2] q;\ncx q[0], q[1],;\n").expect_err("trailing comma");
     assert!(matches!(trailing, PrismError::Parse { .. }), "{trailing:?}");
 
-    // A second `qubit[1] q;` used to allocate a second register and rebind the
-    // name to it, leaving the first one unreachable.
+    // Rebinding the name would leave the first register unreachable.
     let redeclared = parse("qubit[1] q;\nqubit[1] q;\n").expect_err("redeclared");
     assert!(format!("{redeclared}").contains("already"), "{redeclared}");
 }

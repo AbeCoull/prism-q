@@ -17,7 +17,8 @@
 //! - Element A[α, i, β] at index: `α * (2 * bond_right) + i * bond_right + β`.
 //! - Bond dimension capped at `max_bond_dim`, which has no default: `MpsBackend::new`
 //!   takes it, and automatic dispatch passes 256.
-//! - SVD truncation uses relative tolerance (default 1e-12) AND bond dim cap.
+//! - SVD truncation applies both a relative tolerance (default 1e-12) and the
+//!   bond cap.
 //!
 //! # Gate support
 //!
@@ -160,8 +161,8 @@ impl SiteTensor {
     }
 }
 
-/// CU-phase followed by SWAP: applies controlled-phase then exchanges qubits.
-/// Invariant under qubit reorder (symmetric since phase acts on |11⟩ only).
+/// Controlled phase followed by SWAP, symmetric in the two qubits since the
+/// phase acts on |11⟩ only.
 fn cu_phase_swap_matrix(phase: Complex64) -> [[Complex64; 4]; 4] {
     let z = ZERO;
     let o = ONE;
@@ -388,16 +389,14 @@ impl MpsBackend {
         backend
     }
 
-    /// Set the relative singular-value truncation threshold.
+    /// Set the relative singular-value truncation threshold: each SVD drops
+    /// values at or below `epsilon` times the largest, booked in
+    /// [`Self::truncation_discarded`].
     ///
-    /// Each SVD drops singular values at or below `epsilon` times the largest,
-    /// and the discarded weight reports through [`Self::truncation_discarded`]
-    /// and the run's exactness metadata. The construction default of 1e-12
-    /// keeps every numerically meaningful value, so results stay exact
-    /// wherever the bond cap never bites; a larger threshold trades fidelity
-    /// for lower bond dimension and run time on entangling circuits, and can
-    /// lower the total discarded weight at a fixed cap by cutting low-weight
-    /// Schmidt tails before the cap discards real weight.
+    /// The default 1e-12 keeps every numerically meaningful value. A larger
+    /// threshold trades fidelity for bond dimension, and at a fixed cap can
+    /// lower the total discarded weight by cutting low-weight Schmidt tails
+    /// before the cap discards real weight.
     ///
     /// # Panics
     /// Panics unless `0 <= epsilon < 1`.
@@ -428,9 +427,8 @@ impl MpsBackend {
     /// for an infidelity of 1e-24. Comparing it against a distance reads
     /// twelve orders too small.
     ///
-    /// At the default threshold, epsilon truncation contributes negligibly and
-    /// a meaningful value indicates the bond-dimension cap discarded real
-    /// weight; after [`Self::set_svd_epsilon`] both sources contribute.
+    /// At the default threshold a meaningful value means the bond cap discarded
+    /// real weight; after [`Self::set_svd_epsilon`] both sources contribute.
     ///
     /// A cut that can lose weight takes the orthogonality center onto its own
     /// sites first, so what it books is the error it made rather than a figure
@@ -468,9 +466,8 @@ impl MpsBackend {
         self.truncation_discarded += discarded / total;
     }
 
-    /// Peak bond dimension across all internal bonds. Returns 1 for a
-    /// freshly initialized product state. Intended for diagnostics and
-    /// regression tests that monitor entanglement growth.
+    /// Widest bond the chain holds now, 1 for a product state. The run's peak
+    /// is `Backend::bond_report`.
     pub fn current_max_bond_dim(&self) -> usize {
         self.sites.iter().map(|s| s.bond_right).max().unwrap_or(1)
     }
@@ -491,11 +488,11 @@ impl MpsBackend {
         Ok(())
     }
 
-    /// Inner product between two MPS values that share the same site
-    /// layout. Returns an error if the qubit counts or layout differ.
+    /// `<self|other>` for two chains with the same site layout; an error when
+    /// the qubit counts or layouts differ.
     ///
-    /// Contracts left-to-right through the environment tensor in two
-    /// passes per site, avoiding the naive four-loop sum.
+    /// Contracts left-to-right through the environment tensor in two passes
+    /// per site, `O(n χ³)` against the naive four-index sum.
     pub fn inner_product(&self, other: &Self) -> Result<Complex64> {
         self.inner_product_with_scratch(other, &mut Vec::new(), &mut Vec::new())
     }
@@ -582,10 +579,10 @@ impl MpsBackend {
         Ok(env[0])
     }
 
-    /// Compute `⟨ψ|P|ψ⟩` for a Pauli string `P = ⊗_i P_i` with one
-    /// factor per listed `(qubit, axis)`. Missing factors are implicit
-    /// `I`. Walks the contraction once `(O(N·χ³))` and applies each
-    /// site's Pauli matrix inline; no MPS clone, no gate apply pass.
+    /// `⟨ψ|P|ψ⟩` for the Pauli string with one factor per listed
+    /// `(qubit, axis)`, identity elsewhere. Walks the contraction once
+    /// (`O(N·χ³)`) and applies each site's Pauli matrix inline, with no MPS
+    /// clone and no gate apply pass.
     /// Duplicate factors on the same qubit are rejected.
     pub fn pauli_expectation(&self, pauli_factors: &[(usize, MpsPauliAxis)]) -> Result<Complex64> {
         if self.num_qubits == 0 {
@@ -711,22 +708,17 @@ impl MpsBackend {
         prefixes
     }
 
-    /// MPS site index currently hosting logical qubit `q`. SWAP-routing
-    /// changes this mapping; non-adjacent two-qubit gates are realized
-    /// as sequences of nearest-neighbour SWAPs and grow bond dimension
-    /// in proportion to site-coordinate distance. Anchor-selection
-    /// heuristics in CAMPS use this to score candidate cascades.
+    /// Site currently hosting logical qubit `q`. SWAP routing changes this
+    /// mapping: non-adjacent two-qubit gates run as chains of nearest-neighbour
+    /// SWAPs and grow bond dimension in proportion to site distance. CAMPS
+    /// anchor selection uses this to score candidate cascades.
     pub fn site_for_qubit(&self, q: usize) -> usize {
         self.logical_to_site[q]
     }
 
-    /// Test whether logical qubit `q` has zero marginal probability of
-    /// being measured as `|1⟩`, within `tol`. For a state where qubit
-    /// `q` has just been disentangled by an OFD cascade, this is
-    /// equivalent to qubit `q` being in the pure `|0⟩` state on that
-    /// site.
-    ///
-    /// Computed as `(1 − Re⟨Z_q⟩)/2 < tol` via [`Self::pauli_expectation`].
+    /// Whether `P(q = |1⟩) = (1 − Re⟨Z_q⟩)/2` is below `tol`. For a qubit just
+    /// disentangled by an OFD cascade, this is the qubit being in the pure `|0⟩`
+    /// state on its site.
     pub fn is_qubit_in_zero_state(&self, q: usize, tol: f64) -> Result<bool> {
         let z = self.pauli_expectation(&[(q, MpsPauliAxis::Z)])?;
         let p_one = 0.5 * (1.0 - z.re);
@@ -1939,7 +1931,7 @@ impl MpsBackend {
     /// Apply an N-qubit gate to arbitrary (possibly non-adjacent) qubits.
     ///
     /// SWAP-routes qubits into a contiguous block, applies the gate, then
-    /// reverses the SWAPs. Returns nothing; modifies `self.sites` in place.
+    /// reverses the SWAPs.
     fn apply_n_qubit_gate(
         &mut self,
         gate: &[Complex64],
@@ -2001,7 +1993,6 @@ impl MpsBackend {
     ///
     /// `qubit_order[block_pos]` = the MCU role index for that block position.
     /// The original gate assumes role order 0,1,...,N-1 (controls then target).
-    /// This function permutes the matrix indices to match the block ordering.
     fn reorder_n_gate(
         gate: &[Complex64],
         dim: usize,

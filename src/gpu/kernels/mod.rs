@@ -1,11 +1,6 @@
-//! GPU kernels, PTX source compiled once at device construction, plus per-operation
-//! launcher functions.
-//!
-//! The PTX module is composed by concatenating each backend's CUDA C source (dense for
-//! the statevector path, stabilizer for the stabilizer path). `GpuDevice::new` compiles
-//! the combined source through NVRTC once per source change per host and caches the
-//! PTX; `KERNEL_NAMES` lists every entry point from every backend so it can pre-resolve
-//! them all.
+//! CUDA C kernel sources and launchers, one submodule per backend, plus the shared
+//! scratch and staging helpers. `GpuDevice::new` compiles the concatenated source and
+//! pre-resolves every name in `KERNEL_NAMES`.
 
 pub(crate) mod bts;
 pub(crate) mod dense;
@@ -65,17 +60,11 @@ pub(super) fn div_ceil_grid(op: &str, name: &str, value: usize, block: u32) -> R
     Ok(require_u32(op, name, value)?.div_ceil(block).max(1))
 }
 
-/// Scratch buffers reused across launches that need to upload small per-call
-/// metadata (sorted-qubit lists, packed lookup tables, fused gate matrices).
+/// Grow-only device buffers reused across launches, so a small per-call upload fills a
+/// resident allocation instead of allocating through `clone_htod`.
 ///
-/// Replaces the per-call `clone_htod` allocate-and-upload pattern with a
-/// grow-only resident allocation that callers fill via `copy_from_host`. The
-/// allocation is tied to the `GpuContext`; access is serialised through a
-/// `Mutex` because all dense launches share the same CUDA stream anyway.
-///
-/// Worst case across the dense launchers is one f64 buffer plus three i32
-/// buffers (`launch_apply_batch_rzz`); the four named slots cover every
-/// existing call site without sharing across overlapping arguments.
+/// Tied to the `GpuContext` and serialized through a `Mutex`, since every launch shares
+/// one CUDA stream anyway.
 #[derive(Default)]
 pub(crate) struct LauncherScratch {
     pub(crate) f64_a: Option<GpuBuffer<f64>>,
@@ -178,9 +167,7 @@ pub(crate) fn stage_complex(
     )
 }
 
-/// Ensure `slot` has at least `host.len()` elements allocated, growing if not,
-/// and copy `host` into the slot. Returns the device buffer for argument
-/// passing.
+/// Grow `slot` to at least `host.len()` elements and copy `host` into its start.
 pub(crate) fn ensure_scratch<'a, T: DeviceRepr + ValidAsZeroBits>(
     slot: &'a mut Option<GpuBuffer<T>>,
     device: &GpuDevice,
@@ -200,9 +187,7 @@ pub(crate) fn ensure_scratch<'a, T: DeviceRepr + ValidAsZeroBits>(
     Ok(slot.as_ref().unwrap())
 }
 
-/// Ensure `slot` has at least `needed` elements allocated, growing if not.
-/// Returns a mutable reference suitable for kernel write-targets. Unlike
-/// [`ensure_scratch`], does not perform any host-to-device copy.
+/// Grow `slot` to at least `needed` elements without a host copy, for kernel outputs.
 pub(crate) fn ensure_capacity<'a, T: DeviceRepr + ValidAsZeroBits>(
     slot: &'a mut Option<GpuBuffer<T>>,
     device: &GpuDevice,
@@ -233,11 +218,8 @@ pub(crate) fn ensure_exact<'a>(
     Ok(slot.as_mut().unwrap())
 }
 
-/// Combined CUDA C source for the GPU PTX module.
-///
-/// Concatenates each backend's kernel source. Any new backend that adds its own
-/// module here (for example an MPS GPU path later) would append its source the same
-/// way and register its entry-point names in [`KERNEL_NAMES`].
+/// Combined CUDA C source for the PTX module. A kernel added to any part also needs
+/// its name in [`KERNEL_NAMES`].
 pub(crate) fn kernel_source() -> String {
     let mut src = dense::kernel_source();
     src.push('\n');
@@ -252,8 +234,7 @@ pub(crate) fn kernel_source() -> String {
 /// Every kernel entry point that appears in the materialised PTX source.
 ///
 /// `GpuDevice::new` pre-resolves each name once so gate dispatch does not pay the
-/// driver-lookup cost per launch. New backends extend this list with their own
-/// entry-point names.
+/// driver lookup per launch.
 pub(crate) const KERNEL_NAMES: &[&str] = &[
     // Dense statevector kernels.
     "set_initial_state",

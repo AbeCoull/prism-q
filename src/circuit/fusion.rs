@@ -1,23 +1,6 @@
-//! Single-qubit gate fusion and matrix precomputation pass.
-//!
-//! Scans the instruction stream and fuses consecutive single-qubit gates on the
-//! same target qubit into a single `Gate::Fused` carrying the product matrix.
-//! Gates on different qubits are transparent. They do not break a pending fusion.
-//!
-//! When the pass creates a new instruction stream, ALL single-qubit gates are
-//! emitted as `Gate::Fused` with precomputed matrices, including isolated gates
-//! that have no fusion partner. This avoids redundant `matrix_2x2()` dispatch
-//! during simulation. Identity matrices (from inverse cancellation) are elided.
-//!
-//! # Matrix multiplication order
-//!
-//! Gates applied in circuit order G1, G2, G3 produce fused matrix M = G3 · G2 · G1.
-//! The accumulator multiplies each new gate on the LEFT: `acc = G_new * acc`.
-//!
-//! # Flush triggers
-//!
-//! Two-qubit gates, measurements, and barriers flush pending fusions for every
-//! qubit they touch before the instruction is emitted.
+//! Gate fusion pipeline: self-inverse cancellation, 1q and 2q matrix fusion, and batching
+//! into the tiled and diagonal gate families, each pass gated on a qubit-count floor.
+//! Fused matrices multiply on the left, so gates G1, G2, G3 fuse to G3 · G2 · G1.
 
 use std::borrow::Cow;
 
@@ -39,53 +22,42 @@ use super::plan::{Place, Tracer};
 // `PARALLEL_THRESHOLD_QUBITS` in `backend/mod.rs`), so the fused kernel forms
 // appear at sizes the interpreter can execute. Native values are unchanged.
 
-/// Minimum qubit count for 1q fusion, reorder, and batching passes.
-///
-/// Below 10 qubits, statevectors are small enough that gate execution is
-/// nanoseconds. The instruction-clone cost of fusion passes (allocating output
-/// Vec, cloning non-fuseable instructions) exceeds any simulation savings.
+/// Floor for the 1q fusion, reorder, and batching passes. Below it gate execution takes
+/// nanoseconds and cloning the instruction stream costs more than fusion saves.
 #[cfg(not(miri))]
 const MIN_QUBITS_FOR_FUSION: usize = 10;
 #[cfg(miri)]
 const MIN_QUBITS_FOR_FUSION: usize = 8;
 
-/// Minimum qubit count for multi-gate tiled fusion to be profitable.
 #[cfg(not(miri))]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 14;
 #[cfg(miri)]
 const MIN_QUBITS_FOR_MULTI_FUSION: usize = 8;
 
-/// Minimum qubit count for diagonal-family batch passes (BatchRzz, BatchPhase,
-/// DiagonalBatch) to be profitable. LUT kernel overhead needs enough state size
-/// to amortize.
+/// Floor for the diagonal batch passes (BatchRzz, BatchPhase, DiagonalBatch), whose LUT
+/// setup needs a large state to amortize.
 #[cfg(not(miri))]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 16;
 #[cfg(miri)]
 const MIN_QUBITS_FOR_DIAG_BATCH: usize = 8;
 
-/// Minimum qubit count for post-phase-fusion 1q batching.
-///
-/// After `fuse_controlled_phases`, consecutive 1q gates (H gates in QFT) are
-/// batched into MultiFused for tiled execution. At 16q (1MB, L3-resident),
-/// tiling overhead exceeds savings. Profitable at 18q+ where DRAM bandwidth
-/// dominates.
+/// Floor for batching the 1q runs left after `fuse_controlled_phases` (the H gates in
+/// QFT). At 16q the 1 MB state sits in L3 and tiling costs more than it saves.
 #[cfg(not(miri))]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 18;
 #[cfg(miri)]
 const MIN_QUBITS_FOR_POST_PHASE_BATCH: usize = 8;
 
-/// Minimum qubit count for two-qubit gate fusion (absorb 1q into CX/CZ) to be profitable.
-///
-/// The generic 4×4 kernel does ~4x the FLOPs of specialized CX/CZ + SIMD 1q kernels.
-/// Benchmarked QV and random sweeps show memory-pass reduction wins from 12q.
+/// Floor for absorbing 1q gates into a 2q gate. The generic 4×4 kernel does ~4x the
+/// FLOPs of CX/CZ plus SIMD 1q kernels; the saved memory passes win from 12q on QV and
+/// random sweeps.
 #[cfg(not(miri))]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 12;
 #[cfg(miri)]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 8;
 
-/// Bench-only kill switch for `reorder_disjoint_fused2q`. Reads
-/// `PRISM_NO_REORDER` once and caches the result. Toggle for A/B timing
-/// comparisons without rebuilding.
+/// A/B kill switch: setting `PRISM_NO_REORDER` disables `reorder_disjoint_fused2q`. Read
+/// once per process.
 #[inline]
 fn reorder_2q_enabled() -> bool {
     use std::sync::OnceLock;
@@ -93,16 +65,11 @@ fn reorder_2q_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("PRISM_NO_REORDER").is_none())
 }
 
-/// Minimum qubit count for multi-2q tiled fusion to be profitable.
-///
-/// Batches consecutive Fused2q gates into a single cache-tiled pass. Only
-/// created when Fused2q gates exist, so threshold matches.
+/// Equal to the 2q floor because `Multi2q` batches form only from `Fused2q` gates.
 const MIN_QUBITS_FOR_MULTI_2Q_FUSION: usize = MIN_QUBITS_FOR_2Q_FUSION;
 
-/// Minimum batch size for multi-2q fusion (single gate not worth wrapping).
 const MIN_MULTI_2Q_BATCH: usize = 2;
 
-/// Append `q` to a fused-instruction target list unless already present.
 #[inline]
 pub(super) fn push_unique(qubits: &mut SmallVec<[usize; 4]>, q: usize) {
     if !qubits.contains(&q) {
@@ -110,7 +77,6 @@ pub(super) fn push_unique(qubits: &mut SmallVec<[usize; 4]>, q: usize) {
     }
 }
 
-/// Returns the qubits touched by an instruction.
 fn inst_qubits(inst: &Instruction) -> &[usize] {
     match inst {
         Instruction::Gate { targets, .. } | Instruction::Conditional { targets, .. } => targets,
@@ -133,10 +99,8 @@ fn clear_pending(q: usize, instructions: &[Instruction], pending: &mut [Option<u
     }
 }
 
-/// True if two instructions form a cancelling pair (same self-inverse 2q gate, same targets).
-///
-/// For CX, target order must match exactly (CX(0,1) ≠ CX(1,0)).
-/// For CZ and SWAP, either order matches (symmetric gates).
+/// True if two instructions are the same self-inverse 2q gate on the same targets. CX
+/// needs matching target order; CZ and SWAP are symmetric and match either way.
 fn is_cancelling_pair(a: &Instruction, b: &Instruction) -> bool {
     match (a, b) {
         (
@@ -156,7 +120,6 @@ fn is_cancelling_pair(a: &Instruction, b: &Instruction) -> bool {
             if ta.as_slice() == tb.as_slice() {
                 return true;
             }
-            // CZ and SWAP are symmetric, reversed order also cancels
             matches!(ga, Gate::Cz | Gate::Swap)
                 && ta.len() == 2
                 && tb.len() == 2
@@ -167,11 +130,8 @@ fn is_cancelling_pair(a: &Instruction, b: &Instruction) -> bool {
     }
 }
 
-/// Cancel pairs of self-inverse two-qubit gates (CX·CX, CZ·CZ, SWAP·SWAP).
-///
-/// Tracks pending self-inverse 2q gates per-qubit. When a matching gate appears
-/// with no intervening instruction on the same qubits, both are removed.
-/// Returns `Cow::Borrowed` when no cancellation opportunities exist.
+/// Cancel pairs of self-inverse two-qubit gates (CX·CX, CZ·CZ, SWAP·SWAP) with no
+/// intervening instruction on either qubit. Returns the input borrowed when none cancel.
 pub(crate) fn cancel_self_inverse_pairs<'a>(
     circuit: &'a Circuit,
     t: &mut Tracer,
@@ -317,10 +277,9 @@ fn flush(pending: &mut Option<PendingFusion>, output: &mut Vec<Instruction>, t: 
 
 /// Fuse consecutive single-qubit gates on the same target into one `Gate::Fused`.
 ///
-/// Returns a `Cow::Borrowed` reference to the original circuit when no two
-/// consecutive 1q gates share a qubit (zero overhead), or a `Cow::Owned` new
-/// circuit with fused instructions. The fused circuit produces identical
-/// simulation results.
+/// Gates on other qubits do not break a run. A product that matches a named gate is
+/// emitted as that gate, and an identity product is dropped. Returns the input borrowed
+/// when no two 1q gates fuse.
 pub(crate) fn fuse_single_qubit_gates<'a>(
     circuit: &'a Circuit,
     t: &mut Tracer,
@@ -376,14 +335,9 @@ pub(crate) fn fuse_single_qubit_gates<'a>(
 
 /// Reorder single-qubit gates as early as possible in the instruction stream.
 ///
-/// Moves each 1q gate backward past non-conflicting instructions (those that
-/// don't touch the same qubit). Diagonal 1q gates can also pass through CX
-/// (when on the control qubit) and CZ (on either qubit) via commutation.
-///
-/// This groups 1q gates together, maximizing batching opportunities for the
-/// subsequent `fuse_multi_1q_gates()` pass.
-///
-/// Returns the input unchanged when no gate moves.
+/// Each 1q gate moves backward past instructions on other qubits, and a diagonal 1q gate
+/// also commutes past CX on its control and CZ or Rzz on either qubit. Grouping the 1q
+/// gates gives `fuse_multi_1q_gates` longer runs. Returns the input when no gate moves.
 pub(crate) fn reorder_1q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     let n = circuit.num_qubits;
     // block_all[q] / block_diag[q]: index into non_1q of the last blocker
@@ -496,13 +450,8 @@ pub(crate) fn reorder_1q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) ->
 
 /// Fuse single-qubit gates on distinct qubits into `Gate::MultiFused`.
 ///
-/// Accumulates 1q gates per-qubit across the instruction stream. When a non-1q
-/// instruction is encountered, only the pending gates on the **affected qubits**
-/// are flushed. Gates on unrelated qubits continue accumulating. This produces
-/// fewer but larger MultiFused batches than flushing the entire run at every 2q gate.
-///
-/// Correctness: a 1q gate on qubit q commutes with any multi-qubit gate not
-/// involving q (independent subspaces), so deferring its application is safe.
+/// A non-1q instruction flushes the pending 1q gates on its own qubits only; the rest keep
+/// accumulating, which is sound because a 1q gate on q commutes with any gate not on q.
 pub(crate) fn fuse_multi_1q_gates<'a>(
     circuit: Cow<'a, Circuit>,
     t: &mut Tracer,
@@ -628,19 +577,12 @@ fn has_multi_1q_run(circuit: &Circuit) -> bool {
     false
 }
 
-/// Fuse adjacent single-qubit gates into two-qubit gates.
+/// Absorb pending 1q gates into the following two-qubit gate as a `Gate::Fused2q`.
 ///
-/// Scans for patterns where a CX or CZ gate has pending 1q gates on its qubits.
-/// The 1q gates are absorbed into the 2q gate via Kronecker product,
-/// producing a `Gate::Fused2q` with a 4×4 unitary.
-///
-/// Only CX and CZ are targeted. SWAP and Cu have specialized SIMD kernels;
-/// Cu is excluded to preserve downstream cphase batching.
-///
-/// Algorithm: greedy forward pass, absorbing pre-gates only. Post-gates of one
-/// 2q gate become pre-gates of the next, so most HEA-style patterns are captured.
-///
-/// Returns the input unchanged when no absorption happens.
+/// Targets CX, CZ, `Fused2q`, and two-qubit `PauliRot`. SWAP and Cu keep their SIMD
+/// kernels, and Cu stays unfused so cphase batching still sees it. A greedy forward
+/// pass absorbs pre-gates only; post-gates of one 2q gate become pre-gates of the next,
+/// which captures most HEA-style patterns. Returns the input when nothing is absorbed.
 pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     let identity_2x2 = Gate::Id.matrix_2x2();
     let n = circuit.num_qubits;
@@ -717,11 +659,6 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
     }
 }
 
-/// Cache-tier classification for 2q gates based on max target qubit.
-///
-/// A 2q gate on (q0, q1) fits in a tile of 2^N elements iff max(q0, q1) < N.
-/// L2 tiles = 16384 = 2^14 → max qubit ≤ 13.
-/// L3 tiles = 131072 = 2^17 → max qubit ≤ 16.
 #[inline]
 fn swap_order_4x4(mat: &[[Complex64; 4]; 4]) -> [[Complex64; 4]; 4] {
     let swap = Gate::Swap.matrix_4x4();
@@ -874,10 +811,9 @@ fn flush_pair_run(
 
 /// Fuse contiguous same-pair `Fused2q` runs into one larger `Fused2q`.
 ///
-/// This pass is deliberately narrow: it only consumes existing `Fused2q` gates
-/// and single-qubit gates on the same two qubits, and only emits a fused block
-/// when at least two 2q units are present. All-diagonal runs are left alone so
-/// diagonal batch passes keep their cheaper kernels.
+/// Consumes only `Fused2q` gates and 1q gates on the same pair, and fuses only runs
+/// holding at least two 2q units. All-diagonal runs are left for the cheaper diagonal
+/// batch kernels.
 fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     let circuit = input.as_ref();
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
@@ -950,16 +886,12 @@ fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<
     }
 }
 
-/// Reorder consecutive `Fused2q` gates with pairwise-disjoint qubit supports
-/// so that gates which share one subcube tile sit next to each other.
-/// Disjoint-support 2q gates commute, so reordering is identity-preserving.
+/// Reorder consecutive `Fused2q` gates with pairwise-disjoint supports so that gates
+/// sharing one subcube tile sit next to each other. Disjoint 2q gates commute.
 ///
-/// Random pair circuits such as Quantum Volume emit `Fused2q` streams whose
-/// high qubits are interleaved. The downstream `fuse_multi_2q_gates` batches
-/// consecutive gates while they fit one tile, so without this pass a gate on
-/// a fresh high qubit breaks the run every one or two gates.
-///
-/// Returns `Cow::Borrowed` when no reorder happens.
+/// Quantum Volume interleaves high qubits, so without this pass a gate on a fresh high
+/// qubit ends the `fuse_multi_2q_gates` run every one or two gates. Returns the input
+/// when nothing moves.
 pub(crate) fn reorder_disjoint_fused2q<'a>(
     input: Cow<'a, Circuit>,
     t: &mut Tracer,
@@ -1188,9 +1120,8 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
 
 /// Batch contiguous runs of diagonal gates into `DiagonalBatch` instructions.
 ///
-/// Diagonal gates (Z, S, T, Rz, P, CZ, Rzz, CPhase) commute with each other,
-/// so adjacent diagonal gates can be collapsed into a single pass with precomputed
-/// phase LUTs. Non-diagonal gates on non-involved qubits are deferred past the run.
+/// Diagonal gates (Z, S, T, Rz, P, CZ, Rzz, CPhase) commute, so a run collapses into one
+/// LUT pass. Non-diagonal 1q gates on qubits outside the run are deferred past it.
 fn fuse_diagonal_batch<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     let circuit = input.as_ref();
     let insts = &circuit.instructions;
@@ -1334,15 +1265,10 @@ where
 
 /// Fuse each guarded region's body in isolation.
 ///
-/// Every other pass treats a region as one opaque instruction spanning its
-/// qubit union, so a body would otherwise run entirely unfused. A body is an
-/// ordinary instruction list over the same register, so the pipeline applies to
-/// it unchanged. Nothing moves across the boundary here, and nesting is handled
-/// by the recursive call rather than by descending twice.
-///
-/// The tracer is left alone deliberately: this pass rewrites region payloads in
-/// place, and a region carries no provenance of its own, so the input mapping
-/// still describes the output exactly.
+/// Every other pass treats a region as one opaque instruction, so a body would otherwise
+/// run unfused. Nothing moves across the boundary, and the recursive call handles nesting.
+/// The tracer is untouched: regions carry no provenance, so the input mapping still
+/// describes the output.
 fn fuse_region_bodies<'a>(circuit: &'a Circuit, n: usize) -> Cow<'a, Circuit> {
     let insts = &circuit.instructions;
     let mut out: Option<Vec<Instruction>> = None;
@@ -1378,24 +1304,20 @@ fn fuse_region_bodies<'a>(circuit: &'a Circuit, n: usize) -> Cow<'a, Circuit> {
     }
 }
 
-/// Returns `Cow::Borrowed` when no fusion is profitable (zero overhead).
-/// Set `supports_fused` to `false` for backends that cannot handle fused gates
-/// (e.g., stabilizer).
+/// Run the fusion pipeline with every floor gated at the circuit's own width.
 ///
-/// Gates the passes at the circuit's own width. A backend whose buffer is wider
-/// than a `num_qubits` statevector takes
-/// [`fuse_circuit_for_width`] instead.
+/// Returns the input borrowed when nothing fuses. Pass `supports_fused = false` for
+/// backends that cannot run fused gates (the stabilizer). A backend whose buffer is wider
+/// than a `num_qubits` statevector takes [`fuse_circuit_for_width`] instead.
 pub fn fuse_circuit<'a>(circuit: &'a Circuit, supports_fused: bool) -> Cow<'a, Circuit> {
     fuse_circuit_for_width(circuit, supports_fused, circuit.num_qubits)
 }
 
 /// Fuse for a backend that sweeps a `state_qubits`-wide buffer.
 ///
-/// Every floor here is calibrated against the cost of one statevector pass, so
-/// the gate is buffer width rather than circuit width. They coincide for a
-/// statevector and part company for the density matrix, which holds an
-/// `n`-qubit mixture as a `2n`-qubit statevector and so reaches each floor at
-/// half the circuit width.
+/// The floors are calibrated against one statevector pass, so they gate on buffer width.
+/// A density matrix holds an `n`-qubit mixture as a `2n`-qubit statevector and reaches
+/// each floor at half the circuit width.
 pub fn fuse_circuit_for_width<'a>(
     circuit: &'a Circuit,
     supports_fused: bool,

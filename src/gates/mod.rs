@@ -1,14 +1,6 @@
 //! Gate definitions and matrix representations.
 //!
-//! Gates are represented as an enum for fast dispatch without trait-object overhead
-//! in the simulation hot path. Matrix representations use stack-allocated arrays
-//! to avoid heap allocation during gate application.
-//!
-//! # Hot-path design notes
-//! - `Gate` methods take `&self`, the enum is 16 bytes with large payloads boxed.
-//! - `matrix_2x2` returns `[[Complex64; 2]; 2]` on the stack.
-//! - Two-qubit gates (CX, CZ, SWAP) have dedicated application routines in
-//!   backends rather than materializing a 4×4 matrix.
+//! `Gate` is 16 bytes with large payloads boxed; matrices are returned as stack arrays.
 
 use crate::sim::unified_pauli::PauliAxis;
 use num_complex::Complex64;
@@ -16,25 +8,17 @@ use smallvec::SmallVec;
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
 use std::fmt;
 
-/// Threshold for detecting near-zero matrix elements (norm_sqr).
-///
-/// Used in `preserves_sparsity()` to test if off-diagonal or diagonal entries
-/// are effectively zero, indicating a permutation/diagonal gate structure.
+/// Zero threshold on an entry's `norm_sqr` in `preserves_sparsity`.
 const NEAR_ZERO_NORM_SQ: f64 = 1e-24;
 
-/// Threshold for detecting identity-like matrices (element norm).
-///
-/// Used in `is_diagonal_1q()` for fused gate diagonal detection, in
-/// `controlled_phase()` for phase-gate structure recognition, and by the
-/// fusion pass for the identity drop. `RECOGNIZE_EPS` is held at this value so
-/// the matrix recognizers cannot accept a gate an identity drop would reject.
+/// Per-entry norm tolerance for identity, diagonal, and controlled-phase checks.
+/// `RECOGNIZE_EPS` is held at this value so the matrix recognizers cannot accept a
+/// gate the fusion pass's identity drop would reject.
 pub(crate) const IDENTITY_EPS: f64 = 1e-12;
 
 /// Quantum gate identifier.
 ///
-/// Covers the v0 supported gate set. Most variants are data-free or carry an `f64`
-/// parameter inline. Variants with larger payloads (matrices, batch data) box them
-/// to keep the enum at 16 bytes for cache-friendly instruction streams.
+/// Payloads larger than an `f64` are boxed to hold the enum at 16 bytes.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Gate {
@@ -81,54 +65,40 @@ pub enum Gate {
     /// SWAP. Qubit order: [q0, q1] (symmetric).
     Swap,
 
-    /// Controlled-unitary. Applies the boxed 2×2 matrix to the target qubit
-    /// only when the control qubit is |1⟩. Qubit order: [control, target].
+    /// Controlled-unitary on the target when the control is |1⟩. Qubit order:
+    /// [control, target].
     Cu(Box<[[Complex64; 2]; 2]>),
 
-    /// Multi-controlled unitary. Applies the 2×2 matrix to the target qubit
-    /// only when all control qubits are |1⟩. Qubit order:
-    /// `[ctrl_0, ctrl_1, ..., ctrl_{k-1}, target]`.
+    /// Multi-controlled unitary on the target when every control is |1⟩. Qubit
+    /// order: `[ctrl_0, ctrl_1, ..., ctrl_{k-1}, target]`.
     Mcu(Box<McuData>),
 
     /// Pre-fused single-qubit unitary (product of consecutive gates on the same target).
     Fused(Box<[[Complex64; 2]; 2]>),
 
-    /// Batched controlled-phase: multiple cphase gates sharing a control qubit,
-    /// fused into a single pass over the statevector. Created by the cphase
-    /// fusion pass. Targets: `[control]`. The `BatchPhaseData` holds per-target
-    /// phases.
+    /// Controlled-phase gates sharing a control, applied in one pass. Targets:
+    /// `[control]`.
     BatchPhase(Box<BatchPhaseData>),
 
-    /// Batched ZZ rotations: multiple Rzz gates fused into a single pass.
-    /// Created by the batch-Rzz fusion pass. The `BatchRzzData` holds per-edge
-    /// angles.
+    /// Rzz gates applied in one pass.
     BatchRzz(Box<BatchRzzData>),
 
-    /// Batched diagonal gates: a contiguous run of diagonal 1q and 2q gates
-    /// collapsed into a single state-vector sweep with a precomputed phase LUT.
-    /// Subsumes BatchPhase and BatchRzz for mixed diagonal runs. Created by the
-    /// diagonal batch fusion pass.
+    /// A run of diagonal 1q and 2q gates applied in one sweep through a phase LUT.
     DiagonalBatch(Box<DiagonalBatchData>),
 
-    /// Multiple single-qubit gates on distinct qubits, batched for a single
-    /// tiled pass over the statevector. Created by the multi-gate fusion pass.
+    /// Single-qubit gates on distinct qubits, applied in one tiled pass.
     MultiFused(Box<MultiFusedData>),
 
-    /// Pre-fused two-qubit unitary (4×4 matrix). Created by the 2q fusion pass
-    /// which absorbs adjacent single-qubit gates into a two-qubit gate.
+    /// Pre-fused two-qubit unitary, with adjacent single-qubit gates absorbed.
     Fused2q(Box<[[Complex64; 4]; 4]>),
 
-    /// Multiple two-qubit gates batched for a single tiled pass over the
-    /// statevector. Created by the multi-2q fusion pass. Each entry stores
-    /// `(q0, q1, 4×4 matrix)`.
+    /// Two-qubit gates applied in one tiled pass.
     Multi2q(Box<Multi2qData>),
 
     /// Quantum Fourier Transform on `start..start+num`.
     ///
-    /// The CPU statevector backend has a fast whole-state FFT path. Subrange
-    /// blocks and non-native backends expand to textbook H, cphase, and swap
-    /// gates before execution.
-    /// Boxless: `(u8, u8)` fits within the 16-byte enum slot.
+    /// The CPU statevector runs a whole-state FFT. Subrange blocks and other
+    /// backends expand to textbook H, cphase, and swap gates before execution.
     QftBlock { start: u8, num: u8 },
 
     /// Multi-qubit Pauli rotation `exp(-i θ P / 2)`. The `PauliRotData` letter
@@ -145,12 +115,11 @@ pub enum Gate {
     /// with `targets[0]` the most significant bit of both indices, the packing
     /// [`Gate::matrix_4x4`] uses.
     ///
-    /// Built only by [`Gate::unitary`], which lowers one and two qubit
-    /// matrices and the structured wider ones into the existing variants, so
-    /// this variant carries only what nothing else can. The CPU statevector
-    /// applies it in one gather-scatter pass; the factored, density matrix,
-    /// MPS, and tensor network backends apply it through their dense paths,
-    /// and every other backend declines it by name.
+    /// Built only by [`Gate::unitary`], which lowers one and two qubit matrices
+    /// and the structured wider ones into the existing variants. The CPU
+    /// statevector applies it in one gather-scatter pass; the factored, density
+    /// matrix, MPS, and tensor network backends apply it through their dense
+    /// paths, and every other backend declines it by name.
     Unitary(Box<UnitaryData>),
 }
 
@@ -356,11 +325,10 @@ pub(crate) fn diagonal_batch(mat: &[Complex64], targets: &[usize]) -> Option<Gat
     Some(Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })))
 }
 
-/// Analytic differentiation generator for a parametric gate.
+/// Analytic differentiation generator for a parametric gate, returned by
+/// [`Gate::pauli_generator`].
 ///
-/// Returned by [`Gate::pauli_generator`] and consumed by the adjoint gradient
-/// engine. `Gate` stays 16 bytes: this is produced on demand, never stored in
-/// the enum. Each rotation variant is `exp(-i θ/2 G)` with the named Pauli
+/// Each rotation variant is `exp(-i θ/2 G)` with the named Pauli
 /// generator `G` acting on the gate's `targets` (in order); `Phase` is the
 /// non-Pauli phase gate `diag(1, e^{iθ})` whose generator is the projector
 /// `|1⟩⟨1|` on `targets[0]`. The borrow is of the gate the generator was read
@@ -447,11 +415,8 @@ pub struct McuData {
     pub num_controls: u8,
 }
 
-/// Data for a batched controlled-phase gate.
-///
-/// Multiple cphase gates sharing a control qubit are fused into one pass.
-/// Each entry is `(target_qubit, phase)`. The control qubit is stored in the
-/// instruction's `targets[0]`.
+/// Data for a batched controlled-phase gate: `(target_qubit, phase)` entries, with
+/// the shared control in the instruction's `targets[0]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchPhaseData {
     pub phases: SmallVec<[(usize, Complex64); 8]>,
@@ -464,11 +429,8 @@ impl BatchPhaseData {
     pub const MAX_PHASES: usize = 40;
 }
 
-/// Data for batched ZZ rotations.
-///
-/// Multiple Rzz gates batched into a single pass over the statevector.
-/// Each entry is `(qubit_0, qubit_1, theta)`. All qubits are stored in the
-/// instruction's `targets`.
+/// Data for batched ZZ rotations: `(qubit_0, qubit_1, theta)` entries, with every
+/// qubit also in the instruction's `targets`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchRzzData {
     pub edges: Vec<(usize, usize, f64)>,
@@ -550,20 +512,14 @@ impl DiagEntry {
     }
 }
 
-/// Data for a batched diagonal gate pass.
-///
-/// A contiguous run of diagonal gates collapsed into a precomputed phase LUT.
-/// The `entries` describe individual phase contributions; the kernel extracts
-/// unique qubits, builds a LUT indexed by their bits, and applies in one sweep.
+/// Data for a batched diagonal gate; the kernel builds a phase LUT indexed by the
+/// bits of the distinct qubits in `entries`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiagonalBatchData {
     pub entries: Vec<DiagEntry>,
 }
 
-/// Data for multi-gate single-pass fusion.
-///
-/// Batches consecutive single-qubit gates on distinct qubits into one tiled
-/// pass over the statevector. Each entry is `(target_qubit, 2×2 matrix)`.
+/// Data for a `MultiFused` batch of `(target_qubit, 2×2 matrix)` entries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiFusedData {
     pub(crate) gates: Vec<(usize, [[Complex64; 2]; 2])>,
@@ -591,10 +547,7 @@ impl MultiFusedData {
     }
 }
 
-/// Data for multi-2q tiled pass fusion.
-///
-/// Batches consecutive two-qubit gates into a single cache-tiled pass over the
-/// statevector. Each entry is `(q0, q1, 4×4 matrix)`. Gate order is preserved.
+/// Data for a `Multi2q` batch of `(q0, q1, 4×4 matrix)` entries in circuit order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Multi2qData {
     pub gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
@@ -869,9 +822,8 @@ impl Gate {
     /// Returns the 2×2 unitary matrix for single-qubit gates.
     ///
     /// # Panics
-    /// Panics if called on a multi-qubit or batch gate (`Cx`, `Cz`, `Swap`,
-    /// `Cu`, `Mcu`, `BatchPhase`, `MultiFused`, `Fused2q`, `Multi2q`, a
-    /// `PauliRot` of weight two or more).
+    /// Panics on any variant other than the named single-qubit gates, `Fused`,
+    /// and a weight-1 `PauliRot`.
     #[inline]
     pub fn matrix_2x2(&self) -> [[Complex64; 2]; 2] {
         let zero = Complex64::new(0.0, 0.0);
@@ -1078,7 +1030,7 @@ impl Gate {
         }
     }
 
-    /// Human-readable gate name (for errors, logs, and OpenQASM round-tripping).
+    /// Lowercase gate name, the OpenQASM spelling where one exists.
     #[inline]
     pub fn name(&self) -> &'static str {
         match self {
@@ -1116,7 +1068,7 @@ impl Gate {
         }
     }
 
-    /// Compute the inverse (adjoint) of this gate.
+    /// Adjoint of this gate. Panics on `QftBlock`, which has no in-place inverse.
     pub fn inverse(&self) -> Gate {
         match self {
             Gate::Id | Gate::X | Gate::Y | Gate::Z | Gate::H => self.clone(),
@@ -1201,12 +1153,8 @@ impl Gate {
         }
     }
 
-    /// Return the analytic differentiation generator for a parametric gate,
-    /// or `None` if the gate has no defined generator (all non-parametric
-    /// gates, and parametric gates whose angle is not recoverable from the
-    /// variant, e.g. controlled unitaries built from a boxed matrix). Used by
-    /// the adjoint gradient engine to decide which instructions are
-    /// differentiable.
+    /// Analytic differentiation generator, or `None` for a gate with no angle in
+    /// its variant (non-parametric gates, controlled unitaries built from a matrix).
     #[inline]
     pub fn pauli_generator(&self) -> Option<GeneratorKind<'_>> {
         match self {
@@ -1220,10 +1168,7 @@ impl Gate {
         }
     }
 
-    /// Compute integer power of a single-qubit gate.
-    ///
-    /// Returns the gate raised to the `k`-th power. Negative `k` inverts first.
-    /// Only valid for single-qubit gates.
+    /// `U^k` for a single-qubit gate; negative `k` inverts first.
     pub(crate) fn matrix_power(&self, k: i64) -> Gate {
         debug_assert_eq!(
             self.num_qubits(),
@@ -1317,20 +1262,16 @@ impl Gate {
         Gate::Fused(Box::new(powered))
     }
 
-    /// Create a single-controlled unitary gate with the given 2x2 matrix.
     pub fn cu(mat: [[Complex64; 2]; 2]) -> Gate {
         Gate::Cu(Box::new(mat))
     }
 
-    /// Create a multi-controlled unitary gate with `num_controls` control qubits.
-    ///
-    /// One control returns [`Gate::Cu`], the form every backend has a kernel
-    /// for, so an `Mcu` always carries at least two.
+    /// Multi-controlled unitary with `num_controls` controls. One control returns
+    /// [`Gate::Cu`], so an `Mcu` always carries at least two.
     ///
     /// # Panics
-    /// Panics if `num_controls` is zero. A control-free `Mcu` is a plain
-    /// single-qubit gate the kernels would not apply, so it is rejected here
-    /// rather than dropped; use `Gate::Fused(Box::new(mat))` for that.
+    /// Panics if `num_controls` is zero; use `Gate::Fused(Box::new(mat))` for an
+    /// uncontrolled matrix.
     pub fn mcu(mat: [[Complex64; 2]; 2], num_controls: u8) -> Gate {
         assert!(
             num_controls > 0,
@@ -1383,9 +1324,7 @@ impl Gate {
         })
     }
 
-    /// Create a controlled-phase gate CPhase(θ) = Cu(\[\[1,0\],\[0,e^{iθ}\]\]).
-    ///
-    /// Applies phase e^{iθ} to |11⟩ and identity to all other basis states.
+    /// Controlled-phase gate CPhase(θ) = Cu(\[\[1,0\],\[0,e^{iθ}\]\]).
     pub fn cphase(theta: f64) -> Gate {
         let one = Complex64::new(1.0, 0.0);
         let zero = Complex64::new(0.0, 0.0);
@@ -1393,11 +1332,8 @@ impl Gate {
         Gate::cu([[one, zero], [zero, phase]])
     }
 
-    /// Returns the phase if this is a controlled-phase gate (Cu/Mcu with
-    /// diagonal matrix `[[1,0],[0,e^{iθ}]]`).
-    ///
-    /// Used by backends to dispatch to optimized phase-only kernels that
-    /// touch half the memory of the generic controlled-unitary kernel.
+    /// The phase `e^{iθ}` when this is a `Cu` or `Mcu` of `[[1,0],[0,e^{iθ}]]`,
+    /// which backends route to phase-only kernels.
     #[inline]
     pub fn controlled_phase(&self) -> Option<Complex64> {
         let mat = match self {
@@ -1418,9 +1354,6 @@ impl Gate {
     }
 
     /// True if this is a diagonal single-qubit gate (matrix is `[[a,0],[0,b]]`).
-    ///
-    /// Diagonal gates commute with CX on the control qubit and with CZ on
-    /// either qubit. Used by the commutation-aware reordering pass.
     #[inline]
     pub fn is_diagonal_1q(&self) -> bool {
         match self {
@@ -1437,7 +1370,6 @@ impl Gate {
         }
     }
 
-    /// True if this gate can be absorbed into a `DiagonalBatch`.
     #[inline]
     pub(crate) fn is_diag_batchable(&self) -> bool {
         match self {
@@ -1448,9 +1380,8 @@ impl Gate {
         }
     }
 
-    /// The `DiagEntry` values equivalent to this gate applied on `targets`.
-    ///
-    /// Only valid for gates where `is_diag_batchable()` returns true.
+    /// The `DiagEntry` values equivalent to this gate on `targets`. Only valid when
+    /// `is_diag_batchable()` holds.
     pub(crate) fn diag_entries(&self, targets: &[usize]) -> SmallVec<[DiagEntry; 2]> {
         match self {
             Gate::Cz => {
@@ -1490,18 +1421,13 @@ impl Gate {
         }
     }
 
-    /// True if this is a self-inverse two-qubit gate (applying it twice = identity).
     #[inline]
     pub(crate) fn is_self_inverse_2q(&self) -> bool {
         matches!(self, Gate::Cx | Gate::Cz | Gate::Swap)
     }
 
-    /// True if this gate maps computational basis states to computational basis
-    /// states (with at most a phase). Such gates preserve the number of non-zero
-    /// amplitudes, making the sparse backend optimal (O(1) memory for |0...0⟩).
-    ///
-    /// Includes diagonal gates (Z, S, T, Rz, P, CZ) and permutation gates
-    /// (X, Y, CX, SWAP). Excludes superposition-creating gates (H, Rx, Ry, SX).
+    /// True if this gate maps basis states to basis states up to a phase (diagonal
+    /// and permutation gates), so it keeps the count of non-zero amplitudes.
     #[inline]
     pub(crate) fn preserves_sparsity(&self) -> bool {
         match self {
@@ -1530,15 +1456,11 @@ impl Gate {
         }
     }
 
-    /// Try to recognize a 2x2 unitary matrix as a named gate.
+    /// Recognize a 2x2 unitary as a named gate, so passes downstream of fusion see
+    /// the Cliffords it produced (T·T → S).
     ///
-    /// Used by the fusion pass to emit named gate variants instead of opaque
-    /// `Gate::Fused` matrices, so downstream passes (`clifford_prefix_split`)
-    /// see the Clifford gates that arose from fusion (T·T → S).
-    ///
-    /// The match is exact, not up to a global phase. A named gate carries no
-    /// scalar, so recognizing `e^{iπ/4}·X` as `X` would silently drop the factor
-    /// and leave the fused run disagreeing with the unfused one in amplitude.
+    /// The match is exact, not up to a global phase: a named gate carries no
+    /// scalar, so recognizing `e^{iπ/4}·X` as `X` would change the amplitudes.
     /// Such a product stays a [`Gate::Fused`].
     pub(crate) fn recognize_matrix(mat: &[[Complex64; 2]; 2]) -> Option<Gate> {
         NAMED_1Q_CANDIDATES
@@ -1589,7 +1511,8 @@ impl Gate {
         None
     }
 
-    /// True if this gate is a Clifford gate (relevant for stabilizer backend).
+    /// True for the named Clifford variants; a Clifford carried as a matrix or an
+    /// angle (`Fused`, `Rz(π/2)`) reports false.
     #[inline]
     pub fn is_clifford(&self) -> bool {
         matches!(

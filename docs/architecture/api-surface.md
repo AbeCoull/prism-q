@@ -91,7 +91,7 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 `TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
 `MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
 `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`, `MultiFusedData`,
-`BatchPhaseData`, `McuData`, `Multi2qData`, `UnitaryData`
+`BatchPhaseData`, `McuData`, `Multi2qData`, `UnitaryData`, `RunMetadata`, `BondReport`
 
 **Backends:**
 `StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`,
@@ -112,7 +112,8 @@ that simulation runs inside instead of sizing the process-wide one. See
 **Data types:**
 `CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`,
 `NoisyCompiledSampler`, `NoiseChannel`, `NoiseEvent`, `NoiseModel`, `NoiseBuilder`,
-`GateFilter`, `ReadoutError`, `HomologicalSampler`, `ErrorChainComplex`
+`GateFilter`, `ReadoutError`, `DeviceCalibration`, `QubitCalibration`, `GateCalibration`,
+`HomologicalSampler`, `ErrorChainComplex`
 
 Not re-exported at the root but part of the documented surface: the `Backend` trait and
 `BasisSamples` at `prism_q::backend`, the density matrix backend at
@@ -124,7 +125,8 @@ Not re-exported at the root but part of the documented surface: the `Backend` tr
 Public enums are `#[non_exhaustive]` unless named below. A new gate, backend, engine
 label, error variant, noise channel, truncation policy, dialect, result request or
 result value is an additive release, so a `match` on one from outside the crate keeps a
-wildcard arm.
+wildcard arm. `RunMetadata` is `#[non_exhaustive]` for the same reason: a new field on
+it is additive, and code outside the crate reads it rather than building it.
 
 `Instruction` stays exhaustive. It is the circuit IR, and a new instruction kind
 changes what every consumer has to handle, so adding one is a breaking change.

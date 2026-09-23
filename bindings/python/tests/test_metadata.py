@@ -71,6 +71,24 @@ def test_mps_reports_a_fidelity_bound():
     assert clamped.metadata.backend == "Mps"
 
 
+# The cap, not the exactness label, is what says a run was bound: the same
+# chain reports saturated under a cap it fills and not under one it does not.
+def test_mps_reports_the_peak_bond_against_the_cap():
+    circuit = entangling_brickwork(10, 6)
+
+    clamped = simulate(circuit).backend(BackendKind.mps(2)).seed(42).run()
+    assert clamped.metadata.bond.saturated
+    assert clamped.metadata.bond.peak == 2
+    assert clamped.metadata.bond.cap == 2
+
+    roomy = simulate(circuit).backend(BackendKind.mps(64)).seed(42).run()
+    assert not roomy.metadata.bond.saturated
+    assert 2 < roomy.metadata.bond.peak < 64
+    assert "BondReport(peak=" in repr(roomy.metadata.bond)
+
+    assert simulate(bell()).seed(42).run().metadata.bond is None
+
+
 def test_require_exact_rejects_an_approximate_backend():
     circuit = entangling_brickwork(6, 2)
     assert simulate(circuit).backend(BackendKind.mps(8)).seed(42).run() is not None

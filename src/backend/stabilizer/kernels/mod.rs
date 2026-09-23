@@ -636,6 +636,8 @@ impl StabilizerBackend {
         }
     }
 
+    /// Rebuild the sparse generator index from the rows gates touch: the whole
+    /// tableau when eager, the stabilizer half alone under lazy destabilizers.
     pub(super) fn rebuild_qubit_active(&mut self) {
         let n = self.n;
         let stride = self.stride();
@@ -646,7 +648,7 @@ impl StabilizerBackend {
         }
         self.total_weight = 0;
 
-        for g in 0..2 * n {
+        for g in self.gate_row_start..2 * n {
             let row = &self.xz[g * stride..(g + 1) * stride];
             for w in 0..nw {
                 let active = row[w] | row[nw + w];

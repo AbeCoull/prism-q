@@ -53,7 +53,7 @@ through dispatch.
 | Sparse entry count | `PRISM_MAX_SPARSE_QUBITS` (the map holds at most `2^q` entries) | Same budget at 64 bytes per entry across the double-buffered maps |
 | Factored merged-block width | `PRISM_MAX_FACTORED_MERGE_QUBITS` | Same budget over `Complex64` |
 | MPS gate workspace | `PRISM_MAX_MPS_WORKSPACE_QUBITS` (at most `2^q` amplitudes of live contraction buffers) | Same budget over `Complex64` |
-| Tensor-network peak intermediate | `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate) | Same budget over `Complex64` |
+| Tensor-network peak intermediate | `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate, summed over the slices running at once) | Same budget over `Complex64` |
 | Factored stabilizer merged-cluster width | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | Widest joint tableau fitting the same budget, counted as `2n + 1` rows of `2 * ceil(n / 64)` words and halved to cover the peak while both source tableaux are still live |
 
 The five growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
@@ -114,6 +114,8 @@ Word-group batching fuses multiple 1q gate flushes into single tableau passes. T
 
 Probability extraction uses coset-based enumeration with GF(2) Gaussian elimination. O(2^k) where k is the number of non-diagonal generators, rather than O(2^n).
 
+`export_tableau` returns the rows as `(words, phases)` and `init_from_tableau` accepts the same pair, so a Clifford state prepared by one run can start another (a warm start, or a checkpoint). The packing: `2n + 1` rows of `2 * ceil(n / 64)` `u64` words, destabilizer rows `0..n`, stabilizer rows `n..2n`, then a scratch row the importer ignores. Each row is its X words followed by its Z words, with qubit `q` at bit `q % 64` of word `q / 64` in each half, and `phases[r]` is true when row `r` carries sign -1. The import checks the lengths and that destabilizer `i` anticommutes with stabilizer `i`, nothing more: rows that break the rest of the commutation structure are accepted and produce wrong outcomes without an error. The random stream restarts from the importing backend's seed. The factored backend imports the same pair as one cluster over every qubit, held to the merged-cluster cap, and its `export_tableau` scatters every cluster into that joint layout.
+
 **Factored Stabilizer** (`FactoredStabilizerBackend`): Per-cluster tableaux with dynamic merging. Starts with one qubit per cluster. Cross-cluster 2q gates merge tableaux. Measurement and reset can split independent sub-tableaux again. Independent subsystems avoid full-tableau work when product structure is preserved.
 
 ## Sparse
@@ -136,7 +138,9 @@ Shots and Pauli expectations answer from the per-qubit states rather than the `2
 
 ## Tensor Network
 
-Deferred contraction planned on metadata: a greedy min-size pass picks the pair order, seeded noisy restarts rerun it when the greedy tree's peak intermediate grows large, and the kernel replays the winner. Gates append tensors; contraction happens lazily at probability extraction, where the `PRISM_MAX_PROB_QUBITS` cap guards the dense readout and an explicit run past it errors naming the cap rather than reporting `probabilities: None`. Every contraction, dense or doubled, checks its planned peak intermediate against `PRISM_MAX_TN_PEAK_QUBITS` before allocating.
+Deferred contraction planned on metadata: a greedy min-size pass picks the pair order, seeded noisy restarts rerun it when the greedy tree's peak intermediate grows large, and the kernel replays the winner. Gates append tensors; contraction happens lazily at probability extraction, where the `PRISM_MAX_PROB_QUBITS` cap guards the dense readout and an explicit run past it errors naming the cap rather than reporting `probabilities: None`. Every contraction, dense or doubled, checks its planned peak intermediate against `PRISM_MAX_TN_PEAK_QUBITS` before allocating. A plan over that cap is sliced rather than rejected: legs are fixed one at a time, greedily by the peak each choice buys, and the network is contracted once per assignment and summed, which trades a multiplicative time factor for a divided peak. Only a plan still over the cap once `PRISM_MAX_TN_SLICES` assignments are on the table is rejected, and the rejection names the cap as before. Slices are independent and run through Rayon, but only as many at once as fit under the cap together, so a sliced run holds no more than an unsliced one would. The result is exact.
+
+`BackendKind::TensorNetworkBounded { tolerance }` adds truncation; `BackendKind::TensorNetwork` never truncates. Under the bounded kind, a contraction over the cap first factors an intermediate across the cut separating its partner-facing legs from the rest, keeping the new bond only as far as discarding that fraction of the cut's squared weight allows, and replans; slicing then covers whatever is still over the cap. That route reports `Approximate` with 1 minus the summed per-cut discarded weights, the same first-order estimate the MPS backend reports, and `require_exact()` rejects it.
 
 Measurement and reset do not contract to the dense state: the outcome draws from the single-qubit reduced density matrix and the renormalizing projector is absorbed into the tensor holding the measured qubit's output leg, so the network keeps its deferred form, mid-circuit measurement carries no width ceiling, and the tensor count does not grow across measurements.
 
@@ -287,20 +291,50 @@ any width, and every other pair is served by a dense export of both, which reach
 as far as the export cap does. A noise model on either side is rejected, since the
 fidelity of two mixtures is a different computation.
 
+## Auto dispatch policy
+
+Routing constants are static values in `src/sim/dispatch.rs`. The dense memory
+caps are the exception: `src/backend/memory.rs` derives them from detected
+physical memory. The split is deliberate.
+
+A capability limit is detected. Getting one wrong means an allocation that fails
+or a host that swaps, and physical memory is cheap to read and hard to misread.
+`PRISM_MAX_SV_QUBITS` and its siblings override the derivation for a run that
+knows better than the detection.
+
+A performance threshold stays static, with an environment override where the
+value is worth sweeping. The device crossover is the worked case: a default of
+14 qubits with `PRISM_GPU_MIN_QUBITS` beside it, rather than a figure read off
+the installed card. Detecting one of these means detecting cache geometry or
+device throughput, and a detected value that is wrong is a silent slowdown no
+test catches, where a wrong static default is at least the same slowdown on
+every host and shows up in one measurement. Runtime detection of a performance
+threshold waits for a host that can validate the detection.
+
+Changing a threshold takes a measurement, not an argument. The `auto/crossover`
+group in `benches/circuits.rs` holds both arms at the sizes either side of the
+factored-stabilizer floor, the exact stabilizer-rank budget and the Pauli
+marginals floor, so a boundary is read off the pair rather than argued from the
+constant. The fusion floors and the parallel threshold have no such pair,
+because nothing selects between them at run time: moving one of those means
+building both values and comparing the binaries.
+
 ## What a backend reports about its own result
 
-Three `Backend` methods carry provenance onto every result: `resolved` names the
+Four `Backend` methods carry provenance onto every result: `resolved` names the
 engine, `exactness` says whether its representation can discard state weight and
-how much this run discarded, and `placement` says whether the state lived on the
-device. All three have defaults, so an out-of-tree backend compiles unchanged and
-is named by `Backend::name`.
+how much this run discarded, `placement` says whether the state lived on the
+device, and `bond_report` gives the peak bond dimension against the cap for a
+representation bounded by one. All four have defaults, so an out-of-tree backend
+compiles unchanged and is named by `Backend::name`.
 
 These are reports, not predictions. `exactness` is read after the circuit has
 been applied, so the MPS bound reflects the singular values this run actually
 discarded, and `placement` reflects where the amplitudes ended up after any
-device fallback. The MPS accumulates discarded weight per SVD and returns
-`1 - total` as a fidelity lower bound; the sum is over relative discarded
-weights, so the bound is conservative.
+device fallback. Only the MPS answers `bond_report`, and a peak that reached
+the cap is the hard signal that the cap bound the run. The MPS accumulates
+discarded weight per SVD and returns `1 - total` as a fidelity lower bound; the
+sum is over relative discarded weights, so the bound is conservative.
 
 The decomposed route runs one backend per independent block and merges: its
 exactness is the weakest of the parts, its fidelity bound is the product, and its

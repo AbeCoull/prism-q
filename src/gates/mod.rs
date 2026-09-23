@@ -849,7 +849,8 @@ impl Gate {
     ///
     /// # Panics
     /// Panics if called on a multi-qubit or batch gate (`Cx`, `Cz`, `Swap`,
-    /// `Cu`, `Mcu`, `BatchPhase`, `MultiFused`, `Fused2q`, `Multi2q`).
+    /// `Cu`, `Mcu`, `BatchPhase`, `MultiFused`, `Fused2q`, `Multi2q`, a
+    /// `PauliRot` of weight two or more).
     #[inline]
     pub fn matrix_2x2(&self) -> [[Complex64; 2]; 2] {
         let zero = Complex64::new(0.0, 0.0);
@@ -910,6 +911,11 @@ impl Gate {
                 [[one, zero], [zero, phase]]
             }
             Gate::Fused(mat) => **mat,
+            Gate::PauliRot(data) if data.axes.len() == 1 => match data.axes[0] {
+                PauliAxis::X => Gate::Rx(data.theta).matrix_2x2(),
+                PauliAxis::Y => Gate::Ry(data.theta).matrix_2x2(),
+                PauliAxis::Z => Gate::Rz(data.theta).matrix_2x2(),
+            },
             Gate::Rzz(_)
             | Gate::Cx
             | Gate::Cz
@@ -1297,6 +1303,9 @@ impl Gate {
 
     /// Create a multi-controlled unitary gate with `num_controls` control qubits.
     ///
+    /// One control returns [`Gate::Cu`], the form every backend has a kernel
+    /// for, so an `Mcu` always carries at least two.
+    ///
     /// # Panics
     /// Panics if `num_controls` is zero. A control-free `Mcu` is a plain
     /// single-qubit gate the kernels would not apply, so it is rejected here
@@ -1306,6 +1315,9 @@ impl Gate {
             num_controls > 0,
             "Gate::mcu needs at least one control qubit"
         );
+        if num_controls == 1 {
+            return Gate::cu(mat);
+        }
         Gate::Mcu(Box::new(McuData { mat, num_controls }))
     }
 

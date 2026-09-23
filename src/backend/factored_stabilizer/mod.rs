@@ -528,6 +528,84 @@ impl FactoredStabilizerBackend {
         }
     }
 
+    /// Start from a tableau in the layout
+    /// [`StabilizerBackend::init_from_tableau`](crate::backend::stabilizer::StabilizerBackend::init_from_tableau)
+    /// documents, held as one cluster over every qubit until a measurement or
+    /// reset splits it. Same checks as that import, and the joint tableau is
+    /// held to the merged-cluster qubit cap.
+    pub fn init_from_tableau(
+        &mut self,
+        num_qubits: usize,
+        mut words: Vec<u64>,
+        mut phases: Vec<bool>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        let n = num_qubits;
+        rowops::check_imported_rows(n, &words, &phases)?;
+        if n > self.cluster_cap {
+            return Err(crate::backend::stabilizer_cluster_error(
+                n,
+                self.cluster_cap,
+            ));
+        }
+        let num_words = n.div_ceil(64);
+        words[2 * n * 2 * num_words..].fill(0);
+        phases[2 * n] = false;
+        self.num_qubits = n;
+        self.qubit_to_sub = vec![0; n];
+        self.subs.clear();
+        self.subs.push(Some(SubTableau {
+            n,
+            num_words,
+            xz: words,
+            phase: phases,
+            qubits: (0..n).collect(),
+            lazy_destab: false,
+        }));
+        crate::backend::init_classical_bits(&mut self.classical_bits, num_classical_bits);
+        Ok(())
+    }
+
+    /// The state as one joint tableau in the layout
+    /// [`StabilizerBackend::init_from_tableau`](crate::backend::stabilizer::StabilizerBackend::init_from_tableau)
+    /// accepts: each cluster's rows, destabilizers materialized, scattered to
+    /// their global qubit columns, with the clusters' generator pairs laid out
+    /// one cluster after another.
+    pub fn export_tableau(&self) -> (Vec<u64>, Vec<bool>) {
+        let n = self.num_qubits;
+        let nw = n.div_ceil(64);
+        let stride = 2 * nw;
+        let mut xz = vec![0u64; (2 * n + 1) * stride];
+        let mut phase = vec![false; 2 * n + 1];
+        let mut offset = 0;
+        for sub in self.subs.iter().flatten() {
+            let (sub_xz, sub_phase) = sub.rows_with_destabilizers();
+            let k = sub.n;
+            let sub_stride = sub.stride();
+            for r in 0..2 * k {
+                let dst = if r < k {
+                    offset + r
+                } else {
+                    n + offset + r - k
+                };
+                phase[dst] = sub_phase[r];
+                let src = &sub_xz[r * sub_stride..(r + 1) * sub_stride];
+                let row = &mut xz[dst * stride..(dst + 1) * stride];
+                for (local, &global) in sub.qubits.iter().enumerate() {
+                    let bit = 1u64 << (local % 64);
+                    if src[local / 64] & bit != 0 {
+                        row[global / 64] |= 1u64 << (global % 64);
+                    }
+                    if src[sub.num_words + local / 64] & bit != 0 {
+                        row[nw + global / 64] |= 1u64 << (global % 64);
+                    }
+                }
+            }
+            offset += k;
+        }
+        (xz, phase)
+    }
+
     fn ensure_same_sub(&mut self, targets: &[usize]) -> Result<usize> {
         let first = self.qubit_to_sub[targets[0]];
         let mut need_merge: SmallVec<[usize; 4]> = SmallVec::new();

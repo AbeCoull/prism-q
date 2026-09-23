@@ -71,6 +71,7 @@ variable to anything switches the path off.
 | `PRISM_MAX_FACTORED_MERGE_QUBITS` | detected | Factored merged-block width |
 | `PRISM_MAX_MPS_WORKSPACE_QUBITS` | detected | MPS contraction workspace, at most `2^q` amplitudes |
 | `PRISM_MAX_TN_PEAK_QUBITS` | detected | Largest planned tensor-network intermediate, `2^q` elements |
+| `PRISM_MAX_TN_SLICES` | `1024` | Independent slices a tensor-network contraction may sum over to fit the peak cap (minimum 1; `1` leaves slicing off) |
 | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | detected | Factored stabilizer merged-cluster width |
 | `PRISM_QFT_TWIDDLE_CACHE_LIMIT_MB` | `256` | Soft cap on cached QFT twiddle tables; `0` disables the cache |
 | `PRISM_GPU_MIN_QUBITS` | `14` | Auto GPU crossover qubit count (`gpu` feature) |

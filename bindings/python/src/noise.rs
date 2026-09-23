@@ -5,7 +5,8 @@
 //! simulation release the GIL during a noisy run while still owning the model.
 
 use num_complex::Complex64;
-use prism_q::{NoiseChannel, NoiseEvent, NoiseModel};
+use prism_q::sim::calibration::presets;
+use prism_q::{DeviceCalibration, NoiseChannel, NoiseEvent, NoiseModel};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use smallvec::SmallVec;
@@ -160,6 +161,57 @@ impl PyNoiseModel {
     /// entry answers False and still runs on the stabilizer samplers.
     fn is_pauli_only(&self) -> bool {
         self.inner.is_pauli_only()
+    }
+}
+
+/// A device calibration table: per-qubit coherence times and readout rates,
+/// per-family gate durations and error rates. Lowered onto a circuit by
+/// `to_noise_model`.
+#[pyclass(name = "DeviceCalibration", module = "prism_q", frozen)]
+pub struct PyDeviceCalibration(DeviceCalibration);
+
+#[pymethods]
+impl PyDeviceCalibration {
+    /// Parse the line-oriented text form: `qubit <n> t1= t2= p01= p10=`,
+    /// `gate1q time= error=`, `gate2q time= error=`, `gate2q <a> <b> time= error=`.
+    #[staticmethod]
+    fn parse(text: &str) -> PyPrismResult<Self> {
+        Ok(Self(DeviceCalibration::parse(text)?))
+    }
+
+    /// Illustrative transmon magnitudes, the same on every qubit.
+    #[staticmethod]
+    fn superconducting_transmon(num_qubits: usize) -> Self {
+        Self(presets::superconducting_transmon(num_qubits))
+    }
+
+    /// Illustrative trapped-ion magnitudes, the same on every qubit.
+    #[staticmethod]
+    fn trapped_ion(num_qubits: usize) -> Self {
+        Self(presets::trapped_ion(num_qubits))
+    }
+
+    /// Illustrative neutral-atom magnitudes, the same on every qubit.
+    #[staticmethod]
+    fn neutral_atom(num_qubits: usize) -> Self {
+        Self(presets::neutral_atom(num_qubits))
+    }
+
+    #[getter]
+    fn num_qubits(&self) -> usize {
+        self.0.num_qubits()
+    }
+
+    /// Thermal relaxation and depolarizing after every gate, readout error on
+    /// every measured bit.
+    fn to_noise_model(&self, circuit: &PyCircuit) -> PyPrismResult<PyNoiseModel> {
+        Ok(PyNoiseModel {
+            inner: self.0.to_noise_model(circuit.inner())?,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("DeviceCalibration(num_qubits={})", self.0.num_qubits())
     }
 }
 

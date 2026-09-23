@@ -19,19 +19,19 @@ mod parameter;
 mod qec;
 mod sim;
 
-use backend::PyBackendKind;
+use backend::{PyBackendKind, PyStabilizerBackend};
 use braket::PyBraketProgram;
 use circuit::{PyCircuit, PyCircuitBuilder, PySaveSpec};
 use error::PrismError;
 use gate::PyGate;
 use gpu::PyGpuContext;
-use noise::{PyNoiseChannel, PyNoiseModel};
+use noise::{PyDeviceCalibration, PyNoiseChannel, PyNoiseModel};
 use parameter::{PyParameters, PyPreparedCircuit};
 use qec::{
     PyDecoder, PyDetectorErrorModel, PyQecBasis, PyQecNoise, PyQecProgram, PyQecResult, PyRecordRef,
 };
 use sim::{
-    PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
+    PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
     PyObservableVariance, PyOverlapResult, PyReducedDensityMatrix, PyRunMetadata, PyRunOutcome,
     PyShotsResult, PySimulation,
 };
@@ -46,17 +46,20 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCircuitBuilder>()?;
     m.add_class::<PySaveSpec>()?;
     m.add_class::<PyBackendKind>()?;
+    m.add_class::<PyStabilizerBackend>()?;
     m.add_class::<PyParameters>()?;
     m.add_class::<PyPreparedCircuit>()?;
     m.add_class::<PyGpuContext>()?;
     m.add_class::<crate::distributed::PyDistributedContext>()?;
     m.add_class::<PyNoiseChannel>()?;
     m.add_class::<PyNoiseModel>()?;
+    m.add_class::<PyDeviceCalibration>()?;
     m.add_class::<PySimulation>()?;
     m.add_class::<PyRunOutcome>()?;
     m.add_class::<PyShotsResult>()?;
     m.add_class::<PyCountsResult>()?;
     m.add_class::<PyRunMetadata>()?;
+    m.add_class::<PyBondReport>()?;
     m.add_class::<PyObservableExpectation>()?;
     m.add_class::<PyObservableVariance>()?;
     m.add_class::<PyEntropyResult>()?;

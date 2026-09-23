@@ -541,7 +541,7 @@ pub(crate) fn run_trajectories(
     let mut shots = Vec::with_capacity(num_shots);
     let mut metadata = crate::sim::RunMetadata::exact(route);
     for i in 0..num_shots {
-        let shot_seed = seed.wrapping_add(i as u64);
+        let shot_seed = crate::sim::mix_seed(seed, i);
         let mut rng = noise_rng(shot_seed);
         let mut backend = backend_factory(shot_seed);
         let result = run_trajectory_shot(backend.as_mut(), circuit, noise, &readout, &mut rng)?;
@@ -570,7 +570,7 @@ fn run_trajectories_par(
     let results: Result<Vec<(Vec<bool>, crate::sim::RunMetadata)>> = (0..num_shots)
         .into_par_iter()
         .map(|i| {
-            let shot_seed = seed.wrapping_add(i as u64);
+            let shot_seed = crate::sim::mix_seed(seed, i);
             let mut rng = noise_rng(shot_seed);
             let mut backend = backend_factory(shot_seed);
             let bits = run_trajectory_shot(backend.as_mut(), circuit, noise, &readout, &mut rng)?;

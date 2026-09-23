@@ -2870,7 +2870,7 @@ fn run_expectation_values_reported(
                     circuit,
                     obs,
                     *num_samples,
-                    seed.wrapping_add(i as u64),
+                    mix_seed(seed, i),
                 )?;
                 values.push(r.mean);
                 std_errors.push(r.std_error);
@@ -3501,7 +3501,7 @@ fn run_shots_distributed(
     let mut shots = Vec::with_capacity(num_shots);
     let mut metadata = RunMetadata::exact(ResolvedBackend::Distributed);
     for i in 0..num_shots {
-        let shot_seed = seed.wrapping_add(i as u64);
+        let shot_seed = mix_seed(seed, i);
         let mut backend = DistributedStatevectorBackend::new(context.clone(), shot_seed);
         let result = execute_circuit(&mut backend, &fused, &opts)?;
         metadata.weaken_with(&result.metadata);
@@ -3724,14 +3724,29 @@ fn run_shots_per_shot(
     }
 }
 
+const fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Seed for item `index` (a shot, trajectory, block, qubit or observable) of a run
+/// seeded `seed`. Both inputs pass through SplitMix64, so runs on nearby seeds draw
+/// unrelated streams rather than shifted copies of one another.
+pub(crate) const fn mix_seed(seed: u64, index: usize) -> u64 {
+    splitmix64(splitmix64(seed) ^ index as u64)
+}
+
 /// Each shot evolves its own state, so `shot` returns the provenance of its own
 /// run and the ensemble keeps the weakest claim across them. `route` names the
 /// engine for a zero-shot request, which runs nothing to read provenance off.
 ///
 /// Under the `parallel` feature the shots split across Rayon workers when
 /// [`shots_split_across_workers`] accepts `kind` for `states`, the family and width
-/// of each state one shot holds. Shot `i` always runs on seed `seed + i` and the
-/// fold runs in shot order, so the result does not depend on the thread count.
+/// of each state one shot holds. Shot `i` always runs on `mix_seed(seed, i)` and
+/// the fold runs in shot order, so the result does not depend on the thread
+/// count.
 fn collect_shots(
     circuit: &Circuit,
     num_shots: usize,
@@ -3746,7 +3761,7 @@ fn collect_shots(
         use rayon::prelude::*;
         let runs: Vec<Result<(Vec<bool>, RunMetadata)>> = (0..num_shots)
             .into_par_iter()
-            .map(|i| shot(seed.wrapping_add(i as u64)))
+            .map(|i| shot(mix_seed(seed, i)))
             .collect();
         return fold_shots(circuit, route, runs);
     }
@@ -3755,7 +3770,7 @@ fn collect_shots(
     fold_shots(
         circuit,
         route,
-        (0..num_shots).map(|i| shot(seed.wrapping_add(i as u64))),
+        (0..num_shots).map(|i| shot(mix_seed(seed, i))),
     )
 }
 

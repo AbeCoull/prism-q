@@ -1,8 +1,7 @@
 # Performance and SIMD
 
-Performance is the primary product requirement. This guide explains the mechanisms that
-make PRISM-Q fast and the knobs you can turn. The internals live in the architecture
-reference under [Fusion Pipeline](../architecture/fusion.md) and
+The mechanisms behind PRISM-Q's speed and the knobs that tune them. The internals live in
+the architecture reference under [Fusion Pipeline](../architecture/fusion.md) and
 [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 
 ## The three levers
@@ -23,15 +22,15 @@ reference under [Fusion Pipeline](../architecture/fusion.md) and
 3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
    runtime: AVX2+FMA, FMA or SSE2 on x86_64, NEON on aarch64, scalar elsewhere.
 
-The levers are ordered, and lever 3 comes with a prior question: can the arithmetic be
-removed rather than issued faster? A kernel whose operations an algebraic identity or an
+The levers are ordered, and lever 3 comes after a prior question: whether the arithmetic
+can be removed rather than issued faster. A kernel whose operations an algebraic identity or an
 operator structure deletes is bounded by its memory floor; vectorizing what remains is
 bounded by the complex-arithmetic issue ceiling, near 23% of FMA peak in the interleaved
 layout.
 
 ## Threading
 
-Rayon parallel kernels engage at **≥14 qubits** (below that, thread-pool overhead
+Rayon parallel kernels engage at 14 qubits and above (below that, thread-pool overhead
 dominates), with `MIN_PAR_ELEMS = 4096` per task. The pool defaults to all logical cores.
 
 ```admonish tip title="Control the thread pool"

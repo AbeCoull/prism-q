@@ -1,9 +1,9 @@
 # Clifford+T Simulation
 
 Circuits that mix Clifford gates with a modest number of `T` gates sit between the
-efficient stabilizer regime and the exponential statevector regime. PRISM-Q offers three
-strategies. The right one depends on your T-count, qubit count, and whether you need
-exact answers or can tolerate Monte Carlo error.
+polynomial stabilizer regime and the exponential statevector regime. PRISM-Q has three
+strategies for them, chosen by T-count, qubit count, and whether Monte Carlo error is
+acceptable.
 
 ```admonish tip title="Which strategy?"
 - **Few T gates, exact result needed**: stabilizer rank (`run_stabilizer_rank`).
@@ -29,14 +29,13 @@ as one T each, so `is_clifford_plus_t` and the automatic route treat them like `
 
 ## Stabilizer rank (`src/sim/stabilizer_rank.rs`)
 
-Exact probability output remains capped because it returns a dense vector with
-2^n entries. Shot sampling uses coherent weighted MPS branches instead of a
-dense statevector fallback. Clifford gates mutate each branch state, `T` and
-`Tdg` split branches, and measurement computes outcome probabilities from the
-weighted branch ensemble before projecting every branch to the sampled outcome.
-This removes the hard qubit-count cap from `run_stabilizer_rank_shots`;
-practical scaling is governed by branch count, MPS bond growth, and measurement
-count.
+Exact probability output is capped because it returns a dense vector with 2^n
+entries. Shot sampling carries coherent weighted MPS branches instead of falling
+back to a dense statevector. Clifford gates mutate each branch state, `T` and `Tdg`
+split branches, and measurement computes outcome probabilities from the weighted
+branch ensemble before projecting every branch to the sampled outcome. So
+`run_stabilizer_rank_shots` has no hard qubit cap; branch count, MPS bond growth,
+and measurement count govern how far it scales.
 
 The dense probability path maintains a weighted sum of stabilizer states. Each T
 gate doubles the term count via the `T = alpha*I + beta*Z` decomposition.
@@ -65,7 +64,7 @@ directly.
 
 ## Stochastic Pauli Propagation (`src/sim/unified_pauli.rs`)
 
-Backward-propagates measurement observables as Pauli strings. Clifford gates conjugate in O(1). T gates branch stochastically into two Pauli paths with appropriate weights. Per-path cost O(d×n/64), independent of T-gate count. Returns marginal probabilities via Monte Carlo estimation.
+Backward-propagates measurement observables as Pauli strings. Clifford gates conjugate in O(1). T gates branch stochastically into two weighted Pauli paths. Per-path cost O(d×n/64), independent of T-gate count. Returns marginal probabilities via Monte Carlo estimation.
 
 ```rust
 run_spp(circuit, num_samples, seed) // -> SppResult
@@ -74,7 +73,7 @@ run_spp(circuit, num_samples, seed) // -> SppResult
 ## Deterministic Sparse Pauli Dynamics (`src/sim/unified_pauli.rs`)
 
 Backward-propagates as a weighted sum of Pauli strings stored in a HashMap. T gates
-deterministically branch X/Y terms. Identical strings auto-merge. Exact for small T
+deterministically branch X/Y terms. Identical strings merge. Exact for small T
 counts, approximate with a bounded error for larger ones.
 
 ```rust
@@ -122,14 +121,13 @@ let values = simulate(&circuit)
     .expectation_values(&observables)?;
 ```
 
-The error model is worth stating plainly, because it has two independent parts and only
-one of them is approximate.
+The error has two independent parts, and only one is approximate.
 
 The channels are exact. Each one is applied as its adjoint on the Pauli basis rather than
 as a twirl, so depolarizing, dephasing, thermal relaxation, and amplitude damping all
 reproduce the density matrix to machine precision at `max_terms = 0`. Amplitude damping
-is the case worth naming: it is not unital, and the identity term its adjoint produces
-from `Z` is carried rather than dropped. A channel with no Pauli-basis form (custom
+is not unital, and the identity term its adjoint produces from `Z` is carried rather than
+dropped. A channel with no Pauli-basis form (custom
 Kraus, two-qubit Kraus, readout error) is rejected rather than approximated.
 
 The truncation is the approximate part, and it reports its own bound. With
@@ -139,7 +137,7 @@ and the total dropped magnitude bounds the error in the returned value. That bou
 worst case rather than an estimate: it holds because every remaining operation is a
 contraction in the Pauli 1-norm.
 
-What decides whether the engine is usable is the term count, not the qubit count. Every
+The term count, not the qubit count, decides whether the engine is usable. Every
 non-Clifford rotation in the observable's backward light cone can double the sum; every
 channel shrinks it. Circuits where noise wins stay cheap at widths no dense
 representation reaches, and circuits where it does not will hit the budget and report a

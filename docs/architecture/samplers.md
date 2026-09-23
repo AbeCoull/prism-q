@@ -1,6 +1,6 @@
 # Compiled Samplers
 
-For multi-shot sampling without materializing the full statevector on every shot.
+Multi-shot sampling that does not evolve a full statevector per shot.
 
 ## Noiseless compiled sampler (`src/sim/compiled/`)
 
@@ -8,7 +8,7 @@ For multi-shot sampling without materializing the full statevector on every shot
 
 **Forward path** (`compile_forward`): Tracks stabilizer generator dependencies forward through the circuit. Produces the same parity matrix via dependency tracking.
 
-**Sampling**: Random bits for independent generators, then XOR-cascade through the parity matrix. Multiple dispatch tiers:
+**Sampling**: Random bits for independent generators, then XOR-cascade through the parity matrix. Strategies:
 
 | Strategy | Condition | Method |
 |----------|-----------|--------|
@@ -46,12 +46,11 @@ feed packed detector chunks into any `ShotAccumulator`.
 
 ## Native backend sampling (`Backend::sample_basis_states`)
 
-The compiled samplers above cover Clifford circuits. Everything else used to
-funnel through `Backend::probabilities()`, a dense `2^n` allocation, and sample
-from that, which put a hard qubit ceiling on shots for backends whose state is
-polynomial.
+The compiled samplers above cover Clifford circuits. Any other circuit sampled
+through `Backend::probabilities()` pays a dense `2^n` allocation, which caps shots
+at the dense width even on a backend whose state is polynomial.
 
-Two `Backend` hooks lift it. `supports_native_sampling` declares that a backend
+Two `Backend` hooks lift that cap. `supports_native_sampling` declares that a backend
 draws outcomes from its own representation, and `sample_basis_states(num_shots,
 seed)` returns packed per-qubit outcomes as `BasisSamples`
 (`ceil(n / 64)` words per shot). Seeding is from the argument, not the backend's
@@ -85,7 +84,7 @@ already stores one factor per qubit, so splitting a non-entangling circuit into
 independent blocks pays a backend, a partition, and a merge per block to rebuild
 what one native draw reads off the state, and past 64 qubits the merged block
 distribution has no representation at all. Every other backend keeps the block
-split it had before, which `only_the_product_state_takes_the_native_sampler_past_decomposition`
+split, which `only_the_product_state_takes_the_native_sampler_past_decomposition`
 (`src/sim/tests.rs`) pins from both sides.
 
 MPS records each bit against the logical qubit currently hosted at a site rather
@@ -119,7 +118,7 @@ group has one well-defined axis per qubit it touches.
 the statevector family, with the mean and most group variances served by one
 shared batched traversal (`pauli_expectations_from_masks`). Two strings in a
 QWC group multiply phase-free: shared qubits carry equal axes and cancel to
-identity, so each `P_i P_j` is just another Pauli string, and a small group's
+identity, so each `P_i P_j` is another Pauli string, and a small group's
 `⟨H_g²⟩` expands into pairwise product masks appended to the same traversal
 that serves the term means. A group past the pair budget
 (`MAX_PAIR_MASKS_PER_GROUP`, set where the quadratic expansion would cost
@@ -260,9 +259,8 @@ mean two different things depending on which engine ran it.
 dephasing on both routes, at rates chosen so populations decay as
 `exp(-gate_time/t1)` and coherences as `exp(-gate_time/t2)` toward a steady state
 of `excited_population`. At zero excited population the two operators that excite
-or hold a hot steady state are zero, which leaves the amplitude-damping pair and
-the three-branch unraveling the trajectory route had before the field existed. A mixture of reset
-and `Z` reproduces the population decay but reaches the coherence decay only for
+or hold a hot steady state are zero, leaving the amplitude-damping pair and a
+three-branch trajectory unraveling. A mixture of reset and `Z` reproduces the population decay but reaches the coherence decay only for
 `t2 <= t1`, and needs a negative dephasing probability above it.
 
 All engines sample from the same measurement-record distribution for the noise
@@ -285,8 +283,8 @@ CPU reduction. Golden test: `noisy_compiled_gpu_reductions_match_cpu_statistics`
 
 ## Homological sampler (`src/sim/homological.rs`)
 
-`ErrorChainComplex`: GF(2) chain complex over the circuit's noise locations. Computes the kernel (null space) of the boundary map to identify error cycles that are undetectable by syndrome measurements. `HomologicalSampler` uses this for sampling with topological error correction awareness.
+`ErrorChainComplex`: GF(2) chain complex over the circuit's noise locations. Computes the kernel (null space) of the boundary map to identify error cycles that are undetectable by syndrome measurements. `HomologicalSampler` precomputes the syndrome classes from it, so noise costs O(1) work per shot.
 
-`noisy_marginals_analytical`: Closed-form marginal computation using the parity matrix and noise rates. Avoids Monte Carlo sampling entirely.
+`noisy_marginals_analytical`: closed-form marginals from the parity matrix and noise rates, with no Monte Carlo sampling.
 
 See the [Noise and QEC guide](../guides/qec.md) for how these fit together in practice.

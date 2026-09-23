@@ -1,10 +1,7 @@
 # QEC Program Execution
 
-This page covers the execution architecture behind native QEC programs: the
-runner routing, the compiled row machinery, the circuit lowerings, the noisy
-data flow, the expectation-value estimator paths, and the result shape. The
-data model and text format are defined in the
-[native QEC program IR](./qec-ir.md) page; workflow examples live in the
+How native QEC programs execute. The data model and text format are defined on the
+[native QEC program IR](./qec-ir.md) page, and workflow examples are in the
 [noise and QEC guide](../guides/qec.md). The public entry points are
 `run_qec_program`, `run_qec_program_reference`,
 `run_qec_program_with_strategy`, `run_qec_program_spd_rerouted`, and
@@ -70,11 +67,11 @@ flowchart TD
     F -- no --> P[clean compiled sampler]
 ```
 
-Programs containing `EXP_VAL` ops are routed instead of packed-sampled. The
-placement rules are validated first, then active noise sends the program to
-the density-matrix estimator or `run_qec_program_reference`, detectors send it
-to the two-run split, and the remaining noiseless case runs the analytical
-Auto ladder described under Expectation values.
+Programs containing `EXP_VAL` ops are routed instead of packed-sampled. After the
+placement rules pass, active noise sends the program to the density-matrix estimator or
+`run_qec_program_reference`, detectors send it to the two-run split, and the remaining
+noiseless case runs the analytical Auto ladder described under
+[Expectation values](#expectation-values).
 
 Programs without `EXP_VAL` ops take the packed compiled path. Validation
 rejects non-Clifford gates and reports whether active noise is present.
@@ -133,9 +130,8 @@ postselection parities per shot.
 basis measurements and `MPP` ops into `QecCompiledRows`: one packed X/Z Pauli
 row per measurement record (bitmask words over the qubits), plus detector,
 observable, and postselection rows carried as absolute record indices with
-their expected values. Parity projection delegates to
-`PackedShots::parity_rows`, so the QEC layer reuses the packed parity engine
-of the compiled sampler. The row compiler is a lowering artifact, not an
+their expected values. Parity projection delegates to the compiled sampler's
+`PackedShots::parity_rows`. The row compiler is a lowering artifact, not an
 execution path: it rejects programs containing gates, resets, active noise,
 or `EXP_VAL`.
 
@@ -174,10 +170,6 @@ as positioned events for sensitivity compilation.
 ```admonish note title="V1 reset requirement"
 A measured qubit must be reset before any later gate reuses it, because the
 compiled lowering defers measurements to terminal records.
-`QecOptions::chunk_size` bounds compiled-runner shot batches. When raw
-measurements are omitted, chunking avoids materializing the full
-measurement-record matrix before detector, observable, postselection, and
-logical-error accounting.
 ```
 
 ## Noisy data flow
@@ -309,12 +301,12 @@ directly, with no file in between.
 
 ### Decoding
 
-`UnionFindDecoder` closes the pipeline in-tool: sample, derive, decompose,
-decode, logical error rate, one API. The decoder family is union-find with
-peeling (Delfosse and Nickerson, arXiv:1709.06218), chosen for its
-almost-linear decode cost; a minimum-weight perfect matching decoder remains a
-possible second family behind the same model input if accuracy on hard
-workloads ever justifies its cost.
+`UnionFindDecoder` keeps decoding in the crate, so sampling, model derivation,
+decomposition, decoding, and the logical error rate need no external tool. The decoder
+is union-find with peeling (Delfosse and Nickerson, arXiv:1709.06218), chosen for its
+almost-linear decode cost. A minimum-weight perfect matching decoder could sit behind
+the same model input as a second family if accuracy on hard workloads justifies its
+cost.
 
 `UnionFindDecoder::from_model` compiles a graphlike model: detectors become
 vertices, a two-detector mechanism an internal edge, a one-detector mechanism
@@ -323,8 +315,8 @@ more than two detectors is rejected with a pointer to `decompose_graphlike`.
 Mechanisms flipping no detector cannot enter the graph; their probability mass
 is a floor under the logical error rate of any decoder over the model.
 Mechanisms sharing one detector set collapse to the most probable of them, and
-the mass of single faults this misroutes is measured (not assumed away) by the
-enumeration tests in `tests/qec_decoder.rs`.
+the enumeration tests in `tests/qec_decoder.rs` measure the mass of single faults this
+misroutes.
 
 `decode_packed` maps a `PackedShots` of detector samples (either layout) to
 shot-major predicted observable flips, one bit per observable per shot. Per

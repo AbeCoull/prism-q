@@ -1,9 +1,8 @@
 # Noise and QEC
 
 PRISM-Q models noise and quantum error correction without falling back to a dense
-statevector per shot. The machinery is the [compiled samplers](../architecture/samplers.md)
-and the [native QEC program IR](../architecture/qec-ir.md); this guide shows how they fit
-together.
+statevector per shot, through the [compiled samplers](../architecture/samplers.md) and the
+[native QEC program IR](../architecture/qec-ir.md).
 
 ## Noisy shot sampling
 
@@ -23,9 +22,9 @@ let result = simulate(&circuit)
 
 `NoiseModel` carries a list of `NoiseEvent { channel, qubits }` per instruction, where
 the channel is a `NoiseChannel`: Pauli, depolarizing, readout error, amplitude damping
-and the rest. For Clifford circuits, the noisy
-compiled sampler propagates noise sensitivity rows and XORs fired channels into each
-sample, avoiding per-shot state evolution entirely.
+and the rest. For Clifford circuits, the noisy compiled sampler propagates noise
+sensitivity rows and XORs fired channels into each sample, with no per-shot state
+evolution.
 
 ## Device calibration import
 
@@ -102,11 +101,12 @@ programs.
 ```admonish info title="What QEC programs support"
 Clifford gates, basis resets and measurements, `MPP` Pauli-product measurements,
 detectors, observables, postselection, `X_ERROR` / `Z_ERROR` / `DEPOLARIZE1` /
-`DEPOLARIZE2` noise, and terminal `EXP_VAL` final-state expectation estimates
-(noiseless programs use the analytical T strategies, with any detector records
-still sampled by the packed runner; a noisy program is estimated exactly on the density
-matrix when it fits, and falls to the per-shot reference runner when it carries
-measurement records or postselection or exceeds the density-matrix cap). Non-Clifford gates are rejected on the packed sampling path.
+`DEPOLARIZE2` noise, and terminal `EXP_VAL` final-state expectation estimates.
+A noiseless `EXP_VAL` uses the analytical T strategies, with any detector records
+still sampled by the packed runner. A noisy one is estimated exactly on the density
+matrix when it fits, and falls to the per-shot reference runner when the program
+carries measurement records or postselection or exceeds the density-matrix cap.
+Non-Clifford gates are rejected on the packed sampling path.
 See the [QEC IR reference](../architecture/qec-ir.md) for the full
 grammar, and [QEC program execution](../architecture/qec-programs.md) for the
 runner routing, the V1 reset requirement, and the `EXP_VAL` placement rules.

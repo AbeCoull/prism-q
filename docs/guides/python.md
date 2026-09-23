@@ -136,10 +136,9 @@ outcome = sim.run()
 | `expectation_gradient_shift(h, params)` | `(value, gradient)` via the parameter-shift rule | no | no |
 | `overlap(other)` | `OverlapResult`: `\|<a\|b>\|^2` against a second seeded builder, with one `.metadata` per side | no | yes |
 
-`expectation_values_reported()` is worth calling over `expectation_values()`
-when the route matters: under `auto()` a wide shallow circuit can be answered by
-a tensor contraction rather than by the state vector, and only the metadata says
-which ran. `expectation_gradient_shift()` computes the same gradient as
+Call `expectation_values_reported()` instead of `expectation_values()` when the
+route matters: under `auto()` a wide shallow circuit can be answered by a tensor
+contraction rather than by the state vector, and only the metadata says which ran. `expectation_gradient_shift()` computes the same gradient as
 `expectation_gradient()` at two extra circuit runs per parameter, and is the
 only route on a backend with no adjoint pass. `overlap()` takes a second seeded
 builder, so each side keeps its own backend, seed and start state; both circuits
@@ -148,14 +147,13 @@ must declare the same width and both must be unitary.
 `shots()` and `sample_counts()` average trajectories on any backend holding a
 per-shot pure state. Every row marked "density matrix only" reads the exact mixed state
 instead, so it needs `.backend(BackendKind.density_matrix())`; auto dispatch never
-selects it. There
-the mixture is evolved once and every terminal reads that one evolution, so the
-probabilities are seed independent and the observables carry no sampling error.
-Circuits with mid-circuit measurement or classical conditioning are rejected on
-that route, since the mixture holds every measurement branch at once.
+selects it. There the mixture is evolved once and every terminal reads that one
+evolution, so the probabilities are seed independent and the observables carry no
+sampling error. Circuits with mid-circuit measurement or classical conditioning are
+rejected on that route, since the mixture holds every measurement branch at once.
 
-Terminals that cannot honor a model raise `PrismError` naming the reason, rather
-than silently ignoring it. `state_vector()` honors `.backend(...)` and declines
+Terminals that cannot honor a model raise `PrismError` naming the reason.
+`state_vector()` honors `.backend(...)` and declines
 on a backend holding no pure state, rather than substituting one that does;
 `density_matrix_expectation_values()` always uses the density-matrix backend.
 
@@ -276,10 +274,10 @@ propagation) are only valid from |0...0>: a Clifford circuit produces a
 stabilizer state only when its input is one. So `auto()` resolves to the
 statevector, the GPU and distributed statevectors and `density_matrix()` are the
 only other backends that accept one, and every other choice raises `PrismError`
-naming itself. Every terminal whose table row says
-so carries it; `expectation_gradient()` and `density_matrix_expectation_values()`
-reject it, as do `shots()` and `sample_counts()` with a noise model attached,
-since trajectory replay reinitializes a pure state per shot. To evolve a start
+naming itself. Every terminal whose table row says so carries it;
+`expectation_gradient()` and `density_matrix_expectation_values()` reject it, as
+do `shots()` and `sample_counts()` with a noise model attached, since trajectory
+replay reinitializes a pure state per shot. To evolve a start
 state under noise, read the exact mixture with `run()`, `marginals()`, or
 `expectation_values()` on `density_matrix()`.
 
@@ -396,8 +394,8 @@ it raises `PrismError` rather than falling back. Past construction, routing is
 soft by design and matches the Rust API: `statevector_gpu` runs circuits below
 the crossover (`PRISM_GPU_MIN_QUBITS`, default 14) on the host, `auto_gpu`
 routes each block independently, and a block whose device allocation fails
-degrades to the host rather than erroring. A run that produces host results is
-therefore normal, not a failure signal.
+degrades to the host rather than erroring, so host results are not a failure
+signal.
 
 `stabilizer_gpu` sets its crossover at 100000 qubits
 (`PRISM_STABILIZER_GPU_MIN_QUBITS`), so it runs on the host tableau unless that
@@ -674,7 +672,7 @@ prepared = PreparedCircuit(circuit, params, BackendKind.statevector())
 ```
 
 `reuses_fusion_plan` reports whether the recorded fused structure is being
-replayed. It is a performance fact, not an error: results agree either way.
+replayed. Results agree either way; only the speed differs.
 
 Build a `Parameters` three ways. `builder.parameters()` returns the set recorded
 by `param(slot)`; `Parameters.all_rotations(circuit)` gives every bindable gate
@@ -761,7 +759,7 @@ failures = (predicted[:, 0] != res.observables[:, 0]).sum()
 
 Every failure surfaces as `prism_q.PrismError`, carrying the message from the
 Rust error. Backend limits, unsupported operations, and invalid arguments all
-raise it rather than panicking:
+raise it:
 
 ```python
 import prism_q

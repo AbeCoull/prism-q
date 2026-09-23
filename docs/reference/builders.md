@@ -1,7 +1,7 @@
 # Circuit Builders
 
-Pre-built circuits for benchmarking and testing, in `src/circuits.rs`. Each returns a
-`Circuit` you can pass straight to `simulate(&circuit)` or any backend.
+Prebuilt circuits for benchmarks and tests, in `prism_q::circuits` (`src/circuits.rs`).
+Each returns a `Circuit` ready for `simulate(&circuit)`.
 
 | Function | Description |
 |----------|-------------|
@@ -38,7 +38,5 @@ let circuit = qft_circuit(10);
 let result = simulate(&circuit).seed(42).run().unwrap();
 ```
 
-For hand-built circuits, use the [`CircuitBuilder`](../getting-started/first-circuit.md)
-fluent API instead.
-
-The complete generated API documentation lives on [docs.rs](https://docs.rs/prism-q).
+Hand-built circuits go through [`CircuitBuilder`](../getting-started/first-circuit.md).
+Signatures are on [docs.rs](https://docs.rs/prism-q/latest/prism_q/circuits/).

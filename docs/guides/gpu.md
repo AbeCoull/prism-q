@@ -27,16 +27,14 @@ execution, and compiled BTS sampling. Seven entry points are available:
   family's qubit crossover and fits in VRAM runs on the device. Everything else,
   including a device allocation that fails at `init`, takes the identical CPU path
   (the soft VRAM fallback).
-- **`BackendKind::StatevectorGpu { context }`**. Public dispatch path for statevector
-  GPU execution. It routes through `simulate(circuit).backend(kind).seed(seed).run()`,
-  keeps fusion and subsystem
+- **`BackendKind::StatevectorGpu { context }`**. Routes through
+  `simulate(circuit).backend(kind).seed(seed).run()`, keeps fusion and subsystem
   decomposition, and uses `crate::gpu::min_qubits()` (default 14,
   `PRISM_GPU_MIN_QUBITS` override) to keep small sub-circuits on CPU.
-- **`BackendKind::StabilizerGpu { context }`**. Public dispatch path for stabilizer
-  GPU execution. Gate application uses a device tableau and one word-grouped batched
-  Clifford kernel (`stab_apply_word_grouped`). Measurement and reset keep pivot
-  search, row cascade,
-  phase fixup, and deterministic outcomes on the device. The default crossover stays
+- **`BackendKind::StabilizerGpu { context }`**. Gate application uses a device tableau
+  and one word-grouped batched Clifford kernel (`stab_apply_word_grouped`). Measurement
+  and reset keep pivot search, row cascade, phase fixup, and deterministic outcomes on
+  the device. The default crossover stays
   conservative (`STABILIZER_MIN_QUBITS_DEFAULT = 100_000`,
   `PRISM_STABILIZER_GPU_MIN_QUBITS` override) until benchmarks justify lowering it.
   Direct backend benchmarks should use `StabilizerBackend::with_gpu(ctx)` to exclude
@@ -108,11 +106,11 @@ each applying its sub-gates in shared memory. A pass with fewer than three sub-g
 falls back to per gate launches. `Multi2q` still launches once per sub-gate; rare in
 practice.
 
-**PTX template substitution:** the CUDA C source lives in `.cu` files beside the Rust
-launchers and reaches `KERNEL_SOURCE_TEMPLATE` through `include_str!`. `kernels/dense.cu`
-carries placeholders such as `{{BP_TABLE_SIZE}}` and `{{TILE_Q}}`. The `kernel_source()`
-function substitutes them at device construction from the Rust constants in
-`src/backend/statevector/kernels.rs`, keeping CPU and GPU in sync.
+The CUDA C source lives in `.cu` files beside the Rust launchers and reaches
+`KERNEL_SOURCE_TEMPLATE` through `include_str!`. `kernels/dense.cu` carries placeholders
+such as `{{BP_TABLE_SIZE}}` and `{{TILE_Q}}`, which `kernel_source()` substitutes at
+device construction from the Rust constants in `src/backend/statevector/kernels.rs`, so
+CPU and GPU share one value.
 
 ## Correctness
 

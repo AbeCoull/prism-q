@@ -315,6 +315,7 @@ impl PreparedCircuit {
             && crate::sim::runs_split_across_workers(&self.kind, self.template.num_qubits)
         {
             use rayon::prelude::*;
+            use std::sync::atomic::{AtomicUsize, Ordering};
             let Self {
                 template,
                 params,
@@ -323,22 +324,36 @@ impl PreparedCircuit {
                 skeleton,
                 ..
             } = &*self;
-            let results: Vec<Result<T>> = bindings
-                .par_iter()
-                .map_init(
-                    || {
-                        Self::assemble(
-                            template.clone(),
-                            params.clone(),
-                            kind.clone(),
-                            plan.clone(),
-                            skeleton.clone(),
-                        )
-                    },
-                    |worker, values| eval(worker, values.as_ref()),
-                )
+            // Each worker claims the next unclaimed binding until none remain, so it
+            // builds its copy once. `map_init` builds one per split of the range,
+            // which for a short list is nearly one per binding.
+            let next = AtomicUsize::new(0);
+            let claimed: Vec<Vec<(usize, Result<T>)>> = (0..rayon::current_num_threads())
+                .into_par_iter()
+                .map(|_| {
+                    let mut worker = None;
+                    let mut claimed = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(values) = bindings.get(k) else {
+                            return claimed;
+                        };
+                        let worker = worker.get_or_insert_with(|| {
+                            Self::assemble(
+                                template.clone(),
+                                params.clone(),
+                                kind.clone(),
+                                plan.clone(),
+                                skeleton.clone(),
+                            )
+                        });
+                        claimed.push((k, eval(worker, values.as_ref())));
+                    }
+                })
                 .collect();
-            return results.into_iter().collect();
+            let mut results: Vec<(usize, Result<T>)> = claimed.into_iter().flatten().collect();
+            results.sort_unstable_by_key(|&(k, _)| k);
+            return results.into_iter().map(|(_, result)| result).collect();
         }
         bindings
             .iter()

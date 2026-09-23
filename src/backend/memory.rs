@@ -399,22 +399,38 @@ fn max_tensor_peak_qubits() -> usize {
     })
 }
 
-/// Reject a planned contraction whose peak intermediate of `peak` elements
-/// exceeds the tensor-network peak budget, before the replay allocates it.
-pub(crate) fn check_tensor_peak(backend: &str, operation: &str, peak: usize) -> Result<()> {
+/// Tensor-network peak budget in `Complex64` elements, `usize::MAX` when
+/// detection is disabled. The slicing search compares candidate peaks against
+/// this, so it reads the cap as a count rather than through
+/// [`tensor_peak_error`].
+pub(crate) fn tensor_peak_cap_elements() -> usize {
     let cap = max_tensor_peak_qubits();
-    if cap < usize::BITS as usize && peak > 1usize << cap {
-        return Err(PrismError::IncompatibleBackend {
-            backend: backend.to_string(),
-            reason: format!(
-                "{operation} plans a peak intermediate of {peak} elements ({} bytes), exceeding \
-                 the cap of 2^{cap} elements on this machine \
-                 (set PRISM_MAX_TN_PEAK_QUBITS to override)",
-                peak.saturating_mul(size_of::<Complex64>())
-            ),
-        });
+    if cap >= usize::BITS as usize {
+        usize::MAX
+    } else {
+        1usize << cap
     }
-    Ok(())
+}
+
+/// Rejection for a contraction whose peak of `peak` elements is still over
+/// `cap` once slicing has been tried, raised before the replay allocates it.
+#[cold]
+pub(crate) fn tensor_peak_error(
+    backend: &str,
+    operation: &str,
+    peak: usize,
+    cap: usize,
+) -> PrismError {
+    PrismError::IncompatibleBackend {
+        backend: backend.to_string(),
+        reason: format!(
+            "{operation} plans a peak intermediate of {peak} elements ({} bytes), exceeding \
+             the cap of 2^{} elements on this machine \
+             (set PRISM_MAX_TN_PEAK_QUBITS to override)",
+            peak.saturating_mul(size_of::<Complex64>()),
+            cap.trailing_zeros()
+        ),
+    }
 }
 
 fn dense_output_len(

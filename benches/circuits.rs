@@ -10,7 +10,7 @@ use prism_q::backend::density_matrix::DensityMatrixBackend;
 use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::backend::tensornetwork::TensorNetworkBackend;
 #[cfg(feature = "bench-internal")]
-use prism_q::backend::tensornetwork::scalar_expectation;
+use prism_q::backend::tensornetwork::{scalar_expectation, scalar_expectation_capped};
 use prism_q::circuit::fusion::fuse_circuit;
 use prism_q::circuit::{Circuit, SmallVec};
 use prism_q::circuits;
@@ -1760,6 +1760,65 @@ fn bench_tn_scalar_tree_quality(c: &mut Criterion) {
             });
         });
     }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_sliced_contraction(_c: &mut Criterion) {}
+
+/// The same contraction with the peak cap set below its largest intermediate,
+/// so index slicing runs instead of the cap rejecting.
+///
+/// `tn/scalar_hea_l7` at 50 qubits peaks at 8388608 elements, 128 MB in one
+/// intermediate. A cap of `2^22` halves that, which the search meets with four
+/// slices, so the row prices the slice loop against the whole contraction the
+/// tree-quality group runs. Slices near the cap run one or two at a time,
+/// since only as many run at once as fit under it together. Deeper caps are not pricable here:
+/// at `2^20` the same contraction takes the whole 1024-slice budget and one
+/// iteration runs for minutes. The cap and budget are arguments rather than
+/// environment variables so the rest of the process keeps the real ceiling.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_sliced_contraction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/sliced_hea_l7");
+    configure_group(&mut group);
+
+    let n = 50;
+    let circuit = circuits::hardware_efficient_ansatz(n, 7, SEED);
+    let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+    group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+        b.iter(|| {
+            black_box(
+                scalar_expectation_capped(circ, &observable, 1 << 22, 1 << 10, None).unwrap(),
+            );
+        });
+    });
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internal"))]
+fn bench_tn_bounded_contraction(_c: &mut Criterion) {}
+
+/// The same lowered cap with a truncation tolerance set, so bond truncation
+/// runs ahead of slicing.
+///
+/// Pairs with `tn/sliced_hea_l7`: same circuit, same cap, same budget, and
+/// the tolerance is the only difference, so the row prices what truncation
+/// costs and how much of the slice loop it removes.
+#[cfg(feature = "bench-internal")]
+fn bench_tn_bounded_contraction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/bounded_hea_l7");
+    configure_group(&mut group);
+
+    let n = 50;
+    let circuit = circuits::hardware_efficient_ansatz(n, 7, SEED);
+    let observable = [PauliTerm::z(0), PauliTerm::z(n / 2)];
+    group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+        b.iter(|| {
+            black_box(
+                scalar_expectation_capped(circ, &observable, 1 << 22, 1 << 10, Some(1e-3)).unwrap(),
+            );
+        });
+    });
     group.finish();
 }
 
@@ -4017,6 +4076,8 @@ criterion_group! {
     bench_tn_scalar_depth,
     bench_tn_scalar_wide_deep,
     bench_tn_scalar_tree_quality,
+    bench_tn_sliced_contraction,
+    bench_tn_bounded_contraction,
     bench_tn_rdm_chain,
     bench_tn_midmeasure_chain,
     bench_tn_noisy_chain,

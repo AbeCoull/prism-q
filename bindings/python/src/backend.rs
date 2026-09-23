@@ -44,6 +44,12 @@ impl PyBackendKind {
     fn tensor_network() -> Self {
         Self(BackendKind::TensorNetwork)
     }
+    /// The tensor network with bond truncation at the peak cap, discarding
+    /// at most `tolerance` of each cut's squared weight. Approximate.
+    #[staticmethod]
+    fn tensor_network_bounded(tolerance: f64) -> Self {
+        Self(BackendKind::TensorNetworkBounded { tolerance })
+    }
     #[staticmethod]
     fn factored() -> Self {
         Self(BackendKind::Factored)

@@ -1,8 +1,9 @@
 //! Tensor-network resource caps: the dense probability ceiling and the planned
-//! peak-intermediate cap. Isolated in its own test binary: it overrides
-//! `PRISM_MAX_PROB_QUBITS` and `PRISM_MAX_TN_PEAK_QUBITS`, which the cap
-//! helpers cache per process. Every rejection is decided before the backend
-//! contracts anything, so no test allocates an oversize tensor.
+//! peak-intermediate cap with slicing off. Isolated in its own test binary: it
+//! overrides `PRISM_MAX_PROB_QUBITS`, `PRISM_MAX_TN_PEAK_QUBITS` and
+//! `PRISM_MAX_TN_SLICES`, which are cached per process. Every rejection is
+//! decided before the backend contracts anything, so no test allocates an
+//! oversize tensor.
 
 mod common;
 
@@ -19,10 +20,15 @@ const PROB_CAP: usize = 4;
 /// and stays under it, while a single 6-qubit MCU tensor already holds 4096.
 const PEAK_CAP: usize = 8;
 
+/// A slice budget of 1 leaves index slicing off, so the peak cap rejects
+/// rather than cutting the contraction into pieces that fit.
+const SLICE_BUDGET: &str = "1";
+
 fn small_caps() {
     caps::set_once(&[
         ("PRISM_MAX_PROB_QUBITS", "4"),
         ("PRISM_MAX_TN_PEAK_QUBITS", "8"),
+        ("PRISM_MAX_TN_SLICES", SLICE_BUDGET),
     ]);
 }
 

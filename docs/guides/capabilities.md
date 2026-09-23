@@ -139,6 +139,17 @@ sampling, the probability vector and the exported statevector all rescale on
 read, so the probabilities sum to 1 at any bond cap. The discarded weight the
 bound reports is error in that state, not weight missing from it.
 
+Two tensor-network kinds decide which lever runs at the tensor-network memory
+cap. Under `BackendKind::TensorNetwork` a contraction over the cap is sliced: legs
+are fixed, the network is contracted once per assignment and summed, and the
+answer stays `Exact`. Slicing buys memory with time, since every slice repeats
+the whole contraction, so a query the cap used to refuse can now take many times
+longer than one that fits. `BackendKind::TensorNetworkBounded { tolerance }`
+factors an intermediate first and keeps the new bond only as far as discarding
+`tolerance` of that cut's squared weight allows, then slices whatever is still
+over the cap. It reports `Approximate`, with a bound of 1 minus the summed
+per-cut discarded weights, and `require_exact()` rejects it by name.
+
 `Auto` sends a circuit past the statevector cap to an MPS at a bounded bond
 dimension, which is the only route those circuits have. It is taken by default
 and the result says so. `simulate(...).require_exact()` rejects that route

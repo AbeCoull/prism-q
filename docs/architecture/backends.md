@@ -53,7 +53,7 @@ through dispatch.
 | Sparse entry count | `PRISM_MAX_SPARSE_QUBITS` (the map holds at most `2^q` entries) | Same budget at 64 bytes per entry across the double-buffered maps |
 | Factored merged-block width | `PRISM_MAX_FACTORED_MERGE_QUBITS` | Same budget over `Complex64` |
 | MPS gate workspace | `PRISM_MAX_MPS_WORKSPACE_QUBITS` (at most `2^q` amplitudes of live contraction buffers) | Same budget over `Complex64` |
-| Tensor-network peak intermediate | `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate) | Same budget over `Complex64` |
+| Tensor-network peak intermediate | `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate, summed over the slices running at once) | Same budget over `Complex64` |
 | Factored stabilizer merged-cluster width | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | Widest joint tableau fitting the same budget, counted as `2n + 1` rows of `2 * ceil(n / 64)` words and halved to cover the peak while both source tableaux are still live |
 
 The five growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
@@ -136,7 +136,9 @@ Shots and Pauli expectations answer from the per-qubit states rather than the `2
 
 ## Tensor Network
 
-Deferred contraction planned on metadata: a greedy min-size pass picks the pair order, seeded noisy restarts rerun it when the greedy tree's peak intermediate grows large, and the kernel replays the winner. Gates append tensors; contraction happens lazily at probability extraction, where the `PRISM_MAX_PROB_QUBITS` cap guards the dense readout and an explicit run past it errors naming the cap rather than reporting `probabilities: None`. Every contraction, dense or doubled, checks its planned peak intermediate against `PRISM_MAX_TN_PEAK_QUBITS` before allocating.
+Deferred contraction planned on metadata: a greedy min-size pass picks the pair order, seeded noisy restarts rerun it when the greedy tree's peak intermediate grows large, and the kernel replays the winner. Gates append tensors; contraction happens lazily at probability extraction, where the `PRISM_MAX_PROB_QUBITS` cap guards the dense readout and an explicit run past it errors naming the cap rather than reporting `probabilities: None`. Every contraction, dense or doubled, checks its planned peak intermediate against `PRISM_MAX_TN_PEAK_QUBITS` before allocating. A plan over that cap is sliced rather than rejected: legs are fixed one at a time, greedily by the peak each choice buys, and the network is contracted once per assignment and summed, which trades a multiplicative time factor for a divided peak. Only a plan still over the cap once `PRISM_MAX_TN_SLICES` assignments are on the table is rejected, and the rejection names the cap as before. Slices are independent and run through Rayon, but only as many at once as fit under the cap together, so a sliced run holds no more than an unsliced one would. The result is exact.
+
+`BackendKind::TensorNetworkBounded { tolerance }` adds truncation; `BackendKind::TensorNetwork` never truncates. Under the bounded kind, a contraction over the cap first factors an intermediate across the cut separating its partner-facing legs from the rest, keeping the new bond only as far as discarding that fraction of the cut's squared weight allows, and replans; slicing then covers whatever is still over the cap. That route reports `Approximate` with 1 minus the summed per-cut discarded weights, the same first-order estimate the MPS backend reports, and `require_exact()` rejects it.
 
 Measurement and reset do not contract to the dense state: the outcome draws from the single-qubit reduced density matrix and the renormalizing projector is absorbed into the tensor holding the measured qubit's output leg, so the network keeps its deferred form, mid-circuit measurement carries no width ceiling, and the tensor count does not grow across measurements.
 

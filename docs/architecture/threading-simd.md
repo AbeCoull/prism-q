@@ -83,9 +83,12 @@ comparison run used.
   shot order.
 - **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
   mid-circuit measurement, a condition or a region runs once per shot, and below the
-  parallel threshold those runs split across workers. Shot `i` runs on seed `seed + i`
+  width where the resolved engine's own kernels go parallel those runs split across
+  workers: 14 qubits for dense engines, 128 for a tableau, any width for a product
+  state. Noisy trajectories follow the same rule. Shot `i` runs on seed `seed + i`
   and results fold in shot order, so the shots match separate runs seeded `seed`,
-  `seed + 1`, and so on. Pinned for a dense and a decomposed circuit.
+  `seed + 1`, and so on. Pinned for dense, decomposed, tableau and product-state
+  circuits, and for tableau trajectories.
 - **Parallel reductions: stable to about 1e-12, not bitwise.** Norms, measurement
   collapse probabilities, reduced density matrices, and expectation values sum
   deterministic per-chunk partials in Rayon's combine order, which varies with pool width

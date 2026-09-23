@@ -508,20 +508,10 @@ pub(crate) fn run_trajectory_shot(
     Ok(results)
 }
 
-/// Replica cap for parallel trajectories; at and above it they run serially,
-/// one live backend at a time, and the backend's own `init` cap is the only
-/// limit.
+/// Trajectories split across Rayon workers when `sim::state_splits_across_workers`
+/// accepts `route` at the circuit's width. Otherwise they run serially, one live
+/// backend at a time, and the backend's own `init` cap is the only limit.
 ///
-/// Each Rayon thread holds its own backend, so peak memory is
-/// `threads * state(num_qubits)`: below 14 qubits a statevector replica is
-/// under 256 KiB, so even a large thread pool stays in the tens of megabytes.
-/// The cap is also the backend parallel threshold, where the
-/// statevector kernels already saturate the pool and nesting shot tasks inside
-/// kernel joins piles stolen shot frames onto one worker stack until it
-/// overflows. Same guard as `MAX_BLOCK_QUBITS_FOR_PAR` in the decomposed path.
-#[cfg(feature = "parallel")]
-const MAX_QUBITS_FOR_PAR_SHOTS: usize = 14;
-
 /// `force_serial` keeps every trajectory on one thread. Device-resident
 /// backends set it: parallel trajectories would allocate one device state per
 /// Rayon thread against a single-state VRAM verdict, and concurrent launches
@@ -539,7 +529,10 @@ pub(crate) fn run_trajectories(
     let _ = force_serial;
     #[cfg(feature = "parallel")]
     {
-        if !force_serial && circuit.num_qubits < MAX_QUBITS_FOR_PAR_SHOTS && num_shots >= 4 {
+        if !force_serial
+            && num_shots >= 4
+            && crate::sim::state_splits_across_workers(route, circuit.num_qubits)
+        {
             return run_trajectories_par(&backend_factory, circuit, noise, num_shots, seed, route);
         }
     }
@@ -604,7 +597,7 @@ mod tests {
     use crate::circuits;
 
     // The replica cap is only a memory bound if it stays at or below the cap
-    // governing a single state. Raising `MAX_QUBITS_FOR_PAR_SHOTS` past the
+    // governing a single state. Splitting statevector trajectories past the
     // statevector cap would let the parallel path allocate one oversize state
     // per thread, which is the failure `run_trajectories` avoids by falling
     // back to serial execution.
@@ -612,15 +605,13 @@ mod tests {
     #[test]
     fn parallel_trajectory_replicas_stay_within_a_single_state_cap() {
         let cap = crate::backend::max_statevector_qubits();
+        let statevector = crate::sim::ResolvedBackend::Statevector;
+        let replica_cap = (1..)
+            .find(|&n| !crate::sim::state_splits_across_workers(statevector, n))
+            .unwrap();
         assert!(
-            MAX_QUBITS_FOR_PAR_SHOTS <= cap,
-            "parallel replica cap {MAX_QUBITS_FOR_PAR_SHOTS} exceeds the statevector cap {cap}"
-        );
-        let replica_bytes = (1usize << MAX_QUBITS_FOR_PAR_SHOTS) * size_of::<Complex64>();
-        assert_eq!(
-            replica_bytes,
-            256 * 1024,
-            "replica size documented as 256 KiB"
+            replica_cap <= cap,
+            "parallel replica cap {replica_cap} exceeds the statevector cap {cap}"
         );
     }
 

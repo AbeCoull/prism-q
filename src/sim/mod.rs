@@ -1435,16 +1435,25 @@ fn shots_from_initial_state(
     let expanded = expand_for_backend(&*probe, circuit);
     let fused = fuse_for_backend(&*probe, &expanded);
 
-    let (route, width) = (plan.resolved(), circuit.num_qubits);
-    collect_shots(circuit, num_shots, seed, route, kind, width, |shot_seed| {
-        let mut backend = plan.build(shot_seed);
-        state.load(&mut *backend, circuit.num_classical_bits)?;
-        backend.apply_instructions(&fused.instructions)?;
-        Ok((
-            backend.classical_results().to_vec(),
-            backend_metadata(&*backend),
-        ))
-    })
+    let route = plan.resolved();
+    let states = [(route, circuit.num_qubits)];
+    collect_shots(
+        circuit,
+        num_shots,
+        seed,
+        route,
+        kind,
+        &states,
+        |shot_seed| {
+            let mut backend = plan.build(shot_seed);
+            state.load(&mut *backend, circuit.num_classical_bits)?;
+            backend.apply_instructions(&fused.instructions)?;
+            Ok((
+                backend.classical_results().to_vec(),
+                backend_metadata(&*backend),
+            ))
+        },
+    )
 }
 
 fn marginals_from_initial_state(
@@ -2040,18 +2049,7 @@ fn run_batch_entry(
 /// bound to one device or rank context.
 #[cfg(feature = "parallel")]
 pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -> bool {
-    #[cfg(feature = "gpu")]
-    if matches!(
-        kind,
-        BackendKind::AutoGpu { .. }
-            | BackendKind::StatevectorGpu { .. }
-            | BackendKind::DensityMatrixGpu { .. }
-            | BackendKind::StabilizerGpu { .. }
-    ) {
-        return false;
-    }
-    #[cfg(feature = "distributed")]
-    if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
+    if bound_to_one_context(kind) {
         return false;
     }
     let width = if kind.is_density_matrix() {
@@ -2060,6 +2058,52 @@ pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -
         num_qubits
     };
     width < crate::backend::PARALLEL_THRESHOLD_QUBITS
+}
+
+/// Whether per-shot runs on `kind` should split across Rayon workers, given the
+/// resolved family and width of each state one shot holds. See
+/// [`state_splits_across_workers`] for the per-state rule.
+#[cfg(feature = "parallel")]
+fn shots_split_across_workers(kind: &BackendKind, states: &[(ResolvedBackend, usize)]) -> bool {
+    !bound_to_one_context(kind)
+        && states
+            .iter()
+            .all(|&(family, width)| state_splits_across_workers(family, width))
+}
+
+/// Whether separate runs each holding one `width`-qubit state of `family` should
+/// split across Rayon workers: only below the width where that family's own
+/// kernels go parallel, since each worker holds a state and a shot task nested
+/// inside kernel joins can pile stolen frames onto one worker stack.
+///
+/// A tableau parallelizes its row loops only from `MIN_QUBITS_FOR_PAR_GATES`
+/// qubits, and a product state parallelizes no gate, measurement or reset. A
+/// density matrix counts at twice its width.
+#[cfg(feature = "parallel")]
+pub(crate) fn state_splits_across_workers(family: ResolvedBackend, width: usize) -> bool {
+    use crate::backend::{MIN_QUBITS_FOR_PAR_GATES, PARALLEL_THRESHOLD_QUBITS};
+    match family {
+        ResolvedBackend::Stabilizer | ResolvedBackend::FactoredStabilizer => {
+            width < MIN_QUBITS_FOR_PAR_GATES
+        }
+        ResolvedBackend::ProductState => true,
+        ResolvedBackend::DensityMatrix => 2 * width < PARALLEL_THRESHOLD_QUBITS,
+        _ => width < PARALLEL_THRESHOLD_QUBITS,
+    }
+}
+
+#[cfg(feature = "parallel")]
+fn bound_to_one_context(kind: &BackendKind) -> bool {
+    match kind {
+        #[cfg(feature = "gpu")]
+        BackendKind::AutoGpu { .. }
+        | BackendKind::StatevectorGpu { .. }
+        | BackendKind::DensityMatrixGpu { .. }
+        | BackendKind::StabilizerGpu { .. } => true,
+        #[cfg(feature = "distributed")]
+        BackendKind::StatevectorDistributed { .. } => true,
+        _ => false,
+    }
 }
 
 /// The plan a circuit can share, or `None` when it must run on its own.
@@ -3571,11 +3615,20 @@ fn run_shots_per_shot(
     if has_temporal_clifford_opportunity(&kind, circuit) {
         if decompose.is_none() {
             if let Some(tc) = plan_temporal_clifford(&kind, circuit) {
-                let (route, width) = (ResolvedBackend::Statevector, circuit.num_qubits);
-                return collect_shots(circuit, num_shots, seed, route, &kind, width, |shot_seed| {
-                    let outcome = run_temporal_clifford(&tc, shot_seed, false)?;
-                    Ok((outcome.classical_bits, outcome.metadata))
-                });
+                let route = ResolvedBackend::Statevector;
+                let states = [(route, circuit.num_qubits)];
+                return collect_shots(
+                    circuit,
+                    num_shots,
+                    seed,
+                    route,
+                    &kind,
+                    &states,
+                    |shot_seed| {
+                        let outcome = run_temporal_clifford(&tc, shot_seed, false)?;
+                        Ok((outcome.classical_bits, outcome.metadata))
+                    },
+                );
             }
         }
         // Decomposable circuits with a temporal prefix keep the per-shot
@@ -3584,11 +3637,19 @@ fn run_shots_per_shot(
         let opts = SimOptions::classical_only();
         let route = resolve_backend(&kind, circuit, has_partial_independence).resolved();
         let plan = plan_probability_route(&kind, circuit);
-        let width = circuit.num_qubits;
-        return collect_shots(circuit, num_shots, seed, route, &kind, width, |shot_seed| {
-            let outcome = run_route(&kind, circuit, shot_seed, opts, &plan)?;
-            Ok((outcome.classical_bits, outcome.metadata))
-        });
+        let states = [(route, circuit.num_qubits)];
+        return collect_shots(
+            circuit,
+            num_shots,
+            seed,
+            route,
+            &kind,
+            &states,
+            |shot_seed| {
+                let outcome = run_route(&kind, circuit, shot_seed, opts, &plan)?;
+                Ok((outcome.classical_bits, outcome.metadata))
+            },
+        );
     }
 
     let opts = SimOptions::classical_only();
@@ -3614,18 +3675,18 @@ fn run_shots_per_shot(
             })
             .collect();
 
-        let widest_block = comps
+        let block_states: Vec<(ResolvedBackend, usize)> = block_plans
             .iter()
-            .map(Vec::len)
-            .max()
-            .unwrap_or(circuit.num_qubits);
+            .zip(comps)
+            .map(|(plan, comp)| (plan.resolved(), comp.len()))
+            .collect();
         collect_shots(
             circuit,
             num_shots,
             seed,
             ResolvedBackend::Decomposed,
             &kind,
-            widest_block,
+            &block_states,
             |shot_seed| {
                 let result = run_decomposed_prefused(
                     &block_plans,
@@ -3645,12 +3706,21 @@ fn run_shots_per_shot(
         let expanded = expand_for_backend(&*probe, circuit);
         let fused = fuse_for_backend(&*probe, &expanded);
 
-        let (route, width) = (plan.resolved(), circuit.num_qubits);
-        collect_shots(circuit, num_shots, seed, route, &kind, width, |shot_seed| {
-            let mut backend = plan.build(shot_seed);
-            let outcome = execute_circuit(&mut *backend, &fused, &opts)?;
-            Ok((outcome.classical_bits, outcome.metadata))
-        })
+        let route = plan.resolved();
+        let states = [(route, circuit.num_qubits)];
+        collect_shots(
+            circuit,
+            num_shots,
+            seed,
+            route,
+            &kind,
+            &states,
+            |shot_seed| {
+                let mut backend = plan.build(shot_seed);
+                let outcome = execute_circuit(&mut *backend, &fused, &opts)?;
+                Ok((outcome.classical_bits, outcome.metadata))
+            },
+        )
     }
 }
 
@@ -3659,20 +3729,20 @@ fn run_shots_per_shot(
 /// engine for a zero-shot request, which runs nothing to read provenance off.
 ///
 /// Under the `parallel` feature the shots split across Rayon workers when
-/// [`runs_split_across_workers`] accepts `kind` at `width`, the widest state one
-/// shot holds. Shot `i` always runs on seed `seed + i` and the fold runs in shot
-/// order, so the result does not depend on the thread count.
+/// [`shots_split_across_workers`] accepts `kind` for `states`, the family and width
+/// of each state one shot holds. Shot `i` always runs on seed `seed + i` and the
+/// fold runs in shot order, so the result does not depend on the thread count.
 fn collect_shots(
     circuit: &Circuit,
     num_shots: usize,
     seed: u64,
     route: ResolvedBackend,
     kind: &BackendKind,
-    width: usize,
+    states: &[(ResolvedBackend, usize)],
     shot: impl Fn(u64) -> Result<(Vec<bool>, RunMetadata)> + Sync,
 ) -> Result<ShotsResult> {
     #[cfg(feature = "parallel")]
-    if num_shots > 1 && runs_split_across_workers(kind, width) {
+    if num_shots > 1 && shots_split_across_workers(kind, states) {
         use rayon::prelude::*;
         let runs: Vec<Result<(Vec<bool>, RunMetadata)>> = (0..num_shots)
             .into_par_iter()
@@ -3681,7 +3751,7 @@ fn collect_shots(
         return fold_shots(circuit, route, runs);
     }
     #[cfg(not(feature = "parallel"))]
-    let _ = (kind, width);
+    let _ = (kind, states);
     fold_shots(
         circuit,
         route,

@@ -1055,6 +1055,16 @@ pub(super) fn append_mpp_parity_rotations(
     append_parity_rotations(circuit, &qec_terms_to_pauli(terms), scratch);
 }
 
+/// Qubit count of a lowered program, including the `MPP` scratch qubit at index
+/// `program.num_qubits()` when the program measures any Pauli product.
+pub(super) fn qec_lowered_num_qubits(program: &QecProgram) -> usize {
+    let has_mpp = program
+        .ops()
+        .iter()
+        .any(|op| matches!(op, QecOp::MeasurePauliProduct { .. }));
+    program.num_qubits() + usize::from(has_mpp)
+}
+
 pub(super) fn qec_non_clifford_error(gate: &Gate) -> PrismError {
     PrismError::IncompatibleBackend {
         backend: "QEC compiled runner".to_string(),

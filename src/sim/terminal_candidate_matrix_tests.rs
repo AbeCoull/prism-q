@@ -33,11 +33,10 @@ fn partial_independent_circuit_is_not_candidate() {
     assert!(!auto_terminal_statevector_candidate(&circuit));
 }
 
-// A Clifford+T circuit inside the stabilizer-rank budget routes to the
-// rank engine; one T past the budget falls back to the statevector and
-// becomes a candidate. Pins the shared budget helper at its boundary.
+// A Clifford+T circuit inside the stabilizer-rank budget stays a statevector
+// candidate: the probability route no longer diverts it to the rank engine.
 #[test]
-fn clifford_t_budget_boundary_flips_candidacy() {
+fn clifford_t_inside_the_rank_budget_is_a_candidate() {
     let n = 10;
     let budget = stabilizer_rank_budget(n);
     assert_eq!(budget, 2);
@@ -50,17 +49,7 @@ fn clifford_t_budget_boundary_flips_candidacy() {
     for q in 0..budget {
         within.add_gate(Gate::T, &[q]);
     }
-    assert!(!auto_terminal_statevector_candidate(&within));
-
-    let mut beyond = Circuit::new(n, 0);
-    beyond.add_gate(Gate::H, &[0]);
-    for q in 0..n - 1 {
-        beyond.add_gate(Gate::Cx, &[q, q + 1]);
-    }
-    for q in 0..budget + 1 {
-        beyond.add_gate(Gate::T, &[q]);
-    }
-    assert!(auto_terminal_statevector_candidate(&beyond));
+    assert!(auto_terminal_statevector_candidate(&within));
 }
 
 #[test]

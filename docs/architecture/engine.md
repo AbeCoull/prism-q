@@ -151,14 +151,13 @@ For a user-facing version of this decision, see [Choosing a Backend](../getting-
 
 ### Routes the tree does not show
 
-The tree above is the family choice for a state terminal. Six further routes
+The tree above is the family choice for a state terminal. Five further routes
 are reachable under `Auto` alone, each tested before it and each with its own
 constants, in `src/sim/dispatch.rs` and `src/sim/mod.rs`:
 
 | Route | Taken when |
 | --- | --- |
 | Factored stabilizer | Clifford only, the circuit splits into independent components, at least 128 qubits, and the largest component is at least 16 |
-| Stabilizer rank, exact | A probability terminal on a unitary circuit of at most 25 qubits whose T count fits the budget `n - 2*ceil(log2 n)`, itself capped at 18 |
 | Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 |
 | Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits, truncating at 65536 terms |
 | Scalar tensor contraction | An expectation or marginals terminal whose planned contraction stays inside the peak bound |
@@ -310,7 +309,7 @@ All `BackendKind` variants:
 | `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
 | `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal on a unitary circuit of 18 qubits or more under the statevector cap, when a bounded greedy plan for every observable stays under `2^12` elements |
 | `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
-| `StabilizerRank` | Weighted stabilizer sum | Explicit or auto (Clifford+T inside the size-derived T budget; the exact expansion only) |
+| `StabilizerRank` | Weighted stabilizer sum | Explicit, or auto for shots (Clifford+T inside the size-derived T budget); never auto for probabilities |
 | `StochasticPauli { num_samples }` | SPP | Explicit |
 | `DeterministicPauli { truncation }` | SPD | Explicit |
 | `PauliPath { epsilon, max_terms }` | Noisy Heisenberg Pauli sum | Explicit |

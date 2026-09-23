@@ -39,7 +39,7 @@ fn probability_route_precedence_is_pinned() {
     clifford_t.add_gate(Gate::T, &[1]);
     assert!(matches!(
         plan_probability_route(&BackendKind::Auto, &clifford_t),
-        ProbabilityRoute::StabilizerRank
+        ProbabilityRoute::Direct { .. }
     ));
 
     let mut general = Circuit::new(4, 0);
@@ -1231,8 +1231,8 @@ fn test_stabilizer_rank_dispatch() {
     }
 }
 
-// The grid spellings of T reach the stabilizer-rank route the way `T` does,
-// and an angle off the grid keeps the direct route.
+// The grid spellings of T count as T and the rank engine answers them the way
+// it answers `T`; an angle off the grid is not Clifford+T at all.
 #[test]
 fn rz_quarter_pi_spelling_routes_like_t() {
     use std::f64::consts::FRAC_PI_4;
@@ -1258,17 +1258,13 @@ fn rz_quarter_pi_spelling_routes_like_t() {
         assert!(circuit.is_clifford_plus_t());
         assert!(circuit.has_t_gates());
         assert_eq!(circuit.t_count(), 1);
-        assert!(matches!(
-            plan_probability_route(&BackendKind::Auto, &circuit),
-            ProbabilityRoute::StabilizerRank
-        ));
-        let auto = run_with(BackendKind::Auto, &circuit, 42).unwrap();
-        assert_eq!(auto.metadata.backend, ResolvedBackend::StabilizerRank);
-        let probs = auto.probabilities.unwrap().to_vec();
+        let rank = run_with(BackendKind::StabilizerRank, &circuit, 42).unwrap();
+        assert_eq!(rank.metadata.backend, ResolvedBackend::StabilizerRank);
+        let probs = rank.probabilities.unwrap().to_vec();
         for (i, (a, s)) in probs.iter().zip(&sv_probs).enumerate() {
             assert!(
                 (a - s).abs() < 1e-10,
-                "prob[{i}]: auto={a}, statevector={s}"
+                "prob[{i}]: stab_rank={a}, statevector={s}"
             );
         }
     }

@@ -18,62 +18,31 @@
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 
-PRISM-Q is a Rust quantum circuit simulator built for speed. It dispatches across
-multiple specialized backends, runs a multi pass fusion pipeline, and uses AVX2, FMA,
-and BMI2 SIMD kernels in the inner loop. CPU kernels are the default path, with
-optional CUDA support for statevector and experimental stabilizer workloads. Input is
-OpenQASM 3.0 with backward compatible 2.0 syntax; circuits also export back to
+PRISM-Q is a quantum circuit simulator in Rust, with Python bindings. It picks a
+backend from the circuit's structure, runs a multi-pass gate fusion pipeline, and uses
+AVX2, FMA and BMI2 kernels in the inner loop (NEON on ARM64). CUDA is optional and
+covers the statevector, stabilizer (experimental) and density-matrix backends. Input is
+OpenQASM 3.0 with backward-compatible 2.0 syntax, and circuits export back to
 OpenQASM 3.0.
 
-For the CPU and GPU architectures each backend supports, see the
-[capability and support matrix](https://abecoull.github.io/prism-q/guides/capabilities.html).
+- Documentation: <https://abecoull.github.io/prism-q/> (machine-readable index at
+  [`llms.txt`](https://abecoull.github.io/prism-q/llms.txt))
+- API reference: [docs.rs](https://docs.rs/prism-q)
+- Measured timings: [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html)
+- What each backend supports on CPU and GPU:
+  [capability matrix](https://abecoull.github.io/prism-q/guides/capabilities.html)
 
-## Documentation
-
-Full documentation is published at <https://abecoull.github.io/prism-q/>. The generated
-API reference is on [docs.rs](https://docs.rs/prism-q). A machine-readable index of the
-documentation site is at <https://abecoull.github.io/prism-q/llms.txt>.
-
-## Installation
-
-Add PRISM-Q to a Rust project:
+## Install
 
 ```bash
-cargo add prism-q
+cargo add prism-q                          # Rayon parallelism and faer SVD (default)
+cargo add prism-q --no-default-features    # single-threaded, minimal dependencies
+pip install prism-q                        # Python
 ```
 
-Rayon parallelism and the faer SVD path are on by default. For a single-threaded,
-minimal-dependency build, opt out:
-
-```bash
-cargo add prism-q --no-default-features
-```
-
-For CUDA support, install CUDA Toolkit 12.x or newer, then build with:
-
-```bash
-cargo build --release --features "parallel gpu"
-```
-
-Building from source or pinning to a git revision is covered in
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-### Python
-
-Python bindings (PyO3 + maturin) live in [`bindings/python`](bindings/python) and
-expose core simulation, noise, QEC, and the CUDA backends with NumPy output:
-
-```python
-import prism_q
-
-circuit = prism_q.CircuitBuilder(2).h(0).cx(0, 1).build()
-print(prism_q.simulate(circuit).seed(42).run().probabilities)  # [0.5, 0, 0, 0.5]
-```
-
-Count keys and measurement bits are LSB-first (`q[0]` is the least-significant
-qubit), reversed relative to Qiskit. Invalid indices (for example a qubit index
-outside the register) raise an exception. See
-[`bindings/python/README.md`](bindings/python/README.md).
+The `gpu` feature needs CUDA Toolkit 12.x or newer and a CUDA device. Build with
+`cargo build --release --features "parallel gpu"`. Building from source and pinning a
+git revision are covered in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Quick start
 
@@ -96,7 +65,21 @@ println!("{:?}", result.probabilities);
 // Bell state: ~50% |00⟩, ~50% |11⟩
 ```
 
-### Shot-based sampling
+The Python bindings in [`bindings/python`](bindings/python) expose simulation, noise,
+QEC and the CUDA backends, with NumPy output:
+
+```python
+import prism_q
+
+circuit = prism_q.CircuitBuilder(2).h(0).cx(0, 1).build()
+print(prism_q.simulate(circuit).seed(42).run().probabilities)  # [0.5, 0, 0, 0.5]
+```
+
+Count keys and measurement bits are LSB-first (`q[0]` is the least significant qubit),
+the reverse of Qiskit. See the
+[Python guide](https://abecoull.github.io/prism-q/guides/python.html).
+
+### Shots
 
 ```rust
 use prism_q::{bitstring, circuit::openqasm, simulate};
@@ -134,71 +117,17 @@ let marginals = simulate(&bell).seed(42).marginals().unwrap();
 // Per-qubit (P(0), P(1)) pairs: [(0.5, 0.5), (0.5, 0.5)].
 ```
 
-Observables are products of single-qubit Paulis, identity factors omitted. Clifford
-circuits propagate them exactly; past the statevector memory budget the selected
-backend answers from its own representation. Runs can also start from a state other
-than |0...0⟩: `initial_state` takes a normalized amplitude vector of length 2^n with
-qubit 0 in the least significant bit.
+An observable is a product of single-qubit Paulis with identity factors omitted.
+Clifford circuits propagate it exactly, and past the statevector memory budget the
+selected backend answers from its own representation. To start somewhere other than
+|0...0⟩, pass `initial_state` a normalized amplitude vector of length 2^n, qubit 0 in
+the least significant bit.
 
-### Backend dispatch
+### Parameters and gradients
 
-```rust
-use prism_q::{circuit::openqasm, simulate, BackendKind};
-
-let circuit = openqasm::parse(qasm).unwrap();
-
-// Auto selects a backend from the circuit's structure.
-let auto = simulate(&circuit).seed(42).run().unwrap();
-
-// Or choose explicitly.
-let stab = simulate(&circuit)
-    .backend(BackendKind::Stabilizer)
-    .seed(42)
-    .run()
-    .unwrap();
-let mps = simulate(&circuit)
-    .backend(BackendKind::Mps { max_bond_dim: 64 })
-    .seed(42)
-    .run()
-    .unwrap();
-let sparse = simulate(&circuit)
-    .backend(BackendKind::Sparse)
-    .seed(42)
-    .run()
-    .unwrap();
-```
-
-### Programmatic circuit construction
-
-```rust
-use prism_q::CircuitBuilder;
-
-let result = CircuitBuilder::new(3)
-    .h(0)
-    .cx(0, 1)
-    .cx(1, 2)
-    .run(42)
-    .unwrap();
-```
-
-`CircuitBuilder` chains gate, control, and execution methods. For lower-level access,
-use `Circuit` directly:
-
-```rust
-use prism_q::{simulate, Circuit, gates::Gate};
-
-let mut c = Circuit::new(3, 0);
-c.add_gate(Gate::H, &[0]);
-c.add_gate(Gate::Cx, &[0, 1]);
-c.add_gate(Gate::Cx, &[1, 2]);
-let result = simulate(&c).seed(42).run().unwrap();
-```
-
-### Parameterized circuits
-
-Mark rotation angles as parameters while building, then rebind without rebuilding.
-`PreparedCircuit` also reuses one fusion plan across bindings, falling back to a full
-fusion pass when a binding changes what fusion would emit:
+Mark angles as parameters while building, then rebind without rebuilding.
+`PreparedCircuit` reuses one fusion plan across bindings and falls back to a full
+fusion pass when a binding changes what fusion would emit.
 
 ```rust
 use prism_q::{simulate, CircuitBuilder, PauliTerm, PreparedCircuit};
@@ -216,14 +145,7 @@ let result = simulate(&bound).seed(42).run().unwrap();
 
 let mut prepared = PreparedCircuit::new(template, params.clone()).unwrap();
 let fused = prepared.bind_fused(&[0.4, 1.2]).unwrap();
-```
 
-The same `Parameters` drives gradients. `expectation_gradient` computes ⟨H⟩ and its
-exact gradient by the adjoint method on the statevector backend, and
-`expectation_gradient_shift` covers the backends and circuit shapes the adjoint
-declines, using the parameter-shift rule:
-
-```rust
 let hamiltonian = vec![(1.0, vec![PauliTerm::z(0)])];
 let g = simulate(&bound)
     .seed(42)
@@ -232,79 +154,60 @@ let g = simulate(&bound)
 println!("<H> = {}, gradient = {:?}", g.value, g.gradient);
 ```
 
+`expectation_gradient` uses the adjoint method on the statevector backend.
+`expectation_gradient_shift` uses the parameter-shift rule and covers the backends and
+circuit shapes the adjoint declines.
+
 ## Backends
 
 | Backend | Best for | Scaling | Key property |
 | --- | --- | --- | --- |
-| **Statevector** | General circuits | O(2ⁿ) | Full SIMD, tiled L2/L3 kernels, optional CUDA path |
-| **Stabilizer** | Clifford only | O(n²) | SIMD optimized, scales to thousands of qubits |
-| **Factored Stabilizer** | Clifford with independent blocks | O(n²) per cluster | Per-cluster tableaux, dynamic merge and split |
-| **Sparse** | Few live amplitudes | O(k) | HashMap with parallel measurement |
-| **MPS** | Low entanglement or 1D | O(nχ²) | Hybrid faer / Jacobi SVD |
-| **Product State** | No entanglement | O(n) | Per qubit, instant |
-| **Tensor Network** | Low treewidth | Depends on contraction order | Greedy min size heuristic |
-| **Factored** | Partial entanglement | Dynamic | Tracks independent sub-states |
-| **Density Matrix** | Exact noisy evolution | O(4ⁿ) | Explicit dispatch only, reuses statevector kernels |
-| **Distributed Statevector** | Beyond single-host memory | O(2ⁿ) over MPI ranks | `distributed` feature, exact results |
+| Statevector | General circuits | O(2ⁿ) | SIMD, tiled L2/L3 kernels, optional CUDA path |
+| Stabilizer | Clifford only | O(n²) | SIMD, thousands of qubits |
+| Factored Stabilizer | Clifford with independent blocks | O(n²) per cluster | Per-cluster tableaux, dynamic merge and split |
+| Sparse | Few live amplitudes | O(k) | HashMap with parallel measurement |
+| MPS | Low entanglement or 1D | O(nχ²) | Hybrid faer / Jacobi SVD |
+| Product State | No entanglement | O(n) | Per qubit |
+| Tensor Network | Low treewidth | Depends on contraction order | Greedy min size heuristic |
+| Factored | Partial entanglement | Dynamic | Tracks independent sub-states |
+| Density Matrix | Exact noisy evolution | O(4ⁿ) | Explicit dispatch only, reuses statevector kernels |
+| Distributed Statevector | Beyond single-host memory | O(2ⁿ) over MPI ranks | `distributed` feature, exact results |
 
-`BackendKind::Auto` selects at dispatch time. Non-entangling circuits go to Product
-State; all-Clifford circuits go to Stabilizer, or Factored Stabilizer when a large
-circuit splits into independent blocks; circuits past the statevector memory budget go
-to Sparse when sparse-friendly and otherwise to MPS with bond dimension 256; partially
-independent circuits go to Factored; everything else runs on Statevector. Clifford+T
-circuits with few T gates route through the stabilizer rank and Pauli propagation
-engines before this tree. The budget is half the machine's physical memory, read once
-and cached, and `PRISM_MAX_SV_QUBITS` overrides it.
+`BackendKind::Auto` is the default. Circuits with no entangling gates go to Product
+State. All-Clifford circuits go to Stabilizer, or to Factored Stabilizer when a large
+circuit splits into independent blocks. Circuits past the statevector memory budget go
+to Sparse when sparse-friendly and to MPS with bond dimension 256 otherwise; partially
+independent circuits go to Factored, and the rest run on Statevector. Before that tree,
+a Clifford+T circuit with few T gates can take the stabilizer-rank sampler for shots and
+Pauli propagation for marginals.
+The budget is half the machine's physical memory, read once and cached;
+`PRISM_MAX_SV_QUBITS` overrides it.
 
-## Gates and OpenQASM support
+To choose a backend yourself, call `.backend(BackendKind::Stabilizer)` (or
+`BackendKind::Mps { max_bond_dim: 64 }`, `BackendKind::Sparse`, and so on) on the
+`simulate` builder. [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html)
+and the [backends deep dive](https://abecoull.github.io/prism-q/guides/backends.html)
+cover when each one wins.
 
-The parser covers the standard OpenQASM `stdgates.inc` set, common controlled and
-multi-controlled variants, Qiskit exporter gates, IonQ and Google/Cirq native gate
-names, decomposed multi-instruction gates, and IBM legacy u1/u2/u3 syntax. Modifiers
-`inv @`, `ctrl @`, `pow(k) @` chain arbitrarily for direct gates, and user-defined
-`gate` declarations are supported.
+## OpenQASM
 
-Export runs the other way: `qasm_export::to_qasm3` renders a `Circuit` as an OpenQASM
-3.0 program that re-parses to the same instruction stream, with inline angles
-surviving exactly. Gates with no OpenQASM spelling (fused payloads) are rejected with
-an error naming the offending instruction.
+The parser accepts the `stdgates.inc` set, common controlled and multi-controlled
+variants, Qiskit exporter gates, IonQ and Google/Cirq native gate names, decomposed
+multi-instruction gates, IBM legacy u1/u2/u3, and user-defined `gate` declarations.
+The `inv @`, `ctrl @` and `pow(k) @` modifiers chain on direct gates.
+`qasm_export::to_qasm3` writes a `Circuit` back out as OpenQASM 3.0 that re-parses to
+the same instruction stream with inline angles exact;
+fused payloads have no OpenQASM spelling and are rejected with an error naming the
+instruction.
 
-The authoritative list of supported gate keywords, language features, and modifiers
-lives in the parser at [`src/circuit/openqasm.rs`](src/circuit/openqasm.rs). See
-`resolve_gate()` and `resolve_decomposed_gate()`. Smoke tests in
-[`tests/smoke_openqasm.rs`](tests/smoke_openqasm.rs) exercise each feature end to end.
+The [OpenQASM guide](https://abecoull.github.io/prism-q/guides/openqasm.html) lists the
+accepted subset. The parser itself, [`src/circuit/openqasm.rs`](src/circuit/openqasm.rs)
+(`resolve_gate()` and `resolve_decomposed_gate()`), is the authoritative gate list.
 
-## Build and test
+## GPU
 
-```bash
-cargo build --release
-cargo test --all-features
-cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented_unsafe_blocks
-cargo fmt --check
-cargo doc --no-deps --features "parallel gpu distributed"
-```
-
-For Rayon parallelism on larger circuits:
-
-```bash
-cargo build --release --features parallel
-```
-
-Thread count defaults to logical cores. Set `RAYON_NUM_THREADS` to override.
-
-## GPU backend (optional)
-
-The `gpu` feature enables CUDA paths for the statevector and (experimentally) the
-stabilizer backend. Requires CUDA Toolkit 12.x or newer and a CUDA capable device.
-PTX is compiled at runtime via NVRTC against the device's compute capability.
-
-```bash
-cargo build --release --features "parallel gpu"
-```
-
-Opt in through the simulation builder. The circuit still goes through fusion and
-independent subsystem decomposition, and a size aware crossover keeps small sub
-circuits on the CPU:
+The `gpu` feature compiles PTX at runtime through NVRTC for the device's compute
+capability. Opt in through the simulation builder:
 
 ```rust
 use prism_q::{gpu::GpuContext, simulate};
@@ -313,28 +216,12 @@ let ctx = GpuContext::new(0)?;
 let result = simulate(&circuit).gpu(ctx).seed(42).run()?;
 ```
 
-`BackendKind::StabilizerGpu` runs Clifford circuits on the device, and
-`CompiledSampler::with_gpu(ctx)` accelerates large shot counts for compiled BTS
-sampling. Crossover thresholds are conservative by default and can be tuned through
-`PRISM_GPU_MIN_QUBITS`, `PRISM_STABILIZER_GPU_MIN_QUBITS`, and
-`PRISM_GPU_BTS_MIN_SHOTS`.
-
-`simulate(&circuit).gpu_auto(ctx)` runs automatic backend selection with the device
-opted in: statevector and stabilizer workloads that clear the qubit crossover and fit
-in VRAM run on the device, and everything else takes the identical CPU path. See
-[`docs/guides/gpu.md`](docs/guides/gpu.md) for kernel design, crossover analysis,
-and the full set of tuning knobs.
-
-## Coverage
-
-Requires `rustup component add llvm-tools-preview` and `cargo install cargo-llvm-cov`.
-
-```bash
-cargo llvm-cov --all-features                # terminal summary
-cargo llvm-cov --all-features --html --open  # browseable HTML report
-```
-
-CI generates coverage on every push and PR, and updates the badge automatically.
+The circuit still goes through fusion and subsystem decomposition, and a size crossover
+keeps small sub-circuits on the CPU. `simulate(&circuit).gpu_auto(ctx)` runs automatic
+dispatch with the device opted in, `BackendKind::StabilizerGpu` runs Clifford circuits
+on the device, and `CompiledSampler::with_gpu(ctx)` moves large compiled BTS shot
+counts onto it. The [GPU guide](https://abecoull.github.io/prism-q/guides/gpu.html)
+covers the kernels, the crossover thresholds and their environment overrides.
 
 ## Benchmarks
 
@@ -344,44 +231,23 @@ cargo bench --bench bench_driver --features parallel         # gate microbenchma
 cargo bench --bench bench_gpu    --features "parallel gpu"   # GPU dispatch benchmarks
 ```
 
-Always use `--features parallel`; baselines were taken with Rayon enabled. Do not run
-two `cargo bench` invocations concurrently on the same machine: Rayon thread pools
-contend for cores and skew results.
-
-Baseline capture, regression checks, and the markdown table workflow used in PRs live
-in [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-## Profiling
-
-Needs `cargo install flamegraph`:
-
-```bash
-./scripts/flamegraph.sh "qft_textbook/16"              # unix
-.\scripts\flamegraph.ps1 "qft_textbook/16"             # windows
-```
-
-SVGs land in `bench_results/` (gitignored).
+Baselines were taken with `parallel` enabled, so keep it on. Run one `cargo bench` at a
+time: concurrent Rayon pools contend for cores and skew results. `RAYON_NUM_THREADS`
+caps the thread count. The A/B and regression workflow used for PRs is in
+[`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Roadmap
 
-- Expanded classical control: mid circuit branching beyond the current `if` form.
-- Multi GPU and distributed GPU execution: a GPU context currently binds a single
-  device, and the distributed backend is CPU only. Sharding one statevector
-  across devices also needs peer access between them, since a host-staged
-  exchange costs far more than the gate it serves.
-- ROCm (AMD GPU) ports of the CUDA statevector and stabilizer kernels.
-- Distributed noisy shots: noise models are rejected on the distributed backend
-  because trajectory execution is not lockstep across ranks.
-
-## Architecture
-
-See the [architecture reference](docs/architecture/overview.md) for the full picture:
-layered design, backend trait contract, SIMD strategy, fusion pipeline, and compiled
-samplers. The published docs site is at <https://abecoull.github.io/prism-q/>.
+- Mid-circuit branching beyond the current `if` form.
+- Multi-GPU and distributed GPU execution. A GPU context binds one device and the
+  distributed backend is CPU only; sharding one statevector across devices also needs
+  peer access, since a host-staged exchange costs far more than the gate it serves.
+- ROCm ports of the CUDA statevector and stabilizer kernels.
+- Noisy shots on the distributed backend, which rejects noise models today because
+  trajectory execution is not lockstep across ranks.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build, test, and benchmark workflow.
-The pull request template at
-[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) captures the
-required checklist.
+[`CONTRIBUTING.md`](CONTRIBUTING.md) has the build, test, coverage, profiling and
+benchmark workflow. The [architecture reference](docs/architecture/overview.md) covers
+the layered design, backend trait, SIMD strategy, fusion pipeline and compiled samplers.

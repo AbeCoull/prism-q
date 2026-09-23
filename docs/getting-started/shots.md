@@ -1,8 +1,7 @@
 # Shots and Sampling
 
-Probabilities give you the exact distribution. Shots give you sampled measurement
-outcomes, the way real hardware reports results. PRISM-Q samples deterministically from a
-fixed seed.
+Probabilities are the exact distribution. Shots are sampled measurement outcomes, the
+way hardware reports results, and a fixed seed makes them deterministic.
 
 ## Sampling shots
 
@@ -26,25 +25,24 @@ let result = simulate(&circuit).seed(42).shots(1024).expect("shots failed");
 print!("{result}");   // ShotsResult implements Display
 ```
 
-The same seed always produces the same samples. Pass `rand::random()` as the seed for
-non-deterministic sampling.
+Pass `rand::random()` as the seed for non-deterministic sampling.
 
 ## Counts and marginals
 
-For large shot counts, you usually want aggregates rather than raw shots:
+At large shot counts, ask for aggregates instead of raw shots:
 
 ```rust
 // Frequency histogram: bitstring -> count
 let counts = simulate(&circuit).seed(42).sample_counts(100_000).unwrap();
 
-// Per-qubit P(measuring |1>), without the full joint distribution
+// Per-qubit (P(0), P(1)) pairs, without the full joint distribution
 let marginals = simulate(&circuit).seed(42).marginals().unwrap();
 ```
 
 ```admonish tip title="Sampling scales past the statevector"
-`sample_counts` and `shots` route through PRISM-Q's compiled samplers, which propagate
-measurements through the circuit instead of materializing the full statevector on every
-shot. For Clifford circuits this scales to thousands of qubits. See
+`sample_counts` and `shots` route through the compiled samplers, which propagate
+measurements through the circuit instead of rebuilding the statevector for every shot.
+Clifford circuits sample at thousands of qubits. See
 [Compiled Samplers](../architecture/samplers.md).
 ```
 
@@ -64,7 +62,6 @@ let result = simulate(&circuit)
     .unwrap();
 ```
 
-The [Noise and QEC guide](../guides/qec.md) covers noise models and detector sampling in
-depth.
+The [Noise and QEC guide](../guides/qec.md) covers noise models and detector sampling.
 
-Next: learn how PRISM-Q picks a representation in [Choosing a Backend](./choosing-a-backend.md).
+Next: how PRISM-Q picks a representation, in [Choosing a Backend](./choosing-a-backend.md).

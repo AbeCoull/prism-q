@@ -8,8 +8,7 @@ holds syntax only, so meaning is decided once, in the walker. A statement ends a
 `;` and a block at its `}`, wherever the newlines fall.
 
 The [OpenQASM guide](../guides/openqasm.md#the-subset) tabulates what parses, what
-declines, and which error each decline returns. That table is the list; this page does
-not keep a second copy.
+declines, and which error each decline returns. This page does not repeat it.
 
 ## Circuit IR
 
@@ -19,13 +18,13 @@ not keep a second copy.
 |---------|--------|-------------|
 | `Gate` | `gate`, `targets` | Gate application |
 | `Measure` | `qubit`, `classical_bit` | Destructive measurement |
-| `Reset` | `qubit` | Return one qubit to `|0>`, mid-circuit |
+| `Reset` | `qubit` | Return one qubit to the zero state, mid-circuit |
 | `Barrier` | `qubits` | Synchronization barrier |
 | `Conditional` | `condition`, `gate`, `targets` | Classical-controlled gate |
 | `Region` | `Box<GuardedRegion>` | Classical-controlled span of instructions |
 | `Save` | `spec`, `qubits`, `label` | Record the state at this point |
 
-Targets use `SmallVec<[usize; 4]>`, inline storage for up to 4 qubits, no heap allocation for typical gates.
+Targets are a `SmallVec<[usize; 4]>`, stored inline up to 4 qubits, so a typical gate allocates nothing.
 
 ### Save points
 
@@ -60,11 +59,10 @@ flushes exactly those qubits at the region boundary and is transparent
 elsewhere, and no pass fuses across the boundary because a region is not an
 `Instruction::Gate`.
 
-The body itself is fused, by `fuse_region_bodies` running the same pipeline over
-it as an ordinary instruction list on the same register, nested bodies included.
-That is body-local only and does not weaken the boundary above: a body is fused
-as a unit, which is sound because it executes as a unit. Leaving it unfused cost
-73.5% of `dynamic/guarded_region/20`.
+The body itself is fused: `fuse_region_bodies` runs the same pipeline over it as an
+ordinary instruction list on the same register, nested bodies included. Fusion stays
+inside the body, so the boundary holds, and fusing a body as a unit is sound because it
+executes as a unit. Leaving it unfused cost 73.5% of `dynamic/guarded_region/20`.
 
 `Conditional` is the single-gate lowering of the same construct. `if (c) x q[0];`
 keeps that form, so the common guarded gate costs no allocation; anything else
@@ -83,9 +81,9 @@ region rather than leave its body noiseless.
 guards that cannot depend on a measurement. A condition reading only bits no preceding
 measurement writes is a function of the initial classical state, which every
 backend zeroes, so the guard is statically dead or statically taken and is
-dropped or inlined. That returns a circuit whose only guard can never fire to
-the terminal-measurement sampling path, worth 252x on `dynamic/dead_region/16`
-at 1000 shots. A circuit with no guard borrows through unchanged.
+dropped or inlined. A circuit whose only guard can never fire goes back to the
+terminal-measurement sampling path, 252x faster on `dynamic/dead_region/16` at 1000
+shots. A circuit with no guard borrows through unchanged.
 
 ### Condition language
 
@@ -104,12 +102,11 @@ parser rejects a source whose body measures into a bit its own guard reads.
 
 ## Gate enum
 
-`Gate` is a `Clone` enum kept at **16 bytes**. Simple variants carry parameters inline. Composite variants use `Box` to stay within the 16-byte budget for cache-friendly dispatch.
+`Gate` is a `Clone` enum kept at 16 bytes. Simple variants carry parameters inline, and composite variants `Box` their payload to stay inside that budget.
 
 ```admonish warning title="Keep the enum at 16 bytes"
 Adding inline data larger than 16 bytes pollutes cache lines and has caused 40-130%
-regressions. Always check `size_of::<Gate>()` after adding a variant, and `Box` large
-payloads.
+regressions. Check `size_of::<Gate>()` after adding a variant, and `Box` large payloads.
 ```
 
 | Variant | Data | Size |

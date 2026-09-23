@@ -17,55 +17,56 @@ For which SIMD tiers and architectures each backend supports, see the
 
 ## Threading
 
-Gate kernels have `_par` variants using `par_chunks_mut` for safe Rayon parallelism (behind the `parallel` feature flag):
+Under the `parallel` feature, gate kernels have `_par` variants built on
+`par_chunks_mut`. They engage at `PARALLEL_THRESHOLD_QUBITS = 14` (`src/backend/mod.rs`);
+below that, thread-pool overhead exceeds the work. Each task covers at least
+`MIN_PAR_ELEMS = 4096` amplitudes, 64 KiB.
 
-- **<14 qubits**: Single-threaded. Thread-pool overhead exceeds computation.
-- **≥14 qubits**: Rayon parallel iterators with `MIN_PAR_ELEMS = 4096` (64KB per task).
+The pool defaults to every logical core, and `RAYON_NUM_THREADS` overrides it.
+Hyperthreads help at 24 qubits and above by hiding memory latency.
 
-Thread pool defaults to all logical cores (HT helps at 24q+ by hiding memory latency). Overridable via `RAYON_NUM_THREADS`.
-
-The default is the process-wide Rayon pool, sized on the first simulation call. An
-application that owns that pool can hand PRISM-Q a bounded one instead:
+That pool is the process-wide Rayon pool, sized on the first simulation call. An
+application that owns it can hand PRISM-Q a bounded one instead:
 `ThreadPool::with_threads(n)` builds it and `install` runs a closure on it, leaving the
 global pool unbuilt and unresized. Calls made outside `install` take the global path.
-Pool width is not free of consequences for results; see the determinism contract below.
+Pool width can change results; see [Determinism](#determinism).
 
 ## SIMD
 
-`Complex64` maps to 128-bit SIMD naturally. Single-qubit gate kernels use `PreparedGate1q` with runtime CPU detection and tiered dispatch:
+One `Complex64` fills a 128-bit register. Single-qubit gate kernels use `PreparedGate1q` with runtime CPU detection and tiered dispatch:
 
 1. **AVX2+FMA** (256-bit): 2 complex pairs per iteration. Gated by `MAX_AVX2_STATE` for full-state passes (Skylake frequency throttling), but used freely within MultiFused L2 tiles where data is cache-resident.
 2. **FMA** (128-bit): Default for larger states. 3-op complex multiply (permute + mul + fmaddsub).
 3. **SSE2** (128-bit): x86_64 baseline, 2 mul plus shuffle, xor and add.
-4. **NEON** (128-bit): the aarch64 baseline, a real kernel rather than a fallback. 1 mul plus 1 fma against a pre-negated matrix.
+4. **NEON** (128-bit): the aarch64 baseline, 1 mul plus 1 fma against a pre-negated matrix.
 5. **Scalar**: no intrinsics, for everything that is neither x86_64 nor aarch64.
 
 `_pext_u64` is not a tier. BatchPhase, BatchRzz and DiagonalBatch use it for LUT
 indexing where BMI2 is present, one bit extraction in place of a shift-and-or loop, and
 fall back to that loop where it is not.
 
-Two key SIMD structs hoist matrix broadcast at construction time, avoiding per-element dispatch:
+Two structs broadcast the matrix into registers once, at construction, so the per-element loop does no dispatch:
 
-- **`PreparedGate1q`**: Broadcasts 2×2 matrix into SIMD registers. Methods: `apply_full_sequential` (full state), `apply_tiled` (cache-resident tile, no AVX2 throttle guard), `apply_slice_pairs` (MPS bond-dimension slices), `apply_pair_ptr` (Cu/Mcu parallel).
-- **`PreparedGate2q`**: Broadcasts 4×4 matrix. Methods: `apply_full` (mask-based iteration), `apply_tiled` (cache-resident Multi2q tiles, AVX2 paired-group kernel when available), `apply_group_ptr` (4 scattered indices).
+- `PreparedGate1q`: the 2×2 matrix. Methods: `apply_full_sequential` (full state), `apply_tiled` (cache-resident tile, no AVX2 throttle guard), `apply_slice_pairs` (MPS bond-dimension slices), `apply_pair_ptr` (Cu/Mcu parallel).
+- `PreparedGate2q`: the 4×4 matrix. Methods: `apply_full` (mask-based iteration), `apply_tiled` (cache-resident Multi2q tiles, AVX2 paired-group kernel when available), `apply_group_ptr` (4 scattered indices).
 
 The 2q tiled AVX2 path processes paired `k` and `k + 1` groups when the lower target qubit is above 0, which makes each row load contiguous. It falls back to the 128-bit FMA kernel for `lo == 0` and when AVX2+FMA is unavailable. Set `PRISM_NO_AVX2_2Q` to compare against the 128-bit FMA path, or `PRISM_NO_REORDER` to disable disjoint Fused2q tier grouping for A/B timing.
 
 ## Determinism
 
-Reproducibility is a per-path contract, not a blanket guarantee. Gate application never
-reduces across tasks, so it is exactly reproducible; everything that sums floating-point
-values in parallel is reproducible to the last ulp only; the batched compiled sampler is
-reproducible only at a fixed thread count. `tests/determinism.rs` pins the dense
-unitary, terminal sampling, reduction, and compiled-sampler claims by running the same
+Reproducibility is stated per path. Gate application never reduces across tasks, so it
+is exactly reproducible; everything that sums floating-point values in parallel is
+reproducible to the last ulp only; the batched compiled sampler is reproducible only at
+a fixed thread count. `tests/determinism.rs` pins the dense unitary,
+terminal sampling, reduction, and compiled-sampler claims below by running the same
 seeded circuits in scoped 1-thread and 4-thread pools; the trajectory, SPD, and
 stabilizer bullets stand on the mechanisms they state.
 
-What every clause below turns on is thread count, not which pool supplied the threads. A
-caller-supplied `ThreadPool` therefore moves exactly the results a different
-`RAYON_NUM_THREADS` would: the bitwise claims survive it, the reduction bound holds
-across it, and compiled shot payloads change with it whenever the pool is narrower or
-wider than the one the comparison run used.
+Every clause turns on thread count, not on which pool supplied the threads, so a
+caller-supplied `ThreadPool` moves exactly the results a different `RAYON_NUM_THREADS`
+would: the bitwise claims survive it, the reduction bound holds across it, and compiled
+shot payloads change with it whenever the pool is narrower or wider than the one the
+comparison run used.
 
 - **Unitary evolution on the dense kernels: bitwise, at any thread count.** Gate kernels
   partition the state into index-derived disjoint ranges (fixed chunk boundaries, index

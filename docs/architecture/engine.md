@@ -79,18 +79,18 @@ The density matrix holds the mixture instead of a trajectory, so `shots` cannot 
 from the resulting distribution. Every terminal reads that one evolution: `run` and
 `marginals` return the exact noisy distribution, `expectation_values` returns the exact
 `Tr(rho P)`, and `shots` and `sample_counts` carry sampling noise but no trajectory
-variance. Readout error is applied to the drawn outcomes rather than to the state, on an
-RNG stream of its own, which is why `run` and `marginals` reject a model carrying it
-rather than returning a state distribution that the sampled terminals would contradict.
+variance. Readout error is applied to the drawn outcomes, not the state, on an RNG
+stream of its own, so `run` and `marginals` reject a model carrying it rather than
+return a distribution the sampled terminals would contradict.
 
-The mixture holds every measurement branch at once, which is what makes it exact and also
-what it cannot undo. A circuit with mid-circuit measurement or classical conditioning is
-rejected on this route, with or without a noise model attached: the outcome that a later
-gate would have been conditioned on was never fixed. The rejection sits on the evolution
+The mixture holds every measurement branch at once, which makes it exact and also means
+no branch is ever chosen. A circuit with mid-circuit measurement or classical
+conditioning is rejected on this route, with or without a noise model: the outcome a
+later gate would be conditioned on was never fixed. The rejection sits on the evolution
 itself, so `density_matrix_expectation_values` refuses the same circuits the `Simulate`
-terminals do. Those circuits stay on trajectory averaging. This is the
-same property that makes the density matrix the mixture oracle rather than a comparable
-participant in the branching families of `tests/conformance_matrix.rs`.
+terminals do, and those circuits stay on trajectory averaging. The same property keeps
+the density matrix out of the branching families of `tests/conformance_matrix.rs`,
+where it serves as the mixture oracle.
 
 `expectation_gradient` rejects a noise model on every backend, because the adjoint method
 backpropagates through a pure state. `expectation_gradient_shift` accepts one on the
@@ -102,9 +102,9 @@ backend rejects the pair, naming the density matrix.
 
 Every terminal returns a result carrying a `RunMetadata`: the resolved engine,
 whether that engine is exact, where the state lived, and the shot count for a
-sampled result. `Auto` selecting an approximate backend is disclosed by the
-result, which is what makes `require_exact()` an opt-out: rejecting by default
-would remove the only route an oversize non-sparse circuit has.
+sampled result. When `Auto` selects an approximate backend the result says so, and an
+approximate route is refused only on request, through `require_exact()`: rejecting by
+default would remove the only route an oversize non-sparse circuit has.
 
 A run that resolved to the MPS also carries `bond`, a `BondReport` of the peak
 bond dimension any cut kept against the configured cap. Its `saturated()` is the
@@ -114,8 +114,7 @@ as `None`.
 
 `require_exact()` resolves the route from the circuit and errors before
 allocating, so it does not pay for state it would discard. Exactness is read
-from the route and the circuit together rather than from the route alone: an
-oversize circuit of diagonal and permutation gates only holds a single basis
+from the route and the circuit together: an oversize circuit of diagonal and permutation gates only holds a single basis
 state, so the MPS carrying it never leaves bond 1 and is accepted. Sparse Pauli dynamics
 truncates on coefficient magnitudes it only learns while propagating, so that
 route cannot be decided in advance and is caught by a second check on the
@@ -208,13 +207,13 @@ outer product the pure-state load forms.
 
 ## Subsystem decomposition
 
-Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately: under `Auto` each block picks its own backend, and under an explicit kind every block runs that kind, so the merged result reports `Decomposed` rather than any one engine. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), avoiding the O(2^N) dense materialization unless explicitly requested.
+Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately: under `Auto` each block picks its own backend, and under an explicit kind every block runs that kind, so the merged result reports `Decomposed` rather than any one engine. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), so the O(2^N) dense vector is built only when a caller asks for it.
 
-Block-level Rayon parallelism when all blocks are <14 qubits (avoids oversubscription with block-internal parallelism).
+Blocks run in parallel under Rayon only when every block is below 14 qubits (`src/sim/decomposed.rs`), so block-level threads do not oversubscribe the kernels' own parallelism.
 
 ## Temporal Clifford decomposition
 
-For Clifford+T circuits: Clifford prefix runs on the Stabilizer backend, state is exported to Statevector for the non-Clifford tail. Saves exponential memory for circuits with a long Clifford preamble.
+Under `Auto`, a circuit that is not Clifford only and opens with a Clifford prefix of at least `max(2n, 16)` gates (`min_clifford_prefix_gates` in `src/sim/dispatch.rs`) runs that prefix on the stabilizer backend and exports the state to the statevector for the tail. The saving is the dense cost of the prefix, not memory: the route requires the register to fit the statevector cap.
 
 ## Expectation-value gradients
 
@@ -296,7 +295,9 @@ by the parameter count, which is the resource this path exists to stay under.
 
 ## Backend dispatch variants
 
-All `BackendKind` variants:
+The `BackendKind` variants outside feature gates. `AutoGpu`, `StatevectorGpu`,
+`DensityMatrixGpu` and `StabilizerGpu` sit behind `gpu` (see the
+[GPU guide](../guides/gpu.md)), and `StatevectorDistributed` behind `distributed`.
 
 | Variant | Backend | Selection |
 |---------|---------|-----------|
@@ -308,7 +309,9 @@ All `BackendKind` variants:
 | `Mps { max_bond_dim }` | Matrix Product State | Explicit or auto (above memory limit) |
 | `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
 | `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal on a unitary circuit of 18 qubits or more under the statevector cap, when a bounded greedy plan for every observable stays under `2^12` elements |
+| `TensorNetworkBounded { tolerance }` | Deferred contraction with truncation past the peak cap | Explicit |
 | `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
+| `DensityMatrix` | Exact mixed state | Explicit |
 | `StabilizerRank` | Weighted stabilizer sum | Explicit, or auto for shots (Clifford+T inside the size-derived T budget); never auto for probabilities |
 | `StochasticPauli { num_samples }` | SPP | Explicit |
 | `DeterministicPauli { truncation }` | SPD | Explicit |

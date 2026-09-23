@@ -30,16 +30,17 @@ Top-level re-exports from `src/lib.rs`. The full generated documentation is on
 
 **Simulation:**
 `simulate`, `Simulate`, `Unseeded`, `Seeded`, `run_on`, `run_on_state`, `run_qasm`,
-`run_batch`, `run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
-`ObservableExpectation`, `bitstring`
+`run_expectation_values`, `run_observable_expectation`, `PauliObservable`,
+`ObservableExpectation`, `ObservableVariance`, `ExpectationResult`, `OverlapResult`,
+`bitstring`
 
 **Save points:** `Circuit::add_save` appends an `Instruction::Save` recording a
 `SaveSpec`, and `Simulate::run` returns one `SaveRecord` per point in `RunOutcome::saves`,
-carrying a `SavedValue`. See [Circuit IR](./ir.md) for what a save does to fusion and
-which routes decline one.
+carrying a `SavedValue`. All three types are re-exported. See [Circuit IR](./ir.md) for
+what a save does to fusion and which routes decline one.
 
-**Batches:** `run_batch` runs a list of circuits, holding one backend across those of the
-same width that draw no randomness. Results match running each circuit alone with the
+**Batches:** `prism_q::sim::run_batch` runs a list of circuits, holding one backend
+across those of the same width that draw no randomness. Results match running each circuit alone with the
 same seed. Below 14 qubits, under `parallel`, the circuits split across cores, since each
 of those runs is single-threaded inside: a 200-point sweep at 4 to 12 qubits ran 3.2x to
 4.8x faster than a loop on a four-core host. On one thread the held backend is the only
@@ -50,8 +51,7 @@ saving, and it read within about 10% of a loop.
 index) with a `purity` method for `Tr(rho^2)`; `Simulate::entanglement_entropy` returns
 an `EntropyResult` carrying the von Neumann entropy in nats and the descending Schmidt
 spectrum, which is `None` where the backend holds the entropy without the spectrum
-behind it;
-`Simulate::overlap` takes a second seeded builder over a circuit of the same width and
+behind it; `Simulate::overlap` takes a second seeded builder over a circuit of the same width and
 returns an `OverlapResult` carrying the squared inner product and the provenance of both
 runs. All three require a unitary circuit, and under `BackendKind::Auto` a route that
 cannot answer falls back to the statevector. Which backends answer each is tabulated in
@@ -61,8 +61,8 @@ cannot answer falls back to the statevector. Which backends answer each is tabul
 `run_expectation_gradient`, `run_expectation_gradient_shift`, `ExpectationGradient`
 
 **Parameters and binding:**
-`Parameters`, `ParamLink`, `PreparedCircuit`. One parameter model serves both
-consumers: the gradient path reads the links, and binding writes through them.
+`Parameters`, `ParamLink`, `PreparedCircuit`. The gradient path reads the links and
+binding writes through them.
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`,
@@ -91,12 +91,13 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 `TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
 `MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
 `FactoredBlock`, `ShotsResult`, `PrismError`, `Result`, `MultiFusedData`,
-`BatchPhaseData`, `McuData`, `Multi2qData`, `UnitaryData`, `RunMetadata`, `BondReport`
+`BatchPhaseData`, `McuData`, `Multi2qData`, `UnitaryData`, `RunMetadata`, `BondReport`,
+`Engine`, `Exactness`, `Placement`, `ResolvedBackend`
 
 **Backends:**
 `StatevectorBackend`, `StabilizerBackend`, `SparseBackend`, `MpsBackend`,
 `ProductStateBackend`, `TensorNetworkBackend`, `FactoredBackend`,
-`FactoredStabilizerBackend`; with the `distributed` feature:
+`FactoredStabilizerBackend`, `DensityMatrixBackend`; with the `distributed` feature:
 `DistributedStatevectorBackend`, `DistributedContext`, `RankComm`, `SerialComm`; with
 the `distributed-mpi` feature: `MpiComm`
 
@@ -116,9 +117,9 @@ that simulation runs inside instead of sizing the process-wide one. See
 `HomologicalSampler`, `ErrorChainComplex`
 
 Not re-exported at the root but part of the documented surface: the `Backend` trait and
-`BasisSamples` at `prism_q::backend`, the density matrix backend at
-`prism_q::backend::density_matrix`, and the accumulator chunk-size helpers
-(`default_chunk_size`, `optimal_chunk_size`) at `prism_q::sim::compiled`.
+`BasisSamples` at `prism_q::backend`, `run_batch` at `prism_q::sim`, and the accumulator
+chunk-size helpers (`default_chunk_size`, `optimal_chunk_size`) at
+`prism_q::sim::compiled`.
 
 ## Growth of the public enums
 

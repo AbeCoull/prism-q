@@ -1,8 +1,8 @@
 # Choosing a Backend
 
-By default PRISM-Q inspects the circuit and picks a backend for you. You only need to
-choose explicitly when you know something the auto-dispatcher cannot infer, or when you
-are benchmarking a specific representation.
+By default PRISM-Q inspects the circuit and picks a backend. Choose one explicitly when
+you know something the dispatcher cannot infer, or when benchmarking a specific
+representation.
 
 ## Let it choose
 
@@ -27,6 +27,11 @@ flowchart TD
     IND -- yes --> FAC[Factored]
     IND -- no --> SV[Statevector]
 ```
+
+Two routes sit outside the tree: a large Clifford circuit that splits into independent
+blocks goes to `FactoredStabilizer`, and a Clifford+T circuit with few T gates tries the
+stabilizer rank and Pauli propagation engines first. The memory limit is half of
+physical memory unless `PRISM_MAX_SV_QUBITS` sets it.
 
 ## Choose explicitly
 
@@ -53,9 +58,9 @@ let result = simulate(&circuit)
 | Is Clifford + a few T gates | See [Clifford+T](../guides/clifford-t.md) | Beats dense statevector |
 
 ```admonish warning title="ProductState rejects entanglement"
-`ProductState` errors on any entangling gate by design. Auto-dispatch only selects it for
-circuits that have none. Choose it explicitly only when you know the circuit is a product
-state throughout.
+`ProductState` errors on any entangling gate. Auto-dispatch selects it only for circuits
+that have none; choose it explicitly only for a circuit that stays a product state
+throughout.
 ```
 
 The [Backends Deep Dive](../guides/backends.md) and the

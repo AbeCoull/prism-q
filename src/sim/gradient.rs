@@ -25,7 +25,7 @@ use crate::circuit::{Circuit, Instruction, SmallVec, smallvec};
 use crate::error::{PrismError, Result};
 use crate::gates::{
     BatchRzzData, DiagEntry, DiagonalBatchData, Gate, GeneratorKind, MultiFusedData,
-    is_diagonal_2x2, pauli_rot_masks,
+    pauli_rot_masks,
 };
 
 use super::noise::NoiseModel;
@@ -334,13 +334,9 @@ fn multi_fused_inverse(gates: &[(&Gate, &[usize])]) -> Option<Instruction> {
         }
         fused.push((targets[0], gate.inverse().matrix_2x2()));
     }
-    let all_diagonal = fused.iter().all(|(_, mat)| is_diagonal_2x2(mat));
     let targets: SmallVec<[usize; 4]> = fused.iter().map(|&(q, _)| q).collect();
     Some(Instruction::Gate {
-        gate: Gate::MultiFused(Box::new(MultiFusedData {
-            gates: fused,
-            all_diagonal,
-        })),
+        gate: Gate::MultiFused(Box::new(MultiFusedData::new(fused))),
         targets,
     })
 }

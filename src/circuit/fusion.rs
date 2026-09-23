@@ -596,13 +596,9 @@ fn flush_all_pending(
                 }
             }
         }
-        let all_diagonal = gates.iter().all(|(_, m)| is_diagonal_2x2(m));
         let targets: SmallVec<[usize; 4]> = gates.iter().map(|&(t, _)| t).collect();
         output.push(Instruction::Gate {
-            gate: Gate::MultiFused(Box::new(MultiFusedData {
-                gates,
-                all_diagonal,
-            })),
+            gate: Gate::MultiFused(Box::new(MultiFusedData::new(gates))),
             targets,
         });
         t.batch(&entries);

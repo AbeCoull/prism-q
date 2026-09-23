@@ -739,3 +739,12 @@ fn a_weight_one_pauli_rotation_has_the_axis_rotation_matrix() {
         assert_eq!(rot.matrix_2x2(), named.matrix_2x2());
     }
 }
+
+#[test]
+fn multi_fused_data_computes_its_diagonal_flag() {
+    let h = Gate::H.matrix_2x2();
+    let t = Gate::T.matrix_2x2();
+    assert!(MultiFusedData::new(vec![(0, t), (1, Gate::Z.matrix_2x2())]).all_diagonal());
+    assert!(!MultiFusedData::new(vec![(0, t), (1, h)]).all_diagonal());
+    assert_eq!(MultiFusedData::new(vec![(2, h)]).gates(), &[(2, h)]);
+}

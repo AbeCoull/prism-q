@@ -111,9 +111,13 @@ fn assert_payloads_match(a: &Gate, b: &Gate, what: &str) {
         (Gate::Fused(x), Gate::Fused(y)) => assert_mat2(x, y, what),
         (Gate::Fused2q(x), Gate::Fused2q(y)) => assert_mat4(x, y, what),
         (Gate::MultiFused(x), Gate::MultiFused(y)) => {
-            assert_eq!(x.gates.len(), y.gates.len(), "{what}: multi_fused arity");
-            assert_eq!(x.all_diagonal, y.all_diagonal, "{what}: all_diagonal");
-            for (k, (gx, gy)) in x.gates.iter().zip(&y.gates).enumerate() {
+            assert_eq!(
+                x.gates().len(),
+                y.gates().len(),
+                "{what}: multi_fused arity"
+            );
+            assert_eq!(x.all_diagonal(), y.all_diagonal(), "{what}: all_diagonal");
+            for (k, (gx, gy)) in x.gates().iter().zip(y.gates()).enumerate() {
                 assert_eq!(gx.0, gy.0, "{what}: multi_fused entry {k} qubit");
                 assert_mat2(&gx.1, &gy.1, &format!("{what} entry {k}"));
             }

@@ -566,8 +566,29 @@ pub struct DiagonalBatchData {
 /// pass over the statevector. Each entry is `(target_qubit, 2×2 matrix)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiFusedData {
-    pub gates: Vec<(usize, [[Complex64; 2]; 2])>,
-    pub all_diagonal: bool,
+    pub(crate) gates: Vec<(usize, [[Complex64; 2]; 2])>,
+    pub(crate) all_diagonal: bool,
+}
+
+impl MultiFusedData {
+    /// Batch `(target_qubit, 2×2 matrix)` entries, computing the diagonal flag the
+    /// kernels branch on.
+    pub fn new(gates: Vec<(usize, [[Complex64; 2]; 2])>) -> Self {
+        let all_diagonal = gates.iter().all(|(_, m)| is_diagonal_2x2(m));
+        Self {
+            gates,
+            all_diagonal,
+        }
+    }
+
+    pub fn gates(&self) -> &[(usize, [[Complex64; 2]; 2])] {
+        &self.gates
+    }
+
+    /// Whether every matrix is diagonal, so the batch applies as a phase pass.
+    pub fn all_diagonal(&self) -> bool {
+        self.all_diagonal
+    }
 }
 
 /// Data for multi-2q tiled pass fusion.

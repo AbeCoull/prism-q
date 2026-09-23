@@ -211,10 +211,11 @@ fn gate_instructions() -> Vec<Instruction> {
             &[0, 1, 2, 3, 5],
         ),
         g(
-            Gate::MultiFused(Box::new(MultiFusedData {
-                gates: vec![(0, m2), (3, m2), (5, m2)],
-                all_diagonal: false,
-            })),
+            Gate::MultiFused(Box::new(MultiFusedData::new(vec![
+                (0, m2),
+                (3, m2),
+                (5, m2),
+            ]))),
             &[0, 1, 2, 3, 4, 5],
         ),
         g(Gate::Fused2q(Box::new(m4)), &[2, 4]),

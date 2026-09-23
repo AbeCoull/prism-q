@@ -4047,6 +4047,49 @@ fn bench_dynamic_shots(c: &mut Criterion) {
     group.finish();
 }
 
+/// Random Ry/Rz layers with brick CX, a measurement of qubit 0 after `depth`
+/// layers, then `depth` more layers and a measurement of the last qubit.
+fn mid_circuit_rotation_circuit(n: usize, depth: usize) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+    let mut circuit = Circuit::new(n, 2);
+    let mut layers = |circuit: &mut Circuit| {
+        for layer in 0..depth {
+            for q in 0..n {
+                circuit.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+                circuit.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            }
+            for q in ((layer % 2)..n - 1).step_by(2) {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+    };
+    layers(&mut circuit);
+    circuit.add_measure(0, 0);
+    layers(&mut circuit);
+    circuit.add_measure(n - 1, 1);
+    circuit
+}
+
+/// A mid-circuit measurement replays the circuit once per shot. The 16-qubit row
+/// runs fewer shots because each one is a full `2^16` evolution.
+fn bench_dynamic_mid_circuit_shots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic/mid_circuit_shots");
+    configure_group(&mut group);
+
+    for &(n, shots) in &[(6usize, 1_000usize), (10, 1_000), (12, 1_000), (16, 32)] {
+        let circuit = mid_circuit_rotation_circuit(n, 2);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+
+    group.finish();
+}
+
 /// Neutrality row: an untouched statevector row re-run under a density-matrix
 /// group name. The density-matrix backend shares no kernels with the
 /// statevector path, so this must stay within the 5% regression gate.
@@ -4200,6 +4243,7 @@ criterion_group! {
     // Dynamic circuits (guard cost, dead-region predicate, per-shot cliff)
     bench_dynamic_guarded_region,
     bench_dynamic_dead_region,
-    bench_dynamic_shots
+    bench_dynamic_shots,
+    bench_dynamic_mid_circuit_shots
 }
 criterion_main!(benches);

@@ -1,6 +1,11 @@
 # Fusion Pipeline
 
-Gate optimizations before execution, gated by qubit count thresholds. Every pass returns `Cow<Circuit>`. `Borrowed` when no optimization applies, so circuits that do not benefit pay zero overhead.
+Rewrites of the gate stream before execution, each pass gated on a qubit count. The count
+is the width of the buffer the backend sweeps, not the circuit's: the density matrix
+holds `n` qubits as a `2n`-qubit statevector and so reaches each floor at half the
+circuit width (`fuse_circuit_for_width` in `src/circuit/fusion.rs`). Every pass returns
+`Cow<Circuit>` and stays `Borrowed` when it changes nothing, so a circuit no pass
+touches is never cloned.
 
 ```mermaid
 flowchart TD
@@ -50,10 +55,10 @@ as well, so a producer that outgrows a table fails loudly instead of dropping wo
 | `BatchPhase` | 40 entries | `fuse_controlled_phases` splits the chain into consecutive batches |
 
 Splitting is sound because both payloads hold mutually commuting diagonal terms. A
-repeated `(control, target)` pair folds into the entry already present rather than
-adding a second one, which both keeps the two paths in agreement (the BMI2 kernel
-indexes one bit per distinct qubit, so a repeated target has no bit of its own) and
-bounds a chain by the qubit count.
+repeated `(control, target)` pair folds into the entry already present. That keeps the
+BMI2 and fallback paths in agreement, since the BMI2 kernel indexes one bit per distinct
+qubit and a repeated target has no bit of its own, and it bounds a chain by the qubit
+count.
 
 `DiagonalBatch` instead declines at the kernel: `build_diagonal_batch_tables` returns
 `None` when the grouping does not fit and the backend runs the per-element path.
@@ -64,18 +69,17 @@ A variational sweep holds one gate sequence and varies only the angles. Fusion
 decides the same block structure at every point, so `PreparedCircuit` settles it once
 and rebinds against it.
 
-What is reusable is the plan, not the matrices: a changed angle changes every fused
-matrix it feeds. `FusionPlan` therefore records a recipe per angle-derived payload, a
-list of template instructions and how each one's matrix enters the product. Replay
-recomputes the products; it never caches them. Nested recipes splice by rewriting a
+The plan is reusable and the matrices are not, since a changed angle changes every fused
+matrix it feeds. `FusionPlan` records a recipe per angle-derived payload: a list of
+template instructions and how each one's matrix enters the product. Replay recomputes
+the products and never caches them. Nested recipes splice by rewriting a
 placement flag rather than by materializing the inner product, which is sound because
 both widening to a pair and SWAP conjugation are multiplicative.
 
 The passes record this under a `Tracer` that is inactive on the ordinary path, so a
 fusion outside the prepared form allocates what it always did.
 
-A few decisions read a matrix rather than the gate sequence, and those the plan cannot
-assume:
+The plan cannot assume the decisions that read a matrix rather than the gate sequence:
 
 | Decision | Read by | Recorded as |
 |----------|---------|-------------|
@@ -101,9 +105,8 @@ template's angle while every other payload moved.
 ## Fusion cost against apply cost
 
 Fusion cost tracks instruction count and is close to flat in qubit count, while gate
-application is `2^n`. The ratio therefore moves by an order of magnitude across the
-useful range: for `hardware_efficient_ansatz(n, 5, seed)` on this project's reference host,
-fusion is about 22% of a run at 12 qubits and about 0.3% at 20.
+application is `2^n`. For `hardware_efficient_ansatz(n, 5, seed)` on this project's
+reference host, fusion is about 22% of a run at 12 qubits and about 0.3% at 20.
 
 ```admonish tip
 At 16 qubits and above, fusion is not on the hot path, and these passes are tuned for

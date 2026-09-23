@@ -36,19 +36,20 @@ cargo clippy --all-targets --all-features -- -D warnings -D clippy::undocumented
 cargo doc --no-deps --features "parallel gpu distributed"
 ```
 
-The doc build covers the `gpu` and `distributed` surfaces on any host: rustdoc compiles
-but never links, so no CUDA toolkit is needed. An `--all-features` doc build additionally
-requires an MPI installation (the `mpi` crate probes for one in its build script).
+`--all-features` includes `distributed-mpi`, which needs a system MPI installation and
+libclang for its bindgen step; without them, name the features instead, for example
+`--features "parallel gpu distributed"`. The doc build covers the `gpu` and
+`distributed` surfaces without a CUDA toolkit, because rustdoc compiles but never links.
 
 Use `cargo test --all-features` when `cargo-nextest` is not installed. Keep doctests on
 `cargo test --doc` until nextest doctest support is no longer experimental.
 
-GPU golden tests run under `cargo nextest run --features "parallel gpu" --test golden_gpu
---test golden_gpu_density_matrix` and skip automatically when no CUDA device is present,
-so a green run on a host without a card means "not tested". No CI job opens a device.
-Before merging a change to `src/gpu/`, the gate set, the fusion pipeline, or a kernel
-table shape, run `scripts/test-gpu.ps1` on a host with a card: it sets
-`PRISM_REQUIRE_GPU=1` so a missing device fails the run instead of skipping.
+The GPU golden tests (`--test golden_gpu --test golden_gpu_density_matrix` under
+`--features "parallel gpu"`) skip when no CUDA device is present, so a green run on a
+host without a card means untested, and no CI job opens a device. Before merging a
+change to `src/gpu/`, the gate set, the fusion pipeline, or a kernel table shape, run
+`scripts/test-gpu.ps1` on a host with a card. It sets `PRISM_REQUIRE_GPU=1`, so a
+missing device fails the run.
 
 ## Coverage
 
@@ -60,20 +61,17 @@ cargo llvm-cov --all-features --html --open       # browseable HTML report
 
 ## Documentation site
 
-The architecture guide and glossary in `docs/` publish as an mdBook site to GitHub Pages
-via `.github/workflows/docs.yml`. Preview locally:
+`docs/` publishes as an mdBook site to GitHub Pages through `.github/workflows/docs.yml`.
+Preview locally:
 
 ```bash
 cargo install mdbook   # once
 mdbook serve docs      # serves at http://localhost:3000
 ```
 
-The book is rooted at `docs/` (`docs/book.toml`); `docs/SUMMARY.md` lists the pages and
-rendered output lands in `docs/book/` (gitignored). Publishing requires the repository
-Pages source set to "GitHub Actions" once under Settings > Pages.
-
-The workflow generates `sitemap.xml` from the built HTML, so pages in `SUMMARY.md` are
-indexed automatically.
+`docs/SUMMARY.md` lists the pages, and rendered output lands in `docs/book/`
+(gitignored). The workflow generates `sitemap.xml` from the built HTML. Publishing needs the
+repository's Pages source set to "GitHub Actions" once, under Settings > Pages.
 
 ## Benchmarks
 
@@ -82,28 +80,35 @@ cargo bench --bench circuits --features parallel        # circuit macrobenchmark
 cargo bench --bench bench_driver --features parallel    # gate microbenchmarks
 ```
 
-Always use `--features parallel`. Baselines were taken with Rayon enabled. Do not run
-multiple `cargo bench` processes at once. Rayon contention causes noisy results.
+Always use `--features parallel`, since baselines were taken with Rayon enabled. Run one
+`cargo bench` process at a time; competing Rayon pools make the results noisy.
+
+### Profiling
+
+```bash
+./scripts/flamegraph.sh "qft_textbook/16"     # unix, needs `cargo install flamegraph`
+.\scripts\flamegraph.ps1 "qft_textbook/16"    # windows
+```
+
+The script header lists the platform profiler it needs and where the SVG lands.
 
 ### Regression checks
 
-Before/after numbers that have to hold to the 5% gate go through the
-adjacent-binary A/B. It builds both bench binaries first, verifies the working tree
-did not move between the two builds, then runs them adjacent with no rebuild in
-between, and reports every row against its own same-code control:
+Numbers held to the 5% gate come from the adjacent-binary A/B. It builds both bench
+binaries, checks the working tree did not move between the builds, runs them back to
+back, and reports every row against its own same-code control:
 
 ```bash
 ./scripts/bench_ab.sh --filter '^factored/noise_kraus/' --ref main
 ```
 
-Separate `cargo bench` invocations minutes apart are not a valid A/B on a
-development host: the rebuild lands between them and a byte-identical control group
-has read as much as +98%. Do not report a change without its control column, and
-say so plainly when a delta lands inside the noise floor. `benches/README.md` has
-the method and the list of rows this cannot resolve.
+Two `cargo bench` invocations minutes apart are not an A/B on a development host: the
+rebuild lands between them, and a byte-identical control group has read as much as
++98%. Report every change with its control column, and say so when a delta sits inside
+the noise floor. `benches/README.md` has the method and the rows this cannot resolve.
 
-Stored baselines remain useful for tracking a number over weeks and for the CI
-gate, where both sides run in one job:
+Stored baselines still serve for tracking a number over weeks and for the CI gate,
+where both sides run in one job:
 
 ```bash
 cargo bench --features parallel
@@ -120,7 +125,7 @@ description. Both need `jq` and `bc`; `bench_ab.sh` needs neither.
 ## PR guidelines
 
 - Include before/after benchmark numbers for performance-sensitive changes.
-- All tests pass, clippy clean, fmt clean, doc build clean.
+- Tests, clippy, fmt and the doc build all pass.
 - Fixed seeds: `42` for tests, `0xDEAD_BEEF` for benchmark circuits.
 - The pull request template at `.github/PULL_REQUEST_TEMPLATE.md` captures the required
   checklist.
@@ -140,15 +145,13 @@ The level comes from `scripts/release_bump_level.sh` in two stages:
 | `fix:` or `perf:` | patch | patch |
 | anything else | none | none |
 
-The second column is the specification. The third is what actually ships below
-1.0, and the difference is deliberate. Cargo reads `0.27.0` as `^0.27.0`, so under
-0.x the minor position is the compatibility boundary: `0.27` to `0.28` already
-signals a break to every downstream caret requirement. `cargo release major` on a
-0.x version resolves to 1.0.0 instead, which crates.io permits yanking but never
-unpublishing, and which claims an API stability the crate has not reached.
-
-The clamp is gated on the major version read from `Cargo.toml`, not hardcoded, so
-a deliberate 1.0.0 restores the major path with no edit to the script.
+The second column is the specification; the third is what ships below 1.0. Cargo reads
+`0.27.0` as `^0.27.0`, so under 0.x the minor position is already the compatibility
+boundary: `0.27` to `0.28` signals a break to every downstream caret requirement.
+`cargo release major` on a 0.x version would resolve to 1.0.0, which crates.io allows
+yanking but never unpublishing, and which claims an API stability the crate has not
+reached. The clamp reads the major version from `Cargo.toml`, so a deliberate 1.0.0
+restores the major path with no edit to the script.
 
 `scripts/release_bump_level_test.sh` drives the mapping against synthetic commit
 lists, asserting both the level and the version it produces (a `feat!:` commit on
@@ -187,7 +190,7 @@ and voice in whatever does get written.
 ### Inline comments
 
 - Avoid inline comments. Code should carry its meaning through naming and structure.
-  Two exceptions: `// SAFETY:` comments (required, see below) and genuinely non-obvious
+  Two exceptions: `// SAFETY:` comments (required, see below) and non-obvious
   algorithmic reasoning that naming cannot express. When in doubt, leave the comment
   out.
 - No comment that restates the line it sits above.
@@ -207,7 +210,7 @@ and voice in whatever does get written.
   fields whose name says everything) get nothing.
 - A `pub` item that is not meant as public API gets demoted to `pub(crate)` instead of
   documented. Reduce visibility before writing docs nobody should read.
-- Document private items only when they are genuinely complex.
+- Document private items only when they are complex.
 - No `///` on `#[test]` functions. The test name or a plain comment carries any
   explanation.
 

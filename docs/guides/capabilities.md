@@ -1,10 +1,9 @@
 # Capability and Support Matrix
 
-This page records which CPU and GPU architectures each PRISM-Q backend supports,
-and where distributed execution stands. CPU backends are written in portable Rust
-and run on every supported architecture; SIMD acceleration (AVX2/FMA/BMI2 on
-x86-64, NEON on ARM64) is selected at runtime where a kernel exists, otherwise a
-scalar path is used.
+Which CPU and GPU architectures each PRISM-Q backend supports, and where distributed
+execution stands. CPU backends are portable Rust and run on every supported
+architecture; a SIMD kernel (AVX2/FMA/BMI2 on x86-64, NEON on ARM64) is selected at
+runtime where one exists, and a scalar path runs otherwise.
 
 ## Legend
 
@@ -124,11 +123,11 @@ declines loudly, and the rejection says which engine could not serve the request
 rather than blaming the route that selected it.
 
 `simulate(...).marginals()` reads per-qubit Z expectations rather than a
-distribution when the resolved backend has an observable path and the circuit
-routes straight to it. Every backend has one, and the dense output cap does not
-apply on that route; a Clifford circuit with measurements reads its marginals
-off the tableau at any width, and the dense statevector reads them off its own
-amplitudes rather than building the `2^n` distribution to sum. It falls back to
+distribution when the circuit routes straight to the resolved backend's observable
+path, and the dense output cap does not apply on that route: a Clifford circuit
+with measurements reads its marginals off the tableau at any width, and the dense
+statevector reads them off its own amplitudes rather than building the `2^n`
+distribution to sum. It falls back to
 the dense distribution on a circuit that splits into independent blocks unless
 those blocks run as product states, and under a noise model, where the mixture
 is read densely and the density-matrix memory limit applies instead.
@@ -177,8 +176,8 @@ Two tensor-network kinds decide which lever runs at the tensor-network memory
 cap. Under `BackendKind::TensorNetwork` a contraction over the cap is sliced: legs
 are fixed, the network is contracted once per assignment and summed, and the
 answer stays `Exact`. Slicing buys memory with time, since every slice repeats
-the whole contraction, so a query the cap used to refuse can now take many times
-longer than one that fits. `BackendKind::TensorNetworkBounded { tolerance }`
+the whole contraction, so a query over the cap can take many times longer than one
+that fits. `BackendKind::TensorNetworkBounded { tolerance }`
 factors an intermediate first and keeps the new bond only as far as discarding
 `tolerance` of that cut's squared weight allows, then slices whatever is still
 over the cap. It reports `Approximate`, with a bound of 1 minus the summed
@@ -223,14 +222,11 @@ them; see [Shot and observable queries above the dense cap](#shot-and-observable
 | Multi-GPU | Planned | A GPU context binds a single device; sharding one statevector across devices also needs peer access between them to stay ahead of the host path |
 | Distributed noisy shots | Planned | Noise models are rejected on the distributed backend; trajectory execution is not lockstep across ranks |
 
-These targets are listed so the matrix reflects the roadmap rather than hiding
-the gaps.
-
 ## Compatibility
 
 The minimum supported Rust version is 1.87.0. It is pinned in three places that are
 updated together: `rust-version` in `Cargo.toml`, `msrv` in `clippy.toml`, and the
-`CI_MSRV` job that builds against exactly that toolchain. Raising it is a minor bump
+`CI_MSRV` variable the `msrv` CI job builds against. Raising it is a minor bump
 while the crate is below 1.0.
 
 Four feature flags are part of the surface: `parallel`, on by default, and `gpu`,

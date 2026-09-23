@@ -3,13 +3,13 @@
 PRISM-Q ships nine CPU backends, an optional CUDA path attached to the statevector,
 stabilizer and density-matrix backends, and a feature-gated distributed statevector
 backend that shards the dense state across MPI ranks. The
-[simulation engine](./engine.md) picks a backend automatically, or you can select one.
-The density matrix and the distributed backend are explicit only; the tensor network is
-explicit except on an expectation or marginals terminal, where `Auto` reaches it for a
-wide shallow unitary circuit. For a task-oriented version of
-this material, see the [Backends Deep Dive guide](../guides/backends.md).
+[simulation engine](./engine.md) picks a backend automatically unless the caller names
+one. The density matrix and the distributed backend are explicit only; the tensor
+network is explicit except on an expectation or marginals terminal, where `Auto` reaches
+it for a wide shallow unitary circuit. The task-oriented version of this material is the
+[Backends Deep Dive guide](../guides/backends.md).
 
-The diagrams below are rendered directly from PRISM-Q's own SVG circuit renderer.
+The circuit diagrams on this page come from PRISM-Q's own SVG renderer.
 
 ![GHZ state preparation circuit](../diagrams/ghz_5.svg)
 
@@ -31,17 +31,15 @@ pins the contract across backends against the density-matrix oracle.
 
 ## Memory budget
 
-A circuit that does not fit in memory is an error, not a fallback. No backend silently
-hands the work to a different one when its state would not fit: it returns
-`PrismError::IncompatibleBackend` naming itself, the qubit count, the cap, and the
-environment variable that overrides it. Choosing a different backend is the caller's
-decision, and `BackendKind::Auto` makes it from circuit structure before any backend is
-constructed.
+A circuit that does not fit in memory is an error. No backend hands the work to another
+when its state would not fit: it returns `PrismError::IncompatibleBackend` naming
+itself, the qubit count, the cap, and the environment variable that overrides it.
+Choosing a different backend is the caller's decision, and `BackendKind::Auto` makes it
+from circuit structure before any backend is constructed.
 
-The check lives in `Backend::init`, which is the one point every execution path passes
-through before reserving its state. Putting it there means a caller that drives a backend
-directly, through `run_on` rather than `simulate`, gets the same guard as one that goes
-through dispatch.
+The check lives in `Backend::init`, which every execution path passes through before
+reserving its state, so a caller driving a backend through `run_on` gets the same guard
+as one going through `simulate`.
 
 | Cap | Variable | Default |
 |-----|----------|---------|
@@ -56,24 +54,23 @@ through dispatch.
 | Tensor-network peak intermediate | `PRISM_MAX_TN_PEAK_QUBITS` (at most `2^q` elements in the largest planned intermediate, summed over the slices running at once) | Same budget over `Complex64` |
 | Factored stabilizer merged-cluster width | `PRISM_MAX_STABILIZER_CLUSTER_QUBITS` | Widest joint tableau fitting the same budget, counted as `2n + 1` rows of `2 * ceil(n / 64)` words and halved to cover the peak while both source tableaux are still live |
 
-The five growth caps are deliberately independent of `PRISM_MAX_SV_QUBITS`: the sparse,
+The five growth caps are independent of `PRISM_MAX_SV_QUBITS`: the sparse,
 factored, MPS, tensor network, and factored stabilizer backends exist to run above the
 statevector cap, so lowering that cap to steer routing must not shrink what they may
 hold. Their defaults come from the same detected-memory budget.
 
 The factored stabilizer cap is the one that is not a `2^n` amplitude count. A stabilizer
-cluster costs `O(n^2 / 64)` words, so a dense cap is the wrong scale here: it would hold
-a cluster to the dense backends' qubit ceiling, far below the widths reached by the
-Clifford circuits at 128 qubits and above that dispatch selects that backend for.
+cluster costs `O(n^2 / 64)` words, so a dense cap would hold a cluster to the dense
+backends' qubit ceiling, far below the 128 qubits and up at which dispatch selects that
+backend.
 
 The density-matrix cap is the tighter of its own override and half the statevector cap,
 computed in one place so dispatch-time validation and the backend's `init` guard cannot
 disagree about where the ceiling is. Raising `PRISM_MAX_DM_QUBITS` past that bound needs
-`PRISM_MAX_SV_QUBITS` raised with it, which is what the rejection says: the backend
-reports it itself rather than surfacing an error naming the statevector it allocates
-internally. When physical memory cannot be detected the caps are
-disabled and a warning is printed, because guessing a budget is worse than saying the
-budget is unknown.
+`PRISM_MAX_SV_QUBITS` raised with it, and the rejection says so: the backend reports it
+itself rather than surfacing an error naming the statevector it allocates internally.
+When physical memory cannot be detected the caps are disabled and a warning is printed,
+because guessing a budget is worse than saying the budget is unknown.
 
 Parallel noisy trajectories are the one path holding more than one state at a time: each
 Rayon thread runs its own backend, so peak memory is `threads * state(n)`. That path is
@@ -81,25 +78,24 @@ restricted to circuits below 14 qubits, where a statevector replica is 256 KiB a
 thread pool stays in the tens of megabytes. Above it trajectories run serially with one
 live backend, bounded by the ordinary state cap.
 
-The three growth paths that once sat outside this contract are bounded at their growth
-events, each rejecting with an error naming its own backend before the allocation: a
-factored sub-state merge checks the merged block width against the statevector cap, the
-sparse map checks a branching gate's worst-case fan-out against the entry cap (so a
-rejection can fire one gate early on a state that would have deduplicated below it), and
-MPS gate application checks its live contraction-buffer total against the statevector
-budget. The MPS check bounds the workspace, not `max_bond_dim` itself: a large cap on a
-circuit whose bonds stay small is fine, and the rejection fires only when the bonds
-actually grow past what memory holds.
+Three backends grow after `init`, and each checks at the growth event, rejecting with
+an error naming itself before the allocation. A factored sub-state merge checks the
+merged block width against the merge cap. The sparse map checks a branching gate's
+worst-case fan-out against the entry cap, so a rejection can fire one gate early on a
+state that would have deduplicated below it. MPS gate application checks its live
+contraction-buffer total against the workspace cap. That check bounds the workspace, not
+`max_bond_dim`: a large cap on a circuit whose bonds stay small is fine, and the
+rejection fires only when the bonds grow past what memory holds.
 
 ## Statevector
 
-Full-state simulation in a flat `Vec<Complex64>` of 2^n amplitudes. The primary backend for circuits up to ~28 qubits.
+Full-state simulation in a flat `Vec<Complex64>` of 2^n amplitudes. The primary backend up to the memory cap, 29 qubits on a 16 GiB host.
 
 Gate kernels use enum dispatch with specialized routines for CX, CZ, SWAP, Cu, MCU, Rzz, BatchRzz, BatchPhase, DiagonalBatch, MultiFused, and PauliRot (one pass over `(j, j ^ xmask)` pairs for `exp(-i θ P / 2)`, a parity-phase sweep when the string is Z-only; backends without the kernel receive the CNOT-ladder lowering from `expand_pauli_rotations`). Single-qubit gates go through `PreparedGate1q` with FMA-vectorized SIMD. MultiFused gates use a three-tier tiled kernel (L2 16K / L3 131K / individual passes) for cache locality. MultiFused batches where all gates are diagonal dispatch to a dedicated fast path (1 complex multiply/element vs 4+2 for full 2×2).
 
 Rayon parallelism at ≥14 qubits with `par_chunks_mut` and `MIN_PAR_ELEMS = 4096` per task. BMI2 `_pext_u64` accelerates BatchPhase, BatchRzz, and DiagonalBatch LUT indexing.
 
-Deferred measurement normalization: `pending_norm` accumulates normalization factors without full-state scaling passes. Zero-cost for circuits without measurements.
+Measurement normalization is deferred: `pending_norm` accumulates the factors instead of rescaling the full state after each collapse, and a circuit without measurements never touches it.
 
 The Quantum Fourier Transform is a representative statevector workload, dense with
 controlled-phase gates that the fusion pipeline batches:
@@ -120,9 +116,9 @@ Probability extraction uses coset-based enumeration with GF(2) Gaussian eliminat
 
 ## Sparse
 
-`HashMap<usize, Complex64>` for states with few non-zero amplitudes. O(k) memory. Entries at or below a pruning threshold on |a|² (1e-16) are removed after gates that can shrink or cancel amplitudes, and the kept entries are rescaled so the state keeps its norm; a run whose threshold was raised above the default reports `Approximate` with a fidelity bound derived from the dropped weight. Best for circuits whose support stays concentrated in computational-basis states at large qubit counts.
+`FxHashMap<usize, Complex64>` (the crate's multiply-xor hasher) for states with few non-zero amplitudes. O(k) memory. Entries at or below a pruning threshold on |a|² (1e-16) are removed after gates that can shrink or cancel amplitudes, and the kept entries are rescaled so the state keeps its norm; a run whose threshold was raised above the default reports `Approximate` with a fidelity bound derived from the dropped weight. Best for circuits whose support stays concentrated in computational-basis states at large qubit counts.
 
-The map's per-entry gate cost is about 16x the statevector's per-amplitude cost on a mixed diagonal and permutation workload (the `sparse/densify` bench rows), so a state that densifies past roughly 1/16 load factor runs slower than a dense vector at the same width would. There is deliberately no mid-run handoff to the statevector: automatic dispatch selects this backend only above the statevector memory cap, where the dense state exceeds the memory budget, and a run that branches past the entry cap rejects the gate rather than degrading silently. The map is keyed by a `usize` basis index, so a circuit wider than `usize::BITS` qubits is rejected at `init` and automatic dispatch sends it to MPS instead. An explicitly selected sparse run on a densifying circuit degrades in place, measured at up to 24x the dense cost when fully dense at 20 qubits.
+The map's per-entry gate cost is about 16x the statevector's per-amplitude cost on a mixed diagonal and permutation workload (the `sparse/densify` bench rows), so a state that densifies past roughly 1/16 load factor runs slower than a dense vector at the same width would. There is no mid-run handoff to the statevector: automatic dispatch selects this backend only above the statevector memory cap, where the dense state exceeds the memory budget, and a run that branches past the entry cap rejects the gate rather than degrading silently. The map is keyed by a `usize` basis index, so a circuit wider than `usize::BITS` qubits is rejected at `init` and automatic dispatch sends it to MPS instead. An explicitly selected sparse run on a densifying circuit degrades in place, measured at up to 24x the dense cost when fully dense at 20 qubits.
 
 ## MPS (Matrix Product State)
 
@@ -153,12 +149,13 @@ operator and contracts to a scalar. Both follow the doubled network's cost rathe
 the qubit count. An identity factor is a closed leg rather than an appended tensor, so a
 weight-`k` observable adds `k` tensors and not `n`.
 
-Nothing about the planner changed: an index is open when exactly one tensor holds it,
-which the greedy ordering already carries through to its result.
+The planner needs nothing extra for open indices: an index is open when exactly one
+tensor holds it, and the greedy ordering carries it through to the result.
 
-The reduced density matrix is the half of general-noise support the backend was missing,
-so the trajectory engine now runs amplitude damping, phase damping, thermal relaxation,
-and custom Kraus channels here under explicit dispatch.
+The one-qubit reduced density matrix is what the trajectory engine needs for general
+noise, so amplitude damping, phase damping, thermal relaxation, and one-qubit custom
+Kraus channels run here under explicit dispatch. Two-qubit Kraus channels do not: the
+backend declines the two-qubit reduction.
 
 ## Factored
 
@@ -196,8 +193,8 @@ gradient evaluates the mixture once per shifted angle. Readout error is the one 
 model that no evolution holds, so `run` and `marginals` reject a model carrying it and
 point at `sample_counts`. The adjoint stays excluded because
 it backpropagates against a pure state and a channel has no reverse evolution to walk.
-See [Noise across the terminals](./engine.md) for what that route accepts and what stays
-on trajectory averaging.
+See [Noise across the terminals](./engine.md#noise-across-the-terminals) for what that
+route accepts and what stays on trajectory averaging.
 
 ## Pauli Path
 
@@ -274,8 +271,7 @@ Schmidt values come back descending with their squares summing to one whatever n
 representation carried. A stabilizer cut of rank `r` has `2^r` equal weights, so its
 tableau reads the rank off one elimination and builds the list from it; past the dense
 export cap those values no longer fit while the rank still does, and the entropy comes
-back alone with `EntropyResult::schmidt_values` at `None`. That is the width where the
-old fallback to the statevector could not answer at all. The reduced density matrix is
+back alone with `EntropyResult::schmidt_values` at `None`. The reduced density matrix is
 row major with side `2^k` and trace one, and its `4^k` entries are priced as a
 `2k`-qubit statevector against the dense export cap. A noise model sends the marginal and
 the entropy to the density matrix, which answers the marginal of the exact mixture and
@@ -295,7 +291,7 @@ fidelity of two mixtures is a different computation.
 
 Routing constants are static values in `src/sim/dispatch.rs`. The dense memory
 caps are the exception: `src/backend/memory.rs` derives them from detected
-physical memory. The split is deliberate.
+physical memory.
 
 A capability limit is detected. Getting one wrong means an allocation that fails
 or a host that swaps, and physical memory is cheap to read and hard to misread.

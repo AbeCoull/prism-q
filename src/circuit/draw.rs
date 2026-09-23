@@ -274,7 +274,8 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
         return Vec::new();
     }
 
-    let max_moments = opts.max_moments.unwrap_or(moments.len()).min(moments.len());
+    let total_moments = moments.len();
+    let max_moments = opts.max_moments.unwrap_or(total_moments).min(total_moments);
     let moments = &moments[..max_moments];
 
     let label_w = qubit_label_width(num_qubits);
@@ -541,11 +542,10 @@ fn render_moments(moments: &[Vec<PlacedOp>], num_qubits: usize, opts: &TextOptio
         lines.push(format!("  ... and {} more qubits", elided));
     }
 
-    if max_moments < moments.len() {
+    if max_moments < total_moments {
         lines.push(format!(
             "  ... truncated at moment {} of {}",
-            max_moments,
-            moments.len()
+            max_moments, total_moments
         ));
     }
 
@@ -1163,6 +1163,18 @@ mod tests {
         };
         let text = circuit.draw(&opts);
         assert!(text.contains("\u{254C}"));
+    }
+
+    #[test]
+    fn max_moments_truncates_and_says_so() {
+        let circuit = CircuitBuilder::new(1).h(0).x(0).h(0).x(0).build();
+        let opts = TextOptions {
+            max_moments: Some(2),
+            ..Default::default()
+        };
+        let text = circuit.draw(&opts);
+        assert!(text.contains("truncated at moment 2 of 4"), "{text}");
+        assert!(!circuit.draw(&TextOptions::default()).contains("truncated"));
     }
 
     #[test]

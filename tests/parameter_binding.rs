@@ -611,6 +611,52 @@ fn run_matches_simulate_on_every_binding() {
     }
 }
 
+// A held backend would carry its RNG from one call into the next, so repeated
+// calls with one seed must each measure what a fresh `simulate` run measures.
+#[test]
+fn run_with_mid_circuit_measurement_is_independent_of_call_history() {
+    let mut template = Circuit::new(3, 3);
+    template.add_gate(Gate::H, &[0]);
+    template.add_gate(Gate::Rx(0.0), &[1]);
+    template.add_gate(Gate::Cx, &[0, 2]);
+    template.add_measure(0, 0);
+    template.add_gate(Gate::Rx(0.0), &[1]);
+    template.add_gate(Gate::Cx, &[1, 2]);
+    template.add_measure(1, 1);
+    template.add_measure(2, 2);
+    let params = Parameters::from_links(
+        vec![
+            ParamLink {
+                instruction: 1,
+                slot: 0,
+            },
+            ParamLink {
+                instruction: 4,
+                slot: 1,
+            },
+        ],
+        2,
+    );
+    let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+
+    let a = [1.3, 0.4];
+    let b = [0.7, 2.2];
+    let c = [2.9, 1.1];
+    for values in [a, a, a, b, a, c, b, a] {
+        let independent = params.bind(&template, &values).unwrap();
+        let expected = prism_q::simulate(&independent).seed(SEED).run().unwrap();
+        let got = prepared.run(&values, SEED).unwrap();
+        assert_eq!(got.classical_bits, expected.classical_bits, "{values:?}");
+        if let (Some(got), Some(expected)) = (got.probabilities, expected.probabilities) {
+            let (got, expected) = (got.to_vec(), expected.to_vec());
+            assert_eq!(got.len(), expected.len());
+            for (i, (x, y)) in got.iter().zip(&expected).enumerate() {
+                assert!((x - y).abs() < 1e-12, "{values:?} outcome {i}: {x} vs {y}");
+            }
+        }
+    }
+}
+
 // The density matrix backend does not accept fused gates, so `run` has to hand
 // it the bound template rather than the replayed skeleton.
 #[test]

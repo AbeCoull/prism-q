@@ -1657,6 +1657,9 @@ pub(crate) struct PreparedRoute {
     /// width matches, so a sweep pays one `2^n` allocation rather than one per
     /// point. Rebuilt when the seed changes, since the seed feeds its RNG.
     held: Option<(u64, Box<dyn Backend + Send>)>,
+    /// Set when the template reads the RNG, so every point gets a fresh backend
+    /// and measures what a solo run with its seed measures.
+    draws_randomness: bool,
 }
 
 impl PreparedRoute {
@@ -1668,6 +1671,10 @@ impl PreparedRoute {
 
     /// Apply `circuit` verbatim, with no further fusion.
     pub(crate) fn run(&mut self, circuit: &Circuit, seed: u64) -> Result<RunOutcome> {
+        if self.draws_randomness {
+            let mut backend = self.plan.build(seed);
+            return execute_circuit(&mut *backend, circuit, &SimOptions::default());
+        }
         if !matches!(&self.held, Some((s, _)) if *s == seed) {
             self.held = Some((seed, self.plan.build(seed)));
         }
@@ -1709,6 +1716,7 @@ pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<P
         supports_fused: probe.supports_fused_gates(),
         plan,
         held: None,
+        draws_randomness: draws_randomness(template),
     })
 }
 
@@ -2066,16 +2074,7 @@ pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -
 /// A circuit that draws randomness needs a fresh RNG to match its solo run, and
 /// anything that is not a direct backend route has no single plan to hold.
 fn batch_plan(kind: &BackendKind, circuit: &Circuit) -> Option<dispatch::BackendPlan> {
-    let draws_randomness = circuit.instructions.iter().any(|i| {
-        matches!(
-            i,
-            Instruction::Measure { .. }
-                | Instruction::Reset { .. }
-                | Instruction::Conditional { .. }
-                | Instruction::Region(_)
-        )
-    });
-    if draws_randomness {
+    if draws_randomness(circuit) {
         return None;
     }
     let ProbabilityRoute::Direct {
@@ -2088,6 +2087,20 @@ fn batch_plan(kind: &BackendKind, circuit: &Circuit) -> Option<dispatch::Backend
         ExecutionPlan::Backend(plan) => Some(plan),
         _ => None,
     }
+}
+
+/// True when a run of `circuit` reads the backend RNG, so a backend carried over
+/// from an earlier run would change its outcome.
+fn draws_randomness(circuit: &Circuit) -> bool {
+    circuit.instructions.iter().any(|i| {
+        matches!(
+            i,
+            Instruction::Measure { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Conditional { .. }
+                | Instruction::Region(_)
+        )
+    })
 }
 
 /// Parse an OpenQASM string and execute with automatic backend selection.

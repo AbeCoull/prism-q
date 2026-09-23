@@ -30,6 +30,18 @@ pub const DM_EPS: f64 = 1e-12;
 
 pub const SEED: u64 = 42;
 
+/// Seed of shot `index` in a run seeded `seed`: a copy of the crate-private
+/// `mix_seed` in `src/sim/mod.rs`, which the per-shot tests pin against.
+pub fn mix_seed(seed: u64, index: usize) -> u64 {
+    fn splitmix64(mut z: u64) -> u64 {
+        z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    splitmix64(splitmix64(seed) ^ index as u64)
+}
+
 /// The 16 two-qubit Pauli Kraus operators of symmetric depolarizing with
 /// parameter `p`, weighted `sqrt(1-p)` on `I(x)I` and `sqrt(p/15)` elsewhere,
 /// indexed `2*bit(q0) + bit(q1)`. The closed-form

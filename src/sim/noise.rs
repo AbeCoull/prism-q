@@ -2999,7 +2999,7 @@ pub(crate) fn run_shots_noisy_brute_with(
     let readout = crate::sim::trajectory::written_readout(circuit, &noise.readout);
 
     for i in 0..num_shots {
-        let shot_seed = seed.wrapping_add(i as u64);
+        let shot_seed = crate::sim::mix_seed(seed, i);
         let mut rng = crate::sim::trajectory::noise_rng(shot_seed);
         let mut backend = backend_factory(shot_seed);
         backend.init(circuit.num_qubits, circuit.num_classical_bits)?;

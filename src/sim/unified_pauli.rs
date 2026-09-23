@@ -599,7 +599,7 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
                     q,
                     num_words,
                     num_samples,
-                    seed.wrapping_add(q as u64),
+                    super::mix_seed(seed, q),
                 )
             })
             .collect()
@@ -608,7 +608,7 @@ pub fn run_spp(circuit: &Circuit, num_samples: usize, seed: u64) -> Result<SppRe
     #[cfg(not(feature = "parallel"))]
     let results: Vec<(f64, f64, usize)> = (0..n)
         .map(|q| {
-            estimate_qubit_expectation(&ops, q, num_words, num_samples, seed.wrapping_add(q as u64))
+            estimate_qubit_expectation(&ops, q, num_words, num_samples, super::mix_seed(seed, q))
         })
         .collect();
 

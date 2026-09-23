@@ -1660,6 +1660,30 @@ pub(crate) struct PreparedRoute {
     /// Set when the template reads the RNG, so every point gets a fresh backend
     /// and measures what a solo run with its seed measures.
     draws_randomness: bool,
+    values: PreparedValues,
+    observable: PreparedObservable,
+}
+
+/// Who answers [`Simulate::expectation_values`] for a prepared template.
+#[derive(Clone, Copy)]
+enum PreparedValues {
+    Held,
+    /// `Auto` from [`TENSOR_ROUTE_MIN_QUBITS`]: the bound circuit is offered to
+    /// the scalar tensor route first, as `Simulate` offers it.
+    TensorFirst,
+    /// `Simulate` would take a route the held backend does not reproduce.
+    Simulate,
+}
+
+/// Who answers [`Simulate::observable_expectation`] for a prepared template.
+#[derive(Clone, Copy)]
+enum PreparedObservable {
+    /// Term by term on the held backend, with no variance.
+    Held,
+    /// The grouped evaluator on the held statevector, with its variance.
+    Grouped,
+    /// `Simulate` would take a route the held backend does not reproduce.
+    Simulate,
 }
 
 impl PreparedRoute {
@@ -1675,11 +1699,94 @@ impl PreparedRoute {
             let mut backend = self.plan.build(seed);
             return execute_circuit(&mut *backend, circuit, &SimOptions::default());
         }
+        execute_circuit(self.held_backend(seed), circuit, &SimOptions::default())
+    }
+
+    /// [`Simulate::expectation_values`] on `bound`, evaluated by applying
+    /// `applied` verbatim, or `None` when the caller should ask `Simulate`.
+    pub(crate) fn expectation_values(
+        &mut self,
+        bound: &Circuit,
+        applied: &Circuit,
+        observables: &[Vec<PauliTerm>],
+        seed: u64,
+    ) -> Option<Result<Vec<f64>>> {
+        match self.values {
+            PreparedValues::Simulate => return None,
+            PreparedValues::TensorFirst => {
+                if let Some(result) = tensor_route_expectations(bound, observables) {
+                    return Some(result.map(ExpectationResult::into_values));
+                }
+            }
+            PreparedValues::Held => {}
+        }
+        Some(
+            self.held_expectation_values(applied, observables, seed)
+                .map(|(values, _)| values),
+        )
+    }
+
+    /// [`Simulate::observable_expectation`] on the circuit `applied` was bound
+    /// from, or `None` when the caller should ask `Simulate`.
+    pub(crate) fn observable_expectation(
+        &mut self,
+        applied: &Circuit,
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Option<Result<ObservableExpectation>> {
+        match self.observable {
+            PreparedObservable::Simulate => None,
+            PreparedObservable::Held => Some(
+                self.held_expectation_values(applied, &observable_vecs(observable), seed)
+                    .map(|(values, metadata)| {
+                        weighted_observable_result(observable, &values, None, metadata)
+                    }),
+            ),
+            PreparedObservable::Grouped => Some(self.held_grouped(applied, observable, seed)),
+        }
+    }
+
+    fn held_backend(&mut self, seed: u64) -> &mut dyn Backend {
         if !matches!(&self.held, Some((s, _)) if *s == seed) {
             self.held = Some((seed, self.plan.build(seed)));
         }
         let (_, backend) = self.held.as_mut().expect("just built");
-        execute_circuit(&mut **backend, circuit, &SimOptions::default())
+        &mut **backend
+    }
+
+    fn held_expectation_values(
+        &mut self,
+        circuit: &Circuit,
+        observables: &[Vec<PauliTerm>],
+        seed: u64,
+    ) -> Result<(Vec<f64>, RunMetadata)> {
+        for observable in observables {
+            validate_observable(observable, circuit.num_qubits)?;
+        }
+        let backend = self.held_backend(seed);
+        execute_circuit(&mut *backend, circuit, &SimOptions::classical_only())?;
+        Ok((
+            backend.pauli_expectations(observables)?,
+            backend_metadata(backend),
+        ))
+    }
+
+    fn held_grouped(
+        &mut self,
+        circuit: &Circuit,
+        observable: &PauliObservable,
+        seed: u64,
+    ) -> Result<ObservableExpectation> {
+        for (_, factors) in observable.terms() {
+            validate_observable(factors, circuit.num_qubits)?;
+        }
+        let backend = self.held_backend(seed);
+        execute_circuit(&mut *backend, circuit, &SimOptions::classical_only())?;
+        let statevector = backend
+            .as_any()
+            .and_then(|any| any.downcast_ref::<StatevectorBackend>())
+            .expect("a grouped answer is settled only on a statevector plan");
+        grouped_expectation_on_state(statevector, observable, seed)
     }
 }
 
@@ -1712,12 +1819,61 @@ pub(crate) fn prepared_route(kind: &BackendKind, template: &Circuit) -> Option<P
     if has_pauli_rot && !probe.supports_pauli_rotation() {
         return None;
     }
+    let (values, observable) = prepared_expectations(kind, template, &*probe);
     Some(PreparedRoute {
         supports_fused: probe.supports_fused_gates(),
         plan,
         held: None,
         draws_randomness: draws_randomness(template),
+        values,
+        observable,
     })
+}
+
+/// Settle which expectation terminals the held backend `probe` answers the
+/// way `Simulate` answers them.
+///
+/// Both decline a template the terminals reject, whose error `Simulate`
+/// reports, and a Clifford template under `Auto` or a stabilizer kind, which
+/// `Simulate` propagates through the Pauli route rather than a backend. The
+/// weighted observable takes the grouped evaluator wherever `Simulate` would,
+/// so its variance survives, and declines when the held backend is not the
+/// statevector that evaluator reads.
+fn prepared_expectations(
+    kind: &BackendKind,
+    template: &Circuit,
+    probe: &dyn Backend,
+) -> (PreparedValues, PreparedObservable) {
+    let clifford_route =
+        (kind.is_auto() || kind.is_stabilizer_family()) && template.is_clifford_only();
+    if draws_randomness(template)
+        || template.save_count() > 0
+        || clifford_route
+        || !probe.supports_pauli_expectation()
+    {
+        return (PreparedValues::Simulate, PreparedObservable::Simulate);
+    }
+    let fits_dense = template.num_qubits <= max_statevector_qubits();
+    let values = if kind.is_auto() && fits_dense && template.num_qubits >= TENSOR_ROUTE_MIN_QUBITS {
+        PreparedValues::TensorFirst
+    } else {
+        PreparedValues::Held
+    };
+    let grouped = match kind {
+        BackendKind::Statevector => true,
+        #[cfg(feature = "gpu")]
+        BackendKind::StatevectorGpu { .. } => true,
+        _ => kind.is_auto() && fits_dense,
+    };
+    let holds_statevector = probe
+        .as_any()
+        .is_some_and(|any| any.is::<StatevectorBackend>());
+    let observable = match (grouped, holds_statevector) {
+        (false, _) => PreparedObservable::Held,
+        (true, true) => PreparedObservable::Grouped,
+        (true, false) => PreparedObservable::Simulate,
+    };
+    (values, observable)
 }
 
 /// Shared init → apply → extract logic.
@@ -3029,12 +3185,25 @@ fn grouped_expectation_statevector(
     let expanded = expand_for_backend(&backend, circuit);
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
+    backend.apply_instructions(&fused.instructions)?;
+    grouped_expectation_on_state(&backend, observable, seed)
+}
+
+/// The reduction half of [`grouped_expectation_statevector`], on a backend
+/// that has already run the circuit. `seed` seeds the scratch backend a
+/// basis-rotated moments pass runs on.
+fn grouped_expectation_on_state(
+    backend: &StatevectorBackend,
+    observable: &PauliObservable,
+    seed: u64,
+) -> Result<ObservableExpectation> {
+    let num_qubits = backend.num_qubits();
+    let terms = observable.terms();
     let masks = terms
         .iter()
-        .map(|(_, factors)| pauli_masks(factors, circuit.num_qubits))
+        .map(|(_, factors)| pauli_masks(factors, num_qubits))
         .collect::<Result<Vec<_>>>()?;
-    backend.apply_instructions(&fused.instructions)?;
-    let metadata = backend_metadata(&backend);
+    let metadata = backend_metadata(backend);
 
     let grouping = observable.grouping();
 
@@ -3125,7 +3294,7 @@ fn grouped_expectation_statevector(
                     .iter()
                     .map(|&i| masks[i].0 | masks[i].1)
                     .collect();
-                let rotation_circuit = group.basis_rotation_circuit(circuit.num_qubits);
+                let rotation_circuit = group.basis_rotation_circuit(num_qubits);
                 let rotation = crate::circuit::fusion::fuse_circuit(&rotation_circuit, true);
                 let rotated = scratch.get_or_insert_with(|| StatevectorBackend::new(seed));
                 rotated.init_from_amplitudes(state.to_vec(), 0)?;

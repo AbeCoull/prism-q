@@ -2538,9 +2538,9 @@ fn ising_hamiltonian(n: usize) -> PauliObservable {
 
 /// Twenty energy evaluations of a two-layer ansatz, the inner loop of a
 /// variational optimizer. `simulate_loop` binds a fresh circuit and hands it to
-/// `simulate`, which plans dispatch and fuses at every point. `prepared` binds
-/// through a held [`PreparedCircuit`] and still hands the bound circuit to
-/// `simulate`.
+/// `simulate`, which plans dispatch and fuses at every point. `prepared` calls
+/// the terminal on a held [`PreparedCircuit`], which replays the fusion plan
+/// into the backend it holds.
 fn bench_prepared_energy(c: &mut Criterion) {
     const POINTS: u64 = 20;
 
@@ -2569,10 +2569,8 @@ fn bench_prepared_energy(c: &mut Criterion) {
             let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
             b.iter(|| {
                 for values in &points {
-                    let bound = prepared.bind(values).unwrap();
-                    let energy = sim::simulate(bound)
-                        .seed(SEED)
-                        .observable_expectation(&hamiltonian)
+                    let energy = prepared
+                        .observable_expectation(values, &hamiltonian, SEED)
                         .unwrap();
                     black_box(energy.mean);
                 }
@@ -2585,7 +2583,7 @@ fn bench_prepared_energy(c: &mut Criterion) {
 
 /// A 200-binding sweep of a two-layer ansatz through one [`PreparedCircuit`].
 /// `prepared_loop` calls `run` per binding and is the control for
-/// `prepared_many`, which collects the same calls into one vector.
+/// `prepared_many`, which splits the bindings across cores below 14 qubits.
 fn bench_prepared_sweep(c: &mut Criterion) {
     const POINTS: u64 = 200;
 
@@ -2599,13 +2597,7 @@ fn bench_prepared_sweep(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("prepared_many", n), |b| {
             let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
-            b.iter(|| {
-                let outcomes: Vec<_> = points
-                    .iter()
-                    .map(|values| prepared.run(values, SEED).unwrap())
-                    .collect();
-                black_box(outcomes);
-            });
+            b.iter(|| black_box(prepared.run_many(&points, SEED).unwrap()));
         });
         group.bench_function(BenchmarkId::new("prepared_loop", n), |b| {
             let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();

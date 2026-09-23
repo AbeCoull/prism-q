@@ -1999,3 +1999,31 @@ fn test_smoke_stabilizer_rank() {
         .to_vec();
     assert_probs_match(BackendKind::StabilizerRank, &circuit, &sv_probs, 1e-6);
 }
+
+// The prepared expectation terminals exist to skip dispatch and fusion per
+// binding. A settle that declined everywhere would still pass every agreement
+// test against `simulate`, so pin who answers.
+#[test]
+fn prepared_expectations_answer_from_the_held_backend() {
+    let ansatz = crate::circuits::hardware_efficient_ansatz(12, 2, 42);
+    let route = prepared_route(&BackendKind::Auto, &ansatz).expect("direct route");
+    assert!(matches!(route.values, PreparedValues::Held));
+    assert!(matches!(route.observable, PreparedObservable::Grouped));
+
+    let wide = crate::circuits::hardware_efficient_ansatz(TENSOR_ROUTE_MIN_QUBITS, 1, 42);
+    let route = prepared_route(&BackendKind::Auto, &wide).expect("direct route");
+    assert!(matches!(route.values, PreparedValues::TensorFirst));
+    assert!(matches!(route.observable, PreparedObservable::Grouped));
+
+    let kind = BackendKind::Mps { max_bond_dim: 64 };
+    let route = prepared_route(&kind, &ansatz).expect("direct route");
+    assert!(matches!(route.values, PreparedValues::Held));
+    assert!(matches!(route.observable, PreparedObservable::Held));
+
+    let mut measured = Circuit::new(12, 1);
+    measured.instructions = ansatz.instructions.clone();
+    measured.add_measure(0, 0);
+    let route = prepared_route(&BackendKind::Auto, &measured).expect("direct route");
+    assert!(matches!(route.values, PreparedValues::Simulate));
+    assert!(matches!(route.observable, PreparedObservable::Simulate));
+}

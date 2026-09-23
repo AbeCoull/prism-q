@@ -157,6 +157,33 @@ class PreparedCircuit:
     ) -> None: ...
     def bind(self, values: Sequence[float]) -> Circuit: ...
     def run(self, values: Sequence[float], seed: int = 42) -> "RunOutcome": ...
+    def expectation_values(
+        self,
+        values: Sequence[float],
+        observables: list[list[tuple[int, str]]],
+        seed: int = 42,
+    ) -> list[float]: ...
+    def observable_expectation(
+        self,
+        values: Sequence[float],
+        hamiltonian: list[tuple[float, list[tuple[int, str]]]],
+        seed: int = 42,
+    ) -> "ObservableExpectation": ...
+    def run_many(
+        self, bindings: npt.ArrayLike, seed: int = 42
+    ) -> list["RunOutcome"]: ...
+    def expectation_values_many(
+        self,
+        bindings: npt.ArrayLike,
+        observables: list[list[tuple[int, str]]],
+        seed: int = 42,
+    ) -> npt.NDArray[np.float64]: ...
+    def observable_expectation_many(
+        self,
+        bindings: npt.ArrayLike,
+        hamiltonian: list[tuple[float, list[tuple[int, str]]]],
+        seed: int = 42,
+    ) -> list["ObservableExpectation"]: ...
     @property
     def template(self) -> Circuit: ...
     @property

@@ -10,8 +10,8 @@ use common::{SEED, count_gates};
 use num_complex::Complex64;
 use prism_q::circuits::qft_circuit;
 use prism_q::{
-    BackendKind, Circuit, Gate, McuData, PauliTerm, StatevectorBackend, ThreadPool, run_on,
-    run_on_state, run_shots_compiled, simulate,
+    BackendKind, Circuit, Gate, McuData, Parameters, PauliTerm, PreparedCircuit,
+    StatevectorBackend, ThreadPool, run_on, run_on_state, run_shots_compiled, simulate,
 };
 
 #[cfg(not(miri))]
@@ -305,6 +305,49 @@ fn expectation_values_ulp_stable_across_thread_counts() {
             (a - b).abs()
         );
     }
+}
+
+// Below the kernels' parallel floor a prepared sweep splits bindings across
+// workers, each on its own copy, so which worker takes a binding must not
+// reach the result.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn prepared_sweeps_bitwise_equal_across_thread_counts() {
+    let template = prism_q::circuits::hardware_efficient_ansatz(10, 2, SEED);
+    let params = Parameters::all_rotations(&template);
+    let points: Vec<Vec<f64>> = (0..16)
+        .map(|k| {
+            (0..params.num_slots())
+                .map(|s| 0.37 * (k * params.num_slots() + s) as f64)
+                .collect()
+        })
+        .collect();
+    let observables: Vec<Vec<PauliTerm>> = (0..9)
+        .map(|q| vec![PauliTerm::z(q), PauliTerm::x(q + 1)])
+        .collect();
+
+    let sweep = |threads: usize| {
+        in_pool(threads, || {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            let probabilities: Vec<Vec<f64>> = prepared
+                .run_many(&points, SEED)
+                .expect("run_many")
+                .into_iter()
+                .map(|outcome| outcome.probabilities.expect("probabilities").to_vec())
+                .collect();
+            let values = prepared
+                .expectation_values_many(&points, &observables, SEED)
+                .expect("expectation_values_many");
+            (probabilities, values)
+        })
+    };
+    let (base_probs, base_values) = sweep(1);
+    let (wide_probs, wide_values) = sweep(THREADS_HI);
+    assert_eq!(base_probs, wide_probs, "prepared run_many differs");
+    assert_eq!(
+        base_values, wide_values,
+        "prepared expectation_values_many differs"
+    );
 }
 
 // The batched compiled sampler derives one RNG stream per worker, so its shot

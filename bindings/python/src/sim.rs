@@ -8,9 +8,9 @@ use num_complex::Complex64;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     BackendKind, BondReport, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel,
-    ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities,
-    ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue, ShotsResult, bitstring,
-    simulate as core_simulate,
+    ObservableExpectation, ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement,
+    Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue,
+    ShotsResult, bitstring, simulate as core_simulate,
 };
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
@@ -777,13 +777,7 @@ impl PySimulation {
             }
             sim.seed(seed).observable_expectation(&observable)
         })?;
-        Ok(PyObservableExpectation {
-            mean: result.mean,
-            variance: result.variance,
-            group_variances: result.group_variances,
-            std_error: result.std_error,
-            metadata: PyRunMetadata::new(result.metadata),
-        })
+        Ok(PyObservableExpectation::from_result(result))
     }
 
     /// Exact `Tr(rho P)` for each joint Pauli observable, evolving the
@@ -824,11 +818,13 @@ impl PySimulation {
     }
 }
 
-fn parse_observables(observables: Vec<Vec<(usize, String)>>) -> PyPrismResult<Vec<Vec<PauliTerm>>> {
+pub(crate) fn parse_observables(
+    observables: Vec<Vec<(usize, String)>>,
+) -> PyPrismResult<Vec<Vec<PauliTerm>>> {
     observables.into_iter().map(parse_pauli_string).collect()
 }
 
-fn build_observable(
+pub(crate) fn build_observable(
     hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
 ) -> PyPrismResult<PauliObservable> {
     let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
@@ -1250,6 +1246,18 @@ pub struct PyObservableExpectation {
     group_variances: Option<Vec<f64>>,
     std_error: Option<f64>,
     metadata: PyRunMetadata,
+}
+
+impl PyObservableExpectation {
+    pub(crate) fn from_result(result: ObservableExpectation) -> Self {
+        Self {
+            mean: result.mean,
+            variance: result.variance,
+            group_variances: result.group_variances,
+            std_error: result.std_error,
+            metadata: PyRunMetadata::new(result.metadata),
+        }
+    }
 }
 
 #[pymethods]

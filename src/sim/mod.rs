@@ -212,13 +212,35 @@ pub struct Seeded {
     seed: u64,
 }
 
+/// A caller-supplied start: a `2^n` amplitude vector, or a `4^n` mixture in
+/// the density-matrix layout.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum StartState<'c> {
+    Amplitudes(&'c [Complex64]),
+    DensityMatrix(&'c [Complex64]),
+}
+
+impl StartState<'_> {
+    /// Load the start into `backend`, whose register width the buffer sets.
+    fn load(self, backend: &mut dyn Backend, num_classical_bits: usize) -> Result<()> {
+        match self {
+            Self::Amplitudes(amplitudes) => {
+                backend.init_from_amplitudes(amplitudes.to_vec(), num_classical_bits)
+            }
+            Self::DensityMatrix(rho) => {
+                backend.init_from_density_matrix(rho.to_vec(), num_classical_bits)
+            }
+        }
+    }
+}
+
 /// Builder for query-aware simulation requests.
 pub struct Simulate<'c, SeedState> {
     circuit: &'c Circuit,
     kind: BackendKind,
     seed: SeedState,
     noise_model: Option<&'c noise::NoiseModel>,
-    initial_state: Option<&'c [Complex64]>,
+    initial_state: Option<StartState<'c>>,
     require_exact: bool,
 }
 
@@ -287,7 +309,31 @@ impl<'c, SeedState> Simulate<'c, SeedState> {
     /// noise model attached, since trajectory replay has no start-state path.
     #[inline]
     pub fn initial_state(mut self, amplitudes: &'c [Complex64]) -> Self {
-        self.initial_state = Some(amplitudes);
+        self.initial_state = Some(StartState::Amplitudes(amplitudes));
+        self
+    }
+
+    /// Start from the mixture `rho` instead of |0...0⟩.
+    ///
+    /// Row-major `2^n x 2^n` in the layout
+    /// [`DensityMatrixBackend::density_matrix`] exports, qubit 0 in the least
+    /// significant bit of both indices, so entry `(r << n) | c` is `<r|rho|c>`.
+    /// The buffer must be Hermitian, each entry pair agreeing to 1e-12, and
+    /// have unit trace to 1e-9; one failing either check, or of a length other
+    /// than `4^n`, is rejected with `InvalidParameter` naming the check.
+    /// Positive semidefiniteness is not checked, because the backend carries no
+    /// eigendecomposition to check it with.
+    ///
+    /// Only [`BackendKind::DensityMatrix`] and its device sibling hold a
+    /// mixture, so every other kind, [`BackendKind::Auto`] included, reports
+    /// `IncompatibleBackend`. The terminals that decline a start state decline
+    /// this one for the same reasons. Replaces an earlier
+    /// [`Simulate::initial_state`], as that call replaces this one.
+    ///
+    /// [`DensityMatrixBackend::density_matrix`]: crate::backend::density_matrix::DensityMatrixBackend::density_matrix
+    #[inline]
+    pub fn initial_density_matrix(mut self, rho: &'c [Complex64]) -> Self {
+        self.initial_state = Some(StartState::DensityMatrix(rho));
         self
     }
 
@@ -1124,7 +1170,7 @@ fn reject_pauli_path(terminal: &str) -> PrismError {
     }
 }
 
-fn reject_pauli_path_initial_state(state: Option<&[Complex64]>) -> Result<()> {
+fn reject_pauli_path_initial_state(state: Option<StartState<'_>>) -> Result<()> {
     match state {
         Some(_) => Err(reject_pauli_path("a start state")),
         None => Ok(()),
@@ -1226,23 +1272,27 @@ fn reject_initial_state(kind: &BackendKind, terminal: &str, instead: &str) -> Pr
 
 /// Reject a start state whose width disagrees with the circuit's.
 ///
-/// The circuit's declared register wins: the amplitude vector sets the backend's
-/// width, so a shorter or longer one would silently simulate a different
-/// register than the one the instructions index. A register too wide to index
-/// with a `usize` has no dense start state at all.
-fn check_initial_state_len(state: &[Complex64], num_qubits: usize) -> Result<()> {
-    let want = (num_qubits < usize::BITS as usize).then(|| 1usize << num_qubits);
-    if want == Some(state.len()) {
+/// The circuit's declared register wins: the buffer sets the backend's width,
+/// so a shorter or longer one would silently simulate a different register
+/// than the one the instructions index. A register too wide to index with a
+/// `usize` has no dense start state at all.
+fn check_initial_state_len(state: StartState<'_>, num_qubits: usize) -> Result<()> {
+    let (buffer, bits, entries) = match state {
+        StartState::Amplitudes(amplitudes) => (amplitudes, num_qubits, "amplitudes"),
+        StartState::DensityMatrix(rho) => (rho, 2 * num_qubits, "density matrix entries"),
+    };
+    let want = (bits < usize::BITS as usize).then(|| 1usize << bits);
+    if want == Some(buffer.len()) {
         return Ok(());
     }
     let needs = match want {
         Some(count) => count.to_string(),
-        None => format!("2^{num_qubits}"),
+        None => format!("2^{bits}"),
     };
     Err(PrismError::InvalidParameter {
         message: format!(
-            "start state has {} amplitudes, but a {num_qubits}-qubit circuit needs {needs}",
-            state.len()
+            "start state has {} {entries}, but a {num_qubits}-qubit circuit needs {needs}",
+            buffer.len()
         ),
     })
 }
@@ -1251,15 +1301,15 @@ fn check_initial_state_len(state: &[Complex64], num_qubits: usize) -> Result<()>
 fn backend_from_initial_state(
     kind: &BackendKind,
     circuit: &Circuit,
-    state: &[Complex64],
+    state: StartState<'_>,
     seed: u64,
 ) -> Result<Box<dyn Backend>> {
     if !kind.is_auto() {
         validate_explicit_backend(kind, circuit)?;
     }
     check_initial_state_len(state, circuit.num_qubits)?;
-    let mut backend = initial_state_plan(kind, circuit.num_qubits)?.build(seed);
-    backend.init_from_amplitudes(state.to_vec(), circuit.num_classical_bits)?;
+    let mut backend = initial_state_plan(kind, circuit.num_qubits, state)?.build(seed);
+    state.load(&mut *backend, circuit.num_classical_bits)?;
     Ok(backend)
 }
 
@@ -1335,7 +1385,7 @@ fn apply_fused_circuit(backend: &mut dyn Backend, circuit: &Circuit) -> Result<V
 fn run_from_initial_state(
     kind: &BackendKind,
     circuit: &Circuit,
-    state: &[Complex64],
+    state: StartState<'_>,
     seed: u64,
     opts: &SimOptions,
 ) -> Result<RunOutcome> {
@@ -1361,7 +1411,7 @@ fn run_from_initial_state(
 fn shots_from_initial_state(
     kind: &BackendKind,
     circuit: &Circuit,
-    state: &[Complex64],
+    state: StartState<'_>,
     num_shots: usize,
     seed: u64,
 ) -> Result<ShotsResult> {
@@ -1385,14 +1435,14 @@ fn shots_from_initial_state(
         validate_explicit_backend(kind, circuit)?;
     }
     check_initial_state_len(state, circuit.num_qubits)?;
-    let plan = initial_state_plan(kind, circuit.num_qubits)?;
+    let plan = initial_state_plan(kind, circuit.num_qubits, state)?;
     let probe = plan.build(seed);
     let expanded = expand_for_backend(&*probe, circuit);
     let fused = fuse_for_backend(&*probe, &expanded);
 
     collect_shots(circuit, num_shots, seed, plan.resolved(), |shot_seed| {
         let mut backend = plan.build(shot_seed);
-        backend.init_from_amplitudes(state.to_vec(), circuit.num_classical_bits)?;
+        state.load(&mut *backend, circuit.num_classical_bits)?;
         backend.apply_instructions(&fused.instructions)?;
         Ok((
             backend.classical_results().to_vec(),
@@ -1404,7 +1454,7 @@ fn shots_from_initial_state(
 fn marginals_from_initial_state(
     kind: &BackendKind,
     circuit: &Circuit,
-    state: &[Complex64],
+    state: StartState<'_>,
     seed: u64,
 ) -> Result<MarginalsResult> {
     let mut backend = backend_from_initial_state(kind, circuit, state, seed)?;
@@ -1421,7 +1471,7 @@ fn marginals_from_initial_state(
 fn expectation_values_from_initial_state(
     kind: &BackendKind,
     circuit: &Circuit,
-    state: &[Complex64],
+    state: StartState<'_>,
     observables: &[Vec<PauliTerm>],
     seed: u64,
 ) -> Result<ExpectationResult> {
@@ -1515,7 +1565,7 @@ fn exact_noisy_probabilities(
     kind: &BackendKind,
     circuit: &Circuit,
     noise_model: &noise::NoiseModel,
-    initial_state: Option<&[Complex64]>,
+    initial_state: Option<StartState<'_>>,
     seed: u64,
 ) -> Result<Probabilities> {
     Ok(Probabilities::Dense(noise::density_matrix_probabilities(
@@ -1910,7 +1960,7 @@ pub fn run_on_state(
     circuit: &Circuit,
     initial_state: &[Complex64],
 ) -> Result<RunOutcome> {
-    check_initial_state_len(initial_state, circuit.num_qubits)?;
+    check_initial_state_len(StartState::Amplitudes(initial_state), circuit.num_qubits)?;
     backend.init_from_amplitudes(initial_state.to_vec(), circuit.num_classical_bits)?;
     let saves = apply_fused_circuit(backend, circuit)?;
     Ok(RunOutcome {
@@ -3174,7 +3224,7 @@ fn check_diagnostic_width(backend: &dyn Backend, diagnostic: Diagnostic, k: usiz
 fn diagnostic_backend(
     kind: &BackendKind,
     circuit: &Circuit,
-    initial_state: Option<&[Complex64]>,
+    initial_state: Option<StartState<'_>>,
     seed: u64,
     diagnostic: Diagnostic,
     subsystem_len: usize,

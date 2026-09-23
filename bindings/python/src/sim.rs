@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use num_complex::Complex64;
-use numpy::{PyArray1, PyArray2};
+use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     BackendKind, BondReport, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel,
     ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement, Probabilities,
@@ -36,6 +36,7 @@ pub struct PySimulation {
     kind: Option<BackendKind>,
     noise: Option<Py<PyNoiseModel>>,
     initial_state: Option<Vec<Complex64>>,
+    initial_density_matrix: Option<Vec<Complex64>>,
     require_exact: bool,
 }
 
@@ -91,7 +92,52 @@ impl PySimulation {
         amplitudes: Vec<Complex64>,
     ) -> PyRefMut<'_, Self> {
         slf.initial_state = Some(amplitudes);
+        slf.initial_density_matrix = None;
         slf
+    }
+
+    /// Start from the mixture `rho` instead of |0...0>.
+    ///
+    /// Takes a square `complex128` NumPy array, or a sequence of equal-length
+    /// rows, in the layout `reduced_density_matrix()` over the whole register
+    /// returns: row-major `2 ** n` by `2 ** n` with qubit 0 in the least
+    /// significant bit of both indices. The matrix must be Hermitian to 1e-12
+    /// per entry and have unit trace to 1e-9; positive semidefiniteness is not
+    /// checked. Only `BackendKind.density_matrix()` and its GPU sibling accept
+    /// one; every other backend, `auto()` included, raises `PrismError`
+    /// naming itself. Replaces an earlier `.initial_state()`, and vice versa.
+    fn initial_density_matrix<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        rho: &Bound<'py, PyAny>,
+    ) -> PyPrismResult<PyRefMut<'py, Self>> {
+        let (rows, cols, flat) = match rho.extract::<PyReadonlyArray2<'py, Complex64>>() {
+            Ok(array) => {
+                let view = array.as_array();
+                let (rows, cols) = view.dim();
+                (rows, cols, view.iter().copied().collect::<Vec<_>>())
+            }
+            Err(_) => {
+                let rows: Vec<Vec<Complex64>> = rho.extract().map_err(|_| {
+                    invalid(
+                        "initial_density_matrix() takes a complex128 matrix or a sequence of \
+                         complex rows",
+                    )
+                })?;
+                let cols = rows.first().map_or(0, Vec::len);
+                if rows.iter().any(|row| row.len() != cols) {
+                    return Err(invalid("initial_density_matrix() takes rows of one length"));
+                }
+                (rows.len(), cols, rows.concat())
+            }
+        };
+        if rows != cols {
+            return Err(invalid(format!(
+                "initial_density_matrix() takes a square matrix, got shape ({rows}, {cols})"
+            )));
+        }
+        slf.initial_density_matrix = Some(flat);
+        slf.initial_state = None;
+        Ok(slf)
     }
 
     /// Run once and return classical bits plus the probability distribution.
@@ -102,6 +148,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let outcome: RunOutcome = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -116,6 +163,9 @@ impl PySimulation {
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
             }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
+            }
             sim.seed(seed).run()
         })?;
         Ok(PyRunOutcome::from_outcome(outcome))
@@ -129,6 +179,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result: ShotsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -143,6 +194,9 @@ impl PySimulation {
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
             }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
+            }
             sim.seed(seed).shots(num_shots)
         })?;
         Ok(PyShotsResult { inner: result })
@@ -156,6 +210,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result: CountsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -169,6 +224,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).sample_counts(num_shots)
         })?;
@@ -187,6 +245,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result: MarginalsResult = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -200,6 +259,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).marginals()
         })?;
@@ -219,6 +281,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let amps: Vec<Complex64> = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -232,6 +295,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).state_vector()
         })?;
@@ -272,6 +338,7 @@ impl PySimulation {
         let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -283,6 +350,9 @@ impl PySimulation {
             // Carried so the core rejects it rather than ignoring it here.
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).expectation_gradient(&terms, &params)
         })?;
@@ -320,6 +390,7 @@ impl PySimulation {
         let require_exact = self.require_exact;
         let circuit = &self.circuit;
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -331,6 +402,9 @@ impl PySimulation {
             // Carried so the core rejects it rather than ignoring it here.
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).expectation_gradient_shift(&terms, &params)
         })?;
@@ -357,6 +431,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let values = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -370,6 +445,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).expectation_values(&observables)
         })?;
@@ -395,6 +473,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let values = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -408,6 +487,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).probabilities_of(&qubits)
         })?;
@@ -433,6 +515,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let reduced: ReducedDensityMatrix = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -446,6 +529,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).reduced_density_matrix(&qubits)
         })?;
@@ -476,6 +562,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -489,6 +576,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).entanglement_entropy(&subsystem)
         })?;
@@ -519,6 +609,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -532,6 +623,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).observable_variance(&observable)
         })?;
@@ -560,6 +654,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -573,6 +668,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).expectation_values_reported(&observables)
         })?;
@@ -609,6 +707,9 @@ impl PySimulation {
             if let Some(amplitudes) = self.initial_state.as_deref() {
                 left = left.initial_state(amplitudes);
             }
+            if let Some(rho) = self.initial_density_matrix.as_deref() {
+                left = left.initial_density_matrix(rho);
+            }
 
             let mut right = core_simulate(&other.circuit);
             if other.require_exact {
@@ -622,6 +723,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = other.initial_state.as_deref() {
                 right = right.initial_state(amplitudes);
+            }
+            if let Some(rho) = other.initial_density_matrix.as_deref() {
+                right = right.initial_density_matrix(rho);
             }
 
             left.seed(self.seed.unwrap_or(DEFAULT_SEED))
@@ -657,6 +761,7 @@ impl PySimulation {
         let circuit = &self.circuit;
         let owned_noise = self.owned_noise(py);
         let start = self.initial_state.as_deref();
+        let mixed = self.initial_density_matrix.as_deref();
         let result = py.detach(|| {
             let mut sim = core_simulate(circuit);
             if require_exact {
@@ -670,6 +775,9 @@ impl PySimulation {
             }
             if let Some(amplitudes) = start {
                 sim = sim.initial_state(amplitudes);
+            }
+            if let Some(rho) = mixed {
+                sim = sim.initial_density_matrix(rho);
             }
             sim.seed(seed).observable_expectation(&observable)
         })?;
@@ -697,7 +805,7 @@ impl PySimulation {
         py: Python<'_>,
         observables: Vec<Vec<(usize, String)>>,
     ) -> PyPrismResult<Vec<f64>> {
-        if self.initial_state.is_some() {
+        if self.initial_state.is_some() || self.initial_density_matrix.is_some() {
             return Err(invalid(
                 "density_matrix_expectation_values() does not accept a start state; call \
                  expectation_values() with BackendKind.density_matrix(), which takes one on a \
@@ -772,6 +880,7 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
         kind: None,
         noise: None,
         initial_state: None,
+        initial_density_matrix: None,
         require_exact: false,
     }
 }

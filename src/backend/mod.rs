@@ -30,6 +30,7 @@
 //! | `reduced_density_matrix_2q` | TensorNetwork, DistributedStatevector | Feeds the branch weights of a correlated two-qubit Kraus channel, which needs the joint state of the pair. The default reads it out of `Backend::reduced_density_matrix`, so the decline follows that one. Answering is necessary and not sufficient: the branch operator is a general 2x2 block on the pair, so `Backend::supports_two_qubit_kraus` also requires a `Gate::Fused2q` kernel, which is what holds the two tableau backends and the product state out. `run_shots_with_noise` rejects on that query before allocating state. |
 //! | `export_statevector` | DensityMatrix | A mixture of pure states has no statevector. Read `DensityMatrixBackend::purity` or reduce the state instead. |
 //! | `export_statevector` | FactoredStabilizer | Exports while one tableau covers every qubit; past that there is no joint tableau to expand. |
+//! | `init_from_density_matrix` | Everything except DensityMatrix | The input is a dense `4^n` mixture, and every other representation holds a pure state. The density matrix takes the buffer as its own, uploading it when the mixture is device resident. |
 //! | `init_from_amplitudes` | Everything except Statevector, DistributedStatevector, and DensityMatrix | The input is a dense `2^n` amplitude vector, and a tableau, a product state, or a factored register holds only the states its structure can express. MPS could decode one by sequential SVD, but the bond cap would truncate the state the caller supplied. The distributed statevector takes the full vector on every rank and keeps its own slice. |
 //! | `reduced_density_matrix` | TensorNetwork, DistributedStatevector | Each holds the state in a form a partial trace has to be contracted out of, a doubled network or a slice exchange across rank qubits, and neither kernel exists yet. The chain sweeps its own environment for it, at a cost set by the span the named qubits occupy rather than by how many there are. |
 //! | `schmidt_values` | Everything except Statevector, Mps, ProductState, Stabilizer, and FactoredStabilizer | A mixture has no Schmidt decomposition. Sparse, factored, tensor-network and distributed states could answer through a reduced density matrix but do not yet, and `entanglement_entropy` follows wherever its default reads the spectrum. A stabilizer cut's spectrum is flat, so the two tableau backends build it from a rank and decline only past the dense export cap, where the `2^r` equal values no longer fit while the rank behind them still does. |
@@ -184,6 +185,61 @@ pub(crate) fn validate_initial_amplitudes(amplitudes: &[Complex64]) -> Result<()
         });
     }
     Ok(())
+}
+
+/// Tolerance on `|rho[i][j] - conj(rho[j][i])|` for a caller-supplied mixture,
+/// scaled by the larger of the two magnitudes when that exceeds 1.
+pub(crate) const INITIAL_MIXTURE_HERMITIAN_EPS: f64 = 1e-12;
+
+/// Reject a start mixture that is not a Hermitian, unit-trace `4^n` buffer in
+/// the density-matrix layout, returning `n` otherwise.
+///
+/// Positive semidefiniteness is not checked: it needs an eigendecomposition
+/// the backend does not carry, and a mixture with a negative eigenvalue
+/// evolves without complaint, so that check stays with the caller.
+pub(crate) fn validate_initial_density_matrix(rho: &[Complex64]) -> Result<usize> {
+    let len = rho.len();
+    let exponent = len.trailing_zeros();
+    if !len.is_power_of_two() || len < 4 || !exponent.is_multiple_of(2) {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: format!(
+                "start density matrix length must be 4^n for n >= 1 qubits, got {len}"
+            ),
+        });
+    }
+    if rho.iter().any(|a| !a.re.is_finite() || !a.im.is_finite()) {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: "start density matrix has a non-finite entry".to_string(),
+        });
+    }
+    let num_qubits = (exponent / 2) as usize;
+    let dim = 1usize << num_qubits;
+    for r in 0..dim {
+        for c in r..dim {
+            let upper = rho[r * dim + c];
+            let lower = rho[c * dim + r];
+            let scale = upper.norm().max(lower.norm()).max(1.0);
+            if (upper - lower.conj()).norm() > INITIAL_MIXTURE_HERMITIAN_EPS * scale {
+                return Err(crate::error::PrismError::InvalidParameter {
+                    message: format!(
+                        "start density matrix is not Hermitian: entry ({r}, {c}) is {upper} \
+                         but entry ({c}, {r}) conjugates to {}",
+                        lower.conj()
+                    ),
+                });
+            }
+        }
+    }
+    let trace: f64 = (0..dim).map(|r| rho[r * dim + r].re).sum();
+    if (trace - 1.0).abs() > INITIAL_STATE_NORM_EPS {
+        return Err(crate::error::PrismError::InvalidParameter {
+            message: format!(
+                "start density matrix must have unit trace, trace is {trace}; scale the \
+                 entries by 1/trace"
+            ),
+        });
+    }
+    Ok(num_qubits)
 }
 
 /// Tableau size at which stabilizer row loops parallelize.
@@ -470,6 +526,36 @@ pub trait Backend {
         Err(crate::error::PrismError::BackendUnsupported {
             backend: self.name().to_string(),
             operation: "initialization from a caller-supplied state".to_string(),
+        })
+    }
+
+    /// Whether [`Backend::init_from_density_matrix`] can start this backend
+    /// from a caller-supplied mixture.
+    fn supports_initial_density_matrix(&self) -> bool {
+        false
+    }
+
+    /// Initialize from a dense density matrix instead of |0...0⟩.
+    ///
+    /// `rho` is laid out like
+    /// [`DensityMatrixBackend::density_matrix`](density_matrix::DensityMatrixBackend::density_matrix)
+    /// output, row-major `2^n x 2^n` with qubit 0 in the least significant bit
+    /// of both indices, and its length sets the register width. Implementors
+    /// validate it through `validate_initial_density_matrix`, so a length that
+    /// is not `4^n`, a non-finite entry, an entry pair off Hermitian by more
+    /// than 1e-12, or a trace off unity by more than 1e-9 returns
+    /// `InvalidParameter` naming the check. Positive semidefiniteness is not
+    /// checked. The default reports that the representation holds only pure
+    /// states; see the module docs for what declines it.
+    fn init_from_density_matrix(
+        &mut self,
+        rho: Vec<Complex64>,
+        num_classical_bits: usize,
+    ) -> Result<()> {
+        let _ = (rho, num_classical_bits);
+        Err(crate::error::PrismError::BackendUnsupported {
+            backend: self.name().to_string(),
+            operation: "initialization from a caller-supplied density matrix".to_string(),
         })
     }
 

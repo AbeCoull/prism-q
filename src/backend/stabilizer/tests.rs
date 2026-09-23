@@ -1340,13 +1340,13 @@ fn lazy_destab_matches_eager() {
         let mut eager = StabilizerBackend::new(42);
         eager.init(n, 0).unwrap();
         eager.apply_gates_only(&circuit.instructions).unwrap();
-        let eager_probs = eager.compute_probabilities();
+        let eager_probs = eager.probabilities().unwrap();
 
         let mut lazy = StabilizerBackend::new(42);
         lazy.init(n, 0).unwrap();
         lazy.enable_lazy_destab();
         lazy.apply_gates_only(&circuit.instructions).unwrap();
-        let lazy_probs = lazy.compute_probabilities();
+        let lazy_probs = lazy.probabilities().unwrap();
 
         for (i, (&e, &l)) in eager_probs.iter().zip(lazy_probs.iter()).enumerate() {
             assert!(

@@ -1139,6 +1139,33 @@ fn bench_stabilizer_measurement(c: &mut Criterion) {
     group.finish();
 }
 
+// The dense terminals alone, on a tableau prepared outside the timed loop. Every
+// brick CX is placed, so the factored backend holds one cluster and both
+// backends reduce the same width.
+fn bench_stabilizer_dense_terminals(c: &mut Criterion) {
+    let mut group = c.benchmark_group("stabilizer/dense_terminal");
+    configure_group(&mut group);
+
+    let n = 18;
+    let circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
+    let mut stab = prism_q::StabilizerBackend::new(42);
+    sim::run_on(&mut stab, &circuit).unwrap();
+    let mut fstab = prism_q::FactoredStabilizerBackend::new(42);
+    sim::run_on(&mut fstab, &circuit).unwrap();
+
+    let backends: [(&str, &dyn Backend); 2] =
+        [("stabilizer", &stab), ("factored_stabilizer", &fstab)];
+    for (name, backend) in backends {
+        group.bench_function(BenchmarkId::new(format!("{name}_probabilities"), n), |b| {
+            b.iter(|| black_box(backend.probabilities().unwrap()));
+        });
+        group.bench_function(BenchmarkId::new(format!("{name}_statevector"), n), |b| {
+            b.iter(|| black_box(backend.export_statevector().unwrap()));
+        });
+    }
+    group.finish();
+}
+
 // ---- Factored stabilizer backend ----
 
 fn bench_factored_stabilizer_scaling(c: &mut Criterion) {
@@ -4258,6 +4285,7 @@ criterion_group! {
     bench_stabilizer_scaling,
     bench_stabilizer_random_pairs,
     bench_stabilizer_measurement,
+    bench_stabilizer_dense_terminals,
     // Factored stabilizer
     bench_factored_stabilizer_scaling,
     bench_factored_stabilizer_single_cluster,

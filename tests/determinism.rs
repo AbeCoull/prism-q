@@ -6,12 +6,14 @@
 
 mod common;
 
-use common::{SEED, count_gates};
+use common::{SEED, count_gates, mix_seed};
 use num_complex::Complex64;
+use prism_q::circuit::SmallVec;
 use prism_q::circuits::qft_circuit;
 use prism_q::{
-    BackendKind, Circuit, Gate, McuData, PauliTerm, ResolvedBackend, StatevectorBackend,
-    ThreadPool, run_on, run_on_state, run_shots_compiled, simulate,
+    BackendKind, Circuit, ClassicalCondition, Gate, Instruction, McuData, NoiseModel, PauliTerm,
+    ResolvedBackend, StatevectorBackend, ThreadPool, run_on, run_on_state, run_shots_compiled,
+    simulate,
 };
 
 #[cfg(not(miri))]
@@ -453,8 +455,8 @@ fn measure_every_qubit(c: &mut Circuit, first_bit: usize) {
     }
 }
 
-// Each shot runs on seed `SEED + i` whether the loop splits or not, so the
-// shots match a pool of one, a wider pool, and separate seeded runs.
+// Each shot runs on `mix_seed(SEED, i)` whether the loop splits or not, so the
+// shots match a pool of one, a wider pool, and separate runs on those seeds.
 fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
     let shots = |threads: usize| {
         in_pool(threads, || {
@@ -474,10 +476,10 @@ fn assert_per_shot_matches_serial(circuit: &Circuit, route: ResolvedBackend) {
         "per-shot metadata differs"
     );
 
-    let separate: Vec<Vec<bool>> = (0..PER_SHOT_SHOTS as u64)
+    let separate: Vec<Vec<bool>> = (0..PER_SHOT_SHOTS)
         .map(|i| {
             simulate(circuit)
-                .seed(SEED.wrapping_add(i))
+                .seed(mix_seed(SEED, i))
                 .run()
                 .expect("run")
                 .classical_bits
@@ -505,4 +507,107 @@ fn decomposed_mid_circuit_shots_identical_across_thread_counts() {
     add_mid_circuit_block(&mut circuit, &[4, 5, 6, 7], 1);
     measure_every_qubit(&mut circuit, 2);
     assert_per_shot_matches_serial(&circuit, ResolvedBackend::Decomposed);
+}
+
+// H and S layers over brick CX, then a measurement of qubit 0 that conditions
+// an X on qubit 1 and a reset of qubit 0, so the circuit stays off the compiled
+// sampler and every shot replays on a tableau.
+fn dynamic_clifford_circuit(n: usize) -> Circuit {
+    let layer = |c: &mut Circuit, depth: usize| {
+        for q in 0..n {
+            let gate = if (q + depth).is_multiple_of(3) {
+                Gate::S
+            } else {
+                Gate::H
+            };
+            c.add_gate(gate, &[q]);
+        }
+        for q in ((depth % 2)..n - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    };
+    let mut circuit = Circuit::new(n, n);
+    for depth in 0..3 {
+        layer(&mut circuit, depth);
+    }
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_reset(0);
+    for depth in 3..6 {
+        layer(&mut circuit, depth);
+    }
+    measure_every_qubit(&mut circuit, 0);
+    circuit
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn stabilizer_mid_circuit_shots_identical_across_thread_counts() {
+    let circuit = dynamic_clifford_circuit(20);
+    assert_per_shot_matches_serial(&circuit, ResolvedBackend::Stabilizer);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn product_state_mid_circuit_shots_identical_across_thread_counts() {
+    let n = 14;
+    let mut circuit = Circuit::new(n, n);
+    for q in 0..n {
+        circuit.add_gate(Gate::Ry(0.31 + 0.07 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_measure(q, q);
+        circuit.instructions.push(Instruction::Conditional {
+            condition: ClassicalCondition::BitIsOne(q),
+            gate: Gate::H,
+            targets: SmallVec::from_slice(&[q + 1]),
+        });
+    }
+    circuit.add_measure(n - 1, n - 1);
+    assert_per_shot_matches_serial(&circuit, ResolvedBackend::ProductState);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn noisy_stabilizer_trajectories_identical_across_thread_counts() {
+    let circuit = dynamic_clifford_circuit(20);
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+    let shots = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .noise(&noise)
+                .seed(SEED)
+                .shots(PER_SHOT_SHOTS)
+                .expect("noisy shots")
+        })
+    };
+    let single = shots(1);
+    let wide = shots(THREADS_HI);
+    assert_eq!(
+        single.metadata.backend,
+        ResolvedBackend::Stabilizer,
+        "unexpected trajectory route"
+    );
+    assert_eq!(single.shots, wide.shots, "trajectory bits differ");
+    assert_eq!(
+        format!("{:?}", single.metadata),
+        format!("{:?}", wide.metadata),
+        "trajectory metadata differs"
+    );
+
+    // Three shots stay on the serial loop, which must draw the same shot seeds.
+    let serial = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(3)
+        .expect("serial noisy shots");
+    assert_eq!(
+        serial.shots,
+        single.shots[..3],
+        "serial trajectories differ from split ones"
+    );
 }

@@ -44,12 +44,12 @@ fn run_blocks_maybe_par(
             crate::backend::init_thread_pool();
             return (0..k)
                 .into_par_iter()
-                .map(|i| run_subcircuit(kind, &partitions[i].0, seed.wrapping_add(i as u64), opts))
+                .map(|i| run_subcircuit(kind, &partitions[i].0, super::mix_seed(seed, i), opts))
                 .collect();
         }
     }
     (0..k)
-        .map(|i| run_subcircuit(kind, &partitions[i].0, seed.wrapping_add(i as u64), opts))
+        .map(|i| run_subcircuit(kind, &partitions[i].0, super::mix_seed(seed, i), opts))
         .collect()
 }
 
@@ -162,7 +162,7 @@ pub(super) fn run_decomposed_prefused(
     };
     let results: Vec<Result<RunOutcome>> = (0..k)
         .map(|i| {
-            let block_seed = seed.wrapping_add(i as u64);
+            let block_seed = super::mix_seed(seed, i);
             let mut backend = block_plans[i].build(block_seed);
             execute_circuit(&mut *backend, &fused_blocks[i], &block_opts)
         })

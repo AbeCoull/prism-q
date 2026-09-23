@@ -79,13 +79,17 @@ comparison run used.
   into fewer outcomes builds its histogram through a parallel reduction and moves to the
   ulp-stable class below.
 - **Noisy trajectory shots: bitwise for a given seed, at any thread count.** Each shot's
-  generator is seeded from the shot index, not the worker, and results are collected in
-  shot order.
+  generator is seeded from the run seed and the shot index, not the worker, and results
+  are collected in shot order.
 - **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
   mid-circuit measurement, a condition or a region runs once per shot, and below the
-  parallel threshold those runs split across workers. Shot `i` runs on seed `seed + i`
-  and results fold in shot order, so the shots match separate runs seeded `seed`,
-  `seed + 1`, and so on. Pinned for a dense and a decomposed circuit.
+  width where the resolved engine's own kernels go parallel those runs split across
+  workers: 14 qubits for dense engines, 128 for a tableau, any width for a product
+  state. Noisy trajectories follow the same rule. Shot `i` runs on a seed hashed from
+  the run seed and `i` with SplitMix64, and results fold in shot order. Runs on
+  adjacent seeds draw unrelated shots rather than the same shots offset by one.
+  Pinned for dense, decomposed, tableau and product-state circuits, and for tableau
+  trajectories.
 - **Parallel reductions: stable to about 1e-12, not bitwise.** Norms, measurement
   collapse probabilities, reduced density matrices, and expectation values sum
   deterministic per-chunk partials in Rayon's combine order, which varies with pool width

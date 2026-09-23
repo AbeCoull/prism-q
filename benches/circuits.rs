@@ -4090,7 +4090,65 @@ fn bench_dynamic_mid_circuit_shots(c: &mut Criterion) {
     group.finish();
 }
 
-/// Neutrality row: an untouched statevector row re-run under a density-matrix
+/// Clifford layers, a measurement of qubit 0 that conditions an X on qubit 1,
+/// a reset of qubit 0, more layers, then every qubit measured. The condition and
+/// the reset keep it off the compiled sampler, so Auto replays it per shot on a
+/// tableau.
+fn dynamic_clifford_circuit(n: usize, depth: usize) -> Circuit {
+    let mut circuit = Circuit::new(n, n);
+    layered_clifford_body(&mut circuit, n, depth, SEED);
+    circuit.add_measure(0, 0);
+    circuit.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: SmallVec::from_slice(&[1]),
+    });
+    circuit.add_reset(0);
+    layered_clifford_body(&mut circuit, n, depth, SEED ^ 1);
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    circuit
+}
+
+/// Per-shot tableau replays, clean and under depolarizing noise, at widths the
+/// statevector parallel floor covers but the tableau row loops do not.
+fn bench_dynamic_clifford_shots(c: &mut Criterion) {
+    let shots = 1_000usize;
+
+    let mut group = c.benchmark_group("dynamic/clifford_shots");
+    configure_group(&mut group);
+    for &n in &[16usize, 32, 64] {
+        let circuit = dynamic_clifford_circuit(n, 4);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| run_shots_with(BackendKind::Auto, circ, shots, SEED).unwrap());
+            },
+        );
+    }
+    group.finish();
+
+    let mut group = c.benchmark_group("dynamic/noisy_clifford_shots");
+    configure_group(&mut group);
+    for &n in &[16usize, 64] {
+        let circuit = dynamic_clifford_circuit(n, 4);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        group.bench_with_input(
+            BenchmarkId::new(format!("{n}q"), shots),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    run_shots_with_noise(BackendKind::Auto, circ, &noise, shots, SEED).unwrap()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+/// Neutrality row:an untouched statevector row re-run under a density-matrix
 /// group name. The density-matrix backend shares no kernels with the
 /// statevector path, so this must stay within the 5% regression gate.
 fn bench_density_matrix_neutrality(c: &mut Criterion) {
@@ -4244,6 +4302,7 @@ criterion_group! {
     bench_dynamic_guarded_region,
     bench_dynamic_dead_region,
     bench_dynamic_shots,
-    bench_dynamic_mid_circuit_shots
+    bench_dynamic_mid_circuit_shots,
+    bench_dynamic_clifford_shots
 }
 criterion_main!(benches);

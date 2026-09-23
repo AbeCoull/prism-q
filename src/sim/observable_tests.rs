@@ -285,3 +285,199 @@ fn square_of_a_pauli_string_is_the_identity() {
     );
     assert!((squared.terms()[0].0 - 1.0).abs() < 1e-12);
 }
+
+fn random_state(n: usize, seed: u64) -> Vec<Complex64> {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    (0..1usize << n)
+        .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+        .collect()
+}
+
+// Sizes run below one Walsh-Hadamard block, at one block, across several, and
+// past the parallel reduction floor; masks include the empty string and the
+// top qubit.
+#[test]
+fn weighted_group_moments_matches_the_per_index_sum() {
+    for n in [1usize, 2, 5, 6, 7, 10, 17] {
+        let state = random_state(n, 42 + n as u64);
+        let top = 1usize << (n - 1);
+        let mut zmasks = vec![0, top, (1 << n) - 1, 1];
+        zmasks.extend((0..n.saturating_sub(1)).map(|q| 0b11 << q));
+        zmasks.extend((0..n).map(|q| (0x5a5a_5a5a >> q) & ((1 << n) - 1)));
+        let coefficients: Vec<f64> = (0..zmasks.len()).map(|i| 0.7 - 0.13 * i as f64).collect();
+        let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
+
+        let (mut want1, mut want2) = (0.0, 0.0);
+        for (j, amp) in state.iter().enumerate() {
+            let h: f64 = zmasks
+                .iter()
+                .zip(&coefficients)
+                .map(|(&z, &c)| if (j & z).count_ones() % 2 == 1 { -c } else { c })
+                .sum();
+            want1 += amp.norm_sqr() * h;
+            want2 += amp.norm_sqr() * h * h;
+        }
+        let (m1, m2) = weighted_group_moments(&state, &zmasks, &coefficients, norm);
+        let (want1, want2) = (want1 / norm, want2 / norm);
+        assert!(
+            (m1 - want1).abs() < 1e-12 * want1.abs().max(1.0),
+            "n={n}: {m1} vs {want1}"
+        );
+        assert!(
+            (m2 - want2).abs() < 1e-12 * want2.max(1.0),
+            "n={n}: {m2} vs {want2}"
+        );
+    }
+}
+
+/// `sum_i c_i P_i |state>` over the listed terms, each string applied factor by
+/// factor.
+fn apply_terms(
+    terms: &[(f64, Vec<PauliTerm>)],
+    members: &[usize],
+    state: &[Complex64],
+) -> Vec<Complex64> {
+    let mut out = vec![Complex64::new(0.0, 0.0); state.len()];
+    for &i in members {
+        let (coefficient, string) = &terms[i];
+        for (j, &amp) in state.iter().enumerate() {
+            let mut target = j;
+            let mut value = amp * coefficient;
+            for factor in string {
+                let bit = j >> factor.qubit & 1;
+                match factor.axis {
+                    PauliAxis::X => target ^= 1 << factor.qubit,
+                    PauliAxis::Y => {
+                        target ^= 1 << factor.qubit;
+                        value *= Complex64::new(0.0, if bit == 0 { 1.0 } else { -1.0 });
+                    }
+                    PauliAxis::Z if bit == 1 => value = -value,
+                    PauliAxis::Z => {}
+                }
+            }
+            out[target] += value;
+        }
+    }
+    out
+}
+
+/// A `ZZ` chain with Z fields and an alternating X/Y chain with fields, `2n - 1`
+/// terms each, plus seeded 1- to 4-local strings on random axes and an
+/// identity offset.
+fn mixed_observable(n: usize, seed: u64) -> PauliObservable {
+    use rand::{RngExt, SeedableRng};
+    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+    let alternating = |q: usize| {
+        if q.is_multiple_of(2) {
+            PauliTerm::x(q)
+        } else {
+            PauliTerm::y(q)
+        }
+    };
+    let mut terms: Terms = vec![(0.4, Vec::new())];
+    for q in 0..n {
+        terms.push((0.3 + 0.05 * q as f64, vec![PauliTerm::z(q)]));
+        terms.push((-0.2 + 0.07 * q as f64, vec![alternating(q)]));
+        if q + 1 < n {
+            terms.push((
+                0.9 - 0.1 * q as f64,
+                vec![PauliTerm::z(q), PauliTerm::z(q + 1)],
+            ));
+            terms.push((-0.6, vec![alternating(q), alternating(q + 1)]));
+        }
+    }
+    for _ in 0..10 {
+        let mut qubits: Vec<usize> = (0..n).collect();
+        let weight = rng.random_range(1..=4.min(n));
+        let string = (0..weight)
+            .map(|_| {
+                let q = qubits.swap_remove(rng.random_range(0..qubits.len()));
+                match rng.random_range(0..3u32) {
+                    0 => PauliTerm::x(q),
+                    1 => PauliTerm::y(q),
+                    _ => PauliTerm::z(q),
+                }
+            })
+            .collect();
+        terms.push((rng.random::<f64>() - 0.5, string));
+    }
+    PauliObservable::from_terms(terms).unwrap()
+}
+
+// Each group's operator applied to the state gives `<H_g>` and
+// `||H_g psi||^2` with no mask reduction. Across the sizes the grouping holds
+// single-term groups, small groups that expand in pairs, and Z-only and
+// rotated groups past the pair budget that take the moments pass.
+#[test]
+fn grouped_mean_and_variance_match_the_applied_operator() {
+    use crate::backend::Backend;
+    use crate::backend::statevector::StatevectorBackend;
+
+    let mut shapes = [false; 4];
+    for n in 3..=12usize {
+        let circuit = crate::circuits::random_circuit(n, 6, 42 + n as u64);
+        let mut backend = StatevectorBackend::new(42);
+        crate::sim::run_on(&mut backend, &circuit).unwrap();
+        let mut state = backend.export_statevector().unwrap();
+        let norm = state.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+        state.iter_mut().for_each(|a| *a /= norm);
+
+        let ising = (0..n - 1)
+            .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
+            .chain((0..n).map(|q| (0.5, vec![PauliTerm::x(q)])))
+            .chain([(-0.3, Vec::new())]);
+        let observables = [
+            mixed_observable(n, 42 + n as u64),
+            PauliObservable::from_terms(ising.collect::<Vec<_>>()).unwrap(),
+        ];
+        for observable in &observables {
+            let result = crate::sim::simulate(&circuit)
+                .backend(crate::sim::BackendKind::Statevector)
+                .seed(42)
+                .observable_expectation(observable)
+                .unwrap();
+            let terms = observable.terms();
+            let groups = &observable.grouping().groups;
+            let variances = result.group_variances.as_ref().unwrap();
+            let mut mean: f64 = terms
+                .iter()
+                .filter(|(_, string)| string.is_empty())
+                .map(|(c, _)| c)
+                .sum();
+            for (g, group) in groups.iter().enumerate() {
+                let size = group.term_indices.len();
+                shapes[0] |= size == 1;
+                shapes[1] |= (2..=6).contains(&size);
+                shapes[2] |= size > 6 && group.is_z_only();
+                shapes[3] |= size > 6 && !group.is_z_only();
+
+                let applied = apply_terms(terms, &group.term_indices, &state);
+                let first: f64 = state
+                    .iter()
+                    .zip(&applied)
+                    .map(|(a, b)| (a.conj() * b).re)
+                    .sum();
+                let second: f64 = applied.iter().map(|a| a.norm_sqr()).sum();
+                mean += first;
+                let want = second - first * first;
+                assert!(
+                    (variances[g] - want).abs() < 1e-12,
+                    "n={n} group {g}: {} vs {want}",
+                    variances[g]
+                );
+            }
+            assert!(
+                (result.mean - mean).abs() < 1e-12,
+                "n={n}: {} vs {mean}",
+                result.mean
+            );
+            let total: f64 = variances.iter().sum();
+            assert!((result.variance.unwrap() - total).abs() < 1e-12);
+        }
+    }
+    assert_eq!(
+        shapes, [true; 4],
+        "single, small, large Z-only, large rotated"
+    );
+}

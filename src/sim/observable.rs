@@ -370,9 +370,13 @@ fn compute_grouping(terms: &[(f64, Vec<PauliTerm>)]) -> Grouping {
 /// First two moments `(sum_j p_j h(j), sum_j p_j h(j)^2)` of one group
 /// operator `h(j) = sum_i c_i (-1)^popcount(j & z_i)`, normalized by `norm`.
 ///
-/// The z-only accumulator family of `pauli_expectations_from_masks`, combined
-/// per element before squaring so the group variance comes from the same
-/// traversal as its mean.
+/// `h` is built a block of [`MOMENT_BLOCK`] indices at a time. Within a block
+/// the high index bits are fixed, so each term reduces to a signed
+/// coefficient on its low-bit pattern, and a Walsh-Hadamard transform over
+/// those patterns yields `h` at every index of the block. That costs one
+/// scalar step per term per block plus `log2(MOMENT_BLOCK)` butterflies per
+/// index, where a per-index sum over terms costs a parity and an add per term
+/// per index.
 pub(crate) fn weighted_group_moments(
     state: &[Complex64],
     zmasks: &[usize],
@@ -383,27 +387,36 @@ pub(crate) fn weighted_group_moments(
         return (0.0, 0.0);
     }
 
-    let accumulate = |acc: &mut (f64, f64), base: usize, block: &[Complex64]| {
-        for (offset, amp) in block.iter().enumerate() {
-            let j = base + offset;
-            let mut h = 0.0;
+    let accumulate = |acc: &mut (f64, f64), base: usize, chunk: &[Complex64]| {
+        for (b, block) in chunk.chunks(MOMENT_BLOCK).enumerate() {
+            let block_base = base + b * MOMENT_BLOCK;
+            let mut h = [0.0f64; MOMENT_BLOCK];
             for (&zmask, &c) in zmasks.iter().zip(coefficients) {
-                h += if (j & zmask).count_ones() & 1 == 1 {
-                    -c
-                } else {
-                    c
-                };
+                let flip = u64::from((block_base & zmask).count_ones() & 1) << 63;
+                h[zmask & (MOMENT_BLOCK - 1)] += f64::from_bits(c.to_bits() ^ flip);
             }
-            let weighted = amp.norm_sqr() * h;
-            acc.0 += weighted;
-            acc.1 += weighted * h;
+            let mut half = 1;
+            while half < MOMENT_BLOCK {
+                for pair in h.chunks_exact_mut(2 * half) {
+                    let (lo, hi) = pair.split_at_mut(half);
+                    for (a, b) in lo.iter_mut().zip(hi) {
+                        (*a, *b) = (*a + *b, *a - *b);
+                    }
+                }
+                half *= 2;
+            }
+            for (amp, &hj) in block.iter().zip(&h) {
+                let weighted = amp.norm_sqr() * hj;
+                acc.0 += weighted;
+                acc.1 += weighted * hj;
+            }
         }
     };
 
     #[cfg(feature = "parallel")]
     if state.len() >= crate::backend::MIN_PAR_REDUCE_ELEMS {
         use rayon::prelude::*;
-        let chunk = crate::backend::MIN_PAR_ELEMS;
+        let chunk = crate::backend::MIN_PAR_ELEMS.max(MOMENT_BLOCK);
         let (m1, m2) = state
             .par_chunks(chunk)
             .enumerate()
@@ -422,6 +435,11 @@ pub(crate) fn weighted_group_moments(
     accumulate(&mut acc, 0, state);
     (acc.0 / norm, acc.1 / norm)
 }
+
+/// Indices per Walsh-Hadamard block in [`weighted_group_moments`]. A state
+/// shorter than a block reads only the leading entries, which are exact
+/// because every mask then fits below the state length.
+const MOMENT_BLOCK: usize = 64;
 
 #[cfg(test)]
 #[path = "observable_tests.rs"]

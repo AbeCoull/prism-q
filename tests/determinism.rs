@@ -10,7 +10,7 @@ use common::{SEED, count_gates};
 use num_complex::Complex64;
 use prism_q::circuits::qft_circuit;
 use prism_q::{
-    BackendKind, Circuit, Gate, McuData, Parameters, PauliTerm, PreparedCircuit,
+    BackendKind, Circuit, Gate, McuData, Parameters, PauliObservable, PauliTerm, PreparedCircuit,
     StatevectorBackend, ThreadPool, run_on, run_on_state, run_shots_compiled, simulate,
 };
 
@@ -302,6 +302,45 @@ fn expectation_values_ulp_stable_across_thread_counts() {
         assert!(
             (a - b).abs() <= REDUCTION_EPS,
             "observable {idx} differs by {:e}",
+            (a - b).abs()
+        );
+    }
+}
+
+// The grouped route reads a large group's mean and variance from a parallel
+// moments reduction, on the state as run for a Z-only group and on a rotated
+// copy otherwise.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn observable_expectation_ulp_stable_across_thread_counts() {
+    let n = SAMPLING_QUBITS;
+    let circuit = representative_dense_circuit(n);
+    let chain = (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
+    let field = (0..n).map(|q| (0.5, vec![PauliTerm::x(q)]));
+    let pair = [(0.25, vec![PauliTerm::y(0), PauliTerm::y(3)])];
+    let observable =
+        PauliObservable::from_terms(chain.chain(field).chain(pair).collect::<Vec<_>>()).unwrap();
+
+    let run = |threads: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .backend(BackendKind::Statevector)
+                .seed(SEED)
+                .observable_expectation(&observable)
+                .expect("observable expectation")
+        })
+    };
+    let base = run(1);
+    let wide = run(THREADS_HI);
+    assert!(
+        (base.mean - wide.mean).abs() <= REDUCTION_EPS,
+        "mean differs"
+    );
+    let (base_groups, wide_groups) = (base.group_variances.unwrap(), wide.group_variances.unwrap());
+    for (idx, (a, b)) in base_groups.iter().zip(&wide_groups).enumerate() {
+        assert!(
+            (a - b).abs() <= REDUCTION_EPS,
+            "group {idx} variance differs by {:e}",
             (a - b).abs()
         );
     }

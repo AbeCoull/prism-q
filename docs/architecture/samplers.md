@@ -115,8 +115,8 @@ strings qubit-wise commute when every shared qubit carries the same axis, so a
 group has one well-defined axis per qubit it touches.
 
 `observable_expectation` computes `Var(H_g) = ⟨H_g²⟩ - ⟨H_g⟩²` per group on
-the statevector family, with the mean and most group variances served by one
-shared batched traversal (`pauli_expectations_from_masks`). Two strings in a
+the statevector family, with small groups served by one shared batched
+traversal (`pauli_expectations_from_masks`). Two strings in a
 QWC group multiply phase-free: shared qubits carry equal axes and cancel to
 identity, so each `P_i P_j` is another Pauli string, and a small group's
 `⟨H_g²⟩` expands into pairwise product masks appended to the same traversal
@@ -125,8 +125,14 @@ that serves the term means. A group past the pair budget
 more than a state sweep) takes a dedicated single-pass moment accumulation
 instead: on the state as run when the group is Z-only, otherwise on a copy
 rotated by H on X-assigned qubits and Sdg then H on Y-assigned qubits, after
-which members are plus-sign Z strings, and `h(j)` accumulates per element
-before squaring so both moments come from the one pass.
+which members are plus-sign Z strings. Both moments, and so the group's
+share of the mean, come from that one pass. `h(j)` is built 64 indices at a
+time: with the high index bits fixed, each member reduces to a signed
+coefficient on its low-bit pattern, and a Walsh-Hadamard transform over those
+patterns gives `h` across the block. The pass then costs one scalar step per
+member per block and six butterflies per index. Summing members per index,
+one parity and one add per member per index, ran 20x to 50x slower at 12
+to 14 qubits.
 
 A per-group state pass is the fallback rather than the default because it
 loses at molecular shapes: on the 2000-string Jordan-Wigner bench fixture

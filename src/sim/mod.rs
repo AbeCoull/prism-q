@@ -3157,13 +3157,13 @@ fn weighted_observable_result(
     }
 }
 
-/// Evaluate a weighted observable on the statevector: the mean and most group
-/// variances from one shared batched traversal, large groups from a dedicated
-/// moments pass.
+/// Evaluate a weighted observable on the statevector: small groups from one
+/// shared batched traversal, each large group's mean and variance from a
+/// dedicated moments pass.
 ///
 /// `Var(H_g) = <H_g^2> - <H_g>^2` per commuting group. For a small group the
 /// square expands into pairwise product strings appended to the same
-/// traversal that serves the term means; a group past the pair budget takes a
+/// traversal that serves its term means; a group past the pair budget takes a
 /// single-pass moment accumulation instead, on the state as run when the
 /// group is Z-only and on a basis-rotated copy otherwise.
 fn grouped_expectation_statevector(
@@ -3212,9 +3212,10 @@ fn grouped_expectation_on_state(
     // (shared qubits carry equal axes and cancel to identity), so each pair is
     // one more mask. Large groups fall back to a dedicated moments pass, which
     // costs a fixed number of state sweeps where the pair expansion grows
-    // quadratically.
-    let mut combined = masks.clone();
-    let mut pair_blocks: Vec<(usize, usize, Vec<f64>)> = Vec::new();
+    // quadratically. Each group's mean comes out of whichever pass serves its
+    // variance, so a large group's terms stay out of the shared traversal.
+    let mut combined = Vec::with_capacity(masks.len());
+    let mut pair_blocks: Vec<(usize, usize, usize, Vec<f64>)> = Vec::new();
     let mut deferred: Vec<usize> = Vec::new();
     for (gi, group) in grouping.groups.iter().enumerate() {
         let members = &group.term_indices;
@@ -3222,7 +3223,9 @@ fn grouped_expectation_on_state(
             deferred.push(gi);
             continue;
         }
-        let first_mask = combined.len();
+        let first_term = combined.len();
+        combined.extend(members.iter().map(|&i| masks[i]));
+        let first_pair = combined.len();
         let mut pair_coefficients = Vec::with_capacity(members.len() * (members.len() - 1) / 2);
         for (pos, &i) in members.iter().enumerate() {
             for &j in &members[pos + 1..] {
@@ -3232,7 +3235,7 @@ fn grouped_expectation_on_state(
                 pair_coefficients.push(2.0 * terms[i].0 * terms[j].0);
             }
         }
-        pair_blocks.push((gi, first_mask, pair_coefficients));
+        pair_blocks.push((gi, first_term, first_pair, pair_coefficients));
     }
 
     // A device-resident state reduces every mask on the card; the host keeps
@@ -3247,15 +3250,20 @@ fn grouped_expectation_on_state(
         }
     };
 
-    let mean: f64 = terms.iter().zip(&values).map(|((c, _), v)| c * v).sum();
+    let mut mean: f64 = terms
+        .iter()
+        .filter(|(_, factors)| factors.is_empty())
+        .map(|(c, _)| c)
+        .sum();
     let mut group_variances = vec![0.0; grouping.groups.len()];
 
-    for (gi, first_mask, pair_coefficients) in &pair_blocks {
+    for (gi, first_term, first_pair, pair_coefficients) in &pair_blocks {
         let group = &grouping.groups[*gi];
         let m1: f64 = group
             .term_indices
             .iter()
-            .map(|&i| terms[i].0 * values[i])
+            .zip(&values[*first_term..])
+            .map(|(&i, v)| terms[i].0 * v)
             .sum();
         let square_diag: f64 = group
             .term_indices
@@ -3264,9 +3272,10 @@ fn grouped_expectation_on_state(
             .sum();
         let square_cross: f64 = pair_coefficients
             .iter()
-            .zip(&values[*first_mask..])
+            .zip(&values[*first_pair..])
             .map(|(c, v)| c * v)
             .sum();
+        mean += m1;
         group_variances[*gi] = (square_diag + square_cross - m1 * m1).max(0.0);
     }
 
@@ -3306,6 +3315,7 @@ fn grouped_expectation_on_state(
                     norm,
                 )
             };
+            mean += m1;
             group_variances[gi] = (m2 - m1 * m1).max(0.0);
         }
     }
@@ -3320,11 +3330,11 @@ fn grouped_expectation_on_state(
     })
 }
 
-/// Pair-expansion budget per commuting group. Measured on the 2000-string
-/// Jordan-Wigner fixture at n=20: one extra general mask in the shared
-/// traversal costs about 0.6 ms while a scratch-rotation moments pass costs
-/// about 11 ms, so groups whose pair count stays under that ratio expand
-/// inline and larger groups take the dedicated pass.
+/// Pair-expansion budget per commuting group. The dedicated pass pays a scratch
+/// copy and a basis rotation per group that the pair expansion avoids. On the
+/// 2000-string Jordan-Wigner fixture, sending every multi-term group through it
+/// cost about 3x this budget's reduction at n=16 and n=20, and about 0.6x at
+/// n=12.
 const MAX_PAIR_MASKS_PER_GROUP: usize = 20;
 
 /// Values from a route that evaluates rather than samples, so there is no

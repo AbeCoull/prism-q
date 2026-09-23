@@ -40,10 +40,10 @@ which routes decline one.
 
 **Batches:** `run_batch` runs a list of circuits, holding one backend across those of the
 same width that draw no randomness. Results match running each circuit alone with the
-same seed. What it saves is the `2^n` allocation, not the route analysis, which every
-circuit pays either way, so the saving grows with width rather than shrinking: measured
-over 200 circuits, three runs, it is 0.5 to 0.8 microseconds a run slower at 8 qubits,
-saves 0.8 to 4.2 at 10, and saves 10 to 37 at 12. Use it from about 10 qubits up.
+same seed. Below 14 qubits, under `parallel`, the circuits split across cores, since each
+of those runs is single-threaded inside: a 200-point sweep at 4 to 12 qubits ran 3.2x to
+4.8x faster than a loop on a four-core host. On one thread the held backend is the only
+saving, and it read within about 10% of a loop.
 
 **State diagnostics:** `Simulate::reduced_density_matrix` returns a
 `ReducedDensityMatrix` (row major, side `2^k`, `qubits[0]` the lowest bit of the row

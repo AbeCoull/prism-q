@@ -113,6 +113,21 @@ fn a_batch_routed_to_the_stabilizer_matches_running_each_alone() {
     }
 }
 
+// A 14-qubit circuit keeps the whole batch on one thread, so both paths are covered.
+#[test]
+fn a_batch_reaching_the_parallel_floor_matches_running_each_alone() {
+    let circuits = vec![unitary(6, 2, 0), unitary(14, 2, 1), unitary(6, 2, 2)];
+    let batch = run_batch(&circuits, BackendKind::Statevector, SEED).unwrap();
+    for (i, circuit) in circuits.iter().enumerate() {
+        let solo = simulate(circuit)
+            .backend(BackendKind::Statevector)
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert_same(&batch[i], &solo, &format!("circuit {i}"));
+    }
+}
+
 #[test]
 fn an_empty_batch_returns_no_results() {
     assert!(run_batch(&[], BackendKind::Auto, SEED).unwrap().is_empty());
@@ -124,4 +139,27 @@ fn a_failing_circuit_ends_the_batch() {
     bad.add_gate(Gate::T, &[0]);
     let circuits = vec![unitary(3, 1, 0), bad];
     assert!(run_batch(&circuits, BackendKind::Stabilizer, SEED).is_err());
+}
+
+#[test]
+fn a_batch_reports_the_first_failure_in_order() {
+    let mut clifford = Circuit::new(3, 0);
+    clifford.add_gate(Gate::H, &[0]);
+    clifford.add_gate(Gate::Cx, &[0, 1]);
+    let mut first_bad = Circuit::new(2, 0);
+    first_bad.add_gate(Gate::T, &[1]);
+    let mut second_bad = Circuit::new(5, 0);
+    second_bad.add_gate(Gate::Rx(0.3), &[4]);
+    let alone = run_batch(
+        std::slice::from_ref(&first_bad),
+        BackendKind::Stabilizer,
+        SEED,
+    )
+    .unwrap_err()
+    .to_string();
+    let mut circuits = vec![clifford; 8];
+    circuits.push(first_bad);
+    circuits.extend(std::iter::repeat_n(second_bad, 8));
+    let err = run_batch(&circuits, BackendKind::Stabilizer, SEED).unwrap_err();
+    assert_eq!(err.to_string(), alone);
 }

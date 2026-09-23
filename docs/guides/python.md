@@ -632,13 +632,12 @@ from prism_q import run_batch
 outcomes = run_batch(circuits, seed=42)
 ```
 
-Results match running each circuit alone with the same seed, and the first failure ends
-the batch. Two things are saved and they pull in opposite directions. The crossing into
-Rust measured about 2.4 microseconds per call at 6 to 8 qubits, and a batch pays it
-once. The backend allocation is the other, and it grows with width: in Rust the batch
-runs 0.5 to 0.8 microseconds slower per circuit at 8 qubits, saves under 4 at 10, and
-saves 10 to 37 at 12. So the crossing is what pays at the small end and the allocation
-at the wide end, and the flat middle around 10 qubits is where neither is worth much.
+Results match running each circuit alone with the same seed, and a failing batch raises
+the first failure in list order. Below 14 qubits the circuits split across cores with the
+GIL released. A loop cannot do that, because each of those runs is single-threaded
+inside: a 200-point sweep of a two-layer ansatz ran 3.2x to 4.8x faster than a loop on
+a four-core host, from 4 to 12 qubits. From 14 qubits up each circuit already uses every
+core, and the batch saves only the crossing into Rust, about 2.4 microseconds a call.
 
 ## Parameter sweeps
 

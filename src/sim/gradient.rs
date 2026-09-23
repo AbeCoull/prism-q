@@ -550,11 +550,14 @@ fn build_lambda_and_value(
 /// evaluation through automatic backend selection.
 ///
 /// Unlike [`run_expectation_gradient`] this places no ceiling on the qubit
-/// count of its own: it holds one backend state at a time and inherits whatever
-/// the selected backend can represent. It also accepts `QftBlock`. The price is
-/// `1 + 2 * params.links().len()` circuit evaluations against the adjoint's
-/// one, so prefer the adjoint wherever it applies. Select an explicit backend
-/// with [`crate::simulate`] and `expectation_gradient_shift`.
+/// count of its own: it inherits whatever the selected backend can represent,
+/// holding one backend state at a time from 14 qubits up. Below that, under the
+/// `parallel` feature, the shifted evaluations split across Rayon workers with a
+/// state each, and the gradient is bit-identical to the sequential sum. It also
+/// accepts `QftBlock`. The price is `1 + 2 * params.links().len()` circuit
+/// evaluations against the adjoint's one, so prefer the adjoint wherever it
+/// applies. Select an explicit backend with [`crate::simulate`] and
+/// `expectation_gradient_shift`.
 ///
 /// # Examples
 ///
@@ -665,15 +668,38 @@ pub(crate) fn shift_gradient(
     }
 
     let shift = std::f64::consts::FRAC_PI_2;
+    let term = |shifted: &mut Circuit, instruction: usize| -> Result<f64> {
+        let base = *angle_mut(&mut shifted.instructions[instruction]);
+        *angle_mut(&mut shifted.instructions[instruction]) = base + shift;
+        let plus = evaluate(shifted)?;
+        *angle_mut(&mut shifted.instructions[instruction]) = base - shift;
+        let minus = evaluate(shifted)?;
+        *angle_mut(&mut shifted.instructions[instruction]) = base;
+        Ok(0.5 * (plus - minus))
+    };
+
+    // Terms are summed into their slots in link order on both paths, so the
+    // parallel gradient is bit-identical to the sequential one.
+    let links = params.links();
+    #[cfg(feature = "parallel")]
+    if links.len() > 1 && super::runs_split_across_workers(kind, circuit.num_qubits) {
+        use rayon::prelude::*;
+        let terms: Vec<Result<f64>> = links
+            .par_iter()
+            .map_init(
+                || circuit.clone(),
+                |shifted, link| term(shifted, link.instruction),
+            )
+            .collect();
+        for (link, t) in links.iter().zip(terms) {
+            gradient[link.slot] += t?;
+        }
+        return Ok(ExpectationGradient { value, gradient });
+    }
+
     let mut shifted = circuit.clone();
-    for link in params.links() {
-        let base = *angle_mut(&mut shifted.instructions[link.instruction]);
-        *angle_mut(&mut shifted.instructions[link.instruction]) = base + shift;
-        let plus = evaluate(&shifted)?;
-        *angle_mut(&mut shifted.instructions[link.instruction]) = base - shift;
-        let minus = evaluate(&shifted)?;
-        *angle_mut(&mut shifted.instructions[link.instruction]) = base;
-        gradient[link.slot] += 0.5 * (plus - minus);
+    for link in links {
+        gradient[link.slot] += term(&mut shifted, link.instruction)?;
     }
 
     Ok(ExpectationGradient { value, gradient })
@@ -747,6 +773,54 @@ mod tests {
         let g = run_expectation_gradient(&c, &obs, &params, 42).unwrap();
         assert_eq!(g.gradient.len(), 1);
         assert!((g.gradient[0] - (-2.0 * theta.sin())).abs() < 1e-9);
+    }
+
+    // Eight qubits splits the links across workers under `parallel`; the reference
+    // sums the same terms in link order on one thread, so the bits must agree.
+    #[test]
+    fn shift_gradient_matches_a_sequential_sum_bit_for_bit() {
+        let circuit = crate::circuits::hardware_efficient_ansatz(8, 2, 7);
+        let mut params = Parameters::new(3);
+        let rotations = circuit.instructions.iter().enumerate().filter(|(_, inst)| {
+            matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::Ry(_) | Gate::Rz(_),
+                    ..
+                }
+            )
+        });
+        for (k, (i, _)) in rotations.enumerate() {
+            params.link(i, k % 3);
+        }
+        let ham = vec![
+            (0.5, vec![PauliTerm::z(0), PauliTerm::z(1)]),
+            (1.5, vec![PauliTerm::x(3)]),
+        ];
+        let observables: Vec<Vec<PauliTerm>> = ham.iter().map(|(_, t)| t.clone()).collect();
+        let energy = |c: &Circuit| -> f64 {
+            let per_term =
+                super::super::run_expectation_values_with(BackendKind::Auto, c, &observables, 42)
+                    .unwrap();
+            ham.iter()
+                .zip(per_term)
+                .map(|((coeff, _), v)| coeff * v)
+                .sum()
+        };
+        let shift = std::f64::consts::FRAC_PI_2;
+        let mut expected = vec![0.0; 3];
+        for link in params.links() {
+            let mut shifted = circuit.clone();
+            let base = *angle_mut(&mut shifted.instructions[link.instruction]);
+            *angle_mut(&mut shifted.instructions[link.instruction]) = base + shift;
+            let plus = energy(&shifted);
+            *angle_mut(&mut shifted.instructions[link.instruction]) = base - shift;
+            let minus = energy(&shifted);
+            expected[link.slot] += 0.5 * (plus - minus);
+        }
+
+        let g = run_expectation_gradient_shift(&circuit, &ham, &params, 42).unwrap();
+        assert_eq!(g.gradient, expected);
     }
 
     #[test]

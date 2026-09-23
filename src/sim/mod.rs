@@ -1968,16 +1968,18 @@ pub fn run_on_state(
 
 /// Run several circuits, holding one backend across those that can share it.
 ///
-/// What this saves is the backend construction and its `2^n` allocation, which
-/// `init` reuses when the next circuit has the same width. Route analysis is not
-/// saved: the circuits differ, so each one is planned either way.
+/// Under the `parallel` feature, a batch whose circuits all sit below 14 qubits
+/// splits across Rayon workers, each holding its own backend. Those runs are
+/// single-threaded inside, so the batch is the only way to reach the other cores:
+/// a 200-point sweep of a two-layer hardware-efficient ansatz ran 3.2x to 4.8x
+/// faster than a loop over [`simulate`] at 4 to 12 qubits on a four-core
+/// i7-6700K. A wider circuit, a density matrix from 7 qubits, or a GPU or
+/// distributed kind keeps the whole batch on one thread.
 ///
-/// That puts the crossover higher than it looks. Measured over 200 distinct
-/// circuits, best of fifteen, three runs on one host: at 8 qubits the batch is
-/// slower by 0.5 to 0.8 microseconds a run, because the allocation it avoids is
-/// smaller than the per-circuit bookkeeping it adds; at 10 qubits it saves 0.8
-/// to 4.2; at 12 qubits it saves 10 to 37, which is 2% to 8%. Reach for it from
-/// about 10 qubits up, and use a plain loop below that.
+/// On one thread the saving is the backend construction and its `2^n`
+/// allocation, which `init` reuses when the next circuit has the same width;
+/// route analysis is planned per circuit either way. On the same sweep that read
+/// within about 10% of the loop, in both directions.
 ///
 /// Results are identical to running each circuit on its own with the same seed.
 /// A circuit that draws randomness (a measurement, a reset, or a classical
@@ -1985,35 +1987,83 @@ pub fn run_on_state(
 /// RNG forward into the next circuit and change what the next one measures.
 ///
 /// # Errors
-/// The first circuit that fails ends the batch and returns its error, so a
-/// caller that wants the rest to run should call this per circuit.
+/// Returns the error of the first failing circuit in list order. A caller that
+/// wants every circuit's result should call this per circuit.
 pub fn run_batch(circuits: &[Circuit], kind: BackendKind, seed: u64) -> Result<Vec<RunOutcome>> {
-    let mut out = Vec::with_capacity(circuits.len());
-    let mut held: Option<(dispatch::BackendPlan, usize, Box<dyn Backend + Send>)> = None;
-
-    for circuit in circuits {
-        let Some(plan) = batch_plan(&kind, circuit) else {
-            held = None;
-            out.push(run_with_internal(
-                kind.clone(),
-                circuit,
-                seed,
-                SimOptions::default(),
-            )?);
-            continue;
-        };
-
-        let reusable = matches!(
-            &held,
-            Some((p, width, _)) if *width == circuit.num_qubits && dispatch::same_plan(p, &plan)
-        );
-        if !reusable {
-            held = Some((plan.clone(), circuit.num_qubits, plan.build(seed)));
-        }
-        let (_, _, backend) = held.as_mut().expect("just built");
-        out.push(execute(&mut **backend, circuit, &SimOptions::default())?);
+    #[cfg(feature = "parallel")]
+    if circuits.len() > 1
+        && circuits
+            .iter()
+            .all(|c| runs_split_across_workers(&kind, c.num_qubits))
+    {
+        use rayon::prelude::*;
+        let outcomes: Vec<Result<RunOutcome>> = circuits
+            .par_iter()
+            .map_init(
+                || None,
+                |held, circuit| run_batch_entry(&kind, circuit, seed, held),
+            )
+            .collect();
+        return outcomes.into_iter().collect();
     }
-    Ok(out)
+
+    let mut held = None;
+    circuits
+        .iter()
+        .map(|circuit| run_batch_entry(&kind, circuit, seed, &mut held))
+        .collect()
+}
+
+type HeldBackend = Option<(dispatch::BackendPlan, usize, Box<dyn Backend + Send>)>;
+
+fn run_batch_entry(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    seed: u64,
+    held: &mut HeldBackend,
+) -> Result<RunOutcome> {
+    let Some(plan) = batch_plan(kind, circuit) else {
+        *held = None;
+        return run_with_internal(kind.clone(), circuit, seed, SimOptions::default());
+    };
+
+    let reusable = matches!(
+        &*held,
+        Some((p, width, _)) if *width == circuit.num_qubits && dispatch::same_plan(p, &plan)
+    );
+    if !reusable {
+        *held = Some((plan.clone(), circuit.num_qubits, plan.build(seed)));
+    }
+    let (_, _, backend) = held.as_mut().expect("just built");
+    execute(&mut **backend, circuit, &SimOptions::default())
+}
+
+/// Whether separate runs of `num_qubits`-wide circuits on `kind` should split across
+/// Rayon workers: only below the kernels' own parallel floor, counting a density
+/// matrix at twice its width since each worker holds a state, and never on a kind
+/// bound to one device or rank context.
+#[cfg(feature = "parallel")]
+pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -> bool {
+    #[cfg(feature = "gpu")]
+    if matches!(
+        kind,
+        BackendKind::AutoGpu { .. }
+            | BackendKind::StatevectorGpu { .. }
+            | BackendKind::DensityMatrixGpu { .. }
+            | BackendKind::StabilizerGpu { .. }
+    ) {
+        return false;
+    }
+    #[cfg(feature = "distributed")]
+    if matches!(kind, BackendKind::StatevectorDistributed { .. }) {
+        return false;
+    }
+    let width = if kind.is_density_matrix() {
+        2 * num_qubits
+    } else {
+        num_qubits
+    };
+    width < crate::backend::PARALLEL_THRESHOLD_QUBITS
 }
 
 /// The plan a circuit can share, or `None` when it must run on its own.

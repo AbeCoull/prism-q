@@ -2470,6 +2470,51 @@ fn bench_gradient_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+/// Parameter shift below the kernels' parallel floor, where each of the `2P`
+/// shifted evaluations runs on one thread.
+fn bench_gradient_shift_small(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gradient/shift_small");
+    configure_group(&mut group);
+
+    for &n in &[8, 10, 12] {
+        let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let params = Parameters::all_rotations(&circuit);
+        let ham = z_chain_hamiltonian(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| black_box(run_expectation_gradient_shift(circ, &ham, &params, 42).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
+/// A 200-point parameter sweep: one ansatz shape, fresh angles per point. `loop`
+/// runs each circuit on its own and is the control for `run_batch`.
+fn bench_batch_sweep(c: &mut Criterion) {
+    const POINTS: u64 = 200;
+
+    let mut group = c.benchmark_group("batch/hea_l2_sweep");
+    configure_group(&mut group);
+
+    for &n in &[4, 8, 10, 12] {
+        let sweep: Vec<Circuit> = (0..POINTS)
+            .map(|k| circuits::hardware_efficient_ansatz(n, 2, SEED + k))
+            .collect();
+        group.bench_with_input(BenchmarkId::new("run_batch", n), &sweep, |b, sweep| {
+            b.iter(|| black_box(sim::run_batch(sweep, BackendKind::Auto, SEED).unwrap()));
+        });
+        group.bench_with_input(BenchmarkId::new("loop", n), &sweep, |b, sweep| {
+            b.iter(|| {
+                for circ in sweep {
+                    black_box(run_with(BackendKind::Auto, circ, SEED).unwrap());
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // A Trotter ansatz over the largest Jordan-Wigner strings of the seeded
 // two-body operator, on an alternating occupation reference. The recognizing
 // constructor lowers the weight-1 and ZZ generators, so the stream mixes named
@@ -4105,6 +4150,8 @@ criterion_group! {
     bench_gradient_qaoa,
     bench_gradient_density_matrix,
     bench_gradient_prefix,
+    bench_gradient_shift_small,
+    bench_batch_sweep,
     // Variational loop iteration (rebuild vs rebind under simulation cost)
     bench_vqe_loop,
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)

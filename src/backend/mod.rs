@@ -68,7 +68,7 @@ use num_complex::Complex64;
 use crate::circuit::Instruction;
 use crate::error::Result;
 use crate::sim::unified_pauli::PauliTerm;
-use crate::sim::{Exactness, Placement, ResolvedBackend};
+use crate::sim::{BondReport, Exactness, Placement, ResolvedBackend};
 
 /// Qubit count at which dense amplitude kernels switch to Rayon; the factored
 /// backend applies it per sub-state, the density matrix backend to its
@@ -432,6 +432,13 @@ pub trait Backend {
     /// path, and only when the `gpu` feature is on.
     fn placement(&self) -> Placement {
         Placement::Host
+    }
+
+    /// Peak bond dimension the run kept against its cap, for a representation
+    /// that has one. Called once per run, after the circuit has been applied;
+    /// the default reports none.
+    fn bond_report(&self) -> Option<BondReport> {
+        None
     }
 
     /// Initialize (or reset) state for a circuit with the given dimensions.

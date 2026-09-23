@@ -127,11 +127,17 @@ weight, where the state lived, and the shot count for a sampled result.
 | `exactness` | `Exact`, or `Approximate` with a fidelity lower bound when the engine reports one |
 | `placement` | `Host` or `Device` |
 | `shots` | Shots drawn, `None` for an analytic result |
+| `bond` | Peak bond dimension against the cap, `None` unless the MPS ran |
 
 `Approximate` marks the route rather than the run. An MPS at bond 256 on a
 circuit that never fills a bond truncates nothing and still reports
 `Approximate`, with a bound of 1.0: the variant answers whether the answer could
 have been approximated, the bound answers whether it was.
+
+For an MPS run, `bond` says whether the cap ever bound it. It carries `peak`,
+the widest bond any cut kept over the run, and `cap`, the configured maximum,
+with `saturated()` reading `peak >= cap`. A saturated run was bound by the cap;
+one whose peak stayed under it truncated nothing on the cap's account.
 
 The bound describes the normalized state, which is what every read returns: a
 truncating MPS does not renormalize its chain, but expectation values, shot

@@ -88,7 +88,8 @@ pub enum Exactness {
     /// never fills a bond truncates nothing and still reports `Approximate`,
     /// with `fidelity_lower_bound` of 1.0. The variant answers whether the
     /// answer could have been approximated, the bound answers whether it was.
-    /// `None` means the engine reports no bound.
+    /// `None` means the engine reports no bound. For the MPS,
+    /// [`RunMetadata::bond`] says whether the cap was reached at all.
     Approximate {
         fidelity_lower_bound: Option<f64>,
     },
@@ -102,6 +103,24 @@ pub enum Placement {
     Device,
 }
 
+/// Peak bond dimension an MPS run kept, beside the cap it ran under.
+///
+/// `peak` is the widest bond any cut wrote over the whole run, after
+/// truncation, so it never exceeds `cap`. A run that reached the cap was bound
+/// by it; one that stayed under it truncated nothing on the cap's account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BondReport {
+    pub peak: usize,
+    pub cap: usize,
+}
+
+impl BondReport {
+    /// Whether any cut reached the cap, the signal that the cap bound the run.
+    pub fn saturated(&self) -> bool {
+        self.peak >= self.cap
+    }
+}
+
 /// How a result was produced, attached to every [`Simulate`] result type.
 ///
 /// A GPU-attached run below the device crossover reports [`Placement::Host`],
@@ -110,6 +129,7 @@ pub enum Placement {
 ///
 /// [`Simulate`]: crate::sim::Simulate
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RunMetadata {
     pub backend: ResolvedBackend,
     /// Which sampler ran, when `backend` is a label several share. `None`
@@ -121,6 +141,11 @@ pub struct RunMetadata {
     /// Shots drawn, for a result estimated by sampling. `None` for an analytic
     /// result.
     pub shots: Option<usize>,
+    /// Peak bond dimension against the cap, `Some` when the route resolved to
+    /// the MPS and `None` on every other backend. Its
+    /// [`BondReport::saturated`] is the signal that the cap bound the run;
+    /// [`Exactness`] marks the route and cannot say.
+    pub bond: Option<BondReport>,
 }
 
 impl RunMetadata {
@@ -135,6 +160,7 @@ impl RunMetadata {
             exactness,
             placement,
             shots: None,
+            bond: None,
         }
     }
 
@@ -196,6 +222,13 @@ impl RunMetadata {
         if other.placement != self.placement {
             self.placement = Placement::Host;
         }
+        self.bond = match (self.bond, other.bond) {
+            (Some(a), Some(b)) => Some(BondReport {
+                peak: a.peak.max(b.peak),
+                cap: a.cap,
+            }),
+            (a, b) => a.or(b),
+        };
         match (self.exactness, other.exactness) {
             (_, Exactness::Exact) => {}
             (Exactness::Exact, approx) => self.exactness = approx,

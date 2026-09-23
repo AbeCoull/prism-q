@@ -106,6 +106,12 @@ sampled result. `Auto` selecting an approximate backend is disclosed by the
 result, which is what makes `require_exact()` an opt-out: rejecting by default
 would remove the only route an oversize non-sparse circuit has.
 
+A run that resolved to the MPS also carries `bond`, a `BondReport` of the peak
+bond dimension any cut kept against the configured cap. Its `saturated()` is the
+signal that the cap bound the run; `Exactness::Approximate` marks the route and is
+reported whether or not the cap was reached. Every other backend leaves `bond`
+as `None`.
+
 `require_exact()` resolves the route from the circuit and errors before
 allocating, so it does not pay for state it would discard. Exactness is read
 from the route and the circuit together rather than from the route alone: an

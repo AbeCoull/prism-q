@@ -76,7 +76,9 @@ Parallel noisy trajectories are the one path holding more than one state at a ti
 Rayon thread runs its own backend, so peak memory is `threads * state(n)`. That path is
 restricted to circuits below 14 qubits, where a statevector replica is 256 KiB and a full
 thread pool stays in the tens of megabytes. Above it trajectories run serially with one
-live backend, bounded by the ordinary state cap.
+live backend, bounded by the ordinary state cap. Pauli-noise runs grouped by error pattern
+follow the same rule, one state per worker, and add a pattern table and 16 bytes a shot
+for grouping; the outcome draw walks the amplitudes once and builds no `2^n` table.
 
 Three backends grow after `init`, and each checks at the growth event, rejecting with
 an error naming itself before the allocation. A factored sub-state merge checks the

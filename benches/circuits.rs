@@ -309,6 +309,21 @@ fn non_clifford_noise_circuit(n_qubits: usize, depth: usize) -> Circuit {
     with_terminal_measurements(circuit)
 }
 
+/// [`non_clifford_noise_circuit`] with qubit 0 measured into an extra bit halfway
+/// through, so the measurement is followed by more gates.
+fn non_clifford_mid_measure_circuit(n_qubits: usize, depth: usize) -> Circuit {
+    let full = non_clifford_noise_circuit(n_qubits, depth);
+    let per_layer = 4 * n_qubits - 1;
+    let mut circuit = Circuit::new(n_qubits, n_qubits + 1);
+    for (index, instruction) in full.instructions.into_iter().enumerate() {
+        if index == per_layer * (depth / 2) {
+            circuit.add_measure(0, n_qubits);
+        }
+        circuit.instructions.push(instruction);
+    }
+    circuit
+}
+
 /// Brickwork layers between rounds of mid-circuit measurement.
 ///
 /// `mps_measure_reset_circuit` holds bond one from end to end, since a
@@ -3564,6 +3579,41 @@ fn bench_noisy_sampling(c: &mut Criterion) {
                     SEED,
                 )
                 .unwrap();
+            });
+        },
+    );
+
+    // Uniform depolarizing on every gate target, 1000 shots. At 1e-3 about four
+    // shots in five draw no error at all; at 1e-2 one in seven to ten does.
+    for n in [10usize, 12] {
+        let circuit = non_clifford_noise_circuit(n, 4);
+        for (tag, p) in [("p1e-3", 1e-3), ("p1e-2", 1e-2)] {
+            let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, p);
+            group.bench_function(
+                BenchmarkId::new("trajectory_pauli", format!("non_clifford_{n}q_{tag}_1000")),
+                |b| {
+                    b.iter(|| {
+                        run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 1000, SEED)
+                            .unwrap();
+                    });
+                },
+            );
+        }
+    }
+
+    // A mid-circuit measurement collapses each shot's state on its own outcome,
+    // so this shape keeps one trajectory per shot whatever the error pattern.
+    let mid_measured = non_clifford_mid_measure_circuit(10, 4);
+    let mid_noise = prism_q::NoiseModel::uniform_depolarizing(&mid_measured, 1e-3);
+    group.bench_function(
+        BenchmarkId::new(
+            "trajectory_pauli_mid_measure",
+            "non_clifford_10q_p1e-3_1000",
+        ),
+        |b| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::Auto, &mid_measured, &mid_noise, 1000, SEED)
+                    .unwrap();
             });
         },
     );

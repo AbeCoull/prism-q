@@ -80,7 +80,9 @@ comparison run used.
   ulp-stable class below.
 - **Noisy trajectory shots: bitwise for a given seed, at any thread count.** Each shot's
   generator is seeded from the run seed and the shot index, not the worker, and results
-  are collected in shot order.
+  are collected in shot order. Pauli-noise runs that simulate each distinct error pattern
+  once keep the rule: a shot's pattern, outcome and readout flips all draw from its own
+  seed, so the group a worker picks up moves no record.
 - **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
   mid-circuit measurement, a condition or a region runs once per shot, and below the
   width where the resolved engine's own kernels go parallel those runs split across

@@ -214,6 +214,18 @@ conditionals, and non-Clifford gates, at per-shot state evolution cost.
 Distributed backends reject noisy sampling entirely; per-shot trajectories
 cannot keep rank collectives in lockstep.
 
+Pauli noise on the host statevector, with measurements that are all terminal, no
+reset, and no live event after the first measurement, skips the per-shot cost.
+A Pauli branch weight does not depend on the state and no draw depends on an
+outcome, so every shot's error pattern is drawn first, from that shot's own
+seed, and shots with the same pattern share one evolution. Each shot then draws
+its record from its group's final state on its own stream, followed by its
+readout flips. The result is distributionally exact but not seed-identical to
+the per-shot path. At uniform depolarizing `p = 1e-3` on a 12-qubit, 232-event
+circuit, 1000 shots fall into about 190 patterns, four in five of them the
+error-free one. When distinct patterns pass nine tenths of the shots the run
+falls back to per-shot trajectories.
+
 A two-qubit channel is sampled as one joint draw over its 15 non-identity
 Pauli products, never as two single-qubit draws: the true probability that both
 letters move is `0.6p`, where independent draws give `(0.8p)^2`. The compiled

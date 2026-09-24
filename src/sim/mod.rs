@@ -4021,7 +4021,9 @@ fn general_noise_plan(kind: &BackendKind, circuit: &Circuit) -> BackendPlan {
 /// uses the compiled noisy sampler (fast O(n²·m) compile + O(events·m/64) per shot).
 /// For all other cases, falls back to per-shot simulation with noise injection.
 /// The compiled noisy path is limited to terminal measurements with no resets
-/// or classical conditionals.
+/// or classical conditionals. Pauli noise on the host statevector under the
+/// same limits draws every shot's errors first and simulates each distinct
+/// pattern once; see [`trajectory::PauliGroups`].
 pub(crate) fn run_shots_with_noise(
     kind: BackendKind,
     circuit: &Circuit,
@@ -4172,6 +4174,12 @@ pub(crate) fn run_shots_with_noise(
                      exactly on BackendKind::DensityMatrix"
                 .into(),
         });
+    }
+    if matches!(plan, BackendPlan::Statevector { .. }) && !plan.is_gpu() {
+        if let Some(groups) = trajectory::PauliGroups::sample(circuit, noise_model, num_shots, seed)
+        {
+            return trajectory::run_pauli_groups(&groups, circuit, noise_model, seed);
+        }
     }
     let route = plan.resolved();
     trajectory::run_trajectories(

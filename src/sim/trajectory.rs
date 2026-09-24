@@ -1,5 +1,8 @@
 //! Monte Carlo trajectory execution for noisy circuits: one pure-state
-//! simulation per shot, sampling a noise branch after each instruction.
+//! simulation per shot, sampling a noise branch after each instruction, or one
+//! per distinct error pattern when every shot's Pauli errors can be drawn first.
+
+use std::collections::HashMap;
 
 use num_complex::Complex64;
 use rand::SeedableRng;
@@ -7,6 +10,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::smallvec;
 
 use crate::backend::Backend;
+use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
 use crate::gates::Gate;
@@ -29,6 +33,20 @@ pub(crate) fn noise_rng(shot_seed: u64) -> ChaCha8Rng {
     rng
 }
 
+/// Draw one branch of a single-qubit Pauli channel, `None` for the identity.
+fn draw_pauli(px: f64, py: f64, pz: f64, rng: &mut ChaCha8Rng) -> Option<PauliOp> {
+    let r: f64 = rand::RngExt::random(rng);
+    if r < px {
+        Some(PauliOp::X)
+    } else if r < px + py {
+        Some(PauliOp::Y)
+    } else if r < px + py + pz {
+        Some(PauliOp::Z)
+    } else {
+        None
+    }
+}
+
 fn apply_pauli(
     backend: &mut dyn Backend,
     qubit: usize,
@@ -37,24 +55,10 @@ fn apply_pauli(
     pz: f64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    let r: f64 = rand::RngExt::random(rng);
-    if r < px {
-        backend.apply(&Instruction::Gate {
-            gate: Gate::X,
-            targets: smallvec![qubit],
-        })?;
-    } else if r < px + py {
-        backend.apply(&Instruction::Gate {
-            gate: Gate::Y,
-            targets: smallvec![qubit],
-        })?;
-    } else if r < px + py + pz {
-        backend.apply(&Instruction::Gate {
-            gate: Gate::Z,
-            targets: smallvec![qubit],
-        })?;
+    match draw_pauli(px, py, pz, rng) {
+        Some(op) => apply_pauli_op(backend, qubit, op),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Minimum p_jump for applying the jump branch instead of the no-jump
@@ -192,6 +196,17 @@ fn apply_thermal_relaxation(
     backend.apply_1q_matrix(qubit, &mat)
 }
 
+/// Draw one branch of symmetric two-qubit depolarizing as an index into
+/// [`TWO_QUBIT_PAULIS`], `None` for `I (x) I`. Each of the 15 non-identity
+/// products has probability `p/15`.
+fn draw_two_qubit_depolarizing(p: f64, rng: &mut ChaCha8Rng) -> Option<usize> {
+    let r: f64 = rand::RngExt::random(rng);
+    if r >= p {
+        return None;
+    }
+    Some(((r / (p / 15.0)) as usize).min(14))
+}
+
 fn apply_two_qubit_depolarizing(
     backend: &mut dyn Backend,
     q0: usize,
@@ -199,27 +214,15 @@ fn apply_two_qubit_depolarizing(
     p: f64,
     rng: &mut ChaCha8Rng,
 ) -> Result<()> {
-    // 16 Pauli products: I⊗I, I⊗X, I⊗Y, I⊗Z, X⊗I, ..., Z⊗Z
-    // Each non-identity term has probability p/15
-    let pp = p / 15.0;
-    let r: f64 = rand::RngExt::random(rng);
-
-    if r >= p {
-        return Ok(()); // I⊗I (no error)
-    }
-
-    let idx = ((r / pp) as usize).min(14);
+    let Some(idx) = draw_two_qubit_depolarizing(p, rng) else {
+        return Ok(());
+    };
     let (pauli0, pauli1) = TWO_QUBIT_PAULIS[idx];
-    if pauli0 != PauliOp::I {
-        apply_pauli_op(backend, q0, pauli0)?;
-    }
-    if pauli1 != PauliOp::I {
-        apply_pauli_op(backend, q1, pauli1)?;
-    }
-    Ok(())
+    apply_pauli_op(backend, q0, pauli0)?;
+    apply_pauli_op(backend, q1, pauli1)
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum PauliOp {
     I,
     X,
@@ -591,6 +594,288 @@ fn run_trajectories_par(
     Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
 }
 
+/// One sampled Pauli error: the ordinal of the event that fired, counting the
+/// events before the first measurement in instruction order, and the letter it
+/// applies to each of the event's qubits (`I` in the second slot for a one-qubit
+/// event).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct Insertion {
+    event: usize,
+    letters: [PauliOp; 2],
+}
+
+/// Every shot's Pauli error pattern, drawn up front and grouped so each distinct
+/// pattern is simulated once.
+///
+/// A Pauli channel's branch weights do not depend on the state, and on a
+/// circuit whose measurements are all terminal no draw depends on an outcome,
+/// so the whole pattern of a shot can be drawn before anything is simulated.
+/// Conditioned on its pattern a shot ends in one pure state, and its record is
+/// a Born-rule draw from that state followed by readout error. Drawing the
+/// pattern first and the record second is therefore the distribution of the
+/// per-shot trajectory, at one simulation per pattern rather than per shot.
+pub(crate) struct PauliGroups {
+    /// Instructions before the first measurement, where evolution stops.
+    prefix: usize,
+    patterns: Vec<Vec<Insertion>>,
+    /// Shot indices ordered by group, ascending within each group.
+    members: Vec<usize>,
+    /// Group `g` owns `members[offsets[g]..offsets[g + 1]]`.
+    offsets: Vec<usize>,
+}
+
+/// Instructions before the first measurement when every shot's error pattern can
+/// be drawn up front, `None` otherwise.
+///
+/// Requires Pauli-frame channels only, no reset, measurements that are all
+/// terminal (which rules out conditionals and regions), at least one
+/// measurement, and no live event after the first measurement. A reset or a
+/// damping or Kraus channel draws against the state, and a later event would
+/// sit between measurements whose records it can split.
+fn pauli_group_prefix(circuit: &Circuit, noise: &NoiseModel) -> Option<usize> {
+    if !noise.has_only_pauli_channels()
+        || circuit.has_resets()
+        || !circuit.has_terminal_measurements_only()
+    {
+        return None;
+    }
+    let prefix = circuit
+        .instructions
+        .iter()
+        .position(|inst| matches!(inst, Instruction::Measure { .. }))?;
+    noise.after_gate[prefix..]
+        .iter()
+        .flatten()
+        .all(|event| event.channel.is_inert())
+        .then_some(prefix)
+}
+
+fn draw_frame_branch(event: &NoiseEvent, rng: &mut ChaCha8Rng) -> Option<[PauliOp; 2]> {
+    if let Some(p) = event.channel.pauli_pair_rate() {
+        let (a, b) = TWO_QUBIT_PAULIS[draw_two_qubit_depolarizing(p, rng)?];
+        return Some([a, b]);
+    }
+    let (px, py, pz) = event.pauli_probs();
+    draw_pauli(px, py, pz, rng).map(|op| [op, PauliOp::I])
+}
+
+impl PauliGroups {
+    /// Draw the error pattern of each of `num_shots` shots and group them.
+    ///
+    /// Shot `i` draws from `noise_rng(mix_seed(seed, i))`, one uniform per event
+    /// in instruction order, which is the draw sequence the per-shot trajectory
+    /// makes, so a shot fires the same errors on either path. `None` when the
+    /// circuit or model fails [`pauli_group_prefix`], or once distinct patterns
+    /// pass nine tenths of the shots, where grouping saves too few simulations
+    /// to pay for the pattern table.
+    pub(crate) fn sample(
+        circuit: &Circuit,
+        noise: &NoiseModel,
+        num_shots: usize,
+        seed: u64,
+    ) -> Option<Self> {
+        let prefix = pauli_group_prefix(circuit, noise)?;
+        let mut index: HashMap<Vec<Insertion>, usize> = HashMap::new();
+        let mut shot_group = Vec::with_capacity(num_shots);
+        let mut pattern = Vec::new();
+        for shot in 0..num_shots {
+            let mut rng = noise_rng(crate::sim::mix_seed(seed, shot));
+            pattern.clear();
+            let events = noise.after_gate[..prefix].iter().flatten();
+            for (event, noise_event) in events.enumerate() {
+                if let Some(letters) = draw_frame_branch(noise_event, &mut rng) {
+                    pattern.push(Insertion { event, letters });
+                }
+            }
+            let group = match index.get(pattern.as_slice()) {
+                Some(&group) => group,
+                None => {
+                    let group = index.len();
+                    if (group + 1) * 10 > num_shots * 9 {
+                        return None;
+                    }
+                    index.insert(pattern.clone(), group);
+                    group
+                }
+            };
+            shot_group.push(group);
+        }
+
+        let mut patterns = vec![Vec::new(); index.len()];
+        for (pattern, group) in index {
+            patterns[group] = pattern;
+        }
+        let mut offsets = vec![0usize; patterns.len() + 1];
+        for &group in &shot_group {
+            offsets[group + 1] += 1;
+        }
+        for group in 0..patterns.len() {
+            offsets[group + 1] += offsets[group];
+        }
+        let mut cursor = offsets.clone();
+        let mut members = vec![0usize; num_shots];
+        for (shot, &group) in shot_group.iter().enumerate() {
+            members[cursor[group]] = shot;
+            cursor[group] += 1;
+        }
+        Some(Self {
+            prefix,
+            patterns,
+            members,
+            offsets,
+        })
+    }
+
+    pub(crate) fn num_groups(&self) -> usize {
+        self.patterns.len()
+    }
+
+    fn members(&self, group: usize) -> &[usize] {
+        &self.members[self.offsets[group]..self.offsets[group + 1]]
+    }
+}
+
+/// Evolve one pattern's state, then draw the record of each member shot from it.
+///
+/// Member shot `i` draws its outcome and then its readout flips from
+/// `ChaCha8Rng::seed_from_u64(mix_seed(seed, i))`, the stream a per-shot
+/// trajectory measures on, apart from the stream its errors came from. The
+/// outcome is an inverse-CDF draw: the members' uniforms are sorted and matched
+/// against one cumulative pass over the amplitudes, so no `2^n` table is built.
+fn run_pauli_group(
+    groups: &PauliGroups,
+    group: usize,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    meas_map: &[(usize, usize)],
+    readout: &[Option<ReadoutError>],
+    seed: u64,
+) -> Result<(Vec<Vec<bool>>, crate::sim::RunMetadata)> {
+    let members = groups.members(group);
+    let mut backend = StatevectorBackend::new(crate::sim::mix_seed(seed, members[0]));
+    backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    let mut insertions = groups.patterns[group].iter().peekable();
+    let mut ordinal = 0usize;
+    for (instruction, events) in circuit.instructions[..groups.prefix]
+        .iter()
+        .zip(&noise.after_gate)
+    {
+        backend.apply(instruction)?;
+        for event in events {
+            if let Some(insertion) = insertions.next_if(|ins| ins.event == ordinal) {
+                for (&qubit, &letter) in event.qubits.iter().zip(&insertion.letters) {
+                    apply_pauli_op(&mut backend, qubit, letter)?;
+                }
+            }
+            ordinal += 1;
+        }
+    }
+
+    let mut draws: Vec<(f64, usize)> = members
+        .iter()
+        .enumerate()
+        .map(|(k, &shot)| {
+            let mut rng = ChaCha8Rng::seed_from_u64(crate::sim::mix_seed(seed, shot));
+            (rand::RngExt::random::<f64>(&mut rng), k)
+        })
+        .collect();
+    draws.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
+    let scale = backend.probability_scale();
+    let mut outcomes = vec![0usize; members.len()];
+    let mut cumulative = 0.0f64;
+    let mut last_nonzero = 0usize;
+    let mut next = 0usize;
+    for (basis, amp) in backend.state_vector().iter().enumerate() {
+        let weight = amp.norm_sqr() * scale;
+        if weight == 0.0 {
+            continue;
+        }
+        cumulative += weight;
+        last_nonzero = basis;
+        while next < draws.len() && draws[next].0 < cumulative {
+            outcomes[draws[next].1] = basis;
+            next += 1;
+        }
+        if next == draws.len() {
+            break;
+        }
+    }
+    for &(_, k) in &draws[next..] {
+        outcomes[k] = last_nonzero;
+    }
+
+    let has_readout = readout.iter().any(Option::is_some);
+    let shots = members
+        .iter()
+        .zip(&outcomes)
+        .map(|(&shot, &basis)| {
+            let mut bits = vec![false; circuit.num_classical_bits];
+            for &(qubit, cbit) in meas_map {
+                bits[cbit] = (basis >> qubit) & 1 == 1;
+            }
+            if has_readout {
+                let mut rng = ChaCha8Rng::seed_from_u64(crate::sim::mix_seed(seed, shot));
+                let _: f64 = rand::RngExt::random(&mut rng);
+                apply_readout_errors(&mut bits, readout, &mut rng);
+            }
+            bits
+        })
+        .collect();
+    Ok((shots, crate::sim::backend_metadata(&backend)))
+}
+
+/// Run every shot of `groups` on the host statevector, one evolution per
+/// distinct error pattern, and return the shots in index order.
+///
+/// Groups split across Rayon workers under the rule the per-shot trajectories
+/// use, each worker holding one state at a time. Every draw depends only on
+/// its shot's seed, so the result does not depend on the thread count.
+pub(crate) fn run_pauli_groups(
+    groups: &PauliGroups,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+    seed: u64,
+) -> Result<ShotsResult> {
+    let meas_map = circuit.measurement_map();
+    let readout = written_readout(circuit, &noise.readout);
+    let run =
+        |group: usize| run_pauli_group(groups, group, circuit, noise, &meas_map, &readout, seed);
+
+    #[cfg(feature = "parallel")]
+    if groups.num_groups() > 1
+        && crate::sim::state_splits_across_workers(
+            crate::sim::ResolvedBackend::Statevector,
+            circuit.num_qubits,
+        )
+    {
+        let runs: Vec<_> = (0..groups.num_groups()).into_par_iter().map(run).collect();
+        return collect_groups(groups, circuit, runs);
+    }
+    collect_groups(groups, circuit, (0..groups.num_groups()).map(run))
+}
+
+fn collect_groups(
+    groups: &PauliGroups,
+    circuit: &Circuit,
+    runs: impl IntoIterator<Item = Result<(Vec<Vec<bool>>, crate::sim::RunMetadata)>>,
+) -> Result<ShotsResult> {
+    let mut shots = vec![Vec::new(); groups.members.len()];
+    let mut metadata = crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::Statevector);
+    for (group, run) in runs.into_iter().enumerate() {
+        let (records, group_metadata) = run?;
+        if group == 0 {
+            metadata = group_metadata;
+        } else {
+            metadata.weaken_with(&group_metadata);
+        }
+        for (&shot, record) in groups.members(group).iter().zip(records) {
+            shots[shot] = record;
+        }
+    }
+    Ok(ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(metadata))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,5 +1117,336 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r1.shots, r2.shots, "same seed must produce same results");
+    }
+
+    fn grouped_circuit(n: usize) -> Circuit {
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+        }
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+        for q in 0..n {
+            circuit.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+            circuit.add_gate(Gate::Rx(0.2 + 0.15 * q as f64), &[q]);
+        }
+        circuit.measure_all();
+        circuit
+    }
+
+    fn statevector_route(
+        circuit: &Circuit,
+        noise: &NoiseModel,
+        num_shots: usize,
+        seed: u64,
+    ) -> ShotsResult {
+        crate::sim::run_shots_with_noise(
+            crate::sim::BackendKind::Statevector,
+            circuit,
+            noise,
+            num_shots,
+            seed,
+        )
+        .unwrap()
+    }
+
+    fn per_shot(circuit: &Circuit, noise: &NoiseModel, num_shots: usize, seed: u64) -> ShotsResult {
+        let factory = |s: u64| -> Box<dyn Backend> { Box::new(StatevectorBackend::new(s)) };
+        run_trajectories(
+            factory,
+            circuit,
+            noise,
+            num_shots,
+            seed,
+            false,
+            crate::sim::ResolvedBackend::Statevector,
+        )
+        .unwrap()
+    }
+
+    // Every branch kind the grouped path draws: symmetric depolarizing, an
+    // asymmetric Pauli weighted onto Y, the two-qubit pair channel, and
+    // asymmetric readout. The reference is the density-matrix distribution with
+    // the readout flips folded in bit by bit, checked per outcome and pooled as a
+    // chi-square at the Wilson-Hilferty 5-sigma quantile. The trailing rotations
+    // leave X, Y and Z errors after `T` distinguishable in the record; with `Ry`
+    // alone a Y and a Z there read the same, and swapping their rates passed.
+    #[test]
+    fn pauli_groups_sample_the_density_matrix_distribution_within_5_sigma() {
+        let n = 5;
+        let circuit = grouped_circuit(n);
+        let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
+        for (index, instruction) in circuit.instructions.iter().enumerate() {
+            if let Instruction::Gate { gate, targets } = instruction {
+                if matches!(gate, Gate::Cx) {
+                    noise.after_gate[index].push(NoiseEvent {
+                        channel: NoiseChannel::TwoQubitDepolarizing { p: 0.1 },
+                        qubits: smallvec![targets[0], targets[1]],
+                    });
+                }
+                if matches!(gate, Gate::T) {
+                    noise.after_gate[index].push(NoiseEvent::pauli(targets[0], 0.005, 0.05, 0.01));
+                }
+            }
+        }
+        let quantum_only = noise.clone();
+        let (p01, p10) = (0.02, 0.05);
+        noise.with_readout_error(p01, p10);
+
+        let num_shots = 100_000;
+        let seed = 0xDEAD_BEEF;
+        let groups = PauliGroups::sample(&circuit, &noise, num_shots, seed).unwrap();
+        assert!(
+            groups.num_groups() < num_shots / 2,
+            "{} groups at {num_shots} shots leaves too little grouping to test",
+            groups.num_groups()
+        );
+        let result = statevector_route(&circuit, &noise, num_shots, seed);
+        assert_eq!(
+            result.shots,
+            run_pauli_groups(&groups, &circuit, &noise, seed)
+                .unwrap()
+                .shots
+        );
+
+        let probs = crate::sim::noise::density_matrix_probabilities(
+            &crate::sim::BackendKind::DensityMatrix,
+            &circuit,
+            &quantum_only,
+            None,
+            seed,
+        )
+        .unwrap();
+        let dim = 1usize << n;
+        let mut exact = vec![0.0f64; dim];
+        for (x, &px) in probs.iter().enumerate() {
+            for (y, slot) in exact.iter_mut().enumerate() {
+                let mut weight = px;
+                for bit in 0..n {
+                    weight *= match ((x >> bit) & 1, (y >> bit) & 1) {
+                        (0, 0) => 1.0 - p01,
+                        (0, _) => p01,
+                        (_, 0) => p10,
+                        _ => 1.0 - p10,
+                    };
+                }
+                *slot += weight;
+            }
+        }
+
+        let mut counts = vec![0u64; dim];
+        for shot in &result.shots {
+            let index = shot
+                .iter()
+                .enumerate()
+                .fold(0usize, |acc, (bit, &b)| acc | (usize::from(b) << bit));
+            counts[index] += 1;
+        }
+        let total = num_shots as f64;
+        for (index, (&count, &p)) in counts.iter().zip(&exact).enumerate() {
+            let sigma = (p * (1.0 - p) / total).sqrt();
+            let observed = count as f64 / total;
+            assert!(
+                (observed - p).abs() <= 5.0 * sigma,
+                "outcome {index}: exact {p}, sampled {observed}, tolerance {}",
+                5.0 * sigma
+            );
+        }
+
+        let chi_square: f64 = counts
+            .iter()
+            .zip(&exact)
+            .map(|(&count, &p)| {
+                let expected = p * total;
+                (count as f64 - expected).powi(2) / expected
+            })
+            .sum();
+        let dof = (dim - 1) as f64;
+        let spread = (2.0 / (9.0 * dof)).sqrt();
+        let bound = dof * (1.0 - 2.0 / (9.0 * dof) + 5.0 * spread).powi(3);
+        assert!(
+            chi_square < bound,
+            "chi-square {chi_square:.1} over {dof} degrees of freedom exceeds {bound:.1}"
+        );
+    }
+
+    #[test]
+    fn pauli_groups_decline_what_draws_against_the_state_or_an_outcome() {
+        let n = 4;
+        let seed = 42;
+        let shots = 200;
+        let eligible = grouped_circuit(n);
+        let low = |c: &Circuit| NoiseModel::uniform_depolarizing(c, 1e-3);
+        assert!(PauliGroups::sample(&eligible, &low(&eligible), shots, seed).is_some());
+
+        let mut readout_only = NoiseModel::uniform_depolarizing(&eligible, 0.0);
+        readout_only.with_readout_error(0.1, 0.1);
+        let groups = PauliGroups::sample(&eligible, &readout_only, shots, seed).unwrap();
+        assert_eq!(groups.num_groups(), 1);
+
+        let mut mid_measured = Circuit::new(n, n + 1);
+        mid_measured.add_gate(Gate::H, &[0]);
+        mid_measured.add_measure(0, n);
+        mid_measured
+            .instructions
+            .extend(eligible.instructions.iter().cloned());
+        let mut reset = eligible.clone();
+        reset
+            .instructions
+            .insert(n, Instruction::Reset { qubit: 1 });
+        let mut conditional = eligible.clone();
+        conditional.instructions.insert(
+            n,
+            Instruction::Conditional {
+                condition: crate::circuit::ClassicalCondition::BitIsOne(0),
+                gate: Gate::X,
+                targets: smallvec![1],
+            },
+        );
+        let unmeasured = eligible.without_measurements();
+        for (label, circuit) in [
+            ("mid-circuit measurement", &mid_measured),
+            ("reset", &reset),
+            ("conditional", &conditional),
+            ("no measurement", &unmeasured),
+        ] {
+            assert!(
+                PauliGroups::sample(circuit, &low(circuit), shots, seed).is_none(),
+                "{label} must keep the per-shot path"
+            );
+        }
+
+        let damping = NoiseModel::with_amplitude_damping(&eligible, 0.01);
+        assert!(PauliGroups::sample(&eligible, &damping, shots, seed).is_none());
+
+        let mut after_measure = low(&eligible);
+        let first_measure = eligible
+            .instructions
+            .iter()
+            .position(|i| matches!(i, Instruction::Measure { .. }))
+            .unwrap();
+        after_measure.after_gate[first_measure].push(NoiseEvent::pauli(1, 0.01, 0.0, 0.0));
+        assert!(PauliGroups::sample(&eligible, &after_measure, shots, seed).is_none());
+        after_measure.after_gate[first_measure][0] = NoiseEvent::pauli(1, 0.0, 0.0, 0.0);
+        assert!(PauliGroups::sample(&eligible, &after_measure, shots, seed).is_some());
+
+        let saturated = NoiseModel::uniform_depolarizing(&eligible, 0.5);
+        assert!(
+            PauliGroups::sample(&eligible, &saturated, shots, seed).is_none(),
+            "near one pattern per shot must fall back"
+        );
+    }
+
+    // The route check, end to end: a circuit the grouping declines, and an
+    // eligible circuit on a route other than the host statevector, both return
+    // the per-shot trajectories bit for bit.
+    #[test]
+    fn ineligible_noisy_shots_keep_the_per_shot_trajectories() {
+        let n = 6;
+        let seed = 42;
+        let mut mid_measured = Circuit::new(n, n + 1);
+        mid_measured.add_gate(Gate::H, &[0]);
+        mid_measured.add_gate(Gate::T, &[0]);
+        mid_measured.add_measure(0, n);
+        mid_measured
+            .instructions
+            .extend(grouped_circuit(n).instructions);
+        let noise = NoiseModel::uniform_depolarizing(&mid_measured, 1e-3);
+        assert_eq!(
+            statevector_route(&mid_measured, &noise, 300, seed).shots,
+            per_shot(&mid_measured, &noise, 300, seed).shots
+        );
+
+        let mut product = Circuit::new(n, n);
+        for q in 0..n {
+            product.add_gate(Gate::H, &[q]);
+            product.add_gate(Gate::T, &[q]);
+        }
+        product.measure_all();
+        let noise = NoiseModel::uniform_depolarizing(&product, 1e-3);
+        assert!(PauliGroups::sample(&product, &noise, 300, seed).is_some());
+        let auto = crate::sim::run_shots_with_noise(
+            crate::sim::BackendKind::Auto,
+            &product,
+            &noise,
+            300,
+            seed,
+        )
+        .unwrap();
+        assert_eq!(
+            auto.metadata.backend,
+            crate::sim::ResolvedBackend::ProductState
+        );
+        let factory = |s: u64| -> Box<dyn Backend> {
+            Box::new(crate::backend::product::ProductStateBackend::new(s))
+        };
+        let product_per_shot = run_trajectories(
+            factory,
+            &product,
+            &noise,
+            300,
+            seed,
+            false,
+            crate::sim::ResolvedBackend::ProductState,
+        )
+        .unwrap();
+        assert_eq!(auto.shots, product_per_shot.shots);
+    }
+
+    // Shot `i` of a run seeded 42 must not reappear as shot `i + k` of a run
+    // seeded 43, which a seed of `seed + i` would give.
+    #[test]
+    fn adjacent_run_seeds_draw_unrelated_grouped_shots() {
+        let n = 8;
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+        }
+        circuit.measure_all();
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 1e-3);
+        let shots = 200;
+        let groups = PauliGroups::sample(&circuit, &noise, shots, 42).unwrap();
+        assert!(groups.num_groups() < shots / 2);
+
+        let a = statevector_route(&circuit, &noise, shots, 42);
+        let b = statevector_route(&circuit, &noise, shots, 43);
+        for shift in 0..=4 {
+            let aligned = (0..shots - shift)
+                .filter(|&i| a.shots[i + shift] == b.shots[i] || a.shots[i] == b.shots[i + shift])
+                .count();
+            assert!(
+                aligned < shots / 10,
+                "runs seeded 42 and 43 agree at {aligned} positions under shift {shift}"
+            );
+        }
+    }
+
+    // Grouping moves no draw of the error stream, so a shot fires the errors it
+    // fired on the per-shot path. With the outcome fixed by the circuit, the
+    // records then agree shot for shot.
+    #[test]
+    fn grouped_shots_fire_the_per_shot_errors() {
+        let n = 3;
+        let mut circuit = Circuit::new(n, n);
+        for q in 0..n {
+            circuit.add_gate(Gate::T, &[q]);
+        }
+        circuit.add_gate(Gate::Cx, &[0, 1]);
+        circuit.measure_all();
+        let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+        noise.after_gate[0].push(NoiseEvent::pauli(0, 0.05, 0.0, 0.0));
+        noise.after_gate[n].push(NoiseEvent {
+            channel: NoiseChannel::TwoQubitDepolarizing { p: 0.1 },
+            qubits: smallvec![1, 2],
+        });
+        let shots = 500;
+        assert!(PauliGroups::sample(&circuit, &noise, shots, 7).is_some());
+        let grouped = statevector_route(&circuit, &noise, shots, 7);
+        let reference = per_shot(&circuit, &noise, shots, 7);
+        assert_eq!(grouped.shots, reference.shots);
+        assert!(grouped.shots.iter().any(|s| s.iter().any(|&b| b)));
     }
 }

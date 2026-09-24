@@ -718,6 +718,54 @@ fn product_state_mid_circuit_shots_identical_across_thread_counts() {
     assert_per_shot_matches_serial(&circuit, ResolvedBackend::ProductState);
 }
 
+// Pauli noise on a non-Clifford circuit with terminal measurements simulates
+// each distinct error pattern once, with the patterns split across workers.
+// Every draw hangs off its own shot's seed, so neither the pool width nor the
+// shot count moves a record.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn grouped_pauli_trajectories_identical_across_thread_counts() {
+    let n = 10;
+    let mut circuit = Circuit::new(n, n);
+    for layer in 0..3 {
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+            circuit.add_gate(Gate::T, &[q]);
+            circuit.add_gate(Gate::Rz(0.05 * (layer + q + 1) as f64), &[q]);
+        }
+        for q in 0..n - 1 {
+            circuit.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    circuit.measure_all();
+    let mut noise = NoiseModel::uniform_depolarizing(&circuit, 1e-3);
+    noise.with_readout_error(0.01, 0.02);
+
+    let shots = |threads: usize, num_shots: usize| {
+        in_pool(threads, || {
+            simulate(&circuit)
+                .noise(&noise)
+                .seed(SEED)
+                .shots(num_shots)
+                .expect("noisy shots")
+        })
+    };
+    let single = shots(1, 1000);
+    let wide = shots(THREADS_HI, 1000);
+    assert_eq!(single.metadata.backend, ResolvedBackend::Statevector);
+    assert_eq!(single.shots, wide.shots, "grouped trajectory bits differ");
+    assert_eq!(
+        format!("{:?}", single.metadata),
+        format!("{:?}", wide.metadata),
+        "grouped trajectory metadata differs"
+    );
+    assert_eq!(
+        shots(THREADS_HI, 50).shots,
+        single.shots[..50],
+        "a shorter run draws different records for the same shots"
+    );
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn noisy_stabilizer_trajectories_identical_across_thread_counts() {

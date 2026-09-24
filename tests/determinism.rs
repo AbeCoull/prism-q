@@ -392,7 +392,7 @@ fn prepared_sweeps_bitwise_equal_across_thread_counts() {
 }
 
 // Below the kernels' parallel floor a batch splits its circuits across workers,
-// each holding a backend across the circuits it claims, so which worker claims a
+// each holding a backend across the circuits of its split, so which worker runs a
 // circuit, and which widths its backend met before, must not reach the result.
 #[test]
 #[cfg_attr(miri, ignore)]

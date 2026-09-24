@@ -187,8 +187,8 @@ fn assert_bitwise(batch: &prism_q::RunOutcome, solo: &prism_q::RunOutcome, what:
     );
 }
 
-// Workers claim circuits one at a time and keep their backend across claims, so
-// which widths a held backend meets depends on the claim order. Twenty-four
+// Each worker holds a backend across the circuits its split covers, so which
+// widths a held backend meets depends on how the batch splits. Twenty-four
 // circuits on four workers exercise it; the answers must not move by one bit.
 #[test]
 fn a_batch_longer_than_the_pool_matches_a_sequential_loop_bitwise() {
@@ -216,7 +216,7 @@ fn a_batch_longer_than_the_pool_matches_a_sequential_loop_bitwise() {
 // A circuit an explicit backend rejects must fail with the error `simulate` gives,
 // not with the backend's own complaint once the run is under way.
 #[test]
-fn a_failing_circuit_among_claims_matches_the_sequential_loop() {
+fn a_failing_circuit_in_a_split_batch_matches_the_sequential_loop() {
     let mut bad = Circuit::new(4, 0);
     bad.add_gate(Gate::T, &[2]);
     let mut circuits: Vec<Circuit> = (0..12)

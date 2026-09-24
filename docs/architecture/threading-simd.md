@@ -18,7 +18,7 @@ For which SIMD tiers and architectures each backend supports, see the
 ## Threading
 
 Under the `parallel` feature, gate kernels have `_par` variants built on
-`par_chunks_mut`. They engage at `PARALLEL_THRESHOLD_QUBITS = 14` (`src/backend/mod.rs`);
+`par_chunks_mut`. They engage at `PARALLEL_THRESHOLD_QUBITS = 15` (`src/backend/mod.rs`);
 below that, thread-pool overhead exceeds the work. Each task covers at least
 `MIN_PAR_ELEMS = 4096` amplitudes, 64 KiB.
 
@@ -86,7 +86,7 @@ comparison run used.
 - **Per-shot replay: bitwise for a given seed, at any thread count.** A circuit with a
   mid-circuit measurement, a condition or a region runs once per shot, and below the
   width where the resolved engine's own kernels go parallel those runs split across
-  workers: 14 qubits for dense engines, 128 for a tableau, any width for a product
+  workers: 15 qubits for dense engines, 128 for a tableau, any width for a product
   state. Noisy trajectories follow the same rule. Shot `i` runs on a seed hashed from
   the run seed and `i` with SplitMix64, and results fold in shot order. Runs on
   adjacent seeds draw unrelated shots rather than the same shots offset by one.

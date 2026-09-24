@@ -95,7 +95,7 @@ Full-state simulation in a flat `Vec<Complex64>` of 2^n amplitudes. The primary 
 
 Gate kernels use enum dispatch with specialized routines for CX, CZ, SWAP, Cu, MCU, Rzz, BatchRzz, BatchPhase, DiagonalBatch, MultiFused, and PauliRot (one pass over `(j, j ^ xmask)` pairs for `exp(-i θ P / 2)`, a parity-phase sweep when the string is Z-only; backends without the kernel receive the CNOT-ladder lowering from `expand_pauli_rotations`). Single-qubit gates go through `PreparedGate1q` with FMA-vectorized SIMD. MultiFused gates use a three-tier tiled kernel (L2 16K / L3 131K / individual passes) for cache locality. MultiFused batches where all gates are diagonal dispatch to a dedicated fast path (1 complex multiply/element vs 4+2 for full 2×2).
 
-Rayon parallelism at ≥14 qubits with `par_chunks_mut` and `MIN_PAR_ELEMS = 4096` per task. BMI2 `_pext_u64` accelerates BatchPhase, BatchRzz, and DiagonalBatch LUT indexing.
+Rayon parallelism at ≥15 qubits with `par_chunks_mut` and `MIN_PAR_ELEMS = 4096` per task. BMI2 `_pext_u64` accelerates BatchPhase, BatchRzz, and DiagonalBatch LUT indexing.
 
 Measurement normalization is deferred: `pending_norm` accumulates the factors instead of rescaling the full state after each collapse, and a circuit without measurements never touches it.
 
@@ -161,7 +161,7 @@ backend declines the two-qubit reduction.
 
 ## Factored
 
-Dynamic split-state simulation. Starts with n independent 1-qubit states, merges via tensor product only when 2q gates bridge groups. Parallel kernels match statevector patterns for sub-states ≥14 qubits. Selected when subsystem decomposition detects partial independence.
+Dynamic split-state simulation. Starts with n independent 1-qubit states, merges via tensor product only when 2q gates bridge groups. Parallel kernels match statevector patterns for sub-states ≥15 qubits. Selected when subsystem decomposition detects partial independence.
 
 ## Density Matrix
 

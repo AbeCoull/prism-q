@@ -998,10 +998,10 @@ fn expectation_terminals_reject_a_measured_template_as_simulate_does() {
     assert!(prepared.run(&values, SEED).is_ok());
 }
 
-// Eight qubits splits across workers under `parallel`; fourteen runs in order.
+// Eight qubits splits across workers under `parallel`; fifteen runs in order.
 #[test]
 fn many_terminals_are_bit_identical_to_a_loop() {
-    for n in [8, 14] {
+    for n in [8, 15] {
         let template = circuits::hardware_efficient_ansatz(n, 2, SEED);
         let params = Parameters::all_rotations(&template);
         let points = bindings_with_fallback(params.num_slots(), 7300 + n as u64);

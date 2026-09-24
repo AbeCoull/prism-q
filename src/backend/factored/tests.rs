@@ -341,7 +341,7 @@ fn test_conditional_gate() {
 // ---- Factored backend parallel dispatch tests ----
 //
 // These tests exercise the factored backend's Rayon-parallelized code paths
-// when sub-states grow ≥ PARALLEL_THRESHOLD_QUBITS (14).
+// when sub-states grow ≥ PARALLEL_THRESHOLD_QUBITS (15).
 
 #[test]
 fn test_factored_parallel_multifused_16q() {
@@ -443,20 +443,20 @@ fn test_merge_interleaved_three_way() {
 }
 
 #[test]
-fn test_merge_parallel_balanced_14q() {
-    // Build two 7-qubit sub-states then merge: 7+7=14q hits the parallel
-    // branch in kron_low_high with high_dim=128 chunks of 128 elements each.
-    let mut c = Circuit::new(14, 0);
+fn test_merge_parallel_balanced_15q() {
+    // Build a 7-qubit and an 8-qubit sub-state then merge: 7+8=15q hits the
+    // parallel branch in kron_low_high.
+    let mut c = Circuit::new(15, 0);
     for q in 0..7 {
         c.add_gate(Gate::H, &[q]);
     }
     for q in 0..6 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
-    for q in 7..14 {
+    for q in 7..15 {
         c.add_gate(Gate::H, &[q]);
     }
-    for q in 7..13 {
+    for q in 7..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
     c.add_gate(Gate::Cx, &[0, 7]);
@@ -502,37 +502,37 @@ fn test_merge_parallel_interleaved_14q() {
 }
 
 #[test]
-fn test_par_diagonal_z_gate_14q() {
-    let mut c = Circuit::new(14, 0);
-    for q in 0..14 {
+fn test_par_diagonal_z_gate_15q() {
+    let mut c = Circuit::new(15, 0);
+    for q in 0..15 {
         c.add_gate(Gate::H, &[q]);
     }
     // Tie all qubits into one sub-state via a chain of CX
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
     // Diagonal 1q gates trigger par_apply_diagonal
-    for q in 0..14 {
+    for q in 0..15 {
         c.add_gate(Gate::Z, &[q]);
     }
     // Non-diagonal 1q gate triggers par_apply_1q catch-all
-    for q in 0..14 {
+    for q in 0..15 {
         c.add_gate(Gate::X, &[q]);
     }
     compare_with_statevector(&c, 1e-10);
 }
 
 #[test]
-fn test_par_swap_14q() {
-    let mut c = Circuit::new(14, 0);
-    for q in 0..14 {
+fn test_par_swap_15q() {
+    let mut c = Circuit::new(15, 0);
+    for q in 0..15 {
         c.add_gate(Gate::H, &[q]);
     }
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
-    c.add_gate(Gate::Swap, &[0, 13]);
-    c.add_gate(Gate::Cz, &[1, 12]);
+    c.add_gate(Gate::Swap, &[0, 14]);
+    c.add_gate(Gate::Cz, &[1, 13]);
     compare_with_statevector(&c, 1e-10);
 }
 
@@ -687,47 +687,47 @@ fn test_factored_seq_cu_general_matrix() {
 }
 
 #[test]
-fn test_factored_par_rzz_14q() {
-    let mut c = Circuit::new(14, 0);
-    for q in 0..14 {
+fn test_factored_par_rzz_15q() {
+    let mut c = Circuit::new(15, 0);
+    for q in 0..15 {
         c.add_gate(Gate::H, &[q]);
     }
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Rzz(0.1 * q as f64), &[q, q + 1]);
     }
     compare_with_statevector(&c, 1e-10);
 }
 
 #[test]
-fn test_factored_par_cu_general_14q() {
+fn test_factored_par_cu_general_15q() {
     use num_complex::Complex64;
-    let mut c = Circuit::new(14, 0);
-    for q in 0..14 {
+    let mut c = Circuit::new(15, 0);
+    for q in 0..15 {
         c.add_gate(Gate::H, &[q]);
     }
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
     let mat = [
         [Complex64::new(0.6, 0.0), Complex64::new(0.8, 0.0)],
         [Complex64::new(0.8, 0.0), Complex64::new(-0.6, 0.0)],
     ];
-    c.add_gate(Gate::Cu(Box::new(mat)), &[0, 13]);
+    c.add_gate(Gate::Cu(Box::new(mat)), &[0, 14]);
     compare_with_statevector(&c, 1e-10);
 }
 
 #[test]
-fn test_factored_par_mcu_3control_14q() {
+fn test_factored_par_mcu_3control_15q() {
     use crate::gates::McuData;
     use num_complex::Complex64;
-    let mut c = Circuit::new(14, 0);
-    for q in 0..14 {
+    let mut c = Circuit::new(15, 0);
+    for q in 0..15 {
         c.add_gate(Gate::H, &[q]);
     }
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
     let phase = Complex64::from_polar(1.0, 0.5);
@@ -740,20 +740,20 @@ fn test_factored_par_mcu_3control_14q() {
             mat,
             num_controls: 3,
         })),
-        &[0, 1, 2, 13],
+        &[0, 1, 2, 14],
     );
     compare_with_statevector(&c, 1e-10);
 }
 
 #[test]
-fn test_factored_par_diagonal_batch_14q() {
+fn test_factored_par_diagonal_batch_15q() {
     use crate::gates::{DiagEntry, DiagonalBatchData};
     use num_complex::Complex64;
-    let mut c = Circuit::new(14, 0);
-    for q in 0..14 {
+    let mut c = Circuit::new(15, 0);
+    for q in 0..15 {
         c.add_gate(Gate::H, &[q]);
     }
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
     let entries = vec![
@@ -782,20 +782,20 @@ fn test_factored_par_diagonal_batch_14q() {
 }
 
 #[test]
-fn test_factored_par_batch_rzz_14q() {
+fn test_factored_par_batch_rzz_15q() {
     use crate::gates::BatchRzzData;
-    let mut c = Circuit::new(14, 0);
-    for q in 0..14 {
+    let mut c = Circuit::new(15, 0);
+    for q in 0..15 {
         c.add_gate(Gate::H, &[q]);
     }
-    for q in 0..13 {
+    for q in 0..14 {
         c.add_gate(Gate::Cx, &[q, q + 1]);
     }
     let edges: Vec<(usize, usize, f64)> =
-        (0..13).map(|q| (q, q + 1, 0.05 * (q + 1) as f64)).collect();
+        (0..14).map(|q| (q, q + 1, 0.05 * (q + 1) as f64)).collect();
     c.add_gate(
         Gate::BatchRzz(Box::new(BatchRzzData { edges })),
-        &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     );
     compare_with_statevector(&c, 1e-10);
 }

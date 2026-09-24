@@ -113,10 +113,10 @@ fn a_batch_routed_to_the_stabilizer_matches_running_each_alone() {
     }
 }
 
-// A 14-qubit circuit keeps the whole batch on one thread, so both paths are covered.
+// A 17-qubit circuit keeps the whole batch on one thread, so both paths are covered.
 #[test]
-fn a_batch_reaching_the_parallel_floor_matches_running_each_alone() {
-    let circuits = vec![unitary(6, 2, 0), unitary(14, 2, 1), unitary(6, 2, 2)];
+fn a_batch_past_the_split_width_matches_running_each_alone() {
+    let circuits = vec![unitary(6, 2, 0), unitary(17, 2, 1), unitary(6, 2, 2)];
     let batch = run_batch(&circuits, BackendKind::Statevector, SEED).unwrap();
     for (i, circuit) in circuits.iter().enumerate() {
         let solo = simulate(circuit)
@@ -162,4 +162,121 @@ fn a_batch_reports_the_first_failure_in_order() {
     circuits.extend(std::iter::repeat_n(second_bad, 8));
     let err = run_batch(&circuits, BackendKind::Stabilizer, SEED).unwrap_err();
     assert_eq!(err.to_string(), alone);
+}
+
+#[cfg(feature = "parallel")]
+fn on_four_workers<T: Send>(op: impl FnOnce() -> T + Send) -> T {
+    prism_q::ThreadPool::with_threads(4).unwrap().install(op)
+}
+
+#[cfg(not(feature = "parallel"))]
+fn on_four_workers<T>(op: impl FnOnce() -> T) -> T {
+    op()
+}
+
+fn assert_bitwise(batch: &prism_q::RunOutcome, solo: &prism_q::RunOutcome, what: &str) {
+    assert_eq!(batch.classical_bits, solo.classical_bits, "{what}: bits");
+    assert_eq!(
+        batch.metadata.backend, solo.metadata.backend,
+        "{what}: backend"
+    );
+    assert_eq!(
+        batch.probabilities.as_ref().map(|p| p.to_vec()),
+        solo.probabilities.as_ref().map(|p| p.to_vec()),
+        "{what}: probabilities"
+    );
+}
+
+// Each worker holds a backend across the circuits its split covers, so which
+// widths a held backend meets depends on how the batch splits. Twenty-four
+// circuits on four workers exercise it; the answers must not move by one bit.
+#[test]
+fn a_batch_longer_than_the_pool_matches_a_sequential_loop_bitwise() {
+    let circuits: Vec<Circuit> = (0..24)
+        .map(|i| match i % 4 {
+            0 => unitary(4 + i % 7, 2, i),
+            1 => measured(3 + i % 5, i),
+            2 => unitary(9, 3, i),
+            _ => unitary(6, 1, i),
+        })
+        .collect();
+    for kind in [BackendKind::Auto, BackendKind::Statevector] {
+        let batch = on_four_workers(|| run_batch(&circuits, kind.clone(), SEED)).unwrap();
+        for (i, circuit) in circuits.iter().enumerate() {
+            let solo = simulate(circuit)
+                .backend(kind.clone())
+                .seed(SEED)
+                .run()
+                .unwrap();
+            assert_bitwise(&batch[i], &solo, &format!("{kind:?} circuit {i}"));
+        }
+    }
+}
+
+// A circuit an explicit backend rejects must fail with the error `simulate` gives,
+// not with the backend's own complaint once the run is under way.
+#[test]
+fn a_failing_circuit_in_a_split_batch_matches_the_sequential_loop() {
+    let mut bad = Circuit::new(4, 0);
+    bad.add_gate(Gate::T, &[2]);
+    let mut circuits: Vec<Circuit> = (0..12)
+        .map(|i| {
+            let mut c = Circuit::new(3 + i % 3, 0);
+            c.add_gate(Gate::H, &[0]);
+            c.add_gate(Gate::Cx, &[0, 1]);
+            c
+        })
+        .collect();
+    circuits.insert(7, bad);
+    let sequential = circuits
+        .iter()
+        .map(|c| {
+            simulate(c)
+                .backend(BackendKind::Stabilizer)
+                .seed(SEED)
+                .run()
+        })
+        .collect::<prism_q::Result<Vec<_>>>()
+        .unwrap_err()
+        .to_string();
+    let err = on_four_workers(|| run_batch(&circuits, BackendKind::Stabilizer, SEED)).unwrap_err();
+    assert_eq!(err.to_string(), sequential);
+}
+
+// From 14 to 16 qubits a batch splits across workers whose kernels parallelize
+// too, so the nested joins must leave every result as a solo run gives it.
+#[cfg(feature = "parallel")]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_split_batch_at_15_and_16_qubits_matches_a_sequential_loop_bitwise() {
+    let circuits: Vec<Circuit> = (0..6)
+        .map(|i| {
+            let mut c =
+                prism_q::circuits::hardware_efficient_ansatz(15 + i % 2, 2, SEED + i as u64);
+            if i == 3 {
+                c.num_classical_bits = c.num_qubits;
+                for q in 0..c.num_qubits {
+                    c.add_measure(q, q);
+                }
+            }
+            c
+        })
+        .collect();
+    let batch = prism_q::ThreadPool::with_threads(4)
+        .unwrap()
+        .install(|| run_batch(&circuits, BackendKind::Statevector, SEED))
+        .unwrap();
+    for (i, circuit) in circuits.iter().enumerate() {
+        let solo = simulate(circuit)
+            .backend(BackendKind::Statevector)
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert_eq!(batch[i].classical_bits, solo.classical_bits, "circuit {i}");
+        assert_eq!(
+            batch[i].probabilities.as_ref().map(|p| p.to_vec()),
+            solo.probabilities.as_ref().map(|p| p.to_vec()),
+            "circuit {i}"
+        );
+    }
 }

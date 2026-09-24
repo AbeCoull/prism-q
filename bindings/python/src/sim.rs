@@ -877,9 +877,9 @@ pub fn simulate(circuit: &PyCircuit) -> PySimulation {
 
 /// Run a list of circuits, holding one backend across those that can share it.
 ///
-/// Below 14 qubits (7 on the density matrix) the circuits split across cores,
-/// which a loop cannot reach because each of those runs is single-threaded
-/// inside; above that this saves only the crossing into Rust.
+/// Up to 16 qubits (8 on the density matrix) the circuits split across cores, one
+/// circuit per core, which a loop cannot reach; above that this saves only the
+/// crossing into Rust.
 ///
 /// Results are identical to running each circuit on its own with the same seed.
 /// A failing batch raises the first failure in list order.

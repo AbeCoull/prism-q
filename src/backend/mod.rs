@@ -69,12 +69,16 @@ use crate::sim::{BondReport, Exactness, Placement, ResolvedBackend};
 /// backend applies it per sub-state, the density matrix backend to its
 /// `2n`-qubit buffer.
 ///
+/// On a four-core i7-6700K, one thread took 9% to 65% less time than Rayon on the
+/// `auto/qft_like`, `auto/random_d10` and `auto/hea_l5` rows at 14 qubits, and 56% to
+/// 100% more at 16.
+///
 /// Under miri the four parallelism floors here drop so the same kernels split
-/// across real worker threads at sizes the interpreter can execute; a 14-qubit
+/// across real worker threads at sizes the interpreter can execute; a 15-qubit
 /// pass with the race detector on runs minutes per gate. `tests/determinism.rs`
 /// is the miri CI target that relies on this.
 #[cfg(not(miri))]
-pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 14;
+pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 15;
 #[cfg(miri)]
 pub(crate) const PARALLEL_THRESHOLD_QUBITS: usize = 8;
 

@@ -133,9 +133,7 @@ use crate::backend::{
     Backend, BasisSamples, dense_probability_len, dense_statevector_len, measurement_inv_norm,
 };
 #[cfg(feature = "parallel")]
-use crate::backend::{
-    MIN_PAR_ELEMS, MIN_PAR_REDUCE_ELEMS, PARALLEL_THRESHOLD_QUBITS, chunk_min_len,
-};
+use crate::backend::{MIN_PAR_ELEMS, MIN_PAR_REDUCE_ELEMS, chunk_min_len};
 use crate::circuit::{Instruction, SmallVec, smallvec};
 use crate::distributed::DistributedContext;
 use crate::error::{PrismError, Result};
@@ -146,10 +144,10 @@ use rayon::prelude::*;
 
 const BACKEND_NAME: &str = "distributed_statevector";
 
-/// Shard length at which the combine loops below fan out to Rayon: the same
-/// `2^14` amplitudes the inner backend uses for its own kernels.
+/// Shard length at which the combine loops below fan out to Rayon. Not tied to
+/// `PARALLEL_THRESHOLD_QUBITS`, whose move to 15 was measured on dense kernels only.
 #[cfg(feature = "parallel")]
-const PAR_SHARD_LEN: usize = 1 << PARALLEL_THRESHOLD_QUBITS;
+const PAR_SHARD_LEN: usize = 1 << 14;
 
 fn scale_shard(state: &mut [Complex64], factor: Complex64) {
     #[cfg(feature = "parallel")]

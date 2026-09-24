@@ -2577,13 +2577,14 @@ fn bench_gradient_prefix(c: &mut Criterion) {
     group.finish();
 }
 
-/// Parameter shift below the kernels' parallel floor, where each of the `2P`
-/// shifted evaluations runs on one thread.
+/// Parameter shift on either side of the kernels' parallel floor: below 14 qubits
+/// the `2P` shifted evaluations split across workers, from 14 up each runs on
+/// parallel kernels.
 fn bench_gradient_shift_small(c: &mut Criterion) {
     let mut group = c.benchmark_group("gradient/shift_small");
     configure_group(&mut group);
 
-    for &n in &[8, 10, 12] {
+    for &n in &[8, 10, 12, 14, 16] {
         let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
         let params = Parameters::all_rotations(&circuit);
         let ham = z_chain_hamiltonian(n);
@@ -2598,13 +2599,13 @@ fn bench_gradient_shift_small(c: &mut Criterion) {
 /// A 200-point parameter sweep: one ansatz shape, fresh angles per point. `loop`
 /// runs each circuit on its own and is the control for `run_batch`.
 fn bench_batch_sweep(c: &mut Criterion) {
-    const POINTS: u64 = 200;
-
     let mut group = c.benchmark_group("batch/hea_l2_sweep");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 10, 12] {
-        let sweep: Vec<Circuit> = (0..POINTS)
+    for &n in &[4, 8, 10, 12, 14, 16, 18] {
+        // 50 points at 18 qubits keeps an iteration under about 500 ms.
+        let points: u64 = if n >= 18 { 50 } else { 200 };
+        let sweep: Vec<Circuit> = (0..points)
             .map(|k| circuits::hardware_efficient_ansatz(n, 2, SEED + k))
             .collect();
         group.bench_with_input(BenchmarkId::new("run_batch", n), &sweep, |b, sweep| {
@@ -2748,7 +2749,7 @@ fn bench_observable_reduction(c: &mut Criterion) {
 
 /// A 200-binding sweep of a two-layer ansatz through one [`PreparedCircuit`].
 /// `prepared_loop` calls `run` per binding and is the control for
-/// `prepared_many`, which splits the bindings across cores below 14 qubits.
+/// `prepared_many`, which splits the bindings across cores below 15 qubits.
 fn bench_prepared_sweep(c: &mut Criterion) {
     const POINTS: u64 = 200;
 
@@ -3793,7 +3794,7 @@ fn bench_density_matrix_unitary_layers(c: &mut Criterion) {
     let mut group = c.benchmark_group("density_matrix/unitary_layers");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 10, 12] {
+    for &n in &[4, 7, 8, 10, 12] {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -4378,7 +4379,13 @@ fn bench_dynamic_mid_circuit_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("dynamic/mid_circuit_shots");
     configure_group(&mut group);
 
-    for &(n, shots) in &[(6usize, 1_000usize), (10, 1_000), (12, 1_000), (16, 32)] {
+    for &(n, shots) in &[
+        (6usize, 1_000usize),
+        (10, 1_000),
+        (12, 1_000),
+        (14, 200),
+        (16, 32),
+    ] {
         let circuit = mid_circuit_rotation_circuit(n, 2);
         group.bench_with_input(
             BenchmarkId::new(format!("{n}q"), shots),

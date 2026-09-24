@@ -218,7 +218,7 @@ impl PyPreparedCircuit {
     }
 
     /// `run` on each row of `bindings`, a `(points, num_slots)` array, in one call
-    /// that releases the GIL once. Below 14 qubits the rows split across cores.
+    /// that releases the GIL once. Up to 16 qubits the rows split across cores.
     #[pyo3(signature = (bindings, seed = DEFAULT_SEED))]
     fn run_many(
         &self,

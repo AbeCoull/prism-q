@@ -14,7 +14,7 @@ it from [crates.io](https://crates.io/crates/prism-q). The Python package is cov
 
 | Feature | Default | Enables |
 |---------|---------|---------|
-| `parallel` | yes | Rayon parallel kernels (≥14 qubits) and the faer SVD path for MPS |
+| `parallel` | yes | Rayon parallel kernels (≥15 qubits) and the faer SVD path for MPS |
 | `gpu` | no | Optional CUDA backend (see the [GPU guide](../guides/gpu.md)) |
 | `distributed` | no | Statevector partitioning across ranks (see [Capabilities](../guides/capabilities.md)) |
 | `distributed-mpi` | no | `distributed` plus the MPI transport |

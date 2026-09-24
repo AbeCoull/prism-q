@@ -292,12 +292,12 @@ fn product_matches_the_statevector_on_the_separable_corpus() {
 // The general kernel against the tuned one- and two-qubit trajectory
 // routines, whose two-qubit packing puts `q0` in the high bit: below the
 // parallel threshold at eight qubits, where the sums run in one order and
-// agree to rounding, and above it at fourteen. Unit-norm states only, since
+// agree to rounding, and above it at fifteen. Unit-norm states only, since
 // the trajectory routines report the stored norm where the general kernel
 // scales to trace one.
 #[test]
 fn one_and_two_qubit_rows_agree_with_the_trajectory_routines() {
-    for (n, eps) in [(8usize, 1e-15), (14, 1e-13)] {
+    for (n, eps) in [(8usize, 1e-15), (15, 1e-13)] {
         let circuit = random_circuit(n, 4, SEED);
         let mut backend = StatevectorBackend::new(SEED);
         sim::run_on(&mut backend, &circuit).unwrap();
@@ -392,25 +392,25 @@ fn the_whole_register_returns_the_state_itself() {
     assert_matrix_close(&rho, &outer, SV_EPS, "statevector at k = n");
 }
 
-// The naive sum against the threaded partial trace at fourteen qubits of a
+// The naive sum against the threaded partial trace at fifteen qubits of a
 // brick-wall state, whose off-diagonals are complex, with the subsystem
 // spread across the register: three qubits take the fold over the traced
 // index, twelve the stripes of result rows.
 #[test]
 fn the_parallel_partial_trace_matches_a_naive_sum() {
-    let n = 14;
+    let n = 15;
     let circuit = brickwork_circuit(n, 6, SEED);
     let mut sv = StatevectorBackend::new(SEED);
     sim::run_on(&mut sv, &circuit).unwrap();
     let psi = sv.export_statevector().unwrap();
-    for subsystem in [vec![11usize, 2, 7], (0..12).map(|i| (5 * i) % 14).collect()] {
+    for subsystem in [vec![11usize, 2, 7], (0..12).map(|i| (7 * i) % 15).collect()] {
         let rho = rdm_of(&mut sv, &subsystem);
         let expected = naive_rdm(&psi, &subsystem);
         assert_matrix_close(
             &rho,
             &expected,
             SV_EPS,
-            &format!("statevector at 14 qubits on {subsystem:?}"),
+            &format!("statevector at 15 qubits on {subsystem:?}"),
         );
     }
 }

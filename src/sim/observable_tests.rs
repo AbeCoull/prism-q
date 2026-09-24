@@ -1,6 +1,6 @@
 use num_complex::Complex64;
 
-use super::{PauliObservable, weighted_group_moments};
+use super::{PauliObservable, rotate_to_z_basis, weighted_group_moments};
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 fn qubit_wise_commutes(a: &[PauliTerm], b: &[PauliTerm]) -> bool {
@@ -405,24 +405,75 @@ fn mixed_observable(n: usize, seed: u64) -> PauliObservable {
     PauliObservable::from_terms(terms).unwrap()
 }
 
-// Each group's operator applied to the state gives `<H_g>` and
-// `||H_g psi||^2` with no mask reduction. Across the sizes the grouping holds
-// single-term groups, small groups that expand in pairs, and Z-only and
-// rotated groups past the pair budget that take the moments pass.
-#[test]
-fn grouped_mean_and_variance_match_the_applied_operator() {
+/// The seeded random circuit at width `n` and its normalized output state.
+fn random_output(n: usize) -> (crate::circuit::Circuit, Vec<Complex64>) {
     use crate::backend::Backend;
     use crate::backend::statevector::StatevectorBackend;
 
+    let circuit = crate::circuits::random_circuit(n, 6, 42 + n as u64);
+    let mut backend = StatevectorBackend::new(42);
+    crate::sim::run_on(&mut backend, &circuit).unwrap();
+    let mut state = backend.export_statevector().unwrap();
+    let norm = state.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
+    state.iter_mut().for_each(|a| *a /= norm);
+    (circuit, state)
+}
+
+/// Each group's operator applied to `state`, the output of `circuit`, gives
+/// `<H_g>` and `||H_g psi||^2` with no mask reduction; the statevector route's
+/// mean and group variances must match them to 1e-12.
+fn assert_grouped_matches_applied(
+    circuit: &crate::circuit::Circuit,
+    state: &[Complex64],
+    observable: &PauliObservable,
+) {
+    let n = circuit.num_qubits;
+    let result = crate::sim::simulate(circuit)
+        .backend(crate::sim::BackendKind::Statevector)
+        .seed(42)
+        .observable_expectation(observable)
+        .unwrap();
+    let terms = observable.terms();
+    let groups = &observable.grouping().groups;
+    let variances = result.group_variances.as_ref().unwrap();
+    let mut mean: f64 = terms
+        .iter()
+        .filter(|(_, string)| string.is_empty())
+        .map(|(c, _)| c)
+        .sum();
+    for (g, group) in groups.iter().enumerate() {
+        let applied = apply_terms(terms, &group.term_indices, state);
+        let first: f64 = state
+            .iter()
+            .zip(&applied)
+            .map(|(a, b)| (a.conj() * b).re)
+            .sum();
+        let second: f64 = applied.iter().map(|a| a.norm_sqr()).sum();
+        mean += first;
+        let want = second - first * first;
+        assert!(
+            (variances[g] - want).abs() < 1e-12,
+            "n={n} group {g}: {} vs {want}",
+            variances[g]
+        );
+    }
+    assert!(
+        (result.mean - mean).abs() < 1e-12,
+        "n={n}: {} vs {mean}",
+        result.mean
+    );
+    let total: f64 = variances.iter().sum();
+    assert!((result.variance.unwrap() - total).abs() < 1e-12);
+}
+
+// Across the sizes the grouping holds single-term groups, small groups that
+// expand in pairs, and Z-only and rotated groups past the pair budget that take
+// the moments pass.
+#[test]
+fn grouped_mean_and_variance_match_the_applied_operator() {
     let mut shapes = [false; 4];
     for n in 3..=12usize {
-        let circuit = crate::circuits::random_circuit(n, 6, 42 + n as u64);
-        let mut backend = StatevectorBackend::new(42);
-        crate::sim::run_on(&mut backend, &circuit).unwrap();
-        let mut state = backend.export_statevector().unwrap();
-        let norm = state.iter().map(|a| a.norm_sqr()).sum::<f64>().sqrt();
-        state.iter_mut().for_each(|a| *a /= norm);
-
+        let (circuit, state) = random_output(n);
         let ising = (0..n - 1)
             .map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]))
             .chain((0..n).map(|q| (0.5, vec![PauliTerm::x(q)])))
@@ -432,52 +483,133 @@ fn grouped_mean_and_variance_match_the_applied_operator() {
             PauliObservable::from_terms(ising.collect::<Vec<_>>()).unwrap(),
         ];
         for observable in &observables {
-            let result = crate::sim::simulate(&circuit)
-                .backend(crate::sim::BackendKind::Statevector)
-                .seed(42)
-                .observable_expectation(observable)
-                .unwrap();
-            let terms = observable.terms();
-            let groups = &observable.grouping().groups;
-            let variances = result.group_variances.as_ref().unwrap();
-            let mut mean: f64 = terms
-                .iter()
-                .filter(|(_, string)| string.is_empty())
-                .map(|(c, _)| c)
-                .sum();
-            for (g, group) in groups.iter().enumerate() {
+            for group in &observable.grouping().groups {
                 let size = group.term_indices.len();
                 shapes[0] |= size == 1;
                 shapes[1] |= (2..=6).contains(&size);
                 shapes[2] |= size > 6 && group.is_z_only();
                 shapes[3] |= size > 6 && !group.is_z_only();
-
-                let applied = apply_terms(terms, &group.term_indices, &state);
-                let first: f64 = state
-                    .iter()
-                    .zip(&applied)
-                    .map(|(a, b)| (a.conj() * b).re)
-                    .sum();
-                let second: f64 = applied.iter().map(|a| a.norm_sqr()).sum();
-                mean += first;
-                let want = second - first * first;
-                assert!(
-                    (variances[g] - want).abs() < 1e-12,
-                    "n={n} group {g}: {} vs {want}",
-                    variances[g]
-                );
             }
-            assert!(
-                (result.mean - mean).abs() < 1e-12,
-                "n={n}: {} vs {mean}",
-                result.mean
-            );
-            let total: f64 = variances.iter().sum();
-            assert!((result.variance.unwrap() - total).abs() < 1e-12);
+            assert_grouped_matches_applied(&circuit, &state, observable);
         }
     }
     assert_eq!(
         shapes, [true; 4],
         "single, small, large Z-only, large rotated"
     );
+}
+
+/// Strings on one to three consecutive qubits plus gap-two pairs, each factor
+/// on the axis `factor` gives its qubit. Three qubits already give seven
+/// strings, so the one group they form is past the pair budget.
+fn one_group_observable(n: usize, factor: impl Fn(usize) -> PauliTerm) -> PauliObservable {
+    let supports = (0..n).flat_map(|q| {
+        [
+            vec![q],
+            vec![q, q + 1],
+            vec![q, q + 2],
+            vec![q, q + 1, q + 2],
+        ]
+        .into_iter()
+        .filter(move |support| support.iter().all(|&s| s < n))
+    });
+    let terms = supports.enumerate().map(|(k, support)| {
+        let string = support.iter().map(|&q| factor(q)).collect();
+        (0.7 - 0.09 * k as f64 + 0.001 * (k * k) as f64, string)
+    });
+    PauliObservable::from_terms(terms.collect::<Vec<_>>()).unwrap()
+}
+
+// X-only, Y-only and alternating X/Y groups rotate every qubit; the last two
+// rotate one qubit, the lowest in X and the highest in Y, under Z elsewhere.
+// Widths cross the rotation block and the parallel floor.
+#[test]
+fn rotated_groups_match_the_applied_operator() {
+    for n in 3..=14usize {
+        let (circuit, state) = random_output(n);
+        let top = n - 1;
+        let alternating = |q: usize| {
+            if q.is_multiple_of(2) {
+                PauliTerm::x(q)
+            } else {
+                PauliTerm::y(q)
+            }
+        };
+        let low_x = |q: usize| {
+            if q == 0 {
+                PauliTerm::x(q)
+            } else {
+                PauliTerm::z(q)
+            }
+        };
+        let top_y = |q: usize| {
+            if q == top {
+                PauliTerm::y(q)
+            } else {
+                PauliTerm::z(q)
+            }
+        };
+        let observables = [
+            (one_group_observable(n, PauliTerm::x), n),
+            (one_group_observable(n, PauliTerm::y), n),
+            (one_group_observable(n, alternating), n),
+            (one_group_observable(n, low_x), 1),
+            (one_group_observable(n, top_y), 1),
+        ];
+        for (observable, rotated) in &observables {
+            let groups = &observable.grouping().groups;
+            assert_eq!(groups.len(), 1);
+            assert!(groups[0].term_indices.len() > 6);
+            let (x_bits, y_bits) = groups[0].rotation_masks();
+            assert_eq!((x_bits | y_bits).count_ones() as usize, *rotated);
+            assert_grouped_matches_applied(&circuit, &state, observable);
+        }
+    }
+}
+
+// Widths run below, at and past one rotation block and past the parallel
+// floor, with an odd number of qubits above the block at 11, 13 and 15.
+#[test]
+fn rotate_to_z_basis_matches_the_gate_rotation() {
+    use crate::backend::Backend;
+    use crate::backend::statevector::StatevectorBackend;
+    use crate::circuit::Circuit;
+    use crate::gates::Gate;
+
+    for n in [1usize, 2, 3, 5, 10, 11, 13, 14, 15] {
+        let state = random_state(n, 42 + n as u64);
+        let all = (1usize << n) - 1;
+        let top = 1usize << (n - 1);
+        for (x_bits, y_bits) in [
+            (all, 0),
+            (0, all),
+            (all & 0x5555, all & 0xaaaa),
+            (all & 0x2c2c, all & 0x4141),
+            (1, 0),
+            (0, top),
+        ] {
+            let mut circuit = Circuit::new(n, 0);
+            for q in 0..n {
+                if y_bits >> q & 1 == 1 {
+                    circuit.add_gate(Gate::Sdg, &[q]);
+                }
+                if (x_bits | y_bits) >> q & 1 == 1 {
+                    circuit.add_gate(Gate::H, &[q]);
+                }
+            }
+            let mut backend = StatevectorBackend::new(42);
+            backend.init_from_state(state.clone(), 0).unwrap();
+            backend.apply_instructions(&circuit.instructions).unwrap();
+
+            let mut rotated = Vec::new();
+            rotate_to_z_basis(&state, &mut rotated, x_bits, y_bits);
+            let scale = 2f64.powf(-0.5 * (x_bits | y_bits).count_ones() as f64);
+            for (j, (got, want)) in rotated.iter().zip(backend.state_vector()).enumerate() {
+                assert!(
+                    (got * scale - want).norm() < 1e-12,
+                    "n={n} x={x_bits:#x} y={y_bits:#x} index {j}: {got} vs {want}"
+                );
+            }
+        }
+    }
 }

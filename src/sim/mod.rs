@@ -1796,7 +1796,7 @@ impl PreparedRoute {
             .as_any()
             .and_then(|any| any.downcast_ref::<StatevectorBackend>())
             .expect("a grouped answer is settled only on a statevector plan");
-        grouped_expectation_on_state(statevector, observable, seed)
+        grouped_expectation_on_state(statevector, observable)
     }
 }
 
@@ -2137,13 +2137,13 @@ pub fn run_on_state(
 
 /// Run several circuits, holding one backend across those that can share it.
 ///
-/// Under the `parallel` feature, a batch whose circuits all sit below 14 qubits
-/// splits across Rayon workers, each holding its own backend. Those runs are
-/// single-threaded inside, so the batch is the only way to reach the other cores:
-/// a 200-point sweep of a two-layer hardware-efficient ansatz ran 3.2x to 4.8x
-/// faster than a loop over [`simulate`] at 4 to 12 qubits on a four-core
-/// i7-6700K. A wider circuit, a density matrix from 7 qubits, or a GPU or
-/// distributed kind keeps the whole batch on one thread.
+/// Under the `parallel` feature, a batch whose circuits all sit at 16 qubits or
+/// fewer splits across Rayon workers, each holding its own backend: a 200-point
+/// sweep of a two-layer hardware-efficient ansatz ran 3.2x to 4.8x faster than a
+/// loop over [`simulate`] at 4 to 12 qubits on a four-core i7-6700K, and one circuit
+/// per core beat the kernels' own threads at 14 and 16. A wider circuit, a density
+/// matrix from 9 qubits, or a GPU or distributed kind keeps the whole batch on one
+/// thread.
 ///
 /// On one thread the saving is the backend construction and its `2^n`
 /// allocation, which `init` reuses when the next circuit has the same width;
@@ -2195,6 +2195,9 @@ fn run_batch_entry(
         *held = None;
         return run_with_internal(kind.clone(), circuit, seed, SimOptions::default());
     };
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, circuit)?;
+    }
 
     let reusable = matches!(
         &*held,
@@ -2207,10 +2210,19 @@ fn run_batch_entry(
     execute(&mut **backend, circuit, &SimOptions::default())
 }
 
+/// Width below which separate runs split across Rayon workers, above the kernels'
+/// own parallel floor: on a 4-core host a 200-circuit two-layer ansatz batch split
+/// one circuit per core took 18% of the unsplit time at 14 qubits and 53% at 16, and
+/// 10% more at 18. Under miri it follows the kernels' floor down.
+#[cfg(all(feature = "parallel", not(miri)))]
+const RUN_SPLIT_QUBITS: usize = 17;
+#[cfg(all(feature = "parallel", miri))]
+const RUN_SPLIT_QUBITS: usize = crate::backend::PARALLEL_THRESHOLD_QUBITS;
+
 /// Whether separate runs of `num_qubits`-wide circuits on `kind` should split across
-/// Rayon workers: only below the kernels' own parallel floor, counting a density
-/// matrix at twice its width since each worker holds a state, and never on a kind
-/// bound to one device or rank context.
+/// Rayon workers: only below `RUN_SPLIT_QUBITS`, counting a density matrix at
+/// twice its width since each worker holds a state, and never on a kind bound to one
+/// device or rank context.
 #[cfg(feature = "parallel")]
 pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -> bool {
     if bound_to_one_context(kind) {
@@ -2221,7 +2233,7 @@ pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -
     } else {
         num_qubits
     };
-    width < crate::backend::PARALLEL_THRESHOLD_QUBITS
+    width < RUN_SPLIT_QUBITS
 }
 
 /// Whether per-shot runs on `kind` should split across Rayon workers, given the
@@ -3238,16 +3250,14 @@ fn grouped_expectation_statevector(
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
-    grouped_expectation_on_state(&backend, observable, seed)
+    grouped_expectation_on_state(&backend, observable)
 }
 
 /// The reduction half of [`grouped_expectation_statevector`], on a backend
-/// that has already run the circuit. `seed` seeds the scratch backend a
-/// basis-rotated moments pass runs on.
+/// that has already run the circuit.
 fn grouped_expectation_on_state(
     backend: &StatevectorBackend,
     observable: &PauliObservable,
-    seed: u64,
 ) -> Result<ObservableExpectation> {
     let num_qubits = backend.num_qubits();
     let terms = observable.terms();
@@ -3342,7 +3352,7 @@ fn grouped_expectation_on_state(
                 (&exported, crate::backend::state_norm_sqr(&exported))
             }
         };
-        let mut scratch: Option<StatevectorBackend> = None;
+        let mut rotated = Vec::new();
         for &gi in &deferred {
             let group = &grouping.groups[gi];
             let coefficients: Vec<f64> = group.term_indices.iter().map(|&i| terms[i].0).collect();
@@ -3355,17 +3365,10 @@ fn grouped_expectation_on_state(
                     .iter()
                     .map(|&i| masks[i].0 | masks[i].1)
                     .collect();
-                let rotation_circuit = group.basis_rotation_circuit(num_qubits);
-                let rotation = crate::circuit::fusion::fuse_circuit(&rotation_circuit, true);
-                let rotated = scratch.get_or_insert_with(|| StatevectorBackend::new(seed));
-                rotated.init_from_amplitudes(state.to_vec(), 0)?;
-                rotated.apply_instructions(&rotation.instructions)?;
-                observable::weighted_group_moments(
-                    rotated.state_vector(),
-                    &zmasks,
-                    &coefficients,
-                    norm,
-                )
+                let (x_bits, y_bits) = group.rotation_masks();
+                observable::rotate_to_z_basis(state, &mut rotated, x_bits, y_bits);
+                let growth = 2f64.powi((x_bits | y_bits).count_ones() as i32);
+                observable::weighted_group_moments(&rotated, &zmasks, &coefficients, norm * growth)
             };
             mean += m1;
             group_variances[gi] = (m2 - m1 * m1).max(0.0);

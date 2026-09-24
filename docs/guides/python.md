@@ -659,8 +659,21 @@ for values in [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]:
 ```
 
 `run(values, seed=42)` returns the same `RunOutcome` as `simulate(...).run()`.
-`bind(values)` returns the bound `Circuit` instead, for handing to
-`simulate(...)` with different options or to any other consumer of a circuit.
+`expectation_values(values, observables)` and
+`observable_expectation(values, hamiltonian)` return what the `Simulation`
+terminals of the same name return on the bound circuit, without planning
+dispatch or fusing again. `bind(values)` returns the bound `Circuit` instead, for
+handing to `simulate(...)` with different options or to any other consumer of a
+circuit.
+
+`run_many`, `expectation_values_many` and `observable_expectation_many` take a
+`(points, num_slots)` array and cross into Rust once. Below 14 qubits the rows
+split across cores, as `run_batch` does, and every result matches the single
+call with the same seed.
+
+```python
+energies = prepared.observable_expectation_many(points, hamiltonian, seed=42)
+```
 
 Automatic dispatch reads the template, so build it at angles representative of
 the sweep. A template whose rotations are all zero reads as Clifford and settles

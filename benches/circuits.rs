@@ -2607,6 +2607,161 @@ fn bench_batch_sweep(c: &mut Criterion) {
     group.finish();
 }
 
+/// `count` bindings for `params`, each drawn uniformly from `[0, 2pi)` on its
+/// own seeded stream.
+fn binding_points(params: &Parameters, count: u64) -> Vec<Vec<f64>> {
+    (0..count)
+        .map(|k| {
+            let mut rng = ChaCha8Rng::seed_from_u64(SEED.wrapping_add(k));
+            (0..params.num_slots())
+                .map(|_| rng.random::<f64>() * std::f64::consts::TAU)
+                .collect()
+        })
+        .collect()
+}
+
+/// Transverse-field Ising energy: a `ZZ` chain plus an `X` field, two commuting
+/// groups.
+fn ising_hamiltonian(n: usize) -> PauliObservable {
+    let chain = (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
+    let field = (0..n).map(|q| (0.5, vec![PauliTerm::x(q)]));
+    PauliObservable::from_terms(chain.chain(field).collect::<Vec<_>>()).unwrap()
+}
+
+/// Twenty energy evaluations of a two-layer ansatz, the inner loop of a
+/// variational optimizer. `simulate_loop` binds a fresh circuit and hands it to
+/// `simulate`, which plans dispatch and fuses at every point. `prepared` calls
+/// the terminal on a held [`PreparedCircuit`], which replays the fusion plan
+/// into the backend it holds.
+fn bench_prepared_energy(c: &mut Criterion) {
+    const POINTS: u64 = 20;
+
+    let mut group = c.benchmark_group("prepared/hea_l2_energy");
+    configure_group(&mut group);
+
+    for &n in &[8, 10, 12, 14] {
+        let template = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let params = Parameters::all_rotations(&template);
+        let points = binding_points(&params, POINTS);
+        let hamiltonian = ising_hamiltonian(n);
+
+        group.bench_function(BenchmarkId::new("simulate_loop", n), |b| {
+            b.iter(|| {
+                for values in &points {
+                    let bound = params.bind(&template, values).unwrap();
+                    let energy = sim::simulate(&bound)
+                        .seed(SEED)
+                        .observable_expectation(&hamiltonian)
+                        .unwrap();
+                    black_box(energy.mean);
+                }
+            });
+        });
+        group.bench_function(BenchmarkId::new("prepared", n), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| {
+                for values in &points {
+                    let energy = prepared
+                        .observable_expectation(values, &hamiltonian, SEED)
+                        .unwrap();
+                    black_box(energy.mean);
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// MaxCut cost on a ring: `n` `ZZ` edges, one Z-only commuting group.
+fn maxcut_ring_hamiltonian(n: usize) -> PauliObservable {
+    let edges = (0..n).map(|q| (0.5, vec![PauliTerm::z(q), PauliTerm::z((q + 1) % n)]));
+    PauliObservable::from_terms(edges.collect::<Vec<_>>()).unwrap()
+}
+
+/// Heisenberg couplings at distance one and two plus fields on all three axes:
+/// `9n - 9` terms in three commuting groups, 99 at 12 qubits.
+fn heisenberg_hamiltonian(n: usize) -> PauliObservable {
+    let mut terms = Vec::new();
+    for d in 1..=2 {
+        for q in 0..n - d {
+            terms.push((1.0, vec![PauliTerm::x(q), PauliTerm::x(q + d)]));
+            terms.push((0.9, vec![PauliTerm::y(q), PauliTerm::y(q + d)]));
+            terms.push((0.8, vec![PauliTerm::z(q), PauliTerm::z(q + d)]));
+        }
+    }
+    for q in 0..n {
+        terms.push((0.3, vec![PauliTerm::x(q)]));
+        terms.push((0.2, vec![PauliTerm::y(q)]));
+        terms.push((0.1, vec![PauliTerm::z(q)]));
+    }
+    PauliObservable::from_terms(terms).unwrap()
+}
+
+/// One weighted-observable evaluation, mean and grouped variance, on a
+/// two-layer ansatz held in a [`PreparedCircuit`] at a fixed binding, so the
+/// row is the circuit run plus the reduction with no planning or fusion.
+fn bench_observable_reduction(c: &mut Criterion) {
+    let mut group = c.benchmark_group("observable");
+    configure_group(&mut group);
+
+    for (name, build) in [
+        ("tfim", ising_hamiltonian as fn(usize) -> PauliObservable),
+        ("maxcut_ring", maxcut_ring_hamiltonian),
+        ("heisenberg", heisenberg_hamiltonian),
+    ] {
+        for &n in &[8, 10, 12, 14] {
+            let template = circuits::hardware_efficient_ansatz(n, 2, SEED);
+            let params = Parameters::all_rotations(&template);
+            let values = binding_points(&params, 1).remove(0);
+            let observable = build(n);
+            let mut prepared = PreparedCircuit::new(template, params).unwrap();
+            group.bench_function(BenchmarkId::new(name, n), |b| {
+                b.iter(|| {
+                    black_box(
+                        prepared
+                            .observable_expectation(&values, &observable, SEED)
+                            .unwrap(),
+                    )
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
+/// A 200-binding sweep of a two-layer ansatz through one [`PreparedCircuit`].
+/// `prepared_loop` calls `run` per binding and is the control for
+/// `prepared_many`, which splits the bindings across cores below 14 qubits.
+fn bench_prepared_sweep(c: &mut Criterion) {
+    const POINTS: u64 = 200;
+
+    let mut group = c.benchmark_group("prepared/hea_l2_sweep");
+    configure_group(&mut group);
+
+    for &n in &[4, 8, 10, 12] {
+        let template = circuits::hardware_efficient_ansatz(n, 2, SEED);
+        let params = Parameters::all_rotations(&template);
+        let points = binding_points(&params, POINTS);
+
+        group.bench_function(BenchmarkId::new("prepared_many", n), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| black_box(prepared.run_many(&points, SEED).unwrap()));
+        });
+        group.bench_function(BenchmarkId::new("prepared_loop", n), |b| {
+            let mut prepared = PreparedCircuit::new(template.clone(), params.clone()).unwrap();
+            b.iter(|| {
+                for values in &points {
+                    black_box(prepared.run(values, SEED).unwrap());
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // A Trotter ansatz over the largest Jordan-Wigner strings of the seeded
 // two-body operator, on an alternating occupation reference. The recognizing
 // constructor lowers the weight-1 and ZZ generators, so the stream mixes named
@@ -4346,6 +4501,10 @@ criterion_group! {
     bench_gradient_prefix,
     bench_gradient_shift_small,
     bench_batch_sweep,
+    // Prepared circuit terminals and sweeps
+    bench_prepared_energy,
+    bench_prepared_sweep,
+    bench_observable_reduction,
     // Variational loop iteration (rebuild vs rebind under simulation cost)
     bench_vqe_loop,
     // Forward Pauli-sum expectation (parallel-sandwich neutrality)

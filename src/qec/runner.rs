@@ -8,7 +8,8 @@ use super::noise::compile_qec_noisy_sampler;
 use super::{
     QecBasis, QecNoise, QecObservableEstimate, QecOp, QecOptions, QecPauli, QecProgram,
     QecRecordRef, QecSampleResult, append_basis_to_z_rotation, append_mpp_parity_rotations,
-    append_z_to_basis_rotation, ensure_lowered_record_count, qec_non_clifford_error,
+    append_z_to_basis_rotation, ensure_lowered_record_count, qec_lowered_num_qubits,
+    qec_non_clifford_error,
 };
 use crate::backend::{Backend, statevector::StatevectorBackend};
 use crate::circuit::{Circuit, ClassicalCondition, Instruction, SmallVec};
@@ -429,12 +430,8 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
     super::validate_qec_exp_val_placement(program)?;
     let shots = program.options().shots;
     let num_measurements = program.num_measurements();
-    let has_mpp = program
-        .ops()
-        .iter()
-        .any(|op| matches!(op, QecOp::MeasurePauliProduct { .. }));
     let scratch_qubit = program.num_qubits();
-    let backend_qubits = program.num_qubits() + usize::from(has_mpp);
+    let backend_qubits = qec_lowered_num_qubits(program);
     let mut backend = StatevectorBackend::new(program.options().seed);
     let mut noise_rng = ChaCha8Rng::seed_from_u64(program.options().seed ^ 0xD1B5_4A32_D192_ED03);
     let m_words = num_measurements.div_ceil(64);
@@ -481,11 +478,6 @@ pub fn run_qec_program_reference(program: &QecProgram) -> Result<QecSampleResult
                     next_record += 1;
                 }
                 QecOp::MeasurePauliProduct { terms } => {
-                    if !has_mpp {
-                        return Err(PrismError::InvalidParameter {
-                            message: "internal QEC MPP scratch qubit was not allocated".to_string(),
-                        });
-                    }
                     let bit =
                         measure_reference_mpp(&mut backend, terms, scratch_qubit, next_record)?;
                     set_shot_record(&mut measurement_data, m_words, shot, next_record, bit);
@@ -1092,13 +1084,7 @@ fn validate_qec_compiled_program(program: &QecProgram) -> Result<bool> {
     for op in program.ops() {
         match op {
             QecOp::Gate { gate, .. } if !gate.is_clifford() => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "QEC compiled runner".to_string(),
-                    reason: format!(
-                        "compiled QEC runner requires Clifford gates, got `{}`",
-                        gate.name()
-                    ),
-                });
+                return Err(qec_non_clifford_error(gate));
             }
             QecOp::ExpectationValue { .. } => {
                 return Err(PrismError::IncompatibleBackend {
@@ -1122,24 +1108,14 @@ fn validate_qec_compiled_program(program: &QecProgram) -> Result<bool> {
 }
 
 fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit> {
-    let has_mpp = program
-        .ops()
-        .iter()
-        .any(|op| matches!(op, QecOp::MeasurePauliProduct { .. }));
     let scratch_qubit = program.num_qubits();
-    let mut circuit = Circuit::new(
-        program.num_qubits() + usize::from(has_mpp),
-        program.num_measurements(),
-    );
+    let mut circuit = Circuit::new(qec_lowered_num_qubits(program), program.num_measurements());
     let mut next_record = 0usize;
     let mut scratch_needs_reset = false;
 
     for op in program.ops() {
         match op {
             QecOp::Gate { gate, targets } => {
-                if !gate.is_clifford() {
-                    return Err(qec_non_clifford_error(gate));
-                }
                 circuit.add_gate(gate.clone(), targets);
             }
             QecOp::Measure { basis, qubit } => {
@@ -1148,11 +1124,6 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
                 next_record += 1;
             }
             QecOp::MeasurePauliProduct { terms } => {
-                if !has_mpp {
-                    return Err(PrismError::InvalidParameter {
-                        message: "internal QEC MPP scratch qubit was not allocated".to_string(),
-                    });
-                }
                 if scratch_needs_reset {
                     circuit.add_reset(scratch_qubit);
                 }
@@ -1165,32 +1136,11 @@ fn lower_qec_program_to_clifford_circuit(program: &QecProgram) -> Result<Circuit
                 circuit.add_reset(*qubit);
                 append_z_to_basis_rotation(&mut circuit, *basis, *qubit);
             }
-            QecOp::Noise { channel, .. } => {
-                let probability = channel.probability();
-                debug_assert!(
-                    probability == 0.0,
-                    "active QEC noise should use deferred lowering"
-                );
-                if probability > 0.0 {
-                    return Err(PrismError::IncompatibleBackend {
-                        backend: "QEC compiled runner".to_string(),
-                        reason: "compiled QEC runner does not support active noise annotations in the clean path".to_string(),
-                    });
-                }
+            QecOp::ExpectationValue { .. } | QecOp::Feedforward { .. } => {
+                unreachable!("validate_qec_compiled_program rejects EXP_VAL and feedforward")
             }
-            QecOp::ExpectationValue { .. } => {
-                return Err(PrismError::IncompatibleBackend {
-                    backend: "QEC compiled runner".to_string(),
-                    reason: "compiled QEC sampler has no estimator stage for `EXP_VAL`; \
-                             `run_qec_program` routes such programs to the analytical or \
-                             reference runners"
-                        .to_string(),
-                });
-            }
-            QecOp::Feedforward { .. } => {
-                return Err(qec_feedforward_rejection());
-            }
-            QecOp::Detector { .. }
+            QecOp::Noise { .. }
+            | QecOp::Detector { .. }
             | QecOp::ObservableInclude { .. }
             | QecOp::Postselect { .. }
             | QecOp::Tick => {}

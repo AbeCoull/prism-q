@@ -4,7 +4,8 @@
 
 use super::{
     QecNoise, QecOp, QecPauli, QecProgram, append_basis_to_z_rotation, append_mpp_parity_rotations,
-    append_z_to_basis_rotation, ensure_lowered_record_count, qec_non_clifford_error,
+    append_z_to_basis_rotation, ensure_lowered_record_count, qec_lowered_num_qubits,
+    qec_non_clifford_error,
 };
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
@@ -344,11 +345,7 @@ fn lower_qec_program_to_deferred_circuit_inner(
     program: &QecProgram,
     allow_non_clifford: bool,
 ) -> Result<QecDeferredProgram> {
-    let has_mpp = program
-        .ops()
-        .iter()
-        .any(|op| matches!(op, QecOp::MeasurePauliProduct { .. }));
-    let base_qubits = program.num_qubits() + usize::from(has_mpp);
+    let base_qubits = qec_lowered_num_qubits(program);
     let scratch_qubit = program.num_qubits();
     let mut circuit = Circuit::new(base_qubits, program.num_measurements());
     let mut aliases: Vec<usize> = (0..base_qubits).collect();
@@ -375,11 +372,6 @@ fn lower_qec_program_to_deferred_circuit_inner(
                 next_record += 1;
             }
             QecOp::MeasurePauliProduct { terms } => {
-                if !has_mpp {
-                    return Err(PrismError::InvalidParameter {
-                        message: "internal QEC MPP scratch qubit was not allocated".to_string(),
-                    });
-                }
                 let scratch_alias = if measured_aliases[aliases[scratch_qubit]] {
                     qec_assign_fresh_alias(
                         &mut circuit,

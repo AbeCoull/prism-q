@@ -2210,10 +2210,18 @@ fn run_batch_entry(
     execute(&mut **backend, circuit, &SimOptions::default())
 }
 
+/// Width below which separate runs split across Rayon workers. Set at the kernels'
+/// parallel floor; the width where splitting runs stops beating parallel kernels
+/// has not been measured. Under miri it follows that floor down.
+#[cfg(all(feature = "parallel", not(miri)))]
+const RUN_SPLIT_QUBITS: usize = 14;
+#[cfg(all(feature = "parallel", miri))]
+const RUN_SPLIT_QUBITS: usize = crate::backend::PARALLEL_THRESHOLD_QUBITS;
+
 /// Whether separate runs of `num_qubits`-wide circuits on `kind` should split across
-/// Rayon workers: only below the kernels' own parallel floor, counting a density
-/// matrix at twice its width since each worker holds a state, and never on a kind
-/// bound to one device or rank context.
+/// Rayon workers: only below `RUN_SPLIT_QUBITS`, counting a density matrix at
+/// twice its width since each worker holds a state, and never on a kind bound to one
+/// device or rank context.
 #[cfg(feature = "parallel")]
 pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -> bool {
     if bound_to_one_context(kind) {
@@ -2224,7 +2232,7 @@ pub(crate) fn runs_split_across_workers(kind: &BackendKind, num_qubits: usize) -
     } else {
         num_qubits
     };
-    width < crate::backend::PARALLEL_THRESHOLD_QUBITS
+    width < RUN_SPLIT_QUBITS
 }
 
 /// Whether per-shot runs on `kind` should split across Rayon workers, given the

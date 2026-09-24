@@ -1796,7 +1796,7 @@ impl PreparedRoute {
             .as_any()
             .and_then(|any| any.downcast_ref::<StatevectorBackend>())
             .expect("a grouped answer is settled only on a statevector plan");
-        grouped_expectation_on_state(statevector, observable, seed)
+        grouped_expectation_on_state(statevector, observable)
     }
 }
 
@@ -3250,16 +3250,14 @@ fn grouped_expectation_statevector(
     let fused = fuse_for_backend(&backend, &expanded);
     backend.init(fused.num_qubits, fused.num_classical_bits)?;
     backend.apply_instructions(&fused.instructions)?;
-    grouped_expectation_on_state(&backend, observable, seed)
+    grouped_expectation_on_state(&backend, observable)
 }
 
 /// The reduction half of [`grouped_expectation_statevector`], on a backend
-/// that has already run the circuit. `seed` seeds the scratch backend a
-/// basis-rotated moments pass runs on.
+/// that has already run the circuit.
 fn grouped_expectation_on_state(
     backend: &StatevectorBackend,
     observable: &PauliObservable,
-    seed: u64,
 ) -> Result<ObservableExpectation> {
     let num_qubits = backend.num_qubits();
     let terms = observable.terms();
@@ -3354,7 +3352,7 @@ fn grouped_expectation_on_state(
                 (&exported, crate::backend::state_norm_sqr(&exported))
             }
         };
-        let mut scratch: Option<StatevectorBackend> = None;
+        let mut rotated = Vec::new();
         for &gi in &deferred {
             let group = &grouping.groups[gi];
             let coefficients: Vec<f64> = group.term_indices.iter().map(|&i| terms[i].0).collect();
@@ -3367,17 +3365,10 @@ fn grouped_expectation_on_state(
                     .iter()
                     .map(|&i| masks[i].0 | masks[i].1)
                     .collect();
-                let rotation_circuit = group.basis_rotation_circuit(num_qubits);
-                let rotation = crate::circuit::fusion::fuse_circuit(&rotation_circuit, true);
-                let rotated = scratch.get_or_insert_with(|| StatevectorBackend::new(seed));
-                rotated.init_from_amplitudes(state.to_vec(), 0)?;
-                rotated.apply_instructions(&rotation.instructions)?;
-                observable::weighted_group_moments(
-                    rotated.state_vector(),
-                    &zmasks,
-                    &coefficients,
-                    norm,
-                )
+                let (x_bits, y_bits) = group.rotation_masks();
+                observable::rotate_to_z_basis(state, &mut rotated, x_bits, y_bits);
+                let growth = 2f64.powi((x_bits | y_bits).count_ones() as i32);
+                observable::weighted_group_moments(&rotated, &zmasks, &coefficients, norm * growth)
             };
             mean += m1;
             group_variances[gi] = (m2 - m1 * m1).max(0.0);

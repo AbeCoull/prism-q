@@ -8,9 +8,7 @@ use std::sync::OnceLock;
 
 use num_complex::Complex64;
 
-use crate::circuit::Circuit;
 use crate::error::{PrismError, Result};
-use crate::gates::Gate;
 use crate::sim::RunMetadata;
 use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
@@ -306,21 +304,12 @@ impl QwcGroup {
         self.axis_x.iter().all(|&word| word == 0)
     }
 
-    /// Rotation taking every assigned axis to Z: H on X qubits, Sdg then H on
-    /// Y qubits. Conjugation by it sends each member string to a plus-sign Z
-    /// string on the same support.
-    pub(crate) fn basis_rotation_circuit(&self, num_qubits: usize) -> Circuit {
-        let mut circuit = Circuit::new(num_qubits, 0);
-        for qubit in 0..num_qubits.min(self.axis_x.len() * 64) {
-            let bit = 1u64 << (qubit % 64);
-            if self.axis_x[qubit / 64] & bit != 0 {
-                if self.axis_z[qubit / 64] & bit != 0 {
-                    circuit.add_gate(Gate::Sdg, &[qubit]);
-                }
-                circuit.add_gate(Gate::H, &[qubit]);
-            }
-        }
-        circuit
+    /// Qubit masks `(x, y)` of the group's X-assigned and Y-assigned qubits.
+    /// [`rotate_to_z_basis`] on them sends each member string to a plus-sign Z
+    /// string on the same support. Statevector widths fit one word.
+    pub(crate) fn rotation_masks(&self) -> (usize, usize) {
+        let (x, z) = (self.axis_x[0], self.axis_z[0]);
+        ((x & !z) as usize, (x & z) as usize)
     }
 }
 
@@ -440,6 +429,207 @@ pub(crate) fn weighted_group_moments(
 /// shorter than a block reads only the leading entries, which are exact
 /// because every mask then fits below the state length.
 const MOMENT_BLOCK: usize = 64;
+
+/// Copy `state` into `out` rotated so each qubit in `x_bits` reads in the X
+/// basis and each in `y_bits` in the Y basis, as `H` and `H S†` do. The
+/// butterflies drop the `1/sqrt(2)`, so the squared norm of `out` is that of
+/// `state` times `2^popcount(x_bits | y_bits)`, an exact power of two for the
+/// caller to fold into the moments' `norm`.
+///
+/// Qubits below `log2(`[`ROTATION_BLOCK`]`)` rotate a block at a time while
+/// the block is copied in and still in L1. The rest take one sweep per pair of
+/// qubits, each pair a radix-4 butterfly that loads and stores an amplitude
+/// once for two levels.
+pub(crate) fn rotate_to_z_basis(
+    state: &[Complex64],
+    out: &mut Vec<Complex64>,
+    x_bits: usize,
+    y_bits: usize,
+) {
+    out.resize(state.len(), Complex64::ZERO);
+    let block = ROTATION_BLOCK.min(state.len());
+    let levels = |range: std::ops::Range<usize>| {
+        range
+            .filter(|&q| (x_bits | y_bits) >> q & 1 == 1)
+            .map(|q| (q, y_bits >> q & 1 == 1))
+            .collect::<Vec<_>>()
+    };
+    let low = levels(0..block.trailing_zeros() as usize);
+    let high = levels(block.trailing_zeros() as usize..state.len().trailing_zeros() as usize);
+
+    let fill = |(dst, src): (&mut [Complex64], &[Complex64])| {
+        dst.copy_from_slice(src);
+        rotate_levels(dst, &low);
+    };
+
+    #[cfg(feature = "parallel")]
+    if state.len() >= 1 << crate::backend::PARALLEL_THRESHOLD_QUBITS {
+        use rayon::prelude::*;
+        out.par_chunks_mut(block)
+            .zip(state.par_chunks(block))
+            .for_each(fill);
+        for pair in high.chunks(2) {
+            rotate_pair_par(out, pair);
+        }
+        return;
+    }
+
+    out.chunks_mut(block)
+        .zip(state.chunks(block))
+        .for_each(fill);
+    rotate_levels(out, &high);
+}
+
+/// Amplitudes per block in [`rotate_to_z_basis`], 16 KiB.
+const ROTATION_BLOCK: usize = 1 << 10;
+
+/// `-i b` for a Y level, `b` for an X level: the second column of the
+/// unnormalized `H` or `H S†`.
+#[inline(always)]
+fn twiddle<const Y: bool>(b: Complex64) -> Complex64 {
+    if Y { Complex64::new(b.im, -b.re) } else { b }
+}
+
+#[inline(always)]
+fn butterfly2<const Y: bool>(lo: &mut [Complex64], hi: &mut [Complex64]) {
+    for (a, b) in lo.iter_mut().zip(hi) {
+        let t = twiddle::<Y>(*b);
+        (*a, *b) = (*a + t, *a - t);
+    }
+}
+
+/// Levels `q1 < q2` on one amplitude from each quarter, the quarters indexed
+/// by the two target bits as `00 01 10 11`.
+#[inline(always)]
+fn quad<const Y1: bool, const Y2: bool>(
+    a: &mut Complex64,
+    b: &mut Complex64,
+    c: &mut Complex64,
+    d: &mut Complex64,
+) {
+    let (tb, td) = (twiddle::<Y1>(*b), twiddle::<Y1>(*d));
+    let (a1, b1, c1, d1) = (*a + tb, *a - tb, *c + td, *c - td);
+    let (tc, td) = (twiddle::<Y2>(c1), twiddle::<Y2>(d1));
+    (*a, *b, *c, *d) = (a1 + tc, b1 + td, a1 - tc, b1 - td);
+}
+
+#[inline(always)]
+fn butterfly4<const Y1: bool, const Y2: bool>(
+    a: &mut [Complex64],
+    b: &mut [Complex64],
+    c: &mut [Complex64],
+    d: &mut [Complex64],
+) {
+    let n = a.len();
+    let (b, c, d) = (&mut b[..n], &mut c[..n], &mut d[..n]);
+    for i in 0..n {
+        quad::<Y1, Y2>(&mut a[i], &mut b[i], &mut c[i], &mut d[i]);
+    }
+}
+
+/// Apply ascending `(qubit, is_y)` levels to `amps`, pairing levels into
+/// radix-4 sweeps from [`MIN_RADIX4_QUBIT`] up.
+fn rotate_levels(amps: &mut [Complex64], levels: &[(usize, bool)]) {
+    let mut rest = levels;
+    while let Some((&(q1, y1), tail)) = rest.split_first() {
+        match tail.first() {
+            Some(&(q2, y2)) if q1 >= MIN_RADIX4_QUBIT || (q1, q2) == (0, 1) => {
+                match (y1, y2) {
+                    (false, false) => rotate4::<false, false>(amps, q1, q2),
+                    (false, true) => rotate4::<false, true>(amps, q1, q2),
+                    (true, false) => rotate4::<true, false>(amps, q1, q2),
+                    (true, true) => rotate4::<true, true>(amps, q1, q2),
+                }
+                rest = &tail[1..];
+            }
+            _ => {
+                if y1 {
+                    rotate2::<true>(amps, q1);
+                } else {
+                    rotate2::<false>(amps, q1);
+                }
+                rest = tail;
+            }
+        }
+    }
+}
+
+/// Lowest qubit a radix-4 sweep starts from, apart from qubits 0 and 1, which
+/// pair as fixed groups of four. Starting at qubit 1 or 2 leaves quarters of 2
+/// or 4 amplitudes, and those sweeps measured slower than two radix-2 sweeps.
+const MIN_RADIX4_QUBIT: usize = 3;
+
+fn rotate2<const Y: bool>(amps: &mut [Complex64], q: usize) {
+    for pair in amps.chunks_exact_mut(2 << q) {
+        let (lo, hi) = pair.split_at_mut(1 << q);
+        butterfly2::<Y>(lo, hi);
+    }
+}
+
+fn rotate4<const Y1: bool, const Y2: bool>(amps: &mut [Complex64], q1: usize, q2: usize) {
+    if (q1, q2) == (0, 1) {
+        for chunk in amps.chunks_exact_mut(4) {
+            if let [a, b, c, d] = chunk {
+                quad::<Y1, Y2>(a, b, c, d);
+            }
+        }
+        return;
+    }
+    for quad in amps.chunks_exact_mut(2 << q2) {
+        let (lo, hi) = quad.split_at_mut(1 << q2);
+        for (l, h) in lo
+            .chunks_exact_mut(2 << q1)
+            .zip(hi.chunks_exact_mut(2 << q1))
+        {
+            let (a, b) = l.split_at_mut(1 << q1);
+            let (c, d) = h.split_at_mut(1 << q1);
+            butterfly4::<Y1, Y2>(a, b, c, d);
+        }
+    }
+}
+
+/// [`rotate_levels`] on one or two levels at or above `log2(`[`ROTATION_BLOCK`]`)`,
+/// split into runs of [`MIN_PAR_ELEMS`](crate::backend::MIN_PAR_ELEMS) across
+/// the pool.
+#[cfg(feature = "parallel")]
+fn rotate_pair_par(amps: &mut [Complex64], levels: &[(usize, bool)]) {
+    use rayon::prelude::*;
+    let run = crate::backend::MIN_PAR_ELEMS;
+    match *levels {
+        [(q, y)] => amps.par_chunks_mut(2 << q).for_each(|pair| {
+            let (lo, hi) = pair.split_at_mut(1 << q);
+            lo.par_chunks_mut(run)
+                .zip(hi.par_chunks_mut(run))
+                .for_each(|(lo, hi)| {
+                    if y {
+                        butterfly2::<true>(lo, hi)
+                    } else {
+                        butterfly2::<false>(lo, hi)
+                    }
+                });
+        }),
+        [(q1, y1), (q2, y2)] => amps.par_chunks_mut(2 << q2).for_each(|quad| {
+            let (lo, hi) = quad.split_at_mut(1 << q2);
+            lo.par_chunks_mut(2 << q1)
+                .zip(hi.par_chunks_mut(2 << q1))
+                .for_each(|(l, h)| {
+                    let (a, b) = l.split_at_mut(1 << q1);
+                    let (c, d) = h.split_at_mut(1 << q1);
+                    a.par_chunks_mut(run)
+                        .zip(b.par_chunks_mut(run))
+                        .zip(c.par_chunks_mut(run))
+                        .zip(d.par_chunks_mut(run))
+                        .for_each(|(((a, b), c), d)| match (y1, y2) {
+                            (false, false) => butterfly4::<false, false>(a, b, c, d),
+                            (false, true) => butterfly4::<false, true>(a, b, c, d),
+                            (true, false) => butterfly4::<true, false>(a, b, c, d),
+                            (true, true) => butterfly4::<true, true>(a, b, c, d),
+                        });
+                });
+        }),
+        _ => unreachable!(),
+    }
+}
 
 #[cfg(test)]
 #[path = "observable_tests.rs"]

@@ -2195,6 +2195,9 @@ fn run_batch_entry(
         *held = None;
         return run_with_internal(kind.clone(), circuit, seed, SimOptions::default());
     };
+    if !kind.is_auto() {
+        validate_explicit_backend(kind, circuit)?;
+    }
 
     let reusable = matches!(
         &*held,

@@ -212,3 +212,33 @@ fn a_batch_longer_than_the_pool_matches_a_sequential_loop_bitwise() {
         }
     }
 }
+
+// A circuit an explicit backend rejects must fail with the error `simulate` gives,
+// not with the backend's own complaint once the run is under way.
+#[test]
+fn a_failing_circuit_among_claims_matches_the_sequential_loop() {
+    let mut bad = Circuit::new(4, 0);
+    bad.add_gate(Gate::T, &[2]);
+    let mut circuits: Vec<Circuit> = (0..12)
+        .map(|i| {
+            let mut c = Circuit::new(3 + i % 3, 0);
+            c.add_gate(Gate::H, &[0]);
+            c.add_gate(Gate::Cx, &[0, 1]);
+            c
+        })
+        .collect();
+    circuits.insert(7, bad);
+    let sequential = circuits
+        .iter()
+        .map(|c| {
+            simulate(c)
+                .backend(BackendKind::Stabilizer)
+                .seed(SEED)
+                .run()
+        })
+        .collect::<prism_q::Result<Vec<_>>>()
+        .unwrap_err()
+        .to_string();
+    let err = on_four_workers(|| run_batch(&circuits, BackendKind::Stabilizer, SEED)).unwrap_err();
+    assert_eq!(err.to_string(), sequential);
+}

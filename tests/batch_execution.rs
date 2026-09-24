@@ -113,10 +113,10 @@ fn a_batch_routed_to_the_stabilizer_matches_running_each_alone() {
     }
 }
 
-// A 14-qubit circuit keeps the whole batch on one thread, so both paths are covered.
+// A 17-qubit circuit keeps the whole batch on one thread, so both paths are covered.
 #[test]
-fn a_batch_reaching_the_parallel_floor_matches_running_each_alone() {
-    let circuits = vec![unitary(6, 2, 0), unitary(14, 2, 1), unitary(6, 2, 2)];
+fn a_batch_past_the_split_width_matches_running_each_alone() {
+    let circuits = vec![unitary(6, 2, 0), unitary(17, 2, 1), unitary(6, 2, 2)];
     let batch = run_batch(&circuits, BackendKind::Statevector, SEED).unwrap();
     for (i, circuit) in circuits.iter().enumerate() {
         let solo = simulate(circuit)

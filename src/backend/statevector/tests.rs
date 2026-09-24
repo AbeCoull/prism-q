@@ -1010,13 +1010,13 @@ fn test_multi_fused_three_tier_targets() {
 // ---- High-qubit parallel correctness tests ----
 //
 // These tests target specific parallel code paths at and above the
-// PARALLEL_THRESHOLD_QUBITS (14) boundary to validate that Rayon-parallelized
+// PARALLEL_THRESHOLD_QUBITS (15) boundary to validate that Rayon-parallelized
 // kernels produce identical results to sequential execution.
 
 #[cfg(feature = "parallel")]
 #[test]
-fn test_parallel_threshold_boundary_14q() {
-    let mut c = Circuit::new(14, 0);
+fn test_parallel_threshold_boundary_15q() {
+    let mut c = Circuit::new(15, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::Cx, &[0, 1]);
     let mut b = StatevectorBackend::new(42);
@@ -1413,7 +1413,7 @@ fn diagonal_batch_par_matches_independent_reference() {
     use crate::circuit::{Instruction, SmallVec, smallvec};
     use crate::gates::{DiagEntry, DiagonalBatchData, Gate};
 
-    let n = 14usize;
+    let n = 15usize;
     let entries = vec![
         DiagEntry::Phase1q {
             qubit: 0,

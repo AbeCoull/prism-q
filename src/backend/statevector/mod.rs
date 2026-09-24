@@ -40,7 +40,7 @@
 //! # Threading and SIMD
 //!
 //! The pair-iteration loops are embarrassingly parallel. With the `parallel`
-//! feature at `PARALLEL_THRESHOLD_QUBITS` (14) and above, each kernel splits
+//! feature at `PARALLEL_THRESHOLD_QUBITS` (15) and above, each kernel splits
 //! across Rayon with `par_chunks_mut` / `split_at_mut`; a few hot kernels use
 //! raw pointers after proving disjoint access.
 //!

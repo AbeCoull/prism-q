@@ -13,9 +13,9 @@ fn dense_scalar_sweep_matches_closed_form_depolarizing() {
     caps::set_once(&[("PRISM_NO_AVX2_KRAUS", "1")]);
     let p = 0.3;
     let kraus = depolarizing_2q_kraus(p);
-    // (3,0,1) and (5,2,3) run the serial arm at W = 1 and W = 4; the 7-qubit
-    // pairs run the rayon arm (2n >= 14) at both widths.
-    for (n, q0, q1) in [(3usize, 0usize, 1usize), (5, 2, 3), (7, 0, 6), (7, 2, 5)] {
+    // (3,0,1) and (5,2,3) run the serial arm at W = 1 and W = 4; the 8-qubit
+    // pairs run the rayon arm (2n >= 15) at both widths.
+    for (n, q0, q1) in [(3usize, 0usize, 1usize), (5, 2, 3), (8, 0, 7), (8, 2, 5)] {
         let circuit = circuits::random_circuit(n, 4, SEED);
         let masks = all_pauli_masks(n);
 

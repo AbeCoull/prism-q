@@ -2734,7 +2734,7 @@ fn bench_observable_reduction(c: &mut Criterion) {
 
 /// A 200-binding sweep of a two-layer ansatz through one [`PreparedCircuit`].
 /// `prepared_loop` calls `run` per binding and is the control for
-/// `prepared_many`, which splits the bindings across cores below 14 qubits.
+/// `prepared_many`, which splits the bindings across cores below 15 qubits.
 fn bench_prepared_sweep(c: &mut Criterion) {
     const POINTS: u64 = 200;
 

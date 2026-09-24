@@ -977,7 +977,7 @@ fn dm_two_qubit_depolarizing_matches_kraus_sum() {
     // The closed form and the 16-operator Kraus sum are separate kernels,
     // compared here by full tomography. A pair selects the Kraus sweep's block
     // width, 4 when min(q0,q1) >= 2 and 1 otherwise, and n selects the arm:
-    // 2n < 14 is serial. The pairs are each width on each arm. p = 15/16 is the
+    // 2n < 15 is serial. The pairs are each width on each arm. p = 15/16 is the
     // edge where alpha goes to zero.
     for (n, pairs) in [
         (3usize, &[(0usize, 1usize), (1, 2)][..]),
@@ -1252,9 +1252,9 @@ fn dm_apply_1q_matrix_matches_fused_gate_route() {
     let dense = [[c(0.6, 0.0), c(0.8, 0.0)], [c(0.8, 0.0), c(-0.6, 0.0)]];
     let jump = [[c(0.0, 0.0), c(1.3, 0.0)], [c(0.0, 0.0), c(0.0, 0.0)]];
 
-    // 4 qubits embeds an 8-qubit statevector (two-pass path); 7 embeds a
-    // 14-qubit one, which is the block-superoperator path.
-    for n in [4usize, 7] {
+    // 4 qubits embeds an 8-qubit statevector (two-pass path); 8 embeds a
+    // 16-qubit one, which is the block-superoperator path.
+    for n in [4usize, 8] {
         for (label, matrix) in [("dense", dense), ("jump", jump)] {
             for target in [0usize, n - 1] {
                 let circuit = circuits::random_circuit(n, 6, SEED);
@@ -1296,10 +1296,10 @@ fn dm_apply_1q_matrix_matches_fused_gate_route() {
 
 // `project`, `apply_reset`, and `apply_2q_depolarizing` walk the `4^n` buffer in
 // row-major runs whose stride is the qubit's row bit, and parallelize above the
-// embedded statevector's threshold (`2n >= 14`, so n >= 7). At n = 7 the top two
+// embedded statevector's threshold (`2n >= 15`, so n >= 8). At n = 8 the top two
 // qubits leave fewer than four row blocks, which is the arm that splits inside a
 // block. Each case checks the low qubit and the top qubit.
-const PAR_N: usize = 7;
+const PAR_N: usize = 8;
 
 fn pure_reference_state(circuit: &Circuit) -> Vec<Complex64> {
     let mut backend = StatevectorBackend::new(SEED);
@@ -1771,7 +1771,7 @@ fn dm_rzz_sandwich_matches_channel_route() {
 
 #[test]
 fn dm_rzz_phase_shows_in_probabilities_under_basis_change() {
-    // PAR_N puts the buffer at 2n = 14 qubits, so the sweep takes its rayon arm;
+    // PAR_N puts the buffer at 2n = 16 qubits, so the sweep takes its rayon arm;
     // the tomography test above stays small and covers the scalar one.
     const N: usize = PAR_N;
     for &(q0, q1) in &[(0usize, 1usize), (1, 2), (0, N - 1)] {

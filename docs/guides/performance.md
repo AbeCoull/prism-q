@@ -30,7 +30,7 @@ layout.
 
 ## Threading
 
-Rayon parallel kernels engage at 14 qubits and above (below that, thread-pool overhead
+Rayon parallel kernels engage at 15 qubits and above (below that, thread-pool overhead
 dominates), with `MIN_PAR_ELEMS = 4096` per task. The pool defaults to all logical cores.
 
 ```admonish tip title="Control the thread pool"

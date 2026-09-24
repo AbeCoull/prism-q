@@ -2137,13 +2137,13 @@ pub fn run_on_state(
 
 /// Run several circuits, holding one backend across those that can share it.
 ///
-/// Under the `parallel` feature, a batch whose circuits all sit below 14 qubits
-/// splits across Rayon workers, each holding its own backend. Those runs are
-/// single-threaded inside, so the batch is the only way to reach the other cores:
-/// a 200-point sweep of a two-layer hardware-efficient ansatz ran 3.2x to 4.8x
-/// faster than a loop over [`simulate`] at 4 to 12 qubits on a four-core
-/// i7-6700K. A wider circuit, a density matrix from 7 qubits, or a GPU or
-/// distributed kind keeps the whole batch on one thread.
+/// Under the `parallel` feature, a batch whose circuits all sit at 16 qubits or
+/// fewer splits across Rayon workers, each holding its own backend: a 200-point
+/// sweep of a two-layer hardware-efficient ansatz ran 3.2x to 4.8x faster than a
+/// loop over [`simulate`] at 4 to 12 qubits on a four-core i7-6700K, and one circuit
+/// per core beat the kernels' own threads at 14 and 16. A wider circuit, a density
+/// matrix from 9 qubits, or a GPU or distributed kind keeps the whole batch on one
+/// thread.
 ///
 /// On one thread the saving is the backend construction and its `2^n`
 /// allocation, which `init` reuses when the next circuit has the same width;

@@ -209,7 +209,7 @@ outer product the pure-state load forms.
 
 Union-find detects independent qubit groups in O(n·α(n)). Each block runs separately: under `Auto` each block picks its own backend, and under an explicit kind every block runs that kind, so the merged result reports `Decomposed` rather than any one engine. Results merge lazily via `Probabilities::Factored`, a Kronecker product computed on demand per element in O(K), so the O(2^N) dense vector is built only when a caller asks for it.
 
-Blocks run in parallel under Rayon only when every block is below 14 qubits (`src/sim/decomposed.rs`), so block-level threads do not oversubscribe the kernels' own parallelism.
+Blocks run in parallel under Rayon only when every block is below 15 qubits (`src/sim/decomposed.rs`), so block-level threads do not oversubscribe the kernels' own parallelism.
 
 ## Temporal Clifford decomposition
 

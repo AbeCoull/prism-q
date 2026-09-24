@@ -527,14 +527,15 @@ fn test_per_block_clifford_dispatch() {
     let components = c.independent_subsystems();
     assert_eq!(components.len(), 2);
 
-    let (sub_a, _, _) = c.extract_subcircuit(&components[0]);
+    let parts = c.partition_subcircuits(&components);
+    let sub_a = &parts[0].0;
     assert!(sub_a.is_clifford_only());
-    let backend_a = resolve_backend(&BackendKind::Auto, &sub_a, false).build(42);
+    let backend_a = resolve_backend(&BackendKind::Auto, sub_a, false).build(42);
     assert_eq!(backend_a.name(), "stabilizer");
 
-    let (sub_b, _, _) = c.extract_subcircuit(&components[1]);
+    let sub_b = &parts[1].0;
     assert!(!sub_b.is_clifford_only());
-    let backend_b = resolve_backend(&BackendKind::Auto, &sub_b, false).build(43);
+    let backend_b = resolve_backend(&BackendKind::Auto, sub_b, false).build(43);
     assert_eq!(backend_b.name(), "statevector");
 
     // End-to-end: auto (decomposed) must match monolithic statevector

@@ -388,6 +388,41 @@ fn build_filtered_parity_blocks(
 }
 
 impl CompiledSampler {
+    fn from_parts(
+        flip_rows: Vec<Vec<u64>>,
+        ref_bits_packed: Vec<u64>,
+        rank: usize,
+        num_measurements: usize,
+        sparse: Option<SparseParity>,
+        parity_blocks: Option<ParityBlocks>,
+        seed: u64,
+    ) -> Self {
+        let lut = if rank >= LUT_MIN_RANK {
+            Some(FlipLut::build(&flip_rows, num_measurements.div_ceil(64)))
+        } else {
+            None
+        };
+
+        Self {
+            flip_rows,
+            ref_bits_packed,
+            rank,
+            num_measurements,
+            rng: ChaCha8Rng::seed_from_u64(seed),
+            lut,
+            sparse,
+            parity_blocks,
+            #[cfg(feature = "gpu")]
+            gpu_context: None,
+            #[cfg(feature = "gpu")]
+            gpu_bts_cache: None,
+        }
+    }
+
+    fn empty(seed: u64) -> Self {
+        Self::from_parts(Vec::new(), Vec::new(), 0, 0, None, None, seed)
+    }
+
     /// Number of independent random bits in the compiled parity system.
     pub fn rank(&self) -> usize {
         self.rank
@@ -2453,7 +2488,6 @@ const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
 fn finish_sampler(
     mut flip_rows: Vec<Vec<u64>>,
-    num_meas_words: usize,
     rank: usize,
     num_measurements: usize,
     ref_bits: &[bool],
@@ -2461,30 +2495,19 @@ fn finish_sampler(
 ) -> CompiledSampler {
     minimize_flip_row_weight(&mut flip_rows);
 
-    let lut = if rank >= LUT_MIN_RANK {
-        Some(FlipLut::build(&flip_rows, num_meas_words))
-    } else {
-        None
-    };
-
     let sparse = SparseParity::from_flip_rows(&flip_rows, num_measurements);
     let ref_bits_packed = pack_bools(ref_bits);
     let parity_blocks = build_parity_blocks_if_useful(&sparse, rank, &ref_bits_packed);
 
-    CompiledSampler {
+    CompiledSampler::from_parts(
         flip_rows,
         ref_bits_packed,
         rank,
         num_measurements,
-        rng: ChaCha8Rng::seed_from_u64(seed),
-        lut,
-        sparse: Some(sparse),
+        Some(sparse),
         parity_blocks,
-        #[cfg(feature = "gpu")]
-        gpu_context: None,
-        #[cfg(feature = "gpu")]
-        gpu_bts_cache: None,
-    }
+        seed,
+    )
 }
 
 /// Compile a Clifford circuit's measurements via forward stabilizer
@@ -2529,20 +2552,7 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
 
     let num_measurements = measurements.len();
     if num_measurements == 0 {
-        return Ok(CompiledSampler {
-            flip_rows: Vec::new(),
-            ref_bits_packed: Vec::new(),
-            rank: 0,
-            num_measurements: 0,
-            rng: ChaCha8Rng::seed_from_u64(seed),
-            lut: None,
-            sparse: None,
-            parity_blocks: None,
-            #[cfg(feature = "gpu")]
-            gpu_context: None,
-            #[cfg(feature = "gpu")]
-            gpu_bts_cache: None,
-        });
+        return Ok(CompiledSampler::empty(seed));
     }
 
     let n = circuit.num_qubits;
@@ -2655,10 +2665,8 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
         }
     }
 
-    let num_meas_words = m_words;
     Ok(finish_sampler(
         flip_rows,
-        num_meas_words,
         rank,
         num_measurements,
         &ref_bits,
@@ -2678,20 +2686,7 @@ fn compile_measurements_filtered(
         .count();
 
     if num_global_measurements == 0 {
-        return Ok(CompiledSampler {
-            flip_rows: Vec::new(),
-            ref_bits_packed: Vec::new(),
-            rank: 0,
-            num_measurements: 0,
-            rng: ChaCha8Rng::seed_from_u64(seed),
-            lut: None,
-            sparse: None,
-            parity_blocks: None,
-            #[cfg(feature = "gpu")]
-            gpu_context: None,
-            #[cfg(feature = "gpu")]
-            gpu_bts_cache: None,
-        });
+        return Ok(CompiledSampler::empty(seed));
     }
 
     let mut qubit_to_block: Vec<usize> = vec![0; circuit.num_qubits];
@@ -2702,10 +2697,9 @@ fn compile_measurements_filtered(
     }
 
     let mut block_samplers: Vec<CompiledSampler> = Vec::with_capacity(blocks.len());
-    for (bi, block) in blocks.iter().enumerate() {
-        let (sub_circuit, _qubit_map, _classical_map) = circuit.extract_subcircuit(block);
+    for (bi, (sub_circuit, _, _)) in circuit.partition_subcircuits(blocks).iter().enumerate() {
         let block_seed = seed.wrapping_add(bi as u64 * 0x1234_5678);
-        block_samplers.push(compile_measurements(&sub_circuit, block_seed)?);
+        block_samplers.push(compile_measurements(sub_circuit, block_seed)?);
     }
 
     let mut meas_map: Vec<(usize, usize)> = Vec::with_capacity(num_global_measurements);
@@ -2752,12 +2746,6 @@ fn compile_measurements_filtered(
         }
     }
 
-    let lut = if total_rank >= LUT_MIN_RANK {
-        Some(FlipLut::build(&flip_rows, m_words))
-    } else {
-        None
-    };
-
     let sparse = build_sparse_from_filtered_blocks(
         &block_samplers,
         &meas_map,
@@ -2770,20 +2758,15 @@ fn compile_measurements_filtered(
             blocks
         });
 
-    Ok(CompiledSampler {
+    Ok(CompiledSampler::from_parts(
         flip_rows,
         ref_bits_packed,
-        rank: total_rank,
-        num_measurements: num_global_measurements,
-        rng: ChaCha8Rng::seed_from_u64(seed),
-        lut,
-        sparse: Some(sparse),
+        total_rank,
+        num_global_measurements,
+        Some(sparse),
         parity_blocks,
-        #[cfg(feature = "gpu")]
-        gpu_context: None,
-        #[cfg(feature = "gpu")]
-        gpu_bts_cache: None,
-    })
+        seed,
+    ))
 }
 
 /// Convert reset reuse into fresh qubit aliases and move measurements to the end.
@@ -3008,20 +2991,7 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
     let num_measurements = measurement_rows.len();
 
     if num_measurements == 0 {
-        return Ok(CompiledSampler {
-            flip_rows: Vec::new(),
-            ref_bits_packed: Vec::new(),
-            rank: 0,
-            num_measurements: 0,
-            rng: ChaCha8Rng::seed_from_u64(seed),
-            lut: None,
-            sparse: None,
-            parity_blocks: None,
-            #[cfg(feature = "gpu")]
-            gpu_context: None,
-            #[cfg(feature = "gpu")]
-            gpu_bts_cache: None,
-        });
+        return Ok(CompiledSampler::empty(seed));
     }
 
     let n = circuit.num_qubits;
@@ -3086,7 +3056,6 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
 
     Ok(finish_sampler(
         flip_rows,
-        num_meas_words,
         rank,
         num_measurements,
         &ref_bits,

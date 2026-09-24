@@ -491,6 +491,24 @@ fn filtered_bell_pairs_matches_monolithic() {
 }
 
 #[test]
+fn filtered_blocks_sharing_classical_bits() {
+    let mut c = Circuit::new(4, 2);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::X, &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_measure(0, 0);
+    c.add_measure(1, 1);
+    c.add_measure(2, 0);
+    c.add_measure(3, 1);
+
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    assert_eq!(sampler.rank(), 0);
+    for shot in sampler.sample_bulk(8) {
+        assert_eq!(shot, vec![false, false, true, true]);
+    }
+}
+
+#[test]
 fn filtered_product_h_matches_monolithic() {
     let n = 100;
     let mut c = Circuit::new(n, n);

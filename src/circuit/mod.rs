@@ -29,6 +29,8 @@ use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 use num_complex::Complex64;
 pub use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// A quantum circuit in PRISM-Q's internal representation.
 #[derive(Debug, Clone)]
@@ -442,104 +444,12 @@ impl Circuit {
         result
     }
 
-    /// Extract a sub-circuit containing only the given qubits.
+    /// Split the circuit into one sub-circuit per component in two passes over the
+    /// instruction stream.
     ///
-    /// Returns `(sub_circuit, qubit_map, classical_map)` where:
-    /// - `sub_circuit` has remapped qubit/classical indices starting from 0
-    /// - `qubit_map[local] = original` qubit index
-    /// - `classical_map[local] = original` classical bit index
-    pub(crate) fn extract_subcircuit(
-        &self,
-        qubit_set: &[usize],
-    ) -> (Circuit, Vec<usize>, Vec<usize>) {
-        let mut old_to_new_qubit: Vec<Option<usize>> = vec![None; self.num_qubits];
-        for (new_idx, &old_idx) in qubit_set.iter().enumerate() {
-            old_to_new_qubit[old_idx] = Some(new_idx);
-        }
-
-        let mut classical_bits_used: Vec<usize> = Vec::new();
-        let max_cb = self.num_classical_bits.max(1);
-        let mut old_to_new_classical: Vec<Option<usize>> = vec![None; max_cb];
-
-        for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
-            if old_to_new_qubit[qubit].is_some() && old_to_new_classical[classical_bit].is_none() {
-                let new_idx = classical_bits_used.len();
-                old_to_new_classical[classical_bit] = Some(new_idx);
-                classical_bits_used.push(classical_bit);
-            }
-        });
-
-        let mut sub = Circuit::new(qubit_set.len(), classical_bits_used.len());
-
-        let qubit_of = |q: usize| old_to_new_qubit[q].expect("membership checked by the caller");
-        let cbit_of = |c: usize| old_to_new_classical[c].unwrap_or(c);
-
-        for inst in &self.instructions {
-            match inst {
-                Instruction::Gate { gate, targets } => {
-                    if targets.iter().all(|&t| old_to_new_qubit[t].is_some()) {
-                        let new_targets: SmallVec<[usize; 4]> = targets
-                            .iter()
-                            .map(|&t| old_to_new_qubit[t].unwrap())
-                            .collect();
-                        sub.instructions.push(Instruction::Gate {
-                            gate: gate.clone(),
-                            targets: new_targets,
-                        });
-                    }
-                }
-                Instruction::Measure {
-                    qubit,
-                    classical_bit,
-                } => {
-                    if let (Some(nq), Some(nc)) = (
-                        old_to_new_qubit[*qubit],
-                        old_to_new_classical[*classical_bit],
-                    ) {
-                        sub.instructions.push(Instruction::Measure {
-                            qubit: nq,
-                            classical_bit: nc,
-                        });
-                    }
-                }
-                Instruction::Reset { qubit } => {
-                    if let Some(nq) = old_to_new_qubit[*qubit] {
-                        sub.instructions.push(Instruction::Reset { qubit: nq });
-                    }
-                }
-                Instruction::Barrier { qubits } => {
-                    let new_qs: SmallVec<[usize; 4]> =
-                        qubits.iter().filter_map(|&q| old_to_new_qubit[q]).collect();
-                    if new_qs.len() >= 2 {
-                        sub.instructions
-                            .push(Instruction::Barrier { qubits: new_qs });
-                    }
-                }
-                Instruction::Save { .. } => {}
-                Instruction::Conditional { targets, .. } => {
-                    if targets.iter().all(|&t| old_to_new_qubit[t].is_some()) {
-                        sub.instructions
-                            .push(remap_instruction(inst, &qubit_of, &cbit_of));
-                    }
-                }
-                Instruction::Region(region) => {
-                    if region
-                        .qubits()
-                        .iter()
-                        .all(|&q| old_to_new_qubit[q].is_some())
-                    {
-                        sub.instructions
-                            .push(remap_instruction(inst, &qubit_of, &cbit_of));
-                    }
-                }
-            }
-        }
-
-        (sub, qubit_set.to_vec(), classical_bits_used)
-    }
-
-    /// Extract every component in two passes over the instruction stream, rather
-    /// than one `extract_subcircuit` scan per component.
+    /// `components` must cover every qubit with no instruction spanning two of them,
+    /// as [`Circuit::independent_subsystems`] returns. Each entry is
+    /// `(sub_circuit, qubit_map, classical_map)` with `map[local] = original`.
     pub(crate) fn partition_subcircuits(
         &self,
         components: &[Vec<usize>],
@@ -554,18 +464,28 @@ impl Circuit {
             }
         }
 
-        // Pass 1: discover classical bits per component
+        // Pass 1: discover classical bits per component. A bit measured from
+        // several components gets a local index in each; the first claim stays
+        // in the flat map and later claims go to `shared_cbits`.
         let mut classical_bits_per_comp: Vec<Vec<usize>> = vec![Vec::new(); k];
         let max_cb = self.num_classical_bits.max(1);
         let mut cbit_map: Vec<Option<(usize, usize)>> = vec![None; max_cb];
+        let mut shared_cbits: HashMap<(usize, usize), usize> = HashMap::new();
 
         for_each_measure(&self.instructions, &mut |qubit, classical_bit| {
             let (comp_idx, _) = qubit_map[qubit];
-            if cbit_map[classical_bit].is_none() {
-                let new_idx = classical_bits_per_comp[comp_idx].len();
-                cbit_map[classical_bit] = Some((comp_idx, new_idx));
-                classical_bits_per_comp[comp_idx].push(classical_bit);
+            let bits = &mut classical_bits_per_comp[comp_idx];
+            match cbit_map[classical_bit] {
+                None => cbit_map[classical_bit] = Some((comp_idx, bits.len())),
+                Some((owner, _)) if owner == comp_idx => return,
+                Some(_) => match shared_cbits.entry((comp_idx, classical_bit)) {
+                    Entry::Occupied(_) => return,
+                    Entry::Vacant(slot) => {
+                        slot.insert(bits.len());
+                    }
+                },
             }
+            bits.push(classical_bit);
         });
 
         let mut subs: Vec<Circuit> = (0..k)
@@ -574,8 +494,12 @@ impl Circuit {
 
         let mut barrier_buf: Vec<SmallVec<[usize; 4]>> = (0..k).map(|_| SmallVec::new()).collect();
 
+        let local_cbit = |comp_idx: usize, c: usize| match cbit_map[c] {
+            Some((owner, nc)) if owner == comp_idx => Some(nc),
+            Some(_) => shared_cbits.get(&(comp_idx, c)).copied(),
+            None => None,
+        };
         let qubit_of = |q: usize| qubit_map[q].1;
-        let cbit_of = |c: usize| cbit_map[c].map(|(_, nc)| nc).unwrap_or(c);
 
         // Pass 2: route each instruction to its component
         for inst in &self.instructions {
@@ -594,7 +518,7 @@ impl Circuit {
                     classical_bit,
                 } => {
                     let (comp_idx, nq) = qubit_map[*qubit];
-                    if let Some((_, nc)) = cbit_map[*classical_bit] {
+                    if let Some(nc) = local_cbit(comp_idx, *classical_bit) {
                         subs[comp_idx].instructions.push(Instruction::Measure {
                             qubit: nq,
                             classical_bit: nc,
@@ -626,6 +550,7 @@ impl Circuit {
                 Instruction::Save { .. } => {}
                 Instruction::Conditional { targets, .. } => {
                     let (comp_idx, _) = qubit_map[targets[0]];
+                    let cbit_of = |c: usize| local_cbit(comp_idx, c).unwrap_or(c);
                     subs[comp_idx]
                         .instructions
                         .push(remap_instruction(inst, &qubit_of, &cbit_of));
@@ -635,6 +560,7 @@ impl Circuit {
                         continue;
                     };
                     let (comp_idx, _) = qubit_map[first];
+                    let cbit_of = |c: usize| local_cbit(comp_idx, c).unwrap_or(c);
                     subs[comp_idx]
                         .instructions
                         .push(remap_instruction(inst, &qubit_of, &cbit_of));
@@ -1803,7 +1729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_subcircuit_basic() {
+    fn test_partition_subcircuits_basic() {
         let mut c = Circuit::new(4, 2);
         c.add_gate(Gate::H, &[0]);
         c.add_gate(Gate::Cx, &[0, 1]);
@@ -1812,21 +1738,44 @@ mod tests {
         c.add_measure(0, 0);
         c.add_measure(2, 1);
 
-        let (sub, q_map, c_map) = c.extract_subcircuit(&[2, 3]);
+        let parts = c.partition_subcircuits(&c.independent_subsystems());
+        let (sub, q_map, c_map) = &parts[1];
         assert_eq!(sub.num_qubits, 2);
         assert_eq!(sub.num_classical_bits, 1);
         assert_eq!(sub.gate_count(), 2); // H(0), CX(0,1) remapped
         assert_eq!(sub.instructions.len(), 3); // 2 gates + 1 measure
-        assert_eq!(q_map, vec![2, 3]);
-        assert_eq!(c_map, vec![1]); // classical bit 1 maps to local 0
+        assert_eq!(q_map, &[2, 3]);
+        assert_eq!(c_map, &[1]); // classical bit 1 maps to local 0
     }
 
     #[test]
-    fn test_extract_subcircuit_remaps_indices() {
+    fn test_partition_subcircuits_shared_classical_bit() {
+        let mut c = Circuit::new(2, 2);
+        c.add_measure(0, 1);
+        c.add_measure(1, 0);
+        c.add_measure(1, 1);
+
+        let parts = c.partition_subcircuits(&c.independent_subsystems());
+        assert_eq!(parts[0].2, vec![1]);
+        assert_eq!(parts[1].2, vec![0, 1]);
+        let sub = &parts[1].0;
+        assert_eq!(sub.num_classical_bits, 2);
+        assert!(matches!(
+            sub.instructions[1],
+            Instruction::Measure {
+                qubit: 0,
+                classical_bit: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn test_partition_subcircuits_remaps_indices() {
         let mut c = Circuit::new(4, 0);
         c.add_gate(Gate::Cx, &[2, 3]);
 
-        let (sub, _, _) = c.extract_subcircuit(&[2, 3]);
+        let parts = c.partition_subcircuits(&c.independent_subsystems());
+        let (sub, _, _) = &parts[2];
         if let Instruction::Gate { targets, .. } = &sub.instructions[0] {
             assert_eq!(targets.as_slice(), &[0, 1]);
         } else {

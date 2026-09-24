@@ -163,3 +163,52 @@ fn a_batch_reports_the_first_failure_in_order() {
     let err = run_batch(&circuits, BackendKind::Stabilizer, SEED).unwrap_err();
     assert_eq!(err.to_string(), alone);
 }
+
+#[cfg(feature = "parallel")]
+fn on_four_workers<T: Send>(op: impl FnOnce() -> T + Send) -> T {
+    prism_q::ThreadPool::with_threads(4).unwrap().install(op)
+}
+
+#[cfg(not(feature = "parallel"))]
+fn on_four_workers<T>(op: impl FnOnce() -> T) -> T {
+    op()
+}
+
+fn assert_bitwise(batch: &prism_q::RunOutcome, solo: &prism_q::RunOutcome, what: &str) {
+    assert_eq!(batch.classical_bits, solo.classical_bits, "{what}: bits");
+    assert_eq!(
+        batch.metadata.backend, solo.metadata.backend,
+        "{what}: backend"
+    );
+    assert_eq!(
+        batch.probabilities.as_ref().map(|p| p.to_vec()),
+        solo.probabilities.as_ref().map(|p| p.to_vec()),
+        "{what}: probabilities"
+    );
+}
+
+// Workers claim circuits one at a time and keep their backend across claims, so
+// which widths a held backend meets depends on the claim order. Twenty-four
+// circuits on four workers exercise it; the answers must not move by one bit.
+#[test]
+fn a_batch_longer_than_the_pool_matches_a_sequential_loop_bitwise() {
+    let circuits: Vec<Circuit> = (0..24)
+        .map(|i| match i % 4 {
+            0 => unitary(4 + i % 7, 2, i),
+            1 => measured(3 + i % 5, i),
+            2 => unitary(9, 3, i),
+            _ => unitary(6, 1, i),
+        })
+        .collect();
+    for kind in [BackendKind::Auto, BackendKind::Statevector] {
+        let batch = on_four_workers(|| run_batch(&circuits, kind.clone(), SEED)).unwrap();
+        for (i, circuit) in circuits.iter().enumerate() {
+            let solo = simulate(circuit)
+                .backend(kind.clone())
+                .seed(SEED)
+                .run()
+                .unwrap();
+            assert_bitwise(&batch[i], &solo, &format!("{kind:?} circuit {i}"));
+        }
+    }
+}

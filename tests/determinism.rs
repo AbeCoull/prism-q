@@ -391,6 +391,44 @@ fn prepared_sweeps_bitwise_equal_across_thread_counts() {
     );
 }
 
+// Below the kernels' parallel floor a batch splits its circuits across workers,
+// each holding a backend across the circuits it claims, so which worker claims a
+// circuit, and which widths its backend met before, must not reach the result.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn run_batch_bitwise_equal_across_thread_counts() {
+    let circuits: Vec<Circuit> = (0..20)
+        .map(|i| {
+            let mut c = prism_q::circuits::hardware_efficient_ansatz(6 + i % 5, 2, SEED + i as u64);
+            if i % 3 == 0 {
+                c.num_classical_bits = c.num_qubits;
+                for q in 0..c.num_qubits {
+                    c.add_measure(q, q);
+                }
+            }
+            c
+        })
+        .collect();
+    let batch = |threads: usize| {
+        in_pool(threads, || {
+            prism_q::sim::run_batch(&circuits, BackendKind::Auto, SEED)
+                .expect("run_batch")
+                .into_iter()
+                .map(|outcome| {
+                    (
+                        outcome.classical_bits,
+                        outcome.probabilities.map(|p| p.to_vec()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    let base = batch(1);
+    for threads in [3, THREADS_HI] {
+        assert_eq!(base, batch(threads), "{threads} threads");
+    }
+}
+
 // A parameter-shift gradient below the parallel floor splits its links into one
 // chunk per worker, so the chunk boundaries move with the thread count.
 #[test]

@@ -3744,7 +3744,7 @@ fn bench_density_matrix_unitary_layers(c: &mut Criterion) {
     let mut group = c.benchmark_group("density_matrix/unitary_layers");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 10, 12] {
+    for &n in &[4, 7, 8, 10, 12] {
         let circuit = circuits::random_circuit(n, 10, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {
@@ -4329,7 +4329,13 @@ fn bench_dynamic_mid_circuit_shots(c: &mut Criterion) {
     let mut group = c.benchmark_group("dynamic/mid_circuit_shots");
     configure_group(&mut group);
 
-    for &(n, shots) in &[(6usize, 1_000usize), (10, 1_000), (12, 1_000), (16, 32)] {
+    for &(n, shots) in &[
+        (6usize, 1_000usize),
+        (10, 1_000),
+        (12, 1_000),
+        (14, 200),
+        (16, 32),
+    ] {
         let circuit = mid_circuit_rotation_circuit(n, 2);
         group.bench_with_input(
             BenchmarkId::new(format!("{n}q"), shots),

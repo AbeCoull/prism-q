@@ -631,11 +631,12 @@ outcomes = run_batch(circuits, seed=42)
 ```
 
 Results match running each circuit alone with the same seed, and a failing batch raises
-the first failure in list order. Below 14 qubits the circuits split across cores with the
-GIL released. A loop cannot do that, because each of those runs is single-threaded
-inside: a 200-point sweep of a two-layer ansatz ran 3.2x to 4.8x faster than a loop on
-a four-core host, from 4 to 12 qubits. From 14 qubits up each circuit already uses every
-core, and the batch saves only the crossing into Rust, about 2.4 microseconds a call.
+the first failure in list order. Up to 16 qubits the circuits split across cores with the
+GIL released, one circuit per core: a 200-point sweep of a two-layer ansatz ran 3.2x to
+4.8x faster than a loop on a four-core host from 4 to 12 qubits, and 5.5x and 1.9x faster
+than the batch run one circuit at a time at 14 and 16 qubits. From 17 qubits up each
+circuit uses every core itself, and the batch saves only the crossing into Rust, about
+2.4 microseconds a call.
 
 ## Parameter sweeps
 
@@ -667,7 +668,7 @@ handing to `simulate(...)` with different options or to any other consumer of a
 circuit.
 
 `run_many`, `expectation_values_many` and `observable_expectation_many` take a
-`(points, num_slots)` array and cross into Rust once. Below 14 qubits the rows
+`(points, num_slots)` array and cross into Rust once. Up to 16 qubits the rows
 split across cores, as `run_batch` does, and every result matches the single
 call with the same seed.
 

@@ -2210,11 +2210,12 @@ fn run_batch_entry(
     execute(&mut **backend, circuit, &SimOptions::default())
 }
 
-/// Width below which separate runs split across Rayon workers. Set at the kernels'
-/// parallel floor; the width where splitting runs stops beating parallel kernels
-/// has not been measured. Under miri it follows that floor down.
+/// Width below which separate runs split across Rayon workers, above the kernels'
+/// own parallel floor: on a 4-core host a 200-circuit two-layer ansatz batch split
+/// one circuit per core took 18% of the unsplit time at 14 qubits and 53% at 16, and
+/// 10% more at 18. Under miri it follows the kernels' floor down.
 #[cfg(all(feature = "parallel", not(miri)))]
-const RUN_SPLIT_QUBITS: usize = 14;
+const RUN_SPLIT_QUBITS: usize = 17;
 #[cfg(all(feature = "parallel", miri))]
 const RUN_SPLIT_QUBITS: usize = crate::backend::PARALLEL_THRESHOLD_QUBITS;
 

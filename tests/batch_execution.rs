@@ -242,3 +242,41 @@ fn a_failing_circuit_in_a_split_batch_matches_the_sequential_loop() {
     let err = on_four_workers(|| run_batch(&circuits, BackendKind::Stabilizer, SEED)).unwrap_err();
     assert_eq!(err.to_string(), sequential);
 }
+
+// From 14 to 16 qubits a batch splits across workers whose kernels parallelize
+// too, so the nested joins must leave every result as a solo run gives it.
+#[cfg(feature = "parallel")]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_split_batch_at_15_and_16_qubits_matches_a_sequential_loop_bitwise() {
+    let circuits: Vec<Circuit> = (0..6)
+        .map(|i| {
+            let mut c =
+                prism_q::circuits::hardware_efficient_ansatz(15 + i % 2, 2, SEED + i as u64);
+            if i == 3 {
+                c.num_classical_bits = c.num_qubits;
+                for q in 0..c.num_qubits {
+                    c.add_measure(q, q);
+                }
+            }
+            c
+        })
+        .collect();
+    let batch = prism_q::ThreadPool::with_threads(4)
+        .unwrap()
+        .install(|| run_batch(&circuits, BackendKind::Statevector, SEED))
+        .unwrap();
+    for (i, circuit) in circuits.iter().enumerate() {
+        let solo = simulate(circuit)
+            .backend(BackendKind::Statevector)
+            .seed(SEED)
+            .run()
+            .unwrap();
+        assert_eq!(batch[i].classical_bits, solo.classical_bits, "circuit {i}");
+        assert_eq!(
+            batch[i].probabilities.as_ref().map(|p| p.to_vec()),
+            solo.probabilities.as_ref().map(|p| p.to_vec()),
+            "circuit {i}"
+        );
+    }
+}

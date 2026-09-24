@@ -32,7 +32,7 @@ use prism_q::sim;
 const EPS: f64 = 1e-12;
 const MPS_EPS: f64 = 1e-10;
 
-/// Statevector switches to Rayon kernels at 14 qubits, so the 16q and 20q rows
+/// Statevector switches to Rayon kernels at 15 qubits, so the 16q and 20q rows
 /// compare a parallel run against a sequential backend. Reductions pair their
 /// partial sums differently there, which costs a few ulp.
 const PAR_EPS: f64 = 1e-10;

@@ -277,7 +277,7 @@ impl Backend for ProductStateBackend {
         let dim = dense_probability_len(self.name(), self.num_qubits)?;
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= 14 {
+        if self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use rayon::prelude::*;
             let n = self.num_qubits;
             let qubit_probs: Vec<[f64; 2]> = self
@@ -393,7 +393,7 @@ impl Backend for ProductStateBackend {
         let dim = dense_statevector_len(self.name(), "statevector export", self.num_qubits)?;
 
         #[cfg(feature = "parallel")]
-        if self.num_qubits >= 14 {
+        if self.num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
             use rayon::prelude::*;
             let n = self.num_qubits;
             let qubits = &self.qubits;

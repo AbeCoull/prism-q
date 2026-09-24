@@ -19,7 +19,7 @@ pub(super) fn should_decompose(components: &[Vec<usize>], total_qubits: usize) -
 }
 
 #[cfg(feature = "parallel")]
-const MAX_BLOCK_QUBITS_FOR_PAR: usize = 14;
+const MAX_BLOCK_QUBITS_FOR_PAR: usize = crate::backend::PARALLEL_THRESHOLD_QUBITS;
 
 fn run_blocks_maybe_par(
     kind: &BackendKind,

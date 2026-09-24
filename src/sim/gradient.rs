@@ -551,7 +551,7 @@ fn build_lambda_and_value(
 ///
 /// Unlike [`run_expectation_gradient`] this places no ceiling on the qubit
 /// count of its own: it inherits whatever the selected backend can represent,
-/// holding one backend state at a time from 14 qubits up. Below that, under the
+/// holding one backend state at a time from 17 qubits up. Below that, under the
 /// `parallel` feature, the shifted evaluations split across Rayon workers with a
 /// state each, and the gradient is bit-identical to the sequential sum. It also
 /// accepts `QftBlock`. The price is `1 + 2 * params.links().len()` circuit
@@ -1085,19 +1085,19 @@ mod tests {
 
     #[test]
     fn parallel_threshold_width_matches_parameter_shift() {
-        // 2^14 amplitudes, the width at which the gather fans out to Rayon.
-        let mut c = Circuit::new(14, 0);
+        // 2^15 amplitudes, the width at which the gather fans out to Rayon.
+        let mut c = Circuit::new(15, 0);
         c.add_gate(Gate::Ry(0.3), &[0]);
         c.add_gate(Gate::Cx, &[0, 7]);
         c.add_gate(Gate::Rx(0.8), &[7]);
-        c.add_gate(Gate::Cx, &[7, 13]);
-        c.add_gate(Gate::Rz(0.5), &[13]);
+        c.add_gate(Gate::Cx, &[7, 14]);
+        c.add_gate(Gate::Rz(0.5), &[14]);
         let params = Parameters::all_rotations(&c);
 
         let obs = vec![
             (1.0, vec![PauliTerm::z(0)]),
             (0.5, vec![PauliTerm::x(7)]),
-            (-0.25, vec![PauliTerm::y(7), PauliTerm::z(13)]),
+            (-0.25, vec![PauliTerm::y(7), PauliTerm::z(14)]),
             (0.75, vec![PauliTerm::x(7), PauliTerm::z(0)]),
         ];
         let adjoint = run_expectation_gradient(&c, &obs, &params, 42).unwrap();

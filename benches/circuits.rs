@@ -2562,13 +2562,14 @@ fn bench_gradient_prefix(c: &mut Criterion) {
     group.finish();
 }
 
-/// Parameter shift below the kernels' parallel floor, where each of the `2P`
-/// shifted evaluations runs on one thread.
+/// Parameter shift on either side of the kernels' parallel floor: below 14 qubits
+/// the `2P` shifted evaluations split across workers, from 14 up each runs on
+/// parallel kernels.
 fn bench_gradient_shift_small(c: &mut Criterion) {
     let mut group = c.benchmark_group("gradient/shift_small");
     configure_group(&mut group);
 
-    for &n in &[8, 10, 12] {
+    for &n in &[8, 10, 12, 14, 16] {
         let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
         let params = Parameters::all_rotations(&circuit);
         let ham = z_chain_hamiltonian(n);
@@ -2583,13 +2584,13 @@ fn bench_gradient_shift_small(c: &mut Criterion) {
 /// A 200-point parameter sweep: one ansatz shape, fresh angles per point. `loop`
 /// runs each circuit on its own and is the control for `run_batch`.
 fn bench_batch_sweep(c: &mut Criterion) {
-    const POINTS: u64 = 200;
-
     let mut group = c.benchmark_group("batch/hea_l2_sweep");
     configure_group(&mut group);
 
-    for &n in &[4, 8, 10, 12] {
-        let sweep: Vec<Circuit> = (0..POINTS)
+    for &n in &[4, 8, 10, 12, 14, 16, 18] {
+        // 50 points at 18 qubits keeps an iteration under about 500 ms.
+        let points: u64 = if n >= 18 { 50 } else { 200 };
+        let sweep: Vec<Circuit> = (0..points)
             .map(|k| circuits::hardware_efficient_ansatz(n, 2, SEED + k))
             .collect();
         group.bench_with_input(BenchmarkId::new("run_batch", n), &sweep, |b, sweep| {

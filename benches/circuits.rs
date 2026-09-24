@@ -3483,6 +3483,11 @@ fn bench_compiled_sampler(c: &mut Criterion) {
             b.iter(|| sampler.sample_bulk_packed(10_000));
         });
 
+        let compile_id = format!("clifford_{n}q");
+        group.bench_function(BenchmarkId::new("compile_forward", &compile_id), |b| {
+            b.iter(|| prism_q::compile_forward(&circuit, SEED).unwrap());
+        });
+
         let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
         let id_noisy = format!("noisy_{}q_10k", n);
         group.bench_function(BenchmarkId::new("noisy", &id_noisy), |b| {

@@ -1474,13 +1474,6 @@ pub(super) fn colmajor_forward_sim(
         z_cols[q][stab_row / 64] |= 1u64 << (stab_row % 64);
     }
 
-    #[cfg(target_arch = "x86_64")]
-    let use_avx2 = row_words >= 4 && is_x86_feature_detected!("avx2");
-    #[cfg(not(target_arch = "x86_64"))]
-    let use_avx2 = false;
-    #[cfg(target_arch = "aarch64")]
-    let use_neon = row_words >= 2;
-
     for inst in instructions {
         let (gate, targets) = match inst {
             Instruction::Gate { gate, targets } => (gate, targets.as_slice()),
@@ -1488,336 +1481,14 @@ pub(super) fn colmajor_forward_sim(
             _ => continue,
         };
 
-        match gate {
-            Gate::H => {
-                let q = targets[0];
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected, slices have row_words elements
-                    unsafe {
-                        batch_propagate_h_avx2(
-                            &mut x_cols[q],
-                            &mut z_cols[q],
-                            &mut phase,
-                            row_words,
-                        )
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64
-                        unsafe {
-                            batch_propagate_h_neon(
-                                &mut x_cols[q],
-                                &mut z_cols[q],
-                                &mut phase,
-                                row_words,
-                            )
-                        };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= x_cols[q][w] & z_cols[q][w];
-                    }
-                    std::mem::swap(&mut x_cols[q], &mut z_cols[q]);
-                }
-            }
-            Gate::S => {
-                let q = targets[0];
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected
-                    unsafe {
-                        batch_propagate_s_avx2(
-                            &mut x_cols[q],
-                            &mut z_cols[q],
-                            &mut phase,
-                            row_words,
-                            false,
-                        )
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64
-                        unsafe {
-                            batch_propagate_s_neon(
-                                &mut x_cols[q],
-                                &mut z_cols[q],
-                                &mut phase,
-                                row_words,
-                                false,
-                            )
-                        };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= x_cols[q][w] & z_cols[q][w];
-                        z_cols[q][w] ^= x_cols[q][w];
-                    }
-                }
-            }
-            Gate::Sdg => {
-                let q = targets[0];
-                for w in 0..row_words {
-                    z_cols[q][w] ^= x_cols[q][w];
-                    phase[w] ^= x_cols[q][w] & z_cols[q][w];
-                }
-            }
-            Gate::X => {
-                let q = targets[0];
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected
-                    unsafe {
-                        batch_propagate_sign_xor_avx2(&mut phase, &z_cols[q], row_words)
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64
-                        unsafe { batch_propagate_sign_xor_neon(&mut phase, &z_cols[q], row_words) };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= z_cols[q][w];
-                    }
-                }
-            }
-            Gate::Y => {
-                let q = targets[0];
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected
-                    unsafe {
-                        batch_propagate_sign_xor2_avx2(
-                            &mut phase, &x_cols[q], &z_cols[q], row_words,
-                        )
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64
-                        unsafe {
-                            batch_propagate_sign_xor2_neon(
-                                &mut phase, &x_cols[q], &z_cols[q], row_words,
-                            )
-                        };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= x_cols[q][w] ^ z_cols[q][w];
-                    }
-                }
-            }
-            Gate::Z => {
-                let q = targets[0];
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected
-                    unsafe {
-                        batch_propagate_sign_xor_avx2(&mut phase, &x_cols[q], row_words)
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64
-                        unsafe { batch_propagate_sign_xor_neon(&mut phase, &x_cols[q], row_words) };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= x_cols[q][w];
-                    }
-                }
-            }
-            Gate::Id => {}
-            Gate::SX => {
-                let q = targets[0];
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected
-                    unsafe {
-                        batch_propagate_sx_avx2(
-                            &mut x_cols[q],
-                            &z_cols[q],
-                            &mut phase,
-                            row_words,
-                            true,
-                        )
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64
-                        unsafe {
-                            batch_propagate_sx_neon(
-                                &mut x_cols[q],
-                                &z_cols[q],
-                                &mut phase,
-                                row_words,
-                                true,
-                            )
-                        };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= !x_cols[q][w] & z_cols[q][w];
-                        x_cols[q][w] ^= z_cols[q][w];
-                    }
-                }
-            }
-            Gate::SXdg => {
-                let q = targets[0];
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected
-                    unsafe {
-                        batch_propagate_sx_avx2(
-                            &mut x_cols[q],
-                            &z_cols[q],
-                            &mut phase,
-                            row_words,
-                            false,
-                        )
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64
-                        unsafe {
-                            batch_propagate_sx_neon(
-                                &mut x_cols[q],
-                                &z_cols[q],
-                                &mut phase,
-                                row_words,
-                                false,
-                            )
-                        };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= x_cols[q][w] & z_cols[q][w];
-                        x_cols[q][w] ^= z_cols[q][w];
-                    }
-                }
-            }
-            Gate::Cx => {
-                let ctrl = targets[0];
-                let tgt = targets[1];
-                let (xc_sl, xt_sl) = if ctrl < tgt {
-                    let (lo, hi) = x_cols.split_at_mut(tgt);
-                    (&lo[ctrl][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = x_cols.split_at_mut(ctrl);
-                    (&hi[0][..], &mut lo[tgt][..])
-                };
-                let (zc_sl, zt_sl) = if ctrl < tgt {
-                    let (lo, hi) = z_cols.split_at_mut(tgt);
-                    (&mut lo[ctrl][..], &hi[0][..])
-                } else {
-                    let (lo, hi) = z_cols.split_at_mut(ctrl);
-                    (&mut hi[0][..], &lo[tgt][..])
-                };
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected, ctrl != tgt
-                    unsafe {
-                        batch_propagate_cx_avx2(xc_sl, zc_sl, xt_sl, zt_sl, &mut phase, row_words)
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64, ctrl != tgt
-                        unsafe {
-                            batch_propagate_cx_neon(
-                                xc_sl, zc_sl, xt_sl, zt_sl, &mut phase, row_words,
-                            )
-                        };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= xc_sl[w] & zt_sl[w] & !(zc_sl[w] ^ xt_sl[w]);
-                        xt_sl[w] ^= xc_sl[w];
-                        zc_sl[w] ^= zt_sl[w];
-                    }
-                }
-            }
-            Gate::Cz => {
-                let q0 = targets[0];
-                let q1 = targets[1];
-                let (x0_sl, x1_sl) = if q0 < q1 {
-                    let (lo, hi) = x_cols.split_at_mut(q1);
-                    (&lo[q0][..], &hi[0][..])
-                } else {
-                    let (lo, hi) = x_cols.split_at_mut(q0);
-                    (&hi[0][..], &lo[q1][..])
-                };
-                let (z0_sl, z1_sl) = if q0 < q1 {
-                    let (lo, hi) = z_cols.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = z_cols.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected, q0 != q1
-                    unsafe {
-                        batch_propagate_cz_avx2(x0_sl, z0_sl, x1_sl, z1_sl, &mut phase, row_words)
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64, q0 != q1
-                        unsafe {
-                            batch_propagate_cz_neon(
-                                x0_sl, z0_sl, x1_sl, z1_sl, &mut phase, row_words,
-                            )
-                        };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        phase[w] ^= x0_sl[w] & x1_sl[w] & (z0_sl[w] ^ z1_sl[w]);
-                        z0_sl[w] ^= x1_sl[w];
-                        z1_sl[w] ^= x0_sl[w];
-                    }
-                }
-            }
-            Gate::Swap => {
-                let q0 = targets[0];
-                let q1 = targets[1];
-                let (x0_sl, x1_sl) = if q0 < q1 {
-                    let (lo, hi) = x_cols.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = x_cols.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
-                let (z0_sl, z1_sl) = if q0 < q1 {
-                    let (lo, hi) = z_cols.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = z_cols.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
-                if use_avx2 {
-                    #[cfg(target_arch = "x86_64")]
-                    // SAFETY: AVX2 detected, q0 != q1
-                    unsafe {
-                        batch_propagate_swap_avx2(x0_sl, z0_sl, x1_sl, z1_sl, row_words)
-                    };
-                } else {
-                    #[cfg(target_arch = "aarch64")]
-                    if use_neon {
-                        // SAFETY: NEON is baseline on aarch64, q0 != q1
-                        unsafe { batch_propagate_swap_neon(x0_sl, z0_sl, x1_sl, z1_sl, row_words) };
-                        continue;
-                    }
-                    for w in 0..row_words {
-                        std::mem::swap(&mut x0_sl[w], &mut x1_sl[w]);
-                        std::mem::swap(&mut z0_sl[w], &mut z1_sl[w]);
-                    }
-                }
+        // Forward conjugation G·P·G† is the backward step by G†.
+        let backward_gate = match gate {
+            Gate::S => &Gate::Sdg,
+            Gate::Sdg => &Gate::S,
+            Gate::SX => &Gate::SXdg,
+            Gate::SXdg => &Gate::SX,
+            Gate::H | Gate::X | Gate::Y | Gate::Z | Gate::Id | Gate::Cx | Gate::Cz | Gate::Swap => {
+                gate
             }
             _ => {
                 return Err(PrismError::IncompatibleBackend {
@@ -1825,7 +1496,15 @@ pub(super) fn colmajor_forward_sim(
                     reason: format!("unsupported gate {:?} in column-major forward sim", gate),
                 });
             }
-        }
+        };
+        batch_propagate_backward(
+            &mut x_cols,
+            &mut z_cols,
+            &mut phase,
+            backward_gate,
+            targets,
+            row_words,
+        );
     }
 
     let stride = 2 * nw;
@@ -2113,5 +1792,66 @@ mod tests {
         batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::H, &[0], m_words);
         batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::S, &[1], m_words);
         batch_propagate_backward(&mut x, &mut z, &mut sign, &Gate::Cx, &[0, 1], m_words);
+    }
+
+    #[test]
+    fn colmajor_forward_sim_matches_stabilizer_tableau() {
+        use crate::backend::Backend;
+        use crate::backend::stabilizer::StabilizerBackend;
+        use rand::{RngExt, SeedableRng};
+
+        let one_qubit = [
+            Gate::H,
+            Gate::S,
+            Gate::Sdg,
+            Gate::X,
+            Gate::Y,
+            Gate::Z,
+            Gate::Id,
+            Gate::SX,
+            Gate::SXdg,
+        ];
+        let two_qubit = [Gate::Cx, Gate::Cz, Gate::Swap];
+
+        // Row words are 2n/64: 97 and 130 reach the AVX2 threshold of four, 130 and 300
+        // add tail words past the vector chunks.
+        for n in [5, 64, 97, 130, 300] {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
+            let mut c = Circuit::new(n, 0);
+            for _ in 0..12 * n {
+                if rng.random_range(0..3) == 0 {
+                    let a = rng.random_range(0..n);
+                    let b = (a + rng.random_range(1..n)) % n;
+                    c.add_gate(
+                        two_qubit[rng.random_range(0..two_qubit.len())].clone(),
+                        &[a, b],
+                    );
+                } else {
+                    let q = rng.random_range(0..n);
+                    c.add_gate(
+                        one_qubit[rng.random_range(0..one_qubit.len())].clone(),
+                        &[q],
+                    );
+                }
+            }
+
+            let (xz, phase, nw) = colmajor_forward_sim(n, &c.instructions).unwrap();
+
+            let mut reference = StabilizerBackend::new(42);
+            reference.init(n, 0).unwrap();
+            reference.apply_gates_only(&c.instructions).unwrap();
+            let (ref_xz, ref_phase) = reference.export_tableau().unwrap();
+
+            assert_eq!(
+                xz[..],
+                ref_xz[..2 * n * 2 * nw],
+                "tableau bits differ at n={n}"
+            );
+            assert_eq!(
+                phase[..],
+                ref_phase[..2 * n],
+                "tableau signs differ at n={n}"
+            );
+        }
     }
 }

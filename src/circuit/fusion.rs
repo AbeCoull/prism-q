@@ -56,7 +56,7 @@ const MIN_QUBITS_FOR_2Q_FUSION: usize = 12;
 #[cfg(miri)]
 const MIN_QUBITS_FOR_2Q_FUSION: usize = 8;
 
-/// A/B kill switch: setting `PRISM_NO_REORDER` disables `reorder_disjoint_fused2q`. Read
+/// A/B kill switch: setting `PRISM_NO_REORDER` disables `reorder_fused2q_into_tiles`. Read
 /// once per process.
 #[inline]
 fn reorder_2q_enabled() -> bool {
@@ -948,62 +948,39 @@ fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<
     }
 }
 
-/// Reorder consecutive `Fused2q` gates with pairwise-disjoint supports so that gates
-/// sharing one subcube tile sit next to each other. Disjoint 2q gates commute.
+/// Reorder each run of consecutive `Fused2q` gates so that gates sharing one subcube
+/// tile sit next to each other, ready for `fuse_multi_2q_gates` to batch.
 ///
-/// Quantum Volume interleaves high qubits, so without this pass a gate on a fresh high
-/// qubit ends the `fuse_multi_2q_gates` run every one or two gates. Returns the input
-/// when nothing moves.
-pub(crate) fn reorder_disjoint_fused2q<'a>(
+/// Each tile is filled by one scan of the run in order: a gate joins while it fits
+/// the tile and no gate skipped earlier in the scan shares a qubit with it, so every
+/// move commutes a gate past disjoint ones only. Quantum volume at 24 qubits takes 31
+/// passes over the state, against 54 when each layer is packed on its own. Returns the
+/// input when nothing moves.
+pub(crate) fn reorder_fused2q_into_tiles<'a>(
     input: Cow<'a, Circuit>,
     t: &mut Tracer,
 ) -> Cow<'a, Circuit> {
     let circuit = input.as_ref();
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
     let mut window: Vec<(Instruction, usize)> = Vec::new();
-    let mut window_qubits = vec![false; circuit.num_qubits];
+    let mut blocked = vec![false; circuit.num_qubits];
     let mut changed = false;
     t.begin();
 
     for (i, inst) in circuit.instructions.iter().enumerate() {
         if let Instruction::Gate {
             gate: Gate::Fused2q(_),
-            targets,
+            ..
         } = inst
         {
-            let q0 = targets[0];
-            let q1 = targets[1];
-            if window_qubits[q0] || window_qubits[q1] {
-                flush_disjoint_window(
-                    &mut window,
-                    &mut window_qubits,
-                    &mut output,
-                    &mut changed,
-                    t,
-                );
-            }
-            window_qubits[q0] = true;
-            window_qubits[q1] = true;
             window.push((inst.clone(), i));
         } else {
-            flush_disjoint_window(
-                &mut window,
-                &mut window_qubits,
-                &mut output,
-                &mut changed,
-                t,
-            );
+            flush_tile_window(&mut window, &mut blocked, &mut output, &mut changed, t);
             output.push(inst.clone());
             t.keep(i);
         }
     }
-    flush_disjoint_window(
-        &mut window,
-        &mut window_qubits,
-        &mut output,
-        &mut changed,
-        t,
-    );
+    flush_tile_window(&mut window, &mut blocked, &mut output, &mut changed, t);
 
     if changed {
         t.commit();
@@ -1014,36 +991,59 @@ pub(crate) fn reorder_disjoint_fused2q<'a>(
     }
 }
 
-/// Emit a window of disjoint `Fused2q` gates packed first-fit into groups that
-/// each fit one subcube tile, in the window's own order within a group.
-fn flush_disjoint_window(
+/// Emit a run of `Fused2q` gates one tile at a time. A scan stops looking once it
+/// has skipped twice as many gates as there are qubits, which keeps long runs
+/// linear and lost no pass on quantum volume, HEA or random circuits.
+fn flush_tile_window(
     window: &mut Vec<(Instruction, usize)>,
-    window_qubits: &mut [bool],
+    blocked: &mut [bool],
     output: &mut Vec<Instruction>,
     changed: &mut bool,
     t: &mut Tracer,
 ) {
-    let mut groups: Vec<(SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>, Vec<usize>)> = Vec::new();
-    for (k, (inst, _)) in window.iter().enumerate() {
-        let Instruction::Gate { targets, .. } = inst else {
+    let pair = |k: usize| {
+        let Instruction::Gate { targets, .. } = &window[k].0 else {
             unreachable!("the window holds Fused2q gates only");
         };
-        let (q0, q1) = (targets[0], targets[1]);
-        let slot = groups
-            .iter()
-            .position(|(high, _)| multi_2q_join(high, q0, q1).is_some());
-        match slot {
-            Some(g) => {
-                groups[g].0 = multi_2q_join(&groups[g].0, q0, q1).expect("fits, checked above");
-                groups[g].1.push(k);
+        (targets[0], targets[1])
+    };
+    let skip_limit = 2 * blocked.len();
+    let mut rest: Vec<usize> = (0..window.len()).collect();
+    let mut order: Vec<usize> = Vec::with_capacity(window.len());
+    let mut left: Vec<usize> = Vec::new();
+    while !rest.is_empty() {
+        let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
+        for (pos, &k) in rest.iter().enumerate() {
+            if left.len() >= skip_limit {
+                left.extend_from_slice(&rest[pos..]);
+                break;
             }
-            None => {
-                let high = multi_2q_join(&[], q0, q1).expect("one pair fits a tile");
-                groups.push((high, vec![k]));
+            let (q0, q1) = pair(k);
+            let joined = if blocked[q0] || blocked[q1] {
+                None
+            } else {
+                multi_2q_join(&high, q0, q1)
+            };
+            match joined {
+                Some(joined) => {
+                    high = joined;
+                    order.push(k);
+                }
+                None => {
+                    blocked[q0] = true;
+                    blocked[q1] = true;
+                    left.push(k);
+                }
             }
         }
+        for &k in &left {
+            let (q0, q1) = pair(k);
+            blocked[q0] = false;
+            blocked[q1] = false;
+        }
+        std::mem::swap(&mut rest, &mut left);
+        left.clear();
     }
-    let order: Vec<usize> = groups.into_iter().flat_map(|(_, m)| m).collect();
     if order.iter().enumerate().any(|(pos, &k)| pos != k) {
         *changed = true;
     }
@@ -1052,9 +1052,6 @@ fn flush_disjoint_window(
         let (inst, src) = taken[k].take().expect("each window slot is emitted once");
         output.push(inst);
         t.keep(src);
-    }
-    for q in window_qubits.iter_mut() {
-        *q = false;
     }
 }
 
@@ -1421,7 +1418,7 @@ fn fuse_at_width<'a>(circuit: &'a Circuit, n: usize, t: &mut Tracer) -> Cow<'a, 
         fuse_multi_1q_gates(c, t)
     });
     let pass_2qr = if n >= MIN_QUBITS_FOR_MULTI_2Q_FUSION && reorder_2q_enabled() {
-        reorder_disjoint_fused2q(pass2, t)
+        reorder_fused2q_into_tiles(pass2, t)
     } else {
         pass2
     };

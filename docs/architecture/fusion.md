@@ -22,7 +22,7 @@ flowchart TD
     P1f --> P2q["fuse_2q_gates (>=12q): CX/CZ + adjacent 1q to Fused2q"]
     P2q --> P2qb["fuse_same_pair_2q_blocks (>=12q)"]
     P2qb --> P2["fuse_multi_1q_gates (>=14q) to MultiFused"]
-    P2 --> P2qr["reorder_disjoint_fused2q (>=12q)"]
+    P2 --> P2qr["reorder_fused2q_into_tiles (>=12q)"]
     P2qr --> Pm2q["fuse_multi_2q_gates (>=12q) to Multi2q"]
     Pm2q --> Pcp["fuse_controlled_phases (>=16q) to BatchPhase"]
     Pcp --> Pdb["fuse_diagonal_batch (>=16q) to DiagonalBatch"]

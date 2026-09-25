@@ -186,6 +186,8 @@ fn ansatz_cases() -> Vec<(&'static str, Circuit)> {
         ("qaoa/12", circuits::qaoa_circuit(12, 2, SEED)),
         ("qaoa/16", circuits::qaoa_circuit(16, 2, SEED)),
         ("qaoa/20", circuits::qaoa_circuit(20, 2, SEED)),
+        ("qv/12", circuits::quantum_volume_circuit(12, 3, SEED)),
+        ("qv/16", circuits::quantum_volume_circuit(16, 2, SEED)),
     ]
 }
 

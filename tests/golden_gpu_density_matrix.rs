@@ -474,6 +474,19 @@ fn dm_gpu_measure_reset_and_conditional_match_cpu() {
     );
 }
 
+// A trailing 1q layer folds back into the last Fused2q on each qubit, so the
+// rotation tail sits behind a SWAP layer to stay a MultiFused.
+fn random_with_rotation_tail(n: usize) -> Circuit {
+    let mut c = circuits::random_circuit(n, 4, SEED);
+    for q in (0..n - 1).step_by(2) {
+        c.add_gate(Gate::Swap, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::Rx(0.3 + 0.1 * q as f64), &[q]);
+    }
+    c
+}
+
 #[test]
 fn dm_gpu_fused_stream_matches_unfused_cpu() {
     // The device path serves the same fused payloads the host accepts, and the
@@ -493,7 +506,7 @@ fn dm_gpu_fused_stream_matches_unfused_cpu() {
         ),
         (
             "random",
-            circuits::random_circuit(N, 4, SEED),
+            random_with_rotation_tail(N),
             &[("Multi2q", 1), ("MultiFused", 1)][..],
         ),
     ] {

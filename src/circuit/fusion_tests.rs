@@ -1099,6 +1099,94 @@ fn same_pair_2q_block_leaves_diagonal_runs() {
     assert_eq!(after, 2, "all-diagonal Fused2q runs should stay split");
 }
 
+fn final_state(circuit: &Circuit) -> Vec<Complex64> {
+    use crate::backend::statevector::StatevectorBackend;
+    let mut b = StatevectorBackend::new(42);
+    b.init(circuit.num_qubits, circuit.num_classical_bits)
+        .unwrap();
+    for inst in &circuit.instructions {
+        b.apply(inst).unwrap();
+    }
+    b.export_statevector().unwrap()
+}
+
+fn assert_same_state(a: &Circuit, b: &Circuit) {
+    for (i, (x, y)) in final_state(a).iter().zip(&final_state(b)).enumerate() {
+        assert!((x - y).norm() < 1e-12, "amp[{i}]: {x} vs {y}");
+    }
+}
+
+#[test]
+fn trailing_1q_folds_back_into_its_fused2q_on_either_target() {
+    let mut c = Circuit::new(12, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Rx(0.3), &[2]);
+    c.add_gate(Gate::Cx, &[2, 3]);
+    c.add_gate(Gate::Ry(0.4), &[0]);
+    c.add_gate(Gate::Ry(0.9), &[3]);
+
+    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    assert_eq!(fused.instructions.len(), 2);
+    assert_eq!(count_fused_2q(&fused), 2);
+    assert_same_state(&c, &fused);
+}
+
+#[test]
+fn trailing_1q_does_not_fold_past_a_later_gate_on_its_qubit() {
+    let mut c = Circuit::new(12, 0);
+    c.add_gate(Gate::H, &[0]);
+    c.add_gate(Gate::Cx, &[0, 1]);
+    c.add_gate(Gate::Cx, &[0, 2]);
+    c.add_gate(Gate::Ry(0.4), &[0]);
+
+    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    assert!(matches!(
+        fused.instructions.last(),
+        Some(Instruction::Gate { gate: Gate::Fused(_), targets }) if targets.as_slice() == [0]
+    ));
+    assert_same_state(&c, &fused);
+}
+
+#[test]
+fn trailing_1q_keeps_a_diagonal_fused2q_diagonal() {
+    let mut c = Circuit::new(12, 0);
+    c.add_gate(Gate::Rz(0.3), &[0]);
+    c.add_gate(Gate::Cz, &[0, 1]);
+    c.add_gate(Gate::T, &[1]);
+    c.add_gate(Gate::Ry(0.4), &[0]);
+
+    let fused = fuse_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    assert_eq!(fused.instructions.len(), 2, "T folds, Ry stays out");
+    let Instruction::Gate {
+        gate: Gate::Fused2q(m),
+        ..
+    } = &fused.instructions[0]
+    else {
+        panic!("expected a Fused2q first");
+    };
+    assert!(is_diagonal_4x4(m));
+    assert_same_state(&c, &fused);
+}
+
+#[test]
+fn qv_leaves_no_1q_gate_after_fusion() {
+    let c = crate::circuits::quantum_volume_circuit(20, 3, 42);
+    let fused = fuse_circuit(&c, true);
+    for inst in &fused.instructions {
+        assert!(
+            matches!(
+                inst,
+                Instruction::Gate {
+                    gate: Gate::Fused2q(_) | Gate::Multi2q(_),
+                    ..
+                }
+            ),
+            "{inst:?}"
+        );
+    }
+}
+
 #[test]
 fn fuse_1q_returns_borrowed_without_consecutive_pair() {
     let mut c = Circuit::new(12, 0);

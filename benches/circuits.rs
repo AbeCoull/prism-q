@@ -870,7 +870,7 @@ fn bench_statevector_qv(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qv");
     configure_group(&mut group);
 
-    for &n in &[8, 12, 16, 20] {
+    for &n in &[8, 12, 16, 20, 22, 24] {
         let circuit = circuits::quantum_volume_circuit(n, n, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {

@@ -1257,6 +1257,51 @@ fn tile_reorder_pulls_later_gates_ahead_of_a_skipped_gate_on_other_qubits() {
 }
 
 #[test]
+fn multi_2q_batches_bare_cx_and_swap_with_fused_gates() {
+    let mut c = Circuit::new(20, 0);
+    for q in 0..20 {
+        c.add_gate(Gate::Ry(0.05 * q as f64 + 0.1), &[q]);
+    }
+    let dense = Gate::Fused2q(Box::new(mat_mul_4x4(
+        &Gate::Cx.matrix_4x4(),
+        &kron_2x2(&Gate::H.matrix_2x2(), &Gate::S.matrix_2x2()),
+    )));
+    c.add_gate(dense.clone(), &[6, 7]);
+    c.add_gate(Gate::Cx, &[7, 8]);
+    c.add_gate(Gate::Swap, &[8, 9]);
+    c.add_gate(dense, &[9, 10]);
+    let batched = fuse_multi_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    let tail: Vec<&str> = batched.instructions[20..]
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Gate { gate, .. } => gate.name(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(tail, ["multi_2q"]);
+    assert_same_state(&c, &batched);
+}
+
+#[test]
+fn multi_2q_keeps_a_lone_cx_on_its_own_kernel() {
+    let mut c = Circuit::new(20, 0);
+    c.add_gate(Gate::Cx, &[6, 7]);
+    c.add_gate(Gate::Swap, &[7, 8]);
+    c.add_gate(Gate::H, &[9]);
+    c.add_gate(Gate::Cx, &[9, 10]);
+    let batched = fuse_multi_2q_gates(Cow::Borrowed(&c), &mut Tracer::off());
+    let names: Vec<&str> = batched
+        .instructions
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Gate { gate, .. } => gate.name(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(names, ["multi_2q", "h", "cx"]);
+}
+
+#[test]
 fn fuse_controlled_phases_returns_borrowed_without_batchable_chain() {
     let one = Complex64::new(1.0, 0.0);
     let zero = Complex64::new(0.0, 0.0);

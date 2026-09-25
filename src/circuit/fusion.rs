@@ -948,7 +948,19 @@ fn fuse_same_pair_2q_blocks<'a>(input: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<
     }
 }
 
-/// Reorder each run of consecutive `Fused2q` gates so that gates sharing one subcube
+/// A 2q gate a `Multi2q` tile can carry as its dense 4x4. Diagonal gates stay out, since
+/// the diagonal batch passes serve them without a dense multiply.
+fn is_tileable_2q(inst: &Instruction) -> bool {
+    matches!(
+        inst,
+        Instruction::Gate {
+            gate: Gate::Fused2q(_) | Gate::Cx | Gate::Swap,
+            targets,
+        } if targets.len() == 2
+    )
+}
+
+/// Reorder each run of consecutive tileable 2q gates so that gates sharing one subcube
 /// tile sit next to each other, ready for `fuse_multi_2q_gates` to batch.
 ///
 /// Each tile is filled by one scan of the run in order: a gate joins while it fits
@@ -968,11 +980,7 @@ pub(crate) fn reorder_fused2q_into_tiles<'a>(
     t.begin();
 
     for (i, inst) in circuit.instructions.iter().enumerate() {
-        if let Instruction::Gate {
-            gate: Gate::Fused2q(_),
-            ..
-        } = inst
-        {
+        if is_tileable_2q(inst) {
             window.push((inst.clone(), i));
         } else {
             flush_tile_window(&mut window, &mut blocked, &mut output, &mut changed, t);
@@ -1003,7 +1011,7 @@ fn flush_tile_window(
 ) {
     let pair = |k: usize| {
         let Instruction::Gate { targets, .. } = &window[k].0 else {
-            unreachable!("the window holds Fused2q gates only");
+            unreachable!("the window holds tileable 2q gates only");
         };
         (targets[0], targets[1])
     };
@@ -1055,12 +1063,14 @@ fn flush_tile_window(
     }
 }
 
-/// Batch consecutive `Fused2q` gates into `Multi2q` for cache-tiled execution.
+/// Batch consecutive tileable 2q gates (`Fused2q`, `Cx`, `Swap`) into `Multi2q` for
+/// cache-tiled execution.
 ///
-/// A run of consecutive `Fused2q` instructions grows while its gates fit one
+/// A run of consecutive tileable gates grows while its gates fit one
 /// subcube tile: at most [`MULTI_2Q_HIGH_BUDGET`] distinct qubits at or above
 /// the tile's low bits. Each run of two or more gates becomes one `Multi2q`
-/// that the statevector backend applies in one pass over the state.
+/// that the statevector backend applies in one pass over the state. A run of one keeps
+/// its original instruction, so a lone `Cx` stays on its permutation kernel.
 ///
 /// Returns the input unchanged when no batch forms.
 pub(crate) fn fuse_multi_2q_gates<'a>(
@@ -1072,6 +1082,7 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
     let mut pending_src: Vec<usize> = Vec::new();
     let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
     let mut changed = false;
+    let source = &circuit.instructions;
 
     let flush = |pending: &mut Vec<(usize, usize, [[Complex64; 4]; 4])>,
                  pending_src: &mut Vec<usize>,
@@ -1084,16 +1095,11 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
             return;
         }
         if pending.len() < MIN_MULTI_2Q_BATCH {
-            for (k, (q0, q1, mat)) in pending.drain(..).enumerate() {
-                output.push(Instruction::Gate {
-                    gate: Gate::Fused2q(Box::new(mat)),
-                    targets: smallvec![q0, q1],
-                });
-                if tracer.on {
-                    tracer.keep(pending_src[k]);
-                }
+            pending.clear();
+            for src in pending_src.drain(..) {
+                output.push(source[src].clone());
+                tracer.keep(src);
             }
-            pending_src.clear();
         } else {
             let mut all_qubits: SmallVec<[usize; 4]> = SmallVec::new();
             for &(q0, q1, _) in pending.iter() {
@@ -1109,11 +1115,12 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
             });
             if tracer.on {
                 let entries: Vec<Vec<(usize, Place)>> = pending_src
-                    .drain(..)
-                    .map(|src| vec![(src, Place::Plain)])
+                    .iter()
+                    .map(|&src| vec![(src, Place::Plain)])
                     .collect();
                 tracer.batch(&entries);
             }
+            pending_src.clear();
             *changed = true;
         }
     };
@@ -1121,10 +1128,7 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
     tracer.begin();
     for (i, inst) in circuit.instructions.iter().enumerate() {
         match inst {
-            Instruction::Gate {
-                gate: Gate::Fused2q(mat),
-                targets,
-            } => {
+            Instruction::Gate { gate, targets } if is_tileable_2q(inst) => {
                 let q0 = targets[0];
                 let q1 = targets[1];
                 let joined = match multi_2q_join(&high, q0, q1) {
@@ -1142,8 +1146,8 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
                     }
                 };
                 high = joined;
-                pending.push((q0, q1, **mat));
-                tracer.note_idx(&mut pending_src, i);
+                pending.push((q0, q1, gate.matrix_4x4()));
+                pending_src.push(i);
             }
             _ => {
                 flush(

@@ -199,6 +199,15 @@ unsafe fn apply_subcube(
                 );
             }
         }
+        // A zero subcube stays zero under any unitary, so it needs no gates and no
+        // write back. Early in a circuit most subcubes are zero; a dense one exits
+        // this scan at its first amplitude.
+        if tile[..runs << plan.low]
+            .iter()
+            .all(|a| a.re == 0.0 && a.im == 0.0)
+        {
+            return;
+        }
         for &(q0, q1, ref prepared) in gates {
             prepared.apply_tiled(tile, plan.tile_bits, plan.map[q0], plan.map[q1]);
         }

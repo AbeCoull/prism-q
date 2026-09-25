@@ -321,12 +321,92 @@ fn css_transitions_present() {
 fn css_custom_properties() {
     let circuit = CircuitBuilder::new(1).h(0).build();
     let svg = circuit.to_svg(&SvgOptions::default());
-    assert!(svg.contains(":root{"), "should have CSS custom properties");
+    assert!(
+        svg.contains(".pq-circuit{"),
+        "should have CSS custom properties"
+    );
+    assert!(
+        !svg.contains(":root"),
+        "styles must stay scoped to the figure"
+    );
     assert!(svg.contains("--bg:"), "should define --bg variable");
     assert!(svg.contains("var(--bg)"), "background uses CSS variable");
     assert!(svg.contains("var(--wire)"), "wires use CSS variable");
     assert!(svg.contains("var(--text)"), "labels use CSS variable");
     assert!(svg.contains("gate gate-std"), "gate uses CSS class");
+}
+
+fn style_selectors(svg: &str) -> Vec<String> {
+    let mut selectors = Vec::new();
+    let mut rest = svg;
+    while let Some(start) = rest.find("<style>") {
+        let body_start = start + "<style>".len();
+        let end = body_start + rest[body_start..].find("</style>").unwrap();
+        let mut prelude = String::new();
+        let mut depth = 0usize;
+        let mut skip_to = None;
+        for c in rest[body_start..end].chars() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    let p = prelude.trim().to_string();
+                    prelude.clear();
+                    if skip_to.is_some() || p.starts_with("@media") {
+                        continue;
+                    }
+                    if p.starts_with("@keyframes") {
+                        skip_to = Some(depth - 1);
+                        continue;
+                    }
+                    selectors.extend(p.split(',').map(|s| s.trim().to_string()));
+                    skip_to = Some(depth - 1);
+                }
+                '}' => {
+                    depth -= 1;
+                    prelude.clear();
+                    if skip_to == Some(depth) {
+                        skip_to = None;
+                    }
+                }
+                _ if skip_to.is_none() => prelude.push(c),
+                _ => {}
+            }
+        }
+        rest = &rest[end..];
+    }
+    selectors
+}
+
+#[test]
+fn every_style_rule_is_scoped_to_the_figure() {
+    let circuit = CircuitBuilder::new(3)
+        .h(0)
+        .cx(0, 1)
+        .rz(0.3, 2)
+        .swap(1, 2)
+        .build();
+    for dark_mode in [false, true] {
+        for auto_theme in [false, true] {
+            for animate in [false, true] {
+                let opts = SvgOptions {
+                    dark_mode,
+                    auto_theme,
+                    animate,
+                    ..SvgOptions::default()
+                };
+                for svg in [circuit.to_svg(&opts), circuit.to_svg_heatmap(&opts)] {
+                    let selectors = style_selectors(&svg);
+                    for s in &selectors {
+                        assert!(
+                            s == ".pq-circuit" || s.starts_with(".pq-circuit "),
+                            "unscoped selector {s:?} (dark {dark_mode}, auto {auto_theme}, animate {animate})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(!style_selectors(&circuit.to_svg(&SvgOptions::default())).is_empty());
 }
 
 #[test]

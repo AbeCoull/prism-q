@@ -86,7 +86,7 @@ variable to anything switches the path off.
 | `PRISM_MULTI_2Q_TILE_BITS` | 14 | Log2 of the `Multi2q` tile in amplitudes, 14 to 18 |
 | `PRISM_MULTI_2Q_LOW_BITS` | 6 | Log2 of the contiguous run a `Multi2q` tile gathers, 6 to one below the tile bits; fewer means more high qubits per pass |
 | `PRISM_NO_AVX2_KRAUS` | unset | Flag: disable the AVX2 dense two-qubit Kraus kernel |
-| `PRISM_NO_REORDER` | unset | Flag: disable disjoint `Fused2q` tier grouping |
+| `PRISM_NO_REORDER` | unset | Flag: disable the `Fused2q` reordering that fills each `Multi2q` tile |
 | `PRISM_NO_QFT_BLOCK` | unset | Flag: expand `QftBlock` to the textbook sequence |
 
 ## Benchmarking

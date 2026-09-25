@@ -677,10 +677,8 @@ fn fusion_same_pair_qv_20q() {
 
 #[test]
 fn fusion_qv_20q_depth_4() {
-    // Multi-layer QV at 20q exercises `reorder_disjoint_fused2q`: each layer
-    // emits ~10 disjoint Fused2q gates with mixed L2/L3/Individual tiers,
-    // and the reorder must commute them into tier-grouped order without
-    // changing the final state.
+    // Multi-layer QV at 20q exercises `reorder_fused2q_into_tiles`, which
+    // commutes gates across layers to fill each tile.
     assert_fusion_preserves_state(&circuits::quantum_volume_circuit(20, 4, 42));
 }
 

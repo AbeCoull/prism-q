@@ -1223,6 +1223,40 @@ fn fuse_multi_2q_returns_borrowed_without_tileable_run() {
 }
 
 #[test]
+fn tile_reorder_pulls_later_gates_ahead_of_a_skipped_gate_on_other_qubits() {
+    let pairs = [
+        (6, 7),
+        (8, 9),
+        (10, 11),
+        (12, 13),
+        (14, 15),
+        (6, 8),
+        (14, 6),
+        (7, 9),
+        (6, 7),
+    ];
+    let mut c = Circuit::new(20, 0);
+    for q in 6..16 {
+        c.add_gate(Gate::Ry(0.1 * q as f64 + 0.2), &[q]);
+    }
+    for (k, &(a, b)) in pairs.iter().enumerate() {
+        let gate = if k % 2 == 0 { Gate::Cx } else { Gate::Swap };
+        c.add_gate(Gate::Fused2q(Box::new(gate.matrix_4x4())), &[a, b]);
+    }
+    let reordered = reorder_fused2q_into_tiles(Cow::Borrowed(&c), &mut Tracer::off());
+    let order: Vec<(usize, usize)> = reordered.instructions[10..]
+        .iter()
+        .map(|inst| match inst {
+            Instruction::Gate { targets, .. } => (targets[0], targets[1]),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let expect = [0, 1, 2, 3, 5, 7, 4, 6, 8].map(|k| pairs[k]);
+    assert_eq!(order, expect);
+    assert_same_state(&c, &reordered);
+}
+
+#[test]
 fn fuse_controlled_phases_returns_borrowed_without_batchable_chain() {
     let one = Complex64::new(1.0, 0.0);
     let zero = Complex64::new(0.0, 0.0);

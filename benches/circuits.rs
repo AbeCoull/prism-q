@@ -3513,6 +3513,16 @@ fn bench_compiled_sampler(c: &mut Criterion) {
         });
     }
 
+    // Rank one, so nearly every measurement is deterministic, and the CX chain
+    // leaves each destabilizer dense: the shape that prices the deterministic
+    // branch rather than the collapses the Clifford rows above spend on.
+    for &n in &[1000, 5000] {
+        let circuit = measure_all(&circuits::ghz_circuit(n));
+        group.bench_function(BenchmarkId::new("compile", format!("ghz_{n}q")), |b| {
+            b.iter(|| prism_q::compile_measurements(&circuit, SEED).unwrap());
+        });
+    }
+
     group.finish();
 }
 

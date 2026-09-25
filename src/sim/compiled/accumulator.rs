@@ -292,7 +292,7 @@ unsafe fn transpose_64x64_neon(matrix: &mut [u64; 64]) {
 }
 
 #[inline]
-fn transpose_64x64_dispatch(matrix: &mut [u64; 64]) {
+pub(super) fn transpose_64x64_dispatch(matrix: &mut [u64; 64]) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {

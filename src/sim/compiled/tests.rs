@@ -396,6 +396,97 @@ fn forward_clifford_50q_marginals() {
     }
 }
 
+fn reduce_gf2(mut v: Vec<u64>, basis: &[(usize, Vec<u64>)]) -> Vec<u64> {
+    for (pivot, row) in basis {
+        if get_bit(&v, *pivot) {
+            xor_words(&mut v, row);
+        }
+    }
+    v
+}
+
+fn lowest_set_bit(v: &[u64]) -> Option<usize> {
+    v.iter()
+        .position(|&w| w != 0)
+        .map(|i| i * 64 + v[i].trailing_zeros() as usize)
+}
+
+fn measure_in_order(mut c: Circuit, qubits: &[usize]) -> Circuit {
+    c.num_classical_bits = qubits.len();
+    for (bit, &q) in qubits.iter().enumerate() {
+        c.add_measure(q, bit);
+    }
+    c
+}
+
+// Every outcome of an independent tableau run must lie in the compiled affine space,
+// and enough runs span a space of the compiled rank, which pins the space exactly.
+fn assert_forward_matches_tableau(c: &Circuit, runs: u64) {
+    use crate::backend::Backend;
+    use crate::backend::stabilizer::StabilizerBackend;
+
+    let sampler = compile_forward(c, 42).unwrap();
+    let mut compiled: Vec<(usize, Vec<u64>)> = Vec::new();
+    for row in &sampler.flip_rows {
+        let r = reduce_gf2(row.clone(), &compiled);
+        let pivot = lowest_set_bit(&r).expect("flip rows are independent");
+        compiled.push((pivot, r));
+    }
+    assert_eq!(compiled.len(), sampler.rank());
+
+    let mut observed: Vec<(usize, Vec<u64>)> = Vec::new();
+    for seed in 0..runs {
+        let mut b = StabilizerBackend::new(seed);
+        b.init(c.num_qubits, c.num_classical_bits).unwrap();
+        for inst in &c.instructions {
+            b.apply(inst).unwrap();
+        }
+        let mut diff = pack_bools(b.classical_results());
+        xor_words(&mut diff, sampler.ref_bits_packed());
+        assert!(
+            lowest_set_bit(&reduce_gf2(diff.clone(), &compiled)).is_none(),
+            "run {seed} lies outside the compiled space"
+        );
+        let r = reduce_gf2(diff, &observed);
+        if let Some(pivot) = lowest_set_bit(&r) {
+            observed.push((pivot, r));
+        }
+    }
+    assert_eq!(observed.len(), sampler.rank(), "runs span a smaller space");
+}
+
+#[test]
+fn forward_matches_tableau_across_words_in_scrambled_order() {
+    let n = 130;
+    let order: Vec<usize> = (0..n).map(|i| (i * 67) % n).collect();
+    let c = measure_in_order(circuits::clifford_heavy_circuit(n, 2, 7), &order);
+    assert_forward_matches_tableau(&c, 80);
+}
+
+#[test]
+fn forward_matches_tableau_on_a_scrambled_ghz() {
+    let n = 200;
+    let order: Vec<usize> = (0..n).map(|i| (i * 77) % n).collect();
+    let c = measure_in_order(circuits::ghz_circuit(n), &order);
+    assert_forward_matches_tableau(&c, 20);
+}
+
+#[test]
+fn forward_matches_tableau_measuring_in_register_order() {
+    let n = 140;
+    let order: Vec<usize> = (0..n).collect();
+    let c = measure_in_order(circuits::clifford_heavy_circuit(n, 2, 5), &order);
+    assert_forward_matches_tableau(&c, 80);
+}
+
+#[test]
+fn forward_matches_tableau_on_a_partial_register() {
+    let n = 150;
+    let order: Vec<usize> = (0..n).rev().step_by(3).collect();
+    let c = measure_in_order(circuits::clifford_heavy_circuit(n, 3, 11), &order);
+    assert_forward_matches_tableau(&c, 120);
+}
+
 #[test]
 fn rank_analysis_across_circuit_types() {
     let sizes = [10, 50, 100, 200];

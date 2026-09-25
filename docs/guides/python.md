@@ -6,7 +6,9 @@ Rust crate: the compiled extension is `prism_q._prism_q` and the pure-Python
 so the wrapper adds no per-gate overhead.
 
 Wheels are `abi3` for Python 3.11 and newer, so one wheel per platform covers
-every supported interpreter.
+every supported interpreter. PyPI carries wheels for Linux x86_64 and aarch64
+(manylinux), macOS arm64 and Windows x64. Other platforms build from the source
+distribution, which needs a Rust toolchain.
 
 ## Install
 
@@ -408,8 +410,8 @@ every noisy terminal that `density_matrix()` serves answers from the device buff
 and a width whose `4^n` buffer does not fit in free device memory raises `PrismError`
 before anything is allocated (13 qubits on an 11 GiB card).
 
-The published wheels are built without CUDA, because two of the three wheel
-targets have no CUDA toolkit and macOS has no CUDA at all. In those wheels the
+The published wheels are built without CUDA, because the Linux and Windows wheel
+runners have no CUDA toolkit and macOS has no CUDA at all. In those wheels the
 constructors still exist and `GpuContext(...)` raises `PrismError` naming the
 missing build feature, so code written against the GPU API fails with a message
 rather than an `AttributeError`. Two predicates separate the cases:

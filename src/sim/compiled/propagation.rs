@@ -2,6 +2,7 @@
 //! Heisenberg propagation of measured Z operators (bit-packed, batched) and
 //! column-major forward stabilizer simulation.
 
+use super::accumulator::transpose_64x64_dispatch;
 use super::{PauliVec, flip_bit, get_bit, set_bit};
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
@@ -1511,28 +1512,25 @@ pub(super) fn colmajor_forward_sim(
     let mut xz = vec![0u64; total_rows * stride];
     let mut phase_vec = vec![false; total_rows];
 
-    for q in 0..n {
-        let qw = q / 64;
-        let qb = q % 64;
-        let qm = 1u64 << qb;
-        for rw in 0..row_words {
-            let mut xbits = x_cols[q][rw];
-            while xbits != 0 {
-                let bit = xbits.trailing_zeros() as usize;
-                let row = rw * 64 + bit;
-                if row < total_rows {
-                    xz[row * stride + qw] |= qm;
+    let mut block = [0u64; 64];
+    for (cols, offset) in [(&x_cols, 0), (&z_cols, nw)] {
+        for qw in 0..nw {
+            let qubits = &cols[qw * 64..n.min(qw * 64 + 64)];
+            for rw in 0..row_words {
+                let mut any = 0u64;
+                for (b, col) in qubits.iter().enumerate() {
+                    block[b] = col[rw];
+                    any |= col[rw];
                 }
-                xbits &= xbits - 1;
-            }
-            let mut zbits = z_cols[q][rw];
-            while zbits != 0 {
-                let bit = zbits.trailing_zeros() as usize;
-                let row = rw * 64 + bit;
-                if row < total_rows {
-                    xz[row * stride + nw + qw] |= qm;
+                if any == 0 {
+                    continue;
                 }
-                zbits &= zbits - 1;
+                block[qubits.len()..].fill(0);
+                transpose_64x64_dispatch(&mut block);
+                let rows = (total_rows - rw * 64).min(64);
+                for (i, &word) in block[..rows].iter().enumerate() {
+                    xz[(rw * 64 + i) * stride + offset + qw] = word;
+                }
             }
         }
     }

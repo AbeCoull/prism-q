@@ -2573,20 +2573,20 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
     let mut p_dep: Vec<u64> = vec![0u64; rank_words];
     let mut scratch: Vec<u64> = vec![0u64; stride];
     let scratch_idx = total_rows;
+    let mut columns = XWordColumns::new(total_rows);
+    let mut hits: Vec<u64> = vec![0u64; columns.row_words];
+    let destab_words = n.div_ceil(64);
+    let mut held: Vec<u64> = vec![0u64; destab_words];
+    let mut held_valid = false;
+    let mut scratch_phase = false;
 
     for (meas_idx, &(qubit, _)) in measurements.iter().enumerate() {
         let word = qubit / 64;
-        let bit_mask = 1u64 << (qubit % 64);
+        let bit = qubit % 64;
+        let bit_mask = 1u64 << bit;
+        columns.load(&xz, stride, word);
 
-        let mut p: Option<usize> = None;
-        for i in n..2 * n {
-            if xz[i * stride + word] & bit_mask != 0 {
-                p = Some(i);
-                break;
-            }
-        }
-
-        if let Some(p_row) = p {
+        if let Some(p_row) = first_row_from(columns.column(bit), n) {
             // Random measurement, this is the k-th random degree of freedom
             let k = rank;
             rank += 1;
@@ -2599,26 +2599,25 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
             let p_phase = phase[p_row];
             p_dep.copy_from_slice(&gen_dep[p_row][..rank_words]);
 
-            for r in 0..total_rows {
-                if r == p_row {
-                    continue;
-                }
-                if xz[r * stride + word] & bit_mask == 0 {
-                    continue;
-                }
-
+            hits.copy_from_slice(columns.column(bit));
+            hits[p_row / 64] &= !(1u64 << (p_row % 64));
+            for_each_row(&hits, total_rows, |r| {
                 let r_base = r * stride;
+                let old = xz[r_base + word];
                 phase[r] = rowmul_phase(&p_data, &mut xz, r_base, nw, p_phase, phase[r]);
+                columns.update(r, old, xz[r_base + word]);
                 xor_words(&mut gen_dep[r][..rank_words], &p_dep[..rank_words]);
-            }
+            });
 
             let dest_idx = p_row - n;
             let dest_base = dest_idx * stride;
+            columns.update(dest_idx, xz[dest_base + word], p_data[word]);
             xz.copy_within(p_row * stride..p_row * stride + stride, dest_base);
             phase[dest_idx] = p_phase;
             gen_dep[dest_idx][..rank_words].copy_from_slice(&p_dep);
 
             let p_base = p_row * stride;
+            columns.update(p_row, p_data[word], 0);
             xz[p_base..p_base + stride].fill(0);
             xz[p_base + nw + word] |= bit_mask;
             phase[p_row] = false;
@@ -2627,31 +2626,51 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
             gen_dep[p_row][k / 64] |= 1u64 << (k % 64);
 
             ref_bits[meas_idx] = false;
+            held_valid = false;
         } else {
-            scratch[..stride].fill(0);
-            let mut scratch_phase = false;
-            gen_dep[scratch_idx][..rank_words].fill(0);
+            // The scratch row holds the product of the stabilizers in `held`. They
+            // commute and square to +I, so the product this measurement needs is
+            // the held one times the stabilizers in the symmetric difference.
+            let live = rank.div_ceil(64);
+            let column = columns.column(bit);
+            let tail = (1u64 << (n % 64)).wrapping_sub(1);
+            let mut direct = 0u32;
+            let mut changed = 0u32;
+            for w in 0..destab_words {
+                let mask = if w + 1 == destab_words && tail != 0 {
+                    tail
+                } else {
+                    !0
+                };
+                let now = column[w] & mask;
+                direct += now.count_ones();
+                changed += (now ^ held[w]).count_ones();
+                hits[w] = now ^ held[w];
+                held[w] = now;
+            }
+            if !held_valid || changed > direct {
+                scratch[..stride].fill(0);
+                scratch_phase = false;
+                gen_dep[scratch_idx][..live].fill(0);
+                hits[..destab_words].copy_from_slice(&held);
+            }
+            held_valid = true;
 
-            for g in 0..n {
-                let d_base = g * stride;
-                if xz[d_base + word] & bit_mask == 0 {
-                    continue;
-                }
-
+            for_each_row(&hits[..destab_words], n, |g| {
                 let s_base = (g + n) * stride;
                 let s_phase = phase[g + n];
                 scratch_phase =
                     rowmul_phase_into(&xz, s_base, &mut scratch, nw, s_phase, scratch_phase);
 
                 let (lo, hi) = gen_dep.split_at_mut(scratch_idx);
-                for (dst, &src) in hi[0][..rank_words].iter_mut().zip(&lo[g + n][..rank_words]) {
+                for (dst, &src) in hi[0][..live].iter_mut().zip(&lo[g + n][..live]) {
                     *dst ^= src;
                 }
-            }
+            });
 
             ref_bits[meas_idx] = scratch_phase;
 
-            for (w, &dep_word) in gen_dep[scratch_idx][..rank_words].iter().enumerate() {
+            for (w, &dep_word) in gen_dep[scratch_idx][..live].iter().enumerate() {
                 let mut bits = dep_word;
                 while bits != 0 {
                     let bit_pos = bits.trailing_zeros() as usize;
@@ -2672,6 +2691,88 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
         &ref_bits,
         seed,
     ))
+}
+
+/// X bits of one 64-qubit word of a row-major tableau, transposed to one row bitset
+/// per qubit, so a measurement reads the rows it touches from a contiguous column
+/// instead of one strided word per row.
+struct XWordColumns {
+    word: usize,
+    row_words: usize,
+    total_rows: usize,
+    bits: Vec<u64>,
+}
+
+impl XWordColumns {
+    fn new(total_rows: usize) -> Self {
+        let row_words = total_rows.div_ceil(64);
+        Self {
+            word: usize::MAX,
+            row_words,
+            total_rows,
+            bits: vec![0u64; 64 * row_words],
+        }
+    }
+
+    /// Point the index at `word`, rebuilding it only when the word changes.
+    fn load(&mut self, xz: &[u64], stride: usize, word: usize) {
+        if self.word == word {
+            return;
+        }
+        self.word = word;
+        self.bits.fill(0);
+        for r in 0..self.total_rows {
+            let mut v = xz[r * stride + word];
+            while v != 0 {
+                let b = v.trailing_zeros() as usize;
+                self.bits[b * self.row_words + r / 64] |= 1u64 << (r % 64);
+                v &= v - 1;
+            }
+        }
+    }
+
+    /// Record that the X word of `row` changed from `old` to `new`.
+    #[inline]
+    fn update(&mut self, row: usize, old: u64, new: u64) {
+        let mut diff = old ^ new;
+        while diff != 0 {
+            let b = diff.trailing_zeros() as usize;
+            self.bits[b * self.row_words + row / 64] ^= 1u64 << (row % 64);
+            diff &= diff - 1;
+        }
+    }
+
+    fn column(&self, bit: usize) -> &[u64] {
+        &self.bits[bit * self.row_words..(bit + 1) * self.row_words]
+    }
+}
+
+/// First set row of `column` at or after `from`.
+fn first_row_from(column: &[u64], from: usize) -> Option<usize> {
+    let mut w = from / 64;
+    let mut bits = column.get(w)? & (!0u64 << (from % 64));
+    loop {
+        if bits != 0 {
+            return Some(w * 64 + bits.trailing_zeros() as usize);
+        }
+        w += 1;
+        bits = *column.get(w)?;
+    }
+}
+
+/// Call `f` on each set row of `column` below `end`, in ascending order.
+#[inline]
+fn for_each_row(column: &[u64], end: usize, mut f: impl FnMut(usize)) {
+    for (w, &word) in column.iter().enumerate().take(end.div_ceil(64)) {
+        let mut bits = word;
+        if (w + 1) * 64 > end {
+            bits &= (1u64 << (end % 64)).wrapping_sub(1);
+        }
+        while bits != 0 {
+            f(w * 64 + bits.trailing_zeros() as usize);
+            bits &= bits - 1;
+        }
+    }
 }
 
 fn compile_measurements_filtered(

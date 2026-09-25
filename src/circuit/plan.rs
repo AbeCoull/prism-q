@@ -242,6 +242,39 @@ impl Tracer {
         self.output.push(out);
     }
 
+    /// Fold the product of `srcs` into the single payload of output entry `at`,
+    /// applied after the factors it already holds.
+    pub(super) fn extend(&mut self, at: usize, srcs: &[(usize, Place)]) {
+        if !self.on {
+            return;
+        }
+        let mut steps = Vec::new();
+        for &(i, place) in srcs {
+            self.placed(i, place, &mut steps);
+        }
+        match self.output[at].as_mut_slice() {
+            [payload] => payload.extend(steps),
+            _ => self.bailed = true,
+        }
+    }
+
+    /// Record the diagonality a pass read off the 2q payload of output entry `at`.
+    pub(super) fn guard_output_diag_4x4(&mut self, at: usize, diagonal: bool) {
+        if !self.on {
+            return;
+        }
+        let [payload] = self.output[at].as_slice() else {
+            self.bailed = true;
+            return;
+        };
+        let start = self.guard_steps.len() as u32;
+        self.guard_steps.extend_from_slice(payload);
+        self.guards.push(Guard::Diag4q(
+            start..self.guard_steps.len() as u32,
+            diagonal,
+        ));
+    }
+
     /// Resolve `srcs` to template steps without emitting an instruction.
     fn resolve(&mut self, srcs: &[(usize, Place)]) -> Option<Range<u32>> {
         let start = self.guard_steps.len() as u32;

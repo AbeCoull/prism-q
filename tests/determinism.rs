@@ -80,7 +80,8 @@ fn phase_matrix(theta: f64) -> [[Complex64; 2]; 2] {
 // 1q runs, CX with absorbable neighbors, Rzz and phase runs for the diagonal
 // batch tiers, the three Pauli-rotation branches (pair mix at low and high
 // pivot, Z-parity diagonal), plus Swap, Cu, and both Mcu shapes, which fuse
-// into nothing and keep their own index-bijection kernels.
+// into nothing and keep their own index-bijection kernels. The closing 1q run
+// sits behind an Mcu target, where no Fused2q can take it, so it stays Fused.
 fn representative_dense_circuit(n: usize) -> Circuit {
     let mut c = Circuit::new(n, 0);
     for q in 0..n {
@@ -118,6 +119,8 @@ fn representative_dense_circuit(n: usize) -> Circuit {
         })),
         &[1, 3, n - 4],
     );
+    c.add_gate(Gate::Rx(0.37), &[n - 3]);
+    c.add_gate(Gate::Ry(0.41), &[n - 3]);
     c
 }
 

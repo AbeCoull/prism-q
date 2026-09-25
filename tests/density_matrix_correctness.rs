@@ -786,9 +786,16 @@ fn dm_fused_route_matches_unfused_across_fusion_widths() {
     // all of them and is the in-group control. The payload assertions are what
     // keep the widths meaningful: a reorder that dropped 6q to Fused2q-only
     // would still match probabilities, and Multi2q ordering is the reason this
-    // test exists.
+    // test exists. A trailing 1q layer folds back into the last Fused2q on each
+    // qubit, so the tail sits behind a SWAP layer to stay a MultiFused.
     for (n, want_multi2q, want_multifused) in [(4usize, 0, 0), (5, 0, 0), (6, 1, 0), (8, 1, 1)] {
-        let circuit = circuits::random_circuit(n, 4, SEED);
+        let mut circuit = circuits::random_circuit(n, 4, SEED);
+        for q in (0..n - 1).step_by(2) {
+            circuit.add_gate(Gate::Swap, &[q, q + 1]);
+        }
+        for q in 0..n {
+            circuit.add_gate(Gate::Rx(0.3 + 0.1 * q as f64), &[q]);
+        }
         let fused = dm_fused(&circuit);
         assert!(
             count_gates(&fused, |g| matches!(g, Gate::Multi2q(_))) >= want_multi2q,

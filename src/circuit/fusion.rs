@@ -581,13 +581,16 @@ fn has_multi_1q_run(circuit: &Circuit) -> bool {
 ///
 /// Targets CX, CZ, `Fused2q`, and two-qubit `PauliRot`. SWAP and Cu keep their SIMD
 /// kernels, and Cu stays unfused so cphase batching still sees it. A greedy forward
-/// pass absorbs pre-gates only; post-gates of one 2q gate become pre-gates of the next,
-/// which captures most HEA-style patterns. Returns the input when nothing is absorbed.
+/// pass absorbs pre-gates; post-gates of one 2q gate become pre-gates of the next,
+/// which captures most HEA-style patterns. A 1q gate with no later 2q gate to join
+/// folds back into the last `Fused2q` on its qubit instead, unless that would turn a
+/// diagonal block dense. Returns the input when nothing is absorbed.
 pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Cow<'a, Circuit> {
     let identity_2x2 = Gate::Id.matrix_2x2();
     let n = circuit.num_qubits;
     let mut pending_1q: Vec<Option<[[Complex64; 2]; 2]>> = vec![None; n];
     let mut srcs: Vec<Vec<(usize, Place)>> = vec![Vec::new(); n];
+    let mut last_2q: Vec<Option<usize>> = vec![None; n];
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
     let mut changed = false;
     t.begin();
@@ -610,6 +613,9 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
                 let pre1 = pending_1q[q1].take();
 
                 if pre0.is_none() && pre1.is_none() {
+                    let at = matches!(gate, Gate::Fused2q(_)).then_some(output.len());
+                    last_2q[q0] = at;
+                    last_2q[q1] = at;
                     output.push(inst.clone());
                     t.keep(i);
                 } else {
@@ -618,6 +624,8 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
                     let kron = kron_2x2(&m0, &m1);
                     let gate4 = gate.matrix_4x4();
                     let fused = mat_mul_4x4(&gate4, &kron);
+                    last_2q[q0] = Some(output.len());
+                    last_2q[q1] = Some(output.len());
                     output.push(Instruction::Gate {
                         gate: Gate::Fused2q(Box::new(fused)),
                         targets: smallvec![q0, q1],
@@ -638,7 +646,9 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
             }
             _ => {
                 for &q in inst_qubits(inst) {
-                    flush_indexed_1q(q, &mut pending_1q, &mut output, &mut srcs, t);
+                    changed |=
+                        settle_trailing_1q(q, &mut pending_1q, &last_2q, &mut output, &mut srcs, t);
+                    last_2q[q] = None;
                 }
                 output.push(inst.clone());
                 t.keep(i);
@@ -647,7 +657,7 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
     }
 
     for q in 0..n {
-        flush_indexed_1q(q, &mut pending_1q, &mut output, &mut srcs, t);
+        changed |= settle_trailing_1q(q, &mut pending_1q, &last_2q, &mut output, &mut srcs, t);
     }
 
     if changed {
@@ -657,6 +667,58 @@ pub(crate) fn fuse_2q_gates<'a>(circuit: Cow<'a, Circuit>, t: &mut Tracer) -> Co
         t.discard();
         circuit
     }
+}
+
+/// Emit the 1q run pending on `q`, folding it into the last `Fused2q` on `q` when that
+/// gate is the most recent output touching `q`. A diagonal block keeps a non-diagonal
+/// run out so the diagonal batch kernels still see it. Returns whether it folded.
+fn settle_trailing_1q(
+    q: usize,
+    pending: &mut [Option<[[Complex64; 2]; 2]>],
+    last_2q: &[Option<usize>],
+    output: &mut Vec<Instruction>,
+    srcs: &mut [Vec<(usize, Place)>],
+    t: &mut Tracer,
+) -> bool {
+    let (Some(u), Some(at)) = (pending[q], last_2q[q]) else {
+        flush_indexed_1q(q, pending, output, srcs, t);
+        return false;
+    };
+    let Instruction::Gate {
+        gate: Gate::Fused2q(m),
+        targets,
+    } = &mut output[at]
+    else {
+        unreachable!("last_2q indexes a Fused2q");
+    };
+    let m_diagonal = is_diagonal_4x4(m);
+    let u_diagonal = is_diagonal_2x2(&u);
+    let place = if targets[0] == q {
+        Place::Low
+    } else {
+        Place::High
+    };
+    let fold = !m_diagonal || u_diagonal;
+    if fold {
+        **m = mat_mul_4x4(&embed_1q_matrix(&u, q, targets[0]), m);
+    }
+    let placed: Vec<(usize, Place)> = if t.on {
+        srcs[q].iter().map(|&(src, _)| (src, place)).collect()
+    } else {
+        Vec::new()
+    };
+    t.guard_output_diag_4x4(at, m_diagonal);
+    if m_diagonal {
+        t.guard_diag_4x4(&placed, u_diagonal);
+    }
+    if !fold {
+        flush_indexed_1q(q, pending, output, srcs, t);
+        return false;
+    }
+    t.extend(at, &placed);
+    pending[q] = None;
+    srcs[q].clear();
+    true
 }
 
 #[inline]

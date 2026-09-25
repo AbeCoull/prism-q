@@ -199,6 +199,7 @@ fn factored_random_blocks_12q_fused() {
 // The factored MultiFused path shares the statevector's tiered kernel, so it
 // needs a block wide enough to reach every tier: local targets 0-13 land in L2,
 // 14-16 in L3, and 17 above both. A 4-qubit block would exercise none of them.
+// The barrier keeps the rotation layer from folding back into the CX chain.
 #[test]
 fn factored_multi_fused_spans_every_tier_20q_sv() {
     const WIDE: usize = 18;
@@ -211,6 +212,7 @@ fn factored_multi_fused_spans_every_tier_20q_sv() {
     }
     c.add_gate(Gate::H, &[18]);
     c.add_gate(Gate::Cx, &[18, 19]);
+    c.add_barrier(&(0..WIDE).collect::<Vec<_>>());
     for q in 0..WIDE {
         c.add_gate(Gate::Ry(0.19 + q as f64 * 0.07), &[q]);
     }

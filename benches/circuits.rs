@@ -367,7 +367,7 @@ fn bench_statevector_random(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/random_d10");
     configure_group(&mut group);
 
-    let mut sizes = vec![4, 8, 12, 16, 20];
+    let mut sizes = vec![4, 8, 12, 16, 20, 22, 24];
     sizes.extend(high_qubit_sizes());
     for &n in &sizes {
         let circuit = circuits::random_circuit(n, 10, SEED);

@@ -218,12 +218,10 @@ impl GpuContext {
     /// Launches are asynchronous, so a caller timing device work must call
     /// this before reading the clock; a readback synchronizes on its own.
     pub fn synchronize(&self) -> Result<()> {
-        self.device.stream()?.synchronize().map_err(|e| {
-            crate::error::PrismError::BackendUnsupported {
-                backend: "gpu".to_string(),
-                operation: format!("synchronize: {e}"),
-            }
-        })
+        self.device
+            .stream()?
+            .synchronize()
+            .map_err(|e| driver_err("synchronize", e))
     }
 
     pub(crate) fn device(&self) -> &GpuDevice {
@@ -291,12 +289,7 @@ impl GpuState {
     pub fn from_host_amplitudes(context: Arc<GpuContext>, amps: &[Complex64]) -> Result<Self> {
         debug_assert!(amps.len().is_power_of_two() && amps.len() >= 2);
         let num_qubits = amps.len().trailing_zeros() as usize;
-        let mut host = Vec::with_capacity(amps.len() * 2);
-        for a in amps {
-            host.push(a.re);
-            host.push(a.im);
-        }
-        let buffer = GpuBuffer::<f64>::from_host(context.device(), &host)?;
+        let buffer = GpuBuffer::<f64>::from_host(context.device(), complex_as_interleaved(amps))?;
         Ok(Self {
             context,
             buffer,
@@ -356,6 +349,14 @@ impl GpuState {
     }
 }
 
+/// View complex amplitudes as their interleaved `[re, im, re, im, ...]` f64s.
+pub(crate) fn complex_as_interleaved(values: &[Complex64]) -> &[f64] {
+    // SAFETY: `Complex64` is `repr(C)` of two `f64` with no padding, so `values` covers
+    // exactly `2 * values.len()` initialized f64s at 8-byte alignment, borrowed for the
+    // lifetime of the returned slice.
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<f64>(), 2 * values.len()) }
+}
+
 /// Reinterpret an interleaved `[re, im, re, im, ...]` vector as complex amplitudes
 /// without copying. `raw.len()` must be even.
 fn interleaved_into_complex(raw: Vec<f64>) -> Vec<Complex64> {
@@ -385,6 +386,13 @@ fn scale_in_place(amps: &mut [Complex64], factor: f64, num_qubits: usize) {
     #[cfg(not(feature = "parallel"))]
     let _ = num_qubits;
     simd::scale_complex_slice(amps, factor);
+}
+
+fn driver_err(op: &str, err: impl std::fmt::Display) -> crate::error::PrismError {
+    crate::error::PrismError::BackendUnsupported {
+        backend: "gpu".to_string(),
+        operation: format!("{op}: {err}"),
+    }
 }
 
 /// Device stabilizer tableau.

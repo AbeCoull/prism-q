@@ -14,9 +14,9 @@ use cudarc::driver::{
 };
 
 use crate::error::{PrismError, Result};
-use crate::gpu::GpuContext;
 use crate::gpu::device::GpuDevice;
 use crate::gpu::memory::GpuBuffer;
+use crate::gpu::{GpuContext, driver_err};
 
 pub(super) fn stream_and_fn<'a>(
     ctx: &'a GpuContext,
@@ -34,11 +34,25 @@ pub(super) fn linear_cfg(block_size: u32, grid_blocks: u32) -> LaunchConfig {
     }
 }
 
-pub(super) fn launch_err(op: &str, err: impl std::fmt::Display) -> PrismError {
-    PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("{op}: {err}"),
+pub(super) fn check_qubit(n: usize, qubit: usize) -> Result<()> {
+    if qubit >= n {
+        return Err(PrismError::InvalidQubit {
+            index: qubit,
+            register_size: n,
+        });
     }
+    Ok(())
+}
+
+/// Two distinct qubits below `n`; the error names the larger index.
+pub(super) fn check_pair(n: usize, q0: usize, q1: usize) -> Result<()> {
+    if q0 >= n || q1 >= n || q0 == q1 {
+        return Err(PrismError::InvalidQubit {
+            index: q0.max(q1),
+            register_size: n,
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn launch_limit_err(op: &str, name: &str, value: usize, limit: &str) -> PrismError {

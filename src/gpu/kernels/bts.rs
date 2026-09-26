@@ -5,7 +5,9 @@
 //! The sampling kernel reads the precomputed CSR parity matrix and runs one thread per
 //! (measurement, 64-shot batch) pair, emitting packed outcomes in measurement-major layout.
 
-use cudarc::driver::{LaunchConfig, PushKernelArg};
+use std::sync::Arc;
+
+use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
 use crate::error::Result;
 use crate::gpu::GpuBuffer;
@@ -14,7 +16,7 @@ use crate::sim::compiled::rng::Xoshiro256PlusPlus;
 use crate::sim::compiled::shot_tail_mask;
 
 use super::super::GpuContext;
-use super::{div_ceil_grid, launch_err, linear_cfg, require_i32, require_u32, stream_and_fn};
+use super::{div_ceil_grid, driver_err, linear_cfg, require_i32, require_u32, stream_and_fn};
 
 const SAMPLE_BLOCK_SIZE: u32 = 128;
 const NOISE_BLOCK_SIZE: u32 = 128;
@@ -189,6 +191,90 @@ impl GpuBtsCache {
             }
         }
     }
+
+    /// Upload the filled random bits and launch `bts_sample_meas_major` into `out` (the
+    /// chunk output buffer when `None`), laid out as `num_meas` rows of `out_stride_words`
+    /// words with the chunk starting at word `out_word_offset` of each row.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_sample_chunk(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        func: &CudaFunction,
+        rank: usize,
+        chunk_shots: usize,
+        out_stride_words: usize,
+        out_word_offset: usize,
+        out: Option<&mut GpuBuffer<u64>>,
+    ) -> Result<()> {
+        let num_meas = self.num_meas;
+        let chunk_s_words = chunk_shots.div_ceil(64);
+        let chunk_random_len = chunk_s_words * rank;
+        {
+            let mut random_bits_view = self
+                .random_bits_dev
+                .raw_mut()
+                .slice_mut(0..chunk_random_len.max(1));
+            stream
+                .memcpy_htod(
+                    &self.random_bits_host[..chunk_random_len],
+                    &mut random_bits_view,
+                )
+                .map_err(|e| driver_err("upload bts random_bits", e))?;
+        }
+
+        let num_meas_i = require_i32("bts_sample_meas_major", "num_meas", num_meas)?;
+        let chunk_s_words_i = require_i32("bts_sample_meas_major", "chunk_s_words", chunk_s_words)?;
+        let rank_i = require_i32("bts_sample_meas_major", "rank", rank)?;
+        let out_stride_words_i = require_i32(
+            "bts_sample_meas_major",
+            "out_stride_words",
+            out_stride_words,
+        )?;
+        let out_word_offset_i =
+            require_i32("bts_sample_meas_major", "out_word_offset", out_word_offset)?;
+        let tail_mask_u64 = shot_tail_mask(chunk_shots);
+        let batch_blocks = div_ceil_grid(
+            "bts_sample_meas_major",
+            "chunk_s_words",
+            chunk_s_words,
+            SAMPLE_BLOCK_SIZE,
+        )?;
+        let num_meas_grid = require_u32("bts_sample_meas_major", "num_meas", num_meas)?;
+        let cfg = LaunchConfig {
+            grid_dim: (num_meas_grid, batch_blocks, 1),
+            block_dim: (SAMPLE_BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        let out = out.unwrap_or(&mut self.chunk_output_dev);
+        let mut out_view = out
+            .raw_mut()
+            .slice_mut(0..(num_meas * out_stride_words).max(1));
+        let random_bits_dev = self.random_bits_dev.raw().slice(0..chunk_random_len.max(1));
+        let mut builder = stream.launch_builder(func);
+        builder
+            .arg(self.col_indices_dev.raw())
+            .arg(self.row_offsets_dev.raw())
+            .arg(self.ref_bits_dev.raw())
+            .arg(&random_bits_dev)
+            .arg(&num_meas_i)
+            .arg(&chunk_s_words_i)
+            .arg(&rank_i)
+            .arg(&out_stride_words_i)
+            .arg(&out_word_offset_i)
+            .arg(&tail_mask_u64)
+            .arg(&mut out_view);
+        // SAFETY: kernel signature matches the call shape. Each thread writes one unique
+        // output word, addressed by measurement row and chunk-local batch index, inside
+        // the `num_meas * out_stride_words` view. All input buffers are sized to cover
+        // the access pattern above.
+        unsafe {
+            builder
+                .launch(cfg)
+                .map_err(|e| driver_err("bts_sample_meas_major", e))?;
+        }
+        Ok(())
+    }
 }
 
 fn next_power_of_two_or_max(n: usize) -> usize {
@@ -296,76 +382,17 @@ pub(crate) fn launch_bts_sample(
         cache.ensure_chunk_capacity(ctx, chunk_random_len, chunk_output_len)?;
         cache.fill_random_bits(rng, rank, chunk_shots, chunk_s_words);
 
-        {
-            let mut random_bits_view = cache
-                .random_bits_dev
-                .raw_mut()
-                .slice_mut(0..chunk_random_len.max(1));
-            stream
-                .memcpy_htod(
-                    &cache.random_bits_host[..chunk_random_len],
-                    &mut random_bits_view,
-                )
-                .map_err(|e| launch_err("upload bts random_bits", e))?;
-        }
-
-        let num_meas_i = require_i32("bts_sample_meas_major", "num_meas", num_meas)?;
-        let chunk_s_words_i = require_i32("bts_sample_meas_major", "chunk_s_words", chunk_s_words)?;
-        let rank_i = require_i32("bts_sample_meas_major", "rank", rank)?;
-        let out_stride_words_i =
-            require_i32("bts_sample_meas_major", "out_stride_words", chunk_s_words)?;
-        let out_word_offset_i = 0i32;
-        let tail_mask_u64 = shot_tail_mask(chunk_shots);
-        let batch_blocks = div_ceil_grid(
-            "bts_sample_meas_major",
-            "chunk_s_words",
-            chunk_s_words,
-            SAMPLE_BLOCK_SIZE,
-        )?;
-        let num_meas_grid = require_u32("bts_sample_meas_major", "num_meas", num_meas)?;
-        let cfg = LaunchConfig {
-            grid_dim: (num_meas_grid, batch_blocks, 1),
-            block_dim: (SAMPLE_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let random_bits_dev = cache
-            .random_bits_dev
-            .raw()
-            .slice(0..chunk_random_len.max(1));
-        let mut chunk_output_dev = cache
-            .chunk_output_dev
-            .raw_mut()
-            .slice_mut(0..chunk_output_len.max(1));
-        let mut builder = stream.launch_builder(&func);
-        builder
-            .arg(cache.col_indices_dev.raw())
-            .arg(cache.row_offsets_dev.raw())
-            .arg(cache.ref_bits_dev.raw())
-            .arg(&random_bits_dev)
-            .arg(&num_meas_i)
-            .arg(&chunk_s_words_i)
-            .arg(&rank_i)
-            .arg(&out_stride_words_i)
-            .arg(&out_word_offset_i)
-            .arg(&tail_mask_u64)
-            .arg(&mut chunk_output_dev);
-        // SAFETY: kernel signature matches the call shape. Each thread writes
-        // one unique output word (indexed by m and batch), so there is no
-        // inter-thread hazard on `chunk_output`. All input buffers are sized
-        // to cover the access pattern above.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| launch_err("bts_sample_meas_major", e))?;
-        }
+        cache.launch_sample_chunk(stream, &func, rank, chunk_shots, chunk_s_words, 0, None)?;
 
         stream
             .memcpy_dtoh(
-                &chunk_output_dev,
+                &cache
+                    .chunk_output_dev
+                    .raw()
+                    .slice(0..chunk_output_len.max(1)),
                 &mut cache.chunk_output_host[..chunk_output_len.max(1)],
             )
-            .map_err(|e| launch_err("bts output dtoh", e))?;
+            .map_err(|e| driver_err("bts output dtoh", e))?;
 
         let chunk_word_offset = shots_done / 64;
         for m in 0..num_meas {
@@ -410,65 +437,15 @@ pub(crate) fn launch_bts_sample_device(
         cache.ensure_chunk_capacity(ctx, chunk_random_len, 1)?;
         cache.fill_random_bits(rng, rank, chunk_shots, chunk_s_words);
 
-        {
-            let mut random_bits_view = cache
-                .random_bits_dev
-                .raw_mut()
-                .slice_mut(0..chunk_random_len.max(1));
-            stream
-                .memcpy_htod(
-                    &cache.random_bits_host[..chunk_random_len],
-                    &mut random_bits_view,
-                )
-                .map_err(|e| launch_err("upload bts random_bits", e))?;
-        }
-
-        let num_meas_i = require_i32("bts_sample_meas_major", "num_meas", num_meas)?;
-        let chunk_s_words_i = require_i32("bts_sample_meas_major", "chunk_s_words", chunk_s_words)?;
-        let rank_i = require_i32("bts_sample_meas_major", "rank", rank)?;
-        let out_stride_words_i = require_i32("bts_sample_meas_major", "out_stride_words", s_words)?;
-        let out_word_offset_i =
-            require_i32("bts_sample_meas_major", "out_word_offset", shots_done / 64)?;
-        let tail_mask_u64 = shot_tail_mask(chunk_shots);
-        let batch_blocks = div_ceil_grid(
-            "bts_sample_meas_major",
-            "chunk_s_words",
-            chunk_s_words,
-            SAMPLE_BLOCK_SIZE,
+        cache.launch_sample_chunk(
+            stream,
+            &func,
+            rank,
+            chunk_shots,
+            s_words,
+            shots_done / 64,
+            Some(&mut output_dev),
         )?;
-        let num_meas_grid = require_u32("bts_sample_meas_major", "num_meas", num_meas)?;
-        let cfg = LaunchConfig {
-            grid_dim: (num_meas_grid, batch_blocks, 1),
-            block_dim: (SAMPLE_BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 0,
-        };
-
-        let random_bits_dev = cache
-            .random_bits_dev
-            .raw()
-            .slice(0..chunk_random_len.max(1));
-        let mut output_view = output_dev.raw_mut().slice_mut(0..output_len.max(1));
-        let mut builder = stream.launch_builder(&func);
-        builder
-            .arg(cache.col_indices_dev.raw())
-            .arg(cache.row_offsets_dev.raw())
-            .arg(cache.ref_bits_dev.raw())
-            .arg(&random_bits_dev)
-            .arg(&num_meas_i)
-            .arg(&chunk_s_words_i)
-            .arg(&rank_i)
-            .arg(&out_stride_words_i)
-            .arg(&out_word_offset_i)
-            .arg(&tail_mask_u64)
-            .arg(&mut output_view);
-        // SAFETY: kernel signature matches the call shape. Each thread writes
-        // one unique output word addressed by measurement row and chunk-local
-        // batch index.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| launch_err("bts_sample_meas_major", e))?;
-        }
 
         shots_done += chunk_shots;
     }
@@ -520,7 +497,7 @@ pub(crate) fn launch_bts_transpose_meas_to_shot(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("bts_transpose_meas_to_shot", e))?;
+            .map_err(|e| driver_err("bts_transpose_meas_to_shot", e))?;
     }
     Ok(shot_major)
 }
@@ -642,7 +619,7 @@ pub(crate) fn generate_and_apply_noise_masks_meas_major_by_row(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("bts_generate_and_apply_noise_meas_major_by_row", e))?;
+            .map_err(|e| driver_err("bts_generate_and_apply_noise_meas_major_by_row", e))?;
     }
     Ok(())
 }
@@ -722,7 +699,7 @@ pub(crate) fn apply_noise_masks_meas_major(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("bts_apply_noise_masks_meas_major", e))?;
+            .map_err(|e| driver_err("bts_apply_noise_masks_meas_major", e))?;
     }
     Ok(())
 }
@@ -786,7 +763,7 @@ pub(crate) fn count_meas_major_marginals(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("bts_popcount_rows", e))?;
+            .map_err(|e| driver_err("bts_popcount_rows", e))?;
     }
 
     row_counts.copy_to_host(device, &mut host_counts)?;
@@ -824,12 +801,68 @@ fn count_used_slots(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("bts_count_used_slots", e))?;
+            .map_err(|e| driver_err("bts_count_used_slots", e))?;
     }
 
     let mut used_host = [0u32; 1];
     used_out.copy_to_host(device, &mut used_host)?;
     Ok(used_host[0] as usize)
+}
+
+/// Open-addressed device hash table the count kernels fill: `slots` entries of `m_words`
+/// key words, a count, and a state word each, plus a one-word overflow flag.
+struct CountTable {
+    slots: usize,
+    keys: GpuBuffer<u64>,
+    counts: GpuBuffer<u64>,
+    states: GpuBuffer<u32>,
+    overflow: GpuBuffer<u32>,
+}
+
+impl CountTable {
+    /// `None` when [`plan_count_table_slots`] finds no table size that fits.
+    fn alloc(
+        ctx: &GpuContext,
+        num_shots: usize,
+        m_words: usize,
+        rank: usize,
+    ) -> Result<Option<Self>> {
+        let Some(slots) = plan_count_table_slots(ctx, num_shots, m_words, rank)? else {
+            return Ok(None);
+        };
+        let device = ctx.device();
+        Ok(Some(Self {
+            slots,
+            keys: GpuBuffer::<u64>::alloc_zeros(device, (slots * m_words).max(1))?,
+            counts: GpuBuffer::<u64>::alloc_zeros(device, slots.max(1))?,
+            states: GpuBuffer::<u32>::alloc_zeros(device, slots.max(1))?,
+            overflow: GpuBuffer::<u32>::alloc_zeros(device, 1)?,
+        }))
+    }
+
+    /// Compact the filled table on device; `None` when the fill overflowed it.
+    fn finish(
+        self,
+        ctx: &GpuContext,
+        m_words: usize,
+        raw_transfer_bytes: usize,
+    ) -> Result<Option<std::collections::HashMap<Vec<u64>, u64>>> {
+        let mut overflow_host = [0u32; 1];
+        self.overflow
+            .copy_to_host(ctx.device(), &mut overflow_host)?;
+        if overflow_host[0] != 0 {
+            return Ok(None);
+        }
+        compact_count_table(
+            ctx,
+            &self.keys,
+            &self.counts,
+            &self.states,
+            self.slots,
+            m_words,
+            raw_transfer_bytes,
+        )
+    }
 }
 
 fn compact_count_table(
@@ -884,7 +917,7 @@ fn compact_count_table(
     unsafe {
         compact_builder
             .launch(compact_cfg)
-            .map_err(|e| launch_err("bts_compact_counts_upto8", e))?;
+            .map_err(|e| driver_err("bts_compact_counts_upto8", e))?;
     }
 
     let mut out_len_host = [0u32; 1];
@@ -925,22 +958,17 @@ pub(crate) fn try_count_shot_major(
         return Ok(None);
     }
 
-    let Some(table_slots) = plan_count_table_slots(ctx, num_shots, m_words, rank)? else {
+    let Some(mut table) = CountTable::alloc(ctx, num_shots, m_words, rank)? else {
         return Ok(None);
     };
 
     let device = ctx.device();
-    let mut slot_keys = GpuBuffer::<u64>::alloc_zeros(device, (table_slots * m_words).max(1))?;
-    let mut slot_counts = GpuBuffer::<u64>::alloc_zeros(device, table_slots.max(1))?;
-    let mut slot_states = GpuBuffer::<u32>::alloc_zeros(device, table_slots.max(1))?;
-    let overflow = GpuBuffer::<u32>::alloc_zeros(device, 1)?;
-
     let stream = device.stream()?;
     let func = device.function("bts_count_shot_major_upto8")?;
     let num_shots_i = require_i32("bts_count_shot_major_upto8", "num_shots", num_shots)?;
     let m_words_i = require_i32("bts_count_shot_major_upto8", "m_words", m_words)?;
     let table_mask_u32 =
-        require_u32("bts_count_shot_major_upto8", "table_slots", table_slots)?.saturating_sub(1);
+        require_u32("bts_count_shot_major_upto8", "table_slots", table.slots)?.saturating_sub(1);
     let blocks = div_ceil_grid(
         "bts_count_shot_major_upto8",
         "num_shots",
@@ -954,114 +982,20 @@ pub(crate) fn try_count_shot_major(
         .arg(shot_major.raw())
         .arg(&num_shots_i)
         .arg(&m_words_i)
-        .arg(slot_keys.raw_mut())
-        .arg(slot_counts.raw_mut())
-        .arg(slot_states.raw_mut())
+        .arg(table.keys.raw_mut())
+        .arg(table.counts.raw_mut())
+        .arg(table.states.raw_mut())
         .arg(&table_mask_u32)
-        .arg(overflow.raw());
+        .arg(table.overflow.raw());
     // SAFETY: each thread handles at most one shot-major outcome and uses
     // atomics to claim or update hash slots.
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("bts_count_shot_major_upto8", e))?;
+            .map_err(|e| driver_err("bts_count_shot_major_upto8", e))?;
     }
 
-    let mut overflow_host = [0u32; 1];
-    overflow.copy_to_host(device, &mut overflow_host)?;
-    if overflow_host[0] != 0 {
-        return Ok(None);
-    }
-
-    compact_count_table(
-        ctx,
-        &slot_keys,
-        &slot_counts,
-        &slot_states,
-        table_slots,
-        m_words,
-        raw_transfer_bytes,
-    )
-}
-
-fn try_count_meas_major_direct(
-    ctx: &GpuContext,
-    meas_major: &GpuBuffer<u64>,
-    num_meas: usize,
-    num_shots: usize,
-    m_words: usize,
-    s_words: usize,
-    rank: usize,
-) -> Result<Option<std::collections::HashMap<Vec<u64>, u64>>> {
-    if num_shots == 0 || num_meas == 0 {
-        return Ok(Some(std::collections::HashMap::new()));
-    }
-    let raw_transfer_bytes = count_raw_transfer_bytes(num_meas.saturating_mul(s_words));
-    if !should_try_device_count(num_shots, m_words, rank, raw_transfer_bytes) {
-        return Ok(None);
-    }
-
-    let Some(table_slots) = plan_count_table_slots(ctx, num_shots, m_words, rank)? else {
-        return Ok(None);
-    };
-
-    let device = ctx.device();
-    let mut slot_keys = GpuBuffer::<u64>::alloc_zeros(device, (table_slots * m_words).max(1))?;
-    let mut slot_counts = GpuBuffer::<u64>::alloc_zeros(device, table_slots.max(1))?;
-    let mut slot_states = GpuBuffer::<u32>::alloc_zeros(device, table_slots.max(1))?;
-    let overflow = GpuBuffer::<u32>::alloc_zeros(device, 1)?;
-
-    let stream = device.stream()?;
-    let func = device.function("bts_count_meas_major_upto8")?;
-    let num_meas_i = require_i32("bts_count_meas_major_upto8", "num_meas", num_meas)?;
-    let num_shots_i = require_i32("bts_count_meas_major_upto8", "num_shots", num_shots)?;
-    let s_words_i = require_i32("bts_count_meas_major_upto8", "s_words", s_words)?;
-    let m_words_i = require_i32("bts_count_meas_major_upto8", "m_words", m_words)?;
-    let table_mask_u32 =
-        require_u32("bts_count_meas_major_upto8", "table_slots", table_slots)?.saturating_sub(1);
-    let batches = div_ceil_grid(
-        "bts_count_meas_major_upto8",
-        "num_shots",
-        num_shots,
-        COUNT_MEAS_BATCH_SIZE,
-    )?;
-    let cfg = linear_cfg(COUNT_MEAS_BATCH_SIZE, batches.max(1));
-
-    let mut builder = stream.launch_builder(&func);
-    builder
-        .arg(meas_major.raw())
-        .arg(&num_meas_i)
-        .arg(&num_shots_i)
-        .arg(&s_words_i)
-        .arg(&m_words_i)
-        .arg(slot_keys.raw_mut())
-        .arg(slot_counts.raw_mut())
-        .arg(slot_states.raw_mut())
-        .arg(&table_mask_u32)
-        .arg(overflow.raw());
-    // SAFETY: each thread handles at most one logical shot and uses atomics to
-    // claim or update hash slots.
-    unsafe {
-        builder
-            .launch(cfg)
-            .map_err(|e| launch_err("bts_count_meas_major_upto8", e))?;
-    }
-
-    let mut overflow_host = [0u32; 1];
-    overflow.copy_to_host(device, &mut overflow_host)?;
-    if overflow_host[0] != 0 {
-        return Ok(None);
-    }
-
-    compact_count_table(
-        ctx,
-        &slot_keys,
-        &slot_counts,
-        &slot_states,
-        table_slots,
-        m_words,
-        raw_transfer_bytes,
-    )
+    table.finish(ctx, m_words, raw_transfer_bytes)
 }
 
 /// Transpose to shot-major on device and count there, falling back to the
@@ -1102,5 +1036,46 @@ pub(crate) fn try_count_meas_major(
         }
     }
 
-    try_count_meas_major_direct(ctx, meas_major, num_meas, num_shots, m_words, s_words, rank)
+    let Some(mut table) = CountTable::alloc(ctx, num_shots, m_words, rank)? else {
+        return Ok(None);
+    };
+
+    let device = ctx.device();
+    let stream = device.stream()?;
+    let func = device.function("bts_count_meas_major_upto8")?;
+    let num_meas_i = require_i32("bts_count_meas_major_upto8", "num_meas", num_meas)?;
+    let num_shots_i = require_i32("bts_count_meas_major_upto8", "num_shots", num_shots)?;
+    let s_words_i = require_i32("bts_count_meas_major_upto8", "s_words", s_words)?;
+    let m_words_i = require_i32("bts_count_meas_major_upto8", "m_words", m_words)?;
+    let table_mask_u32 =
+        require_u32("bts_count_meas_major_upto8", "table_slots", table.slots)?.saturating_sub(1);
+    let batches = div_ceil_grid(
+        "bts_count_meas_major_upto8",
+        "num_shots",
+        num_shots,
+        COUNT_MEAS_BATCH_SIZE,
+    )?;
+    let cfg = linear_cfg(COUNT_MEAS_BATCH_SIZE, batches.max(1));
+
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(meas_major.raw())
+        .arg(&num_meas_i)
+        .arg(&num_shots_i)
+        .arg(&s_words_i)
+        .arg(&m_words_i)
+        .arg(table.keys.raw_mut())
+        .arg(table.counts.raw_mut())
+        .arg(table.states.raw_mut())
+        .arg(&table_mask_u32)
+        .arg(table.overflow.raw());
+    // SAFETY: each thread handles at most one logical shot and uses atomics to
+    // claim or update hash slots.
+    unsafe {
+        builder
+            .launch(cfg)
+            .map_err(|e| driver_err("bts_count_meas_major_upto8", e))?;
+    }
+
+    table.finish(ctx, m_words, raw_transfer_bytes)
 }

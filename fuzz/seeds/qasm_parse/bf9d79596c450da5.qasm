@@ -1,0 +1,10 @@
+OPENQASM 3.0;
+qubit[2] q;
+h q[0];
+rx(pi/2) q[0];
+rx(pi/2) q[1];
+cx q[0], q[1];
+rz(0.7) q[1];
+cx q[0], q[1];
+rx(-pi/2) q[0];
+rx(-pi/2) q[1];

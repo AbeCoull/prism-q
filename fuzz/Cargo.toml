@@ -1,0 +1,38 @@
+[package]
+name = "prism-q-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+num-complex = "0.4"
+prism-q = { path = ".." }
+
+# Its own workspace, so the root crate's commands and CI never build it.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "qasm_parse"
+path = "fuzz_targets/qasm_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qasm_tokens"
+path = "fuzz_targets/qasm_tokens.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fusion"
+path = "fuzz_targets/fusion.rs"
+test = false
+doc = false
+bench = false

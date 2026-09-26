@@ -20,8 +20,8 @@ fn small_caps() {
     ]);
 }
 
-fn incompatible_reason(err: PrismError) -> String {
-    caps::incompatible_reason(err, "statevector")
+fn cap_message(err: PrismError) -> String {
+    caps::cap_message(err, "statevector")
 }
 
 // The dispatch layer reads `BackendUnsupported` from a probability query as
@@ -35,7 +35,7 @@ fn explicit_run_one_qubit_above_the_probability_cap_names_it() {
         .seed(SEED)
         .run()
         .unwrap_err();
-    let reason = incompatible_reason(err);
+    let reason = cap_message(err);
     assert!(
         reason.contains(&format!("{n} qubits"))
             && reason.contains(&format!("cap of {CAP}"))
@@ -59,7 +59,7 @@ fn export_one_qubit_above_the_export_cap_names_it() {
     let mut sv = StatevectorBackend::new(SEED);
     sv.init(n, 0).unwrap();
     sv.apply_instructions(&circuit.instructions).unwrap();
-    let reason = incompatible_reason(sv.export_statevector().unwrap_err());
+    let reason = cap_message(sv.export_statevector().unwrap_err());
     assert!(
         reason.contains("statevector export")
             && reason.contains(&format!("{n} qubits"))
@@ -86,7 +86,7 @@ fn state_vector_terminal_one_qubit_above_the_export_cap_names_it() {
         .backend(BackendKind::Statevector)
         .state_vector()
         .unwrap_err();
-    let reason = incompatible_reason(err);
+    let reason = cap_message(err);
     assert!(
         reason.contains(&format!("{n} qubits")) && reason.contains("PRISM_MAX_EXPORT_QUBITS"),
         "{reason}"

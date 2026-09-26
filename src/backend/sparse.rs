@@ -180,16 +180,14 @@ impl SparseBackend {
 
     #[cold]
     fn entry_growth_error(&self, projected: usize) -> crate::error::PrismError {
-        crate::error::PrismError::IncompatibleBackend {
+        crate::error::PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
             backend: "sparse".to_string(),
-            reason: format!(
-                "state holds {} entries and this gate can reach {projected}, \
-                 exceeding the cap of {} entries on this machine \
-                 (set PRISM_MAX_SPARSE_QUBITS to override)",
-                self.state.len(),
-                self.entry_cap
-            ),
-        }
+            operation: format!("a gate on a state of {} entries", self.state.len()),
+            resource: crate::error::ResourceKind::Entries,
+            required: projected as u128,
+            limit: self.entry_cap as u128,
+            env_var: Some("PRISM_MAX_SPARSE_QUBITS"),
+        }))
     }
 
     #[inline(always)]
@@ -658,6 +656,8 @@ impl SparseBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for SparseBackend {}
+
 impl Backend for SparseBackend {
     fn name(&self) -> &'static str {
         "sparse"
@@ -687,13 +687,16 @@ impl Backend for SparseBackend {
 
     fn init(&mut self, num_qubits: usize, num_classical_bits: usize) -> Result<()> {
         if num_qubits > MAX_SPARSE_INDEX_QUBITS {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "sparse".to_string(),
-                reason: format!(
-                    "a {num_qubits}-qubit circuit exceeds the {MAX_SPARSE_INDEX_QUBITS}-qubit \
-                     basis-index width of the sparse backend"
-                ),
-            });
+            return Err(crate::error::PrismError::ResourceLimit(Box::new(
+                crate::error::ResourceLimit {
+                    backend: "sparse".to_string(),
+                    operation: "the basis index of the circuit".to_string(),
+                    resource: crate::error::ResourceKind::Qubits,
+                    required: num_qubits as u128,
+                    limit: MAX_SPARSE_INDEX_QUBITS as u128,
+                    env_var: None,
+                },
+            )));
         }
         self.num_qubits = num_qubits;
         self.state.clear();

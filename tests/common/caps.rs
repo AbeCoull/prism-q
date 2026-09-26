@@ -23,31 +23,49 @@ pub fn set_once(pairs: &[(&str, &str)]) {
 
 pub fn assert_cap_rejection(err: PrismError, backend: &str) {
     match err {
-        PrismError::IncompatibleBackend {
-            backend: named,
-            reason,
-        } => {
-            assert_eq!(named, backend, "wrong backend named: {reason}");
-            assert!(
-                reason.contains("exceeding the cap"),
-                "expected a cap rejection, got {reason}"
-            );
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend: named,
+                required,
+                limit,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
+            assert_eq!(named, backend, "wrong backend named");
+            assert!(required > limit, "{required} is within the cap of {limit}");
         }
         other => panic!("expected a clean cap error, got {other:?}"),
     }
 }
 
-/// The `reason` of an `IncompatibleBackend` raised by `backend`, for tests that
-/// go on to assert which cap and which width the message names.
-pub fn incompatible_reason(err: PrismError, backend: &str) -> String {
+/// The message of a `ResourceLimit` raised by `backend`, for tests that go on to
+/// assert which cap and which width it names.
+pub fn cap_message(err: PrismError, backend: &str) -> String {
+    let message = err.to_string();
     match err {
-        PrismError::IncompatibleBackend {
-            backend: named,
-            reason,
-        } => {
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit { backend: named, .. } =
+                prism_q::ResourceLimit::clone(&data);
             assert_eq!(named, backend);
-            reason
+            message
         }
-        other => panic!("expected IncompatibleBackend, got {other:?}"),
+        other => panic!("expected ResourceLimit, got {other:?}"),
+    }
+}
+
+/// The `(operation, required, limit)` of a `ResourceLimit` raised by `backend`.
+pub fn cap_fields(err: PrismError, backend: &str) -> (String, u128, u128) {
+    match err {
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend: named,
+                operation,
+                required,
+                limit,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
+            assert_eq!(named, backend);
+            (operation, required, limit)
+        }
+        other => panic!("expected ResourceLimit, got {other:?}"),
     }
 }

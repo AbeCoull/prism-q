@@ -98,14 +98,16 @@ pub fn run_expectation_gradient(
     params.validate(circuit)?;
 
     if circuit.num_qubits > max_statevector_qubits() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "Statevector".into(),
-            reason: format!(
-                "adjoint gradients for {} qubits exceed the statevector cap ({} qubits); the gradient path holds two statevectors",
-                circuit.num_qubits,
-                max_statevector_qubits()
-            ),
-        });
+        return Err(PrismError::ResourceLimit(Box::new(
+            crate::error::ResourceLimit {
+                backend: "Statevector".into(),
+                operation: "adjoint gradients, which hold two statevectors,".to_string(),
+                resource: crate::error::ResourceKind::Qubits,
+                required: circuit.num_qubits as u128,
+                limit: max_statevector_qubits() as u128,
+                env_var: Some("PRISM_MAX_SV_QUBITS"),
+            },
+        )));
     }
 
     // Validate and reduce observables before the 2^n simulation.

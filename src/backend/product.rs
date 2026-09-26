@@ -122,6 +122,8 @@ impl ProductStateBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for ProductStateBackend {}
+
 impl Backend for ProductStateBackend {
     fn name(&self) -> &'static str {
         "productstate"

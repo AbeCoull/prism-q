@@ -46,20 +46,18 @@ fn product_single_qubit_diagonal_batch_direct() {
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[1]);
     c.add_gate(
-        Gate::DiagonalBatch(Box::new(DiagonalBatchData {
-            entries: vec![
-                DiagEntry::Phase1q {
-                    qubit: 0,
-                    d0: Complex64::new(1.0, 0.0),
-                    d1: Complex64::from_polar(1.0, 0.37),
-                },
-                DiagEntry::Phase1q {
-                    qubit: 1,
-                    d0: Complex64::new(1.0, 0.0),
-                    d1: Complex64::from_polar(1.0, -0.53),
-                },
-            ],
-        })),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 0,
+                d0: Complex64::new(1.0, 0.0),
+                d1: Complex64::from_polar(1.0, 0.37),
+            },
+            DiagEntry::Phase1q {
+                qubit: 1,
+                d0: Complex64::new(1.0, 0.0),
+                d1: Complex64::from_polar(1.0, -0.53),
+            },
+        ]))),
         &[0, 1],
     );
     c.add_gate(Gate::H, &[0]);

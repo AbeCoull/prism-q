@@ -186,7 +186,11 @@ and `density_matrix` are declined in turn. See the
 [OpenQASM guide](openqasm.md) for the pragma surface.
 
 `PrismError` carries a `kind` string naming the variant it came from, so a
-caller can branch on the failure without matching its message.
+caller can branch on the failure without matching its message. A run over a memory
+cap raises kind `"resource_limit"` with the numbers attached: `resource` names the
+unit (`"qubits"`, `"amplitudes"`, `"entries"`, `"elements"` or
+`"bytes of device memory"`), `required` and `limit` are integers in that unit, and
+`env_var` names the variable that overrides the cap, or is `None`.
 
 ### Distributions too wide to write down
 

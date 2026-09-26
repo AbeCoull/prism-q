@@ -19,10 +19,8 @@ pub(crate) fn reduced_density_side(backend: &str, k: usize) -> Result<usize> {
     if width > super::schmidt::export_cap() {
         return Err(super::schmidt::export_cap_exceeded(
             backend,
-            format!(
-                "reduced density matrix on {k} qubits, which is the size of a statevector for \
-                 {width} qubits"
-            ),
+            format!("a reduced density matrix on {k} qubits"),
+            width,
         ));
     }
     Ok(1usize << k)

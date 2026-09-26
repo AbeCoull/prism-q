@@ -4,9 +4,9 @@
 //! Device statevectors are `2 * 2^n` interleaved (re, im) `f64` values, the layout of
 //! `num_complex::Complex64` and CUDA's `double2`, so neither side converts.
 
-pub mod device;
+pub(crate) mod device;
 pub(crate) mod kernels;
-pub mod memory;
+pub(crate) mod memory;
 
 use std::sync::Arc;
 
@@ -14,8 +14,8 @@ use num_complex::Complex64;
 
 use crate::error::Result;
 
-pub use self::device::GpuDevice;
-pub use self::memory::GpuBuffer;
+pub(crate) use self::device::GpuDevice;
+pub(crate) use self::memory::GpuBuffer;
 
 /// Default for `PRISM_GPU_MIN_QUBITS`: below this many qubits,
 /// [`crate::BackendKind::StatevectorGpu`] builds a host `StatevectorBackend` instead.

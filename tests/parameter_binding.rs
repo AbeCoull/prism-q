@@ -123,8 +123,8 @@ fn assert_payloads_match(a: &Gate, b: &Gate, what: &str) {
             }
         }
         (Gate::Multi2q(x), Gate::Multi2q(y)) => {
-            assert_eq!(x.gates.len(), y.gates.len(), "{what}: multi_2q arity");
-            for (k, (gx, gy)) in x.gates.iter().zip(&y.gates).enumerate() {
+            assert_eq!(x.gates().len(), y.gates().len(), "{what}: multi_2q arity");
+            for (k, (gx, gy)) in x.gates().iter().zip(y.gates()).enumerate() {
                 assert_eq!(
                     (gx.0, gx.1),
                     (gy.0, gy.1),
@@ -134,8 +134,8 @@ fn assert_payloads_match(a: &Gate, b: &Gate, what: &str) {
             }
         }
         (Gate::BatchRzz(x), Gate::BatchRzz(y)) => {
-            assert_eq!(x.edges.len(), y.edges.len(), "{what}: batch_rzz arity");
-            for (k, (ex, ey)) in x.edges.iter().zip(&y.edges).enumerate() {
+            assert_eq!(x.edges().len(), y.edges().len(), "{what}: batch_rzz arity");
+            for (k, (ex, ey)) in x.edges().iter().zip(y.edges()).enumerate() {
                 assert_eq!(
                     (ex.0, ex.1),
                     (ey.0, ey.1),

@@ -140,15 +140,16 @@ fn check_device_budget(context: &GpuContext, num_qubits: usize) -> crate::error:
     };
     let needed = (1usize << num_qubits) * crate::gpu::STATEVECTOR_BYTES_PER_AMPLITUDE;
     if needed > free {
-        return Err(crate::error::PrismError::IncompatibleBackend {
-            backend: "statevector-gpu".to_string(),
-            reason: format!(
-                "circuit has {num_qubits} qubits needing {} MiB of device memory, \
-                 exceeding the {} MiB free on the GPU",
-                needed >> 20,
-                free >> 20
-            ),
-        });
+        return Err(crate::error::PrismError::ResourceLimit(Box::new(
+            crate::error::ResourceLimit {
+                backend: "statevector-gpu".to_string(),
+                operation: format!("the {num_qubits}-qubit state on the device"),
+                resource: crate::error::ResourceKind::DeviceBytes,
+                required: needed as u128,
+                limit: free as u128,
+                env_var: None,
+            },
+        )));
     }
     Ok(())
 }
@@ -771,6 +772,8 @@ impl StatevectorBackend {
         }
     }
 }
+
+impl crate::backend::sealed::Sealed for StatevectorBackend {}
 
 impl Backend for StatevectorBackend {
     fn name(&self) -> &'static str {

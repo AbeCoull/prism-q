@@ -5,7 +5,7 @@ use std::mem::size_of;
 
 use num_complex::Complex64;
 
-use crate::error::{PrismError, Result};
+use crate::error::{PrismError, ResourceKind, Result};
 
 const MEMORY_BUDGET_DIVISOR: u64 = 2;
 
@@ -185,14 +185,14 @@ pub(crate) fn max_stabilizer_cluster_qubits() -> usize {
 /// budget, raised before the joint tableau allocates.
 #[cold]
 pub(crate) fn stabilizer_cluster_error(total_n: usize, cap: usize) -> PrismError {
-    PrismError::IncompatibleBackend {
+    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
         backend: "factored-stabilizer".to_string(),
-        reason: format!(
-            "merging entangled clusters needs a {total_n}-qubit joint tableau, exceeding \
-             the cap of {cap} on this machine \
-             (set PRISM_MAX_STABILIZER_CLUSTER_QUBITS to override)"
-        ),
-    }
+        operation: "the joint tableau of merged clusters".to_string(),
+        resource: ResourceKind::Qubits,
+        required: total_n as u128,
+        limit: cap as u128,
+        env_var: Some("PRISM_MAX_STABILIZER_CLUSTER_QUBITS"),
+    }))
 }
 
 /// Workspace cap for MPS gate application, as `2^q` amplitudes of live
@@ -228,13 +228,14 @@ pub(crate) fn mps_workspace_cap_elements() -> u128 {
 #[cold]
 pub(crate) fn workspace_allocation_error(backend: &str, what: &str, elements: u128) -> PrismError {
     let cap = max_mps_workspace_qubits();
-    PrismError::IncompatibleBackend {
+    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
         backend: backend.to_string(),
-        reason: format!(
-            "{what} needs {elements} amplitudes of workspace, exceeding the cap of \
-             2^{cap} on this machine (set PRISM_MAX_MPS_WORKSPACE_QUBITS to override)"
-        ),
-    }
+        operation: what.to_string(),
+        resource: ResourceKind::Amplitudes,
+        required: elements,
+        limit: 1u128 << cap,
+        env_var: Some("PRISM_MAX_MPS_WORKSPACE_QUBITS"),
+    }))
 }
 
 fn configured_or_detected_dense_qubits(
@@ -283,22 +284,31 @@ pub(crate) fn check_state_allocation(
     backend: &str,
     num_qubits: usize,
     cap: usize,
-    env_var: &str,
+    env_var: &'static str,
 ) -> Result<()> {
     if num_qubits >= usize::BITS as usize {
-        return Err(PrismError::IncompatibleBackend {
-            backend: backend.to_string(),
-            reason: format!("circuit has {num_qubits} qubits, exceeding addressable memory"),
-        });
+        return Err(PrismError::ResourceLimit(Box::new(
+            crate::error::ResourceLimit {
+                backend: backend.to_string(),
+                operation: "the circuit".to_string(),
+                resource: ResourceKind::Qubits,
+                required: num_qubits as u128,
+                limit: usize::BITS as u128 - 1,
+                env_var: None,
+            },
+        )));
     }
     if num_qubits > cap {
-        return Err(PrismError::IncompatibleBackend {
-            backend: backend.to_string(),
-            reason: format!(
-                "circuit has {num_qubits} qubits, exceeding the cap of {cap} on this machine \
-                 (set {env_var} to override)"
-            ),
-        });
+        return Err(PrismError::ResourceLimit(Box::new(
+            crate::error::ResourceLimit {
+                backend: backend.to_string(),
+                operation: "the circuit".to_string(),
+                resource: ResourceKind::Qubits,
+                required: num_qubits as u128,
+                limit: cap as u128,
+                env_var: Some(env_var),
+            },
+        )));
     }
     Ok(())
 }
@@ -368,17 +378,20 @@ fn capped_output_len(
     operation: &str,
     num_qubits: usize,
     cap: usize,
-    env_var: &str,
+    env_var: &'static str,
 ) -> Result<usize> {
     let cap = cap.min(usize::BITS as usize - 1);
     if num_qubits > cap {
-        return Err(PrismError::IncompatibleBackend {
-            backend: backend.to_string(),
-            reason: format!(
-                "{num_qubits} qubits exceed the {operation} cap of {cap} on this machine \
-                 (set {env_var} to override)"
-            ),
-        });
+        return Err(PrismError::ResourceLimit(Box::new(
+            crate::error::ResourceLimit {
+                backend: backend.to_string(),
+                operation: operation.to_string(),
+                resource: ResourceKind::Qubits,
+                required: num_qubits as u128,
+                limit: cap as u128,
+                env_var: Some(env_var),
+            },
+        )));
     }
     Ok(1usize << num_qubits)
 }
@@ -419,16 +432,14 @@ pub(crate) fn tensor_peak_error(
     peak: usize,
     cap: usize,
 ) -> PrismError {
-    PrismError::IncompatibleBackend {
+    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
         backend: backend.to_string(),
-        reason: format!(
-            "{operation} plans a peak intermediate of {peak} elements ({} bytes), exceeding \
-             the cap of 2^{} elements on this machine \
-             (set PRISM_MAX_TN_PEAK_QUBITS to override)",
-            peak.saturating_mul(size_of::<Complex64>()),
-            cap.trailing_zeros()
-        ),
-    }
+        operation: format!("the peak intermediate of {operation}"),
+        resource: ResourceKind::Elements,
+        required: peak as u128,
+        limit: cap as u128,
+        env_var: Some("PRISM_MAX_TN_PEAK_QUBITS"),
+    }))
 }
 
 fn dense_output_len(
@@ -590,12 +601,15 @@ mod tests {
         let err =
             capped_output_len("test", "probabilities", 5, 4, "PRISM_MAX_PROB_QUBITS").unwrap_err();
         match err {
-            PrismError::IncompatibleBackend { reason, .. } => {
-                assert!(
-                    reason.contains("5 qubits") && reason.contains("cap of 4"),
-                    "{reason}"
-                );
-                assert!(reason.contains("PRISM_MAX_PROB_QUBITS"), "{reason}");
+            PrismError::ResourceLimit(data) => {
+                let crate::error::ResourceLimit {
+                    required,
+                    limit,
+                    env_var,
+                    ..
+                } = crate::error::ResourceLimit::clone(&data);
+                assert_eq!((required, limit), (5, 4));
+                assert_eq!(env_var, Some("PRISM_MAX_PROB_QUBITS"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

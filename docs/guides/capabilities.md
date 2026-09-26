@@ -249,4 +249,7 @@ runs, and what the benchmark rows are named all move underneath that promise wit
 bump, because they are implementation rather than interface. Public enums are
 `#[non_exhaustive]` apart from a handful that mirror a closed set, so a new variant is
 additive and a `match` on one outside the crate keeps a wildcard arm. That page names
-the exceptions.
+the exceptions. The `Backend` trait is sealed, so only the crate implements it and a new
+method is additive. Items hidden from the rendered API docs, such as
+`prism_q::circuit::fusion`, are reachable for tests and tooling but are not part of the
+surface either.

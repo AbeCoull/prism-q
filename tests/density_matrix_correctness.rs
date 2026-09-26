@@ -922,12 +922,11 @@ fn dm_multi_entry_batch_phase_matches_the_per_gate_route() {
     }
 
     prep.instructions.push(Instruction::Gate {
-        gate: Gate::BatchPhase(Box::new(BatchPhaseData {
-            phases: phases
+        gate: Gate::BatchPhase(Box::new(BatchPhaseData::new(
+            phases
                 .iter()
-                .map(|&(target, theta)| (target, Complex64::from_polar(1.0, theta)))
-                .collect(),
-        })),
+                .map(|&(target, theta)| (target, Complex64::from_polar(1.0, theta))),
+        ))),
         targets: [control].into_iter().collect(),
     });
 
@@ -1559,9 +1558,9 @@ fn dm_batch_phase_through_apply_matches_the_unfused_cphase() {
     dm.init(2, 0).unwrap();
     dm.apply_instructions(&circuit.instructions).unwrap();
     dm.apply(&prism_q::circuit::Instruction::Gate {
-        gate: Gate::BatchPhase(Box::new(prism_q::gates::BatchPhaseData {
-            phases: [(1usize, phase)].into_iter().collect(),
-        })),
+        gate: Gate::BatchPhase(Box::new(prism_q::gates::BatchPhaseData::new([(
+            1usize, phase,
+        )]))),
         targets: [0usize].into_iter().collect(),
     })
     .unwrap();
@@ -1701,9 +1700,7 @@ fn dm_multi_2q_batched_bra_preserves_gate_order() {
     }
     batched
         .apply(&Instruction::Gate {
-            gate: Gate::Multi2q(Box::new(Multi2qData {
-                gates: gates.clone(),
-            })),
+            gate: Gate::Multi2q(Box::new(Multi2qData::new(gates.clone()))),
             targets: prism_q::circuit::smallvec![0, 1, 2, 3],
         })
         .unwrap();

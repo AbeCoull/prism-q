@@ -30,15 +30,17 @@ fn assert_answers_at_the_cap_and_declines_past_it(backend: &mut dyn Backend, cir
     let rho = backend.reduced_density_matrix(&[0, 3]).unwrap();
     assert_eq!(rho.len(), 16, "{name}");
     match backend.reduced_density_matrix(&[0, 3, 1]).unwrap_err() {
-        PrismError::IncompatibleBackend { backend, reason } => {
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend,
+                operation,
+                required,
+                limit,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
             assert_eq!(backend, name);
-            assert!(
-                reason.starts_with(
-                    "reduced density matrix on 3 qubits, which is the size of a statevector \
-                     for 6 qubits"
-                ),
-                "{name}: {reason}"
-            );
+            assert_eq!(operation, "a reduced density matrix on 3 qubits", "{name}");
+            assert_eq!((required, limit), (6, 4), "{name}");
         }
         other => panic!("{name}: unexpected error {other:?}"),
     }
@@ -75,9 +77,12 @@ fn assert_ghz_spectrum(values: &[f64]) {
 fn assert_declines_past_the_cap(backend: &mut dyn Backend, subsystem: &[usize], route: &str) {
     let name = backend.name();
     match backend.schmidt_values(subsystem).unwrap_err() {
-        PrismError::IncompatibleBackend { backend, reason } => {
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend, operation, ..
+            } = prism_q::ResourceLimit::clone(&data);
             assert_eq!(backend, name);
-            assert!(reason.starts_with(route), "{reason}");
+            assert!(operation.starts_with(route), "{operation}");
         }
         other => panic!("unexpected error {other:?}"),
     }
@@ -102,8 +107,7 @@ fn a_spectrum_declines_when_its_transient_prices_past_the_export_cap() {
     assert_declines_past_the_cap(
         &mut sv,
         &[0],
-        "Schmidt values across a cut, whose gathered copy and thin factor together are the \
-         size of a statevector for 5 qubits",
+        "Schmidt values across a cut, as a gathered copy and thin factor",
     );
 
     // Two qubits on the smaller side price as a 4-qubit statevector, at the
@@ -141,15 +145,17 @@ fn the_terminal_declines_an_oversized_subsystem_before_running() {
         .reduced_density_matrix(&[0, 3, 1])
         .unwrap_err()
     {
-        PrismError::IncompatibleBackend { backend, reason } => {
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend,
+                operation,
+                required,
+                limit,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
             assert_eq!(backend, "statevector");
-            assert!(
-                reason.starts_with(
-                    "reduced density matrix on 3 qubits, which is the size of a statevector \
-                     for 6 qubits"
-                ),
-                "{reason}"
-            );
+            assert_eq!(operation, "a reduced density matrix on 3 qubits");
+            assert_eq!((required, limit), (6, 4));
         }
         other => panic!("unexpected error {other:?}"),
     }

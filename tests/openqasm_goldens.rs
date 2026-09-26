@@ -350,8 +350,8 @@ fn gates_match(a: &Gate, b: &Gate) -> bool {
         }
         (Gate::Fused2q(x), Gate::Fused2q(y)) => close(x.iter().flatten(), y.iter().flatten()),
         (Gate::Mcu(x), Gate::Mcu(y)) => {
-            x.num_controls == y.num_controls
-                && close(x.mat.iter().flatten(), y.mat.iter().flatten())
+            x.num_controls() == y.num_controls()
+                && close(x.mat().iter().flatten(), y.mat().iter().flatten())
         }
         _ => a == b,
     }

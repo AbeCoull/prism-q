@@ -1986,6 +1986,8 @@ impl DistributedStatevectorBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for DistributedStatevectorBackend {}
+
 impl Backend for DistributedStatevectorBackend {
     fn name(&self) -> &'static str {
         BACKEND_NAME

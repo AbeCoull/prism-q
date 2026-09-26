@@ -323,8 +323,8 @@ Four `Backend` methods carry provenance onto every result: `resolved` names the
 engine, `exactness` says whether its representation can discard state weight and
 how much this run discarded, `placement` says whether the state lived on the
 device, and `bond_report` gives the peak bond dimension against the cap for a
-representation bounded by one. All four have defaults, so an out-of-tree backend
-compiles unchanged and is named by `Backend::name`.
+representation bounded by one. All four have defaults; a backend that keeps the
+`resolved` default is named by `Backend::name`.
 
 These are reports, not predictions. `exactness` is read after the circuit has
 been applied, so the MPS bound reflects the singular values this run actually

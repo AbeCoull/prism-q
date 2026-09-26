@@ -303,8 +303,7 @@ fn oversize_dense_route_is_unavailable() {
     assert!(
         matches!(
             err,
-            prism_q::PrismError::IncompatibleBackend { .. }
-                | prism_q::PrismError::BackendUnsupported { .. }
+            prism_q::PrismError::ResourceLimit(_) | prism_q::PrismError::BackendUnsupported { .. }
         ),
         "expected the statevector route to reject {OVERSIZE_QUBITS} qubits, got {err:?}"
     );
@@ -499,8 +498,7 @@ fn wide_product_dense_route_is_unavailable() {
     assert!(
         matches!(
             err,
-            prism_q::PrismError::IncompatibleBackend { .. }
-                | prism_q::PrismError::BackendUnsupported { .. }
+            prism_q::PrismError::ResourceLimit(_) | prism_q::PrismError::BackendUnsupported { .. }
         ),
         "expected the statevector route to reject {WIDE_QUBITS} qubits, got {err:?}"
     );

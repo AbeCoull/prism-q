@@ -83,8 +83,12 @@ fn density_matrix_override_above_the_clamp_is_rejected_identically_at_both_gates
 
         for (gate, err) in [("dispatch", &dispatched), ("init", &initialized)] {
             match err {
-                PrismError::IncompatibleBackend { backend, reason } => {
-                    assert_eq!(backend, "density_matrix", "{gate} named the wrong backend");
+                PrismError::ResourceLimit(data) => {
+                    assert_eq!(
+                        data.backend, "density_matrix",
+                        "{gate} named the wrong backend"
+                    );
+                    let reason = err.to_string();
                     assert!(
                         reason.contains(&format!("exceeding the cap of {DM_CAP}")),
                         "{width}q {gate} must report the clamped cap, got {reason}"
@@ -111,11 +115,16 @@ fn unaddressable_qubit_count_is_rejected_before_the_shift() {
     let mut backend = StatevectorBackend::new(42);
     let err = backend.init(usize::BITS as usize, 0).unwrap_err();
     match err {
-        PrismError::IncompatibleBackend { reason, .. } => {
-            assert!(
-                reason.contains("addressable memory"),
-                "expected an addressability rejection, got {reason}"
-            );
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                required,
+                limit,
+                env_var,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
+            assert_eq!(required, usize::BITS as u128);
+            assert_eq!(limit, usize::BITS as u128 - 1);
+            assert_eq!(env_var, None, "no variable raises the addressable width");
         }
         other => panic!("expected a clean addressability error, got {other:?}"),
     }

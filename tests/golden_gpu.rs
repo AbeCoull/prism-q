@@ -114,41 +114,33 @@ fn gate_samples() -> Vec<Gate> {
         Gate::Cz,
         Gate::Swap,
         Gate::Cu(Box::new(m2)),
-        Gate::Mcu(Box::new(McuData {
-            mat: m2,
-            num_controls: 2,
-        })),
-        Gate::BatchPhase(Box::new(BatchPhaseData {
-            phases: smallvec![(1usize, Complex64::from_polar(1.0, 0.5))],
-        })),
-        Gate::BatchRzz(Box::new(BatchRzzData {
-            edges: vec![(0, 1, 0.3), (1, 2, 0.5)],
-        })),
-        Gate::DiagonalBatch(Box::new(DiagonalBatchData {
-            entries: vec![
-                DiagEntry::Phase1q {
-                    qubit: 0,
-                    d0: Complex64::from_polar(1.0, 0.2),
-                    d1: Complex64::from_polar(1.0, -0.3),
-                },
-                DiagEntry::Phase2q {
-                    q0: 1,
-                    q1: 2,
-                    phase: Complex64::from_polar(1.0, 0.5),
-                },
-                DiagEntry::Parity2q {
-                    q0: 0,
-                    q1: 3,
-                    same: Complex64::from_polar(1.0, 0.1),
-                    diff: Complex64::from_polar(1.0, -0.4),
-                },
-            ],
-        })),
+        Gate::Mcu(Box::new(McuData::new(m2, 2))),
+        Gate::BatchPhase(Box::new(BatchPhaseData::new(vec![(
+            1usize,
+            Complex64::from_polar(1.0, 0.5),
+        )]))),
+        Gate::BatchRzz(Box::new(BatchRzzData::new(vec![(0, 1, 0.3), (1, 2, 0.5)]))),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+            DiagEntry::Phase1q {
+                qubit: 0,
+                d0: Complex64::from_polar(1.0, 0.2),
+                d1: Complex64::from_polar(1.0, -0.3),
+            },
+            DiagEntry::Phase2q {
+                q0: 1,
+                q1: 2,
+                phase: Complex64::from_polar(1.0, 0.5),
+            },
+            DiagEntry::Parity2q {
+                q0: 0,
+                q1: 3,
+                same: Complex64::from_polar(1.0, 0.1),
+                diff: Complex64::from_polar(1.0, -0.4),
+            },
+        ]))),
         Gate::MultiFused(Box::new(MultiFusedData::new(vec![(0, m2), (1, m2)]))),
         Gate::Fused2q(Box::new(m4)),
-        Gate::Multi2q(Box::new(Multi2qData {
-            gates: vec![(0, 1, m4)],
-        })),
+        Gate::Multi2q(Box::new(Multi2qData::new(vec![(0, 1, m4)]))),
         Gate::QftBlock { start: 0, num: 4 },
         pauli_rot_sample(),
     ]
@@ -179,7 +171,7 @@ fn representative(gate: &Gate) -> (usize, Vec<Instruction>) {
         | Gate::Fused(_) => vec![0],
         Gate::Cx | Gate::Cz | Gate::Swap | Gate::Rzz(_) => vec![0, 1],
         Gate::Cu(_) => vec![0, 2],
-        Gate::Mcu(data) => (0..=data.num_controls as usize).collect(),
+        Gate::Mcu(data) => (0..=data.num_controls() as usize).collect(),
         Gate::BatchPhase(_) => vec![0],
         Gate::BatchRzz(_) => vec![0, 1, 2],
         Gate::DiagonalBatch(_) => vec![0, 1, 2, 3],
@@ -341,20 +333,14 @@ fn mcu_toffoli_and_generic() {
         [Complex64::new(0.0, 0.0), Complex64::new(1.0, 0.0)],
         [Complex64::new(1.0, 0.0), Complex64::new(0.0, 0.0)],
     ];
-    let mcu_toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
+    let mcu_toffoli = Gate::Mcu(Box::new(McuData::new(x_mat, 2)));
     insts.push(g(mcu_toffoli, &[0, 1, 2]));
 
     let mat = [
         [Complex64::new(0.4, 0.3), Complex64::new(-0.2, 0.5)],
         [Complex64::new(0.5, -0.2), Complex64::new(0.3, 0.4)],
     ];
-    let mcu_3 = Gate::Mcu(Box::new(McuData {
-        mat,
-        num_controls: 3,
-    }));
+    let mcu_3 = Gate::Mcu(Box::new(McuData::new(mat, 3)));
     insts.push(g(mcu_3, &[0, 1, 3, 4]));
     f.compare(n, &insts);
 }
@@ -372,10 +358,7 @@ fn mcu_phase_shortcut() {
     for q in 0..n {
         insts.push(g(Gate::H, &[q]));
     }
-    let mcu = Gate::Mcu(Box::new(McuData {
-        mat: diag,
-        num_controls: 3,
-    }));
+    let mcu = Gate::Mcu(Box::new(McuData::new(diag, 3)));
     insts.push(g(mcu, &[0, 1, 2, 4]));
     f.compare(n, &insts);
 }
@@ -460,7 +443,7 @@ fn diagonal_batch_all_entry_kinds() {
         },
     ];
     insts.push(g(
-        Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(entries))),
         &[0, 1, 2, 3],
     ));
     f.compare(n, &insts);
@@ -535,7 +518,7 @@ fn diagonal_batch_14q_mixed_entries_matches_cpu() {
         },
     ];
     insts.push(g(
-        Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(entries))),
         &(0..8).collect::<Vec<_>>(),
     ));
     f.compare(n, &insts);
@@ -567,7 +550,7 @@ fn diagonal_batch_14q_short_groups_matches_cpu() {
         });
     }
     insts.push(g(
-        Gate::DiagonalBatch(Box::new(DiagonalBatchData { entries })),
+        Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(entries))),
         &(0..12).collect::<Vec<_>>(),
     ));
     f.compare(n, &insts);
@@ -2775,13 +2758,19 @@ fn over_vram_init_reports_the_device_budget() {
     let over = f.ctx.max_qubits_for_statevector().unwrap() + 1;
     let mut backend = StatevectorBackend::new(42).with_gpu(f.ctx.clone());
     match backend.init(over, 0).unwrap_err() {
-        prism_q::PrismError::IncompatibleBackend { backend, reason } => {
+        prism_q::PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend,
+                operation,
+                resource,
+                required,
+                limit,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
             assert_eq!(backend, "statevector-gpu");
-            assert!(
-                reason.contains("free on the GPU"),
-                "expected the budget message, got: {reason}"
-            );
-            assert!(reason.contains(&format!("{over} qubits")));
+            assert_eq!(resource, prism_q::ResourceKind::DeviceBytes);
+            assert!(required > limit);
+            assert!(operation.contains(&format!("{over}-qubit")), "{operation}");
         }
         other => panic!("expected the device budget error, got {other:?}"),
     }

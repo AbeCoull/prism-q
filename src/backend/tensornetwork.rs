@@ -153,44 +153,288 @@ impl Tensor {
     }
 }
 
-/// Fill `out` with transposed elements, `out[0]` being output index `start`.
+/// Elements from which a freed buffer is worth holding for reuse, 512 KiB. Smaller
+/// ones the allocator recycles without faulting in new pages.
+const POOL_MIN_ELEMENTS: usize = 1 << 15;
+
+/// Freed buffers a [`BufferPool`] holds at once: the two operands and two
+/// transposes one contraction step releases.
+const POOL_BUFFERS: usize = 4;
+
+/// Large tensor buffers one plan replay frees and reuses.
 ///
-/// The output index is walked as an odometer over the permuted axes, so the
-/// source offset advances by addition and only a nonzero `start` needs division.
-///
-/// `steps[a]` is the source stride of the axis that output axis `a` came from.
-fn transpose_range(
-    out: &mut [Complex64],
-    src: &[Complex64],
-    start: usize,
-    new_shape: &[usize],
-    new_strides: &[usize],
-    steps: &[usize],
-) {
-    let rank = new_shape.len();
-    let mut counter: SmallVec<[usize; 6]> = SmallVec::from_elem(0usize, rank);
-    let mut src_idx = 0usize;
-    if start != 0 {
-        let mut rem = start;
-        for a in 0..rank {
-            counter[a] = rem / new_strides[a];
-            rem %= new_strides[a];
-            src_idx += counter[a] * steps[a];
+/// A fresh buffer past the allocator's mapping threshold faults in every page on
+/// first write, and each contraction step of a replay allocates and frees a few
+/// of these. Recycling them keeps the replay on pages it has already touched.
+/// The pool holds only what earlier steps released, so resident memory stays at
+/// the largest single step instead of dropping between steps.
+#[derive(Default)]
+struct BufferPool {
+    free: Vec<Vec<Complex64>>,
+}
+
+impl BufferPool {
+    /// A buffer of `len` elements whose contents the caller overwrites.
+    fn take(&mut self, len: usize) -> Vec<Complex64> {
+        self.reuse(len)
+            .unwrap_or_else(|| vec![Complex64::new(0.0, 0.0); len])
+    }
+
+    fn take_zeroed(&mut self, len: usize) -> Vec<Complex64> {
+        let zero = Complex64::new(0.0, 0.0);
+        match self.reuse(len) {
+            Some(mut buf) => {
+                buf.fill(zero);
+                buf
+            }
+            None => vec![zero; len],
         }
     }
 
-    for slot in out.iter_mut() {
-        *slot = src[src_idx];
-        for a in (0..rank).rev() {
-            counter[a] += 1;
-            src_idx += steps[a];
-            if counter[a] < new_shape[a] {
-                break;
+    /// The smallest held buffer of at least `len` elements, cut to `len`.
+    fn reuse(&mut self, len: usize) -> Option<Vec<Complex64>> {
+        if len < POOL_MIN_ELEMENTS {
+            return None;
+        }
+        let (index, _) = self
+            .free
+            .iter()
+            .enumerate()
+            .filter(|(_, buf)| buf.len() >= len)
+            .min_by_key(|(_, buf)| buf.len())?;
+        let mut buf = self.free.swap_remove(index);
+        buf.truncate(len);
+        Some(buf)
+    }
+
+    /// Hold `buf` for reuse, displacing the smallest held buffer when full.
+    fn give(&mut self, buf: Vec<Complex64>) {
+        if buf.len() < POOL_MIN_ELEMENTS {
+            return;
+        }
+        if self.free.len() == POOL_BUFFERS {
+            let (index, smallest) = self
+                .free
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, held)| held.len())
+                .expect("a full pool holds buffers");
+            if smallest.len() >= buf.len() {
+                return;
             }
-            counter[a] = 0;
-            src_idx -= steps[a] * new_shape[a];
+            self.free.swap_remove(index);
+        }
+        self.free.push(buf);
+    }
+}
+
+/// Extent and source stride of each output axis, in output order.
+type Axes = SmallVec<[(usize, usize); 6]>;
+
+/// Source elements a tiled transpose reads per contiguous run, two cache lines.
+const TRANSPOSE_TILE: usize = 8;
+
+/// Elements from which a strided transpose tiles its reads: 512 KiB, past a
+/// private L2.
+const TRANSPOSE_TILE_MIN: usize = 1 << 15;
+
+/// Output axes of `perm` over a tensor of `shape`, with neighbours that stay
+/// adjacent in the source merged into one axis and unit extents dropped.
+///
+/// Merging keeps every walk below on the fewest axes: a permutation that moves
+/// a few legs of a rank-20 tensor becomes a handful of long runs.
+fn fused_axes(shape: &[usize], perm: &[usize]) -> Axes {
+    let mut strides: SmallVec<[usize; 6]> = SmallVec::from_elem(0, shape.len());
+    let mut stride = 1;
+    for (axis, &extent) in shape.iter().enumerate().rev() {
+        strides[axis] = stride;
+        stride *= extent;
+    }
+    let mut axes = Axes::new();
+    for &old in perm {
+        let (extent, stride) = (shape[old], strides[old]);
+        if extent == 1 {
+            continue;
+        }
+        match axes.last_mut() {
+            Some((outer_extent, outer_stride)) if *outer_stride == stride * extent => {
+                *outer_extent *= extent;
+                *outer_stride = stride;
+            }
+            _ => axes.push((extent, stride)),
         }
     }
+    if axes.is_empty() {
+        axes.push((1, 1));
+    }
+    axes
+}
+
+/// Source offset of a row-major walk over `axes`.
+struct Odometer<'a> {
+    axes: &'a [(usize, usize)],
+    counter: SmallVec<[usize; 6]>,
+    offset: usize,
+}
+
+impl<'a> Odometer<'a> {
+    /// Start the walk at row-major index `start`; only a nonzero start divides.
+    fn new(axes: &'a [(usize, usize)], start: usize) -> Self {
+        let mut counter: SmallVec<[usize; 6]> = SmallVec::from_elem(0, axes.len());
+        let mut offset = 0;
+        let mut rem = start;
+        if start != 0 {
+            for (slot, &(extent, stride)) in counter.iter_mut().zip(axes).rev() {
+                *slot = rem % extent;
+                rem /= extent;
+                offset += *slot * stride;
+            }
+        }
+        Self {
+            axes,
+            counter,
+            offset,
+        }
+    }
+
+    #[inline(always)]
+    fn advance(&mut self) {
+        for (slot, &(extent, stride)) in self.counter.iter_mut().zip(self.axes).rev() {
+            *slot += 1;
+            self.offset += stride;
+            if *slot < extent {
+                return;
+            }
+            *slot = 0;
+            self.offset -= stride * extent;
+        }
+    }
+}
+
+/// Write `out`, the output elements from index `start`, as whole runs of the
+/// innermost axis, which the source holds contiguously.
+fn transpose_runs(out: &mut [Complex64], src: &[Complex64], axes: &[(usize, usize)], start: usize) {
+    let (run, _) = axes[axes.len() - 1];
+    let mut outer = Odometer::new(&axes[..axes.len() - 1], start / run);
+    for dst in out.chunks_exact_mut(run) {
+        dst.copy_from_slice(&src[outer.offset..outer.offset + run]);
+        outer.advance();
+    }
+}
+
+/// Write `out`, [`TRANSPOSE_TILE`] consecutive indices of the source-contiguous
+/// axis `b` starting at output index `start`.
+///
+/// Output index is `prefix | b | mid | inner`. Walking `b` innermost reads whole
+/// cache lines of the source and writes the tile's output rows in step, where the
+/// plain output-order walk reads one element per line on a strided inner axis.
+fn transpose_tile(
+    out: &mut [Complex64],
+    src: &[Complex64],
+    axes: &[(usize, usize)],
+    b: usize,
+    start: usize,
+) {
+    let (inner_extent, inner_stride) = axes[axes.len() - 1];
+    let mid = &axes[b + 1..axes.len() - 1];
+    let row: usize = axes[b + 1..].iter().map(|&(extent, _)| extent).product();
+    let (b_extent, _) = axes[b];
+    let first = start / row;
+    let base = Odometer::new(&axes[..b], first / b_extent).offset + first % b_extent;
+
+    let mut walk = Odometer::new(mid, 0);
+    for mid_out in (0..row).step_by(inner_extent) {
+        let mut from = base + walk.offset;
+        for a in 0..inner_extent {
+            let lane = &src[from..from + TRANSPOSE_TILE];
+            for (t, &value) in lane.iter().enumerate() {
+                out[t * row + mid_out + a] = value;
+            }
+            from += inner_stride;
+        }
+        walk.advance();
+    }
+}
+
+/// Write `out`, the output elements from index `start`, one at a time.
+fn transpose_elements(
+    out: &mut [Complex64],
+    src: &[Complex64],
+    axes: &[(usize, usize)],
+    start: usize,
+) {
+    let mut walk = Odometer::new(axes, start);
+    for slot in out {
+        *slot = src[walk.offset];
+        walk.advance();
+    }
+}
+
+/// Fill `out` with `src` read along `axes`.
+///
+/// Runs of at least [`TRANSPOSE_TILE`] copy whole. A strided inner axis on a
+/// tensor past [`TRANSPOSE_TILE_MIN`] goes through [`transpose_tile`]; below it
+/// the source sits in cache and the element walk has less setup per element.
+fn transpose_into(out: &mut [Complex64], src: &[Complex64], axes: &[(usize, usize)]) {
+    let (inner_extent, inner_stride) = axes[axes.len() - 1];
+    if inner_stride == 1 && inner_extent >= TRANSPOSE_TILE {
+        let chunk = inner_extent * (MIN_TRANSPOSE_TASK / inner_extent).max(1);
+        return for_each_chunk(out, chunk, |start, dst| {
+            transpose_runs(dst, src, axes, start)
+        });
+    }
+    if inner_stride != 1 && out.len() >= TRANSPOSE_TILE_MIN {
+        let b = axes
+            .iter()
+            .position(|&(_, stride)| stride == 1)
+            .expect("the source's last axis has unit stride");
+        let (b_extent, _) = axes[b];
+        if b_extent % TRANSPOSE_TILE == 0 {
+            let row: usize = axes[b + 1..].iter().map(|&(extent, _)| extent).product();
+            let part = TRANSPOSE_TILE * row;
+            let per_task = (MIN_TRANSPOSE_TASK / part).max(1);
+            let chunk = part * gcd(b_extent / TRANSPOSE_TILE, per_task);
+            return for_each_chunk(out, chunk, |start, dst| {
+                for (index, piece) in dst.chunks_exact_mut(part).enumerate() {
+                    transpose_tile(piece, src, axes, b, start + index * part);
+                }
+            });
+        }
+    }
+    for_each_chunk(out, MIN_TRANSPOSE_TASK, |start, dst| {
+        transpose_elements(dst, src, axes, start)
+    })
+}
+
+/// Output elements below which a transpose task is not worth a Rayon split.
+#[cfg(feature = "parallel")]
+const MIN_TRANSPOSE_TASK: usize = MIN_PAR_ELEMS;
+#[cfg(not(feature = "parallel"))]
+const MIN_TRANSPOSE_TASK: usize = usize::MAX;
+
+/// Run `body` over `out` in `chunk`-sized pieces with each piece's start index,
+/// in parallel when there is more than one.
+fn for_each_chunk(
+    out: &mut [Complex64],
+    chunk: usize,
+    body: impl Fn(usize, &mut [Complex64]) + Sync,
+) {
+    #[cfg(feature = "parallel")]
+    if out.len() > chunk {
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(index, dst)| body(index * chunk, dst));
+        return;
+    }
+    let _ = chunk;
+    body(0, out);
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
 }
 
 /// Transpose a tensor by permuting its axes.
@@ -198,68 +442,17 @@ fn transpose_range(
 /// `perm[new_axis] = old_axis`. The output tensor has shape
 /// `[input.shape[perm[0]], input.shape[perm[1]], ...]`.
 fn transpose(t: &Tensor, perm: &[usize]) -> Tensor {
-    let rank = t.rank();
-    debug_assert_eq!(perm.len(), rank);
+    transpose_with(t, perm, &mut BufferPool::default())
+}
 
-    let new_shape: SmallVec<[usize; 6]> = perm.iter().map(|&p| t.shape[p]).collect();
-    let new_legs: SmallVec<[LegId; 6]> = perm.iter().map(|&p| t.legs[p]).collect();
-
-    let total = t.num_elements();
-    let mut new_data = vec![Complex64::new(0.0, 0.0); total];
-
-    let mut old_strides: SmallVec<[usize; 6]> = SmallVec::new();
-    let mut stride = 1usize;
-    for _ in 0..rank {
-        old_strides.push(0);
-    }
-    for i in (0..rank).rev() {
-        old_strides[i] = stride;
-        stride *= t.shape[i];
-    }
-
-    let mut new_strides: SmallVec<[usize; 6]> = SmallVec::new();
-    stride = 1;
-    for _ in 0..rank {
-        new_strides.push(0);
-    }
-    for i in (0..rank).rev() {
-        new_strides[i] = stride;
-        stride *= new_shape[i];
-    }
-
-    let steps: SmallVec<[usize; 6]> = perm.iter().map(|&old_ax| old_strides[old_ax]).collect();
-
-    #[cfg(feature = "parallel")]
-    if total >= MIN_PAR_ELEMS {
-        let src = &t.data;
-        new_data
-            .par_chunks_mut(MIN_PAR_ELEMS)
-            .enumerate()
-            .for_each(|(chunk_idx, out)| {
-                transpose_range(
-                    out,
-                    src,
-                    chunk_idx * MIN_PAR_ELEMS,
-                    &new_shape,
-                    &new_strides,
-                    &steps,
-                );
-            });
-
-        return Tensor {
-            data: new_data,
-            shape: new_shape,
-            legs: new_legs,
-        };
-    }
-
-    transpose_range(&mut new_data, &t.data, 0, &new_shape, &new_strides, &steps);
-
-    Tensor {
-        data: new_data,
-        shape: new_shape,
-        legs: new_legs,
-    }
+/// [`transpose`] into a buffer from `pool`.
+fn transpose_with(t: &Tensor, perm: &[usize], pool: &mut BufferPool) -> Tensor {
+    debug_assert_eq!(perm.len(), t.rank());
+    let shape: SmallVec<[usize; 6]> = perm.iter().map(|&p| t.shape[p]).collect();
+    let legs: SmallVec<[LegId; 6]> = perm.iter().map(|&p| t.legs[p]).collect();
+    let mut data = pool.take(t.num_elements());
+    transpose_into(&mut data, &t.data, &fused_axes(&t.shape, perm));
+    Tensor { data, shape, legs }
 }
 
 /// Multiply the row-major `m` by `k` and `k` by `n` operands into `c`.
@@ -286,6 +479,12 @@ fn faer_gemm(a: &[Complex64], b: &[Complex64], c: &mut [Complex64], m: usize, k:
 /// Standard tensordot: find shared legs, reshape both to 2D matrices,
 /// multiply, reshape result.
 fn contract(a: &Tensor, b: &Tensor) -> Tensor {
+    contract_with(a, b, &mut BufferPool::default())
+}
+
+/// [`contract`] with its transposes and result drawn from `pool`, and the
+/// transposes handed back to it.
+fn contract_with(a: &Tensor, b: &Tensor, pool: &mut BufferPool) -> Tensor {
     let mut a_shared: SmallVec<[usize; 4]> = SmallVec::new();
     let mut b_shared: SmallVec<[usize; 4]> = SmallVec::new();
     for (ai, &a_leg) in a.legs.iter().enumerate() {
@@ -311,13 +510,13 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     let a_t = if a_perm.iter().enumerate().all(|(i, &p)| i == p) {
         Cow::Borrowed(a)
     } else {
-        Cow::Owned(transpose(a, &a_perm))
+        Cow::Owned(transpose_with(a, &a_perm, pool))
     };
 
     let b_t = if b_perm.iter().enumerate().all(|(i, &p)| i == p) {
         Cow::Borrowed(b)
     } else {
-        Cow::Owned(transpose(b, &b_perm))
+        Cow::Owned(transpose_with(b, &b_perm, pool))
     };
 
     let m: usize = a_free.iter().map(|&i| a.shape[i]).product::<usize>().max(1);
@@ -329,10 +528,18 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
     let n: usize = b_free.iter().map(|&i| b.shape[i]).product::<usize>().max(1);
 
     let zero = Complex64::new(0.0, 0.0);
-    let mut c_data = vec![zero; m * n];
+    #[cfg(feature = "parallel")]
+    let faer = m * k * n >= MIN_FAER_GEMM_WORK;
+    #[cfg(not(feature = "parallel"))]
+    let faer = false;
+    let mut c_data = if faer {
+        pool.take(m * n)
+    } else {
+        pool.take_zeroed(m * n)
+    };
 
     #[cfg(feature = "parallel")]
-    if m * k * n >= MIN_FAER_GEMM_WORK {
+    if faer {
         faer_gemm(&a_t.data, &b_t.data, &mut c_data, m, k, n);
     } else if m * n >= MIN_PAR_ELEMS {
         let a_data = &a_t.data;
@@ -378,6 +585,13 @@ fn contract(a: &Tensor, b: &Tensor) -> Tensor {
                 *c_elem += a_val * b_val;
             }
         }
+    }
+
+    if let Cow::Owned(t) = a_t {
+        pool.give(t.data);
+    }
+    if let Cow::Owned(t) = b_t {
+        pool.give(t.data);
     }
 
     let mut result_shape: SmallVec<[usize; 6]> = SmallVec::new();
@@ -638,25 +852,37 @@ fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
     #[cfg(test)]
     PLANNER_CALLS.with(|calls| calls.set(calls.get() + 1));
     let slots: Vec<Option<TensorMeta>> = tensors.iter().map(|t| Some(TensorMeta::of(t))).collect();
-    let mut plan = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
-    if plan.peak >= RESTART_PEAK_THRESHOLD {
-        let metas: Vec<TensorMeta> = tensors.iter().map(TensorMeta::of).collect();
-        for (temp_index, &temperature) in PLAN_NOISE_TEMPERATURES.iter().enumerate() {
-            for pass in 0..PLAN_RESTARTS_PER_TEMPERATURE {
-                let pass_seed = PLAN_NOISE_SEED ^ (((temp_index as u64) << 32) | pass);
-                let mut rng = ChaCha8Rng::seed_from_u64(pass_seed);
-                let slots: Vec<Option<TensorMeta>> = metas.iter().cloned().map(Some).collect();
-                let Some(candidate) = plan_pairs(slots, Some((&mut rng, temperature)), plan.peak)
-                else {
-                    continue;
-                };
-                if (candidate.peak, candidate.total) < (plan.peak, plan.total) {
-                    plan = candidate;
-                }
-            }
-        }
+    let greedy = plan_pairs(slots, None, usize::MAX).expect("unbounded pass completes");
+    if greedy.peak < RESTART_PEAK_THRESHOLD {
+        return greedy;
     }
-    plan
+    let metas: Vec<TensorMeta> = tensors.iter().map(TensorMeta::of).collect();
+    let bound = greedy.peak;
+    let restart = |index: u64| {
+        let temp_index = index / PLAN_RESTARTS_PER_TEMPERATURE;
+        let pass = index % PLAN_RESTARTS_PER_TEMPERATURE;
+        let temperature = PLAN_NOISE_TEMPERATURES[temp_index as usize];
+        let pass_seed = PLAN_NOISE_SEED ^ ((temp_index << 32) | pass);
+        let mut rng = ChaCha8Rng::seed_from_u64(pass_seed);
+        let slots: Vec<Option<TensorMeta>> = metas.iter().cloned().map(Some).collect();
+        plan_pairs(slots, Some((&mut rng, temperature)), bound)
+    };
+    let passes = PLAN_NOISE_TEMPERATURES.len() as u64 * PLAN_RESTARTS_PER_TEMPERATURE;
+    #[cfg(feature = "parallel")]
+    let candidates: Vec<Option<ContractionPlan>> =
+        (0..passes).into_par_iter().map(restart).collect();
+    #[cfg(not(feature = "parallel"))]
+    let candidates: Vec<Option<ContractionPlan>> = (0..passes).map(restart).collect();
+    candidates
+        .into_iter()
+        .flatten()
+        .fold(greedy, |best, candidate| {
+            if (candidate.peak, candidate.total) < (best.peak, best.total) {
+                candidate
+            } else {
+                best
+            }
+        })
 }
 
 /// Multiply out the tensors left once no pair shares a leg, smallest first.
@@ -666,7 +892,7 @@ fn plan_with_restarts(tensors: &[Tensor]) -> ContractionPlan {
 /// create a shared leg. For disjoint operands the greedy cost reduces to the
 /// product of their element counts, so smallest-first is the same choice a scan
 /// over every pair would make, without the scan.
-fn join_disjoint(mut slots: Vec<Option<Tensor>>) -> Tensor {
+fn join_disjoint(mut slots: Vec<Option<Tensor>>, pool: &mut BufferPool) -> Tensor {
     let mut by_size: BinaryHeap<Reverse<(usize, usize)>> = slots
         .iter()
         .enumerate()
@@ -678,7 +904,9 @@ fn join_disjoint(mut slots: Vec<Option<Tensor>>) -> Tensor {
         let Reverse((_, j)) = by_size.pop().expect("two or more queued");
         let a_tensor = slots[i].take().expect("queued slots are live");
         let b_tensor = slots[j].take().expect("queued slots are live");
-        let merged = contract(&a_tensor, &b_tensor);
+        let merged = contract_with(&a_tensor, &b_tensor, pool);
+        pool.give(a_tensor.data);
+        pool.give(b_tensor.data);
         by_size.push(Reverse((merged.num_elements(), slots.len())));
         slots.push(Some(merged));
     }
@@ -1344,6 +1572,7 @@ fn kept_rank(values: &[f64], budget: f64) -> usize {
 /// no leg and go to [`join_disjoint`].
 fn replay_plan(tensors: &mut Vec<Tensor>, plan: &ContractionPlan) -> Tensor {
     let mut slots: Vec<Option<Tensor>> = std::mem::take(tensors).into_iter().map(Some).collect();
+    let mut pool = BufferPool::default();
     for &(i, j) in &plan.pairs {
         let a_tensor = slots[i].take().expect("planned pair is live");
         let b_tensor = slots[j].take().expect("planned pair is live");
@@ -1351,10 +1580,12 @@ fn replay_plan(tensors: &mut Vec<Tensor>, plan: &ContractionPlan) -> Tensor {
             a_tensor.legs.iter().any(|leg| b_tensor.legs.contains(leg)),
             "planned pair shares a leg"
         );
-        slots.push(Some(contract(&a_tensor, &b_tensor)));
+        slots.push(Some(contract_with(&a_tensor, &b_tensor, &mut pool)));
+        pool.give(a_tensor.data);
+        pool.give(b_tensor.data);
     }
 
-    join_disjoint(slots)
+    join_disjoint(slots, &mut pool)
 }
 
 /// One sweep position's plan, with the fingerprint of the metadata it was
@@ -2971,6 +3202,43 @@ mod tests {
     // peaking at 16.8M elements, past RESTART_PEAK_THRESHOLD, so the restart
     // arm runs. Planning walks metadata only, so no contraction executes here.
     #[test]
+    fn transpose_matches_an_index_by_index_permutation() {
+        let cases: [(&[usize], &[usize]); 6] = [
+            (&[2, 3, 4], &[2, 0, 1]),
+            (&[5, 1, 3], &[1, 2, 0]),
+            (&[64, 2, 2, 2, 2, 16], &[1, 2, 0, 3, 4, 5]),
+            (&[16, 2, 4, 2, 64, 2], &[3, 1, 5, 0, 2, 4]),
+            (&[8, 2, 2, 8, 2, 2, 2, 16], &[1, 7, 2, 4, 0, 6, 3, 5]),
+            (&[3, 16, 2, 2, 7, 32], &[4, 0, 2, 5, 3, 1]),
+        ];
+        for (shape, perm) in cases {
+            let total: usize = shape.iter().product();
+            let tensor = Tensor {
+                data: (0..total)
+                    .map(|i| Complex64::new(i as f64, -(i as f64)))
+                    .collect(),
+                shape: SmallVec::from_slice(shape),
+                legs: (0..shape.len()).collect(),
+            };
+            let out = transpose(&tensor, perm);
+            let mut index: SmallVec<[usize; 8]> = SmallVec::from_elem(0, shape.len());
+            for (flat, value) in out.data.iter().enumerate() {
+                let mut rem = flat;
+                for axis in (0..perm.len()).rev() {
+                    index[perm[axis]] = rem % shape[perm[axis]];
+                    rem /= shape[perm[axis]];
+                }
+                let src = index.iter().zip(shape).fold(0, |acc, (&i, &e)| acc * e + i);
+                assert_eq!(
+                    value.re, src as f64,
+                    "shape {shape:?} perm {perm:?} at {flat}"
+                );
+            }
+            assert_eq!(out.legs.as_slice(), perm);
+        }
+    }
+
+    #[test]
     fn test_plan_restarts_deterministic_and_never_worse() {
         let circuit = crate::circuits::hardware_efficient_ansatz(30, 7, 42);
         let terms = [PauliTerm::z(0), PauliTerm::z(15)];
@@ -3155,7 +3423,7 @@ mod tests {
         let expected = expectation_zero_state(&circuit, &terms).unwrap();
 
         for seed in 0..5u64 {
-            let network = scalar_network(&circuit, &terms);
+            let mut network = scalar_network(&circuit, &terms);
             let slots: Vec<Option<TensorMeta>> = network
                 .tensors
                 .iter()
@@ -3164,13 +3432,7 @@ mod tests {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let plan = plan_pairs(slots, Some((&mut rng, 1.0)), usize::MAX).unwrap();
 
-            let mut slots: Vec<Option<Tensor>> = network.tensors.into_iter().map(Some).collect();
-            for &(i, j) in &plan.pairs {
-                let a = slots[i].take().unwrap();
-                let b = slots[j].take().unwrap();
-                slots.push(Some(contract(&a, &b)));
-            }
-            let result = join_disjoint(slots);
+            let result = replay_plan(&mut network.tensors, &plan);
             assert_eq!(result.data.len(), 1);
             assert!(
                 (result.data[0].re - expected).abs() < EPS,

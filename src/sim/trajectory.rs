@@ -248,7 +248,7 @@ const TWO_QUBIT_PAULIS: [(PauliOp, PauliOp); 15] = [
     (PauliOp::Z, PauliOp::Z),
 ];
 
-fn apply_pauli_op(backend: &mut dyn Backend, qubit: usize, op: PauliOp) -> Result<()> {
+fn apply_pauli_op<B: Backend + ?Sized>(backend: &mut B, qubit: usize, op: PauliOp) -> Result<()> {
     let gate = match op {
         PauliOp::X => Gate::X,
         PauliOp::Y => Gate::Y,
@@ -735,13 +735,19 @@ impl PauliGroups {
     }
 }
 
+/// Builds the backend a group evolves on, from the group's first member seed.
+pub(crate) type GroupBackendFactory<'a> = &'a (dyn Fn(u64) -> Box<dyn Backend + Send> + Sync);
+
 /// Evolve one pattern's state, then draw the record of each member shot from it.
 ///
 /// Member shot `i` draws its outcome and then its readout flips from
 /// `ChaCha8Rng::seed_from_u64(mix_seed(seed, i))`, the stream a per-shot
 /// trajectory measures on, apart from the stream its errors came from. The
 /// outcome is an inverse-CDF draw: the members' uniforms are sorted and matched
-/// against one cumulative pass over the amplitudes, so no `2^n` table is built.
+/// against one cumulative pass over the distribution. On the host statevector
+/// (`build` is `None`) that pass reads the amplitudes, so no `2^n` table is
+/// built; any other backend answers `probabilities()`.
+#[allow(clippy::too_many_arguments)]
 fn run_pauli_group(
     groups: &PauliGroups,
     group: usize,
@@ -750,27 +756,10 @@ fn run_pauli_group(
     meas_map: &[(usize, usize)],
     readout: &[Option<ReadoutError>],
     seed: u64,
+    build: Option<GroupBackendFactory<'_>>,
 ) -> Result<(Vec<Vec<bool>>, crate::sim::RunMetadata)> {
     let members = groups.members(group);
-    let mut backend = StatevectorBackend::new(crate::sim::mix_seed(seed, members[0]));
-    backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
-    let mut insertions = groups.patterns[group].iter().peekable();
-    let mut ordinal = 0usize;
-    for (instruction, events) in circuit.instructions[..groups.prefix]
-        .iter()
-        .zip(&noise.after_gate)
-    {
-        backend.apply(instruction)?;
-        for event in events {
-            if let Some(insertion) = insertions.next_if(|ins| ins.event == ordinal) {
-                for (&qubit, &letter) in event.qubits.iter().zip(&insertion.letters) {
-                    apply_pauli_op(&mut backend, qubit, letter)?;
-                }
-            }
-            ordinal += 1;
-        }
-    }
-
+    let backend_seed = crate::sim::mix_seed(seed, members[0]);
     let mut draws: Vec<(f64, usize)> = members
         .iter()
         .enumerate()
@@ -781,29 +770,29 @@ fn run_pauli_group(
         .collect();
     draws.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
-    let scale = backend.probability_scale();
-    let mut outcomes = vec![0usize; members.len()];
-    let mut cumulative = 0.0f64;
-    let mut last_nonzero = 0usize;
-    let mut next = 0usize;
-    for (basis, amp) in backend.state_vector().iter().enumerate() {
-        let weight = amp.norm_sqr() * scale;
-        if weight == 0.0 {
-            continue;
+    let (outcomes, metadata) = match build {
+        None => {
+            let mut backend = StatevectorBackend::new(backend_seed);
+            evolve_pattern(&mut backend, groups, group, circuit, noise)?;
+            let scale = backend.probability_scale();
+            let weights = backend
+                .state_vector()
+                .iter()
+                .map(|amp| amp.norm_sqr() * scale);
+            (
+                inverse_cdf(&draws, weights),
+                crate::sim::backend_metadata(&backend),
+            )
         }
-        cumulative += weight;
-        last_nonzero = basis;
-        while next < draws.len() && draws[next].0 < cumulative {
-            outcomes[draws[next].1] = basis;
-            next += 1;
+        Some(build) => {
+            let mut backend = build(backend_seed);
+            evolve_pattern(backend.as_mut(), groups, group, circuit, noise)?;
+            (
+                inverse_cdf(&draws, backend.probabilities()?),
+                crate::sim::backend_metadata(backend.as_ref()),
+            )
         }
-        if next == draws.len() {
-            break;
-        }
-    }
-    for &(_, k) in &draws[next..] {
-        outcomes[k] = last_nonzero;
-    }
+    };
 
     let has_readout = readout.iter().any(Option::is_some);
     let shots = members
@@ -822,46 +811,109 @@ fn run_pauli_group(
             bits
         })
         .collect();
-    Ok((shots, crate::sim::backend_metadata(&backend)))
+    Ok((shots, metadata))
 }
 
-/// Run every shot of `groups` on the host statevector, one evolution per
-/// distinct error pattern, and return the shots in index order.
+/// Initialize `backend` and run the circuit prefix with `group`'s Pauli errors
+/// inserted after the events that fired.
+fn evolve_pattern<B: Backend + ?Sized>(
+    backend: &mut B,
+    groups: &PauliGroups,
+    group: usize,
+    circuit: &Circuit,
+    noise: &NoiseModel,
+) -> Result<()> {
+    backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    let mut insertions = groups.patterns[group].iter().peekable();
+    let mut ordinal = 0usize;
+    for (instruction, events) in circuit.instructions[..groups.prefix]
+        .iter()
+        .zip(&noise.after_gate)
+    {
+        backend.apply(instruction)?;
+        for event in events {
+            if let Some(insertion) = insertions.next_if(|ins| ins.event == ordinal) {
+                for (&qubit, &letter) in event.qubits.iter().zip(&insertion.letters) {
+                    apply_pauli_op(backend, qubit, letter)?;
+                }
+            }
+            ordinal += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Basis index each draw lands on, indexed by the draw's member slot, for
+/// `draws` sorted by uniform and `weights` in basis order.
 ///
-/// Groups split across Rayon workers under the rule the per-shot trajectories
-/// use, each worker holding one state at a time. Every draw depends only on
-/// its shot's seed, so the result does not depend on the thread count.
+/// Draws past the last cumulative weight, which roundoff can leave short of
+/// one, land on the last basis state with nonzero weight.
+fn inverse_cdf(draws: &[(f64, usize)], weights: impl IntoIterator<Item = f64>) -> Vec<usize> {
+    let mut outcomes = vec![0usize; draws.len()];
+    let mut cumulative = 0.0f64;
+    let mut last_nonzero = 0usize;
+    let mut next = 0usize;
+    for (basis, weight) in weights.into_iter().enumerate() {
+        if weight == 0.0 {
+            continue;
+        }
+        cumulative += weight;
+        last_nonzero = basis;
+        while next < draws.len() && draws[next].0 < cumulative {
+            outcomes[draws[next].1] = basis;
+            next += 1;
+        }
+        if next == draws.len() {
+            break;
+        }
+    }
+    for &(_, k) in &draws[next..] {
+        outcomes[k] = last_nonzero;
+    }
+    outcomes
+}
+
+/// Run every shot of `groups`, one evolution per distinct error pattern, and
+/// return the shots in index order.
+///
+/// `build` is `None` for the host statevector and otherwise builds the
+/// `route` backend each group evolves on. Groups split across Rayon workers
+/// under the rule the per-shot trajectories use for `route`, each worker
+/// holding one state at a time. Every draw depends only on its shot's seed, so
+/// the result does not depend on the thread count.
 pub(crate) fn run_pauli_groups(
     groups: &PauliGroups,
     circuit: &Circuit,
     noise: &NoiseModel,
     seed: u64,
+    build: Option<GroupBackendFactory<'_>>,
+    route: crate::sim::ResolvedBackend,
 ) -> Result<ShotsResult> {
     let meas_map = circuit.measurement_map();
     let readout = written_readout(circuit, &noise.readout);
-    let run =
-        |group: usize| run_pauli_group(groups, group, circuit, noise, &meas_map, &readout, seed);
+    let run = |group: usize| {
+        run_pauli_group(
+            groups, group, circuit, noise, &meas_map, &readout, seed, build,
+        )
+    };
 
     #[cfg(feature = "parallel")]
-    if groups.num_groups() > 1
-        && crate::sim::state_splits_across_workers(
-            crate::sim::ResolvedBackend::Statevector,
-            circuit.num_qubits,
-        )
+    if groups.num_groups() > 1 && crate::sim::state_splits_across_workers(route, circuit.num_qubits)
     {
         let runs: Vec<_> = (0..groups.num_groups()).into_par_iter().map(run).collect();
-        return collect_groups(groups, circuit, runs);
+        return collect_groups(groups, circuit, route, runs);
     }
-    collect_groups(groups, circuit, (0..groups.num_groups()).map(run))
+    collect_groups(groups, circuit, route, (0..groups.num_groups()).map(run))
 }
 
 fn collect_groups(
     groups: &PauliGroups,
     circuit: &Circuit,
+    route: crate::sim::ResolvedBackend,
     runs: impl IntoIterator<Item = Result<(Vec<Vec<bool>>, crate::sim::RunMetadata)>>,
 ) -> Result<ShotsResult> {
     let mut shots = vec![Vec::new(); groups.members.len()];
-    let mut metadata = crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::Statevector);
+    let mut metadata = crate::sim::RunMetadata::exact(route);
     for (group, run) in runs.into_iter().enumerate() {
         let (records, group_metadata) = run?;
         if group == 0 {
@@ -1206,9 +1258,16 @@ mod tests {
         let result = statevector_route(&circuit, &noise, num_shots, seed);
         assert_eq!(
             result.shots,
-            run_pauli_groups(&groups, &circuit, &noise, seed)
-                .unwrap()
-                .shots
+            run_pauli_groups(
+                &groups,
+                &circuit,
+                &noise,
+                seed,
+                None,
+                crate::sim::ResolvedBackend::Statevector
+            )
+            .unwrap()
+            .shots
         );
 
         let probs = crate::sim::noise::density_matrix_probabilities(
@@ -1269,6 +1328,29 @@ mod tests {
         assert!(
             chi_square < bound,
             "chi-square {chi_square:.1} over {dof} degrees of freedom exceeds {bound:.1}"
+        );
+    }
+
+    #[test]
+    fn tensor_network_groups_draw_the_statevector_records() {
+        let circuit = grouped_circuit(6);
+        let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
+        noise.with_readout_error(0.03, 0.05);
+        let (shots, seed) = (400, 42);
+        let groups = PauliGroups::sample(&circuit, &noise, shots, seed).unwrap();
+        assert!(groups.num_groups() < shots / 2);
+
+        let network = crate::sim::run_shots_with_noise(
+            crate::sim::BackendKind::TensorNetwork,
+            &circuit,
+            &noise,
+            shots,
+            seed,
+        )
+        .unwrap();
+        assert_eq!(
+            network.shots,
+            statevector_route(&circuit, &noise, shots, seed).shots
         );
     }
 

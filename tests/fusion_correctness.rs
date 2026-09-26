@@ -876,6 +876,21 @@ fn fusion_diagonal_batch_respects_non_diagonal_barrier() {
     }
 }
 
+// A doubly controlled phase is a three-body diagonal; batching it read only the
+// first two targets and applied the phase whatever the third qubit held.
+#[test]
+fn fusion_diagonal_batch_keeps_multi_controlled_phase_whole() {
+    for n in 16..=18 {
+        let mut c = Circuit::new(n, 0);
+        for q in [0, 3, 13] {
+            c.add_gate(Gate::H, &[q]);
+        }
+        c.add_gate(Gate::mcu(Gate::P(0.3).matrix_2x2(), 2), &[13, 3, 0]);
+        c.add_gate(Gate::Cz, &[5, 6]);
+        assert_fusion_preserves_state(&c);
+    }
+}
+
 // Pins the fused form for the `statevector/diag_mixed_l6` bench rows: the rows
 // measure the `DiagonalBatch` sweep, so the batch must actually appear. Sizes
 // cross the parallel threshold, so the state comparison also exercises the

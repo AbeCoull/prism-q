@@ -383,7 +383,7 @@ and its compiled kernels. Build it once and reuse it: construction compiles the
 kernel module, and passing the same handle to several simulations shares that
 work.
 
-```python
+```python,ignore
 from prism_q import BackendKind, GpuContext, circuits, simulate
 
 context = GpuContext(0)
@@ -443,7 +443,7 @@ that is already running. This extension never calls `MPI_Init` or
 a handle whose refcount drop finalized MPI would make every later MPI call in
 the process erroneous.
 
-```python
+```python,ignore
 from mpi4py import MPI  # starts MPI; import before touching the context
 from prism_q import BackendKind, DistributedContext, circuits, simulate
 
@@ -465,7 +465,7 @@ The contract is SPMD, and it is enforced rather than assumed. Four ranks are
 four interpreters running the same source, and every collective inside the
 backend is entered by all of them, so a script that branches before the call
 
-```python
+```python,ignore
 if comm.rank == 0:
     result = simulate(circuit).backend(...).run()   # deadlocks
 ```

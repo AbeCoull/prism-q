@@ -2,9 +2,9 @@
 //!
 //! Stores only non-zero amplitudes in a map keyed by basis-state index, giving
 //! O(k) memory where k is the number of non-zero basis states. Entries whose
-//! squared amplitude is at or below 1e-16 are dropped after gates that can
-//! shrink or cancel amplitudes, and the kept entries are rescaled so the state
-//! keeps its norm.
+//! squared amplitude is at or below 1e-28 (magnitude 1e-14, cancellation
+//! roundoff) are dropped after gates that can shrink or cancel amplitudes, and
+//! the kept entries are rescaled so the state keeps its norm.
 //!
 //! Every gate walks the map, so the map hashes basis-state indices with the
 //! crate's multiply-xor hasher rather than the stdlib default.
@@ -64,7 +64,10 @@ use crate::gates::{Gate, diag_entries_phase, is_antidiagonal_2x2, is_diagonal_2x
 use crate::hash::FxHashMap;
 use crate::sim::unified_pauli::PauliTerm;
 
-const DEFAULT_EPSILON: f64 = 1e-16;
+/// Squared magnitude at or below which an entry is roundoff dust: a unit amplitude
+/// carries about 1e-16 of error per gate, so this keeps every amplitude a gate
+/// could legitimately produce while still clearing exact cancellations.
+const DEFAULT_EPSILON: f64 = 1e-28;
 
 /// Widest circuit the basis-index representation addresses.
 ///
@@ -113,7 +116,7 @@ impl SparseBackend {
     /// Set the pruning threshold on squared amplitude magnitude; 0 drops exact
     /// zeros only.
     ///
-    /// Above the 1e-16 default the run reports `Approximate` until the next
+    /// Above the 1e-28 default the run reports `Approximate` until the next
     /// [`Backend::init`], even if the threshold is lowered again, and the
     /// dropped weight feeds the metadata's `fidelity_lower_bound` as a
     /// first-order estimate. The threshold survives `init`; the accumulated
@@ -1312,7 +1315,7 @@ mod tests {
     fn test_antidiagonal_subunit_prunes() {
         let mut b = SparseBackend::new(42);
         b.init(1, 0).unwrap();
-        b.state.insert(1, Complex64::new(1.5e-8, 0.0));
+        b.state.insert(1, Complex64::new(1.5e-14, 0.0));
         let zero = Complex64::new(0.0, 0.0);
         let half = Complex64::new(0.5, 0.0);
         b.apply_1q_matrix(0, &[[zero, half], [half, zero]]).unwrap();

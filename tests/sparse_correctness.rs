@@ -5,9 +5,13 @@
 mod common;
 
 use common::{SEED, SPARSE_EPS, assert_backend_matches_sv, assert_fused_matches_unfused};
+use prism_q::backend::Backend;
 use prism_q::backend::sparse::SparseBackend;
+use prism_q::backend::statevector::StatevectorBackend;
 use prism_q::circuit::Circuit;
-use prism_q::circuits;
+use prism_q::gates::Gate;
+use prism_q::sim::Exactness;
+use prism_q::{circuits, sim};
 
 fn check_sv_cross(label: &str, circuit: &Circuit) {
     let mut backend = SparseBackend::new(SEED);
@@ -161,4 +165,31 @@ fn sparse_monomial_2q_12q_sv() {
 #[test]
 fn sparse_monomial_2q_12q_fused() {
     check_fused_vs_unfused("monomial 2q 12q fused", &monomial_rich_circuit(12));
+}
+
+// The smallest amplitude of this product layer is about 2.5e-11, far below 1 but far above
+// roundoff, so a sound threshold keeps every entry and the run matches amplitude for amplitude.
+#[test]
+fn sparse_keeps_small_real_amplitudes_at_18q() {
+    let n = 18;
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.2 + 0.05 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let mut sparse = SparseBackend::new(SEED);
+    sim::run_on(&mut sparse, &c).unwrap();
+    let mut sv = StatevectorBackend::new(SEED);
+    sim::run_on(&mut sv, &c).unwrap();
+    let actual = sparse.export_statevector().unwrap();
+    let expected = sv.export_statevector().unwrap();
+    let worst = actual
+        .iter()
+        .zip(&expected)
+        .map(|(a, b)| (a - b).norm())
+        .fold(0.0, f64::max);
+    assert!(worst < 1e-13, "worst amplitude error {worst:e}");
+    assert_eq!(sparse.exactness(), Exactness::Exact);
 }

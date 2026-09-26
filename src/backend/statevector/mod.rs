@@ -79,6 +79,16 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 pub(crate) use super::{MIN_PAR_ELEMS, PARALLEL_THRESHOLD_QUBITS};
 
+/// Width from which `init` zeroes the state with the thread pool, which spreads the first
+/// touch of every page of a fresh buffer: 157 ms to 63 ms at 26 qubits. At 16 qubits
+/// waking the pool cost more than the fill and read +6% on a loop of fresh runs.
+#[cfg(feature = "parallel")]
+const PARALLEL_INIT_QUBITS: usize = 20;
+
+/// Amplitudes one pool task zeroes on `init`, 1 MiB.
+#[cfg(feature = "parallel")]
+const INIT_ZERO_CHUNK: usize = 1 << 16;
+
 /// Per-block partial sums for a 1q reduced density matrix: `(p0, p1, r)` over
 /// one `2 * 2^qubit` block whose low half holds the qubit-0 amplitudes.
 #[inline(always)]
@@ -845,10 +855,40 @@ impl Backend for StatevectorBackend {
         )?;
 
         let dim = 1usize << num_qubits;
-        if self.state.len() == dim {
-            self.state.fill(Complex64::new(0.0, 0.0));
+        let zero = Complex64::new(0.0, 0.0);
+        let reuse = self.state.len() == dim;
+        if !reuse {
+            self.state = Vec::new();
+        }
+        #[cfg(feature = "parallel")]
+        if num_qubits >= PARALLEL_INIT_QUBITS {
+            if !reuse {
+                self.state = Vec::with_capacity(dim);
+            }
+            let base = SendPtr(self.state.as_mut_ptr());
+            (0..dim / INIT_ZERO_CHUNK).into_par_iter().for_each(|c| {
+                // SAFETY: the buffer has capacity for `dim` elements and each chunk index
+                // addresses its own `INIT_ZERO_CHUNK` of them. A per-chunk `fill` wrote
+                // through the cache and re-zeroed a 2^28 state in 342 ms against 226 ms
+                // for one thread's memset; `write_bytes` keeps memset's streaming stores.
+                unsafe {
+                    std::ptr::write_bytes(
+                        base.as_complex_ptr().add(c * INIT_ZERO_CHUNK),
+                        0,
+                        INIT_ZERO_CHUNK,
+                    );
+                }
+            });
+            // SAFETY: every element below `dim` was written above, and all-zero bytes are
+            // the value 0 + 0i.
+            unsafe { self.state.set_len(dim) };
+            self.state[0] = Complex64::new(1.0, 0.0);
+            return Ok(());
+        }
+        if reuse {
+            self.state.fill(zero);
         } else {
-            self.state = vec![Complex64::new(0.0, 0.0); dim];
+            self.state = vec![zero; dim];
         }
         self.state[0] = Complex64::new(1.0, 0.0);
         Ok(())

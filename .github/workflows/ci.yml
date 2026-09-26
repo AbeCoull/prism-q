@@ -573,6 +573,34 @@ jobs:
       - name: Doc tests
         run: cargo test --doc --features "$CI_FEATURES"
 
+  # The MSVC target, where the memory probe behind the qubit caps calls kernel32.
+  # Bash so the commands match the other jobs: the runner default is PowerShell,
+  # which does not expand `$CI_FEATURES`. The Windows main thread has 1 MiB of
+  # stack, and a debug statevector run can need up to 2 MiB. libtest runs each
+  # test on its own 2 MiB thread, so the suite passes; a debug example binary,
+  # which runs on the main thread, can overflow, so examples stay unrun here.
+  test-windows:
+    name: Test Windows x64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: taiki-e/install-action@cargo-nextest
+      - name: Clippy
+        run: cargo clippy --all-targets --features "$CI_FEATURES" -- -D warnings -D clippy::undocumented_unsafe_blocks
+      - name: Tests
+        run: cargo nextest run --features "$CI_FEATURES"
+      - name: Doc tests
+        run: cargo test --doc --features "$CI_FEATURES"
+
   security:
     name: Security & Licenses
     runs-on: ubuntu-latest

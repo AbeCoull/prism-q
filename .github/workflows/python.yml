@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "bindings/python/**"
+      - "docs/guides/python.md"
       - "src/**"
       - "Cargo.toml"
       - ".github/workflows/python.yml"

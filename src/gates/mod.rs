@@ -1448,7 +1448,7 @@ impl Gate {
         match self {
             Gate::Cz | Gate::Rzz(_) => true,
             _ if self.is_diagonal_1q() => true,
-            _ if self.controlled_phase().is_some() => true,
+            Gate::Cu(_) if self.controlled_phase().is_some() => true,
             _ => false,
         }
     }

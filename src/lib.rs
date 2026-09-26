@@ -138,3 +138,25 @@ pub use threading::ThreadPool;
 
 #[cfg(feature = "gpu")]
 pub use sim::compiled::{DevicePackedShots, run_shots_compiled_with_gpu};
+
+// Runs the Rust code blocks of the user guides under `cargo test --doc`. The Python guide
+// is executed by the bindings' test suite instead. mdbook-admonish blocks carry
+// `title="..."`, which rustdoc reads as a malformed attribute on a block it never runs.
+#[cfg(doctest)]
+#[allow(rustdoc::invalid_codeblock_attributes)]
+mod guide_examples {
+    #[doc = include_str!("../docs/guides/backends.md")]
+    struct Backends;
+    #[doc = include_str!("../docs/guides/capabilities.md")]
+    struct Capabilities;
+    #[doc = include_str!("../docs/guides/clifford-t.md")]
+    struct CliffordT;
+    #[doc = include_str!("../docs/guides/gpu.md")]
+    struct Gpu;
+    #[doc = include_str!("../docs/guides/openqasm.md")]
+    struct OpenQasm;
+    #[doc = include_str!("../docs/guides/performance.md")]
+    struct Performance;
+    #[doc = include_str!("../docs/guides/qec.md")]
+    struct Qec;
+}

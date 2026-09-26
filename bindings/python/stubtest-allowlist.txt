@@ -1,0 +1,10 @@
+# Entries for `python -m mypy.stubtest prism_q._prism_q`. Each names a runtime
+# shape the stub cannot state; a signature mismatch belongs in the stub instead.
+
+# PyO3 generates `__all__` for the extension module. The stub leaves it out, and
+# bindings/python/tests/test_exports.py checks the names it would hold.
+prism_q._prism_q.__all__
+
+# A submodule at runtime. A single-file stub cannot declare one, so the stub
+# describes it as a class of static methods, which types the same call sites.
+prism_q._prism_q.circuits

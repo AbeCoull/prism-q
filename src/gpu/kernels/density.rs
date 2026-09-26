@@ -5,10 +5,10 @@
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use num_complex::Complex64;
 
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 
-use super::super::{GpuContext, GpuState};
-use super::{ensure_exact, ensure_scratch, launch_err, linear_cfg, stream_and_fn};
+use super::super::{GpuContext, GpuState, complex_as_interleaved};
+use super::{check_pair, driver_err, ensure_exact, ensure_scratch, linear_cfg, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -37,25 +37,6 @@ fn buffer_len(state: &GpuState, n: usize) -> u64 {
     1u64 << (2 * n)
 }
 
-fn flatten(values: &[Complex64]) -> Vec<f64> {
-    let mut flat = Vec::with_capacity(2 * values.len());
-    for v in values {
-        flat.push(v.re);
-        flat.push(v.im);
-    }
-    flat
-}
-
-fn check_pair(n: usize, q0: usize, q1: usize) -> Result<()> {
-    if q0 >= n || q1 >= n || q0 == q1 {
-        return Err(PrismError::InvalidQubit {
-            index: q0.max(q1),
-            register_size: n,
-        });
-    }
-    Ok(())
-}
-
 /// `Re rho[r][r]` for every `r`, the `2^n` diagonal of the `4^n` buffer.
 pub(crate) fn diagonal(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<Vec<f64>> {
     buffer_len(state, n);
@@ -72,7 +53,7 @@ pub(crate) fn diagonal(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<V
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_diagonal", e))?;
+            .map_err(|e| driver_err("dm_diagonal", e))?;
     }
     let mut host = vec![0.0_f64; d as usize];
     out.copy_to_host(device, &mut host)?;
@@ -103,7 +84,7 @@ pub(crate) fn norm_sqr(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<f
         unsafe {
             builder
                 .launch(shared_cfg(num_blocks, 1))
-                .map_err(|e| launch_err("dm_norm_sqr", e))?;
+                .map_err(|e| driver_err("dm_norm_sqr", e))?;
         }
     }
     let result = super::ensure_capacity(&mut scratch.measure_result, device, 1)?;
@@ -118,7 +99,7 @@ pub(crate) fn norm_sqr(ctx: &GpuContext, state: &GpuState, n: usize) -> Result<f
         unsafe {
             builder
                 .launch(shared_cfg(1, 1))
-                .map_err(|e| launch_err("measure_prob_one_finalize", e))?;
+                .map_err(|e| driver_err("measure_prob_one_finalize", e))?;
         }
     }
     let mut host = [0.0_f64];
@@ -158,7 +139,7 @@ pub(crate) fn project(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_project", e))?;
+            .map_err(|e| driver_err("dm_project", e))?;
     }
     Ok(())
 }
@@ -181,7 +162,7 @@ pub(crate) fn reset(ctx: &GpuContext, state: &mut GpuState, n: usize, qubit: usi
     // block bases, so the four amplitudes one thread touches are disjoint from
     // every other thread's.
     unsafe {
-        builder.launch(cfg).map_err(|e| launch_err("dm_reset", e))?;
+        builder.launch(cfg).map_err(|e| driver_err("dm_reset", e))?;
     }
     Ok(())
 }
@@ -196,7 +177,7 @@ pub(crate) fn conjugate(ctx: &GpuContext, state: &mut GpuState, n: usize) -> Res
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_conjugate", e))?;
+            .map_err(|e| driver_err("dm_conjugate", e))?;
     }
     Ok(())
 }
@@ -227,7 +208,7 @@ pub(crate) fn diagonal_sandwich(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_diagonal_sandwich", e))?;
+            .map_err(|e| driver_err("dm_diagonal_sandwich", e))?;
     }
     Ok(())
 }
@@ -263,7 +244,7 @@ pub(crate) fn kraus_2q_diagonal(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_kraus_2q_diagonal", e))?;
+            .map_err(|e| driver_err("dm_kraus_2q_diagonal", e))?;
     }
     Ok(())
 }
@@ -284,12 +265,7 @@ pub(crate) fn kraus_2q_dense(
     let (stream, func) = stream_and_fn(ctx, "dm_kraus_2q_dense")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(groups));
     let mut scratch = ctx.launcher_scratch();
-    let s_buf = super::stage_blob(&mut scratch.blob, device, std::iter::empty(), 512, |dst| {
-        for (d, c) in dst.chunks_exact_mut(2).zip(s.iter().flatten()) {
-            d[0] = c.re;
-            d[1] = c.im;
-        }
-    })?;
+    let s_buf = super::stage_complex(&mut scratch.blob, device, s.as_flattened())?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -305,7 +281,7 @@ pub(crate) fn kraus_2q_dense(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_kraus_2q_dense", e))?;
+            .map_err(|e| driver_err("dm_kraus_2q_dense", e))?;
     }
     Ok(())
 }
@@ -339,7 +315,7 @@ pub(crate) fn depolarizing_2q(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_depolarizing_2q", e))?;
+            .map_err(|e| driver_err("dm_depolarizing_2q", e))?;
     }
     Ok(())
 }
@@ -358,7 +334,7 @@ pub(crate) fn outer_product(
     let (stream, func) = stream_and_fn(ctx, "dm_outer_product")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(len));
     let mut scratch = ctx.launcher_scratch();
-    let amps_buf = ensure_scratch(&mut scratch.f64_a, device, &flatten(amps))?;
+    let amps_buf = ensure_scratch(&mut scratch.f64_a, device, complex_as_interleaved(amps))?;
     let mut builder = stream.launch_builder(&func);
     builder
         .arg(state.buffer_mut().raw_mut())
@@ -370,7 +346,7 @@ pub(crate) fn outer_product(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("dm_outer_product", e))?;
+            .map_err(|e| driver_err("dm_outer_product", e))?;
     }
     Ok(())
 }
@@ -427,7 +403,7 @@ pub(crate) fn pauli_sums(
         unsafe {
             builder
                 .launch(cfg)
-                .map_err(|e| launch_err("dm_pauli_expect", e))?;
+                .map_err(|e| driver_err("dm_pauli_expect", e))?;
         }
     }
     let result = scratch.pauli_result.as_mut().unwrap();
@@ -448,7 +424,7 @@ pub(crate) fn pauli_sums(
         unsafe {
             builder
                 .launch(cfg)
-                .map_err(|e| launch_err("dm_pauli_expect_finalize", e))?;
+                .map_err(|e| driver_err("dm_pauli_expect_finalize", e))?;
         }
     }
     let mut host = vec![0.0_f64; 2 * masks.len()];

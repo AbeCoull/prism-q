@@ -11,6 +11,7 @@ Attach a `NoiseModel` and sample:
 ```rust
 use prism_q::{simulate, BackendKind, NoiseModel};
 
+# let circuit = prism_q::CircuitBuilder::new_with_classical(3, 3).h(0).cx(0, 1).cx(1, 2).measure_all().build();
 let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
 let result = simulate(&circuit)
     .backend(BackendKind::Statevector)
@@ -53,6 +54,7 @@ positive), and an error names the line and the field.
 ```rust
 use prism_q::{simulate, BackendKind, DeviceCalibration};
 
+# let circuit = prism_q::CircuitBuilder::new_with_classical(2, 2).h(0).cx(0, 1).measure_all().build();
 let calibration = DeviceCalibration::parse(
     "qubit 0 t1=120e-6 t2=80e-6 p01=0.02 p10=0.03
      qubit 1 t1=95e-6 t2=110e-6 p01=0.01 p10=0.02
@@ -90,6 +92,16 @@ as first-class constructs, use the native QEC program IR rather than a `Circuit`
 ```rust
 use prism_q::{parse_qec_program, run_qec_program};
 
+let qec_text = "
+    R 0 1 2 3 4
+    X_ERROR(0.01) 0 2 4
+    CX 0 1 2 1 2 3 4 3
+    MR 1 3
+    DETECTOR rec[-2]
+    DETECTOR rec[-1]
+    M 0 2 4
+    OBSERVABLE_INCLUDE(0) rec[-1]
+";
 let program = parse_qec_program(qec_text).unwrap();
 let result = run_qec_program(&program).unwrap();
 ```
@@ -119,9 +131,20 @@ detector samples. `QecProgram::detector_error_model` derives one from the
 program's noise annotations, detectors, and observables, and `to_text` renders
 it in the common detector error model text format that external decoders read:
 
-```rust
+```rust,no_run
+# let program = prism_q::parse_qec_program(
+#     "R 0 1 2 3 4
+#      X_ERROR(0.01) 0 2 4
+#      CX 0 1 2 1 2 3 4 3
+#      MR 1 3
+#      DETECTOR rec[-2]
+#      DETECTOR rec[-1]
+#      M 0 2 4
+#      OBSERVABLE_INCLUDE(0) rec[-1]",
+# )?;
 let model = program.detector_error_model().unwrap();
 std::fs::write("memory_d3.dem", model.to_text()).unwrap();
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 Each mechanism carries a probability and the detector and observable indices
@@ -143,6 +166,16 @@ tool:
 ```rust
 use prism_q::{UnionFindDecoder, run_qec_program};
 
+# let program = prism_q::parse_qec_program(
+#     "R 0 1 2 3 4
+#      X_ERROR(0.01) 0 2 4
+#      CX 0 1 2 1 2 3 4 3
+#      MR 1 3
+#      DETECTOR rec[-2]
+#      DETECTOR rec[-1]
+#      M 0 2 4
+#      OBSERVABLE_INCLUDE(0) rec[-1]",
+# )?;
 let model = program.detector_error_model()?.decompose_graphlike()?;
 let decoder = UnionFindDecoder::from_model(&model)?;
 let result = run_qec_program(&program)?;
@@ -150,6 +183,7 @@ let predicted = decoder.decode_packed(&result.detectors)?;
 let failures = (0..result.total_shots)
     .filter(|&shot| predicted.get_bit(shot, 0) != result.observables.get_bit(shot, 0))
     .count();
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 The decoder is weighted union-find with peeling: edges weigh `ln((1-p)/p)`,

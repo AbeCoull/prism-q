@@ -304,8 +304,8 @@ extern "C" __global__ void apply_fused_2q(
 // ============================================================================
 //
 // measure_prob_one: per-block reduction of sum(|amp|^2) over elements where qubit bit is 1.
-// Each block reduces 2*BLOCK_SIZE elements (using shared memory). Host sums the
-// out_partials array afterward.
+// Each block reduces 2*BLOCK_SIZE elements (using shared memory) into out_partials, which
+// measure_prob_one_finalize then sums on the device.
 
 extern "C" __global__ void measure_prob_one(
     const double2 *state, unsigned long long dim, int qubit, double *out_partials)
@@ -557,10 +557,10 @@ extern "C" __global__ void compute_probabilities(
 
 // apply_multi_fused_tiled: batched non-diagonal MultiFused via shared-memory tiles.
 //
-// Each block loads a TILE_SIZE slice of amplitudes into shared memory, then applies every
-// sub-gate whose target bit is inside the tile (target < TILE_Q) with no further global
-// memory reads. Pairs (i0, i1) for a given gate stay within the tile because the target
-// bit is a low bit of the global index; the high bits (> TILE_Q) are the block id.
+// Each block loads the TILE_SIZE amplitudes spanned by the tile qubits into shared memory,
+// then applies every sub-gate with no further global memory reads. Pairs (i0, i1) for a
+// given gate stay within the tile because every target is a tile qubit; the block id
+// supplies the bits of the other qubits.
 //
 // Gate data rides in parameter space: six bits of `gates.qubits` per tile qubit, four
 // bits of `gates.targets` per gate (a position in the tile qubit list), and
@@ -684,7 +684,7 @@ extern "C" __global__ void apply_diagonal_batch(
 }
 
 // apply_batch_rzz: applies a batch of Rzz gates via precomputed parity-phase LUTs (built
-// built on the host by build_batch_rzz_tables). Replaces per-edge apply_parity_phase launches.
+// on the host by build_batch_rzz_tables). Replaces per-edge apply_parity_phase launches.
 // Launches 2^n threads across the full state; each thread computes parity bits per edge
 // per group, indexes the 256-entry LUT, chains multiplies.
 //

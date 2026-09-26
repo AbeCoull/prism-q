@@ -14,12 +14,14 @@
 //! deterministic-branch kernel that serially rowmuls, into the scratch row, the
 //! stabilizers whose paired destabilizers anticommute with `Z_q`, then reads its phase.
 
-use cudarc::driver::{CudaSlice, PushKernelArg};
+use std::sync::Arc;
+
+use cudarc::driver::{CudaSlice, CudaStream, CudaView, PushKernelArg};
 
 use crate::error::Result;
 
 use super::super::{GpuContext, GpuTableau};
-use super::{div_ceil_grid, launch_err, linear_cfg, require_i32, require_u32, stream_and_fn};
+use super::{div_ceil_grid, driver_err, linear_cfg, require_i32, require_u32, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 128;
 
@@ -58,7 +60,7 @@ pub(crate) fn launch_set_initial_tableau(ctx: &GpuContext, tableau: &mut GpuTabl
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("stab_set_initial_tableau", e))?;
+            .map_err(|e| driver_err("stab_set_initial_tableau", e))?;
     }
     Ok(())
 }
@@ -108,9 +110,7 @@ pub(crate) fn launch_clifford_batch(
         ops.len().is_multiple_of(CLIFOP_STRIDE),
         "ClifOp buffer length must be a multiple of {CLIFOP_STRIDE}"
     );
-    let num_rows = tableau.total_rows();
-    let num_words = tableau.num_words();
-    if num_rows == 0 || num_words == 0 {
+    if tableau.num_words() == 0 {
         return Ok(());
     }
     scratch.launch_ops(ctx, tableau, ops)
@@ -153,11 +153,7 @@ impl CliffordBatchScratch {
 
     fn prepare(&mut self, num_words: usize) {
         self.num_words = num_words;
-        if self.per_word_ops.len() < num_words {
-            self.per_word_ops.resize_with(num_words, Vec::new);
-        } else if self.per_word_ops.len() > num_words {
-            self.per_word_ops.truncate(num_words);
-        }
+        self.per_word_ops.resize_with(num_words, Vec::new);
         self.cross_word_qubits.resize(num_words, 0);
         self.clear();
     }
@@ -257,7 +253,30 @@ impl CliffordBatchScratch {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Upload `host`, or one zero word when it is empty, into the start of the grow-only
+/// `slot` and return a view of the uploaded words.
+fn stage_u32<'a>(
+    stream: &Arc<CudaStream>,
+    slot: &'a mut Option<CudaSlice<u32>>,
+    host: &[u32],
+    name: &str,
+) -> Result<CudaView<'a, u32>> {
+    let src: &[u32] = if host.is_empty() { &ZERO_U32 } else { host };
+    if slot.as_ref().is_none_or(|buf| buf.len() < src.len()) {
+        *slot = Some(
+            stream
+                .alloc_zeros::<u32>(src.len())
+                .map_err(|e| driver_err(&format!("alloc {name}"), e))?,
+        );
+    }
+    let dev = slot.as_mut().expect("slot allocated above");
+    stream
+        .memcpy_htod(src, &mut dev.slice_mut(0..src.len()))
+        .map_err(|e| driver_err(&format!("upload {name}"), e))?;
+    let dev: &'a CudaSlice<u32> = dev;
+    Ok(dev.slice(0..src.len()))
+}
+
 fn launch_word_grouped_kernel(
     ctx: &GpuContext,
     tableau: &mut GpuTableau,
@@ -269,97 +288,30 @@ fn launch_word_grouped_kernel(
         return Ok(());
     }
     let num_rows_usize = tableau.total_rows();
-    if num_rows_usize == 0 {
-        return Ok(());
-    }
     let num_rows = require_i32("stab_apply_word_grouped", "num_rows", num_rows_usize)?;
     let num_words_i = require_i32("stab_apply_word_grouped", "num_words", tableau.num_words())?;
 
     let (stream, func) = stream_and_fn(ctx, "stab_apply_word_grouped")?;
 
-    let group_words_src: &[u32] = if scratch.group_words.is_empty() {
-        &ZERO_U32
-    } else {
-        &scratch.group_words
-    };
-    let group_offsets_src: &[u32] = if scratch.group_offsets.is_empty() {
-        &ZERO_U32
-    } else {
-        &scratch.group_offsets
-    };
-    let ops_src: &[u32] = if scratch.ops_flat.is_empty() {
-        &ZERO_U32
-    } else {
-        &scratch.ops_flat
-    };
-    let cross_src: &[u32] = if scratch.cross_word.is_empty() {
-        &ZERO_U32
-    } else {
-        &scratch.cross_word
-    };
-
-    let ensure_u32_buffer =
-        |slot: &mut Option<CudaSlice<u32>>, len: usize, op: &str| -> Result<()> {
-            let needed = len.max(1);
-            if slot.as_ref().is_none_or(|buf| buf.len() < needed) {
-                *slot = Some(
-                    stream
-                        .alloc_zeros::<u32>(needed)
-                        .map_err(|e| launch_err(op, e))?,
-                );
-            }
-            Ok(())
-        };
-    ensure_u32_buffer(
+    let group_words_dev = stage_u32(
+        stream,
         &mut scratch.group_words_dev,
-        group_words_src.len(),
-        "alloc group_words",
+        &scratch.group_words,
+        "group_words",
     )?;
-    ensure_u32_buffer(
+    let group_offsets_dev = stage_u32(
+        stream,
         &mut scratch.group_offsets_dev,
-        group_offsets_src.len(),
-        "alloc group_offsets",
+        &scratch.group_offsets,
+        "group_offsets",
     )?;
-    ensure_u32_buffer(&mut scratch.ops_dev, ops_src.len(), "alloc ops_flat")?;
-    ensure_u32_buffer(&mut scratch.cross_dev, cross_src.len(), "alloc cross_word")?;
-
-    {
-        let dev = scratch
-            .group_words_dev
-            .as_mut()
-            .expect("group_words_dev allocated above");
-        let mut view = dev.slice_mut(0..group_words_src.len());
-        stream
-            .memcpy_htod(group_words_src, &mut view)
-            .map_err(|e| launch_err("upload group_words", e))?;
-    }
-    {
-        let dev = scratch
-            .group_offsets_dev
-            .as_mut()
-            .expect("group_offsets_dev allocated above");
-        let mut view = dev.slice_mut(0..group_offsets_src.len());
-        stream
-            .memcpy_htod(group_offsets_src, &mut view)
-            .map_err(|e| launch_err("upload group_offsets", e))?;
-    }
-    {
-        let dev = scratch.ops_dev.as_mut().expect("ops_dev allocated above");
-        let mut view = dev.slice_mut(0..ops_src.len());
-        stream
-            .memcpy_htod(ops_src, &mut view)
-            .map_err(|e| launch_err("upload ops_flat", e))?;
-    }
-    {
-        let dev = scratch
-            .cross_dev
-            .as_mut()
-            .expect("cross_dev allocated above");
-        let mut view = dev.slice_mut(0..cross_src.len());
-        stream
-            .memcpy_htod(cross_src, &mut view)
-            .map_err(|e| launch_err("upload cross_word", e))?;
-    }
+    let ops_dev = stage_u32(stream, &mut scratch.ops_dev, &scratch.ops_flat, "ops_flat")?;
+    let cross_dev = stage_u32(
+        stream,
+        &mut scratch.cross_dev,
+        &scratch.cross_word,
+        "cross_word",
+    )?;
 
     let num_groups_i = require_i32("stab_apply_word_grouped", "num_groups", num_groups)?;
     let num_cross_word_i =
@@ -369,27 +321,6 @@ fn launch_word_grouped_kernel(
         .clamp(32, BLOCK_SIZE as usize) as u32;
     let num_rows_grid = require_u32("stab_apply_word_grouped", "num_rows", num_rows_usize)?;
     let cfg = linear_cfg(block_threads, num_rows_grid);
-
-    let group_words_dev = scratch
-        .group_words_dev
-        .as_ref()
-        .expect("group_words_dev uploaded above")
-        .slice(0..group_words_src.len());
-    let group_offsets_dev = scratch
-        .group_offsets_dev
-        .as_ref()
-        .expect("group_offsets_dev uploaded above")
-        .slice(0..group_offsets_src.len());
-    let ops_dev = scratch
-        .ops_dev
-        .as_ref()
-        .expect("ops_dev uploaded above")
-        .slice(0..ops_src.len());
-    let cross_dev = scratch
-        .cross_dev
-        .as_ref()
-        .expect("cross_dev uploaded above")
-        .slice(0..cross_src.len());
 
     let mut builder = stream.launch_builder(&func);
     let (xz_buf, phase_buf) = tableau.xz_phase_mut();
@@ -412,7 +343,7 @@ fn launch_word_grouped_kernel(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("stab_apply_word_grouped", e))?;
+            .map_err(|e| driver_err("stab_apply_word_grouped", e))?;
     }
     Ok(())
 }
@@ -452,7 +383,7 @@ pub(crate) fn launch_rowmul_words(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("stab_rowmul_words", e))?;
+            .map_err(|e| driver_err("stab_rowmul_words", e))?;
     }
     Ok(())
 }
@@ -501,7 +432,7 @@ pub(crate) fn launch_measure_find_pivot(
         let out_pivot = pivot_buf.raw_mut();
         stream
             .memcpy_htod(&[sentinel], out_pivot)
-            .map_err(|e| launch_err("reset find_pivot sentinel", e))?;
+            .map_err(|e| driver_err("reset find_pivot sentinel", e))?;
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(xz)
@@ -515,11 +446,11 @@ pub(crate) fn launch_measure_find_pivot(
         unsafe {
             builder
                 .launch(cfg)
-                .map_err(|e| launch_err("stab_measure_find_pivot", e))?;
+                .map_err(|e| driver_err("stab_measure_find_pivot", e))?;
         }
         stream
             .memcpy_dtoh(out_pivot, &mut host_pivot)
-            .map_err(|e| launch_err("find_pivot dtoh", e))?;
+            .map_err(|e| driver_err("find_pivot dtoh", e))?;
     }
     if host_pivot[0] >= sentinel {
         Ok(None)
@@ -568,7 +499,7 @@ pub(crate) fn launch_measure_cascade(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("stab_measure_cascade", e))?;
+            .map_err(|e| driver_err("stab_measure_cascade", e))?;
     }
     Ok(())
 }
@@ -613,7 +544,7 @@ pub(crate) fn launch_measure_fixup(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("stab_measure_fixup", e))?;
+            .map_err(|e| driver_err("stab_measure_fixup", e))?;
     }
     Ok(())
 }
@@ -649,7 +580,7 @@ pub(crate) fn launch_measure_deterministic(
         let out_outcome = outcome_buf.raw_mut();
         stream
             .memcpy_htod(&[0u8], out_outcome)
-            .map_err(|e| launch_err("reset deterministic outcome", e))?;
+            .map_err(|e| driver_err("reset deterministic outcome", e))?;
         let mut builder = stream.launch_builder(&func);
         builder
             .arg(xz)
@@ -664,11 +595,11 @@ pub(crate) fn launch_measure_deterministic(
         unsafe {
             builder
                 .launch(cfg)
-                .map_err(|e| launch_err("stab_measure_deterministic", e))?;
+                .map_err(|e| driver_err("stab_measure_deterministic", e))?;
         }
         stream
             .memcpy_dtoh(out_outcome, &mut host_out)
-            .map_err(|e| launch_err("deterministic outcome dtoh", e))?;
+            .map_err(|e| driver_err("deterministic outcome dtoh", e))?;
     }
     Ok(host_out[0] != 0)
 }

@@ -1,0 +1,6 @@
+OPENQASM 3.0;
+qubit[3] q;
+bit[1] c;
+x q[0];
+measure q[0] -> c[0];
+if (c[0]) { x q[1]; } else { x q[2]; }

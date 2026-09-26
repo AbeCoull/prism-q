@@ -2433,6 +2433,53 @@ fn gpu_expectation_values_mixed_strings_match_cpu_statevector() {
     }
 }
 
+// Masks sharing an X part reduce in groups of eight: eleven Z-only strings
+// split eight and three, and three strings over X on qubits 1 and 4 share a
+// group, all interleaved so each result must land back in its input slot.
+#[test]
+fn gpu_expectation_values_shared_x_groups_match_cpu_statevector() {
+    use prism_q::{BackendKind, PauliTerm, simulate};
+
+    let Some(f) = Fixture::try_new() else { return };
+
+    let n = 14;
+    let mut circuit = prism_q::Circuit::new(n, 0);
+    for q in 0..n {
+        circuit.add_gate(Gate::Rx(0.3 + 0.07 * q as f64), &[q]);
+        circuit.add_gate(Gate::Ry(0.2 + 0.05 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        circuit.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        circuit.add_gate(Gate::Rz(0.4), &[q]);
+        circuit.add_gate(Gate::Ry(0.5 + 0.03 * q as f64), &[q]);
+    }
+    let mut obs: Vec<Vec<PauliTerm>> = (0..11)
+        .map(|q| vec![PauliTerm::z(q), PauliTerm::z(q + 3)])
+        .collect();
+    obs.insert(2, vec![PauliTerm::x(1), PauliTerm::x(4)]);
+    obs.insert(7, vec![PauliTerm::y(1), PauliTerm::y(4)]);
+    obs.insert(11, vec![PauliTerm::x(1), PauliTerm::y(4), PauliTerm::z(9)]);
+    obs.push(vec![PauliTerm::x(5)]);
+
+    let cpu = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .seed(42)
+        .expectation_values(&obs)
+        .unwrap();
+    let gpu = simulate(&circuit)
+        .gpu(f.ctx.clone())
+        .seed(42)
+        .expectation_values(&obs)
+        .unwrap();
+
+    assert_eq!(cpu.len(), obs.len());
+    for (i, (c, g)) in cpu.iter().zip(&gpu).enumerate() {
+        assert!((c - g).abs() < EPS, "obs {i}: cpu={c}, gpu={g}");
+    }
+}
+
 // Three commuting groups, one per host branch of the grouped evaluation: six
 // members expand into 15 pair masks inline, eight Z-only members take the
 // moments pass on the state as run, seven mixed members take it on a

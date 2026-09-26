@@ -429,23 +429,14 @@ differential_cases! {
     rotations_18q => (Class::Rotations, 18),
 }
 
-// The sparse backend prunes entries with |a|^2 at or below 1e-16 after each gate and still
-// reports the run exact. The opening rotation layer of an 18-qubit circuit is a product
-// state whose smallest amplitudes are real and fall under that line (57 of them here), and
-// later layers spread the loss: 9.9e-9 in amplitude, 3.7e-11 in probability. The unfused
-// sparse run is off by 1.2e-8, while the statevector (fused and unfused), factored and
-// tensor-network runs agree with each other to 4e-17. At 14 qubits no amplitude falls
-// under the line and sparse agrees to 1e-16.
+// Sparse at 18 qubits on these two classes is outside the main matrix for cost. Both
+// build real amplitudes below 1e-8, so they pin the sparse prune threshold beneath them.
 #[test]
-#[ignore = "sparse default prune threshold drops real amplitude at 18 qubits"]
 fn sparse_layered_mixed_18q_matches_statevector() {
     check_one(Participant::Sparse, Class::LayeredMixed, 18);
 }
 
-// Same mechanism, 34 amplitudes under the line: 2.3e-10 in amplitude, 3.6e-14 in
-// probability.
 #[test]
-#[ignore = "sparse default prune threshold drops real amplitude at 18 qubits"]
 fn sparse_matched_brickwork_18q_matches_statevector() {
     check_one(Participant::Sparse, Class::MatchedBrickwork, 18);
 }

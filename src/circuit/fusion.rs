@@ -974,21 +974,36 @@ pub(crate) fn reorder_fused2q_into_tiles<'a>(
 ) -> Cow<'a, Circuit> {
     let circuit = input.as_ref();
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
-    let mut window: Vec<(Instruction, usize)> = Vec::new();
+    let source = &circuit.instructions;
+    let mut window: Vec<usize> = Vec::new();
     let mut blocked = vec![false; circuit.num_qubits];
     let mut changed = false;
     t.begin();
 
-    for (i, inst) in circuit.instructions.iter().enumerate() {
+    for (i, inst) in source.iter().enumerate() {
         if is_tileable_2q(inst) {
-            window.push((inst.clone(), i));
+            window.push(i);
         } else {
-            flush_tile_window(&mut window, &mut blocked, &mut output, &mut changed, t);
+            flush_tile_window(
+                source,
+                &mut window,
+                &mut blocked,
+                &mut output,
+                &mut changed,
+                t,
+            );
             output.push(inst.clone());
             t.keep(i);
         }
     }
-    flush_tile_window(&mut window, &mut blocked, &mut output, &mut changed, t);
+    flush_tile_window(
+        source,
+        &mut window,
+        &mut blocked,
+        &mut output,
+        &mut changed,
+        t,
+    );
 
     if changed {
         t.commit();
@@ -999,18 +1014,20 @@ pub(crate) fn reorder_fused2q_into_tiles<'a>(
     }
 }
 
-/// Emit a run of `Fused2q` gates one tile at a time. A scan stops looking once it
-/// has skipped twice as many gates as there are qubits, which keeps long runs
-/// linear and lost no pass on quantum volume, HEA or random circuits.
+/// Emit a run of tileable 2q gates, given as indices into `source`, one tile at a
+/// time. A scan stops looking once it has skipped twice as many gates as there are
+/// qubits, which keeps long runs linear and lost no pass on quantum volume, HEA or
+/// random circuits.
 fn flush_tile_window(
-    window: &mut Vec<(Instruction, usize)>,
+    source: &[Instruction],
+    window: &mut Vec<usize>,
     blocked: &mut [bool],
     output: &mut Vec<Instruction>,
     changed: &mut bool,
     t: &mut Tracer,
 ) {
     let pair = |k: usize| {
-        let Instruction::Gate { targets, .. } = &window[k].0 else {
+        let Instruction::Gate { targets, .. } = &source[window[k]] else {
             unreachable!("the window holds tileable 2q gates only");
         };
         (targets[0], targets[1])
@@ -1055,11 +1072,62 @@ fn flush_tile_window(
     if order.iter().enumerate().any(|(pos, &k)| pos != k) {
         *changed = true;
     }
-    let mut taken: Vec<Option<(Instruction, usize)>> = window.drain(..).map(Some).collect();
     for k in order {
-        let (inst, src) = taken[k].take().expect("each window slot is emitted once");
-        output.push(inst);
+        let src = window[k];
+        output.push(source[src].clone());
         t.keep(src);
+    }
+    window.clear();
+}
+
+/// A run of tileable 2q gates that fits one subcube tile.
+#[derive(Default)]
+struct Multi2qRun {
+    gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
+    srcs: Vec<usize>,
+    high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>,
+}
+
+impl Multi2qRun {
+    /// Emit the run as one `Multi2q`, or as its source instructions when it is too
+    /// short to batch, and start a new run. Returns whether a `Multi2q` was emitted.
+    fn flush(
+        &mut self,
+        source: &[Instruction],
+        output: &mut Vec<Instruction>,
+        tracer: &mut Tracer,
+    ) -> bool {
+        self.high.clear();
+        if self.gates.len() < MIN_MULTI_2Q_BATCH {
+            self.gates.clear();
+            for src in self.srcs.drain(..) {
+                output.push(source[src].clone());
+                tracer.keep(src);
+            }
+            return false;
+        }
+        let mut all_qubits: SmallVec<[usize; 4]> = SmallVec::new();
+        for &(q0, q1, _) in &self.gates {
+            push_unique(&mut all_qubits, q0);
+            push_unique(&mut all_qubits, q1);
+        }
+        all_qubits.sort_unstable();
+        output.push(Instruction::Gate {
+            gate: Gate::Multi2q(Box::new(Multi2qData {
+                gates: std::mem::take(&mut self.gates),
+            })),
+            targets: all_qubits,
+        });
+        if tracer.on {
+            let entries: Vec<Vec<(usize, Place)>> = self
+                .srcs
+                .iter()
+                .map(|&src| vec![(src, Place::Plain)])
+                .collect();
+            tracer.batch(&entries);
+        }
+        self.srcs.clear();
+        true
     }
 }
 
@@ -1078,99 +1146,35 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
     tracer: &mut Tracer,
 ) -> Cow<'a, Circuit> {
     let mut output: Vec<Instruction> = Vec::with_capacity(circuit.instructions.len());
-    let mut pending: Vec<(usize, usize, [[Complex64; 4]; 4])> = Vec::new();
-    let mut pending_src: Vec<usize> = Vec::new();
-    let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
+    let mut run = Multi2qRun::default();
     let mut changed = false;
     let source = &circuit.instructions;
 
-    let flush = |pending: &mut Vec<(usize, usize, [[Complex64; 4]; 4])>,
-                 pending_src: &mut Vec<usize>,
-                 high: &mut SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>,
-                 output: &mut Vec<Instruction>,
-                 changed: &mut bool,
-                 tracer: &mut Tracer| {
-        high.clear();
-        if pending.is_empty() {
-            return;
-        }
-        if pending.len() < MIN_MULTI_2Q_BATCH {
-            pending.clear();
-            for src in pending_src.drain(..) {
-                output.push(source[src].clone());
-                tracer.keep(src);
-            }
-        } else {
-            let mut all_qubits: SmallVec<[usize; 4]> = SmallVec::new();
-            for &(q0, q1, _) in pending.iter() {
-                push_unique(&mut all_qubits, q0);
-                push_unique(&mut all_qubits, q1);
-            }
-            all_qubits.sort_unstable();
-            output.push(Instruction::Gate {
-                gate: Gate::Multi2q(Box::new(Multi2qData {
-                    gates: std::mem::take(pending),
-                })),
-                targets: all_qubits,
-            });
-            if tracer.on {
-                let entries: Vec<Vec<(usize, Place)>> = pending_src
-                    .iter()
-                    .map(|&src| vec![(src, Place::Plain)])
-                    .collect();
-                tracer.batch(&entries);
-            }
-            pending_src.clear();
-            *changed = true;
-        }
-    };
-
     tracer.begin();
-    for (i, inst) in circuit.instructions.iter().enumerate() {
+    for (i, inst) in source.iter().enumerate() {
         match inst {
             Instruction::Gate { gate, targets } if is_tileable_2q(inst) => {
                 let q0 = targets[0];
                 let q1 = targets[1];
-                let joined = match multi_2q_join(&high, q0, q1) {
+                let joined = match multi_2q_join(&run.high, q0, q1) {
                     Some(joined) => joined,
                     None => {
-                        flush(
-                            &mut pending,
-                            &mut pending_src,
-                            &mut high,
-                            &mut output,
-                            &mut changed,
-                            tracer,
-                        );
+                        changed |= run.flush(source, &mut output, tracer);
                         multi_2q_join(&[], q0, q1).expect("one pair fits a tile")
                     }
                 };
-                high = joined;
-                pending.push((q0, q1, gate.matrix_4x4()));
-                pending_src.push(i);
+                run.high = joined;
+                run.gates.push((q0, q1, gate.matrix_4x4()));
+                run.srcs.push(i);
             }
             _ => {
-                flush(
-                    &mut pending,
-                    &mut pending_src,
-                    &mut high,
-                    &mut output,
-                    &mut changed,
-                    tracer,
-                );
+                changed |= run.flush(source, &mut output, tracer);
                 output.push(inst.clone());
                 tracer.keep(i);
             }
         }
     }
-    flush(
-        &mut pending,
-        &mut pending_src,
-        &mut high,
-        &mut output,
-        &mut changed,
-        tracer,
-    );
+    changed |= run.flush(source, &mut output, tracer);
 
     if changed {
         tracer.commit();

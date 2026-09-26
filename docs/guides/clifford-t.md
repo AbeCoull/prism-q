@@ -67,7 +67,11 @@ directly.
 Backward-propagates measurement observables as Pauli strings. Clifford gates conjugate in O(1). T gates branch stochastically into two weighted Pauli paths. Per-path cost O(d×n/64), independent of T-gate count. Returns marginal probabilities via Monte Carlo estimation.
 
 ```rust
-run_spp(circuit, num_samples, seed) // -> SppResult
+# use prism_q::{circuits::clifford_t_circuit, run_spp};
+# let circuit = clifford_t_circuit(8, 10, 0.1, 42);
+# let (num_samples, seed) = (1000, 42);
+let result = run_spp(&circuit, num_samples, seed)?; // SppResult
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 ## Deterministic Sparse Pauli Dynamics (`src/sim/unified_pauli.rs`)
@@ -77,19 +81,29 @@ deterministically branch X/Y terms. Identical strings merge. Exact for small T
 counts, approximate with a bounded error for larger ones.
 
 ```rust
-run_spd(circuit, epsilon, max_terms) // -> SpdResult
-run_spd_with(circuit, &truncation)   // -> SpdResult, any policy
+# use prism_q::{SpdTruncation, circuits::clifford_t_circuit, run_spd, run_spd_with};
+# let circuit = clifford_t_circuit(8, 10, 0.1, 42);
+# let (epsilon, max_terms) = (1e-8, 1 << 16);
+# let truncation = SpdTruncation::Budget { max_terms };
+let result = run_spd(&circuit, epsilon, max_terms)?; // SpdResult
+let result = run_spd_with(&circuit, &truncation)?;   // SpdResult, any policy
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 Two truncation policies, selectable from the builder as well as from the free
 functions:
 
 ```rust
+# use prism_q::{BackendKind, PauliTerm, SpdTruncation, circuits::clifford_t_circuit, simulate};
+# let circuit = clifford_t_circuit(8, 10, 0.1, 42);
+# let observables = vec![vec![PauliTerm::z(0)], vec![PauliTerm::z(0), PauliTerm::z(1)]];
 let values = simulate(&circuit)
+    .seed(42)
     .backend(BackendKind::DeterministicPauli {
         truncation: SpdTruncation::Budget { max_terms: 1 << 16 },
     })
     .expectation_values(&observables)?;
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 `SpdTruncation::Threshold { epsilon, max_terms }` drops terms below `epsilon` once
@@ -114,11 +128,16 @@ The same weighted Pauli sum, carried through a noise model. Select
 answers `expectation_values` and `observable_expectation`, and nothing else.
 
 ```rust
+# use prism_q::{BackendKind, NoiseModel, PauliTerm, circuits::clifford_t_circuit, simulate};
+# let circuit = clifford_t_circuit(8, 10, 0.1, 42);
+# let observables = vec![vec![PauliTerm::z(0)], vec![PauliTerm::z(0), PauliTerm::z(1)]];
 let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
 let values = simulate(&circuit)
+    .seed(42)
     .backend(BackendKind::PauliPath { epsilon: 1e-8, max_terms: 1 << 16 })
     .noise(&noise)
     .expectation_values(&observables)?;
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 The error has two independent parts, and only one is approximate.

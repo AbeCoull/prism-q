@@ -15,6 +15,7 @@ panic and never a silent drop.
 use prism_q::circuit::openqasm;
 use prism_q::simulate;
 
+# let qasm_str = "OPENQASM 3.0; qubit[2] q; h q[0]; cx q[0], q[1];";
 let circuit = openqasm::parse(qasm_str).expect("parse error");
 let result = simulate(&circuit).seed(42).run().unwrap();
 ```
@@ -26,6 +27,7 @@ let result = simulate(&circuit).seed(42).run().unwrap();
 ```rust
 use prism_q::circuit::qasm_export;
 
+# let circuit = prism_q::circuits::qft_circuit(4);
 let qasm = qasm_export::to_qasm3(&circuit).expect("export error");
 ```
 
@@ -129,9 +131,13 @@ rz(phi) q[1];
 ```
 
 ```rust
+# use prism_q::circuit::{openqasm, qasm_export::to_qasm3};
+# let qasm = "OPENQASM 3.0; input float[64] theta; input float[64] phi; qubit[2] q;
+#     h q[0]; rx(theta) q[0]; cx q[0], q[1]; rz(phi) q[1];";
 let (template, params) = openqasm::parse_parametric(qasm)?;
 let bound = params.bind(&template, &[0.41, 1.27])?;
 let text = to_qasm3(&bound)?;   // angles written out, no `input` line
+# Ok::<(), prism_q::PrismError>(())
 ```
 
 Several gates may read one input, which is the weight sharing `Parameters`
@@ -230,6 +236,9 @@ lands at index 2 of a two-qubit result and not at index 1.
 use prism_q::circuit::openqasm;
 use prism_q::simulate;
 
+# let qasm_str = "OPENQASM 3.0; qubit[2] q; h q[0]; cnot q[0], q[1];
+#     #pragma braket result probability all
+#     #pragma braket result expectation z(q[0]) @ z(q[1])";
 let program = openqasm::parse_braket(qasm_str).expect("parse error");
 let values = simulate(&program.circuit)
     .seed(42)
@@ -255,6 +264,10 @@ reports beside a mean. `sample` has no exact reading and is declined here.
 record, which is what Braket does above zero shots:
 
 ```rust
+# use prism_q::{circuit::openqasm, simulate};
+# let program = openqasm::parse_braket("OPENQASM 3.0; qubit[2] q; h q[0]; cnot q[0], q[1];
+#     #pragma braket result probability all
+#     #pragma braket result expectation z(q[0]) @ z(q[1])").unwrap();
 let values = simulate(&program.circuit)
     .seed(42)
     .braket_results_sampled(&program.results, 1000)

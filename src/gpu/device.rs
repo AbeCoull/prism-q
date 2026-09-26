@@ -10,6 +10,7 @@ use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 
 use crate::error::{PrismError, Result};
 
+use super::driver_err;
 use super::kernels::{KERNEL_NAMES, kernel_source};
 
 /// Handle to a CUDA-capable device.
@@ -26,11 +27,10 @@ enum DeviceInner {
     Real {
         context: Arc<CudaContext>,
         stream: Arc<CudaStream>,
-        #[allow(dead_code)]
-        module: Arc<CudaModule>,
+        _module: Arc<CudaModule>,
         functions: HashMap<&'static str, CudaFunction>,
     },
-    #[allow(dead_code)]
+    #[cfg_attr(not(test), allow(dead_code))]
     Stub,
 }
 
@@ -44,7 +44,7 @@ impl GpuDevice {
     /// disk in `prism-q-ptx` under the user cache dir (`XDG_CACHE_HOME`, `LOCALAPPDATA`,
     /// or `HOME/.cache`), so NVRTC runs once per source change per user and host.
     pub fn new(device_id: usize) -> Result<Self> {
-        let context = CudaContext::new(device_id).map_err(|e| Self::driver_err("init", e))?;
+        let context = CudaContext::new(device_id).map_err(|e| driver_err("init", e))?;
         let stream = context.default_stream();
         let arch = detect_arch(&context)?;
         let module = load_kernel_module(&context, arch)?;
@@ -54,14 +54,14 @@ impl GpuDevice {
         for &name in KERNEL_NAMES {
             let func = module
                 .load_function(name)
-                .map_err(|e| Self::driver_err(&format!("load_function `{name}`"), e))?;
+                .map_err(|e| driver_err(&format!("load_function `{name}`"), e))?;
             functions.insert(name, func);
         }
         Ok(Self {
             inner: DeviceInner::Real {
                 context,
                 stream,
-                module,
+                _module: module,
                 functions,
             },
         })
@@ -75,9 +75,9 @@ impl GpuDevice {
     /// Total VRAM on the selected device in bytes.
     pub fn vram_bytes(&self) -> Result<usize> {
         match &self.inner {
-            DeviceInner::Real { context, .. } => context
-                .total_mem()
-                .map_err(|e| Self::driver_err("vram_bytes", e)),
+            DeviceInner::Real { context, .. } => {
+                context.total_mem().map_err(|e| driver_err("vram_bytes", e))
+            }
             DeviceInner::Stub => Err(Self::stub_unsupported("vram_bytes")),
         }
     }
@@ -91,7 +91,7 @@ impl GpuDevice {
             DeviceInner::Real { context, .. } => context
                 .mem_get_info()
                 .map(|(free, _total)| free)
-                .map_err(|e| Self::driver_err("vram_available", e)),
+                .map_err(|e| driver_err("vram_available", e)),
             DeviceInner::Stub => Err(Self::stub_unsupported("vram_available")),
         }
     }
@@ -139,16 +139,9 @@ impl GpuDevice {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn is_stub(&self) -> bool {
         matches!(self.inner, DeviceInner::Stub)
-    }
-
-    fn driver_err(op: &str, err: impl std::fmt::Display) -> PrismError {
-        PrismError::BackendUnsupported {
-            backend: "gpu".to_string(),
-            operation: format!("{op}: {err}"),
-        }
     }
 
     fn stub_unsupported(op: &str) -> PrismError {
@@ -168,7 +161,7 @@ fn load_kernel_module(context: &Arc<CudaContext>, arch: &'static str) -> Result<
     if let Some(ptx) = cache.get(arch) {
         return context
             .load_module(Ptx::clone(ptx))
-            .map_err(|e| GpuDevice::driver_err("load_module", e));
+            .map_err(|e| driver_err("load_module", e));
     }
     let (ptx, module) = load_or_compile(context, arch, &ptx_cache_dir())?;
     cache.insert(arch, ptx);
@@ -197,13 +190,11 @@ fn load_or_compile(
             return Ok((Arc::new(ptx), module));
         }
     }
-    let ptx = compile_ptx_with_opts(&source, opts).map_err(|e| PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("PTX compilation (arch={arch}): {e}"),
-    })?;
+    let ptx = compile_ptx_with_opts(&source, opts)
+        .map_err(|e| driver_err(&format!("PTX compilation (arch={arch})"), e))?;
     let module = context
         .load_module(ptx.clone())
-        .map_err(|e| GpuDevice::driver_err("load_module", e))?;
+        .map_err(|e| driver_err("load_module", e))?;
     write_ptx_cache(&path, &ptx.to_src());
     Ok((Arc::new(ptx), module))
 }
@@ -278,7 +269,7 @@ fn arch_for_capability(capability: (i32, i32)) -> Option<&'static str> {
 fn detect_arch(context: &Arc<CudaContext>) -> Result<&'static str> {
     let capability = context
         .compute_capability()
-        .map_err(|e| GpuDevice::driver_err("compute_capability", e))?;
+        .map_err(|e| driver_err("compute_capability", e))?;
     arch_for_capability(capability).ok_or_else(|| PrismError::BackendUnsupported {
         backend: "gpu".to_string(),
         operation: format!(

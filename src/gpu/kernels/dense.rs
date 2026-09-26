@@ -14,7 +14,7 @@ use crate::backend::statevector::kernels as cpu_k;
 use crate::error::{PrismError, Result};
 
 use super::super::{GpuContext, GpuState};
-use super::{launch_err, linear_cfg, stream_and_fn};
+use super::{check_pair, check_qubit, driver_err, linear_cfg, stream_and_fn};
 
 const BLOCK_SIZE: u32 = 256;
 
@@ -159,7 +159,7 @@ pub(crate) fn launch_set_initial_state(ctx: &GpuContext, state: &mut GpuState) -
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("set_initial_state", e))?;
+            .map_err(|e| driver_err("set_initial_state", e))?;
     }
     Ok(())
 }
@@ -187,7 +187,7 @@ pub(crate) fn launch_compute_probabilities(ctx: &GpuContext, state: &GpuState) -
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("compute_probabilities", e))?;
+            .map_err(|e| driver_err("compute_probabilities", e))?;
     }
     let mut host = vec![0.0_f64; dim as usize];
     scratch.copy_to_host(device, &mut host)?;
@@ -201,12 +201,7 @@ pub(crate) fn launch_apply_gate_1q(
     matrix: [[Complex64; 2]; 2],
 ) -> Result<()> {
     let n = state.num_qubits();
-    if target >= n {
-        return Err(PrismError::InvalidQubit {
-            index: target,
-            register_size: n,
-        });
-    }
+    check_qubit(n, target)?;
     let pair_count: u64 = 1u64 << (n - 1);
     let (stream, func) = stream_and_fn(ctx, "apply_gate_1q")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
@@ -237,7 +232,7 @@ pub(crate) fn launch_apply_gate_1q(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_gate_1q", e))?;
+            .map_err(|e| driver_err("apply_gate_1q", e))?;
     }
     Ok(())
 }
@@ -250,12 +245,7 @@ pub(crate) fn launch_apply_diagonal_1q(
     d1: Complex64,
 ) -> Result<()> {
     let n = state.num_qubits();
-    if target >= n {
-        return Err(PrismError::InvalidQubit {
-            index: target,
-            register_size: n,
-        });
-    }
+    check_qubit(n, target)?;
     let pair_count: u64 = 1u64 << (n - 1);
     let (stream, func) = stream_and_fn(ctx, "apply_diagonal_1q")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
@@ -278,7 +268,7 @@ pub(crate) fn launch_apply_diagonal_1q(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_diagonal_1q", e))?;
+            .map_err(|e| driver_err("apply_diagonal_1q", e))?;
     }
     Ok(())
 }
@@ -291,12 +281,7 @@ fn launch_2q(
     q1: usize,
 ) -> Result<()> {
     let n = state.num_qubits();
-    if q0 >= n || q1 >= n || q0 == q1 {
-        return Err(PrismError::InvalidQubit {
-            index: q0.max(q1),
-            register_size: n,
-        });
-    }
+    check_pair(n, q0, q1)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let device = ctx.device();
     let stream = device.stream()?;
@@ -309,7 +294,7 @@ fn launch_2q(
     builder.arg(buffer).arg(&pair_count).arg(&q0_i).arg(&q1_i);
     // SAFETY: signature matches kernel (state, pair_count, q0, q1); grid covers iter space.
     unsafe {
-        builder.launch(cfg).map_err(|e| launch_err(kernel, e))?;
+        builder.launch(cfg).map_err(|e| driver_err(kernel, e))?;
     }
     Ok(())
 }
@@ -352,12 +337,7 @@ pub(crate) fn launch_apply_parity_phase(
     diff: Complex64,
 ) -> Result<()> {
     let n = state.num_qubits();
-    if q0 >= n || q1 >= n || q0 == q1 {
-        return Err(PrismError::InvalidQubit {
-            index: q0.max(q1),
-            register_size: n,
-        });
-    }
+    check_pair(n, q0, q1)?;
     let dim: u64 = 1u64 << n;
     let (stream, func) = stream_and_fn(ctx, "apply_parity_phase")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
@@ -382,7 +362,7 @@ pub(crate) fn launch_apply_parity_phase(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_parity_phase", e))?;
+            .map_err(|e| driver_err("apply_parity_phase", e))?;
     }
     Ok(())
 }
@@ -411,12 +391,7 @@ pub(crate) fn launch_apply_cu(
     matrix: [[Complex64; 2]; 2],
 ) -> Result<()> {
     let n = state.num_qubits();
-    if control >= n || target >= n || control == target {
-        return Err(PrismError::InvalidQubit {
-            index: control.max(target),
-            register_size: n,
-        });
-    }
+    check_pair(n, control, target)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_cu")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
@@ -447,7 +422,7 @@ pub(crate) fn launch_apply_cu(
         .arg(&m11i);
     // SAFETY: signature matches kernel; grid covers pair_count.
     unsafe {
-        builder.launch(cfg).map_err(|e| launch_err("apply_cu", e))?;
+        builder.launch(cfg).map_err(|e| driver_err("apply_cu", e))?;
     }
     Ok(())
 }
@@ -460,12 +435,7 @@ pub(crate) fn launch_apply_cu_phase(
     phase: Complex64,
 ) -> Result<()> {
     let n = state.num_qubits();
-    if control >= n || target >= n || control == target {
-        return Err(PrismError::InvalidQubit {
-            index: control.max(target),
-            register_size: n,
-        });
-    }
+    check_pair(n, control, target)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_cu_phase")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
@@ -486,31 +456,21 @@ pub(crate) fn launch_apply_cu_phase(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_cu_phase", e))?;
+            .map_err(|e| driver_err("apply_cu_phase", e))?;
     }
     Ok(())
 }
 
 fn validate_mcu_qubits(n: usize, controls: &[usize], target: usize) -> Result<Vec<u32>> {
     for &c in controls {
-        if c >= n {
-            return Err(PrismError::InvalidQubit {
-                index: c,
-                register_size: n,
-            });
-        }
+        check_qubit(n, c)?;
         if c == target {
             return Err(PrismError::InvalidParameter {
                 message: "control qubit equals target".to_string(),
             });
         }
     }
-    if target >= n {
-        return Err(PrismError::InvalidQubit {
-            index: target,
-            register_size: n,
-        });
-    }
+    check_qubit(n, target)?;
     let mut sorted: Vec<u32> = controls.iter().map(|&q| q as u32).collect();
     sorted.push(target as u32);
     sorted.sort_unstable();
@@ -569,7 +529,7 @@ pub(crate) fn launch_apply_mcu(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_mcu", e))?;
+            .map_err(|e| driver_err("apply_mcu", e))?;
     }
     Ok(())
 }
@@ -610,7 +570,7 @@ pub(crate) fn launch_apply_mcu_phase(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_mcu_phase", e))?;
+            .map_err(|e| driver_err("apply_mcu_phase", e))?;
     }
     Ok(())
 }
@@ -624,12 +584,7 @@ pub(crate) fn launch_apply_fused_2q(
     matrix: &[[Complex64; 4]; 4],
 ) -> Result<()> {
     let n = state.num_qubits();
-    if q0 >= n || q1 >= n || q0 == q1 {
-        return Err(PrismError::InvalidQubit {
-            index: q0.max(q1),
-            register_size: n,
-        });
-    }
+    check_pair(n, q0, q1)?;
     let pair_count: u64 = 1u64 << (n - 2);
     let (stream, func) = stream_and_fn(ctx, "apply_fused_2q")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(pair_count));
@@ -652,7 +607,7 @@ pub(crate) fn launch_apply_fused_2q(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_fused_2q", e))?;
+            .map_err(|e| driver_err("apply_fused_2q", e))?;
     }
     Ok(())
 }
@@ -661,12 +616,7 @@ pub(crate) fn launch_apply_fused_2q(
 /// finalize); one f64 crosses PCIe.
 pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize) -> Result<f64> {
     let n = state.num_qubits();
-    if qubit >= n {
-        return Err(PrismError::InvalidQubit {
-            index: qubit,
-            register_size: n,
-        });
-    }
+    check_qubit(n, qubit)?;
     let dim: u64 = 1u64 << n;
     // Each block of stage 1 processes 2*BLOCK_SIZE elements.
     let elems_per_block = 2u64 * BLOCK_SIZE as u64;
@@ -705,7 +655,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
         unsafe {
             builder
                 .launch(stage1_cfg)
-                .map_err(|e| launch_err("measure_prob_one", e))?;
+                .map_err(|e| driver_err("measure_prob_one", e))?;
         }
     }
 
@@ -722,7 +672,7 @@ pub(crate) fn measure_prob_one(ctx: &GpuContext, state: &GpuState, qubit: usize)
         unsafe {
             builder
                 .launch(stage2_cfg)
-                .map_err(|e| launch_err("measure_prob_one_finalize", e))?;
+                .map_err(|e| driver_err("measure_prob_one_finalize", e))?;
         }
     }
 
@@ -746,12 +696,7 @@ pub(crate) fn reduced_density_matrix_1q(
     qubit: usize,
 ) -> Result<[[Complex64; 2]; 2]> {
     let n = state.num_qubits();
-    if qubit >= n {
-        return Err(PrismError::InvalidQubit {
-            index: qubit,
-            register_size: n,
-        });
-    }
+    check_qubit(n, qubit)?;
     let pairs: u64 = 1u64 << (n - 1);
     let elems_per_block = 2u64 * BLOCK_SIZE as u64;
     let num_blocks = pairs.div_ceil(elems_per_block).max(1) as u32;
@@ -794,7 +739,7 @@ pub(crate) fn reduced_density_matrix_1q(
         unsafe {
             builder
                 .launch(stage1_cfg)
-                .map_err(|e| launch_err("rdm_qubit", e))?;
+                .map_err(|e| driver_err("rdm_qubit", e))?;
         }
     }
 
@@ -811,7 +756,7 @@ pub(crate) fn reduced_density_matrix_1q(
         unsafe {
             builder
                 .launch(stage2_cfg)
-                .map_err(|e| launch_err("rdm_qubit_finalize", e))?;
+                .map_err(|e| driver_err("rdm_qubit_finalize", e))?;
         }
     }
 
@@ -914,7 +859,7 @@ pub(crate) fn pauli_sums(
         unsafe {
             builder
                 .launch(cfg)
-                .map_err(|e| launch_err("sv_pauli_expect", e))?;
+                .map_err(|e| driver_err("sv_pauli_expect", e))?;
         }
     }
     let result = scratch.pauli_result.as_mut().unwrap();
@@ -935,7 +880,7 @@ pub(crate) fn pauli_sums(
         unsafe {
             builder
                 .launch(cfg)
-                .map_err(|e| launch_err("dm_pauli_expect_finalize", e))?;
+                .map_err(|e| driver_err("dm_pauli_expect_finalize", e))?;
         }
     }
     let mut host = vec![0.0_f64; 2 * masks.len()];
@@ -962,12 +907,7 @@ pub(crate) fn measure_collapse(
     outcome: bool,
 ) -> Result<()> {
     let n = state.num_qubits();
-    if qubit >= n {
-        return Err(PrismError::InvalidQubit {
-            index: qubit,
-            register_size: n,
-        });
-    }
+    check_qubit(n, qubit)?;
     let dim: u64 = 1u64 << n;
     let (stream, func) = stream_and_fn(ctx, "measure_collapse")?;
     let cfg = linear_cfg(BLOCK_SIZE, grid_for(dim));
@@ -980,7 +920,7 @@ pub(crate) fn measure_collapse(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("measure_collapse", e))?;
+            .map_err(|e| driver_err("measure_collapse", e))?;
     }
     Ok(())
 }
@@ -995,12 +935,7 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
     }
     let n = state.num_qubits();
     for &(target, _) in gates {
-        if target >= n {
-            return Err(PrismError::InvalidQubit {
-                index: target,
-                register_size: n,
-            });
-        }
+        check_qubit(n, target)?;
     }
 
     let num_gates = gates.len();
@@ -1036,7 +971,7 @@ pub(crate) fn launch_apply_multi_fused_diagonal(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_multi_fused_diagonal", e))?;
+            .map_err(|e| driver_err("apply_multi_fused_diagonal", e))?;
     }
     Ok(())
 }
@@ -1055,19 +990,9 @@ pub(crate) fn launch_apply_batch_phase(
         n >= 1,
         "batch_phase requires at least one qubit for the control"
     );
-    if control >= n {
-        return Err(PrismError::InvalidQubit {
-            index: control,
-            register_size: n,
-        });
-    }
+    check_qubit(n, control)?;
     for &(q, _) in phases {
-        if q >= n {
-            return Err(PrismError::InvalidQubit {
-                index: q,
-                register_size: n,
-            });
-        }
+        check_qubit(n, q)?;
     }
 
     let one = Complex64::new(1.0, 0.0);
@@ -1134,7 +1059,7 @@ pub(crate) fn launch_apply_batch_phase(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_batch_phase", e))?;
+            .map_err(|e| driver_err("apply_batch_phase", e))?;
     }
     Ok(())
 }
@@ -1219,7 +1144,7 @@ pub(crate) fn launch_apply_batch_rzz(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_batch_rzz", e))?;
+            .map_err(|e| driver_err("apply_batch_rzz", e))?;
     }
     Ok(())
 }
@@ -1238,16 +1163,9 @@ pub(crate) fn launch_apply_diagonal_batch(
     }
 
     let Some(built) = cpu_k::build_diagonal_batch_tables(entries) else {
-        let n = state.num_qubits();
         for entry in entries {
             match *entry {
                 DiagEntry::Phase1q { qubit, d0, d1 } => {
-                    if qubit >= n {
-                        return Err(PrismError::InvalidQubit {
-                            index: qubit,
-                            register_size: n,
-                        });
-                    }
                     launch_apply_diagonal_1q(ctx, state, qubit, d0, d1)?;
                 }
                 DiagEntry::Phase2q { q0, q1, phase } => {
@@ -1323,7 +1241,7 @@ pub(crate) fn launch_apply_diagonal_batch(
     unsafe {
         builder
             .launch(cfg)
-            .map_err(|e| launch_err("apply_diagonal_batch", e))?;
+            .map_err(|e| driver_err("apply_diagonal_batch", e))?;
     }
     Ok(())
 }
@@ -1375,12 +1293,7 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
     }
     let mut is_target = [false; MAX_GPU_QUBITS];
     for &(target, _) in gates {
-        if target >= n {
-            return Err(PrismError::InvalidQubit {
-                index: target,
-                register_size: n,
-            });
-        }
+        check_qubit(n, target)?;
         is_target[target] = true;
     }
 
@@ -1472,7 +1385,7 @@ pub(crate) fn launch_apply_multi_fused_nondiag(
         unsafe {
             builder
                 .launch(cfg)
-                .map_err(|e| launch_err("apply_multi_fused_tiled", e))?;
+                .map_err(|e| driver_err("apply_multi_fused_tiled", e))?;
         }
     }
     Ok(())

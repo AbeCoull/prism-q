@@ -2,9 +2,10 @@
 
 use cudarc::driver::{CudaSlice, DeviceRepr, ValidAsZeroBits};
 
-use crate::error::{PrismError, Result};
+use crate::error::Result;
 
 use super::device::GpuDevice;
+use super::driver_err;
 
 /// RAII wrapper over a typed device allocation.
 pub struct GpuBuffer<T: DeviceRepr> {
@@ -73,12 +74,5 @@ impl<T: DeviceRepr> std::fmt::Debug for GpuBuffer<T> {
         f.debug_struct("GpuBuffer")
             .field("len", &self.slice.len())
             .finish()
-    }
-}
-
-fn driver_err(op: &str, err: impl std::fmt::Display) -> PrismError {
-    PrismError::BackendUnsupported {
-        backend: "gpu".to_string(),
-        operation: format!("{op}: {err}"),
     }
 }

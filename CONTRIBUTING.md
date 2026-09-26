@@ -273,7 +273,7 @@ and voice in whatever does get written.
 ## Adding a backend
 
 1. Create `src/backend/<name>.rs` (or a directory module) and implement the `Backend`
-   trait.
+   trait, plus the `backend::sealed::Sealed` marker that keeps it crate-only.
 2. Add `pub mod <name>;` to `src/backend/mod.rs`.
 3. Write unit tests (single-qubit, two-qubit, measurement at minimum) and golden tests
    against the statevector backend.

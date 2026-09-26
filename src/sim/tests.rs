@@ -149,6 +149,8 @@ impl ProbabilityFailureBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for ProbabilityFailureBackend {}
+
 impl Backend for ProbabilityFailureBackend {
     fn name(&self) -> &'static str {
         "probability_failure"

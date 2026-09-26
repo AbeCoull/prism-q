@@ -3481,7 +3481,8 @@ fn check_diagnostic_width(backend: &dyn Backend, diagnostic: Diagnostic, k: usiz
             if k > crate::backend::schmidt::export_cap() {
                 return Err(crate::backend::schmidt::export_cap_exceeded(
                     backend.name(),
-                    format!("dense statevector of {k} qubits"),
+                    "a dense statevector".to_string(),
+                    k,
                 ));
             }
             Ok(())

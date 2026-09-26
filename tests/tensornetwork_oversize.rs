@@ -32,8 +32,8 @@ fn small_caps() {
     ]);
 }
 
-fn incompatible_reason(err: PrismError) -> String {
-    caps::incompatible_reason(err, "tensornetwork")
+fn cap_message(err: PrismError) -> String {
+    caps::cap_message(err, "tensornetwork")
 }
 
 // The dispatch layer reads `BackendUnsupported` from a probability query as
@@ -47,7 +47,7 @@ fn explicit_probabilities_one_qubit_above_the_ceiling_name_the_cap() {
         .seed(SEED)
         .run()
         .unwrap_err();
-    let reason = incompatible_reason(err);
+    let reason = cap_message(err);
     assert!(
         reason.contains(&format!("{n} qubits")) && reason.contains(&format!("cap of {PROB_CAP}")),
         "{reason}"
@@ -83,22 +83,14 @@ fn doubled_contraction_over_the_peak_cap_errors_before_allocating() {
     tn.apply_instructions(&circuit.instructions).unwrap();
 
     let err = tn.pauli_expectations(&[vec![PauliTerm::z(0)]]).unwrap_err();
-    let reason = incompatible_reason(err);
-    assert!(
-        reason.contains("pauli expectation") && reason.contains(&format!("2^{PEAK_CAP}")),
-        "{reason}"
-    );
-    let peak: usize = reason
-        .split("peak intermediate of ")
-        .nth(1)
-        .and_then(|rest| rest.split(' ').next())
-        .and_then(|digits| digits.parse().ok())
-        .expect("reason names the planned peak");
-    assert!(peak > 1 << PEAK_CAP, "{reason}");
+    let (operation, peak, limit) = caps::cap_fields(err, "tensornetwork");
+    assert!(operation.contains("pauli expectation"), "{operation}");
+    assert_eq!(limit, 1 << PEAK_CAP);
+    assert!(peak > limit, "planned peak {peak}");
 
     let err = tn.reduced_density_matrix_1q(0).unwrap_err();
     assert!(
-        incompatible_reason(err).contains("reduced density matrix"),
+        cap_message(err).contains("reduced density matrix"),
         "the marginal path shares the guard"
     );
 }

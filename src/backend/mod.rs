@@ -455,13 +455,20 @@ impl BasisSamples {
     }
 }
 
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
 /// Trait that all simulation backends must implement.
-pub trait Backend {
+///
+/// Sealed: only the crate's own backends implement it, so a method can be added
+/// without a breaking release. Every method stays callable from outside.
+pub trait Backend: sealed::Sealed {
     /// Backend name used in error messages and benchmark labels.
     fn name(&self) -> &'static str;
 
     /// Which engine this is, for the provenance attached to every result. The
-    /// default names an out-of-tree backend by its [`Backend::name`].
+    /// default names the backend by its [`Backend::name`].
     fn resolved(&self) -> ResolvedBackend {
         ResolvedBackend::Other(self.name())
     }

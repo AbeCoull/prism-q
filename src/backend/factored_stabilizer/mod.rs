@@ -782,6 +782,8 @@ impl FactoredStabilizerBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for FactoredStabilizerBackend {}
+
 impl Backend for FactoredStabilizerBackend {
     fn name(&self) -> &'static str {
         "factored-stabilizer"

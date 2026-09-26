@@ -1,0 +1,41 @@
+name: Public API
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same surface as the docs build: rustdoc never links, so gpu and distributed build on
+  # a bare runner. distributed-mpi stays out because mpi-sys needs an MPI library.
+  API_FEATURES: parallel gpu distributed
+  # cargo-public-api reads rustdoc JSON, whose format moves with nightly; both pins move
+  # together, and the snapshot is regenerated with the same pair.
+  API_NIGHTLY: nightly-2026-08-10
+  API_TOOL_VERSION: 0.52.0
+
+jobs:
+  snapshot:
+    name: Public API snapshot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.API_NIGHTLY }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-public-api
+        run: cargo install cargo-public-api --locked --version "$API_TOOL_VERSION"
+      - name: Compare against docs/architecture/public-api.txt
+        run: |
+          cargo +"$API_NIGHTLY" public-api --features "$API_FEATURES" -sss > /tmp/public-api.txt
+          if ! diff -u docs/architecture/public-api.txt /tmp/public-api.txt; then
+            echo "::error::The public API changed. If intended, regenerate the snapshot with"
+            echo "::error::cargo +$API_NIGHTLY public-api --features \"$API_FEATURES\" -sss > docs/architecture/public-api.txt"
+            exit 1
+          fi

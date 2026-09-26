@@ -2843,6 +2843,8 @@ fn pair_entry(instruction: &Instruction, k: usize) -> (usize, usize) {
     }
 }
 
+impl crate::backend::sealed::Sealed for MpsBackend {}
+
 impl Backend for MpsBackend {
     fn name(&self) -> &'static str {
         "mps"

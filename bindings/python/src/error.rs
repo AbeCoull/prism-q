@@ -35,6 +35,7 @@ fn error_kind(err: &prism_q::PrismError) -> &'static str {
         E::UndefinedRegister { .. } => "undefined_register",
         E::ExportUnsupported { .. } => "export_unsupported",
         E::IncompatibleBackend { .. } => "incompatible_backend",
+        E::ResourceLimit { .. } => "resource_limit",
         _ => "other",
     }
 }
@@ -45,7 +46,14 @@ impl From<PyPrismError> for PyErr {
         let py_err = PrismError::new_err(err.0.to_string());
         Python::attach(|py| {
             // Failing to annotate must not displace the error being reported.
-            let _ = py_err.value(py).setattr("kind", kind);
+            let value = py_err.value(py);
+            let _ = value.setattr("kind", kind);
+            if let prism_q::PrismError::ResourceLimit(data) = &err.0 {
+                let _ = value.setattr("resource", data.resource.to_string());
+                let _ = value.setattr("required", data.required);
+                let _ = value.setattr("limit", data.limit);
+                let _ = value.setattr("env_var", data.env_var);
+            }
         });
         py_err
     }

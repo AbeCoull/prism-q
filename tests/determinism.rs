@@ -106,17 +106,11 @@ fn representative_dense_circuit(n: usize) -> Circuit {
     c.add_gate(Gate::Swap, &[0, n - 1]);
     c.add_gate(Gate::Cu(Box::new(rx_matrix(0.4))), &[1, n - 2]);
     c.add_gate(
-        Gate::Mcu(Box::new(McuData {
-            mat: rx_matrix(0.7),
-            num_controls: 2,
-        })),
+        Gate::Mcu(Box::new(McuData::new(rx_matrix(0.7), 2))),
         &[0, 2, n - 3],
     );
     c.add_gate(
-        Gate::Mcu(Box::new(McuData {
-            mat: phase_matrix(0.9),
-            num_controls: 2,
-        })),
+        Gate::Mcu(Box::new(McuData::new(phase_matrix(0.9), 2))),
         &[1, 3, n - 4],
     );
     c.add_gate(Gate::Rx(0.37), &[n - 3]);

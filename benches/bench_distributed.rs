@@ -192,7 +192,7 @@ fn bench_controlled_star_direct(c: &mut Criterion) {
             (2, top, cry_mat(0.8)),
         ];
         circuit.add_gate(
-            Gate::Multi2q(Box::new(Multi2qData { gates })),
+            Gate::Multi2q(Box::new(Multi2qData::new(gates))),
             &[0, 1, 2, top],
         );
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {

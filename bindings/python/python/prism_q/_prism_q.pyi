@@ -15,6 +15,12 @@ class PrismError(Exception):
     kind: str
     """Stable discriminant for the failure, e.g. "parse", "gate_arity",
     "backend_unsupported". Branch on this rather than on the message."""
+    resource: str
+    """Unit of `required` and `limit`; set only when `kind` is "resource_limit"."""
+    required: int
+    limit: int
+    env_var: str | None
+    """Environment variable that overrides the cap, or None."""
 
 class Gate:
     @staticmethod

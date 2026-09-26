@@ -2650,6 +2650,8 @@ impl TensorNetworkBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for TensorNetworkBackend {}
+
 impl Backend for TensorNetworkBackend {
     fn name(&self) -> &'static str {
         "tensornetwork"

@@ -194,10 +194,8 @@ pub(crate) fn check_schmidt_side(backend: &str, what: &str, side: usize) -> Resu
     if width > export_cap() {
         return Err(export_cap_exceeded(
             backend,
-            format!(
-                "{what} with {side} qubits on the smaller side, whose reduced density matrix \
-                 is the size of a statevector for {width} qubits"
-            ),
+            format!("{what} with {side} qubits on the smaller side, as a reduced density matrix"),
+            width,
         ));
     }
     Ok(())
@@ -212,10 +210,8 @@ fn check_dense_schmidt_width(backend: &str, num_qubits: usize) -> Result<()> {
     if width > export_cap() {
         return Err(export_cap_exceeded(
             backend,
-            format!(
-                "Schmidt values across a cut, whose gathered copy and thin factor together are \
-                 the size of a statevector for {width} qubits"
-            ),
+            "Schmidt values across a cut, as a gathered copy and thin factor".to_string(),
+            width,
         ));
     }
     Ok(())
@@ -230,14 +226,15 @@ pub(crate) fn export_cap() -> usize {
 /// The error a diagnostic raises past the dense export cap: the same variant a
 /// statevector export raises there, so nothing reads it as a missing terminal,
 /// with `what` naming the allocation that was priced.
-pub(crate) fn export_cap_exceeded(backend: &str, what: String) -> PrismError {
-    PrismError::IncompatibleBackend {
+pub(crate) fn export_cap_exceeded(backend: &str, what: String, width: usize) -> PrismError {
+    PrismError::ResourceLimit(Box::new(crate::error::ResourceLimit {
         backend: backend.to_string(),
-        reason: format!(
-            "{what} (max {} on this machine, set PRISM_MAX_EXPORT_QUBITS to override)",
-            export_cap()
-        ),
-    }
+        operation: what,
+        resource: crate::error::ResourceKind::Qubits,
+        required: width as u128,
+        limit: export_cap() as u128,
+        env_var: Some("PRISM_MAX_EXPORT_QUBITS"),
+    }))
 }
 
 /// Schmidt values of a dense `2^num_qubits` amplitude vector across

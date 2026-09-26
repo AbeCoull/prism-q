@@ -103,17 +103,16 @@ fn a_contraction_the_budget_cannot_reach_names_the_cap() {
 
     let tn = loaded(&circuit);
     let err = tn.pauli_expectations(&[vec![PauliTerm::z(0)]]).unwrap_err();
-    let reason = caps::incompatible_reason(err, "tensornetwork");
-    assert!(
-        reason.contains("pauli expectation") && reason.contains(&format!("2^{PEAK_CAP}")),
-        "{reason}"
-    );
+    let (operation, peak, limit) = caps::cap_fields(err, "tensornetwork");
+    assert!(operation.contains("pauli expectation"), "{operation}");
+    assert_eq!(limit, 1 << PEAK_CAP);
+    assert!(peak > limit, "planned peak {peak}");
 }
 
 // The guard rejects before the replay allocates, so an oversize contraction
 // that cannot be sliced must not have moved any data first.
 #[test]
-fn the_rejection_is_an_incompatible_backend_error() {
+fn the_rejection_is_a_resource_limit_error() {
     small_caps();
     let mut circuit = Circuit::new(12, 0);
     for q in 0..12 {
@@ -127,8 +126,5 @@ fn the_rejection_is_an_incompatible_backend_error() {
 
     let tn = loaded(&circuit);
     let err = tn.reduced_density_matrix_1q(0).unwrap_err();
-    assert!(
-        matches!(err, PrismError::IncompatibleBackend { .. }),
-        "{err:?}"
-    );
+    assert!(matches!(err, PrismError::ResourceLimit(_)), "{err:?}");
 }

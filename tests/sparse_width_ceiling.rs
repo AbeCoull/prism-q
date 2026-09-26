@@ -34,11 +34,19 @@ fn sparse_rejects_a_circuit_wider_than_the_basis_index() {
     let circuit = phase_chain(WIDTH + 1);
     let mut backend = SparseBackend::new(42);
     match run_on(&mut backend, &circuit).unwrap_err() {
-        PrismError::IncompatibleBackend { backend, reason } => {
+        PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend,
+                required,
+                limit,
+                env_var,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
             assert_eq!(backend, "sparse");
-            assert!(reason.contains("basis-index width"), "reason: {reason}");
+            assert_eq!((required, limit), (WIDTH as u128 + 1, WIDTH as u128));
+            assert_eq!(env_var, None);
         }
-        other => panic!("expected an incompatible-backend rejection, got {other:?}"),
+        other => panic!("expected a resource-limit rejection, got {other:?}"),
     }
 }
 

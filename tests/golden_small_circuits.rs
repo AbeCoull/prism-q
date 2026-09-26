@@ -531,10 +531,7 @@ fn depth_calculation() {
 fn mcu_toffoli_both_active() {
     // Toffoli (CCX): |110⟩ → |111⟩
     let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
+    let toffoli = Gate::Mcu(Box::new(McuData::new(x_mat, 2)));
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::X, &[1]);
     c.add_gate(Gate::X, &[2]);
@@ -549,10 +546,7 @@ fn mcu_toffoli_both_active() {
 fn mcu_toffoli_one_inactive() {
     // Toffoli (CCX): |100⟩ → |100⟩ (only 1 control active, no flip)
     let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
+    let toffoli = Gate::Mcu(Box::new(McuData::new(x_mat, 2)));
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::X, &[2]);
     c.add_gate(toffoli, &[1, 2, 0]);
@@ -566,10 +560,7 @@ fn mcu_toffoli_one_inactive() {
 fn mcu_ccz_phase_flip() {
     // CCZ: phase-flip |111⟩
     let z_mat = Gate::Z.matrix_2x2();
-    let ccz = Gate::Mcu(Box::new(McuData {
-        mat: z_mat,
-        num_controls: 2,
-    }));
+    let ccz = Gate::Mcu(Box::new(McuData::new(z_mat, 2)));
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[1]);
@@ -590,10 +581,7 @@ fn mcu_ccz_phase_flip() {
 fn mcu_3ctrl_x() {
     // CCCX: 3 controls, flip target only when all active
     let x_mat = Gate::X.matrix_2x2();
-    let cccx = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 3,
-    }));
+    let cccx = Gate::Mcu(Box::new(McuData::new(x_mat, 3)));
     let mut c = Circuit::new(4, 0);
     c.add_gate(Gate::X, &[0]);
     c.add_gate(Gate::X, &[1]);
@@ -611,14 +599,8 @@ fn mcu_inv_ctrl_ctrl_rz() {
     // inv @ ctrl @ ctrl @ rz(pi/4): apply CRz(−π/4) with 2 controls
     let rz_mat = Gate::Rz(std::f64::consts::FRAC_PI_4).matrix_2x2();
     let rz_inv_mat = Gate::Rz(-std::f64::consts::FRAC_PI_4).matrix_2x2();
-    let mcu_fwd = Gate::Mcu(Box::new(McuData {
-        mat: rz_mat,
-        num_controls: 2,
-    }));
-    let mcu_inv = Gate::Mcu(Box::new(McuData {
-        mat: rz_inv_mat,
-        num_controls: 2,
-    }));
+    let mcu_fwd = Gate::Mcu(Box::new(McuData::new(rz_mat, 2)));
+    let mcu_inv = Gate::Mcu(Box::new(McuData::new(rz_inv_mat, 2)));
 
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::X, &[0]);

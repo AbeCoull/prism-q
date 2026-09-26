@@ -87,7 +87,7 @@ pub use circuit::{
 pub use distributed::MpiComm;
 #[cfg(feature = "distributed")]
 pub use distributed::{DistributedContext, RankComm, SerialComm};
-pub use error::{PrismError, Result};
+pub use error::{PrismError, ResourceKind, ResourceLimit, Result};
 pub use gates::{
     BatchPhaseData, Gate, GeneratorKind, McuData, Multi2qData, MultiFusedData, UnitaryData,
 };

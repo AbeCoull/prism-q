@@ -409,20 +409,57 @@ pub(crate) fn pauli_rot_masks(targets: &[usize], axes: &[PauliAxis]) -> (usize, 
 /// Data for a multi-controlled unitary gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McuData {
-    /// 2×2 unitary applied to the target qubit.
-    pub mat: [[Complex64; 2]; 2],
-    /// Number of control qubits (≥ 2).
-    pub num_controls: u8,
+    pub(crate) mat: [[Complex64; 2]; 2],
+    pub(crate) num_controls: u8,
+}
+
+impl McuData {
+    /// `mat` applied to the target when all `num_controls` controls are set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `num_controls` is below 2; [`Gate::mcu`] takes one control and
+    /// returns the controlled 2x2 form instead.
+    pub fn new(mat: [[Complex64; 2]; 2], num_controls: u8) -> Self {
+        assert!(num_controls >= 2, "McuData needs at least 2 controls");
+        Self { mat, num_controls }
+    }
+
+    /// 2x2 unitary applied to the target qubit.
+    pub fn mat(&self) -> &[[Complex64; 2]; 2] {
+        &self.mat
+    }
+
+    pub fn num_controls(&self) -> u8 {
+        self.num_controls
+    }
 }
 
 /// Data for a batched controlled-phase gate: `(target_qubit, phase)` entries, with
 /// the shared control in the instruction's `targets[0]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchPhaseData {
-    pub phases: SmallVec<[(usize, Complex64); 8]>,
+    pub(crate) phases: SmallVec<[(usize, Complex64); 8]>,
 }
 
 impl BatchPhaseData {
+    /// # Panics
+    ///
+    /// Panics if there are more than [`Self::MAX_PHASES`] entries.
+    pub fn new(phases: impl IntoIterator<Item = (usize, Complex64)>) -> Self {
+        let phases: SmallVec<[(usize, Complex64); 8]> = phases.into_iter().collect();
+        assert!(
+            phases.len() <= Self::MAX_PHASES,
+            "BatchPhaseData holds at most {} entries",
+            Self::MAX_PHASES
+        );
+        Self { phases }
+    }
+
+    pub fn phases(&self) -> &[(usize, Complex64)] {
+        &self.phases
+    }
+
     /// Entry cap the fusion pass splits on, matching the kernel group tables.
     /// Targets are distinct within one payload, so a repeated `(control, target)`
     /// pair folds into a single entry rather than adding one.
@@ -433,10 +470,26 @@ impl BatchPhaseData {
 /// qubit also in the instruction's `targets`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BatchRzzData {
-    pub edges: Vec<(usize, usize, f64)>,
+    pub(crate) edges: Vec<(usize, usize, f64)>,
 }
 
 impl BatchRzzData {
+    /// # Panics
+    ///
+    /// Panics if there are more than [`Self::MAX_EDGES`] edges.
+    pub fn new(edges: Vec<(usize, usize, f64)>) -> Self {
+        assert!(
+            edges.len() <= Self::MAX_EDGES,
+            "BatchRzzData holds at most {} edges",
+            Self::MAX_EDGES
+        );
+        Self { edges }
+    }
+
+    pub fn edges(&self) -> &[(usize, usize, f64)] {
+        &self.edges
+    }
+
     /// Edge cap the fusion pass splits on, matching the kernel group tables.
     pub const MAX_EDGES: usize = 32;
 }
@@ -516,7 +569,17 @@ impl DiagEntry {
 /// bits of the distinct qubits in `entries`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiagonalBatchData {
-    pub entries: Vec<DiagEntry>,
+    pub(crate) entries: Vec<DiagEntry>,
+}
+
+impl DiagonalBatchData {
+    pub fn new(entries: Vec<DiagEntry>) -> Self {
+        Self { entries }
+    }
+
+    pub fn entries(&self) -> &[DiagEntry] {
+        &self.entries
+    }
 }
 
 /// Data for a `MultiFused` batch of `(target_qubit, 2×2 matrix)` entries.
@@ -550,7 +613,17 @@ impl MultiFusedData {
 /// Data for a `Multi2q` batch of `(q0, q1, 4×4 matrix)` entries in circuit order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Multi2qData {
-    pub gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
+    pub(crate) gates: Vec<(usize, usize, [[Complex64; 4]; 4])>,
+}
+
+impl Multi2qData {
+    pub fn new(gates: Vec<(usize, usize, [[Complex64; 4]; 4])>) -> Self {
+        Self { gates }
+    }
+
+    pub fn gates(&self) -> &[(usize, usize, [[Complex64; 4]; 4])] {
+        &self.gates
+    }
 }
 
 /// A `Multi2q` batch runs inside one tile of `2^tile_bits` amplitudes: the

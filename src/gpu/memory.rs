@@ -55,10 +55,6 @@ impl<T: DeviceRepr> GpuBuffer<T> {
         self.slice.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.slice.len() == 0
-    }
-
     pub(crate) fn raw(&self) -> &CudaSlice<T> {
         &self.slice
     }

@@ -10,6 +10,7 @@ pub use draw::TextOptions;
 mod svg;
 pub use svg::SvgOptions;
 pub mod braket;
+#[doc(hidden)]
 pub mod fusion;
 mod fusion_phase;
 mod fusion_rzz;

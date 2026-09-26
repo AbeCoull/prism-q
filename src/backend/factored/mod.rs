@@ -139,24 +139,29 @@ impl FactoredBackend {
     /// contract.
     fn check_merge_allocation(total_n: usize) -> Result<()> {
         if total_n >= usize::BITS as usize {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "factored".to_string(),
-                reason: format!(
-                    "merging entangled sub-states needs a {total_n}-qubit dense block, \
-                     exceeding addressable memory"
-                ),
-            });
+            return Err(crate::error::PrismError::ResourceLimit(Box::new(
+                crate::error::ResourceLimit {
+                    backend: "factored".to_string(),
+                    operation: "the dense block of merged sub-states".to_string(),
+                    resource: crate::error::ResourceKind::Qubits,
+                    required: total_n as u128,
+                    limit: usize::BITS as u128 - 1,
+                    env_var: None,
+                },
+            )));
         }
         let cap = crate::backend::max_factored_merge_qubits();
         if total_n > cap {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "factored".to_string(),
-                reason: format!(
-                    "merging entangled sub-states needs a {total_n}-qubit dense block, \
-                     exceeding the cap of {cap} on this machine \
-                     (set PRISM_MAX_FACTORED_MERGE_QUBITS to override)"
-                ),
-            });
+            return Err(crate::error::PrismError::ResourceLimit(Box::new(
+                crate::error::ResourceLimit {
+                    backend: "factored".to_string(),
+                    operation: "the dense block of merged sub-states".to_string(),
+                    resource: crate::error::ResourceKind::Qubits,
+                    required: total_n as u128,
+                    limit: cap as u128,
+                    env_var: Some("PRISM_MAX_FACTORED_MERGE_QUBITS"),
+                },
+            )));
         }
         Ok(())
     }
@@ -653,6 +658,8 @@ impl FactoredBackend {
         Ok(masks)
     }
 }
+
+impl crate::backend::sealed::Sealed for FactoredBackend {}
 
 impl Backend for FactoredBackend {
     fn name(&self) -> &'static str {

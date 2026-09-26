@@ -165,49 +165,41 @@ fn gate_instructions() -> Vec<Instruction> {
         g(Gate::Cz, &[2, 3]),
         g(Gate::Swap, &[0, 3]),
         g(Gate::Cu(Box::new(m2)), &[4, 1]),
+        g(Gate::Mcu(Box::new(McuData::new(m2, 2))), &[0, 2, 5]),
         g(
-            Gate::Mcu(Box::new(McuData {
-                mat: m2,
-                num_controls: 2,
-            })),
-            &[0, 2, 5],
-        ),
-        g(
-            Gate::BatchPhase(Box::new(BatchPhaseData {
-                phases: smallvec![
-                    (2usize, Complex64::from_polar(1.0, 0.5)),
-                    (4usize, Complex64::from_polar(1.0, -1.3))
-                ],
-            })),
+            Gate::BatchPhase(Box::new(BatchPhaseData::new(vec![
+                (2usize, Complex64::from_polar(1.0, 0.5)),
+                (4usize, Complex64::from_polar(1.0, -1.3)),
+            ]))),
             &[1],
         ),
         g(
-            Gate::BatchRzz(Box::new(BatchRzzData {
-                edges: vec![(0, 1, 0.3), (2, 5, 0.5), (3, 4, -0.9)],
-            })),
+            Gate::BatchRzz(Box::new(BatchRzzData::new(vec![
+                (0, 1, 0.3),
+                (2, 5, 0.5),
+                (3, 4, -0.9),
+            ]))),
             &[0, 1, 2, 3, 4, 5],
         ),
         g(
-            Gate::DiagonalBatch(Box::new(DiagonalBatchData {
-                entries: vec![
-                    DiagEntry::Phase1q {
-                        qubit: 0,
-                        d0: Complex64::from_polar(1.0, 0.2),
-                        d1: Complex64::from_polar(1.0, -0.3),
-                    },
-                    DiagEntry::Phase2q {
-                        q0: 1,
-                        q1: 2,
-                        phase: Complex64::from_polar(1.0, 0.5),
-                    },
-                    DiagEntry::Parity2q {
-                        q0: 3,
-                        q1: 5,
-                        same: Complex64::from_polar(1.0, 0.1),
-                        diff: Complex64::from_polar(1.0, -0.4),
-                    },
-                ],
-            })),
+            Gate::DiagonalBatch(Box::new(DiagonalBatchData::new(vec![
+                DiagEntry::Phase1q {
+                    qubit: 0,
+                    d0: Complex64::from_polar(1.0, 0.2),
+                    d1: Complex64::from_polar(1.0, -0.3),
+                },
+                DiagEntry::Phase2q {
+                    q0: 1,
+                    q1: 2,
+                    phase: Complex64::from_polar(1.0, 0.5),
+                },
+                DiagEntry::Parity2q {
+                    q0: 3,
+                    q1: 5,
+                    same: Complex64::from_polar(1.0, 0.1),
+                    diff: Complex64::from_polar(1.0, -0.4),
+                },
+            ]))),
             &[0, 1, 2, 3, 5],
         ),
         g(
@@ -220,9 +212,7 @@ fn gate_instructions() -> Vec<Instruction> {
         ),
         g(Gate::Fused2q(Box::new(m4)), &[2, 4]),
         g(
-            Gate::Multi2q(Box::new(Multi2qData {
-                gates: vec![(0, 1, m4), (3, 5, m4)],
-            })),
+            Gate::Multi2q(Box::new(Multi2qData::new(vec![(0, 1, m4), (3, 5, m4)]))),
             &[0, 1, 3, 5],
         ),
         g(Gate::QftBlock { start: 1, num: 4 }, &[1, 2, 3, 4]),
@@ -636,13 +626,19 @@ fn dm_gpu_over_budget_init_names_the_mixture() {
     let over = f.ctx.max_qubits_for_statevector().unwrap() / 2 + 1;
     let mut backend = f.device_backend();
     match backend.init(over, 0).unwrap_err() {
-        prism_q::PrismError::IncompatibleBackend { backend, reason } => {
+        prism_q::PrismError::ResourceLimit(data) => {
+            let prism_q::ResourceLimit {
+                backend,
+                operation,
+                resource,
+                required,
+                limit,
+                ..
+            } = prism_q::ResourceLimit::clone(&data);
             assert_eq!(backend, "density_matrix-gpu");
-            assert!(
-                reason.contains("free on the GPU") && reason.contains("4^n"),
-                "expected the mixture budget message, got: {reason}"
-            );
-            assert!(reason.contains(&format!("{over} qubits")));
+            assert_eq!(resource, prism_q::ResourceKind::DeviceBytes);
+            assert!(required > limit);
+            assert!(operation.contains(&format!("{over}-qubit")), "{operation}");
         }
         other => panic!("expected the device budget error, got {other:?}"),
     }

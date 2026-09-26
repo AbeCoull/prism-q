@@ -1064,6 +1064,8 @@ impl StabilizerBackend {
     }
 }
 
+impl crate::backend::sealed::Sealed for StabilizerBackend {}
+
 impl Backend for StabilizerBackend {
     fn name(&self) -> &'static str {
         "stabilizer"

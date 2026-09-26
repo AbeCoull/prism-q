@@ -291,15 +291,16 @@ fn check_device_budget(context: &GpuContext, num_qubits: usize) -> Result<()> {
     };
     let needed = (1usize << (2 * num_qubits)) * 16 + (1usize << num_qubits) * 8;
     if needed > free {
-        return Err(crate::error::PrismError::IncompatibleBackend {
-            backend: "density_matrix-gpu".to_string(),
-            reason: format!(
-                "circuit has {num_qubits} qubits needing {} MiB of device memory for the \
-                 4^n mixture, exceeding the {} MiB free on the GPU",
-                needed >> 20,
-                free >> 20
-            ),
-        });
+        return Err(crate::error::PrismError::ResourceLimit(Box::new(
+            crate::error::ResourceLimit {
+                backend: "density_matrix-gpu".to_string(),
+                operation: format!("the 4^n mixture of a {num_qubits}-qubit circuit on the device"),
+                resource: crate::error::ResourceKind::DeviceBytes,
+                required: needed as u128,
+                limit: free as u128,
+                env_var: None,
+            },
+        )));
     }
     Ok(())
 }
@@ -1270,6 +1271,8 @@ impl DensityMatrixBackend {
             .collect()
     }
 }
+
+impl crate::backend::sealed::Sealed for DensityMatrixBackend {}
 
 impl Backend for DensityMatrixBackend {
     fn name(&self) -> &'static str {

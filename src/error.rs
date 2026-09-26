@@ -52,6 +52,60 @@ pub enum PrismError {
     /// Incompatible backend for the given circuit.
     #[error("backend `{backend}` is incompatible: {reason}")]
     IncompatibleBackend { backend: String, reason: String },
+
+    /// An allocation the run needs is over a memory cap; the numbers are on
+    /// [`ResourceLimit`], boxed so the error stays small on every `Result`.
+    #[error("{0}")]
+    ResourceLimit(Box<ResourceLimit>),
+}
+
+/// Payload of [`PrismError::ResourceLimit`]. `limit` is the cap detected on this
+/// machine or set through `env_var`, when a variable overrides it.
+#[derive(Debug, Error, Clone, PartialEq)]
+#[error(
+    "backend `{backend}`: {operation} needs {required} {resource}, exceeding the cap of \
+     {limit} on this machine{}",
+    override_hint(.env_var)
+)]
+#[non_exhaustive]
+pub struct ResourceLimit {
+    pub backend: String,
+    pub operation: String,
+    pub resource: ResourceKind,
+    pub required: u128,
+    pub limit: u128,
+    pub env_var: Option<&'static str>,
+}
+
+/// Unit of a [`PrismError::ResourceLimit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResourceKind {
+    /// Qubits of a dense statevector, or of an allocation priced as one.
+    Qubits,
+    /// Complex amplitudes of backend workspace.
+    Amplitudes,
+    /// Stored nonzero entries of a sparse state.
+    Entries,
+    /// Complex elements of a tensor-network intermediate.
+    Elements,
+    DeviceBytes,
+}
+
+impl std::fmt::Display for ResourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ResourceKind::Qubits => "qubits",
+            ResourceKind::Amplitudes => "amplitudes",
+            ResourceKind::Entries => "entries",
+            ResourceKind::Elements => "elements",
+            ResourceKind::DeviceBytes => "bytes of device memory",
+        })
+    }
+}
+
+fn override_hint(env_var: &Option<&'static str>) -> String {
+    env_var.map_or_else(String::new, |var| format!(" (set {var} to override)"))
 }
 
 pub type Result<T> = std::result::Result<T, PrismError>;

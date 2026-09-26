@@ -1700,7 +1700,7 @@ mod dispatch_matrix_tests {
         }
         let circuit = dense(cap + 1);
         let err = validate_explicit_backend(&BackendKind::DensityMatrix, &circuit).unwrap_err();
-        assert!(matches!(err, PrismError::IncompatibleBackend { .. }));
+        assert!(matches!(err, PrismError::ResourceLimit(_)));
         // At or below the cap the same shape validates.
         assert!(validate_explicit_backend(&BackendKind::DensityMatrix, &dense(cap)).is_ok());
     }

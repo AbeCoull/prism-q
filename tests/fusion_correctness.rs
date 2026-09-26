@@ -1125,11 +1125,11 @@ fn fusion_batch_rzz_splits_oversize_run() {
         } = inst
         {
             assert!(
-                data.edges.len() <= 32,
+                data.edges().len() <= 32,
                 "BatchRzz carries {} edges, past the kernel group capacity",
-                data.edges.len()
+                data.edges().len()
             );
-            edges += data.edges.len();
+            edges += data.edges().len();
         }
     }
     assert_eq!(edges, 45, "every Rzz edge should survive the split");
@@ -1169,7 +1169,7 @@ fn fusion_batch_phase_folds_duplicate_pair() {
             ..
         } = inst
         {
-            let mut seen: Vec<usize> = data.phases.iter().map(|&(t, _)| t).collect();
+            let mut seen: Vec<usize> = data.phases().iter().map(|&(t, _)| t).collect();
             seen.sort_unstable();
             let len = seen.len();
             seen.dedup();

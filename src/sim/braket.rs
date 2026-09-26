@@ -267,7 +267,8 @@ impl<'c> Simulate<'c, Seeded> {
                     if targets.len() > crate::backend::schmidt::export_cap() {
                         return Err(crate::backend::schmidt::export_cap_exceeded(
                             &format!("{:?}", self.kind),
-                            format!("a probability over {} qubits", targets.len()),
+                            "a probability histogram".to_string(),
+                            targets.len(),
                         ));
                     }
                     let source = unrotated.as_ref().unwrap_or(&record);

@@ -16,6 +16,7 @@ Fallible public APIs return `Result<T, PrismError>`. Error variants:
 | `ExportUnsupported` | Export | Instruction with no OpenQASM 3.0 spelling |
 | `BackendUnsupported` | Runtime | Backend can't perform requested operation |
 | `IncompatibleBackend` | Runtime | Backend incompatible with circuit |
+| `ResourceLimit` | Runtime | An allocation over a memory cap; the boxed `ResourceLimit` carries the operation, the `ResourceKind` unit, `required` and `limit`, and the environment variable that overrides the cap |
 
 ```admonish note
 Invalid input data (QASM text, incompatible backend) returns `PrismError`. API misuse
@@ -95,7 +96,8 @@ feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
 `Circuit`, `CircuitBuilder`, `Instruction`, `ClassicalCondition`, `SvgOptions`,
 `TextOptions`, `Gate`, `GeneratorKind`, `BackendKind`, `RunOutcome`, `CountsResult`,
 `MarginalsResult`, `ReducedDensityMatrix`, `EntropyResult`, `Probabilities`,
-`FactoredBlock`, `ShotsResult`, `PrismError`, `Result`, `MultiFusedData`,
+`FactoredBlock`, `ShotsResult`, `PrismError`, `ResourceLimit`, `ResourceKind`, `Result`,
+`MultiFusedData`,
 `BatchPhaseData`, `McuData`, `Multi2qData`, `UnitaryData`, `RunMetadata`, `BondReport`,
 `Engine`, `Exactness`, `Placement`, `ResolvedBackend`
 
@@ -124,7 +126,13 @@ that simulation runs inside instead of sizing the process-wide one. See
 Not re-exported at the root but part of the documented surface: the `Backend` trait and
 `BasisSamples` at `prism_q::backend`, `run_batch` at `prism_q::sim`, and the accumulator
 chunk-size helpers (`default_chunk_size`, `optimal_chunk_size`) at
-`prism_q::sim::compiled`.
+`prism_q::sim::compiled`. `Backend` is sealed: callers use its methods, but only the
+crate implements it, so a new method is additive.
+
+The complete item list is checked in as [`public-api.txt`](public-api.txt), generated
+by `cargo public-api` with `--features "parallel gpu distributed"`. CI regenerates it
+and fails when it differs, so every change to the surface shows in review as a diff to
+that file.
 
 ## Growth of the public enums
 

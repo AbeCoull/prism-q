@@ -353,10 +353,7 @@ fn mps_measurement_matches_statevector() {
 #[test]
 fn mcu_sparse_toffoli_matches_statevector() {
     let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
+    let toffoli = Gate::Mcu(Box::new(McuData::new(x_mat, 2)));
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::X, &[1]);
@@ -367,10 +364,7 @@ fn mcu_sparse_toffoli_matches_statevector() {
 #[test]
 fn mcu_sparse_ccz_matches_statevector() {
     let z_mat = Gate::Z.matrix_2x2();
-    let ccz = Gate::Mcu(Box::new(McuData {
-        mat: z_mat,
-        num_controls: 2,
-    }));
+    let ccz = Gate::Mcu(Box::new(McuData::new(z_mat, 2)));
     let mut c = Circuit::new(4, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::H, &[1]);
@@ -406,10 +400,7 @@ fn cphase_sparse_matches_statevector() {
 #[test]
 fn mps_matches_statevector_mcu() {
     let x_mat = Gate::X.matrix_2x2();
-    let mcu = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
+    let mcu = Gate::Mcu(Box::new(McuData::new(x_mat, 2)));
     let mut c = Circuit::new(4, 0);
     c.add_gate(Gate::X, &[0]);
     c.add_gate(Gate::X, &[1]);
@@ -1152,10 +1143,7 @@ fn factored_export_statevector_after_measurement_is_normalized() {
 #[test]
 fn tn_mcu_toffoli_matches_statevector() {
     let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
+    let toffoli = Gate::Mcu(Box::new(McuData::new(x_mat, 2)));
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::X, &[1]);
@@ -1166,10 +1154,7 @@ fn tn_mcu_toffoli_matches_statevector() {
 #[test]
 fn factored_mcu_toffoli_matches_statevector() {
     let x_mat = Gate::X.matrix_2x2();
-    let toffoli = Gate::Mcu(Box::new(McuData {
-        mat: x_mat,
-        num_controls: 2,
-    }));
+    let toffoli = Gate::Mcu(Box::new(McuData::new(x_mat, 2)));
     let mut c = Circuit::new(3, 0);
     c.add_gate(Gate::H, &[0]);
     c.add_gate(Gate::X, &[1]);

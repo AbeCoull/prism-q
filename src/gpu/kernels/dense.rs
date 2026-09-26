@@ -100,6 +100,11 @@ pub(crate) fn kernel_source() -> String {
     KERNEL_SOURCE_TEMPLATE
         .replace("{{TILE_Q}}", &MULTI_FUSED_TILE_Q.to_string())
         .replace("{{TILE_SIZE}}", &MULTI_FUSED_TILE_SIZE.to_string())
+        .replace("{{PAULI_GROUP_MASKS}}", &PAULI_GROUP_MASKS.to_string())
+        .replace(
+            "{{PAULI_AMPS_PER_THREAD}}",
+            &PAULI_AMPS_PER_THREAD.to_string(),
+        )
         .replace(
             "{{BP_TABLE_SIZE}}",
             &cpu_k::BATCH_PHASE_TABLE_SIZE.to_string(),
@@ -829,7 +834,8 @@ pub(crate) fn reduced_density_matrix_1q(
 /// `sum_j conj(psi[j ^ xmask]) psi[j] (-1)^{popcount(j & zmask)}` per
 /// `(xmask, zmask)` pair with `pending_norm²` applied: the complex accumulator
 /// behind `<P>` before the `i^{num_y}` factor and the norm. Two launches and a
-/// `16 * masks.len()` byte readback replace a full-state export.
+/// `16 * masks.len()` byte readback replace a full-state export. Masks sharing an
+/// `xmask` run in groups of up to [`PAULI_GROUP_MASKS`], one state pass per group.
 pub(crate) fn pauli_sums(
     ctx: &GpuContext,
     state: &GpuState,
@@ -839,44 +845,72 @@ pub(crate) fn pauli_sums(
         return Ok(Vec::new());
     }
     let dim: u64 = 1u64 << state.num_qubits();
-    let elems_per_block = 2u64 * BLOCK_SIZE as u64;
+    let elems_per_block = (PAULI_AMPS_PER_THREAD * BLOCK_SIZE as usize) as u64;
     let blocks_per_mask = dim.div_ceil(elems_per_block).max(1) as u32;
     let num_masks = super::require_u32("sv_pauli_expect", "masks", masks.len())?;
     let device = ctx.device();
     let stream = device.stream()?;
     let stage1 = device.function("sv_pauli_expect")?;
     let stage2 = device.function("dm_pauli_expect_finalize")?;
-    let xmasks: Vec<u64> = masks.iter().map(|m| m.0).collect();
-    let zmasks: Vec<u64> = masks.iter().map(|m| m.1).collect();
+
+    let mut order: Vec<usize> = (0..masks.len()).collect();
+    order.sort_by_key(|&k| masks[k].0);
+    let mut group_x = Vec::new();
+    let mut group_start = Vec::new();
+    for (position, &k) in order.iter().enumerate() {
+        let opens = match group_start.last() {
+            Some(&start) => {
+                group_x.last() != Some(&masks[k].0)
+                    || position - start as usize == PAULI_GROUP_MASKS
+            }
+            None => true,
+        };
+        if opens {
+            group_x.push(masks[k].0);
+            group_start.push(position as u64);
+        }
+    }
+    let num_groups = super::require_u32("sv_pauli_expect", "groups", group_x.len())?;
+    let mut groups = group_x;
+    groups.extend(group_start);
+    groups.push(masks.len() as u64);
+    let members: Vec<u64> = order
+        .iter()
+        .map(|&k| masks[k].1)
+        .chain(order.iter().map(|&k| k as u64))
+        .collect();
     let shared_bytes = 2 * BLOCK_SIZE * std::mem::size_of::<f64>() as u32;
 
     let mut scratch = ctx.launcher_scratch();
     let scratch = &mut *scratch;
     let partial_len = 2 * masks.len() * blocks_per_mask as usize;
     super::ensure_capacity(&mut scratch.measure_partials, device, partial_len)?;
-    super::ensure_scratch(&mut scratch.u64_a, device, &xmasks)?;
-    super::ensure_scratch(&mut scratch.u64_b, device, &zmasks)?;
+    super::ensure_scratch(&mut scratch.u64_a, device, &groups)?;
+    super::ensure_scratch(&mut scratch.u64_b, device, &members)?;
     super::ensure_exact(&mut scratch.pauli_result, device, 2 * masks.len())?;
     let partials = scratch.measure_partials.as_mut().unwrap();
     {
         let cfg = LaunchConfig {
-            grid_dim: (blocks_per_mask, num_masks, 1),
+            grid_dim: (blocks_per_mask, num_groups, 1),
             block_dim: (BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: shared_bytes,
+            shared_mem_bytes: 0,
         };
         let mut builder = stream.launch_builder(&stage1);
         builder
             .arg(state.buffer().raw())
             .arg(&dim)
             .arg(scratch.u64_a.as_ref().unwrap().raw())
+            .arg(&num_groups)
             .arg(scratch.u64_b.as_ref().unwrap().raw())
+            .arg(&num_masks)
             .arg(partials.raw_mut());
-        // SAFETY: signature matches the kernel. `blocks_per_mask` blocks of two
-        // amplitudes per thread cover the `dim` amplitudes of each of the
-        // `num_masks` masks, every partner read `j ^ x` stays below `dim`
-        // because `x < dim` (masks are built from validated qubit indices), and
-        // `partials` holds two f64s per (mask, block). All buffers are held by
-        // the scratch guard.
+        // SAFETY: signature matches the kernel. `blocks_per_mask` blocks of
+        // `PAULI_AMPS_PER_THREAD` amplitudes per thread cover the `dim` amplitudes
+        // of each of the `num_groups` groups of at most `PAULI_GROUP_MASKS`
+        // members, every partner read `j ^ x` stays below `dim` because
+        // `x < dim` (masks are built from validated qubit indices), and every
+        // member slot is a distinct mask index, so `partials` holds two f64s per
+        // (slot, block). All buffers are held by the scratch guard.
         unsafe {
             builder
                 .launch(cfg)
@@ -912,6 +946,12 @@ pub(crate) fn pauli_sums(
         .map(|pair| Complex64::new(pair[0], pair[1]) * norm_sq)
         .collect())
 }
+
+/// Masks one `sv_pauli_expect` block reduces per state pass.
+const PAULI_GROUP_MASKS: usize = 8;
+
+/// Amplitudes each `sv_pauli_expect` thread reads before the block reduction.
+const PAULI_AMPS_PER_THREAD: usize = 16;
 
 /// Zeroes the losing branch only; renormalization is deferred to the caller
 /// via `pending_norm`.

@@ -43,9 +43,10 @@ pub fn is_fast() -> bool {
 /// took 335s with plots and 47s without, so roughly 58s per row goes to HTML
 /// against 9s of measurement. Regression gating reads stdout and
 /// `target/criterion/**/estimates.json`, neither of which the plots feed, so
-/// they are off unless `PRISM_BENCH_PLOTS` is set.
+/// they are off unless `PRISM_BENCH_PLOTS` is set. The confidence-interval bootstrap
+/// draws 10,000 resamples rather than 100,000; point estimates do not depend on it.
 pub fn criterion_config() -> criterion::Criterion {
-    let criterion = criterion::Criterion::default();
+    let criterion = criterion::Criterion::default().nresamples(10_000);
     if std::env::var_os("PRISM_BENCH_PLOTS").is_some() {
         criterion
     } else {

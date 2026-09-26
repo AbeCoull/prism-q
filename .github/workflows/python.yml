@@ -59,6 +59,18 @@ jobs:
           python -m pip install --no-index --find-links dist prism-q
           pytest bindings/python/tests -q
 
+      # Compares the hand-written stub with the extension it describes. The
+      # allowlist names the shapes a stub cannot state for a PyO3 class; drift in
+      # a signature fails here. The stub is the same on every platform, so one
+      # wheel checks it. mypy is pinned because stubtest's checks change between
+      # releases, and the allowlist is written against these.
+      - name: Stub check
+        if: matrix.platform.os == 'linux' && matrix.platform.target == 'x86_64'
+        shell: bash
+        run: |
+          python -m pip install mypy==1.19.1
+          python -m mypy.stubtest prism_q._prism_q --allowlist bindings/python/stubtest-allowlist.txt
+
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.target }}

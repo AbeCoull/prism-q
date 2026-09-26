@@ -59,6 +59,25 @@ cargo llvm-cov --all-features                     # terminal summary
 cargo llvm-cov --all-features --html --open       # browseable HTML report
 ```
 
+## Fuzzing
+
+`fuzz/` holds `cargo fuzz` targets for the OpenQASM front end (`qasm_parse` on raw
+bytes, `qasm_tokens` on programs assembled from QASM fragments), which must never panic,
+and for fusion (`fusion`), which checks a fused statevector run against a plain apply
+loop to 1e-10 per amplitude. The crate is its own workspace and needs nightly:
+
+```bash
+# requires: cargo install cargo-fuzz
+cd fuzz
+mkdir -p corpus/qasm_parse
+cargo +nightly fuzz run qasm_parse corpus/qasm_parse seeds/qasm_parse -- -dict=qasm.dict
+```
+
+On Windows MSVC the AddressSanitizer runtime (`clang_rt.asan_dynamic-x86_64.dll`, in the
+MSVC `bin\Hostx64\x64` directory) must be on `PATH`. `tests/fuzz_replay.rs` replays
+`fuzz/seeds/` and a seeded sweep through the same checks on stable, and the `Fuzz`
+workflow runs each target weekly and uploads any crash input.
+
 ## Documentation site
 
 `docs/` publishes as an mdBook site to GitHub Pages through `.github/workflows/docs.yml`.

@@ -16,6 +16,7 @@ categories = ["science", "science::quantum-computing", "simulation", "mathematic
 [workspace]
 members = [".", "bindings/python"]
 default-members = ["."]
+exclude = ["fuzz"]
 resolver = "3"
 
 [dependencies]

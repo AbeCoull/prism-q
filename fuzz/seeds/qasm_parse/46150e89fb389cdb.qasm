@@ -1,0 +1,11 @@
+OPENQASM 3.0;
+include "stdgates.inc";
+input float[64] theta;
+input angle phi;
+qubit[3] q;
+output bit[3] c;
+h q[0];
+rx(theta) q[0];
+cx q[0], q[1];
+rz(phi) q[1];
+rzz(theta) q[1], q[2];

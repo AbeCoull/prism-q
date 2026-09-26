@@ -1,0 +1,75 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to fuzz each target
+        default: '900'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The fuzz crate is its own workspace, so none of the CI jobs build it. cargo-fuzz
+  # builds with AddressSanitizer, debug assertions, and overflow checks by default. The
+  # corpus carries over between runs through the cache; the checked-in seeds are read
+  # alongside it and never written.
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: qasm_parse
+            flags: -dict=qasm.dict
+          - target: qasm_tokens
+            flags: ''
+          - target: fusion
+            flags: ''
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          workspaces: fuzz
+          key: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: actions/cache@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # The runner's default toolchain stays stable; the explicit +nightly is what
+      # routes cargo at the toolchain the action installed.
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          mkdir -p corpus/${{ matrix.target }}
+          cargo +nightly fuzz run ${{ matrix.target }} \
+            corpus/${{ matrix.target }} seeds/${{ matrix.target }} -- \
+            -max_total_time=${{ inputs.seconds || '900' }} -timeout=60 -rss_limit_mb=4096 \
+            ${{ matrix.flags }}
+
+      - name: Minimize the corpus
+        working-directory: fuzz
+        run: cargo +nightly fuzz cmin ${{ matrix.target }} corpus/${{ matrix.target }}
+
+      - name: Upload crash inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore

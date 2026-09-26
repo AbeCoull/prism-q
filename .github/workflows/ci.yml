@@ -242,6 +242,50 @@ jobs:
       - name: Verify the conventional-commit mapping and the pre-1.0 clamp
         run: bash scripts/release_bump_level_test.sh
 
+  # Compares the public API against the last release, at the release type the
+  # conventional commits since it imply before the pre-1.0 clamp, with the PR
+  # title standing in for the squash subject it becomes. A break therefore passes
+  # only when a commit declares it with `!` or `BREAKING CHANGE:`, so the bump
+  # and the changelog cannot miss one, and a `feat` is held to additions. The
+  # release type is passed explicitly because cargo-semver-checks reads a manifest
+  # version equal to the baseline as a patch release, which would fail every
+  # declared break below 1.0. From 1.0 the same mapping is the stability guard,
+  # with nothing here to change. The feature set is the documented surface.
+  semver:
+    name: Semver checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Resolve the baseline and release type
+        id: release
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          source scripts/release_bump_level.sh
+          tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
+          subjects="$(git log --format=%s "$tag..HEAD")"$'\n'"$PR_TITLE"
+          bodies="$(git log --format=%b "$tag..HEAD")"
+          level="$(conventional_bump_level "$subjects" "$bodies")"
+          type="${level/none/patch}"
+          echo "baseline=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "type=$type" >> "$GITHUB_OUTPUT"
+          echo "### Semver: against \`$tag\` as a \`$type\` release" >> "$GITHUB_STEP_SUMMARY"
+      - name: Check the public API
+        run: >-
+          cargo semver-checks --package prism-q
+          --baseline-version "${{ steps.release.outputs.baseline }}"
+          --release-type "${{ steps.release.outputs.type }}"
+          --only-explicit-features --features "$CI_DOC_FEATURES"
+
   # Builds the bench binary for each commit that lands on main and caches it, so
   # the gate below can measure against a reference it did not have to compile.
   # That is the whole benefit: one build instead of two. The checkout path also

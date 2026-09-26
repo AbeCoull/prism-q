@@ -315,7 +315,7 @@ extern "C" __global__ void stab_apply_word_grouped(
 // `stab_measure_deterministic`. XORs `src_row` into `dst_row` word by word
 // and computes the g-function phase contribution. Returns the contribution
 // modulo 4 on every thread (broadcast via `warp_sums[0]`). Callers supply a
-// 32-slot __shared__ buffer and handle the final phase byte update.
+// 32-slot __shared__ buffer and apply `stab_rowmul_phase` on one thread.
 __device__ __forceinline__ unsigned long long stab_rowmul_block(
     unsigned long long *xz,
     int num_words,
@@ -371,6 +371,20 @@ __device__ __forceinline__ unsigned long long stab_rowmul_block(
     return warp_sums[0];
 }
 
+// Phase byte of `dst_row` after rowmul from `src_row`, given the block's
+// g-function sum from `stab_rowmul_block`.
+__device__ __forceinline__ void stab_rowmul_phase(
+    unsigned char *phase,
+    int src_row,
+    int dst_row,
+    unsigned long long sum
+) {
+    unsigned long long initial = 2ULL * (unsigned long long)phase[src_row]
+                                + 2ULL * (unsigned long long)phase[dst_row];
+    unsigned long long total = (sum + initial) & 3ULL;
+    phase[dst_row] = (total >= 2ULL) ? 1 : 0;
+}
+
 extern "C" __global__ void stab_rowmul_words(
     unsigned long long *xz,
     unsigned char *phase,
@@ -383,12 +397,7 @@ extern "C" __global__ void stab_rowmul_words(
     __shared__ unsigned long long warp_sums[32];
     unsigned long long sum =
         stab_rowmul_block(xz, num_words, src_row, dst_row, tid, bsz, warp_sums);
-    if (tid == 0) {
-        unsigned long long initial = 2ULL * (unsigned long long)phase[src_row]
-                                    + 2ULL * (unsigned long long)phase[dst_row];
-        unsigned long long total = (sum + initial) & 3ULL;
-        phase[dst_row] = (total >= 2ULL) ? 1 : 0;
-    }
+    if (tid == 0) stab_rowmul_phase(phase, src_row, dst_row, sum);
 }
 
 // ============================================================================
@@ -456,12 +465,7 @@ extern "C" __global__ void stab_measure_cascade(
     __shared__ unsigned long long warp_sums[32];
     unsigned long long sum =
         stab_rowmul_block(xz, num_words, pivot_row, r, tid, bsz, warp_sums);
-    if (tid == 0) {
-        unsigned long long initial = 2ULL * (unsigned long long)phase[pivot_row]
-                                    + 2ULL * (unsigned long long)phase[r];
-        unsigned long long total = (sum + initial) & 3ULL;
-        phase[r] = (total >= 2ULL) ? 1 : 0;
-    }
+    if (tid == 0) stab_rowmul_phase(phase, pivot_row, r, sum);
 }
 
 // After the cascade: copy pivot row into the paired destabiliser row
@@ -535,12 +539,7 @@ extern "C" __global__ void stab_measure_deterministic(
         int src_row = num_qubits + i;
         unsigned long long sum =
             stab_rowmul_block(xz, num_words, src_row, scratch, tid, bsz, warp_sums);
-        if (tid == 0) {
-            unsigned long long initial = 2ULL * (unsigned long long)phase[src_row]
-                                        + 2ULL * (unsigned long long)phase[scratch];
-            unsigned long long total = (sum + initial) & 3ULL;
-            phase[scratch] = (total >= 2ULL) ? 1 : 0;
-        }
+        if (tid == 0) stab_rowmul_phase(phase, src_row, scratch, sum);
         __syncthreads();
     }
 

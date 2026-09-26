@@ -1,18 +1,14 @@
 
 // ============================================================================
 // Density-matrix sweeps. `n` is the circuit width; the buffer holds 4^n
-// amplitudes indexed (ket << n) | bra.
+// amplitudes indexed (ket << n) | bra. Compiled after dense.cu, whose `cmul`
+// these kernels share.
 // ============================================================================
 
 __device__ __forceinline__ unsigned long long dm_insert_zero(unsigned long long m, int pos)
 {
     unsigned long long low = (1ULL << pos) - 1ULL;
     return ((m & ~low) << 1) | (m & low);
-}
-
-__device__ __forceinline__ double2 dm_mul(double2 a, double2 b)
-{
-    return make_double2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
 // Base of the (q0, q1) block for compacted index m: a zero bit inserted at
@@ -126,7 +122,7 @@ extern "C" __global__ void dm_diagonal_sandwich(
     double2 k = table[i >> n];
     double2 b = table[i & (d - 1ULL)];
     b.y = -b.y;
-    state[i] = dm_mul(state[i], dm_mul(k, b));
+    state[i] = cmul(state[i], cmul(k, b));
 }
 
 // Diagonal 16-entry block superoperator: one complex multiply per amplitude,
@@ -140,7 +136,7 @@ extern "C" __global__ void dm_kraus_2q_diagonal(
              | (int)(((i >> (q1 + n)) & 1ULL) << 2)
              | (int)(((i >> q0) & 1ULL) << 1)
              | (int)((i >> q1) & 1ULL);
-    state[i] = dm_mul(state[i], diag[slot]);
+    state[i] = cmul(state[i], diag[slot]);
 }
 
 // Dense 16x16 block superoperator `s` (row-major, 256 complex entries), one
@@ -205,7 +201,7 @@ extern "C" __global__ void dm_outer_product(
     double2 k = amps[i >> n];
     double2 b = amps[i & (d - 1ULL)];
     b.y = -b.y;
-    state[i] = dm_mul(k, b);
+    state[i] = cmul(k, b);
 }
 
 // Per-block complex partials of sum_j (-1)^{popcount(j & z)} rho[j][j ^ x] for

@@ -299,6 +299,20 @@ impl GpuState {
         })
     }
 
+    /// A second device state holding a copy of this one's amplitudes and pending norm.
+    pub(crate) fn duplicate(&self) -> Result<Self> {
+        let device = self.context.device();
+        let mut buffer = GpuBuffer::<f64>::alloc_zeros(device, self.buffer.len())?;
+        buffer.copy_from_device(device, &self.buffer)?;
+        Ok(Self {
+            context: self.context.clone(),
+            buffer,
+            num_qubits: self.num_qubits,
+            pending_norm: self.pending_norm,
+            probs_scratch: std::cell::RefCell::new(None),
+        })
+    }
+
     pub fn num_qubits(&self) -> usize {
         self.num_qubits
     }

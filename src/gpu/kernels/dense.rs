@@ -870,6 +870,113 @@ pub(crate) fn pauli_sums(
     )
 }
 
+/// First two moments `(<h>, <h^2>)` of each group operator
+/// `h(j) = sum_i c_i (-1)^popcount(j & z_i)`, one `(zmasks, coefficients, x_bits,
+/// y_bits)` request per group, read in the basis `rotate_to_z_basis` gives for
+/// `x_bits` and `y_bits`. A rotated group runs on a device copy of the state, rotated
+/// by the tiled 1q passes, so the state is left as it was. `Ok(None)` when that copy
+/// does not fit in device memory.
+pub(crate) fn group_moments(
+    ctx: &GpuContext,
+    state: &GpuState,
+    groups: &[(Vec<u64>, Vec<f64>, u64, u64)],
+) -> Result<Option<Vec<(f64, f64)>>> {
+    let mut rotated = None;
+    if groups.iter().any(|&(_, _, x, y)| x | y != 0) {
+        match state.duplicate() {
+            Ok(copy) => rotated = Some(copy),
+            Err(_) => return Ok(None),
+        }
+    }
+    let n = state.num_qubits();
+    let mut fresh = true;
+    let mut out = Vec::with_capacity(groups.len());
+    for (zmasks, coefficients, x_bits, y_bits) in groups {
+        let rotation = x_bits | y_bits;
+        let source = if rotation == 0 {
+            state
+        } else {
+            let copy = rotated.as_mut().unwrap();
+            if !fresh {
+                copy.buffer_mut()
+                    .copy_from_device(ctx.device(), state.buffer())?;
+            }
+            fresh = false;
+            let gates: Vec<(usize, [[Complex64; 2]; 2])> = (0..n)
+                .filter(|&q| rotation >> q & 1 == 1)
+                .map(|q| {
+                    let t = if y_bits >> q & 1 == 1 {
+                        Complex64::new(0.0, -1.0)
+                    } else {
+                        Complex64::ONE
+                    };
+                    (q, [[Complex64::ONE, t], [Complex64::ONE, -t]])
+                })
+                .collect();
+            launch_apply_multi_fused_nondiag(ctx, copy, &gates)?;
+            &*copy
+        };
+        out.push(group_moments_pass(ctx, source, zmasks, coefficients)?);
+    }
+    Ok(Some(out))
+}
+
+/// `(<h>, <h^2>)` of one group operator over `state` through `sv_group_moments`. The
+/// kernel also sums `p`, so the ratio cancels the pending norm and any rotation growth.
+fn group_moments_pass(
+    ctx: &GpuContext,
+    state: &GpuState,
+    zmasks: &[u64],
+    coefficients: &[f64],
+) -> Result<(f64, f64)> {
+    let device = ctx.device();
+    let stream = device.stream()?;
+    let func = device.function("sv_group_moments")?;
+    let dim: u64 = 1u64 << state.num_qubits();
+    let num_terms = super::require_u32("sv_group_moments", "terms", zmasks.len())?;
+    let grid = dim
+        .div_ceil(64)
+        .div_ceil(u64::from(BLOCK_SIZE / 32))
+        .min(MOMENT_MAX_BLOCKS) as u32;
+
+    let mut scratch = ctx.launcher_scratch();
+    let scratch = &mut *scratch;
+    super::ensure_scratch(&mut scratch.u64_a, device, zmasks)?;
+    super::ensure_scratch(&mut scratch.f64_a, device, coefficients)?;
+    let result = super::ensure_exact(&mut scratch.moment_partials, device, 3 * grid as usize)?;
+    let cfg = linear_cfg(BLOCK_SIZE, grid);
+    let mut builder = stream.launch_builder(&func);
+    builder
+        .arg(state.buffer().raw())
+        .arg(&dim)
+        .arg(scratch.u64_a.as_ref().unwrap().raw())
+        .arg(scratch.f64_a.as_ref().unwrap().raw())
+        .arg(&num_terms)
+        .arg(result.raw_mut());
+    // SAFETY: signature matches the kernel. The state holds `dim` amplitudes, the mask
+    // and coefficient buffers hold at least `num_terms` entries, every read index is
+    // checked against `dim`, and `result` holds three f64s per block. All buffers are
+    // held by the scratch guard until the readback below drains the stream.
+    unsafe {
+        builder
+            .launch(cfg)
+            .map_err(|e| driver_err("sv_group_moments", e))?;
+    }
+    let mut partials = vec![0.0_f64; 3 * grid as usize];
+    result.copy_to_host(device, &mut partials)?;
+    let (s0, s1, s2) = partials.chunks_exact(3).fold((0.0, 0.0, 0.0), |acc, p| {
+        (acc.0 + p[0], acc.1 + p[1], acc.2 + p[2])
+    });
+    Ok(if s0 == 0.0 {
+        (0.0, 0.0)
+    } else {
+        (s1 / s0, s2 / s0)
+    })
+}
+
+/// Grid cap for `sv_group_moments`; warps stride over the remaining 64-index blocks.
+const MOMENT_MAX_BLOCKS: u64 = 1024;
+
 /// Masks one `sv_pauli_expect` block reduces per state pass.
 const PAULI_GROUP_MASKS: usize = 8;
 

@@ -98,6 +98,9 @@ pub(crate) struct LauncherScratch {
     /// Two f64s per Pauli mask for the Pauli expectation finalize, pure or
     /// mixed state. Exact length: the readback covers the whole buffer.
     pub(crate) pauli_result: Option<GpuBuffer<f64>>,
+    /// Three f64s per block for [`super::dense::group_moments`]. Exact length, like
+    /// `pauli_result`.
+    pub(crate) moment_partials: Option<GpuBuffer<f64>>,
     /// One upload per gate for what does not fit parameter space; see [`stage_blob`].
     pub(crate) blob: BlobScratch,
 }
@@ -308,6 +311,7 @@ pub(crate) const KERNEL_NAMES: &[&str] = &[
     "rdm_qubit",
     "rdm_qubit_finalize",
     "sv_pauli_expect",
+    "sv_group_moments",
     "measure_collapse",
     "compute_probabilities",
     "apply_multi_fused_diagonal",

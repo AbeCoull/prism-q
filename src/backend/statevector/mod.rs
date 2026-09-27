@@ -589,6 +589,26 @@ impl StatevectorBackend {
         None
     }
 
+    /// Group moments on a device-resident state through
+    /// [`group_moments`](crate::gpu::kernels::dense::group_moments). `None` when the
+    /// state lives on the host or a rotated copy does not fit on the device.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn group_moments_on_device(
+        &self,
+        groups: &[(Vec<u64>, Vec<f64>, u64, u64)],
+    ) -> Option<Result<Vec<(f64, f64)>>> {
+        let gpu = self.gpu_state.as_ref()?;
+        crate::gpu::kernels::dense::group_moments(gpu.context(), gpu, groups).transpose()
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    pub(crate) fn group_moments_on_device(
+        &self,
+        _groups: &[(Vec<u64>, Vec<f64>, u64, u64)],
+    ) -> Option<Result<Vec<(f64, f64)>>> {
+        None
+    }
+
     /// [`pauli_expectations_from_masks`](crate::sim::pauli_expectations_from_masks)
     /// evaluated on a device-resident state: one reduction launch over every
     /// mask plus an appended identity mask that supplies the norm, so nothing

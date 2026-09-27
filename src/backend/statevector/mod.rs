@@ -522,6 +522,15 @@ impl StatevectorBackend {
         self.pending_norm * self.pending_norm
     }
 
+    /// Overwrite this backend's host state with `source`'s, reusing the amplitude
+    /// buffer when it already holds enough. The RNG stays this backend's own.
+    pub(crate) fn copy_state_from(&mut self, source: &Self) {
+        self.num_qubits = source.num_qubits;
+        self.pending_norm = source.pending_norm;
+        self.classical_bits.clone_from(&source.classical_bits);
+        self.state.clone_from(&source.state);
+    }
+
     /// Probabilities of the host state, skipping the dense-output cap.
     ///
     /// For a caller whose vector is a working buffer sized by a state it

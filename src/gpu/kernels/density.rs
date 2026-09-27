@@ -371,7 +371,6 @@ pub(crate) fn pauli_sums(
     let device = ctx.device();
     let stream = device.stream()?;
     let stage1 = device.function("dm_pauli_expect")?;
-    let stage2 = device.function("dm_pauli_expect_finalize")?;
     let xmasks: Vec<u64> = masks.iter().map(|m| m.0).collect();
     let zmasks: Vec<u64> = masks.iter().map(|m| m.1).collect();
 
@@ -381,7 +380,6 @@ pub(crate) fn pauli_sums(
     super::ensure_capacity(&mut scratch.measure_partials, device, partial_len)?;
     ensure_scratch(&mut scratch.u64_a, device, &xmasks)?;
     ensure_scratch(&mut scratch.u64_b, device, &zmasks)?;
-    ensure_exact(&mut scratch.pauli_result, device, 2 * masks.len())?;
     let partials = scratch.measure_partials.as_mut().unwrap();
     {
         let cfg = LaunchConfig {
@@ -406,31 +404,5 @@ pub(crate) fn pauli_sums(
                 .map_err(|e| driver_err("dm_pauli_expect", e))?;
         }
     }
-    let result = scratch.pauli_result.as_mut().unwrap();
-    {
-        let cfg = LaunchConfig {
-            grid_dim: (num_masks, 1, 1),
-            block_dim: (BLOCK_SIZE, 1, 1),
-            shared_mem_bytes: 2 * BLOCK_SIZE * std::mem::size_of::<f64>() as u32,
-        };
-        let mut builder = stream.launch_builder(&stage2);
-        builder
-            .arg(scratch.measure_partials.as_ref().unwrap().raw())
-            .arg(&blocks_per_mask)
-            .arg(result.raw_mut());
-        // SAFETY: signature matches the kernel; one block per mask strides over
-        // that mask's `blocks_per_mask` partial pairs, and `result` holds two
-        // f64s per mask. Both buffers are held by the scratch guard.
-        unsafe {
-            builder
-                .launch(cfg)
-                .map_err(|e| driver_err("dm_pauli_expect_finalize", e))?;
-        }
-    }
-    let mut host = vec![0.0_f64; 2 * masks.len()];
-    result.copy_to_host(device, &mut host)?;
-    Ok(host
-        .chunks_exact(2)
-        .map(|pair| Complex64::new(pair[0], pair[1]))
-        .collect())
+    super::finalize_pauli_sums(device, scratch, num_masks, blocks_per_mask, BLOCK_SIZE, 1.0)
 }

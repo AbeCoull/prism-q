@@ -10,8 +10,9 @@ pub(crate) mod stabilizer;
 use std::sync::Arc;
 
 use cudarc::driver::{
-    CudaFunction, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, ValidAsZeroBits,
+    CudaFunction, CudaStream, DevicePtr, DeviceRepr, LaunchConfig, PushKernelArg, ValidAsZeroBits,
 };
+use num_complex::Complex64;
 
 use crate::error::{PrismError, Result};
 use crate::gpu::device::GpuDevice;
@@ -230,6 +231,45 @@ pub(crate) fn ensure_exact<'a>(
         *slot = Some(GpuBuffer::<f64>::alloc_zeros(device, len)?);
     }
     Ok(slot.as_mut().unwrap())
+}
+
+/// Reduce the `[mask][block][re, im]` partials in `measure_partials` with
+/// `dm_pauli_expect_finalize` and read back one complex sum per mask, times `scale`.
+pub(super) fn finalize_pauli_sums(
+    device: &GpuDevice,
+    scratch: &mut LauncherScratch,
+    num_masks: u32,
+    blocks_per_mask: u32,
+    block_size: u32,
+    scale: f64,
+) -> Result<Vec<Complex64>> {
+    let stream = device.stream()?;
+    let finalize = device.function("dm_pauli_expect_finalize")?;
+    let result = ensure_exact(&mut scratch.pauli_result, device, 2 * num_masks as usize)?;
+    let cfg = LaunchConfig {
+        grid_dim: (num_masks, 1, 1),
+        block_dim: (block_size, 1, 1),
+        shared_mem_bytes: 2 * block_size * size_of::<f64>() as u32,
+    };
+    let mut builder = stream.launch_builder(&finalize);
+    builder
+        .arg(scratch.measure_partials.as_ref().unwrap().raw())
+        .arg(&blocks_per_mask)
+        .arg(result.raw_mut());
+    // SAFETY: signature matches the kernel; one block per mask strides over that
+    // mask's `blocks_per_mask` partial pairs, and `result` holds two f64s per mask.
+    // Both buffers are held by the caller's scratch guard.
+    unsafe {
+        builder
+            .launch(cfg)
+            .map_err(|e| driver_err("dm_pauli_expect_finalize", e))?;
+    }
+    let mut host = vec![0.0_f64; 2 * num_masks as usize];
+    result.copy_to_host(device, &mut host)?;
+    Ok(host
+        .chunks_exact(2)
+        .map(|pair| Complex64::new(pair[0], pair[1]) * scale)
+        .collect())
 }
 
 /// Combined CUDA C source for the PTX module. A kernel added to any part also needs

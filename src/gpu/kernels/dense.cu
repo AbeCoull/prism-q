@@ -45,6 +45,11 @@ __device__ __forceinline__ void apply_phase(double2 *state, unsigned long long i
     state[i].y = pr*a.y + pi*a.x;
 }
 
+__device__ __forceinline__ double2 cmul(double2 a, double2 b)
+{
+    return make_double2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
 // ============================================================================
 // Initialisation
 // ============================================================================
@@ -99,9 +104,11 @@ extern "C" __global__ void apply_diagonal_1q(
 // ============================================================================
 //
 // All take `pair_count = 2^(n-2)` threads. Each thread computes a compressed index
-// and expands via chained insert_zero_bit (q0, q1 sorted).
+// and expands via chained insert_zero_bit (q0, q1 in either order).
 
-__device__ __forceinline__ unsigned long long expand_2q(unsigned long long k, int lo_q, int hi_q) {
+__device__ __forceinline__ unsigned long long expand_2q(unsigned long long k, int q0, int q1) {
+    int lo_q = q0 < q1 ? q0 : q1;
+    int hi_q = q0 < q1 ? q1 : q0;
     unsigned long long lo_mask = (1ULL << lo_q) - 1;
     unsigned long long lo = k & lo_mask;
     unsigned long long mid_hi = k >> lo_q;
@@ -119,9 +126,7 @@ extern "C" __global__ void apply_cx(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= pair_count) return;
-    int lo_q = control < target ? control : target;
-    int hi_q = control < target ? target : control;
-    unsigned long long idx = expand_2q(k, lo_q, hi_q);
+    unsigned long long idx = expand_2q(k, control, target);
     unsigned long long i0 = idx | (1ULL << control);
     unsigned long long i1 = i0 | (1ULL << target);
     double2 tmp = state[i0];
@@ -134,9 +139,7 @@ extern "C" __global__ void apply_cz(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= pair_count) return;
-    int lo_q = q0 < q1 ? q0 : q1;
-    int hi_q = q0 < q1 ? q1 : q0;
-    unsigned long long idx = expand_2q(k, lo_q, hi_q);
+    unsigned long long idx = expand_2q(k, q0, q1);
     unsigned long long i = idx | (1ULL << q0) | (1ULL << q1);
     state[i].x = -state[i].x;
     state[i].y = -state[i].y;
@@ -147,9 +150,7 @@ extern "C" __global__ void apply_swap(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= pair_count) return;
-    int lo_q = q0 < q1 ? q0 : q1;
-    int hi_q = q0 < q1 ? q1 : q0;
-    unsigned long long idx = expand_2q(k, lo_q, hi_q);
+    unsigned long long idx = expand_2q(k, q0, q1);
     unsigned long long i01 = idx | (1ULL << q0);
     unsigned long long i10 = idx | (1ULL << q1);
     double2 tmp = state[i01];
@@ -184,9 +185,7 @@ extern "C" __global__ void apply_cu(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= pair_count) return;
-    int lo_q = control < target ? control : target;
-    int hi_q = control < target ? target : control;
-    unsigned long long idx = expand_2q(k, lo_q, hi_q);
+    unsigned long long idx = expand_2q(k, control, target);
     unsigned long long i0 = idx | (1ULL << control);
     unsigned long long i1 = i0 | (1ULL << target);
 
@@ -202,11 +201,23 @@ extern "C" __global__ void apply_cu_phase(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= pair_count) return;
-    int lo_q = control < target ? control : target;
-    int hi_q = control < target ? target : control;
-    unsigned long long idx = expand_2q(k, lo_q, hi_q);
+    unsigned long long idx = expand_2q(k, control, target);
     unsigned long long i = idx | (1ULL << control) | (1ULL << target);
     apply_phase(state, i, pr, pi);
+}
+
+// Insert a zero bit at each of the `count` ascending positions in `sorted`.
+__device__ __forceinline__ unsigned long long insert_zero_bits(
+    unsigned long long idx, const int *sorted, int count)
+{
+    for (int i = 0; i < count; ++i) {
+        int bit = sorted[i];
+        unsigned long long mask_lo = (1ULL << bit) - 1;
+        unsigned long long lo = idx & mask_lo;
+        unsigned long long hi = idx >> bit;
+        idx = (hi << (bit + 1)) | lo;
+    }
+    return idx;
 }
 
 // Multi-controlled unitary. `sorted` contains all controls + target, sorted ascending.
@@ -223,14 +234,7 @@ extern "C" __global__ void apply_mcu(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= iter_count) return;
-    unsigned long long idx = k;
-    for (int i = 0; i < num_sorted; ++i) {
-        int bit = sorted.q[i];
-        unsigned long long mask_lo = (1ULL << bit) - 1;
-        unsigned long long lo = idx & mask_lo;
-        unsigned long long hi = idx >> bit;
-        idx = (hi << (bit + 1)) | lo;
-    }
+    unsigned long long idx = insert_zero_bits(k, sorted.q, num_sorted);
     unsigned long long i0 = idx | ctrl_mask;
     unsigned long long i1 = i0 | tgt_mask;
 
@@ -245,14 +249,7 @@ extern "C" __global__ void apply_mcu_phase(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= iter_count) return;
-    unsigned long long idx = k;
-    for (int i = 0; i < num_sorted; ++i) {
-        int bit = sorted.q[i];
-        unsigned long long mask_lo = (1ULL << bit) - 1;
-        unsigned long long lo = idx & mask_lo;
-        unsigned long long hi = idx >> bit;
-        idx = (hi << (bit + 1)) | lo;
-    }
+    unsigned long long idx = insert_zero_bits(k, sorted.q, num_sorted);
     unsigned long long i = idx | all_mask;
     apply_phase(state, i, pr, pi);
 }
@@ -268,9 +265,7 @@ extern "C" __global__ void apply_fused_2q(
 {
     unsigned long long k = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= pair_count) return;
-    int lo_q = q0 < q1 ? q0 : q1;
-    int hi_q = q0 < q1 ? q1 : q0;
-    unsigned long long idx = expand_2q(k, lo_q, hi_q);
+    unsigned long long idx = expand_2q(k, q0, q1);
 
     // Basis ordering matches the CPU PreparedGate2q::apply_full in src/backend/simd.rs:
     //   basis index b = (q0_bit << 1) | q1_bit   i.e. q1 is LSB of the 4-element basis.
@@ -665,7 +660,7 @@ extern "C" __global__ void apply_diagonal_batch(
     const int *group_lens = meta + DB_MAX_GROUPS * DB_MAX_QUBITS;
     const int *group_offsets = group_lens + DB_MAX_GROUPS;
 
-    double cr = 1.0, ci = 0.0;
+    double2 c = make_double2(1.0, 0.0);
     for (int g = 0; g < num_groups; ++g) {
         int len = group_lens[g];
         const int *shifts = group_shifts + g * DB_MAX_QUBITS;
@@ -673,14 +668,10 @@ extern "C" __global__ void apply_diagonal_batch(
         for (int j = 0; j < len; ++j) {
             bits |= (int)(((i >> shifts[j]) & 1ULL) << j);
         }
-        double2 ph = group_tables[group_offsets[g] + bits];
-        double nr = cr * ph.x - ci * ph.y;
-        double ni = cr * ph.y + ci * ph.x;
-        cr = nr;
-        ci = ni;
+        c = cmul(c, group_tables[group_offsets[g] + bits]);
     }
 
-    apply_phase(state, i, cr, ci);
+    apply_phase(state, i, c.x, c.y);
 }
 
 // apply_batch_rzz: applies a batch of Rzz gates via precomputed parity-phase LUTs (built
@@ -707,7 +698,7 @@ extern "C" __global__ void apply_batch_rzz(
     const int *group_lens = group_q1s + BR_MAX_GROUPS * BR_GROUP_SIZE;
     const int *group_offsets = group_lens + BR_MAX_GROUPS;
 
-    double cr = 1.0, ci = 0.0;
+    double2 c = make_double2(1.0, 0.0);
     for (int g = 0; g < num_groups; ++g) {
         int len = group_lens[g];
         const int *q0s = group_q0s + g * BR_GROUP_SIZE;
@@ -716,14 +707,10 @@ extern "C" __global__ void apply_batch_rzz(
         for (int k = 0; k < len; ++k) {
             bits |= (int)((((i >> q0s[k]) ^ (i >> q1s[k])) & 1ULL) << k);
         }
-        double2 ph = group_tables[group_offsets[g] + bits];
-        double nr = cr * ph.x - ci * ph.y;
-        double ni = cr * ph.y + ci * ph.x;
-        cr = nr;
-        ci = ni;
+        c = cmul(c, group_tables[group_offsets[g] + bits]);
     }
 
-    apply_phase(state, i, cr, ci);
+    apply_phase(state, i, c.x, c.y);
 }
 
 // apply_batch_phase: applies a batch of controlled-phase gates sharing a control qubit via
@@ -751,7 +738,7 @@ extern "C" __global__ void apply_batch_phase(
     unsigned long long mask = ctrl_mask - 1ULL;
     unsigned long long idx = ((k & ~mask) << 1) | (k & mask) | ctrl_mask;
 
-    double cr = 1.0, ci = 0.0;
+    double2 c = make_double2(1.0, 0.0);
     for (int g = 0; g < num_groups; ++g) {
         int len = group_lens[g];
         const int *shifts = group_shifts + g * BP_GROUP_SIZE;
@@ -759,14 +746,10 @@ extern "C" __global__ void apply_batch_phase(
         for (int j = 0; j < len; ++j) {
             bits |= (int)(((idx >> shifts[j]) & 1ULL) << j);
         }
-        double2 ph = group_tables[group_offsets[g] + bits];
-        double nr = cr * ph.x - ci * ph.y;
-        double ni = cr * ph.y + ci * ph.x;
-        cr = nr;
-        ci = ni;
+        c = cmul(c, group_tables[group_offsets[g] + bits]);
     }
 
-    apply_phase(state, idx, cr, ci);
+    apply_phase(state, idx, c.x, c.y);
 }
 
 // apply_multi_fused_diagonal: batch of diagonal 1q gates in a single pass. Replaces the

@@ -97,10 +97,46 @@
 #                   the build runs through the same code path as the A/B's own
 #                   build, so a binary cached by one is what the other expects.
 #                   --filter is not required in this mode.
+#   --build-dir     with --build-only, build this checkout instead of the one the
+#                   script sits in, so one copy of the script can fill a cache
+#                   from several worktrees.
+#   --new-exe       prebuilt working-tree executable. Skips the working-tree
+#                   build and its fingerprint check; the caller owns the claim,
+#                   as with --ref-exe. The two together run no build at all.
+#   --project-dir   checkout the run reports on and writes bench_results/ into,
+#                   instead of the one the script sits in.
 #   --min-rows      fail when fewer than this many rows appear in every measured
 #                   pass, catching a filter that stopped matching a renamed
 #                   benchmark id. Default: 1.
 #   --out           markdown output path (default: bench_results/ab-<stamp>.md)
+#
+# Host guards (on by default):
+#   --max-host-load percent of all CPUs other work may hold while the host sits
+#                   between passes (default 10, 0 disables). Checked before the
+#                   first pass, where a busy host stops the run, and before each
+#                   measured pass, where it is recorded in the report. One busy
+#                   thread on an 8-thread host is 12.5%.
+#   --wait-idle     seconds to wait for the host to fall under --max-host-load
+#                   before giving up (default 0). A queued run passes a long wait
+#                   so it starts when the host settles instead of failing.
+#
+# Verdict guards:
+#   A run whose same-binary controls lean one way across most rows reads RERUN
+#   (exit 3), not PASS or FAIL: the median control, signed, past half the
+#   threshold means one binary's passes moved as a lane, the pattern a run
+#   straight after a cold build or under background load shows, and the change
+#   column carries that shift on every row.
+#   --no-confirm    by default a full-tier FAIL re-runs the regressed rows once
+#                   from fresh copies of both binaries. A row that does not
+#                   regress again leaves the run at RERUN rather than FAIL: a
+#                   copied binary can land in a slow layout for one run, and the
+#                   controls cannot see it because they compare a binary with
+#                   itself.
+#   --escalate      with --light, re-run every row that moved past half the
+#                   threshold on the full tier against the same two binaries,
+#                   and take the verdict from that run.
+#
+# Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN.
 #
 # Environment:
 #   REGRESSION_THRESHOLD   regression gate in percent (default: 5.0)
@@ -137,9 +173,18 @@ FEATURES="parallel"
 REF_DIR=""
 REF_EXE=""
 BUILD_ONLY=""
+BUILD_DIR=""
+NEW_EXE=""
 OUT=""
 MIN_ROWS=1
 THRESHOLD="${REGRESSION_THRESHOLD:-5.0}"
+MAX_HOST_LOAD=10
+WAIT_IDLE=0
+CONFIRM=1
+ESCALATE=""
+# Set on the runs this script starts itself: "confirm" for the re-run of a FAIL,
+# "escalate" for the full-tier run behind --escalate.
+NESTED="${PRISM_BENCH_AB_NESTED:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -157,6 +202,13 @@ while [[ $# -gt 0 ]]; do
         --ref-dir)     REF_DIR="$2"; shift 2 ;;
         --ref-exe)     REF_EXE="$2"; shift 2 ;;
         --build-only)  BUILD_ONLY="$2"; shift 2 ;;
+        --build-dir)   BUILD_DIR="$2"; shift 2 ;;
+        --new-exe)     NEW_EXE="$2"; shift 2 ;;
+        --project-dir) PROJECT_DIR="$(cd "$2" && pwd)"; shift 2 ;;
+        --max-host-load) MAX_HOST_LOAD="$2"; shift 2 ;;
+        --wait-idle)   WAIT_IDLE="$2"; shift 2 ;;
+        --no-confirm)  CONFIRM=""; shift ;;
+        --escalate)    ESCALATE=1; shift ;;
         --min-rows)    MIN_ROWS="$2"; shift 2 ;;
         --out)         OUT="$2"; shift 2 ;;
         --threshold|-t) THRESHOLD="$2"; shift 2 ;;
@@ -185,6 +237,19 @@ else
     PASS_LABELS=(ref new new ref)
 fi
 PASS_COUNT="${#PASS_LABELS[@]}"
+
+if [[ -n "$ESCALATE" && -z "$LIGHT" ]]; then
+    echo "Error: --escalate re-runs light-tier rows on the full tier, so it needs --light." >&2
+    exit 1
+fi
+# The light verdict is triage, so there is nothing to confirm; a nested run
+# never starts another of its own kind.
+if [[ -n "$LIGHT" || "$NESTED" == "confirm" ]]; then
+    CONFIRM=""
+fi
+if [[ -n "$NESTED" ]]; then
+    ESCALATE=""
+fi
 PASS_ORDER="$(IFS=,; echo "${PASS_LABELS[*]}")"
 PASS_ORDER="${PASS_ORDER//,/, }"
 
@@ -588,11 +653,85 @@ host_cpu() {
     fi
 }
 
+# Busy share of every CPU over about two seconds, as a whole percent, or empty
+# where the host offers no reading. MSYS and Cygwin expose the Windows counters
+# through /proc/stat, so one reader covers Windows, Linux, and WSL.
+host_load() {
+    if [[ -r /proc/stat ]]; then
+        local first second
+        first="$(awk '/^cpu / { b = $2 + $3 + $4 + $7 + $8 + $9; print b, b + $5 + $6; exit }' /proc/stat)"
+        sleep 2
+        second="$(awk '/^cpu / { b = $2 + $3 + $4 + $7 + $8 + $9; print b, b + $5 + $6; exit }' /proc/stat)"
+        awk -v a="$first" -v b="$second" 'BEGIN {
+            split(a, x, " "); split(b, y, " ")
+            if (y[2] > x[2]) { printf "%d", (y[1] - x[1]) * 100 / (y[2] - x[2]) }
+        }'
+    elif command -v sysctl >/dev/null 2>&1 && sysctl -n hw.ncpu >/dev/null 2>&1; then
+        ps -A -o %cpu= | awk -v n="$(sysctl -n hw.ncpu)" '{ s += $1 } END { printf "%d", s / n }'
+    fi
+}
+
+# The processes holding the most CPU, for the message that stops a run.
+busy_processes() {
+    if command -v wmic >/dev/null 2>&1; then
+        wmic path Win32_PerfFormattedData_PerfProc_Process get Name,PercentProcessorTime 2>/dev/null |
+            tr -d '\r' |
+            awk 'NR > 1 && $1 != "_Total" && $1 != "Idle" && $2 + 0 > 0 { print $2 "% " $1 }' |
+            sort -rn | head -5
+    else
+        ps -eo pcpu,comm --sort=-pcpu 2>/dev/null | sed -n '2,6p'
+    fi
+}
+
+# Stop, or wait up to --wait-idle, while other work holds more of the host than
+# --max-host-load. Every row of the run would carry that load, and the controls
+# only see the part of it that changes between passes.
+preflight() {
+    (( MAX_HOST_LOAD > 0 )) || return 0
+    local load waited=0
+    while :; do
+        load="$(host_load)"
+        if [[ -z "$load" ]]; then
+            echo ">>> no host load reading here, so the load guard is off for this run"
+            MAX_HOST_LOAD=0
+            return 0
+        fi
+        if (( load <= MAX_HOST_LOAD )); then
+            echo ">>> host ${load}% busy before measuring"
+            echo ""
+            return 0
+        fi
+        if (( waited >= WAIT_IDLE )); then
+            echo "Error: the host is ${load}% busy before measuring, over --max-host-load ${MAX_HOST_LOAD}%." >&2
+            busy_processes | sed 's/^/    /' >&2
+            echo "  Stop that work, pass --wait-idle SECONDS to wait for it, or raise" >&2
+            echo "  --max-host-load if the load is part of what is being measured." >&2
+            exit 2
+        fi
+        echo ">>> host ${load}% busy, waiting for it to fall under ${MAX_HOST_LOAD}% (${waited}s of ${WAIT_IDLE}s)"
+        sleep 28
+        waited=$(( waited + 30 ))
+    done
+}
+
+# Read the host between passes, when none of this script's work is running, and
+# record a pass that starts on a busy host.
+LOADED_PASSES=""
+check_load() {
+    (( MAX_HOST_LOAD > 0 )) || return 0
+    local load
+    load="$(host_load)"
+    if [[ -n "$load" ]] && (( load > MAX_HOST_LOAD )); then
+        echo ">>> host ${load}% busy before pass $1, over ${MAX_HOST_LOAD}%"
+        LOADED_PASSES="${LOADED_PASSES}${LOADED_PASSES:+, }pass $1 at ${load}%"
+    fi
+}
+
 # --- Build both binaries ---
 
 if [[ -n "$BUILD_ONLY" ]]; then
     mkdir -p "$(dirname "$BUILD_ONLY")"
-    build_bench_exe "$PROJECT_DIR" "$BUILD_ONLY" "build-only"
+    build_bench_exe "$(cd "${BUILD_DIR:-$PROJECT_DIR}" && pwd)" "$BUILD_ONLY" "build-only"
     exit 0
 fi
 
@@ -607,7 +746,19 @@ echo "  reference: $REF ($REF_SHA)"
 echo "  threshold: ${THRESHOLD}%"
 echo ""
 
-build_bench_exe "$PROJECT_DIR" "$WORKDIR/exe-new" "new"
+if [[ -n "$NEW_EXE" ]]; then
+    if [[ ! -f "$NEW_EXE" ]]; then
+        echo "Error: --new-exe '$NEW_EXE' does not exist." >&2
+        exit 1
+    fi
+    echo ">>> using the supplied working-tree executable $NEW_EXE"
+    cp "$NEW_EXE" "$WORKDIR/exe-new"
+    chmod +x "$WORKDIR/exe-new"
+    NEW_PROVENANCE="supplied via \`--new-exe\`, not built here"
+else
+    build_bench_exe "$PROJECT_DIR" "$WORKDIR/exe-new" "new"
+    NEW_PROVENANCE="built from the working tree"
+fi
 
 if [[ -n "$REF_EXE" ]]; then
     if [[ ! -f "$REF_EXE" ]]; then
@@ -635,7 +786,7 @@ else
     # save landing between them, which would leave two binaries that no longer
     # differ by the change under test.
     FINGERPRINT_AFTER="$(tree_fingerprint)"
-    if [[ "$FINGERPRINT_BEFORE" != "$FINGERPRINT_AFTER" ]]; then
+    if [[ -z "$NEW_EXE" && "$FINGERPRINT_BEFORE" != "$FINGERPRINT_AFTER" ]]; then
         echo "Error: the working tree changed between the two builds." >&2
         echo "  The two binaries no longer differ by the change under test, so the" >&2
         echo "  comparison would be meaningless. Re-run with the tree settled." >&2
@@ -659,6 +810,7 @@ fi
 
 echo "=== $TIER tier: two discarded warmup passes, then $PASS_COUNT adjacent passes ($PASS_ORDER) ==="
 echo ""
+preflight
 warm_up 1 "$WORKDIR/exe-ref"
 
 # Criterion projected every row during the warmup, so the slow rows can be
@@ -683,6 +835,7 @@ fi
 warm_up 2 "$WORKDIR/exe-new"
 for idx in $(seq 1 "$PASS_COUNT"); do
     label="${PASS_LABELS[idx - 1]}"
+    check_load "$idx"
     run_pass "$idx" "$label" "$WORKDIR/exe-$label"
 done
 
@@ -716,6 +869,7 @@ set +e
     fi
     echo "| Reference | \`$REF\` ($REF_SHA) |"
     echo "| Reference binary | $REF_PROVENANCE |"
+    echo "| Working-tree binary | $NEW_PROVENANCE |"
     echo "| Features | \`$FEATURES\` |"
     echo "| Tier | $TIER |"
     echo "| Pass order | ref, new discarded at $WARM_SAMPLES samples, then $PASS_ORDER (adjacent, no rebuild) |"
@@ -725,6 +879,11 @@ set +e
         echo "| Slow rows | over ${SLOW_ROW_SECONDS}s per pass at $SAMPLES samples run at $SLOW_SAMPLES |"
     fi
     echo "| Row budget | ${MAX_ROW_SECONDS}s per pass |"
+    if (( MAX_HOST_LOAD > 0 )); then
+        echo "| Host load guard | ${MAX_HOST_LOAD}% of all CPUs, read before each measured pass |"
+    else
+        echo "| Host load guard | off |"
+    fi
     echo "| High-qubit rows | $HIGH_QUBITS_STATE |"
     echo "| CPU | $(host_cpu) |"
     echo "| OS | $(uname -srm) |"
@@ -735,7 +894,8 @@ set +e
 
     awk -v threshold="$THRESHOLD" -v min_rows="$MIN_ROWS" -v full="$SAMPLES" \
         -v light="${LIGHT:-0}" -v passes="$PASS_COUNT" -v slow_ids="$SLOW_IDS" \
-        -v slow_at="$SLOW_SAMPLES" '
+        -v slow_at="$SLOW_SAMPLES" -v loaded="$LOADED_PASSES" \
+        -v moved_file="$WORKDIR/moved.txt" -v regressed_file="$WORKDIR/regressed.txt" '
         BEGIN {
             FS = "\t"; SEP = "\x1f"
             slow_n = split(slow_ids, slow_list, "\n")
@@ -756,6 +916,16 @@ set +e
 
         function pct(v) { return sprintf("%+.1f%%", v) }
         function abs(v) { return v < 0 ? -v : v }
+
+        function median(src, m,    i, j, t, a) {
+            for (i = 1; i <= m; i++) { a[i] = src[i] }
+            for (i = 2; i <= m; i++) {
+                t = a[i]; j = i - 1
+                while (j >= 1 && a[j] > t) { a[j + 1] = a[j]; j-- }
+                a[j + 1] = t
+            }
+            return (m % 2) ? a[(m + 1) / 2] : (a[m / 2] + a[m / 2 + 1]) / 2
+        }
 
         END {
             print "| Benchmark | Ref | New | Change | Paired | Control (ref) | Control (new) | Samples | Verdict |"
@@ -855,6 +1025,13 @@ set +e
 
                 if (change > threshold && change > floor) {
                     regressions++; regressed[regressions] = id
+                    print id > regressed_file
+                }
+                if (!control_row) {
+                    nc++
+                    cr[nc] = ctl_ref
+                    cn[nc] = ctl_new
+                    if (abs(change) > threshold / 2) { print id > moved_file }
                 }
                 if (floor > threshold && !control_row) {
                     unresolvable++; unresolved[unresolvable] = id
@@ -903,8 +1080,42 @@ set +e
             if (light) {
                 tier_note = " Light tier, triage only: re-run the rows that moved on the full tier before claiming a number."
             }
+            # A lane that moved as a whole shows up as a median control well off
+            # zero. Row noise scatters controls both ways and leaves the median
+            # near it; a cold start or a background job shifts one binary every
+            # row at once, and each change then carries the shift.
+            shift_text = ""
+            if (nc >= 4) {
+                mref = median(cr, nc)
+                if (abs(mref) > threshold / 2) {
+                    shift_text = sprintf("The reference binary read a median of %s between its own two passes across %d rows", pct(mref), nc)
+                }
+                if (!light) {
+                    mnew = median(cn, nc)
+                    if (abs(mnew) > threshold / 2 && abs(mnew) >= abs(mref)) {
+                        shift_text = sprintf("The working-tree binary read a median of %s between its own two passes across %d rows", pct(mnew), nc)
+                    }
+                }
+            }
+
             status = 0
-            if (regressions > 0) {
+            if (shift_text != "") {
+                status = 3
+                printf "**Regression verdict**: RERUN. %s, so that binary moved as a lane and every row'"'"'s change carries the shift. A run straight after a cold build or under background load reads this way.%s\n",
+                    shift_text, tier_note
+                if (regressions > 0) {
+                    print ""
+                    print "Rows past the gate in this run, not a result:"
+                    print ""
+                    for (i = 1; i <= regressions; i++) { printf "- `%s`\n", regressed[i] }
+                }
+            } else if (regressions > 0 && loaded != "") {
+                status = 3
+                printf "**Regression verdict**: RERUN. %d row(s) read past %s%%, but the host was busy before %s.%s\n",
+                    regressions, threshold, loaded, tier_note
+                print ""
+                for (i = 1; i <= regressions; i++) { printf "- `%s`\n", regressed[i] }
+            } else if (regressions > 0) {
                 status = 1
                 printf "**Regression verdict**: FAIL. %d row(s) regressed beyond %s%% and beyond their own control spread.%s\n",
                     regressions, threshold, tier_note
@@ -912,6 +1123,9 @@ set +e
                 for (i = 1; i <= regressions; i++) { printf "- `%s`\n", regressed[i] }
             } else {
                 printf "**Regression verdict**: PASS at %s%%.%s\n", threshold, tier_note
+                if (loaded != "") {
+                    printf "\nThe host was busy before %s; read the control columns before trusting a flat row.\n", loaded
+                }
             }
 
             if (moved_controls > 0) {
@@ -938,6 +1152,54 @@ set +e
 } > "$OUT"
 REPORT_STATUS=$?
 set -e
+
+# Run this script again on a subset of rows against the two binaries already
+# built, and append that run's report under a heading. Each run copies both
+# executables into its own directory, so a follow-up measures fresh copies.
+follow_up() {
+    local kind="$1" filter="$2" title="$3"
+    shift 3
+    local sub_out="${OUT%.md}-$kind.md" status=0
+    PRISM_BENCH_AB_NESTED="$kind" bash "${BASH_SOURCE[0]}" \
+        --project-dir "$PROJECT_DIR" --bench "$BENCH" --features "$FEATURES" --ref "$REF" \
+        --ref-exe "$WORKDIR/exe-ref" --new-exe "$WORKDIR/exe-new" \
+        --filter "$filter" --out "$sub_out" --threshold "$THRESHOLD" \
+        --max-host-load "$MAX_HOST_LOAD" --wait-idle "$WAIT_IDLE" \
+        --slow-row-seconds "$SLOW_ROW_SECONDS" --slow-samples "$SLOW_SAMPLES" \
+        --warm-samples "$WARM_SAMPLES" --max-row-seconds "$MAX_ROW_SECONDS" "$@" || status=$?
+    if [[ -f "$sub_out" ]]; then
+        { echo ""; echo "## $title"; echo ""; sed '1{/^## /d}' "$sub_out"; } >> "$OUT"
+    else
+        printf '\n## %s\n\nThe run stopped before writing a report (exit %d).\n' "$title" "$status" >> "$OUT"
+    fi
+    return "$status"
+}
+
+if [[ -n "$CONFIRM" && "$REPORT_STATUS" == 1 && -s "$WORKDIR/regressed.txt" ]]; then
+    echo ">>> re-running the regressed rows from fresh copies of both binaries"
+    CONFIRM_STATUS=0
+    follow_up confirm "$(ids_to_filter < "$WORKDIR/regressed.txt")" \
+        "Confirmation: the regressed rows from fresh copies" || CONFIRM_STATUS=$?
+    if (( CONFIRM_STATUS == 1 )); then
+        printf '\n**Final verdict**: FAIL, confirmed from fresh copies of both binaries.\n' >> "$OUT"
+    else
+        REPORT_STATUS=3
+        printf '\n**Final verdict**: RERUN. Fresh copies did not reproduce the regression, which points at the layout one copy landed in rather than the change. Measure again before claiming either way.\n' >> "$OUT"
+    fi
+fi
+
+if [[ -n "$ESCALATE" ]]; then
+    if [[ -s "$WORKDIR/moved.txt" ]]; then
+        echo ">>> re-running the rows that moved past half the threshold on the full tier"
+        ESCALATE_STATUS=0
+        follow_up escalate "$(ids_to_filter < "$WORKDIR/moved.txt")" \
+            "Full-tier run of the rows that moved" || ESCALATE_STATUS=$?
+        REPORT_STATUS=$ESCALATE_STATUS
+        printf '\n**Final verdict**: the full-tier run above decides (exit %d).\n' "$ESCALATE_STATUS" >> "$OUT"
+    else
+        printf '\nNo row moved past half the threshold, so nothing went to the full tier.\n' >> "$OUT"
+    fi
+fi
 
 cat "$OUT"
 echo ""

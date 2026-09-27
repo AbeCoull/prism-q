@@ -174,12 +174,71 @@ cargo bench -- --baseline my_baseline
 ./scripts/bench_ab.sh -f '^sparse/' --ref-exe /tmp/ref-circuits  # skip the reference build
 ./scripts/bench_ab.sh -f '^x/affected/' -c '^x/control/'         # controls at 10 samples
 ./scripts/bench_ab.sh -f '^statevector/' --light                 # triage tier, about a fifth of the time
+./scripts/bench_ab.sh -f '^statevector/' --light --escalate      # then the full tier on rows that moved
 ```
 
 `--build-only` and `--ref-exe` are a pair: the first produces a bench binary through the
 same build path the A/B uses, the second consumes one and skips the reference build
-entirely. Nothing checks that the supplied executable was built from `--ref`, so whatever
-stores it owns that claim; the report records which of the two ways the reference arrived.
+entirely. `--new-exe` does the same for the working tree, and `--build-dir` points
+`--build-only` at another checkout. Nothing checks that a supplied executable was built
+from what it claims, so whatever stores it owns that claim; the report records how each
+binary arrived.
+
+### Host and verdict guards
+
+Three failure patterns cost repeated runs on the development host, and the script names
+each one rather than reporting a number.
+
+**A busy host.** Before the first measured pass the script reads the host's CPU load for
+two seconds and stops with exit 2 when other work holds more than `--max-host-load`
+(default 10% of all CPUs; one busy thread on an 8-thread host is 12.5%), listing the
+busiest processes. `--wait-idle SECONDS` waits for the load to fall instead of stopping.
+The same reading before each measured pass is recorded in the report, and a FAIL with a
+busy pass behind it reads RERUN. Background load read as a 15% to 82% same-code control
+spread on one run it overlapped.
+
+**A lane that moved.** When one binary's two passes disagree in the same direction across
+most rows, the change column carries that shift on every row. The script takes the signed
+median of each binary's control column, and past half the threshold the verdict is RERUN
+(exit 3) rather than PASS or FAIL. The pattern shows up straight after a cold build: one
+run read its working-tree binary faster in its second pass than its first on
+14 of 20 rows by 5% to 25%, with the reference lane flat.
+
+**A copy that landed slow.** A copied binary can run a row about 18% slow for a whole run
+and fast in the next, and the controls cannot see it because they compare a binary with
+itself. On the full tier a FAIL now re-runs the regressed rows once from fresh copies of
+both binaries, and the run stays a FAIL only if they regress again; otherwise it reads
+RERUN. `--no-confirm` turns this off.
+
+`--escalate` joins the two tiers: after a light run, every row that moved past half the
+threshold is measured again on the full tier against the same two binaries, and that run
+decides the verdict.
+
+Exit status: 0 PASS, 1 FAIL, 2 host too busy to start, 3 RERUN.
+
+## Unattended queues
+
+`scripts/bench_queue.sh` runs a list of A/Bs and other measurements one after another,
+building every binary before measuring anything:
+
+```bash
+cat > queue.sh <<'EOF'
+ab  fstab  ../pq-dispatch -r 315b43e -f '^auto/crossover/auto/fstab_' --light --escalate
+ab  spd    ../pq-spd      -r dea250c -f '^auto/crossover/(auto|statevector)/spd_wide_'
+run cold   ../pq-spd      -- ./target/release/examples/cold_marginals 16 20 0.2 auto
+EOF
+./scripts/bench_queue.sh --dry-run queue.sh     # the plan, and which builds are cached
+./scripts/bench_queue.sh --schedule queue.sh    # detached; progress in <out>/status.txt
+```
+
+Binaries are cached under `bench_results/bin`, keyed on commit, features, bench target,
+and toolchain, so steps that share a reference build it once and a later queue reuses it.
+Each A/B waits up to an hour for an idle host. `--schedule` matters on Windows: a child of
+a terminal session is torn down with that session's job object even under `nohup`, so the
+queue registers a scheduled task and starts it there. The task opens a console window,
+and closing that window ends the queue. Every step logs in full to its own
+file; the status file carries one START and END line per step, the verdicts, and
+`ALLDONE`.
 
 ### Keeping an A/B affordable
 

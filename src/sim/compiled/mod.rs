@@ -2486,6 +2486,16 @@ const MAX_RANK_FOR_RANK_SPACE: usize = 20;
 const MIN_SHOTS_PER_OUTCOME: usize = 4;
 const MAX_LUT_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
 
+fn require_clifford(circuit: &Circuit) -> Result<()> {
+    if circuit.is_clifford_only() {
+        return Ok(());
+    }
+    Err(PrismError::IncompatibleBackend {
+        backend: "CompiledSampler".to_string(),
+        reason: "circuit contains non-Clifford gates".to_string(),
+    })
+}
+
 fn finish_sampler(
     mut flip_rows: Vec<Vec<u64>>,
     rank: usize,
@@ -2531,12 +2541,7 @@ fn finish_sampler(
 /// assert_eq!(counts.values().sum::<u64>(), 1000);
 /// ```
 pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
-    if !circuit.is_clifford_only() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "circuit contains non-Clifford gates".to_string(),
-        });
-    }
+    require_clifford(circuit)?;
 
     let measurements: Vec<(usize, usize)> = circuit
         .instructions
@@ -2612,11 +2617,10 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
             let dest_idx = p_row - n;
             let dest_base = dest_idx * stride;
             columns.update(dest_idx, xz[dest_base + word], p_data[word]);
-            xz.copy_within(p_row * stride..p_row * stride + stride, dest_base);
+            xz.copy_within(p_base..p_base + stride, dest_base);
             phase[dest_idx] = p_phase;
             gen_dep[dest_idx][..rank_words].copy_from_slice(&p_dep);
 
-            let p_base = p_row * stride;
             columns.update(p_row, p_data[word], 0);
             xz[p_base..p_base + stride].fill(0);
             xz[p_base + nw + word] |= bit_mask;
@@ -2670,17 +2674,9 @@ pub fn compile_forward(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> 
 
             ref_bits[meas_idx] = scratch_phase;
 
-            for (w, &dep_word) in gen_dep[scratch_idx][..live].iter().enumerate() {
-                let mut bits = dep_word;
-                while bits != 0 {
-                    let bit_pos = bits.trailing_zeros() as usize;
-                    let k = w * 64 + bit_pos;
-                    if k < rank {
-                        flip_rows[k][meas_idx / 64] |= 1u64 << (meas_idx % 64);
-                    }
-                    bits &= bits - 1;
-                }
-            }
+            for_each_row(&gen_dep[scratch_idx][..live], rank, |k| {
+                flip_rows[k][meas_idx / 64] |= 1u64 << (meas_idx % 64);
+            });
         }
     }
 
@@ -3050,12 +3046,7 @@ pub fn compile_detector_sampler(
 ///
 /// Requires terminal measurements with no resets or classical conditionals.
 pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSampler> {
-    if !circuit.is_clifford_only() {
-        return Err(PrismError::IncompatibleBackend {
-            backend: "CompiledSampler".to_string(),
-            reason: "circuit contains non-Clifford gates".to_string(),
-        });
-    }
+    require_clifford(circuit)?;
 
     let has_measurements = circuit
         .instructions

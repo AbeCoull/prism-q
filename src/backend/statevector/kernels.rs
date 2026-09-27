@@ -141,6 +141,24 @@ fn prepare_2q(
         .collect()
 }
 
+/// Prepare the gates whose high qubit fits the L2 or L3 tile, by tier. Gates above
+/// the L3 tile are left out.
+#[inline(always)]
+fn split_multi_2q_tiers(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    small_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
+    medium_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
+) {
+    for &(q0, q1, ref mat) in gates {
+        let max_q = q0.max(q1);
+        if max_q <= MULTI_GATE_MAX_L2_TARGET {
+            small_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
+        } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
+            medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
+        }
+    }
+}
+
 thread_local! {
     /// The gathered tile, one per thread and kept between batches: a fresh
     /// allocation per subcube paid more in page faults than the sweeps it
@@ -2118,6 +2136,50 @@ pub(crate) fn par_apply_unitary(state: &mut [Complex64], targets: &[usize], mat:
         });
 }
 
+type TargetedGate1q = (usize, [[Complex64; 2]; 2]);
+
+/// Sort `gates` into the L2 tile, L3 tile and untiled tiers by target.
+#[inline(always)]
+fn split_multi_1q_tiers(
+    gates: &[TargetedGate1q],
+    small_gates: &mut SmallVec<[(usize, simd::PreparedGate1q); 16]>,
+    medium_gates: &mut SmallVec<[(usize, simd::PreparedGate1q); 4]>,
+    large_gates: &mut SmallVec<[TargetedGate1q; 4]>,
+) {
+    for &(target, mat) in gates {
+        if target <= MULTI_GATE_MAX_L2_TARGET {
+            small_gates.push((target, simd::PreparedGate1q::new(&mat)));
+        } else if target <= MULTI_GATE_MAX_L3_TARGET {
+            medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
+        } else {
+            large_gates.push((target, mat));
+        }
+    }
+}
+
+/// Sort diagonal `gates` into the L2 tile, L3 tile and untiled tiers by target, as
+/// `(target, d0, d1)` with the tiled tiers also carrying `is_phase_one(d0)`.
+#[inline(always)]
+fn split_multi_1q_diagonal_tiers(
+    gates: &[TargetedGate1q],
+    small_gates: &mut SmallVec<[(usize, Complex64, Complex64, bool); 16]>,
+    medium_gates: &mut SmallVec<[(usize, Complex64, Complex64, bool); 4]>,
+    large_gates: &mut SmallVec<[(usize, Complex64, Complex64); 4]>,
+) {
+    for &(target, mat) in gates {
+        let d0 = mat[0][0];
+        let d1 = mat[1][1];
+        let skip_lo = is_phase_one(d0);
+        if target <= MULTI_GATE_MAX_L2_TARGET {
+            small_gates.push((target, d0, d1, skip_lo));
+        } else if target <= MULTI_GATE_MAX_L3_TARGET {
+            medium_gates.push((target, d0, d1, skip_lo));
+        } else {
+            large_gates.push((target, d0, d1));
+        }
+    }
+}
+
 /// Apply a `MultiFused` batch in the tiered tiled pass. Shared with the factored
 /// backend, whose blocks are bare statevector slices.
 #[cfg(feature = "parallel")]
@@ -2131,19 +2193,10 @@ pub(crate) fn apply_multi_1q_par(state: &mut [Complex64], gates: &[(usize, [[Com
         return;
     }
 
-    let mut small_gates: SmallVec<[(usize, simd::PreparedGate1q); 16]> = SmallVec::new();
-    let mut medium_gates: SmallVec<[(usize, simd::PreparedGate1q); 4]> = SmallVec::new();
-    let mut large_gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = SmallVec::new();
-
-    for &(target, mat) in gates {
-        if target <= MULTI_GATE_MAX_L2_TARGET {
-            small_gates.push((target, simd::PreparedGate1q::new(&mat)));
-        } else if target <= MULTI_GATE_MAX_L3_TARGET {
-            medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
-        } else {
-            large_gates.push((target, mat));
-        }
-    }
+    let mut small_gates = SmallVec::new();
+    let mut medium_gates = SmallVec::new();
+    let mut large_gates = SmallVec::new();
+    split_multi_1q_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
 
     if !small_gates.is_empty() {
         let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
@@ -3613,19 +3666,10 @@ impl StatevectorBackend {
             return;
         }
 
-        let mut small_gates: SmallVec<[(usize, simd::PreparedGate1q); 16]> = SmallVec::new();
-        let mut medium_gates: SmallVec<[(usize, simd::PreparedGate1q); 4]> = SmallVec::new();
-        let mut large_gates: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = SmallVec::new();
-
-        for &(target, mat) in gates {
-            if target <= MULTI_GATE_MAX_L2_TARGET {
-                small_gates.push((target, simd::PreparedGate1q::new(&mat)));
-            } else if target <= MULTI_GATE_MAX_L3_TARGET {
-                medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
-            } else {
-                large_gates.push((target, mat));
-            }
-        }
+        let mut small_gates = SmallVec::new();
+        let mut medium_gates = SmallVec::new();
+        let mut large_gates = SmallVec::new();
+        split_multi_1q_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
 
         if !small_gates.is_empty() {
             let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
@@ -3667,22 +3711,10 @@ impl StatevectorBackend {
             return;
         }
 
-        let mut small_gates: SmallVec<[(usize, Complex64, Complex64, bool); 16]> = SmallVec::new();
-        let mut medium_gates: SmallVec<[(usize, Complex64, Complex64, bool); 4]> = SmallVec::new();
-        let mut large_gates: SmallVec<[(usize, Complex64, Complex64); 4]> = SmallVec::new();
-
-        for &(target, mat) in gates {
-            let d0 = mat[0][0];
-            let d1 = mat[1][1];
-            let skip_lo = is_phase_one(d0);
-            if target <= MULTI_GATE_MAX_L2_TARGET {
-                small_gates.push((target, d0, d1, skip_lo));
-            } else if target <= MULTI_GATE_MAX_L3_TARGET {
-                medium_gates.push((target, d0, d1, skip_lo));
-            } else {
-                large_gates.push((target, d0, d1));
-            }
-        }
+        let mut small_gates = SmallVec::new();
+        let mut medium_gates = SmallVec::new();
+        let mut large_gates = SmallVec::new();
+        split_multi_1q_diagonal_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
 
         if !small_gates.is_empty() {
             let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
@@ -3713,22 +3745,10 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_multi_1q_diagonal_par(&mut self, gates: &[(usize, [[Complex64; 2]; 2])]) {
-        let mut small_gates: SmallVec<[(usize, Complex64, Complex64, bool); 16]> = SmallVec::new();
-        let mut medium_gates: SmallVec<[(usize, Complex64, Complex64, bool); 4]> = SmallVec::new();
-        let mut large_gates: SmallVec<[(usize, Complex64, Complex64); 4]> = SmallVec::new();
-
-        for &(target, mat) in gates {
-            let d0 = mat[0][0];
-            let d1 = mat[1][1];
-            let skip_lo = is_phase_one(d0);
-            if target <= MULTI_GATE_MAX_L2_TARGET {
-                small_gates.push((target, d0, d1, skip_lo));
-            } else if target <= MULTI_GATE_MAX_L3_TARGET {
-                medium_gates.push((target, d0, d1, skip_lo));
-            } else {
-                large_gates.push((target, d0, d1));
-            }
-        }
+        let mut small_gates = SmallVec::new();
+        let mut medium_gates = SmallVec::new();
+        let mut large_gates = SmallVec::new();
+        split_multi_1q_diagonal_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
 
         if !small_gates.is_empty() {
             let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
@@ -3808,14 +3828,15 @@ impl StatevectorBackend {
     /// Apply multiple two-qubit gates in a cache-tiled pass.
     ///
     /// A batch whose qubits reach past the lowest tile bits takes the subcube
-    /// path (see [`subcube_plan`]): each 256 KB subcube is gathered into a
-    /// per-thread tile, every gate is applied there in order, and the tile is
-    /// scattered back, so the whole batch costs one pass over the state plus
-    /// in-cache arithmetic.
-    /// A batch that sits entirely below bit 14 tiles the state in place. Any
-    /// other list falls back to the tiered pass by `max(q0, q1)`: L2 tiles up
-    /// to qubit 13, L3 tiles up to 16, one full pass per gate above that. That
-    /// pass runs tier by tier, so it keeps application order only within a tier.
+    /// path (see [`subcube_plan`]): each subcube (256 KB by default, set by
+    /// `PRISM_MULTI_2Q_TILE_BITS`) is gathered into a per-thread tile, every
+    /// gate is applied there in order, and the tile is scattered back, so the
+    /// whole batch costs one pass over the state plus in-cache arithmetic.
+    /// A batch that sits entirely below the tile bits (14 by default) tiles the
+    /// state in place. Any other list falls back to the tiered pass by
+    /// `max(q0, q1)`: L2 tiles up to qubit 13, L3 tiles up to 16, one full pass
+    /// per gate above that. That pass runs tier by tier, so it keeps application
+    /// order only within a tier.
     #[inline(always)]
     pub(crate) fn apply_multi_2q(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
         if gates.is_empty() {
@@ -3841,17 +3862,9 @@ impl StatevectorBackend {
             return;
         }
 
-        let mut small_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
-        let mut medium_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
-
-        for &(q0, q1, ref mat) in gates {
-            let max_q = q0.max(q1);
-            if max_q <= MULTI_GATE_MAX_L2_TARGET {
-                small_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
-            } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
-                medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
-            }
-        }
+        let mut small_gates = SmallVec::new();
+        let mut medium_gates = SmallVec::new();
+        split_multi_2q_tiers(gates, &mut small_gates, &mut medium_gates);
 
         if !small_gates.is_empty() {
             let tile_size = MULTI_GATE_L2_TILE;
@@ -3875,6 +3888,12 @@ impl StatevectorBackend {
             }
         }
 
+        self.apply_multi_2q_untiled(gates);
+    }
+
+    /// Apply, one full pass each, the gates whose high qubit is above the L3 tile.
+    #[inline(always)]
+    fn apply_multi_2q_untiled(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
         for &(q0, q1, ref mat) in gates {
             if q0.max(q1) > MULTI_GATE_MAX_L3_TARGET {
                 self.apply_fused_2q(q0, q1, mat);
@@ -3885,17 +3904,9 @@ impl StatevectorBackend {
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_multi_2q_par(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
-        let mut small_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
-        let mut medium_gates: SmallVec<[(usize, usize, simd::PreparedGate2q); 2]> = SmallVec::new();
-
-        for &(q0, q1, ref mat) in gates {
-            let max_q = q0.max(q1);
-            if max_q <= MULTI_GATE_MAX_L2_TARGET {
-                small_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
-            } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
-                medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
-            }
-        }
+        let mut small_gates = SmallVec::new();
+        let mut medium_gates = SmallVec::new();
+        split_multi_2q_tiers(gates, &mut small_gates, &mut medium_gates);
 
         if !small_gates.is_empty() {
             let tile_size = MULTI_GATE_L2_TILE;
@@ -3925,11 +3936,7 @@ impl StatevectorBackend {
                 });
         }
 
-        for &(q0, q1, ref mat) in gates {
-            if q0.max(q1) > MULTI_GATE_MAX_L3_TARGET {
-                self.apply_fused_2q(q0, q1, mat);
-            }
-        }
+        self.apply_multi_2q_untiled(gates);
     }
 
     #[cfg(feature = "parallel")]

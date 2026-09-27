@@ -2114,8 +2114,33 @@ fn bench_auto_crossover(c: &mut Criterion) {
     // size through `run_on`, which brackets the floor from below and, above
     // it, runs what `auto` runs. Depth 200 rather than 10 because at depth 10
     // these rows sit near 500 us, where two arms running the same route read
-    // 14% to 48% apart on the reference host.
-    for &(blocks, block_size) in &[(6usize, 16usize), (8, 16), (10, 16), (20, 8)] {
+    // 14% to 48% apart on the reference host. The grid runs 24 to 160 qubits
+    // at blocks of 2 to 16, so each constant's crossover reads along one axis
+    // with the other held. At 64 qubits and below every arm also builds the
+    // per-block probabilities, as a run returns them there.
+    for &(blocks, block_size) in &[
+        (2usize, 16usize),
+        (3, 16),
+        (4, 16),
+        (6, 16),
+        (8, 16),
+        (10, 16),
+        (3, 8),
+        (4, 8),
+        (8, 8),
+        (12, 8),
+        (20, 8),
+        (6, 4),
+        (8, 4),
+        (16, 4),
+        (24, 4),
+        (40, 4),
+        (12, 2),
+        (16, 2),
+        (32, 2),
+        (48, 2),
+        (80, 2),
+    ] {
         let n = blocks * block_size;
         let circuit = circuits::local_clifford_blocks(blocks, block_size, 200, SEED);
         let id = format!("fstab_{n}q_b{block_size}");

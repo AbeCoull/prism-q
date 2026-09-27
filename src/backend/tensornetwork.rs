@@ -107,7 +107,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::SmallVec;
 
 use crate::backend::{
-    Backend, BasisSamples, NORM_CLAMP_MIN, dense_statevector_len, reserve_dense_output,
+    Backend, BasisSamples, NORM_CLAMP_MIN, dense_statevector_len, reserve_dense_output, simd,
     tensor_peak_cap_elements, tensor_peak_error, tensor_probability_len,
 };
 use crate::circuit::{Circuit, Instruction};
@@ -1635,6 +1635,65 @@ thread_local! {
     static PLANNER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// Rank-`2k` tensor of a `k`-qubit gate on legs `[out.., in..]`, conjugated for
+/// the bra copy when `conjugate` is set.
+///
+/// A row-major `2^k` by `2^k` matrix is already the tensor's data in that leg
+/// order, the first target the most significant bit on each side.
+fn gate_tensor(
+    mut data: Vec<Complex64>,
+    out_legs: &[LegId],
+    in_legs: &[LegId],
+    conjugate: bool,
+) -> Tensor {
+    if conjugate {
+        data.iter_mut().for_each(|value| *value = value.conj());
+    }
+    Tensor {
+        data,
+        shape: SmallVec::from_elem(2, out_legs.len() + in_legs.len()),
+        legs: out_legs.iter().chain(in_legs).copied().collect(),
+    }
+}
+
+/// The Pauli on `axis` as a tensor on legs `[bra, ket]`, identity for `None`.
+fn pauli_tensor(axis: Option<PauliAxis>, bra_leg: LegId, ket_leg: LegId) -> Tensor {
+    let gate = match axis {
+        None => Gate::Id,
+        Some(PauliAxis::X) => Gate::X,
+        Some(PauliAxis::Y) => Gate::Y,
+        Some(PauliAxis::Z) => Gate::Z,
+    };
+    let data = gate.matrix_2x2().as_flattened().to_vec();
+    gate_tensor(data, &[bra_leg], &[ket_leg], false)
+}
+
+/// Reset `axes`, one slot per qubit, and fill it from a joint Pauli observable.
+///
+/// The checks match [`crate::sim::validate_observable`]; `owner` leads the
+/// duplicate-factor message.
+fn observable_axes(terms: &[PauliTerm], axes: &mut [Option<PauliAxis>], owner: &str) -> Result<()> {
+    axes.fill(None);
+    for term in terms {
+        if term.qubit >= axes.len() {
+            return Err(PrismError::InvalidQubit {
+                index: term.qubit,
+                register_size: axes.len(),
+            });
+        }
+        if axes[term.qubit].is_some() {
+            return Err(PrismError::InvalidParameter {
+                message: format!(
+                    "{owner} observable has duplicate factor on qubit {}",
+                    term.qubit
+                ),
+            });
+        }
+        axes[term.qubit] = Some(term.axis);
+    }
+    Ok(())
+}
+
 struct ScalarExpectationNetwork {
     num_qubits: usize,
     tensors: Vec<Tensor>,
@@ -1702,21 +1761,12 @@ impl ScalarExpectationNetwork {
             self.ket_legs[target]
         };
         let out_leg = self.fresh_leg();
-        let data = if conjugate {
-            vec![
-                mat[0][0].conj(),
-                mat[0][1].conj(),
-                mat[1][0].conj(),
-                mat[1][1].conj(),
-            ]
-        } else {
-            vec![mat[0][0], mat[0][1], mat[1][0], mat[1][1]]
-        };
-        self.tensors.push(Tensor {
-            data,
-            shape: smallvec::smallvec![2, 2],
-            legs: smallvec::smallvec![out_leg, in_leg],
-        });
+        self.tensors.push(gate_tensor(
+            mat.as_flattened().to_vec(),
+            &[out_leg],
+            &[in_leg],
+            conjugate,
+        ));
         if conjugate {
             self.bra_legs[target] = out_leg;
         } else {
@@ -1741,23 +1791,12 @@ impl ScalarExpectationNetwork {
         };
         let out0 = self.fresh_leg();
         let out1 = self.fresh_leg();
-        let mut data = vec![Complex64::new(0.0, 0.0); 16];
-        for i0 in 0..2usize {
-            for i1 in 0..2usize {
-                for j0 in 0..2usize {
-                    for j1 in 0..2usize {
-                        let value = mat[i0 * 2 + i1][j0 * 2 + j1];
-                        data[i0 * 8 + i1 * 4 + j0 * 2 + j1] =
-                            if conjugate { value.conj() } else { value };
-                    }
-                }
-            }
-        }
-        self.tensors.push(Tensor {
-            data,
-            shape: SmallVec::from_slice(&[2, 2, 2, 2]),
-            legs: SmallVec::from_slice(&[out0, out1, in0, in1]),
-        });
+        self.tensors.push(gate_tensor(
+            mat.as_flattened().to_vec(),
+            &[out0, out1],
+            &[in0, in1],
+            conjugate,
+        ));
         if conjugate {
             self.bra_legs[q0] = out0;
             self.bra_legs[q1] = out1;
@@ -1771,7 +1810,7 @@ impl ScalarExpectationNetwork {
     fn append_nq_matrix(
         &mut self,
         qubits: &[usize],
-        full_mat: &[Vec<Complex64>],
+        matrix: Vec<Complex64>,
         conjugate: bool,
     ) -> Result<()> {
         for &qubit in qubits {
@@ -1779,7 +1818,7 @@ impl ScalarExpectationNetwork {
         }
         let m = qubits.len();
         let dim = 1usize << m;
-        if full_mat.len() != dim || full_mat.iter().any(|row| row.len() != dim) {
+        if matrix.len() != dim * dim {
             return Err(PrismError::InvalidParameter {
                 message: format!(
                     "tensor-network scalar expected a {dim} by {dim} matrix for {} targets",
@@ -1793,35 +1832,8 @@ impl ScalarExpectationNetwork {
             qubits.iter().map(|&q| self.ket_legs[q]).collect()
         };
         let out_legs: SmallVec<[LegId; 6]> = (0..m).map(|_| self.fresh_leg()).collect();
-        let mut data = vec![Complex64::new(0.0, 0.0); dim * dim];
-
-        for (out_idx, row) in full_mat.iter().enumerate() {
-            for (in_idx, &raw) in row.iter().enumerate() {
-                let value = if conjugate { raw.conj() } else { raw };
-                let mut flat = 0usize;
-                for bit in 0..m {
-                    let out_bit = (out_idx >> (m - 1 - bit)) & 1;
-                    flat = flat * 2 + out_bit;
-                }
-                for bit in 0..m {
-                    let in_bit = (in_idx >> (m - 1 - bit)) & 1;
-                    flat = flat * 2 + in_bit;
-                }
-                data[flat] = value;
-            }
-        }
-
-        let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
-        let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
-        for &leg in &out_legs {
-            shape.push(2);
-            legs.push(leg);
-        }
-        for &leg in &in_legs {
-            shape.push(2);
-            legs.push(leg);
-        }
-        self.tensors.push(Tensor { data, shape, legs });
+        self.tensors
+            .push(gate_tensor(matrix, &out_legs, &in_legs, conjugate));
 
         let legs = if conjugate {
             &mut self.bra_legs
@@ -1832,6 +1844,31 @@ impl ScalarExpectationNetwork {
             legs[qubit] = out_legs[idx];
         }
         Ok(())
+    }
+
+    /// The ket and bra copies of `circuit`, rejecting any instruction that is
+    /// not a unitary gate or a barrier.
+    fn from_circuit(circuit: &Circuit) -> Result<Self> {
+        let mut network = Self::new(circuit.num_qubits);
+        for instruction in &circuit.instructions {
+            match instruction {
+                Instruction::Gate { gate, targets } => network.append_gate(gate, targets)?,
+                Instruction::Barrier { .. } => {}
+                Instruction::Save { label, .. } => {
+                    return Err(crate::backend::save_not_applied("TensorNetwork", label));
+                }
+                Instruction::Measure { .. }
+                | Instruction::Reset { .. }
+                | Instruction::Conditional { .. }
+                | Instruction::Region(_) => {
+                    return Err(PrismError::BackendUnsupported {
+                        backend: "tensor_network_scalar".to_string(),
+                        operation: format!("non-unitary instruction {instruction:?}"),
+                    });
+                }
+            }
+        }
+        Ok(network)
     }
 
     fn append_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
@@ -1845,45 +1882,22 @@ impl ScalarExpectationNetwork {
                 self.append_2q_matrix(q0, q1, &mat, false)?;
                 self.append_2q_matrix(q0, q1, &mat, true)
             }
-            GateTensorOp::NQ(qubits, full) => {
-                self.append_nq_matrix(qubits, &full, false)?;
-                self.append_nq_matrix(qubits, &full, true)
+            GateTensorOp::NQ(qubits, matrix) => {
+                self.append_nq_matrix(qubits, matrix.clone(), false)?;
+                self.append_nq_matrix(qubits, matrix, true)
             }
         })
     }
 
     fn append_observable(&mut self, terms: &[PauliTerm]) -> Result<()> {
         let mut axes = vec![None; self.num_qubits];
-        for term in terms {
-            self.validate_qubit(term.qubit)?;
-            if axes[term.qubit].is_some() {
-                return Err(PrismError::InvalidParameter {
-                    message: format!(
-                        "tensor-network scalar observable has duplicate factor on qubit {}",
-                        term.qubit
-                    ),
-                });
-            }
-            axes[term.qubit] = Some(term.axis);
-        }
-
-        let zero = Complex64::new(0.0, 0.0);
-        let one = Complex64::new(1.0, 0.0);
-        let neg_one = Complex64::new(-1.0, 0.0);
-        let i = Complex64::new(0.0, 1.0);
-        let neg_i = Complex64::new(0.0, -1.0);
+        observable_axes(terms, &mut axes, "tensor-network scalar")?;
         for (qubit, axis) in axes.into_iter().enumerate() {
-            let data = match axis {
-                None => vec![one, zero, zero, one],
-                Some(PauliAxis::X) => vec![zero, one, one, zero],
-                Some(PauliAxis::Y) => vec![zero, neg_i, i, zero],
-                Some(PauliAxis::Z) => vec![one, zero, zero, neg_one],
-            };
-            self.tensors.push(Tensor {
-                data,
-                shape: smallvec::smallvec![2, 2],
-                legs: smallvec::smallvec![self.bra_legs[qubit], self.ket_legs[qubit]],
-            });
+            self.tensors.push(pauli_tensor(
+                axis,
+                self.bra_legs[qubit],
+                self.ket_legs[qubit],
+            ));
         }
         Ok(())
     }
@@ -1919,25 +1933,7 @@ impl ScalarExpectationNetwork {
 
 /// Contract `<0| U^dag P U |0>` without materializing a full statevector.
 pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
-    let mut network = ScalarExpectationNetwork::new(circuit.num_qubits);
-    for instruction in &circuit.instructions {
-        match instruction {
-            Instruction::Gate { gate, targets } => network.append_gate(gate, targets)?,
-            Instruction::Barrier { .. } => {}
-            Instruction::Save { label, .. } => {
-                return Err(crate::backend::save_not_applied("TensorNetwork", label));
-            }
-            Instruction::Measure { .. }
-            | Instruction::Reset { .. }
-            | Instruction::Conditional { .. }
-            | Instruction::Region(_) => {
-                return Err(PrismError::BackendUnsupported {
-                    backend: "tensor_network_scalar".to_string(),
-                    operation: format!("non-unitary instruction {instruction:?}"),
-                });
-            }
-        }
-    }
+    let mut network = ScalarExpectationNetwork::from_circuit(circuit)?;
     network.append_observable(pauli_terms)?;
     network.contract(ContractionLimits::from_env())
 }
@@ -1962,14 +1958,7 @@ pub(crate) fn bounded_expectations_zero_state(
     let circuit = crate::circuit::expand_qft_blocks(circuit);
     let mut planned = Vec::with_capacity(observables.len());
     for observable in observables {
-        let mut network = ScalarExpectationNetwork::new(circuit.num_qubits);
-        for instruction in &circuit.instructions {
-            match instruction {
-                Instruction::Gate { gate, targets } => network.append_gate(gate, targets).ok()?,
-                Instruction::Barrier { .. } => {}
-                _ => return None,
-            }
-        }
+        let mut network = ScalarExpectationNetwork::from_circuit(&circuit).ok()?;
         if let Err(e) = network.append_observable(observable) {
             return Some(Err(e));
         }
@@ -2006,13 +1995,7 @@ pub fn scalar_expectation_capped(
     slice_budget: usize,
     tolerance: Option<f64>,
 ) -> Result<f64> {
-    let mut network = ScalarExpectationNetwork::new(circuit.num_qubits);
-    for instruction in &circuit.instructions {
-        let Instruction::Gate { gate, targets } = instruction else {
-            continue;
-        };
-        network.append_gate(gate, targets)?;
-    }
+    let mut network = ScalarExpectationNetwork::from_circuit(circuit)?;
     network.append_observable(pauli_terms)?;
     network.contract(ContractionLimits {
         peak_cap,
@@ -2022,12 +2005,12 @@ pub fn scalar_expectation_capped(
 }
 
 /// Elementary tensor operation a gate decomposes into when appended to a
-/// tensor network. `NQ` carries the full `2^k × 2^k` matrix for
+/// tensor network. `NQ` carries the full row-major `2^k × 2^k` matrix for
 /// multi-controlled unitaries.
 enum GateTensorOp<'a> {
     OneQ(usize, [[Complex64; 2]; 2]),
     TwoQ(usize, usize, [[Complex64; 4]; 4]),
-    NQ(&'a [usize], Vec<Vec<Complex64>>),
+    NQ(&'a [usize], Vec<Complex64>),
 }
 
 /// Decompose `gate` into the elementary 1q/2q/nq matrix operations a tensor
@@ -2086,13 +2069,7 @@ where
         }
         Gate::Unitary(data) => {
             check_arity(data.num_qubits())?;
-            let dim = 1usize << data.num_qubits();
-            let full: Vec<Vec<Complex64>> = data
-                .matrix()
-                .chunks(dim)
-                .map(<[Complex64]>::to_vec)
-                .collect();
-            emit(GateTensorOp::NQ(targets, full))
+            emit(GateTensorOp::NQ(targets, data.matrix().to_vec()))
         }
         Gate::BatchPhase(data) => {
             if targets.is_empty() {
@@ -2375,16 +2352,12 @@ impl TensorNetworkBackend {
     fn append_1q_matrix(&mut self, target: usize, mat: &[[Complex64; 2]; 2]) {
         let in_leg = self.output_legs[target];
         let out_leg = self.fresh_leg();
-
-        // Rank-2 tensor: shape [2, 2], legs [out, in]
-        // data[out_idx * 2 + in_idx] = mat[out_idx][in_idx]
-        let data = vec![mat[0][0], mat[0][1], mat[1][0], mat[1][1]];
-        self.tensors.push(Tensor {
-            data,
-            shape: smallvec::smallvec![2, 2],
-            legs: smallvec::smallvec![out_leg, in_leg],
-        });
-
+        self.tensors.push(gate_tensor(
+            mat.as_flattened().to_vec(),
+            &[out_leg],
+            &[in_leg],
+            false,
+        ));
         self.output_legs[target] = out_leg;
     }
 
@@ -2393,85 +2366,37 @@ impl TensorNetworkBackend {
         let in1 = self.output_legs[q1];
         let out0 = self.fresh_leg();
         let out1 = self.fresh_leg();
-
-        // Rank-4 tensor: shape [2, 2, 2, 2], legs [out0, out1, in0, in1]
-        // Index: mat[i0*2 + i1][j0*2 + j1] → data[out0 * 8 + out1 * 4 + in0 * 2 + in1]
-        let mut data = vec![Complex64::new(0.0, 0.0); 16];
-        for i0 in 0..2usize {
-            for i1 in 0..2usize {
-                for j0 in 0..2usize {
-                    for j1 in 0..2usize {
-                        data[i0 * 8 + i1 * 4 + j0 * 2 + j1] = mat[i0 * 2 + i1][j0 * 2 + j1];
-                    }
-                }
-            }
-        }
-
-        self.tensors.push(Tensor {
-            data,
-            shape: SmallVec::from_slice(&[2, 2, 2, 2]),
-            legs: SmallVec::from_slice(&[out0, out1, in0, in1]),
-        });
-
+        self.tensors.push(gate_tensor(
+            mat.as_flattened().to_vec(),
+            &[out0, out1],
+            &[in0, in1],
+            false,
+        ));
         self.output_legs[q0] = out0;
         self.output_legs[q1] = out1;
     }
 
-    /// Build the full 2^m × 2^m matrix for an MCU gate.
-    fn mcu_full_matrix(num_controls: usize, mat: &[[Complex64; 2]; 2]) -> Vec<Vec<Complex64>> {
+    /// Build the full row-major 2^m × 2^m matrix for an MCU gate.
+    fn mcu_full_matrix(num_controls: usize, mat: &[[Complex64; 2]; 2]) -> Vec<Complex64> {
         let m = num_controls + 1;
         let dim = 1usize << m;
         let zero = Complex64::new(0.0, 0.0);
         let one = Complex64::new(1.0, 0.0);
-        let mut full = vec![vec![zero; dim]; dim];
-        for (i, row) in full.iter_mut().enumerate().take(dim - 2) {
-            row[i] = one;
+        let mut full = vec![zero; dim * dim];
+        for i in 0..dim - 2 {
+            full[i * dim + i] = one;
         }
-        full[dim - 2][dim - 2] = mat[0][0];
-        full[dim - 2][dim - 1] = mat[0][1];
-        full[dim - 1][dim - 2] = mat[1][0];
-        full[dim - 1][dim - 1] = mat[1][1];
+        let corner = (dim - 2) * dim + dim - 2;
+        full[corner..corner + 2].copy_from_slice(&mat[0]);
+        full[corner + dim..corner + dim + 2].copy_from_slice(&mat[1]);
         full
     }
 
-    fn apply_nq_matrix(&mut self, qubits: &[usize], full_mat: &[Vec<Complex64>]) {
-        let m = qubits.len();
-        let dim = 1usize << m;
-
+    fn apply_nq_matrix(&mut self, qubits: &[usize], matrix: Vec<Complex64>) {
         let in_legs: SmallVec<[LegId; 6]> = qubits.iter().map(|&q| self.output_legs[q]).collect();
-        let out_legs: SmallVec<[LegId; 6]> = (0..m).map(|_| self.fresh_leg()).collect();
-
-        // Rank-2m tensor: shape [2]^(2m), legs [out0..outm, in0..inm]
-        let total = dim * dim;
-        let mut data = vec![Complex64::new(0.0, 0.0); total];
-
-        for (out_idx, row) in full_mat.iter().enumerate() {
-            for (in_idx, &val) in row.iter().enumerate() {
-                let mut flat = 0usize;
-                for bit in 0..m {
-                    let out_bit = (out_idx >> (m - 1 - bit)) & 1;
-                    flat = flat * 2 + out_bit;
-                }
-                for bit in 0..m {
-                    let in_bit = (in_idx >> (m - 1 - bit)) & 1;
-                    flat = flat * 2 + in_bit;
-                }
-                data[flat] = val;
-            }
-        }
-
-        let mut shape: SmallVec<[usize; 6]> = SmallVec::new();
-        let mut legs: SmallVec<[LegId; 6]> = SmallVec::new();
-        for i in 0..m {
-            shape.push(2);
-            legs.push(out_legs[i]);
-        }
-        for i in 0..m {
-            shape.push(2);
-            legs.push(in_legs[i]);
-        }
-
-        self.tensors.push(Tensor { data, shape, legs });
+        let out_legs: SmallVec<[LegId; 6]> = (0..qubits.len()).map(|_| self.fresh_leg()).collect();
+        self.tensors
+            .push(gate_tensor(matrix, &out_legs, &in_legs, false));
 
         for (i, &q) in qubits.iter().enumerate() {
             self.output_legs[q] = out_legs[i];
@@ -2572,23 +2497,11 @@ impl TensorNetworkBackend {
         }
 
         let mut network = self.double_through(&bra_legs);
-
-        let zero = Complex64::new(0.0, 0.0);
-        let one = Complex64::new(1.0, 0.0);
-        let i = Complex64::new(0.0, 1.0);
-        for (q, axis) in axes.iter().enumerate() {
-            let Some(axis) = axis else { continue };
-            let data = match axis {
-                PauliAxis::X => vec![zero, one, one, zero],
-                PauliAxis::Y => vec![zero, -i, i, zero],
-                PauliAxis::Z => vec![one, zero, zero, -one],
-            };
-            let ket_leg = self.output_legs[q];
-            network.push(Tensor {
-                data,
-                shape: smallvec::smallvec![2, 2],
-                legs: smallvec::smallvec![bra_legs[ket_leg], ket_leg],
-            });
+        for (q, &axis) in axes.iter().enumerate() {
+            if axis.is_some() {
+                let ket_leg = self.output_legs[q];
+                network.push(pauli_tensor(axis, bra_legs[ket_leg], ket_leg));
+            }
         }
 
         let result = greedy_contract(
@@ -2643,7 +2556,7 @@ impl TensorNetworkBackend {
             match op {
                 GateTensorOp::OneQ(q, mat) => self.append_1q_matrix(q, &mat),
                 GateTensorOp::TwoQ(q0, q1, mat) => self.apply_2q_matrix(q0, q1, &mat),
-                GateTensorOp::NQ(qubits, full) => self.apply_nq_matrix(qubits, &full),
+                GateTensorOp::NQ(qubits, matrix) => self.apply_nq_matrix(qubits, matrix),
             }
             Ok(())
         })
@@ -2756,11 +2669,17 @@ impl Backend for TensorNetworkBackend {
     fn probabilities(&self) -> Result<Vec<f64>> {
         tensor_probability_len(self.name(), self.num_qubits)?;
         let amplitudes = self.contract_to_statevector()?;
+        let mut probs = vec![0.0_f64; amplitudes.len()];
         #[cfg(feature = "parallel")]
         if amplitudes.len() >= MIN_PAR_ELEMS {
-            return Ok(amplitudes.par_iter().map(|a| a.norm_sqr()).collect());
+            amplitudes
+                .par_chunks(MIN_PAR_ELEMS)
+                .zip(probs.par_chunks_mut(MIN_PAR_ELEMS))
+                .for_each(|(src, dst)| simd::norm_sqr_to_slice(src, dst));
+            return Ok(probs);
         }
-        Ok(amplitudes.iter().map(|a| a.norm_sqr()).collect())
+        simd::norm_sqr_to_slice(&amplitudes, &mut probs);
+        Ok(probs)
     }
 
     fn supports_native_sampling(&self) -> bool {
@@ -2828,24 +2747,7 @@ impl Backend for TensorNetworkBackend {
         let norm_sq = self.contract_pauli_sandwich(&axes)?;
 
         for observable in observables {
-            axes.iter_mut().for_each(|axis| *axis = None);
-            for term in observable {
-                if term.qubit >= self.num_qubits {
-                    return Err(PrismError::InvalidQubit {
-                        index: term.qubit,
-                        register_size: self.num_qubits,
-                    });
-                }
-                if axes[term.qubit].is_some() {
-                    return Err(PrismError::InvalidParameter {
-                        message: format!(
-                            "tensor-network observable has duplicate factor on qubit {}",
-                            term.qubit
-                        ),
-                    });
-                }
-                axes[term.qubit] = Some(term.axis);
-            }
+            observable_axes(observable, &mut axes, "tensor-network")?;
             expectations.push(self.contract_pauli_sandwich(&axes)? / norm_sq);
         }
 
@@ -3189,13 +3091,7 @@ mod tests {
     }
 
     fn scalar_network(circuit: &Circuit, terms: &[PauliTerm]) -> ScalarExpectationNetwork {
-        let mut network = ScalarExpectationNetwork::new(circuit.num_qubits);
-        for instruction in &circuit.instructions {
-            let Instruction::Gate { gate, targets } = instruction else {
-                continue;
-            };
-            network.append_gate(gate, targets).unwrap();
-        }
+        let mut network = ScalarExpectationNetwork::from_circuit(circuit).unwrap();
         network.append_observable(terms).unwrap();
         network
     }

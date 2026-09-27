@@ -12,7 +12,7 @@ use crate::circuit::PyCircuit;
 use crate::error::{PyPrismResult, invalid};
 use crate::numpy_util::f64_matrix;
 use crate::sim::{
-    DEFAULT_SEED, PyObservableExpectation, PyRunOutcome, build_observable, parse_observables,
+    DEFAULT_SEED, Hamiltonian, PyObservableExpectation, PyRunOutcome, parse_observables,
 };
 
 /// Parameter slots over the rotation angles of a circuit.
@@ -206,10 +206,10 @@ impl PyPreparedCircuit {
         &self,
         py: Python<'_>,
         values: Vec<f64>,
-        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        hamiltonian: Hamiltonian<'_>,
         seed: u64,
     ) -> PyPrismResult<PyObservableExpectation> {
-        let observable = build_observable(hamiltonian)?;
+        let observable = hamiltonian.observable()?;
         let result = py.detach(|| {
             self.locked()
                 .observable_expectation(&values, &observable, seed)
@@ -260,11 +260,11 @@ impl PyPreparedCircuit {
         &self,
         py: Python<'_>,
         bindings: &Bound<'_, PyAny>,
-        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        hamiltonian: Hamiltonian<'_>,
         seed: u64,
     ) -> PyPrismResult<Vec<PyObservableExpectation>> {
         let rows = binding_rows(bindings)?;
-        let observable = build_observable(hamiltonian)?;
+        let observable = hamiltonian.observable()?;
         let results = py.detach(|| {
             self.locked()
                 .observable_expectation_many(&rows, &observable, seed)

@@ -29,8 +29,8 @@ use qec::{
 };
 use sim::{
     PyBondReport, PyCountsResult, PyEntropyResult, PyExpectationResult, PyObservableExpectation,
-    PyObservableVariance, PyOverlapResult, PyReducedDensityMatrix, PyRunMetadata, PyRunOutcome,
-    PyShotsResult, PySimulation,
+    PyObservableVariance, PyOverlapResult, PyPauliObservable, PyReducedDensityMatrix,
+    PyRunMetadata, PyRunOutcome, PyShotsResult, PySimulation,
 };
 
 #[pymodule]
@@ -57,6 +57,7 @@ fn _prism_q(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCountsResult>()?;
     m.add_class::<PyRunMetadata>()?;
     m.add_class::<PyBondReport>()?;
+    m.add_class::<PyPauliObservable>()?;
     m.add_class::<PyObservableExpectation>()?;
     m.add_class::<PyObservableVariance>()?;
     m.add_class::<PyEntropyResult>()?;

@@ -2,6 +2,7 @@
 //! the core `Simulate` chain inside each terminal, so no Rust lifetimes or typestate
 //! parameters reach Python.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use num_complex::Complex64;
@@ -314,16 +315,13 @@ impl PySimulation {
     fn expectation_gradient<'py>(
         &self,
         py: Python<'py>,
-        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        hamiltonian: Hamiltonian<'py>,
         parameters: Vec<(usize, usize)>,
     ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
         if self.noise.is_some() {
             return Err(invalid("expectation_gradient() does not support noise"));
         }
-        let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
-        for (coeff, factors) in hamiltonian {
-            terms.push((coeff, parse_pauli_string(factors)?));
-        }
+        let terms = hamiltonian.terms()?;
         let links: Vec<ParamLink> = parameters
             .into_iter()
             .map(|(instruction, slot)| ParamLink { instruction, slot })
@@ -364,7 +362,7 @@ impl PySimulation {
     fn expectation_gradient_shift<'py>(
         &self,
         py: Python<'py>,
-        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        hamiltonian: Hamiltonian<'py>,
         parameters: Vec<(usize, usize)>,
     ) -> PyPrismResult<(f64, Bound<'py, PyArray1<f64>>)> {
         if self.noise.is_some() {
@@ -372,10 +370,7 @@ impl PySimulation {
                 "expectation_gradient_shift() does not support noise",
             ));
         }
-        let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
-        for (coeff, factors) in hamiltonian {
-            terms.push((coeff, parse_pauli_string(factors)?));
-        }
+        let terms = hamiltonian.terms()?;
         let links: Vec<ParamLink> = parameters
             .into_iter()
             .map(|(instruction, slot)| ParamLink { instruction, slot })
@@ -597,9 +592,9 @@ impl PySimulation {
     fn observable_variance(
         &self,
         py: Python<'_>,
-        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        hamiltonian: Hamiltonian<'_>,
     ) -> PyPrismResult<PyObservableVariance> {
-        let observable = build_observable(hamiltonian)?;
+        let observable = hamiltonian.observable()?;
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let require_exact = self.require_exact;
@@ -748,9 +743,9 @@ impl PySimulation {
     fn observable_expectation(
         &self,
         py: Python<'_>,
-        hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
+        hamiltonian: Hamiltonian<'_>,
     ) -> PyPrismResult<PyObservableExpectation> {
-        let observable = build_observable(hamiltonian)?;
+        let observable = hamiltonian.observable()?;
         let seed = self.seed.unwrap_or(DEFAULT_SEED);
         let kind = self.kind.clone();
         let require_exact = self.require_exact;
@@ -821,24 +816,111 @@ impl PySimulation {
 pub(crate) fn parse_observables(
     observables: Vec<Vec<(usize, String)>>,
 ) -> PyPrismResult<Vec<Vec<PauliTerm>>> {
-    observables.into_iter().map(parse_pauli_string).collect()
+    observables.iter().map(|f| parse_pauli_string(f)).collect()
 }
 
-pub(crate) fn build_observable(
-    hamiltonian: Vec<(f64, Vec<(usize, String)>)>,
-) -> PyPrismResult<PauliObservable> {
-    let mut terms: Vec<(f64, Vec<PauliTerm>)> = Vec::with_capacity(hamiltonian.len());
-    for (coefficient, factors) in hamiltonian {
-        terms.push((coefficient, parse_pauli_string(factors)?));
-    }
-    Ok(PauliObservable::from_terms(terms)?)
-}
-
-pub(crate) fn parse_pauli_string(factors: Vec<(usize, String)>) -> PyPrismResult<Vec<PauliTerm>> {
-    factors
-        .into_iter()
-        .map(|(qubit, axis)| Ok(PauliTerm::new(qubit, parse_axis(&axis)?)))
+fn parse_terms(
+    hamiltonian: &[(f64, Vec<(usize, String)>)],
+) -> PyPrismResult<Vec<(f64, Vec<PauliTerm>)>> {
+    hamiltonian
+        .iter()
+        .map(|(coefficient, factors)| Ok((*coefficient, parse_pauli_string(factors)?)))
         .collect()
+}
+
+fn build_observable(hamiltonian: &[(f64, Vec<(usize, String)>)]) -> PyPrismResult<PauliObservable> {
+    Ok(PauliObservable::from_terms(parse_terms(hamiltonian)?)?)
+}
+
+pub(crate) fn parse_pauli_string(factors: &[(usize, String)]) -> PyPrismResult<Vec<PauliTerm>> {
+    factors
+        .iter()
+        .map(|(qubit, axis)| Ok(PauliTerm::new(*qubit, parse_axis(axis)?)))
+        .collect()
+}
+
+type WeightedStrings = [(f64, Vec<PauliTerm>)];
+
+/// A Hamiltonian argument: a held `PauliObservable`, or a term list parsed on
+/// every call.
+pub(crate) enum Hamiltonian<'py> {
+    Held(Bound<'py, PyPauliObservable>),
+    Terms(Vec<(f64, Vec<(usize, String)>)>),
+}
+
+impl<'py> FromPyObject<'_, 'py> for Hamiltonian<'py> {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        match obj.cast::<PyPauliObservable>() {
+            Ok(held) => Ok(Self::Held(held.to_owned())),
+            Err(_) => obj.extract().map(Self::Terms),
+        }
+    }
+}
+
+impl Hamiltonian<'_> {
+    pub(crate) fn observable(&self) -> PyPrismResult<Cow<'_, PauliObservable>> {
+        match self {
+            Self::Held(held) => Ok(Cow::Borrowed(&held.get().0)),
+            Self::Terms(terms) => Ok(Cow::Owned(build_observable(terms)?)),
+        }
+    }
+
+    /// Terms for the gradient terminals, which take a term list as given rather
+    /// than merged into canonical form.
+    fn terms(&self) -> PyPrismResult<Cow<'_, WeightedStrings>> {
+        match self {
+            Self::Held(held) => Ok(Cow::Borrowed(held.get().0.terms())),
+            Self::Terms(terms) => Ok(Cow::Owned(parse_terms(terms)?)),
+        }
+    }
+}
+
+/// Weighted Pauli sum parsed once, for reuse across expectation calls.
+///
+/// Takes the `(coefficient, [(qubit, axis), ...])` terms a Hamiltonian argument
+/// takes, and every such argument accepts one in its place. The
+/// qubit-wise-commuting grouping is computed on first use and kept.
+#[pyclass(name = "PauliObservable", module = "prism_q", frozen)]
+pub struct PyPauliObservable(PauliObservable);
+
+#[pymethods]
+impl PyPauliObservable {
+    #[new]
+    fn new(terms: Vec<(f64, Vec<(usize, String)>)>) -> PyPrismResult<Self> {
+        Ok(Self(build_observable(&terms)?))
+    }
+
+    /// Canonical terms: factors sorted by qubit, identical strings merged,
+    /// ordered by Pauli string.
+    fn terms(&self) -> Vec<(f64, Vec<(usize, char)>)> {
+        self.0
+            .terms()
+            .iter()
+            .map(|(coefficient, factors)| {
+                (
+                    *coefficient,
+                    factors.iter().map(|t| (t.qubit, t.axis.letter())).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[getter]
+    fn num_terms(&self) -> usize {
+        self.0.num_terms()
+    }
+
+    /// Qubit-wise-commuting groups; identity terms belong to none.
+    #[getter]
+    fn num_groups(&self) -> usize {
+        self.0.num_groups()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PauliObservable(num_terms={})", self.0.num_terms())
+    }
 }
 
 fn parse_axis(axis: &str) -> PyPrismResult<PauliAxis> {

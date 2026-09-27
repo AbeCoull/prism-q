@@ -9,6 +9,7 @@ from prism_q import (
     CircuitBuilder,
     Gate,
     Parameters,
+    PauliObservable,
     PreparedCircuit,
     PrismError,
     simulate,
@@ -102,6 +103,65 @@ def test_many_terminals_match_a_loop():
         assert energies[row].mean == prepared.observable_expectation(point, HAMILTONIAN).mean
     with pytest.raises(PrismError):
         prepared.run_many(np.zeros((2, 7)))
+
+
+def test_held_observable_matches_the_term_list():
+    held = PauliObservable(HAMILTONIAN)
+    prepared = _prepared_ansatz()
+    bindings = np.array(POINTS)
+    listed = prepared.observable_expectation_many(bindings, HAMILTONIAN)
+    for row, result in enumerate(prepared.observable_expectation_many(bindings, held)):
+        assert result.mean == listed[row].mean
+        assert result.variance == listed[row].variance
+    for values in POINTS:
+        a = prepared.observable_expectation(values, held)
+        b = prepared.observable_expectation(values, HAMILTONIAN)
+        assert (a.mean, a.variance) == (b.mean, b.variance)
+
+        sim = simulate(_ansatz(values).build()).seed(42)
+        assert sim.observable_expectation(held).mean == sim.observable_expectation(
+            HAMILTONIAN
+        ).mean
+        assert sim.observable_variance(held).variance == pytest.approx(
+            sim.observable_variance(HAMILTONIAN).variance, abs=1e-12
+        )
+
+    builder = _ansatz(POINTS[1])
+    sim = simulate(builder.build()).seed(42)
+    links = builder.parameter_links()
+    for gradient in ("expectation_gradient", "expectation_gradient_shift"):
+        value, grad = getattr(sim, gradient)(held, links)
+        expected_value, expected_grad = getattr(sim, gradient)(HAMILTONIAN, links)
+        assert value == pytest.approx(expected_value, abs=1e-12)
+        np.testing.assert_allclose(grad, expected_grad, atol=1e-12)
+
+
+def test_held_observable_is_canonical_and_reused():
+    held = PauliObservable(
+        [(1.0, [(1, "z"), (0, "Z")]), (0.5, [(0, "X")]), (2.0, [(0, "Z"), (1, "Z")])]
+    )
+    assert held.num_terms == 2
+    assert held.terms() == [(0.5, [(0, "X")]), (3.0, [(0, "Z"), (1, "Z")])]
+    assert held.num_groups == 2
+    prepared = _prepared_ansatz()
+    first = prepared.observable_expectation(POINTS[0], held).mean
+    prepared.observable_expectation(POINTS[1], held)
+    assert prepared.observable_expectation(POINTS[0], held).mean == first
+    assert held.num_terms == 2
+
+
+def test_held_observable_rejects_bad_terms():
+    with pytest.raises(PrismError):
+        PauliObservable([(1.0, [(0, "Q")])])
+    with pytest.raises(PrismError):
+        PauliObservable([(1.0, [(0, "X"), (0, "Z")])])
+    with pytest.raises(PrismError):
+        PauliObservable([(math.inf, [(0, "Z")])])
+    with pytest.raises(TypeError):
+        PauliObservable([(1.0, "Z0")])
+    out_of_range = PauliObservable([(1.0, [(9, "Z")])])
+    with pytest.raises(PrismError):
+        _prepared_ansatz().observable_expectation(POINTS[0], out_of_range)
 
 
 def test_run_reuses_one_object_across_a_sweep():

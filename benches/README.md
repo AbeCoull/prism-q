@@ -123,6 +123,15 @@ fan out.
 | `distributed/sample_indices` | 4096 terminal shots of a 20 qubit uniform state at two and four ranks with relabeling off: the per-rank cumulative distribution, owner draws, and the index gather |
 | `distributed/cyclic_wall/ranks{2,4}` | Three layers of a seeded Rx or Ry on every qubit and a nearest neighbour CX ring at 20 and 22 qubits across two and four ranks with relabeling on: the cyclic scan whose working set exceeds the local positions, so eviction choice sets the exchange count |
 
+### Python binding timings
+
+`bindings/python/benches/energy_sweep.py` times the `prepared/hea_l2_energy` sweep
+through the installed wheel at 10, 12 and 14 qubits, with the Hamiltonian passed as a
+term list and as a `PauliObservable`, per point and through
+`observable_expectation_many`. It is a plain `perf_counter` script rather than a
+Criterion target, so read its rows beside `prepared/hea_l2_energy/prepared` for the
+cost the binding adds, not as a gate.
+
 ## Circuit families
 
 All seeded with `0xDEAD_BEEF` for reproducibility.

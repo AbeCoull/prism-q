@@ -26,7 +26,8 @@ execution, and compiled BTS sampling. Seven entry points are available:
   tree runs unchanged; a selected statevector or stabilizer workload that clears the
   family's qubit crossover and fits in VRAM runs on the device. Everything else,
   including a device allocation that fails at `init`, takes the identical CPU path
-  (the soft VRAM fallback).
+  (the soft VRAM fallback). `RunMetadata::placement` reports `Host` or `Device` for
+  the run that happened.
 - **`BackendKind::StatevectorGpu { context }`**. Routes through
   `simulate(circuit).backend(kind).seed(seed).run()`, keeps fusion and subsystem
   decomposition, and uses `crate::gpu::min_qubits()` (default 14,
@@ -144,14 +145,11 @@ equality tests.
 
 ## Current limits
 
-- Device placement is silent. Circuits below the crossover run on the host, and the
-  `AutoGpu` soft VRAM fallback degrades to host execution without a report; nothing
-  user-visible says whether a run executed on the device.
 - Stabilizer `probabilities()`, `export_tableau()`, and `export_statevector()` read
   back to the CPU.
 - Every trajectory shot rebuilds the backend, reallocating the device buffer
   (measured at 0.1 ms per shot at 20 qubits, so not a practical cost). `Custom`
   Kraus branch probabilities come from an on-device reduced-density-matrix
   reduction (`rdm_qubit`), not a full-state readback.
-- Kernel design and crossover analysis live in the module docstrings on
-  `src/gpu/kernels/dense.rs`.
+- Kernel design notes live in the module docstrings under `src/gpu/kernels/`. The
+  statevector crossover measurement is on `MIN_QUBITS_DEFAULT` in `src/gpu/mod.rs`.

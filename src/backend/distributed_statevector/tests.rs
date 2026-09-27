@@ -2224,6 +2224,46 @@ fn loopback_simulate_starts_the_distributed_backend_from_a_state() {
     }
 }
 
+// Terminal shots from a start state take the rank-local sampler: the draws
+// match the statevector route and no rank gathers the probability vector.
+#[test]
+fn start_state_terminal_shots_sample_natively_across_rank_counts() {
+    let mut circuit = injected_state_circuit();
+    let n = circuit.num_qubits;
+    circuit.num_classical_bits = n;
+    for q in 0..n {
+        circuit.add_measure(q, q);
+    }
+    let state = random_state(n, SEED + 3);
+    let shots = 64;
+
+    let expected = simulate(&circuit)
+        .initial_state(&state)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap()
+        .shots;
+
+    for size in [2usize, 4] {
+        let (per_rank, max_gather) = run_ranks_max_gather(size, |ctx| {
+            simulate(&circuit)
+                .distributed(ctx)
+                .initial_state(&state)
+                .seed(SEED)
+                .shots(shots)
+                .unwrap()
+                .shots
+        });
+        for draws in &per_rank {
+            assert_eq!(draws, &expected, "size {size}");
+        }
+        assert!(
+            max_gather <= 1,
+            "size {size}: start-state shots must not gather a dense block"
+        );
+    }
+}
+
 /// The `2^k`-point DFT as a dense gate: unitary, and dense enough that no
 /// detector in the constructor lowers it into an existing variant.
 fn dft_gate(k: usize) -> crate::gates::Gate {

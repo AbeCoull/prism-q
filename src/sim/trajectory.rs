@@ -770,10 +770,15 @@ fn run_pauli_group(
         .collect();
     draws.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
 
+    let error_free = groups.patterns[group].is_empty();
     let (outcomes, metadata) = match build {
         None => {
             let mut backend = StatevectorBackend::new(backend_seed);
-            evolve_pattern(&mut backend, groups, group, circuit, noise)?;
+            if error_free {
+                evolve_error_free(&mut backend, circuit, groups.prefix)?;
+            } else {
+                evolve_pattern(&mut backend, groups, group, circuit, noise)?;
+            }
             let scale = backend.probability_scale();
             let weights = backend
                 .state_vector()
@@ -786,7 +791,11 @@ fn run_pauli_group(
         }
         Some(build) => {
             let mut backend = build(backend_seed);
-            evolve_pattern(backend.as_mut(), groups, group, circuit, noise)?;
+            if error_free {
+                evolve_error_free(backend.as_mut(), circuit, groups.prefix)?;
+            } else {
+                evolve_pattern(backend.as_mut(), groups, group, circuit, noise)?;
+            }
             (
                 inverse_cdf(&draws, backend.probabilities()?),
                 crate::sim::backend_metadata(backend.as_ref()),
@@ -812,6 +821,16 @@ fn run_pauli_group(
         })
         .collect();
     Ok((shots, metadata))
+}
+
+/// Initialize `backend` and run the circuit's first `prefix` instructions through
+/// the fused plan a noiseless run takes, which no error insertion splits.
+fn evolve_error_free(backend: &mut dyn Backend, circuit: &Circuit, prefix: usize) -> Result<()> {
+    backend.init(circuit.num_qubits, circuit.num_classical_bits)?;
+    let noiseless = circuit.with_instructions(circuit.instructions[..prefix].to_vec());
+    let expanded = crate::sim::expand_for_backend(backend, &noiseless);
+    let fused = crate::sim::fuse_for_backend(backend, &expanded);
+    backend.apply_instructions(&fused.instructions)
 }
 
 /// Initialize `backend` and run the circuit prefix with `group`'s Pauli errors
@@ -1503,6 +1522,83 @@ mod tests {
                 aligned < shots / 10,
                 "runs seeded 42 and 43 agree at {aligned} positions under shift {shift}"
             );
+        }
+    }
+
+    // From 10 qubits the fusion passes rewrite the prefix: 1q runs at 10, 2q
+    // blocks at 12, tiled runs at 14 and diagonal batches at 16. The error-free
+    // group runs that fused plan and must end on the raw stream's state, and its
+    // members must draw the records the raw state would give them.
+    #[test]
+    fn error_free_group_matches_the_raw_prefix_above_the_fusion_floors() {
+        let seed = 42;
+        let shots = 300;
+        for n in [10usize, 12, 14, 16] {
+            let mut circuit = Circuit::new(n, n);
+            for layer in 0..4 {
+                for q in 0..n {
+                    circuit.add_gate(Gate::H, &[q]);
+                    circuit.add_gate(Gate::T, &[q]);
+                    circuit.add_gate(Gate::Rz(0.03 * (layer + q + 1) as f64), &[q]);
+                }
+                for q in 0..n - 1 {
+                    circuit.add_gate(Gate::Cx, &[q, q + 1]);
+                    circuit.add_gate(Gate::Rzz(0.1 * (q + 1) as f64), &[q, q + 1]);
+                }
+            }
+            circuit.measure_all();
+            let noise = NoiseModel::uniform_depolarizing(&circuit, 1e-4);
+            let groups = PauliGroups::sample(&circuit, &noise, shots, seed).unwrap();
+            assert!(groups.num_groups() > 1, "{n} qubits: no error group drawn");
+            let error_free = groups.patterns.iter().position(Vec::is_empty).unwrap();
+
+            let prefix = circuit.with_instructions(circuit.instructions[..groups.prefix].to_vec());
+            let fused_len = crate::sim::fuse_for_backend(&StatevectorBackend::new(seed), &prefix)
+                .instructions
+                .len();
+            assert!(
+                fused_len < groups.prefix,
+                "{n} qubits: fusion kept {fused_len} of {} instructions",
+                groups.prefix
+            );
+
+            let mut fused = StatevectorBackend::new(seed);
+            evolve_error_free(&mut fused, &circuit, groups.prefix).unwrap();
+            let mut raw = StatevectorBackend::new(seed);
+            evolve_pattern(&mut raw, &groups, error_free, &circuit, &noise).unwrap();
+            let raw_probs = raw.probabilities().unwrap();
+            let fused_probs = fused.probabilities().unwrap();
+            for (index, (f, r)) in fused_probs.iter().zip(&raw_probs).enumerate() {
+                assert!(
+                    (f - r).abs() < 1e-12,
+                    "{n} qubits, basis {index}: fused {f} vs raw {r}"
+                );
+            }
+
+            let members = groups.members(error_free);
+            let mut draws: Vec<(f64, usize)> = members
+                .iter()
+                .enumerate()
+                .map(|(k, &shot)| {
+                    let mut rng = ChaCha8Rng::seed_from_u64(crate::sim::mix_seed(seed, shot));
+                    (rand::RngExt::random::<f64>(&mut rng), k)
+                })
+                .collect();
+            draws.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+            let outcomes = inverse_cdf(&draws, raw_probs);
+            let result = run_pauli_groups(
+                &groups,
+                &circuit,
+                &noise,
+                seed,
+                None,
+                crate::sim::ResolvedBackend::Statevector,
+            )
+            .unwrap();
+            for (&shot, &basis) in members.iter().zip(&outcomes) {
+                let expected: Vec<bool> = (0..n).map(|q| (basis >> q) & 1 == 1).collect();
+                assert_eq!(result.shots[shot], expected, "{n} qubits, shot {shot}");
+            }
         }
     }
 

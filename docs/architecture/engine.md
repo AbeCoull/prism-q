@@ -156,7 +156,7 @@ constants, in `src/sim/dispatch.rs` and `src/sim/mod.rs`:
 
 | Route | Taken when |
 | --- | --- |
-| Factored stabilizer | Clifford only, the circuit splits into independent components, at least 128 qubits, and the largest component is at least 16 |
+| Factored stabilizer | Clifford only, the circuit splits into independent components, at least 24 qubits, and the largest component is at least 2 |
 | Stabilizer rank, sampled | Shots with terminal measurements only, above 25 qubits, T count at most 40 |
 | Deterministic Pauli marginals | A marginals terminal on a unitary Clifford+T circuit of at least 12 qubits. The propagation is exact, and at or below the statevector cap it hands over to the tree once its summed term count passes the dense run's amplitude updates divided by 64 |
 | Scalar tensor contraction | An expectation or marginals terminal whose planned contraction stays inside the peak bound |

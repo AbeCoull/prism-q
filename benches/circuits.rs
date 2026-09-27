@@ -2095,8 +2095,8 @@ fn bench_auto_expectation(c: &mut Criterion) {
 
 /// `Auto` beside the backend it passes over, at the sizes where a routing
 /// constant switches. Each set brackets one constant so the boundary can be
-/// read off the two arms either side of it: the factored-stabilizer floor (128
-/// qubits with a largest block of 16), the exact stabilizer-rank budget (`n`
+/// read off the two arms either side of it: the factored-stabilizer floor (24
+/// qubits with a largest block of 2), the exact stabilizer-rank budget (`n`
 /// less twice `ceil(log2 n)`, which is 10 at 20 qubits), and the Pauli
 /// marginals floor (12 qubits).
 ///

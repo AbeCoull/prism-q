@@ -1826,16 +1826,11 @@ mod gpu_scaffold {
 
     // Real-device smoke test: |0000⟩ state round-trips correctly through the GPU path.
     //
-    // When CUDA is not available or the driver rejects the PTX, prints a SKIP message and
-    // returns without failing. This avoids fighting CI on machines without a usable GPU.
+    // Skips without a usable GPU unless PRISM_REQUIRE_GPU is set, as the golden suites do.
     #[test]
     fn gpu_init_and_readback_zero_state() {
-        let ctx = match GpuContext::new(0) {
-            Ok(ctx) => ctx,
-            Err(e) => {
-                eprintln!("SKIP: no usable GPU ({e})");
-                return;
-            }
+        let Some(ctx) = device_or_skip() else {
+            return;
         };
         let mut backend = StatevectorBackend::new(42).with_gpu(ctx);
         backend.init(4, 0).expect("GPU init failed");
@@ -1859,9 +1854,8 @@ mod gpu_scaffold {
     // kernels, host↔device transfer, and the full dispatcher.
     #[test]
     fn gpu_bell_state_matches_cpu() {
-        let ctx = match GpuContext::new(0) {
-            Ok(ctx) => ctx,
-            Err(_) => return,
+        let Some(ctx) = device_or_skip() else {
+            return;
         };
         use crate::circuit::{Circuit, Instruction};
         use crate::gates::Gate;

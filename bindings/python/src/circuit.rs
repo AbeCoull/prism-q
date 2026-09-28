@@ -62,7 +62,7 @@ fn check_pauli_factors(
     if factors.is_empty() {
         return Err(invalid("pauli rotation needs at least one factor"));
     }
-    let terms = parse_pauli_string(factors)?;
+    let terms = parse_pauli_string(&factors)?;
     for (idx, term) in terms.iter().enumerate() {
         check_qubit(num_qubits, term.qubit, format!("factor[{idx}] qubit"))?;
     }

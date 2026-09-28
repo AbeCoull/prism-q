@@ -682,6 +682,19 @@ call with the same seed.
 energies = prepared.observable_expectation_many(points, hamiltonian, seed=42)
 ```
 
+A term list is parsed on every call, and the grouping of its terms into
+qubit-wise-commuting sets is recomputed with it. `PauliObservable` parses the
+list once and keeps the grouping after its first use. Every argument that takes
+a Hamiltonian accepts one in place of the list, the gradients included:
+
+```python
+from prism_q import PauliObservable
+
+h = PauliObservable(hamiltonian)
+for values in points:
+    mean = prepared.observable_expectation(values, h, seed=42).mean
+```
+
 Automatic dispatch reads the template, so build it at angles representative of
 the sweep. A template whose rotations are all zero reads as Clifford and settles
 on a backend that then rejects the bound circuit. Pass an explicit backend as

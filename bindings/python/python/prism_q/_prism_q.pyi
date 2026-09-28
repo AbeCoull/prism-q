@@ -1,12 +1,14 @@
 """Type stubs for the compiled ``prism_q._prism_q`` extension module."""
 
 from collections.abc import Sequence
-from typing import Any, ClassVar, Optional, Self, final
+from typing import Any, ClassVar, Optional, Self, TypeAlias, final
 
 import numpy as np
 import numpy.typing as npt
 
 __version__: str
+
+_Hamiltonian: TypeAlias = PauliObservable | list[tuple[float, list[tuple[int, str]]]]
 
 class PrismError(Exception):
     """Error raised by PRISM-Q operations."""
@@ -177,7 +179,7 @@ class PreparedCircuit:
     def observable_expectation(
         self,
         values: Sequence[float],
-        hamiltonian: list[tuple[float, list[tuple[int, str]]]],
+        hamiltonian: _Hamiltonian,
         seed: int = ...,
     ) -> "ObservableExpectation": ...
     def run_many(
@@ -192,7 +194,7 @@ class PreparedCircuit:
     def observable_expectation_many(
         self,
         bindings: npt.ArrayLike,
-        hamiltonian: list[tuple[float, list[tuple[int, str]]]],
+        hamiltonian: _Hamiltonian,
         seed: int = ...,
     ) -> list["ObservableExpectation"]: ...
     @property
@@ -407,6 +409,15 @@ class EntropyResult:
     def metadata(self) -> RunMetadata: ...
 
 @final
+class PauliObservable:
+    def __new__(cls, terms: list[tuple[float, list[tuple[int, str]]]]) -> Self: ...
+    def terms(self) -> list[tuple[float, list[tuple[int, str]]]]: ...
+    @property
+    def num_terms(self) -> int: ...
+    @property
+    def num_groups(self) -> int: ...
+
+@final
 class ObservableExpectation:
     @property
     def mean(self) -> float: ...
@@ -478,16 +489,16 @@ class Simulation:
     ) -> ReducedDensityMatrix: ...
     def entanglement_entropy(self, subsystem: Sequence[int]) -> EntropyResult: ...
     def observable_variance(
-        self, hamiltonian: list[tuple[float, list[tuple[int, str]]]]
+        self, hamiltonian: _Hamiltonian
     ) -> ObservableVariance: ...
     def expectation_gradient(
         self,
-        hamiltonian: list[tuple[float, list[tuple[int, str]]]],
+        hamiltonian: _Hamiltonian,
         parameters: list[tuple[int, int]],
     ) -> tuple[float, npt.NDArray[np.float64]]: ...
     def expectation_gradient_shift(
         self,
-        hamiltonian: list[tuple[float, list[tuple[int, str]]]],
+        hamiltonian: _Hamiltonian,
         parameters: list[tuple[int, int]],
     ) -> tuple[float, npt.NDArray[np.float64]]: ...
     def expectation_values(
@@ -498,7 +509,7 @@ class Simulation:
     ) -> ExpectationResult: ...
     def overlap(self, other: Simulation) -> OverlapResult: ...
     def observable_expectation(
-        self, hamiltonian: list[tuple[float, list[tuple[int, str]]]]
+        self, hamiltonian: _Hamiltonian
     ) -> ObservableExpectation: ...
     def density_matrix_expectation_values(
         self, observables: list[list[tuple[int, str]]]

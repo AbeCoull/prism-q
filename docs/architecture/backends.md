@@ -61,8 +61,7 @@ hold. Their defaults come from the same detected-memory budget.
 
 The factored stabilizer cap is the one that is not a `2^n` amplitude count. A stabilizer
 cluster costs `O(n^2 / 64)` words, so a dense cap would hold a cluster to the dense
-backends' qubit ceiling, far below the 128 qubits and up at which dispatch selects that
-backend.
+backends' qubit ceiling, which Clifford circuits pass routinely.
 
 The density-matrix cap is the tighter of its own override and half the statevector cap,
 computed in one place so dispatch-time validation and the backend's `init` guard cannot

@@ -64,6 +64,28 @@ fn probability_route_precedence_is_pinned() {
     }
 }
 
+#[test]
+fn factored_stabilizer_route_starts_at_24_qubits_with_pair_blocks() {
+    let at_floor = crate::circuits::local_clifford_blocks(12, 2, 20, 42);
+    assert!(matches!(
+        plan_probability_route(&BackendKind::Auto, &at_floor),
+        ProbabilityRoute::FactoredStabilizer
+    ));
+    let below_floor = crate::circuits::local_clifford_blocks(11, 2, 20, 42);
+    assert!(matches!(
+        plan_probability_route(&BackendKind::Auto, &below_floor),
+        ProbabilityRoute::Decomposed(_)
+    ));
+    let mut singles = Circuit::new(24, 0);
+    for q in 0..24 {
+        singles.add_gate(Gate::H, &[q]);
+    }
+    assert!(matches!(
+        plan_probability_route(&BackendKind::Auto, &singles),
+        ProbabilityRoute::Decomposed(_)
+    ));
+}
+
 // The decomposition bypass in `try_native_terminal_backend` is scoped to
 // the product state. Pin both halves: a product circuit reaches the native
 // sampler even though its route is decomposed, and a decomposable circuit

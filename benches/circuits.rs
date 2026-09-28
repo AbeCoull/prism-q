@@ -28,7 +28,9 @@ use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
-use common::{SEED, configure_group, run_shots_with, run_with};
+use common::{
+    SEED, configure_group, heisenberg_hamiltonian, ising_hamiltonian, run_shots_with, run_with,
+};
 
 fn run_shots_with_noise(
     kind: BackendKind,
@@ -2636,14 +2638,6 @@ fn binding_points(params: &Parameters, count: u64) -> Vec<Vec<f64>> {
         .collect()
 }
 
-/// Transverse-field Ising energy: a `ZZ` chain plus an `X` field, two commuting
-/// groups.
-fn ising_hamiltonian(n: usize) -> PauliObservable {
-    let chain = (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
-    let field = (0..n).map(|q| (0.5, vec![PauliTerm::x(q)]));
-    PauliObservable::from_terms(chain.chain(field).collect::<Vec<_>>()).unwrap()
-}
-
 /// Twenty energy evaluations of a two-layer ansatz, the inner loop of a
 /// variational optimizer. `simulate_loop` binds a fresh circuit and hands it to
 /// `simulate`, which plans dispatch and fuses at every point. `prepared` calls
@@ -2693,25 +2687,6 @@ fn bench_prepared_energy(c: &mut Criterion) {
 fn maxcut_ring_hamiltonian(n: usize) -> PauliObservable {
     let edges = (0..n).map(|q| (0.5, vec![PauliTerm::z(q), PauliTerm::z((q + 1) % n)]));
     PauliObservable::from_terms(edges.collect::<Vec<_>>()).unwrap()
-}
-
-/// Heisenberg couplings at distance one and two plus fields on all three axes:
-/// `9n - 9` terms in three commuting groups, 99 at 12 qubits.
-fn heisenberg_hamiltonian(n: usize) -> PauliObservable {
-    let mut terms = Vec::new();
-    for d in 1..=2 {
-        for q in 0..n - d {
-            terms.push((1.0, vec![PauliTerm::x(q), PauliTerm::x(q + d)]));
-            terms.push((0.9, vec![PauliTerm::y(q), PauliTerm::y(q + d)]));
-            terms.push((0.8, vec![PauliTerm::z(q), PauliTerm::z(q + d)]));
-        }
-    }
-    for q in 0..n {
-        terms.push((0.3, vec![PauliTerm::x(q)]));
-        terms.push((0.2, vec![PauliTerm::y(q)]));
-        terms.push((0.1, vec![PauliTerm::z(q)]));
-    }
-    PauliObservable::from_terms(terms).unwrap()
 }
 
 /// One weighted-observable evaluation, mean and grouped variance, on a

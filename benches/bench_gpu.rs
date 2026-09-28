@@ -31,12 +31,15 @@ use prism_q::circuits;
 use prism_q::gates::Gate;
 use prism_q::gpu::GpuContext;
 use prism_q::{
-    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, Parameters, PauliTerm, StabilizerBackend,
-    StatevectorBackend, sim,
+    BackendKind, NoiseChannel, NoiseEvent, NoiseModel, Parameters, PauliObservable, PauliTerm,
+    StabilizerBackend, StatevectorBackend, sim,
 };
 
 mod common;
-use common::{SEED, configure_group, is_fast, run_shots_with, run_with};
+use common::{
+    SEED, configure_group, heisenberg_hamiltonian, is_fast, ising_hamiltonian, run_shots_with,
+    run_with,
+};
 
 fn shared_ctx() -> Option<Arc<GpuContext>> {
     static CTX: OnceLock<Option<Arc<GpuContext>>> = OnceLock::new();
@@ -1046,6 +1049,40 @@ fn bench_gpu_marginals(c: &mut Criterion) {
     group.finish();
 }
 
+/// The weighted-observable route on a device-resident state, with the CPU
+/// `observable` Hamiltonians on a two-layer HEA. Every group in both is past the
+/// pair budget, so the evaluation is the moments pass per group.
+fn bench_gpu_pauli_sum_grouped(c: &mut Criterion) {
+    let Some(ctx) = shared_ctx() else { return };
+    let mut group = c.benchmark_group("gpu/pauli_sum_grouped");
+    configure_group(&mut group);
+    let kind = gpu_kind(&ctx);
+    let sizes: &[usize] = if is_fast() { &[20] } else { &[20, 22, 24] };
+
+    for (name, build) in [
+        ("tfim", ising_hamiltonian as fn(usize) -> PauliObservable),
+        ("heisenberg", heisenberg_hamiltonian),
+    ] {
+        for &n in sizes {
+            let circuit = circuits::hardware_efficient_ansatz(n, 2, SEED);
+            let observable = build(n);
+            group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(kind.clone())
+                            .seed(SEED)
+                            .observable_expectation(&observable)
+                            .unwrap(),
+                    )
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 /// Device-to-host readback of a prepared state through `export_statevector`.
 /// The plain rows leave the deferred norm at one; the `scaled` rows measure
 /// one qubit of the uniform superposition first so the in-place norm pass
@@ -1095,6 +1132,7 @@ criterion_group! {
     bench_gpu_measurement,
     bench_gpu_pauli_expect,
     bench_gpu_marginals,
+    bench_gpu_pauli_sum_grouped,
     bench_gpu_export,
     bench_gpu_noisy_kraus,
     bench_cpu_noisy_kraus,

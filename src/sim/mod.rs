@@ -3341,35 +3341,51 @@ fn grouped_expectation_on_state(
         group_variances[*gi] = (square_diag + square_cross - m1 * m1).max(0.0);
     }
 
-    // The moments pass runs on the host, so a device-resident state is
-    // exported here and only when a group needs it.
+    // A Z-only group reads the state as run, any other group a copy rotated so
+    // its terms read as Z strings (`x | z` per term). A device-resident state
+    // takes both on the card and is exported only when the rotated copy does
+    // not fit there.
     if !deferred.is_empty() {
-        let exported;
-        let (state, norm): (&[Complex64], f64) = match host {
-            Some(host) => host,
+        let requests: Vec<(Vec<u64>, Vec<f64>, u64, u64)> = deferred
+            .iter()
+            .map(|&gi| {
+                let group = &grouping.groups[gi];
+                let (x_bits, y_bits) = if group.is_z_only() {
+                    (0, 0)
+                } else {
+                    group.rotation_masks()
+                };
+                (
+                    group
+                        .term_indices
+                        .iter()
+                        .map(|&i| (masks[i].0 | masks[i].1) as u64)
+                        .collect(),
+                    group.term_indices.iter().map(|&i| terms[i].0).collect(),
+                    x_bits as u64,
+                    y_bits as u64,
+                )
+            })
+            .collect();
+        let on_device = match host {
+            Some(_) => None,
+            None => backend.group_moments_on_device(&requests).transpose()?,
+        };
+        let moments = match on_device {
+            Some(moments) => moments,
             None => {
-                exported = backend.export_statevector()?;
-                (&exported, crate::backend::state_norm_sqr(&exported))
+                let exported;
+                let (state, norm): (&[Complex64], f64) = match host {
+                    Some(host) => host,
+                    None => {
+                        exported = backend.export_statevector()?;
+                        (&exported, crate::backend::state_norm_sqr(&exported))
+                    }
+                };
+                host_group_moments(state, norm, &requests)
             }
         };
-        let mut rotated = Vec::new();
-        for &gi in &deferred {
-            let group = &grouping.groups[gi];
-            let coefficients: Vec<f64> = group.term_indices.iter().map(|&i| terms[i].0).collect();
-            let (m1, m2) = if group.is_z_only() {
-                let zmasks: Vec<usize> = group.term_indices.iter().map(|&i| masks[i].1).collect();
-                observable::weighted_group_moments(state, &zmasks, &coefficients, norm)
-            } else {
-                let zmasks: Vec<usize> = group
-                    .term_indices
-                    .iter()
-                    .map(|&i| masks[i].0 | masks[i].1)
-                    .collect();
-                let (x_bits, y_bits) = group.rotation_masks();
-                observable::rotate_to_z_basis(state, &mut rotated, x_bits, y_bits);
-                let growth = 2f64.powi((x_bits | y_bits).count_ones() as i32);
-                observable::weighted_group_moments(&rotated, &zmasks, &coefficients, norm * growth)
-            };
+        for (&gi, (m1, m2)) in deferred.iter().zip(moments) {
             mean += m1;
             group_variances[gi] = (m2 - m1 * m1).max(0.0);
         }
@@ -3383,6 +3399,29 @@ fn grouped_expectation_on_state(
         std_error: None,
         metadata,
     })
+}
+
+/// The host moments pass over each `(zmasks, coefficients, x_bits, y_bits)`
+/// request of [`grouped_expectation_on_state`].
+pub(crate) fn host_group_moments(
+    state: &[Complex64],
+    norm: f64,
+    requests: &[(Vec<u64>, Vec<f64>, u64, u64)],
+) -> Vec<(f64, f64)> {
+    let mut rotated = Vec::new();
+    requests
+        .iter()
+        .map(|(zmasks, coefficients, x_bits, y_bits)| {
+            let zmasks: Vec<usize> = zmasks.iter().map(|&z| z as usize).collect();
+            let rotation = x_bits | y_bits;
+            if rotation == 0 {
+                return observable::weighted_group_moments(state, &zmasks, coefficients, norm);
+            }
+            observable::rotate_to_z_basis(state, &mut rotated, *x_bits as usize, *y_bits as usize);
+            let growth = 2f64.powi(rotation.count_ones() as i32);
+            observable::weighted_group_moments(&rotated, &zmasks, coefficients, norm * growth)
+        })
+        .collect()
 }
 
 /// Pair-expansion budget per commuting group. The dedicated pass pays a scratch

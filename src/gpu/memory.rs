@@ -42,6 +42,18 @@ impl<T: DeviceRepr> GpuBuffer<T> {
             .map_err(|e| driver_err("copy_from_host", e))
     }
 
+    /// Copy all of `src` into the start of this buffer on the device.
+    pub(crate) fn copy_from_device(
+        &mut self,
+        device: &GpuDevice,
+        src: &GpuBuffer<T>,
+    ) -> Result<()> {
+        let stream = device.stream()?;
+        stream
+            .memcpy_dtod(&src.slice, &mut self.slice)
+            .map_err(|e| driver_err("copy_from_device", e))
+    }
+
     /// Copy `host.len()` elements from device into the provided host buffer.
     pub fn copy_to_host(&self, device: &GpuDevice, host: &mut [T]) -> Result<()> {
         let stream = device.stream()?;

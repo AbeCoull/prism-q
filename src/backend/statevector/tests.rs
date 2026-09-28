@@ -1722,6 +1722,71 @@ mod gpu_scaffold {
     use crate::error::PrismError;
     use crate::gpu::GpuContext;
 
+    fn device_or_skip() -> Option<std::sync::Arc<GpuContext>> {
+        match GpuContext::new(0) {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                assert!(
+                    std::env::var_os("PRISM_REQUIRE_GPU").is_none(),
+                    "PRISM_REQUIRE_GPU is set but no usable GPU was found ({e})"
+                );
+                eprintln!("SKIP: no usable GPU ({e})");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_group_moments_match_host() {
+        let Some(ctx) = device_or_skip() else {
+            return;
+        };
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for n in [5usize, 9, 13] {
+            let dim_mask = (1u64 << n) - 1;
+            let mut group = |terms: usize, x_bits: u64, y_bits: u64| {
+                let zmasks = (0..terms).map(|_| next() & dim_mask).collect();
+                let coefficients = (0..terms)
+                    .map(|_| (next() % 2001) as f64 / 1000.0 - 1.0)
+                    .collect();
+                (zmasks, coefficients, x_bits & dim_mask, y_bits & dim_mask)
+            };
+            let requests = vec![
+                group(40, 0, 0),
+                group(40, 0b1011, 0),
+                group(12, 0b0001, 1 << (n - 1)),
+                group(7, 0, dim_mask),
+            ];
+
+            let circuit = crate::circuits::random_circuit(n, 6, 42);
+            let mut cpu = StatevectorBackend::new(42);
+            sim::run_on(&mut cpu, &circuit).unwrap();
+            let mut gpu = StatevectorBackend::new(42).with_gpu(ctx.clone());
+            sim::run_on(&mut gpu, &circuit).unwrap();
+            let before = gpu.export_statevector().unwrap();
+
+            let state = cpu.state_vector();
+            let host =
+                sim::host_group_moments(state, crate::backend::state_norm_sqr(state), &requests);
+            let device = gpu.group_moments_on_device(&requests).unwrap().unwrap();
+            for (g, (h, d)) in host.iter().zip(&device).enumerate() {
+                for (label, a, b) in [("<h>", h.0, d.0), ("<h^2>", h.1, d.1)] {
+                    assert!(
+                        (a - b).abs() < 1e-11 * a.abs().max(1.0),
+                        "n={n} group {g} {label}: host {a}, device {b}"
+                    );
+                }
+            }
+            assert_eq!(gpu.export_statevector().unwrap(), before, "n={n}");
+        }
+    }
+
     #[test]
     fn with_gpu_stores_context() {
         let ctx = GpuContext::stub_for_tests();

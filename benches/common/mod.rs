@@ -6,9 +6,9 @@
 
 #![allow(dead_code)]
 
-use prism_q::BackendKind;
 use prism_q::circuit::Circuit;
 use prism_q::sim;
+use prism_q::{BackendKind, PauliObservable, PauliTerm};
 use std::time::Duration;
 
 pub const SEED: u64 = 0xDEAD_BEEF;
@@ -86,4 +86,31 @@ pub fn configure_group(group: &mut criterion::BenchmarkGroup<criterion::measurem
     } else {
         group.sample_size(sample_size());
     }
+}
+
+/// Transverse-field Ising energy: a `ZZ` chain plus an `X` field, two commuting
+/// groups.
+pub fn ising_hamiltonian(n: usize) -> PauliObservable {
+    let chain = (0..n - 1).map(|q| (1.0, vec![PauliTerm::z(q), PauliTerm::z(q + 1)]));
+    let field = (0..n).map(|q| (0.5, vec![PauliTerm::x(q)]));
+    PauliObservable::from_terms(chain.chain(field).collect::<Vec<_>>()).unwrap()
+}
+
+/// Heisenberg couplings at distance one and two plus fields on all three axes:
+/// `9n - 9` terms in three commuting groups, 99 at 12 qubits.
+pub fn heisenberg_hamiltonian(n: usize) -> PauliObservable {
+    let mut terms = Vec::new();
+    for d in 1..=2 {
+        for q in 0..n - d {
+            terms.push((1.0, vec![PauliTerm::x(q), PauliTerm::x(q + d)]));
+            terms.push((0.9, vec![PauliTerm::y(q), PauliTerm::y(q + d)]));
+            terms.push((0.8, vec![PauliTerm::z(q), PauliTerm::z(q + d)]));
+        }
+    }
+    for q in 0..n {
+        terms.push((0.3, vec![PauliTerm::x(q)]));
+        terms.push((0.2, vec![PauliTerm::y(q)]));
+        terms.push((0.1, vec![PauliTerm::z(q)]));
+    }
+    PauliObservable::from_terms(terms).unwrap()
 }

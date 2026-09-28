@@ -709,6 +709,9 @@ preflight() {
             exit 2
         fi
         echo ">>> host ${load}% busy, waiting for it to fall under ${MAX_HOST_LOAD}% (${waited}s of ${WAIT_IDLE}s)"
+        if (( waited % 600 == 0 )); then
+            busy_processes | sed 's/^/    /'
+        fi
         sleep 28
         waited=$(( waited + 30 ))
     done

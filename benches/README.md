@@ -236,7 +236,8 @@ and toolchain, so steps that share a reference build it once and a later queue r
 Each A/B waits up to an hour for an idle host. `--schedule` matters on Windows: a child of
 a terminal session is torn down with that session's job object even under `nohup`, so the
 queue registers a scheduled task and starts it there. The task opens a console window,
-and closing that window ends the queue. Every step logs in full to its own
+and closing that window ends the queue. A second queue scheduled while one runs needs its own
+`--task-name`, and a first step that waits for the other's `ALLDONE`. Every step logs in full to its own
 file; the status file carries one START and END line per step, the verdicts, and
 `ALLDONE`.
 

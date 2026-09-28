@@ -41,6 +41,8 @@
 #   --cache DIR     binary cache (default bench_results/bin)
 #   --ref-root DIR  where reference worktrees live (default: next to the repository)
 #   --wait-idle S   seconds each A/B waits for an idle host (default 3600)
+#   --task-name N   scheduled task name for --schedule on Windows (default
+#                   PrismBenchQueue); a second queue needs its own while one runs
 #
 # Exit status: 0 when every step exited 0, otherwise 1. A step's own exit code
 # is in the status file; bench_ab.sh uses 1 for FAIL, 2 for a host too busy to
@@ -59,6 +61,7 @@ OUT_DIR=""
 CACHE_DIR=""
 REF_ROOT=""
 WAIT_IDLE=3600
+TASK_NAME="PrismBenchQueue"
 QUEUE_FILE=""
 
 while [[ $# -gt 0 ]]; do
@@ -69,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --cache)     CACHE_DIR="$2"; shift 2 ;;
         --ref-root)  REF_ROOT="$2"; shift 2 ;;
         --wait-idle) WAIT_IDLE="$2"; shift 2 ;;
+        --task-name) TASK_NAME="$2"; shift 2 ;;
         -h|--help)   awk 'NR > 1 && !/^#/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
         -*)          echo "Unknown option: $1" >&2; exit 1 ;;
         *)           QUEUE_FILE="$1"; shift ;;
@@ -98,7 +102,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 if [[ -n "$SCHEDULE" ]]; then
     args=(--out "$OUT_DIR" --cache "$CACHE_DIR" --ref-root "$REF_ROOT" --wait-idle "$WAIT_IDLE" "$QUEUE_FILE")
     if command -v schtasks >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
-        task="PrismBenchQueue"
+        task="$TASK_NAME"
         runner="$OUT_DIR/run.sh"
         {
             echo "#!/usr/bin/env bash"

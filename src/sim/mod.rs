@@ -1413,14 +1413,20 @@ fn shots_from_initial_state(
     let bits = circuit.num_classical_bits;
     if circuit.has_terminal_measurements_only() {
         let stripped = circuit.without_measurements();
-        let outcome = run_from_initial_state(kind, &stripped, state, seed, &SimOptions::default())?;
-        if let Some(probs) = outcome.probabilities {
-            let meas_map = circuit.measurement_map();
-            return Ok(ShotsResult::from_shots(
-                sample_shots(&probs, &meas_map, bits, num_shots, seed),
-                bits,
-            )
-            .with_metadata(outcome.metadata));
+        let mut backend = backend_from_initial_state(kind, &stripped, state, seed)?;
+        apply_fused_circuit(&mut *backend, &stripped)?;
+        let meas_map = circuit.measurement_map();
+        let shots = if backend.supports_native_sampling() {
+            let samples = backend.sample_basis_states(num_shots, seed)?;
+            Some(shots_from_basis_samples(&samples, &meas_map, bits))
+        } else {
+            try_backend_probabilities(&*backend)?
+                .map(|probs| sample_shots(&probs, &meas_map, bits, num_shots, seed))
+        };
+        if let Some(shots) = shots {
+            return Ok(
+                ShotsResult::from_shots(shots, bits).with_metadata(backend_metadata(&*backend))
+            );
         }
     }
 

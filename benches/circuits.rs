@@ -3469,6 +3469,53 @@ fn bench_stabilizer_rank(c: &mut Criterion) {
     group.finish();
 }
 
+/// Random Clifford layers with a full random CX pairing each, and `t_count` T gates at
+/// random spots ahead of a layer.
+fn random_clifford_t_layers(n: usize, depth: usize, t_count: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let ones = [Gate::H, Gate::S, Gate::Sdg, Gate::X, Gate::Z];
+    let mut spots: Vec<usize> = (0..depth * n).collect();
+    for i in (1..spots.len()).rev() {
+        spots.swap(i, rng.random_range(0..=i));
+    }
+    spots.truncate(t_count);
+    let mut c = Circuit::new(n, n);
+    for layer in 0..depth {
+        for q in (0..n).filter(|q| spots.contains(&(layer * n + q))) {
+            c.add_gate(Gate::T, &[q]);
+        }
+        for q in 0..n {
+            c.add_gate(ones[rng.random_range(0..ones.len())].clone(), &[q]);
+        }
+        let mut perm: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            perm.swap(i, rng.random_range(0..=i));
+        }
+        for pair in perm.chunks_exact(2) {
+            c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
+        }
+    }
+    measure_all(&c)
+}
+
+fn bench_auto_clifford_t_shots(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/clifford_t_shots");
+    configure_group(&mut group);
+
+    for &n in &[16, 20, 24] {
+        let circuit = random_clifford_t_layers(n, 10, 10, SEED);
+        group.bench_with_input(
+            BenchmarkId::from_parameter(format!("{n}q_t10")),
+            &circuit,
+            |b, circ| {
+                b.iter(|| black_box(run_shots_with(BackendKind::Auto, circ, 1024, SEED).unwrap()));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 fn bench_compiled_sampler(c: &mut Criterion) {
     let mut group = c.benchmark_group("compiled_sampler");
     configure_group(&mut group);
@@ -4614,6 +4661,7 @@ criterion_group! {
     bench_clifford_t,
     // Stabilizer rank
     bench_stabilizer_rank,
+    bench_auto_clifford_t_shots,
     // Compiled sampler (noiseless + noisy shot sampling)
     bench_compiled_sampler,
     // Noisy trajectory dispatch and compiled Pauli sampling

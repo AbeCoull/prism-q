@@ -56,8 +56,8 @@ fn auto_non_clifford_oversize_evaluates_on_the_selected_backend() {
     }
 }
 
-/// Not sparse-friendly, so Auto takes the MPS branch of the oversize split
-/// rather than the sparse one.
+/// Reaches every basis state, so from 8 qubits its support passes the sparse
+/// route's bound and Auto takes the MPS branch of the oversize split.
 fn oversize_dense(num_qubits: usize) -> Circuit {
     let mut circuit = Circuit::new(num_qubits, 0);
     for q in 0..num_qubits {
@@ -83,7 +83,7 @@ fn auto_reports_approximate_above_the_statevector_cap() {
         .seed(SEED)
         .marginals()
         .unwrap();
-    let above = simulate(&oversize_dense(CAP + 2))
+    let above = simulate(&oversize_dense(CAP + 4))
         .seed(SEED)
         .marginals()
         .unwrap();
@@ -96,7 +96,7 @@ fn auto_reports_approximate_above_the_statevector_cap() {
 #[test]
 fn require_exact_rejects_the_approximate_route() {
     small_sv_cap();
-    let circuit = oversize_dense(CAP + 2);
+    let circuit = oversize_dense(CAP + 4);
     let err = simulate(&circuit)
         .seed(SEED)
         .require_exact()

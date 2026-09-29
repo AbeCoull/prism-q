@@ -176,10 +176,10 @@ circuit shapes the adjoint declines.
 `BackendKind::Auto` is the default. Circuits with no entangling gates go to Product
 State. All-Clifford circuits go to Stabilizer, or to Factored Stabilizer when a large
 circuit splits into independent blocks. Circuits past the statevector memory budget go
-to Sparse when sparse-friendly and to MPS with bond dimension 256 otherwise; partially
-independent circuits go to Factored, and the rest run on Statevector. Before that tree,
-a Clifford+T circuit with few T gates can take the stabilizer-rank sampler for shots and
-Pauli propagation for marginals.
+to Sparse when the state never holds more than 128 basis states and to MPS with bond
+dimension 256 otherwise; partially independent circuits go to Factored, and the rest run
+on Statevector. Before that tree, a Clifford+T circuit with few T gates can take the
+stabilizer-rank sampler for shots and Pauli propagation for marginals.
 The budget is half the machine's physical memory, read once and cached;
 `PRISM_MAX_SV_QUBITS` overrides it.
 

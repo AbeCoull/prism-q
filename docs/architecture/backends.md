@@ -250,9 +250,9 @@ export.
 
 Under `BackendKind::Auto` the route is the dispatcher's choice, not the caller's, so a
 resolved backend that cannot answer is replaced by the statevector while the circuit fits
-its cap. A partially independent circuit routed to the factored backend and a
-sparse-friendly one both read their entropy that way, and the same circuits decline when
-the backend is named explicitly. A Clifford circuit keeps its tableau, which answers the
+its cap. A partially independent circuit routed to the factored backend and one routed to
+the sparse map both read their entropy that way, and the same circuits decline when the
+backend is named explicitly. A Clifford circuit keeps its tableau, which answers the
 entropy and the marginal without expanding anything.
 
 | Backend | Reduced density matrix | Entanglement entropy | State overlap |

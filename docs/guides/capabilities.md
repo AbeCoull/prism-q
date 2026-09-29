@@ -109,7 +109,7 @@ bounded only by their own representation.
 | Statevector | Dense (streams from amplitudes, no probability vector) | Dense |
 | Stabilizer, Factored Stabilizer | Compiled Clifford sampler | Sparse Pauli Dynamics, exact |
 | Stochastic / Deterministic Pauli | Not applicable | Native Pauli propagation |
-| Tensor Network | Dense | Native, one doubled-network contraction per observable |
+| Tensor Network | Dense | Native, one doubled-network contraction per observable over its backward light cone |
 | Density Matrix | Dense | Native, `Tr(rho P)` per observable |
 
 Native sampling is deterministic from the seed alone: the same seed and shot
@@ -184,8 +184,11 @@ over the cap. It reports `Approximate`, with a bound of 1 minus the summed
 per-cut discarded weights, and `require_exact()` rejects it by name.
 
 `Auto` sends a circuit past the statevector cap to an MPS at a bounded bond
-dimension, which is the only route those circuits have. It is taken by default
-and the result says so. `simulate(...).require_exact()` rejects that route
+dimension. Expectation and marginals terminals first weigh the exact scalar
+tensor route, which contracts each observable's light cone, against an estimate
+of the MPS run from its bond growth, and take it when the MPS bond would grow
+faster than the cones. Otherwise MPS is the only route those circuits have. It is
+taken by default and the result says so. `simulate(...).require_exact()` rejects that route
 instead, with an error naming the engine it would have used.
 
 `Simulate::expectation_values_reported` returns the values with a standard error

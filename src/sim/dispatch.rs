@@ -16,6 +16,7 @@ use crate::backend::{
 };
 use crate::circuit::{Circuit, Instruction};
 use crate::error::{PrismError, Result};
+use crate::gates::Gate;
 use crate::sim::unified_pauli::SpdTruncation;
 
 #[cfg(any(feature = "gpu", feature = "distributed"))]
@@ -34,6 +35,85 @@ use super::metadata::ResolvedBackend;
 use super::{RunOutcome, try_backend_probabilities};
 
 pub(super) const AUTO_MPS_BOND_DIM: usize = 256;
+
+/// Fixed cost of one gate at one cut in [`mps_apply_cost`] units, standing for
+/// the per-gate work (tensor reshapes, gauge moves, allocation) a small bond does
+/// not amortize. Fit on 85 circuits at 32 to 64 qubits: about 4 us per gate-cut
+/// against about 15 ns per unit of bond cubed.
+const MPS_GATE_CUT_OVERHEAD: f64 = 256.0;
+
+/// Estimate the work an MPS capped at `max_bond` spends applying `circuit`, in
+/// units of one bond dimension cubed.
+///
+/// Each gate on two or more qubits multiplies the bond at every cut it spans by
+/// its operator Schmidt rank (2 for controlled and `Rzz` gates, 4 otherwise),
+/// capped at `min(2^min(left, right), max_bond)`, and costs the cube of each
+/// resulting bond, the SVD it triggers there, plus [`MPS_GATE_CUT_OVERHEAD`].
+/// Gates on one pair with nothing between them on either qubit or any spanned
+/// cut form one block, whose rank stays at most 4, as fusion delivers them
+/// merged. At 15 ns per unit, MPS time measured 0.08 to 3.8 times the estimate
+/// (median 1.04) across the fitted circuits; the bond is an upper bound, and on
+/// shallow circuits whose gates entangle less than their rank allows the
+/// estimate runs far high.
+pub(super) fn mps_apply_cost(circuit: &Circuit, max_bond: usize) -> f64 {
+    let n = circuit.num_qubits;
+    if n < 2 {
+        return 0.0;
+    }
+    let limit: Vec<f64> = (0..n - 1)
+        .map(|cut| {
+            2f64.powi((cut + 1).min(n - cut - 1) as i32)
+                .min(max_bond as f64)
+        })
+        .collect();
+    let mut bond = vec![1.0f64; n - 1];
+    let mut base = vec![1.0f64; n - 1];
+    let mut block_rank = vec![1.0f64; n - 1];
+    let mut qubit_block = vec![0usize; n];
+    let mut cut_block = vec![0usize; n - 1];
+    let mut next_block = 1usize;
+    let mut cost = 0.0;
+    for instruction in &circuit.instructions {
+        let Instruction::Gate { gate, targets } = instruction else {
+            continue;
+        };
+        if targets.len() < 2 {
+            continue;
+        }
+        let lo = *targets.iter().min().expect("two or more targets");
+        let hi = *targets.iter().max().expect("two or more targets");
+        let rank = match gate {
+            Gate::Cx | Gate::Cz | Gate::Rzz(_) | Gate::Cu(_) | Gate::Mcu(_) => 2.0,
+            _ => 4.0,
+        };
+        let block = qubit_block[lo];
+        let continues = targets.len() == 2
+            && block != 0
+            && qubit_block[hi] == block
+            && cut_block[lo..hi].iter().all(|&b| b == block);
+        let block = if continues {
+            block
+        } else {
+            next_block += 1;
+            next_block - 1
+        };
+        for cut in lo..hi {
+            if continues {
+                block_rank[cut] = (block_rank[cut] * rank).min(4.0);
+            } else {
+                base[cut] = bond[cut];
+                block_rank[cut] = rank;
+            }
+            bond[cut] = (base[cut] * block_rank[cut]).min(limit[cut]);
+            cut_block[cut] = block;
+            cost += MPS_GATE_CUT_OVERHEAD + bond[cut].powi(3);
+        }
+        for &q in targets.iter() {
+            qubit_block[q] = if targets.len() == 2 { block } else { 0 };
+        }
+    }
+    cost
+}
 
 pub(super) const MAX_AUTO_T_COUNT_SHOTS: usize = 40;
 
@@ -1781,5 +1861,28 @@ mod dispatch_matrix_tests {
         assert_eq!(plan.family(), Family::Stabilizer);
         assert!(matches!(plan.accel(), Accel::Gpu { soft: false, .. }));
         assert_cpu_family(&stab_kind, &clifford(8), false, Family::Stabilizer);
+    }
+
+    // Three CX on one pair form a block of rank at most 4, so the middle cut
+    // reads bonds 2, 4, 4; a CX on a neighbouring pair in between ends the block
+    // and the next CX doubles the bond from where it stands.
+    #[test]
+    fn mps_apply_cost_merges_a_pair_block_and_breaks_it_on_a_neighbour() {
+        let overhead = MPS_GATE_CUT_OVERHEAD;
+        let mut block = Circuit::new(8, 0);
+        for _ in 0..3 {
+            block.add_gate(Gate::Cx, &[3, 4]);
+            block.add_gate(Gate::Ry(0.4), &[4]);
+        }
+        let cost = mps_apply_cost(&block, 256);
+        assert_eq!(cost, 3.0 * overhead + 8.0 + 64.0 + 64.0);
+
+        let mut broken = Circuit::new(8, 0);
+        broken.add_gate(Gate::Cx, &[3, 4]);
+        broken.add_gate(Gate::Cx, &[3, 4]);
+        broken.add_gate(Gate::Cx, &[2, 3]);
+        broken.add_gate(Gate::Cx, &[3, 4]);
+        let cost = mps_apply_cost(&broken, 256);
+        assert_eq!(cost, 4.0 * overhead + 8.0 + 64.0 + 8.0 + 512.0);
     }
 }

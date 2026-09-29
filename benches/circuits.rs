@@ -105,6 +105,60 @@ fn dense_entanglement_circuit(n_qubits: usize, depth: usize) -> Circuit {
     circuit
 }
 
+/// `rows` x `n / rows` grid: each cycle puts `Rx(pi/2)`, `Ry(pi/2)` or `T` on every
+/// qubit, then `CZ` on one of the four edge sets (even and odd horizontal, even and odd
+/// vertical) in turn.
+fn grid_cycles_circuit(n_qubits: usize, rows: usize, cycles: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n_qubits, 0);
+    let cols = n_qubits / rows;
+    let half_pi = std::f64::consts::FRAC_PI_2;
+
+    for cycle in 0..cycles {
+        for q in 0..n_qubits {
+            let gate = match rng.random_range(0..3) {
+                0 => Gate::Rx(half_pi),
+                1 => Gate::Ry(half_pi),
+                _ => Gate::T,
+            };
+            circuit.add_gate(gate, &[q]);
+        }
+        let kind = cycle % 4;
+        for r in 0..rows {
+            for c in 0..cols {
+                let q = r * cols + c;
+                if kind < 2 && c % 2 == kind && c + 1 < cols {
+                    circuit.add_gate(Gate::Cz, &[q, q + 1]);
+                }
+                if kind >= 2 && r % 2 == kind - 2 && r + 1 < rows {
+                    circuit.add_gate(Gate::Cz, &[q, q + cols]);
+                }
+            }
+        }
+    }
+    circuit
+}
+
+/// Brick layers of generic two-qubit blocks, three CX with random rotations
+/// between, so an MPS bond grows fourfold per layer at every cut a layer crosses.
+fn su4_brickwork_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n_qubits, 0);
+    let tau = std::f64::consts::TAU;
+    for layer in 0..depth {
+        for i in (layer % 2..n_qubits - 1).step_by(2) {
+            for _ in 0..3 {
+                for q in [i, i + 1] {
+                    circuit.add_gate(Gate::Ry(rng.random::<f64>() * tau), &[q]);
+                    circuit.add_gate(Gate::Rz(rng.random::<f64>() * tau), &[q]);
+                }
+                circuit.add_gate(Gate::Cx, &[i, i + 1]);
+            }
+        }
+    }
+    circuit
+}
+
 fn random_clifford_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut circuit = Circuit::new(n_qubits, 0);
@@ -1907,6 +1961,46 @@ fn bench_tn_bounded_contraction(c: &mut Criterion) {
     group.finish();
 }
 
+/// `Z` observables on a 4-row grid through explicit `TensorNetwork`, 8 cycles deep.
+///
+/// The backward light cone of the middle qubit holds 87 gates on 16 qubits at every
+/// width, so the `local_z` rows separate cost that follows the cone from cost that
+/// follows the whole circuit. At 16 qubits that cone spans every qubit but holds half
+/// the gates. The `all_z` rows put a `Z` on every qubit, whose cone is the circuit.
+fn bench_tn_grid_expectation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tn/grid_expectation");
+    configure_group(&mut group);
+
+    let rows = [
+        ("local_z", 16),
+        ("local_z", 20),
+        ("local_z", 24),
+        ("all_z", 16),
+        ("all_z", 20),
+    ];
+    for (name, n) in rows {
+        let circuit = grid_cycles_circuit(n, 4, 8, SEED);
+        let observable = if name == "local_z" {
+            vec![PauliTerm::z(n / 2)]
+        } else {
+            (0..n).map(PauliTerm::z).collect()
+        };
+        let observables = [observable];
+        group.bench_with_input(BenchmarkId::new(name, n), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::TensorNetwork)
+                        .seed(42)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Reduced density matrix on a long chain, past the dense query ceiling.
 ///
 /// The query doubles the network against its conjugate and contracts with one
@@ -2133,6 +2227,64 @@ fn bench_auto_expectation(c: &mut Criterion) {
         });
     }
 
+    group.finish();
+}
+
+/// `Auto` expectations above the statevector cap, where MPS is the fallback.
+///
+/// `su4_brick_d6` drives the MPS bond to 64 while one `Z` has a twelve-qubit
+/// cone; `brickwork_d10` crosses the tensor route's peak bound after a dry run;
+/// `hea_l2` and `su4_brick_d4` stay under the MPS cost at which the dry run is
+/// worth attempting.
+fn bench_auto_expectation_above_cap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/expectation_above_cap");
+    configure_group(&mut group);
+
+    let local = |n: usize| vec![vec![PauliTerm::z(n / 2)]];
+    let two_local = |n: usize| -> Vec<Vec<PauliTerm>> {
+        (0..8)
+            .map(|k| {
+                let a = (k * n / 8) % n;
+                let b = (a + n / 3 + 1) % n;
+                vec![PauliTerm::z(a), PauliTerm::z(b)]
+            })
+            .collect()
+    };
+    let rows: Vec<(&str, Circuit, Vec<Vec<PauliTerm>>)> = vec![
+        (
+            "su4_brick_d6/64",
+            su4_brickwork_circuit(64, 6, SEED),
+            local(64),
+        ),
+        (
+            "brickwork_d10/48",
+            circuits::brickwork_circuit(48, 10, SEED),
+            local(48),
+        ),
+        (
+            "hea_l2/64",
+            circuits::hardware_efficient_ansatz(64, 2, SEED),
+            two_local(64),
+        ),
+        (
+            "su4_brick_d4/64",
+            su4_brickwork_circuit(64, 4, SEED),
+            two_local(64),
+        ),
+    ];
+    for (name, circuit, observables) in rows {
+        group.bench_with_input(BenchmarkId::from_parameter(name), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Auto)
+                        .seed(42)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                )
+            });
+        });
+    }
     group.finish();
 }
 
@@ -4690,12 +4842,14 @@ criterion_group! {
     bench_tn_scalar_tree_quality,
     bench_tn_sliced_contraction,
     bench_tn_bounded_contraction,
+    bench_tn_grid_expectation,
     bench_tn_rdm_chain,
     bench_tn_midmeasure_chain,
     bench_tn_noisy_chain,
     bench_tn_sample_chain,
     // Auto dispatch
     bench_auto_expectation,
+    bench_auto_expectation_above_cap,
     bench_auto_crossover,
     bench_auto_random,
     bench_auto_qft,

@@ -629,32 +629,39 @@ fn build_batch_rzz_bmi2_tables(
     for (g, group) in groups.iter_mut().enumerate().take(num_groups) {
         let mask = masks[g];
         group.pext_mask = mask;
-        let mut group_edges = [(0u8, 0u8, 0.0f64); BatchRzzData::MAX_EDGES];
-        let mut len = 0;
+        let unique = mask.count_ones() as usize;
+        // Flipping table bit `k` flips the parity of every edge on it, which
+        // multiplies the phase by `e^{i theta}` or its conjugate.
+        let mut incident = [[(0u8, ONE); BatchRzzData::MAX_EDGES]; BATCH_RZZ_BMI2_MAX_UNIQUE];
+        let mut degree = [0usize; BATCH_RZZ_BMI2_MAX_UNIQUE];
+        let mut base = ONE;
         let mut bits = members[g];
         while bits != 0 {
             let (q0, q1, theta) = edges[bits.trailing_zeros() as usize];
-            group_edges[len] = (
-                (mask & ((1u64 << q0) - 1)).count_ones() as u8,
-                (mask & ((1u64 << q1) - 1)).count_ones() as u8,
-                theta,
-            );
-            len += 1;
+            let p0 = (mask & ((1u64 << q0) - 1)).count_ones() as usize;
+            let p1 = (mask & ((1u64 << q1) - 1)).count_ones() as usize;
+            let flip = Complex64::from_polar(1.0, theta);
+            incident[p0][degree[p0]] = (p1 as u8, flip);
+            degree[p0] += 1;
+            incident[p1][degree[p1]] = (p0 as u8, flip);
+            degree[p1] += 1;
+            base *= Complex64::from_polar(1.0, -theta / 2.0);
             bits &= bits - 1;
         }
 
-        let table_size = 1usize << mask.count_ones();
-        for c in 0..table_size {
-            let mut angle = 0.0f64;
-            for &(p0, p1, theta) in &group_edges[..len] {
-                let parity = ((c >> p0) ^ (c >> p1)) & 1;
-                angle += if parity == 0 {
-                    -theta / 2.0
+        group.table[0] = base;
+        for c in 1..1usize << unique {
+            let k = c.trailing_zeros() as usize;
+            let prev = c & (c - 1);
+            let mut phase = group.table[prev];
+            for &(other, flip) in &incident[k][..degree[k]] {
+                phase *= if (prev >> other) & 1 == 0 {
+                    flip
                 } else {
-                    theta / 2.0
+                    flip.conj()
                 };
             }
-            group.table[c] = Complex64::from_polar(1.0, angle);
+            group.table[c] = phase;
         }
     }
     Some(num_groups)

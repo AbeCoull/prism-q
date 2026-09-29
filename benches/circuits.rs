@@ -3487,6 +3487,10 @@ fn bench_compiled_sampler(c: &mut Criterion) {
             });
         });
 
+        group.bench_function(BenchmarkId::new("one_shot", format!("{n}q")), |b| {
+            b.iter(|| sim::simulate(&circuit).seed(SEED).shots(1).unwrap());
+        });
+
         let id_lut = format!("lut_only_{}q_10k", n);
         group.bench_function(BenchmarkId::new("lut_only", &id_lut), |b| {
             let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();

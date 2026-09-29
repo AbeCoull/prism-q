@@ -381,6 +381,13 @@ fn noiseless_shots_name_the_compiled_sampler() {
 }
 
 #[test]
+fn a_single_noiseless_shot_names_the_compiled_sampler() {
+    let circuit = ghz_ladder(0);
+    let shots = simulate(&circuit).seed(SEED).shots(1).unwrap();
+    assert_eq!(shots.metadata.engine, Some(Engine::CompiledSampler));
+}
+
+#[test]
 fn a_thousand_noisy_shots_name_the_homological_sampler() {
     let circuit = ghz_ladder(0);
     let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);

@@ -69,78 +69,6 @@ fn gf2_kernel_verifies() {
 }
 
 #[test]
-fn homological_ghz_compiles() {
-    let n = 6;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-    let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    assert!(sampler.syndrome_rank() <= n, "syndrome rank should be ≤ n");
-}
-
-#[test]
-fn homological_ghz_samples() {
-    let n = 6;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let mut sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    let shots = sampler.sample_bulk(1000);
-    assert_eq!(shots.len(), 1000);
-    assert_eq!(shots[0].len(), n);
-}
-
-#[test]
-fn homological_bell_pairs() {
-    let n = 4;
-    let mut circuit = circuits::independent_bell_pairs(n / 2);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-    let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    // Bell pairs with noise should have non-trivial syndrome rank
-    assert!(sampler.syndrome_rank() > 0);
-}
-
-#[test]
-fn homological_class_probs_sum_to_one() {
-    let n = 6;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    let sum: f64 = sampler.class_probs.iter().sum();
-    assert!(
-        (sum - 1.0).abs() < 1e-10,
-        "class probabilities should sum to 1, got {sum}"
-    );
-}
-
-#[test]
-fn homological_matches_brute_force_statistics() {
-    let n = 4;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.05);
-    let num_shots = 10000;
-
-    // Homological sampler
-    let homo_result = run_shots_homological(&circuit, &noise, num_shots, 42).unwrap();
-
-    // Brute-force sampler
-    let brute_result = crate::sim::noise::run_shots_noisy(&circuit, &noise, num_shots, 42).unwrap();
-
-    for bit in 0..n {
-        let homo_p = homo_result.marginal(bit);
-        let brute_p = brute_result.marginal(bit);
-        let diff = (homo_p - brute_p).abs();
-        assert!(
-            diff < 0.05,
-            "bit {bit}: homological p={homo_p:.4}, brute p={brute_p:.4}, diff={diff:.4}"
-        );
-    }
-}
-
-#[test]
 fn boundary_trivial_circuit_has_zero_homology() {
     let n = 4;
     let mut circuit = crate::circuit::Circuit::new(n, n);
@@ -197,17 +125,6 @@ fn boundary_independent_bell_pairs() {
 }
 
 #[test]
-fn boundary_exposed_via_sampler() {
-    let n = 4;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-    let sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    assert_eq!(sampler.homology_dim(), 1);
-    assert_eq!(sampler.boundary_dim(), n - 1);
-}
-
-#[test]
 fn boundary_partial_measurement() {
     let mut circuit = crate::circuit::Circuit::new(3, 1);
     circuit.add_gate(crate::gates::Gate::H, &[0]);
@@ -221,78 +138,6 @@ fn boundary_partial_measurement() {
     // boundary_dim = 3-1 = 2, homology_dim = 3-1+1 = 3
     assert_eq!(ecc.boundary_dim(), 2);
     assert_eq!(ecc.homology_dim(), 3);
-}
-
-#[test]
-fn packed_matches_unpacked() {
-    let n = 6;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-
-    let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    let mut s2 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-
-    let unpacked = s1.sample_bulk(500);
-    let packed = s2.sample_packed(500);
-
-    assert_eq!(packed.num_shots(), 500);
-    assert_eq!(packed.num_measurements(), n);
-
-    for (s, shot) in unpacked.iter().enumerate() {
-        for (m, &val) in shot.iter().enumerate() {
-            assert_eq!(packed.get_bit(s, m), val, "mismatch at shot={s} meas={m}");
-        }
-    }
-}
-
-#[test]
-fn marginals_matches_unpacked() {
-    let n = 6;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-
-    let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    let mut s2 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-
-    let num_shots = 10_000;
-    let unpacked = s1.sample_bulk(num_shots);
-    let marginals = s2.sample_marginals(num_shots);
-
-    assert_eq!(marginals.len(), n);
-    for m in 0..n {
-        let unpacked_p = unpacked.iter().filter(|s| s[m]).count() as f64 / num_shots as f64;
-        assert!(
-            (marginals[m] - unpacked_p).abs() < 1e-10,
-            "marginal mismatch at meas={m}: packed={}, unpacked={unpacked_p}",
-            marginals[m],
-        );
-    }
-}
-
-#[test]
-fn analytical_marginals_match_sampled_small() {
-    let n = 6;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-
-    let analytical = noisy_marginals_analytical(&circuit, &noise, 42).unwrap();
-
-    let mut sampler = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    let sampled = sampler.sample_marginals(100_000);
-
-    assert_eq!(analytical.len(), n);
-    assert_eq!(sampled.len(), n);
-    for i in 0..n {
-        assert!(
-            (analytical[i] - sampled[i]).abs() < 0.01,
-            "bit {i}: analytical={:.6}, sampled={:.6}",
-            analytical[i],
-            sampled[i],
-        );
-    }
 }
 
 #[test]
@@ -443,25 +288,4 @@ fn analytical_marginals_no_noise() {
             "bit {i}: GHZ with no noise should have marginal 0.5, got {p}"
         );
     }
-}
-
-#[test]
-fn chunked_accumulator_matches_packed() {
-    let n = 6;
-    let mut circuit = circuits::ghz_circuit(n);
-    circuit.measure_all();
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-
-    let mut s1 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-    let mut s2 = HomologicalSampler::compile(&circuit, &noise, 42).unwrap();
-
-    let num_shots = 5_000;
-    let packed = s1.sample_packed(num_shots);
-    let direct_counts = packed.counts();
-
-    let mut acc = super::super::compiled::HistogramAccumulator::new();
-    s2.sample_chunked(num_shots, &mut acc);
-    let chunked_counts = acc.into_counts();
-
-    assert_eq!(direct_counts, chunked_counts);
 }

@@ -73,8 +73,6 @@ pub enum Engine {
     NoisyCompiledSampler,
     /// The Pauli frame sampler, which replays a reference record per batch.
     FrameSampler,
-    /// `HomologicalSampler`: syndrome classes precomputed, O(1) per shot.
-    HomologicalSampler,
 }
 
 /// Whether a result is exact for the circuit as given.

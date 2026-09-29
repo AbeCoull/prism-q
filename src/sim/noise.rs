@@ -314,12 +314,12 @@ impl NoiseEvent {
     ///
     /// Panics if the channel is not Pauli or Depolarizing. Callers on the
     /// compiled stabilizer sampler path must guard with
-    /// [`NoiseModel::ensure_pauli_only`] before invoking this method, and read
-    /// a two-qubit channel through [`NoiseEvent::pauli_pair`] instead.
+    /// [`NoiseModel::is_pauli_only`] before invoking this method, and read a
+    /// two-qubit channel through [`NoiseEvent::pauli_pair`] instead.
     pub fn pauli_probs(&self) -> (f64, f64, f64) {
         self.channel
             .as_pauli()
-            .expect("pauli_probs called on non-Pauli channel; caller must use ensure_pauli_only")
+            .expect("pauli_probs called on non-Pauli channel; caller must check is_pauli_only")
     }
 
     /// Both targets and the total rate of a two-qubit Pauli channel, `None`
@@ -461,10 +461,9 @@ impl NoiseModel {
     }
 
     /// True when every channel is a single-qubit Pauli or Depolarizing channel
-    /// and nothing else can flip a bit, the precondition for the homological
-    /// sampler, which folds noise into syndrome classes computed before any
-    /// shot is drawn. A live two-qubit channel answers `false` here and still
-    /// runs on the Clifford samplers; an inert one blocks nothing.
+    /// and no readout entry can flip a bit. A live two-qubit channel answers
+    /// `false` here and still runs on the Clifford samplers; an inert one
+    /// blocks nothing.
     pub fn is_pauli_only(&self) -> bool {
         self.has_chain_complex_channels()
             && self.readout.iter().flatten().all(ReadoutError::is_inert)
@@ -506,31 +505,12 @@ impl NoiseModel {
             || self.readout.iter().any(|r| r.is_some())
     }
 
-    /// Return an error if the noise model contains any non-Pauli channels
-    /// or readout errors. Precondition of the samplers that fold noise into
-    /// the measurement record ahead of sampling, which readout error, drawn
-    /// per shot against the record itself, is not part of.
-    pub fn ensure_pauli_only(&self) -> Result<()> {
-        self.ensure_chain_complex_channels()?;
-        if !self.readout.iter().flatten().all(ReadoutError::is_inert) {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "homological sampler".into(),
-                reason: "readout error is drawn per shot against the record rather than \
-                         folded into a syndrome class; sample through `run_shots_noisy`, \
-                         or read per-bit marginals through `noisy_marginals_analytical`, \
-                         which applies it in closed form"
-                    .into(),
-            });
-        }
-        Ok(())
-    }
-
     /// Return an error if any channel falls outside the error chain complex,
     /// which holds one column per single-qubit Pauli error.
     pub(crate) fn ensure_chain_complex_channels(&self) -> Result<()> {
         if !self.has_chain_complex_channels() {
             return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "homological sampler".into(),
+                backend: "error chain complex".into(),
                 reason: "non-Pauli noise channels (amplitude damping, phase damping, \
                          thermal relaxation, custom Kraus) carry no Pauli frame, and a \
                          two-qubit channel spans two error columns where the complex \
@@ -2865,8 +2845,8 @@ fn run_shots_noisy_frame(
     )
 }
 
-/// Sample a Pauli-noisy Clifford circuit through the compiled noisy sampler,
-/// frame sampler, or homological path as appropriate.
+/// Sample a Pauli-noisy Clifford circuit through the compiled noisy sampler or
+/// the frame sampler.
 ///
 /// Circuits with resets, classical conditionals, or mid-circuit measurements
 /// fall back to per-shot stabilizer replay. Non-Clifford circuits take the

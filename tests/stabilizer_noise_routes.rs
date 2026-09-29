@@ -12,8 +12,7 @@ use prism_q::gates::Gate;
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
 use prism_q::{
     BackendKind, Engine, PauliTerm, ResolvedBackend, compile_noisy,
-    density_matrix_expectation_values, noisy_marginals_analytical, run_shots_homological,
-    run_shots_noisy, simulate,
+    density_matrix_expectation_values, noisy_marginals_analytical, run_shots_noisy, simulate,
 };
 
 const SHOTS: usize = 20_000;
@@ -396,21 +395,17 @@ fn the_replay_fallback_matches_the_trajectory_engine() {
 }
 
 // The chain complex holds one column per single-qubit error, so a live pair
-// has no column to occupy. `run_shots_noisy` still answers: the homological
-// attempt is a fallible probe and the compiled family takes over.
+// has no column to occupy, while the compiled family still samples it.
 #[test]
-fn the_homological_sampler_rejects_a_live_pair_channel() {
+fn the_chain_complex_rejects_a_live_pair_channel() {
     let circuit = ones_chain(4, 0);
     let noise = pair_noise(&circuit, 0.02);
 
     assert!(!noise.is_pauli_only());
-    assert!(noise.ensure_pauli_only().is_err());
-    assert!(run_shots_homological(&circuit, &noise, 1000, SEED).is_err());
     assert!(noisy_marginals_analytical(&circuit, &noise, SEED).is_err());
     assert!(run_shots_noisy(&circuit, &noise, 1000, SEED).is_ok());
 
     let inert = pair_noise(&circuit, 0.0);
     assert!(inert.is_pauli_only());
-    assert!(run_shots_homological(&circuit, &inert, 1000, SEED).is_ok());
     assert!(noisy_marginals_analytical(&circuit, &inert, SEED).is_ok());
 }

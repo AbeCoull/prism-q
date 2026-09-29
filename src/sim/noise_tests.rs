@@ -143,11 +143,6 @@ fn pauli_engines_share_observable_statistics() {
             run_shots_noisy_frame(&circuit, &noise, num_shots, seed).unwrap(),
         ),
         (
-            "homological",
-            crate::sim::homological::run_shots_homological(&circuit, &noise, num_shots, seed)
-                .unwrap(),
-        ),
-        (
             "brute",
             run_shots_noisy_brute_with(
                 |s| Box::new(StabilizerBackend::new(s)),
@@ -1114,7 +1109,7 @@ fn the_two_letters_are_drawn_jointly_on_the_compiled_route() {
 }
 
 // A zero-rate pair flips nothing, so it must not cost the model the device
-// path the way a live one does, and must not block the homological gate, which
+// path the way a live one does, and must not block the chain complex, which
 // otherwise reads the channel variant alone. This is the reading the readout
 // table already uses: inert, not absent.
 #[test]
@@ -1125,7 +1120,6 @@ fn a_zero_rate_pair_channel_is_inert() {
     let sampler = compile_noisy(&circuit, &inert, 42).unwrap();
     assert!(!sampler.events.has_pairs());
     assert!(inert.is_pauli_only());
-    assert!(inert.ensure_pauli_only().is_ok());
     assert!(crate::sim::homological::noisy_marginals_analytical(&circuit, &inert, 42).is_ok());
 
     let live = x_basis_pair_model(&circuit, 4, 0.2);
@@ -1137,9 +1131,7 @@ fn a_zero_rate_pair_channel_is_inert() {
 // The inert entry must also draw nothing. A pass that draws and never fires
 // leaves the record alone, so the draw shows only in what the stream feeds
 // next: the readout entry, drawn from the same generator after the pair pass.
-// The two runs share one seed and diverge on the first extra draw. The shot
-// count sits under the homological threshold so both models run the noisy
-// compiled sampler; above it only the pair-free model would.
+// The two runs share one seed and diverge on the first extra draw.
 #[test]
 fn a_zero_rate_pair_channel_consumes_no_randomness() {
     let mut circuit = Circuit::new(2, 2);

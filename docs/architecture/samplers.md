@@ -162,7 +162,7 @@ Backward Pauli propagation through circuit + noise sensitivity analysis. Each no
 
 `NoiseModel`: per-instruction noise events. Pauli and depolarizing channels are
 supported by every noisy engine, and two-qubit depolarizing by every one but
-the homological sampler. Amplitude damping, phase damping, thermal relaxation,
+`noisy_marginals_analytical`. Amplitude damping, phase damping, thermal relaxation,
 and one- and two-qubit custom Kraus operators require the trajectory engine. Readout error is separate: it acts on
 the measurement record rather than the state, so the route is chosen on the
 channels alone and each engine applies readout itself.
@@ -206,12 +206,6 @@ The last two, and the noiseless compiled sampler, all resolve to
 `ResolvedBackend::CompiledStabilizer`. `RunMetadata::engine` names which one
 ran, so a test pins a route off the result rather than off the predicates that
 picked it.
-
-The homological sampler is reachable only through `run_shots_homological`. Its
-compile enumerates all `2^r` syndrome classes, 0.4 ms at rank 8 and 3.7 s at
-rank 20 against 0.03 to 0.09 ms for the compiled Pauli sampler, and its draw
-costs about 0.3 us a shot against 0.01 to 0.05 us for the compiled sampler at a
-million shots, at every rank from 8 to 20.
 
 The trajectory engine (`src/sim/trajectory.rs`) covers everything the compiled
 family rejects: non-Pauli channels, mid-circuit measurement, reset, classical
@@ -270,7 +264,7 @@ at least one quantum event: slots are indexed per top-level instruction, so a
 region body has none and would run noiselessly. A readout-only model has
 nothing to lose there and is accepted. Reaching noise inside a region body
 needs the event stream keyed by something other than a top-level index, which
-the compiled sampler, the homological builder, and the density-matrix evolution
+the compiled sampler, the error chain complex, and the density-matrix evolution
 all walk today.
 
 Custom Kraus sets must be trace preserving, `sum_k Kdagger_k K_k = I` to 1e-9.
@@ -304,9 +298,9 @@ limited to 512 measurements (8 packed words); larger circuits fall back to the
 CPU reduction. Golden test: `noisy_compiled_gpu_reductions_match_cpu_statistics`
 (`tests/golden_gpu.rs`).
 
-## Homological sampler (`src/sim/homological.rs`)
+## Error chain complex (`src/sim/homological.rs`)
 
-`ErrorChainComplex`: GF(2) chain complex over the circuit's noise locations. Computes the kernel (null space) of the boundary map to identify error cycles that are undetectable by syndrome measurements. `HomologicalSampler` precomputes the syndrome classes from it, so noise costs O(1) work per shot.
+`ErrorChainComplex`: GF(2) chain complex over the circuit's noise locations. Computes the kernel (null space) of the boundary map to identify error cycles that are undetectable by syndrome measurements.
 
 `noisy_marginals_analytical`: closed-form marginals from the parity matrix and noise rates, with no Monte Carlo sampling.
 

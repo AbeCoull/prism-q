@@ -14,9 +14,7 @@ use prism_q::circuit::Circuit;
 use prism_q::gates::Gate;
 use prism_q::sim;
 use prism_q::sim::noise::NoiseModel;
-use prism_q::{
-    HomologicalSampler, QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef, run_qec_program,
-};
+use prism_q::{QecNoise, QecOptions, QecPauli, QecProgram, QecRecordRef, run_qec_program};
 #[cfg(feature = "bench-internal")]
 use prism_q::{compile_qec_profiled_sampler, parse_qec_program};
 use std::collections::HashMap;
@@ -677,96 +675,6 @@ fn bench_qec_noisy_runner_split(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_homological_compile(c: &mut Criterion) {
-    let mut group = c.benchmark_group("homological_compile");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
-
-    for &n in &[6, 10, 16, 20] {
-        let circuit = ghz_circuit_with_measurements(n);
-        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-        if HomologicalSampler::compile(&circuit, &noise, SEED).is_ok() {
-            group.bench_with_input(BenchmarkId::new("ghz", n), &n, |b, _| {
-                b.iter(|| HomologicalSampler::compile(&circuit, &noise, SEED).unwrap());
-            });
-        }
-    }
-
-    for &n in &[10, 20, 30] {
-        let circuit = clifford_circuit_with_measurements(n, 5);
-        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-        if HomologicalSampler::compile(&circuit, &noise, SEED).is_ok() {
-            group.bench_with_input(BenchmarkId::new("clifford_d5", n), &n, |b, _| {
-                b.iter(|| HomologicalSampler::compile(&circuit, &noise, SEED).unwrap());
-            });
-        }
-    }
-
-    group.finish();
-}
-
-fn bench_homological_sample(c: &mut Criterion) {
-    let mut group = c.benchmark_group("homological_sample");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(200));
-    group.measurement_time(Duration::from_secs(3));
-
-    for &n_shots in &[1_000, 10_000, 100_000, 1_000_000] {
-        let circuit = ghz_circuit_with_measurements(20);
-        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-
-        {
-            let mut sampler = HomologicalSampler::compile(&circuit, &noise, SEED).unwrap();
-            group.bench_with_input(
-                BenchmarkId::new("ghz_20q_unpacked", n_shots),
-                &n_shots,
-                |b, &shots| {
-                    b.iter(|| sampler.sample_bulk(shots));
-                },
-            );
-        }
-
-        {
-            let mut sampler = HomologicalSampler::compile(&circuit, &noise, SEED).unwrap();
-            group.bench_with_input(
-                BenchmarkId::new("ghz_20q_packed", n_shots),
-                &n_shots,
-                |b, &shots| {
-                    b.iter(|| sampler.sample_packed(shots));
-                },
-            );
-        }
-
-        {
-            let mut sampler = HomologicalSampler::compile(&circuit, &noise, SEED).unwrap();
-            group.bench_with_input(
-                BenchmarkId::new("ghz_20q_marginals", n_shots),
-                &n_shots,
-                |b, &shots| {
-                    b.iter(|| sampler.sample_marginals(shots));
-                },
-            );
-        }
-    }
-
-    for &n_shots in &[1_000, 10_000, 100_000, 1_000_000] {
-        let circuit = bell_circuit_with_measurements(16);
-        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
-        if let Ok(mut sampler) = HomologicalSampler::compile(&circuit, &noise, SEED) {
-            group.bench_with_input(
-                BenchmarkId::new("bell_16q_packed", n_shots),
-                &n_shots,
-                |b, &shots| {
-                    b.iter(|| sampler.sample_packed(shots));
-                },
-            );
-        }
-    }
-
-    group.finish();
-}
-
 fn sparse_active_circuit(n_qubits: usize, n_active: usize) -> Circuit {
     let mut active = prism_q::circuits::clifford_heavy_circuit(n_active, 10, SEED);
     active.num_qubits = n_qubits;
@@ -897,8 +805,6 @@ criterion_group! {
     bench_qec_clifford_runner,
     bench_qec_noisy_runner,
     bench_qec_noisy_runner_split,
-    bench_homological_compile,
-    bench_homological_sample,
     bench_analytical_marginals,
     bench_chunked_high_shots
 }

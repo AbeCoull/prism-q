@@ -199,14 +199,19 @@ engine per call:
 | Engine | Selected when | Limitations |
 |---|---|---|
 | Brute-force replay (`run_shots_noisy_brute_with`) | Resets, classical conditionals, or mid-circuit measurements | Per-shot tableau replay, O(shots) simulations; non-Clifford circuits error here (the public entry point routes them to the trajectory engine instead) |
-| Homological (`src/sim/homological.rs`) | >= 1000 shots, single-qubit channels, ideal readout, and the error complex compiles (syndrome rank <= 20) | Falls through to frame/compiled above rank 20, or when the model carries readout error or a two-qubit channel, neither of which has a syndrome class to fold into |
 | Pauli frame | Shallow circuits: gate count / qubits < 3, or < 5 at >= 200 qubits | Clifford, terminal measurements only |
 | Compiled Pauli (`NoisyCompiledSampler`) | Remaining Clifford + terminal-measurement circuits | Clifford, terminal measurements only |
 
-The last three, and the noiseless compiled sampler, all resolve to
+The last two, and the noiseless compiled sampler, all resolve to
 `ResolvedBackend::CompiledStabilizer`. `RunMetadata::engine` names which one
 ran, so a test pins a route off the result rather than off the predicates that
 picked it.
+
+The homological sampler is reachable only through `run_shots_homological`. Its
+compile enumerates all `2^r` syndrome classes, 0.4 ms at rank 8 and 3.7 s at
+rank 20 against 0.03 to 0.09 ms for the compiled Pauli sampler, and its draw
+costs about 0.3 us a shot against 0.01 to 0.05 us for the compiled sampler at a
+million shots, at every rank from 8 to 20.
 
 The trajectory engine (`src/sim/trajectory.rs`) covers everything the compiled
 family rejects: non-Pauli channels, mid-circuit measurement, reset, classical

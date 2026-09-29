@@ -308,7 +308,7 @@ The `BackendKind` variants outside feature gates. `AutoGpu`, `StatevectorGpu`,
 | `Sparse` | HashMap state | Explicit or auto (above memory limit, sparse-friendly) |
 | `Mps { max_bond_dim }` | Matrix Product State | Explicit or auto (above memory limit) |
 | `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
-| `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal on a unitary circuit of 18 qubits or more under the statevector cap, when a bounded greedy plan for every observable stays under `2^12` elements |
+| `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal on a unitary circuit when a bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when `Auto` would take MPS and the plan costs less than an estimate of the MPS run |
 | `TensorNetworkBounded { tolerance }` | Deferred contraction with truncation past the peak cap | Explicit |
 | `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
 | `DensityMatrix` | Exact mixed state | Explicit |

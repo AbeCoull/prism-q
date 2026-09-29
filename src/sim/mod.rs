@@ -25,12 +25,12 @@ use decomposed::{
 };
 pub use dispatch::BackendKind;
 use dispatch::{
-    BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS, MAX_STABILIZER_RANK_QUBITS,
-    MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS, MIN_QUBITS_FOR_SPD_AUTO,
-    accel_for, approximate_route_name, auto_selects_cpu_statevector, auto_spd_work_budget,
-    build_statevector, has_temporal_clifford_opportunity, initial_state_plan, plan_for_family,
-    plan_temporal_clifford, resolve, resolve_backend, run_temporal_clifford,
-    stabilizer_rank_budget, validate_explicit_backend,
+    AUTO_MPS_BOND_DIM, BackendPlan, ExecutionPlan, Family, MAX_AUTO_T_COUNT_SHOTS,
+    MAX_STABILIZER_RANK_QUBITS, MIN_BLOCK_FOR_FACTORED_STAB, MIN_FACTORED_STABILIZER_QUBITS,
+    MIN_QUBITS_FOR_SPD_AUTO, accel_for, approximate_route_name, auto_selects_cpu_statevector,
+    auto_spd_work_budget, build_statevector, has_temporal_clifford_opportunity, initial_state_plan,
+    mps_apply_cost, plan_for_family, plan_temporal_clifford, resolve, resolve_backend,
+    run_temporal_clifford, stabilizer_rank_budget, validate_explicit_backend,
 };
 pub use metadata::{
     BondReport, Engine, Exactness, ExpectationResult, Placement, ResolvedBackend, RunMetadata,
@@ -2972,12 +2972,16 @@ fn run_marginals_result_with(
         return marginals_from_pauli_expectations(&backend, n);
     }
 
-    // A marginal is a `Z_q` expectation, so a unitary circuit under the cap
-    // gets the same bounded tensor dry run the expectation terminal takes.
-    if kind.is_auto() && n <= max_statevector_qubits() && !has_nonunitary_or_classical_ops(circuit)
-    {
+    // A marginal is a `Z_q` expectation, so a unitary circuit gets the same
+    // tensor routes the expectation terminal takes.
+    if kind.is_auto() && !has_nonunitary_or_classical_ops(circuit) {
         let observables: Vec<Vec<PauliTerm>> = (0..n).map(|q| vec![PauliTerm::z(q)]).collect();
-        if let Some(result) = tensor_route_expectations(circuit, &observables) {
+        let tensor_route = if n <= max_statevector_qubits() {
+            tensor_route_expectations(circuit, &observables)
+        } else {
+            tensor_route_over_mps(circuit, &observables)
+        };
+        if let Some(result) = tensor_route {
             let result = result?;
             return Ok(MarginalsResult {
                 marginals: expectations_to_marginals(&result.values),
@@ -3100,6 +3104,9 @@ fn run_expectation_values_reported(
                 ))
             } else if kind.is_auto() {
                 if circuit.num_qubits > max_statevector_qubits() {
+                    if let Some(result) = tensor_route_over_mps(circuit, observables) {
+                        return result;
+                    }
                     return expectation_values_native(&kind, circuit, observables, seed);
                 }
                 if let Some(result) = tensor_route_expectations(circuit, observables) {
@@ -3626,12 +3633,73 @@ fn tensor_route_expectations(
             return Some(Err(e));
         }
     }
-    let values = crate::backend::tensornetwork::bounded_expectations_zero_state(
+    let planned = match crate::backend::tensornetwork::plan_bounded_expectations(
         circuit,
         observables,
         crate::backend::tensornetwork::AUTO_EXPECTATION_PEAK_BOUND,
-    )?;
-    Some(values.map(|values| {
+    )? {
+        Ok(planned) => planned,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(planned.contract().map(|values| {
+        analytic_expectations(values, RunMetadata::exact(ResolvedBackend::TensorNetwork))
+    }))
+}
+
+/// MPS work per observable, in [`mps_apply_cost`] units, from which an `Auto`
+/// expectation above the statevector cap plans the scalar tensor route before
+/// running MPS. About 2 ms of MPS time, the most one observable's dry run took
+/// across the calibration circuits (0.1 to 1.9 ms), so a declined or losing
+/// plan costs at most about the MPS run it tried to replace.
+const TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE: f64 = 1.5e5;
+
+/// [`mps_apply_cost`] units one planned tensor-network element costs: about
+/// 40 ns per element contracted against 15 ns per unit.
+const TENSOR_ELEMENT_MPS_COST: f64 = 3.0;
+
+/// The scalar tensor route for an `Auto` expectation above the statevector cap,
+/// where the alternative is the MPS `Auto` resolves to rather than a dense run.
+/// `None` when `Auto` resolves to another backend, when the MPS estimate is
+/// under [`TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE`] per observable, when a plan
+/// crosses the peak bound, or when the planned contraction costs more than the
+/// MPS estimate.
+fn tensor_route_over_mps(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+) -> Option<Result<ExpectationResult>> {
+    if observables.is_empty() {
+        return None;
+    }
+    let mps_cost = mps_apply_cost(circuit, AUTO_MPS_BOND_DIM);
+    if mps_cost < TENSOR_ROUTE_MPS_COST_PER_OBSERVABLE * observables.len() as f64 {
+        return None;
+    }
+    let (_, has_partial_independence) = analyze_independence(circuit);
+    let ExecutionPlan::Backend(plan) =
+        resolve(&BackendKind::Auto, circuit, has_partial_independence)
+    else {
+        return None;
+    };
+    if !matches!(plan, BackendPlan::Mps { .. }) {
+        return None;
+    }
+    for observable in observables {
+        if let Err(e) = validate_observable(observable, circuit.num_qubits) {
+            return Some(Err(e));
+        }
+    }
+    let planned = match crate::backend::tensornetwork::plan_bounded_expectations(
+        circuit,
+        observables,
+        crate::backend::tensornetwork::AUTO_EXPECTATION_PEAK_BOUND,
+    )? {
+        Ok(planned) => planned,
+        Err(e) => return Some(Err(e)),
+    };
+    if planned.total_elements() as f64 * TENSOR_ELEMENT_MPS_COST >= mps_cost {
+        return None;
+    }
+    Some(planned.contract().map(|values| {
         analytic_expectations(values, RunMetadata::exact(ResolvedBackend::TensorNetwork))
     }))
 }

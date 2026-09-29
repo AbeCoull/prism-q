@@ -3,6 +3,7 @@
 
 pub mod braket;
 pub mod calibration;
+mod clifford_register;
 pub mod compiled;
 mod decomposed;
 mod dispatch;
@@ -2672,6 +2673,23 @@ impl ShotSource {
     }
 }
 
+/// Narrowest register `Auto` samples through the Clifford register rather than the
+/// statevector. At 12 qubits the statevector still wins, 0.8 against 1.3 ms for 1024
+/// shots; at 16 the register takes 1.5 ms against 3.3.
+const MIN_AUTO_CLIFFORD_REGISTER_QUBITS: usize = 16;
+
+/// Whether terminal shots of `circuit` go to the Clifford register ahead of the
+/// statevector: Clifford+T, at least [`MIN_AUTO_CLIFFORD_REGISTER_QUBITS`] wide, and
+/// fewer T gates than qubits, within the register's width cap.
+fn auto_prefers_clifford_register(circuit: &Circuit) -> bool {
+    circuit.num_qubits >= MIN_AUTO_CLIFFORD_REGISTER_QUBITS
+        && circuit.has_terminal_measurements_only()
+        && !circuit.has_resets()
+        && auto_clifford_t_budget(circuit).is_some_and(|(t, _)| {
+            t < circuit.num_qubits && t <= clifford_register::MAX_REGISTER_QUBITS
+        })
+}
+
 /// Select and prepare the sampling source for `circuit`.
 ///
 /// Preparation is real work: compiling a sampler, building and running a
@@ -2699,6 +2717,10 @@ fn prepare_shot_source(
                 deferred: true,
             });
         }
+    }
+
+    if kind.is_auto() && auto_prefers_clifford_register(circuit) {
+        return Ok(ShotSource::StabilizerRank);
     }
 
     if let Some((backend, meas_map)) = try_terminal_statevector_backend(kind, circuit, seed)? {

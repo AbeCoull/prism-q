@@ -30,12 +30,24 @@ as one T each, so `is_clifford_plus_t` and the automatic route treat them like `
 ## Stabilizer rank (`src/sim/stabilizer_rank.rs`)
 
 Exact probability output is capped because it returns a dense vector with 2^n
-entries. Shot sampling carries coherent weighted MPS branches instead of falling
-back to a dense statevector. Clifford gates mutate each branch state, `T` and `Tdg`
-split branches, and measurement computes outcome probabilities from the weighted
-branch ensemble before projecting every branch to the sampled outcome. So
-`run_stabilizer_rank_shots` has no hard qubit cap; branch count, MPS bond growth,
-and measurement count govern how far it scales.
+entries. Shot sampling has no hard qubit cap and takes one of two forms.
+
+Terminal measurements of a unitary circuit hold the state as a Clifford tableau `C`
+applied to `|0>` on most qubits and a dense register `φ` on the rest. A T gate on
+qubit `q` rotates about `P = C† Z_q C`. When `P` flips a qubit still in `|0>`, CX
+gates controlled on that qubit clear `P` from the other `|0>` qubits, fold into `C`,
+and move the qubit into the register, so the register grows by at most one qubit per
+T gate and holds `2^t` amplitudes at most. Sampling reduces the measured `C† Z_q C`
+once: an outcome that flips a `|0>` qubit is a fair coin, and the rest are read from
+one table of register marginals. Random Clifford depth 10 with 10 T gates takes about
+0.5 ms for 1024 shots from 16 to 32 qubits and 77 ms at 1000. The register is capped at
+20 qubits.
+
+Mid-circuit measurements, or a register past that cap, carry coherent weighted MPS
+branches instead. Clifford gates mutate each branch state, `T` and `Tdg` split
+branches, and measurement computes outcome probabilities from the weighted branch
+ensemble before projecting every branch to the sampled outcome. Branch count, MPS
+bond growth, and measurement count govern how far that form scales.
 
 The dense probability path maintains a weighted sum of stabilizer states. Each T
 gate doubles the term count via the `T = alpha*I + beta*Z` decomposition.

@@ -563,6 +563,47 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
     group.finish();
 }
 
+/// QAOA on a ring plus a random perfect matching, `H` on every qubit first.
+///
+/// `qaoa_circuit` puts its `Rzz` on a chain, whose runs of consecutive edges
+/// touch few qubits each; a matching's edges do not, which is the shape that
+/// decides how a `BatchRzz` groups its lookups.
+fn bench_statevector_qaoa_ring_matching(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/qaoa_ring_matching");
+    configure_group(&mut group);
+
+    for &n in &[20, 24] {
+        let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+        let mut circuit = Circuit::new(n, 0);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        let mut edges: Vec<(usize, usize)> = (0..n).map(|q| (q, (q + 1) % n)).collect();
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            order.swap(i, rng.random_range(0..=i));
+        }
+        edges.extend(order.chunks_exact(2).map(|pair| (pair[0], pair[1])));
+        for _ in 0..3 {
+            let gamma = rng.random::<f64>() * std::f64::consts::PI;
+            let beta = rng.random::<f64>() * std::f64::consts::PI;
+            for &(a, b) in &edges {
+                circuit.add_gate(Gate::Rzz(gamma), &[a, b]);
+            }
+            for q in 0..n {
+                circuit.add_gate(Gate::Rx(beta), &[q]);
+            }
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // One first-order Trotter step of the seeded Jordan-Wigner two-body operator,
 // truncated to the 200 largest coefficients. The recognizing constructor
 // lowers weight-1 and ZZ terms, so the native arm mixes named rotations with
@@ -4552,6 +4593,7 @@ criterion_group! {
     bench_statevector_qpe,
     bench_statevector_hea,
     bench_statevector_qaoa,
+    bench_statevector_qaoa_ring_matching,
     bench_statevector_trotter,
     bench_statevector_diag_mixed,
     bench_statevector_hardware_basis,

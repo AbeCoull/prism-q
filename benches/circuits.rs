@@ -2383,6 +2383,47 @@ fn bench_auto_scalability(c: &mut Criterion) {
     group.finish();
 }
 
+/// `k` rotated qubits on a connected register: `2^k` basis states in support at
+/// bond dimension at most 2, the shape least favourable to the sparse route.
+fn wide_support_circuit(n: usize, k: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..k {
+        c.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cz, &[q, q + 1]);
+    }
+    for q in k..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::Rz(0.2), &[q]);
+    }
+    c
+}
+
+/// Shots past the statevector cap, where `Auto` picks between the sparse map
+/// and the MPS by the circuit's support.
+fn bench_auto_sparse_support(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/sparse_support_shots");
+    configure_group(&mut group);
+
+    let cases = [
+        ("w_state/32", circuits::w_state_circuit(32)),
+        ("w_state/64", circuits::w_state_circuit(64)),
+        ("wide_k6/64", wide_support_circuit(64, 6)),
+        ("wide_k12/64", wide_support_circuit(64, 12)),
+    ];
+    for (name, circuit) in cases {
+        let circuit = measure_all(&circuit);
+        group.bench_with_input(BenchmarkId::from_parameter(name), &circuit, |b, circ| {
+            b.iter(|| black_box(run_shots_with(BackendKind::Auto, circ, 1024, SEED).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
 // ---- Decomposition benchmarks ----
 
 fn bench_decomposition(c: &mut Criterion) {
@@ -4574,6 +4615,7 @@ criterion_group! {
     bench_auto_hea,
     bench_auto_clifford,
     bench_auto_scalability,
+    bench_auto_sparse_support,
     // Cross-backend comparisons
     bench_compare_clifford,
     bench_compare_single_qubit,

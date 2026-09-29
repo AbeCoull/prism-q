@@ -21,7 +21,7 @@ flowchart TD
     E -- yes --> CL{All Clifford?}
     CL -- yes --> STB[Stabilizer]
     CL -- no --> MEM{Above memory limit?}
-    MEM -- "yes, sparse-friendly" --> SPR[Sparse]
+    MEM -- "yes, at most 128 entries" --> SPR[Sparse]
     MEM -- "yes, otherwise" --> MPS[MPS bond 256]
     MEM -- no --> IND{Partial independence?}
     IND -- yes --> FAC[Factored]

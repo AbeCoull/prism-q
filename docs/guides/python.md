@@ -243,10 +243,10 @@ run), `cap` (the configured maximum), and `saturated` (`peak >= cap`). Saturatio
 the signal that the cap bound the run: a run whose peak stayed under the cap
 truncated nothing on the cap's account, whatever the exactness label says.
 
-Automatic dispatch sends a circuit past the statevector cap to the sparse map when it
-is sparse-friendly and to a bounded-bond MPS otherwise. That is taken by default and
-the result says so. `.require_exact()` rejects it instead, raising `PrismError`
-naming the engine it would have used.
+Automatic dispatch sends a circuit past the statevector cap to the sparse map when its
+state never holds more than 128 basis states and to a bounded-bond MPS otherwise. The
+MPS route is taken by default and the result says so. `.require_exact()` rejects it
+instead, raising `PrismError` naming the engine it would have used.
 
 ```python
 simulate(big_circuit).seed(42).require_exact().marginals()  # raises

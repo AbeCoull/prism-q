@@ -434,12 +434,8 @@ fn random_pairs_rows_buffer_cross_word_gates() {
 // A model the Clifford samplers refuse is not an error: it runs on the
 // trajectory engine or on per-shot replay, one state per shot, and returns
 // shots either way, so a demoted row keeps reporting while measuring an engine
-// it does not name. The three `noisy_sampling/compiled_*` models must also
-// stay off the homological sampler, which would price syndrome classes rather
-// than the compiled sampler the rows name: the fixture's syndrome rank exceeds
-// the sampler's cap of 20, which turns `compiled_pauli` away at its compile
-// step, a pair channel and a readout entry each block it outright, and the
-// depth ratio keeps all three off the frame sampler.
+// it does not name. The depth ratio keeps the three `noisy_sampling/compiled_*`
+// models and the `noisy_sampling/low_rank/*` rows off the frame sampler.
 #[test]
 fn noisy_sampling_rows_take_the_compiled_sampler() {
     let mut circuit = circuits::clifford_heavy_circuit(100, 10, SEED);
@@ -465,8 +461,7 @@ fn noisy_sampling_rows_take_the_compiled_sampler() {
     let mut readout = NoiseModel::uniform_depolarizing(&circuit, 0.001);
     readout.with_readout_error(0.02, 0.05);
 
-    // 10_000 shots, as the rows run: the homological sampler is tried above
-    // 1000 and a smaller count would pin a route the rows never take.
+    // 10_000 shots, as the rows run.
     for (label, model) in [
         ("compiled_pauli", &pauli),
         ("compiled_pair", &pair),
@@ -482,6 +477,25 @@ fn noisy_sampling_rows_take_the_compiled_sampler() {
             Some(Engine::NoisyCompiledSampler),
             "{label}: the model ran on {:?}, not on the compiled sampler",
             result.metadata.backend
+        );
+    }
+
+    for n in [12usize, 16] {
+        let mut circuit = circuits::clifford_heavy_circuit(n, 10, SEED);
+        circuit.num_classical_bits = n;
+        for q in 0..n {
+            circuit.add_measure(q, q);
+        }
+        let noise = NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        let result = sim::simulate(&circuit)
+            .noise(&noise)
+            .seed(SEED)
+            .shots(10_000)
+            .unwrap();
+        assert_eq!(
+            result.metadata.engine,
+            Some(Engine::NoisyCompiledSampler),
+            "low_rank/clifford_{n}q_10k"
         );
     }
 }

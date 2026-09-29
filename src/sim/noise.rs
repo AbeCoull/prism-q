@@ -2900,14 +2900,6 @@ pub fn run_shots_noisy(
         );
     }
 
-    // Try homological sampler for high shot counts, O(r_quantum + 1) per shot
-    // when syndrome rank ≤ 20. Falls back to compiled/frame if rank too high.
-    if num_shots >= 1000 {
-        if let Ok(sampler) = super::homological::HomologicalSampler::compile(circuit, noise, seed) {
-            return super::homological::run_shots_homological_inner(sampler, circuit, num_shots);
-        }
-    }
-
     if use_frame_sampler(circuit) {
         run_shots_noisy_frame(circuit, noise, num_shots, seed)
     } else {
@@ -2971,12 +2963,6 @@ pub(crate) fn run_shots_noisy_with_gpu(
             num_shots,
             seed,
         );
-    }
-
-    if num_shots >= 1000 {
-        if let Ok(sampler) = super::homological::HomologicalSampler::compile(circuit, noise, seed) {
-            return super::homological::run_shots_homological_inner(sampler, circuit, num_shots);
-        }
     }
 
     if use_frame_sampler(circuit) {

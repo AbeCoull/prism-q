@@ -764,15 +764,7 @@ pub fn run_shots_homological(
     seed: u64,
 ) -> Result<ShotsResult> {
     noise.validate_for(circuit)?;
-    let sampler = HomologicalSampler::compile(circuit, noise, seed)?;
-    run_shots_homological_inner(sampler, circuit, num_shots)
-}
-
-pub(crate) fn run_shots_homological_inner(
-    mut sampler: HomologicalSampler,
-    circuit: &Circuit,
-    num_shots: usize,
-) -> Result<ShotsResult> {
+    let mut sampler = HomologicalSampler::compile(circuit, noise, seed)?;
     let classical_bit_order = circuit.classical_bit_order();
     let num_classical = circuit.num_classical_bits;
 

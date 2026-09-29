@@ -3549,9 +3549,7 @@ fn bench_noisy_sampling(c: &mut Criterion) {
     // The same circuit and shot count as `compiled_pauli`, with a pair event on
     // every CX. Each firing shot draws one of the 15 non-identity products and
     // XORs the four propagated rows the pair contributes, a second pass over
-    // the record on top of the single-qubit rows. The homological sampler
-    // refuses a live pair outright, where the model above reaches its compile
-    // step before being turned away.
+    // the record on top of the single-qubit rows.
     let pair_noise = pair_depolarizing_noise(&clifford, 0.001, 0.01);
     group.bench_function(
         BenchmarkId::new("compiled_pair", "clifford_100q_10k"),
@@ -3579,8 +3577,8 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         },
     );
 
-    // Syndrome rank equals the qubit count here, so the error complex compiles
-    // under a rank cap of 20 where the 100-qubit rows above exceed it.
+    // Syndrome rank equals the qubit count here, under the homological
+    // sampler's cap of 20 where the 100-qubit rows above exceed it.
     for n in [12usize, 16] {
         let circuit = with_terminal_measurements(circuits::clifford_heavy_circuit(n, 10, SEED));
         let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);

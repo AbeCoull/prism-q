@@ -131,6 +131,11 @@ pub(super) const MIN_FACTORED_STABILIZER_QUBITS: usize = 24;
 
 pub(super) const MIN_BLOCK_FOR_FACTORED_STAB: usize = 2;
 
+/// Entry bound under which `Auto` takes the sparse map over the MPS past the
+/// statevector cap. A sparse gate costs about 8 ns per entry and an MPS gate at
+/// bond 2 about 2 us, so on a circuit that barely entangles the two tie near 256.
+const AUTO_SPARSE_MAX_SUPPORT: usize = 128;
+
 #[inline]
 pub(super) fn stabilizer_rank_budget(num_qubits: usize) -> usize {
     let log2n = if num_qubits >= 2 {
@@ -484,7 +489,10 @@ fn select_auto_backend_choice(circuit: &Circuit, has_partial_independence: bool)
     } else if circuit.is_clifford_only() {
         Family::Stabilizer
     } else if circuit.num_qubits > max_statevector_qubits() {
-        if circuit.is_sparse_friendly() && circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS {
+        if circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS
+            && (circuit.is_sparse_friendly()
+                || sparse_support_fits(circuit, AUTO_SPARSE_MAX_SUPPORT))
+        {
             Family::Sparse
         } else {
             Family::Mps
@@ -494,6 +502,24 @@ fn select_auto_backend_choice(circuit: &Circuit, has_partial_independence: bool)
     } else {
         Family::Statevector
     }
+}
+
+/// Run the circuit's gates on a sparse map and report whether it stays within
+/// `cap` entries throughout. Declines resets, saves, and anything after a
+/// measurement, whose branch could reach a different support.
+fn sparse_support_fits(circuit: &Circuit, cap: usize) -> bool {
+    if !circuit.has_terminal_measurements_only() {
+        return false;
+    }
+    let mut probe = SparseBackend::new(0);
+    if probe.init(circuit.num_qubits, 0).is_err() {
+        return false;
+    }
+    circuit.instructions.iter().all(|inst| match inst {
+        Instruction::Gate { .. } => probe.apply(inst).is_ok() && probe.entry_count() <= cap,
+        Instruction::Measure { .. } | Instruction::Barrier { .. } => true,
+        _ => false,
+    })
 }
 
 pub(super) fn auto_selects_cpu_statevector(
@@ -1677,8 +1703,30 @@ mod dispatch_matrix_tests {
             if let Some(n) = oversize {
                 assert_cpu_family(&kind, &oversize_sparse(n), false, Family::Sparse);
                 assert_cpu_family(&kind, &oversize_dense(n), false, Family::Mps);
+                let w_state = crate::circuits::w_state_circuit(n);
+                assert_cpu_family(&kind, &w_state, false, Family::Sparse);
             }
         }
+    }
+
+    #[test]
+    fn sparse_support_probe_bounds_every_gate_not_the_final_state() {
+        // A W state ends on 64 basis states but holds 126 midway through its last
+        // controlled rotation.
+        let w_state = crate::circuits::w_state_circuit(64);
+        assert!(sparse_support_fits(&w_state, 126));
+        assert!(!sparse_support_fits(&w_state, 125));
+        assert!(!sparse_support_fits(
+            &oversize_dense(40),
+            AUTO_SPARSE_MAX_SUPPORT
+        ));
+
+        let mut measured = Circuit::new(8, 1);
+        measured.instructions = crate::circuits::w_state_circuit(8).instructions;
+        measured.add_measure(0, 0);
+        assert!(sparse_support_fits(&measured, AUTO_SPARSE_MAX_SUPPORT));
+        measured.add_gate(Gate::H, &[1]);
+        assert!(!sparse_support_fits(&measured, AUTO_SPARSE_MAX_SUPPORT));
     }
 
     #[test]

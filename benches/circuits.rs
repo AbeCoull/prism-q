@@ -617,6 +617,47 @@ fn bench_statevector_qaoa(c: &mut Criterion) {
     group.finish();
 }
 
+/// QAOA on a ring plus a random perfect matching, `H` on every qubit first.
+///
+/// `qaoa_circuit` puts its `Rzz` on a chain, whose runs of consecutive edges
+/// touch few qubits each; a matching's edges do not, which is the shape that
+/// decides how a `BatchRzz` groups its lookups.
+fn bench_statevector_qaoa_ring_matching(c: &mut Criterion) {
+    let mut group = c.benchmark_group("statevector/qaoa_ring_matching");
+    configure_group(&mut group);
+
+    for &n in &[20, 24] {
+        let mut rng = ChaCha8Rng::seed_from_u64(SEED);
+        let mut circuit = Circuit::new(n, 0);
+        for q in 0..n {
+            circuit.add_gate(Gate::H, &[q]);
+        }
+        let mut edges: Vec<(usize, usize)> = (0..n).map(|q| (q, (q + 1) % n)).collect();
+        let mut order: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            order.swap(i, rng.random_range(0..=i));
+        }
+        edges.extend(order.chunks_exact(2).map(|pair| (pair[0], pair[1])));
+        for _ in 0..3 {
+            let gamma = rng.random::<f64>() * std::f64::consts::PI;
+            let beta = rng.random::<f64>() * std::f64::consts::PI;
+            for &(a, b) in &edges {
+                circuit.add_gate(Gate::Rzz(gamma), &[a, b]);
+            }
+            for q in 0..n {
+                circuit.add_gate(Gate::Rx(beta), &[q]);
+            }
+        }
+        group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
+            b.iter(|| {
+                run_with(BackendKind::Statevector, circ, 42).unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // One first-order Trotter step of the seeded Jordan-Wigner two-body operator,
 // truncated to the 200 largest coefficients. The recognizing constructor
 // lowers weight-1 and ZZ terms, so the native arm mixes named rotations with
@@ -2529,6 +2570,47 @@ fn bench_auto_scalability(c: &mut Criterion) {
             b.iter(|| {
                 run_with(BackendKind::Auto, circ, 42).unwrap();
             });
+        });
+    }
+
+    group.finish();
+}
+
+/// `k` rotated qubits on a connected register: `2^k` basis states in support at
+/// bond dimension at most 2, the shape least favourable to the sparse route.
+fn wide_support_circuit(n: usize, k: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..k {
+        c.add_gate(Gate::Ry(0.3 + 0.1 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cz, &[q, q + 1]);
+    }
+    for q in k..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::Rz(0.2), &[q]);
+    }
+    c
+}
+
+/// Shots past the statevector cap, where `Auto` picks between the sparse map
+/// and the MPS by the circuit's support.
+fn bench_auto_sparse_support(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/sparse_support_shots");
+    configure_group(&mut group);
+
+    let cases = [
+        ("w_state/32", circuits::w_state_circuit(32)),
+        ("w_state/64", circuits::w_state_circuit(64)),
+        ("wide_k6/64", wide_support_circuit(64, 6)),
+        ("wide_k12/64", wide_support_circuit(64, 12)),
+    ];
+    for (name, circuit) in cases {
+        let circuit = measure_all(&circuit);
+        group.bench_with_input(BenchmarkId::from_parameter(name), &circuit, |b, circ| {
+            b.iter(|| black_box(run_shots_with(BackendKind::Auto, circ, 1024, SEED).unwrap()));
         });
     }
 
@@ -4663,6 +4745,7 @@ criterion_group! {
     bench_statevector_qpe,
     bench_statevector_hea,
     bench_statevector_qaoa,
+    bench_statevector_qaoa_ring_matching,
     bench_statevector_trotter,
     bench_statevector_diag_mixed,
     bench_statevector_hardware_basis,
@@ -4728,6 +4811,7 @@ criterion_group! {
     bench_auto_hea,
     bench_auto_clifford,
     bench_auto_scalability,
+    bench_auto_sparse_support,
     // Cross-backend comparisons
     bench_compare_clifford,
     bench_compare_single_qubit,

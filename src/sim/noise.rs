@@ -8,7 +8,7 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::smallvec;
 
 use crate::backend::Backend;
-use crate::backend::density_matrix::DensityMatrixBackend;
+use crate::backend::density_matrix::{DeferredSuperoperators, DensityMatrixBackend};
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
@@ -3229,35 +3229,56 @@ pub(crate) fn evolve_density_matrix(
         }
         None => dm.init(circuit.num_qubits, circuit.num_classical_bits)?,
     }
-    for (i, inst) in circuit.instructions.iter().enumerate() {
-        let events: &[NoiseEvent] = match noise {
-            Some(noise) => &noise.after_gate[i],
-            None => &[],
-        };
+    let Some(noise) = noise else {
+        for inst in &circuit.instructions {
+            if !matches!(inst, Instruction::Measure { .. }) {
+                dm.apply(inst)?;
+            }
+        }
+        return Ok(dm);
+    };
 
-        if let Instruction::Gate { gate, targets } = inst {
-            if targets.len() == 1
-                && !events.is_empty()
-                && events
-                    .iter()
-                    .all(|event| event.channel.num_qubits() == 1 && event.qubits[0] == targets[0])
-            {
-                let channels: Vec<Vec<[[Complex64; 2]; 2]>> =
-                    events.iter().map(|e| kraus_1q(&e.channel)).collect();
-                if dm.try_apply_fused_1q_channels(gate, targets[0], &channels) {
-                    continue;
+    let mut deferred = DeferredSuperoperators::new(circuit.num_qubits);
+    for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+        if let Instruction::Gate { gate, targets } = inst
+            && events
+                .iter()
+                .all(|event| event.channel.num_qubits() == 1 && targets.contains(&event.qubits[0]))
+        {
+            let folded = match *targets.as_slice() {
+                [q] => {
+                    let channels: Vec<Vec<[[Complex64; 2]; 2]>> =
+                        events.iter().map(|e| kraus_1q(&e.channel)).collect();
+                    deferred.defer_1q(gate, q, &channels)
                 }
+                [q0, q1] => {
+                    let channels: Vec<(usize, Vec<[[Complex64; 2]; 2]>)> = events
+                        .iter()
+                        .map(|e| (e.qubits[0], kraus_1q(&e.channel)))
+                        .collect();
+                    deferred.apply_2q(&mut dm, gate, q0, q1, &channels)
+                }
+                _ => false,
+            };
+            if folded {
+                continue;
             }
         }
 
         match inst {
+            Instruction::Gate { targets, .. } => deferred.flush_qubits(&mut dm, targets),
             Instruction::Measure { .. } => {}
-            other => dm.apply(other)?,
+            _ => deferred.flush(&mut dm),
+        }
+        if !matches!(inst, Instruction::Measure { .. }) {
+            dm.apply(inst)?;
         }
         for event in events {
+            deferred.flush_qubits(&mut dm, &event.qubits);
             apply_noise_event_dm(&mut dm, event);
         }
     }
+    deferred.flush(&mut dm);
     Ok(dm)
 }
 

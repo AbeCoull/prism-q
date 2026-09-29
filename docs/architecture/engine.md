@@ -129,7 +129,7 @@ flowchart TD
     E -- yes --> CL{All Clifford?}
     CL -- yes --> STB["Stabilizer (O(n^2))"]
     CL -- no --> MEM{Above memory limit?}
-    MEM -- "yes, sparse-friendly" --> SPR["Sparse (O(k))"]
+    MEM -- "yes, at most 128 entries" --> SPR["Sparse (O(k))"]
     MEM -- "yes, otherwise" --> MPS["MPS (bond dim 256)"]
     MEM -- no --> IND{Partial independence?}
     IND -- yes --> FAC["Factored (split-state)"]
@@ -145,6 +145,12 @@ with a warning on stderr: a register too wide for the machine then aborts on
 allocation rather than routing to another backend, since there is no figure left
 to route against. `src/backend/memory.rs` holds the derivation and the other
 dense caps that share it.
+
+Past the limit, dispatch runs the gates on a sparse map and takes it when the map never
+holds more than 128 entries, as a W state does. A sparse gate costs about 8 ns per
+entry and an MPS gate about 2 us even at bond 2, so the MPS wins past that on a
+circuit that barely entangles. A circuit whose gates only permute or phase basis
+states stays on one entry and skips the run.
 
 For a user-facing version of this decision, see [Choosing a Backend](../getting-started/choosing-a-backend.md).
 
@@ -305,7 +311,7 @@ The `BackendKind` variants outside feature gates. `AutoGpu`, `StatevectorGpu`,
 | `Statevector` | Full state-vector | Explicit |
 | `Stabilizer` | Aaronson-Gottesman tableau | Explicit or auto (all Clifford) |
 | `FactoredStabilizer` | Per-cluster tableaux | Explicit or auto (large independent Clifford blocks) |
-| `Sparse` | HashMap state | Explicit or auto (above memory limit, sparse-friendly) |
+| `Sparse` | HashMap state | Explicit or auto (above memory limit, at most 128 entries) |
 | `Mps { max_bond_dim }` | Matrix Product State | Explicit or auto (above memory limit) |
 | `ProductState` | Per-qubit product | Explicit or auto (no entangling) |
 | `TensorNetwork` | Deferred contraction | Explicit, or auto for an expectation or marginals terminal on a unitary circuit when a bounded greedy plan for every observable stays under `2^12` elements: from 18 qubits under the statevector cap, and above it when `Auto` would take MPS and the plan costs less than an estimate of the MPS run |

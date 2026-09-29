@@ -110,9 +110,7 @@ pub use sim::compiled::{
 pub use sim::gradient::{
     ExpectationGradient, run_expectation_gradient, run_expectation_gradient_shift,
 };
-pub use sim::homological::{
-    ErrorChainComplex, HomologicalSampler, noisy_marginals_analytical, run_shots_homological,
-};
+pub use sim::homological::{ErrorChainComplex, noisy_marginals_analytical};
 pub use sim::noise::{
     GateFilter, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel, NoisyCompiledSampler,
     ReadoutError, compile_noisy, density_matrix_expectation_values, run_shots_noisy,

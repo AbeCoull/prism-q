@@ -1,5 +1,5 @@
 //! Argument validation on the noise channels and the readout table: which
-//! rates a constructor rejects, and which models survive `ensure_pauli_only`.
+//! rates a constructor rejects, and which models count as `is_pauli_only`.
 //! Channel semantics are anchored in `tests/golden_small_circuits.rs`.
 
 use num_complex::Complex64;
@@ -190,21 +190,19 @@ fn custom_kraus_empty_rejected() {
 }
 
 #[test]
-fn ensure_pauli_only_rejects_amplitude_damping() {
+fn amplitude_damping_is_not_pauli_only() {
     let circuit = one_gate_circuit();
     let noise = NoiseModel::with_amplitude_damping(&circuit, 0.1);
-    assert!(noise.ensure_pauli_only().is_err());
     assert!(!noise.is_pauli_only());
     assert!(noise.has_noise());
 }
 
 #[test]
-fn ensure_pauli_only_rejects_readout() {
+fn live_readout_is_not_pauli_only() {
     let circuit = one_gate_circuit();
     let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
-    assert!(noise.ensure_pauli_only().is_ok());
+    assert!(noise.is_pauli_only());
     noise.with_readout_error(0.02, 0.03);
-    assert!(noise.ensure_pauli_only().is_err());
     assert!(!noise.is_pauli_only());
 }
 
@@ -220,13 +218,10 @@ fn zero_rate_readout_stays_pauli_only() {
     let mut noise = NoiseModel::uniform_depolarizing(&circuit, 0.01);
     noise.with_readout_error(0.0, 0.0);
     assert!(noise.is_pauli_only());
-    assert!(noise.ensure_pauli_only().is_ok());
     assert!(prism_q::noisy_marginals_analytical(&circuit, &noise, 42).is_ok());
-    assert!(prism_q::run_shots_homological(&circuit, &noise, 100, 42).is_ok());
 
     noise.set_bit_readout_error(0, 0.0, 0.02);
     assert!(!noise.is_pauli_only());
-    assert!(prism_q::run_shots_homological(&circuit, &noise, 100, 42).is_err());
 }
 
 #[test]

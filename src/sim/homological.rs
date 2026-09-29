@@ -1,15 +1,10 @@
-//! Homological noisy sampling for Clifford circuits: precomputed syndrome
-//! classes give O(1) noise work per shot, plus exact analytic noisy
-//! marginals.
+//! Error chain complex of a noisy Clifford circuit and the exact analytic noisy
+//! marginals read off it.
 
 use crate::circuit::{Circuit, Instruction};
 use crate::error::Result;
-use crate::sim::ShotsResult;
 use crate::sim::compiled::batch_propagate_backward;
-use crate::sim::compiled::{PackedShots, ShotAccumulator, default_chunk_size, xor_words};
 use crate::sim::noise::NoiseModel;
-use rand::SeedableRng;
-use rand_chacha::ChaCha8Rng;
 
 /// Dense binary matrix over GF(2) stored as packed u64 words per row.
 /// Row-major: row i is stored in words[i * row_words .. (i+1) * row_words].
@@ -40,7 +35,7 @@ impl F2DenseMatrix {
         self.data[row * self.row_words + col / 64] |= 1u64 << (col % 64);
     }
 
-    #[inline(always)]
+    #[cfg(test)]
     fn get(&self, row: usize, col: usize) -> bool {
         (self.data[row * self.row_words + col / 64] >> (col % 64)) & 1 != 0
     }
@@ -169,31 +164,6 @@ pub struct ErrorChainComplex {
     homology_dim: usize,
 }
 
-/// Precomputed sampler for O(r + 1) per-shot noisy measurement sampling.
-///
-/// Combines a compiled sampler (quantum randomness, O(r) per shot) with
-/// precomputed syndrome class probabilities (noise randomness, O(1) per shot).
-/// The syndrome classes are elements of im(E) ⊆ F₂^m where E is the
-/// error-to-measurement propagation matrix.
-pub struct HomologicalSampler {
-    compiled: crate::sim::compiled::CompiledSampler,
-    /// Syndrome rank = dim(im(E))
-    syndrome_rank: usize,
-    /// 2^r class probabilities before normalization, kept for the sum-to-one test.
-    #[cfg(test)]
-    class_probs: Vec<f64>,
-    /// 2^r cumulative probabilities for sampling
-    class_cdf: Vec<f64>,
-    /// 2^r detection signatures: for class c, which measurements are flipped.
-    /// Stored as packed u64 vectors, each of length ceil(m/64).
-    class_detections: Vec<Vec<u64>>,
-    /// dim(im(∂₂) ∩ ker(∂₁)): undetectable stabilizer generators
-    boundary_dim: usize,
-    /// dim(H₁ = ker(∂₁)/im(∂₂)): independent logical error classes
-    homology_dim: usize,
-    rng: ChaCha8Rng,
-}
-
 impl ErrorChainComplex {
     /// Build the error chain complex from a Clifford circuit and noise model.
     ///
@@ -241,8 +211,8 @@ impl ErrorChainComplex {
                 Instruction::Gate { gate, targets } => {
                     let noise_events = &noise.after_gate[instr_idx];
                     for event in noise_events {
-                        // An inert channel contributes no column, and passes
-                        // `ensure_pauli_only` whatever its variant.
+                        // An inert channel contributes no column, whatever its
+                        // variant.
                         if event.channel.is_inert() {
                             continue;
                         }
@@ -506,287 +476,6 @@ impl ErrorChainComplex {
         }
         result
     }
-}
-
-const MAX_SYNDROME_RANK: usize = 20;
-
-impl HomologicalSampler {
-    /// Build a sampler from a circuit and noise model.
-    ///
-    /// Computes the E-matrix (error-to-measurement propagation), finds a basis
-    /// for im(E), and precomputes 2^r syndrome class probabilities where
-    /// r = rank(E), rejecting circuits with r above `MAX_SYNDROME_RANK`.
-    /// Also builds a compiled sampler for quantum randomness. Readout error is
-    /// rejected with the non-Pauli channels: it is drawn per shot against the
-    /// record and has no syndrome class to fold into.
-    ///
-    /// Total per-shot cost: O(r_quantum + 1) where r_quantum is the stabilizer
-    /// rank (number of random measurements), versus O(p) for brute-force
-    /// where p is the number of error locations.
-    pub fn compile(circuit: &Circuit, noise: &NoiseModel, seed: u64) -> Result<Self> {
-        noise.ensure_pauli_only()?;
-        let ecc = ErrorChainComplex::build(circuit, noise, seed)?;
-        let m = ecc.num_measurements;
-        let p = ecc.num_errors;
-        let compiled = crate::sim::compiled::compile_measurements(circuit, seed)?;
-
-        if m == 0 || p == 0 {
-            return Ok(Self {
-                compiled,
-                syndrome_rank: 0,
-                #[cfg(test)]
-                class_probs: vec![1.0],
-                class_cdf: vec![1.0],
-                class_detections: vec![vec![0u64; m.div_ceil(64)]],
-                boundary_dim: ecc.boundary_dim,
-                homology_dim: ecc.homology_dim,
-                rng: ChaCha8Rng::seed_from_u64(seed),
-            });
-        }
-
-        let m_words = m.div_ceil(64);
-
-        let mut work = ecc.e_matrix.data.clone();
-        let rw = ecc.e_matrix.row_words;
-        let mut pivot_cols = Vec::new();
-        let mut pivot_row = 0;
-
-        for col in 0..p {
-            let mut found = None;
-            for r in pivot_row..m {
-                if (work[r * rw + col / 64] >> (col % 64)) & 1 != 0 {
-                    found = Some(r);
-                    break;
-                }
-            }
-            let Some(pr) = found else { continue };
-
-            if pr != pivot_row {
-                for w in 0..rw {
-                    work.swap(pivot_row * rw + w, pr * rw + w);
-                }
-            }
-
-            for r in 0..m {
-                if r != pivot_row && (work[r * rw + col / 64] >> (col % 64)) & 1 != 0 {
-                    for w in 0..rw {
-                        work[r * rw + w] ^= work[pivot_row * rw + w];
-                    }
-                }
-            }
-
-            pivot_cols.push(col);
-            pivot_row += 1;
-        }
-
-        let r = pivot_cols.len();
-        if r > MAX_SYNDROME_RANK {
-            return Err(crate::error::PrismError::IncompatibleBackend {
-                backend: "HomologicalSampler".to_string(),
-                reason: format!("syndrome rank {r} too large (max {MAX_SYNDROME_RANK})"),
-            });
-        }
-
-        // Extract r-bit coordinates from RREF: col j's coordinate at basis i
-        // is work[i][j] in the reduced matrix.
-        let mut col_coords = vec![0usize; p];
-        for (basis_idx, &_pivot_col) in pivot_cols.iter().enumerate() {
-            for j in 0..p {
-                if (work[basis_idx * rw + j / 64] >> (j % 64)) & 1 != 0 {
-                    col_coords[j] |= 1 << basis_idx;
-                }
-            }
-        }
-
-        let num_classes = 1usize << r;
-        let mut class_detections = Vec::with_capacity(num_classes);
-        for c in 0..num_classes {
-            let mut det = vec![0u64; m_words];
-            for (basis_idx, &pivot_col) in pivot_cols.iter().enumerate() {
-                if (c >> basis_idx) & 1 != 0 {
-                    for row in 0..m {
-                        if ecc.e_matrix.get(row, pivot_col) {
-                            det[row / 64] ^= 1u64 << (row % 64);
-                        }
-                    }
-                }
-            }
-            class_detections.push(det);
-        }
-
-        // F₂^r probability convolution: P[c] = (1-p_j) P[c] + p_j P[c ⊕ coord_j]
-        let mut class_probs = vec![0.0_f64; num_classes];
-        class_probs[0] = 1.0;
-
-        for (j, &coord) in col_coords.iter().enumerate() {
-            let pj = ecc.error_probs[j];
-            if pj < 1e-15 {
-                continue;
-            }
-            if coord == 0 {
-                continue;
-            }
-            let mut new_probs = vec![0.0_f64; num_classes];
-            for c in 0..num_classes {
-                new_probs[c] = (1.0 - pj) * class_probs[c] + pj * class_probs[c ^ coord];
-            }
-            class_probs = new_probs;
-        }
-
-        let mut class_cdf = vec![0.0_f64; num_classes];
-        class_cdf[0] = class_probs[0];
-        for c in 1..num_classes {
-            class_cdf[c] = class_cdf[c - 1] + class_probs[c];
-        }
-        let total = class_cdf[num_classes - 1];
-        if total > 0.0 {
-            for v in &mut class_cdf {
-                *v /= total;
-            }
-        }
-
-        Ok(Self {
-            compiled,
-            syndrome_rank: r,
-            #[cfg(test)]
-            class_probs,
-            class_cdf,
-            class_detections,
-            boundary_dim: ecc.boundary_dim,
-            homology_dim: ecc.homology_dim,
-            rng: ChaCha8Rng::seed_from_u64(seed),
-        })
-    }
-
-    /// rank(E): number of independent syndrome classes is `2^rank`.
-    pub fn syndrome_rank(&self) -> usize {
-        self.syndrome_rank
-    }
-
-    /// dim(im(∂₂) ∩ ker(∂₁)): stabilizer generators undetectable by the
-    /// measurements.
-    pub fn boundary_dim(&self) -> usize {
-        self.boundary_dim
-    }
-
-    /// dim(H₁): independent logical error classes.
-    pub fn homology_dim(&self) -> usize {
-        self.homology_dim
-    }
-
-    /// Cost: O(r_quantum) for compiled sampler + O(1) for noise class lookup.
-    pub fn sample(&mut self) -> Vec<bool> {
-        let mut outcome = self.compiled.sample();
-
-        let u: f64 = rand::RngExt::random(&mut self.rng);
-        let class = match self
-            .class_cdf
-            .binary_search_by(|p| p.partial_cmp(&u).unwrap_or(std::cmp::Ordering::Equal))
-        {
-            Ok(i) => i,
-            Err(i) => i.min(self.class_cdf.len() - 1),
-        };
-
-        let det = &self.class_detections[class];
-        for (mi, bit) in outcome.iter_mut().enumerate() {
-            let det_bit = (det[mi / 64] >> (mi % 64)) & 1 != 0;
-            *bit ^= det_bit;
-        }
-        outcome
-    }
-
-    pub fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
-        (0..num_shots).map(|_| self.sample()).collect()
-    }
-
-    /// Sample `num_shots` shots into a shot-major [`PackedShots`] buffer.
-    pub fn sample_packed(&mut self, num_shots: usize) -> PackedShots {
-        let m = self.compiled.num_measurements();
-        let m_words = m.div_ceil(64);
-        if num_shots == 0 || m == 0 {
-            return PackedShots::from_shot_major(Vec::new(), num_shots, m);
-        }
-
-        let mut accum = Vec::new();
-        let mut rand_buf = Vec::new();
-        self.compiled
-            .sample_bulk_words_shot_major_reuse(&mut accum, &mut rand_buf, num_shots);
-
-        let ref_bits = self.compiled.ref_bits_packed();
-        for s in 0..num_shots {
-            let base = s * m_words;
-            xor_words(&mut accum[base..base + m_words], ref_bits);
-        }
-
-        for s in 0..num_shots {
-            let u: f64 = rand::RngExt::random(&mut self.rng);
-            let class = match self
-                .class_cdf
-                .binary_search_by(|p| p.partial_cmp(&u).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                Ok(i) => i,
-                Err(i) => i.min(self.class_cdf.len() - 1),
-            };
-
-            let det = &self.class_detections[class];
-            let base = s * m_words;
-            xor_words(&mut accum[base..base + m_words], det);
-        }
-
-        PackedShots::from_shot_major(accum, num_shots, m)
-    }
-
-    /// Stream shots into `acc` in default-sized chunks instead of one matrix.
-    pub fn sample_chunked<A: ShotAccumulator>(&mut self, total_shots: usize, acc: &mut A) {
-        let chunk_size = default_chunk_size(self.compiled.num_measurements());
-        crate::sim::compiled::for_each_chunk(total_shots, chunk_size, |batch| {
-            let packed = self.sample_packed(batch);
-            acc.accumulate(&packed);
-        });
-    }
-
-    /// Sample `total_shots` shots and return per-measurement `P(bit = 1)`.
-    pub fn sample_marginals(&mut self, total_shots: usize) -> Vec<f64> {
-        crate::sim::compiled::marginals_from_chunks(self.compiled.num_measurements(), |acc| {
-            self.sample_chunked(total_shots, acc)
-        })
-    }
-}
-
-/// Run noisy shot sampling using the homological sampler.
-///
-/// For Clifford circuits whose syndrome rank is at most `MAX_SYNDROME_RANK`
-/// (20), precomputes class probabilities and samples in O(1) per shot.
-pub fn run_shots_homological(
-    circuit: &Circuit,
-    noise: &NoiseModel,
-    num_shots: usize,
-    seed: u64,
-) -> Result<ShotsResult> {
-    noise.validate_for(circuit)?;
-    let mut sampler = HomologicalSampler::compile(circuit, noise, seed)?;
-    let classical_bit_order = circuit.classical_bit_order();
-    let num_classical = circuit.num_classical_bits;
-
-    let raw_shots = sampler.sample_bulk(num_shots);
-
-    let mut shots = Vec::with_capacity(num_shots);
-    for raw in &raw_shots {
-        let mut out = vec![false; num_classical];
-        for (mi, &cbit) in classical_bit_order.iter().enumerate() {
-            if cbit < num_classical {
-                out[cbit] = raw[mi];
-            }
-        }
-        shots.push(out);
-    }
-
-    Ok(
-        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
-            crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer)
-                .with_engine(crate::sim::Engine::HomologicalSampler),
-        ),
-    )
 }
 
 /// Compute exact noisy marginals analytically. No sampling, no rank limit.

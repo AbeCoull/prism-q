@@ -72,9 +72,9 @@ and splits it across cores where `run_batch` would.
 
 **Compiled sampling:**
 `compile_measurements`, `compile_forward`, `compile_detector_sampler`, `compile_noisy`,
-`run_shots_compiled`, `run_shots_noisy`, `run_shots_homological`,
-`noisy_marginals_analytical`, `density_matrix_expectation_values`; with the `gpu`
-feature: `run_shots_compiled_with_gpu`, `DevicePackedShots`
+`run_shots_compiled`, `run_shots_noisy`, `noisy_marginals_analytical`,
+`density_matrix_expectation_values`; with the `gpu` feature: `run_shots_compiled_with_gpu`,
+`DevicePackedShots`
 
 **Native QEC:**
 `parse_qec_program`, `compile_qec_program_rows`, `run_qec_program`,
@@ -121,7 +121,7 @@ that simulation runs inside instead of sizing the process-wide one. See
 `CompiledSampler`, `CompiledDetectorSampler`, `DetectorSampleBatch`,
 `NoisyCompiledSampler`, `NoiseChannel`, `NoiseEvent`, `NoiseModel`, `NoiseBuilder`,
 `GateFilter`, `ReadoutError`, `DeviceCalibration`, `QubitCalibration`, `GateCalibration`,
-`HomologicalSampler`, `ErrorChainComplex`
+`ErrorChainComplex`
 
 Not re-exported at the root but part of the documented surface: the `Backend` trait and
 `BasisSamples` at `prism_q::backend`, `run_batch` at `prism_q::sim`, and the accumulator

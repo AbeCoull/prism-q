@@ -3577,8 +3577,6 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         },
     );
 
-    // Syndrome rank equals the qubit count here, under the homological
-    // sampler's cap of 20 where the 100-qubit rows above exceed it.
     for n in [12usize, 16] {
         let circuit = with_terminal_measurements(circuits::clifford_heavy_circuit(n, 10, SEED));
         let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);

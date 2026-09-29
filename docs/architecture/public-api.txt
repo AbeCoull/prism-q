@@ -1895,19 +1895,7 @@ pub fn prism_q::sim::homological::ErrorChainComplex::boundary_dim(&self) -> usiz
 pub fn prism_q::sim::homological::ErrorChainComplex::build(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<Self>
 pub fn prism_q::sim::homological::ErrorChainComplex::homology_dim(&self) -> usize
 pub fn prism_q::sim::homological::ErrorChainComplex::noisy_marginals(&self, &[f64]) -> alloc::vec::Vec<f64>
-pub struct prism_q::sim::homological::HomologicalSampler
-impl prism_q::sim::homological::HomologicalSampler
-pub fn prism_q::sim::homological::HomologicalSampler::boundary_dim(&self) -> usize
-pub fn prism_q::sim::homological::HomologicalSampler::compile(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<Self>
-pub fn prism_q::sim::homological::HomologicalSampler::homology_dim(&self) -> usize
-pub fn prism_q::sim::homological::HomologicalSampler::sample(&mut self) -> alloc::vec::Vec<bool>
-pub fn prism_q::sim::homological::HomologicalSampler::sample_bulk(&mut self, usize) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
-pub fn prism_q::sim::homological::HomologicalSampler::sample_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A)
-pub fn prism_q::sim::homological::HomologicalSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
-pub fn prism_q::sim::homological::HomologicalSampler::sample_packed(&mut self, usize) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::homological::HomologicalSampler::syndrome_rank(&self) -> usize
 pub fn prism_q::sim::homological::noisy_marginals_analytical(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<alloc::vec::Vec<f64>>
-pub fn prism_q::sim::homological::run_shots_homological(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub mod prism_q::sim::noise
 pub mod prism_q::sim::noise::builder
 pub struct prism_q::sim::noise::builder::GateFilter
@@ -1991,7 +1979,6 @@ pub struct prism_q::sim::noise::NoiseModel
 pub prism_q::sim::noise::NoiseModel::after_gate: alloc::vec::Vec<alloc::vec::Vec<prism_q::sim::noise::NoiseEvent>>
 pub prism_q::sim::noise::NoiseModel::readout: alloc::vec::Vec<core::option::Option<prism_q::sim::noise::ReadoutError>>
 impl prism_q::sim::noise::NoiseModel
-pub fn prism_q::sim::noise::NoiseModel::ensure_pauli_only(&self) -> prism_q::error::Result<()>
 pub fn prism_q::sim::noise::NoiseModel::has_noise(&self) -> bool
 pub fn prism_q::sim::noise::NoiseModel::is_pauli_only(&self) -> bool
 pub fn prism_q::sim::noise::NoiseModel::set_bit_readout_error(&mut self, usize, f64, f64) -> &mut Self
@@ -2129,7 +2116,6 @@ pub fn prism_q::BackendKind::supports_noisy_per_shot(&self) -> bool
 #[non_exhaustive] pub enum prism_q::sim::Engine
 pub prism_q::sim::Engine::CompiledSampler
 pub prism_q::sim::Engine::FrameSampler
-pub prism_q::sim::Engine::HomologicalSampler
 pub prism_q::sim::Engine::NoisyCompiledSampler
 #[non_exhaustive] pub enum prism_q::sim::Exactness
 pub prism_q::sim::Exactness::Approximate
@@ -2381,7 +2367,6 @@ pub fn prism_q::circuit::ClassicalCondition::negate(&self) -> prism_q::circuit::
 #[non_exhaustive] pub enum prism_q::Engine
 pub prism_q::Engine::CompiledSampler
 pub prism_q::Engine::FrameSampler
-pub prism_q::Engine::HomologicalSampler
 pub prism_q::Engine::NoisyCompiledSampler
 #[non_exhaustive] pub enum prism_q::Exactness
 pub prism_q::Exactness::Approximate
@@ -3060,17 +3045,6 @@ impl core::default::Default for prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::default() -> Self
 impl prism_q::ShotAccumulator for prism_q::HistogramAccumulator
 pub fn prism_q::HistogramAccumulator::accumulate(&mut self, &prism_q::sim::compiled::PackedShots)
-pub struct prism_q::HomologicalSampler
-impl prism_q::sim::homological::HomologicalSampler
-pub fn prism_q::sim::homological::HomologicalSampler::boundary_dim(&self) -> usize
-pub fn prism_q::sim::homological::HomologicalSampler::compile(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, u64) -> prism_q::error::Result<Self>
-pub fn prism_q::sim::homological::HomologicalSampler::homology_dim(&self) -> usize
-pub fn prism_q::sim::homological::HomologicalSampler::sample(&mut self) -> alloc::vec::Vec<bool>
-pub fn prism_q::sim::homological::HomologicalSampler::sample_bulk(&mut self, usize) -> alloc::vec::Vec<alloc::vec::Vec<bool>>
-pub fn prism_q::sim::homological::HomologicalSampler::sample_chunked<A: prism_q::ShotAccumulator>(&mut self, usize, &mut A)
-pub fn prism_q::sim::homological::HomologicalSampler::sample_marginals(&mut self, usize) -> alloc::vec::Vec<f64>
-pub fn prism_q::sim::homological::HomologicalSampler::sample_packed(&mut self, usize) -> prism_q::sim::compiled::PackedShots
-pub fn prism_q::sim::homological::HomologicalSampler::syndrome_rank(&self) -> usize
 pub struct prism_q::MarginalsAccumulator
 impl prism_q::MarginalsAccumulator
 pub fn prism_q::MarginalsAccumulator::marginals(&self) -> alloc::vec::Vec<f64>
@@ -3173,7 +3147,6 @@ pub struct prism_q::NoiseModel
 pub prism_q::NoiseModel::after_gate: alloc::vec::Vec<alloc::vec::Vec<prism_q::sim::noise::NoiseEvent>>
 pub prism_q::NoiseModel::readout: alloc::vec::Vec<core::option::Option<prism_q::sim::noise::ReadoutError>>
 impl prism_q::sim::noise::NoiseModel
-pub fn prism_q::sim::noise::NoiseModel::ensure_pauli_only(&self) -> prism_q::error::Result<()>
 pub fn prism_q::sim::noise::NoiseModel::has_noise(&self) -> bool
 pub fn prism_q::sim::noise::NoiseModel::is_pauli_only(&self) -> bool
 pub fn prism_q::sim::noise::NoiseModel::set_bit_readout_error(&mut self, usize, f64, f64) -> &mut Self
@@ -3871,7 +3844,6 @@ pub fn prism_q::run_qec_program_spd_rerouted(&prism_q::qec::QecProgram, &[prism_
 pub fn prism_q::run_qec_program_with_strategy(&prism_q::qec::QecProgram, prism_q::QecTStrategy) -> prism_q::error::Result<prism_q::QecSampleResult>
 pub fn prism_q::run_shots_compiled(&prism_q::circuit::Circuit, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::run_shots_compiled_with_gpu(&prism_q::circuit::Circuit, usize, u64, alloc::sync::Arc<prism_q::gpu::GpuContext>) -> prism_q::error::Result<prism_q::ShotsResult>
-pub fn prism_q::run_shots_homological(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::run_shots_noisy(&prism_q::circuit::Circuit, &prism_q::sim::noise::NoiseModel, usize, u64) -> prism_q::error::Result<prism_q::ShotsResult>
 pub fn prism_q::run_spd(&prism_q::circuit::Circuit, f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdResult>
 pub fn prism_q::run_spd_observable(&prism_q::circuit::Circuit, &[prism_q::sim::unified_pauli::PauliTerm], f64, usize) -> prism_q::error::Result<prism_q::sim::unified_pauli::SpdObservableResult>

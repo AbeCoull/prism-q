@@ -7,7 +7,7 @@ use common::SEED;
 use prism_q::circuits::brickwork_circuit;
 use prism_q::{
     BackendKind, Circuit, CircuitBuilder, Engine, Exactness, Gate, NoiseModel, PauliTerm,
-    Placement, ResolvedBackend, SpdTruncation, run_shots_compiled, run_shots_homological, simulate,
+    Placement, ResolvedBackend, SpdTruncation, run_shots_compiled, simulate,
 };
 
 fn bell() -> Circuit {
@@ -364,7 +364,7 @@ fn ghz_ladder(pad: usize) -> Circuit {
     circuit
 }
 
-// Four samplers resolve to `CompiledStabilizer`, and the noisy entry point
+// Three samplers resolve to `CompiledStabilizer`, and the noisy entry point
 // picks between two of them at run time. Each test below drives one route
 // through the public terminal by the condition that selects it and reads the
 // route off the result, so a stamp removed upstream fails the one assertion
@@ -385,22 +385,6 @@ fn a_single_noiseless_shot_names_the_compiled_sampler() {
     let circuit = ghz_ladder(0);
     let shots = simulate(&circuit).seed(SEED).shots(1).unwrap();
     assert_eq!(shots.metadata.engine, Some(Engine::CompiledSampler));
-}
-
-#[test]
-fn the_homological_sampler_runs_only_when_asked_for() {
-    let circuit = ghz_ladder(0);
-    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.02);
-    let routed = simulate(&circuit)
-        .noise(&noise)
-        .seed(SEED)
-        .shots(1000)
-        .unwrap();
-    assert_eq!(routed.metadata.backend, ResolvedBackend::CompiledStabilizer);
-    assert_eq!(routed.metadata.engine, Some(Engine::FrameSampler));
-
-    let direct = run_shots_homological(&circuit, &noise, 1000, SEED).unwrap();
-    assert_eq!(direct.metadata.engine, Some(Engine::HomologicalSampler));
 }
 
 #[test]

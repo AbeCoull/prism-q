@@ -94,8 +94,9 @@
 //! cache on the rest.
 //!
 //! `expectation_zero_state` remains a separate path, contracting `⟨0|U†PU|0⟩`
-//! from a circuit rather than an evolved backend, and is what the QEC estimator
-//! ladder uses.
+//! from a circuit rather than an evolved backend over the observable's backward
+//! light cone. Explicit `TensorNetwork` expectations, the `Auto` bounded route
+//! and the QEC estimator ladder use it.
 
 use std::borrow::Cow;
 use std::cmp::Reverse;
@@ -1846,13 +1847,24 @@ impl ScalarExpectationNetwork {
         Ok(())
     }
 
-    /// The ket and bra copies of `circuit`, rejecting any instruction that is
-    /// not a unitary gate or a barrier.
-    fn from_circuit(circuit: &Circuit) -> Result<Self> {
-        let mut network = Self::new(circuit.num_qubits);
+    /// `<0| U^dag P U |0>` over the backward light cone of `terms`, rejecting any
+    /// instruction that is not a unitary gate or a barrier. A gate whose qubits all
+    /// lie outside the cone cancels against its adjoint, and a qubit no kept gate
+    /// touches closes to `<0|0> = 1`, so neither enters the network.
+    fn for_observable(circuit: &Circuit, terms: &[PauliTerm]) -> Result<Self> {
+        let num_qubits = circuit.num_qubits;
+        let mut axes = vec![None; num_qubits];
+        observable_axes(terms, &mut axes, "tensor-network scalar")?;
+
+        let mut ops = Vec::new();
         for instruction in &circuit.instructions {
             match instruction {
-                Instruction::Gate { gate, targets } => network.append_gate(gate, targets)?,
+                Instruction::Gate { gate, targets } => {
+                    for_each_gate_tensor(gate, targets, num_qubits, |op| {
+                        ops.push(op);
+                        Ok(())
+                    })?;
+                }
                 Instruction::Barrier { .. } => {}
                 Instruction::Save { label, .. } => {
                     return Err(crate::backend::save_not_applied("TensorNetwork", label));
@@ -1868,12 +1880,39 @@ impl ScalarExpectationNetwork {
                 }
             }
         }
+
+        let mut in_cone: Vec<bool> = axes.iter().map(Option::is_some).collect();
+        let mut keep = vec![false; ops.len()];
+        for (kept, op) in keep.iter_mut().zip(&ops).rev() {
+            let qubits = op.qubits();
+            if qubits.iter().any(|&q| in_cone[q]) {
+                *kept = true;
+                for q in qubits {
+                    in_cone[q] = true;
+                }
+            }
+        }
+
+        let mut network = Self::new(num_qubits);
+        let mut idle_legs = vec![false; network.next_leg];
+        for q in (0..num_qubits).filter(|&q| !in_cone[q]) {
+            idle_legs[network.ket_legs[q]] = true;
+            idle_legs[network.bra_legs[q]] = true;
+        }
+        for (op, kept) in ops.into_iter().zip(keep) {
+            if kept {
+                network.append_op(op)?;
+            }
+        }
+        network.append_observable(terms)?;
+        network
+            .tensors
+            .retain(|t| !t.legs.iter().all(|&leg| idle_legs.get(leg) == Some(&true)));
         Ok(network)
     }
 
-    fn append_gate(&mut self, gate: &Gate, targets: &[usize]) -> Result<()> {
-        let num_qubits = self.num_qubits;
-        for_each_gate_tensor(gate, targets, num_qubits, |op| match op {
+    fn append_op(&mut self, op: GateTensorOp<'_>) -> Result<()> {
+        match op {
             GateTensorOp::OneQ(q, mat) => {
                 self.append_1q_matrix(q, &mat, false)?;
                 self.append_1q_matrix(q, &mat, true)
@@ -1886,7 +1925,7 @@ impl ScalarExpectationNetwork {
                 self.append_nq_matrix(qubits, matrix.clone(), false)?;
                 self.append_nq_matrix(qubits, matrix, true)
             }
-        })
+        }
     }
 
     fn append_observable(&mut self, terms: &[PauliTerm]) -> Result<()> {
@@ -1933,9 +1972,20 @@ impl ScalarExpectationNetwork {
 
 /// Contract `<0| U^dag P U |0>` without materializing a full statevector.
 pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
-    let mut network = ScalarExpectationNetwork::from_circuit(circuit)?;
-    network.append_observable(pauli_terms)?;
-    network.contract(ContractionLimits::from_env())
+    ScalarExpectationNetwork::for_observable(circuit, pauli_terms)?
+        .contract(ContractionLimits::from_env())
+}
+
+/// [`expectation_zero_state`] for every observable, after QFT blocks expand.
+pub(crate) fn expectations_zero_state(
+    circuit: &Circuit,
+    observables: &[Vec<PauliTerm>],
+) -> Result<Vec<f64>> {
+    let circuit = crate::circuit::expand_qft_blocks(circuit);
+    observables
+        .iter()
+        .map(|observable| expectation_zero_state(&circuit, observable))
+        .collect()
 }
 
 /// Largest greedy-tree intermediate, in elements, under which the `Auto`
@@ -1958,10 +2008,11 @@ pub(crate) fn bounded_expectations_zero_state(
     let circuit = crate::circuit::expand_qft_blocks(circuit);
     let mut planned = Vec::with_capacity(observables.len());
     for observable in observables {
-        let mut network = ScalarExpectationNetwork::from_circuit(&circuit).ok()?;
-        if let Err(e) = network.append_observable(observable) {
+        let mut axes = vec![None; circuit.num_qubits];
+        if let Err(e) = observable_axes(observable, &mut axes, "tensor-network scalar") {
             return Some(Err(e));
         }
+        let network = ScalarExpectationNetwork::for_observable(&circuit, observable).ok()?;
         let slots: Vec<Option<TensorMeta>> = network
             .tensors
             .iter()
@@ -1995,9 +2046,7 @@ pub fn scalar_expectation_capped(
     slice_budget: usize,
     tolerance: Option<f64>,
 ) -> Result<f64> {
-    let mut network = ScalarExpectationNetwork::from_circuit(circuit)?;
-    network.append_observable(pauli_terms)?;
-    network.contract(ContractionLimits {
+    ScalarExpectationNetwork::for_observable(circuit, pauli_terms)?.contract(ContractionLimits {
         peak_cap,
         slice_budget,
         tolerance,
@@ -2011,6 +2060,16 @@ enum GateTensorOp<'a> {
     OneQ(usize, [[Complex64; 2]; 2]),
     TwoQ(usize, usize, [[Complex64; 4]; 4]),
     NQ(&'a [usize], Vec<Complex64>),
+}
+
+impl GateTensorOp<'_> {
+    fn qubits(&self) -> SmallVec<[usize; 4]> {
+        match self {
+            GateTensorOp::OneQ(q, _) => smallvec::smallvec![*q],
+            GateTensorOp::TwoQ(q0, q1, _) => smallvec::smallvec![*q0, *q1],
+            GateTensorOp::NQ(qubits, _) => SmallVec::from_slice(qubits),
+        }
+    }
 }
 
 /// Decompose `gate` into the elementary 1q/2q/nq matrix operations a tensor
@@ -3074,6 +3133,29 @@ mod tests {
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 
+    // Four brickwork layers confine Z on qubit 0 to the first few qubits, so
+    // the gates at the far end never enter the network.
+    #[test]
+    fn test_scalar_expectation_prunes_to_the_light_cone() {
+        let circuit = crate::circuits::brickwork_circuit(14, 4, 42);
+        let local = [PauliTerm::z(0)];
+        let global: Vec<PauliTerm> = (0..14).map(PauliTerm::z).collect();
+
+        let expected =
+            crate::sim::run_expectation_values(&circuit, &[local.to_vec()], 42).unwrap()[0];
+        let actual = expectation_zero_state(&circuit, &local).unwrap();
+        assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
+
+        let pruned = ScalarExpectationNetwork::for_observable(&circuit, &local).unwrap();
+        let full = ScalarExpectationNetwork::for_observable(&circuit, &global).unwrap();
+        assert!(
+            2 * pruned.tensors.len() < full.tensors.len(),
+            "{} tensors against {} over the whole circuit",
+            pruned.tensors.len(),
+            full.tensors.len()
+        );
+    }
+
     // Idle qubits leave one disconnected component each, which is what
     // join_disjoint exists for.
     #[test]
@@ -3091,9 +3173,7 @@ mod tests {
     }
 
     fn scalar_network(circuit: &Circuit, terms: &[PauliTerm]) -> ScalarExpectationNetwork {
-        let mut network = ScalarExpectationNetwork::from_circuit(circuit).unwrap();
-        network.append_observable(terms).unwrap();
-        network
+        ScalarExpectationNetwork::for_observable(circuit, terms).unwrap()
     }
 
     // hardware_efficient_ansatz(30, 7) is a recorded case of the greedy tree

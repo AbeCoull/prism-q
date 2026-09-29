@@ -3120,6 +3120,20 @@ fn run_expectation_values_reported(
         BackendKind::StatevectorGpu { .. } => {
             expectation_values_statevector(&kind, circuit, observables, seed)
         }
+        // The scalar network prunes each observable to its light cone, which
+        // the backend's stored network cannot: it no longer knows its gates.
+        BackendKind::TensorNetwork => {
+            validate_explicit_backend(&kind, circuit)?;
+            for observable in observables {
+                validate_observable(observable, circuit.num_qubits)?;
+            }
+            let values =
+                crate::backend::tensornetwork::expectations_zero_state(circuit, observables)?;
+            Ok(analytic_expectations(
+                values,
+                RunMetadata::exact(ResolvedBackend::TensorNetwork),
+            ))
+        }
         other => expectation_values_native(other, circuit, observables, seed),
     }
 }

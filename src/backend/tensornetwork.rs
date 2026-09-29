@@ -2021,16 +2021,36 @@ pub(crate) fn expectations_zero_state(
 /// decides costs 1 to 22 ms.
 pub(crate) const AUTO_EXPECTATION_PEAK_BOUND: usize = 1 << 12;
 
-/// `<0| U^dag P U |0>` for every observable, each contracted on a greedy tree
-/// that stays under `bound` elements. `None` when any observable's tree
-/// crosses the bound, or the circuit holds an instruction the network cannot
-/// append, so the caller falls back to a dense route. The plan the dry run
-/// produced is the plan contracted, so nothing is planned twice.
-pub(crate) fn bounded_expectations_zero_state(
+/// Scalar networks for a set of observables, each planned on a greedy tree that
+/// stays under a peak bound. The plan the dry run produced is the plan
+/// contracted, so nothing is planned twice.
+pub(crate) struct BoundedExpectations {
+    planned: Vec<(ScalarExpectationNetwork, ContractionPlan)>,
+}
+
+impl BoundedExpectations {
+    /// Sum of every planned intermediate's element count across the observables.
+    pub(crate) fn total_elements(&self) -> usize {
+        self.planned.iter().map(|(_, plan)| plan.total).sum()
+    }
+
+    pub(crate) fn contract(self) -> Result<Vec<f64>> {
+        self.planned
+            .into_iter()
+            .map(|(network, plan)| network.contract_on(&plan, ContractionLimits::from_env()))
+            .collect()
+    }
+}
+
+/// Plan `<0| U^dag P U |0>` for every observable under `bound` elements. `None`
+/// when any observable's tree crosses the bound, or the circuit holds an
+/// instruction the network cannot append, so the caller falls back to another
+/// route.
+pub(crate) fn plan_bounded_expectations(
     circuit: &Circuit,
     observables: &[Vec<PauliTerm>],
     bound: usize,
-) -> Option<Result<Vec<f64>>> {
+) -> Option<Result<BoundedExpectations>> {
     let circuit = crate::circuit::expand_qft_blocks(circuit);
     let mut planned = Vec::with_capacity(observables.len());
     for observable in observables {
@@ -2047,12 +2067,7 @@ pub(crate) fn bounded_expectations_zero_state(
         let plan = plan_pairs(slots, None, bound)?;
         planned.push((network, plan));
     }
-    Some(
-        planned
-            .into_iter()
-            .map(|(network, plan)| network.contract_on(&plan, ContractionLimits::from_env()))
-            .collect(),
-    )
+    Some(Ok(BoundedExpectations { planned }))
 }
 
 /// Bench-visible wrapper over [`expectation_zero_state`]; not stable API.

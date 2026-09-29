@@ -184,8 +184,11 @@ over the cap. It reports `Approximate`, with a bound of 1 minus the summed
 per-cut discarded weights, and `require_exact()` rejects it by name.
 
 `Auto` sends a circuit past the statevector cap to an MPS at a bounded bond
-dimension, which is the only route those circuits have. It is taken by default
-and the result says so. `simulate(...).require_exact()` rejects that route
+dimension. Expectation and marginals terminals first weigh the exact scalar
+tensor route, which contracts each observable's light cone, against an estimate
+of the MPS run from its bond growth, and take it when the MPS bond would grow
+faster than the cones. Otherwise MPS is the only route those circuits have. It is
+taken by default and the result says so. `simulate(...).require_exact()` rejects that route
 instead, with an error naming the engine it would have used.
 
 `Simulate::expectation_values_reported` returns the values with a standard error

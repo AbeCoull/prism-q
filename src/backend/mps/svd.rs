@@ -486,22 +486,57 @@ pub fn svd_jacobi(a: &[Complex64], m: usize, n: usize) -> SvdResult {
 }
 
 /// Compute thin SVD using the faer library (SIMD-accelerated bidiag + D&C).
+///
+/// faer's divide-and-conquer stage can return `Ok` with NaN singular vectors
+/// on a rank-deficient input, so non-finite output is recomputed by QR
+/// iteration on the bidiagonal, and by [`svd_jacobi`] if that fails too.
 #[cfg(feature = "parallel")]
 #[doc(hidden)]
 pub fn svd_faer(a: &[Complex64], m: usize, n: usize) -> SvdResult {
-    use faer::MatRef;
+    faer_thin_svd(a, m, n, true)
+        .or_else(|| faer_thin_svd(a, m, n, false))
+        .unwrap_or_else(|| svd_jacobi(a, m, n))
+}
 
-    let mat = MatRef::from_column_major_slice(a, m, n);
+#[cfg(feature = "parallel")]
+fn faer_thin_svd(
+    a: &[Complex64],
+    m: usize,
+    n: usize,
+    divide_and_conquer: bool,
+) -> Option<SvdResult> {
+    use faer::diag::Diag;
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::svd::{self as faer_svd, ComputeSvdVectors, SvdParams};
+    use faer::{Auto, Mat, MatRef};
 
-    let result = match mat.thin_svd() {
-        Ok(svd) => svd,
-        Err(_) => return svd_jacobi(a, m, n),
-    };
     let k = m.min(n);
-
-    let u_mat = result.U();
-    let s_col = result.S().column_vector();
-    let v_mat = result.V();
+    let par = faer::get_global_parallelism();
+    let mut params = <SvdParams as Auto<Complex64>>::auto();
+    if !divide_and_conquer {
+        params.recursion_threshold = usize::MAX;
+    }
+    let mut u_mat = Mat::<Complex64>::zeros(m, k);
+    let mut v_mat = Mat::<Complex64>::zeros(n, k);
+    let mut s_diag = Diag::<Complex64>::zeros(k);
+    let scratch = faer_svd::svd_scratch::<Complex64>(
+        m,
+        n,
+        ComputeSvdVectors::Thin,
+        ComputeSvdVectors::Thin,
+        par,
+        params.into(),
+    );
+    faer_svd::svd(
+        MatRef::from_column_major_slice(a, m, n),
+        s_diag.as_mut(),
+        Some(u_mat.as_mut()),
+        Some(v_mat.as_mut()),
+        par,
+        MemStack::new(&mut MemBuffer::new(scratch)),
+        params.into(),
+    )
+    .ok()?;
 
     let mut u = vec![ZERO; m * k];
     for j in 0..k {
@@ -510,6 +545,7 @@ pub fn svd_faer(a: &[Complex64], m: usize, n: usize) -> SvdResult {
         }
     }
 
+    let s_col = s_diag.column_vector();
     let s: Vec<f64> = (0..k).map(|i| s_col[i].re).collect();
 
     let mut vt = vec![ZERO; k * n];
@@ -519,11 +555,16 @@ pub fn svd_faer(a: &[Complex64], m: usize, n: usize) -> SvdResult {
         }
     }
 
-    SvdResult {
+    let finite = |z: &Complex64| z.re.is_finite() && z.im.is_finite();
+    if !(s.iter().all(|x| x.is_finite()) && u.iter().all(finite) && vt.iter().all(finite)) {
+        return None;
+    }
+
+    Some(SvdResult {
         u,
         u_rows: m,
         s,
         vt,
         vt_cols: n,
-    }
+    })
 }

@@ -208,6 +208,148 @@ fn matrix_1q(gate: &Gate) -> Option<[[Complex64; 2]; 2]> {
     }
 }
 
+/// The gate's 4x4 matrix over `(targets[0], targets[1])`, or `None` for a
+/// variant [`Gate::matrix_4x4`] does not cover.
+fn matrix_2q(gate: &Gate) -> Option<[[Complex64; 4]; 4]> {
+    match gate {
+        Gate::Rzz(_) | Gate::Cx | Gate::Cz | Gate::Swap | Gate::Cu(_) | Gate::Fused2q(_) => {
+            Some(gate.matrix_4x4())
+        }
+        Gate::PauliRot(data) if data.axes.len() == 2 => Some(gate.matrix_4x4()),
+        _ => None,
+    }
+}
+
+/// `A (x) B` over the 16x16 block index `4 * tr + tc`, `A` on the first
+/// qubit's `(row-bit, col-bit)` pair and `B` on the second's.
+fn kron_block_superoperators(
+    a: &[[Complex64; 4]; 4],
+    b: &[[Complex64; 4]; 4],
+) -> [[Complex64; 16]; 16] {
+    let pair = |t: usize, u: usize, shift: usize| 2 * ((t >> shift) & 1) + ((u >> shift) & 1);
+    std::array::from_fn(|row| {
+        let (tr, tc) = (row >> 2, row & 3);
+        std::array::from_fn(|col| {
+            let (trp, tcp) = (col >> 2, col & 3);
+            a[pair(tr, tc, 1)][pair(trp, tcp, 1)] * b[pair(tr, tc, 0)][pair(trp, tcp, 0)]
+        })
+    })
+}
+
+fn mat_mul_16x16(a: &[[Complex64; 16]; 16], b: &[[Complex64; 16]; 16]) -> [[Complex64; 16]; 16] {
+    std::array::from_fn(|r| std::array::from_fn(|c| (0..16).map(|k| a[r][k] * b[k][c]).sum()))
+}
+
+const IDENTITY_4X4: [[Complex64; 4]; 4] = {
+    let z = Complex64::new(0.0, 0.0);
+    let o = Complex64::new(1.0, 0.0);
+    [[o, z, z, z], [z, o, z, z], [z, z, o, z], [z, z, z, o]]
+};
+
+/// One-qubit block superoperators the exact noisy walk holds back per qubit.
+///
+/// Gates and one-qubit channels on a qubit compose here rather than sweeping
+/// the buffer one at a time. A two-qubit gate folds both its qubits' pending
+/// maps and its own trailing one-qubit channels into one 16x16 sweep, and any
+/// other instruction flushes first. Every sweep costs about the same on a
+/// buffer past the caches, so a gate with channels on both targets drops from
+/// five sweeps to one.
+pub(crate) struct DeferredSuperoperators {
+    pending: Vec<Option<[[Complex64; 4]; 4]>>,
+}
+
+impl DeferredSuperoperators {
+    pub(crate) fn new(num_qubits: usize) -> Self {
+        Self {
+            pending: vec![None; num_qubits],
+        }
+    }
+
+    /// Compose `gate` and then each Kraus set in `channels` onto `qubit`'s
+    /// pending map. False, with nothing held, when `gate` has no 2x2 matrix.
+    pub(crate) fn defer_1q(
+        &mut self,
+        gate: &Gate,
+        qubit: usize,
+        channels: &[Vec<[[Complex64; 2]; 2]>],
+    ) -> bool {
+        let Some(mat) = matrix_1q(gate) else {
+            return false;
+        };
+        let mut s = block_superoperator(&[mat]);
+        if let Some(prior) = &self.pending[qubit] {
+            s = mat_mul_4x4(&s, prior);
+        }
+        for kraus in channels {
+            s = mat_mul_4x4(&block_superoperator(kraus), &s);
+        }
+        self.pending[qubit] = Some(s);
+        true
+    }
+
+    /// Apply `gate` on `(q0, q1)` in one sweep, preceded by both qubits'
+    /// pending maps and followed by `channels`, one-qubit Kraus sets each on
+    /// `q0` or `q1`, in order. False, with nothing applied, when `gate` has no
+    /// 4x4 matrix or there is nothing to fold into it.
+    pub(crate) fn apply_2q(
+        &mut self,
+        dm: &mut DensityMatrixBackend,
+        gate: &Gate,
+        q0: usize,
+        q1: usize,
+        channels: &[(usize, Vec<[[Complex64; 2]; 2]>)],
+    ) -> bool {
+        let Some(g) = matrix_2q(gate) else {
+            return false;
+        };
+        if channels.is_empty() && self.pending[q0].is_none() && self.pending[q1].is_none() {
+            return false;
+        }
+
+        let before = kron_block_superoperators(
+            self.pending[q0].as_ref().unwrap_or(&IDENTITY_4X4),
+            self.pending[q1].as_ref().unwrap_or(&IDENTITY_4X4),
+        );
+        let (mut after0, mut after1) = (IDENTITY_4X4, IDENTITY_4X4);
+        for (qubit, kraus) in channels {
+            let target = if *qubit == q0 {
+                &mut after0
+            } else {
+                &mut after1
+            };
+            *target = mat_mul_4x4(&block_superoperator(kraus), target);
+        }
+        let after = kron_block_superoperators(&after0, &after1);
+        let gate_map: [[Complex64; 16]; 16] = std::array::from_fn(|row| {
+            std::array::from_fn(|col| g[row >> 2][col >> 2] * g[row & 3][col & 3].conj())
+        });
+
+        let s = mat_mul_16x16(&after, &mat_mul_16x16(&gate_map, &before));
+        self.pending[q0] = None;
+        self.pending[q1] = None;
+        dm.apply_2q_superoperator(q0, q1, &s);
+        true
+    }
+
+    /// Sweep every pending map into the buffer.
+    pub(crate) fn flush(&mut self, dm: &mut DensityMatrixBackend) {
+        for (qubit, pending) in self.pending.iter_mut().enumerate() {
+            if let Some(s) = pending.take() {
+                dm.apply_block_superoperator_infallible(qubit, &s);
+            }
+        }
+    }
+
+    /// Sweep the pending maps of `qubits` into the buffer.
+    pub(crate) fn flush_qubits(&mut self, dm: &mut DensityMatrixBackend, qubits: &[usize]) {
+        for &qubit in qubits {
+            if let Some(s) = self.pending[qubit].take() {
+                dm.apply_block_superoperator_infallible(qubit, &s);
+            }
+        }
+    }
+}
+
 /// `conj(gate)` as a native gate variant, which is what the bra register of
 /// `rho -> U rho U^dagger` needs. `Cx`, `Cz`, and `Swap` are real, so they are
 /// their own conjugate. `None` means the variant has no native conjugate form
@@ -830,31 +972,6 @@ impl DensityMatrixBackend {
         result.expect("host block superoperator is infallible");
     }
 
-    /// Apply `gate` and then every Kraus set in `channels`, all one-qubit maps
-    /// on `qubit`, in one buffer sweep instead of one per map.
-    ///
-    /// Returns false with the buffer untouched when `gate` has no one-qubit
-    /// matrix. Each block superoperator acts on the same `(row-bit, col-bit)`
-    /// 4-vector of `qubit`, so the composition is their matrix product in
-    /// application order and costs 64 complex multiplies per factor, once per
-    /// instruction rather than once per amplitude.
-    pub(crate) fn try_apply_fused_1q_channels(
-        &mut self,
-        gate: &Gate,
-        qubit: usize,
-        channels: &[Vec<[[Complex64; 2]; 2]>],
-    ) -> bool {
-        let Some(mat) = matrix_1q(gate) else {
-            return false;
-        };
-        let mut s = block_superoperator(&[mat]);
-        for kraus in channels {
-            s = mat_mul_4x4(&block_superoperator(kraus), &s);
-        }
-        self.apply_block_superoperator_infallible(qubit, &s);
-        true
-    }
-
     /// Apply symmetric two-qubit depolarizing on `(q0, q1)`:
     /// `rho -> (1-p) rho + (p/15) sum_{P != I(x)I} P rho P`, summed over the 15
     /// non-identity two-qubit Paulis.
@@ -1009,6 +1126,17 @@ impl DensityMatrixBackend {
             }
         }
 
+        self.apply_2q_superoperator(q0, q1, &s);
+    }
+
+    /// Sweep a compiled 16x16 block superoperator over `(q0, q1)`, indexed as
+    /// [`DensityMatrixBackend::apply_2q_kraus`] compiles it.
+    pub(crate) fn apply_2q_superoperator(
+        &mut self,
+        q0: usize,
+        q1: usize,
+        s: &[[Complex64; 16]; 16],
+    ) {
         let (positions, flats, num_groups) = self.block_layout(q0, q1);
 
         // Off-diagonal entries of an all-diagonal set only ever accumulate
@@ -1032,7 +1160,7 @@ impl DensityMatrixBackend {
         {
             let n = self.num_qubits;
             if let Some((ctx, gpu)) = self.device() {
-                launched(dk::kraus_2q_dense(&ctx, gpu, n, q0, q1, &s));
+                launched(dk::kraus_2q_dense(&ctx, gpu, n, q0, q1, s));
                 return;
             }
         }
@@ -1041,14 +1169,14 @@ impl DensityMatrixBackend {
         if simd::has_avx2_fma() && simd::kraus_2q_wide_enabled() {
             // SAFETY: AVX2 and FMA checked above; AVX2 implies the AVX the
             // constructor requires.
-            let prepared = unsafe { simd::PreparedKraus2q::new(&s) };
+            let prepared = unsafe { simd::PreparedKraus2q::new(s) };
             self.kraus_2q_sweep_wide(&prepared, &positions, &flats, num_groups);
             return;
         }
 
         match positions[0] {
-            0 | 1 => self.kraus_2q_sweep::<1>(&s, &positions, &flats, num_groups),
-            _ => self.kraus_2q_sweep::<4>(&s, &positions, &flats, num_groups),
+            0 | 1 => self.kraus_2q_sweep::<1>(s, &positions, &flats, num_groups),
+            _ => self.kraus_2q_sweep::<4>(s, &positions, &flats, num_groups),
         }
     }
 

@@ -1241,3 +1241,85 @@ fn the_filtered_compile_carries_an_in_block_pair() {
         );
     }
 }
+
+// The exact walk defers one-qubit maps and folds them, a gate, and its
+// channels into one 16x16 sweep. Applying every instruction and channel on its
+// own is the reference: orientation (a CX with its control above its target),
+// non-unital damping, noise on one target only, a gate with nothing to fold, a
+// channel with no gate, and a three-qubit gate that flushes all run through it.
+#[test]
+fn deferred_density_matrix_walk_matches_one_sweep_per_map() {
+    use crate::backend::density_matrix::DensityMatrixBackend;
+
+    let n = 4;
+    let mut circuit = Circuit::new(n, 0);
+    let mut after_gate: Vec<Vec<NoiseEvent>> = Vec::new();
+    let damp = |q: usize| NoiseEvent {
+        channel: NoiseChannel::AmplitudeDamping { gamma: 0.07 },
+        qubits: smallvec::smallvec![q],
+    };
+    let mut push = |gate: Gate, targets: &[usize], events: Vec<NoiseEvent>| {
+        circuit.add_gate(gate, targets);
+        after_gate.push(events);
+    };
+    push(Gate::H, &[0], vec![NoiseEvent::pauli(0, 0.01, 0.02, 0.03)]);
+    push(Gate::Ry(0.4), &[1], vec![damp(1)]);
+    push(Gate::Rx(1.1), &[1], vec![]);
+    push(
+        Gate::Cx,
+        &[1, 0],
+        vec![NoiseEvent::pauli(1, 0.02, 0.0, 0.01), damp(0)],
+    );
+    push(Gate::T, &[2], vec![]);
+    push(Gate::Rzz(0.8), &[2, 3], vec![damp(3)]);
+    push(Gate::Swap, &[0, 2], vec![]);
+    push(Gate::Cz, &[3, 1], vec![]);
+    push(
+        Gate::cu(Gate::Ry(0.9).matrix_2x2()),
+        &[0, 3],
+        vec![damp(0), damp(3)],
+    );
+    push(Gate::S, &[1], vec![NoiseEvent::pauli(2, 0.05, 0.0, 0.0)]);
+    push(
+        Gate::mcu(Gate::X.matrix_2x2(), 2),
+        &[0, 1, 2],
+        vec![damp(2)],
+    );
+    push(
+        Gate::Rz(0.3),
+        &[3],
+        vec![NoiseEvent::pauli(3, 0.0, 0.04, 0.0)],
+    );
+    let noise = NoiseModel {
+        after_gate,
+        readout: Vec::new(),
+    };
+
+    let folded = evolve_density_matrix(
+        &BackendKind::DensityMatrix,
+        &circuit,
+        Some(&noise),
+        None,
+        42,
+    )
+    .unwrap()
+    .density_matrix()
+    .unwrap();
+
+    let mut reference = DensityMatrixBackend::new(42);
+    reference.init(n, 0).unwrap();
+    for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
+        reference.apply(inst).unwrap();
+        for event in events {
+            apply_noise_event_dm(&mut reference, event);
+        }
+    }
+    let reference = reference.density_matrix().unwrap();
+
+    for (i, (a, b)) in folded.iter().zip(&reference).enumerate() {
+        assert!(
+            (a - b).norm() < 1e-12,
+            "entry {i}: folded {a} vs reference {b}"
+        );
+    }
+}

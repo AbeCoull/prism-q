@@ -339,6 +339,8 @@ pub(crate) const MAX_BATCH_RZZ_GROUPS: usize = 4;
 const BATCH_RZZ_BMI2_MAX_UNIQUE: usize = 10;
 #[cfg(target_arch = "x86_64")]
 const BATCH_RZZ_BMI2_TABLE_SIZE: usize = 1024;
+#[cfg(target_arch = "x86_64")]
+const BATCH_RZZ_BMI2_MAX_GROUPS: usize = 8;
 
 const _: () = assert!(
     MAX_BATCH_PHASE_GROUPS * BATCH_PHASE_GROUP_SIZE == BatchPhaseData::MAX_PHASES
@@ -593,45 +595,59 @@ struct BatchRzzBmi2Group {
     pext_mask: u64,
 }
 
+/// Pack `edges` into lookup groups of at most [`BATCH_RZZ_BMI2_MAX_UNIQUE`] qubits
+/// each, placing every edge in the group it widens least. A group takes any number of
+/// edges among its qubits, so a ring plus a random pairing fits in a few groups where
+/// runs of consecutive edges would not. `None` when the edges need more than
+/// [`BATCH_RZZ_BMI2_MAX_GROUPS`] groups.
 #[cfg(target_arch = "x86_64")]
 fn build_batch_rzz_bmi2_tables(
     edges: &[(usize, usize, f64)],
-    groups: &mut [BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS],
+    groups: &mut [BatchRzzBmi2Group; BATCH_RZZ_BMI2_MAX_GROUPS],
 ) -> Option<usize> {
-    let num_groups = edges.len().div_ceil(BATCH_RZZ_GROUP_SIZE);
-    if num_groups > MAX_BATCH_RZZ_GROUPS {
-        return None;
+    debug_assert!(edges.len() <= u64::BITS as usize);
+    let mut masks = [0u64; BATCH_RZZ_BMI2_MAX_GROUPS];
+    let mut members = [0u64; BATCH_RZZ_BMI2_MAX_GROUPS];
+    let mut num_groups = 0;
+    for (e, &(q0, q1, _)) in edges.iter().enumerate() {
+        let pair = (1u64 << q0) | (1u64 << q1);
+        let best = (0..num_groups)
+            .filter(|&g| (masks[g] | pair).count_ones() as usize <= BATCH_RZZ_BMI2_MAX_UNIQUE)
+            .min_by_key(|&g| (masks[g] | pair).count_ones() - masks[g].count_ones());
+        let g = match best {
+            Some(g) => g,
+            None if num_groups < BATCH_RZZ_BMI2_MAX_GROUPS => {
+                num_groups += 1;
+                num_groups - 1
+            }
+            None => return None,
+        };
+        masks[g] |= pair;
+        members[g] |= 1u64 << e;
     }
 
     for (g, group) in groups.iter_mut().enumerate().take(num_groups) {
-        let start = g * BATCH_RZZ_GROUP_SIZE;
-        let end = (start + BATCH_RZZ_GROUP_SIZE).min(edges.len());
-        let group_len = end - start;
-
-        let mut mask = 0u64;
-        for &(q0, q1, _) in &edges[start..end] {
-            mask |= (1u64 << q0) | (1u64 << q1);
-        }
-        let num_unique = mask.count_ones() as usize;
-        if num_unique > BATCH_RZZ_BMI2_MAX_UNIQUE {
-            return None;
-        }
-
+        let mask = masks[g];
         group.pext_mask = mask;
-
-        let mut q0_pos = [0u8; BATCH_RZZ_GROUP_SIZE];
-        let mut q1_pos = [0u8; BATCH_RZZ_GROUP_SIZE];
-        for (k, &(q0, q1, _)) in edges[start..end].iter().enumerate() {
-            q0_pos[k] = (mask & ((1u64 << q0) - 1)).count_ones() as u8;
-            q1_pos[k] = (mask & ((1u64 << q1) - 1)).count_ones() as u8;
+        let mut group_edges = [(0u8, 0u8, 0.0f64); BatchRzzData::MAX_EDGES];
+        let mut len = 0;
+        let mut bits = members[g];
+        while bits != 0 {
+            let (q0, q1, theta) = edges[bits.trailing_zeros() as usize];
+            group_edges[len] = (
+                (mask & ((1u64 << q0) - 1)).count_ones() as u8,
+                (mask & ((1u64 << q1) - 1)).count_ones() as u8,
+                theta,
+            );
+            len += 1;
+            bits &= bits - 1;
         }
 
-        let table_size = 1usize << num_unique;
+        let table_size = 1usize << mask.count_ones();
         for c in 0..table_size {
             let mut angle = 0.0f64;
-            for k in 0..group_len {
-                let parity = ((c >> q0_pos[k]) ^ (c >> q1_pos[k])) & 1;
-                let theta = edges[start + k].2;
+            for &(p0, p1, theta) in &group_edges[..len] {
+                let parity = ((c >> p0) ^ (c >> p1)) & 1;
                 angle += if parity == 0 {
                     -theta / 2.0
                 } else {
@@ -649,7 +665,7 @@ fn build_batch_rzz_bmi2_tables(
 unsafe fn batch_rzz_tile_bmi2(
     tile: &mut [Complex64],
     base_idx: usize,
-    groups: &[BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS],
+    groups: &[BatchRzzBmi2Group; BATCH_RZZ_BMI2_MAX_GROUPS],
     num_groups: usize,
 ) {
     use std::arch::x86_64::_pext_u64;
@@ -710,7 +726,7 @@ impl BatchPhaseGroup {
 pub(crate) struct BatchTableScratch {
     rzz: Option<Box<[BatchRzzGroup; MAX_BATCH_RZZ_GROUPS]>>,
     #[cfg(target_arch = "x86_64")]
-    rzz_bmi2: Option<Box<[BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS]>>,
+    rzz_bmi2: Option<Box<[BatchRzzBmi2Group; BATCH_RZZ_BMI2_MAX_GROUPS]>>,
     phase: Option<Box<[BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS]>>,
     diag: Option<Box<DiagBatchTables>>,
 }
@@ -722,9 +738,9 @@ impl BatchTableScratch {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn rzz_bmi2(&mut self) -> &mut [BatchRzzBmi2Group; MAX_BATCH_RZZ_GROUPS] {
+    fn rzz_bmi2(&mut self) -> &mut [BatchRzzBmi2Group; BATCH_RZZ_BMI2_MAX_GROUPS] {
         self.rzz_bmi2
-            .get_or_insert_with(|| Box::new([BatchRzzBmi2Group::EMPTY; MAX_BATCH_RZZ_GROUPS]))
+            .get_or_insert_with(|| Box::new([BatchRzzBmi2Group::EMPTY; BATCH_RZZ_BMI2_MAX_GROUPS]))
     }
 
     fn phase(&mut self) -> &mut [BatchPhaseGroup; MAX_BATCH_PHASE_GROUPS] {
@@ -4303,6 +4319,51 @@ mod pext_agreement_tests {
         }
     }
 
+    // A 24-qubit ring plus four pairs of a matching: runs of eight consecutive
+    // edges would put the pairs in a sixteen-qubit group, past the PEXT table.
+    #[test]
+    fn batch_rzz_pext_packs_a_ring_with_a_matching() {
+        if !std::is_x86_feature_detected!("bmi2") {
+            panic!("bmi2 is required to check the PEXT path against the scalar path");
+        }
+        let one = Complex64::new(1.0, 0.0);
+        let mut edges: Vec<(usize, usize, f64)> = (0..24)
+            .map(|q| (q, (q + 1) % 24, 0.3 + 0.01 * q as f64))
+            .collect();
+        edges.extend([(3, 17, 0.7), (5, 11, -0.4), (20, 8, 1.1), (1, 14, 0.2)]);
+        edges.extend([(6, 22, 0.9), (9, 2, -1.3), (13, 19, 0.5), (4, 15, 0.8)]);
+
+        let mut bmi2_groups = [BatchRzzBmi2Group {
+            table: [one; BATCH_RZZ_BMI2_TABLE_SIZE],
+            pext_mask: 0,
+        }; BATCH_RZZ_BMI2_MAX_GROUPS];
+        let num_groups = build_batch_rzz_bmi2_tables(&edges, &mut bmi2_groups)
+            .expect("the ring and matching fit the PEXT groups");
+
+        for idx in (0..1usize << 24).step_by(9973) {
+            let mut angle = 0.0;
+            for &(q0, q1, theta) in &edges {
+                let parity = ((idx >> q0) ^ (idx >> q1)) & 1;
+                angle += if parity == 0 {
+                    -theta / 2.0
+                } else {
+                    theta / 2.0
+                };
+            }
+            let expected = Complex64::from_polar(1.0, angle);
+            let mut pext = one;
+            for group in bmi2_groups.iter().take(num_groups) {
+                // SAFETY: BMI2 checked above.
+                let bits = unsafe { std::arch::x86_64::_pext_u64(idx as u64, group.pext_mask) };
+                pext *= group.table[bits as usize];
+            }
+            assert!(
+                (expected - pext).norm() < 1e-12,
+                "idx {idx}: {expected} vs {pext}"
+            );
+        }
+    }
+
     #[test]
     fn batch_rzz_pext_matches_scalar_lookup() {
         if !std::is_x86_feature_detected!("bmi2") {
@@ -4335,12 +4396,11 @@ mod pext_agreement_tests {
             let mut bmi2_groups = [BatchRzzBmi2Group {
                 table: [one; BATCH_RZZ_BMI2_TABLE_SIZE],
                 pext_mask: 0,
-            }; MAX_BATCH_RZZ_GROUPS];
+            }; BATCH_RZZ_BMI2_MAX_GROUPS];
             let Some(bmi2_num_groups) = build_batch_rzz_bmi2_tables(&edges, &mut bmi2_groups)
             else {
                 continue;
             };
-            assert_eq!(num_groups, bmi2_num_groups);
 
             for idx in 0..(1usize << NUM_QUBITS) {
                 let mut scalar = one;
@@ -4348,7 +4408,7 @@ mod pext_agreement_tests {
                     scalar *= group.table[extract_rzz_bits(idx, group)];
                 }
                 let mut pext = one;
-                for group in bmi2_groups.iter().take(num_groups) {
+                for group in bmi2_groups.iter().take(bmi2_num_groups) {
                     // SAFETY: BMI2 checked above.
                     let bits = unsafe { std::arch::x86_64::_pext_u64(idx as u64, group.pext_mask) };
                     pext *= group.table[bits as usize];

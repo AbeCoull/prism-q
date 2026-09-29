@@ -3579,6 +3579,22 @@ fn bench_noisy_sampling(c: &mut Criterion) {
         },
     );
 
+    // Syndrome rank equals the qubit count here, so the error complex compiles
+    // under a rank cap of 20 where the 100-qubit rows above exceed it.
+    for n in [12usize, 16] {
+        let circuit = with_terminal_measurements(circuits::clifford_heavy_circuit(n, 10, SEED));
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&circuit, 0.001);
+        group.bench_function(
+            BenchmarkId::new("low_rank", format!("clifford_{n}q_10k")),
+            |b| {
+                b.iter(|| {
+                    run_shots_with_noise(BackendKind::Auto, &circuit, &noise, 10_000, SEED)
+                        .unwrap();
+                });
+            },
+        );
+    }
+
     let non_clifford = non_clifford_noise_circuit(12, 4);
     let non_clifford_noise = prism_q::NoiseModel::uniform_depolarizing(&non_clifford, 0.001);
     group.bench_function(

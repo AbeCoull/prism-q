@@ -139,6 +139,26 @@ fn grid_cycles_circuit(n_qubits: usize, rows: usize, cycles: usize, seed: u64) -
     circuit
 }
 
+/// Brick layers of generic two-qubit blocks, three CX with random rotations
+/// between, so an MPS bond grows fourfold per layer at every cut a layer crosses.
+fn su4_brickwork_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut circuit = Circuit::new(n_qubits, 0);
+    let tau = std::f64::consts::TAU;
+    for layer in 0..depth {
+        for i in (layer % 2..n_qubits - 1).step_by(2) {
+            for _ in 0..3 {
+                for q in [i, i + 1] {
+                    circuit.add_gate(Gate::Ry(rng.random::<f64>() * tau), &[q]);
+                    circuit.add_gate(Gate::Rz(rng.random::<f64>() * tau), &[q]);
+                }
+                circuit.add_gate(Gate::Cx, &[i, i + 1]);
+            }
+        }
+    }
+    circuit
+}
+
 fn random_clifford_circuit(n_qubits: usize, depth: usize, seed: u64) -> Circuit {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let mut circuit = Circuit::new(n_qubits, 0);
@@ -2166,6 +2186,64 @@ fn bench_auto_expectation(c: &mut Criterion) {
         });
     }
 
+    group.finish();
+}
+
+/// `Auto` expectations above the statevector cap, where MPS is the fallback.
+///
+/// `su4_brick_d6` drives the MPS bond to 64 while one `Z` has a twelve-qubit
+/// cone; `brickwork_d10` crosses the tensor route's peak bound after a dry run;
+/// `hea_l2` and `su4_brick_d4` stay under the MPS cost at which the dry run is
+/// worth attempting.
+fn bench_auto_expectation_above_cap(c: &mut Criterion) {
+    let mut group = c.benchmark_group("auto/expectation_above_cap");
+    configure_group(&mut group);
+
+    let local = |n: usize| vec![vec![PauliTerm::z(n / 2)]];
+    let two_local = |n: usize| -> Vec<Vec<PauliTerm>> {
+        (0..8)
+            .map(|k| {
+                let a = (k * n / 8) % n;
+                let b = (a + n / 3 + 1) % n;
+                vec![PauliTerm::z(a), PauliTerm::z(b)]
+            })
+            .collect()
+    };
+    let rows: Vec<(&str, Circuit, Vec<Vec<PauliTerm>>)> = vec![
+        (
+            "su4_brick_d6/64",
+            su4_brickwork_circuit(64, 6, SEED),
+            local(64),
+        ),
+        (
+            "brickwork_d10/48",
+            circuits::brickwork_circuit(48, 10, SEED),
+            local(48),
+        ),
+        (
+            "hea_l2/64",
+            circuits::hardware_efficient_ansatz(64, 2, SEED),
+            two_local(64),
+        ),
+        (
+            "su4_brick_d4/64",
+            su4_brickwork_circuit(64, 4, SEED),
+            two_local(64),
+        ),
+    ];
+    for (name, circuit, observables) in rows {
+        group.bench_with_input(BenchmarkId::from_parameter(name), &circuit, |b, circ| {
+            b.iter(|| {
+                black_box(
+                    sim::simulate(circ)
+                        .backend(BackendKind::Auto)
+                        .seed(42)
+                        .expectation_values(&observables)
+                        .unwrap(),
+                )
+            });
+        });
+    }
     group.finish();
 }
 
@@ -4641,6 +4719,7 @@ criterion_group! {
     bench_tn_sample_chain,
     // Auto dispatch
     bench_auto_expectation,
+    bench_auto_expectation_above_cap,
     bench_auto_crossover,
     bench_auto_random,
     bench_auto_qft,

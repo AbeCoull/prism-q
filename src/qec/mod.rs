@@ -14,7 +14,7 @@
 //!   to matching and belief-propagation decoders.
 //! - [`UnionFindDecoder`] decodes packed detector samples against a graphlike model.
 
-mod camps_prefix;
+pub(crate) mod camps_prefix;
 /// Treewidth-aware cut-selection heuristics, benchmark-only: the dispatcher follows a
 /// fixed SPD -> CAMPS -> tensor-network ladder and does not use them.
 #[cfg(feature = "bench-internal")]

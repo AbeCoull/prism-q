@@ -318,7 +318,7 @@ The `BackendKind` variants outside feature gates. `AutoGpu`, `StatevectorGpu`,
 | `TensorNetworkBounded { tolerance }` | Deferred contraction with truncation past the peak cap | Explicit |
 | `Factored` | Dynamic split-state | Explicit or auto (partial independence) |
 | `DensityMatrix` | Exact mixed state | Explicit |
-| `StabilizerRank` | Weighted stabilizer sum | Explicit, or auto for shots (Clifford+T inside the size-derived T budget); never auto for probabilities |
+| `StabilizerRank` | Weighted stabilizer sum, or a Clifford tableau over a dense T register for terminal shots | Explicit, or auto for shots (Clifford+T from 16 qubits with fewer T gates than qubits and at most 20, or past the statevector cap inside the size-derived T budget); never auto for probabilities |
 | `StochasticPauli { num_samples }` | SPP | Explicit |
 | `DeterministicPauli { truncation }` | SPD | Explicit |
 | `PauliPath { epsilon, max_terms }` | Noisy Heisenberg Pauli sum | Explicit |

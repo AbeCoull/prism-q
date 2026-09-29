@@ -15,7 +15,9 @@
 //! Two modes:
 //! - **Exact probabilities** (n ≤ 25): reconstruct `|ψ_0⟩`, sum weighted
 //!   Pauli-shifted amplitudes, compute |amplitude|² for each basis state.
-//! - **Measurement sampling** (any n): keep coherent weighted MPS branches,
+//! - **Measurement sampling** (any n): terminal measurements go through a
+//!   Clifford tableau over a dense register of the qubits the T gates reach;
+//!   otherwise keep coherent weighted MPS branches,
 //!   project requested measurement outcomes, and contract pairwise branch
 //!   overlaps without materializing a dense statevector.
 
@@ -33,6 +35,8 @@ use crate::circuit::clifford_t::lower_to_clifford_t;
 use crate::circuit::{Circuit, GuardedRegion, Instruction, SmallVec, any_gate};
 use crate::error::{PrismError, Result};
 use crate::gates::Gate;
+
+use super::clifford_register::{MAX_REGISTER_QUBITS, TerminalSampler};
 
 /// Letter-level signed Pauli string. Each qubit's `(x, z)` bit pair encodes
 /// the Pauli letter directly: (0,0)=I, (1,0)=X, (0,1)=Z, (1,1)=Y. `phase4` is
@@ -1171,9 +1175,11 @@ fn sample_mps_branches_online(
 /// (for example `H·T·H` would collapse to `[0.5, 0.5]` instead of
 /// `[cos²(π/8), sin²(π/8)]`).
 ///
-/// Terminal and mid-circuit measurements are sampled by projecting coherent
-/// weighted branches and contracting branch overlaps, so the dense
-/// statevector cap does not apply.
+/// Terminal measurements of a unitary circuit are drawn from a Clifford tableau over a
+/// dense register holding only the qubits the T gates reach, at most 20 of them.
+/// Mid-circuit measurements, and a wider register, are sampled by projecting coherent
+/// weighted branches and contracting branch overlaps. Neither is bound by the dense
+/// statevector cap.
 pub fn run_stabilizer_rank_shots(
     circuit: &Circuit,
     num_shots: usize,
@@ -1186,6 +1192,15 @@ pub fn run_stabilizer_rank_shots(
     }
 
     if circuit.has_terminal_measurements_only() && !circuit.has_resets() {
+        if let Some(sampler) = TerminalSampler::compile(circuit, MAX_REGISTER_QUBITS)? {
+            return Ok(super::ShotsResult::from_shots(
+                sampler.sample(num_shots, seed),
+                circuit.num_classical_bits,
+            )
+            .with_metadata(super::RunMetadata::exact(
+                super::ResolvedBackend::StabilizerRank,
+            )));
+        }
         let stripped = circuit.without_measurements();
         let base_branches = build_mps_branches_for_unitary(&stripped, seed)?;
         return sample_terminal_mps_branches(&base_branches, circuit, num_shots, seed);

@@ -2375,7 +2375,7 @@ fn should_use_compiled_clifford_sampling(
     circuit: &Circuit,
     num_shots: usize,
 ) -> bool {
-    num_shots >= 2
+    num_shots >= 1
         && supports_compiled_measurement_sampling(circuit)
         && is_clifford_sampler_kind(kind)
 }

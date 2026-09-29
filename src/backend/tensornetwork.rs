@@ -1941,14 +1941,6 @@ impl ScalarExpectationNetwork {
         Ok(())
     }
 
-    fn contract(self, limits: ContractionLimits) -> Result<f64> {
-        if self.tensors.is_empty() {
-            return Ok(1.0);
-        }
-        let plan = plan_with_restarts(&self.tensors);
-        self.contract_on(&plan, limits)
-    }
-
     fn contract_on(mut self, plan: &ContractionPlan, limits: ContractionLimits) -> Result<f64> {
         let result = contract_within(
             &mut self.tensors,
@@ -1970,10 +1962,44 @@ impl ScalarExpectationNetwork {
     }
 }
 
+/// Plan total, in elements, from which the fused circuit's network competes
+/// with the unfused one.
+///
+/// Fusion trades tensor count for tensor size, and which side contracts faster
+/// follows the plan total: on a 4-row grid with `Z` on every qubit the fused
+/// plan totals 573k elements against 3.1M at 16 qubits and runs 3x faster,
+/// while at 20 qubits it totals 5.6M against 4.0M and runs 1.4x slower.
+/// Fusing and planning the second network costs about 0.3 ms, under 5% of a
+/// contraction this size; a local observable's cone stays far below it.
+const FUSED_PLAN_TOTAL: usize = 1 << 18;
+
 /// Contract `<0| U^dag P U |0>` without materializing a full statevector.
 pub(crate) fn expectation_zero_state(circuit: &Circuit, pauli_terms: &[PauliTerm]) -> Result<f64> {
-    ScalarExpectationNetwork::for_observable(circuit, pauli_terms)?
-        .contract(ContractionLimits::from_env())
+    contract_scalar(circuit, pauli_terms, ContractionLimits::from_env())
+}
+
+/// Contract the observable's network, or the fused circuit's when its plan is
+/// lower by peak then total.
+fn contract_scalar(
+    circuit: &Circuit,
+    pauli_terms: &[PauliTerm],
+    limits: ContractionLimits,
+) -> Result<f64> {
+    let network = ScalarExpectationNetwork::for_observable(circuit, pauli_terms)?;
+    if network.tensors.is_empty() {
+        return Ok(1.0);
+    }
+    let plan = plan_with_restarts(&network.tensors);
+    if plan.total >= FUSED_PLAN_TOTAL
+        && let Cow::Owned(fused) = crate::circuit::fusion::fuse_circuit(circuit, true)
+    {
+        let fused_network = ScalarExpectationNetwork::for_observable(&fused, pauli_terms)?;
+        let fused_plan = plan_with_restarts(&fused_network.tensors);
+        if (fused_plan.peak, fused_plan.total) < (plan.peak, plan.total) {
+            return fused_network.contract_on(&fused_plan, limits);
+        }
+    }
+    network.contract_on(&plan, limits)
 }
 
 /// [`expectation_zero_state`] for every observable, after QFT blocks expand.
@@ -2046,11 +2072,15 @@ pub fn scalar_expectation_capped(
     slice_budget: usize,
     tolerance: Option<f64>,
 ) -> Result<f64> {
-    ScalarExpectationNetwork::for_observable(circuit, pauli_terms)?.contract(ContractionLimits {
-        peak_cap,
-        slice_budget,
-        tolerance,
-    })
+    contract_scalar(
+        circuit,
+        pauli_terms,
+        ContractionLimits {
+            peak_cap,
+            slice_budget,
+            tolerance,
+        },
+    )
 }
 
 /// Elementary tensor operation a gate decomposes into when appended to a
@@ -3172,6 +3202,26 @@ mod tests {
         assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
     }
 
+    // Twelve brickwork layers under Z on every qubit plan lower fused, peak
+    // 262144 against 1048576, so the fused network is the one contracted.
+    #[test]
+    fn test_scalar_expectation_takes_the_fused_network_when_it_plans_lower() {
+        let circuit = crate::circuits::brickwork_circuit(16, 12, 42);
+        let terms: Vec<PauliTerm> = (0..16).map(PauliTerm::z).collect();
+
+        let unfused = plan_with_restarts(&scalar_network(&circuit, &terms).tensors);
+        let fused_circuit = crate::circuit::fusion::fuse_circuit(&circuit, true);
+        let fused = plan_with_restarts(&scalar_network(&fused_circuit, &terms).tensors);
+        assert!(unfused.total >= FUSED_PLAN_TOTAL);
+        assert!((fused.peak, fused.total) < (unfused.peak, unfused.total));
+
+        let expected =
+            crate::sim::run_expectation_values(&circuit, std::slice::from_ref(&terms), 42).unwrap()
+                [0];
+        let actual = expectation_zero_state(&circuit, &terms).unwrap();
+        assert!((actual - expected).abs() < EPS, "{actual} vs {expected}");
+    }
+
     fn scalar_network(circuit: &Circuit, terms: &[PauliTerm]) -> ScalarExpectationNetwork {
         ScalarExpectationNetwork::for_observable(circuit, terms).unwrap()
     }
@@ -3250,9 +3300,7 @@ mod tests {
     fn test_slices_sum_to_the_unsliced_contraction() {
         let circuit = crate::circuits::hardware_efficient_ansatz(12, 4, 42);
         let terms = [PauliTerm::z(0), PauliTerm::z(6)];
-        let exact = scalar_network(&circuit, &terms)
-            .contract(ContractionLimits::from_env())
-            .unwrap();
+        let exact = expectation_zero_state(&circuit, &terms).unwrap();
 
         let network = scalar_network(&circuit, &terms);
         let plan = plan_with_restarts(&network.tensors);

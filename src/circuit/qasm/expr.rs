@@ -3,6 +3,7 @@
 //! Parsing and evaluation are separate so a body that runs many times, a `for`
 //! body above all, is parsed once and evaluated per pass.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -188,7 +189,7 @@ fn parse_primary<'a>(stream: &mut Stream<'_, 'a>) -> Result<Expr<'a>> {
         }
         Kind::Int | Kind::Float => {
             let token = stream.advance();
-            Ok(Expr::Number(number(token.text, token.line)?))
+            Ok(Expr::Number(number(token.text, token.line as usize)?))
         }
         Kind::Ident => {
             let name = stream.advance().text;
@@ -226,6 +227,13 @@ fn binary<'a>(op: BinaryOp, left: Expr<'a>, right: Expr<'a>) -> Expr<'a> {
 /// Read a numeric literal, in whichever radix it was written and with `_`
 /// separators dropped.
 fn number(text: &str, line: usize) -> Result<f64> {
+    // Qubit indices are nearly every literal a program writes; fifteen digits
+    // stay exact in an f64.
+    if text.len() <= 15 && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Ok(text
+            .bytes()
+            .fold(0u64, |acc, byte| acc * 10 + u64::from(byte - b'0')) as f64);
+    }
     let invalid = || PrismError::Parse {
         line,
         message: format!("invalid number: `{text}`"),
@@ -236,7 +244,11 @@ fn number(text: &str, line: usize) -> Result<f64> {
         Some("0o" | "0O") => Some(8),
         _ => None,
     };
-    let cleaned: String = text.chars().filter(|c| *c != '_').collect();
+    let cleaned = if text.contains('_') {
+        Cow::Owned(text.replace('_', ""))
+    } else {
+        Cow::Borrowed(text)
+    };
     let value = match radix {
         Some(radix) => u64::from_str_radix(&cleaned[2..], radix).map_err(|_| invalid())? as f64,
         None => cleaned.parse::<f64>().map_err(|_| invalid())?,

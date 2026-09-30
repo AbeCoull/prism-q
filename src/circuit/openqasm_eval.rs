@@ -111,13 +111,13 @@ impl<'a> Parser<'a> {
     /// Run a block, threading the parameter link and noise event each statement
     /// may leave behind onto the instruction index they belong to.
     pub(super) fn execute(&mut self, block: &Block<'a>) -> Result<Vec<Instruction>> {
-        let mut instructions = Vec::new();
+        let mut instructions = Vec::with_capacity(block.len());
         for stmt in block {
             let base = instructions.len();
             self.pending_input_slot = None;
-            let produced = self.exec_stmt(stmt)?;
+            self.exec_stmt(stmt, &mut instructions)?;
             if let Some(slot) = self.pending_input_slot.take() {
-                for offset in 0..produced.len() {
+                for offset in 0..instructions.len() - base {
                     self.links.push(ParamLink {
                         instruction: base + offset,
                         slot,
@@ -135,26 +135,25 @@ impl<'a> Parser<'a> {
                 }
                 self.noise_specs.push((base - 1, spec));
             }
-            instructions.extend(produced);
         }
         Ok(instructions)
     }
 
-    fn exec_stmt(&mut self, stmt: &Stmt<'a>) -> Result<Vec<Instruction>> {
+    fn exec_stmt(&mut self, stmt: &Stmt<'a>, out: &mut Vec<Instruction>) -> Result<()> {
         let line = stmt.line;
         match &stmt.kind {
-            StmtKind::Empty | StmtKind::Include => Ok(Vec::new()),
+            StmtKind::Empty | StmtKind::Include => Ok(()),
             StmtKind::Version(version) => {
                 Self::check_version_number(version, line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::RegisterDecl { kind, name, size } => {
                 self.declare_register(*kind, name, size.as_ref(), line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::InputDecl { ty, name } => {
                 self.declare_input(ty, name, line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::OutputDecl { ty, name, size } => {
                 if *ty != "bit" {
@@ -164,7 +163,7 @@ impl<'a> Parser<'a> {
                     });
                 }
                 self.declare_register(ast::RegisterKind::Classical, name, size.as_ref(), line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::ClassicalDecl {
                 constant,
@@ -173,29 +172,29 @@ impl<'a> Parser<'a> {
                 value,
             } => {
                 self.declare_classical(*constant, ty, name, value.as_ref(), line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::Assign { target, op, value } => {
                 self.assign_classical(target, *op, value, line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::Alias { name, sources } => {
                 self.declare_alias(name, sources, line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::Call {
                 modifiers,
                 name,
                 params,
                 operands,
-            } => self.exec_call(modifiers, name, params, operands, line),
+            } => self.exec_call(modifiers, name, params, operands, line, out),
             StmtKind::Measure(measure) => {
                 let qubits = self.qubits_of(&measure.source)?;
                 let bits = self.bits_of(&measure.target)?;
-                Self::build_measurements(qubits, bits, line)
+                out.extend(Self::build_measurements(qubits, bits, line)?);
+                Ok(())
             }
             StmtKind::Reset { targets } => {
-                let mut out = Vec::new();
                 for target in targets {
                     out.extend(
                         self.qubits_of(target)?
@@ -203,7 +202,7 @@ impl<'a> Parser<'a> {
                             .map(|qubit| Instruction::Reset { qubit }),
                     );
                 }
-                Ok(out)
+                Ok(())
             }
             StmtKind::Barrier { targets } => {
                 let mut qubits = SmallVec::<[usize; 4]>::new();
@@ -214,15 +213,25 @@ impl<'a> Parser<'a> {
                         qubits.extend(self.qubits_of(target)?);
                     }
                 }
-                Ok(vec![Instruction::Barrier { qubits }])
+                out.push(Instruction::Barrier { qubits });
+                Ok(())
             }
-            StmtKind::If(conditional) => self.exec_if(conditional, line),
+            StmtKind::If(conditional) => {
+                out.extend(self.exec_if(conditional, line)?);
+                Ok(())
+            }
             StmtKind::For {
                 variable,
                 range,
                 body,
-            } => self.exec_for(variable, range, body, line),
-            StmtKind::Switch { operand, arms } => self.exec_switch(operand, arms, line),
+            } => {
+                out.extend(self.exec_for(variable, range, body, line)?);
+                Ok(())
+            }
+            StmtKind::Switch { operand, arms } => {
+                out.extend(self.exec_switch(operand, arms, line)?);
+                Ok(())
+            }
             StmtKind::GateDef {
                 name,
                 params,
@@ -243,11 +252,11 @@ impl<'a> Parser<'a> {
                         body: body.clone(),
                     },
                 );
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::DefDef { name, args, body } => {
                 self.declare_def(name, args, body, line)?;
-                Ok(Vec::new())
+                Ok(())
             }
             StmtKind::Box(body) => {
                 if !self.verbatim_pending {
@@ -262,9 +271,13 @@ impl<'a> Parser<'a> {
                 let was_nested = std::mem::replace(&mut self.nested, true);
                 let result = self.execute(body);
                 self.nested = was_nested;
-                result
+                out.extend(result?);
+                Ok(())
             }
-            StmtKind::Pragma(text) => self.exec_pragma(text, line),
+            StmtKind::Pragma(text) => {
+                out.extend(self.exec_pragma(text, line)?);
+                Ok(())
+            }
         }
     }
 
@@ -695,12 +708,14 @@ impl<'a> Parser<'a> {
         params: &[Argument],
         operands: &[Operand],
         line: usize,
-    ) -> Result<Vec<Instruction>> {
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
         let modifiers = self.fold_modifiers(modifiers, line)?;
 
         if self.def_defs.contains_key(name) {
             let instrs = self.expand_def(name, params, line)?;
-            return Self::modify_expansion(instrs, &modifiers, name, line);
+            out.extend(Self::modify_expansion(instrs, &modifiers, name, line)?);
+            return Ok(());
         }
 
         let (values, input_slot) = self.fold_params(params, line)?;
@@ -718,7 +733,8 @@ impl<'a> Parser<'a> {
                     )),
                 })
                 .collect::<Result<Vec<_>>>()?;
-            return self.resolve_global_phase(&values, &modifiers, &qubits, line);
+            out.extend(self.resolve_global_phase(&values, &modifiers, &qubits, line)?);
+            return Ok(());
         }
         if input_slot.is_some() && !modifiers.is_empty() {
             return Err(PrismError::UnsupportedConstruct {
@@ -727,13 +743,13 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let resolved: Vec<SmallVec<[usize; 4]>> = operands
+        let resolved: SmallVec<[SmallVec<[usize; 4]>; 4]> = operands
             .iter()
             .map(|operand| self.qubits_of(operand))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<_>>()?;
         let width = self.broadcast_length(&resolved, name, line)?;
 
-        let mut all = Vec::with_capacity(width);
+        let base = out.len();
         for at in 0..width {
             let qubits: SmallVec<[usize; 4]> = resolved
                 .iter()
@@ -745,20 +761,21 @@ impl<'a> Parser<'a> {
                     }
                 })
                 .collect();
-            all.append(&mut self.resolve_gate_application_once(
+            self.resolve_gate_application_once(
                 name,
                 &values,
                 &modifiers,
                 &qubits,
                 input_slot.is_some(),
                 line,
-            )?);
+                out,
+            )?;
         }
         if input_slot.is_some() {
-            Self::check_every_instruction_is_bindable(&all, name, line)?;
+            Self::check_every_instruction_is_bindable(&out[base..], name, line)?;
         }
         self.pending_input_slot = input_slot;
-        Ok(all)
+        Ok(())
     }
 
     fn fold_modifiers(

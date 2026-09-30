@@ -100,8 +100,8 @@ impl Kind {
 pub(crate) struct Token<'a> {
     pub kind: Kind,
     pub text: &'a str,
-    pub line: usize,
-    pub column: usize,
+    pub line: u32,
+    pub column: u32,
 }
 
 impl<'a> Token<'a> {
@@ -140,9 +140,9 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token<'_>>> {
         line: 1,
         line_start: 0,
     };
-    // One token per four bytes is the ratio this grammar runs at, so the
-    // stream is built in a single allocation for anything short of a pathology.
-    let mut out = Vec::with_capacity(source.len() / 4 + 1);
+    // Dense gate lists run near one token per 1.5 bytes (`cx q[0], q[1];`), so
+    // half the byte count leaves one doubling at most on any real program.
+    let mut out = Vec::with_capacity(source.len() / 2 + 1);
     loop {
         lexer.skip_trivia()?;
         if lexer.at >= lexer.bytes.len() {
@@ -158,8 +158,8 @@ impl<'a> Lexer<'a> {
         Token {
             kind,
             text: &self.source[start..end],
-            line: self.line,
-            column: start - self.line_start + 1,
+            line: self.line as u32,
+            column: (start - self.line_start + 1) as u32,
         }
     }
 

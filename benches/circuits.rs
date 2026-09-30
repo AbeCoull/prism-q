@@ -3750,6 +3750,44 @@ fn bench_auto_clifford_t_shots(c: &mut Criterion) {
     group.finish();
 }
 
+/// Layers of random `H`, `S`, `X` on every qubit and a CX on each neighbour pair,
+/// measured: the shape where parsing outweighs a stabilizer run.
+fn clifford_layers(n: usize, depth: usize, seed: u64) -> Circuit {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, 0);
+    for _ in 0..depth {
+        for q in 0..n {
+            c.add_gate(
+                [Gate::H, Gate::S, Gate::X][rng.random_range(0..3)].clone(),
+                &[q],
+            );
+        }
+        for q in (0..n - 1).step_by(2) {
+            c.add_gate(Gate::Cx, &[q, q + 1]);
+        }
+    }
+    measure_all(&c)
+}
+
+fn bench_qasm_parse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qasm/parse");
+    configure_group(&mut group);
+
+    let cases = [
+        ("clifford_1000q_d100", clifford_layers(1000, 100, SEED)),
+        ("random_d200/24", circuits::random_circuit(24, 200, SEED)),
+        ("qv/24", circuits::quantum_volume_circuit(24, 24, SEED)),
+    ];
+    for (name, circuit) in cases {
+        let text = prism_q::circuit::qasm_export::to_qasm3(&circuit).unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(name), &text, |b, text| {
+            b.iter(|| black_box(prism_q::circuit::openqasm::parse(black_box(text)).unwrap()));
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_compiled_sampler(c: &mut Criterion) {
     let mut group = c.benchmark_group("compiled_sampler");
     configure_group(&mut group);
@@ -4900,6 +4938,7 @@ criterion_group! {
     // Stabilizer rank
     bench_stabilizer_rank,
     bench_auto_clifford_t_shots,
+    bench_qasm_parse,
     // Compiled sampler (noiseless + noisy shot sampling)
     bench_compiled_sampler,
     // Noisy trajectory dispatch and compiled Pauli sampling

@@ -30,7 +30,7 @@ impl<'t, 'a> Stream<'t, 'a> {
     }
 
     pub(crate) fn line(&self) -> usize {
-        self.peek().line
+        self.peek().line as usize
     }
 
     pub(crate) fn at_end(&self) -> bool {
@@ -84,7 +84,7 @@ impl<'t, 'a> Stream<'t, 'a> {
     pub(crate) fn expected(&self, wanted: &str) -> PrismError {
         let token = self.peek();
         PrismError::Parse {
-            line: token.line,
+            line: token.line as usize,
             message: format!(
                 "expected {wanted}, found {} at column {}",
                 token.describe(),

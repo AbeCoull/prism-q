@@ -658,6 +658,7 @@ impl<'a> Parser<'a> {
     /// resolved on what is left and the controls are added to whatever it
     /// expanded to. `inv` and `pow` commute with a control, so they apply to
     /// the body first and the result is the same either way.
+    #[allow(clippy::too_many_arguments)]
     fn resolve_gate_application_once(
         &self,
         gate_name: &str,
@@ -666,11 +667,13 @@ impl<'a> Parser<'a> {
         qubits: &SmallVec<[usize; 4]>,
         has_input: bool,
         line_num: usize,
-    ) -> Result<Vec<Instruction>> {
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
         let polarity: Vec<bool> = modifiers.iter().filter_map(Modifier::control).collect();
         if polarity.is_empty() {
-            return self
-                .resolve_gate_body(gate_name, params, modifiers, qubits, has_input, line_num);
+            return self.resolve_gate_body(
+                gate_name, params, modifiers, qubits, has_input, line_num, out,
+            );
         }
         if qubits.len() <= polarity.len() {
             return Err(PrismError::GateArity {
@@ -685,18 +688,22 @@ impl<'a> Parser<'a> {
             .filter(|m| m.control().is_none())
             .copied()
             .collect();
-        let body = self.resolve_gate_body(
+        let mut body = Vec::new();
+        self.resolve_gate_body(
             gate_name,
             params,
             &unitary,
             &rest.iter().copied().collect(),
             has_input,
             line_num,
+            &mut body,
         )?;
         let controlled = Self::control_expansion(body, controls, line_num)?;
-        Ok(Self::conjugate_negations(controlled, controls, &polarity))
+        out.extend(Self::conjugate_negations(controlled, controls, &polarity));
+        Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve_gate_body(
         &self,
         gate_name: &str,
@@ -705,7 +712,8 @@ impl<'a> Parser<'a> {
         qubits: &SmallVec<[usize; 4]>,
         has_input: bool,
         line_num: usize,
-    ) -> Result<Vec<Instruction>> {
+        out: &mut Vec<Instruction>,
+    ) -> Result<()> {
         if let Some(instrs) = Self::resolve_decomposed_gate(gate_name, params, qubits, line_num)? {
             // A lowering folds the angle into its own arithmetic, so binding a
             // slot afterwards would write the raw value over a derived one.
@@ -715,7 +723,10 @@ impl<'a> Parser<'a> {
                     line: line_num,
                 });
             }
-            return Self::modify_expansion(instrs, modifiers, gate_name, line_num);
+            out.extend(Self::modify_expansion(
+                instrs, modifiers, gate_name, line_num,
+            )?);
+            return Ok(());
         }
 
         if let Some(instrs) = self.expand_user_gate(gate_name, params, qubits, line_num)? {
@@ -727,13 +738,22 @@ impl<'a> Parser<'a> {
                     line: line_num,
                 });
             }
-            return Self::modify_expansion(instrs, modifiers, gate_name, line_num);
+            out.extend(Self::modify_expansion(
+                instrs, modifiers, gate_name, line_num,
+            )?);
+            return Ok(());
         }
 
         if let Some(axes) = pauli_rotation_axes(bare_pauli_rotation(gate_name).unwrap_or(gate_name))
         {
             let instr = Self::resolve_pauli_rotation(gate_name, &axes, params, qubits, line_num)?;
-            return Self::modify_expansion(vec![instr], modifiers, gate_name, line_num);
+            out.extend(Self::modify_expansion(
+                vec![instr],
+                modifiers,
+                gate_name,
+                line_num,
+            )?);
+            return Ok(());
         }
 
         let mut gate = Self::resolve_gate(gate_name, params, self.dialect, line_num)?;
@@ -753,15 +773,19 @@ impl<'a> Parser<'a> {
                 gate,
                 targets: qubits.clone(),
             }];
-            return Self::modify_expansion(single, modifiers, gate_name, line_num);
+            out.extend(Self::modify_expansion(
+                single, modifiers, gate_name, line_num,
+            )?);
+            return Ok(());
         }
         for modifier in modifiers.iter().rev() {
             gate = Self::apply_modifier(gate, modifier);
         }
-        Ok(vec![Instruction::Gate {
+        out.push(Instruction::Gate {
             gate,
             targets: qubits.clone(),
-        }])
+        });
+        Ok(())
     }
 
     /// Broadcast length of the resolved qubit arguments. Multi-element arguments

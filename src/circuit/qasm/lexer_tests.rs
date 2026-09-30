@@ -92,7 +92,7 @@ fn comments_and_strings_do_not_reach_into_each_other() {
 fn a_line_number_survives_every_kind_of_trivia() {
     let source = "a\n// comment\n/* two\nlines */\nb\n\"text\"\nc";
     let tokens = tokenize(source).unwrap();
-    let lines: Vec<usize> = tokens
+    let lines: Vec<u32> = tokens
         .iter()
         .filter(|token| token.kind != Kind::Eof)
         .map(|token| token.line)

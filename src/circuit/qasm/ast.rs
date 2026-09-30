@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use smallvec::SmallVec;
+
 use super::expr::Expr;
 
 pub(crate) type Block<'a> = Vec<Stmt<'a>>;
@@ -57,8 +59,8 @@ pub(crate) enum StmtKind<'a> {
     Call {
         modifiers: Vec<Modifier<'a>>,
         name: &'a str,
-        params: Vec<Argument<'a>>,
-        operands: Vec<Operand<'a>>,
+        params: SmallVec<[Argument<'a>; 1]>,
+        operands: SmallVec<[Operand<'a>; 2]>,
     },
     /// Boxed because two operands would otherwise set the width of every
     /// statement in the tree.

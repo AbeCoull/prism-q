@@ -11,6 +11,7 @@ use super::expr::{self, Expr};
 use super::lexer::{Kind, Token};
 use super::stream::Stream;
 use crate::error::{PrismError, Result};
+use smallvec::SmallVec;
 
 /// Keywords that open a classical declaration. `complex` and `stretch` parse and
 /// are declined by the evaluator; `duration` never gets here, as `UNSUPPORTED`
@@ -42,7 +43,8 @@ const UNSUPPORTED: &[(&str, &str)] = &[
 
 pub(crate) fn parse_program<'a>(tokens: &[Token<'a>]) -> Result<Block<'a>> {
     let mut stream = Stream::new(tokens);
-    let mut out = Block::new();
+    // A gate statement runs six to twelve tokens.
+    let mut out = Block::with_capacity(tokens.len() / 6);
     while !stream.at_end() {
         out.push(statement(&mut stream)?);
     }
@@ -251,7 +253,7 @@ fn operand<'a>(stream: &mut Stream<'_, 'a>) -> Result<Operand<'a>> {
         Kind::Physical => {
             stream.advance();
             let index = token.text.parse::<usize>().map_err(|_| PrismError::Parse {
-                line: token.line,
+                line: token.line as usize,
                 message: format!("`${}` is not a qubit index", token.text),
             })?;
             OperandName::Physical(index)
@@ -269,7 +271,7 @@ fn operand<'a>(stream: &mut Stream<'_, 'a>) -> Result<Operand<'a>> {
     Ok(Operand {
         name,
         index,
-        line: token.line,
+        line: token.line as usize,
     })
 }
 
@@ -580,12 +582,20 @@ fn def_def<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
 /// A gate application, a `def` call, or an assignment, which all open with a
 /// name. Only what follows the name tells them apart.
 fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
-    if let Some(kind) = try_assignment(stream)? {
-        return Ok(kind);
+    // A name followed by an operand, an argument list or `@` opens a call, never
+    // an assignment, so the trial parse only runs where one could follow.
+    let call_shape = matches!(
+        stream.peek_at(1).kind,
+        Kind::Ident | Kind::Physical | Kind::LParen | Kind::At
+    );
+    if !call_shape {
+        if let Some(kind) = try_assignment(stream)? {
+            return Ok(kind);
+        }
     }
     let modifiers = modifier_chain(stream)?;
     let name = stream.expect_ident()?;
-    let mut params = Vec::new();
+    let mut params = SmallVec::new();
     if stream.eat(Kind::LParen) {
         while !stream.eat(Kind::RParen) {
             params.push(argument(stream)?);
@@ -595,9 +605,12 @@ fn call_or_assignment<'a>(stream: &mut Stream<'_, 'a>) -> Result<StmtKind<'a>> {
             }
         }
     }
-    let mut operands = Vec::new();
+    let mut operands = SmallVec::new();
     if stream.kind() != Kind::Semicolon {
-        operands = operand_list(stream, name)?;
+        operands.push(operand(stream)?);
+        while stream.eat(Kind::Comma) {
+            operands.push(operand(stream)?);
+        }
     }
     stream.expect(Kind::Semicolon)?;
     Ok(StmtKind::Call {

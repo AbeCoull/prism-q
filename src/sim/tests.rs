@@ -1938,7 +1938,7 @@ fn test_noise_stabilizer_rejects_non_pauli_noise() {
             });
             ag
         },
-        readout: vec![None; circuit.num_qubits],
+        readout: vec![None; circuit.num_classical_bits],
     };
     let err = run_shots_with_noise(BackendKind::Stabilizer, &circuit, &nm, 10, 42).unwrap_err();
     match err {
@@ -1972,7 +1972,7 @@ fn test_noise_stabilizer_gpu_rejects_non_pauli_noise() {
             });
             ag
         },
-        readout: vec![None; circuit.num_qubits],
+        readout: vec![None; circuit.num_classical_bits],
     };
     assert!(matches!(
         run_shots_with_noise(

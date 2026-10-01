@@ -374,7 +374,8 @@ pub struct NoiseModel {
     /// Events fired after each instruction, indexed by instruction position;
     /// length must equal the circuit's instruction count.
     pub after_gate: Vec<Vec<NoiseEvent>>,
-    /// Per-classical-bit readout error; `None` means ideal readout. A bit no
+    /// Per-classical-bit readout error; `None` means ideal readout. Either empty,
+    /// for no readout error at all, or one entry per classical bit. A bit no
     /// measurement writes is never flipped.
     pub readout: Vec<Option<ReadoutError>>,
 }
@@ -541,8 +542,9 @@ impl NoiseModel {
     }
 
     /// Validate as [`NoiseModel::validate`] does, plus the checks that need the
-    /// circuit: one event slot per instruction, and every target qubit inside
-    /// the register.
+    /// circuit: one event slot per instruction, a readout table that is empty
+    /// or holds one entry per classical bit, and every target qubit inside the
+    /// register.
     ///
     /// Every noisy entry point calls this before allocating state. Qubit bounds
     /// cannot be checked without the circuit, and an out-of-range target reaches
@@ -554,6 +556,15 @@ impl NoiseModel {
                     "noise model carries {} event slots for {} instructions",
                     self.after_gate.len(),
                     circuit.instructions.len()
+                ),
+            });
+        }
+        if !self.readout.is_empty() && self.readout.len() != circuit.num_classical_bits {
+            return Err(crate::error::PrismError::InvalidParameter {
+                message: format!(
+                    "noise model carries {} readout entries for {} classical bits",
+                    self.readout.len(),
+                    circuit.num_classical_bits
                 ),
             });
         }

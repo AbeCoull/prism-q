@@ -3162,8 +3162,13 @@ pub fn compile_measurements(circuit: &Circuit, seed: u64) -> Result<CompiledSamp
 pub fn run_shots_compiled(circuit: &Circuit, num_shots: usize, seed: u64) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?;
     let packed = sampler.sample_bulk_packed(num_shots);
+    let shots = crate::sim::shots::packed_shots_to_classical_bits(
+        &packed,
+        &circuit.measurement_map(),
+        circuit.num_classical_bits,
+    );
     Ok(
-        ShotsResult::from_shots(packed.to_shots(), circuit.num_classical_bits).with_metadata(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
             crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer)
                 .with_engine(crate::sim::Engine::CompiledSampler),
         ),
@@ -3185,8 +3190,13 @@ pub fn run_shots_compiled_with_gpu(
 ) -> Result<ShotsResult> {
     let mut sampler = compile_measurements(circuit, seed)?.with_gpu(context);
     let packed = sampler.sample_bulk_packed(num_shots);
+    let shots = crate::sim::shots::packed_shots_to_classical_bits(
+        &packed,
+        &circuit.measurement_map(),
+        circuit.num_classical_bits,
+    );
     Ok(
-        ShotsResult::from_shots(packed.to_shots(), circuit.num_classical_bits).with_metadata(
+        ShotsResult::from_shots(shots, circuit.num_classical_bits).with_metadata(
             crate::sim::RunMetadata::exact(crate::sim::ResolvedBackend::CompiledStabilizer)
                 .with_engine(crate::sim::Engine::CompiledSampler),
         ),

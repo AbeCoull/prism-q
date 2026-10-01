@@ -5,8 +5,8 @@
 use prism_q::circuit::openqasm;
 use prism_q::{
     Gate, PackedShots, PrismError, QecBasis, QecNoise, QecOp, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, compile_qec_program_rows, parse_qec_program, run_qec_program,
-    run_qec_program_reference,
+    QecRecordRef, QecSampleResult, ShotLayout, compile_qec_program_rows, parse_qec_program,
+    run_qec_program, run_qec_program_reference,
 };
 
 mod qec_common;
@@ -1081,6 +1081,17 @@ fn any_detector_fires(program: &QecProgram) -> bool {
     result.detectors.to_shots().iter().flatten().any(|&bit| bit)
 }
 
+#[track_caller]
+fn assert_parities_meas_major(program: &QecProgram, label: &str) {
+    let result = run_qec_program(program).unwrap();
+    assert_eq!(result.detectors.layout(), ShotLayout::MeasMajor, "{label}");
+    assert_eq!(
+        result.observables.layout(),
+        ShotLayout::MeasMajor,
+        "{label}"
+    );
+}
+
 #[test]
 fn qec_dropped_records_match_kept_projection_on_repetition_memory() {
     for distance in [4usize, 6, 10] {
@@ -1094,6 +1105,7 @@ fn qec_dropped_records_match_kept_projection_on_repetition_memory() {
             if noise.probability() > 0.0 {
                 assert!(any_detector_fires(&program), "d{distance} {noise:?}");
             }
+            assert_parities_meas_major(&program, &format!("d{distance} {noise:?}"));
             for chunk_size in [None, Some(500)] {
                 assert_dropped_records_match_kept(
                     &program,
@@ -1110,12 +1122,50 @@ fn qec_dropped_records_match_kept_projection_on_surface_memory() {
     let data: Vec<usize> = (0..9).collect();
     for noise in [QecNoise::Depolarize1(0.0), QecNoise::Depolarize1(0.01)] {
         let program = qec_common::surface_memory_d3(3, noise, &data, PARITY_SHOTS);
+        assert_parities_meas_major(&program, &format!("surface d3 {noise:?}"));
         for chunk_size in [None, Some(500)] {
             assert_dropped_records_match_kept(
                 &program,
                 chunk_size,
                 &format!("surface d3 {noise:?} chunk {chunk_size:?}"),
             );
+        }
+    }
+}
+
+// Rounds of X checks make the noiseless records random while every detector stays
+// fixed. XError(0.6) takes the per-shot draw path at every chunk size, and chunk 448 is
+// a multiple of 64 where 500 is not.
+#[test]
+fn qec_dropped_records_match_kept_projection_on_rotated_surface_memory() {
+    for distance in [3usize, 5] {
+        let data: Vec<usize> = (0..distance * distance).collect();
+        let pairs = &data[..distance * distance - 1];
+        for (noise, targets) in [
+            (QecNoise::Depolarize1(0.0), &data[..]),
+            (QecNoise::Depolarize1(0.001), &data[..]),
+            (QecNoise::Depolarize1(0.01), &data[..]),
+            (QecNoise::XError(0.6), &data[..]),
+            (QecNoise::Depolarize2(0.02), pairs),
+        ] {
+            let program = qec_common::rotated_surface_memory(
+                distance,
+                distance,
+                noise,
+                targets,
+                PARITY_SHOTS,
+            );
+            if noise.probability() > 0.0 {
+                assert!(any_detector_fires(&program), "d{distance} {noise:?}");
+            }
+            assert_parities_meas_major(&program, &format!("surface d{distance} {noise:?}"));
+            for chunk_size in [None, Some(500), Some(448), Some(31)] {
+                assert_dropped_records_match_kept(
+                    &program,
+                    chunk_size,
+                    &format!("surface d{distance} {noise:?} chunk {chunk_size:?}"),
+                );
+            }
         }
     }
 }

@@ -116,7 +116,9 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
                 &program.observable_rows()?,
             );
             if let Some(pattern) = projection.constant_pattern(sampler.noiseless()) {
-                let noise = sampler.into_parity_noise(|records| projection.project(records));
+                let noise = sampler.into_parity_noise(projection.words, |records, out| {
+                    projection.project_into(records, out)
+                });
                 return qec_result_from_parity_projection(
                     program,
                     &projection,
@@ -900,16 +902,14 @@ fn qec_records_unobserved(program: &QecProgram) -> bool {
             .any(|op| matches!(op, QecOp::Postselect { .. }))
 }
 
-/// Detector and observable rows as one packed parity space: detector `i` is bit `i` of
-/// the first `detector_words` words of a shot, observable `j` bit `j` of the rest, so
-/// the two record sets split by word. Held as the output bits each measurement record
-/// feeds, so projecting a record vector visits only its set bits.
+/// Detector and observable rows as one parity space: detector `i` is output `i` and
+/// observable `j` output `num_detectors + j`. Held as the outputs each measurement
+/// record feeds, so projecting a record vector visits only its set bits.
 struct QecParityProjection {
     record_offsets: Vec<usize>,
     record_outputs: Vec<usize>,
     num_detectors: usize,
     num_observables: usize,
-    detector_words: usize,
     words: usize,
 }
 
@@ -919,14 +919,8 @@ impl QecParityProjection {
         detector_rows: &[Vec<usize>],
         observable_rows: &[Vec<usize>],
     ) -> Self {
-        let detector_words = detector_rows.len().div_ceil(64);
-        let words = detector_words + observable_rows.len().div_ceil(64);
-        let outputs = detector_rows.iter().enumerate().chain(
-            observable_rows
-                .iter()
-                .enumerate()
-                .map(|(observable, row)| (detector_words * 64 + observable, row)),
-        );
+        let num_detectors = detector_rows.len();
+        let outputs = detector_rows.iter().chain(observable_rows).enumerate();
 
         let mut record_offsets = vec![0usize; num_measurements + 1];
         for (_, row) in outputs.clone() {
@@ -949,15 +943,15 @@ impl QecParityProjection {
         Self {
             record_offsets,
             record_outputs,
-            num_detectors: detector_rows.len(),
+            num_detectors,
             num_observables: observable_rows.len(),
-            detector_words,
-            words,
+            words: (num_detectors + observable_rows.len()).div_ceil(64),
         }
     }
 
-    fn project(&self, records: &[u64]) -> Vec<u64> {
-        let mut projected = vec![0u64; self.words];
+    /// Overwrite `projected` with the output parities of the record bits in `records`.
+    fn project_into(&self, records: &[u64], projected: &mut [u64]) {
+        projected.fill(0);
         for (word_idx, &word) in records.iter().enumerate() {
             let mut bits = word;
             while bits != 0 {
@@ -970,25 +964,25 @@ impl QecParityProjection {
                 bits &= bits - 1;
             }
         }
-        projected
     }
 
-    /// Projected reference records, or `None` when any flip row of `sampler` reaches a
-    /// projected bit and the noiseless parities vary between shots.
+    /// Projected reference records, or `None` when any flip row of `sampler` reaches an
+    /// output and the noiseless parities vary between shots.
     fn constant_pattern(&self, sampler: &CompiledSampler) -> Option<Vec<u64>> {
-        if sampler
-            .flip_rows()
-            .iter()
-            .any(|row| self.project(row).iter().any(|&word| word != 0))
-        {
-            return None;
+        let mut projected = vec![0u64; self.words];
+        for row in sampler.flip_rows() {
+            self.project_into(row, &mut projected);
+            if projected.iter().any(|&word| word != 0) {
+                return None;
+            }
         }
-        Some(self.project(sampler.ref_bits_packed()))
+        self.project_into(sampler.ref_bits_packed(), &mut projected);
+        Some(projected)
     }
 }
 
-/// Sample detector and observable bits without measurement records, from the projected
-/// noiseless `pattern` plus projected noise. Chunks match
+/// Sample measurement-major detector and observable bits without measurement records,
+/// from the projected noiseless `pattern` plus projected noise. Chunks match
 /// [`qec_result_from_measurement_chunks`] so the noise stream draws identically.
 fn qec_result_from_parity_projection(
     program: &QecProgram,
@@ -1000,33 +994,33 @@ fn qec_result_from_parity_projection(
     let chunk_size = qec_runner_chunk_size(program.options())?;
     let num_detectors = projection.num_detectors;
     let num_observables = projection.num_observables;
-    let words = projection.words;
-    let detector_words = projection.detector_words;
+    let row_words = shots.div_ceil(64);
+    let tail_mask = match shots % 64 {
+        0 => u64::MAX,
+        bits => (1u64 << bits) - 1,
+    };
 
-    let mut detector_data = Vec::with_capacity(shots * detector_words);
-    let mut observable_data = Vec::with_capacity(shots * (words - detector_words));
-    let mut chunk = Vec::with_capacity(chunk_size.min(shots) * words);
-    let mut sampled_shots = 0usize;
-    while sampled_shots < shots {
-        let this_chunk = (shots - sampled_shots).min(chunk_size);
-        chunk.clear();
-        for _ in 0..this_chunk {
-            chunk.extend_from_slice(pattern);
-        }
-        if let Some(noise) = noise.as_mut() {
-            noise.apply(&mut chunk, this_chunk, words);
-        }
-        if words > 0 {
-            for shot_words in chunk.chunks_exact(words) {
-                detector_data.extend_from_slice(&shot_words[..detector_words]);
-                observable_data.extend_from_slice(&shot_words[detector_words..]);
+    let mut rows = vec![0u64; (num_detectors + num_observables) * row_words];
+    if row_words > 0 {
+        for (output, row) in rows.chunks_exact_mut(row_words).enumerate() {
+            if (pattern[output / 64] >> (output % 64)) & 1 == 1 {
+                row.fill(u64::MAX);
+                row[row_words - 1] = tail_mask;
             }
         }
-        sampled_shots += this_chunk;
+    }
+    if let Some(noise) = noise.as_mut() {
+        let mut sampled_shots = 0usize;
+        while sampled_shots < shots {
+            let this_chunk = (shots - sampled_shots).min(chunk_size);
+            noise.apply(&mut rows, row_words, sampled_shots, this_chunk);
+            sampled_shots += this_chunk;
+        }
     }
 
-    let detectors = PackedShots::from_shot_major(detector_data, shots, num_detectors);
-    let observables = PackedShots::from_shot_major(observable_data, shots, num_observables);
+    let observable_data = rows.split_off(num_detectors * row_words);
+    let detectors = PackedShots::from_meas_major(rows, shots, num_detectors);
+    let observables = PackedShots::from_meas_major(observable_data, shots, num_observables);
     let mut logical_errors = vec![0u64; num_observables];
     add_qec_logical_error_counts(&observables, &mut logical_errors);
     QecSampleResult::new_with_total_shots(
@@ -1531,7 +1525,7 @@ mod tests {
         for (text, expected) in [
             (
                 "X 0\nH 1\nM 0 1\nDETECTOR rec[-2]\nOBSERVABLE_INCLUDE(0) rec[-2]",
-                Some(vec![1, 1]),
+                Some(vec![0b11]),
             ),
             (
                 "H 0\nCX 0 1\nM 0 1\nDETECTOR rec[-2] rec[-1]",

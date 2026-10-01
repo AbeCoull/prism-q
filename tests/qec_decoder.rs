@@ -344,7 +344,9 @@ fn decoder_logical_error_rate_falls_with_distance() {
 
 #[test]
 fn decoder_layouts_and_parallelism_agree() {
-    let program = qec_common::repetition_memory(3, 3, QecNoise::Depolarize1(0.05), STAT_SHOTS);
+    let mut program = qec_common::repetition_memory(3, 3, QecNoise::Depolarize1(0.05), STAT_SHOTS);
+    // Kept records route through the shot-major record path.
+    program.set_options(qec_common::qec_options(STAT_SHOTS, 4096, true));
     let model = program.detector_error_model().unwrap();
     let decoder = UnionFindDecoder::from_model(&model).unwrap();
 

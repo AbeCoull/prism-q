@@ -57,8 +57,8 @@ use crate::circuit::{Circuit, Instruction, SaveRecord, SaveSpec, SavedValue};
 use crate::error::{PrismError, Result};
 use crate::sim::noise::NoiseModel;
 use shots::{
-    packed_shots_to_classical_bits, record_counts_to_classical_bits, sample_shots,
-    shots_from_basis_samples,
+    counts_from_basis_samples, packed_shots_to_classical_bits, record_counts_to_classical_bits,
+    sample_shots, shots_from_basis_samples,
 };
 use terminal_sampling::{
     sample_counts_from_probs, sample_counts_from_state, sample_shots_from_probs,
@@ -2843,7 +2843,7 @@ pub(crate) fn run_counts_with(
             meas_map,
         } => {
             let samples = backend.sample_basis_states(num_shots, seed)?;
-            counts_of(shots_from_basis_samples(&samples, &meas_map, bits), bits)
+            counts_from_basis_samples(&samples, &meas_map, bits)
         }
         ShotSource::TerminalProbabilities {
             probs, meas_map, ..

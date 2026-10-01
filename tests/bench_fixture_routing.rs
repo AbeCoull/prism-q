@@ -299,6 +299,57 @@ fn sparse_sampling_fixture_reaches_the_sparse_backend() {
 }
 
 #[test]
+fn native_counts_rows_count_on_their_backend() {
+    fn measure_all(circuit: &prism_q::circuit::Circuit) -> prism_q::circuit::Circuit {
+        let mut measured = prism_q::circuit::Circuit::new(circuit.num_qubits, circuit.num_qubits);
+        measured.instructions = circuit.instructions.clone();
+        for q in 0..circuit.num_qubits {
+            measured.add_measure(q, q);
+        }
+        measured
+    }
+
+    let mut dense_d4 = prism_q::circuit::Circuit::new(24, 0);
+    for _ in 0..4 {
+        for q in 0..24 {
+            dense_d4.add_gate(prism_q::gates::Gate::H, &[q]);
+        }
+        for q in 0..23 {
+            dense_d4.add_gate(prism_q::gates::Gate::Cx, &[q, q + 1]);
+        }
+    }
+
+    let rows = [
+        (
+            "mps/dense_d4_24",
+            BackendKind::Mps { max_bond_dim: 32 },
+            ResolvedBackend::Mps,
+            measure_all(&dense_d4),
+        ),
+        (
+            "sparse/ghz_64",
+            BackendKind::Sparse,
+            ResolvedBackend::Sparse,
+            measure_all(&circuits::ghz_circuit(64)),
+        ),
+        (
+            "sparse/walk_k12_64",
+            BackendKind::Sparse,
+            ResolvedBackend::Sparse,
+            measure_all(&circuits::sparse_walk_circuit(64, 12, 2, SEED)),
+        ),
+    ];
+    for (label, kind, expected, circuit) in rows {
+        let counts = sim::simulate(&circuit)
+            .backend(kind)
+            .seed(SEED)
+            .sample_counts(64)
+            .unwrap();
+        assert_eq!(counts.metadata.backend, expected, "native_counts/{label}");
+    }
+}
+
+#[test]
 fn statevector_corpus_rows_reach_the_statevector() {
     for n in [16usize, 20] {
         assert_resolves(

@@ -1729,6 +1729,52 @@ fn bench_sparse_sampling_populated(c: &mut Criterion) {
     group.finish();
 }
 
+const NATIVE_COUNTS_SHOTS: usize = 100_000;
+
+/// `sample_counts` on the native samplers, over the `mps/sampling` and sparse
+/// sampling fixtures. The GHZ row has two outcomes and a near-empty map, so it
+/// prices the histogram alone; the walk row holds up to 4096 outcomes.
+fn bench_native_counts(c: &mut Criterion) {
+    let mut group = c.benchmark_group("native_counts");
+    configure_group(&mut group);
+
+    let rows = [
+        (
+            "mps/dense_d4_24",
+            BackendKind::Mps { max_bond_dim: 32 },
+            measure_all(&dense_entanglement_circuit(24, 4)),
+        ),
+        (
+            "sparse/ghz_64",
+            BackendKind::Sparse,
+            measure_all(&circuits::ghz_circuit(64)),
+        ),
+        (
+            "sparse/walk_k12_64",
+            BackendKind::Sparse,
+            measure_all(&circuits::sparse_walk_circuit(64, 12, 2, SEED)),
+        ),
+    ];
+    for (label, kind, circuit) in rows {
+        group.bench_with_input(
+            BenchmarkId::new(label, NATIVE_COUNTS_SHOTS),
+            &circuit,
+            |b, circ| {
+                b.iter(|| {
+                    black_box(
+                        sim::simulate(circ)
+                            .backend(kind.clone())
+                            .seed(SEED)
+                            .sample_counts(NATIVE_COUNTS_SHOTS)
+                            .unwrap(),
+                    )
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 // ---- Product state backend ----
 
 fn bench_product_scaling(c: &mut Criterion) {
@@ -4948,6 +4994,7 @@ criterion_group! {
     bench_sparse_densify,
     bench_sparse_sampling,
     bench_sparse_sampling_populated,
+    bench_native_counts,
     // MPS
     bench_mps_scaling,
     bench_mps_linear_chain,

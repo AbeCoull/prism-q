@@ -3308,7 +3308,8 @@ pub(crate) fn evolve_density_matrix(
 /// Exact output distribution of `circuit` under `noise`, read off the diagonal
 /// of the evolved mixture. Measurements are not collapsed during evolution, so
 /// the distribution answers for a whole shot only when every measurement is
-/// terminal; callers gate on that shape.
+/// terminal; callers gate on that shape. Events past the last measurement of
+/// every qubit they touch are dropped, see [`settle_measured_qubits`].
 pub(crate) fn density_matrix_probabilities(
     kind: &BackendKind,
     circuit: &Circuit,
@@ -3316,7 +3317,79 @@ pub(crate) fn density_matrix_probabilities(
     initial_state: Option<super::StartState<'_>>,
     seed: u64,
 ) -> Result<Vec<f64>> {
-    evolve_density_matrix(kind, circuit, Some(noise), initial_state, seed)?.probabilities()
+    let noise = if circuit.has_terminal_measurements_only() {
+        settle_measured_qubits(circuit, noise)?
+    } else {
+        std::borrow::Cow::Borrowed(noise)
+    };
+    evolve_density_matrix(kind, circuit, Some(&noise), initial_state, seed)?.probabilities()
+}
+
+/// `noise` without the events that fire after the last measurement of every
+/// qubit they act on. A shot records the bit before such an event, but the
+/// mixture is read once at the end, so applying it would rewrite the outcome.
+///
+/// # Errors
+/// `IncompatibleBackend` for an event on a qubit between two of its
+/// measurements, or one coupling a measured qubit to an unmeasured one: the
+/// record and the state part ways there, and the mixture holds only the state.
+fn settle_measured_qubits<'a>(
+    circuit: &Circuit,
+    noise: &'a NoiseModel,
+) -> Result<std::borrow::Cow<'a, NoiseModel>> {
+    let mut first = vec![usize::MAX; circuit.num_qubits];
+    let mut last = vec![usize::MAX; circuit.num_qubits];
+    for (idx, inst) in circuit.instructions.iter().enumerate() {
+        if let Instruction::Measure { qubit, .. } = *inst {
+            first[qubit] = first[qubit].min(idx);
+            last[qubit] = idx;
+        }
+    }
+    let measured = |q: usize, idx: usize| first.get(q).is_some_and(|&m| m <= idx);
+    let settled = |event: &NoiseEvent, idx: usize| {
+        event
+            .qubits
+            .iter()
+            .all(|&q| last.get(q).is_some_and(|&m| m <= idx))
+    };
+
+    let mut any_settled = false;
+    for (idx, events) in noise.after_gate.iter().enumerate() {
+        for event in events {
+            if settled(event, idx) {
+                any_settled = true;
+            } else if event.qubits.iter().any(|&q| measured(q, idx)) {
+                return Err(crate::error::PrismError::IncompatibleBackend {
+                    backend: "density_matrix".into(),
+                    reason: format!(
+                        "the noise event after instruction {idx} acts on a measured qubit that \
+                         is measured again or coupled to an unmeasured one, so the recorded bit \
+                         and the state diverge and one mixture cannot hold both; run \
+                         trajectories on a backend with a per-shot pure state"
+                    ),
+                });
+            }
+        }
+    }
+    if !any_settled {
+        return Ok(std::borrow::Cow::Borrowed(noise));
+    }
+    let after_gate = noise
+        .after_gate
+        .iter()
+        .enumerate()
+        .map(|(idx, events)| {
+            events
+                .iter()
+                .filter(|event| !settled(event, idx))
+                .cloned()
+                .collect()
+        })
+        .collect();
+    Ok(std::borrow::Cow::Owned(NoiseModel {
+        after_gate,
+        readout: noise.readout.clone(),
+    }))
 }
 
 /// Exact per-classical-bit measurement marginals under a noise model, evolved

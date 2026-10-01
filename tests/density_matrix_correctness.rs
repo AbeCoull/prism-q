@@ -441,6 +441,51 @@ fn dm_noisy_terminals_reject_branching_circuits_naming_the_mixture() {
     }
 }
 
+// Idle damping lands on qubit 0 once before its measurement and once after it,
+// in the slot of the measurement of qubit 1. A shot has recorded qubit 0 by
+// then, so only the first event reaches the distribution: P(q0 = 1) = 1/2.
+#[test]
+fn dm_noise_after_the_last_measurement_leaves_the_record_alone() {
+    use prism_q::{BackendKind, NoiseBuilder, NoiseChannel, NoiseEvent, NoiseModel};
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::X, &[0]);
+    for _ in 0..3 {
+        circuit.add_gate(Gate::X, &[1]);
+    }
+    circuit.measure_all();
+    let damping = NoiseChannel::AmplitudeDamping { gamma: 0.5 };
+    let noise = NoiseBuilder::new()
+        .on_idle_qubits(damping.clone())
+        .build(&circuit)
+        .unwrap();
+    let after_q0 = NoiseEvent {
+        channel: damping,
+        qubits: [0].into_iter().collect(),
+    };
+    assert_eq!(noise.after_gate[5], vec![after_q0]);
+
+    let probs = dm_noisy_probs(&circuit, &noise, SEED);
+    assert_probs_close(&probs, &[0.0, 0.0, 0.5, 0.5], DM_EPS, "recorded bits");
+
+    let mut twice = Circuit::new(1, 2);
+    twice.add_measure(0, 0);
+    twice.add_measure(0, 1);
+    let between = NoiseModel {
+        after_gate: vec![vec![NoiseEvent::pauli(0, 0.5, 0.0, 0.0)], vec![]],
+        readout: vec![None; 2],
+    };
+    let err = sim::simulate(&twice)
+        .backend(BackendKind::DensityMatrix)
+        .noise(&between)
+        .seed(SEED)
+        .shots(16)
+        .unwrap_err();
+    assert!(
+        matches!(err, prism_q::PrismError::IncompatibleBackend { .. }),
+        "a channel between two measurements of one qubit must be rejected, got {err:?}"
+    );
+}
+
 #[test]
 fn noisy_exact_terminals_without_a_mixture_name_the_density_matrix() {
     use prism_q::{BackendKind, NoiseModel, PauliTerm};

@@ -1329,6 +1329,59 @@ fn detection_event_sampling() {
 }
 
 #[test]
+fn detection_events_carry_reference_bits_on_every_path() {
+    // q8 holds the parity of eight random bits, q9 copies q0, q10 is flipped
+    // and q11 stays at zero.
+    let build = |random: bool| {
+        let mut c = Circuit::new(12, 12);
+        for q in 0..8 {
+            if random {
+                c.add_gate(Gate::H, &[q]);
+            }
+            c.add_gate(Gate::Cx, &[q, 8]);
+        }
+        c.add_gate(Gate::Cx, &[0, 9]);
+        c.add_gate(Gate::X, &[10]);
+        for q in 0..12 {
+            c.add_measure(q, q);
+        }
+        c
+    };
+    let base = [(0, 9), (10, 11), (11, 10), (8, 11)];
+    // Repeating the weight-8 pair pushes the projected parity weight past the
+    // measurement weight, which selects the path that samples records first.
+    let repeated: Vec<(usize, usize)> = base.iter().copied().cycle().take(64).collect();
+
+    for (random, pairs) in [(true, &base[..]), (true, &repeated[..]), (false, &base[..])] {
+        let mut sampler = compile_measurements(&build(random), 42).unwrap();
+        let num_shots = 1000;
+        let shots = sampler.sample_detection_events(pairs, num_shots).to_shots();
+        assert_eq!(shots.len(), num_shots);
+        let (mut fired, mut trials) = (0, 0);
+        for shot in &shots {
+            for (e, &(a, b)) in pairs.iter().enumerate() {
+                match (a.min(b), a.max(b)) {
+                    (0, 9) => assert!(!shot[e], "copied pair event {e} fired"),
+                    (10, 11) => assert!(shot[e], "flipped pair event {e} did not fire"),
+                    _ => {
+                        fired += usize::from(shot[e]);
+                        trials += 1;
+                    }
+                }
+            }
+        }
+        if random {
+            assert!(
+                fired > trials / 3 && fired < 2 * trials / 3,
+                "parity event fired {fired} of {trials}"
+            );
+        } else {
+            assert_eq!(fired, 0);
+        }
+    }
+}
+
+#[test]
 fn chunked_histogram_matches_direct() {
     let mut c = circuits::clifford_heavy_circuit(20, 5, 42);
     c.num_classical_bits = 20;

@@ -1414,9 +1414,7 @@ pub fn guarded(condition: ClassicalCondition, mut body: Vec<Instruction>) -> Opt
     if body.is_empty() {
         return None;
     }
-    if body.len() == 1
-        && let Instruction::Gate { .. } = &body[0]
-    {
+    if body.len() == 1 && matches!(body[0], Instruction::Gate { .. }) {
         let Some(Instruction::Gate { gate, targets }) = body.pop() else {
             unreachable!("length and variant both checked above")
         };

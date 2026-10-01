@@ -224,11 +224,12 @@ jobs:
         with:
           cache-bin: false
 
+      # `rust-toolchain.toml` pins stable and would override the installed floor.
       - name: Check (default features)
-        run: cargo check --features "$CI_FEATURES"
+        run: cargo +"$CI_MSRV" check --features "$CI_FEATURES"
 
       - name: Check (no default features)
-        run: cargo check --no-default-features
+        run: cargo +"$CI_MSRV" check --no-default-features
 
   # The release workflow publishes to crates.io with --no-confirm --execute and no
   # manual gate, so the version arithmetic in front of it is verified here rather

@@ -835,8 +835,9 @@ impl<'a> Parser<'a> {
 
     /// One angle argument, reporting the slot when it is exactly an `input`.
     fn fold_angle(&self, expr: &Expr, line: usize) -> Result<(f64, Option<usize>)> {
-        if let Some(name) = expr.as_ident()
-            && let Some(&slot) = self.inputs.get(name)
+        if let Some((name, &slot)) = expr
+            .as_ident()
+            .and_then(|name| self.inputs.get(name).map(|slot| (name, slot)))
         {
             if self.nested {
                 return Err(PrismError::UnsupportedConstruct {

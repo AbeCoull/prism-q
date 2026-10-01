@@ -931,9 +931,14 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<Instruction>> {
         let mut out = Vec::with_capacity(instrs.len());
         for instr in instrs {
-            if let Instruction::Gate { targets, .. } = &instr
-                && let Some(&shared) = targets.iter().find(|target| controls.contains(target))
-            {
+            let shared = match &instr {
+                Instruction::Gate { targets, .. } => targets
+                    .iter()
+                    .find(|target| controls.contains(target))
+                    .copied(),
+                _ => None,
+            };
+            if let Some(shared) = shared {
                 return Err(parse_error(
                     line_num,
                     format!("qubit {shared} is both a control and a target"),

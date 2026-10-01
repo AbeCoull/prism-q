@@ -4261,6 +4261,74 @@ fn bench_density_matrix_exact_vs_trajectory(c: &mut Criterion) {
     group.finish();
 }
 
+/// Exact noisy evolution on circuit and noise shapes whose two-qubit gates
+/// have cheap native kernels (CX chains, controlled phases) or whose noise
+/// skips the two-qubit gates, at widths where the buffer sits in cache.
+fn bench_density_matrix_exact_noise(c: &mut Criterion) {
+    let mut group = c.benchmark_group("density_matrix/exact_noise");
+    configure_group(&mut group);
+
+    let ghz_chain = |n: usize| {
+        let mut circuit = Circuit::new(n, 0);
+        for _ in 0..3 {
+            circuit.add_gate(Gate::H, &[0]);
+            for q in 0..n - 1 {
+                circuit.add_gate(Gate::Cx, &[q, q + 1]);
+            }
+        }
+        with_terminal_measurements(circuit)
+    };
+    let gate_qft = |n: usize| {
+        let mut circuit = Circuit::new(n, 0);
+        for i in 0..n {
+            circuit.add_gate(Gate::H, &[i]);
+            for j in i + 1..n {
+                let theta = std::f64::consts::PI / (1u64 << (j - i)) as f64;
+                circuit.add_gate(Gate::cphase(theta), &[j, i]);
+            }
+        }
+        with_terminal_measurements(circuit)
+    };
+    let one_qubit_noise = |circuit: &Circuit| {
+        let mut noise = prism_q::NoiseModel::uniform_depolarizing(circuit, 0.001);
+        for (inst, events) in circuit.instructions.iter().zip(&mut noise.after_gate) {
+            if matches!(inst, Instruction::Gate { targets, .. } if targets.len() > 1) {
+                events.clear();
+            }
+        }
+        noise
+    };
+
+    let mut rows = Vec::new();
+    for n in [6, 8] {
+        let ghz = ghz_chain(n);
+        let qft = gate_qft(n);
+        let random = non_clifford_noise_circuit(n, 4);
+        let ghz_noise = prism_q::NoiseModel::uniform_depolarizing(&ghz, 0.001);
+        let qft_noise = prism_q::NoiseModel::uniform_depolarizing(&qft, 0.001);
+        let random_noise = one_qubit_noise(&random);
+        rows.push(("ghz_depolarizing", n, ghz, ghz_noise));
+        rows.push(("qft_depolarizing", n, qft, qft_noise));
+        rows.push(("random_1q_noise", n, random, random_noise));
+    }
+    for n in [4, 7] {
+        let random = non_clifford_noise_circuit(n, 4);
+        let noise = prism_q::NoiseModel::uniform_depolarizing(&random, 0.001);
+        rows.push(("random_depolarizing", n, random, noise));
+    }
+
+    for (label, n, circuit, noise) in &rows {
+        group.bench_function(BenchmarkId::new(*label, n), |b| {
+            b.iter(|| {
+                run_shots_with_noise(BackendKind::DensityMatrix, circuit, noise, 256, SEED)
+                    .unwrap();
+            });
+        });
+    }
+
+    group.finish();
+}
+
 /// Kraus set for amplitude damping at rate `gamma`.
 fn amplitude_damping_kraus(gamma: f64) -> Vec<[[Complex64; 2]; 2]> {
     let c = |re: f64| Complex64::new(re, 0.0);
@@ -4920,6 +4988,7 @@ criterion_group! {
     bench_density_matrix_rzz_sandwich,
     bench_density_matrix_fused_layers,
     bench_density_matrix_exact_vs_trajectory,
+    bench_density_matrix_exact_noise,
     bench_density_matrix_noisy_channels,
     bench_density_matrix_noisy_shots,
     bench_density_matrix_shots_fused,

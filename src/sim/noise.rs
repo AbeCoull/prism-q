@@ -3243,11 +3243,17 @@ pub(crate) fn evolve_density_matrix(
     let defer = circuit.num_qubits >= MIN_DEFERRED_QUBITS;
     let mut deferred = DeferredSuperoperators::new(circuit.num_qubits);
     for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
-        if let Instruction::Gate { gate, targets } = inst
-            && events
-                .iter()
-                .all(|event| event.channel.num_qubits() == 1 && targets.contains(&event.qubits[0]))
-        {
+        let foldable = match inst {
+            Instruction::Gate { gate, targets }
+                if events.iter().all(|event| {
+                    event.channel.num_qubits() == 1 && targets.contains(&event.qubits[0])
+                }) =>
+            {
+                Some((gate, targets))
+            }
+            _ => None,
+        };
+        if let Some((gate, targets)) = foldable {
             let folded = match *targets.as_slice() {
                 [q] if defer || !events.is_empty() => {
                     let channels: Vec<Vec<[[Complex64; 2]; 2]>> =

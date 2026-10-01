@@ -1990,13 +1990,13 @@ fn contract_scalar(
         return Ok(1.0);
     }
     let plan = plan_with_restarts(&network.tensors);
-    if plan.total >= FUSED_PLAN_TOTAL
-        && let Cow::Owned(fused) = crate::circuit::fusion::fuse_circuit(circuit, true)
-    {
-        let fused_network = ScalarExpectationNetwork::for_observable(&fused, pauli_terms)?;
-        let fused_plan = plan_with_restarts(&fused_network.tensors);
-        if (fused_plan.peak, fused_plan.total) < (plan.peak, plan.total) {
-            return fused_network.contract_on(&fused_plan, limits);
+    if plan.total >= FUSED_PLAN_TOTAL {
+        if let Cow::Owned(fused) = crate::circuit::fusion::fuse_circuit(circuit, true) {
+            let fused_network = ScalarExpectationNetwork::for_observable(&fused, pauli_terms)?;
+            let fused_plan = plan_with_restarts(&fused_network.tensors);
+            if (fused_plan.peak, fused_plan.total) < (plan.peak, plan.total) {
+                return fused_network.contract_on(&fused_plan, limits);
+            }
         }
     }
     network.contract_on(&plan, limits)

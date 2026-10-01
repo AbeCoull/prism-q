@@ -4156,9 +4156,14 @@ fn fold_shots(
 /// Family choice for auto-routed non-Pauli noise trajectories. Restricted to
 /// families whose trajectory operations (1q Kraus, qubit probability, reduced
 /// density matrix, reset) are supported; the statevector leaf carries the
-/// kind's acceleration.
-fn general_noise_plan(kind: &BackendKind, circuit: &Circuit) -> BackendPlan {
-    let family = if !circuit.has_entangling_gates() {
+/// kind's acceleration. A two-qubit Kraus event entangles its pair, so it keeps
+/// the circuit off the product state as an entangling gate would.
+fn general_noise_plan(
+    kind: &BackendKind,
+    circuit: &Circuit,
+    noise_model: &NoiseModel,
+) -> BackendPlan {
+    let family = if !circuit.has_entangling_gates() && !noise_model.has_two_qubit_kraus() {
         Family::ProductState
     } else if circuit.num_qubits > max_statevector_qubits() {
         if circuit.is_sparse_friendly() && circuit.num_qubits <= MAX_SPARSE_INDEX_QUBITS {
@@ -4292,7 +4297,7 @@ pub(crate) fn run_shots_with_noise(
     }
 
     let plan = if kind.is_auto() && !noise_model.has_only_pauli_channels() {
-        general_noise_plan(&kind, circuit)
+        general_noise_plan(&kind, circuit, noise_model)
     } else {
         resolve_backend(&kind, circuit, false)
     };

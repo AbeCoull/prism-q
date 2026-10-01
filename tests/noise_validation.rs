@@ -232,6 +232,42 @@ fn readout_p01_out_of_range_rejected() {
     assert!(noise.validate().is_err());
 }
 
+// A table sized for another register would leave trailing bits without error
+// or carry entries for bits that do not exist. An empty table is no readout
+// error and stays legal.
+#[test]
+fn readout_table_sized_for_another_register_rejected() {
+    let measured = |bits: usize| {
+        let mut c = Circuit::new(3, bits);
+        c.add_gate(Gate::X, &[0]);
+        for q in 0..3 {
+            c.add_measure(q, q.min(bits - 1));
+        }
+        c
+    };
+    let circuit = measured(3);
+
+    for bits in [2, 4] {
+        let mut noise = NoiseModel::uniform_depolarizing(&measured(bits), 0.0);
+        noise.with_readout_error(0.1, 0.1);
+        let err = simulate(&circuit)
+            .noise(&noise)
+            .seed(42)
+            .shots(16)
+            .unwrap_err();
+        assert!(
+            matches!(&err, PrismError::InvalidParameter { message }
+                if message.contains(&format!("{bits} readout entries for 3 classical bits"))),
+            "{err:?}"
+        );
+    }
+
+    let mut noise = silent_noise(&circuit);
+    noise.readout.clear();
+    let shots = simulate(&circuit).noise(&noise).seed(42).shots(16).unwrap();
+    assert!(shots.shots.iter().all(|s| *s == [true, false, false]));
+}
+
 #[test]
 fn readout_p10_out_of_range_rejected() {
     let circuit = one_gate_circuit();

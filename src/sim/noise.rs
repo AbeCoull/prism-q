@@ -374,7 +374,8 @@ pub struct NoiseModel {
     /// Events fired after each instruction, indexed by instruction position;
     /// length must equal the circuit's instruction count.
     pub after_gate: Vec<Vec<NoiseEvent>>,
-    /// Per-classical-bit readout error; `None` means ideal readout. A bit no
+    /// Per-classical-bit readout error; `None` means ideal readout. Either empty,
+    /// for no readout error at all, or one entry per classical bit. A bit no
     /// measurement writes is never flipped.
     pub readout: Vec<Option<ReadoutError>>,
 }
@@ -541,8 +542,9 @@ impl NoiseModel {
     }
 
     /// Validate as [`NoiseModel::validate`] does, plus the checks that need the
-    /// circuit: one event slot per instruction, and every target qubit inside
-    /// the register.
+    /// circuit: one event slot per instruction, a readout table that is empty
+    /// or holds one entry per classical bit, and every target qubit inside the
+    /// register.
     ///
     /// Every noisy entry point calls this before allocating state. Qubit bounds
     /// cannot be checked without the circuit, and an out-of-range target reaches
@@ -554,6 +556,15 @@ impl NoiseModel {
                     "noise model carries {} event slots for {} instructions",
                     self.after_gate.len(),
                     circuit.instructions.len()
+                ),
+            });
+        }
+        if !self.readout.is_empty() && self.readout.len() != circuit.num_classical_bits {
+            return Err(crate::error::PrismError::InvalidParameter {
+                message: format!(
+                    "noise model carries {} readout entries for {} classical bits",
+                    self.readout.len(),
+                    circuit.num_classical_bits
                 ),
             });
         }
@@ -2537,8 +2548,14 @@ fn reference_simulation(circuit: &Circuit, seed: u64) -> Result<ReferenceInfo> {
         .iter()
         .enumerate()
         .all(|(i, &(inst_idx, _, _))| inst_idx == first_meas_idx + i);
+    let mut seen_qubits = vec![false; circuit.num_qubits];
+    let mut seen_bits = vec![false; circuit.num_classical_bits];
+    let distinct = meas_info.iter().all(|&(_, qubit, classical_bit)| {
+        !std::mem::replace(&mut seen_qubits[qubit], true)
+            && !std::mem::replace(&mut seen_bits[classical_bit], true)
+    });
 
-    if all_at_end {
+    if all_at_end && distinct {
         stab.apply_gates_only(&circuit.instructions[..first_meas_idx])?;
 
         let measurements: Vec<(usize, usize)> = meas_info
@@ -2554,6 +2571,7 @@ fn reference_simulation(circuit: &Circuit, seed: u64) -> Result<ReferenceInfo> {
         });
     }
 
+    let mut outcomes = Vec::with_capacity(num_meas);
     let mut is_random = Vec::with_capacity(num_meas);
     let mut random_x_support: Vec<Vec<usize>> = Vec::with_capacity(num_meas);
 
@@ -2564,19 +2582,11 @@ fn reference_simulation(circuit: &Circuit, seed: u64) -> Result<ReferenceInfo> {
         }
 
         let (meas_random, support) = stab.apply_measure_with_info(qubit, classical_bit);
+        outcomes.push(stab.classical_results()[classical_bit]);
         is_random.push(meas_random);
         random_x_support.push(support);
         seg_start = meas_inst_idx + 1;
     }
-
-    if seg_start < circuit.instructions.len() {
-        stab.apply_gates_only(&circuit.instructions[seg_start..])?;
-    }
-
-    let outcomes: Vec<bool> = meas_info
-        .iter()
-        .map(|&(_, _, cbit)| stab.classical_results()[cbit])
-        .collect();
 
     Ok(ReferenceInfo {
         outcomes,

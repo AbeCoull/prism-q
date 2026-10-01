@@ -211,6 +211,30 @@ fn bell_pairs_always_agree() {
 }
 
 #[test]
+fn run_shots_compiled_follows_the_measurement_map() {
+    let mut c = Circuit::new(3, 5);
+    c.add_gate(Gate::X, &[0]);
+    c.add_gate(Gate::H, &[2]);
+    c.add_gate(Gate::Cx, &[2, 1]);
+    c.add_measure(0, 4);
+    c.add_measure(1, 0);
+    c.add_measure(2, 2);
+    c.add_measure(0, 0);
+
+    let result = run_shots_compiled(&c, 256, 42).unwrap();
+    assert!(result.shots.iter().all(|shot| shot.len() == 5));
+    let counts = result.counts();
+    assert_eq!(counts.values().sum::<u64>(), 256);
+    for key in counts.keys() {
+        assert!(
+            *key == vec![0b10001] || *key == vec![0b10101],
+            "unexpected key {key:?}"
+        );
+    }
+    assert_eq!(counts.len(), 2);
+}
+
+#[test]
 fn random_clifford_marginals() {
     let n = 10;
     let mut c = circuits::clifford_heavy_circuit(n, 10, 42);

@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use crate::hash::FxHashMap;
+
 use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -260,6 +262,68 @@ pub(super) fn record_counts_to_classical_bits(
     out
 }
 
+/// Histogram of native samples keyed as [`ShotsResult::counts`] keys them,
+/// equal to counting [`shots_from_basis_samples`]. Rows are counted with
+/// unmeasured qubits masked off, so only distinct outcomes pay the projection
+/// onto classical bits.
+pub(crate) fn counts_from_basis_samples(
+    samples: &crate::backend::BasisSamples,
+    meas_map: &[(usize, usize)],
+    num_classical_bits: usize,
+) -> HashMap<Vec<u64>, u64> {
+    let words_per_shot = samples.words_per_shot();
+    let mut mask = vec![0u64; words_per_shot];
+    for &(qubit, _) in meas_map {
+        mask[qubit / 64] |= 1u64 << (qubit % 64);
+    }
+    let m_words = num_classical_bits.div_ceil(64).max(1);
+    let in_place = meas_map.iter().all(|&(qubit, cbit)| qubit == cbit);
+    let classical_key = |row: &[u64]| -> Vec<u64> {
+        let mut key = vec![0u64; m_words];
+        if in_place {
+            let live = m_words.min(row.len());
+            key[..live].copy_from_slice(&row[..live]);
+        } else {
+            for &(qubit, cbit) in meas_map {
+                let bit = (row[qubit / 64] >> (qubit % 64)) & 1;
+                let word = &mut key[cbit / 64];
+                *word = (*word & !(1u64 << (cbit % 64))) | (bit << (cbit % 64));
+            }
+        }
+        key
+    };
+
+    let mut counts = HashMap::new();
+    if words_per_shot == 1 {
+        let mask = mask[0];
+        let mut rows: FxHashMap<u64, u64> = FxHashMap::default();
+        for &word in samples.words() {
+            *rows.entry(word & mask).or_insert(0) += 1;
+        }
+        for (row, n) in rows {
+            *counts.entry(classical_key(&[row])).or_insert(0) += n;
+        }
+    } else {
+        let mut rows: FxHashMap<Vec<u64>, u64> = FxHashMap::default();
+        let mut scratch = vec![0u64; words_per_shot];
+        for row in samples.words().chunks_exact(words_per_shot) {
+            for ((dst, &word), &m) in scratch.iter_mut().zip(row).zip(&mask) {
+                *dst = word & m;
+            }
+            match rows.get_mut(scratch.as_slice()) {
+                Some(n) => *n += 1,
+                None => {
+                    rows.insert(scratch.clone(), 1);
+                }
+            }
+        }
+        for (row, n) in rows {
+            *counts.entry(classical_key(&row)).or_insert(0) += n;
+        }
+    }
+    counts
+}
+
 pub(super) fn packed_shots_to_classical_bits(
     packed: &compiled::PackedShots,
     meas_map: &[(usize, usize)],
@@ -421,6 +485,37 @@ mod tests {
             shots_from_basis_samples(&samples, &meas_map, 3),
             shots_per_bit(&samples, &meas_map, 3)
         );
+    }
+
+    #[test]
+    fn basis_sample_counts_match_the_expanded_histogram() {
+        let cases = [
+            (8, 8, (0..8).map(|q| (q, q)).collect::<Vec<_>>()),
+            (8, 3, vec![(3, 0), (0, 1), (7, 2)]),
+            (8, 3, vec![(1, 0), (2, 0), (5, 2), (6, 0)]),
+            (8, 20, vec![(1, 7), (4, 19)]),
+            (8, 130, vec![(0, 0), (3, 64), (5, 129)]),
+            (130, 130, (0..130).map(|q| (q, q)).collect()),
+            (
+                130,
+                70,
+                vec![(129, 0), (64, 69), (2, 64), (100, 64), (63, 63)],
+            ),
+        ];
+        for (num_qubits, num_classical_bits, meas_map) in cases {
+            let samples = basis_samples_fixture(40, num_qubits);
+            let expanded = ShotsResult::from_shots(
+                shots_per_bit(&samples, &meas_map, num_classical_bits),
+                num_classical_bits,
+            )
+            .counts();
+            assert_eq!(
+                counts_from_basis_samples(&samples, &meas_map, num_classical_bits),
+                expanded,
+                "{num_qubits} qubits, {num_classical_bits} bits, map {meas_map:?}"
+            );
+        }
+        assert!(counts_from_basis_samples(&basis_samples_fixture(0, 8), &[(0, 0)], 1).is_empty());
     }
 
     #[test]

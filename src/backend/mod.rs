@@ -414,6 +414,10 @@ impl BasisSamples {
         &mut self.words
     }
 
+    pub(crate) fn words(&self) -> &[u64] {
+        &self.words
+    }
+
     pub(crate) fn words_per_shot(&self) -> usize {
         self.words_per_shot
     }

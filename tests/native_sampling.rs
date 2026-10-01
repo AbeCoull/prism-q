@@ -280,6 +280,106 @@ fn product_counts_match_shots() {
     );
 }
 
+// ===== counts under a measurement map =====
+
+fn rotation_chain(n: usize) -> Circuit {
+    let mut c = Circuit::new(n, 0);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.5 + 0.1 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    c
+}
+
+/// GHZ across two outcome words with three rotated qubits, so samples differ
+/// in both words.
+fn wide_ghz_rotated() -> Circuit {
+    let mut c = ghz(70);
+    for q in [3, 40, 66] {
+        c.add_gate(Gate::Ry(0.7), &[q]);
+    }
+    c
+}
+
+fn check_mapped_counts_match_shots(
+    label: &str,
+    circuit: &Circuit,
+    num_classical_bits: usize,
+    meas_map: &[(usize, usize)],
+    kinds: &[BackendKind],
+) {
+    let mut measured = Circuit::new(circuit.num_qubits, num_classical_bits);
+    measured.instructions = circuit.instructions.clone();
+    for &(qubit, cbit) in meas_map {
+        measured.add_measure(qubit, cbit);
+    }
+    for kind in kinds {
+        let shots = simulate(&measured)
+            .backend(kind.clone())
+            .seed(SEED)
+            .shots(SHOTS)
+            .unwrap();
+        let counts = simulate(&measured)
+            .backend(kind.clone())
+            .seed(SEED)
+            .sample_counts(SHOTS)
+            .unwrap();
+        assert!(counts.counts.len() > 1, "{label} {kind:?}: one outcome");
+        assert_eq!(
+            shots.counts(),
+            counts.into_counts(),
+            "{label} {kind:?}: counts disagree with the shot histogram"
+        );
+    }
+}
+
+const NARROW_KINDS: [BackendKind; 2] = [BackendKind::Sparse, MPS];
+
+#[test]
+fn mapped_counts_identity() {
+    let map: Vec<_> = (0..10).map(|q| (q, q)).collect();
+    check_mapped_counts_match_shots("identity", &rotation_chain(10), 10, &map, &NARROW_KINDS);
+}
+
+#[test]
+fn mapped_counts_permuted() {
+    let map: Vec<_> = (0..10).map(|q| (q, (q * 3 + 1) % 10)).collect();
+    check_mapped_counts_match_shots("permuted", &rotation_chain(10), 10, &map, &NARROW_KINDS);
+}
+
+#[test]
+fn mapped_counts_repeated_classical_bit_keeps_the_last_writer() {
+    let map = [(0, 2), (1, 0), (5, 0), (2, 1), (7, 2), (9, 1)];
+    check_mapped_counts_match_shots("repeated", &rotation_chain(10), 3, &map, &NARROW_KINDS);
+}
+
+#[test]
+fn mapped_counts_leave_unused_classical_bits_clear() {
+    let map = [(1, 9), (4, 0), (6, 3), (8, 12)];
+    check_mapped_counts_match_shots("unused bits", &rotation_chain(10), 16, &map, &NARROW_KINDS);
+}
+
+// The 70-qubit cases are past the sparse backend's 64-bit basis index.
+#[test]
+fn mapped_counts_past_64_classical_bits() {
+    let map: Vec<_> = (0..10).map(|q| (q, 60 + 7 * q)).collect();
+    check_mapped_counts_match_shots("wide key", &rotation_chain(10), 130, &map, &NARROW_KINDS);
+
+    let identity: Vec<_> = (0..70).map(|q| (q, q)).collect();
+    let wide = [(66, 0), (3, 64), (40, 65), (0, 66), (69, 1), (41, 64)];
+    let cases = [
+        (wide_ghz_rotated(), MPS),
+        (product_layers(70), BackendKind::ProductState),
+    ];
+    for (circuit, kind) in cases {
+        let kinds = [kind];
+        check_mapped_counts_match_shots("wide identity", &circuit, 70, &identity, &kinds);
+        check_mapped_counts_match_shots("wide mapped", &circuit, 80, &wide, &kinds);
+    }
+}
+
 // ===== above the dense cap =====
 
 /// Qubit count for the oversize cases. A `2^40` amplitude vector is eight

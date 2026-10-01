@@ -243,6 +243,14 @@ jobs:
       - name: Verify the conventional-commit mapping and the pre-1.0 clamp
         run: bash scripts/release_bump_level_test.sh
 
+  bench-gate-confirmation:
+    name: Bench gate confirmation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify that only a valid second run clears a FAIL
+        run: bash scripts/bench_ci_test.sh
+
   # Compares the public API against the last release, at the release type the
   # conventional commits since it imply before the pre-1.0 clamp, with the PR
   # title standing in for the squash subject it becomes. A break therefore passes

@@ -41,7 +41,34 @@ pub(super) struct QecCompiledNoiseSampler {
     rng: Xoshiro256PlusPlus,
 }
 
+/// Compiled noise events whose flips act on a projected parity space instead of
+/// measurement records.
+pub(super) struct QecParityNoise {
+    events: QecNoiseSensitivity,
+    rng: Xoshiro256PlusPlus,
+}
+
+impl QecParityNoise {
+    pub(super) fn apply(&mut self, data: &mut [u64], num_shots: usize, words: usize) {
+        self.events.apply(data, num_shots, words, &mut self.rng);
+    }
+}
+
 impl QecCompiledNoiseSampler {
+    pub(super) fn noiseless(&self) -> &CompiledSampler {
+        &self.noiseless
+    }
+
+    /// Map every event's record flips through the linear `project`, keeping event
+    /// order, probabilities, and the noise stream. Applied to projected records, it
+    /// matches projecting [`Self::apply_noise_to_measurements`] over the same chunks.
+    pub(super) fn into_parity_noise(self, project: impl Fn(&[u64]) -> Vec<u64>) -> QecParityNoise {
+        QecParityNoise {
+            events: self.events.project(project),
+            rng: self.rng,
+        }
+    }
+
     pub(super) fn sample_measurements_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
         let measurements = self.sample_noiseless_measurements_packed(num_shots)?;
         self.apply_noise_to_measurements(measurements)
@@ -95,6 +122,39 @@ impl QecNoiseSensitivity {
 
     fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+
+    fn project(self, project: impl Fn(&[u64]) -> Vec<u64>) -> Self {
+        let events = self
+            .events
+            .into_iter()
+            .map(|event| match event {
+                QecNoiseSensitivityEvent::Single {
+                    x_flip,
+                    z_flip,
+                    px,
+                    py,
+                    pz,
+                } => QecNoiseSensitivityEvent::Single {
+                    x_flip: project(&x_flip),
+                    z_flip: project(&z_flip),
+                    px,
+                    py,
+                    pz,
+                },
+                QecNoiseSensitivityEvent::Pair { branch_flips, p } => {
+                    let m_words = branch_flips.len() / 15;
+                    QecNoiseSensitivityEvent::Pair {
+                        branch_flips: branch_flips
+                            .chunks_exact(m_words)
+                            .flat_map(&project)
+                            .collect(),
+                        p,
+                    }
+                }
+            })
+            .collect();
+        Self { events }
     }
 
     fn push_single(&mut self, x_flip: &[u64], z_flip: &[u64], px: f64, py: f64, pz: f64) {

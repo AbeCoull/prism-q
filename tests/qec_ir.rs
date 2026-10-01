@@ -9,6 +9,8 @@ use prism_q::{
     run_qec_program_reference,
 };
 
+mod qec_common;
+
 fn assert_f64_close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
@@ -1011,4 +1013,144 @@ fn qec_row_compiler_rejects_later_stage_features() {
         .unwrap();
     let err = compile_qec_program_rows(&exp_val_program).unwrap_err();
     assert!(format!("{err}").contains("EXP_VAL"));
+}
+
+// The tail chunk of 17 shots falls under the 32-shot cutoff where the noise kernels
+// switch from geometric skipping to one draw per shot.
+const PARITY_SHOTS: usize = 2_017;
+
+#[track_caller]
+fn assert_dropped_records_match_kept(program: &QecProgram, chunk_size: Option<usize>, label: &str) {
+    let options = QecOptions {
+        shots: PARITY_SHOTS,
+        seed: 42,
+        chunk_size,
+        keep_measurements: false,
+    };
+    let mut program = program.clone();
+    program.set_options(options);
+    let dropped = run_qec_program(&program).unwrap();
+    program.set_options(QecOptions {
+        keep_measurements: true,
+        ..options
+    });
+    let kept = run_qec_program(&program).unwrap();
+
+    assert_eq!(dropped.measurements.num_shots(), 0, "{label}");
+    assert_eq!(kept.measurements.num_shots(), PARITY_SHOTS, "{label}");
+    let detector_rows = program.detector_rows().unwrap();
+    let observable_rows = program.observable_rows().unwrap();
+    let projected_detectors = kept.measurements.parity_rows(&detector_rows).unwrap();
+    let projected_observables = kept.measurements.parity_rows(&observable_rows).unwrap();
+    assert_eq!(
+        kept.detectors.to_shots(),
+        projected_detectors.to_shots(),
+        "{label}"
+    );
+    assert_eq!(
+        kept.observables.to_shots(),
+        projected_observables.to_shots(),
+        "{label}"
+    );
+
+    assert_eq!(dropped.total_shots, kept.total_shots, "{label}");
+    assert_eq!(
+        dropped.detectors.to_shots(),
+        kept.detectors.to_shots(),
+        "{label}"
+    );
+    assert_eq!(
+        dropped.observables.to_shots(),
+        kept.observables.to_shots(),
+        "{label}"
+    );
+    assert_eq!(dropped.accepted_shots, kept.accepted_shots, "{label}");
+    assert_eq!(dropped.discarded_shots, kept.discarded_shots, "{label}");
+    assert_eq!(dropped.logical_errors, kept.logical_errors, "{label}");
+}
+
+fn any_detector_fires(program: &QecProgram) -> bool {
+    let mut program = program.clone();
+    program.set_options(QecOptions {
+        shots: PARITY_SHOTS,
+        seed: 42,
+        chunk_size: None,
+        keep_measurements: false,
+    });
+    let result = run_qec_program(&program).unwrap();
+    result.detectors.to_shots().iter().flatten().any(|&bit| bit)
+}
+
+#[test]
+fn qec_dropped_records_match_kept_projection_on_repetition_memory() {
+    for distance in [4usize, 6, 10] {
+        for noise in [
+            QecNoise::Depolarize1(0.0),
+            QecNoise::XError(0.05),
+            QecNoise::Depolarize1(0.01),
+            QecNoise::Depolarize2(0.02),
+        ] {
+            let program = qec_common::repetition_memory(distance, distance, noise, PARITY_SHOTS);
+            if noise.probability() > 0.0 {
+                assert!(any_detector_fires(&program), "d{distance} {noise:?}");
+            }
+            for chunk_size in [None, Some(500)] {
+                assert_dropped_records_match_kept(
+                    &program,
+                    chunk_size,
+                    &format!("d{distance} {noise:?} chunk {chunk_size:?}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn qec_dropped_records_match_kept_projection_on_surface_memory() {
+    let data: Vec<usize> = (0..9).collect();
+    for noise in [QecNoise::Depolarize1(0.0), QecNoise::Depolarize1(0.01)] {
+        let program = qec_common::surface_memory_d3(3, noise, &data, PARITY_SHOTS);
+        for chunk_size in [None, Some(500)] {
+            assert_dropped_records_match_kept(
+                &program,
+                chunk_size,
+                &format!("surface d3 {noise:?} chunk {chunk_size:?}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn qec_dropped_records_match_kept_projection_when_detectors_vary() {
+    for noise in ["", "X_ERROR(0.1) 1\n"] {
+        let program = parse_qec_program(&format!(
+            "H 0\n{noise}M 0 1\nDETECTOR rec[-2]\nDETECTOR rec[-1]\n\
+             OBSERVABLE_INCLUDE(0) rec[-2] rec[-1]"
+        ))
+        .unwrap();
+        assert!(any_detector_fires(&program), "{noise:?}");
+        for chunk_size in [None, Some(500)] {
+            assert_dropped_records_match_kept(
+                &program,
+                chunk_size,
+                &format!("random detector {noise:?} chunk {chunk_size:?}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn qec_dropped_records_match_kept_projection_with_postselection() {
+    let program = parse_qec_program(
+        "X_ERROR(0.2) 0 1\nM 0 1\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(0) rec[-1]\n\
+         POSTSELECT rec[-2]",
+    )
+    .unwrap();
+    for chunk_size in [None, Some(500)] {
+        assert_dropped_records_match_kept(
+            &program,
+            chunk_size,
+            &format!("postselected chunk {chunk_size:?}"),
+        );
+    }
 }

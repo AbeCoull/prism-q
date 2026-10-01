@@ -8,7 +8,9 @@ use rand_chacha::ChaCha8Rng;
 use smallvec::smallvec;
 
 use crate::backend::Backend;
-use crate::backend::density_matrix::{DeferredSuperoperators, DensityMatrixBackend};
+use crate::backend::density_matrix::{
+    DeferredSuperoperators, DensityMatrixBackend, MIN_DEFERRED_QUBITS,
+};
 use crate::backend::stabilizer::StabilizerBackend;
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::Result;
@@ -3238,6 +3240,7 @@ pub(crate) fn evolve_density_matrix(
         return Ok(dm);
     };
 
+    let defer = circuit.num_qubits >= MIN_DEFERRED_QUBITS;
     let mut deferred = DeferredSuperoperators::new(circuit.num_qubits);
     for (inst, events) in circuit.instructions.iter().zip(&noise.after_gate) {
         if let Instruction::Gate { gate, targets } = inst
@@ -3246,12 +3249,16 @@ pub(crate) fn evolve_density_matrix(
                 .all(|event| event.channel.num_qubits() == 1 && targets.contains(&event.qubits[0]))
         {
             let folded = match *targets.as_slice() {
-                [q] => {
+                [q] if defer || !events.is_empty() => {
                     let channels: Vec<Vec<[[Complex64; 2]; 2]>> =
                         events.iter().map(|e| kraus_1q(&e.channel)).collect();
-                    deferred.defer_1q(gate, q, &channels)
+                    let held = deferred.defer_1q(gate, q, &channels);
+                    if held && !defer {
+                        deferred.flush_qubits(&mut dm, &[q]);
+                    }
+                    held
                 }
-                [q0, q1] => {
+                [q0, q1] if defer => {
                     let channels: Vec<(usize, Vec<[[Complex64; 2]; 2]>)> = events
                         .iter()
                         .map(|e| (e.qubits[0], kraus_1q(&e.channel)))

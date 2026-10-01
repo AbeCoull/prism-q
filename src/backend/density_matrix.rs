@@ -246,6 +246,17 @@ const IDENTITY_4X4: [[Complex64; 4]; 4] = {
     [[o, z, z, z], [z, o, z, z], [z, z, o, z], [z, z, z, o]]
 };
 
+/// Narrowest register the exact noisy walk defers one-qubit maps on. Below it
+/// the native one-qubit and two-qubit kernels beat the composed sweeps.
+pub(crate) const MIN_DEFERRED_QUBITS: usize = 7;
+
+/// From this width a two-qubit gate folds whatever is pending. Below it the
+/// buffer is small enough that a dense 16x16 sweep costs more than a native
+/// CX or diagonal pass plus two one-qubit sweeps, so the fold must absorb at
+/// least [`MIN_FOLDED_MAPS`] maps.
+const MIN_FOLD_ANY_QUBITS: usize = 9;
+const MIN_FOLDED_MAPS: usize = 3;
+
 /// One-qubit block superoperators the exact noisy walk holds back per qubit.
 ///
 /// Gates and one-qubit channels on a qubit compose here rather than sweeping
@@ -256,12 +267,18 @@ const IDENTITY_4X4: [[Complex64; 4]; 4] = {
 /// five sweeps to one.
 pub(crate) struct DeferredSuperoperators {
     pending: Vec<Option<[[Complex64; 4]; 4]>>,
+    min_maps: usize,
 }
 
 impl DeferredSuperoperators {
     pub(crate) fn new(num_qubits: usize) -> Self {
         Self {
             pending: vec![None; num_qubits],
+            min_maps: if num_qubits >= MIN_FOLD_ANY_QUBITS {
+                1
+            } else {
+                MIN_FOLDED_MAPS
+            },
         }
     }
 
@@ -290,7 +307,8 @@ impl DeferredSuperoperators {
     /// Apply `gate` on `(q0, q1)` in one sweep, preceded by both qubits'
     /// pending maps and followed by `channels`, one-qubit Kraus sets each on
     /// `q0` or `q1`, in order. False, with nothing applied, when `gate` has no
-    /// 4x4 matrix or there is nothing to fold into it.
+    /// 4x4 matrix or the fold would absorb fewer pending maps and channel
+    /// targets than the register width calls for.
     pub(crate) fn apply_2q(
         &mut self,
         dm: &mut DensityMatrixBackend,
@@ -302,7 +320,11 @@ impl DeferredSuperoperators {
         let Some(g) = matrix_2q(gate) else {
             return false;
         };
-        if channels.is_empty() && self.pending[q0].is_none() && self.pending[q1].is_none() {
+        let maps = usize::from(self.pending[q0].is_some())
+            + usize::from(self.pending[q1].is_some())
+            + usize::from(channels.iter().any(|(q, _)| *q == q0))
+            + usize::from(channels.iter().any(|(q, _)| *q == q1));
+        if maps < self.min_maps {
             return false;
         }
 

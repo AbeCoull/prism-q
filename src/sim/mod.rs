@@ -56,7 +56,10 @@ use crate::backend::{Backend, max_statevector_qubits};
 use crate::circuit::{Circuit, Instruction, SaveRecord, SaveSpec, SavedValue};
 use crate::error::{PrismError, Result};
 use crate::sim::noise::NoiseModel;
-use shots::{packed_shots_to_classical_bits, sample_shots, shots_from_basis_samples};
+use shots::{
+    packed_shots_to_classical_bits, record_counts_to_classical_bits, sample_shots,
+    shots_from_basis_samples,
+};
 use terminal_sampling::{
     sample_counts_from_probs, sample_counts_from_state, sample_shots_from_probs,
     sample_shots_from_state,
@@ -2813,7 +2816,11 @@ pub(crate) fn run_counts_with(
                     bits,
                 )
             } else {
-                sampler.try_sample_counts(num_shots)?
+                record_counts_to_classical_bits(
+                    sampler.try_sample_counts(num_shots)?,
+                    &meas_map,
+                    bits,
+                )
             }
         }
         ShotSource::TerminalStatevector { backend, meas_map } => {

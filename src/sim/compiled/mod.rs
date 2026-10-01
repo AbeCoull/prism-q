@@ -1369,8 +1369,8 @@ impl CompiledSampler {
         })
     }
 
-    /// Sample packed detection events: output row `e` holds the XOR of
-    /// measurement pair `pairs[e]` across shots.
+    /// Sample packed detection events: event `e` holds the XOR of measurement
+    /// pair `pairs[e]`'s outcomes in each shot.
     ///
     /// # Panics
     /// Panics if the sampler was compiled with no measurements.
@@ -1385,56 +1385,40 @@ impl CompiledSampler {
         let m_words = num_events.div_ceil(64);
         let s_words = num_shots.div_ceil(64);
 
-        if num_events == 0 || num_shots == 0 || self.rank == 0 {
-            return PackedShots {
-                data: vec![0u64; num_events * s_words],
-                num_shots,
-                num_measurements: num_events,
-                m_words,
-                s_words,
-                layout: ShotLayout::MeasMajor,
-            };
-        }
-
         let det_weight = det_sparse.stats().total_weight;
         let meas_weight = sparse.stats().total_weight;
-
-        if det_weight > meas_weight + num_events {
-            let meas_packed = self.sample_bulk_packed(num_shots);
-            let mut data = vec![0u64; num_events * s_words];
-            for (e, &(m_a, m_b)) in pairs.iter().enumerate() {
-                let src_a = &meas_packed.data[m_a * s_words..(m_a + 1) * s_words];
-                let src_b = &meas_packed.data[m_b * s_words..(m_b + 1) * s_words];
-                let dst = &mut data[e * s_words..(e + 1) * s_words];
-                for (d, (&a, &b)) in dst.iter_mut().zip(src_a.iter().zip(src_b.iter())) {
-                    *d = a ^ b;
-                }
-            }
-            return PackedShots {
-                data,
-                num_shots,
-                num_measurements: num_events,
-                m_words,
-                s_words,
-                layout: ShotLayout::MeasMajor,
-            };
+        if self.rank > 0 && num_shots > 0 && det_weight > meas_weight + num_events {
+            let rows: Vec<Vec<usize>> = pairs.iter().map(|&(a, b)| vec![a, b]).collect();
+            return self
+                .sample_bulk_packed(num_shots)
+                .parity_rows(&rows)
+                .expect("compile_detection_events bounds-checked every pair");
         }
 
-        let det_ref = vec![0u64; m_words];
+        let ref_bit = |m: usize| (self.ref_bits_packed[m / 64] >> (m % 64)) & 1;
+        let mut det_ref = vec![0u64; m_words];
+        for (e, &(m_a, m_b)) in pairs.iter().enumerate() {
+            det_ref[e / 64] |= (ref_bit(m_a) ^ ref_bit(m_b)) << (e % 64);
+        }
 
-        let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
-
-        let data = if num_shots > BTS_BATCH_SHOTS {
-            bts_batched(
-                &det_sparse,
-                num_shots,
-                s_words,
-                &det_ref,
-                &mut fast_rng,
-                self.rank,
-            )
+        let data = if num_events == 0 || num_shots == 0 || self.rank == 0 {
+            let mut data = vec![0u64; num_events * s_words];
+            bts::apply_ref_bits_meas_major(&mut data, &det_ref, num_events, s_words, num_shots);
+            data
         } else {
-            sample_bts_meas_major(&det_sparse, num_shots, &det_ref, &mut fast_rng, self.rank)
+            let mut fast_rng = Xoshiro256PlusPlus::from_chacha(&mut self.rng);
+            if num_shots > BTS_BATCH_SHOTS {
+                bts_batched(
+                    &det_sparse,
+                    num_shots,
+                    s_words,
+                    &det_ref,
+                    &mut fast_rng,
+                    self.rank,
+                )
+            } else {
+                sample_bts_meas_major(&det_sparse, num_shots, &det_ref, &mut fast_rng, self.rank)
+            }
         };
 
         PackedShots {

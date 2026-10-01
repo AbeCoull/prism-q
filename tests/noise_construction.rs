@@ -12,7 +12,7 @@ use prism_q::circuit::{Circuit, ClassicalCondition, Instruction, guarded};
 use prism_q::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel};
 use prism_q::{
     BackendKind, CircuitBuilder, Gate, GateFilter, NoiseBuilder, PauliTerm, PrismError,
-    density_matrix_expectation_values, simulate,
+    ResolvedBackend, density_matrix_expectation_values, simulate,
 };
 use smallvec::smallvec;
 
@@ -755,6 +755,59 @@ fn two_qubit_kraus_rejected_before_a_shot_allocates_state() {
 
     let err = simulate(&circuit)
         .backend(BackendKind::TensorNetwork)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(4)
+        .unwrap_err();
+    assert!(
+        matches!(&err, PrismError::IncompatibleBackend { reason, .. }
+            if reason.contains("reduced density matrix")),
+        "{err:?}"
+    );
+}
+
+// Crosstalk hangs a two-qubit channel on a one-qubit gate, so a circuit with no
+// entangling gate still needs a backend that answers the pair. Auto takes the
+// statevector; an explicit product state is still refused at dispatch.
+#[test]
+fn auto_routes_crosstalk_kraus_on_one_qubit_gates_to_the_statevector() {
+    let shots = 4096;
+    let mut circuit = Circuit::new(2, 2);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    assert!(!circuit.has_entangling_gates());
+
+    let noise = NoiseBuilder::new()
+        .crosstalk(
+            GateFilter::all().arity(1),
+            [(0, 1)],
+            correlated_bit_flip(0.3),
+        )
+        .build(&circuit)
+        .unwrap();
+
+    let auto = simulate(&circuit)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(auto.metadata.backend, ResolvedBackend::Statevector);
+    let explicit = simulate(&circuit)
+        .backend(BackendKind::Statevector)
+        .noise(&noise)
+        .seed(SEED)
+        .shots(shots)
+        .unwrap();
+    assert_eq!(auto.shots, explicit.shots);
+
+    // The flip takes |10> to |01> as a pair, so the two bits always differ.
+    assert!(auto.shots.iter().all(|s| s[0] != s[1]));
+    let flipped = auto.shots.iter().filter(|s| s[1]).count() as f64 / shots as f64;
+    assert!((flipped - 0.3).abs() < 0.04, "flip rate {flipped}");
+
+    let err = simulate(&circuit)
+        .backend(BackendKind::ProductState)
         .noise(&noise)
         .seed(SEED)
         .shots(4)

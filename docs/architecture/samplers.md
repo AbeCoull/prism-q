@@ -181,9 +181,13 @@ set into a 16x16 block superoperator (`apply_2q_kraus`, which
 `Tr(Kdagger K rho)` over `Backend::reduced_density_matrix_2q` and applies the
 normalized operator as a `Fused2q`. The host statevector, sparse, factored and MPS
 backends answer that reduction; the tableau backends, the product state, the tensor
-network and the distributed statevector decline it. `run_shots_with_noise` checks
-`Backend::supports_two_qubit_kraus` before the first shot, so an `Auto` route that picked another backend is named
-at dispatch rather than part way through a trajectory.
+network and the distributed statevector decline it. `Auto` counts a two-qubit
+Kraus event as entangling when it picks the trajectory backend, so a circuit of
+one-qubit gates carrying a crosstalk channel runs on the statevector (or the sparse
+map or MPS past the dense cap) instead of the product state. `run_shots_with_noise`
+checks `Backend::supports_two_qubit_kraus` before the first shot, so an explicit kind
+or a device statevector that declines the channel is named at dispatch rather than
+part way through a trajectory.
 
 ## Noisy engine routing and the observable-result contract
 

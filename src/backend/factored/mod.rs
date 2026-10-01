@@ -240,10 +240,14 @@ impl FactoredBackend {
                 let tgts = [q0, q1];
                 let ss_idx = self.ensure_same_substate(&tgts)?;
                 let sub = self.substates[ss_idx].as_mut().unwrap();
+                let n = sub.qubits.len();
                 let lq0 = Self::local_qubit(sub, q0);
                 let lq1 = Self::local_qubit(sub, q1);
-                let prepared = simd::PreparedGate2q::new(mat);
-                prepared.apply_full(&mut sub.state, sub.qubits.len(), lq0, lq1);
+                seq_or_par!(
+                    n >= PARALLEL_THRESHOLD_QUBITS,
+                    simd::PreparedGate2q::new(mat).apply_full(&mut sub.state, n, lq0, lq1),
+                    par_apply_fused2q(&mut sub.state, n, lq0, lq1, mat)
+                );
             }
             return Ok(());
         }

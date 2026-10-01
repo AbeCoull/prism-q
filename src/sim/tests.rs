@@ -788,6 +788,44 @@ fn test_run_counts_factored_stabilizer() {
     assert_eq!(bell_total, 128);
 }
 
+#[test]
+fn test_compiled_counts_follow_the_measurement_map() {
+    let mut circuit = Circuit::new(3, 4);
+    circuit.add_gate(Gate::X, &[0]);
+    circuit.add_gate(Gate::H, &[2]);
+    circuit.add_measure(0, 3);
+    circuit.add_measure(1, 0);
+    circuit.add_measure(2, 1);
+    let allowed = [vec![0b1000u64], vec![0b1010u64]];
+
+    for kind in [BackendKind::Auto, BackendKind::Stabilizer] {
+        let (counts, _) = run_counts_with(kind.clone(), &circuit, 256, 42).unwrap();
+        assert_eq!(counts.values().sum::<u64>(), 256);
+        for key in counts.keys() {
+            assert!(allowed.contains(key), "{kind:?}: unexpected key {key:?}");
+        }
+        let shot_counts = run_shots_with(kind.clone(), &circuit, 256, 42)
+            .unwrap()
+            .counts();
+        let mut got: Vec<_> = counts.keys().collect();
+        let mut want: Vec<_> = shot_counts.keys().collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "{kind:?}: counts and shots disagree on outcomes");
+    }
+
+    let mut overwrite = Circuit::new(2, 1);
+    overwrite.add_gate(Gate::X, &[1]);
+    overwrite.add_measure(0, 0);
+    overwrite.add_measure(1, 0);
+    let (counts, _) = run_counts_with(BackendKind::Stabilizer, &overwrite, 64, 42).unwrap();
+    assert_eq!(
+        counts.get(&vec![1u64]),
+        Some(&64),
+        "last write wins: {counts:?}"
+    );
+}
+
 fn assert_unit_norm(state: &[num_complex::Complex64], label: &str) {
     let norm: f64 = state.iter().map(|a| a.norm_sqr()).sum();
     assert!(

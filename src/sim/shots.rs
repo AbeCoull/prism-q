@@ -213,6 +213,53 @@ pub(crate) fn shots_from_basis_samples(
     shots
 }
 
+/// Re-key counts drawn in measurement-record order onto the classical
+/// register, merging records that land on the same classical outcome. A later
+/// measurement of a classical bit overwrites an earlier one.
+pub(super) fn record_counts_to_classical_bits(
+    counts: HashMap<Vec<u64>, u64>,
+    meas_map: &[(usize, usize)],
+    num_classical_bits: usize,
+) -> HashMap<Vec<u64>, u64> {
+    let words = num_classical_bits.div_ceil(64).max(1);
+    let in_order = meas_map.len() <= num_classical_bits
+        && meas_map
+            .iter()
+            .enumerate()
+            .all(|(idx, &(_, classical_bit))| idx == classical_bit);
+    if in_order && counts.keys().all(|key| key.len() == words) {
+        return counts;
+    }
+
+    let mut out: HashMap<Vec<u64>, u64> = HashMap::with_capacity(counts.len());
+    for (record, count) in counts {
+        let key = if in_order {
+            let mut key = record;
+            key.resize(words, 0);
+            key
+        } else {
+            let mut key = vec![0u64; words];
+            for (idx, &(_, classical_bit)) in meas_map.iter().enumerate() {
+                if classical_bit >= num_classical_bits {
+                    continue;
+                }
+                let bit = record
+                    .get(idx / 64)
+                    .is_some_and(|w| (w >> (idx % 64)) & 1 == 1);
+                let mask = 1u64 << (classical_bit % 64);
+                if bit {
+                    key[classical_bit / 64] |= mask;
+                } else {
+                    key[classical_bit / 64] &= !mask;
+                }
+            }
+            key
+        };
+        *out.entry(key).or_insert(0) += count;
+    }
+    out
+}
+
 pub(super) fn packed_shots_to_classical_bits(
     packed: &compiled::PackedShots,
     meas_map: &[(usize, usize)],

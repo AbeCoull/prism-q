@@ -1171,7 +1171,7 @@ impl CompiledSampler {
         }
 
         if self.parity_blocks.is_none() {
-            let num_outcomes = 1usize << self.rank;
+            let num_outcomes = 1usize.checked_shl(self.rank as u32).unwrap_or(usize::MAX);
 
             if self.rank <= MAX_RANK_FOR_MULTINOMIAL
                 && total_shots >= num_outcomes * MIN_SHOTS_PER_OUTCOME_MULTINOMIAL

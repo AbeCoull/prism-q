@@ -1975,3 +1975,89 @@ fn gpu_bts_low_weight_h_layer_stays_on_cpu_above_threshold() {
     assert_eq!(gpu.rank(), n, "independent H layer should have full rank");
     assert!(!gpu.should_use_gpu_bts(shots));
 }
+
+fn key_bit(key: &[u64], bit: usize) -> bool {
+    key[bit / 64] >> (bit % 64) & 1 == 1
+}
+
+fn assert_padding_clear(key: &[u64], num_bits: usize) {
+    for bit in num_bits..key.len() * 64 {
+        assert!(!key_bit(key, bit), "padding bit {bit} set");
+    }
+}
+
+#[test]
+fn independent_counts_cross_the_word_rank() {
+    for rank in [63usize, 64, 65, 128] {
+        let one = rank;
+        let zero = rank + 1;
+        let mut c = Circuit::new(rank + 2, rank + 2);
+        for q in 0..rank {
+            c.add_gate(Gate::H, &[q]);
+        }
+        c.add_gate(Gate::X, &[one]);
+        for q in 0..rank + 2 {
+            c.add_measure(q, q);
+        }
+
+        for shots in [0usize, 1000] {
+            let mut sampler = compile_measurements(&c, 42).unwrap();
+            assert_eq!(sampler.rank(), rank);
+            let counts = sampler.sample_counts(shots);
+            assert_eq!(counts.values().sum::<u64>(), shots as u64, "rank {rank}");
+            assert_eq!(
+                counts.len(),
+                shots,
+                "rank {rank}: draws over 2^{rank} collided"
+            );
+            for key in counts.keys() {
+                assert_eq!(key.len(), (rank + 2).div_ceil(64));
+                assert!(key_bit(key, one) && !key_bit(key, zero), "rank {rank}");
+                assert_padding_clear(key, rank + 2);
+            }
+        }
+    }
+}
+
+#[test]
+fn wide_rank_counts_follow_the_measurement_map() {
+    for rank in [63usize, 64, 65, 128] {
+        let one = rank;
+        let zero = rank + 1;
+        let num_bits = rank + 4;
+        let (twice, unused, wide) = (rank, rank + 2, rank + 3);
+        let mut c = Circuit::new(rank + 2, num_bits);
+        for q in 0..rank {
+            c.add_gate(Gate::H, &[q]);
+        }
+        c.add_gate(Gate::X, &[one]);
+        for q in 0..rank {
+            c.add_measure(q, rank - 1 - q);
+        }
+        c.add_measure(zero, twice);
+        c.add_measure(one, twice);
+        c.add_measure(one, wide);
+        c.add_measure(zero, rank + 1);
+
+        for shots in [0usize, 1000] {
+            let counts = crate::sim::simulate(&c)
+                .seed(42)
+                .sample_counts(shots)
+                .unwrap()
+                .counts;
+            assert_eq!(counts.values().sum::<u64>(), shots as u64, "rank {rank}");
+            assert_eq!(
+                counts.len(),
+                shots,
+                "rank {rank}: draws over 2^{rank} collided"
+            );
+            for key in counts.keys() {
+                assert_eq!(key.len(), num_bits.div_ceil(64));
+                assert!(key_bit(key, twice), "rank {rank}: last write wins");
+                assert!(key_bit(key, wide) && !key_bit(key, unused), "rank {rank}");
+                assert!(!key_bit(key, rank + 1), "rank {rank}");
+                assert_padding_clear(key, num_bits);
+            }
+        }
+    }
+}

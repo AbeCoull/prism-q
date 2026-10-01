@@ -120,6 +120,38 @@ fn factored_hea_16q_sv() {
     );
 }
 
+// The first CX chain merges blocks pair by pair inside one `Multi2q`; later
+// layers land on a 16-qubit block, past the parallel threshold.
+#[test]
+fn factored_multi_2q_wide_block_matches_sv_amplitudes() {
+    use prism_q::backend::Backend;
+
+    let c = circuits::hardware_efficient_ansatz(16, 3, SEED);
+    let fused = prism_q::circuit::fusion::fuse_circuit(&c, true);
+    assert!(
+        fused.instructions.iter().any(|inst| matches!(
+            inst,
+            Instruction::Gate {
+                gate: Gate::Multi2q(_),
+                ..
+            }
+        )),
+        "the CX chains should batch into Multi2q"
+    );
+
+    let expected = common::run_and_state(&c);
+    let mut backend = FactoredBackend::new(SEED);
+    prism_q::sim::run_on(&mut backend, &c).unwrap();
+    let actual = backend.export_statevector().unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for (i, (a, e)) in actual.iter().zip(&expected).enumerate() {
+        assert!(
+            (a - e).norm() < FACTORED_EPS,
+            "amplitude {i}: factored {a} vs statevector {e}"
+        );
+    }
+}
+
 // ===== clifford_heavy =====
 
 #[test]

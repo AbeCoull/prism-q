@@ -571,6 +571,34 @@ fn frame_stats_match_compiled_ghz() {
     );
 }
 
+// Every qubit is read twice in one terminal block: q0 is random, q1 reads one,
+// and the second read of q2 overwrites bit 0.
+#[test]
+fn frame_rereads_a_qubit_measured_twice() {
+    let mut circuit = Circuit::new(3, 5);
+    circuit.add_gate(Gate::H, &[0]);
+    circuit.add_gate(Gate::X, &[1]);
+    circuit.add_measure(0, 0);
+    circuit.add_measure(1, 1);
+    circuit.add_measure(2, 2);
+    circuit.add_measure(0, 3);
+    circuit.add_measure(1, 4);
+    circuit.add_measure(2, 0);
+
+    let noise = NoiseModel::uniform_depolarizing(&circuit, 0.0);
+    let frame = run_shots_noisy_frame(&circuit, &noise, 512, 42).unwrap();
+    let mut ones = 0;
+    for shot in &frame.shots {
+        assert_eq!(shot[..3], [false, true, false], "{shot:?}");
+        assert!(shot[4], "{shot:?}");
+        ones += usize::from(shot[3]);
+    }
+    assert!(
+        (128..384).contains(&ones),
+        "q0 read one {ones} of 512 times"
+    );
+}
+
 #[test]
 fn frame_clifford_100q_produces_noise() {
     assert_clifford_noise_varies(run_shots_noisy_frame, 100);

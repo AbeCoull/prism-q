@@ -3846,6 +3846,26 @@ fn bench_compiled_sampler(c: &mut Criterion) {
         });
     }
 
+    // Rank zero: X on alternate qubits then a CX chain, so every measurement is
+    // deterministic and the histogram holds a single outcome.
+    let mut deterministic = Circuit::new(100, 0);
+    for q in (0..100).step_by(2) {
+        deterministic.add_gate(Gate::X, &[q]);
+    }
+    for q in 0..99 {
+        deterministic.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    let deterministic = measure_all(&deterministic);
+    for &shots in &[100_000, 1_000_000] {
+        group.bench_function(
+            BenchmarkId::new("deterministic_counts", format!("100q_{shots}")),
+            |b| {
+                let mut sampler = prism_q::compile_measurements(&deterministic, SEED).unwrap();
+                b.iter(|| sampler.sample_counts(shots));
+            },
+        );
+    }
+
     group.finish();
 }
 

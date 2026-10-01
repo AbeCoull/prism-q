@@ -1161,7 +1161,16 @@ impl CompiledSampler {
         &mut self,
         total_shots: usize,
     ) -> std::collections::HashMap<Vec<u64>, u64> {
-        if self.rank > 0 && self.parity_blocks.is_none() {
+        if self.rank == 0 {
+            let mut counts = std::collections::HashMap::new();
+            if total_shots > 0 {
+                let m_words = self.num_measurements.div_ceil(64);
+                counts.insert(self.ref_bits_packed[..m_words].to_vec(), total_shots as u64);
+            }
+            return counts;
+        }
+
+        if self.parity_blocks.is_none() {
             let num_outcomes = 1usize << self.rank;
 
             if self.rank <= MAX_RANK_FOR_MULTINOMIAL
@@ -1189,11 +1198,6 @@ impl CompiledSampler {
 
         if total_shots == 0 || self.num_measurements == 0 {
             return HashMap::new();
-        }
-        if self.rank == 0 {
-            let mut counts = HashMap::new();
-            counts.insert(self.ref_bits_packed[..m_words].to_vec(), total_shots as u64);
-            return counts;
         }
 
         let rank = self.rank;
@@ -1247,11 +1251,6 @@ impl CompiledSampler {
 
         if total_shots == 0 || self.num_measurements == 0 {
             return HashMap::new();
-        }
-        if self.rank == 0 {
-            let mut counts = HashMap::new();
-            counts.insert(self.ref_bits_packed[..m_words].to_vec(), total_shots as u64);
-            return counts;
         }
 
         let rank = self.rank;

@@ -1479,6 +1479,72 @@ fn rank_space_counts_matches_distribution() {
     }
 }
 
+fn deterministic_circuit(clbit_of: impl Fn(usize) -> usize) -> Circuit {
+    let n = 70;
+    let num_clbits = 75;
+    let mut c = Circuit::new(n, num_clbits);
+    for q in (0..n).step_by(3) {
+        c.add_gate(Gate::X, &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_measure(q, clbit_of(q) % num_clbits);
+    }
+    c
+}
+
+fn chunked_counts(
+    sampler: &mut CompiledSampler,
+    shots: usize,
+) -> std::collections::HashMap<Vec<u64>, u64> {
+    counts_from_chunks(|acc| sampler.sample_chunked(shots, acc))
+}
+
+#[test]
+fn rank_zero_counts_match_chunked_histogram() {
+    let c = deterministic_circuit(|q| q * 11 + 3);
+    for mut sampler in [
+        compile_measurements(&c, 42).unwrap(),
+        compile_forward(&c, 42).unwrap(),
+    ] {
+        assert_eq!(sampler.rank(), 0);
+        for shots in [0, 1, 1000, 100_000] {
+            let expected = chunked_counts(&mut sampler, shots);
+            let first = sampler.sample_counts(shots);
+            let second = sampler.sample_counts(shots);
+            assert_eq!(first, expected, "shots={shots}");
+            assert_eq!(second, expected, "shots={shots}");
+        }
+        assert!(sampler.sample_counts(0).is_empty());
+    }
+}
+
+#[test]
+fn rank_zero_counts_without_measurements() {
+    let c = circuits::ghz_circuit(5);
+    let mut sampler = compile_measurements(&c, 42).unwrap();
+    assert_eq!(sampler.rank(), 0);
+    for shots in [0, 7] {
+        assert_eq!(
+            sampler.sample_counts(shots),
+            chunked_counts(&mut sampler, shots)
+        );
+    }
+}
+
+#[test]
+fn rank_zero_run_counts_match_shot_counts() {
+    let c = deterministic_circuit(|q| q);
+    let counts = crate::sim::run_counts_with(BackendKind::Auto, &c, 5000, 42)
+        .unwrap()
+        .0;
+    let shots = crate::sim::run_shots_with(BackendKind::Auto, &c, 5000, 42).unwrap();
+    assert_eq!(counts.len(), 1);
+    assert_eq!(counts, shots.counts());
+}
+
 #[test]
 fn accumulator_matches_packed_counts() {
     let mut c = circuits::clifford_heavy_circuit(20, 5, 42);

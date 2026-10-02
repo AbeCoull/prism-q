@@ -3,7 +3,7 @@
 use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
 use prism_q::{
     DetectorErrorModel, PackedShots, QecBasis, QecNoise, QecOptions, QecPauli, QecProgram,
-    QecRecordRef, QecSampleResult, UnionFindDecoder, run_qec_program,
+    QecRecordRef, QecSampleResult, ShotLayout, UnionFindDecoder, run_qec_program,
 };
 use pyo3::prelude::*;
 
@@ -400,16 +400,60 @@ pub struct PyQecResult {
     inner: QecSampleResult,
 }
 
+/// Byte value to its eight bits, least significant first.
+const BYTE_BITS: [[bool; 8]; 256] = {
+    let mut table = [[false; 8]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut bit = 0;
+        while bit < 8 {
+            table[byte][bit] = (byte >> bit) & 1 == 1;
+            bit += 1;
+        }
+        byte += 1;
+    }
+    table
+};
+
+/// Write the low `out.len()` bits of `word` into `out`, bit 0 first.
+fn unpack_word(word: u64, out: &mut [bool]) {
+    let full = out.len() / 8;
+    let (bytes, tail) = out.split_at_mut(full * 8);
+    for (chunk, byte) in bytes.chunks_exact_mut(8).zip(word.to_le_bytes()) {
+        chunk.copy_from_slice(&BYTE_BITS[byte as usize]);
+    }
+    for (bit, slot) in tail.iter_mut().enumerate() {
+        *slot = (word >> (full * 8 + bit)) & 1 != 0;
+    }
+}
+
 fn packed_to_2d<'py>(
     py: Python<'py>,
     packed: &PackedShots,
 ) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
     let n_shots = packed.num_shots();
     let n_meas = packed.num_measurements();
-    let mut flat = Vec::with_capacity(n_shots * n_meas);
-    for shot in 0..n_shots {
-        for meas in 0..n_meas {
-            flat.push(packed.get_bit(shot, meas));
+    let mut flat = vec![false; n_shots * n_meas];
+    if n_meas > 0 {
+        match packed.layout() {
+            ShotLayout::ShotMajor => {
+                for (shot, row) in flat.chunks_exact_mut(n_meas).enumerate() {
+                    for (&word, bits) in packed.shot_words(shot).iter().zip(row.chunks_mut(64)) {
+                        unpack_word(word, bits);
+                    }
+                }
+            }
+            _ => {
+                for (block, rows) in flat.chunks_mut(64 * n_meas).enumerate() {
+                    for meas in 0..n_meas {
+                        let mut word = packed.meas_words(meas)[block];
+                        for row in rows.chunks_exact_mut(n_meas) {
+                            row[meas] = word & 1 != 0;
+                            word >>= 1;
+                        }
+                    }
+                }
+            }
         }
     }
     bool_matrix(py, n_shots, n_meas, flat)

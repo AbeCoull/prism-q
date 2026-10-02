@@ -11,11 +11,11 @@ use prism_q::{
     BackendKind, BondReport, Circuit, CountsResult, Exactness, MarginalsResult, NoiseModel,
     ObservableExpectation, ParamLink, Parameters, PauliAxis, PauliObservable, PauliTerm, Placement,
     Probabilities, ReducedDensityMatrix, RunMetadata, RunOutcome, SaveRecord, SavedValue,
-    ShotsResult, bitstring, simulate as core_simulate,
+    ShotsResult, simulate as core_simulate,
 };
 use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyDict, PyList, PyString};
 
 use crate::backend::PyBackendKind;
 use crate::circuit::PyCircuit;
@@ -995,8 +995,16 @@ fn counts_to_dict<'py>(
     num_bits: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
+    let mut chars = vec![b'0'; num_bits];
     for (key, count) in counts {
-        dict.set_item(bitstring(key, num_bits), count)?;
+        for (index, word_chars) in chars.chunks_mut(64).enumerate() {
+            let word = key.get(index).copied().unwrap_or(0);
+            for (bit, slot) in word_chars.iter_mut().enumerate() {
+                *slot = b'0' + ((word >> bit) & 1) as u8;
+            }
+        }
+        let text = std::str::from_utf8(&chars).expect("bitstring keys are ASCII");
+        dict.set_item(PyString::new(py, text), count)?;
     }
     Ok(dict)
 }

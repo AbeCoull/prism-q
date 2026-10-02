@@ -791,6 +791,20 @@ predicted = decoder.decode(res.detectors)
 failures = (predicted[:, 0] != res.observables[:, 0]).sum()
 ```
 
+`packed_detectors()`, `packed_observables()`, and `packed_measurements()` return
+the same records eight to a byte, as `(shots, ceil(n / 8))` `uint8` arrays: record
+`j` of a shot is bit `j % 8` of byte `j // 8`, and the unused high bits of the
+last byte are zero. A million shots then hold an eighth of the memory of the
+bool arrays, and `np.unpackbits` restores them:
+
+```python
+import numpy as np
+
+packed = res.packed_detectors()
+detectors = np.unpackbits(packed, axis=1, count=qp.num_detectors, bitorder="little")
+assert (detectors.astype(bool) == res.detectors).all()
+```
+
 ## Errors and typing
 
 Every failure surfaces as `prism_q.PrismError`, carrying the message from the

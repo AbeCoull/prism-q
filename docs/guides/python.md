@@ -496,7 +496,10 @@ workers run beside MPI in the same process, and every MPI call stays on the thre
 that constructed the context. mpi4py requests `MPI_THREAD_MULTIPLE` by default; a
 script that lowers it (`mpi4py.rc.thread_level = 'single'` or
 `mpi4py.rc.threads = False`) gets an error from the constructor rather than a run
-that mixes threads with a single-threaded MPI.
+that mixes threads with a single-threaded MPI. Below `MPI_THREAD_MULTIPLE`, a
+simulation call from a Python thread other than the one that constructed the
+context raises before it reaches MPI, and at `MPI_THREAD_FUNNELED` the constructor
+itself raises off the thread that imported mpi4py.
 
 The published wheels have no MPI support: `mpi-sys` runs bindgen and needs a
 system MPI at build time, and the extension has to link the same MPI

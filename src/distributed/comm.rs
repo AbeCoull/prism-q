@@ -7,6 +7,8 @@ use num_complex::Complex64;
 use crate::error::{PrismError, Result};
 #[cfg(feature = "distributed-mpi")]
 use mpi::environment::Threading;
+#[cfg(any(test, feature = "distributed-mpi"))]
+use std::thread::ThreadId;
 
 /// Collective and peer operations across a rank set.
 ///
@@ -137,20 +139,46 @@ fn check_threading(provided: Threading) -> Result<()> {
     })
 }
 
+/// The thread every MPI call must come from at `provided`: the calling one below
+/// `MPI_THREAD_MULTIPLE`, any thread (`None`) at it.
+#[cfg(feature = "distributed-mpi")]
+fn owner_for(provided: Threading) -> Option<ThreadId> {
+    (provided < Threading::Multiple).then(|| std::thread::current().id())
+}
+
+#[cfg(any(test, feature = "distributed-mpi"))]
+#[inline]
+fn assert_owner_thread(owner: Option<ThreadId>) {
+    if let Some(owner) = owner {
+        let here = std::thread::current().id();
+        assert!(
+            here == owner,
+            "MPI call from thread {here:?}, but the MPI thread level confines calls to \
+             thread {owner:?}, which constructed the comm"
+        );
+    }
+}
+
 /// MPI transport over `rsmpi`.
 ///
 /// Requires the `distributed-mpi` feature, a system MPI install, and an MPI
 /// launcher. MPI must run at `MPI_THREAD_FUNNELED` or higher: [`MpiComm::world`]
 /// requests that level and both constructors return an error when the provided
-/// level is lower. Keep every MPI call, including dropping the comm, on the
-/// thread that constructed it.
+/// level is lower. Drop a comm from [`MpiComm::world`] on the thread that
+/// constructed it, since the drop runs `MPI_Finalize`.
+///
+/// # Panics
+///
+/// Below `MPI_THREAD_MULTIPLE`, every collective and exchange panics before
+/// reaching MPI when called from a thread other than the one that constructed
+/// the comm.
 #[cfg(feature = "distributed-mpi")]
 pub struct MpiComm {
     /// Held only by a comm that ran `MPI_Init` itself, because dropping a
     /// `Universe` runs `MPI_Finalize`. A comm attached to an MPI another
     /// component owns leaves that lifetime alone.
     _universe: Option<mpi::environment::Universe>,
-    world: mpi::topology::SimpleCommunicator,
+    owner: Option<ThreadId>,
     rank: usize,
     size: usize,
 }
@@ -183,8 +211,7 @@ impl MpiComm {
                     .into(),
             })?;
         check_threading(provided)?;
-        let world = universe.world();
-        Ok(Self::from_parts(Some(universe), world))
+        Ok(Self::from_parts(Some(universe), provided))
     }
 
     /// Attach to an MPI another component has already initialized.
@@ -195,32 +222,52 @@ impl MpiComm {
     /// handle would make every later MPI call in the process erroneous.
     ///
     /// Returns `Ok(None)` when MPI is not initialized, and an error when the
-    /// owner initialized it below `MPI_THREAD_FUNNELED`.
+    /// owner initialized it below `MPI_THREAD_FUNNELED`, or at that level on
+    /// another thread.
     pub fn attach_world() -> Result<Option<Self>> {
         if !mpi::environment::is_initialized() {
             return Ok(None);
         }
-        check_threading(mpi::environment::threading_support())?;
-        Ok(Some(Self::from_parts(
-            None,
-            mpi::topology::SimpleCommunicator::world(),
-        )))
+        let provided = mpi::environment::threading_support();
+        check_threading(provided)?;
+        if provided < Threading::Serialized && !is_thread_main() {
+            return Err(PrismError::IncompatibleBackend {
+                backend: "distributed".into(),
+                reason: "MPI runs at MPI_THREAD_FUNNELED, which confines MPI calls to the \
+                         thread that initialized it; attach from that thread"
+                    .into(),
+            });
+        }
+        Ok(Some(Self::from_parts(None, provided)))
     }
 
-    fn from_parts(
-        universe: Option<mpi::environment::Universe>,
-        world: mpi::topology::SimpleCommunicator,
-    ) -> Self {
+    fn from_parts(universe: Option<mpi::environment::Universe>, provided: Threading) -> Self {
         use mpi::traits::Communicator;
-        let rank = world.rank() as usize;
-        let size = world.size() as usize;
+        let world = mpi::topology::SimpleCommunicator::world();
         Self {
             _universe: universe,
-            world,
-            rank,
-            size,
+            owner: owner_for(provided),
+            rank: world.rank() as usize,
+            size: world.size() as usize,
         }
     }
+
+    /// The world communicator, fetched per call rather than stored: Open MPI
+    /// types `MPI_Comm` as a pointer, so a stored one would make the comm
+    /// neither `Send` nor `Sync`.
+    fn world_comm(&self) -> mpi::topology::SimpleCommunicator {
+        assert_owner_thread(self.owner);
+        mpi::topology::SimpleCommunicator::world()
+    }
+}
+
+#[cfg(feature = "distributed-mpi")]
+fn is_thread_main() -> bool {
+    let mut flag: std::os::raw::c_int = 0;
+    // SAFETY: MPI is initialized, and the standard allows `MPI_Is_thread_main`
+    // from any thread at any level. rsmpi exposes no safe wrapper for it.
+    unsafe { mpi::ffi::MPI_Is_thread_main(&mut flag) };
+    flag != 0
 }
 
 #[cfg(feature = "distributed-mpi")]
@@ -236,7 +283,7 @@ impl RankComm for MpiComm {
     fn allgather_c64(&self, local: &[Complex64]) -> Vec<Complex64> {
         use mpi::traits::CommunicatorCollectives;
         let mut out = vec![Complex64::new(0.0, 0.0); local.len() * self.size];
-        self.world
+        self.world_comm()
             .all_gather_into(as_f64(local), as_f64_mut(&mut out));
         out
     }
@@ -244,7 +291,7 @@ impl RankComm for MpiComm {
     fn allgather_f64(&self, local: &[f64]) -> Vec<f64> {
         use mpi::traits::CommunicatorCollectives;
         let mut out = vec![0.0_f64; local.len() * self.size];
-        self.world.all_gather_into(local, &mut out);
+        self.world_comm().all_gather_into(local, &mut out);
         out
     }
 
@@ -260,7 +307,7 @@ impl RankComm for MpiComm {
             total += c;
         }
         let mut out = vec![0_u64; total as usize];
-        self.world
+        self.world_comm()
             .all_gather_varcount_into(local, &mut PartitionMut::new(&mut out[..], counts, displs));
         out
     }
@@ -268,8 +315,11 @@ impl RankComm for MpiComm {
     fn allreduce_sum_f64(&self, value: f64) -> f64 {
         use mpi::traits::CommunicatorCollectives;
         let mut out = 0.0_f64;
-        self.world
-            .all_reduce_into(&value, &mut out, mpi::collective::SystemOperation::sum());
+        self.world_comm().all_reduce_into(
+            &value,
+            &mut out,
+            mpi::collective::SystemOperation::sum(),
+        );
         out
     }
 
@@ -277,13 +327,36 @@ impl RankComm for MpiComm {
         use mpi::point_to_point as p2p;
         use mpi::traits::Communicator;
         debug_assert_eq!(send.len(), recv.len());
-        let peer = self.world.process_at_rank(partner as i32);
+        let world = self.world_comm();
+        let peer = world.process_at_rank(partner as i32);
         p2p::send_receive_into(as_f64(send), &peer, as_f64_mut(recv), &peer);
     }
 
     fn barrier(&self) {
         use mpi::traits::CommunicatorCollectives;
-        self.world.barrier();
+        self.world_comm().barrier();
+    }
+}
+
+#[cfg(test)]
+mod owner_thread_tests {
+    use super::assert_owner_thread;
+
+    #[test]
+    fn owner_thread_check_admits_the_owner_and_rejects_other_threads() {
+        let owner = Some(std::thread::current().id());
+        assert_owner_thread(owner);
+        assert_owner_thread(None);
+        std::thread::spawn(|| assert_owner_thread(None))
+            .join()
+            .expect("an unconfined comm admits every thread");
+        let panic = std::thread::spawn(move || assert_owner_thread(owner))
+            .join()
+            .expect_err("a confined comm rejects other threads");
+        let message = panic
+            .downcast_ref::<String>()
+            .expect("formatted panic message");
+        assert!(message.contains("constructed the comm"), "{message}");
     }
 }
 
@@ -306,5 +379,13 @@ mod threading_tests {
         ] {
             assert!(check_threading(level).is_ok(), "{level:?}");
         }
+    }
+
+    #[test]
+    fn only_multiple_leaves_calls_unconfined() {
+        let here = Some(std::thread::current().id());
+        assert_eq!(owner_for(Threading::Funneled), here);
+        assert_eq!(owner_for(Threading::Serialized), here);
+        assert_eq!(owner_for(Threading::Multiple), None);
     }
 }

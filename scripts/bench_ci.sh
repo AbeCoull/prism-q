@@ -14,7 +14,9 @@
 # run of this tier is not a result: four runs of identical code against identical
 # code produced three PASSes and one FAIL, the FAIL on `statevector/scalability_d5/18`
 # at +5.3% against a 4.2% control spread. Confirmation costs nothing on a green
-# run and one extra set on a red one.
+# run and one extra set on a red one. Only a valid second result clears the
+# first: a PASS, or a FAIL on disjoint rows. A RERUN, NO DATA, a busy host or a
+# missing report leaves the FAIL standing. `scripts/bench_ci_test.sh` covers each.
 #
 # Environment:
 #   PRISM_BENCH_REF       git ref for the reference build (required)
@@ -120,14 +122,34 @@ echo
 echo "Regression reported. Running the set again; only a row that regresses twice blocks."
 echo
 
-bash "$SCRIPT_DIR/bench_ab.sh" "${args[@]}" --out "$CONFIRM" || true
+CONFIRM_STATUS=0
+bash "$SCRIPT_DIR/bench_ab.sh" "${args[@]}" --out "$CONFIRM" || CONFIRM_STATUS=$?
 
-if ! grep -q '^\*\*Regression verdict\*\*: FAIL' "$CONFIRM"; then
-    echo "Second run reports no regression. Treating the first as unconfirmed."
-    exit 0
+CONFIRM_VERDICT=""
+if [[ -f "$CONFIRM" ]]; then
+    CONFIRM_VERDICT="$(sed -n 's/^\*\*Regression verdict\*\*: \([A-Z][A-Z ]*[A-Z]\).*/\1/p' "$CONFIRM")"
 fi
 
-CONFIRMED="$(comm -12 <(sort <<<"$FIRST_ROWS") <(regressed_rows "$CONFIRM" | sort))"
+case "$CONFIRM_STATUS/$CONFIRM_VERDICT" in
+    0/PASS)
+        echo "Second run passes. Treating the first as unconfirmed."
+        exit 0
+        ;;
+    1/FAIL)
+        ;;
+    *)
+        echo "Second run gave no valid result (exit $CONFIRM_STATUS, verdict ${CONFIRM_VERDICT:-none}). The first FAIL stands." >&2
+        exit 1
+        ;;
+esac
+
+CONFIRM_ROWS="$(regressed_rows "$CONFIRM")"
+if [[ -z "$CONFIRM_ROWS" ]]; then
+    echo "Second report says FAIL but names no row. Blocking rather than clearing on a list that could not be read." >&2
+    exit 1
+fi
+
+CONFIRMED="$(comm -12 <(sort <<<"$FIRST_ROWS") <(sort <<<"$CONFIRM_ROWS"))"
 
 if [[ -z "$CONFIRMED" ]]; then
     echo "Both runs reported a regression, on disjoint rows. Neither is confirmed."

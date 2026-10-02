@@ -7,9 +7,9 @@
 # binary with Rayon enabled (the shipped combination: workers beside MPI, which
 # must grant MPI_THREAD_FUNNELED at init), then launches it across N ranks under
 # three configurations (default, tiled exchange, relabeling off). Rank 0 asserts
-# the gathered result matches the one process statevector reference and exits
-# nonzero on mismatch. A final three rank run asserts the power of two
-# requirement is rejected.
+# the gathered result matches the one process statevector reference and reports
+# the world size it saw, which must equal N. A final three rank run asserts the
+# power of two requirement is rejected.
 #
 # -Timed skips the sweep and runs only the timed arm of the check binary, built
 # in release, at 2 and 4 ranks with the exchange tiled to -TimedChunk
@@ -83,6 +83,9 @@ foreach ($n in $RankCounts) {
         $out = & $mpiexec -n $n @envArgs $exe
         if ($LASTEXITCODE -ne 0) { throw "rank check failed at $label" }
         $out | ForEach-Object { Write-Host $_ }
+        if (-not ($out | Select-String -Pattern "^OK: $n ranks," -Quiet)) {
+            throw "rank 0 did not report a world of $n ranks at $label"
+        }
         $match = $out | Select-String -Pattern 'outcome_sig=(\S+)' | Select-Object -First 1
         if (-not $match) {
             throw "measurement signature missing at $label"
@@ -135,7 +138,7 @@ if ($LASTEXITCODE -ne 0) {
     if ($LASTEXITCODE -ne 0) { throw "python distributed tests failed at one rank" }
     foreach ($n in $RankCounts) {
         Write-Host "`n== mpiexec -n $n pytest test_distributed.py =="
-        & $mpiexec -n $n -env PRISM_DIST_MIN_LOCAL_QUBITS 1 python -m pytest bindings/python/tests/test_distributed.py -q
+        & $mpiexec -n $n -env PRISM_DIST_MIN_LOCAL_QUBITS 1 -env PRISM_REQUIRE_MPI_RANKS $n python -m pytest bindings/python/tests/test_distributed.py -q
         if ($LASTEXITCODE -ne 0) { throw "python distributed tests failed at $n ranks" }
     }
 }

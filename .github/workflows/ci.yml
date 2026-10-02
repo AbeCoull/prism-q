@@ -130,6 +130,55 @@ jobs:
       - name: Tests
         run: cargo nextest run --features "$CI_DIST_FEATURES"
 
+  # The MPI transport against Open MPI, under a real launcher. The loopback suite
+  # above never links MPI, and a Windows MS-MPI run speaks for neither Open MPI's
+  # handle types (`MPI_Comm` is a pointer there, an int in MS-MPI) nor its launcher.
+  # `--require` turns every skip in the script and in test_distributed.py into a
+  # failure, and each launch asserts the world size it asked for.
+  mpi-linux:
+    name: MPI acceptance (Linux, Open MPI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Single-copy shared memory reads peer ranks through process_vm_readv, which
+      # a ptrace-restricted host refuses mid-transfer. Copy-in/copy-out keeps the
+      # run independent of that host setting.
+      OMPI_MCA_btl_vader_single_copy_mechanism: none
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+
+      # mpi-sys runs bindgen over mpi.h, so it needs libclang beside the MPI headers.
+      - name: Install Open MPI and libclang
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin libclang-dev
+
+      # maturin develop installs only into a virtualenv. mpi4py builds from source
+      # so it compiles against the same Open MPI as the extension and the launcher.
+      - name: Python environment
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/venv/bin/pip" install maturin numpy pytest
+          "$RUNNER_TEMP/venv/bin/pip" install --no-binary mpi4py mpi4py
+
+      - name: Compile and lint against Open MPI
+        run: cargo clippy --all-targets --features "parallel distributed-mpi" -- -D warnings -D clippy::undocumented_unsafe_blocks
+
+      - name: Compile and lint the Python bindings against Open MPI
+        run: cargo clippy -p prism-q-py --all-targets --features distributed-mpi -- -D warnings -D clippy::undocumented_unsafe_blocks
+
+      - name: Rank check and Python distributed tests at 1, 2, and 4 ranks
+        run: bash scripts/test-mpi.sh --require
+
   # Miri interprets the determinism target, which drives every parallel kernel family
   # at cfg(miri)-reduced sizes, and rejects undefined behavior in the SendPtr
   # partitioning paths (aliasing, provenance, data races) that no native test can see.

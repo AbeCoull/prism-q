@@ -1,9 +1,11 @@
 //! Factored statevector backend.
 //!
 //! Maintains separate sub-state vectors per entangled qubit group. When a
-//! multi-qubit gate bridges two groups, they merge via tensor product. Groups
-//! never split. For sparse-entanglement circuits this is exponentially cheaper
-//! than a monolithic 2^n statevector.
+//! multi-qubit gate bridges two groups, they merge via tensor product. A
+//! measurement or reset leaves its qubit product with the rest of the group, so
+//! it splits back out into a group of its own once the group is wide enough to
+//! pay for the split. For sparse-entanglement circuits this is exponentially
+//! cheaper than a monolithic 2^n statevector.
 //!
 //! # Memory layout
 //!
@@ -11,6 +13,8 @@
 //!   total cost is the sum over groups, dominated by the largest.
 //! - Each group lists its global qubits sorted ascending; position = local
 //!   qubit index. A global map resolves qubit to group.
+//! - A split compacts its group in place and keeps the allocation, so a split
+//!   qubit merging back in grows the group without allocating.
 //!
 //! # Gate support
 //!
@@ -65,6 +69,14 @@ use crate::backend::{
 use rayon::prelude::*;
 
 type GateList = SmallVec<[(usize, [[Complex64; 2]; 2]); 4]>;
+
+/// Narrowest sub-state a measurement or reset splits. Below it, the split and
+/// the merge that usually follows cost more than the halved sweeps return.
+const MIN_SPLIT_QUBITS: usize = 7;
+
+/// Shortest contiguous run a split or single-qubit merge copies under Rayon.
+#[cfg(feature = "parallel")]
+const MIN_PAR_RUN: usize = 1 << (PARALLEL_THRESHOLD_QUBITS - 1);
 
 macro_rules! seq_or_par {
     ($cond:expr, $seq:expr, $par:expr) => {{
@@ -177,6 +189,26 @@ impl FactoredBackend {
         let src_n = self.substates[src_idx].as_ref().unwrap().qubits.len();
         let total_n = dst_n + src_n;
         Self::check_merge_allocation(total_n)?;
+
+        // A sub-state a split shrank keeps its capacity, so a qubit merging
+        // back in grows it in place instead of allocating the product.
+        let wide_idx = if src_n > dst_n { src_idx } else { dst_idx };
+        let wide = &self.substates[wide_idx].as_ref().unwrap().state;
+        if dst_n.min(src_n) == 1 && wide.capacity() >= wide.len() << 1 {
+            let mut src = self.substates[src_idx].take().unwrap();
+            let dst = self.substates[dst_idx].as_mut().unwrap();
+            if src_n > dst_n {
+                std::mem::swap(dst, &mut src);
+            }
+            let q = src.qubits[0];
+            let pos = dst.qubits.partition_point(|&g| g < q);
+            insert_qubit(&mut dst.state, pos, [src.state[0], src.state[1]]);
+            dst.qubits.insert(pos, q);
+            for &g in &dst.qubits {
+                self.qubit_to_substate[g] = dst_idx;
+            }
+            return Ok(());
+        }
 
         let src = self.substates[src_idx].take().unwrap();
         let dst = self.substates[dst_idx].as_ref().unwrap();
@@ -564,63 +596,51 @@ impl FactoredBackend {
     }
 
     fn apply_reset(&mut self, qubit: usize) {
-        let ss_idx = self.qubit_to_substate[qubit];
-        let sub = self.substates[ss_idx].as_mut().unwrap();
-        let local = Self::local_qubit(sub, qubit);
-
-        let mask = 1usize << local;
-        let n = sub.state.len();
-        let zero = Complex64::new(0.0, 0.0);
-
-        let mut prob_one = 0.0f64;
-        for i in 0..n {
-            if (i & mask) != 0 {
-                prob_one += sub.state[i].norm_sqr();
-            }
-        }
-
-        let outcome = self.rng.random::<f64>() < prob_one;
-        let inv_norm = measurement_inv_norm(outcome, prob_one);
-
-        for i in 0..n {
-            if (i & mask) != 0 {
-                continue;
-            }
-            let source = if outcome { i | mask } else { i };
-            sub.state[i] = sub.state[source] * inv_norm;
-            sub.state[i | mask] = zero;
-        }
+        self.collapse(qubit, true);
     }
 
     fn apply_measure(&mut self, qubit: usize, classical_bit: usize) {
+        self.classical_bits[classical_bit] = self.collapse(qubit, false);
+    }
+
+    /// Project `qubit` onto a sampled outcome and return it. A reset then
+    /// rotates the qubit to `|0>`.
+    ///
+    /// The collapsed qubit is exactly product with the rest of its sub-state.
+    /// From [`MIN_SPLIT_QUBITS`] up, the outcome branch becomes the shrunken
+    /// sub-state and the qubit takes a free slot as a basis state; below it
+    /// the sub-state collapses in place, which costs less than the split and
+    /// the merge that usually follows.
+    fn collapse(&mut self, qubit: usize, reset: bool) -> bool {
         let ss_idx = self.qubit_to_substate[qubit];
         let sub = self.substates[ss_idx].as_mut().unwrap();
         let local = Self::local_qubit(sub, qubit);
 
-        let mask = 1usize << local;
-        let n = sub.state.len();
-
-        let mut prob_one = 0.0f64;
-        for i in 0..n {
-            if (i & mask) != 0 {
-                prob_one += sub.state[i].norm_sqr();
-            }
-        }
-
+        let prob_one = branch_norm_sqr(&sub.state, local);
         let outcome = self.rng.random::<f64>() < prob_one;
-        self.classical_bits[classical_bit] = outcome;
-
         let inv_norm = measurement_inv_norm(outcome, prob_one);
-        let zero = Complex64::new(0.0, 0.0);
+        let lands_on_one = outcome && !reset;
 
-        for i in 0..n {
-            let bit_set = (i & mask) != 0;
-            if bit_set == outcome {
-                sub.state[i] *= inv_norm;
-            } else {
-                sub.state[i] = zero;
-            }
+        if sub.qubits.len() < MIN_SPLIT_QUBITS {
+            collapse_in_place(&mut sub.state, local, outcome, lands_on_one, inv_norm);
+            return outcome;
         }
+
+        extract_branch(&mut sub.state, local, outcome, inv_norm);
+        sub.qubits.remove(local);
+
+        let zero = Complex64::new(0.0, 0.0);
+        let mut basis = vec![zero; 2];
+        basis[lands_on_one as usize] = Complex64::new(1.0, 0.0);
+        // `init` made one slot per qubit, and a sub-state of two or more qubits
+        // leaves fewer live sub-states than that.
+        let slot = self.substates.iter().position(Option::is_none).unwrap();
+        self.substates[slot] = Some(SubState {
+            state: basis,
+            qubits: smallvec![qubit],
+        });
+        self.qubit_to_substate[qubit] = slot;
+        outcome
     }
 
     /// Reduce a joint Pauli observable to per-sub-state masks in local qubit
@@ -1028,6 +1048,165 @@ impl Backend for FactoredBackend {
         }
         Ok(products)
     }
+}
+
+/// Probability that bit `local` of a normalized sub-state reads one.
+fn branch_norm_sqr(state: &[Complex64], local: usize) -> f64 {
+    let half = 1usize << local;
+
+    #[cfg(feature = "parallel")]
+    if state.len() >= 1 << PARALLEL_THRESHOLD_QUBITS {
+        if half >= MIN_PAR_ELEMS {
+            let chunks_per_half = half / MIN_PAR_ELEMS;
+            return state
+                .par_chunks(MIN_PAR_ELEMS)
+                .enumerate()
+                .filter(|(c, _)| (c / chunks_per_half) & 1 == 1)
+                .map(|(_, chunk)| simd::norm_sqr_sum(chunk))
+                .sum();
+        }
+        return state
+            .par_chunks((half << 1).max(MIN_PAR_ELEMS))
+            .map(|chunk| branch_norm_sqr_seq(chunk, half))
+            .sum();
+    }
+    branch_norm_sqr_seq(state, half)
+}
+
+#[inline(always)]
+fn branch_norm_sqr_seq(state: &[Complex64], half: usize) -> f64 {
+    if half < 4 {
+        return state
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i & half != 0)
+            .map(|(_, amp)| amp.norm_sqr())
+            .sum();
+    }
+    state
+        .chunks_exact(half << 1)
+        .map(|block| simd::norm_sqr_sum(&block[half..]))
+        .sum()
+}
+
+/// Scale the `outcome` branch of bit `local` by `scale` onto the branch
+/// `lands_on_one` names and zero the other.
+fn collapse_in_place(
+    state: &mut [Complex64],
+    local: usize,
+    outcome: bool,
+    lands_on_one: bool,
+    scale: f64,
+) {
+    let half = 1usize << local;
+    let factor = Complex64::new(scale, 0.0);
+    let zero = Complex64::new(0.0, 0.0);
+    for block in state.chunks_exact_mut(half << 1) {
+        let (lo, hi) = block.split_at_mut(half);
+        match (outcome, lands_on_one) {
+            (false, _) => {
+                simd::scale_complex_slice(lo, factor);
+                hi.fill(zero);
+            }
+            (true, true) => {
+                simd::scale_complex_slice(hi, factor);
+                lo.fill(zero);
+            }
+            (true, false) => {
+                simd::scale_complex_to_slice(lo, hi, factor);
+                hi.fill(zero);
+            }
+        }
+    }
+}
+
+/// Keep the amplitudes whose bit `local` equals `outcome`, scaled by `scale`,
+/// compacted in place into a sub-state one qubit narrower. Bits above `local`
+/// shift down by one; capacity is kept for a later merge to grow back into.
+fn extract_branch(state: &mut Vec<Complex64>, local: usize, outcome: bool, scale: f64) {
+    let half = 1usize << local;
+    let offset = if outcome { half } else { 0 };
+    let len = state.len() >> 1;
+
+    if half < 4 {
+        let low = half - 1;
+        for j in 0..len {
+            state[j] = state[((j & !low) << 1) | offset | (j & low)] * scale;
+        }
+    } else {
+        let factor = Complex64::new(scale, 0.0);
+        // Run `c` moves from `2c * half + offset` down to `c * half`. Past the
+        // first run the two ranges are disjoint, and ascending order reads
+        // every run before anything lands on it.
+        for c in 0..len / half {
+            let src = 2 * c * half + offset;
+            let dst = c * half;
+            if src == dst {
+                scale_run_in_place(&mut state[..half], factor);
+            } else {
+                let (lo, hi) = state.split_at_mut(src);
+                scale_run(&mut lo[dst..dst + half], &hi[..half], factor);
+            }
+        }
+    }
+    state.truncate(len);
+}
+
+/// Tensor a one-qubit state into bit `pos` of `state` in place, shifting the
+/// bits at and above `pos` up by one.
+fn insert_qubit(state: &mut Vec<Complex64>, pos: usize, single: [Complex64; 2]) {
+    let len = state.len();
+    let half = 1usize << pos;
+    state.resize(len << 1, Complex64::new(0.0, 0.0));
+
+    if half < 4 {
+        let low = half - 1;
+        // Descending: index `j` writes at or above `j`, so no unread source
+        // is overwritten.
+        for j in (0..len).rev() {
+            let amp = state[j];
+            let base = ((j & !low) << 1) | (j & low);
+            state[base | half] = amp * single[1];
+            state[base] = amp * single[0];
+        }
+        return;
+    }
+    for c in (0..len / half).rev() {
+        if c == 0 {
+            let (lo, hi) = state.split_at_mut(half);
+            scale_run(&mut hi[..half], lo, single[1]);
+            scale_run_in_place(lo, single[0]);
+        } else {
+            let (lo, hi) = state.split_at_mut(2 * c * half);
+            let src = &lo[c * half..(c + 1) * half];
+            let (dst0, dst1) = hi[..2 * half].split_at_mut(half);
+            scale_run(dst0, src, single[0]);
+            scale_run(dst1, src, single[1]);
+        }
+    }
+}
+
+#[inline(always)]
+fn scale_run(dst: &mut [Complex64], src: &[Complex64], factor: Complex64) {
+    #[cfg(feature = "parallel")]
+    if dst.len() >= MIN_PAR_RUN {
+        dst.par_chunks_mut(MIN_PAR_ELEMS)
+            .zip(src.par_chunks(MIN_PAR_ELEMS))
+            .for_each(|(d, s)| simd::scale_complex_to_slice(d, s, factor));
+        return;
+    }
+    simd::scale_complex_to_slice(dst, src, factor);
+}
+
+#[inline(always)]
+fn scale_run_in_place(run: &mut [Complex64], factor: Complex64) {
+    #[cfg(feature = "parallel")]
+    if run.len() >= MIN_PAR_RUN {
+        run.par_chunks_mut(MIN_PAR_ELEMS)
+            .for_each(|chunk| simd::scale_complex_slice(chunk, factor));
+        return;
+    }
+    simd::scale_complex_slice(run, factor);
 }
 
 /// Kronecker product where `low_state` occupies the low `low_n` bits of the

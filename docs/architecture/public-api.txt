@@ -1221,6 +1221,7 @@ pub fn prism_q::circuits::independent_random_blocks(usize, usize, usize, u64) ->
 pub fn prism_q::circuits::jordan_wigner_hamiltonian(usize, usize, u64) -> alloc::vec::Vec<(f64, alloc::vec::Vec<prism_q::sim::unified_pauli::PauliTerm>)>
 pub fn prism_q::circuits::local_clifford_blocks(usize, usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::matched_brickwork_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
+pub fn prism_q::circuits::measure_split_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::partially_independent_circuit(usize, usize, u64) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::phase_estimation_circuit(usize) -> prism_q::circuit::Circuit
 pub fn prism_q::circuits::qaoa_circuit(usize, usize, u64) -> prism_q::circuit::Circuit

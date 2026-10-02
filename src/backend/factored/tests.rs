@@ -4,6 +4,7 @@ use crate::backend::statevector::StatevectorBackend;
 use crate::circuit::{Circuit, ClassicalCondition, Instruction, smallvec};
 use crate::gates::Gate;
 use crate::sim;
+use crate::sim::unified_pauli::{PauliAxis, PauliTerm};
 
 fn assert_probs_close(actual: &[f64], expected: &[f64], eps: f64) {
     assert_eq!(
@@ -798,4 +799,255 @@ fn test_factored_par_batch_rzz_15q() {
         &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
     );
     compare_with_statevector(&c, 1e-10);
+}
+
+// ---- Splitting on measurement and reset ----
+
+fn group_widths(b: &FactoredBackend) -> Vec<usize> {
+    let mut widths: Vec<usize> = b
+        .substates
+        .iter()
+        .flatten()
+        .map(|sub| sub.qubits.len())
+        .collect();
+    widths.sort_unstable_by(|a, b| b.cmp(a));
+    widths
+}
+
+fn assert_layout_consistent(b: &FactoredBackend) {
+    let mut seen = vec![false; b.num_qubits];
+    for (idx, sub) in b.substates.iter().enumerate() {
+        let Some(sub) = sub else { continue };
+        assert_eq!(sub.state.len(), 1 << sub.qubits.len());
+        assert!(sub.qubits.windows(2).all(|w| w[0] < w[1]));
+        for &q in &sub.qubits {
+            assert!(!seen[q], "qubit {q} sits in two sub-states");
+            seen[q] = true;
+            assert_eq!(
+                b.qubit_to_substate[q], idx,
+                "qubit {q} maps to the wrong slot"
+            );
+        }
+    }
+    assert!(seen.iter().all(|&s| s), "a qubit belongs to no sub-state");
+}
+
+fn observables(n: usize) -> Vec<Vec<PauliTerm>> {
+    vec![
+        vec![PauliTerm::new(0, PauliAxis::Z)],
+        vec![PauliTerm::new(1, PauliAxis::X)],
+        vec![
+            PauliTerm::new(0, PauliAxis::X),
+            PauliTerm::new(n / 2, PauliAxis::Y),
+        ],
+        (0..n).map(|q| PauliTerm::new(q, PauliAxis::Z)).collect(),
+        vec![
+            PauliTerm::new(1, PauliAxis::Y),
+            PauliTerm::new(n - 1, PauliAxis::X),
+            PauliTerm::new(n / 3, PauliAxis::Z),
+        ],
+    ]
+}
+
+// One trajectory on each backend from the same seed draws the same outcomes,
+// so the classical record, the amplitudes and the expectations must all agree.
+fn assert_trajectory_matches(circuit: &Circuit, seed: u64) -> FactoredBackend {
+    let mut sv = StatevectorBackend::new(seed);
+    sim::run_on(&mut sv, circuit).unwrap();
+    let mut fac = FactoredBackend::new(seed);
+    sim::run_on(&mut fac, circuit).unwrap();
+    assert_layout_consistent(&fac);
+
+    assert_eq!(
+        fac.classical_results(),
+        sv.classical_results(),
+        "seed {seed}: classical record differs"
+    );
+    let fac_state = fac.export_statevector().unwrap();
+    let sv_state = sv.export_statevector().unwrap();
+    for (i, (a, e)) in fac_state.iter().zip(&sv_state).enumerate() {
+        assert!(
+            (a - e).norm() < 1e-10,
+            "seed {seed}: amplitude {i} is {a}, statevector has {e}"
+        );
+    }
+    let obs = observables(circuit.num_qubits);
+    let fac_exp = fac.pauli_expectations(&obs).unwrap();
+    let sv_exp = sv.pauli_expectations(&obs).unwrap();
+    for (k, (a, e)) in fac_exp.iter().zip(&sv_exp).enumerate() {
+        assert!(
+            (a - e).abs() < 1e-10,
+            "seed {seed}: observable {k} is {a}, statevector has {e}"
+        );
+    }
+    fac
+}
+
+fn entangled_chain(n: usize, num_bits: usize) -> Circuit {
+    let mut c = Circuit::new(n, num_bits);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.4 + 0.3 * q as f64), &[q]);
+    }
+    for q in 0..n - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..n {
+        c.add_gate(Gate::Rz(0.2 + 0.17 * q as f64), &[q]);
+    }
+    c
+}
+
+#[test]
+fn measure_split_fixture_leaves_the_survivors_alone() {
+    for seed in 42..47 {
+        let circuit = crate::circuits::measure_split_circuit(16, 4, seed);
+        let fac = assert_trajectory_matches(&circuit, seed);
+        let mut expected = vec![7, 2];
+        expected.extend([1; 7]);
+        assert_eq!(group_widths(&fac), expected, "seed {seed}");
+    }
+}
+
+#[test]
+fn measuring_a_wide_group_splits_the_qubit_out() {
+    for target in [0usize, 1, 2, 5, 9] {
+        let mut c = entangled_chain(10, 1);
+        c.add_measure(target, 0);
+        for seed in 42..46 {
+            let fac = assert_trajectory_matches(&c, seed);
+            assert_eq!(group_widths(&fac), vec![9, 1], "target {target}");
+        }
+    }
+}
+
+#[test]
+fn reset_splits_to_zero() {
+    for target in [0usize, 3, 9] {
+        let mut c = entangled_chain(10, 0);
+        c.add_reset(target);
+        for seed in 42..46 {
+            let fac = assert_trajectory_matches(&c, seed);
+            assert_eq!(group_widths(&fac), vec![9, 1]);
+            let ss = fac.qubit_to_substate[target];
+            let single = &fac.substates[ss].as_ref().unwrap().state;
+            assert!((single[0].norm() - 1.0).abs() < 1e-12 && single[1].norm() < 1e-12);
+        }
+    }
+}
+
+#[test]
+fn narrow_groups_collapse_in_place() {
+    let width = super::MIN_SPLIT_QUBITS - 1;
+    let mut c = entangled_chain(width, 1);
+    c.add_measure(width / 2, 0);
+    c.add_reset(0);
+    for seed in 42..46 {
+        let fac = assert_trajectory_matches(&c, seed);
+        assert_eq!(group_widths(&fac), vec![width]);
+    }
+}
+
+#[test]
+fn split_qubits_merge_back_at_every_position() {
+    for target in [0usize, 1, 2, 4, 9] {
+        let partner = if target == 0 { 9 } else { 0 };
+        let mut c = entangled_chain(10, 2);
+        c.add_measure(target, 0);
+        c.add_gate(Gate::H, &[target]);
+        c.add_gate(Gate::Cx, &[target, partner]);
+        c.add_gate(Gate::Ry(0.7), &[target]);
+        c.add_reset(target);
+        c.add_gate(Gate::Rx(1.1), &[target]);
+        c.add_gate(Gate::Cz, &[partner, target]);
+        c.add_measure(target, 1);
+        c.add_gate(Gate::Cx, &[(target + 3) % 10, target]);
+        for seed in 42..46 {
+            let fac = assert_trajectory_matches(&c, seed);
+            assert_eq!(group_widths(&fac), vec![10], "target {target}");
+        }
+    }
+}
+
+#[test]
+fn split_and_merge_back_on_parallel_groups() {
+    let n = 17;
+    let mut c = entangled_chain(n, 4);
+    for (bit, &target) in [16usize, 15, 0, 8].iter().enumerate() {
+        c.add_measure(target, bit);
+    }
+    for &target in &[0usize, 8, 16] {
+        c.add_gate(Gate::H, &[target]);
+        c.add_gate(Gate::Cx, &[target, 7]);
+    }
+    c.add_reset(16);
+    for q in 0..n {
+        c.add_gate(Gate::Ry(0.1 * q as f64), &[q]);
+    }
+    for seed in 42..45 {
+        let fac = assert_trajectory_matches(&c, seed);
+        assert_eq!(group_widths(&fac), vec![15, 1, 1]);
+    }
+}
+
+#[test]
+fn random_dynamic_circuits_match_statevector() {
+    use rand::{RngExt, SeedableRng};
+    let n = 11;
+    let bits = 6;
+    for seed in 42..62u64 {
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        let mut c = entangled_chain(n, bits);
+        for _ in 0..60 {
+            let q = rng.random_range(0..n);
+            match rng.random_range(0..8) {
+                0 => c.add_gate(Gate::Ry(rng.random::<f64>() * 6.0), &[q]),
+                1 => c.add_gate(Gate::Rz(rng.random::<f64>() * 6.0), &[q]),
+                2 => c.add_gate(Gate::H, &[q]),
+                3 | 4 => {
+                    let mut p = rng.random_range(0..n);
+                    if p == q {
+                        p = (q + 1) % n;
+                    }
+                    c.add_gate(Gate::Cx, &[q, p]);
+                }
+                5 => c.add_measure(q, rng.random_range(0..bits)),
+                6 => c.add_reset(q),
+                _ => c.instructions.push(Instruction::Conditional {
+                    condition: ClassicalCondition::BitIsOne(rng.random_range(0..bits)),
+                    gate: Gate::Ry(rng.random::<f64>() * 6.0),
+                    targets: smallvec![q],
+                }),
+            }
+        }
+        assert_trajectory_matches(&c, seed);
+    }
+}
+
+#[test]
+fn dynamic_shots_match_statevector_per_shot() {
+    let mut c = crate::circuits::measure_split_circuit(12, 3, 42);
+    let first = c.num_classical_bits;
+    c.num_classical_bits += 4;
+    c.instructions.push(Instruction::Conditional {
+        condition: ClassicalCondition::BitIsOne(0),
+        gate: Gate::X,
+        targets: smallvec![0],
+    });
+    for (i, q) in [0usize, 2, 4, 6].into_iter().enumerate() {
+        c.add_measure(q, first + i);
+    }
+    for seed in 42..45 {
+        let fac = sim::simulate(&c)
+            .backend(crate::BackendKind::Factored)
+            .seed(seed)
+            .shots(64)
+            .unwrap();
+        let sv = sim::simulate(&c)
+            .backend(crate::BackendKind::Statevector)
+            .seed(seed)
+            .shots(64)
+            .unwrap();
+        assert_eq!(fac.metadata.backend, crate::sim::ResolvedBackend::Factored);
+        assert_eq!(fac.shots, sv.shots, "seed {seed}");
+    }
 }

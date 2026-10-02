@@ -49,14 +49,21 @@ impl ShotsResult {
     pub fn counts(&self) -> HashMap<Vec<u64>, u64> {
         let m_words = self.num_classical_bits.div_ceil(64).max(1);
         let mut counts: HashMap<Vec<u64>, u64> = HashMap::new();
+        let mut key = vec![0u64; m_words];
         for shot in &self.shots {
-            let mut key = vec![0u64; m_words];
-            for (i, &b) in shot.iter().enumerate() {
-                if b {
-                    key[i / 64] |= 1u64 << (i % 64);
+            key.fill(0);
+            for (word, bits) in key.iter_mut().zip(shot.chunks(64)) {
+                *word = bits
+                    .iter()
+                    .enumerate()
+                    .fold(0, |acc, (i, &b)| acc | (u64::from(b) << i));
+            }
+            match counts.get_mut(key.as_slice()) {
+                Some(count) => *count += 1,
+                None => {
+                    counts.insert(key.clone(), 1);
                 }
             }
-            *counts.entry(key).or_insert(0) += 1;
         }
         counts
     }
@@ -570,6 +577,37 @@ mod tests {
         let s = format!("{}", result);
         assert!(s.contains("10: 2"));
         assert!(s.contains("01: 1"));
+    }
+
+    #[test]
+    fn shots_result_counts_match_per_bit_keys_across_words() {
+        let num_bits: usize = 130;
+        let mut state = 42u64;
+        let mut distinct = Vec::new();
+        for _ in 0..7 {
+            let shot: Vec<bool> = (0..num_bits)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state & 1 == 1
+                })
+                .collect();
+            distinct.push(shot);
+        }
+        let shots: Vec<Vec<bool>> = (0..200).map(|i| distinct[(i * i) % 7].clone()).collect();
+
+        let mut expected: HashMap<Vec<u64>, u64> = HashMap::new();
+        for shot in &shots {
+            let mut key = vec![0u64; num_bits.div_ceil(64)];
+            for (i, &b) in shot.iter().enumerate() {
+                key[i / 64] |= u64::from(b) << (i % 64);
+            }
+            *expected.entry(key).or_insert(0) += 1;
+        }
+
+        let counts = ShotsResult::from_shots(shots, num_bits).counts();
+        assert_eq!(counts, expected);
     }
 
     #[test]

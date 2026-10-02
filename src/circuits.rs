@@ -174,6 +174,59 @@ pub fn partially_independent_circuit(n: usize, depth: usize, seed: u64) -> Circu
     c
 }
 
+/// A chain over `n - 2` qubits that a mid-circuit collapse halves, then `layers`
+/// of rotations and brick CX on the surviving half, plus one independent pair.
+///
+/// The chain entangles every qubit once; the odd ones are then measured (even
+/// collapse index) or reset (odd), so only the even qubits carry state into the
+/// layers. The pair keeps the largest component at `n - 2`, which the
+/// decomposition heuristic declines, so the circuit runs whole on one backend.
+///
+/// # Panics
+/// Panics if `n < 8`.
+pub fn measure_split_circuit(n: usize, layers: usize, seed: u64) -> Circuit {
+    assert!(n >= 8, "measure_split_circuit needs at least 8 qubits");
+    let big = n - 2;
+    let collapsed: Vec<usize> = (1..big).step_by(2).collect();
+    let kept: Vec<usize> = (0..big).step_by(2).collect();
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut c = Circuit::new(n, collapsed.len().div_ceil(2));
+
+    for q in 0..big {
+        c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+    }
+    for q in 0..big - 1 {
+        c.add_gate(Gate::Cx, &[q, q + 1]);
+    }
+    for q in 0..big {
+        c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+    }
+    for (index, &q) in collapsed.iter().enumerate() {
+        if index % 2 == 0 {
+            c.add_measure(q, index / 2);
+        } else {
+            c.add_reset(q);
+        }
+    }
+
+    for layer in 0..layers {
+        for &q in &kept {
+            c.add_gate(Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+            c.add_gate(Gate::Rz(rng.random::<f64>() * std::f64::consts::TAU), &[q]);
+        }
+        for pair in kept[layer % 2..].chunks_exact(2) {
+            c.add_gate(Gate::Cx, &[pair[0], pair[1]]);
+        }
+    }
+
+    c.add_gate(
+        Gate::Ry(rng.random::<f64>() * std::f64::consts::TAU),
+        &[big],
+    );
+    c.add_gate(Gate::Cx, &[big, big + 1]);
+    c
+}
+
 /// `num_blocks` random brick-layer blocks of `block_size` qubits, with no gate between
 /// blocks.
 pub fn independent_random_blocks(

@@ -430,6 +430,37 @@ fn disjoint_block_rows_pin_the_batch_and_the_block_count() {
     }
 }
 
+// `factored/measure_split` prices what a mid-circuit collapse leaves behind on
+// the factored backend, so its rows only mean something if a plain run lands
+// there. The fixture's pair keeps the largest component at `n - 2`, the width
+// the decomposition heuristic declines, and the no-collapse control must route
+// the same way or it controls for a different engine.
+#[test]
+fn measure_split_rows_reach_the_factored_backend() {
+    for n in [16usize, 20] {
+        let circuit = circuits::measure_split_circuit(n, 24, SEED);
+        let mut control = circuit.clone();
+        control.instructions.retain(|inst| {
+            !matches!(
+                inst,
+                prism_q::Instruction::Measure { .. } | prism_q::Instruction::Reset { .. }
+            )
+        });
+
+        for (label, circ) in [("measure_split", &circuit), ("no_collapse", &control)] {
+            let outcome = sim::simulate(circ).seed(42).run().unwrap();
+            assert_eq!(
+                outcome.metadata.backend,
+                ResolvedBackend::Factored,
+                "{label}/{n}: Auto must pick the factored backend"
+            );
+            for kind in [BackendKind::Factored, BackendKind::Statevector] {
+                assert_resolves(&format!("{label}/{n}"), kind, circ);
+            }
+        }
+    }
+}
+
 // `stabilizer/random_pairs` prices the batched cross-word kernel, whose buffer
 // takes only pairs split across two tableau words and runs the batched form
 // once four of them are held. That the fixture feeds it is what an external

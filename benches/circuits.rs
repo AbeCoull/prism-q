@@ -3434,6 +3434,46 @@ fn bench_factored_partial_independence(c: &mut Criterion) {
     group.finish();
 }
 
+/// A mid-circuit collapse of half a merged chain, followed by layers on the
+/// surviving half. The collapsed qubits are product with the rest exactly, so
+/// the rows price whatever the factored state still carries for them.
+///
+/// `factored_no_collapse` runs the same stream with every measure and reset
+/// dropped, so its group stays `n - 2` wide throughout and a change to the
+/// collapse path cannot reach it. The statevector row is context: it pays the
+/// full register on every layer either way.
+fn bench_factored_measure_split(c: &mut Criterion) {
+    let mut group = c.benchmark_group("factored/measure_split");
+    configure_group(&mut group);
+
+    for &n in &[16, 20] {
+        let circuit = circuits::measure_split_circuit(n, 24, SEED);
+        let mut control = circuit.clone();
+        control.instructions.retain(|inst| {
+            !matches!(
+                inst,
+                Instruction::Measure { .. } | Instruction::Reset { .. }
+            )
+        });
+
+        group.bench_with_input(BenchmarkId::new("statevector", n), &circuit, |b, circ| {
+            b.iter(|| run_with(BackendKind::Statevector, circ, 42).unwrap());
+        });
+        group.bench_with_input(BenchmarkId::new("factored", n), &circuit, |b, circ| {
+            b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
+        });
+        group.bench_with_input(
+            BenchmarkId::new("factored_no_collapse", n),
+            &control,
+            |b, circ| {
+                b.iter(|| run_with(BackendKind::Factored, circ, 42).unwrap());
+            },
+        );
+    }
+
+    group.finish();
+}
+
 /// Non-Pauli trajectory noise on the factored backend, the only path that reaches
 /// `Backend::apply_1q_matrix`. Pauli noise routes to gate application instead, so
 /// `noisy_sampling` does not cover this at all.
@@ -5065,6 +5105,7 @@ criterion_group! {
     bench_factored_sim_only,
     bench_factored_dynamic,
     bench_factored_partial_independence,
+    bench_factored_measure_split,
     bench_factored_dense,
     bench_factored_noise_kraus,
     bench_factored_disjoint_blocks,

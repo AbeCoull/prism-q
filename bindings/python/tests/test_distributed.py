@@ -3,27 +3,43 @@
 Nothing here starts or stops MPI: mpi4py owns `MPI_Init` and its atexit
 `MPI_Finalize`, and this extension only attaches to the world it finds. Cases
 needing a live world skip without mpi4py and skip again on a world of one rank,
-so a green run outside `mpiexec` means "not tested". The four-rank case is
-gated together with the Rust one by `scripts/test-mpi.ps1`.
+so a green run outside `mpiexec` means "not tested". Set
+`PRISM_REQUIRE_MPI_RANKS=N` to turn a build without MPI support or a missing
+mpi4py into a failure and to require a world of exactly N ranks. The multi-rank
+cases are gated together with the Rust ones by `scripts/test-mpi.ps1` and
+`scripts/test-mpi.sh`.
 """
+
+import os
 
 import pytest
 
 from prism_q import BackendKind, CircuitBuilder, DistributedContext, PrismError, simulate
 
 SUPPORTED = DistributedContext.is_supported()
+REQUIRED_RANKS = os.environ.get("PRISM_REQUIRE_MPI_RANKS")
 
 requires_build = pytest.mark.skipif(
-    not SUPPORTED, reason="built without the distributed-mpi feature"
+    not SUPPORTED and REQUIRED_RANKS is None, reason="built without the distributed-mpi feature"
 )
 
 
 def world():
     """The mpi4py world communicator, skipping the case when it is absent."""
-    pytest.importorskip("mpi4py", reason="mpi4py owns MPI_Init; without it there is no world")
+    if REQUIRED_RANKS is None:
+        pytest.importorskip("mpi4py", reason="mpi4py owns MPI_Init; without it there is no world")
     from mpi4py import MPI
 
     return MPI.COMM_WORLD
+
+
+def test_prism_require_mpi_ranks_is_honoured():
+    if REQUIRED_RANKS is None:
+        pytest.skip("PRISM_REQUIRE_MPI_RANKS not set")
+    assert SUPPORTED, "PRISM_REQUIRE_MPI_RANKS is set but this build lacks `distributed-mpi`"
+    expected = int(REQUIRED_RANKS)
+    assert world().Get_size() == expected, "the launcher started a different world size"
+    assert DistributedContext().size == expected
 
 
 def check_circuit(n, start=0):

@@ -42,7 +42,7 @@ absolute indices while parsing.
 | --- | --- | --- |
 | `shots` | `1024` | Number of shots requested by the runner APIs. |
 | `seed` | `42` | RNG seed for stochastic samplers and Pauli-noise dispatch. |
-| `chunk_size` | `None` | Per-batch shot bound for the compiled runner. `None` is equivalent to `Some(shots)`; `Some(0)` is rejected. No effect on the reference runner. |
+| `chunk_size` | `None` | Per-batch shot bound for the compiled runner. `None` is equivalent to `Some(shots)`; `Some(0)` is rejected. No effect on the reference runner or on seeded noise. |
 | `keep_measurements` | `true` | When `false`, `QecSampleResult::measurements` is returned with zero shots (column count preserved). Detector and observable records are always populated. |
 
 ## Runner routing
@@ -186,11 +186,25 @@ compiled on the deferred circuit.
 
 At sample time, the noiseless records are sampled first, then each noise
 event stochastically XORs its branch flip masks into the shot-major record
-buffer from a noise RNG stream derived from the seed. Small-probability
-events skip between firing shots with geometric sampling; dense events
-(probability at or above `0.5`, or fewer than 32 shots) iterate every shot.
-`DEPOLARIZE2` precomputes the flip masks of all 15 non-identity two-qubit
-Pauli branches and picks one uniformly per firing.
+buffer. Small-probability events skip between firing shots with geometric
+sampling; dense events (probability at or above `0.5`, or a unit of fewer
+than 32 shots) iterate every shot. `DEPOLARIZE2` precomputes the flip masks of
+all 15 non-identity two-qubit Pauli branches and picks one uniformly per
+firing.
+
+Noise draws in fixed units of 8192 shots. Unit `k` covers shots
+`[8192 k, 8192 (k + 1))` and draws every event in program order from ChaCha
+stream `k` of the noise seed, so a unit's faults depend only on the seed and
+`k`. A chunk boundary inside a unit continues that unit's draws rather than
+restarting them, which makes seeded noise independent of
+`QecOptions::chunk_size`, and units run in parallel under the `parallel`
+feature without changing any bit. When records are neither kept nor
+postselected and every detector and observable is fixed in the noiseless
+circuit, the same draws land directly on detector and observable rows, bit
+for bit what the record path produces. The unit size is part of the seeded
+output: changing it changes noisy results at a given seed. Noiseless records
+that are random in the circuit still draw from the compiled sampler per
+chunk.
 
 Supported channels are `X_ERROR`, `Z_ERROR`, `DEPOLARIZE1`, and
 `DEPOLARIZE2`. Noise on an already-measured target is dropped (it can no

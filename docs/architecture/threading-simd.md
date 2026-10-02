@@ -97,6 +97,10 @@ comparison run used.
   deterministic per-chunk partials in Rayon's combine order, which varies with pool width
   and work stealing. A mid-circuit measurement compares a seeded draw against such a sum,
   so an outcome flip is possible in principle when the draw lands inside the ulp gap.
+- **Compiled QEC noise: bitwise for a given seed, at any thread count and chunk size.**
+  Noise draws per fixed 8192-shot unit from a counter-based stream indexed by the unit,
+  and each unit writes only its own shots, so neither the schedule nor `chunk_size`
+  reaches a fault. Pinned in `tests/qec_ir.rs` with 1-thread and 4-thread pools.
 - **Compiled (BTS) sampling: reproducible at a fixed thread count only.** The batched
   sampler derives one RNG stream per worker and splits shots by
   `rayon::current_num_threads()`, so a different pool width yields a different, equally

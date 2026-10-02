@@ -249,7 +249,7 @@ fn pack_bools(bools: &[bool]) -> Vec<u64> {
 
 #[cfg(feature = "parallel")]
 #[derive(Clone, Copy)]
-pub(super) struct SendPtrU64(pub(super) *mut u64);
+pub(crate) struct SendPtrU64(pub(crate) *mut u64);
 #[cfg(feature = "parallel")]
 // SAFETY: SendPtrU64 is used only for packed shot buffers partitioned by
 // disjoint word ranges before entering parallel workers.
@@ -271,6 +271,19 @@ impl SendPtrU64 {
         // SAFETY: same contract as the enclosing unsafe fn.
         unsafe {
             std::ptr::copy_nonoverlapping(src, self.0.add(offset), len);
+        }
+    }
+
+    /// XOR `bits` into the word at `offset`.
+    ///
+    /// # Safety
+    ///
+    /// `offset` must be in bounds, and no other thread may access that word concurrently.
+    #[inline(always)]
+    pub(crate) unsafe fn xor_word(self, offset: usize, bits: u64) {
+        // SAFETY: same contract as the enclosing unsafe fn.
+        unsafe {
+            *self.0.add(offset) ^= bits;
         }
     }
 }

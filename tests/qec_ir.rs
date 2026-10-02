@@ -1015,8 +1015,7 @@ fn qec_row_compiler_rejects_later_stage_features() {
     assert!(format!("{err}").contains("EXP_VAL"));
 }
 
-// The tail chunk of 17 shots falls under the 32-shot cutoff where the noise kernels
-// switch from geometric skipping to one draw per shot.
+// Not a multiple of 64, so the last packed word of every row is partial.
 const PARITY_SHOTS: usize = 2_017;
 
 #[track_caller]
@@ -1203,4 +1202,204 @@ fn qec_dropped_records_match_kept_projection_with_postselection() {
             &format!("postselected chunk {chunk_size:?}"),
         );
     }
+}
+
+// Shot counts around the 8192-shot noise unit: one partial unit, one shot past a unit,
+// a 17-shot last unit under the 32-shot per-shot cutoff, and a partial third unit.
+const UNIT_EDGE_SHOTS: [usize; 4] = [2_017, 8_193, 16_401, 20_000];
+
+fn run_with(
+    program: &QecProgram,
+    shots: usize,
+    chunk_size: Option<usize>,
+    keep_measurements: bool,
+) -> QecSampleResult {
+    let mut program = program.clone();
+    program.set_options(QecOptions {
+        shots,
+        seed: 42,
+        chunk_size,
+        keep_measurements,
+    });
+    run_qec_program(&program).unwrap()
+}
+
+#[track_caller]
+fn assert_same_parities(actual: &QecSampleResult, expected: &QecSampleResult, label: &str) {
+    assert_eq!(
+        actual.detectors.to_shots(),
+        expected.detectors.to_shots(),
+        "{label}"
+    );
+    assert_eq!(
+        actual.observables.to_shots(),
+        expected.observables.to_shots(),
+        "{label}"
+    );
+    assert_eq!(actual.accepted_shots, expected.accepted_shots, "{label}");
+    assert_eq!(actual.logical_errors, expected.logical_errors, "{label}");
+}
+
+fn noisy_unit_fixtures() -> Vec<(String, QecProgram)> {
+    let data: Vec<usize> = (0..9).collect();
+    vec![
+        (
+            "repetition d5 depolarize1".to_string(),
+            qec_common::repetition_memory(5, 5, QecNoise::Depolarize1(0.01), 1),
+        ),
+        (
+            "repetition d4 depolarize2".to_string(),
+            qec_common::repetition_memory(4, 4, QecNoise::Depolarize2(0.02), 1),
+        ),
+        (
+            "surface d3 depolarize1".to_string(),
+            qec_common::rotated_surface_memory(3, 3, QecNoise::Depolarize1(0.01), &data, 1),
+        ),
+        (
+            "surface d3 depolarize2".to_string(),
+            qec_common::rotated_surface_memory(3, 3, QecNoise::Depolarize2(0.02), &data[..8], 1),
+        ),
+        (
+            "surface d3 x_error 0.6".to_string(),
+            qec_common::rotated_surface_memory(3, 3, QecNoise::XError(0.6), &data, 1),
+        ),
+    ]
+}
+
+#[test]
+fn qec_noise_ignores_chunk_size_and_record_path() {
+    for (label, program) in noisy_unit_fixtures() {
+        for shots in UNIT_EDGE_SHOTS {
+            let reference = run_with(&program, shots, None, false);
+            assert!(
+                reference.logical_errors[0] > 0
+                    || reference.detectors.to_shots().iter().flatten().any(|&b| b),
+                "{label} {shots}"
+            );
+            for chunk_size in [None, Some(500), Some(31), Some(8_192), Some(10_007)] {
+                for keep in [false, true] {
+                    let result = run_with(&program, shots, chunk_size, keep);
+                    assert_same_parities(
+                        &result,
+                        &reference,
+                        &format!("{label} shots {shots} chunk {chunk_size:?} keep {keep}"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn qec_noisy_records_ignore_chunk_size_when_noiseless_records_are_fixed() {
+    let program = qec_common::repetition_memory(5, 5, QecNoise::Depolarize1(0.01), 1);
+    let reference = run_with(&program, 20_000, None, true);
+    for chunk_size in [Some(500), Some(31), Some(10_007)] {
+        let result = run_with(&program, 20_000, chunk_size, true);
+        assert_eq!(
+            result.measurements.to_shots(),
+            reference.measurements.to_shots(),
+            "chunk {chunk_size:?}"
+        );
+    }
+}
+
+#[test]
+fn qec_postselected_noise_ignores_chunk_size() {
+    let program = parse_qec_program(
+        "X_ERROR(0.2) 0 1\nM 0 1\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(0) rec[-1]\n\
+         POSTSELECT rec[-2]",
+    )
+    .unwrap();
+    let reference = run_with(&program, 20_000, None, false);
+    assert!(reference.discarded_shots > 0);
+    for chunk_size in [Some(500), Some(31), Some(10_007)] {
+        let result = run_with(&program, 20_000, chunk_size, false);
+        assert_same_parities(&result, &reference, &format!("chunk {chunk_size:?}"));
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn qec_noise_ignores_thread_count() {
+    use prism_q::ThreadPool;
+
+    let data: Vec<usize> = (0..25).collect();
+    let program = qec_common::rotated_surface_memory(5, 5, QecNoise::Depolarize1(0.05), &data, 1);
+    for keep in [false, true] {
+        let reference = run_with(&program, 200_003, None, keep);
+        for threads in [1, 4] {
+            let pool = ThreadPool::with_threads(threads).unwrap();
+            let result = pool.install(|| run_with(&program, 200_003, None, keep));
+            assert_same_parities(
+                &result,
+                &reference,
+                &format!("{threads} threads keep {keep}"),
+            );
+        }
+    }
+}
+
+// Each detector reads one qubit after one channel, so its rate is that channel's chance of
+// flipping a Z measurement: p for X_ERROR, 2p/3 for DEPOLARIZE1, 8p/15 per qubit for
+// DEPOLARIZE2. The observable reads both DEPOLARIZE2 qubits, which disagree with
+// probability 8p/15. X_ERROR(0.6) takes the per-shot draw path.
+#[test]
+fn qec_noise_matches_analytic_flip_rates() {
+    let shots = 200_003;
+    let program = parse_qec_program(
+        "X_ERROR(0.03) 0\nDEPOLARIZE1(0.06) 1\nDEPOLARIZE2(0.075) 2 3\nX_ERROR(0.6) 4\n\
+         M 0 1 2 3 4\nDETECTOR rec[-5]\nDETECTOR rec[-4]\nDETECTOR rec[-3]\n\
+         DETECTOR rec[-2]\nDETECTOR rec[-1]\nOBSERVABLE_INCLUDE(0) rec[-3] rec[-2]",
+    )
+    .unwrap();
+    let detector_rates = [0.03, 0.04, 0.04, 0.04, 0.6];
+    for keep in [false, true] {
+        let result = run_with(&program, shots, Some(10_007), keep);
+        let detectors = result.detectors.to_shots();
+        for (detector, &p) in detector_rates.iter().enumerate() {
+            let fired = detectors.iter().filter(|shot| shot[detector]).count();
+            let sigma = (shots as f64 * p * (1.0 - p)).sqrt();
+            let deviation = (fired as f64 - shots as f64 * p).abs() / sigma;
+            assert!(
+                deviation < 5.0,
+                "detector {detector} keep {keep}: {fired} fired, {deviation:.2} sigma from {p}"
+            );
+        }
+        let p = 0.04;
+        let sigma = (shots as f64 * p * (1.0 - p)).sqrt();
+        let deviation = (result.logical_errors[0] as f64 - shots as f64 * p).abs() / sigma;
+        assert!(
+            deviation < 5.0,
+            "observable keep {keep}: {deviation:.2} sigma"
+        );
+    }
+}
+
+fn fingerprint(words: &[u64]) -> u64 {
+    words.iter().fold(0xCBF2_9CE4_8422_2325, |hash, &word| {
+        (hash ^ word).wrapping_mul(0x0000_0100_0000_01B3)
+    })
+}
+
+// Pinned from the sampler before noise moved to per-unit streams. The X checks make the
+// chunked noiseless records random, so the measurement fingerprint covers that stream.
+#[test]
+fn qec_noiseless_sampling_is_unchanged_by_noise_units() {
+    let data: Vec<usize> = (0..9).collect();
+    let program = qec_common::rotated_surface_memory(3, 3, QecNoise::Depolarize1(0.0), &data, 1);
+    let result = run_with(&program, 20_000, Some(4_096), true);
+    let fingerprints = [
+        fingerprint(result.measurements.raw_data()),
+        fingerprint(result.detectors.raw_data()),
+        fingerprint(result.observables.raw_data()),
+    ];
+    assert_eq!(
+        fingerprints,
+        [
+            6_594_110_323_581_659_221,
+            1_070_141_396_434_947_493,
+            1_070_141_396_434_947_493
+        ]
+    );
 }

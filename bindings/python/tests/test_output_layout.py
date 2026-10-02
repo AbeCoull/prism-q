@@ -133,3 +133,53 @@ def test_analytical_observable_records_put_ones_first():
         assert 0 < count < 100
         assert observables[:count, column].all()
         assert not observables[count:, column].any()
+
+
+def _unpack(packed, count):
+    assert packed.dtype == np.uint8
+    assert packed.shape[1] == (count + 7) // 8
+    return np.unpackbits(packed, axis=1, count=count, bitorder="little").astype(bool)
+
+
+def _padding_clear(packed, count):
+    if count % 8 == 0 or packed.shape[0] == 0:
+        return True
+    return not (packed[:, -1] >> (count % 8)).any()
+
+
+def test_packed_qec_records_unpack_to_the_bool_records():
+    for n in (1, 8, 63, 64, 65, 70, 130):
+        noisy = sorted({0, n // 2, n - 1})
+        program = _qec_flip_program(n, {n - 1}, noisy)
+        program.set_options(shots=200, seed=11)
+        result = program.run()
+        pairs = (
+            (result.packed_detectors(), result.detectors),
+            (result.packed_observables(), result.observables),
+            (result.packed_measurements(), result.measurements),
+        )
+        for packed, records in pairs:
+            count = records.shape[1]
+            assert packed.shape[0] == records.shape[0]
+            assert np.array_equal(_unpack(packed, count), records)
+            assert _padding_clear(packed, count)
+
+
+def test_packed_analytical_observables_unpack_to_the_bool_records():
+    program = QecProgram.from_text(
+        "H 0\nT 0\nH 0\nM 0\nOBSERVABLE_INCLUDE(0) rec[-1]\n"
+        "H 1\nM 1\nOBSERVABLE_INCLUDE(1) rec[-1]\nEXP_VAL Z2\n"
+    )
+    program.set_options(shots=100, seed=4)
+    result = program.run()
+    packed = result.packed_observables()
+    assert np.array_equal(_unpack(packed, 2), result.observables)
+    assert _padding_clear(packed, 2)
+
+
+def test_packed_dropped_measurements_are_empty():
+    program = _qec_flip_program(5, {1}, [])
+    program.set_options(shots=10, seed=1, keep_measurements=False)
+    result = program.run()
+    assert result.packed_measurements().shape == (0, 1)
+    assert result.packed_detectors().shape == (10, 1)

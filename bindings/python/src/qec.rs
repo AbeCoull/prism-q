@@ -9,7 +9,7 @@ use pyo3::prelude::*;
 
 use crate::error::PyPrismResult;
 use crate::gate::PyGate;
-use crate::numpy_util::{bool_matrix, f64_array};
+use crate::numpy_util::{bool_matrix, f64_array, u8_matrix};
 
 /// Pauli basis for QEC measurements and resets.
 #[pyclass(name = "QecBasis", module = "prism_q", eq, eq_int, from_py_object)]
@@ -459,6 +459,44 @@ fn packed_to_2d<'py>(
     bool_matrix(py, n_shots, n_meas, flat)
 }
 
+/// Repack shot-major as `(shots, ceil(n / 8))` bytes: record `j` is bit `j % 8` of
+/// byte `j / 8`, and the padding bits of the last byte are clear.
+fn packed_to_bytes<'py>(
+    py: Python<'py>,
+    packed: &PackedShots,
+) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
+    let n_shots = packed.num_shots();
+    let n_meas = packed.num_measurements();
+    let row_bytes = n_meas.div_ceil(8);
+    let mut flat = vec![0u8; n_shots * row_bytes];
+    if row_bytes > 0 {
+        match packed.layout() {
+            ShotLayout::ShotMajor => {
+                let tail_mask = u8::MAX >> ((8 - n_meas % 8) % 8);
+                for (shot, row) in flat.chunks_exact_mut(row_bytes).enumerate() {
+                    for (&word, bytes) in packed.shot_words(shot).iter().zip(row.chunks_mut(8)) {
+                        bytes.copy_from_slice(&word.to_le_bytes()[..bytes.len()]);
+                    }
+                    row[row_bytes - 1] &= tail_mask;
+                }
+            }
+            _ => {
+                for (block, rows) in flat.chunks_mut(64 * row_bytes).enumerate() {
+                    for meas in 0..n_meas {
+                        let mut word = packed.meas_words(meas)[block];
+                        let bit = meas % 8;
+                        for row in rows.chunks_exact_mut(row_bytes) {
+                            row[meas / 8] |= ((word & 1) as u8) << bit;
+                            word >>= 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    u8_matrix(py, n_shots, row_bytes, flat)
+}
+
 #[pymethods]
 impl PyQecResult {
     #[getter]
@@ -505,6 +543,22 @@ impl PyQecResult {
     #[getter]
     fn measurements<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<bool>>> {
         packed_to_2d(py, &self.inner.measurements)
+    }
+
+    /// Detector records as `(shots, ceil(num_detectors / 8))` uint8 in little bit
+    /// order, the layout `np.unpackbits(..., bitorder="little")` reverses.
+    fn packed_detectors<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
+        packed_to_bytes(py, &self.inner.detectors)
+    }
+
+    /// Observable records in the `packed_detectors` layout.
+    fn packed_observables<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
+        packed_to_bytes(py, &self.inner.observables)
+    }
+
+    /// Measurement records in the `packed_detectors` layout.
+    fn packed_measurements<'py>(&self, py: Python<'py>) -> PyPrismResult<Bound<'py, PyArray2<u8>>> {
+        packed_to_bytes(py, &self.inner.measurements)
     }
 
     fn __repr__(&self) -> String {

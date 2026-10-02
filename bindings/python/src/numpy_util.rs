@@ -60,6 +60,21 @@ pub fn bool_matrix(
     Ok(array.into_pyarray(py))
 }
 
+/// Build a row-major `(rows, cols)` `uint8` NumPy matrix from a flat buffer.
+pub fn u8_matrix(
+    py: Python<'_>,
+    rows: usize,
+    cols: usize,
+    flat: Vec<u8>,
+) -> PyPrismResult<Bound<'_, PyArray2<u8>>> {
+    let array = Array2::from_shape_vec((rows, cols), flat).map_err(|e| {
+        invalid(format!(
+            "failed to shape ({rows}, {cols}) uint8 matrix: {e}"
+        ))
+    })?;
+    Ok(array.into_pyarray(py))
+}
+
 /// Read a 1-D `uint64` NumPy array, or any sequence of ints, into a `Vec`.
 pub fn u64_words(value: &Bound<'_, PyAny>) -> PyPrismResult<Vec<u64>> {
     if let Ok(array) = value.cast::<PyArray1<u64>>() {

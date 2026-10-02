@@ -69,6 +69,15 @@ fn bell_circuit_with_measurements(n_qubits: usize) -> Circuit {
     c
 }
 
+fn uniform_circuit_with_measurements(n_qubits: usize) -> Circuit {
+    let mut c = Circuit::new(n_qubits, n_qubits);
+    for q in 0..n_qubits {
+        c.add_gate(Gate::H, &[q]);
+        c.add_measure(q, q);
+    }
+    c
+}
+
 fn ghz_circuit_with_measurements(n_qubits: usize) -> Circuit {
     let mut c = Circuit::new(n_qubits, n_qubits);
     c.add_gate(Gate::H, &[0]);
@@ -270,6 +279,19 @@ fn bench_counts(c: &mut Criterion) {
 
         group.bench_with_input(
             BenchmarkId::new("ShotsResult_counts_16q", n_shots),
+            &result,
+            |b, res| {
+                b.iter(|| res.counts());
+            },
+        );
+    }
+
+    for &(n_qubits, n_shots) in &[(20, 1_000_000), (1000, 10_000)] {
+        let circuit = uniform_circuit_with_measurements(n_qubits);
+        let result = run_shots_with(BackendKind::Auto, &circuit, n_shots, SEED).unwrap();
+
+        group.bench_with_input(
+            BenchmarkId::new(format!("ShotsResult_counts_uniform_{n_qubits}q"), n_shots),
             &result,
             |b, res| {
                 b.iter(|| res.counts());

@@ -2117,8 +2117,9 @@ pub(crate) fn apply_single_gate_par(
 /// Apply gates on `k` distinct targets in one traversal instead of `k`.
 ///
 /// Gates on disjoint qubits commute, so the stages run in target order.
-/// For targets above the L3 tier only: below it the tiered passes keep a
-/// tile cache resident across gates, which this shape cannot.
+/// For targets above the L2 tier only: below it the tiled pass keeps a tile
+/// cache resident across gates, which this shape cannot. The L3 tier's targets
+/// join it where their tiles would not stay resident either.
 #[cfg(feature = "parallel")]
 fn apply_multi_1q_shared(state: &mut [Complex64], gates: &[(usize, [[Complex64; 2]; 2])]) {
     let mut sorted: SmallVec<[(usize, [[Complex64; 2]; 2]); 4]> = gates.into();
@@ -2305,10 +2306,13 @@ pub(crate) fn par_apply_unitary(state: &mut [Complex64], targets: &[usize], mat:
 
 type TargetedGate1q = (usize, [[Complex64; 2]; 2]);
 
-/// Sort `gates` into the L2 tile, L3 tile and untiled tiers by target.
+/// Sort `gates` into the L2 tile, L3 tile and untiled tiers by target. Both upper
+/// tiers run in ascending target order, so folding the L3 tier into the untiled one
+/// leaves every amplitude bitwise unchanged.
 #[inline(always)]
 fn split_multi_1q_tiers(
     gates: &[TargetedGate1q],
+    medium_tiled: bool,
     small_gates: &mut SmallVec<[(usize, simd::PreparedGate1q); 16]>,
     medium_gates: &mut SmallVec<[(usize, simd::PreparedGate1q); 4]>,
     large_gates: &mut SmallVec<[TargetedGate1q; 4]>,
@@ -2316,12 +2320,28 @@ fn split_multi_1q_tiers(
     for &(target, mat) in gates {
         if target <= MULTI_GATE_MAX_L2_TARGET {
             small_gates.push((target, simd::PreparedGate1q::new(&mat)));
-        } else if target <= MULTI_GATE_MAX_L3_TARGET {
+        } else if target <= MULTI_GATE_MAX_L3_TARGET && medium_tiled {
             medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
         } else {
             large_gates.push((target, mat));
         }
     }
+    medium_gates.sort_unstable_by_key(|&(target, _)| target);
+    large_gates.sort_unstable_by_key(|&(target, _)| target);
+}
+
+/// Whether the L3 tier beats folding its targets into the shared passes: every
+/// worker needs its own tile, and the concurrent tiles must fit the last-level cache.
+/// An unreported cache keeps the tier.
+#[cfg(feature = "parallel")]
+fn keep_l3_tier(state_len: usize) -> bool {
+    let Some(cache) = crate::backend::cache::last_level_cache() else {
+        return true;
+    };
+    let tiles = state_len / MULTI_GATE_L3_TILE;
+    let workers = rayon::current_num_threads();
+    let tile_bytes = MULTI_GATE_L3_TILE * std::mem::size_of::<Complex64>();
+    tiles >= workers && crate::backend::cache::tiles_fit(cache, tile_bytes, workers)
 }
 
 /// Sort diagonal `gates` into the L2 tile, L3 tile and untiled tiers by target, as
@@ -2352,6 +2372,17 @@ fn split_multi_1q_diagonal_tiers(
 #[cfg(feature = "parallel")]
 #[inline(always)]
 pub(crate) fn apply_multi_1q_par(state: &mut [Complex64], gates: &[(usize, [[Complex64; 2]; 2])]) {
+    apply_multi_1q_par_tiered(state, gates, keep_l3_tier(state.len()));
+}
+
+/// [`apply_multi_1q_par`] with the L3 tier on or folded into the shared passes.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn apply_multi_1q_par_tiered(
+    state: &mut [Complex64],
+    gates: &[(usize, [[Complex64; 2]; 2])],
+    medium_tiled: bool,
+) {
     if gates.is_empty() {
         return;
     }
@@ -2363,7 +2394,13 @@ pub(crate) fn apply_multi_1q_par(state: &mut [Complex64], gates: &[(usize, [[Com
     let mut small_gates = SmallVec::new();
     let mut medium_gates = SmallVec::new();
     let mut large_gates = SmallVec::new();
-    split_multi_1q_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
+    split_multi_1q_tiers(
+        gates,
+        medium_tiled,
+        &mut small_gates,
+        &mut medium_gates,
+        &mut large_gates,
+    );
 
     if !small_gates.is_empty() {
         let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
@@ -3811,7 +3848,8 @@ impl StatevectorBackend {
     ///
     /// Three tiers based on gate target qubit:
     /// - L2 tier (target 0..13): 256KB tiles, all applied per tile in L2 cache
-    /// - L3 tier (target 14..16): 2MB tiles, applied per tile in L3 cache
+    /// - L3 tier (target 14..16): 2MB tiles, applied per tile in L3 cache where
+    ///   one tile per worker fits it, otherwise folded into the shared traversal
     /// - Individual (target 17+): one shared traversal, or a single
     ///   full-state pass when only one gate lands there
     #[inline(always)]
@@ -3833,7 +3871,13 @@ impl StatevectorBackend {
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
         let mut large_gates = SmallVec::new();
-        split_multi_1q_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
+        split_multi_1q_tiers(
+            gates,
+            true,
+            &mut small_gates,
+            &mut medium_gates,
+            &mut large_gates,
+        );
 
         if !small_gates.is_empty() {
             let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
@@ -4668,5 +4712,70 @@ mod qft_layout_tests {
                 assert_eq!(*amp, Complex64::new(src, -src), "bits {bits}, index {i}");
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod multi_1q_tier_tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    fn random_unitary(rng: &mut ChaCha8Rng) -> [[Complex64; 2]; 2] {
+        let mut angle = || rng.random::<f64>() * std::f64::consts::TAU;
+        let (theta, phi, lambda) = (angle() / 2.0, angle(), angle());
+        let (c, s) = (theta.cos(), theta.sin());
+        [
+            [Complex64::new(c, 0.0), -Complex64::from_polar(s, lambda)],
+            [
+                Complex64::from_polar(s, phi),
+                Complex64::from_polar(c, phi + lambda),
+            ],
+        ]
+    }
+
+    fn apply_scalar(state: &mut [Complex64], target: usize, mat: &[[Complex64; 2]; 2]) {
+        let bit = 1usize << target;
+        for i in (0..state.len()).filter(|i| i & bit == 0) {
+            let (a, b) = (state[i], state[i | bit]);
+            state[i] = mat[0][0] * a + mat[0][1] * b;
+            state[i | bit] = mat[1][0] * a + mat[1][1] * b;
+        }
+    }
+
+    // Targets span the L2, L3 and untiled tiers in no particular order. The route
+    // depends on the thread count, so the two must agree bitwise.
+    #[test]
+    fn medium_tier_routes_match_per_gate_application() {
+        const NUM_QUBITS: usize = 18;
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let start: Vec<Complex64> = (0..1usize << NUM_QUBITS)
+            .map(|_| Complex64::new(rng.random::<f64>() - 0.5, rng.random::<f64>() - 0.5))
+            .collect();
+        let gates: Vec<TargetedGate1q> = [17, 0, 14, 5, 16, 13, 15]
+            .into_iter()
+            .map(|target| (target, random_unitary(&mut rng)))
+            .collect();
+
+        let mut expected = start.clone();
+        for (target, mat) in &gates {
+            apply_scalar(&mut expected, *target, mat);
+        }
+        let mut routes = [true, false].map(|medium_tiled| {
+            let mut state = start.clone();
+            apply_multi_1q_par_tiered(&mut state, &gates, medium_tiled);
+            state
+        });
+        for (i, (got, want)) in routes[0].iter().zip(&expected).enumerate() {
+            assert!(
+                (got - want).norm() < 1e-12,
+                "amplitude {i}: {got} vs {want}"
+            );
+        }
+        let [tiled, shared] = &mut routes;
+        assert!(
+            tiled.iter().zip(shared.iter()).all(|(a, b)| a == b),
+            "the two routes must agree bitwise, or results depend on the thread count"
+        );
     }
 }

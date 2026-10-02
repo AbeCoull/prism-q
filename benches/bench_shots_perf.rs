@@ -569,6 +569,141 @@ fn bench_qec_noisy_runner(c: &mut Criterion) {
     group.finish();
 }
 
+// Distance-d rotated surface-code Z memory with d rounds: Z and X plaquettes per round,
+// compare detectors after the first round, data readout closing the Z checks, and the
+// left column as the logical observable. Data qubit (r, c) is r * d + c.
+fn qec_surface_program(
+    distance: usize,
+    rounds: usize,
+    shots: usize,
+    noise_rate: Option<f64>,
+) -> QecProgram {
+    let mut z_stabs = Vec::new();
+    let mut x_stabs = Vec::new();
+    for i in 0..=distance {
+        for j in 0..=distance {
+            let cells: Vec<usize> = [(i, j), (i, j + 1), (i + 1, j), (i + 1, j + 1)]
+                .into_iter()
+                .filter(|&(r, c)| (1..=distance).contains(&r) && (1..=distance).contains(&c))
+                .map(|(r, c)| (r - 1) * distance + (c - 1))
+                .collect();
+            let z_type = (i + j) % 2 == 1;
+            let boundary_kept = if z_type {
+                i == 0 || i == distance
+            } else {
+                j == 0 || j == distance
+            };
+            if cells.len() == 4 || (cells.len() == 2 && boundary_kept) {
+                if z_type {
+                    z_stabs.push(cells);
+                } else {
+                    x_stabs.push(cells);
+                }
+            }
+        }
+    }
+
+    let num_qubits = distance * distance;
+    let data: Vec<usize> = (0..num_qubits).collect();
+    let options = QecOptions {
+        shots,
+        seed: SEED,
+        chunk_size: Some(10_000),
+        keep_measurements: false,
+    };
+    let mut program = QecProgram::with_options(num_qubits, options);
+    let mut previous: Vec<usize> = Vec::new();
+    for _ in 0..rounds {
+        if let Some(p) = noise_rate {
+            program.noise(QecNoise::Depolarize1(p), &data).unwrap();
+        }
+        let mut records = Vec::with_capacity(z_stabs.len() + x_stabs.len());
+        for stab in &z_stabs {
+            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();
+            records.push(program.measure_pauli_product(&terms).unwrap());
+        }
+        for stab in &x_stabs {
+            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::x(q)).collect();
+            records.push(program.measure_pauli_product(&terms).unwrap());
+        }
+        if previous.is_empty() {
+            for &record in &records[..z_stabs.len()] {
+                program.detector(&[QecRecordRef::absolute(record)]).unwrap();
+            }
+        } else {
+            for (&record, &prior) in records.iter().zip(&previous) {
+                program
+                    .detector(&[
+                        QecRecordRef::absolute(record),
+                        QecRecordRef::absolute(prior),
+                    ])
+                    .unwrap();
+            }
+        }
+        previous = records;
+    }
+    let readout: Vec<usize> = (0..num_qubits)
+        .map(|qubit| program.measure_z(qubit).unwrap())
+        .collect();
+    for (stab, &prior) in z_stabs.iter().zip(&previous) {
+        let mut refs: Vec<QecRecordRef> = stab
+            .iter()
+            .map(|&q| QecRecordRef::absolute(readout[q]))
+            .collect();
+        refs.push(QecRecordRef::absolute(prior));
+        program.detector(&refs).unwrap();
+    }
+    let logical: Vec<QecRecordRef> = (0..distance)
+        .map(|row| QecRecordRef::absolute(readout[row * distance]))
+        .collect();
+    program.observable_include(0, &logical).unwrap();
+    program
+}
+
+type QecMemoryBuilder = fn(usize, usize, usize, Option<f64>) -> QecProgram;
+
+// Distance-d repetition and rotated surface memories with d rounds at 100k shots.
+// `drop` discards the raw records and `keep` returns them, so each pair runs one
+// program with and without materialized measurement records.
+fn bench_qec_detector_sampling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_detector_sampling");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let shots = 100_000;
+    let families: [(&str, &[usize], QecMemoryBuilder); 2] = [
+        ("rep", &[5, 9, 15], qec_repetition_program),
+        ("surf", &[3, 5], qec_surface_program),
+    ];
+    for (family, distances, build) in families {
+        for (noise_label, noise_rate) in [("noiseless", None), ("p001", Some(0.001))] {
+            for &distance in distances {
+                let dropped = build(distance, distance, shots, noise_rate);
+                let mut kept = dropped.clone();
+                kept.set_options(QecOptions {
+                    keep_measurements: true,
+                    ..dropped.options()
+                });
+                for (records_label, program) in [("drop", &dropped), ("keep", &kept)] {
+                    group.bench_with_input(
+                        BenchmarkId::new(
+                            format!("{family}_{noise_label}_{records_label}"),
+                            distance,
+                        ),
+                        program,
+                        |b, program| {
+                            b.iter(|| run_qec_program(program).unwrap());
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    group.finish();
+}
+
 #[cfg(not(feature = "bench-internal"))]
 fn bench_qec_noisy_runner_split(_c: &mut Criterion) {}
 
@@ -804,6 +939,7 @@ criterion_group! {
     bench_sparse_deterministic,
     bench_qec_clifford_runner,
     bench_qec_noisy_runner,
+    bench_qec_detector_sampling,
     bench_qec_noisy_runner_split,
     bench_analytical_marginals,
     bench_chunked_high_shots

@@ -146,6 +146,88 @@ pub fn surface_memory_d3(
     program
 }
 
+/// Distance-d rotated surface-code Z memory with the round structure of
+/// [`surface_memory_d3`], on a d x d data grid with qubit `r * d + c`.
+pub fn rotated_surface_memory(
+    distance: usize,
+    rounds: usize,
+    noise: QecNoise,
+    noise_targets: &[usize],
+    shots: usize,
+) -> QecProgram {
+    let mut z_stabs = Vec::new();
+    let mut x_stabs = Vec::new();
+    for i in 0..=distance {
+        for j in 0..=distance {
+            let cells: Vec<usize> = [(i, j), (i, j + 1), (i + 1, j), (i + 1, j + 1)]
+                .into_iter()
+                .filter(|&(r, c)| (1..=distance).contains(&r) && (1..=distance).contains(&c))
+                .map(|(r, c)| (r - 1) * distance + (c - 1))
+                .collect();
+            let z_type = (i + j) % 2 == 1;
+            let boundary_kept = if z_type {
+                i == 0 || i == distance
+            } else {
+                j == 0 || j == distance
+            };
+            if cells.len() == 4 || (cells.len() == 2 && boundary_kept) {
+                if z_type {
+                    z_stabs.push(cells);
+                } else {
+                    x_stabs.push(cells);
+                }
+            }
+        }
+    }
+
+    let num_qubits = distance * distance;
+    let mut program = QecProgram::with_options(num_qubits, qec_options(shots, 4096, false));
+    let mut previous: Vec<usize> = Vec::new();
+    for _ in 0..rounds {
+        program.noise(noise, noise_targets).unwrap();
+        let mut records = Vec::with_capacity(z_stabs.len() + x_stabs.len());
+        for stab in &z_stabs {
+            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::z(q)).collect();
+            records.push(program.measure_pauli_product(&terms).unwrap());
+        }
+        for stab in &x_stabs {
+            let terms: Vec<QecPauli> = stab.iter().map(|&q| QecPauli::x(q)).collect();
+            records.push(program.measure_pauli_product(&terms).unwrap());
+        }
+        if previous.is_empty() {
+            for &record in &records[..z_stabs.len()] {
+                program.detector(&[QecRecordRef::absolute(record)]).unwrap();
+            }
+        } else {
+            for (&record, &prior) in records.iter().zip(&previous) {
+                program
+                    .detector(&[
+                        QecRecordRef::absolute(record),
+                        QecRecordRef::absolute(prior),
+                    ])
+                    .unwrap();
+            }
+        }
+        previous = records;
+    }
+    let readout: Vec<usize> = (0..num_qubits)
+        .map(|qubit| program.measure_z(qubit).unwrap())
+        .collect();
+    for (stab, &prior) in z_stabs.iter().zip(&previous) {
+        let mut refs: Vec<QecRecordRef> = stab
+            .iter()
+            .map(|&q| QecRecordRef::absolute(readout[q]))
+            .collect();
+        refs.push(QecRecordRef::absolute(prior));
+        program.detector(&refs).unwrap();
+    }
+    let logical: Vec<QecRecordRef> = (0..distance)
+        .map(|row| QecRecordRef::absolute(readout[row * distance]))
+        .collect();
+    program.observable_include(0, &logical).unwrap();
+    program
+}
+
 /// The `EXP_VAL` estimates of a result, which every estimator path attaches.
 pub fn estimates(result: &QecSampleResult) -> &[QecObservableEstimate] {
     result

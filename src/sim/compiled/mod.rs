@@ -677,6 +677,12 @@ impl CompiledSampler {
         &self.ref_bits_packed
     }
 
+    /// Packed measurement flips, one row per random bit; every sample is the reference
+    /// bits XOR a subset of these rows.
+    pub(crate) fn flip_rows(&self) -> &[Vec<u64>] {
+        &self.flip_rows
+    }
+
     pub fn sample_bulk(&mut self, num_shots: usize) -> Vec<Vec<bool>> {
         self.sample_bulk_packed(num_shots).to_shots()
     }
@@ -2201,6 +2207,10 @@ impl CompiledDetectorSampler {
 
     pub fn observable_rows(&self) -> &[Vec<usize>] {
         &self.observable_rows
+    }
+
+    pub(crate) fn measurement_sampler(&self) -> &CompiledSampler {
+        &self.measurement_sampler
     }
 
     /// Opt the underlying measurement sampler into GPU BTS sampling.

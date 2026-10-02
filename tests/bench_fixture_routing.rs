@@ -434,7 +434,9 @@ fn disjoint_block_rows_pin_the_batch_and_the_block_count() {
 // the factored backend, so its rows only mean something if a plain run lands
 // there. The fixture's pair keeps the largest component at `n - 2`, the width
 // the decomposition heuristic declines, and the no-collapse control must route
-// the same way or it controls for a different engine.
+// the same way or it controls for a different engine. The widest block at the
+// end separates the two: the collapse leaves the survivors alone, the control
+// keeps the whole chain.
 #[test]
 fn measure_split_rows_reach_the_factored_backend() {
     for n in [16usize, 20] {
@@ -457,6 +459,25 @@ fn measure_split_rows_reach_the_factored_backend() {
             for kind in [BackendKind::Factored, BackendKind::Statevector] {
                 assert_resolves(&format!("{label}/{n}"), kind, circ);
             }
+        }
+
+        for (label, circ, widest) in [
+            ("measure_split", &circuit, (n - 2) / 2),
+            ("no_collapse", &control, n - 2),
+        ] {
+            let mut backend = prism_q::FactoredBackend::new(SEED);
+            sim::run_on(&mut backend, circ).unwrap();
+            let Some(prism_q::sim::Probabilities::Factored { blocks, .. }) =
+                backend.block_probabilities()
+            else {
+                panic!("{label}/{n}: the run collapsed to a single block");
+            };
+            let max = blocks.iter().map(|b| b.mask.count_ones() as usize).max();
+            assert_eq!(
+                max,
+                Some(widest),
+                "{label}/{n}: the layers must run on a block of {widest} qubits"
+            );
         }
     }
 }

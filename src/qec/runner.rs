@@ -50,6 +50,10 @@ use rand_chacha::ChaCha8Rng;
 ///   fixed in the noiseless circuit, detector and observable bits are sampled without
 ///   measurement records, matching the record path bit for bit at the same seed.
 ///
+/// Noise draws in fixed units of 8192 shots, each from its own stream of the seed, so
+/// seeded noise depends on neither `chunk_size` nor the thread count. Noiseless records
+/// that are random in the circuit still draw per chunk.
+///
 /// # Examples
 ///
 /// One noiseless round of a three-qubit repetition-code memory. Every
@@ -127,12 +131,13 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
                 );
             }
         }
-        if chunk_size >= program.options().shots {
-            let measurements = sampler.sample_measurements_packed(program.options().shots)?;
+        let shots = program.options().shots;
+        if chunk_size >= shots {
+            let measurements = sampler.sample_measurements_packed(0, shots, shots)?;
             return qec_result_from_measurements(program, measurements);
         }
-        return qec_result_from_measurement_chunks(program, |chunk| {
-            sampler.sample_measurements_packed(chunk)
+        return qec_result_from_measurement_chunks(program, |first_shot, chunk| {
+            sampler.sample_measurements_packed(first_shot, chunk, shots)
         });
     }
 
@@ -157,7 +162,9 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         let measurements = sampler.sample_measurements_packed(program.options().shots)?;
         return qec_result_from_measurements(program, measurements);
     }
-    qec_result_from_measurement_chunks(program, |chunk| sampler.sample_measurements_packed(chunk))
+    qec_result_from_measurement_chunks(program, |_, chunk| {
+        sampler.sample_measurements_packed(chunk)
+    })
 }
 
 /// Execution for `EXP_VAL` programs carrying active noise.
@@ -368,7 +375,8 @@ impl QecProfiledSampler {
     ) -> Result<PackedShots> {
         match &mut self.sampler {
             QecProfiledMeasurementSampler::Noisy(sampler) => {
-                sampler.apply_noise_to_measurements(measurements)
+                let shots = measurements.num_shots();
+                sampler.apply_noise_to_measurements(measurements, 0, shots)
             }
             QecProfiledMeasurementSampler::Empty | QecProfiledMeasurementSampler::Clean(_) => {
                 Ok(measurements)
@@ -796,7 +804,7 @@ fn qec_result_from_measurement_chunks<F>(
     mut sample_chunk: F,
 ) -> Result<QecSampleResult>
 where
-    F: FnMut(usize) -> Result<PackedShots>,
+    F: FnMut(usize, usize) -> Result<PackedShots>,
 {
     let options = program.options();
     let shots = options.shots;
@@ -825,7 +833,7 @@ where
 
     while sampled_shots < shots {
         let this_chunk = (shots - sampled_shots).min(chunk_size);
-        let measurements = sample_chunk(this_chunk)?;
+        let measurements = sample_chunk(sampled_shots, this_chunk)?;
         if measurements.num_shots() != this_chunk
             || measurements.num_measurements() != num_measurements
         {
@@ -982,16 +990,14 @@ impl QecParityProjection {
 }
 
 /// Sample measurement-major detector and observable bits without measurement records,
-/// from the projected noiseless `pattern` plus projected noise. Chunks match
-/// [`qec_result_from_measurement_chunks`] so the noise stream draws identically.
+/// from the projected noiseless `pattern` plus projected noise.
 fn qec_result_from_parity_projection(
     program: &QecProgram,
     projection: &QecParityProjection,
     pattern: &[u64],
-    mut noise: Option<QecParityNoise>,
+    noise: Option<QecParityNoise>,
 ) -> Result<QecSampleResult> {
     let shots = program.options().shots;
-    let chunk_size = qec_runner_chunk_size(program.options())?;
     let num_detectors = projection.num_detectors;
     let num_observables = projection.num_observables;
     let row_words = shots.div_ceil(64);
@@ -1009,13 +1015,8 @@ fn qec_result_from_parity_projection(
             }
         }
     }
-    if let Some(noise) = noise.as_mut() {
-        let mut sampled_shots = 0usize;
-        while sampled_shots < shots {
-            let this_chunk = (shots - sampled_shots).min(chunk_size);
-            noise.apply(&mut rows, row_words, sampled_shots, this_chunk);
-            sampled_shots += this_chunk;
-        }
+    if let Some(noise) = noise {
+        noise.apply(&mut rows, row_words, shots);
     }
 
     let observable_data = rows.split_off(num_detectors * row_words);

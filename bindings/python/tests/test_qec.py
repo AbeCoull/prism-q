@@ -162,7 +162,7 @@ def test_decoder_beats_physical_error_rate():
     assert predicted.shape == (res.total_shots, 1)
     failures = int((predicted[:, 0] != res.observables[:, 0]).sum())
     # The fixed-seed golden decode count, pinned in `tests/qec_decoder.rs`.
-    assert failures == 23
+    assert failures == 27
     assert failures / res.total_shots < p
 
 

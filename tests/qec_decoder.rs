@@ -15,9 +15,9 @@ const STAT_SHOTS: usize = 20_000;
 // shifts any of them is a loud regression signal.
 const GOLDEN_REPETITION_D3_ANALYTIC_UF: f64 = 0.00971417964172128;
 const GOLDEN_SURFACE_D3_ANALYTIC_UF: f64 = 0.03503902060385806;
-const GOLDEN_REPETITION_D3_DECODE_FAILURES: usize = 23;
-const GOLDEN_REPETITION_D5_DECODE_FAILURES: usize = 2;
-const GOLDEN_SURFACE_D3_DECODE_FAILURES: usize = 639;
+const GOLDEN_REPETITION_D3_DECODE_FAILURES: usize = 27;
+const GOLDEN_REPETITION_D5_DECODE_FAILURES: usize = 1;
+const GOLDEN_SURFACE_D3_DECODE_FAILURES: usize = 603;
 
 // Exact joint distribution over (syndrome, observable 0) under the model:
 // XOR-convolve one two-point distribution per mechanism. Syndrome bits are

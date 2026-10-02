@@ -424,6 +424,7 @@ pub struct QecOptions {
     pub seed: u64,
     /// Maximum shots per compiled-runner batch, bounding peak measurement-matrix memory.
     /// `None` means one batch and `Some(0)` is rejected. The reference runner ignores it.
+    /// Seeded noise draws in fixed 8192-shot units and does not depend on it.
     pub chunk_size: Option<usize>,
     /// When `false`, [`QecSampleResult::measurements`] keeps only its column count and
     /// holds zero shots; detectors and observables are always populated.

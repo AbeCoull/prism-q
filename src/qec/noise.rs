@@ -9,6 +9,8 @@ use super::{
 };
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
+#[cfg(feature = "parallel")]
+use crate::sim::compiled::SendPtrU64;
 use crate::sim::compiled::{
     CompiledSampler, PackedShots, batch_propagate_backward, compile_measurements,
     rng::Xoshiro256PlusPlus, xor_words,
@@ -16,6 +18,21 @@ use crate::sim::compiled::{
 use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, geometric_sample_xoshiro};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+/// Shots per noise unit, part of the seeded-output contract. Unit `k` covers shots
+/// `[k * QEC_NOISE_UNIT_SHOTS, (k + 1) * QEC_NOISE_UNIT_SHOTS)` and draws from ChaCha
+/// stream `k` of the noise seed, so seeded noise depends on neither chunking nor threads.
+const QEC_NOISE_UNIT_SHOTS: usize = 8192;
+
+#[cfg(feature = "parallel")]
+const QEC_PARALLEL_MIN_UNITS: usize = 4;
+
+/// Expected faults per run below which noise units run on the calling thread. Faults
+/// carry the work inside a unit; output rows are allocated and filled outside it.
+#[cfg(feature = "parallel")]
+const QEC_PARALLEL_MIN_FIRINGS: f64 = 1e4;
 
 #[derive(Clone)]
 pub(super) struct QecDeferredNoiseEvent {
@@ -38,7 +55,23 @@ pub(super) struct QecCompiledNoiseSampler {
     noiseless: CompiledSampler,
     events: QecNoiseSensitivity,
     num_measurements: usize,
-    rng: Xoshiro256PlusPlus,
+    seed: u64,
+    split_unit: QecSplitUnit,
+}
+
+/// Record flips of the unit a chunk boundary splits, drawn once and sorted by shot so
+/// each chunk applies its own slice.
+#[derive(Default)]
+struct QecSplitUnit {
+    unit: Option<usize>,
+    flips: Vec<QecRecordFlip>,
+}
+
+#[derive(Clone, Copy)]
+struct QecRecordFlip {
+    shot: u32,
+    event: u32,
+    branch: u8,
 }
 
 /// Compiled noise events whose flips land on measurement-major detector and observable
@@ -48,55 +81,70 @@ pub(super) struct QecParityNoise {
     events: Vec<QecParityNoiseEvent>,
     branch_offsets: Vec<u32>,
     outputs: Vec<u32>,
-    rng: Xoshiro256PlusPlus,
+    seed: u64,
 }
 
-enum QecParityNoiseEvent {
-    /// X, Y, and Z fault branches from `first_branch`.
-    Single {
-        rates: QecSingleNoiseRates,
-        first_branch: usize,
-    },
-    /// The 15 depolarize-2 branches from `first_branch`, in `push_pair` order.
-    Pair { p: f64, first_branch: usize },
+/// Branches run from `first_branch`: X, Y, Z for a single-qubit event, the 15
+/// depolarize-2 branches in `push_pair` order for a pair.
+struct QecParityNoiseEvent {
+    draw: QecNoiseDraw,
+    first_branch: usize,
 }
 
 impl QecParityNoise {
-    /// Apply the chunk of `num_shots` shots starting at shot `offset` to `rows` of
-    /// `row_words` words each, drawing exactly as the record path does on that chunk.
-    pub(super) fn apply(
-        &mut self,
-        rows: &mut [u64],
-        row_words: usize,
-        offset: usize,
-        num_shots: usize,
-    ) {
-        let branch_offsets = &self.branch_offsets;
-        let outputs = &self.outputs;
-        let mut flip = |branch: usize, shot: usize| {
-            let shot = offset + shot;
-            let word = shot / 64;
-            let bit = 1u64 << (shot % 64);
-            let range = branch_offsets[branch] as usize..branch_offsets[branch + 1] as usize;
-            for &output in &outputs[range] {
-                rows[output as usize * row_words + word] ^= bit;
-            }
-        };
-        for event in &self.events {
-            match *event {
-                QecParityNoiseEvent::Single {
-                    rates,
-                    first_branch,
-                } => draw_qec_single_noise(num_shots, rates, &mut self.rng, |shot, branch| {
-                    flip(first_branch + branch, shot)
-                }),
-                QecParityNoiseEvent::Pair { p, first_branch } => {
-                    draw_qec_pair_noise(num_shots, p, &mut self.rng, |shot, branch| {
-                        flip(first_branch + branch, shot)
-                    })
-                }
-            }
+    /// Apply noise for all `shots` shots to `rows` of `row_words` words each, drawing
+    /// exactly as the record path does.
+    pub(super) fn apply(&self, rows: &mut [u64], row_words: usize, shots: usize) {
+        let units = shots.div_ceil(QEC_NOISE_UNIT_SHOTS);
+        #[cfg(feature = "parallel")]
+        if qec_noise_units_in_parallel(units, shots, self.events.iter().map(|event| &event.draw)) {
+            let rows_len = rows.len();
+            let rows = SendPtrU64(rows.as_mut_ptr());
+            (0..units).into_par_iter().for_each(|unit| {
+                self.draw_unit(unit, shots, |output, word, bit| {
+                    let offset = output * row_words + word;
+                    debug_assert!(offset < rows_len);
+                    // SAFETY: `output` is below the row count and `word` below `row_words`
+                    // (its shot is below `shots`), so `offset` lies in `rows`. Unit `unit`
+                    // writes only words `unit * U / 64..(unit + 1) * U / 64` of each row,
+                    // with `U = QEC_NOISE_UNIT_SHOTS` a multiple of 64, so no two units
+                    // touch the same word.
+                    unsafe { rows.xor_word(offset, bit) }
+                });
+            });
+            return;
         }
+        for unit in 0..units {
+            self.draw_unit(unit, shots, |output, word, bit| {
+                rows[output * row_words + word] ^= bit;
+            });
+        }
+    }
+
+    /// Draw unit `unit` of a `shots`-shot run, calling `flip(output, word, bit)` for every
+    /// output bit a fault toggles.
+    #[inline(always)]
+    fn draw_unit(&self, unit: usize, shots: usize, mut flip: impl FnMut(usize, usize, u64)) {
+        let first_shot = unit * QEC_NOISE_UNIT_SHOTS;
+        let unit_shots = (shots - first_shot).min(QEC_NOISE_UNIT_SHOTS);
+        let mut rng = qec_noise_unit_rng(self.seed, unit);
+        draw_qec_unit(
+            &self.events,
+            |event| &event.draw,
+            &mut rng,
+            unit_shots,
+            |_, event, shot, branch| {
+                let shot = first_shot + shot;
+                let word = shot / 64;
+                let bit = 1u64 << (shot % 64);
+                let branch = event.first_branch + branch;
+                let range =
+                    self.branch_offsets[branch] as usize..self.branch_offsets[branch + 1] as usize;
+                for &output in &self.outputs[range] {
+                    flip(output as usize, word, bit);
+                }
+            },
+        );
     }
 
     fn push_branch(&mut self, words: impl Iterator<Item = u64>) {
@@ -130,51 +178,44 @@ impl QecCompiledNoiseSampler {
             events: Vec::with_capacity(self.events.events.len()),
             branch_offsets: vec![0],
             outputs: Vec::new(),
-            rng: self.rng,
+            seed: self.seed,
         };
         let mut x = vec![0u64; out_words];
         let mut z = vec![0u64; out_words];
         for event in self.events.events {
             let first_branch = parity.branch_offsets.len() - 1;
-            match event {
-                QecNoiseSensitivityEvent::Single {
-                    x_flip,
-                    z_flip,
-                    px,
-                    py,
-                    pz,
-                } => {
+            match event.flips {
+                QecNoiseFlips::Single { x_flip, z_flip } => {
                     project(&x_flip, &mut x);
                     project(&z_flip, &mut z);
                     parity.push_branch(z.iter().copied());
                     parity.push_branch(x.iter().zip(&z).map(|(x, z)| x ^ z));
                     parity.push_branch(x.iter().copied());
-                    parity.events.push(QecParityNoiseEvent::Single {
-                        rates: QecSingleNoiseRates {
-                            px,
-                            py,
-                            p_event: px + py + pz,
-                        },
-                        first_branch,
-                    });
                 }
-                QecNoiseSensitivityEvent::Pair { branch_flips, p } => {
+                QecNoiseFlips::Pair { branch_flips } => {
                     for flips in branch_flips.chunks_exact(branch_flips.len() / 15) {
                         project(flips, &mut x);
                         parity.push_branch(x.iter().copied());
                     }
-                    parity
-                        .events
-                        .push(QecParityNoiseEvent::Pair { p, first_branch });
                 }
             }
+            parity.events.push(QecParityNoiseEvent {
+                draw: event.draw,
+                first_branch,
+            });
         }
         parity
     }
 
-    pub(super) fn sample_measurements_packed(&mut self, num_shots: usize) -> Result<PackedShots> {
+    /// Sample shots `first_shot..first_shot + num_shots` of a `total_shots`-shot run.
+    pub(super) fn sample_measurements_packed(
+        &mut self,
+        first_shot: usize,
+        num_shots: usize,
+        total_shots: usize,
+    ) -> Result<PackedShots> {
         let measurements = self.sample_noiseless_measurements_packed(num_shots)?;
-        self.apply_noise_to_measurements(measurements)
+        self.apply_noise_to_measurements(measurements, first_shot, total_shots)
     }
 
     pub(super) fn sample_noiseless_measurements_packed(
@@ -184,9 +225,13 @@ impl QecCompiledNoiseSampler {
         self.noiseless.try_sample_bulk_packed(num_shots)
     }
 
+    /// Apply noise to `measurements`, which hold shots from `first_shot` of a
+    /// `total_shots`-shot run.
     pub(super) fn apply_noise_to_measurements(
         &mut self,
         measurements: PackedShots,
+        first_shot: usize,
+        total_shots: usize,
     ) -> Result<PackedShots> {
         let num_shots = measurements.num_shots();
         if measurements.num_measurements() != self.num_measurements {
@@ -202,15 +247,126 @@ impl QecCompiledNoiseSampler {
             return Ok(measurements);
         }
 
+        debug_assert!(first_shot + num_shots <= total_shots);
         let m_words = self.num_measurements.div_ceil(64);
         let mut data = measurements.into_shot_major_data();
-        self.events
-            .apply(&mut data, num_shots, m_words, &mut self.rng);
+        self.apply_noise_window(&mut data, m_words, first_shot, total_shots);
         Ok(PackedShots::from_shot_major(
             data,
             num_shots,
             self.num_measurements,
         ))
+    }
+
+    /// XOR noise into shot-major `data` holding shots from `first_shot`. Units inside the
+    /// window draw straight onto their shots; a unit the window splits draws once into
+    /// [`QecSplitUnit`] and contributes the flips that land in the window.
+    fn apply_noise_window(
+        &mut self,
+        data: &mut [u64],
+        m_words: usize,
+        first_shot: usize,
+        total_shots: usize,
+    ) {
+        let end_shot = first_shot + data.len() / m_words;
+        let unit_end = |unit: usize| ((unit + 1) * QEC_NOISE_UNIT_SHOTS).min(total_shots);
+        let is_split =
+            |unit: usize| unit * QEC_NOISE_UNIT_SHOTS < first_shot || unit_end(unit) > end_shot;
+        let first_unit = first_shot / QEC_NOISE_UNIT_SHOTS;
+        let last_unit = (end_shot - 1) / QEC_NOISE_UNIT_SHOTS;
+
+        if is_split(first_unit) {
+            self.apply_split_unit(data, m_words, first_shot, total_shots, first_unit);
+        }
+        let whole_start = first_unit + usize::from(is_split(first_unit));
+        let whole_end = (last_unit + 1 - usize::from(is_split(last_unit))).max(whole_start);
+        if whole_start < whole_end {
+            let lo = whole_start * QEC_NOISE_UNIT_SHOTS - first_shot;
+            let hi = unit_end(whole_end - 1) - first_shot;
+            self.apply_whole_units(&mut data[lo * m_words..hi * m_words], m_words, whole_start);
+        }
+        if last_unit != first_unit && is_split(last_unit) {
+            self.apply_split_unit(data, m_words, first_shot, total_shots, last_unit);
+        }
+    }
+
+    /// Draw units from `first_unit` onto `data`, which holds exactly their shots.
+    fn apply_whole_units(&self, data: &mut [u64], m_words: usize, first_unit: usize) {
+        let unit_words = QEC_NOISE_UNIT_SHOTS * m_words;
+        let events = &self.events.events;
+        let draw_unit = |(index, unit_data): (usize, &mut [u64])| {
+            let mut rng = qec_noise_unit_rng(self.seed, first_unit + index);
+            draw_qec_unit(
+                events,
+                |event| &event.draw,
+                &mut rng,
+                unit_data.len() / m_words,
+                |_, event, shot, branch| {
+                    event.flip(&mut unit_data[shot * m_words..(shot + 1) * m_words], branch)
+                },
+            );
+        };
+        #[cfg(feature = "parallel")]
+        if qec_noise_units_in_parallel(
+            data.len().div_ceil(unit_words),
+            data.len() / m_words,
+            events.iter().map(|event| &event.draw),
+        ) {
+            data.par_chunks_mut(unit_words)
+                .enumerate()
+                .for_each(draw_unit);
+            return;
+        }
+        data.chunks_mut(unit_words).enumerate().for_each(draw_unit);
+    }
+
+    /// Apply the flips of unit `unit` that land in the shots `data` holds from `first_shot`.
+    fn apply_split_unit(
+        &mut self,
+        data: &mut [u64],
+        m_words: usize,
+        first_shot: usize,
+        total_shots: usize,
+        unit: usize,
+    ) {
+        let unit_start = unit * QEC_NOISE_UNIT_SHOTS;
+        let unit_shots = (total_shots - unit_start).min(QEC_NOISE_UNIT_SHOTS);
+        let events = &self.events.events;
+        let split = &mut self.split_unit;
+        if split.unit != Some(unit) {
+            split.flips.clear();
+            let mut rng = qec_noise_unit_rng(self.seed, unit);
+            draw_qec_unit(
+                events,
+                |event| &event.draw,
+                &mut rng,
+                unit_shots,
+                |event, _, shot, branch| {
+                    split.flips.push(QecRecordFlip {
+                        shot: shot as u32,
+                        event: event as u32,
+                        branch: branch as u8,
+                    })
+                },
+            );
+            split.flips.sort_unstable_by_key(|flip| flip.shot);
+            split.unit = Some(unit);
+        }
+
+        let end_shot = first_shot + data.len() / m_words;
+        let lo = (first_shot.max(unit_start) - unit_start) as u32;
+        let hi = (end_shot.min(unit_start + unit_shots) - unit_start) as u32;
+        let start = split.flips.partition_point(|flip| flip.shot < lo);
+        for flip in split.flips[start..]
+            .iter()
+            .take_while(|flip| flip.shot < hi)
+        {
+            let shot = unit_start + flip.shot as usize - first_shot;
+            events[flip.event as usize].flip(
+                &mut data[shot * m_words..(shot + 1) * m_words],
+                flip.branch as usize,
+            );
+        }
     }
 }
 
@@ -247,12 +403,12 @@ impl QecNoiseSensitivity {
             return;
         }
 
-        self.events.push(QecNoiseSensitivityEvent::Single {
-            x_flip: x_flip.to_vec(),
-            z_flip: z_flip.to_vec(),
-            px,
-            py,
-            pz,
+        self.events.push(QecNoiseSensitivityEvent {
+            draw: QecNoiseDraw::single(px, py, pz),
+            flips: QecNoiseFlips::Single {
+                x_flip: x_flip.to_vec(),
+                z_flip: z_flip.to_vec(),
+            },
         });
     }
 
@@ -283,69 +439,136 @@ impl QecNoiseSensitivity {
         }
 
         if any {
-            self.events
-                .push(QecNoiseSensitivityEvent::Pair { branch_flips, p });
+            self.events.push(QecNoiseSensitivityEvent {
+                draw: QecNoiseDraw::pair(p),
+                flips: QecNoiseFlips::Pair { branch_flips },
+            });
         }
     }
+}
 
-    fn apply(
-        &self,
-        data: &mut [u64],
-        num_shots: usize,
-        m_words: usize,
-        rng: &mut Xoshiro256PlusPlus,
-    ) {
-        for event in &self.events {
-            match event {
-                QecNoiseSensitivityEvent::Single {
-                    x_flip,
-                    z_flip,
-                    px,
-                    py,
-                    pz,
-                } => {
-                    let rates = QecSingleNoiseRates {
-                        px: *px,
-                        py: *py,
-                        p_event: *px + *py + *pz,
-                    };
-                    draw_qec_single_noise(num_shots, rates, rng, |shot, branch| {
-                        let base = shot * m_words;
-                        apply_qec_single_noise_branch(
-                            &mut data[base..base + m_words],
-                            x_flip,
-                            z_flip,
-                            branch,
-                        );
-                    });
-                }
-                QecNoiseSensitivityEvent::Pair { branch_flips, p } => {
-                    draw_qec_pair_noise(num_shots, *p, rng, |shot, branch| {
-                        let shot_base = shot * m_words;
-                        let flip_base = branch * m_words;
-                        xor_words(
-                            &mut data[shot_base..shot_base + m_words],
-                            &branch_flips[flip_base..flip_base + m_words],
-                        );
-                    })
-                }
+struct QecNoiseSensitivityEvent {
+    draw: QecNoiseDraw,
+    flips: QecNoiseFlips,
+}
+
+enum QecNoiseFlips {
+    Single { x_flip: Vec<u64>, z_flip: Vec<u64> },
+    Pair { branch_flips: Vec<u64> },
+}
+
+impl QecNoiseSensitivityEvent {
+    /// XOR fault `branch` into one shot's record words.
+    #[inline(always)]
+    fn flip(&self, shot_words: &mut [u64], branch: usize) {
+        match &self.flips {
+            QecNoiseFlips::Single { x_flip, z_flip } => {
+                apply_qec_single_noise_branch(shot_words, x_flip, z_flip, branch)
+            }
+            QecNoiseFlips::Pair { branch_flips } => {
+                let m_words = shot_words.len();
+                xor_words(
+                    shot_words,
+                    &branch_flips[branch * m_words..(branch + 1) * m_words],
+                );
             }
         }
     }
 }
 
-enum QecNoiseSensitivityEvent {
+/// One event's draw constants, computed once so every unit restarts the event from them.
+#[derive(Clone, Copy)]
+enum QecNoiseDraw {
     Single {
-        x_flip: Vec<u64>,
-        z_flip: Vec<u64>,
-        px: f64,
-        py: f64,
-        pz: f64,
+        rates: QecSingleNoiseRates,
+        /// Branch rates given that the event fires.
+        conditional: QecSingleNoiseRates,
+        ln_1mp: f64,
     },
     Pair {
-        branch_flips: Vec<u64>,
         p: f64,
+        ln_1mp: f64,
     },
+}
+
+impl QecNoiseDraw {
+    fn single(px: f64, py: f64, pz: f64) -> Self {
+        let p_event = px + py + pz;
+        let px_frac = px / p_event;
+        let pxy_frac = (px + py) / p_event;
+        Self::Single {
+            rates: QecSingleNoiseRates { px, py, p_event },
+            conditional: QecSingleNoiseRates {
+                px: px_frac,
+                py: pxy_frac - px_frac,
+                p_event: 1.0,
+            },
+            ln_1mp: (1.0 - p_event).ln(),
+        }
+    }
+
+    fn pair(p: f64) -> Self {
+        Self::Pair {
+            p,
+            ln_1mp: (1.0 - p).ln(),
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    fn rate(&self) -> f64 {
+        match *self {
+            Self::Single { rates, .. } => rates.p_event,
+            Self::Pair { p, .. } => p,
+        }
+    }
+}
+
+/// Whether to spread `units` noise units of `shots` shots in total over Rayon. Scheduling
+/// only: every unit draws from its own stream into its own shots, so the answer cannot
+/// change output.
+#[cfg(feature = "parallel")]
+fn qec_noise_units_in_parallel<'a>(
+    units: usize,
+    shots: usize,
+    draws: impl Iterator<Item = &'a QecNoiseDraw>,
+) -> bool {
+    units >= QEC_PARALLEL_MIN_UNITS
+        && shots as f64 * draws.map(QecNoiseDraw::rate).sum::<f64>() >= QEC_PARALLEL_MIN_FIRINGS
+}
+
+fn qec_noise_unit_rng(seed: u64, unit: usize) -> Xoshiro256PlusPlus {
+    let mut seed_rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(0x51A7_EC01));
+    seed_rng.set_stream(unit as u64);
+    Xoshiro256PlusPlus::from_chacha(&mut seed_rng)
+}
+
+/// Draw every event over one unit of `unit_shots` shots, event-major, calling
+/// `flip(event_index, event, shot, branch)` per fault. The record and parity paths both
+/// draw through here, so they consume each unit's stream identically.
+#[inline(always)]
+fn draw_qec_unit<E>(
+    events: &[E],
+    draw: impl Fn(&E) -> &QecNoiseDraw,
+    rng: &mut Xoshiro256PlusPlus,
+    unit_shots: usize,
+    mut flip: impl FnMut(usize, &E, usize, usize),
+) {
+    for (index, event) in events.iter().enumerate() {
+        match *draw(event) {
+            QecNoiseDraw::Single {
+                rates,
+                conditional,
+                ln_1mp,
+            } => draw_qec_single_noise(unit_shots, rates, conditional, ln_1mp, rng, |shot, b| {
+                flip(index, event, shot, b)
+            }),
+            QecNoiseDraw::Pair { p, ln_1mp } => {
+                draw_qec_pair_noise(unit_shots, p, ln_1mp, rng, |shot, b| {
+                    flip(index, event, shot, b)
+                })
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -379,13 +602,9 @@ pub(super) fn compile_qec_noisy_sampler(program: &QecProgram) -> Result<QecCompi
         noiseless,
         events,
         num_measurements: deferred.measurement_qubits.len(),
-        rng: qec_noise_rng(program.options().seed),
+        seed: program.options().seed,
+        split_unit: QecSplitUnit::default(),
     })
-}
-
-fn qec_noise_rng(seed: u64) -> Xoshiro256PlusPlus {
-    let mut seed_rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(0x51A7_EC01));
-    Xoshiro256PlusPlus::from_chacha(&mut seed_rng)
 }
 
 /// Lower a measurement-free QEC program into a circuit plus the matching
@@ -840,12 +1059,13 @@ fn push_qec_noise_sensitivity_event(
 }
 
 /// Draw one single-qubit Pauli event over `num_shots` shots, calling `flip(shot, branch)`
-/// per fault with the branch of [`QecSingleNoiseRates::branch`]. The record and parity
-/// paths both draw through here, so they consume the noise stream identically.
+/// per fault with the branch of [`QecSingleNoiseRates::branch`].
 #[inline(always)]
 fn draw_qec_single_noise(
     num_shots: usize,
     rates: QecSingleNoiseRates,
+    conditional: QecSingleNoiseRates,
+    ln_1mp: f64,
     rng: &mut Xoshiro256PlusPlus,
     mut flip: impl FnMut(usize, usize),
 ) {
@@ -862,14 +1082,6 @@ fn draw_qec_single_noise(
         return;
     }
 
-    let ln_1mp = (1.0 - rates.p_event).ln();
-    let px_frac = rates.px / rates.p_event;
-    let pxy_frac = (rates.px + rates.py) / rates.p_event;
-    let conditional = QecSingleNoiseRates {
-        px: px_frac,
-        py: pxy_frac - px_frac,
-        p_event: 1.0,
-    };
     let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
     while shot < num_shots {
         if let Some(branch) = conditional.branch(rng.next_f64()) {
@@ -905,6 +1117,7 @@ fn apply_qec_single_noise_branch(
 fn draw_qec_pair_noise(
     num_shots: usize,
     p: f64,
+    ln_1mp: f64,
     rng: &mut Xoshiro256PlusPlus,
     mut flip: impl FnMut(usize, usize),
 ) {
@@ -921,7 +1134,6 @@ fn draw_qec_pair_noise(
         return;
     }
 
-    let ln_1mp = (1.0 - p).ln();
     let mut shot = geometric_sample_xoshiro(rng, ln_1mp);
     while shot < num_shots {
         flip(shot, qec_uniform_15(rng));

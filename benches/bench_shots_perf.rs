@@ -723,6 +723,25 @@ fn bench_qec_detector_sampling(c: &mut Criterion) {
         }
     }
 
+    // Noise-dominated rows at 1M shots, and the smallest dropped-record program at 10k.
+    let sized: [(&str, usize, usize, f64, QecMemoryBuilder); 3] = [
+        ("rep_p01_drop", 15, 1_000_000, 0.01, qec_repetition_program),
+        ("surf_p01_drop", 5, 1_000_000, 0.01, qec_surface_program),
+        (
+            "rep_p001_drop_10k",
+            5,
+            10_000,
+            0.001,
+            qec_repetition_program,
+        ),
+    ];
+    for (label, distance, shots, noise_rate, build) in sized {
+        let program = build(distance, distance, shots, Some(noise_rate));
+        group.bench_with_input(BenchmarkId::new(label, distance), &program, |b, program| {
+            b.iter(|| run_qec_program(program).unwrap());
+        });
+    }
+
     group.finish();
 }
 

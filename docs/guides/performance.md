@@ -54,7 +54,8 @@ Deterministic partitioning makes unitary evolution and seeded terminal sampling 
 dense backends bitwise reproducible at any thread count. Parallel reductions (norms,
 collapse probabilities, expectation values) are stable to about 1e-12 but not bitwise,
 and the batched compiled sampler seeds one RNG stream per worker, so its shots reproduce
-only at a fixed thread count. The per-path contract is in
+only at a fixed thread count. At that width the stream is the same on x86 and aarch64:
+the vector and scalar kernels draw from one four-lane layout. The per-path contract is in
 [Threading, SIMD, and Memory Layout](../architecture/threading-simd.md).
 
 ## Tuning environment variables

@@ -745,6 +745,40 @@ fn bench_qec_detector_sampling(c: &mut Criterion) {
     group.finish();
 }
 
+// Memories run for many more rounds than their distance, at 10k shots so compiling the
+// program, which grows with rounds times records, outweighs sampling.
+fn bench_qec_deep_memory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_deep_memory");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_secs(3));
+
+    let shots = 10_000;
+    let rows: [(&str, usize, usize, bool, QecMemoryBuilder); 5] = [
+        ("rep_p001_drop", 15, 256, false, qec_repetition_program),
+        ("surf_p001_drop", 5, 200, false, qec_surface_program),
+        ("surf_p001_drop", 9, 90, false, qec_surface_program),
+        ("surf_p001_drop", 9, 360, false, qec_surface_program),
+        ("surf_p001_keep", 9, 90, true, qec_surface_program),
+    ];
+    for (label, distance, rounds, keep_measurements, build) in rows {
+        let mut program = build(distance, rounds, shots, Some(0.001));
+        program.set_options(QecOptions {
+            keep_measurements,
+            ..program.options()
+        });
+        group.bench_with_input(
+            BenchmarkId::new(label, format!("{distance}x{rounds}")),
+            &program,
+            |b, program| {
+                b.iter(|| run_qec_program(program).unwrap());
+            },
+        );
+    }
+
+    group.finish();
+}
+
 #[cfg(not(feature = "bench-internal"))]
 fn bench_qec_noisy_runner_split(_c: &mut Criterion) {}
 
@@ -981,6 +1015,7 @@ criterion_group! {
     bench_qec_clifford_runner,
     bench_qec_noisy_runner,
     bench_qec_detector_sampling,
+    bench_qec_deep_memory,
     bench_qec_noisy_runner_split,
     bench_analytical_marginals,
     bench_chunked_high_shots

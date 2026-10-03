@@ -633,8 +633,9 @@ impl Multi2qData {
 /// platform, see [`multi_2q_tile_bits`]; [`MULTI_2Q_HIGH_BUDGET`] is the
 /// widest budget any platform reaches and sizes the inline qubit lists.
 pub(crate) const MULTI_2Q_MAX_TILE_BITS: usize = 18;
-/// Smallest tile any platform uses, 256 KB: one L2 on the x86 cores measured.
-pub(crate) const MULTI_2Q_MIN_TILE_BITS: usize = 14;
+/// Smallest tile the knob accepts, 128 KB: half the derived floor, so a sweep can
+/// try it.
+pub(crate) const MULTI_2Q_MIN_TILE_BITS: usize = 13;
 /// Fewest low bits a tile keeps contiguous: 64-amplitude runs, 1 KB each.
 pub(crate) const MULTI_2Q_MIN_LOW_BITS: usize = 6;
 /// Most distinct high qubits one `Multi2q` batch may span on any platform.
@@ -656,9 +657,9 @@ pub(crate) fn multi_2q_low_bits() -> usize {
     })
 }
 
-/// Log2 of the `Multi2q` tile in amplitudes: 2^14, 256 KB, or
-/// `PRISM_MULTI_2Q_TILE_BITS` clamped to
-/// `MULTI_2Q_MIN_TILE_BITS..=MULTI_2Q_MAX_TILE_BITS`.
+/// Log2 of the `Multi2q` tile in amplitudes: the tile budget from the cache topology
+/// (2^14, 256 KB, on the x86 cores measured), or `PRISM_MULTI_2Q_TILE_BITS` clamped
+/// to `MULTI_2Q_MIN_TILE_BITS..=MULTI_2Q_MAX_TILE_BITS`.
 ///
 /// The tile has to sit in the core's private cache: on an i7-6700K (256 KB
 /// of L2 per core, 8 MB of L3 shared by four) a 1 MB tile ran quantum volume
@@ -669,7 +670,10 @@ pub(crate) fn multi_2q_tile_bits() -> usize {
     static CACHED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
         crate::env_knobs::usize_override("PRISM_MULTI_2Q_TILE_BITS", 1)
-            .unwrap_or(MULTI_2Q_MIN_TILE_BITS)
+            .unwrap_or_else(|| {
+                (crate::backend::cache::tile_budget_bytes() / size_of::<Complex64>()).ilog2()
+                    as usize
+            })
             .clamp(MULTI_2Q_MIN_TILE_BITS, MULTI_2Q_MAX_TILE_BITS)
     })
 }

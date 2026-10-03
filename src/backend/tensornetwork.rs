@@ -235,9 +235,12 @@ type Axes = SmallVec<[(usize, usize); 6]>;
 /// Source elements a tiled transpose reads per contiguous run, two cache lines.
 const TRANSPOSE_TILE: usize = 8;
 
-/// Elements from which a strided transpose tiles its reads: 512 KiB, past a
-/// private L2.
-const TRANSPOSE_TILE_MIN: usize = 1 << 15;
+/// Elements from which a strided transpose tiles its reads: twice the tile budget,
+/// 512 KiB on the x86 cores measured, past a private L2.
+#[inline(always)]
+fn transpose_tile_min() -> usize {
+    2 * crate::backend::cache::tile_budget_bytes() / size_of::<Complex64>()
+}
 
 /// Output axes of `perm` over a tensor of `shape`, with neighbours that stay
 /// adjacent in the source merged into one axis and unit extents dropped.
@@ -374,7 +377,7 @@ fn transpose_elements(
 /// Fill `out` with `src` read along `axes`.
 ///
 /// Runs of at least [`TRANSPOSE_TILE`] copy whole. A strided inner axis on a
-/// tensor past [`TRANSPOSE_TILE_MIN`] goes through [`transpose_tile`]; below it
+/// tensor past [`transpose_tile_min`] goes through [`transpose_tile`]; below it
 /// the source sits in cache and the element walk has less setup per element.
 fn transpose_into(out: &mut [Complex64], src: &[Complex64], axes: &[(usize, usize)]) {
     let (inner_extent, inner_stride) = axes[axes.len() - 1];
@@ -384,7 +387,7 @@ fn transpose_into(out: &mut [Complex64], src: &[Complex64], axes: &[(usize, usiz
             transpose_runs(dst, src, axes, start)
         });
     }
-    if inner_stride != 1 && out.len() >= TRANSPOSE_TILE_MIN {
+    if inner_stride != 1 && out.len() >= transpose_tile_min() {
         let b = axes
             .iter()
             .position(|&(_, stride)| stride == 1)

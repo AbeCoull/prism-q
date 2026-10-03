@@ -10,15 +10,21 @@ the architecture reference under [Fusion Pipeline](../architecture/fusion.md) an
    reducing memory traffic over the statevector. It is qubit-count gated and zero-cost
    when it does not apply.
 2. **Cache-resident tiling** keeps batched gates working on data that stays hot across
-   a pass, in two shapes. `MultiFused` splits its gates by target: bit 13 and below run
-   on 256 KB tiles, bits 14 through 16 on 2 MB ones, and higher targets run untiled. A
-   `Multi2q` tile is a contiguous run of the low index bits plus gathered high qubits,
-   64 amplitudes per run and up to eight high qubits in a 2^14 tile, so a batch of
-   gates on any qubits costs one pass over the state as long as it spans at most eight
-   qubits above bit 6. The tile is 256 KB, one core's private L2 on the x86 parts
-   measured (a 1 MB tile ran 2x slower at 22 and 24 qubits on an i7-6700K);
-   `PRISM_MULTI_2Q_TILE_BITS` and `PRISM_MULTI_2Q_LOW_BITS` set both by hand, and a
-   core with a larger private cache is worth a sweep of the first.
+   a pass, in two shapes. Both size their tiles from one budget read off the cache
+   topology at startup: the smaller of the L2 per core and a quarter of the last-level
+   cache per logical CPU sharing it, floored at 256 KB and capped at 1 MB, so every
+   concurrent tile and the lines it gathers fit half that cache. On the i7-6700K the
+   kernels were measured on, that is 256 KB; a 1 MB tile ran 2x slower there at 22 and
+   24 qubits. `MultiFused` splits its gates by target: targets whose period fits the
+   budget run on budget-sized tiles (bit 13 and below at 256 KB), bits 14 through 16
+   on 2 MB ones when those fit the last-level cache, and higher targets run untiled.
+   A `Multi2q` tile is a contiguous run of the low index bits plus gathered high
+   qubits, 64 amplitudes per run and up to eight high qubits in a 2^14 tile, so a
+   batch of gates on any qubits costs one pass over the state as long as it spans at
+   most eight qubits above bit 6. `PRISM_TILE_KB` overrides the budget for every tile,
+   and `PRISM_MULTI_2Q_TILE_BITS` and `PRISM_MULTI_2Q_LOW_BITS` set the `Multi2q`
+   shape by hand. Budgets past 256 KB are derived, not measured, so a core with a
+   larger cache is worth a sweep of `PRISM_TILE_KB`.
 3. **SIMD** vectorizes the inner complex-arithmetic loop. The tier is picked at
    runtime: AVX2+FMA, FMA or SSE2 on x86_64, NEON on aarch64, scalar elsewhere.
 
@@ -83,7 +89,8 @@ variable to anything switches the path off.
 | `PRISM_DIST_RELABEL` | `1` | `0`/`false` disables qubit relabeling in the distributed backend |
 | `RAYON_NUM_THREADS` | all cores | Rayon thread count, read by Rayon itself |
 | `PRISM_NO_AVX2_2Q` | unset | Flag: force the 128-bit FMA two-qubit kernel |
-| `PRISM_MULTI_2Q_TILE_BITS` | 14 | Log2 of the `Multi2q` tile in amplitudes, 14 to 18 |
+| `PRISM_TILE_KB` | detected | Cache-resident tile budget in KB, rounded down to a power of two, 128 to 2048; derived from the cache topology when unset (256 on a 256 KB L2) |
+| `PRISM_MULTI_2Q_TILE_BITS` | detected | Log2 of the `Multi2q` tile in amplitudes, 13 to 18; the tile budget when unset (14 at 256 KB) |
 | `PRISM_MULTI_2Q_LOW_BITS` | 6 | Log2 of the contiguous run a `Multi2q` tile gathers, 6 to one below the tile bits; fewer means more high qubits per pass |
 | `PRISM_NO_AVX2_KRAUS` | unset | Flag: disable the AVX2 dense two-qubit Kraus kernel |
 | `PRISM_NO_REORDER` | unset | Flag: disable the `Fused2q` reordering that fills each `Multi2q` tile |

@@ -1224,6 +1224,16 @@ fn fuse_multi_2q_returns_borrowed_without_tileable_run() {
 
 #[test]
 fn tile_reorder_pulls_later_gates_ahead_of_a_skipped_gate_on_other_qubits() {
+    // The expected order is the one a 2^14 tile's eight-qubit budget produces, so
+    // the tile shape is pinned rather than taken from the host's cache topology.
+    // SAFETY: set_var is unsafe because it can race concurrent getenv calls. The
+    // supported runner (cargo nextest) executes each test in its own process, so
+    // no other thread exists when this runs, and nothing has read the knobs yet.
+    unsafe {
+        std::env::set_var("PRISM_MULTI_2Q_TILE_BITS", "14");
+        std::env::set_var("PRISM_MULTI_2Q_LOW_BITS", "6");
+    }
+    assert_eq!(crate::gates::multi_2q_high_budget(), 8);
     let pairs = [
         (6, 7),
         (8, 9),

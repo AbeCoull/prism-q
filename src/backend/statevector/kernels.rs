@@ -4688,7 +4688,8 @@ mod qft_layout_tests {
 
     #[test]
     fn compact_twiddles_match_whole_state_table_bitwise() {
-        let n = 16;
+        // The whole-state table has to reach the compact table's widest stride.
+        let n = qft_max_tile_bits().max(16);
         let total = 1usize << n;
         let whole = qft_twiddles_scaled(n);
         let compact = qft_compact_twiddles();

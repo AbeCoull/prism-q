@@ -92,6 +92,10 @@ fn floor_pow2(n: usize) -> usize {
 
 /// Assemble the topology from the caches CPU 0 sits in, in `(level, bytes, sharing)`
 /// form, and its logical CPUs per core.
+#[cfg_attr(
+    any(miri, target_os = "macos", not(any(windows, unix))),
+    allow(dead_code)
+)]
 fn assemble(
     caches: impl IntoIterator<Item = (u32, usize, usize)>,
     smt: usize,

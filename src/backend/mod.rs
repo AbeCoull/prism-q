@@ -40,6 +40,8 @@
 //! operator it selects, so their coverage is one set by construction. That set is
 //! `BackendKind::supports_general_noise`.
 
+#[cfg(feature = "parallel")]
+pub(crate) mod cache;
 pub mod density_matrix;
 #[cfg(feature = "distributed")]
 pub mod distributed_statevector;

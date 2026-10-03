@@ -4,7 +4,7 @@
 
 #[cfg(feature = "bench-internal")]
 use super::noise::QecCompiledNoiseSampler;
-use super::noise::{QecParityNoise, compile_qec_noisy_sampler};
+use super::noise::{QecParityNoise, compile_qec_noisy_sampler, compile_qec_parity_noise};
 use super::{
     QecBasis, QecNoise, QecObservableEstimate, QecOp, QecOptions, QecPauli, QecProgram,
     QecRecordRef, QecSampleResult, append_basis_to_z_rotation, append_mpp_parity_rotations,
@@ -112,17 +112,13 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
 
     let samples_parities_directly = qec_records_unobserved(program);
     if has_noise {
-        let mut sampler = compile_qec_noisy_sampler(program)?;
         if samples_parities_directly {
             let projection = QecParityProjection::new(
                 program.num_measurements(),
                 &program.detector_rows()?,
                 &program.observable_rows()?,
             );
-            if let Some(pattern) = projection.constant_pattern(sampler.noiseless()) {
-                let noise = sampler.into_parity_noise(projection.words, |records, out| {
-                    projection.project_into(records, out)
-                });
+            if let Some((pattern, noise)) = compile_qec_parity_noise(program, &projection)? {
                 return qec_result_from_parity_projection(
                     program,
                     &projection,
@@ -131,6 +127,7 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
                 );
             }
         }
+        let mut sampler = compile_qec_noisy_sampler(program)?;
         let shots = program.options().shots;
         if chunk_size >= shots {
             let measurements = sampler.sample_measurements_packed(0, shots, shots)?;
@@ -913,16 +910,16 @@ fn qec_records_unobserved(program: &QecProgram) -> bool {
 /// Detector and observable rows as one parity space: detector `i` is output `i` and
 /// observable `j` output `num_detectors + j`. Held as the outputs each measurement
 /// record feeds, so projecting a record vector visits only its set bits.
-struct QecParityProjection {
+pub(super) struct QecParityProjection {
     record_offsets: Vec<usize>,
     record_outputs: Vec<usize>,
     num_detectors: usize,
     num_observables: usize,
-    words: usize,
+    pub(super) words: usize,
 }
 
 impl QecParityProjection {
-    fn new(
+    pub(super) fn new(
         num_measurements: usize,
         detector_rows: &[Vec<usize>],
         observable_rows: &[Vec<usize>],
@@ -957,8 +954,17 @@ impl QecParityProjection {
         }
     }
 
+    pub(super) fn num_outputs(&self) -> usize {
+        self.num_detectors + self.num_observables
+    }
+
+    /// Outputs that `record` feeds.
+    pub(super) fn outputs(&self, record: usize) -> &[usize] {
+        &self.record_outputs[self.record_offsets[record]..self.record_offsets[record + 1]]
+    }
+
     /// Overwrite `projected` with the output parities of the record bits in `records`.
-    fn project_into(&self, records: &[u64], projected: &mut [u64]) {
+    pub(super) fn project_into(&self, records: &[u64], projected: &mut [u64]) {
         projected.fill(0);
         for (word_idx, &word) in records.iter().enumerate() {
             let mut bits = word;
@@ -1554,5 +1560,164 @@ mod tests {
             let pattern = projection.constant_pattern(sampler.measurement_sampler());
             assert_eq!(pattern, expected, "{text}");
         }
+    }
+
+    #[test]
+    fn parity_compile_fixes_the_parities_the_record_sampler_fixes() {
+        for text in [
+            "X_ERROR(0.1) 0
+X 0
+H 1
+M 0 1
+DETECTOR rec[-2]
+OBSERVABLE_INCLUDE(0) rec[-2]",
+            "DEPOLARIZE1(0.1) 0
+H 0
+M 0 1
+DETECTOR rec[-1]
+OBSERVABLE_INCLUDE(0) rec[-2]",
+            "RX 0
+Z_ERROR(0.1) 0
+MX 0
+DETECTOR rec[-1]",
+            "RY 0
+X_ERROR(0.1) 0
+MY 0
+DETECTOR rec[-1]",
+            "H 0
+CX 0 1
+DEPOLARIZE2(0.1) 0 1
+MPP X0*X1 Z0*Z1
+MPP X0*X1
+DETECTOR rec[-1] rec[-3]",
+            "X_ERROR(0.1) 0
+MPP X0
+DETECTOR rec[-1]",
+            "H 0
+M 0
+R 0
+X_ERROR(0.1) 0
+M 0
+DETECTOR rec[-1]
+OBSERVABLE_INCLUDE(0) rec[-2]",
+            "H 0
+M 0
+R 0
+X_ERROR(0.1) 0
+M 0
+DETECTOR rec[-1]",
+            "RX 1
+MRX 1
+DEPOLARIZE2(0.2) 0 1
+X 0
+MR 0 1
+DETECTOR rec[-2] rec[-3]
+DETECTOR rec[-1]",
+        ] {
+            let program = parse_dropping_records(text);
+            let projection = QecParityProjection::new(
+                program.num_measurements(),
+                &program.detector_rows().unwrap(),
+                &program.observable_rows().unwrap(),
+            );
+            let sampler = compile_qec_noisy_sampler(&program).unwrap();
+            let expected = projection.constant_pattern(sampler.noiseless());
+            let pattern = compile_qec_parity_noise(&program, &projection)
+                .unwrap()
+                .map(|(pattern, _)| pattern);
+            assert_eq!(pattern, expected, "{text}");
+        }
+    }
+    fn random_clifford_qec_text(rng: &mut ChaCha8Rng) -> String {
+        const PAULIS: [&str; 3] = ["X", "Y", "Z"];
+        const GATES: [&str; 8] = ["H", "S", "S_DAG", "X", "Y", "Z", "CX", "CZ"];
+        const MEASURES: [&str; 6] = ["M", "MX", "MY", "MR", "MRX", "MRY"];
+        const RESETS: [&str; 3] = ["R", "RX", "RY"];
+        let num_qubits = 3;
+        let mut lines = Vec::new();
+        let mut records = 0usize;
+        for _ in 0..rng.random_range(4..24) {
+            let q = rng.random_range(0..num_qubits);
+            match rng.random_range(0..10) {
+                0..=3 => {
+                    let gate = GATES[rng.random_range(0..GATES.len())];
+                    if gate.starts_with('C') {
+                        let other = (q + rng.random_range(1..num_qubits)) % num_qubits;
+                        lines.push(format!("{gate} {q} {other}"));
+                    } else {
+                        lines.push(format!("{gate} {q}"));
+                    }
+                }
+                4..=5 => {
+                    let measure = MEASURES[rng.random_range(0..MEASURES.len())];
+                    lines.push(format!("{measure} {q}"));
+                    if !measure.starts_with("MR") {
+                        lines.push(format!("{} {q}", RESETS[rng.random_range(0..RESETS.len())]));
+                    }
+                    records += 1;
+                }
+                6 => lines.push(format!("{} {q}", RESETS[rng.random_range(0..RESETS.len())])),
+                7 => lines.push(format!("DEPOLARIZE1(0.1) {q}")),
+                _ => {
+                    let mut terms = Vec::new();
+                    for t in 0..num_qubits {
+                        if rng.random_range(0..2) == 0 {
+                            terms.push(format!("{}{t}", PAULIS[rng.random_range(0..3)]));
+                        }
+                    }
+                    if !terms.is_empty() {
+                        lines.push(format!("MPP {}", terms.join("*")));
+                        records += 1;
+                    }
+                }
+            }
+        }
+        if records == 0 {
+            return String::new();
+        }
+        for output in 0..rng.random_range(1..3) {
+            let refs: Vec<String> = (0..rng.random_range(1..4))
+                .map(|_| format!("rec[-{}]", 1 + rng.random_range(0..records.min(4))))
+                .collect();
+            if output == 0 {
+                lines.push(format!("DETECTOR {}", refs.join(" ")));
+            } else {
+                lines.push(format!("OBSERVABLE_INCLUDE(0) {}", refs.join(" ")));
+            }
+        }
+        lines.join(
+            "
+",
+        )
+    }
+
+    #[test]
+    fn parity_compile_matches_the_record_sampler_on_random_clifford_programs() {
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let mut fixed = 0;
+        let mut ones = 0;
+        for _ in 0..3000 {
+            let text = random_clifford_qec_text(&mut rng);
+            if text.is_empty() {
+                continue;
+            }
+            let program = parse_dropping_records(&text);
+            let projection = QecParityProjection::new(
+                program.num_measurements(),
+                &program.detector_rows().unwrap(),
+                &program.observable_rows().unwrap(),
+            );
+            let sampler = compile_qec_noisy_sampler(&program).unwrap();
+            let expected = projection.constant_pattern(sampler.noiseless());
+            let pattern = compile_qec_parity_noise(&program, &projection)
+                .unwrap()
+                .map(|(pattern, _)| pattern);
+            assert_eq!(pattern, expected, "{text}");
+            if let Some(pattern) = pattern {
+                fixed += 1;
+                ones += usize::from(pattern[0] != 0);
+            }
+        }
+        assert!(fixed > 300 && ones > 20, "fixed {fixed}, nonzero {ones}");
     }
 }

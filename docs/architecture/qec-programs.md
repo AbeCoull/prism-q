@@ -184,6 +184,13 @@ branch, the set of measurement records whose propagated Pauli anti-commutes
 with the injected error, packed as flip masks. The noiseless sampler is
 compiled on the deferred circuit.
 
+When records are neither kept nor postselected, the walk holds rows only for
+the aliases live at each position and projects each event onto detector and
+observable bits as it reaches it, so compile memory follows the live qubit
+count rather than records times aliases. The same walk reads the noiseless
+detector and observable values from the propagated signs. If any of them is
+random, compilation falls back to the record path.
+
 At sample time, the noiseless records are sampled first, then each noise
 event stochastically XORs its branch flip masks into the shot-major record
 buffer. Small-probability events skip between firing shots with geometric

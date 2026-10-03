@@ -1263,7 +1263,51 @@ fn noisy_unit_fixtures() -> Vec<(String, QecProgram)> {
             "surface d3 x_error 0.6".to_string(),
             qec_common::rotated_surface_memory(3, 3, QecNoise::XError(0.6), &data, 1),
         ),
+        (
+            "surface d3 twelve rounds".to_string(),
+            qec_common::rotated_surface_memory(3, 12, QecNoise::Depolarize1(0.01), &data, 1),
+        ),
+        (
+            "measure-reset repetition with X resets".to_string(),
+            parse_qec_program(&measure_reset_repetition(12)).unwrap(),
+        ),
     ]
+}
+
+// Three data qubits checked by two ancillas that are measured, hit by a depolarize-2
+// while measured, and reset through the X basis each round.
+fn measure_reset_repetition(rounds: usize) -> String {
+    let mut text = String::new();
+    for round in 0..rounds {
+        text.push_str(
+            "DEPOLARIZE1(0.02) 0 1 2
+CX 0 3 1 3 1 4 2 4
+M 3 4
+DEPOLARIZE2(0.02) 3 0
+             RX 3
+H 3
+R 4
+Z_ERROR(0.02) 3
+",
+        );
+        text.push_str(if round == 0 {
+            "DETECTOR rec[-2]
+DETECTOR rec[-1]
+"
+        } else {
+            "DETECTOR rec[-2] rec[-4]
+DETECTOR rec[-1] rec[-3]
+"
+        });
+    }
+    text.push_str(
+        "M 0 1 2
+DETECTOR rec[-3] rec[-2] rec[-5]
+DETECTOR rec[-2] rec[-1] rec[-4]
+         OBSERVABLE_INCLUDE(0) rec[-1]
+",
+    );
+    text
 }
 
 #[test]

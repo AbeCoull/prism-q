@@ -481,12 +481,108 @@ fn cached_qft_twiddles(cache: &RwLock<QftTwiddleCache>, n: usize) -> QftTwiddleT
     twiddles
 }
 
+/// Fewest low qubits [`StatevectorBackend::apply_qft_block`] runs together in one tile.
+const QFT_MIN_TILE_BITS: usize = 13;
+/// Most low qubits per tile: 512 KiB, twice the smallest L2 a current core carries.
+const QFT_MAX_TILE_BITS: usize = 15;
+
+/// Tile width for an `n`-qubit QFT: as wide as leaves eight tiles for the threads, and
+/// above the minimum one bit narrower where that leaves an even count of stages above
+/// the tile, which then all run as radix-4 pairs instead of paying a radix-2 pass.
+fn qft_tile_bits(n: usize) -> usize {
+    let widest = QFT_MAX_TILE_BITS
+        .min(n.saturating_sub(3))
+        .max(QFT_MIN_TILE_BITS.min(n));
+    if widest > QFT_MIN_TILE_BITS && (n - widest) % 2 == 1 {
+        widest - 1
+    } else {
+        widest
+    }
+}
+
+/// Per-stride QFT twiddles for the in-tile stages: entries `[s, 2s)` hold
+/// `exp(2 pi i k / 2s) / sqrt(2)` for each power of two `s`. They are bit-identical to
+/// the whole-state table's entries `k * total / 2s`, which a small stride would read
+/// one page apart.
+fn qft_compact_twiddles() -> &'static [Complex64] {
+    static TABLE: OnceLock<Box<[Complex64]>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
+        let mut table = vec![Complex64::new(0.0, 0.0); 1 << QFT_MAX_TILE_BITS];
+        let mut s = 1;
+        while s < table.len() {
+            for k in 0..s {
+                let angle = std::f64::consts::TAU * k as f64 / (2 * s) as f64;
+                table[s + k] = Complex64::from_polar(inv_sqrt2, angle);
+            }
+            s <<= 1;
+        }
+        table.into_boxed_slice()
+    })
+}
+
 #[inline(always)]
 fn reverse_low_bits(x: usize, bits: usize) -> usize {
     if bits == 0 {
         return 0;
     }
     x.reverse_bits() >> (usize::BITS as usize - bits)
+}
+
+/// Bits per side of the square tiles the bit reversal transposes: 32 rows of 32
+/// amplitudes, so a tile pair takes 32 KiB.
+const BITREV_TILE_BITS: usize = 5;
+
+/// Move tile `b` of a `bits`-bit state to tile `reverse(b)` and back, viewing an index
+/// as `(a, b, c)` with `a` the high and `c` the low [`BITREV_TILE_BITS`] bits.
+/// Amplitude `(a, b, c)` moves to `(rev(c), rev(b), rev(a))`, so every row read or
+/// written is a contiguous run. Out of line, so its 32 KiB of tiles live only while a
+/// task runs instead of in every frame of Rayon's recursive split.
+///
+/// # Safety
+///
+/// `state` must be valid for `1 << bits` amplitudes, `bits >= 2 * BITREV_TILE_BITS`,
+/// and no other thread may access tile `b` or its reverse during the call.
+#[inline(never)]
+unsafe fn bit_reverse_tile_pair(state: *mut Complex64, bits: usize, b: usize) {
+    const Q: usize = BITREV_TILE_BITS;
+    const SIDE: usize = 1 << Q;
+    let rb = reverse_low_bits(b, bits - 2 * Q);
+    let row_stride = 1usize << (bits - Q);
+    let rev: [usize; SIDE] = std::array::from_fn(|x| reverse_low_bits(x, Q));
+    let mut tile_b = [Complex64::new(0.0, 0.0); SIDE * SIDE];
+    let mut tile_rb = [Complex64::new(0.0, 0.0); SIDE * SIDE];
+    // SAFETY: same contract as the enclosing unsafe fn.
+    unsafe {
+        for a in 0..SIDE {
+            let row = a * row_stride;
+            std::ptr::copy_nonoverlapping(
+                state.add(row + (b << Q)),
+                tile_b.as_mut_ptr().add(a * SIDE),
+                SIDE,
+            );
+            if rb != b {
+                std::ptr::copy_nonoverlapping(
+                    state.add(row + (rb << Q)),
+                    tile_rb.as_mut_ptr().add(a * SIDE),
+                    SIDE,
+                );
+            }
+        }
+        for a in 0..SIDE {
+            let row = a * row_stride;
+            let out_rb = state.add(row + (rb << Q));
+            for c in 0..SIDE {
+                *out_rb.add(c) = tile_b[rev[c] * SIDE + rev[a]];
+            }
+            if rb != b {
+                let out_b = state.add(row + (b << Q));
+                for c in 0..SIDE {
+                    *out_b.add(c) = tile_rb[rev[c] * SIDE + rev[a]];
+                }
+            }
+        }
+    }
 }
 
 #[inline]
@@ -496,38 +592,38 @@ fn apply_bit_reverse_permutation(state: &mut [Complex64], bits: usize) {
     if len <= 2 {
         return;
     }
+    if bits < 2 * BITREV_TILE_BITS {
+        for i in 0..len {
+            let j = reverse_low_bits(i, bits);
+            if j > i {
+                state.swap(i, j);
+            }
+        }
+        return;
+    }
+
+    let middle = bits - 2 * BITREV_TILE_BITS;
+    let owns_pair = move |&b: &usize| reverse_low_bits(b, middle) >= b;
 
     #[cfg(feature = "parallel")]
     if bits >= PARALLEL_THRESHOLD_QUBITS {
         let ptr = SendPtr(state.as_mut_ptr());
-        (0..len)
+        (0..1usize << middle)
             .into_par_iter()
-            .with_min_len(MIN_PAR_ITERS)
-            .for_each(move |i| {
-                let j = reverse_low_bits(i, bits);
-                if j > i {
-                    // SAFETY: bit reversal is an involution. The `j > i`
-                    // guard assigns each pair to exactly one iteration, and
-                    // fixed points are skipped. The safe alternative is the
-                    // serial `state.swap` fallback below; above the parallel
-                    // threshold this O(N) final pass is part of the measured
-                    // whole-state QFT hot path.
-                    unsafe {
-                        let a = ptr.load(i);
-                        let b = ptr.load(j);
-                        ptr.store(i, b);
-                        ptr.store(j, a);
-                    }
-                }
+            .filter(owns_pair)
+            .for_each(move |b| {
+                // SAFETY: reversal of the middle bits is an involution, so the pairs
+                // `{b, reverse(b)}` with `b <= reverse(b)` partition the tiles and each
+                // task owns its pair. Tiles are disjoint sets of rows of the state.
+                unsafe { bit_reverse_tile_pair(ptr.as_complex_ptr(), bits, b) }
             });
         return;
     }
 
-    for i in 0..len {
-        let j = reverse_low_bits(i, bits);
-        if j > i {
-            state.swap(i, j);
-        }
+    let ptr = state.as_mut_ptr();
+    for b in (0..1usize << middle).filter(owns_pair) {
+        // SAFETY: `ptr` spans the whole state, borrowed mutably for this loop alone.
+        unsafe { bit_reverse_tile_pair(ptr, bits, b) }
     }
 }
 
@@ -1165,8 +1261,8 @@ fn radix2_butterfly_values(
 }
 
 /// Apply one full radix-2 DIF stage in place to `state` at the given stride.
-/// `twiddle_step = total_state_len / (2 * stride)` selects the right
-/// subsample of the twiddle table.
+/// Butterfly `k` takes `twiddles_scaled[k * twiddle_step]`: step `total / (2 * stride)`
+/// on the whole-state table, 1 on a per-stride run.
 #[inline]
 fn run_radix2_stage_seq(
     state: &mut [Complex64],
@@ -1340,9 +1436,8 @@ unsafe fn radix4_butterfly_fma(
 /// AVX2-256 SIMD variant: processes TWO radix-4 butterflies per call (at
 /// consecutive `k` and `k+1`, four complex amplitudes each, eight elements
 /// total). Each load/store is one 256-bit op covering two adjacent complex
-/// values (which are 32 bytes contiguous in memory). Twiddles are still
-/// loaded scalar-by-scalar since the stage's `twiddle_step` is typically
-/// > 1 for high-stride pairs.
+/// values (which are 32 bytes contiguous in memory). Twiddles are loaded
+/// scalar-by-scalar since the inner twiddle step is 2.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[allow(clippy::too_many_arguments)]
@@ -1712,27 +1807,209 @@ fn apply_radix4_groups(
     }
 }
 
+/// Run two DIF stages at inner stride `s` within `slice`, reading [`qft_compact_twiddles`].
 #[inline]
 fn fft_stage_pair_in_slice(
     slice: &mut [Complex64],
-    inner_stride: usize,
-    total: usize,
+    s: usize,
+    compact: &[Complex64],
+    inv_sqrt2: f64,
+) {
+    apply_radix4_groups(slice, s, 0, 1, 2, &compact[s << 1..s << 2], inv_sqrt2);
+}
+
+/// Offsets per quarter that one task of [`fft_stage_pair_chunked`] covers.
+#[cfg(feature = "parallel")]
+const QFT_PAIR_CHUNK: usize = 1024;
+/// Radix-4 groups that share one gathered twiddle chunk within a task.
+#[cfg(feature = "parallel")]
+const QFT_PAIR_GROUPS_PER_TASK: usize = 16;
+
+/// Run a radix-4 stage pair as tasks of one twiddle chunk over a batch of groups.
+///
+/// Below the top pair a stride's twiddles sit `step_outer` and `step_inner` entries
+/// apart in the whole-state table, up to a page each. A task gathers its chunk once
+/// and reuses it across the batch, and splitting by chunk keeps every thread busy when
+/// a stage has fewer groups than threads. `s` must be a multiple of the chunk.
+#[cfg(feature = "parallel")]
+fn fft_stage_pair_chunked(
+    state: &mut [Complex64],
+    s: usize,
+    step_outer: usize,
+    step_inner: usize,
     twiddles_scaled: &[Complex64],
     inv_sqrt2: f64,
 ) {
-    let s = inner_stride;
-    let block_size = s << 2;
-    let step_outer = total / block_size;
-    let step_inner = total / (s << 1);
-    apply_radix4_groups(
-        slice,
-        s,
-        0,
-        step_outer,
-        step_inner,
-        twiddles_scaled,
-        inv_sqrt2,
-    );
+    const CHUNK: usize = QFT_PAIR_CHUNK;
+    debug_assert_eq!(s % CHUNK, 0);
+    let chunks = s / CHUNK;
+    let groups = state.len() / (s << 2);
+    let batch = QFT_PAIR_GROUPS_PER_TASK.min(groups);
+    let batches = groups / batch;
+    let ptr = SendPtr(state.as_mut_ptr());
+    (0..chunks * batches).into_par_iter().for_each(move |task| {
+        let k0 = task / batches * CHUNK;
+        let first_group = task % batches * batch;
+        // SAFETY: a task owns offsets `[k0, k0 + CHUNK)` of the four quarters of each
+        // group in its batch. Tasks differ in chunk or batch, so no two share a run.
+        unsafe {
+            fft_stage_pair_chunk(
+                ptr.as_complex_ptr(),
+                s,
+                k0,
+                first_group..first_group + batch,
+                step_outer,
+                step_inner,
+                twiddles_scaled,
+                inv_sqrt2,
+            );
+        }
+    });
+}
+
+/// Gather the twiddles for offsets `[k0, k0 + QFT_PAIR_CHUNK)` and apply them to
+/// `groups`. Out of line, so its 48 KiB of twiddles live only while a task runs
+/// instead of in every frame of Rayon's recursive split.
+///
+/// # Safety
+///
+/// `state` must be valid for every group in `groups`, and no other thread may access
+/// those offsets of any quarter of these groups during the call.
+#[cfg(feature = "parallel")]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fft_stage_pair_chunk(
+    state: *mut Complex64,
+    s: usize,
+    k0: usize,
+    groups: std::ops::Range<usize>,
+    step_outer: usize,
+    step_inner: usize,
+    twiddles_scaled: &[Complex64],
+    inv_sqrt2: f64,
+) {
+    const CHUNK: usize = QFT_PAIR_CHUNK;
+    let w_outer: [Complex64; CHUNK] =
+        std::array::from_fn(|j| twiddles_scaled[(k0 + j) * step_outer]);
+    let w_outer_s: [Complex64; CHUNK] =
+        std::array::from_fn(|j| twiddles_scaled[(k0 + j + s) * step_outer]);
+    let w_inner: [Complex64; CHUNK] =
+        std::array::from_fn(|j| twiddles_scaled[(k0 + j) * step_inner]);
+    for g in groups {
+        let base = g * (s << 2) + k0;
+        // SAFETY: same contract as the enclosing unsafe fn.
+        let (qa, qb, qc, qd) = unsafe {
+            (
+                std::slice::from_raw_parts_mut(state.add(base), CHUNK),
+                std::slice::from_raw_parts_mut(state.add(base + s), CHUNK),
+                std::slice::from_raw_parts_mut(state.add(base + 2 * s), CHUNK),
+                std::slice::from_raw_parts_mut(state.add(base + 3 * s), CHUNK),
+            )
+        };
+        radix4_runs(qa, qb, qc, qd, &w_outer, &w_outer_s, &w_inner, inv_sqrt2);
+    }
+}
+
+/// Apply radix-4 butterflies at matching offsets of four quarter slices, with offset
+/// `j` taking index `j` of each twiddle slice.
+#[cfg(feature = "parallel")]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn radix4_runs(
+    qa: &mut [Complex64],
+    qb: &mut [Complex64],
+    qc: &mut [Complex64],
+    qd: &mut [Complex64],
+    w_outer: &[Complex64],
+    w_outer_s: &[Complex64],
+    w_inner: &[Complex64],
+    inv_sqrt2: f64,
+) {
+    let n = qa.len();
+    #[cfg(target_arch = "aarch64")]
+    let _ = inv_sqrt2;
+
+    #[cfg(target_arch = "x86_64")]
+    if simd::has_avx2_fma() && n >= 2 {
+        let mut j = 0usize;
+        // SAFETY: AVX2 detected. Each call reads and writes two adjacent amplitudes
+        // at offset `j` of four disjoint slices of length `n`, with `j + 2 <= n`.
+        unsafe {
+            let (pa, pb, pc, pd) = (
+                qa.as_mut_ptr() as *mut f64,
+                qb.as_mut_ptr() as *mut f64,
+                qc.as_mut_ptr() as *mut f64,
+                qd.as_mut_ptr() as *mut f64,
+            );
+            while j + 2 <= n {
+                radix4_butterfly_pair_slices_avx2fma(
+                    pa.add(j * 2),
+                    pb.add(j * 2),
+                    pc.add(j * 2),
+                    pd.add(j * 2),
+                    w_outer[j],
+                    w_outer[j + 1],
+                    w_outer_s[j],
+                    w_outer_s[j + 1],
+                    w_inner[j],
+                    w_inner[j + 1],
+                );
+                j += 2;
+            }
+        }
+        if j < n {
+            radix4_butterfly_quartet_scalar(
+                qa,
+                qb,
+                qc,
+                qd,
+                j,
+                w_outer[j],
+                w_outer_s[j],
+                w_inner[j],
+                inv_sqrt2,
+            );
+        }
+        return;
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is baseline on aarch64. Each call reads and writes the amplitude at
+    // offset `j < n` of four disjoint slices of length `n`.
+    unsafe {
+        let (pa, pb, pc, pd) = (
+            qa.as_mut_ptr() as *mut f64,
+            qb.as_mut_ptr() as *mut f64,
+            qc.as_mut_ptr() as *mut f64,
+            qd.as_mut_ptr() as *mut f64,
+        );
+        for j in 0..n {
+            radix4_butterfly_slices_neon(
+                pa.add(j * 2),
+                pb.add(j * 2),
+                pc.add(j * 2),
+                pd.add(j * 2),
+                w_outer[j],
+                w_outer_s[j],
+                w_inner[j],
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    for j in 0..n {
+        radix4_butterfly_quartet_scalar(
+            qa,
+            qb,
+            qc,
+            qd,
+            j,
+            w_outer[j],
+            w_outer_s[j],
+            w_inner[j],
+            inv_sqrt2,
+        );
+    }
 }
 
 /// Run two DIF FFT stages as one radix-4 pass.
@@ -1747,156 +2024,23 @@ fn fft_stage_pair_par(
     inv_sqrt2: f64,
 ) {
     let s = inner_stride;
-    let block_size = s << 2;
     let total = state.len();
-    let step_outer = total / block_size;
+    let step_outer = total / (s << 2);
     let step_inner = total / (s << 1);
 
-    let apply_group = |group: &mut [Complex64], k_base: usize| {
-        apply_radix4_groups(
-            group,
-            s,
-            k_base,
-            step_outer,
-            step_inner,
-            twiddles_scaled,
-            inv_sqrt2,
-        );
-    };
-
     #[cfg(feature = "parallel")]
-    {
-        let num_groups = total / block_size;
-        if num_groups >= 4 && block_size >= MIN_PAR_ELEMS {
-            // Case A: many independent groups, split state by block.
-            state.par_chunks_mut(block_size).for_each(|chunk| {
-                apply_group(chunk, 0);
-            });
-            return;
-        }
-        if block_size < MIN_PAR_ELEMS {
-            // Case B: small groups, bundle work per Rayon task.
-            let task_size = MIN_PAR_ELEMS;
-            state.par_chunks_mut(task_size).for_each(|task_chunk| {
-                apply_group(task_chunk, 0);
-            });
-            return;
-        }
-        // Case C: 1-3 large groups, split inside each group.
-        const MIN_PAR_PAIRS: usize = MIN_PAR_ELEMS / 4;
-        for group_start in (0..total).step_by(block_size) {
-            let group = &mut state[group_start..group_start + block_size];
-            let (q0, rest) = group.split_at_mut(s);
-            let (q1, rest) = rest.split_at_mut(s);
-            let (q2, q3) = rest.split_at_mut(s);
-            let sub = MIN_PAR_PAIRS.min(s).max(1);
-            q0.par_chunks_mut(sub)
-                .zip(q1.par_chunks_mut(sub))
-                .zip(q2.par_chunks_mut(sub))
-                .zip(q3.par_chunks_mut(sub))
-                .enumerate()
-                .for_each(|(chunk_idx, (((qa, qb), qc), qd))| {
-                    let k_base = chunk_idx * sub;
-                    let n_local = qa.len();
-                    #[cfg(target_arch = "x86_64")]
-                    if simd::has_avx2_fma() && n_local >= 2 {
-                        // SAFETY: the four slices are disjoint quarters of
-                        // one radix-4 group. Each AVX2 call handles adjacent
-                        // complex values inside the same local chunk. The
-                        // safe alternative is the scalar quartet loop below;
-                        // this SIMD path is kept because the measured QFT
-                        // speedup depends on avoiding scalar Complex64
-                        // arithmetic in the fused stage-pair hot loop.
-                        unsafe {
-                            let qa_ptr = qa.as_mut_ptr() as *mut f64;
-                            let qb_ptr = qb.as_mut_ptr() as *mut f64;
-                            let qc_ptr = qc.as_mut_ptr() as *mut f64;
-                            let qd_ptr = qd.as_mut_ptr() as *mut f64;
-                            let mut j = 0usize;
-                            while j + 2 <= n_local {
-                                let k = k_base + j;
-                                let w_2s_k0 = twiddles_scaled[k * step_outer];
-                                let w_2s_k1 = twiddles_scaled[(k + 1) * step_outer];
-                                let w_2s_kps0 = twiddles_scaled[(k + s) * step_outer];
-                                let w_2s_kps1 = twiddles_scaled[(k + s + 1) * step_outer];
-                                let w_s_k0 = twiddles_scaled[k * step_inner];
-                                let w_s_k1 = twiddles_scaled[(k + 1) * step_inner];
-                                radix4_butterfly_pair_slices_avx2fma(
-                                    qa_ptr.add(j * 2),
-                                    qb_ptr.add(j * 2),
-                                    qc_ptr.add(j * 2),
-                                    qd_ptr.add(j * 2),
-                                    w_2s_k0,
-                                    w_2s_k1,
-                                    w_2s_kps0,
-                                    w_2s_kps1,
-                                    w_s_k0,
-                                    w_s_k1,
-                                );
-                                j += 2;
-                            }
-                            if j == n_local {
-                                return;
-                            }
-                            let k = k_base + j;
-                            let w_2s_k = twiddles_scaled[k * step_outer];
-                            let w_2s_kps = twiddles_scaled[(k + s) * step_outer];
-                            let w_s_k = twiddles_scaled[k * step_inner];
-                            radix4_butterfly_quartet_scalar(
-                                qa, qb, qc, qd, j, w_2s_k, w_2s_kps, w_s_k, inv_sqrt2,
-                            );
-                            return;
-                        }
-                    }
-                    #[cfg(target_arch = "aarch64")]
-                    {
-                        // SAFETY: the zipped Rayon chunks own disjoint
-                        // quarter slices. Each iteration touches the same
-                        // local offset in all four quarters, matching the
-                        // scalar fallback below without aliasing. This SIMD
-                        // counterpart is required so Apple Silicon does not
-                        // pay scalar Complex64 overhead in the same measured
-                        // QFT hot loop as x86.
-                        unsafe {
-                            let qa_ptr = qa.as_mut_ptr() as *mut f64;
-                            let qb_ptr = qb.as_mut_ptr() as *mut f64;
-                            let qc_ptr = qc.as_mut_ptr() as *mut f64;
-                            let qd_ptr = qd.as_mut_ptr() as *mut f64;
-                            for j in 0..n_local {
-                                let k = k_base + j;
-                                let w_2s_k = twiddles_scaled[k * step_outer];
-                                let w_2s_kps = twiddles_scaled[(k + s) * step_outer];
-                                let w_s_k = twiddles_scaled[k * step_inner];
-                                radix4_butterfly_slices_neon(
-                                    qa_ptr.add(j * 2),
-                                    qb_ptr.add(j * 2),
-                                    qc_ptr.add(j * 2),
-                                    qd_ptr.add(j * 2),
-                                    w_2s_k,
-                                    w_2s_kps,
-                                    w_s_k,
-                                );
-                            }
-                        }
-                    }
-                    #[cfg(not(target_arch = "aarch64"))]
-                    {
-                        for j in 0..n_local {
-                            let k = k_base + j;
-                            let w_2s_k = twiddles_scaled[k * step_outer];
-                            let w_2s_kps = twiddles_scaled[(k + s) * step_outer];
-                            let w_s_k = twiddles_scaled[k * step_inner];
-                            radix4_butterfly_quartet_scalar(
-                                qa, qb, qc, qd, j, w_2s_k, w_2s_kps, w_s_k, inv_sqrt2,
-                            );
-                        }
-                    }
-                });
-        }
-    }
+    fft_stage_pair_chunked(state, s, step_outer, step_inner, twiddles_scaled, inv_sqrt2);
 
     #[cfg(not(feature = "parallel"))]
-    apply_group(state, 0);
+    apply_radix4_groups(
+        state,
+        s,
+        0,
+        step_outer,
+        step_inner,
+        twiddles_scaled,
+        inv_sqrt2,
+    );
 }
 
 /// Mix the pairs `(lo[i], hi[i ^ xlow])` of one Pauli-rotation pivot block.
@@ -3308,10 +3452,8 @@ impl StatevectorBackend {
 
         // Cache-tiled DIF FFT:
         //   - High-stride stages run as full-state passes.
-        //   - Low-stride stages run together inside each L2-sized tile.
-        const TILE_BITS: usize = 13;
-
-        let tile_bits = TILE_BITS.min(n);
+        //   - Low-stride stages run together inside each cache-sized tile.
+        let tile_bits = qft_tile_bits(n);
 
         // Phase 1: high-stride stages.
         //
@@ -3363,20 +3505,19 @@ impl StatevectorBackend {
         }
         let tile_size = 1usize << tile_bits;
 
-        let apply_low_stages_in_tile = |tile: &mut [Complex64], twiddles_scaled: &[Complex64]| {
+        let compact = qft_compact_twiddles();
+        let apply_low_stages_in_tile = |tile: &mut [Complex64]| {
             let mut stage_top = tile_bits;
             let mut stages_left = tile_bits;
             if stages_left % 2 == 1 {
                 stage_top -= 1;
                 let stride = 1usize << stage_top;
-                let block_size = stride << 1;
-                let twiddle_step = total / block_size;
-                run_radix2_stage_seq(tile, stride, twiddles_scaled, twiddle_step, inv_sqrt2);
+                run_radix2_stage_seq(tile, stride, &compact[stride..stride << 1], 1, inv_sqrt2);
                 stages_left -= 1;
             }
             while stages_left > 0 {
                 let inner_stride = 1usize << (stage_top - 2);
-                fft_stage_pair_in_slice(tile, inner_stride, total, twiddles_scaled, inv_sqrt2);
+                fft_stage_pair_in_slice(tile, inner_stride, compact, inv_sqrt2);
                 stage_top -= 2;
                 stages_left -= 2;
             }
@@ -3385,9 +3526,9 @@ impl StatevectorBackend {
         #[cfg(feature = "parallel")]
         let low_done_parallel =
             if self.num_qubits >= PARALLEL_THRESHOLD_QUBITS && total / tile_size >= 4 {
-                self.state.par_chunks_mut(tile_size).for_each(|tile| {
-                    apply_low_stages_in_tile(tile, twiddles_scaled);
-                });
+                self.state
+                    .par_chunks_mut(tile_size)
+                    .for_each(apply_low_stages_in_tile);
                 true
             } else {
                 false
@@ -3397,7 +3538,7 @@ impl StatevectorBackend {
 
         if !low_done_parallel {
             for tile in self.state.chunks_mut(tile_size) {
-                apply_low_stages_in_tile(tile, twiddles_scaled);
+                apply_low_stages_in_tile(tile);
             }
         }
 
@@ -4482,5 +4623,50 @@ mod qft_twiddle_cache_tests {
         let cached = &guard.entries[6].as_ref().unwrap().table;
         assert!(tables.iter().all(|t| Arc::ptr_eq(t, cached)));
         assert_eq!(guard.bytes, qft_twiddle_table_bytes(cached.len()));
+    }
+}
+#[cfg(test)]
+mod qft_layout_tests {
+    use super::*;
+
+    #[test]
+    fn compact_twiddles_match_whole_state_table_bitwise() {
+        let n = 16;
+        let total = 1usize << n;
+        let whole = qft_twiddles_scaled(n);
+        let compact = qft_compact_twiddles();
+        let mut s = 1;
+        while s < compact.len() {
+            let step = total / (2 * s);
+            for k in 0..s {
+                assert_eq!(compact[s + k], whole[k * step], "stride {s}, k {k}");
+            }
+            s <<= 1;
+        }
+    }
+
+    #[test]
+    fn qft_tiles_leave_paired_stages_and_eight_tiles() {
+        let widths: Vec<usize> = (10..=26).map(qft_tile_bits).collect();
+        assert_eq!(
+            widths,
+            [
+                10, 11, 12, 13, 13, 13, 13, 13, 14, 15, 14, 15, 14, 15, 14, 15, 14
+            ]
+        );
+    }
+
+    #[test]
+    fn tiled_bit_reversal_matches_index_reversal() {
+        for bits in [3, 9, 10, 11, 12, 15, 16, 17] {
+            let mut state: Vec<Complex64> = (0..1usize << bits)
+                .map(|i| Complex64::new(i as f64, -(i as f64)))
+                .collect();
+            apply_bit_reverse_permutation(&mut state, bits);
+            for (i, amp) in state.iter().enumerate() {
+                let src = reverse_low_bits(i, bits) as f64;
+                assert_eq!(*amp, Complex64::new(src, -src), "bits {bits}, index {i}");
+            }
+        }
     }
 }

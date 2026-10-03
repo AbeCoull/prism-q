@@ -408,6 +408,26 @@ directory.
 `bench_ab.sh` needs only git, awk, and cargo. It deliberately avoids `jq` and
 `bc`, neither of which is present on the reference host.
 
+## Knob sweeps on other hardware
+
+The cache-resident tile sizes derive from the cache topology the OS reports (see the
+performance guide), and every number behind that rule was measured on one i7-6700K.
+`scripts/tile_sweep.sh` is the tool for checking the rule on a host with a different
+geometry: it builds the bench target once, runs the same executable at each value of
+an environment knob forward and then reversed so drift cancels, and reports each
+row's minimum over runs against the first value.
+
+```bash
+./scripts/tile_sweep.sh -f '^statevector/(qv|qft_textbook)/2[02]$'           # PRISM_TILE_KB over 256 128 512 1024 2048
+./scripts/tile_sweep.sh -f '^statevector/qv/24$' --values '256 512 1024' --runs 4
+./scripts/tile_sweep.sh -f '^statevector/qv/20$' --var PRISM_MULTI_2Q_TILE_BITS --values '13 14 15 16'
+```
+
+The `Tile sweep` workflow runs it on the hosted Linux, macOS and Windows runners
+from the Actions tab. Those are triage numbers: a shared runner resolves a 2x cliff,
+not a 5% move. A default changes only after a full-tier `bench_ab.sh` run on real
+hardware confirms the chosen value.
+
 ## Stored baselines
 
 Point-in-time snapshots for tracking a number across weeks. Not a gating

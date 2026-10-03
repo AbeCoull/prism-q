@@ -52,8 +52,12 @@ jobs:
       - name: Clippy Python bindings
         run: cargo clippy -p prism-q-py --all-targets -- -D warnings -D clippy::undocumented_unsafe_blocks
 
+      # The tile budget is pinned to the development host's so the fused circuits
+      # under test match a local run; the macOS and Windows jobs leave it detected.
       - name: Tests
         run: cargo nextest run --features "$CI_FEATURES"
+        env:
+          PRISM_TILE_KB: "256"
 
       - name: Doc tests
         run: cargo test --doc --features "$CI_FEATURES"

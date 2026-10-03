@@ -1904,14 +1904,22 @@ mod gpu_scaffold {
 }
 
 // The density-matrix bra half batches only under this predicate, so the
-// boundary pins max_target_for_tile(MULTI_GATE_L2_TILE): moving the tile
-// constant moves the boundary and fails here.
+// boundary pins the highest target the L2 tile holds: a tile of 2^(t + 1)
+// amplitudes takes target t and not t + 1.
 #[test]
 fn multi_2q_single_tier_boundary_pins_the_l2_tile() {
     let mat = crate::gates::Gate::Cx.matrix_4x4();
-    assert!(kernels::multi_2q_single_tier(&[(12, 13, mat)]));
-    assert!(!kernels::multi_2q_single_tier(&[(12, 14, mat)]));
-    assert!(!kernels::multi_2q_single_tier(&[(0, 1, mat), (0, 14, mat)]));
+    let t = kernels::multi_gate_max_l2_target();
+    assert_eq!(
+        1usize << (t + 1),
+        crate::backend::cache::tile_budget_bytes() / 16
+    );
+    assert!(kernels::multi_2q_single_tier(&[(t - 1, t, mat)]));
+    assert!(!kernels::multi_2q_single_tier(&[(t - 1, t + 1, mat)]));
+    assert!(!kernels::multi_2q_single_tier(&[
+        (0, 1, mat),
+        (0, t + 1, mat)
+    ]));
 }
 
 // Pair-aware grouping keeps every benched `diag_mixed_l6` batch on the LUT path. The

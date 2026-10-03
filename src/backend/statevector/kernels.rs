@@ -26,22 +26,29 @@ use crate::sim::unified_pauli::PauliAxis;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use crate::backend::cache;
 #[cfg(feature = "parallel")]
 use crate::backend::{MIN_PAR_ITERS, chunk_min_len};
 
 /// Largest qubit target whose full period (2^(t+1) elements) fits within `tile_size`.
 #[inline(always)]
 const fn max_target_for_tile(tile_size: usize) -> usize {
-    let mut t = 0usize;
-    while (1usize << (t + 1)) <= tile_size {
-        t += 1;
-    }
-    t - 1
+    tile_size.ilog2() as usize - 1
 }
 
-const MULTI_GATE_L2_TILE: usize = 16_384;
+/// Amplitudes per L2 tile: the tile budget, 2^14 on the x86 cores measured.
+#[inline(always)]
+fn multi_gate_l2_tile() -> usize {
+    cache::tile_budget_bytes() / size_of::<Complex64>()
+}
+
+/// Highest target the L2 tier takes.
+#[inline(always)]
+pub(crate) fn multi_gate_max_l2_target() -> usize {
+    max_target_for_tile(multi_gate_l2_tile())
+}
+
 const MULTI_GATE_L3_TILE: usize = 131_072;
-const MULTI_GATE_MAX_L2_TARGET: usize = max_target_for_tile(MULTI_GATE_L2_TILE);
 const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
 
 /// True when every gate's high target sits in the L2 tile, so the tiled pass
@@ -49,9 +56,8 @@ const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
 /// that need order beyond one tier (the density-matrix bra half) batch only
 /// under this predicate and apply per constituent otherwise.
 pub(crate) fn multi_2q_single_tier(gates: &[(usize, usize, [[Complex64; 4]; 4])]) -> bool {
-    gates
-        .iter()
-        .all(|&(q0, q1, _)| q0.max(q1) <= MULTI_GATE_MAX_L2_TARGET)
+    let max_l2_target = multi_gate_max_l2_target();
+    gates.iter().all(|&(q0, q1, _)| q0.max(q1) <= max_l2_target)
 }
 
 /// Tile geometry for a `Multi2q` batch that reaches past the lowest tile bits:
@@ -149,9 +155,10 @@ fn split_multi_2q_tiers(
     small_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
     medium_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
 ) {
+    let max_l2_target = multi_gate_max_l2_target();
     for &(q0, q1, ref mat) in gates {
         let max_q = q0.max(q1);
-        if max_q <= MULTI_GATE_MAX_L2_TARGET {
+        if max_q <= max_l2_target {
             small_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
         } else if max_q <= MULTI_GATE_MAX_L3_TARGET {
             medium_gates.push((q0, q1, simd::PreparedGate2q::new(mat)));
@@ -483,14 +490,22 @@ fn cached_qft_twiddles(cache: &RwLock<QftTwiddleCache>, n: usize) -> QftTwiddleT
 
 /// Fewest low qubits [`StatevectorBackend::apply_qft_block`] runs together in one tile.
 const QFT_MIN_TILE_BITS: usize = 13;
-/// Most low qubits per tile: 512 KiB, twice the smallest L2 a current core carries.
-const QFT_MAX_TILE_BITS: usize = 15;
+
+/// Most low qubits per tile: twice the tile budget, 512 KiB on the x86 cores measured.
+#[inline(always)]
+fn qft_max_tile_bits() -> usize {
+    (2 * cache::tile_budget_bytes() / size_of::<Complex64>()).ilog2() as usize
+}
 
 /// Tile width for an `n`-qubit QFT: as wide as leaves eight tiles for the threads, and
 /// above the minimum one bit narrower where that leaves an even count of stages above
 /// the tile, which then all run as radix-4 pairs instead of paying a radix-2 pass.
 fn qft_tile_bits(n: usize) -> usize {
-    let widest = QFT_MAX_TILE_BITS
+    qft_tile_bits_for(n, qft_max_tile_bits())
+}
+
+fn qft_tile_bits_for(n: usize, max_tile_bits: usize) -> usize {
+    let widest = max_tile_bits
         .min(n.saturating_sub(3))
         .max(QFT_MIN_TILE_BITS.min(n));
     if widest > QFT_MIN_TILE_BITS && (n - widest) % 2 == 1 {
@@ -508,7 +523,7 @@ fn qft_compact_twiddles() -> &'static [Complex64] {
     static TABLE: OnceLock<Box<[Complex64]>> = OnceLock::new();
     TABLE.get_or_init(|| {
         let inv_sqrt2 = std::f64::consts::FRAC_1_SQRT_2;
-        let mut table = vec![Complex64::new(0.0, 0.0); 1 << QFT_MAX_TILE_BITS];
+        let mut table = vec![Complex64::new(0.0, 0.0); 1 << qft_max_tile_bits()];
         let mut s = 1;
         while s < table.len() {
             for k in 0..s {
@@ -2145,7 +2160,7 @@ fn apply_multi_1q_shared(state: &mut [Complex64], gates: &[(usize, [[Complex64; 
     }
 
     let run = 1usize << low_target;
-    let tile_len = (MULTI_GATE_L2_TILE / lanes).max(1);
+    let tile_len = (multi_gate_l2_tile() / lanes).max(1);
     let tiles_per_run = run / tile_len;
     let blocks = (state.len() >> k) >> low_target;
 
@@ -2317,8 +2332,9 @@ fn split_multi_1q_tiers(
     medium_gates: &mut SmallVec<[(usize, simd::PreparedGate1q); 4]>,
     large_gates: &mut SmallVec<[TargetedGate1q; 4]>,
 ) {
+    let max_l2_target = multi_gate_max_l2_target();
     for &(target, mat) in gates {
-        if target <= MULTI_GATE_MAX_L2_TARGET {
+        if target <= max_l2_target {
             small_gates.push((target, simd::PreparedGate1q::new(&mat)));
         } else if target <= MULTI_GATE_MAX_L3_TARGET && medium_tiled {
             medium_gates.push((target, simd::PreparedGate1q::new(&mat)));
@@ -2353,11 +2369,12 @@ fn split_multi_1q_diagonal_tiers(
     medium_gates: &mut SmallVec<[(usize, Complex64, Complex64, bool); 4]>,
     large_gates: &mut SmallVec<[(usize, Complex64, Complex64); 4]>,
 ) {
+    let max_l2_target = multi_gate_max_l2_target();
     for &(target, mat) in gates {
         let d0 = mat[0][0];
         let d1 = mat[1][1];
         let skip_lo = is_phase_one(d0);
-        if target <= MULTI_GATE_MAX_L2_TARGET {
+        if target <= max_l2_target {
             small_gates.push((target, d0, d1, skip_lo));
         } else if target <= MULTI_GATE_MAX_L3_TARGET {
             medium_gates.push((target, d0, d1, skip_lo));
@@ -2403,8 +2420,7 @@ fn apply_multi_1q_par_tiered(
     );
 
     if !small_gates.is_empty() {
-        let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
-        let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
+        let tile_size = multi_gate_l2_tile();
         state
             .par_chunks_mut(tile_size)
             .with_min_len(chunk_min_len(tile_size))
@@ -3880,8 +3896,7 @@ impl StatevectorBackend {
         );
 
         if !small_gates.is_empty() {
-            let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
-            let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
+            let tile_size = multi_gate_l2_tile();
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, ref prepared) in &small_gates {
                     prepared.apply_tiled(tile, target);
@@ -3925,8 +3940,7 @@ impl StatevectorBackend {
         split_multi_1q_diagonal_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
 
         if !small_gates.is_empty() {
-            let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
-            let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
+            let tile_size = multi_gate_l2_tile();
             for tile in self.state.chunks_mut(tile_size) {
                 for &(target, d0, d1, skip_lo) in &small_gates {
                     simd::apply_diagonal_sequential(tile, target, d0, d1, skip_lo);
@@ -3959,8 +3973,7 @@ impl StatevectorBackend {
         split_multi_1q_diagonal_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
 
         if !small_gates.is_empty() {
-            let outer_block = 1usize << (MULTI_GATE_MAX_L2_TARGET + 1);
-            let tile_size = MULTI_GATE_L2_TILE.max(outer_block);
+            let tile_size = multi_gate_l2_tile();
             self.state
                 .par_chunks_mut(tile_size)
                 .with_min_len(chunk_min_len(tile_size))
@@ -4075,7 +4088,7 @@ impl StatevectorBackend {
         split_multi_2q_tiers(gates, &mut small_gates, &mut medium_gates);
 
         if !small_gates.is_empty() {
-            let tile_size = MULTI_GATE_L2_TILE;
+            let tile_size = multi_gate_l2_tile();
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
                 let n = tile.len().trailing_zeros() as usize;
@@ -4117,7 +4130,7 @@ impl StatevectorBackend {
         split_multi_2q_tiers(gates, &mut small_gates, &mut medium_gates);
 
         if !small_gates.is_empty() {
-            let tile_size = MULTI_GATE_L2_TILE;
+            let tile_size = multi_gate_l2_tile();
             let tile_qubits = tile_size.trailing_zeros() as usize;
             self.state
                 .par_chunks_mut(tile_size)
@@ -4675,7 +4688,8 @@ mod qft_layout_tests {
 
     #[test]
     fn compact_twiddles_match_whole_state_table_bitwise() {
-        let n = 16;
+        // The whole-state table has to reach the compact table's widest stride.
+        let n = qft_max_tile_bits().max(16);
         let total = 1usize << n;
         let whole = qft_twiddles_scaled(n);
         let compact = qft_compact_twiddles();
@@ -4691,7 +4705,7 @@ mod qft_layout_tests {
 
     #[test]
     fn qft_tiles_leave_paired_stages_and_eight_tiles() {
-        let widths: Vec<usize> = (10..=26).map(qft_tile_bits).collect();
+        let widths: Vec<usize> = (10..=26).map(|n| qft_tile_bits_for(n, 15)).collect();
         assert_eq!(
             widths,
             [

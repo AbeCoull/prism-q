@@ -1224,29 +1224,25 @@ fn fuse_multi_2q_returns_borrowed_without_tileable_run() {
 
 #[test]
 fn tile_reorder_pulls_later_gates_ahead_of_a_skipped_gate_on_other_qubits() {
-    // The expected order is the one a 2^14 tile's eight-qubit budget produces, so
-    // the tile shape is pinned rather than taken from the host's cache topology.
-    // SAFETY: set_var is unsafe because it can race concurrent getenv calls. The
-    // supported runner (cargo nextest) executes each test in its own process, so
-    // no other thread exists when this runs, and nothing has read the knobs yet.
-    unsafe {
-        std::env::set_var("PRISM_MULTI_2Q_TILE_BITS", "14");
-        std::env::set_var("PRISM_MULTI_2Q_LOW_BITS", "6");
-    }
-    assert_eq!(crate::gates::multi_2q_high_budget(), 8);
-    let pairs = [
-        (6, 7),
-        (8, 9),
-        (10, 11),
-        (12, 13),
-        (14, 15),
-        (6, 8),
-        (14, 6),
-        (7, 9),
-        (6, 7),
-    ];
-    let mut c = Circuit::new(20, 0);
-    for q in 6..16 {
+    // Shaped from the host's tile budget: `fill` disjoint pairs take the whole
+    // high-qubit budget, the next pair brings two new qubits and is skipped, and
+    // two later gates inside the tile are pulled ahead of it.
+    let base = crate::gates::multi_2q_low_bits();
+    let fill = crate::gates::multi_2q_high_budget() / 2;
+    let top = base + 2 * fill;
+    let mut pairs: Vec<(usize, usize)> = (0..fill)
+        .map(|i| (base + 2 * i, base + 2 * i + 1))
+        .collect();
+    pairs.extend([
+        (top, top + 1),
+        (base, base + 2),
+        (top, base),
+        (base + 1, base + 3),
+        (base, base + 1),
+    ]);
+    let prelude = top + 2 - base;
+    let mut c = Circuit::new(20.max(top + 2), 0);
+    for q in base..top + 2 {
         c.add_gate(Gate::Ry(0.1 * q as f64 + 0.2), &[q]);
     }
     for (k, &(a, b)) in pairs.iter().enumerate() {
@@ -1254,14 +1250,17 @@ fn tile_reorder_pulls_later_gates_ahead_of_a_skipped_gate_on_other_qubits() {
         c.add_gate(Gate::Fused2q(Box::new(gate.matrix_4x4())), &[a, b]);
     }
     let reordered = reorder_fused2q_into_tiles(Cow::Borrowed(&c), &mut Tracer::off());
-    let order: Vec<(usize, usize)> = reordered.instructions[10..]
+    let order: Vec<(usize, usize)> = reordered.instructions[prelude..]
         .iter()
         .map(|inst| match inst {
             Instruction::Gate { targets, .. } => (targets[0], targets[1]),
             other => panic!("{other:?}"),
         })
         .collect();
-    let expect = [0, 1, 2, 3, 5, 7, 4, 6, 8].map(|k| pairs[k]);
+    let expect: Vec<(usize, usize)> = (0..fill)
+        .chain([fill + 1, fill + 3, fill, fill + 2, fill + 4])
+        .map(|k| pairs[k])
+        .collect();
     assert_eq!(order, expect);
     assert_same_state(&c, &reordered);
 }

@@ -24,7 +24,8 @@ architectures each backend supports, see the
 | Density Matrix | $O(4^n)$ | Exact noisy evolution | ~14 qubits (RAM-bound) |
 
 The distributed statevector backend (behind the `distributed` feature) shards the dense
-state across MPI ranks; see the
+state across MPI ranks with exact results; see
+[Distributed Statevector and MPI](./distributed.md) for the layout and limits and the
 [Capability and Support Matrix](./capabilities.md) for its status.
 
 ## Statevector

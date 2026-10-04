@@ -15,10 +15,12 @@
 - [Backends Deep Dive](./guides/backends.md)
 - [Capability and Support Matrix](./guides/capabilities.md)
 - [Performance and SIMD](./guides/performance.md)
+- [Benchmark Methodology](./guides/benchmarking.md)
 - [OpenQASM Support](./guides/openqasm.md)
 - [Clifford+T Simulation](./guides/clifford-t.md)
 - [Noise and QEC](./guides/qec.md)
 - [GPU Backend](./guides/gpu.md)
+- [Distributed Statevector and MPI](./guides/distributed.md)
 
 # Architecture Reference
 

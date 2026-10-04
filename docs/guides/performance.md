@@ -111,4 +111,6 @@ cargo bench --bench bench_driver --features parallel   # gate microbenchmarks
 ```
 
 For current wall-clock numbers across the circuit suite, see the
-[Benchmarks](../benchmarks.md) page.
+[Benchmarks](../benchmarks.md) page. What those numbers include, how the Criterion
+rows are held to the regression gate, and the controls for a comparison against
+another simulator are in [Benchmark Methodology](./benchmarking.md).

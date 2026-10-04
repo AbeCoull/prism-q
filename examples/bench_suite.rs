@@ -136,6 +136,27 @@ fn cpu_model() -> String {
     std::env::consts::ARCH.to_string()
 }
 
+fn rustc_version() -> String {
+    std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|v| v.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn pool_threads() -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        rayon::current_num_threads()
+    }
+    #[cfg(not(feature = "parallel"))]
+    {
+        1
+    }
+}
+
 fn render(rows: &[Row], threads: usize) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -148,7 +169,10 @@ fn render(rows: &[Row], threads: usize) -> String {
         s,
         "Wall-clock simulation time for PRISM-Q on a fixed circuit suite built from \
          the `prism_q::circuits` generators, pushed toward this machine's limits. \
-         Every number is reproducible with the command at the bottom of this page.\n"
+         Every number is reproducible with the command at the bottom of this page, \
+         and describes the crate version and host named under Setup. The circuit \
+         definitions, the timing rules, and the controls for comparing against \
+         another simulator are in [Benchmark Methodology](./guides/benchmarking.md).\n"
     );
     let _ = writeln!(
         s,
@@ -157,12 +181,30 @@ fn render(rows: &[Row], threads: usize) -> String {
     let _ = writeln!(s, "## Setup\n");
     let _ = writeln!(s, "- Date: {}", utc_date(now));
     let _ = writeln!(s, "- CPU: {}", cpu_model());
-    let _ = writeln!(s, "- Threads available: {threads}");
+    let _ = writeln!(s, "- Logical cores: {threads}");
+    let _ = writeln!(
+        s,
+        "- Rayon threads: {} (`RAYON_NUM_THREADS` caps the pool)",
+        pool_threads()
+    );
+    let _ = writeln!(s, "- Compiler: {}", rustc_version());
+    let _ = writeln!(
+        s,
+        "- Build: `release` profile (opt-level 3, fat LTO, codegen-units 1), \
+         features `parallel`"
+    );
     let _ = writeln!(s, "- PRISM-Q version: {}\n", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(s, "## Methodology\n");
     let _ = writeln!(
         s,
-        "- Metric: median wall-clock over repeated runs after warmup, lower is better."
+        "- Metric: median wall-clock over repeated runs after warmup, lower is better. \
+         Up to 18 qubits: 2 warmup runs, then 7 timed; 19 to 22: 1 then 5; 23 to 25: \
+         1 then 3; 26 and above: no warmup, 1 timed run."
+    );
+    let _ = writeln!(
+        s,
+        "- Seeds: `0xDEAD_BEEF` for the random circuit families (HEA, QV), `42` for \
+         the simulation. Amplitudes are `f64` complex."
     );
     let _ = writeln!(
         s,

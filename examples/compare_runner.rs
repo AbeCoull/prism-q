@@ -30,7 +30,7 @@
 use prism_q::circuit::{Circuit, Instruction, expand_qft_blocks};
 use prism_q::circuits;
 use prism_q::gates::Gate;
-use prism_q::sim::{self, BackendKind};
+use prism_q::sim::{self, BackendKind, Probabilities};
 use std::io::{Read, Write};
 use std::time::Instant;
 
@@ -156,7 +156,8 @@ fn dense_probabilities(circuit: &Circuit) -> Vec<f64> {
         .run()
         .unwrap_or_else(|err| fail(4, format!("simulation error: {err}")));
     match outcome.probabilities {
-        Some(probs) => probs.to_vec(),
+        Some(Probabilities::Dense(probs)) => probs,
+        Some(factored) => factored.to_vec(),
         None => fail(
             4,
             "simulation error: backend exposed no probability distribution",

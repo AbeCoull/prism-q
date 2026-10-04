@@ -27,6 +27,10 @@ def _fmt_ms(value: float | None) -> str:
     return f"{value:.1f} ms"
 
 
+def _fmt_tvd(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1e}"
+
+
 def _fmt_ratio(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.2f}x"
 
@@ -122,7 +126,7 @@ def render(results: dict[str, Any]) -> str:
             cells.append(_fmt_ms(_timing(row, name)))
             cells.append(_fmt_ratio(row["ratio_vs_prismq"].get(name)) + marker)
         tvds = [e["tvd"] for e in row["equivalence"].values() if e.get("tvd") is not None]
-        cells.append(f"{max(tvds):.1e}" if tvds else "n/a")
+        cells.append(_fmt_tvd(max(tvds)) if tvds else "unchecked")
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
     if has_excluded:
@@ -132,6 +136,22 @@ def render(results: dict[str, Any]) -> str:
             "simulation and are left out of the summary."
         )
         lines.append("")
+
+    lines.append(
+        "Reading the ratios: the comparators differ in design, and the design explains most "
+        "of a gap. QuEST and Spinoza apply every gate as its own pass over the state and carry "
+        "no gate fusion, so their time grows with the gate count; PRISM-Q, Aer and qsim fuse "
+        "gates before execution, which pays most on the deep families (HEA, QV). Under "
+        "`automatic`, Aer routes a Clifford circuit (GHZ) to its stabilizer method, as PRISM-Q "
+        "routes it to its stabilizer backend, so that row compares two tableau simulations "
+        "plus the dense read-out rather than two statevector runs. The GHZ rows at every "
+        "size are dominated by materializing the `2^n` probability vector, not by the gates. "
+        "The QFT rows run the expanded textbook sequence on every simulator, PRISM-Q included, "
+        "so PRISM-Q's block FFT path (which the Benchmarks page measures through the "
+        "generator's `QftBlock`) is not exercised here and its QFT times are higher than on "
+        "that page."
+    )
+    lines.append("")
 
     lines.append("## Summary")
     lines.append("")
@@ -155,8 +175,24 @@ def render(results: dict[str, Any]) -> str:
     lines.append("")
 
     failures = results["summary"]["equivalence_failures"]
+    unchecked = [
+        (row["benchmark"], row["num_qubits"], name)
+        for row in results["results"]
+        for name, entry in row["equivalence"].items()
+        if entry.get("pass") is None
+    ]
     lines.append("## Equivalence")
     lines.append("")
+    if unchecked:
+        lines.append(
+            f"{len(unchecked)} circuit runs could not be checked because the reference "
+            f"simulator ({run['reference_simulator']}) produced no vector for that circuit; "
+            "their timings are shown without a ratio and are not counted:"
+        )
+        lines.append("")
+        for benchmark, qubits, name in unchecked:
+            lines.append(f"- {benchmark} at {qubits} qubits, {name}")
+        lines.append("")
     if failures:
         lines.append(
             f"{len(failures)} circuit runs produced a probability vector differing from "
@@ -168,9 +204,9 @@ def render(results: dict[str, Any]) -> str:
         for item in failures:
             lines.append(
                 f"- {item['benchmark']} at {item['num_qubits']} qubits, {item['simulator']}, "
-                f"TVD {item['tvd']:.2e}"
+                f"TVD {_fmt_tvd(item['tvd'])}"
             )
-    else:
+    elif not unchecked:
         lines.append(
             f"Every simulator reproduced the reference probability vector "
             f"({run['reference_simulator']}) to within "

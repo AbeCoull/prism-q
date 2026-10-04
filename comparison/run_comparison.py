@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import SCHEMA_VERSION, adapters, corpus, provenance, report  # noqa: E402
 
 REPO_ROOT = provenance.REPO_ROOT
-REFERENCE_SIMULATOR = "aer-statevector"
+DEFAULT_REFERENCE = "aer-statevector"
 CARGO_FEATURES = "parallel"
 
 DOCS_PREAMBLE = """# Comparative Measurements
@@ -63,6 +63,11 @@ def parse_args() -> argparse.Namespace:
         default=",".join(adapters.DEFAULT_SIMULATORS),
         help="comma separated adapter names; prismq is always included",
     )
+    parser.add_argument(
+        "--reference",
+        default=DEFAULT_REFERENCE,
+        help="adapter whose distribution every other output is checked against; must be among --simulators",
+    )
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--timeout-s", type=float, default=900.0, help="per call, per simulator")
@@ -79,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docs", default=None, help="write the documentation page here")
     parser.add_argument("--check", default=None, help="compare against a reference JSON")
     parser.add_argument("--no-build", action="store_true", help="skip building compare_runner")
+    parser.add_argument("--render", default=None, help="re-render an existing results JSON instead of running")
     return parser.parse_args()
 
 
@@ -130,7 +136,7 @@ def measure(
         message = f"{type(exc).__name__}: {exc}"[:200]
         errors.append({"simulator": sim.name, "error": message})
 
-    reference_sim = next((s for s in sims if s.name == REFERENCE_SIMULATOR), sims[0])
+    reference_sim = next(s for s in sims if s.name == args.reference)
     reference: np.ndarray | None = None
     try:
         reference = reference_sim.probabilities(program)
@@ -174,7 +180,7 @@ def measure(
         if sim.name == "prismq":
             continue
         other = timings.get(sim.name, {}).get("median_ms")
-        passed = equivalence.get(sim.name, {}).get("pass") is not False
+        passed = equivalence.get(sim.name, {}).get("pass") is True
         ratio = other / base if base and other and passed else None
         ratios[sim.name] = ratio
         verdicts[sim.name] = verdict_for(ratio, args.tie_band_pct)
@@ -245,6 +251,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     requested = [n.strip() for n in args.simulators.split(",") if n.strip()]
     if "prismq" not in requested:
         requested.insert(0, "prismq")
+    if args.reference not in requested:
+        sys.exit(f"--reference {args.reference} is not among the selected simulators; add it or pick another")
 
     warnings = provenance.quiet_machine_warnings()
     for message in warnings:
@@ -300,7 +308,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "sizes": sizes,
             "tie_band_pct": args.tie_band_pct,
             "equivalence_tolerance_tvd": args.equivalence_tvd,
-            "reference_simulator": REFERENCE_SIMULATOR,
+            "reference_simulator": args.reference,
             "headline_min_qubits": args.headline_min_qubits,
             "timed_region": (
                 "execute the circuit and materialize the full 2^n probability vector; "
@@ -322,7 +330,18 @@ def check(results: dict[str, Any], reference_path: str) -> int:
         reference = json.load(handle)
 
     ref_rows = {(r["benchmark"], r["num_qubits"]): r for r in reference["results"]}
+    got_rows = {(r["benchmark"], r["num_qubits"]): r for r in results["results"]}
     problems: list[str] = []
+
+    # A claim the run did not re-test is not a claim that held.
+    for key, ref in ref_rows.items():
+        row = got_rows.get(key)
+        if row is None:
+            problems.append(f"{key[0]} {key[1]}q: in the reference but not in this run")
+            continue
+        for name, expected in ref["verdict"].items():
+            if expected is not None and row["verdict"].get(name) is None:
+                problems.append(f"{key[0]} {key[1]}q vs {name}: reference has a verdict, this run has none")
 
     for row in results["results"]:
         key = (row["benchmark"], row["num_qubits"])
@@ -337,7 +356,11 @@ def check(results: dict[str, Any], reference_path: str) -> int:
             continue
         for name, entry in row["equivalence"].items():
             if entry.get("pass") is False:
-                problems.append(f"{key[0]} {key[1]}q: {name} output diverged, TVD {entry['tvd']:.2e}")
+                tvd = entry["tvd"]
+                problems.append(
+                    f"{key[0]} {key[1]}q: {name} output diverged, TVD "
+                    f"{'n/a' if tvd is None else format(tvd, '.2e')}"
+                )
         for name, got in row["verdict"].items():
             expected = ref["verdict"].get(name)
             if expected is not None and got is not None and expected != got:
@@ -360,7 +383,11 @@ def check(results: dict[str, Any], reference_path: str) -> int:
 
 def main() -> int:
     args = parse_args()
-    results = run(args)
+    if args.render:
+        with open(args.render, encoding="utf-8") as handle:
+            results = json.load(handle)
+    else:
+        results = run(args)
 
     if args.out:
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)

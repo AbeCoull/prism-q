@@ -87,7 +87,13 @@ class Native:
             raise AdapterError(f"timed out after {self.timeout_s:.0f} s") from exc
         if proc.returncode != 0:
             raise AdapterError(proc.stderr.strip()[:200] or f"exit code {proc.returncode}")
-        return json.loads(proc.stdout.strip().splitlines()[-1])
+        lines = proc.stdout.strip().splitlines()
+        if not lines:
+            raise AdapterError("no output")
+        try:
+            return json.loads(lines[-1])
+        except ValueError as exc:
+            raise AdapterError(f"unparseable output: {lines[-1][:80]}") from exc
 
     def version(self) -> str | None:
         try:

@@ -233,14 +233,14 @@ fn simulator(name: &str, threads: usize) -> Simulator {
             }
             Simulator {
                 name: "spinoza",
-                version: "0.5.1 (git f900971)",
+                version: env!("SPINOZA_VERSION"),
                 run: run_spinoza,
                 lsb_first: probe_order(run_spinoza),
             }
         }
         "qip" => Simulator {
             name: "qip",
-            version: "1.5.0",
+            version: env!("QIP_VERSION"),
             run: run_qip,
             lsb_first: probe_order(run_qip),
         },

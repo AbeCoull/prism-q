@@ -423,7 +423,7 @@ fn bench_statevector_random(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/random_d10");
     configure_group(&mut group);
 
-    let mut sizes = vec![4, 8, 12, 16, 20, 22, 24];
+    let mut sizes = vec![4, 8, 12, 15, 16, 17, 20, 22, 24];
     sizes.extend(high_qubit_sizes());
     for &n in &sizes {
         let circuit = circuits::random_circuit(n, 10, SEED);
@@ -967,7 +967,7 @@ fn bench_statevector_qv(c: &mut Criterion) {
     let mut group = c.benchmark_group("statevector/qv");
     configure_group(&mut group);
 
-    for &n in &[8, 12, 16, 20, 22, 24] {
+    for &n in &[8, 12, 15, 16, 17, 20, 22, 24] {
         let circuit = circuits::quantum_volume_circuit(n, n, SEED);
         group.bench_with_input(BenchmarkId::from_parameter(n), &circuit, |b, circ| {
             b.iter(|| {

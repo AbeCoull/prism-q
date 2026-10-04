@@ -1132,6 +1132,53 @@ fn qec_dropped_records_match_kept_projection_on_surface_memory() {
     }
 }
 
+// Memories far deeper than their distance, noiseless: every detector and the observable
+// stay fixed at zero, and the dropped-record parities still match the kept projection.
+// The bench rows go four times deeper; these depths keep the test near a second.
+#[test]
+fn qec_deep_noiseless_memories_keep_fixed_parities() {
+    let surface_data: Vec<usize> = (0..81).collect();
+    let programs = [
+        (
+            "repetition d15 x 256",
+            qec_common::repetition_memory(15, 256, QecNoise::Depolarize1(0.0), PARITY_SHOTS),
+        ),
+        (
+            "rotated surface d9 x 90",
+            qec_common::rotated_surface_memory(
+                9,
+                90,
+                QecNoise::Depolarize1(0.0),
+                &surface_data,
+                PARITY_SHOTS,
+            ),
+        ),
+    ];
+    for (label, program) in &programs {
+        let result = run_qec_program(program).unwrap();
+        assert_eq!(result.detectors.num_shots(), PARITY_SHOTS, "{label}");
+        assert!(
+            result
+                .detectors
+                .to_shots()
+                .iter()
+                .flatten()
+                .all(|&bit| !bit),
+            "{label}: a detector fired without noise"
+        );
+        assert!(
+            result
+                .observables
+                .to_shots()
+                .iter()
+                .flatten()
+                .all(|&bit| !bit),
+            "{label}: the observable flipped without noise"
+        );
+        assert_dropped_records_match_kept(program, None, label);
+    }
+}
+
 // Rounds of X checks make the noiseless records random while every detector stays
 // fixed. XError(0.6) takes the per-shot draw path at every chunk size, and chunk 448 is
 // a multiple of 64 where 500 is not.

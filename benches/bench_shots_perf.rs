@@ -746,23 +746,92 @@ fn bench_qec_detector_sampling(c: &mut Criterion) {
 }
 
 // Memories run for many more rounds than their distance, at 10k shots so compiling the
-// program, which grows with rounds times records, outweighs sampling.
+// program, which grows with rounds times records, outweighs sampling. The noiseless rows
+// time the Clifford lowering and detector compile on their own.
 fn bench_qec_deep_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_deep_memory");
     group.sample_size(10);
     group.warm_up_time(Duration::from_millis(200));
     group.measurement_time(Duration::from_secs(3));
 
+    struct DeepRow {
+        label: &'static str,
+        distance: usize,
+        rounds: usize,
+        keep_measurements: bool,
+        noise_rate: Option<f64>,
+        build: QecMemoryBuilder,
+    }
+
     let shots = 10_000;
-    let rows: [(&str, usize, usize, bool, QecMemoryBuilder); 5] = [
-        ("rep_p001_drop", 15, 256, false, qec_repetition_program),
-        ("surf_p001_drop", 5, 200, false, qec_surface_program),
-        ("surf_p001_drop", 9, 90, false, qec_surface_program),
-        ("surf_p001_drop", 9, 360, false, qec_surface_program),
-        ("surf_p001_keep", 9, 90, true, qec_surface_program),
+    let rows = [
+        DeepRow {
+            label: "rep_p001_drop",
+            distance: 15,
+            rounds: 256,
+            keep_measurements: false,
+            noise_rate: Some(0.001),
+            build: qec_repetition_program,
+        },
+        DeepRow {
+            label: "surf_p001_drop",
+            distance: 5,
+            rounds: 200,
+            keep_measurements: false,
+            noise_rate: Some(0.001),
+            build: qec_surface_program,
+        },
+        DeepRow {
+            label: "surf_p001_drop",
+            distance: 9,
+            rounds: 90,
+            keep_measurements: false,
+            noise_rate: Some(0.001),
+            build: qec_surface_program,
+        },
+        DeepRow {
+            label: "surf_p001_drop",
+            distance: 9,
+            rounds: 360,
+            keep_measurements: false,
+            noise_rate: Some(0.001),
+            build: qec_surface_program,
+        },
+        DeepRow {
+            label: "surf_p001_keep",
+            distance: 9,
+            rounds: 90,
+            keep_measurements: true,
+            noise_rate: Some(0.001),
+            build: qec_surface_program,
+        },
+        DeepRow {
+            label: "rep_noiseless_drop",
+            distance: 15,
+            rounds: 1024,
+            keep_measurements: false,
+            noise_rate: None,
+            build: qec_repetition_program,
+        },
+        DeepRow {
+            label: "surf_noiseless_drop",
+            distance: 9,
+            rounds: 360,
+            keep_measurements: false,
+            noise_rate: None,
+            build: qec_surface_program,
+        },
     ];
-    for (label, distance, rounds, keep_measurements, build) in rows {
-        let mut program = build(distance, rounds, shots, Some(0.001));
+    for DeepRow {
+        label,
+        distance,
+        rounds,
+        keep_measurements,
+        noise_rate,
+        build,
+    } in rows
+    {
+        let mut program = build(distance, rounds, shots, noise_rate);
         program.set_options(QecOptions {
             keep_measurements,
             ..program.options()

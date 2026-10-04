@@ -1,13 +1,19 @@
-# PRISM-Q
+# PRISM-Q: High-Performance Quantum Circuit Simulator in Rust
 
-```text
- ██████╗ ██████╗ ██╗███████╗███╗   ███╗       ██████╗
- ██╔══██╗██╔══██╗██║██╔════╝████╗ ████║      ██╔═══██╗
- ██████╔╝██████╔╝██║███████╗██╔████╔██║█████╗██║   ██║
- ██╔═══╝ ██╔══██╗██║╚════██║██║╚██╔╝██║╚════╝██║▄▄ ██║
- ██║     ██║  ██║██║███████║██║ ╚═╝ ██║      ╚██████╔╝
- ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚═╝     ╚═╝       ╚══▀▀═╝
-```
+PRISM-Q is an open-source quantum circuit simulator written in Rust, with Python
+bindings. It reads OpenQASM 3.0 (with backward-compatible 2.0 syntax), selects a
+simulation backend from the circuit's structure, runs a multi-pass gate fusion pipeline,
+and executes on SIMD kernels: AVX2, FMA and BMI2 on x86-64, NEON on ARM64. Two optional
+features extend the dense path: CUDA acceleration for the statevector, stabilizer
+(experimental) and density-matrix backends, and an MPI-distributed statevector for
+registers larger than one host's memory.
+
+The simulation methods are a dense statevector, a stabilizer tableau, a sparse amplitude
+map, matrix product states (MPS), a product state, a tensor network, an exact density
+matrix, and two factored variants that split independent registers. Beside the backends
+sit Clifford+T engines (stabilizer rank and Pauli propagation) and a native quantum
+error-correction (QEC) program path with detector sampling and decoding. Circuits export
+back to OpenQASM 3.0.
 
 [![Crates.io](https://img.shields.io/crates/v/prism-q?logo=rust)](https://crates.io/crates/prism-q)
 [![docs.rs](https://img.shields.io/docsrs/prism-q?logo=docsdotrs&logoColor=white)](https://docs.rs/prism-q)
@@ -18,19 +24,27 @@
 ![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)
 ![OpenQASM](https://img.shields.io/badge/OpenQASM-3.0-purple)
 
-PRISM-Q is a quantum circuit simulator in Rust, with Python bindings. It picks a
-backend from the circuit's structure, runs a multi-pass gate fusion pipeline, and uses
-AVX2, FMA and BMI2 kernels in the inner loop (NEON on ARM64). CUDA is optional and
-covers the statevector, stabilizer (experimental) and density-matrix backends. Input is
-OpenQASM 3.0 with backward-compatible 2.0 syntax, and circuits export back to
-OpenQASM 3.0.
+```text
+ ██████╗ ██████╗ ██╗███████╗███╗   ███╗       ██████╗
+ ██╔══██╗██╔══██╗██║██╔════╝████╗ ████║      ██╔═══██╗
+ ██████╔╝██████╔╝██║███████╗██╔████╔██║█████╗██║   ██║
+ ██╔═══╝ ██╔══██╗██║╚════██║██║╚██╔╝██║╚════╝██║▄▄ ██║
+ ██║     ██║  ██║██║███████║██║ ╚═╝ ██║      ╚██████╔╝
+ ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝╚═╝     ╚═╝       ╚══▀▀═╝
+```
 
 - Documentation: <https://abecoull.github.io/prism-q/> (machine-readable index at
   [`llms.txt`](https://abecoull.github.io/prism-q/llms.txt))
 - API reference: [docs.rs](https://docs.rs/prism-q)
-- Measured timings: [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html)
+- Measured timings: [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html),
+  with the method in
+  [Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html)
+- Reproducible measurements beside Qiskit Aer, qsim, QuEST, Spinoza and RustQIP:
+  [Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html)
+- Design: [Architecture reference](https://abecoull.github.io/prism-q/architecture/overview.html)
 - What each backend supports on CPU and GPU:
   [capability matrix](https://abecoull.github.io/prism-q/guides/capabilities.html)
+- Changes by release: [`CHANGELOG.md`](CHANGELOG.md)
 
 ## Install
 
@@ -158,7 +172,7 @@ println!("<H> = {}, gradient = {:?}", g.value, g.gradient);
 `expectation_gradient_shift` uses the parameter-shift rule and covers the backends and
 circuit shapes the adjoint declines.
 
-## Backends
+## Backends and automatic selection
 
 | Backend | Best for | Scaling | Key property |
 | --- | --- | --- | --- |
@@ -173,7 +187,10 @@ circuit shapes the adjoint declines.
 | Density Matrix | Exact noisy evolution | O(4ⁿ) | Explicit dispatch only, reuses statevector kernels |
 | Distributed Statevector | Beyond single-host memory | O(2ⁿ) over MPI ranks | `distributed` feature, exact results |
 
-`BackendKind::Auto` is the default. Circuits with no entangling gates go to Product
+`BackendKind::Auto` is the default: PRISM-Q selects a backend from the circuit's
+structure and the host's memory, and the run metadata reports which one ran. The
+choice is a shape rule, not a cost model, so an explicit backend can still win for a
+circuit the rules misjudge. Circuits with no entangling gates go to Product
 State. All-Clifford circuits go to Stabilizer, or to Factored Stabilizer when a large
 circuit splits into independent blocks. Circuits past the statevector memory budget go
 to Sparse when the state never holds more than 128 basis states and to MPS with bond
@@ -181,7 +198,8 @@ dimension 256 otherwise; partially independent circuits go to Factored, and the 
 on Statevector. Before that tree, a Clifford+T circuit with few T gates can take the
 stabilizer-rank sampler for shots and Pauli propagation for marginals.
 The budget is half the machine's physical memory, read once and cached;
-`PRISM_MAX_SV_QUBITS` overrides it.
+`PRISM_MAX_SV_QUBITS` overrides it. Density Matrix and Distributed Statevector are never
+selected automatically; name them.
 
 To choose a backend yourself, call `.backend(BackendKind::Stabilizer)` (or
 `BackendKind::Mps { max_bond_dim: 64 }`, `BackendKind::Sparse`, and so on) on the
@@ -223,6 +241,25 @@ on the device, and `CompiledSampler::with_gpu(ctx)` moves large compiled BTS sho
 counts onto it. The [GPU guide](https://abecoull.github.io/prism-q/guides/gpu.html)
 covers the kernels, the crossover thresholds and their environment overrides.
 
+## Distributed execution (MPI)
+
+The `distributed` feature shards one exact statevector across `2^p` ranks: the top `p`
+qubits select the rank and the rest index a local slice that runs on the same SIMD
+kernels and fusion pipeline as the single-host backend. `distributed-mpi` adds the MPI
+transport over `rsmpi` and needs a system MPI installation.
+
+```rust
+use prism_q::{distributed::DistributedContext, simulate};
+
+let context = DistributedContext::world()?;   // MPI_Init at MPI_THREAD_FUNNELED
+let result = simulate(&circuit).distributed(context).seed(42).run()?;
+```
+
+Results do not depend on the rank count. The
+[distributed guide](https://abecoull.github.io/prism-q/guides/distributed.html) covers
+the layout, the qubit relabeling that keeps busy qubits local, the launch scripts, and
+the limits (power-of-two ranks, no noise models, CPU only).
+
 ## Benchmarks
 
 ```bash
@@ -233,8 +270,29 @@ cargo bench --bench bench_gpu    --features "parallel gpu"   # GPU dispatch benc
 
 Baselines were taken with `parallel` enabled, so keep it on. Run one `cargo bench` at a
 time: concurrent Rayon pools contend for cores and skew results. `RAYON_NUM_THREADS`
-caps the thread count. The A/B and regression workflow used for PRs is in
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+caps the thread count. The published timings, the circuit definitions, the warmup and
+timing rules, and how to run a like-for-like comparison against another simulator are in
+[Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html).
+The A/B and regression workflow used for PRs is in [`CONTRIBUTING.md`](CONTRIBUTING.md)
+and [`benches/README.md`](benches/README.md).
+
+## Documentation map
+
+| Task | Page |
+| --- | --- |
+| Install the crate or the wheel | [Installation](https://abecoull.github.io/prism-q/getting-started/install.html) |
+| Let the dispatcher pick a backend, or override it | [Choosing a Backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html) |
+| Compare the backends' memory and scaling | [Backends Deep Dive](https://abecoull.github.io/prism-q/guides/backends.html) |
+| Use the simulator from Python | [Python Bindings](https://abecoull.github.io/prism-q/guides/python.html) |
+| Check which OpenQASM constructs parse | [OpenQASM Support](https://abecoull.github.io/prism-q/guides/openqasm.html) |
+| Tune threads, tiles and memory caps | [Performance and SIMD](https://abecoull.github.io/prism-q/guides/performance.html) |
+| Run on a CUDA device | [GPU Backend](https://abecoull.github.io/prism-q/guides/gpu.html) |
+| Run across MPI ranks | [Distributed Statevector](https://abecoull.github.io/prism-q/guides/distributed.html) |
+| Simulate Clifford+T circuits past the dense limit | [Clifford+T Simulation](https://abecoull.github.io/prism-q/guides/clifford-t.html) |
+| Add noise, detectors and decoding | [Noise and QEC](https://abecoull.github.io/prism-q/guides/qec.html) |
+| Reproduce or extend the benchmarks | [Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html) |
+| See how it measures beside other simulators | [Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html), harness in [`comparison/`](comparison/README.md) |
+| Read how the layers fit together | [Architecture](https://abecoull.github.io/prism-q/architecture/overview.html) |
 
 ## Roadmap
 
@@ -251,3 +309,13 @@ caps the thread count. The A/B and regression workflow used for PRs is in
 [`CONTRIBUTING.md`](CONTRIBUTING.md) has the build, test, coverage, profiling and
 benchmark workflow. The [architecture reference](docs/architecture/overview.md) covers
 the layered design, backend trait, SIMD strategy, fusion pipeline and compiled samplers.
+
+## Citing
+
+[`CITATION.cff`](CITATION.cff) carries the citation metadata; GitHub renders it under
+"Cite this repository". Name the release version used, since timings and dispatch
+rules change between releases.
+
+## License
+
+Dual-licensed under MIT or Apache-2.0, at your option.

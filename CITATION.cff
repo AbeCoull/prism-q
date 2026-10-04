@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use PRISM-Q in published work, please cite it as below and name the release version used."
+title: "PRISM-Q: quantum circuit simulator in Rust"
+type: software
+authors:
+  - family-names: Coull
+    given-names: A.
+repository-code: "https://github.com/AbeCoull/prism-q"
+url: "https://abecoull.github.io/prism-q/"
+license:
+  - MIT
+  - Apache-2.0
+abstract: >-
+  PRISM-Q is an open-source quantum circuit simulator written in Rust with Python
+  bindings. It reads OpenQASM 3.0, selects a simulation backend from the circuit's
+  structure (statevector, stabilizer, sparse, matrix product state, product state,
+  tensor network, density matrix, and factored variants), runs a multi-pass gate
+  fusion pipeline, and executes on SIMD kernels, with optional CUDA acceleration and
+  an optional MPI-distributed statevector.
+keywords:
+  - quantum computing
+  - quantum circuit simulator
+  - statevector simulation
+  - stabilizer simulation
+  - tensor network
+  - OpenQASM
+  - Rust
+  - CUDA
+  - MPI

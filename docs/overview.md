@@ -2,15 +2,16 @@
 
 # PRISM-Q
 
-**A Rust quantum circuit simulator built for speed.**
+**An open-source quantum circuit simulator written in Rust.**
 
 </div>
 
 PRISM-Q matches each circuit to a simulation strategy. It dispatches across nine CPU
-backends plus optional CUDA and MPI paths, runs circuits through a multi-pass fusion
-pipeline, and uses AVX2, FMA and BMI2 SIMD in the inner loop. Input is OpenQASM 3.0,
-with backward-compatible 2.0 syntax. A two-qubit Bell pair and a thousand-qubit Clifford
-circuit go through the same entry point.
+backends plus optional CUDA and MPI-distributed paths, runs circuits through a
+multi-pass gate fusion pipeline, and uses AVX2, FMA and BMI2 SIMD in the inner loop
+(NEON on ARM64). Input is OpenQASM 3.0, with backward-compatible 2.0 syntax, and
+Python bindings expose the same engine with NumPy output. A two-qubit Bell pair and a
+thousand-qubit Clifford circuit go through the same entry point.
 
 ```rust
 use prism_q::CircuitBuilder;
@@ -36,14 +37,17 @@ let probs = result.probabilities.unwrap();
   the noisy and detector/QEC paths.
 - Clifford+T engines (stabilizer rank, stochastic and deterministic Pauli propagation)
   for circuits a dense statevector cannot hold.
-- An optional CUDA path for statevector, stabilizer and density-matrix execution.
+- An optional CUDA path for statevector, stabilizer and density-matrix execution, and
+  an optional [MPI-distributed statevector](./guides/distributed.md) for registers
+  larger than one host's memory.
 - [Python bindings](./guides/python.md) with NumPy output.
 
 ## Where to go next
 
 - [Installation](./getting-started/install.md) and [Your First Circuit](./getting-started/first-circuit.md)
 - [Architecture](./architecture/overview.md): backends, dispatch tree, fusion pipeline and SIMD strategy
-- [Benchmarks](./benchmarks.md): measured timings on the reference circuit suite
+- [Benchmarks](./benchmarks.md): measured timings on the reference circuit suite, and
+  the [methodology](./guides/benchmarking.md) behind them
 - [Glossary](./glossary.md)
 - [API reference](https://docs.rs/prism-q) on docs.rs
 - [Source and issues](https://github.com/AbeCoull/prism-q) on GitHub

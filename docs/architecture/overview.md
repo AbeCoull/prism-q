@@ -4,7 +4,8 @@ How PRISM-Q is built. Terms are defined in the [Glossary](../glossary.md).
 
 ## Goals
 
-- The fastest practical quantum circuit simulation in Rust, ahead of the other two.
+- The fastest practical quantum circuit simulation in Rust. When goals conflict,
+  performance is weighed first, then correctness, then maintainability.
 - Correct simulation of the supported gate sets on every backend.
 - A backend plugin model, so a new simulation strategy is added without touching the core.
 

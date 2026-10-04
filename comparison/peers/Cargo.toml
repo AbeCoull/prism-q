@@ -1,0 +1,19 @@
+[package]
+name = "peers"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Rust comparators for the cross-simulator comparison harness"
+
+# A crate of its own, outside the prism-q workspace: it builds on nightly for
+# Spinoza and must not add its dependencies to the library's lock file.
+[workspace]
+
+[dependencies]
+qip = "1.5.0"
+spinoza = { git = "https://github.com/QuState/spinoza", rev = "f900971" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1

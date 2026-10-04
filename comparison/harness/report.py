@@ -1,0 +1,258 @@
+"""Markdown rendering of a results file.
+
+Generated, never hand edited. Rows where PRISM-Q is slower render the same as
+rows where it is faster; a table that shows one direction only is not evidence.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+FRAMING = (
+    "Comparative performance measurements against commonly used quantum simulators. "
+    "These results are intended to make performance characteristics reproducible and "
+    "transparent across representative workloads, not to rank projects: each simulator "
+    "makes different trade-offs, and a ratio here describes one workload on one host "
+    "under the controls listed below."
+)
+
+
+def _fmt_ms(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if value < 1.0:
+        return f"{value * 1000:.0f} us"
+    if value >= 1000.0:
+        return f"{value / 1000:.2f} s"
+    return f"{value:.1f} ms"
+
+
+def _fmt_tvd(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.1e}"
+
+
+def _fmt_ratio(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2f}x"
+
+
+def _timing(row: dict[str, Any], name: str) -> float | None:
+    entry = row["timings"].get(name)
+    if not entry or "median_ms" not in entry:
+        return None
+    return entry["median_ms"]
+
+
+def render(results: dict[str, Any]) -> str:
+    run = results["run"]
+    prov = results["provenance"]
+    host = prov["host"]
+    tool = prov["toolchain"]
+    adapters = results["adapters"]
+    comparators = [n for n in adapters if n != "prismq"]
+
+    lines: list[str] = []
+    lines.append("# Comparative measurements")
+    lines.append("")
+    lines.append(FRAMING)
+    lines.append("")
+    lines.append(
+        "Every simulator replays the same gate list for each circuit, built from the "
+        "`prism_q::circuits` generators and hashed so a rerun can prove it did the same work. "
+        f"The timed region is: {run['timed_region']}. "
+        f"Ratios are the comparator's median over PRISM-Q's median, so a ratio above 1.00x "
+        f"means PRISM-Q finished sooner and below 1.00x means the comparator did; a ratio "
+        f"within {run['tie_band_pct']:.0f}% of 1.00x is reported as within band, because "
+        "cross-process timing noise on one host is of that order."
+    )
+    lines.append("")
+
+    lines.append("## Host and versions")
+    lines.append("")
+    lines.append("| Field | Value |")
+    lines.append("| --- | --- |")
+    lines.append(f"| CPU | {host['cpu_model']} |")
+    lines.append(f"| Cores | {host['physical_cores']} physical, {host['logical_cores']} logical |")
+    lines.append(f"| RAM | {host['ram_gb']} GB |")
+    lines.append(f"| OS | {host['os']} |")
+    lines.append(f"| rustc (PRISM-Q) | {tool['rustc']}, features `{tool['cargo_features']}`, profile release |")
+    lines.append(f"| rustc (Spinoza, qip) | {tool['rustc_peers']}, profile release |")
+    lines.append(f"| C++ compiler (QuEST) | {tool['cxx_compiler']} |")
+    lines.append(f"| Python | {prov['python']['version']} |")
+    lines.append(f"| Commit | {tool['git_sha']}{' (dirty tree)' if tool['git_dirty'] else ''} |")
+    lines.append(f"| Threads | {run['threads']} on every simulator |")
+    lines.append(f"| Iterations | {run['iterations']} timed per circuit after one warmup |")
+    lines.append("")
+    lines.append("| Simulator | Version | Settings |")
+    lines.append("| --- | --- | --- |")
+    for name, entry in adapters.items():
+        lines.append(f"| {entry['label']} | {entry.get('version') or 'n/a'} | {entry.get('settings', '')} |")
+    lines.append("")
+    overheads = results.get("fixed_overhead_ms", {})
+    if overheads:
+        lines.append(
+            "Per-call overhead of driving a comparator from Python on a one-gate circuit, "
+            "recorded so small rows can be read correctly: "
+            + ", ".join(f"{name} {_fmt_ms(value)}" for name, value in overheads.items())
+            + "."
+        )
+        lines.append("")
+
+    lines.append("## Results")
+    lines.append("")
+    header = ["Circuit", "Qubits", "Gates", "PRISM-Q"]
+    for name in comparators:
+        header += [name, "ratio"]
+    header.append("max TVD")
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("| " + " | ".join(["---"] * len(header)) + " |")
+
+    has_excluded = False
+    for row in results["results"]:
+        counted = row["num_qubits"] >= run["headline_min_qubits"]
+        has_excluded = has_excluded or not counted
+        marker = "" if counted else " \\*"
+        cells = [
+            row["benchmark"],
+            str(row["num_qubits"]),
+            str(row["num_operations"]),
+            _fmt_ms(_timing(row, "prismq")),
+        ]
+        for name in comparators:
+            timing = row["timings"].get(name, {})
+            if "error" in timing:
+                cells.append("not run")
+                cells.append("n/a")
+                continue
+            cells.append(_fmt_ms(_timing(row, name)))
+            cells.append(_fmt_ratio(row["ratio_vs_prismq"].get(name)) + marker)
+        tvds = [e["tvd"] for e in row["equivalence"].values() if e.get("tvd") is not None]
+        cells.append(_fmt_tvd(max(tvds)) if tvds else "unchecked")
+        lines.append("| " + " | ".join(cells) + " |")
+    lines.append("")
+    if has_excluded:
+        lines.append(
+            f"\\* Below {run['headline_min_qubits']} qubits a run is comparable to the per-call "
+            "overhead of a comparator, so these ratios describe framework cost rather than "
+            "simulation and are left out of the summary."
+        )
+        lines.append("")
+
+    requested = run["iterations"]
+    short = [
+        (row["benchmark"], row["num_qubits"], name, len(entry["samples_ms"]))
+        for row in results["results"]
+        for name, entry in row["timings"].items()
+        if "samples_ms" in entry and len(entry["samples_ms"]) < requested
+    ]
+    if short:
+        lines.append(
+            f"Rows timed with fewer than {requested} samples under the "
+            f"{run.get('iteration_budget_s')} s budget per simulator and circuit: "
+            + ", ".join(f"{b} {q}q {name} ({n})" for b, q, name, n in short)
+            + ". Their medians rest on fewer samples; every other row has the full count."
+        )
+        lines.append("")
+
+    lines.append(
+        "Reading the ratios: the comparators differ in design, and the design explains most "
+        "of a gap. QuEST and Spinoza apply every gate as its own pass over the state and carry "
+        "no gate fusion, so their time grows with the gate count; PRISM-Q, Aer and qsim fuse "
+        "gates before execution, which pays most on the deep families (HEA, QV). Under "
+        "`automatic`, Aer routes a Clifford circuit (GHZ) to its stabilizer method, as PRISM-Q "
+        "routes it to its stabilizer backend, so that row compares two tableau simulations "
+        "plus the dense read-out rather than two statevector runs. The GHZ rows at every "
+        "size are dominated by materializing the `2^n` probability vector, not by the gates. "
+        "The QFT rows run the expanded textbook sequence on every simulator, PRISM-Q included, "
+        "so PRISM-Q's block FFT path (which the Benchmarks page measures through the "
+        "generator's `QftBlock`) is not exercised here and its QFT times are higher than on "
+        "that page."
+    )
+    lines.append("")
+
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(
+        f"Counted over circuits with at least {run['headline_min_qubits']} qubits. "
+        "A row where the comparator did not run is not counted."
+    )
+    lines.append("")
+    lines.append("| Comparator | PRISM-Q sooner | Within band | Comparator sooner | Median ratio | Range |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    for name, stats in results["summary"]["per_comparator"].items():
+        rng = (
+            f"{_fmt_ratio(stats['min_ratio'])} to {_fmt_ratio(stats['max_ratio'])}"
+            if stats["min_ratio"] is not None
+            else "n/a"
+        )
+        lines.append(
+            f"| {name} | {stats['faster']} | {stats['within_band']} | {stats['slower']} | "
+            f"{_fmt_ratio(stats['median_ratio'])} | {rng} |"
+        )
+    lines.append("")
+
+    failures = results["summary"]["equivalence_failures"]
+    unchecked = [
+        (row["benchmark"], row["num_qubits"], name)
+        for row in results["results"]
+        for name, entry in row["equivalence"].items()
+        if entry.get("pass") is None
+    ]
+    lines.append("## Equivalence")
+    lines.append("")
+    if unchecked:
+        lines.append(
+            f"{len(unchecked)} circuit runs could not be checked because the reference "
+            f"simulator ({run['reference_simulator']}) produced no vector for that circuit; "
+            "their timings are shown without a ratio and are not counted:"
+        )
+        lines.append("")
+        for benchmark, qubits, name in unchecked:
+            lines.append(f"- {benchmark} at {qubits} qubits, {name}")
+        lines.append("")
+    if failures:
+        lines.append(
+            f"{len(failures)} circuit runs produced a probability vector differing from "
+            f"{run['reference_simulator']} by more than "
+            f"{run['equivalence_tolerance_tvd']:.0e} total variation distance; their timings "
+            "are shown but not counted:"
+        )
+        lines.append("")
+        for item in failures:
+            lines.append(
+                f"- {item['benchmark']} at {item['num_qubits']} qubits, {item['simulator']}, "
+                f"TVD {_fmt_tvd(item['tvd'])}"
+            )
+    elif not unchecked:
+        lines.append(
+            f"Every simulator reproduced the reference probability vector "
+            f"({run['reference_simulator']}) to within "
+            f"{run['equivalence_tolerance_tvd']:.0e} total variation distance on every circuit. "
+            "The tolerance separates a wrong answer, which lands near 1e-1, from rounding; "
+            "the max TVD column shows the measured distance, and a value near 1e-6 is the "
+            "single-precision comparator."
+        )
+    lines.append("")
+
+    errors = results["summary"]["errors"]
+    if errors:
+        lines.append("## Rows not run")
+        lines.append("")
+        lines.append("Listed so the selection can be audited; a row is never dropped for how it performs.")
+        lines.append("")
+        for item in errors:
+            lines.append(
+                f"- {item['benchmark']} at {item['num_qubits']} qubits, {item['simulator']}: {item['error']}"
+            )
+        lines.append("")
+
+    skipped = results["corpus"]["skipped"]
+    if skipped:
+        lines.append("## Circuits not generated")
+        lines.append("")
+        lines.append("| Circuit | Qubits | Reason |")
+        lines.append("| --- | --- | --- |")
+        for item in skipped:
+            lines.append(f"| {item['benchmark']} | {item['num_qubits']} | {item['reason']} |")
+        lines.append("")
+
+    return "\n".join(lines)

@@ -1,0 +1,69 @@
+# Comparative measurements
+
+Comparative performance measurements against commonly used quantum simulators. These results are intended to make performance characteristics reproducible and transparent across representative workloads, not to rank projects: each simulator makes different trade-offs, and a ratio here describes one workload on one host under the controls listed below.
+
+Every simulator replays the same gate list for each circuit, built from the `prism_q::circuits` generators and hashed so a rerun can prove it did the same work. The timed region is: execute the circuit and materialize the full 2^n probability vector; building the circuit from the gate list is excluded on every side. Ratios are the comparator's median over PRISM-Q's median, so a ratio above 1.00x means PRISM-Q finished sooner and below 1.00x means the comparator did; a ratio within 10% of 1.00x is reported as within band, because cross-process timing noise on one host is of that order.
+
+## Host and versions
+
+| Field | Value |
+| --- | --- |
+| CPU | Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz |
+| Cores | 4 physical, 8 logical |
+| RAM | 31.9 GB |
+| OS | Windows 10 |
+| rustc (PRISM-Q) | 1.97.0, features `parallel`, profile release |
+| rustc (Spinoza, qip) | 1.99.0-nightly, profile release |
+| C++ compiler (QuEST) | MSVC 19.38.33145.0 |
+| Python | 3.14.0 |
+| Commit | 9324ed6c019b7f36f29cd28ec46824afaa354910 (dirty tree) |
+| Threads | 8 on every simulator |
+| Iterations | 5 timed per circuit after one warmup |
+
+| Simulator | Version | Settings |
+| --- | --- | --- |
+| PRISM-Q (auto dispatch) | 0.33.0 | BackendKind::Auto, fusion on, double precision, RAYON_NUM_THREADS pinned |
+| Qiskit Aer (statevector) | 0.17.2 | method=statevector, fusion on (default), double precision, max_parallel_threads pinned |
+| Qiskit Aer (automatic) | 0.17.2 | method=automatic, fusion on (default), double precision, max_parallel_threads pinned |
+| qsim (qsimcirq) | 0.22.1 | QSimOptions defaults (max_fused_gate_size 2), cpu_threads pinned; single precision, the only precision qsim offers |
+| QuEST (OpenMP) | v4.3.0 | static library, double precision, OpenMP on, OMP_NUM_THREADS pinned |
+| Spinoza | 0.5.1 (git f900971) | default double feature, Config.threads pinned |
+| RustQIP (qip) | 1.5.0 | LocalBuilder<f64>, parallel feature, RAYON_NUM_THREADS pinned |
+
+Per-call overhead of driving a comparator from Python on a one-gate circuit, recorded so small rows can be read correctly: aer-statevector 549 us, aer-automatic 492 us, qsim 130 us.
+
+## Results
+
+| Circuit | Qubits | Gates | PRISM-Q | aer-statevector | ratio | aer-automatic | ratio | qsim | ratio | quest | ratio | spinoza | ratio | qip | ratio | max TVD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| ghz | 16 | 16 | 18 us | 3.9 ms | 222.10x | 1.2 ms | 67.55x | 3.0 ms | 171.15x | 3.0 ms | 170.16x | 1.7 ms | 96.86x | 8.7 ms | 492.09x | 1.7e-08 |
+| qft | 16 | 144 | 2.5 ms | 26.3 ms | 10.66x | 26.5 ms | 10.77x | 13.9 ms | 5.64x | 17.6 ms | 7.14x | 14.8 ms | 6.00x | 168.8 ms | 68.52x | 1.9e-15 |
+| hea | 16 | 235 | 3.7 ms | 29.2 ms | 7.96x | 29.8 ms | 8.14x | 18.6 ms | 5.07x | 34.1 ms | 9.30x | 104.1 ms | 28.40x | 69.6 ms | 19.00x | 5.1e-07 |
+| qv | 16 | 1024 | 6.1 ms | 91.2 ms | 14.98x | 90.0 ms | 14.78x | 57.2 ms | 9.40x | 133.5 ms | 21.92x | 347.3 ms | 57.02x | 285.7 ms | 46.92x | 1.2e-06 |
+| ghz | 20 | 20 | 1.3 ms | 36.3 ms | 27.47x | 4.4 ms | 3.37x | 47.2 ms | 35.71x | 41.5 ms | 31.45x | 24.7 ms | 18.73x | 147.4 ms | 111.61x | 1.7e-08 |
+| qft | 20 | 220 | 52.8 ms | 193.5 ms | 3.66x | 201.1 ms | 3.81x | 156.0 ms | 2.95x | 286.1 ms | 5.42x | 244.4 ms | 4.63x | 3.00 s | 56.73x | 2.2e-15 |
+| hea | 20 | 295 | 34.4 ms | 178.5 ms | 5.19x | 177.1 ms | 5.15x | 96.1 ms | 2.79x | 474.8 ms | 13.80x | 1.56 s | 45.41x | 992.1 ms | 28.84x | 6.2e-07 |
+| qv | 20 | 1600 | 72.3 ms | 606.6 ms | 8.39x | 592.4 ms | 8.19x | 200.4 ms | 2.77x | 1.84 s | 25.39x | 6.44 s | 89.02x | 4.52 s | 62.43x | 1.6e-06 |
+| ghz | 24 | 24 | 20.2 ms | 435.2 ms | 21.54x | 23.0 ms | 1.14x | 648.4 ms | 32.09x | 587.7 ms | 29.08x | 411.9 ms | 20.38x | 2.20 s | 109.06x | 1.7e-08 |
+| qft | 24 | 312 | 1.01 s | 2.48 s | 2.44x | 2.45 s | 2.42x | 3.75 s | 3.69x | 4.32 s | 4.26x | 4.57 s | 4.51x | 58.33 s | 57.51x | 2.6e-15 |
+| hea | 24 | 355 | 593.6 ms | 2.12 s | 3.57x | 2.10 s | 3.54x | 1.83 s | 3.09x | 8.38 s | 14.13x | 23.53 s | 39.64x | 16.56 s | 27.90x | 6.6e-07 |
+| qv | 24 | 2304 | 1.45 s | 5.66 s | 3.91x | 5.64 s | 3.89x | 3.80 s | 2.62x | 50.34 s | 34.73x | 130.22 s | 89.84x | 114.49 s | 78.99x | 1.8e-06 |
+
+Reading the ratios: the comparators differ in design, and the design explains most of a gap. QuEST and Spinoza apply every gate as its own pass over the state and carry no gate fusion, so their time grows with the gate count; PRISM-Q, Aer and qsim fuse gates before execution, which pays most on the deep families (HEA, QV). Under `automatic`, Aer routes a Clifford circuit (GHZ) to its stabilizer method, as PRISM-Q routes it to its stabilizer backend, so that row compares two tableau simulations plus the dense read-out rather than two statevector runs. The GHZ rows at every size are dominated by materializing the `2^n` probability vector, not by the gates. The QFT rows run the expanded textbook sequence on every simulator, PRISM-Q included, so PRISM-Q's block FFT path (which the Benchmarks page measures through the generator's `QftBlock`) is not exercised here and its QFT times are higher than on that page.
+
+## Summary
+
+Counted over circuits with at least 16 qubits. A row where the comparator did not run is not counted.
+
+| Comparator | PRISM-Q sooner | Within band | Comparator sooner | Median ratio | Range |
+| --- | --- | --- | --- | --- | --- |
+| aer-statevector | 12 | 0 | 0 | 8.17x | 2.44x to 222.10x |
+| aer-automatic | 12 | 0 | 0 | 4.52x | 1.14x to 67.55x |
+| qsim | 12 | 0 | 0 | 4.38x | 2.62x to 171.15x |
+| quest | 12 | 0 | 0 | 18.02x | 4.26x to 170.16x |
+| spinoza | 12 | 0 | 0 | 34.02x | 4.51x to 96.86x |
+| qip | 12 | 0 | 0 | 59.97x | 19.00x to 492.09x |
+
+## Equivalence
+
+Every simulator reproduced the reference probability vector (aer-statevector) to within 1e-05 total variation distance on every circuit. The tolerance separates a wrong answer, which lands near 1e-1, from rounding; the max TVD column shows the measured distance, and a value near 1e-6 is the single-precision comparator.

@@ -1420,7 +1420,6 @@ fn qec_noise_matches_analytic_flip_rates() {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 fn fingerprint(words: &[u64]) -> u64 {
     words.iter().fold(0xCBF2_9CE4_8422_2325, |hash, &word| {
         (hash ^ word).wrapping_mul(0x0000_0100_0000_01B3)
@@ -1429,9 +1428,8 @@ fn fingerprint(words: &[u64]) -> u64 {
 
 // Pinned from the sampler before noise moved to per-unit streams. The X checks make the
 // chunked noiseless records random, so the measurement fingerprint covers that stream.
-// That stream is not the same on every host (the macOS ARM64 runner draws another), so
-// the pin holds on x86_64, where it was taken.
-#[cfg(target_arch = "x86_64")]
+// The sampler lays its four xoshiro lanes identically across the AVX2, NEON and scalar
+// paths, so the pin holds on every host.
 #[test]
 fn qec_noiseless_sampling_is_unchanged_by_noise_units() {
     let data: Vec<usize> = (0..9).collect();

@@ -1,0 +1,1924 @@
+{
+  "schema_version": 1,
+  "run": {
+    "iterations": 5,
+    "threads": 8,
+    "sizes": [
+      16,
+      20,
+      24
+    ],
+    "tie_band_pct": 10.0,
+    "equivalence_tolerance_tvd": 1e-05,
+    "reference_simulator": "aer-statevector",
+    "headline_min_qubits": 16,
+    "timed_region": "execute the circuit and materialize the full 2^n probability vector; building the circuit from the gate list is excluded on every side",
+    "machine_warnings": [
+      "CPU was 52% busy before the run started; timings will be noisy"
+    ]
+  },
+  "provenance": {
+    "host": {
+      "cpu_model": "Intel(R) Core(TM) i7-6700K CPU @ 4.00GHz",
+      "arch": "AMD64",
+      "logical_cores": 8,
+      "physical_cores": 4,
+      "ram_gb": 31.9,
+      "os": "Windows 10"
+    },
+    "toolchain": {
+      "rustc": "1.97.0",
+      "rustc_peers": "1.99.0-nightly",
+      "cxx_compiler": "MSVC 19.38.33145.0",
+      "cargo_profile": "release",
+      "cargo_features": "parallel",
+      "rustflags": "",
+      "git_sha": "9324ed6c019b7f36f29cd28ec46824afaa354910",
+      "git_dirty": true
+    },
+    "python": {
+      "version": "3.14.0",
+      "implementation": "CPython",
+      "packages": {
+        "qiskit": "2.5.2",
+        "qiskit-aer": "0.17.2",
+        "qsimcirq": "0.22.1",
+        "cirq-core": "1.7.0",
+        "numpy": "2.5.1",
+        "psutil": "7.2.2"
+      }
+    },
+    "simulators": {
+      "prismq": "0.33.0",
+      "aer-statevector": "0.17.2",
+      "aer-automatic": "0.17.2",
+      "qsim": "0.22.1",
+      "quest": "v4.3.0",
+      "spinoza": "0.5.1 (git f900971)",
+      "qip": "1.5.0"
+    },
+    "threads": {
+      "requested": 8,
+      "rayon_num_threads": null,
+      "omp_num_threads": null
+    }
+  },
+  "corpus": {
+    "name": "prism-q benchmark suite families",
+    "families": {
+      "ghz": "H on qubit 0, then a CX chain",
+      "qft": "textbook quantum Fourier transform: H, controlled phases, final swaps",
+      "hea": "hardware-efficient ansatz: 5 layers of Ry and Rz on every qubit, then a CX chain",
+      "qv": "quantum volume: n layers of random pairings, each pair a random SU(4) as CX and rotations"
+    },
+    "gate_set": [
+      "h",
+      "cx",
+      "swap",
+      "ry",
+      "rz",
+      "cp"
+    ],
+    "circuit_seed": "0xDEAD_BEEF",
+    "source": "examples/compare_runner.rs export, from the prism_q::circuits generators",
+    "skipped": []
+  },
+  "adapters": {
+    "prismq": {
+      "label": "PRISM-Q (auto dispatch)",
+      "version": "0.33.0",
+      "settings": "BackendKind::Auto, fusion on, double precision, RAYON_NUM_THREADS pinned"
+    },
+    "aer-statevector": {
+      "label": "Qiskit Aer (statevector)",
+      "version": "0.17.2",
+      "settings": "method=statevector, fusion on (default), double precision, max_parallel_threads pinned"
+    },
+    "aer-automatic": {
+      "label": "Qiskit Aer (automatic)",
+      "version": "0.17.2",
+      "settings": "method=automatic, fusion on (default), double precision, max_parallel_threads pinned"
+    },
+    "qsim": {
+      "label": "qsim (qsimcirq)",
+      "version": "0.22.1",
+      "settings": "QSimOptions defaults (max_fused_gate_size 2), cpu_threads pinned; single precision, the only precision qsim offers"
+    },
+    "quest": {
+      "label": "QuEST (OpenMP)",
+      "version": "v4.3.0",
+      "settings": "static library, double precision, OpenMP on, OMP_NUM_THREADS pinned"
+    },
+    "spinoza": {
+      "label": "Spinoza",
+      "version": "0.5.1 (git f900971)",
+      "settings": "default double feature, Config.threads pinned"
+    },
+    "qip": {
+      "label": "RustQIP (qip)",
+      "version": "1.5.0",
+      "settings": "LocalBuilder<f64>, parallel feature, RAYON_NUM_THREADS pinned"
+    }
+  },
+  "fixed_overhead_ms": {
+    "aer-statevector": 0.5493500002557994,
+    "aer-automatic": 0.4924499999106047,
+    "qsim": 0.1301000002058572
+  },
+  "results": [
+    {
+      "benchmark": "ghz",
+      "num_qubits": 16,
+      "sha256": "32c8226e218bd99ca2c38093923835992b8d12ef26616948ec533d3460d21527",
+      "num_operations": 16,
+      "timings": {
+        "prismq": {
+          "median_ms": 0.0176,
+          "min_ms": 0.0166,
+          "p25_ms": 0.0167,
+          "p75_ms": 0.0206,
+          "samples_ms": [
+            0.0206,
+            0.0176,
+            0.0167,
+            0.0225,
+            0.0166
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 3.908900000169524,
+          "min_ms": 3.652499999589054,
+          "p25_ms": 3.7544000006164424,
+          "p75_ms": 4.0210999995906604,
+          "samples_ms": [
+            4.0211,
+            4.056,
+            3.7544,
+            3.9089,
+            3.6525
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 1.1887999989994569,
+          "min_ms": 1.1718000005203066,
+          "p25_ms": 1.1746000000130152,
+          "p75_ms": 1.2485999995988095,
+          "samples_ms": [
+            1.2486,
+            1.1888,
+            1.1718,
+            1.1746,
+            1.6408
+          ]
+        },
+        "qsim": {
+          "median_ms": 3.0123000015009893,
+          "min_ms": 2.7943000004597707,
+          "p25_ms": 2.8669999992416706,
+          "p75_ms": 3.1698000002506888,
+          "samples_ms": [
+            3.5279,
+            3.0123,
+            2.867,
+            2.7943,
+            3.1698
+          ]
+        },
+        "quest": {
+          "median_ms": 2.9949,
+          "min_ms": 2.9476,
+          "p25_ms": 2.9575,
+          "p75_ms": 3.0021,
+          "samples_ms": [
+            2.9575,
+            3.0021,
+            2.9476,
+            3.2081,
+            2.9949
+          ]
+        },
+        "spinoza": {
+          "median_ms": 1.7048,
+          "min_ms": 1.5873,
+          "p25_ms": 1.6098,
+          "p75_ms": 1.9204,
+          "samples_ms": [
+            1.6098,
+            1.7048,
+            1.5873,
+            2.0701,
+            1.9204
+          ]
+        },
+        "qip": {
+          "median_ms": 8.6608,
+          "min_ms": 8.2926,
+          "p25_ms": 8.5938,
+          "p75_ms": 9.0025,
+          "samples_ms": [
+            9.6958,
+            8.2926,
+            8.5938,
+            8.6608,
+            9.0025
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 1.1102230246251565e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 1.1102230246251565e-16,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 1.711427100037355e-08,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 2.220446049250313e-16,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 0.0,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 222.09659091872294,
+        "aer-automatic": 67.5454544886055,
+        "qsim": 171.15340917619255,
+        "quest": 170.16477272727272,
+        "spinoza": 96.86363636363636,
+        "qip": 492.09090909090907
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "qft",
+      "num_qubits": 16,
+      "sha256": "2647f63f6d924a1549e2063cad4c6023757d6b4284c79570de03569462303b5a",
+      "num_operations": 144,
+      "timings": {
+        "prismq": {
+          "median_ms": 2.4635,
+          "min_ms": 2.3789,
+          "p25_ms": 2.4264,
+          "p75_ms": 2.607,
+          "samples_ms": [
+            2.8592,
+            2.607,
+            2.4264,
+            2.4635,
+            2.3789
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 26.271799999449286,
+          "min_ms": 25.469000000157394,
+          "p25_ms": 25.80810000108613,
+          "p75_ms": 26.425000000017462,
+          "samples_ms": [
+            26.425,
+            26.2718,
+            25.8081,
+            26.79,
+            25.469
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 26.53170000121463,
+          "min_ms": 26.396900000690948,
+          "p25_ms": 26.468000000022585,
+          "p75_ms": 27.429199999460252,
+          "samples_ms": [
+            26.468,
+            26.5317,
+            27.4292,
+            26.3969,
+            28.5139
+          ]
+        },
+        "qsim": {
+          "median_ms": 13.90460000038729,
+          "min_ms": 13.725499999054591,
+          "p25_ms": 13.753299999734736,
+          "p75_ms": 14.241800001400406,
+          "samples_ms": [
+            13.7255,
+            14.3661,
+            13.7533,
+            13.9046,
+            14.2418
+          ]
+        },
+        "quest": {
+          "median_ms": 17.5921,
+          "min_ms": 17.4123,
+          "p25_ms": 17.5277,
+          "p75_ms": 18.1825,
+          "samples_ms": [
+            17.4123,
+            18.3064,
+            17.5921,
+            18.1825,
+            17.5277
+          ]
+        },
+        "spinoza": {
+          "median_ms": 14.7746,
+          "min_ms": 14.0855,
+          "p25_ms": 14.5715,
+          "p75_ms": 14.7785,
+          "samples_ms": [
+            15.5191,
+            14.5715,
+            14.0855,
+            14.7785,
+            14.7746
+          ]
+        },
+        "qip": {
+          "median_ms": 168.7898,
+          "min_ms": 167.3884,
+          "p25_ms": 167.5807,
+          "p75_ms": 168.9042,
+          "samples_ms": [
+            168.9042,
+            169.8032,
+            167.3884,
+            167.5807,
+            168.7898
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 4.440892098500626e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 6.661338147750939e-16,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 1.887379141862766e-15,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 4.440892098500626e-16,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 6.693830331607614e-16,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 10.664420539658733,
+        "aer-automatic": 10.769920844820229,
+        "qsim": 5.644245991632755,
+        "quest": 7.141100060888979,
+        "spinoza": 5.99740207022529,
+        "qip": 68.51625735741831
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "hea",
+      "num_qubits": 16,
+      "sha256": "e7abfbd3cb2fac7b07cf55726b93756a67414e38b66b5d22798c078b37e6c33b",
+      "num_operations": 235,
+      "timings": {
+        "prismq": {
+          "median_ms": 3.6661,
+          "min_ms": 3.3649,
+          "p25_ms": 3.3675,
+          "p75_ms": 3.6912,
+          "samples_ms": [
+            3.6661,
+            3.7831,
+            3.3675,
+            3.3649,
+            3.6912
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 29.179799999837996,
+          "min_ms": 26.005199999417528,
+          "p25_ms": 26.889400000072783,
+          "p75_ms": 31.043599999975413,
+          "samples_ms": [
+            31.0436,
+            26.0052,
+            26.8894,
+            29.1798,
+            33.5771
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 29.846100000213482,
+          "min_ms": 27.099800001451513,
+          "p25_ms": 29.703199999858043,
+          "p75_ms": 30.256600000939216,
+          "samples_ms": [
+            27.0998,
+            29.7032,
+            29.8461,
+            30.6163,
+            30.2566
+          ]
+        },
+        "qsim": {
+          "median_ms": 18.58379999976023,
+          "min_ms": 14.803600000959705,
+          "p25_ms": 14.927599999282393,
+          "p75_ms": 28.530999999929918,
+          "samples_ms": [
+            120.5195,
+            28.531,
+            14.8036,
+            18.5838,
+            14.9276
+          ]
+        },
+        "quest": {
+          "median_ms": 34.0872,
+          "min_ms": 33.6466,
+          "p25_ms": 33.7552,
+          "p75_ms": 34.158,
+          "samples_ms": [
+            34.0872,
+            33.7552,
+            33.6466,
+            34.4568,
+            34.158
+          ]
+        },
+        "spinoza": {
+          "median_ms": 104.1133,
+          "min_ms": 102.6364,
+          "p25_ms": 103.2786,
+          "p75_ms": 107.3849,
+          "samples_ms": [
+            104.1133,
+            103.2786,
+            102.6364,
+            109.1342,
+            107.3849
+          ]
+        },
+        "qip": {
+          "median_ms": 69.6413,
+          "min_ms": 68.551,
+          "p25_ms": 68.9792,
+          "p75_ms": 69.859,
+          "samples_ms": [
+            69.859,
+            69.6413,
+            71.5696,
+            68.551,
+            68.9792
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 4.689743403978906e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 5.085476835912789e-07,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 6.531081425096517e-16,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 6.529424843537701e-16,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 6.531081425096517e-16,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 7.959357355183436,
+        "aer-automatic": 8.141103625163929,
+        "qsim": 5.069092496047634,
+        "quest": 9.29794604620714,
+        "spinoza": 28.39892528845367,
+        "qip": 18.996017566351163
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "qv",
+      "num_qubits": 16,
+      "sha256": "17c9b3fe9ac3e3cd5a299e6ffbbb904d80d53e570ab346356b5ed6c27873c37e",
+      "num_operations": 1024,
+      "timings": {
+        "prismq": {
+          "median_ms": 6.0898,
+          "min_ms": 5.4224,
+          "p25_ms": 5.5351,
+          "p75_ms": 6.2949,
+          "samples_ms": [
+            6.2949,
+            11.1568,
+            5.5351,
+            6.0898,
+            5.4224
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 91.24890000020969,
+          "min_ms": 88.06800000093062,
+          "p25_ms": 89.56169999873964,
+          "p75_ms": 94.19460000026447,
+          "samples_ms": [
+            94.1946,
+            95.1828,
+            88.068,
+            89.5617,
+            91.2489
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 89.9821000002703,
+          "min_ms": 89.47260000059032,
+          "p25_ms": 89.7398000015528,
+          "p75_ms": 89.9970000009489,
+          "samples_ms": [
+            89.4726,
+            89.997,
+            89.7398,
+            89.9821,
+            92.3641
+          ]
+        },
+        "qsim": {
+          "median_ms": 57.236200000261306,
+          "min_ms": 53.73709999912535,
+          "p25_ms": 55.02630000046338,
+          "p75_ms": 57.865599999786355,
+          "samples_ms": [
+            53.7371,
+            55.0263,
+            57.8656,
+            58.9736,
+            57.2362
+          ]
+        },
+        "quest": {
+          "median_ms": 133.5026,
+          "min_ms": 132.5753,
+          "p25_ms": 132.6364,
+          "p75_ms": 135.1115,
+          "samples_ms": [
+            135.3247,
+            132.6364,
+            135.1115,
+            132.5753,
+            133.5026
+          ]
+        },
+        "spinoza": {
+          "median_ms": 347.2654,
+          "min_ms": 345.3673,
+          "p25_ms": 345.6657,
+          "p75_ms": 348.1443,
+          "samples_ms": [
+            359.1617,
+            347.2654,
+            345.3673,
+            348.1443,
+            345.6657
+          ]
+        },
+        "qip": {
+          "median_ms": 285.7241,
+          "min_ms": 280.2522,
+          "p25_ms": 284.1135,
+          "p75_ms": 287.0816,
+          "samples_ms": [
+            287.8813,
+            284.1135,
+            280.2522,
+            285.7241,
+            287.0816
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 1.2442037560859026e-15,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 1.1920846775294424e-06,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 1.5805622497786734e-15,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 1.5428418855169635e-15,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 1.5805622497786734e-15,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 14.983891096622168,
+        "aer-automatic": 14.775871128817085,
+        "qsim": 9.39869946472155,
+        "quest": 21.922329140530067,
+        "spinoza": 57.02410588196656,
+        "qip": 46.91847022890735
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "ghz",
+      "num_qubits": 20,
+      "sha256": "e6ffbaf3849fd52de00e8134aaaee646e3272e5c3cc9de208b5c4f5393b372c8",
+      "num_operations": 20,
+      "timings": {
+        "prismq": {
+          "median_ms": 1.3203,
+          "min_ms": 1.2567,
+          "p25_ms": 1.3024,
+          "p75_ms": 1.5257,
+          "samples_ms": [
+            1.3203,
+            1.2567,
+            1.3024,
+            1.6733,
+            1.5257
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 36.26259999873582,
+          "min_ms": 34.63980000014999,
+          "p25_ms": 36.01569999955245,
+          "p75_ms": 36.26769999937096,
+          "samples_ms": [
+            34.6398,
+            36.2626,
+            36.0157,
+            36.4978,
+            36.2677
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 4.445800001121825,
+          "min_ms": 4.328700000769459,
+          "p25_ms": 4.404999999678694,
+          "p75_ms": 4.56070000109321,
+          "samples_ms": [
+            4.4458,
+            4.3287,
+            5.0625,
+            4.5607,
+            4.405
+          ]
+        },
+        "qsim": {
+          "median_ms": 47.15050000049814,
+          "min_ms": 44.366899999658926,
+          "p25_ms": 45.69710000032501,
+          "p75_ms": 50.40020000160439,
+          "samples_ms": [
+            54.3684,
+            45.6971,
+            50.4002,
+            44.3669,
+            47.1505
+          ]
+        },
+        "quest": {
+          "median_ms": 41.5266,
+          "min_ms": 40.2017,
+          "p25_ms": 40.6959,
+          "p75_ms": 41.6911,
+          "samples_ms": [
+            41.5266,
+            40.2017,
+            40.6959,
+            41.6911,
+            43.081
+          ]
+        },
+        "spinoza": {
+          "median_ms": 24.7333,
+          "min_ms": 22.8293,
+          "p25_ms": 23.3392,
+          "p75_ms": 24.945,
+          "samples_ms": [
+            24.7333,
+            24.945,
+            22.8293,
+            25.0329,
+            23.3392
+          ]
+        },
+        "qip": {
+          "median_ms": 147.3522,
+          "min_ms": 144.3292,
+          "p25_ms": 144.9794,
+          "p75_ms": 148.2367,
+          "samples_ms": [
+            144.3292,
+            147.3522,
+            144.9794,
+            148.2367,
+            149.6055
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 1.1102230246251565e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 1.1102230246251565e-16,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 1.711427100037355e-08,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 2.220446049250313e-16,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 0.0,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 27.465424523771734,
+        "aer-automatic": 3.3672650163764484,
+        "qsim": 35.71195940354324,
+        "quest": 31.452397182458533,
+        "spinoza": 18.733090964174806,
+        "qip": 111.60508975232902
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "qft",
+      "num_qubits": 20,
+      "sha256": "8c40902f4f381da06f8b376dd552d5832e8994ac06c2f1b430220226931b57cf",
+      "num_operations": 220,
+      "timings": {
+        "prismq": {
+          "median_ms": 52.8348,
+          "min_ms": 52.5766,
+          "p25_ms": 52.72,
+          "p75_ms": 52.8802,
+          "samples_ms": [
+            52.8348,
+            52.72,
+            52.5766,
+            52.8802,
+            54.1221
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 193.49780000084138,
+          "min_ms": 191.17720000031113,
+          "p25_ms": 192.76650000028894,
+          "p75_ms": 194.17749999956868,
+          "samples_ms": [
+            193.4978,
+            191.1772,
+            194.1775,
+            194.371,
+            192.7665
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 201.12370000060764,
+          "min_ms": 193.08599999931175,
+          "p25_ms": 194.51920000028622,
+          "p75_ms": 201.49040000069363,
+          "samples_ms": [
+            193.086,
+            201.1237,
+            194.5192,
+            201.4904,
+            203.0065
+          ]
+        },
+        "qsim": {
+          "median_ms": 155.98169999975653,
+          "min_ms": 150.3709999997227,
+          "p25_ms": 152.54119999917748,
+          "p75_ms": 161.1284999999043,
+          "samples_ms": [
+            155.9817,
+            161.1285,
+            152.5412,
+            150.371,
+            167.0488
+          ]
+        },
+        "quest": {
+          "median_ms": 286.146,
+          "min_ms": 284.6602,
+          "p25_ms": 285.4588,
+          "p75_ms": 286.8532,
+          "samples_ms": [
+            284.6602,
+            286.9045,
+            286.146,
+            285.4588,
+            286.8532
+          ]
+        },
+        "spinoza": {
+          "median_ms": 244.4449,
+          "min_ms": 241.6566,
+          "p25_ms": 243.3665,
+          "p75_ms": 247.1428,
+          "samples_ms": [
+            252.9328,
+            243.3665,
+            244.4449,
+            247.1428,
+            241.6566
+          ]
+        },
+        "qip": {
+          "median_ms": 2997.4236,
+          "min_ms": 2953.7815,
+          "p25_ms": 2993.1896,
+          "p75_ms": 3003.3637,
+          "samples_ms": [
+            2993.1896,
+            3007.9022,
+            2997.4236,
+            3003.3637,
+            2953.7815
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 4.440892098500626e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 6.661338147750939e-16,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 2.220446049250313e-15,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 4.440892098500626e-16,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 1.748553724060457e-15,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 3.6623172606093215,
+        "aer-automatic": 3.8066520550964067,
+        "qsim": 2.9522530604782555,
+        "quest": 5.415862272593063,
+        "spinoza": 4.626588914881858,
+        "qip": 56.73199482159486
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "hea",
+      "num_qubits": 20,
+      "sha256": "28556acc8e40fa6dbf304a719ca41c78bea173b9b4c22fd4966878150883a2a7",
+      "num_operations": 295,
+      "timings": {
+        "prismq": {
+          "median_ms": 34.3959,
+          "min_ms": 33.2094,
+          "p25_ms": 34.2788,
+          "p75_ms": 34.5127,
+          "samples_ms": [
+            34.3959,
+            34.5127,
+            35.7513,
+            33.2094,
+            34.2788
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 178.53759999889007,
+          "min_ms": 172.9088000010961,
+          "p25_ms": 178.26900000000023,
+          "p75_ms": 179.20609999964654,
+          "samples_ms": [
+            178.5376,
+            179.2061,
+            178.269,
+            180.7991,
+            172.9088
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 177.1483000011358,
+          "min_ms": 172.54670000147598,
+          "p25_ms": 173.18449999947916,
+          "p75_ms": 177.1506999994017,
+          "samples_ms": [
+            179.7866,
+            177.1483,
+            177.1507,
+            173.1845,
+            172.5467
+          ]
+        },
+        "qsim": {
+          "median_ms": 96.12550000019837,
+          "min_ms": 94.58059999997204,
+          "p25_ms": 96.08169999955862,
+          "p75_ms": 99.70760000032897,
+          "samples_ms": [
+            96.0817,
+            101.6588,
+            96.1255,
+            94.5806,
+            99.7076
+          ]
+        },
+        "quest": {
+          "median_ms": 474.8349,
+          "min_ms": 472.3431,
+          "p25_ms": 473.9142,
+          "p75_ms": 476.0665,
+          "samples_ms": [
+            474.8349,
+            476.0665,
+            476.3558,
+            472.3431,
+            473.9142
+          ]
+        },
+        "spinoza": {
+          "median_ms": 1561.9609,
+          "min_ms": 1499.7182,
+          "p25_ms": 1543.3362,
+          "p75_ms": 1588.2728,
+          "samples_ms": [
+            1543.3362,
+            1588.2728,
+            1561.9609,
+            1499.7182,
+            1633.857
+          ]
+        },
+        "qip": {
+          "median_ms": 992.0662,
+          "min_ms": 977.2788,
+          "p25_ms": 978.6331,
+          "p75_ms": 1009.3391,
+          "samples_ms": [
+            978.6331,
+            977.2788,
+            1056.5546,
+            1009.3391,
+            992.0662
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 5.891397668523085e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 6.173791676934119e-07,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 6.455482469649625e-16,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 6.320652343673376e-16,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 6.455482469649625e-16,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 5.190665166455598,
+        "aer-automatic": 5.150273724517626,
+        "qsim": 2.794679016981628,
+        "quest": 13.804985477920335,
+        "spinoza": 45.41125250393216,
+        "qip": 28.842571352981025
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "qv",
+      "num_qubits": 20,
+      "sha256": "516647ae080e4ef9f97a9012ad150a4608ac0c107e9be72a0755fce3d423e7e5",
+      "num_operations": 1600,
+      "timings": {
+        "prismq": {
+          "median_ms": 72.3369,
+          "min_ms": 70.7559,
+          "p25_ms": 72.0683,
+          "p75_ms": 72.7885,
+          "samples_ms": [
+            74.5573,
+            72.0683,
+            72.3369,
+            72.7885,
+            70.7559
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 606.649399998787,
+          "min_ms": 595.6590000005235,
+          "p25_ms": 605.5478999987827,
+          "p75_ms": 611.8197000014334,
+          "samples_ms": [
+            637.6515,
+            606.6494,
+            611.8197,
+            605.5479,
+            595.659
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 592.4056999992899,
+          "min_ms": 581.0048999992432,
+          "p25_ms": 582.5860000004468,
+          "p75_ms": 617.1421999988524,
+          "samples_ms": [
+            592.4057,
+            582.586,
+            581.0049,
+            617.1422,
+            627.9501
+          ]
+        },
+        "qsim": {
+          "median_ms": 200.36540000000969,
+          "min_ms": 170.0234999989334,
+          "p25_ms": 191.60569999985455,
+          "p75_ms": 208.35619999888877,
+          "samples_ms": [
+            200.3654,
+            208.3562,
+            191.6057,
+            170.0235,
+            220.4326
+          ]
+        },
+        "quest": {
+          "median_ms": 1836.3473,
+          "min_ms": 1781.0895,
+          "p25_ms": 1801.9288,
+          "p75_ms": 2421.8474,
+          "samples_ms": [
+            2795.7366,
+            2421.8474,
+            1836.3473,
+            1781.0895,
+            1801.9288
+          ]
+        },
+        "spinoza": {
+          "median_ms": 6439.3914,
+          "min_ms": 6378.824,
+          "p25_ms": 6416.7179,
+          "p75_ms": 6470.5977,
+          "samples_ms": [
+            6378.824,
+            6416.7179,
+            6439.3914,
+            6470.5977,
+            6555.4806
+          ]
+        },
+        "qip": {
+          "median_ms": 4516.0449,
+          "min_ms": 4504.953,
+          "p25_ms": 4508.7503,
+          "p75_ms": 4520.4768,
+          "samples_ms": [
+            4504.953,
+            4521.1246,
+            4520.4768,
+            4516.0449,
+            4508.7503
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 1.4037946770710958e-15,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 1.6008220134146124e-06,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 2.7946170647002023e-15,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 2.757547883596889e-15,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 2.7946170647002023e-15,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 8.386444539353871,
+        "aer-automatic": 8.189536737118814,
+        "qsim": 2.7698919915010136,
+        "quest": 25.38603810779837,
+        "spinoza": 89.01945480107663,
+        "qip": 62.430722079602525
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "ghz",
+      "num_qubits": 24,
+      "sha256": "06c3954ce1feead970f185b30034dabd4e8609cd9cd306efd3e3b4fd35df6b6f",
+      "num_operations": 24,
+      "timings": {
+        "prismq": {
+          "median_ms": 20.2077,
+          "min_ms": 19.3163,
+          "p25_ms": 20.0203,
+          "p75_ms": 20.4543,
+          "samples_ms": [
+            22.1832,
+            20.4543,
+            20.2077,
+            20.0203,
+            19.3163
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 435.19259999993665,
+          "min_ms": 412.3064000013983,
+          "p25_ms": 430.5891999993037,
+          "p75_ms": 449.32039999912377,
+          "samples_ms": [
+            412.3064,
+            450.628,
+            449.3204,
+            435.1926,
+            430.5892
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 23.00459999969462,
+          "min_ms": 21.371900000303867,
+          "p25_ms": 21.592199998849537,
+          "p75_ms": 24.50420000059239,
+          "samples_ms": [
+            26.6043,
+            24.5042,
+            23.0046,
+            21.5922,
+            21.3719
+          ]
+        },
+        "qsim": {
+          "median_ms": 648.4426999995776,
+          "min_ms": 641.045700000177,
+          "p25_ms": 642.3039999990579,
+          "p75_ms": 660.3726000012102,
+          "samples_ms": [
+            660.3726,
+            675.1981,
+            642.304,
+            648.4427,
+            641.0457
+          ]
+        },
+        "quest": {
+          "median_ms": 587.6631,
+          "min_ms": 567.1955,
+          "p25_ms": 575.6278,
+          "p75_ms": 607.8189,
+          "samples_ms": [
+            587.6631,
+            575.6278,
+            567.1955,
+            612.8935,
+            607.8189
+          ]
+        },
+        "spinoza": {
+          "median_ms": 411.8874,
+          "min_ms": 410.5843,
+          "p25_ms": 410.9647,
+          "p75_ms": 414.2578,
+          "samples_ms": [
+            415.8459,
+            414.2578,
+            410.5843,
+            411.8874,
+            410.9647
+          ]
+        },
+        "qip": {
+          "median_ms": 2203.8781,
+          "min_ms": 2196.4373,
+          "p25_ms": 2198.588,
+          "p75_ms": 2204.2917,
+          "samples_ms": [
+            2204.2917,
+            2196.4373,
+            2224.3332,
+            2198.588,
+            2203.8781
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 1.1102230246251565e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 1.1102230246251565e-16,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 1.711427100037355e-08,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 2.220446049250313e-16,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 0.0,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 21.535978859540506,
+        "aer-automatic": 1.1384076366778317,
+        "qsim": 32.08889185803321,
+        "quest": 29.0811472854407,
+        "spinoza": 20.382695705102513,
+        "qip": 109.06130336455905
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "qft",
+      "num_qubits": 24,
+      "sha256": "174b33e155a0b220da324824c6c0e986bc2dd3b285e7ae0b7210e70b4825af49",
+      "num_operations": 312,
+      "timings": {
+        "prismq": {
+          "median_ms": 1014.1942,
+          "min_ms": 1009.2372,
+          "p25_ms": 1011.6663,
+          "p75_ms": 1014.3685,
+          "samples_ms": [
+            1023.5676,
+            1014.3685,
+            1014.1942,
+            1009.2372,
+            1011.6663
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 2479.5819999999367,
+          "min_ms": 2416.8288000000757,
+          "p25_ms": 2434.5214999993914,
+          "p75_ms": 2481.9297999983974,
+          "samples_ms": [
+            2416.8288,
+            2434.5215,
+            2479.582,
+            2481.9298,
+            2791.3019
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 2450.613600001816,
+          "min_ms": 2417.562500000713,
+          "p25_ms": 2417.8475999997318,
+          "p75_ms": 2465.362599999935,
+          "samples_ms": [
+            2485.1498,
+            2450.6136,
+            2465.3626,
+            2417.5625,
+            2417.8476
+          ]
+        },
+        "qsim": {
+          "median_ms": 3745.3757999992376,
+          "min_ms": 3702.0327000009274,
+          "p25_ms": 3704.7345000009955,
+          "p75_ms": 3748.9144999999553,
+          "samples_ms": [
+            3745.3758,
+            3702.0327,
+            3748.9145,
+            3752.7327,
+            3704.7345
+          ]
+        },
+        "quest": {
+          "median_ms": 4316.0449,
+          "min_ms": 4293.841,
+          "p25_ms": 4303.05,
+          "p75_ms": 4354.4636,
+          "samples_ms": [
+            4354.4636,
+            4316.0449,
+            4375.6842,
+            4303.05,
+            4293.841
+          ]
+        },
+        "spinoza": {
+          "median_ms": 4572.3719,
+          "min_ms": 4556.0082,
+          "p25_ms": 4566.2597,
+          "p75_ms": 4636.8741,
+          "samples_ms": [
+            4694.2228,
+            4636.8741,
+            4572.3719,
+            4556.0082,
+            4566.2597
+          ]
+        },
+        "qip": {
+          "median_ms": 58325.7733,
+          "min_ms": 58109.6635,
+          "p25_ms": 58322.3393,
+          "p75_ms": 59691.7056,
+          "samples_ms": [
+            58322.3393,
+            58109.6635,
+            58325.7733,
+            59691.7056,
+            61066.9307
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 4.440892098500626e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 6.661338147750939e-16,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 2.55351295663786e-15,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 4.440892098500626e-16,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 1.085630217095016e-15,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 2.4448788999187103,
+        "aer-automatic": 2.416315928450208,
+        "qsim": 3.6929572265343635,
+        "quest": 4.25563950178378,
+        "spinoza": 4.5083790658633225,
+        "qip": 57.50947234760364
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "hea",
+      "num_qubits": 24,
+      "sha256": "6041b72405b3735b6e5aefd2835eb0e0ffd2930d9e94753ce14c2c32ab13432f",
+      "num_operations": 355,
+      "timings": {
+        "prismq": {
+          "median_ms": 593.5864,
+          "min_ms": 589.1264,
+          "p25_ms": 591.661,
+          "p75_ms": 602.1369,
+          "samples_ms": [
+            616.619,
+            591.661,
+            602.1369,
+            593.5864,
+            589.1264
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 2117.911899998944,
+          "min_ms": 2084.6421999995073,
+          "p25_ms": 2114.1668999989633,
+          "p75_ms": 2120.4256000000896,
+          "samples_ms": [
+            2084.6422,
+            2150.1519,
+            2120.4256,
+            2114.1669,
+            2117.9119
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 2103.7942999992083,
+          "min_ms": 2091.4592999997694,
+          "p25_ms": 2102.0267000003514,
+          "p75_ms": 2159.2995999999403,
+          "samples_ms": [
+            2103.7943,
+            2162.6617,
+            2102.0267,
+            2159.2996,
+            2091.4593
+          ]
+        },
+        "qsim": {
+          "median_ms": 1831.9423000011739,
+          "min_ms": 1824.3636999995942,
+          "p25_ms": 1825.6225000004633,
+          "p75_ms": 1864.867399999639,
+          "samples_ms": [
+            1831.9423,
+            1883.4657,
+            1825.6225,
+            1864.8674,
+            1824.3637
+          ]
+        },
+        "quest": {
+          "median_ms": 8384.8722,
+          "min_ms": 8275.7695,
+          "p25_ms": 8360.2048,
+          "p75_ms": 8465.1006,
+          "samples_ms": [
+            8769.5666,
+            8275.7695,
+            8384.8722,
+            8465.1006,
+            8360.2048
+          ]
+        },
+        "spinoza": {
+          "median_ms": 23530.6123,
+          "min_ms": 23297.4176,
+          "p25_ms": 23442.7031,
+          "p75_ms": 23671.4718,
+          "samples_ms": [
+            23297.4176,
+            23673.9122,
+            23530.6123,
+            23442.7031,
+            23671.4718
+          ]
+        },
+        "qip": {
+          "median_ms": 16559.4154,
+          "min_ms": 16517.3876,
+          "p25_ms": 16527.7201,
+          "p75_ms": 16586.5949,
+          "samples_ms": [
+            16648.7478,
+            16559.4154,
+            16517.3876,
+            16527.7201,
+            16586.5949
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 6.532181539239027e-16,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 6.58237560263722e-07,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 8.384482851879626e-16,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 8.557924866722793e-16,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 8.384482851879626e-16,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 3.5679926292094026,
+        "aer-automatic": 3.544209065435475,
+        "qsim": 3.086226874472147,
+        "quest": 14.125782194470762,
+        "spinoza": 39.641427600093266,
+        "qip": 27.89722844054379
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    },
+    {
+      "benchmark": "qv",
+      "num_qubits": 24,
+      "sha256": "b25c4c9db0c26de5af580df54cf357ea4b8a09c1b0681e9d5f461ed074cf7365",
+      "num_operations": 2304,
+      "timings": {
+        "prismq": {
+          "median_ms": 1449.3726,
+          "min_ms": 1440.4074,
+          "p25_ms": 1447.8661,
+          "p75_ms": 1487.946,
+          "samples_ms": [
+            1449.3726,
+            1440.4074,
+            1505.1026,
+            1487.946,
+            1447.8661
+          ]
+        },
+        "aer-statevector": {
+          "median_ms": 5661.118500000157,
+          "min_ms": 5575.218900001346,
+          "p25_ms": 5577.307999999903,
+          "p75_ms": 5714.3316000001505,
+          "samples_ms": [
+            5575.2189,
+            5577.308,
+            5913.0967,
+            5661.1185,
+            5714.3316
+          ]
+        },
+        "aer-automatic": {
+          "median_ms": 5643.083099999785,
+          "min_ms": 5547.697399999379,
+          "p25_ms": 5576.756699998441,
+          "p75_ms": 5648.852000000261,
+          "samples_ms": [
+            5643.0831,
+            5771.7446,
+            5547.6974,
+            5576.7567,
+            5648.852
+          ]
+        },
+        "qsim": {
+          "median_ms": 3795.309000000998,
+          "min_ms": 3784.795599998688,
+          "p25_ms": 3790.745500000412,
+          "p75_ms": 3798.4679999990476,
+          "samples_ms": [
+            3798.468,
+            3784.7956,
+            3799.7582,
+            3790.7455,
+            3795.309
+          ]
+        },
+        "quest": {
+          "median_ms": 50338.737,
+          "min_ms": 50177.6655,
+          "p25_ms": 50336.1556,
+          "p75_ms": 50340.3179,
+          "samples_ms": [
+            50632.5856,
+            50336.1556,
+            50338.737,
+            50340.3179,
+            50177.6655
+          ]
+        },
+        "spinoza": {
+          "median_ms": 130217.3353,
+          "min_ms": 129149.4813,
+          "p25_ms": 129554.7059,
+          "p75_ms": 130334.3242,
+          "samples_ms": [
+            130217.3353,
+            130334.3242,
+            130601.1915,
+            129149.4813,
+            129554.7059
+          ]
+        },
+        "qip": {
+          "median_ms": 114490.8649,
+          "min_ms": 104359.0093,
+          "p25_ms": 109500.1337,
+          "p75_ms": 115027.0606,
+          "samples_ms": [
+            114490.8649,
+            109500.1337,
+            104359.0093,
+            115495.1608,
+            115027.0606
+          ]
+        }
+      },
+      "equivalence": {
+        "prismq": {
+          "tvd": 1.7650180664208738e-15,
+          "pass": true
+        },
+        "aer-statevector": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "aer-automatic": {
+          "tvd": 0.0,
+          "pass": true
+        },
+        "qsim": {
+          "tvd": 1.8417491600632803e-06,
+          "pass": true
+        },
+        "quest": {
+          "tvd": 3.227914857996231e-15,
+          "pass": true
+        },
+        "spinoza": {
+          "tvd": 3.236576485343452e-15,
+          "pass": true
+        },
+        "qip": {
+          "tvd": 3.227914857996231e-15,
+          "pass": true
+        }
+      },
+      "ratio_vs_prismq": {
+        "aer-statevector": 3.9059097018945694,
+        "aer-automatic": 3.893466110784615,
+        "qsim": 2.6185875184897234,
+        "quest": 34.73139826156504,
+        "spinoza": 89.84393336813461,
+        "qip": 78.99339679803523
+      },
+      "verdict": {
+        "aer-statevector": "prismq-sooner",
+        "aer-automatic": "prismq-sooner",
+        "qsim": "prismq-sooner",
+        "quest": "prismq-sooner",
+        "spinoza": "prismq-sooner",
+        "qip": "prismq-sooner"
+      }
+    }
+  ],
+  "summary": {
+    "per_comparator": {
+      "aer-statevector": {
+        "faster": 12,
+        "within_band": 0,
+        "slower": 0,
+        "median_ratio": 8.172900947268653,
+        "min_ratio": 2.4448788999187103,
+        "max_ratio": 222.09659091872294
+      },
+      "aer-automatic": {
+        "faster": 12,
+        "within_band": 0,
+        "slower": 0,
+        "median_ratio": 4.52186991765112,
+        "min_ratio": 1.1384076366778317,
+        "max_ratio": 67.5454544886055
+      },
+      "qsim": {
+        "faster": 12,
+        "within_band": 0,
+        "slower": 0,
+        "median_ratio": 4.3810248612909986,
+        "min_ratio": 2.6185875184897234,
+        "max_ratio": 171.15340917619255
+      },
+      "quest": {
+        "faster": 12,
+        "within_band": 0,
+        "slower": 0,
+        "median_ratio": 18.024055667500413,
+        "min_ratio": 4.25563950178378,
+        "max_ratio": 170.16477272727272
+      },
+      "spinoza": {
+        "faster": 12,
+        "within_band": 0,
+        "slower": 0,
+        "median_ratio": 34.02017644427347,
+        "min_ratio": 4.5083790658633225,
+        "max_ratio": 96.86363636363636
+      },
+      "qip": {
+        "faster": 12,
+        "within_band": 0,
+        "slower": 0,
+        "median_ratio": 59.97009721360308,
+        "min_ratio": 18.996017566351163,
+        "max_ratio": 492.09090909090907
+      }
+    },
+    "equivalence_failures": [],
+    "errors": []
+  }
+}

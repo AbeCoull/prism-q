@@ -39,6 +39,8 @@ back to OpenQASM 3.0.
 - Measured timings: [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html),
   with the method in
   [Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html)
+- Reproducible measurements beside Qiskit Aer, qsim, QuEST, Spinoza and RustQIP:
+  [Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html)
 - Design: [Architecture reference](https://abecoull.github.io/prism-q/architecture/overview.html)
 - What each backend supports on CPU and GPU:
   [capability matrix](https://abecoull.github.io/prism-q/guides/capabilities.html)
@@ -289,6 +291,7 @@ and [`benches/README.md`](benches/README.md).
 | Simulate Clifford+T circuits past the dense limit | [Clifford+T Simulation](https://abecoull.github.io/prism-q/guides/clifford-t.html) |
 | Add noise, detectors and decoding | [Noise and QEC](https://abecoull.github.io/prism-q/guides/qec.html) |
 | Reproduce or extend the benchmarks | [Benchmark Methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html) |
+| See how it measures beside other simulators | [Comparative Measurements](https://abecoull.github.io/prism-q/comparison.html), harness in [`comparison/`](comparison/README.md) |
 | Read how the layers fit together | [Architecture](https://abecoull.github.io/prism-q/architecture/overview.html) |
 
 ## Roadmap

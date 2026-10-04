@@ -13,6 +13,14 @@ flamegraph.svg
 perf.data
 perf.data.old
 
+# Comparison harness: ad-hoc runs and the local environment stay out,
+# committed references do not
+comparison/results/*
+!comparison/results/.gitkeep
+!comparison/results/reference-*.json
+!comparison/results/reference-*.md
+comparison/.venv/
+
 # Coverage
 lcov.info
 codecov.json
@@ -80,3 +88,5 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 nul
+comparison/quest/build/
+comparison/peers/target/

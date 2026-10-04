@@ -1,0 +1,9 @@
+# Pinned so a re-run compares the same software, not just the same commands.
+# Bumping any of these invalidates the committed reference results: regenerate
+# them in the same change.
+qiskit==2.5.2
+qiskit-aer==0.17.2
+qsimcirq==0.22.1
+cirq-core==1.7.0
+numpy==2.5.1
+psutil==7.2.2

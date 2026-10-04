@@ -953,7 +953,8 @@ impl QecParityProjection {
     }
 
     /// Overwrite `projected` with the output parities of the record bits in `records`.
-    pub(super) fn project_into(&self, records: &[u64], projected: &mut [u64]) {
+    #[cfg(test)]
+    fn project_into(&self, records: &[u64], projected: &mut [u64]) {
         projected.fill(0);
         for (word_idx, &word) in records.iter().enumerate() {
             let mut bits = word;

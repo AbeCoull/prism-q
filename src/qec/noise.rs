@@ -10,6 +10,7 @@ use super::{
 };
 use crate::circuit::{Circuit, Instruction, SmallVec};
 use crate::error::{PrismError, Result};
+use crate::gates::Gate;
 #[cfg(feature = "parallel")]
 use crate::sim::compiled::SendPtrU64;
 use crate::sim::compiled::{
@@ -17,6 +18,7 @@ use crate::sim::compiled::{
     rng::Xoshiro256PlusPlus, xor_words,
 };
 use crate::sim::noise::{NoiseChannel, NoiseEvent, NoiseModel, geometric_sample_xoshiro};
+use crate::sim::splitmix64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 #[cfg(feature = "parallel")]
@@ -151,15 +153,33 @@ impl QecParityNoise {
         );
     }
 
-    fn push_branch(&mut self, words: impl Iterator<Item = u64>) {
-        for (word_idx, word) in words.enumerate() {
+    fn new(seed: u64) -> Self {
+        Self {
+            events: Vec::new(),
+            branch_offsets: vec![0],
+            outputs: Vec::new(),
+            seed,
+        }
+    }
+
+    fn first_branch(&self) -> usize {
+        self.branch_offsets.len() - 1
+    }
+
+    /// Record one branch's flips from a row over the walk's live columns, as the
+    /// outputs those columns hold. Words past the columns (the fingerprint) carry none.
+    fn push_branch(&mut self, words: impl Iterator<Item = u64>, output_of_slot: &[u32]) {
+        let start = self.outputs.len();
+        for (word_idx, word) in words.take(output_of_slot.len() / 64).enumerate() {
             let mut bits = word;
             while bits != 0 {
-                self.outputs
-                    .push((word_idx * 64 + bits.trailing_zeros() as usize) as u32);
+                let output = output_of_slot[word_idx * 64 + bits.trailing_zeros() as usize];
+                debug_assert_ne!(output, u32::MAX, "a set column holds an output");
+                self.outputs.push(output);
                 bits &= bits - 1;
             }
         }
+        self.outputs[start..].sort_unstable();
         let end = u32::try_from(self.outputs.len()).expect("parity noise output count fits u32");
         self.branch_offsets.push(end);
     }
@@ -452,51 +472,28 @@ fn qec_pair_branch_flips(
 }
 
 /// [`QecParityNoise`] built event by event as the sensitivity walk reaches each one.
-struct QecParityNoiseBuilder<'a, P> {
-    noise: QecParityNoise,
-    project: &'a P,
-    x: Vec<u64>,
-    z: Vec<u64>,
-    branch_flips: Vec<u64>,
+/// Pushes an event's flips into `noise` as the output indices of its branches,
+/// translating the walk's live columns through `output_of_slot`.
+struct QecParityNoiseSink<'a> {
+    noise: &'a mut QecParityNoise,
+    output_of_slot: &'a [u32],
+    branch_flips: &'a mut Vec<u64>,
 }
 
-impl<'a, P: Fn(&[u64], &mut [u64])> QecParityNoiseBuilder<'a, P> {
-    fn new(seed: u64, out_words: usize, project: &'a P) -> Self {
-        Self {
-            noise: QecParityNoise {
-                events: Vec::new(),
-                branch_offsets: vec![0],
-                outputs: Vec::new(),
-                seed,
-            },
-            project,
-            x: vec![0; out_words],
-            z: vec![0; out_words],
-            branch_flips: Vec::new(),
-        }
-    }
-
-    fn first_branch(&self) -> usize {
-        self.noise.branch_offsets.len() - 1
-    }
-
-    fn finish(self) -> QecParityNoise {
-        self.noise
-    }
-}
-
-impl<P: Fn(&[u64], &mut [u64])> QecNoiseSink for QecParityNoiseBuilder<'_, P> {
+impl QecNoiseSink for QecParityNoiseSink<'_> {
     fn push_single(&mut self, x_flip: &[u64], z_flip: &[u64], px: f64, py: f64, pz: f64) {
         let Some((px, py, pz)) = qec_single_noise_rates(x_flip, z_flip, px, py, pz) else {
             return;
         };
-        let first_branch = self.first_branch();
-        (self.project)(x_flip, &mut self.x);
-        (self.project)(z_flip, &mut self.z);
-        self.noise.push_branch(self.z.iter().copied());
+        let first_branch = self.noise.first_branch();
         self.noise
-            .push_branch(self.x.iter().zip(&self.z).map(|(x, z)| x ^ z));
-        self.noise.push_branch(self.x.iter().copied());
+            .push_branch(z_flip.iter().copied(), self.output_of_slot);
+        self.noise.push_branch(
+            x_flip.iter().zip(z_flip).map(|(x, z)| x ^ z),
+            self.output_of_slot,
+        );
+        self.noise
+            .push_branch(x_flip.iter().copied(), self.output_of_slot);
         self.noise.events.push(QecParityNoiseEvent {
             draw: QecNoiseDraw::single(px, py, pz),
             first_branch,
@@ -517,14 +514,14 @@ impl<P: Fn(&[u64], &mut [u64])> QecNoiseSink for QecParityNoiseBuilder<'_, P> {
             q1_x_flip,
             q1_z_flip,
             p,
-            &mut self.branch_flips,
+            self.branch_flips,
         ) {
             return;
         }
-        let first_branch = self.first_branch();
+        let first_branch = self.noise.first_branch();
         for flips in self.branch_flips.chunks_exact(q0_x_flip.len().max(1)) {
-            (self.project)(flips, &mut self.x);
-            self.noise.push_branch(self.x.iter().copied());
+            self.noise
+                .push_branch(flips.iter().copied(), self.output_of_slot);
         }
         self.noise.events.push(QecParityNoiseEvent {
             draw: QecNoiseDraw::pair(p),
@@ -1048,100 +1045,26 @@ fn compile_qec_noise_sensitivity(deferred: &QecDeferredProgram) -> Result<QecNoi
 ///
 /// Events, branch rates and draw order match [`QecCompiledNoiseSampler`], so sampling
 /// stays bit-identical to projecting its record flips. Nothing here grows with records
-/// times aliases: rows exist only for live aliases, each event is projected as the
-/// walk reaches it, and the pattern comes from the walk's own signs.
+/// times gates or records times events: the walk carries one Pauli row per output
+/// still live at its position (see [`QecOutputRows`]), and an event stores the output
+/// indices its branches flip.
 pub(super) fn compile_qec_parity_noise(
     program: &QecProgram,
     projection: &QecParityProjection,
 ) -> Result<Option<(Vec<u64>, QecParityNoise)>> {
     let deferred = lower_qec_program_to_deferred_circuit(program)?;
-    let project = |records: &[u64], out: &mut [u64]| projection.project_into(records, out);
-    let mut parity = QecParityNoiseBuilder::new(program.options().seed, projection.words, &project);
-    let mut phases = QecParityPhases::new(projection);
-    let signs = walk_qec_noise_sensitivity_retiring(
-        &deferred,
-        |event, x_packed, z_packed| {
-            push_qec_noise_sensitivity_event(event, x_packed, z_packed, &mut parity);
-        },
-        |x_row, z_row| phases.retire(x_row, z_row),
-    )?;
-    if !phases.fixed {
-        return Ok(None);
-    }
-    let mut pattern = vec![0u64; projection.words];
-    projection.project_into(&signs, &mut pattern);
-    for (output, &power) in phases.power.iter().enumerate() {
-        debug_assert_eq!(power % 2, 0, "a fixed parity multiplies to a real sign");
-        pattern[output / 64] ^= u64::from(power >> 1) << (output % 64);
-    }
-    Ok(Some((pattern, parity.finish())))
-}
-
-/// The power of `i` each output's records pick up when their back-propagated Paulis are
-/// multiplied in record order. A fixed output's value is the XOR of its records' signs
-/// plus half that power, and the power factors over qubits, so it is folded in one
-/// retiring alias at a time. An output that keeps X support on a retiring alias, which
-/// starts in `|0>`, is random.
-struct QecParityPhases<'a> {
-    projection: &'a QecParityProjection,
-    power: Vec<u8>,
-    pauli: Vec<(bool, bool)>,
-    touched: Vec<usize>,
-    fixed: bool,
-}
-
-impl<'a> QecParityPhases<'a> {
-    fn new(projection: &'a QecParityProjection) -> Self {
-        let outputs = projection.num_outputs();
-        Self {
-            projection,
-            power: vec![0; outputs],
-            pauli: vec![(false, false); outputs],
-            touched: Vec::new(),
-            fixed: true,
-        }
-    }
-
-    fn retire(&mut self, x_row: &[u64], z_row: &[u64]) {
-        if !self.fixed {
-            return;
-        }
-        for (word_idx, (&x_word, &z_word)) in x_row.iter().zip(z_row).enumerate() {
-            let mut bits = x_word | z_word;
-            while bits != 0 {
-                let bit = bits.trailing_zeros();
-                let x = (x_word >> bit) & 1 == 1;
-                let z = (z_word >> bit) & 1 == 1;
-                for &output in self.projection.outputs(word_idx * 64 + bit as usize) {
-                    let (px, pz) = self.pauli[output];
-                    if !px && !pz {
-                        self.touched.push(output);
-                    }
-                    self.power[output] =
-                        (self.power[output] + pauli_product_power(px, pz, x, z)) & 3;
-                    self.pauli[output] = (px ^ x, pz ^ z);
-                }
-                bits &= bits - 1;
-            }
-        }
-        for output in self.touched.drain(..) {
-            self.fixed &= !self.pauli[output].0;
-            self.pauli[output] = (false, false);
-        }
-    }
-}
-
-/// Power of `i`, mod 4, in `P1 P2 = i^k P3` for Hermitian single-qubit Paulis given as
-/// `(x, z)` bits, `Y` being `(true, true)`.
-fn pauli_product_power(x1: bool, z1: bool, x2: bool, z2: bool) -> u8 {
-    let (x2, z2) = (i32::from(x2), i32::from(z2));
-    let power = match (x1, z1) {
-        (false, false) => 0,
-        (true, true) => z2 - x2,
-        (true, false) => z2 * (2 * x2 - 1),
-        (false, true) => x2 * (1 - 2 * z2),
-    };
-    power.rem_euclid(4) as u8
+    let mut noise = QecParityNoise::new(program.options().seed);
+    let mut branch_flips = Vec::new();
+    let mut rows = QecOutputRows::new(&deferred, projection);
+    walk_qec_deferred_circuit(&deferred, &mut rows, |event, rows| {
+        let mut sink = QecParityNoiseSink {
+            noise: &mut noise,
+            output_of_slot: &rows.output_of_slot,
+            branch_flips: &mut branch_flips,
+        };
+        push_qec_noise_sensitivity_event(event, &rows.x, &rows.z, &mut sink);
+    })?;
+    Ok(rows.finish().map(|pattern| (pattern, noise)))
 }
 
 /// Walk the deferred circuit backward and visit every noise event with the
@@ -1153,24 +1076,32 @@ fn pauli_product_power(x1: bool, z1: bool, x2: bool, z2: bool) -> u8 {
 /// rows of the aliases live at the anchor.
 pub(super) fn walk_qec_noise_sensitivity(
     deferred: &QecDeferredProgram,
-    visit: impl FnMut(&QecDeferredNoiseEvent, &[Vec<u64>], &[Vec<u64>]),
+    mut visit: impl FnMut(&QecDeferredNoiseEvent, &[Vec<u64>], &[Vec<u64>]),
 ) -> Result<()> {
-    walk_qec_noise_sensitivity_retiring(deferred, visit, |_, _| {}).map(drop)
+    let m_words = deferred.measurement_qubits.len().div_ceil(64);
+    let mut rows = QecAliasRows::new(deferred, m_words);
+    walk_qec_deferred_circuit(deferred, &mut rows, |event, rows| {
+        visit(event, &rows.x, &rows.z)
+    })
 }
 
-/// [`walk_qec_noise_sensitivity`], also passing `retire` the X and Z rows of each alias
-/// that got a row, at the position where the alias comes into use, and returning each
-/// record's sign at the start of the circuit.
-fn walk_qec_noise_sensitivity_retiring(
-    deferred: &QecDeferredProgram,
-    mut visit: impl FnMut(&QecDeferredNoiseEvent, &[Vec<u64>], &[Vec<u64>]),
-    mut retire: impl FnMut(&[u64], &[u64]),
-) -> Result<Vec<u64>> {
-    let num_measurements = deferred.measurement_qubits.len();
-    let m_words = num_measurements.div_ceil(64);
-    let mut rows = QecAliasRows::new(deferred, m_words);
-    let mut sign_packed = vec![0u64; m_words];
+/// Rows the backward walk propagates: an X and a Z bitset per live alias, over
+/// columns the implementation chooses, plus the sign of each column's Pauli.
+trait QecWalkRows {
+    /// Row of `alias`, created at the alias's last use where the walk first meets it.
+    fn slot(&mut self, alias: usize) -> usize;
+    /// Give back the row of `alias` where the alias comes into use.
+    fn retire(&mut self, alias: usize);
+    fn propagate(&mut self, gate: &Gate, slots: &[usize]);
+}
 
+/// Walk the deferred circuit backward over `rows`, visiting each noise event at its
+/// anchor with its targets renumbered to rows, and retiring each alias at its creation.
+fn walk_qec_deferred_circuit<R: QecWalkRows>(
+    deferred: &QecDeferredProgram,
+    rows: &mut R,
+    mut visit: impl FnMut(&QecDeferredNoiseEvent, &R),
+) -> Result<()> {
     let gate_count = deferred
         .circuit
         .instructions
@@ -1204,10 +1135,10 @@ fn walk_qec_noise_sensitivity_retiring(
             for &target in &event.targets {
                 live_event.targets.push(rows.slot(target));
             }
-            visit(&live_event, &rows.x, &rows.z);
+            visit(&live_event, rows);
         }
         for &alias in &created_by_position[position] {
-            rows.retire(alias, &mut retire);
+            rows.retire(alias);
         }
         let Some(gate_position) = position.checked_sub(1) else {
             break;
@@ -1222,26 +1153,21 @@ fn walk_qec_noise_sensitivity_retiring(
             }
         };
         let slots: SmallVec<[usize; 4]> = targets.iter().map(|&t| rows.slot(t)).collect();
-        batch_propagate_backward(
-            &mut rows.x,
-            &mut rows.z,
-            &mut sign_packed,
-            gate,
-            &slots,
-            m_words,
-        );
+        rows.propagate(gate, &slots);
     }
 
-    Ok(sign_packed)
+    Ok(())
 }
 
-/// Sensitivity rows for the aliases the backward walk has reached and not yet retired.
-/// An alias gets a row at its last use, seeded with its own record, and gives it back
-/// where it comes into use, so the row count stays near the program's qubit count
-/// however many aliases resets and `MPP` scratch create.
+/// Sensitivity rows in record space for the aliases the backward walk has reached and
+/// not yet retired, one bit per measurement record. An alias gets a row at its last
+/// use, seeded with its own record, and gives it back where it comes into use, so the
+/// row count stays near the program's qubit count however many aliases resets and
+/// `MPP` scratch create.
 struct QecAliasRows {
     x: Vec<Vec<u64>>,
     z: Vec<Vec<u64>>,
+    sign: Vec<u64>,
     slot_of: Vec<usize>,
     record_of: Vec<usize>,
     free: Vec<usize>,
@@ -1258,13 +1184,16 @@ impl QecAliasRows {
         Self {
             x: Vec::new(),
             z: Vec::new(),
+            sign: vec![0; m_words],
             slot_of: vec![usize::MAX; num_aliases],
             record_of,
             free: Vec::new(),
             m_words,
         }
     }
+}
 
+impl QecWalkRows for QecAliasRows {
     fn slot(&mut self, alias: usize) -> usize {
         if self.slot_of[alias] != usize::MAX {
             return self.slot_of[alias];
@@ -1282,15 +1211,233 @@ impl QecAliasRows {
         slot
     }
 
-    fn retire(&mut self, alias: usize, retire: &mut impl FnMut(&[u64], &[u64])) {
+    fn retire(&mut self, alias: usize) {
         let slot = std::mem::replace(&mut self.slot_of[alias], usize::MAX);
         if slot == usize::MAX {
             return;
         }
-        retire(&self.x[slot], &self.z[slot]);
         self.x[slot].fill(0);
         self.z[slot].fill(0);
         self.free.push(slot);
+    }
+
+    fn propagate(&mut self, gate: &Gate, slots: &[usize]) {
+        batch_propagate_backward(
+            &mut self.x,
+            &mut self.z,
+            &mut self.sign,
+            gate,
+            slots,
+            self.m_words,
+        );
+    }
+}
+
+/// Pauli rows in output space for the aliases the backward walk has reached and not
+/// yet retired: one column per detector or observable whose Pauli is live, instead of
+/// one per record.
+///
+/// An output's Pauli is the product of its records' back-propagated measurement
+/// operators. A record seeds `Z` on its alias at the alias's last use (an output listing
+/// a record twice cancels it), and the product
+/// returns to identity, with its sign settled, once the walk passes the gates that join
+/// its records: a memory experiment's detector spans about two rounds, so the live
+/// columns stay near a round or two of outputs however deep the program runs, and each
+/// gate touches that many words. A column whose Pauli is identity is reclaimed, its
+/// sign folded into `pattern` first; an output that gets a later seed takes a fresh
+/// column, so its pattern bit is the XOR of its columns' signs. An output with `X`
+/// support on an alias at the alias's creation, where it sits in `|0>`, is random.
+///
+/// The record path merges or drops an event's branches by which records they flip,
+/// which output columns cannot see once flips cancel in every detector. So every row
+/// ends in one more word, the XOR of a 64-bit tag per record it holds in record
+/// space: it rides through the same kernel, and its zero and equality tests stand in
+/// for the record rows' (a collision has odds of 2^-64 per test), so the compiled
+/// events, and the seeded samples, match the record path.
+struct QecOutputRows<'a> {
+    projection: &'a QecParityProjection,
+    x: Vec<Vec<u64>>,
+    z: Vec<Vec<u64>>,
+    sign: Vec<u64>,
+    words: usize,
+    alias_slot_of: Vec<usize>,
+    record_of: Vec<usize>,
+    free_alias_slots: Vec<usize>,
+    output_slot_of: Vec<u32>,
+    output_of_slot: Vec<u32>,
+    free_output_slots: Vec<u32>,
+    used: Vec<u64>,
+    pattern: Vec<u64>,
+    fixed: bool,
+}
+
+impl<'a> QecOutputRows<'a> {
+    fn new(deferred: &QecDeferredProgram, projection: &'a QecParityProjection) -> Self {
+        let num_aliases = deferred.circuit.num_qubits;
+        let mut record_of = vec![usize::MAX; num_aliases];
+        for (record, &alias) in deferred.measurement_qubits.iter().enumerate() {
+            record_of[alias] = record;
+        }
+        let mut rows = Self {
+            projection,
+            x: Vec::new(),
+            z: Vec::new(),
+            sign: Vec::new(),
+            words: 0,
+            alias_slot_of: vec![usize::MAX; num_aliases],
+            record_of,
+            free_alias_slots: Vec::new(),
+            output_slot_of: vec![u32::MAX; projection.num_outputs()],
+            output_of_slot: Vec::new(),
+            free_output_slots: Vec::new(),
+            used: Vec::new(),
+            pattern: vec![0; projection.words],
+            fixed: true,
+        };
+        rows.sign.push(0);
+        rows.widen();
+        rows
+    }
+
+    /// Column of `output`, reclaiming identity columns and then widening the rows when
+    /// none is free.
+    fn output_slot(&mut self, output: usize) -> usize {
+        let mapped = self.output_slot_of[output];
+        if mapped != u32::MAX {
+            return mapped as usize;
+        }
+        if self.free_output_slots.is_empty() {
+            self.reclaim_output_slots();
+        }
+        let slot = self
+            .free_output_slots
+            .pop()
+            .expect("reclaiming leaves a free column");
+        self.output_slot_of[output] = slot;
+        self.output_of_slot[slot as usize] = output as u32;
+        slot as usize
+    }
+
+    /// Free every mapped column no row has support on, folding its sign into the
+    /// pattern, and widen the rows by a word when that frees less than a word of them.
+    fn reclaim_output_slots(&mut self) {
+        self.used.clear();
+        self.used.resize(self.words, 0);
+        for row in self.x.iter().chain(&self.z) {
+            for (used, &word) in self.used.iter_mut().zip(row) {
+                *used |= word;
+            }
+        }
+        let mut freed = 0;
+        for word_idx in 0..self.words {
+            let mut idle = !self.used[word_idx];
+            while idle != 0 {
+                let bit = idle.trailing_zeros() as usize;
+                idle &= idle - 1;
+                let slot = word_idx * 64 + bit;
+                let output = self.output_of_slot[slot];
+                if output == u32::MAX {
+                    continue;
+                }
+                self.fold_sign(slot, output);
+                self.output_slot_of[output as usize] = u32::MAX;
+                self.output_of_slot[slot] = u32::MAX;
+                self.free_output_slots.push(slot as u32);
+                freed += 1;
+            }
+        }
+        if freed < 64 {
+            self.widen();
+        }
+    }
+
+    /// Add an output word ahead of the fingerprint word of every row.
+    fn widen(&mut self) {
+        let first = self.words * 64;
+        for row in self.x.iter_mut().chain(&mut self.z) {
+            row.insert(self.words, 0);
+        }
+        self.sign.insert(self.words, 0);
+        self.words += 1;
+        self.output_of_slot.resize(first + 64, u32::MAX);
+        self.free_output_slots
+            .extend((first..first + 64).rev().map(|slot| slot as u32));
+    }
+
+    fn fold_sign(&mut self, slot: usize, output: u32) {
+        let sign = (self.sign[slot / 64] >> (slot % 64)) & 1;
+        self.sign[slot / 64] &= !(1u64 << (slot % 64));
+        self.pattern[output as usize / 64] ^= sign << (output % 64);
+    }
+
+    /// The noiseless pattern over the outputs, or `None` when one of them is random.
+    fn finish(mut self) -> Option<Vec<u64>> {
+        if !self.fixed {
+            return None;
+        }
+        debug_assert!(
+            self.x
+                .iter()
+                .chain(&self.z)
+                .flatten()
+                .all(|&word| word == 0),
+            "every alias retires at its creation"
+        );
+        for slot in 0..self.words * 64 {
+            let output = self.output_of_slot[slot];
+            if output != u32::MAX {
+                self.fold_sign(slot, output);
+            }
+        }
+        Some(self.pattern)
+    }
+}
+
+impl QecWalkRows for QecOutputRows<'_> {
+    fn slot(&mut self, alias: usize) -> usize {
+        if self.alias_slot_of[alias] != usize::MAX {
+            return self.alias_slot_of[alias];
+        }
+        let slot = self.free_alias_slots.pop().unwrap_or_else(|| {
+            self.x.push(vec![0; self.words + 1]);
+            self.z.push(vec![0; self.words + 1]);
+            self.x.len() - 1
+        });
+        self.alias_slot_of[alias] = slot;
+        let record = self.record_of[alias];
+        if record != usize::MAX {
+            let projection = self.projection;
+            for &output in projection.outputs(record) {
+                let column = self.output_slot(output);
+                self.z[slot][column / 64] ^= 1u64 << (column % 64);
+            }
+            self.z[slot][self.words] ^= splitmix64(record as u64);
+        }
+        slot
+    }
+
+    fn retire(&mut self, alias: usize) {
+        let slot = std::mem::replace(&mut self.alias_slot_of[alias], usize::MAX);
+        if slot == usize::MAX {
+            return;
+        }
+        if self.x[slot][..self.words].iter().any(|&word| word != 0) {
+            self.fixed = false;
+        }
+        self.x[slot].fill(0);
+        self.z[slot].fill(0);
+        self.free_alias_slots.push(slot);
+    }
+
+    fn propagate(&mut self, gate: &Gate, slots: &[usize]) {
+        batch_propagate_backward(
+            &mut self.x,
+            &mut self.z,
+            &mut self.sign,
+            gate,
+            slots,
+            self.words + 1,
+        );
     }
 }
 

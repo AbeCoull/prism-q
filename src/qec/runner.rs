@@ -17,7 +17,7 @@ use crate::error::{PrismError, Result};
 use crate::gates::Gate;
 #[cfg(feature = "bench-internal")]
 use crate::sim::compiled::CompiledDetectorSampler;
-use crate::sim::compiled::{CompiledSampler, PackedShots, ShotLayout, compile_detector_sampler};
+use crate::sim::compiled::{PackedShots, ShotLayout, compile_detector_sampler};
 use crate::sim::unified_pauli::Welford;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -110,23 +110,22 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         return qec_result_from_measurements(program, measurements);
     }
 
-    let samples_parities_directly = qec_records_unobserved(program);
-    if has_noise {
-        if samples_parities_directly {
-            let projection = QecParityProjection::new(
-                program.num_measurements(),
-                &program.detector_rows()?,
-                &program.observable_rows()?,
+    if qec_records_unobserved(program) {
+        let projection = QecParityProjection::new(
+            program.num_measurements(),
+            &program.detector_rows()?,
+            &program.observable_rows()?,
+        );
+        if let Some((pattern, noise)) = compile_qec_parity_noise(program, &projection)? {
+            return qec_result_from_parity_projection(
+                program,
+                &projection,
+                &pattern,
+                has_noise.then_some(noise),
             );
-            if let Some((pattern, noise)) = compile_qec_parity_noise(program, &projection)? {
-                return qec_result_from_parity_projection(
-                    program,
-                    &projection,
-                    &pattern,
-                    Some(noise),
-                );
-            }
         }
+    }
+    if has_noise {
         let mut sampler = compile_qec_noisy_sampler(program)?;
         let shots = program.options().shots;
         if chunk_size >= shots {
@@ -145,16 +144,6 @@ pub fn run_qec_program(program: &QecProgram) -> Result<QecSampleResult> {
         program.observable_rows()?,
         program.options().seed,
     )?;
-    if samples_parities_directly {
-        let projection = QecParityProjection::new(
-            sampler.num_measurements(),
-            sampler.detector_rows(),
-            sampler.observable_rows(),
-        );
-        if let Some(pattern) = projection.constant_pattern(sampler.measurement_sampler()) {
-            return qec_result_from_parity_projection(program, &projection, &pattern, None);
-        }
-    }
     if chunk_size >= program.options().shots {
         let measurements = sampler.sample_measurements_packed(program.options().shots)?;
         return qec_result_from_measurements(program, measurements);
@@ -982,7 +971,11 @@ impl QecParityProjection {
 
     /// Projected reference records, or `None` when any flip row of `sampler` reaches an
     /// output and the noiseless parities vary between shots.
-    fn constant_pattern(&self, sampler: &CompiledSampler) -> Option<Vec<u64>> {
+    #[cfg(test)]
+    fn constant_pattern(
+        &self,
+        sampler: &crate::sim::compiled::CompiledSampler,
+    ) -> Option<Vec<u64>> {
         let mut projected = vec![0u64; self.words];
         for row in sampler.flip_rows() {
             self.project_into(row, &mut projected);

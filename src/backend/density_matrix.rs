@@ -250,12 +250,36 @@ const IDENTITY_4X4: [[Complex64; 4]; 4] = {
 /// the native one-qubit and two-qubit kernels beat the composed sweeps.
 pub(crate) const MIN_DEFERRED_QUBITS: usize = 7;
 
-/// From this width a two-qubit gate folds whatever is pending. Below it the
-/// buffer is small enough that a dense 16x16 sweep costs more than a native
-/// CX or diagonal pass plus two one-qubit sweeps, so the fold must absorb at
-/// least [`MIN_FOLDED_MAPS`] maps.
-const MIN_FOLD_ANY_QUBITS: usize = 9;
-const MIN_FOLDED_MAPS: usize = 3;
+/// Fewest pending maps and trailing channels a two-qubit gate must absorb for its
+/// dense 16x16 sweep to beat the native kernels, by where the buffer sits. Past the
+/// last-level cache every sweep streams from memory and costs about the same, so one
+/// map pays. Resident in a quarter of it or more, the sweep is compute-bound and costs
+/// about two one-qubit block sweeps: on an i7-6700K (8 MB L3) a one-map fold at 9
+/// qubits read 10% slower than a CX or controlled phase plus its block sweep, and a
+/// one-map `Rzz` fold 11% faster. Smaller still, composing the 16x16 map is itself a
+/// sweep's worth of work and three maps pay for it; four lost the three-map `Rzz`
+/// folds at 7 qubits.
+const MIN_FOLDED_MAPS_PAST_CACHE: usize = 1;
+const MIN_FOLDED_MAPS_IN_CACHE: usize = 2;
+const MIN_FOLDED_MAPS_SMALL: usize = 3;
+
+/// Last-level cache assumed when the OS reports none: the 8 MB L3 the floors above were
+/// measured against.
+const ASSUMED_LLC_BYTES: usize = 8 << 20;
+
+/// The fold floor for an `num_qubits` buffer on this host, see
+/// [`MIN_FOLDED_MAPS_PAST_CACHE`].
+fn min_folded_maps(num_qubits: usize) -> usize {
+    let bytes = size_of::<Complex64>() << (2 * num_qubits);
+    let llc = crate::backend::cache::last_level_cache().map_or(ASSUMED_LLC_BYTES, |c| c.bytes);
+    if bytes >= llc {
+        MIN_FOLDED_MAPS_PAST_CACHE
+    } else if bytes >= llc / 4 {
+        MIN_FOLDED_MAPS_IN_CACHE
+    } else {
+        MIN_FOLDED_MAPS_SMALL
+    }
+}
 
 /// One-qubit block superoperators the exact noisy walk holds back per qubit.
 ///
@@ -274,11 +298,7 @@ impl DeferredSuperoperators {
     pub(crate) fn new(num_qubits: usize) -> Self {
         Self {
             pending: vec![None; num_qubits],
-            min_maps: if num_qubits >= MIN_FOLD_ANY_QUBITS {
-                1
-            } else {
-                MIN_FOLDED_MAPS
-            },
+            min_maps: min_folded_maps(num_qubits),
         }
     }
 

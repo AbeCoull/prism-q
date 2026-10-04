@@ -709,7 +709,9 @@ impl DensityMatrixBackend {
                 for &(q0, q1, ref mat) in data.gates.iter() {
                     self.fused_2q(q0 + n, q1 + n, mat)?;
                 }
-                if !self.sv.is_gpu_resident() && kernels::multi_2q_single_tier(&data.gates) {
+                if !self.sv.is_gpu_resident()
+                    && kernels::multi_2q_single_tier(&data.gates, self.sv.num_qubits)
+                {
                     let conjugated: Vec<(usize, usize, [[Complex64; 4]; 4])> = data
                         .gates
                         .iter()

@@ -678,19 +678,35 @@ pub(crate) fn multi_2q_tile_bits() -> usize {
     })
 }
 
-/// Most distinct high qubits one `Multi2q` batch may span on this platform.
-pub(crate) fn multi_2q_high_budget() -> usize {
-    multi_2q_tile_bits() - multi_2q_low_bits()
+/// [`multi_2q_tile_bits`] for a `num_qubits` statevector: cut, down to
+/// [`MULTI_2Q_MIN_TILE_BITS`], so a parallel pass gathers at least
+/// `cache::min_parallel_tiles` subcubes instead of leaving workers idle at the widths
+/// just past the parallel threshold.
+#[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+pub(crate) fn multi_2q_tile_bits_for(num_qubits: usize) -> usize {
+    let bits = multi_2q_tile_bits();
+    #[cfg(feature = "parallel")]
+    if num_qubits >= crate::backend::PARALLEL_THRESHOLD_QUBITS {
+        let pool_bits = num_qubits - crate::backend::cache::min_parallel_tiles().ilog2() as usize;
+        return bits.min(pool_bits).max(MULTI_2Q_MIN_TILE_BITS);
+    }
+    bits
 }
 
-/// The high qubits `high` grows to if the pair joins the batch, or `None` when
-/// the pair would take it past [`multi_2q_high_budget`].
+/// Most distinct high qubits one `Multi2q` batch may span on a `num_qubits` state.
+pub(crate) fn multi_2q_high_budget_for(num_qubits: usize) -> usize {
+    multi_2q_tile_bits_for(num_qubits) - multi_2q_low_bits()
+}
+
+/// The high qubits `high` grows to if the pair joins a batch on a `num_qubits`
+/// state, or `None` when the pair would take it past [`multi_2q_high_budget_for`].
 pub(crate) fn multi_2q_join(
     high: &[usize],
     q0: usize,
     q1: usize,
+    num_qubits: usize,
 ) -> Option<smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]>> {
-    let budget = multi_2q_high_budget();
+    let budget = multi_2q_high_budget_for(num_qubits);
     let low_bits = multi_2q_low_bits();
     let mut joined: smallvec::SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> =
         high.iter().copied().collect();

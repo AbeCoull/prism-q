@@ -1914,12 +1914,16 @@ fn multi_2q_single_tier_boundary_pins_the_l2_tile() {
         1usize << (t + 1),
         crate::backend::cache::tile_budget_bytes() / 16
     );
-    assert!(kernels::multi_2q_single_tier(&[(t - 1, t, mat)]));
-    assert!(!kernels::multi_2q_single_tier(&[(t - 1, t + 1, mat)]));
-    assert!(!kernels::multi_2q_single_tier(&[
-        (0, 1, mat),
-        (0, t + 1, mat)
-    ]));
+    let small = 10;
+    assert!(kernels::multi_2q_single_tier(&[(t - 1, t, mat)], small));
+    assert!(!kernels::multi_2q_single_tier(
+        &[(t - 1, t + 1, mat)],
+        small
+    ));
+    assert!(!kernels::multi_2q_single_tier(
+        &[(0, 1, mat), (0, t + 1, mat)],
+        small
+    ));
 }
 
 // Pair-aware grouping keeps every benched `diag_mixed_l6` batch on the LUT path. The

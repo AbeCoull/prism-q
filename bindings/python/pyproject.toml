@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "prism-q"
-description = "PRISM-Q: performance-first quantum circuit simulator (Python bindings)"
+description = "Python bindings for PRISM-Q, a quantum circuit simulator written in Rust"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }
 requires-python = ">=3.11"

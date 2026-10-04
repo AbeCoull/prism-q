@@ -79,7 +79,7 @@ outside it for every simulator.
 | One shared gate list per circuit | `compare_runner export` writes the suite circuit as `h`, `cx`, `swap`, `ry`, `rz` and `cp` lines; every adapter replays those through its native API. No simulator parses OpenQASM and none gets a private transpilation pass. |
 | Matched thread counts | Every simulator is pinned to `--threads` through its own control. |
 | Comparators at their documented defaults | Fusion stays on where a simulator has it; nothing is tuned per row. |
-| Median of N iterations after a warmup | Reported with min, p25 and p75. Never a single sample. |
+| Median of N iterations after a warmup | Reported with min, p25 and p75. Never a single sample. `--iteration-budget-s` caps the time spent on one simulator and circuit: the equivalence pass doubles as a probe, a comparator that cannot fit N samples in the budget gets as many as fit (at least two), and the report names every row measured with fewer. A 120 s budget cuts a full run from about an hour to about fifteen minutes on the reference host, at the cost of precision on rows that are far from the band anyway. |
 | A 10% band | Cross-process timing noise on one host is of that order, so a ratio within the band is reported as within band rather than as a direction. |
 | Equivalence checked in the same run | Total variation distance against `aer-statevector`. A row that diverges keeps its timing in the table but is not counted. |
 | Per-call overhead recorded | Driving Aer or qsim from Python costs a fixed amount per call, measured on a one-gate circuit and printed, so rows under 16 qubits are shown but left out of the summary. |

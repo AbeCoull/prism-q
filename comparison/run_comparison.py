@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -27,6 +28,7 @@ from harness import SCHEMA_VERSION, adapters, corpus, provenance, report  # noqa
 REPO_ROOT = provenance.REPO_ROOT
 DEFAULT_REFERENCE = "aer-statevector"
 CARGO_FEATURES = "parallel"
+MIN_TIMED_ITERATIONS = 2
 
 DOCS_PREAMBLE = """# Comparative Measurements
 
@@ -68,7 +70,17 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_REFERENCE,
         help="adapter whose distribution every other output is checked against; must be among --simulators",
     )
-    parser.add_argument("--iterations", type=int, default=5)
+    parser.add_argument("--iterations", type=int, default=5, help="timed samples per simulator and circuit")
+    parser.add_argument(
+        "--iteration-budget-s",
+        type=float,
+        default=None,
+        help=(
+            "wall-clock budget for the timed samples of one simulator on one circuit; when the "
+            f"equivalence pass shows fewer than --iterations fit, at least {MIN_TIMED_ITERATIONS} "
+            "are taken and the sample count is recorded per row (default: no budget)"
+        ),
+    )
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--timeout-s", type=float, default=900.0, help="per call, per simulator")
     parser.add_argument("--tie-band-pct", type=float, default=10.0)
@@ -136,10 +148,21 @@ def measure(
         message = f"{type(exc).__name__}: {exc}"[:200]
         errors.append({"simulator": sim.name, "error": message})
 
+    # The equivalence pass doubles as a probe: its wall time per simulator sets
+    # how many timed iterations fit the budget, so a comparator that is a
+    # hundred times slower is not asked for five samples of a two-minute run.
+    probe_s: dict[str, float] = {}
+
+    def probe(sim: Any) -> np.ndarray:
+        start = time.perf_counter()
+        vector = sim.probabilities(program)
+        probe_s[sim.name] = time.perf_counter() - start
+        return vector
+
     reference_sim = next(s for s in sims if s.name == args.reference)
     reference: np.ndarray | None = None
     try:
-        reference = reference_sim.probabilities(program)
+        reference = probe(reference_sim)
     except Exception as exc:  # noqa: BLE001
         record_error(reference_sim, exc)
 
@@ -150,7 +173,7 @@ def measure(
                 equivalence[sim.name] = {"tvd": 0.0, "pass": True}
             continue
         try:
-            vector = sim.probabilities(program)
+            vector = probe(sim)
         except Exception as exc:  # noqa: BLE001
             record_error(sim, exc)
             continue
@@ -167,8 +190,12 @@ def measure(
         if sim.name in failed:
             timings[sim.name] = {"error": next(e["error"] for e in errors if e["simulator"] == sim.name)}
             continue
+        iterations = args.iterations
+        if args.iteration_budget_s and probe_s.get(sim.name):
+            affordable = int(args.iteration_budget_s // probe_s[sim.name])
+            iterations = max(MIN_TIMED_ITERATIONS, min(args.iterations, affordable))
         try:
-            timings[sim.name] = stats(sim.time(program, args.iterations))
+            timings[sim.name] = stats(sim.time(program, iterations))
         except Exception as exc:  # noqa: BLE001
             record_error(sim, exc)
             timings[sim.name] = {"error": errors[-1]["error"]}
@@ -304,6 +331,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "run": {
             "iterations": args.iterations,
+            "iteration_budget_s": args.iteration_budget_s,
             "threads": args.threads,
             "sizes": sizes,
             "tie_band_pct": args.tie_band_pct,

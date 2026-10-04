@@ -137,6 +137,22 @@ def render(results: dict[str, Any]) -> str:
         )
         lines.append("")
 
+    requested = run["iterations"]
+    short = [
+        (row["benchmark"], row["num_qubits"], name, len(entry["samples_ms"]))
+        for row in results["results"]
+        for name, entry in row["timings"].items()
+        if "samples_ms" in entry and len(entry["samples_ms"]) < requested
+    ]
+    if short:
+        lines.append(
+            f"Rows timed with fewer than {requested} samples under the "
+            f"{run.get('iteration_budget_s')} s budget per simulator and circuit: "
+            + ", ".join(f"{b} {q}q {name} ({n})" for b, q, name, n in short)
+            + ". Their medians rest on fewer samples; every other row has the full count."
+        )
+        lines.append("")
+
     lines.append(
         "Reading the ratios: the comparators differ in design, and the design explains most "
         "of a gap. QuEST and Spinoza apply every gate as its own pass over the state and carry "

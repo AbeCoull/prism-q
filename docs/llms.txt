@@ -67,6 +67,7 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 ## Reference
 
 - [Benchmarks](https://abecoull.github.io/prism-q/benchmarks.html): wall-clock timings on a fixed circuit suite, with the command that reproduces them.
+- [Comparative measurements](https://abecoull.github.io/prism-q/comparison.html): the same circuit families timed beside Qiskit Aer, qsim, QuEST, Spinoza and RustQIP on one host, with versions, settings, an equivalence check per row, and a committed harness that reproduces the table.
 - [Circuit builders](https://abecoull.github.io/prism-q/reference/builders.html): the prebuilt circuit generators.
 - [Glossary](https://abecoull.github.io/prism-q/glossary.html)
 

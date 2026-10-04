@@ -38,5 +38,6 @@
 # Reference
 
 - [Benchmarks](./benchmarks.md)
+- [Comparative Measurements](./comparison.md)
 - [Circuit Builders](./reference/builders.md)
 - [Glossary](./glossary.md)

@@ -5,11 +5,11 @@
 #[cfg(feature = "parallel")]
 use super::SendPtrU64;
 use super::parity::SparseParity;
-use super::rng::Xoshiro256PlusPlus;
 #[cfg(target_arch = "aarch64")]
 use super::rng::Xoshiro256PlusPlusX2;
 #[cfg(target_arch = "x86_64")]
 use super::rng::Xoshiro256PlusPlusX4;
+use super::rng::{Xoshiro256PlusPlus, Xoshiro256PlusPlusLanes};
 use super::shot_tail_mask;
 
 pub(super) const BTS_BATCH_SHOTS: usize = 65536;
@@ -194,9 +194,6 @@ pub(super) fn sample_bts_meas_major(
     rng: &mut Xoshiro256PlusPlus,
     rank: usize,
 ) -> Vec<u64> {
-    let num_meas = sparse.num_rows;
-    let s_words = num_shots.div_ceil(64);
-
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") && num_shots >= 256 {
@@ -213,12 +210,28 @@ pub(super) fn sample_bts_meas_major(
         }
     }
 
+    sample_bts_meas_major_scalar(sparse, num_shots, ref_bits, rng, rank)
+}
+
+/// The portable path, drawing shot word `w` from lane `w % 4` of the four-lane stream
+/// the vector paths lay across their registers, so all three agree bitwise.
+fn sample_bts_meas_major_scalar(
+    sparse: &SparseParity,
+    num_shots: usize,
+    ref_bits: &[u64],
+    rng: &mut Xoshiro256PlusPlus,
+    rank: usize,
+) -> Vec<u64> {
+    let num_meas = sparse.num_rows;
+    let s_words = num_shots.div_ceil(64);
+    let mut lanes = Xoshiro256PlusPlusLanes::from_scalar(rng);
     let mut meas_major = vec![0u64; num_meas * s_words];
     let mut random_bits = vec![0u64; rank];
 
     for batch in 0..s_words {
+        let lane = batch % 4;
         for r in random_bits.iter_mut().take(rank) {
-            *r = rng.next_u64();
+            *r = lanes.next_u64(lane);
         }
         if batch == s_words - 1 {
             let mask = shot_tail_mask(num_shots);
@@ -658,7 +671,11 @@ unsafe fn sample_bts_meas_major_neon(
         let s_pairs = num_shots.div_ceil(128);
 
         let mut meas_major = vec![0u64; num_meas * s_words];
-        let mut vrng = Xoshiro256PlusPlusX2::from_scalar(rng);
+        // Pair p carries lanes 2(p % 2) and 2(p % 2) + 1 of the four-lane stream.
+        let mut vrng = [
+            Xoshiro256PlusPlusX2::from_scalar(rng),
+            Xoshiro256PlusPlusX2::from_scalar(rng),
+        ];
 
         let tile = if rank == 0 {
             s_pairs
@@ -675,8 +692,9 @@ unsafe fn sample_bts_meas_major_neon(
             let mut pair_start = 0;
             while pair_start + tile <= full_pairs {
                 for t in 0..tile {
+                    let lanes = &mut vrng[(pair_start + t) % 2];
                     for r in 0..rank {
-                        random_tile[r * tile + t] = vrng.next_uint64x2();
+                        random_tile[r * tile + t] = lanes.next_uint64x2();
                     }
                 }
 
@@ -780,7 +798,7 @@ unsafe fn sample_bts_meas_major_neon(
 unsafe fn bts_neon_per_pair(
     sparse: &SparseParity,
     meas_major: &mut [u64],
-    vrng: &mut Xoshiro256PlusPlusX2,
+    vrng: &mut [Xoshiro256PlusPlusX2; 2],
     rank: usize,
     s_words: usize,
     s_pairs: usize,
@@ -797,8 +815,9 @@ unsafe fn bts_neon_per_pair(
             let base_sw = pair * 2;
             let words_this_pair = (s_words - base_sw).min(2);
 
+            let lanes = &mut vrng[pair % 2];
             for nval in random_neon.iter_mut().take(rank) {
-                *nval = vrng.next_uint64x2();
+                *nval = lanes.next_uint64x2();
             }
 
             if pair == s_pairs - 1 && rem != 0 {
@@ -960,6 +979,61 @@ mod tests {
         let num_shots = 32;
         let out = sample_bts_meas_major(&sparse, num_shots, &ref_bits, &mut r, rank);
         assert_eq!(out.len(), num_meas * num_shots.div_ceil(64));
+    }
+
+    // Every path lays the same four xoshiro lanes over the shot words, so the vector
+    // kernel and the portable loop agree bitwise at any shot count and rank, and
+    // both leave the scalar generator at the same point.
+    #[test]
+    fn vector_and_scalar_paths_draw_one_stream() {
+        let num_meas = 40;
+        let cases = [
+            (64, 1),
+            (100, 3),
+            (128, 2),
+            (200, 7),
+            (256, 0),
+            (300, 5),
+            (1000, 17),
+            (4096, 70),
+            (5000, 2),
+        ];
+        for (num_shots, rank) in cases {
+            let mut setup = rng(7 + rank as u64);
+            let mask = (1u64 << num_meas) - 1;
+            let flip_rows: Vec<Vec<u64>> =
+                (0..rank).map(|_| vec![setup.next_u64() & mask]).collect();
+            let sparse = SparseParity::from_flip_rows(&flip_rows, num_meas);
+            let ref_bits = vec![setup.next_u64() & mask];
+            let mut scalar_rng = rng(99);
+            let mut vector_rng = rng(99);
+            let scalar =
+                sample_bts_meas_major_scalar(&sparse, num_shots, &ref_bits, &mut scalar_rng, rank);
+            #[cfg(target_arch = "x86_64")]
+            let vector = {
+                if !is_x86_feature_detected!("avx2") {
+                    return;
+                }
+                // SAFETY: AVX2 detected
+                unsafe {
+                    sample_bts_meas_major_avx2(&sparse, num_shots, &ref_bits, &mut vector_rng, rank)
+                }
+            };
+            #[cfg(target_arch = "aarch64")]
+            // SAFETY: NEON is baseline on aarch64
+            let vector = unsafe {
+                sample_bts_meas_major_neon(&sparse, num_shots, &ref_bits, &mut vector_rng, rank)
+            };
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            let vector =
+                sample_bts_meas_major_scalar(&sparse, num_shots, &ref_bits, &mut vector_rng, rank);
+            assert_eq!(scalar, vector, "{num_shots} shots, rank {rank}");
+            assert_eq!(
+                scalar_rng.next_u64(),
+                vector_rng.next_u64(),
+                "both paths consume the sixteen seeding draws"
+            );
+        }
     }
 
     #[test]

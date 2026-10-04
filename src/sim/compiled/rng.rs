@@ -233,6 +233,31 @@ fn binomial_btpe(rng: &mut Xoshiro256PlusPlus, n: usize, p: f64, nf: f64, np: f6
     }
 }
 
+/// Four independent xoshiro256++ streams seeded from sixteen draws of the scalar
+/// generator, lane `j` from draws `4j..4j + 4`. The AVX2 and NEON generators lay the
+/// same streams across their vector lanes, so every sampler path draws the word for
+/// shot word `w` from lane `w % 4` and the stream is the same on every ISA.
+pub(super) struct Xoshiro256PlusPlusLanes([Xoshiro256PlusPlus; 4]);
+
+impl Xoshiro256PlusPlusLanes {
+    #[inline(always)]
+    pub(super) fn from_scalar(rng: &mut Xoshiro256PlusPlus) -> Self {
+        Self(std::array::from_fn(|_| Xoshiro256PlusPlus {
+            s: [
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+                rng.next_u64(),
+            ],
+        }))
+    }
+
+    #[inline(always)]
+    pub(super) fn next_u64(&mut self, lane: usize) -> u64 {
+        self.0[lane].next_u64()
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 pub(super) struct Xoshiro256PlusPlusX4 {
     s0: std::arch::x86_64::__m256i,

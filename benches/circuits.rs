@@ -3908,6 +3908,13 @@ fn bench_compiled_sampler(c: &mut Criterion) {
             b.iter(|| sampler.sample_bulk_packed(10_000));
         });
 
+        // Under 256 shots the bit-sliced sampler takes its scalar kernel on x86.
+        let id_packed_small = format!("packed_{}q_200", n);
+        group.bench_function(BenchmarkId::new("packed", &id_packed_small), |b| {
+            let mut sampler = prism_q::compile_forward(&circuit, SEED).unwrap();
+            b.iter(|| sampler.sample_bulk_packed(200));
+        });
+
         let compile_id = format!("clifford_{n}q");
         group.bench_function(BenchmarkId::new("compile_forward", &compile_id), |b| {
             b.iter(|| prism_q::compile_forward(&circuit, SEED).unwrap());

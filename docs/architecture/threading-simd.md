@@ -101,12 +101,18 @@ comparison run used.
   Noise draws per fixed 8192-shot unit from a counter-based stream indexed by the unit,
   and each unit writes only its own shots, so neither the schedule nor `chunk_size`
   reaches a fault. Pinned in `tests/qec_ir.rs` with 1-thread and 4-thread pools.
-- **Compiled (BTS) sampling: reproducible at a fixed thread count only.** The batched
-  sampler derives one RNG stream per worker and splits shots by
+- **Compiled (BTS) sampling: reproducible at a fixed thread count, on any ISA.** The
+  batched sampler derives one RNG stream per worker and splits shots by
   `rayon::current_num_threads()`, so a different pool width yields a different, equally
   distributed shot set. Pin the width when byte-identical shot payloads matter across
   machines, through `RAYON_NUM_THREADS` on the global path or through the width passed to
-  `ThreadPool::with_threads` on the scoped one. The GPU analogue is documented in the [GPU guide](../guides/gpu.md).
+  `ThreadPool::with_threads` on the scoped one. Within a stream, the AVX2, NEON and
+  scalar kernels lay the same four xoshiro lanes over the shot words, so an x86 host
+  and an Apple or Graviton host draw the same shots from one seed; `tests/qec_ir.rs`
+  pins the noiseless fingerprint on every CI platform. Noise draws go through the
+  platform's `exp` and `ln`, so a noisy payload is bitwise on one platform and can
+  differ across C libraries on the rare draw that lands within an ulp of a threshold.
+  The GPU analogue is documented in the [GPU guide](../guides/gpu.md).
 - **SPD analytic estimates: stable to about 1e-12 between runs.** Hash-order term
   accumulation moves the last ulp even at a fixed thread count; tests carry that
   tolerance.

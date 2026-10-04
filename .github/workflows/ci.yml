@@ -607,6 +607,8 @@ jobs:
         run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::word_ops::tests
       - name: Batched diagonal phase reference (NEON path)
         run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib backend::statevector::tests::batch_phase_matches_independent_reference
+      - name: Compiled sampler stream (NEON vs scalar lanes)
+        run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --lib sim::compiled::bts::tests::vector_and_scalar_paths_draw_one_stream
       - name: Cross-backend correctness matrix
         run: cross test --target aarch64-unknown-linux-gnu --features "$CI_FEATURES" --test backend_matrix
 

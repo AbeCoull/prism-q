@@ -33,28 +33,34 @@ jobs:
         run: cargo install --locked mdbook-admonish@1.20.0 mdbook-mermaid@0.14.0 mdbook-katex@0.9.4
       - name: Build book
         run: mdbook build docs
-      - name: Generate sitemap.xml
+      - name: Add canonical links and generate sitemap.xml
+        # mdBook exposes a chapter's source path but no helper to turn it into
+        # the rendered URL, so the per-page canonical link and og:url are
+        # inserted here, after the build, where every page's URL is known. The
+        # first chapter is also served as the site root and canonicalizes to it.
         run: |
           base="https://abecoull.github.io/prism-q"
-          tmp="$(mktemp)"
+          pages="$(mktemp)"
+          find docs/book -name '*.html' \
+            ! -name '404.html' ! -name 'print.html' ! -name 'toc.html' \
+            -printf '%P\n' | sort | while read -r f; do
+              if [ "$f" = "index.html" ] || cmp -s "docs/book/$f" docs/book/index.html; then
+                echo "$f $base/"
+              else
+                echo "$f $base/$f"
+              fi
+            done > "$pages"
+          while read -r f loc; do
+            sed -i "s|<meta charset=\"UTF-8\">|&\n        <link rel=\"canonical\" href=\"$loc\">\n        <meta property=\"og:url\" content=\"$loc\">|" "docs/book/$f"
+          done < "$pages"
           {
             echo '<?xml version="1.0" encoding="UTF-8"?>'
             echo '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
-            find docs/book -name '*.html' \
-              ! -name '404.html' ! -name 'print.html' ! -name 'toc.html' \
-              -printf '%P\n' | sort | while read -r f; do
-                if [ "$f" = "index.html" ]; then
-                  loc="$base/"
-                elif cmp -s "docs/book/$f" docs/book/index.html; then
-                  continue
-                else
-                  loc="$base/$f"
-                fi
-                printf '  <url><loc>%s</loc></url>\n' "$loc"
-              done
+            awk '{print $2}' "$pages" | sort -u | while read -r loc; do
+              printf '  <url><loc>%s</loc></url>\n' "$loc"
+            done
             echo '</urlset>'
-          } > "$tmp"
-          mv "$tmp" docs/book/sitemap.xml
+          } > docs/book/sitemap.xml
       - uses: actions/upload-pages-artifact@v5
         with:
           path: docs/book

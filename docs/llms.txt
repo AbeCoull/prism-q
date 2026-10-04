@@ -1,10 +1,11 @@
 # PRISM-Q
 
-> Quantum circuit simulator in Rust with Python bindings. Nine CPU backends and
-> four Clifford+T and Pauli-propagation engines behind one dispatcher, a
-> multi-pass gate fusion pipeline, AVX2, FMA and BMI2 kernels, an optional CUDA
-> path and an optional distributed MPI statevector path. Input is OpenQASM 3.0
-> with backward-compatible 2.0 syntax, and circuits export back to OpenQASM 3.0.
+> Open-source quantum circuit simulator written in Rust, with Python bindings.
+> Nine CPU backends and four Clifford+T and Pauli-propagation engines behind one
+> dispatcher, a multi-pass gate fusion pipeline, AVX2, FMA and BMI2 kernels
+> (NEON on ARM64), an optional CUDA path and an optional MPI-distributed
+> statevector. Input is OpenQASM 3.0 with backward-compatible 2.0 syntax, and
+> circuits export back to OpenQASM 3.0.
 
 PRISM-Q picks the state representation from the circuit. A Clifford circuit
 runs on a stabilizer tableau, a Clifford+T circuit on a stabilizer-rank or
@@ -12,13 +13,21 @@ Pauli-propagation engine, a diagonal and permutation circuit on a map of basis
 states, a low-entanglement circuit on matrix product states, a circuit that
 splits into independent registers on per-block backends, and everything else on
 a dense statevector. `BackendKind::Auto` is the default; every backend can also
-be named, and the run metadata reports which one ran.
+be named, and the run metadata reports which one ran. The selection is a shape
+rule, not a cost model.
 
 Backend kinds: Statevector, Stabilizer, Sparse, Mps, ProductState,
 TensorNetwork, Factored, FactoredStabilizer, DensityMatrix, and the Clifford+T
 engines StabilizerRank, StochasticPauli, DeterministicPauli and PauliPath, plus
-GPU and distributed statevector variants behind feature flags.
+GPU variants (StatevectorGpu, StabilizerGpu, DensityMatrixGpu, AutoGpu) behind
+the `gpu` feature and StatevectorDistributed behind the `distributed` feature.
 
+Install: `cargo add prism-q` (Rust, crates.io) or `pip install prism-q`
+(Python wheels for Linux x86_64 and aarch64, macOS arm64, Windows x64; Python
+3.11 and newer). Feature flags: `parallel` (default, Rayon), `gpu` (CUDA 12.x),
+`distributed`, `distributed-mpi`.
+
+Status: pre-1.0, released on crates.io and PyPI with a changelog per release.
 Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 
 ## Getting started
@@ -27,7 +36,7 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 - [Installation](https://abecoull.github.io/prism-q/getting-started/install.html): cargo and pip install, and the feature flags.
 - [Your first circuit](https://abecoull.github.io/prism-q/getting-started/first-circuit.html): building a circuit in Rust, from the builder or from OpenQASM.
 - [Shots and sampling](https://abecoull.github.io/prism-q/getting-started/shots.html): measurement records, shot counts, and seeding.
-- [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html): when to override the automatic choice.
+- [Choosing a backend](https://abecoull.github.io/prism-q/getting-started/choosing-a-backend.html): the automatic dispatch tree and when to override it.
 
 ## Guides
 
@@ -35,10 +44,12 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 - [Backends deep dive](https://abecoull.github.io/prism-q/guides/backends.html): memory layout, gate support, and applicability per backend.
 - [Capability and support matrix](https://abecoull.github.io/prism-q/guides/capabilities.html): which gates, channels, and terminals each backend answers, CPU and GPU.
 - [Performance and SIMD](https://abecoull.github.io/prism-q/guides/performance.html): parallel thresholds, kernel dispatch, and the tuning knobs.
+- [Benchmark methodology](https://abecoull.github.io/prism-q/guides/benchmarking.html): what the published timings include, the warmup and timing rules, the Criterion targets, and the controls for a fair comparison against another simulator.
 - [OpenQASM support](https://abecoull.github.io/prism-q/guides/openqasm.html): the accepted subset, the Braket dialect, gate modifiers, and export.
 - [Clifford+T simulation](https://abecoull.github.io/prism-q/guides/clifford-t.html): stabilizer rank, sparse Pauli propagation, and their exactness contracts.
 - [Noise and QEC](https://abecoull.github.io/prism-q/guides/qec.html): noise channels, trajectory and exact mixture routes, detectors, and decoding.
 - [GPU backend](https://abecoull.github.io/prism-q/guides/gpu.html): the CUDA path, what it accelerates, and how to enable it.
+- [Distributed statevector and MPI](https://abecoull.github.io/prism-q/guides/distributed.html): the rank layout, qubit relabeling, launch scripts, and limits.
 
 ## Architecture
 
@@ -59,6 +70,24 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 - [Circuit builders](https://abecoull.github.io/prism-q/reference/builders.html): the prebuilt circuit generators.
 - [Glossary](https://abecoull.github.io/prism-q/glossary.html)
 
+## Limitations
+
+- OpenQASM 3.0 coverage is a practical subset; a construct outside it returns an
+  `UnsupportedConstruct` error naming it. The OpenQASM guide lists the subset.
+- The dense statevector is capped by host memory (half of physical memory by
+  default, `PRISM_MAX_SV_QUBITS` overrides); past it, automatic dispatch falls
+  back to sparse or MPS representations, which are exact only when the circuit
+  fits them.
+- The density matrix and distributed statevector backends are never selected
+  automatically.
+- A GPU context binds one device; there is no multi-GPU or distributed GPU
+  execution. The stabilizer GPU path is experimental. ROCm is not implemented.
+- The distributed backend is CPU only, needs a power-of-two rank count, and
+  rejects noise models.
+- Amplitudes are `f64` complex on every backend; there is no single-precision
+  mode.
+- Library only: no command-line tool, GUI, or hardware backend connectivity.
+
 ## Optional
 
 - [API reference on docs.rs](https://docs.rs/prism-q): generated rustdoc for every public item.
@@ -66,3 +95,4 @@ Licensed MIT or Apache-2.0. Source at https://github.com/AbeCoull/prism-q.
 - [Package on PyPI](https://pypi.org/project/prism-q)
 - [Changelog](https://github.com/AbeCoull/prism-q/blob/main/CHANGELOG.md)
 - [Contributing guide](https://github.com/AbeCoull/prism-q/blob/main/CONTRIBUTING.md)
+- [Citation metadata](https://github.com/AbeCoull/prism-q/blob/main/CITATION.cff)

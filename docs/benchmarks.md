@@ -6,13 +6,13 @@ Wall-clock simulation time for PRISM-Q on a fixed circuit suite built from the `
 
 ## Setup
 
-- Date: 2026-05-29
+- Date: 2026-10-04
 - CPU: Intel64 Family 6 Model 94 Stepping 3, GenuineIntel
 - Logical cores: 8
-- Rayon threads: not recorded for this run (defaults to every logical core)
-- Compiler: not recorded for this run
+- Rayon threads: 8 (`RAYON_NUM_THREADS` caps the pool)
+- Compiler: rustc 1.97.0 (2d8144b78 2026-07-07)
 - Build: `release` profile (opt-level 3, fat LTO, codegen-units 1), features `parallel`
-- PRISM-Q version: 0.16.0
+- PRISM-Q version: 0.33.0
 
 ## Methodology
 
@@ -26,39 +26,39 @@ Wall-clock simulation time for PRISM-Q on a fixed circuit suite built from the `
 
 | Qubits | auto |
 |---|---|
-| 24 | 37.9 us |
-| 28 | 79.2 us |
-| 256 | 825.8 us |
-| 1024 | 2.73 ms |
-| 4096 | 35.97 ms |
+| 24 | 18.78 ms |
+| 28 | 299.03 ms |
+| 256 | 242.9 us |
+| 1024 | 1.13 ms |
+| 4096 | 3.16 ms |
 
 ## QFT
 
 | Qubits | auto |
 |---|---|
-| 16 | 715.0 us |
-| 20 | 25.34 ms |
-| 24 | 639.72 ms |
-| 26 | 3.786 s |
-| 28 | 17.727 s |
+| 16 | 902.7 us |
+| 20 | 13.31 ms |
+| 24 | 295.38 ms |
+| 26 | 1.843 s |
+| 28 | 8.353 s |
 
 ## HEA
 
 | Qubits | auto |
 |---|---|
-| 16 | 3.49 ms |
-| 20 | 63.81 ms |
-| 24 | 1.588 s |
-| 26 | 7.330 s |
-| 28 | 33.303 s |
+| 16 | 3.94 ms |
+| 20 | 33.12 ms |
+| 24 | 639.08 ms |
+| 26 | 2.761 s |
+| 28 | 11.695 s |
 
 ## QV
 
 | Qubits | auto |
 |---|---|
-| 16 | 7.73 ms |
-| 20 | 190.02 ms |
-| 24 | 5.811 s |
+| 16 | 5.78 ms |
+| 20 | 79.24 ms |
+| 24 | 1.538 s |
 
 ## Reproducing
 

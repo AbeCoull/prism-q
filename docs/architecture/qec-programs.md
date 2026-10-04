@@ -189,7 +189,10 @@ the aliases live at each position and projects each event onto detector and
 observable bits as it reaches it, so compile memory follows the live qubit
 count rather than records times aliases. The same walk reads the noiseless
 detector and observable values from the propagated signs. If any of them is
-random, compilation falls back to the record path.
+random, compilation falls back to the record path. A noiseless program takes
+the same walk with no events: its cost follows the live qubit count times the
+record count, where compiling the deferred circuit forward grew with the
+square of the record count.
 
 At sample time, the noiseless records are sampled first, then each noise
 event stochastically XORs its branch flip masks into the shot-major record

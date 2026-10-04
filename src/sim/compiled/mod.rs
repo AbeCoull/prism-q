@@ -692,6 +692,7 @@ impl CompiledSampler {
 
     /// Packed measurement flips, one row per random bit; every sample is the reference
     /// bits XOR a subset of these rows.
+    #[cfg(test)]
     pub(crate) fn flip_rows(&self) -> &[Vec<u64>] {
         &self.flip_rows
     }
@@ -2222,6 +2223,7 @@ impl CompiledDetectorSampler {
         &self.observable_rows
     }
 
+    #[cfg(test)]
     pub(crate) fn measurement_sampler(&self) -> &CompiledSampler {
         &self.measurement_sampler
     }

@@ -14,8 +14,14 @@ use prism_q::{PauliAxis, PauliTerm, run_on, run_on_state};
 pub const FUSION_EPS: f64 = 1e-10;
 
 const MIN_QUBITS: usize = 10;
-const MAX_QUBITS: usize = 16;
+const MAX_QUBITS: usize = 18;
 const MAX_OPS: usize = 160;
+
+/// Operation budget for a circuit on `n` qubits: [`MAX_OPS`] through 16 qubits, halved
+/// per qubit above that, so an input costs about the same at every width.
+fn max_ops(n: usize) -> usize {
+    MAX_OPS >> n.saturating_sub(16)
+}
 
 /// Parse `text` through every public QASM entry point. Errors are expected; only a
 /// panic is a failure.
@@ -305,11 +311,13 @@ fn kron_cx(a: [[Complex64; 2]; 2], b: [[Complex64; 2]; 2]) -> Vec<Complex64> {
     out
 }
 
-/// Decode a unitary circuit on 10 to 16 qubits from a fixed gate menu.
+/// Decode a unitary circuit on 10 to 18 qubits from a fixed gate menu. The top width
+/// reaches the post-phase 1q batching pass, which starts at 18 qubits.
 pub fn circuit_from_bytes(bytes: &mut Bytes<'_>) -> Circuit {
     let n = MIN_QUBITS + bytes.below(MAX_QUBITS - MIN_QUBITS + 1);
+    let budget = max_ops(n);
     let mut circuit = Circuit::new(n, 0);
-    while !bytes.exhausted() && circuit.instructions.len() < MAX_OPS {
+    while !bytes.exhausted() && circuit.instructions.len() < budget {
         push_op(&mut circuit, bytes);
     }
     circuit

@@ -35,8 +35,8 @@ pub(crate) use parity::{ParityBlock, ParityBlocks, SparseParity};
 use parity::{build_parity_blocks_if_useful, minimize_flip_row_weight};
 
 pub(crate) use crate::backend::word_ops::xor_words;
-pub(crate) use propagation::batch_propagate_backward;
 pub(crate) use propagation::propagate_backward;
+pub(crate) use propagation::{batch_propagate_backward, batch_propagate_backward_flat};
 use propagation::{
     build_measurement_rows, colmajor_forward_sim, compute_reference_bits, rowmul_phase,
     rowmul_phase_into,

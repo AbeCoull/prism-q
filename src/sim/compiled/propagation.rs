@@ -768,6 +768,75 @@ pub(crate) fn batch_propagate_backward(
     targets: &[usize],
     m_words: usize,
 ) {
+    match *targets {
+        [q] => propagate_rows_1q(gate, &mut x[q], &mut z[q], sign, m_words),
+        [a, b] => {
+            let (x0, x1) = pair_mut(x, a, b);
+            let (z0, z1) = pair_mut(z, a, b);
+            propagate_rows_2q(gate, x0, z0, x1, z1, sign, m_words);
+        }
+        _ => {}
+    }
+}
+
+/// [`batch_propagate_backward`] over rows packed end to end: slot `s` holds words
+/// `s * words..(s + 1) * words` of `x` and `z`.
+#[inline(always)]
+pub(crate) fn batch_propagate_backward_flat(
+    x: &mut [u64],
+    z: &mut [u64],
+    sign: &mut [u64],
+    words: usize,
+    gate: &Gate,
+    slots: &[usize],
+) {
+    match *slots {
+        [q] => propagate_rows_1q(
+            gate,
+            &mut x[q * words..(q + 1) * words],
+            &mut z[q * words..(q + 1) * words],
+            sign,
+            words,
+        ),
+        [a, b] => {
+            let (x0, x1) = pair_rows_mut(x, a, b, words);
+            let (z0, z1) = pair_rows_mut(z, a, b, words);
+            propagate_rows_2q(gate, x0, z0, x1, z1, sign, words);
+        }
+        _ => {}
+    }
+}
+
+fn pair_mut<T>(v: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
+    debug_assert_ne!(a, b);
+    if a < b {
+        let (lo, hi) = v.split_at_mut(b);
+        (&mut lo[a], &mut hi[0])
+    } else {
+        let (lo, hi) = v.split_at_mut(a);
+        (&mut hi[0], &mut lo[b])
+    }
+}
+
+fn pair_rows_mut(v: &mut [u64], a: usize, b: usize, words: usize) -> (&mut [u64], &mut [u64]) {
+    debug_assert_ne!(a, b);
+    if a < b {
+        let (lo, hi) = v.split_at_mut(b * words);
+        (&mut lo[a * words..(a + 1) * words], &mut hi[..words])
+    } else {
+        let (lo, hi) = v.split_at_mut(a * words);
+        (&mut hi[..words], &mut lo[b * words..(b + 1) * words])
+    }
+}
+
+#[inline(always)]
+fn propagate_rows_1q(
+    gate: &Gate,
+    xq: &mut [u64],
+    zq: &mut [u64],
+    sign: &mut [u64],
+    m_words: usize,
+) {
     #[cfg(target_arch = "x86_64")]
     let use_avx2 = m_words >= 4 && is_x86_feature_detected!("avx2");
     #[cfg(target_arch = "aarch64")]
@@ -775,308 +844,219 @@ pub(crate) fn batch_propagate_backward(
 
     match gate {
         Gate::H => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_h_avx2(&mut x[q], &mut z[q], sign, m_words) };
+                unsafe { batch_propagate_h_avx2(xq, zq, sign, m_words) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_h_neon(&mut x[q], &mut z[q], sign, m_words) };
+                unsafe { batch_propagate_h_neon(xq, zq, sign, m_words) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q][w] & z[q][w];
+                sign[w] ^= xq[w] & zq[w];
             }
-            std::mem::swap(&mut x[q], &mut z[q]);
+            xq[..m_words].swap_with_slice(&mut zq[..m_words]);
         }
         Gate::S => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_s_avx2(&mut x[q], &mut z[q], sign, m_words, true) };
+                unsafe { batch_propagate_s_avx2(xq, zq, sign, m_words, true) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_s_neon(&mut x[q], &mut z[q], sign, m_words, true) };
+                unsafe { batch_propagate_s_neon(xq, zq, sign, m_words, true) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q][w] & !z[q][w];
-                z[q][w] ^= x[q][w];
+                sign[w] ^= xq[w] & !zq[w];
+                zq[w] ^= xq[w];
             }
         }
         Gate::Sdg => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_s_avx2(&mut x[q], &mut z[q], sign, m_words, false) };
+                unsafe { batch_propagate_s_avx2(xq, zq, sign, m_words, false) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_s_neon(&mut x[q], &mut z[q], sign, m_words, false) };
+                unsafe { batch_propagate_s_neon(xq, zq, sign, m_words, false) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q][w] & z[q][w];
-                z[q][w] ^= x[q][w];
+                sign[w] ^= xq[w] & zq[w];
+                zq[w] ^= xq[w];
             }
         }
         Gate::X => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_avx2(sign, &z[q], m_words) };
+                unsafe { batch_propagate_sign_xor_avx2(sign, zq, m_words) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_neon(sign, &z[q], m_words) };
+                unsafe { batch_propagate_sign_xor_neon(sign, zq, m_words) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= z[q][w];
+                sign[w] ^= zq[w];
             }
         }
         Gate::Y => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor2_avx2(sign, &x[q], &z[q], m_words) };
+                unsafe { batch_propagate_sign_xor2_avx2(sign, xq, zq, m_words) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor2_neon(sign, &x[q], &z[q], m_words) };
+                unsafe { batch_propagate_sign_xor2_neon(sign, xq, zq, m_words) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q][w] ^ z[q][w];
+                sign[w] ^= xq[w] ^ zq[w];
             }
         }
         Gate::Z => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_avx2(sign, &x[q], m_words) };
+                unsafe { batch_propagate_sign_xor_avx2(sign, xq, m_words) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sign_xor_neon(sign, &x[q], m_words) };
+                unsafe { batch_propagate_sign_xor_neon(sign, xq, m_words) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q][w];
+                sign[w] ^= xq[w];
             }
         }
-        Gate::Id => {}
         Gate::SX => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_avx2(&mut x[q], &z[q], sign, m_words, false) };
+                unsafe { batch_propagate_sx_avx2(xq, zq, sign, m_words, false) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_neon(&mut x[q], &z[q], sign, m_words, false) };
+                unsafe { batch_propagate_sx_neon(xq, zq, sign, m_words, false) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q][w] & z[q][w];
-                x[q][w] ^= z[q][w];
+                sign[w] ^= xq[w] & zq[w];
+                xq[w] ^= zq[w];
             }
         }
         Gate::SXdg => {
-            let q = targets[0];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
                 // SAFETY: AVX2 detected, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_avx2(&mut x[q], &z[q], sign, m_words, true) };
+                unsafe { batch_propagate_sx_avx2(xq, zq, sign, m_words, true) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
                 // SAFETY: NEON is baseline on aarch64, slices are valid with m_words elements
-                unsafe { batch_propagate_sx_neon(&mut x[q], &z[q], sign, m_words, true) };
+                unsafe { batch_propagate_sx_neon(xq, zq, sign, m_words, true) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= !x[q][w] & z[q][w];
-                x[q][w] ^= z[q][w];
+                sign[w] ^= !xq[w] & zq[w];
+                xq[w] ^= zq[w];
             }
         }
+        _ => {}
+    }
+}
+
+#[inline(always)]
+fn propagate_rows_2q(
+    gate: &Gate,
+    x0: &mut [u64],
+    z0: &mut [u64],
+    x1: &mut [u64],
+    z1: &mut [u64],
+    sign: &mut [u64],
+    m_words: usize,
+) {
+    #[cfg(target_arch = "x86_64")]
+    let use_avx2 = m_words >= 4 && is_x86_feature_detected!("avx2");
+    #[cfg(target_arch = "aarch64")]
+    let use_neon = m_words >= 2;
+
+    match gate {
         Gate::Cx => {
-            let ctrl = targets[0];
-            let tgt = targets[1];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
-                let (x_ctrl_sl, x_tgt_sl) = if ctrl < tgt {
-                    let (lo, hi) = x.split_at_mut(tgt);
-                    (&lo[ctrl][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = x.split_at_mut(ctrl);
-                    (&hi[0][..], &mut lo[tgt][..])
-                };
-                let (z_ctrl_sl, z_tgt_sl) = if ctrl < tgt {
-                    let (lo, hi) = z.split_at_mut(tgt);
-                    (&mut lo[ctrl][..], &hi[0][..])
-                } else {
-                    let (lo, hi) = z.split_at_mut(ctrl);
-                    (&mut hi[0][..], &lo[tgt][..])
-                };
                 // SAFETY: AVX2 detected, slices are valid, ctrl != tgt
-                unsafe {
-                    batch_propagate_cx_avx2(x_ctrl_sl, z_ctrl_sl, x_tgt_sl, z_tgt_sl, sign, m_words)
-                };
+                unsafe { batch_propagate_cx_avx2(x0, z0, x1, z1, sign, m_words) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
-                let (x_ctrl_sl, x_tgt_sl) = if ctrl < tgt {
-                    let (lo, hi) = x.split_at_mut(tgt);
-                    (&lo[ctrl][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = x.split_at_mut(ctrl);
-                    (&hi[0][..], &mut lo[tgt][..])
-                };
-                let (z_ctrl_sl, z_tgt_sl) = if ctrl < tgt {
-                    let (lo, hi) = z.split_at_mut(tgt);
-                    (&mut lo[ctrl][..], &hi[0][..])
-                } else {
-                    let (lo, hi) = z.split_at_mut(ctrl);
-                    (&mut hi[0][..], &lo[tgt][..])
-                };
                 // SAFETY: NEON is baseline on aarch64, slices are valid, ctrl != tgt
-                unsafe {
-                    batch_propagate_cx_neon(x_ctrl_sl, z_ctrl_sl, x_tgt_sl, z_tgt_sl, sign, m_words)
-                };
+                unsafe { batch_propagate_cx_neon(x0, z0, x1, z1, sign, m_words) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[ctrl][w] & z[tgt][w] & !(z[ctrl][w] ^ x[tgt][w]);
-                x[tgt][w] ^= x[ctrl][w];
-                z[ctrl][w] ^= z[tgt][w];
+                sign[w] ^= x0[w] & z1[w] & !(z0[w] ^ x1[w]);
+                x1[w] ^= x0[w];
+                z0[w] ^= z1[w];
             }
         }
         Gate::Cz => {
-            let q0 = targets[0];
-            let q1 = targets[1];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
-                let (x0_sl, x1_sl) = if q0 < q1 {
-                    let (lo, hi) = x.split_at_mut(q1);
-                    (&lo[q0][..], &hi[0][..])
-                } else {
-                    let (lo, hi) = x.split_at_mut(q0);
-                    (&hi[0][..], &lo[q1][..])
-                };
-                let (z0_sl, z1_sl) = if q0 < q1 {
-                    let (lo, hi) = z.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = z.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
                 // SAFETY: AVX2 detected, slices are valid, q0 != q1
-                unsafe { batch_propagate_cz_avx2(x0_sl, z0_sl, x1_sl, z1_sl, sign, m_words) };
+                unsafe { batch_propagate_cz_avx2(x0, z0, x1, z1, sign, m_words) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
-                let (x0_sl, x1_sl) = if q0 < q1 {
-                    let (lo, hi) = x.split_at_mut(q1);
-                    (&lo[q0][..], &hi[0][..])
-                } else {
-                    let (lo, hi) = x.split_at_mut(q0);
-                    (&hi[0][..], &lo[q1][..])
-                };
-                let (z0_sl, z1_sl) = if q0 < q1 {
-                    let (lo, hi) = z.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = z.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
                 // SAFETY: NEON is baseline on aarch64, slices are valid, q0 != q1
-                unsafe { batch_propagate_cz_neon(x0_sl, z0_sl, x1_sl, z1_sl, sign, m_words) };
+                unsafe { batch_propagate_cz_neon(x0, z0, x1, z1, sign, m_words) };
                 return;
             }
             for w in 0..m_words {
-                sign[w] ^= x[q0][w] & x[q1][w] & (z[q0][w] ^ z[q1][w]);
-                z[q0][w] ^= x[q1][w];
-                z[q1][w] ^= x[q0][w];
+                sign[w] ^= x0[w] & x1[w] & (z0[w] ^ z1[w]);
+                z0[w] ^= x1[w];
+                z1[w] ^= x0[w];
             }
         }
         Gate::Swap => {
-            let q0 = targets[0];
-            let q1 = targets[1];
             #[cfg(target_arch = "x86_64")]
             if use_avx2 {
-                let (x0_sl, x1_sl) = if q0 < q1 {
-                    let (lo, hi) = x.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = x.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
-                let (z0_sl, z1_sl) = if q0 < q1 {
-                    let (lo, hi) = z.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = z.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
                 // SAFETY: AVX2 detected, slices are valid, q0 != q1
-                unsafe { batch_propagate_swap_avx2(x0_sl, z0_sl, x1_sl, z1_sl, m_words) };
+                unsafe { batch_propagate_swap_avx2(x0, z0, x1, z1, m_words) };
                 return;
             }
             #[cfg(target_arch = "aarch64")]
             if use_neon {
-                let (x0_sl, x1_sl) = if q0 < q1 {
-                    let (lo, hi) = x.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = x.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
-                let (z0_sl, z1_sl) = if q0 < q1 {
-                    let (lo, hi) = z.split_at_mut(q1);
-                    (&mut lo[q0][..], &mut hi[0][..])
-                } else {
-                    let (lo, hi) = z.split_at_mut(q0);
-                    (&mut hi[0][..], &mut lo[q1][..])
-                };
                 // SAFETY: NEON is baseline on aarch64, slices are valid, q0 != q1
-                unsafe { batch_propagate_swap_neon(x0_sl, z0_sl, x1_sl, z1_sl, m_words) };
+                unsafe { batch_propagate_swap_neon(x0, z0, x1, z1, m_words) };
                 return;
             }
-            for w in 0..m_words {
-                let tmp_x = x[q0][w];
-                x[q0][w] = x[q1][w];
-                x[q1][w] = tmp_x;
-                let tmp_z = z[q0][w];
-                z[q0][w] = z[q1][w];
-                z[q1][w] = tmp_z;
-            }
+            x0[..m_words].swap_with_slice(&mut x1[..m_words]);
+            z0[..m_words].swap_with_slice(&mut z1[..m_words]);
         }
         _ => {}
     }

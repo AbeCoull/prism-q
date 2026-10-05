@@ -23,6 +23,7 @@ mod decoder;
 mod dem;
 mod noise;
 pub mod observable_reroute;
+mod parity_walk;
 mod parse;
 mod result;
 mod runner;

@@ -37,7 +37,6 @@ pub(crate) fn topology() -> Option<CacheTopology> {
 }
 
 /// The last-level cache from [`topology`].
-#[cfg(feature = "parallel")]
 pub(crate) fn last_level_cache() -> Option<SharedCache> {
     topology().map(|topology| topology.llc)
 }

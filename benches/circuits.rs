@@ -4414,7 +4414,8 @@ fn bench_density_matrix_exact_vs_trajectory(c: &mut Criterion) {
 
 /// Exact noisy evolution on circuit and noise shapes whose two-qubit gates
 /// have cheap native kernels (CX chains, controlled phases) or whose noise
-/// skips the two-qubit gates, at widths where the buffer sits in cache.
+/// skips the two-qubit gates, from widths where the buffer sits in cache to
+/// the first past an 8 MB last-level cache.
 fn bench_density_matrix_exact_noise(c: &mut Criterion) {
     let mut group = c.benchmark_group("density_matrix/exact_noise");
     configure_group(&mut group);
@@ -4451,7 +4452,7 @@ fn bench_density_matrix_exact_noise(c: &mut Criterion) {
     };
 
     let mut rows = Vec::new();
-    for n in [6, 8] {
+    for n in [6, 8, 9, 10] {
         let ghz = ghz_chain(n);
         let qft = gate_qft(n);
         let random = non_clifford_noise_circuit(n, 4);

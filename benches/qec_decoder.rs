@@ -1,5 +1,5 @@
-//! Bulk union-find decode over sampled detector batches: repetition and
-//! rotated-surface memories at distances 3 and 5.
+//! Bulk union-find decode over sampled detector batches and detector error model
+//! derivation: repetition and rotated-surface memories at distances 3 and 5.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use prism_q::{
@@ -209,9 +209,27 @@ fn bench_qec_decoder(c: &mut Criterion) {
     group.finish();
 }
 
+// Model derivation alone: the walk over the deferred circuit and the symptom merge.
+fn bench_qec_dem(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qec_dem");
+    common::configure_group(&mut group);
+    let fixtures = [
+        ("rep_d5_r5", repetition_memory(5, 5, 1)),
+        ("surface_d3_r3", rotated_surface_memory(3, 3, 1)),
+        ("surface_d5_r5", rotated_surface_memory(5, 5, 1)),
+        ("surface_d5_r25", rotated_surface_memory(5, 25, 1)),
+    ];
+    for (label, program) in fixtures {
+        group.bench_with_input(BenchmarkId::new(label, 0), &program, |b, program| {
+            b.iter(|| black_box(program.detector_error_model().unwrap()));
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = common::criterion_config();
-    targets = bench_qec_decoder
+    targets = bench_qec_decoder, bench_qec_dem
 }
 criterion_main!(benches);

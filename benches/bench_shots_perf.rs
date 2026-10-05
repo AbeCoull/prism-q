@@ -746,8 +746,8 @@ fn bench_qec_detector_sampling(c: &mut Criterion) {
 }
 
 // Memories run for many more rounds than their distance, at 10k shots so compiling the
-// program, which grows with rounds times records, outweighs sampling. The noiseless rows
-// time the Clifford lowering and detector compile on their own.
+// program outweighs sampling; the 1440-round row is the depth a logical memory runs at.
+// The noiseless rows time the lowering and detector compile on their own.
 fn bench_qec_deep_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("qec_deep_memory");
     group.sample_size(10);
@@ -793,6 +793,14 @@ fn bench_qec_deep_memory(c: &mut Criterion) {
             label: "surf_p001_drop",
             distance: 9,
             rounds: 360,
+            keep_measurements: false,
+            noise_rate: Some(0.001),
+            build: qec_surface_program,
+        },
+        DeepRow {
+            label: "surf_p001_drop",
+            distance: 9,
+            rounds: 1440,
             keep_measurements: false,
             noise_rate: Some(0.001),
             build: qec_surface_program,

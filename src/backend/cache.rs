@@ -90,6 +90,46 @@ fn floor_pow2(n: usize) -> usize {
     1 << n.ilog2()
 }
 
+/// Fewest tiles a parallel tiled pass hands the pool per hardware thread. Below one, a
+/// 15 or 16 qubit pass ran on two or four of eight threads; a sweep of two per thread
+/// read the same on those rows and 6% slower at 17 qubits, where it narrows the subcube.
+#[cfg(feature = "parallel")]
+const MIN_TILES_PER_CPU: usize = 1;
+
+/// Fewest tiles a parallel tiled pass splits the state into: [`MIN_TILES_PER_CPU`] per
+/// hardware thread the process may run on, rounded up to a power of two, and 1 without
+/// the `parallel` feature. It reads the hardware, not the Rayon pool, so a tile width,
+/// and with it the tier a gate lands in and the order its arithmetic runs in, is the
+/// same at every thread count on one host. `PRISM_MIN_TILES_PER_CPU` overrides the
+/// per-thread count; 0 keeps every pass at its budget tile.
+pub(crate) fn min_parallel_tiles() -> usize {
+    #[cfg(feature = "parallel")]
+    {
+        static CACHED: OnceLock<usize> = OnceLock::new();
+        *CACHED.get_or_init(|| {
+            let per_cpu = crate::env_knobs::usize_override("PRISM_MIN_TILES_PER_CPU", 0)
+                .unwrap_or(MIN_TILES_PER_CPU);
+            let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+            (per_cpu * cpus).next_power_of_two()
+        })
+    }
+    #[cfg(not(feature = "parallel"))]
+    1
+}
+
+/// Elements per tile for a parallel pass over `state_len` elements: `max_tile`, cut to
+/// the power of two that leaves the pass [`min_parallel_tiles`] tiles, and never below
+/// `min_tile`. Both bounds are powers of two.
+#[cfg(feature = "parallel")]
+pub(crate) fn parallel_tile_len(state_len: usize, max_tile: usize, min_tile: usize) -> usize {
+    tile_len_for_pool(state_len, max_tile, min_tile, min_parallel_tiles())
+}
+
+#[cfg_attr(not(feature = "parallel"), allow(dead_code))]
+fn tile_len_for_pool(state_len: usize, max_tile: usize, min_tile: usize, tiles: usize) -> usize {
+    max_tile.min(floor_pow2((state_len / tiles).max(min_tile)))
+}
+
 /// Assemble the topology from the caches CPU 0 sits in, in `(level, bytes, sharing)`
 /// form, and its logical CPUs per core.
 #[cfg_attr(
@@ -405,6 +445,20 @@ mod tests {
 
     // Every value the kernels were tuned with comes back on the host they were tuned
     // on, and the rule shrinks or grows elsewhere only within the derived range.
+    #[test]
+    fn pool_tile_cuts_the_budget_until_the_pass_has_its_tile_count() {
+        let budget = 1 << 14;
+        let floor = 1 << 12;
+        assert_eq!(tile_len_for_pool(1 << 20, budget, floor, 16), budget);
+        assert_eq!(tile_len_for_pool(1 << 18, budget, floor, 16), budget);
+        assert_eq!(tile_len_for_pool(1 << 17, budget, floor, 16), 1 << 13);
+        assert_eq!(tile_len_for_pool(1 << 16, budget, floor, 16), 1 << 12);
+        assert_eq!(tile_len_for_pool(1 << 15, budget, floor, 16), floor);
+        assert_eq!(tile_len_for_pool(1 << 10, budget, floor, 16), floor);
+        assert_eq!(tile_len_for_pool(1 << 15, budget, floor, 1), budget);
+        assert!(min_parallel_tiles().is_power_of_two());
+    }
+
     #[test]
     fn tile_budget_reproduces_the_measured_host_and_bounds_the_rest() {
         assert_eq!(tile_budget_for(skylake_4c()), 256 * KB);

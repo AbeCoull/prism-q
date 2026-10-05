@@ -1228,7 +1228,7 @@ fn tile_reorder_pulls_later_gates_ahead_of_a_skipped_gate_on_other_qubits() {
     // high-qubit budget, the next pair brings two new qubits and is skipped, and
     // two later gates inside the tile are pulled ahead of it.
     let base = crate::gates::multi_2q_low_bits();
-    let fill = crate::gates::multi_2q_high_budget() / 2;
+    let fill = crate::gates::multi_2q_high_budget_for(20) / 2;
     let top = base + 2 * fill;
     let mut pairs: Vec<(usize, usize)> = (0..fill)
         .map(|i| (base + 2 * i, base + 2 * i + 1))
@@ -1382,7 +1382,7 @@ fn qv_12_uses_multi_2q_fusion() {
 
 #[test]
 fn qv_20_batches_fit_one_subcube_tile() {
-    use crate::gates::{multi_2q_high_budget, multi_2q_low_bits};
+    use crate::gates::{multi_2q_high_budget_for, multi_2q_low_bits};
     let circuit = crate::circuits::quantum_volume_circuit(20, 20, 42);
     let fused = fuse_circuit(&circuit, true);
     let mut batches = 0usize;
@@ -1402,7 +1402,10 @@ fn qv_20_batches_fit_one_subcube_tile() {
                     .collect();
                 high.sort_unstable();
                 high.dedup();
-                assert!(high.len() <= multi_2q_high_budget(), "batch spans {high:?}");
+                assert!(
+                    high.len() <= multi_2q_high_budget_for(20),
+                    "batch spans {high:?}"
+                );
                 batches += 1;
                 batched_gates += data.gates.len();
             }

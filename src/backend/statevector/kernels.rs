@@ -19,7 +19,7 @@ use crate::backend::{MCU_QUBIT_BUF, is_phase_one, measurement_inv_norm, sorted_m
 use crate::circuit::{QftTextbookStep, qft_textbook_steps};
 use crate::gates::{
     BatchPhaseData, BatchRzzData, DiagEntry, Gate, MAX_UNITARY_QUBITS, MULTI_2Q_HIGH_BUDGET,
-    diag_entries_phase, multi_2q_high_budget, multi_2q_low_bits, multi_2q_tile_bits,
+    diag_entries_phase, multi_2q_high_budget_for, multi_2q_low_bits, multi_2q_tile_bits_for,
     pauli_rot_masks,
 };
 use crate::sim::unified_pauli::PauliAxis;
@@ -42,10 +42,25 @@ fn multi_gate_l2_tile() -> usize {
     cache::tile_budget_bytes() / size_of::<Complex64>()
 }
 
-/// Highest target the L2 tier takes.
+/// Highest target the L2 tier takes in a sequential pass.
 #[inline(always)]
 pub(crate) fn multi_gate_max_l2_target() -> usize {
     max_target_for_tile(multi_gate_l2_tile())
+}
+
+/// Amplitudes per L2 tile for a parallel pass over `state_len` amplitudes: the budget,
+/// cut to leave the pool its tile count (see [`cache::parallel_tile_len`]).
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn multi_gate_l2_tile_par(state_len: usize) -> usize {
+    cache::parallel_tile_len(state_len, multi_gate_l2_tile(), MIN_PAR_ELEMS)
+}
+
+/// The in-place tile a `Multi2q` tiered pass over a `num_qubits` state runs with: the
+/// subcube tile, so a batch that sits below it lands in one tier and keeps its order.
+#[inline(always)]
+fn multi_2q_small_tile(num_qubits: usize) -> usize {
+    1 << multi_2q_tile_bits_for(num_qubits)
 }
 
 const MULTI_GATE_L3_TILE: usize = 131_072;
@@ -55,8 +70,11 @@ const MULTI_GATE_MAX_L3_TARGET: usize = max_target_for_tile(MULTI_GATE_L3_TILE);
 /// runs the whole list as one tier and preserves application order. Callers
 /// that need order beyond one tier (the density-matrix bra half) batch only
 /// under this predicate and apply per constituent otherwise.
-pub(crate) fn multi_2q_single_tier(gates: &[(usize, usize, [[Complex64; 4]; 4])]) -> bool {
-    let max_l2_target = multi_gate_max_l2_target();
+pub(crate) fn multi_2q_single_tier(
+    gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    num_qubits: usize,
+) -> bool {
+    let max_l2_target = max_target_for_tile(multi_2q_small_tile(num_qubits));
     gates.iter().all(|&(q0, q1, _)| q0.max(q1) <= max_l2_target)
 }
 
@@ -90,7 +108,7 @@ fn subcube_plan(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
     num_qubits: usize,
 ) -> Option<SubcubePlan> {
-    let tile_bits = multi_2q_tile_bits();
+    let tile_bits = multi_2q_tile_bits_for(num_qubits);
     if num_qubits <= tile_bits {
         return None;
     }
@@ -98,7 +116,7 @@ fn subcube_plan(
     if max_q < tile_bits {
         return None;
     }
-    let budget = multi_2q_high_budget();
+    let budget = multi_2q_high_budget_for(num_qubits);
     let low_bits = multi_2q_low_bits();
     let mut high: SmallVec<[usize; MULTI_2Q_HIGH_BUDGET]> = SmallVec::new();
     for &(q0, q1, _) in gates {
@@ -147,15 +165,15 @@ fn prepare_2q(
         .collect()
 }
 
-/// Prepare the gates whose high qubit fits the L2 or L3 tile, by tier. Gates above
-/// the L3 tile are left out.
+/// Prepare the gates whose high qubit fits the L2 tile (up to `max_l2_target`) or the
+/// L3 tile, by tier. Gates above the L3 tile are left out.
 #[inline(always)]
 fn split_multi_2q_tiers(
     gates: &[(usize, usize, [[Complex64; 4]; 4])],
+    max_l2_target: usize,
     small_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
     medium_gates: &mut SmallVec<[(usize, usize, simd::PreparedGate2q); 2]>,
 ) {
-    let max_l2_target = multi_gate_max_l2_target();
     for &(q0, q1, ref mat) in gates {
         let max_q = q0.max(q1);
         if max_q <= max_l2_target {
@@ -497,16 +515,21 @@ fn qft_max_tile_bits() -> usize {
     (2 * cache::tile_budget_bytes() / size_of::<Complex64>()).ilog2() as usize
 }
 
-/// Tile width for an `n`-qubit QFT: as wide as leaves eight tiles for the threads, and
-/// above the minimum one bit narrower where that leaves an even count of stages above
-/// the tile, which then all run as radix-4 pairs instead of paying a radix-2 pass.
+/// Tile width for an `n`-qubit QFT: as wide as leaves the pool its tile count
+/// ([`cache::min_parallel_tiles`]), and above the minimum one bit narrower where that
+/// leaves an even count of stages above the tile, which then all run as radix-4 pairs
+/// instead of paying a radix-2 pass.
 fn qft_tile_bits(n: usize) -> usize {
-    qft_tile_bits_for(n, qft_max_tile_bits())
+    qft_tile_bits_for(
+        n,
+        qft_max_tile_bits(),
+        cache::min_parallel_tiles().ilog2() as usize,
+    )
 }
 
-fn qft_tile_bits_for(n: usize, max_tile_bits: usize) -> usize {
+fn qft_tile_bits_for(n: usize, max_tile_bits: usize, min_tiles_log2: usize) -> usize {
     let widest = max_tile_bits
-        .min(n.saturating_sub(3))
+        .min(n.saturating_sub(min_tiles_log2))
         .max(QFT_MIN_TILE_BITS.min(n));
     if widest > QFT_MIN_TILE_BITS && (n - widest) % 2 == 1 {
         widest - 1
@@ -2327,12 +2350,12 @@ type TargetedGate1q = (usize, [[Complex64; 2]; 2]);
 #[inline(always)]
 fn split_multi_1q_tiers(
     gates: &[TargetedGate1q],
+    max_l2_target: usize,
     medium_tiled: bool,
     small_gates: &mut SmallVec<[(usize, simd::PreparedGate1q); 16]>,
     medium_gates: &mut SmallVec<[(usize, simd::PreparedGate1q); 4]>,
     large_gates: &mut SmallVec<[TargetedGate1q; 4]>,
 ) {
-    let max_l2_target = multi_gate_max_l2_target();
     for &(target, mat) in gates {
         if target <= max_l2_target {
             small_gates.push((target, simd::PreparedGate1q::new(&mat)));
@@ -2365,11 +2388,11 @@ fn keep_l3_tier(state_len: usize) -> bool {
 #[inline(always)]
 fn split_multi_1q_diagonal_tiers(
     gates: &[TargetedGate1q],
+    max_l2_target: usize,
     small_gates: &mut SmallVec<[(usize, Complex64, Complex64, bool); 16]>,
     medium_gates: &mut SmallVec<[(usize, Complex64, Complex64, bool); 4]>,
     large_gates: &mut SmallVec<[(usize, Complex64, Complex64); 4]>,
 ) {
-    let max_l2_target = multi_gate_max_l2_target();
     for &(target, mat) in gates {
         let d0 = mat[0][0];
         let d1 = mat[1][1];
@@ -2408,11 +2431,13 @@ fn apply_multi_1q_par_tiered(
         return;
     }
 
+    let tile_size = multi_gate_l2_tile_par(state.len());
     let mut small_gates = SmallVec::new();
     let mut medium_gates = SmallVec::new();
     let mut large_gates = SmallVec::new();
     split_multi_1q_tiers(
         gates,
+        max_target_for_tile(tile_size),
         medium_tiled,
         &mut small_gates,
         &mut medium_gates,
@@ -2420,7 +2445,6 @@ fn apply_multi_1q_par_tiered(
     );
 
     if !small_gates.is_empty() {
-        let tile_size = multi_gate_l2_tile();
         state
             .par_chunks_mut(tile_size)
             .with_min_len(chunk_min_len(tile_size))
@@ -3889,6 +3913,7 @@ impl StatevectorBackend {
         let mut large_gates = SmallVec::new();
         split_multi_1q_tiers(
             gates,
+            multi_gate_max_l2_target(),
             true,
             &mut small_gates,
             &mut medium_gates,
@@ -3937,7 +3962,13 @@ impl StatevectorBackend {
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
         let mut large_gates = SmallVec::new();
-        split_multi_1q_diagonal_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
+        split_multi_1q_diagonal_tiers(
+            gates,
+            multi_gate_max_l2_target(),
+            &mut small_gates,
+            &mut medium_gates,
+            &mut large_gates,
+        );
 
         if !small_gates.is_empty() {
             let tile_size = multi_gate_l2_tile();
@@ -3970,10 +4001,16 @@ impl StatevectorBackend {
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
         let mut large_gates = SmallVec::new();
-        split_multi_1q_diagonal_tiers(gates, &mut small_gates, &mut medium_gates, &mut large_gates);
+        let tile_size = multi_gate_l2_tile_par(self.state.len());
+        split_multi_1q_diagonal_tiers(
+            gates,
+            max_target_for_tile(tile_size),
+            &mut small_gates,
+            &mut medium_gates,
+            &mut large_gates,
+        );
 
         if !small_gates.is_empty() {
-            let tile_size = multi_gate_l2_tile();
             self.state
                 .par_chunks_mut(tile_size)
                 .with_min_len(chunk_min_len(tile_size))
@@ -4083,12 +4120,17 @@ impl StatevectorBackend {
             return;
         }
 
+        let tile_size = multi_2q_small_tile(self.num_qubits);
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
-        split_multi_2q_tiers(gates, &mut small_gates, &mut medium_gates);
+        split_multi_2q_tiers(
+            gates,
+            max_target_for_tile(tile_size),
+            &mut small_gates,
+            &mut medium_gates,
+        );
 
         if !small_gates.is_empty() {
-            let tile_size = multi_gate_l2_tile();
             let tile_qubits = tile_size.trailing_zeros() as usize;
             for tile in self.state.chunks_mut(tile_size) {
                 let n = tile.len().trailing_zeros() as usize;
@@ -4122,15 +4164,23 @@ impl StatevectorBackend {
         }
     }
 
+    /// The tiered pass with the in-place tile cut for the pool. The L3 tier stays one
+    /// sweep even where the state is a single L3 tile: at 17 qubits per-gate parallel
+    /// passes in its place read 28% slower on `statevector/random_d10/17`.
     #[cfg(feature = "parallel")]
     #[inline(always)]
     fn apply_multi_2q_par(&mut self, gates: &[(usize, usize, [[Complex64; 4]; 4])]) {
+        let tile_size = multi_2q_small_tile(self.num_qubits);
         let mut small_gates = SmallVec::new();
         let mut medium_gates = SmallVec::new();
-        split_multi_2q_tiers(gates, &mut small_gates, &mut medium_gates);
+        split_multi_2q_tiers(
+            gates,
+            max_target_for_tile(tile_size),
+            &mut small_gates,
+            &mut medium_gates,
+        );
 
         if !small_gates.is_empty() {
-            let tile_size = multi_gate_l2_tile();
             let tile_qubits = tile_size.trailing_zeros() as usize;
             self.state
                 .par_chunks_mut(tile_size)
@@ -4705,7 +4755,7 @@ mod qft_layout_tests {
 
     #[test]
     fn qft_tiles_leave_paired_stages_and_eight_tiles() {
-        let widths: Vec<usize> = (10..=26).map(|n| qft_tile_bits_for(n, 15)).collect();
+        let widths: Vec<usize> = (10..=26).map(|n| qft_tile_bits_for(n, 15, 3)).collect();
         assert_eq!(
             widths,
             [

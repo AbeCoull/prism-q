@@ -1047,7 +1047,7 @@ fn flush_tile_window(
             let joined = if blocked[q0] || blocked[q1] {
                 None
             } else {
-                multi_2q_join(&high, q0, q1)
+                multi_2q_join(&high, q0, q1, blocked.len())
             };
             match joined {
                 Some(joined) => {
@@ -1156,11 +1156,12 @@ pub(crate) fn fuse_multi_2q_gates<'a>(
             Instruction::Gate { gate, targets } if is_tileable_2q(inst) => {
                 let q0 = targets[0];
                 let q1 = targets[1];
-                let joined = match multi_2q_join(&run.high, q0, q1) {
+                let joined = match multi_2q_join(&run.high, q0, q1, circuit.num_qubits) {
                     Some(joined) => joined,
                     None => {
                         changed |= run.flush(source, &mut output, tracer);
-                        multi_2q_join(&[], q0, q1).expect("one pair fits a tile")
+                        multi_2q_join(&[], q0, q1, circuit.num_qubits)
+                            .expect("one pair fits a tile")
                     }
                 };
                 run.high = joined;

@@ -6,13 +6,11 @@
 
 use std::collections::HashMap;
 
-use super::noise::{
-    QecDeferredNoiseEvent, append_qec_pauli_noise_effect, lower_qec_program_to_deferred_circuit,
-    walk_qec_noise_sensitivity,
-};
-use super::{QecNoise, QecOp, QecProgram};
+use super::noise::lower_qec_program_to_deferred_circuit;
+use super::parity_walk::compile_fault_sites;
+use super::runner::QecParityProjection;
+use super::{QecOp, QecProgram};
 use crate::error::{PrismError, Result};
-use crate::sim::compiled::xor_words;
 
 /// One error mechanism: an independent fault process that flips a fixed set of
 /// detectors and observables with the given probability.
@@ -202,14 +200,6 @@ impl QecProgram {
     }
 }
 
-/// One independent random draw in the sampler: the mutually exclusive Pauli
-/// branches of a single noise annotation on a single target (or target pair),
-/// each with its packed measurement-record flip mask.
-struct FaultUnit {
-    position: usize,
-    branches: Vec<(f64, Vec<u64>)>,
-}
-
 /// Flipped (detector indices, observable indices), both ascending.
 type Symptom = (Vec<usize>, Vec<usize>);
 
@@ -218,21 +208,37 @@ fn derive_detector_error_model(program: &QecProgram) -> Result<DetectorErrorMode
     let observable_rows = program.observable_rows()?;
     let num_detectors = detector_rows.len();
     let num_observables = observable_rows.len();
-    let m_words = program.num_measurements().div_ceil(64);
-    let detector_masks = pack_record_rows(&detector_rows, m_words);
-    let observable_masks = pack_record_rows(&observable_rows, m_words);
-
+    let projection =
+        QecParityProjection::new(program.num_measurements(), &detector_rows, &observable_rows);
     let deferred = lower_qec_program_to_deferred_circuit(program)?;
-    let mut units: Vec<FaultUnit> = Vec::new();
-    walk_qec_noise_sensitivity(&deferred, |event, x_packed, z_packed| {
-        collect_fault_units(event, x_packed, z_packed, &mut units);
-    })?;
-    units.sort_by_key(|unit| unit.position);
+    let sites = compile_fault_sites(&deferred, &projection)?;
 
     let mut index: HashMap<Symptom, usize> = HashMap::new();
     let mut mechanisms: Vec<ErrorMechanism> = Vec::new();
-    for unit in units {
-        for (symptom, probability) in unit_symptoms(&unit, &detector_masks, &observable_masks) {
+    let mut local: Vec<(Symptom, f64)> = Vec::new();
+    for site in sites.sites() {
+        local.clear();
+        for (probability, outputs) in site {
+            if outputs.is_empty() {
+                continue;
+            }
+            let split = outputs.partition_point(|&output| (output as usize) < num_detectors);
+            let symptom: Symptom = (
+                outputs[..split]
+                    .iter()
+                    .map(|&output| output as usize)
+                    .collect(),
+                outputs[split..]
+                    .iter()
+                    .map(|&output| output as usize - num_detectors)
+                    .collect(),
+            );
+            match local.iter_mut().find(|(existing, _)| *existing == symptom) {
+                Some((_, total)) => *total += probability,
+                None => local.push((symptom, probability)),
+            }
+        }
+        for (symptom, probability) in local.drain(..) {
             match index.get(&symptom) {
                 Some(&at) => {
                     let prior = mechanisms[at].probability;
@@ -258,129 +264,6 @@ fn derive_detector_error_model(program: &QecProgram) -> Result<DetectorErrorMode
         num_detectors,
         num_observables,
     })
-}
-
-fn collect_fault_units(
-    event: &QecDeferredNoiseEvent,
-    x_packed: &[Vec<u64>],
-    z_packed: &[Vec<u64>],
-    units: &mut Vec<FaultUnit>,
-) {
-    match event.channel {
-        QecNoise::XError(p) => {
-            for &target in &event.targets {
-                units.push(FaultUnit {
-                    position: event.position,
-                    branches: vec![(p, z_packed[target].clone())],
-                });
-            }
-        }
-        QecNoise::ZError(p) => {
-            for &target in &event.targets {
-                units.push(FaultUnit {
-                    position: event.position,
-                    branches: vec![(p, x_packed[target].clone())],
-                });
-            }
-        }
-        QecNoise::Depolarize1(p) => {
-            let branch_p = p / 3.0;
-            for &target in &event.targets {
-                let mut y_mask = x_packed[target].clone();
-                xor_words(&mut y_mask, &z_packed[target]);
-                units.push(FaultUnit {
-                    position: event.position,
-                    branches: vec![
-                        (branch_p, z_packed[target].clone()),
-                        (branch_p, y_mask),
-                        (branch_p, x_packed[target].clone()),
-                    ],
-                });
-            }
-        }
-        QecNoise::Depolarize2(p) => {
-            let branch_p = p / 15.0;
-            for pair in event.targets.chunks_exact(2) {
-                let m_words = z_packed[pair[0]].len();
-                let mut branches = Vec::with_capacity(15);
-                for sample in 1..=15 {
-                    let mut mask = vec![0u64; m_words];
-                    append_qec_pauli_noise_effect(
-                        &mut mask,
-                        sample / 4,
-                        &x_packed[pair[0]],
-                        &z_packed[pair[0]],
-                    );
-                    append_qec_pauli_noise_effect(
-                        &mut mask,
-                        sample % 4,
-                        &x_packed[pair[1]],
-                        &z_packed[pair[1]],
-                    );
-                    branches.push((branch_p, mask));
-                }
-                units.push(FaultUnit {
-                    position: event.position,
-                    branches,
-                });
-            }
-        }
-    }
-}
-
-/// Project a unit's branches onto (detectors, observables) symptoms, summing
-/// exclusive branches that share a symptom and dropping branches that flip
-/// nothing.
-fn unit_symptoms(
-    unit: &FaultUnit,
-    detector_masks: &[Vec<u64>],
-    observable_masks: &[Vec<u64>],
-) -> Vec<(Symptom, f64)> {
-    let mut local: Vec<(Symptom, f64)> = Vec::new();
-    for (probability, mask) in &unit.branches {
-        let detectors = flipped_rows(mask, detector_masks);
-        let observables = flipped_rows(mask, observable_masks);
-        if detectors.is_empty() && observables.is_empty() {
-            continue;
-        }
-        let symptom = (detectors, observables);
-        match local.iter_mut().find(|(existing, _)| *existing == symptom) {
-            Some((_, total)) => *total += probability,
-            None => local.push((symptom, *probability)),
-        }
-    }
-    local
-}
-
-fn flipped_rows(mask: &[u64], rows: &[Vec<u64>]) -> Vec<usize> {
-    rows.iter()
-        .enumerate()
-        .filter(|(_, row)| odd_overlap(mask, row))
-        .map(|(row_index, _)| row_index)
-        .collect()
-}
-
-fn odd_overlap(a: &[u64], b: &[u64]) -> bool {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (x & y).count_ones())
-        .sum::<u32>()
-        % 2
-        == 1
-}
-
-/// Pack record-index rows into bit masks. XOR rather than OR: a record listed
-/// twice in a row cancels in the parity, and the mask must agree.
-fn pack_record_rows(rows: &[Vec<usize>], m_words: usize) -> Vec<Vec<u64>> {
-    rows.iter()
-        .map(|row| {
-            let mut mask = vec![0u64; m_words];
-            for &record in row {
-                mask[record / 64] ^= 1u64 << (record % 64);
-            }
-            mask
-        })
-        .collect()
 }
 
 /// Depth-first over candidates in mechanism order; the first cover found is
